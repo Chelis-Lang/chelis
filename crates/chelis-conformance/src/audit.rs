@@ -341,6 +341,22 @@ fn check_workflow_env_pins(ctx: &Ctx) -> Check {
     let mut mismatches = Vec::new();
     let mut checked = 0;
     for (name, body) in &ctx.workflows {
+        if let Some(call) = central_workflow_call(ctx, body) {
+            checked += 1;
+            if let Some(version) = &call.chelis_version
+                && version.trim_start_matches('v') != bare
+            {
+                mismatches.push(format!(
+                    "{name}: central chelis-version={version} != {bare}"
+                ));
+            }
+            if let Some(tag) = &call.chelis_tag
+                && tag.trim_start_matches('v') != bare
+            {
+                mismatches.push(format!("{name}: central chelis-tag={tag} != v{bare}"));
+            }
+            continue;
+        }
         if !workflow_installs_toolchain(body) {
             continue;
         }
@@ -396,22 +412,25 @@ fn check_pin_consistency_guard(ctx: &Ctx) -> Check {
             "add a CI workflow wiring the conformance guard",
         );
     };
-    if ci.contains("conform bump-check") || ci.contains("conform audit") {
+    let local_guard = workflow_runs_command(ci, "chelis reef conform bump-check")
+        || workflow_runs_command(ci, "chelis reef conform audit");
+    let central_guard = central_workflow_call(ctx, ci)
+        .is_some_and(|call| matches!(call.profile.as_str(), "coral-ci" | "nautilus-ci"));
+    if local_guard || central_guard {
         pass()
     } else {
         fail(
-            "ci.yml does not run the offline pin/conformance guard",
-            "add a step running `chelis reef conform bump-check --base origin/main` (and/or `conform audit`)",
+            "ci.yml does not run the offline pin/conformance guard or an approved central CI profile",
+            "run `chelis reef conform bump-check --base origin/main` / `conform audit`, or call the immutable approved central CI profile",
         )
     }
 }
 
 fn check_toolchain_installer(ctx: &Ctx) -> Check {
-    let uses_chelisup = ctx
-        .workflows
-        .iter()
-        .any(|(_, b)| b.contains("chelisup") || b.contains("install-chelis"));
-    if uses_chelisup {
+    let uses_pin_resolving_installer = ctx.workflows.iter().any(|(_, body)| {
+        workflow_installs_toolchain(body) || central_workflow_call(ctx, body).is_some()
+    });
+    if uses_pin_resolving_installer {
         pass()
     } else {
         (
@@ -855,11 +874,12 @@ fn check_tests_neg(ctx: &Ctx) -> Check {
             "add tests_neg/<area>/<name>.ch + .expect sidecars",
         );
     }
-    if !ctx
-        .workflows
-        .iter()
-        .any(|(_, b)| b.contains("--expect neg") || b.contains("--expect=neg"))
-    {
+    let suite_is_wired = ctx.workflows.iter().any(|(_, body)| {
+        workflow_runs_expected_suite(body, "tests_neg", "neg")
+            || central_workflow_call(ctx, body)
+                .is_some_and(|call| matches!(call.profile.as_str(), "coral-ci" | "nautilus-ci"))
+    });
+    if !suite_is_wired {
         return fail(
             "no CI step runs `chelis test tests_neg --expect neg`",
             "wire the negative suite into ci.yml",
@@ -885,11 +905,11 @@ fn check_tests_blocked(ctx: &Ctx) -> Check {
             "add tests_blocked/<area>/<name>.ch + .expect for each expressible blocker",
         );
     }
-    if !ctx
-        .workflows
-        .iter()
-        .any(|(_, b)| b.contains("--expect blocked") || b.contains("--expect=blocked"))
-    {
+    let suite_is_wired = ctx.workflows.iter().any(|(_, body)| {
+        workflow_runs_expected_suite(body, "tests_blocked", "blocked")
+            || central_workflow_call(ctx, body).is_some_and(|call| call.profile == "nautilus-ci")
+    });
+    if !suite_is_wired {
         return fail(
             "no CI step runs `chelis test tests_blocked --expect blocked`",
             "wire the blocked-probe suite into ci.yml",
@@ -1334,11 +1354,402 @@ fn read_workflows(root: &Path) -> Vec<(String, String)> {
     out
 }
 
+const CENTRAL_WORKFLOW_PREFIX: &str = "Chelis-Lang/ci/.github/workflows/consumer.yml@";
+const CENTRAL_SECRET_EXPRESSION: &str = "${{ secrets.CHELIS_RELEASE_TOKEN }}";
+
+#[derive(Debug)]
+struct CentralWorkflowCall {
+    profile: String,
+    chelis_version: Option<String>,
+    chelis_tag: Option<String>,
+}
+
+/// Recognize a complete thin reusable-workflow calling job. This parser is
+/// intentionally narrower than YAML: it accepts only the canonical block-map
+/// wrapper shape. Comments, run-string lookalikes, conditional jobs, mutable
+/// refs, unexpected inputs, and additional jobs therefore cannot become audit
+/// authority.
+fn central_workflow_call(ctx: &Ctx, body: &str) -> Option<CentralWorkflowCall> {
+    let call = parse_central_workflow_call(body)?;
+    let matches_shell = match ctx.shell_name.as_deref() {
+        Some("coral") => matches!(call.profile.as_str(), "coral-ci" | "coral-release"),
+        Some("nautilus") => matches!(
+            call.profile.as_str(),
+            "nautilus-ci" | "nautilus-nightly" | "nautilus-release"
+        ),
+        _ => false,
+    };
+    matches_shell.then_some(call)
+}
+
+fn parse_central_workflow_call(body: &str) -> Option<CentralWorkflowCall> {
+    let lines: Vec<&str> = body.lines().collect();
+    let jobs_start = lines
+        .iter()
+        .position(|line| leading_spaces(line) == Some(0) && line.trim() == "jobs:")?;
+    let jobs_end = lines
+        .iter()
+        .enumerate()
+        .skip(jobs_start + 1)
+        .find(|(_, line)| !line.trim().is_empty() && leading_spaces(line) == Some(0))
+        .map(|(index, _)| index)
+        .unwrap_or(lines.len());
+
+    let mut jobs: Vec<&[&str]> = Vec::new();
+    let mut index = jobs_start + 1;
+    while index < jobs_end {
+        let line = lines[index];
+        if line.trim().is_empty() || line.trim_start().starts_with('#') {
+            index += 1;
+            continue;
+        }
+        let (_, value) = mapping_at(line, 2)?;
+        if !value.is_empty() {
+            return None;
+        }
+        let job_end = lines
+            .iter()
+            .enumerate()
+            .take(jobs_end)
+            .skip(index + 1)
+            .find(|(_, candidate)| {
+                !candidate.trim().is_empty()
+                    && leading_spaces(candidate).is_some_and(|indent| indent <= 2)
+            })
+            .map(|(end, _)| end)
+            .unwrap_or(jobs_end);
+        jobs.push(&lines[index + 1..job_end]);
+        index = job_end;
+    }
+    if jobs.len() != 1 {
+        return None;
+    }
+
+    let job = jobs[0];
+    let mut keys: BTreeMap<String, (String, usize, usize)> = BTreeMap::new();
+    let mut index = 0;
+    while index < job.len() {
+        let line = job[index];
+        if line.trim().is_empty() || line.trim_start().starts_with('#') {
+            index += 1;
+            continue;
+        }
+        let (key, value) = mapping_at(line, 4)?;
+        if keys.contains_key(&key) {
+            return None;
+        }
+        let child_end = job
+            .iter()
+            .enumerate()
+            .skip(index + 1)
+            .find(|(_, candidate)| {
+                !candidate.trim().is_empty()
+                    && leading_spaces(candidate).is_some_and(|indent| indent <= 4)
+            })
+            .map(|(end, _)| end)
+            .unwrap_or(job.len());
+        keys.insert(key, (value, index + 1, child_end));
+        index = child_end;
+    }
+    if !["uses", "with", "secrets"]
+        .iter()
+        .all(|key| keys.contains_key(*key))
+        || !keys
+            .keys()
+            .all(|key| matches!(key.as_str(), "name" | "uses" | "with" | "secrets"))
+    {
+        return None;
+    }
+
+    if !keys.get("with")?.0.is_empty() || !keys.get("secrets")?.0.is_empty() {
+        return None;
+    }
+    for scalar_key in ["name", "uses"] {
+        if let Some((_, child_start, child_end)) = keys.get(scalar_key)
+            && child_start != child_end
+        {
+            return None;
+        }
+    }
+    let uses = &keys.get("uses")?.0;
+    let sha = uses.strip_prefix(CENTRAL_WORKFLOW_PREFIX)?;
+    if sha.len() != 40
+        || sha.bytes().all(|byte| byte == b'0')
+        || !sha
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return None;
+    }
+
+    let (_, with_start, with_end) = keys.get("with")?;
+    let inputs = nested_mapping(job, *with_start, *with_end, 6)?;
+    let profile = inputs.get("profile")?.to_string();
+    let expected_inputs: &[&str] = match profile.as_str() {
+        "coral-ci" => &[
+            "profile",
+            "chelis-tag",
+            "chelis-version",
+            "chelis-linux-sha256",
+            "chelis-darwin-sha256",
+            "nautilus-tag",
+            "package-version",
+        ],
+        "coral-release" | "nautilus-release" => &["profile", "chelis-linux-sha256"],
+        "nautilus-ci" => &[
+            "profile",
+            "chelis-tag",
+            "chelis-version",
+            "chelis-linux-sha256",
+            "chelis-darwin-sha256",
+        ],
+        "nautilus-nightly" => &[
+            "profile",
+            "chelis-tag",
+            "chelis-version",
+            "chelis-linux-sha256",
+        ],
+        _ => return None,
+    };
+    if inputs.len() != expected_inputs.len()
+        || !expected_inputs.iter().all(|key| inputs.contains_key(*key))
+        || !canonical_sha256(inputs.get("chelis-linux-sha256")?)
+        || inputs
+            .get("chelis-darwin-sha256")
+            .is_some_and(|digest| !canonical_sha256(digest))
+    {
+        return None;
+    }
+
+    let (_, secrets_start, secrets_end) = keys.get("secrets")?;
+    let secrets = nested_mapping(job, *secrets_start, *secrets_end, 6)?;
+    if secrets.len() != 1
+        || secrets.get("CHELIS_RELEASE_TOKEN").map(String::as_str)
+            != Some(CENTRAL_SECRET_EXPRESSION)
+    {
+        return None;
+    }
+
+    Some(CentralWorkflowCall {
+        profile,
+        chelis_version: inputs.get("chelis-version").cloned(),
+        chelis_tag: inputs.get("chelis-tag").cloned(),
+    })
+}
+
+fn leading_spaces(line: &str) -> Option<usize> {
+    let prefix = &line[..line.len() - line.trim_start_matches([' ', '\t']).len()];
+    (!prefix.contains('\t')).then_some(prefix.len())
+}
+
+fn yaml_scalar(value: &str) -> String {
+    let mut value = value.trim();
+    if let Some((before, _)) = value.split_once(" #") {
+        value = before.trim_end();
+    }
+    if value.len() >= 2
+        && ((value.starts_with('"') && value.ends_with('"'))
+            || (value.starts_with('\'') && value.ends_with('\'')))
+    {
+        value[1..value.len() - 1].to_string()
+    } else {
+        value.to_string()
+    }
+}
+
+fn mapping_at(line: &str, indent: usize) -> Option<(String, String)> {
+    if leading_spaces(line)? != indent {
+        return None;
+    }
+    let text = &line[indent..];
+    if text.starts_with(['#', '-']) {
+        return None;
+    }
+    let (key, value) = text.split_once(':')?;
+    let key = key.trim();
+    (!key.is_empty()).then(|| (key.to_string(), yaml_scalar(value)))
+}
+
+fn nested_mapping(
+    lines: &[&str],
+    start: usize,
+    end: usize,
+    indent: usize,
+) -> Option<BTreeMap<String, String>> {
+    let mut values = BTreeMap::new();
+    for line in &lines[start..end] {
+        if line.trim().is_empty() || line.trim_start().starts_with('#') {
+            continue;
+        }
+        let (key, value) = mapping_at(line, indent)?;
+        if value.is_empty() || values.insert(key, value).is_some() {
+            return None;
+        }
+    }
+    Some(values)
+}
+
+fn canonical_sha256(value: &str) -> bool {
+    value.strip_prefix("sha256:").is_some_and(|digest| {
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    })
+}
+
 fn workflow_installs_toolchain(body: &str) -> bool {
-    body.contains("CHELIS_VERSION")
-        || body.contains("CHELIS_TAG")
-        || body.contains("chelisup install")
-        || body.contains("install-chelis")
+    workflow_step_uses(body)
+        .iter()
+        .any(|uses| uses == "./.github/actions/install-chelis")
+        || workflow_run_blocks(body).iter().any(|block| {
+            let commands: Vec<&str> = block.lines().map(str::trim).collect();
+            commands
+                .iter()
+                .any(|command| command.starts_with("chelisup install "))
+                || (commands
+                    .iter()
+                    .any(|command| command.starts_with("gh release download"))
+                    && commands
+                        .iter()
+                        .any(|command| command.contains("--repo Chelis-Lang/chelis")))
+        })
+}
+
+fn workflow_runs_command(body: &str, command: &str) -> bool {
+    workflow_run_blocks(body).iter().any(|block| {
+        block
+            .lines()
+            .map(str::trim)
+            .any(|line| line == command || line.starts_with(&format!("{command} ")))
+    })
+}
+
+fn workflow_runs_expected_suite(body: &str, directory: &str, expected: &str) -> bool {
+    let command = format!("chelis test {directory}");
+    workflow_run_blocks(body).iter().any(|block| {
+        block.lines().map(str::trim).any(|line| {
+            line.strip_prefix(&command).is_some_and(|rest| {
+                (rest.starts_with(' ') || rest.starts_with("/ "))
+                    && (line.contains(&format!("--expect {expected}"))
+                        || line.contains(&format!("--expect={expected}")))
+            })
+        })
+    })
+}
+
+fn workflow_run_blocks(body: &str) -> Vec<String> {
+    let lines: Vec<&str> = body.lines().collect();
+    let mut blocks = Vec::new();
+    let mut index = 0;
+    while index < lines.len() {
+        let Some((indent, value)) = step_field(&lines, index, "run") else {
+            index += 1;
+            continue;
+        };
+        if !matches!(value.as_str(), "|" | ">" | "|-" | ">-" | "|+" | ">+") {
+            blocks.push(value);
+            index += 1;
+            continue;
+        }
+        let mut commands = Vec::new();
+        index += 1;
+        while index < lines.len() {
+            let line = lines[index];
+            if !line.trim().is_empty()
+                && leading_spaces(line).is_none_or(|child_indent| child_indent <= indent)
+            {
+                break;
+            }
+            if !line.trim().is_empty() && !line.trim_start().starts_with('#') {
+                commands.push(line.trim());
+            }
+            index += 1;
+        }
+        blocks.push(commands.join("\n"));
+    }
+    blocks
+}
+
+fn workflow_step_uses(body: &str) -> Vec<String> {
+    let lines: Vec<&str> = body.lines().collect();
+    let mut uses = Vec::new();
+    let mut index = 0;
+    while index < lines.len() {
+        if let Some((indent, value)) = step_field(&lines, index, "run")
+            && matches!(value.as_str(), "|" | ">" | "|-" | ">-" | "|+" | ">+")
+        {
+            index += 1;
+            while index < lines.len() {
+                let line = lines[index];
+                if !line.trim().is_empty()
+                    && leading_spaces(line).is_none_or(|child_indent| child_indent <= indent)
+                {
+                    break;
+                }
+                index += 1;
+            }
+            continue;
+        }
+        if let Some((_, value)) = step_field(&lines, index, "uses") {
+            uses.push(value);
+        }
+        index += 1;
+    }
+    uses
+}
+
+fn step_field(lines: &[&str], index: usize, key: &str) -> Option<(usize, String)> {
+    let line = lines[index];
+    if line.trim().is_empty() || line.trim_start().starts_with('#') {
+        return None;
+    }
+    let indent = leading_spaces(line)?;
+    if !matches!(indent, 6 | 8) {
+        return None;
+    }
+
+    // Restrict recognition to canonical GitHub jobs -> job -> steps -> step.
+    // An inert list under env or another arbitrary YAML field is not a step.
+    let root = lines[..index]
+        .iter()
+        .rev()
+        .find(|candidate| !candidate.trim().is_empty() && leading_spaces(candidate) == Some(0))?;
+    if root.trim() != "jobs:" {
+        return None;
+    }
+    let job = lines[..index]
+        .iter()
+        .rev()
+        .find(|candidate| !candidate.trim().is_empty() && leading_spaces(candidate) == Some(2))?;
+    if mapping_at(job, 2).is_none_or(|(_, value)| !value.is_empty()) {
+        return None;
+    }
+    let section = lines[..index]
+        .iter()
+        .rev()
+        .find(|candidate| !candidate.trim().is_empty() && leading_spaces(candidate) == Some(4))?;
+    if !matches!(
+        mapping_at(section, 4),
+        Some((ref section_key, ref value)) if section_key == "steps" && value.is_empty()
+    ) {
+        return None;
+    }
+
+    let mut text = &line[indent..];
+    if indent == 6 {
+        text = text.strip_prefix("- ")?.trim_start();
+    } else {
+        let parent = lines[..index].iter().rev().find(|candidate| {
+            !candidate.trim().is_empty()
+                && leading_spaces(candidate).is_some_and(|parent_indent| parent_indent < 8)
+        })?;
+        if leading_spaces(parent) != Some(6) || !parent.trim_start().starts_with("- ") {
+            return None;
+        }
+    }
+    let value = text.strip_prefix(key)?.strip_prefix(':')?;
+    Some((indent, yaml_scalar(value)))
 }
 
 /// Extract a `KEY: value` env value (first occurrence), tolerating quotes.
@@ -1357,19 +1768,26 @@ fn extract_env(body: &str, key: &str) -> Option<String> {
     None
 }
 
-/// Extract the version argument of each `chelisup install <ver>` occurrence,
-/// tolerating surrounding quotes. Only tokens that look like a version (start
-/// with a digit or `v`) are returned, so flags like `--force` are ignored.
+/// Extract the version argument of each executed `chelisup install <ver>`.
 fn extract_chelisup_install_versions(body: &str) -> Vec<String> {
-    let needle = "chelisup install ";
-    body.match_indices(needle)
-        .filter_map(|(i, _)| {
-            let rest = body[i + needle.len()..].trim_start_matches(['"', '\'']);
-            let ver: String = rest
-                .chars()
-                .take_while(|c| !c.is_whitespace() && *c != '"' && *c != '\'')
-                .collect();
-            (ver.chars().next()).and_then(|c| (c.is_ascii_digit() || c == 'v').then_some(ver))
+    workflow_run_blocks(body)
+        .iter()
+        .flat_map(|block| {
+            block
+                .lines()
+                .map(str::trim)
+                .filter_map(|line| line.strip_prefix("chelisup install "))
+                .filter_map(|rest| {
+                    let rest = rest.trim_start_matches(['"', '\'']);
+                    let version: String = rest
+                        .chars()
+                        .take_while(|char| !char.is_whitespace() && *char != '"' && *char != '\'')
+                        .collect();
+                    version.chars().next().and_then(|first| {
+                        (first.is_ascii_digit() || first == 'v').then_some(version)
+                    })
+                })
+                .collect::<Vec<_>>()
         })
         .collect()
 }
@@ -1773,12 +2191,17 @@ mod tests {
 
     #[test]
     fn chelisup_install_versions_extracted() {
-        let body = "run: chelisup install 0.13.0 --force\n  and chelisup install \"v0.14.0\"\n";
+        let body = "jobs:\n  test:\n    steps:\n      - run: |\n          chelisup install 0.13.0 --force\n          chelisup install \"v0.14.0\"\n";
         assert_eq!(
             extract_chelisup_install_versions(body),
             vec!["0.13.0".to_string(), "v0.14.0".to_string()]
         );
-        assert!(extract_chelisup_install_versions("chelisup install --help").is_empty());
+        let help = "jobs:\n  test:\n    steps:\n      - run: chelisup install --help\n";
+        assert!(extract_chelisup_install_versions(help).is_empty());
+        let inert = "jobs:\n  test:\n    steps:\n      - run: echo 'chelisup install 0.13.0'\n";
+        assert!(extract_chelisup_install_versions(inert).is_empty());
+        let non_step = "jobs:\n  test:\n    fake:\n      - uses: ./.github/actions/install-chelis\n      - run: chelisup install 0.13.0\n";
+        assert!(!workflow_installs_toolchain(non_step));
     }
 
     #[test]

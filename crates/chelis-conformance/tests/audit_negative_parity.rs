@@ -15,6 +15,9 @@ use chelis_conformance::scaffold;
 // applies to blocks stamped at AUDITOR_VERSION, so a hardcoded scaffold
 // version silently skips the forged-block oracle after every release bump.
 const VER: &str = env!("CARGO_PKG_VERSION");
+const CENTRAL_SHA: &str = "1111111111111111111111111111111111111111";
+const ARCHIVE_DIGEST: &str =
+    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
 fn stamp(dir: &Path, name: &str) -> PathBuf {
     let root = dir.join(name);
@@ -91,6 +94,209 @@ fn editing_workflow_pin_fails_row_3() {
     assert!(!report.ok());
     assert_eq!(verdict_of(&report, "workflow-env-pins"), Verdict::Fail);
     assert!(diagnostic_of(&report, "workflow-env-pins").contains("0.13.0"));
+}
+
+fn central_profile_wrapper(profile: &str, inputs: &[String]) -> String {
+    let mut lines = vec![
+        "name: central".to_string(),
+        "on: workflow_dispatch".to_string(),
+        "permissions:".to_string(),
+        "  contents: read".to_string(),
+        "jobs:".to_string(),
+        "  call-central:".to_string(),
+        "    name: Call central profile".to_string(),
+        format!("    uses: Chelis-Lang/ci/.github/workflows/consumer.yml@{CENTRAL_SHA}"),
+        "    with:".to_string(),
+        format!("      profile: {profile}"),
+    ];
+    lines.extend(inputs.iter().map(|input| format!("      {input}")));
+    lines.extend([
+        "    secrets:".to_string(),
+        "      CHELIS_RELEASE_TOKEN: ${{ secrets.CHELIS_RELEASE_TOKEN }}".to_string(),
+    ]);
+    format!("{}\n", lines.join("\n"))
+}
+
+fn central_ci_wrapper(package: &str, version: &str) -> String {
+    let profile = match package {
+        "coral" => "coral-ci",
+        "nautilus" => "nautilus-ci",
+        other => panic!("unsupported central wrapper fixture {other}"),
+    };
+    let mut inputs = vec![
+        format!("chelis-tag: v{version}"),
+        format!("chelis-version: {version}"),
+        format!("chelis-linux-sha256: {ARCHIVE_DIGEST}"),
+        format!("chelis-darwin-sha256: {ARCHIVE_DIGEST}"),
+    ];
+    if package == "coral" {
+        inputs.push("nautilus-tag: v4.5.6".to_string());
+        inputs.push("package-version: 7.8.9".to_string());
+    }
+    central_profile_wrapper(profile, &inputs)
+}
+
+#[test]
+fn immutable_central_ci_wrappers_satisfy_executed_contract_rows() {
+    for package in ["coral", "nautilus"] {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = stamp(tmp.path(), package);
+        std::fs::write(
+            root.join(".github/workflows/ci.yml"),
+            central_ci_wrapper(package, VER),
+        )
+        .unwrap();
+
+        let report = audit::audit(&root);
+        for row in [
+            "workflow-env-pins",
+            "pin-consistency-guard",
+            "toolchain-installer",
+            "tests-neg",
+        ] {
+            assert_eq!(
+                verdict_of(&report, row),
+                Verdict::Pass,
+                "{package} central wrapper did not satisfy {row}: {}",
+                diagnostic_of(&report, row)
+            );
+        }
+        assert!(report.ok(), "{package}: central wrapper must audit green");
+    }
+}
+
+#[test]
+fn central_nightly_and_release_profiles_are_real_install_contracts() {
+    let cases = [
+        (
+            "coral",
+            "coral-release",
+            vec![format!("chelis-linux-sha256: {ARCHIVE_DIGEST}")],
+        ),
+        (
+            "nautilus",
+            "nautilus-nightly",
+            vec![
+                format!("chelis-tag: v{VER}"),
+                format!("chelis-version: {VER}"),
+                format!("chelis-linux-sha256: {ARCHIVE_DIGEST}"),
+            ],
+        ),
+        (
+            "nautilus",
+            "nautilus-release",
+            vec![format!("chelis-linux-sha256: {ARCHIVE_DIGEST}")],
+        ),
+    ];
+    for (package, profile, inputs) in cases {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = stamp(tmp.path(), package);
+        std::fs::write(
+            root.join(".github/workflows/ci.yml"),
+            "name: inert\njobs:\n  no-install:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo no\n",
+        )
+        .unwrap();
+        std::fs::remove_file(root.join(".github/workflows/bump-pr.yml")).unwrap();
+        std::fs::write(
+            root.join(".github/workflows/central.yml"),
+            central_profile_wrapper(profile, &inputs),
+        )
+        .unwrap();
+
+        let report = audit::audit(&root);
+        assert_eq!(
+            verdict_of(&report, "workflow-env-pins"),
+            Verdict::Pass,
+            "{profile} was not recognized: {}",
+            diagnostic_of(&report, "workflow-env-pins")
+        );
+        assert_eq!(
+            verdict_of(&report, "toolchain-installer"),
+            Verdict::Pass,
+            "{profile} was not recognized as an installer"
+        );
+    }
+}
+
+#[test]
+fn central_wrapper_pin_drift_fails_workflow_pin_row() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = stamp(tmp.path(), "nautilus");
+    std::fs::write(
+        root.join(".github/workflows/ci.yml"),
+        central_ci_wrapper("nautilus", "0.0.1"),
+    )
+    .unwrap();
+
+    let report = audit::audit(&root);
+    assert_eq!(verdict_of(&report, "workflow-env-pins"), Verdict::Fail);
+    assert!(diagnostic_of(&report, "workflow-env-pins").contains("0.0.1"));
+}
+
+#[test]
+fn central_nautilus_profile_binds_blocked_suite() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = stamp(tmp.path(), "nautilus");
+    std::fs::write(
+        root.join(".github/workflows/ci.yml"),
+        central_ci_wrapper("nautilus", VER),
+    )
+    .unwrap();
+    std::fs::create_dir_all(root.join("tests_blocked/example")).unwrap();
+    std::fs::write(root.join("tests_blocked/example/case.ch"), "1\n").unwrap();
+
+    let report = audit::audit(&root);
+    assert_eq!(verdict_of(&report, "tests-blocked"), Verdict::Pass);
+}
+
+#[test]
+fn inert_or_skippable_central_markers_do_not_satisfy_audit() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = stamp(tmp.path(), "nautilus");
+    let inert = [
+        "name: inert".to_string(),
+        "jobs:".to_string(),
+        "  test:".to_string(),
+        "    runs-on: ubuntu-latest".to_string(),
+        "    steps:".to_string(),
+        "      - run: |".to_string(),
+        format!(
+            "          echo 'uses: Chelis-Lang/ci/.github/workflows/consumer.yml@{CENTRAL_SHA}'"
+        ),
+        "          echo 'chelis reef conform audit'".to_string(),
+        "          echo 'uses: ./.github/actions/install-chelis'".to_string(),
+        "          echo 'chelis test tests_neg --expect neg'".to_string(),
+    ]
+    .join("\n");
+    std::fs::write(root.join(".github/workflows/ci.yml"), inert).unwrap();
+    std::fs::remove_file(root.join(".github/workflows/bump-pr.yml")).unwrap();
+
+    let report = audit::audit(&root);
+    assert_eq!(verdict_of(&report, "pin-consistency-guard"), Verdict::Fail);
+    assert_ne!(verdict_of(&report, "toolchain-installer"), Verdict::Pass);
+    assert_eq!(verdict_of(&report, "tests-neg"), Verdict::Fail);
+}
+
+#[test]
+fn central_call_rejects_mutable_skipped_and_wrong_secret_shapes() {
+    let cases = [
+        central_ci_wrapper("nautilus", VER).replace(CENTRAL_SHA, "main"),
+        central_ci_wrapper("nautilus", VER).replace("    with:\n", "    if: false\n    with:\n"),
+        central_ci_wrapper("nautilus", VER)
+            .replace("${{ secrets.CHELIS_RELEASE_TOKEN }}", "${{ github.token }}"),
+        central_ci_wrapper("nautilus", VER).replace("profile: nautilus-ci", "profile: coral-ci"),
+    ];
+    for (index, wrapper) in cases.into_iter().enumerate() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = stamp(tmp.path(), "nautilus");
+        std::fs::write(root.join(".github/workflows/ci.yml"), wrapper).unwrap();
+        let report = audit::audit(&root);
+        assert_eq!(
+            verdict_of(&report, "pin-consistency-guard"),
+            Verdict::Fail,
+            "case {index} must not become central authority"
+        );
+    }
 }
 
 #[test]
