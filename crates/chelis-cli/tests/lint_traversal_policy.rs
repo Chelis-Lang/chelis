@@ -273,6 +273,64 @@ fn admitted_manifest_retains_doc_package_exception_through_cli() {
         .stdout("");
 }
 
+#[test]
+fn admitted_sibling_manifest_retains_doc_exception_for_subdirectory_cli_target() {
+    let temp = tempdir().unwrap();
+    let root = temp.path();
+    write_spec(root);
+    fs::write(
+        root.join("chelis-lint.toml"),
+        "version = 1\nspec = \"spec/01-nomenclature.md\"\n",
+    )
+    .unwrap();
+    let docs = root.join("docs");
+    fs::create_dir_all(&docs).unwrap();
+    let doc = docs.join("foo-bar.md");
+    fs::write(&doc, "# Docs\n").unwrap();
+    fs::create_dir_all(root.join("crates/foo-bar")).unwrap();
+    fs::write(
+        root.join("crates/foo-bar/Cargo.toml"),
+        "[package]\nname = \"foo-bar\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+
+    for target in [&docs, &doc] {
+        chelis_lint_rule(target, "doc-filename-convention")
+            .assert()
+            .success()
+            .stdout("");
+    }
+}
+
+#[test]
+fn external_parent_manifest_cannot_grant_doc_exception_through_cli() {
+    let temp = tempdir().unwrap();
+    fs::write(
+        temp.path().join("Cargo.toml"),
+        "[package]\nname = \"foo-bar\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    let root = temp.path().join("repository");
+    write_spec(&root);
+    fs::write(
+        root.join("chelis-lint.toml"),
+        "version = 1\nspec = \"spec/01-nomenclature.md\"\n",
+    )
+    .unwrap();
+    let docs = root.join("docs");
+    fs::create_dir_all(&docs).unwrap();
+    let doc = docs.join("foo-bar.md");
+    fs::write(&doc, "# Docs\n").unwrap();
+
+    for target in [&docs, &doc] {
+        chelis_lint_rule(target, "doc-filename-convention")
+            .assert()
+            .failure()
+            .stdout(predicate::str::contains("doc-filename-convention"))
+            .stdout(predicate::str::contains("foo-bar.md"));
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn external_policy_symlink_fails_standalone_cli() {

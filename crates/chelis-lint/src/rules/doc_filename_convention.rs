@@ -111,16 +111,17 @@ fn is_inside_mdbook_tree(path: &Path) -> bool {
 }
 
 /// True if the filename stem of `path` (without the `.md` extension)
-/// matches the `name` of a Cargo package somewhere in the workspace
-/// rooted at `root`. This is the "Cargo-package-name exception" carve-out
+/// matches the `name` of a Cargo package somewhere in the workspace selected
+/// by repository policy, falling back to `root` when no policy is present.
+/// This is the "Cargo-package-name exception" carve-out
 /// to §8.3: when a narrative doc is named for a Cargo crate (e.g.,
 /// `docs/shells/c-earchin.md` for the `c-earchin` crate), the kebab-case
 /// filename is intentional and accepted.
 ///
-/// Detection walks ancestor dirs of `path` looking for `Cargo.toml`, plus
-/// — when no ancestor `Cargo.toml` matches — scans the `root` for
-/// `Cargo.toml` files under `crates/`. The scan is bounded so it's safe
-/// to call from a lint check.
+/// Detection scans the policy-root `crates/` directory, then walks ancestor
+/// dirs of `path` looking for an admitted `Cargo.toml`. The scan is bounded so
+/// it is safe to call from a lint check, and policy-root admission prevents
+/// machine-local ancestors from affecting repository lint.
 fn filename_matches_cargo_package(root: &Path, path: &Path) -> bool {
     let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
         return false;
@@ -136,12 +137,14 @@ fn filename_matches_cargo_package(root: &Path, path: &Path) -> bool {
         return false;
     };
     let is_admitted = |manifest: &Path| policy.is_admitted_ancillary(manifest, false);
-    // Scan workspace crates first — this is the common case. The
-    // `root/crates/` layout is what the chelis ecosystem uses. Direct
-    // Rule::check callers retain this bounded compatibility path, but every
-    // directory and ancillary manifest still passes traversal-policy
-    // admission through the centralized non-recursive discovery API.
-    for manifest in policy.admitted_workspace_cargo_manifests(root) {
+    // Scan workspace crates first — this is the common case. Repository
+    // policy defines the workspace boundary even when the lint target is a
+    // subdirectory or one explicit doc. Direct Rule::check callers retain
+    // this bounded compatibility path, but every directory and ancillary
+    // manifest still passes traversal-policy admission through the
+    // centralized non-recursive discovery API.
+    let manifest_root = policy.repository_root().unwrap_or(root);
+    for manifest in policy.admitted_workspace_cargo_manifests(manifest_root) {
         if let Some(name) = read_cargo_package_name(&manifest)
             && name == stem
         {
@@ -193,6 +196,15 @@ fn prepare_doc_filename_state(
         }
         visited_manifests.insert(entry.path.clone());
         if let Some(name) = read_cargo_package_name(&entry.path) {
+            package_names.insert(name);
+        }
+    }
+
+    let manifest_root = policy.repository_root().unwrap_or(root);
+    for manifest in policy.admitted_workspace_cargo_manifests(manifest_root) {
+        if visited_manifests.insert(manifest.clone())
+            && let Some(name) = read_cargo_package_name(&manifest)
+        {
             package_names.insert(name);
         }
     }

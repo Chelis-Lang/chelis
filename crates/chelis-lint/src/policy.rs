@@ -258,9 +258,11 @@ impl TraversalPolicy {
         let governed = lexical_relative.is_some();
         let is_symlink = link_metadata.file_type().is_symlink();
         if !governed && !is_symlink {
-            // Preserve the documented ancestor-manifest compatibility path for
-            // explicit file/subdirectory lint targets.
-            return true;
+            // A discovered repository policy defines the workspace boundary:
+            // ordinary machine-local ancestors above it cannot contribute
+            // ancillary metadata. Loose targets without repository policy keep
+            // the historical ancestor-manifest compatibility path.
+            return self.repository_root.is_none();
         }
         let Some(canonical_scope_root) = self.canonical_scope_root.as_deref() else {
             return false;
@@ -272,10 +274,15 @@ impl TraversalPolicy {
             return false;
         };
         let resolved_is_dir = metadata.is_dir();
+        let resolved_kind_matches = if is_dir {
+            resolved_is_dir
+        } else {
+            metadata.is_file()
+        };
         let Ok(resolved_relative) = resolved.strip_prefix(canonical_scope_root) else {
             return false;
         };
-        if resolved_is_dir != is_dir {
+        if !resolved_kind_matches {
             return false;
         }
         let traverses_alias = lexical_relative.as_deref() != Some(resolved_relative);

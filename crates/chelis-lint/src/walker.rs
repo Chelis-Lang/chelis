@@ -34,6 +34,10 @@ pub fn walk(
                 return true;
             }
             let file_type = entry.file_type();
+            if file_type.is_some_and(|kind| !kind.is_dir() && !kind.is_file() && !kind.is_symlink())
+            {
+                return false;
+            }
             let is_dir = file_type.is_some_and(|kind| kind.is_dir());
             let resolve_target = file_type.is_none_or(|kind| kind.is_symlink());
             policy_for_filter.is_admitted_entry(entry.path(), is_dir, resolve_target)

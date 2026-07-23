@@ -119,11 +119,14 @@ now rejected at the offending site — see **Changed** for the migration.
   of importing machine-local policy. Explicit targets remain lintable, and all
   rules plus prepared catalogs consume one policy-admitted corpus. Ancillary
   Cargo manifests used by `doc-filename-convention` now come from admitted
-  entries or pass a parent-aware policy check, so an excluded generated crate
+  entries or pass a parent-aware policy check. Admitted sibling workspace
+  manifests remain visible to subdirectory and explicit-file lint targets,
+  while excluded crates and machine-local ancestors above the policy root
   cannot suppress an admitted documentation violation. Discovered symlink
-  targets are resolved through the same policy: internal admitted file links
-  remain usable, while aliases into excluded or machine-local content cannot
-  affect prepared catalogs or ancillary metadata. Rule modules are tripwired
+  targets are resolved through the same policy: internal admitted regular-file
+  links remain usable, while special files and aliases into excluded or
+  machine-local content cannot affect prepared catalogs or ancillary metadata.
+  Rule modules are tripwired
   against independent walker and directory-discovery primitives. A crate-local
   canonical `AGENTS.md` plus `CLAUDE.md` symlink locks the rule-registration and
   canonical-traversal protocol for both agent entry points at edit time.

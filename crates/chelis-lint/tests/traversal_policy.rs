@@ -770,6 +770,32 @@ fn broken_or_entry_kind_changing_source_symlinks_are_omitted() {
 
 #[cfg(unix)]
 #[test]
+fn non_regular_source_entries_and_symlink_targets_are_omitted() {
+    use std::os::unix::fs::symlink;
+    use std::os::unix::net::UnixListener;
+
+    let repository = tempdir().unwrap();
+    let root = repository.path();
+    write_policy(root, "");
+    let _direct_socket = UnixListener::bind(root.join("direct.ch")).unwrap();
+    let _target_socket = UnixListener::bind(root.join("socket-target")).unwrap();
+    symlink("socket-target", root.join("linked.ch")).unwrap();
+    fs::write(root.join("visible.ch"), "def visible() = 1\n").unwrap();
+
+    let names = walked(root);
+    assert!(names.iter().any(|path| path == "visible.ch"));
+    assert!(
+        !names.iter().any(|path| path == "direct.ch"),
+        "a discovered source-shaped socket must not enter the lint corpus: {names:?}"
+    );
+    assert!(
+        !names.iter().any(|path| path == "linked.ch"),
+        "a source-shaped symlink must resolve to a regular file, not a socket: {names:?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn internal_admitted_surf_symlink_target_still_contributes_to_opaque_catalog() {
     use std::os::unix::fs::symlink;
 
@@ -928,6 +954,78 @@ fn admitted_manifest_still_grants_package_name_exception_to_admitted_doc() {
     assert!(
         lint_doc_filenames(root).is_empty(),
         "an admitted matching Cargo manifest must retain the §8.3 package-name exception"
+    );
+}
+
+#[test]
+fn subdirectory_and_explicit_doc_lint_retain_admitted_sibling_package_exception() {
+    let temp = tempdir().unwrap();
+    let root = temp.path();
+    write_policy(root, "");
+    let docs = root.join("docs");
+    fs::create_dir_all(&docs).unwrap();
+    let doc = docs.join("foo-bar.md");
+    fs::write(&doc, "# Docs\n").unwrap();
+    fs::create_dir_all(root.join("crates/foo-bar")).unwrap();
+    fs::write(
+        root.join("crates/foo-bar/Cargo.toml"),
+        "[package]\nname = \"foo-bar\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+
+    assert!(
+        lint_doc_filenames(&docs).is_empty(),
+        "subdirectory lint must retain an admitted sibling workspace package"
+    );
+    assert!(
+        lint_doc_filenames(&doc).is_empty(),
+        "explicit-file lint must retain an admitted sibling workspace package"
+    );
+    let direct_ctx = Context {
+        root: &docs,
+        path: &doc,
+        source: None,
+        surface: Surface::DocFile,
+    };
+    assert!(
+        DocFilenameConvention.check(&direct_ctx).is_empty(),
+        "direct Rule::check must use the policy-root workspace package catalog"
+    );
+}
+
+#[test]
+fn external_parent_manifest_cannot_grant_package_name_exception() {
+    let temp = tempdir().unwrap();
+    fs::write(
+        temp.path().join("Cargo.toml"),
+        "[package]\nname = \"foo-bar\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    let root = temp.path().join("repository");
+    write_policy(&root, "");
+    let docs = root.join("docs");
+    fs::create_dir_all(&docs).unwrap();
+    let doc = docs.join("foo-bar.md");
+    fs::write(&doc, "# Docs\n").unwrap();
+
+    for target in [docs.clone(), doc.clone()] {
+        let violations = lint_doc_filenames(&target);
+        assert_eq!(
+            violations.len(),
+            1,
+            "a Cargo manifest above the policy root is machine-local, not a workspace package: {violations:?}"
+        );
+    }
+    let direct_ctx = Context {
+        root: &docs,
+        path: &doc,
+        source: None,
+        surface: Surface::DocFile,
+    };
+    assert_eq!(
+        DocFilenameConvention.check(&direct_ctx).len(),
+        1,
+        "direct Rule::check must ignore machine-local manifests above policy root"
     );
 }
 

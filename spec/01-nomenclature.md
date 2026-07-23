@@ -1317,14 +1317,16 @@ keeps local and CI scope identical and keeps hidden source such as
 `.github/workflows/` visible unless Chelis policy explicitly excludes it.
 An explicitly named file or directory is always admitted at traversal depth
 zero; separately excluded descendants under an explicit directory remain
-pruned. A non-explicit symlink entry is resolved before admission: its target
-must be the same entry kind inside the policy root, and both the target and its
-governed parents must remain policy-admitted. Broken links, links escaping the
-policy root, and aliases into excluded content are omitted before any rule can
-read them. Internal links to admitted regular files remain visible and are
-classified by the link path. Under an explicitly named excluded directory,
-that root's exclusion remains overridden for an internal symlink target while
-separately excluded descendants remain effective.
+pruned. Non-explicit discovered entries must be directories, regular files, or
+symlinks that resolve to the same entry kind inside the policy root. Sockets,
+FIFOs, devices, and other special entries or targets are omitted before a rule
+can open or read them. A symlink's target and governed parents must remain
+policy-admitted. Broken links, links escaping the policy root, and aliases into
+excluded content are omitted before any rule can read them. Internal links to
+admitted regular files remain visible and are classified by the link path.
+Under an explicitly named excluded directory, that root's exclusion remains
+overridden for an internal symlink target while separately excluded
+descendants remain effective.
 
 Traversal policy does not replace rule-specific `Exception` entries or inline
 `allow` and `keep` directives. Those mechanisms act after a path has entered
@@ -1332,7 +1334,10 @@ the canonical corpus and retain their existing per-rule diagnostic or autofix
 semantics. Rule-side catalogs and ancillary metadata must derive from the same
 canonical entry set or pass a parent-aware traversal-policy admission check;
 content under an excluded directory must not change an admitted entry's
-verdict indirectly.
+verdict indirectly. When repository policy exists, its root bounds ancillary
+workspace discovery: admitted sibling workspace manifests remain visible when
+lint targets a subdirectory or explicit file, while machine-local ancestors
+above the policy root cannot grant lint exceptions.
 
 ### 12.3 Future rule queue
 
