@@ -61,9 +61,11 @@ accepted language can cover the prohibited shape without laundering paths or
 false positives. The attempted `rust-no-wildcard-dispatch` rule did not meet
 that standard under execution; it was extracted from [#730] to [#815] for an
 independent keep-or-delete decision. [#730] is instead closed structurally by
-typed boundaries and exhaustive consumers. The `spec-provenance` family
-([#733] Phase 1) remains a valid lint-shaped contract because it checks an
-explicit document grammar rather than approximating Rust semantics.
+typed boundaries and exhaustive consumers. Repository-wide authority,
+freshness, and impact analysis use the pinned Buoy shell plus a one-way,
+versioned Chelis adapter ([#733] Phases 1-3), avoiding both a second
+provenance engine inside `chelis-lint` and any outward Chelis dependency
+from `buoy-core`.
 
 The closing-move question for an incident is therefore: "what is the lowest
 typed construction boundary that makes this state unrepresentable?" A lint is

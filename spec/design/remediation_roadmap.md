@@ -77,11 +77,13 @@ false-positive behavior; the lint was extracted to PR [#815] and is not a
 Wave 2 dependency. Its one authoritative completion oracle is
 `.venv/bin/python scripts/loud_unsupported_phase2_oracle.py`; acceptance
 requires exit 0 with final line `PHASE 2 ORACLE: PASS` plus the plan-set's
-fresh-context adversarial review. [#733]'s
-OpenSpec track rides alongside (per the 2026-07-20 re-scope): new
-normative text Waves 1-2 author is born with atom IDs and goes through
-the OpenSpec claim flow; the rev/lint machinery (the re-scoped Phase 1)
-stays deferred.
+fresh-context adversarial review. [#733] Phase 1's Buoy shell-side design
+and fixture preparation may ride alongside: OpenSpec still plans new
+normative text and atom IDs remain stable. The executable advisory pilot
+waits for the selected Buoy revision's standalone `devenv test` final
+oracle and the shell-adapter prerequisites; once admitted, it reports
+malformed authorities and stale registrations without blocking existing
+Chelis commands or coupling `buoy-core` back to Chelis.
 [#732] Phase 2 additionally gates the ECOSYSTEM's compiled-lane
 validation: no shell runs a compiled binary today, and [#754]'s
 cross-lane agreement gate (the mechanism [#738]'s conform row points
