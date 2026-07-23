@@ -358,8 +358,9 @@ The exact Deep grammar and binder rules are normative in spec/03 §2.5.1/§2.6.
    or weakened.
 4. **The fitness-honesty corpus**: the permanent CI suite contains
    known-ill-typed programs - the wrapper battery plus every
-   census-verified silent-hole repro ([#709]/[#710]/[#755]/[#756] and
-   future finds) - asserting every member scores strictly below 1.0;
+   census-verified silent-hole repro ([#709]/[#710]/[#755]/[#756],
+   [#833]'s declaration-only `total_nodes == 0` hole, and future
+   finds) - asserting every member scores strictly below 1.0;
    any member scoring 1.0 fails the build. This is the continuous,
    corpus-level enforcement of §C1.3, standing even after §C3 makes
    violations unconstructible. Margin thresholds (e.g. < 0.9) are
@@ -620,3 +621,4 @@ Deep tag without a checker disposition uncompilable through exhaustive
 [#731]: https://github.com/Chelis-Lang/chelis/issues/731
 [#755]: https://github.com/Chelis-Lang/chelis/issues/755
 [#756]: https://github.com/Chelis-Lang/chelis/issues/756
+[#833]: https://github.com/Chelis-Lang/chelis/issues/833
