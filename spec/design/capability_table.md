@@ -40,9 +40,8 @@ One row per **(builtin, surface, dtype)**:
     tensor[f32]`), which the checker derives from - deleting the
     hand-mirrored lists (`TRANSCENDENTAL_FLOAT_ONLY_OPS` becomes a view).
   - `atom`: the controlling current atom revision ([#733] §C5 item 1). The
-    machine-readable table schema requires this field, and the future
-    OpenSpec-type provenance tool backed by Buoy checks authority and
-    freshness. A row without an atom fails table construction or the blocking
+    machine-readable table schema requires this field, and the pinned Buoy
+    shell-side integration checks authority and freshness. A row without an atom fails table construction or the blocking
     provenance policy. This is the authoring-forcing function: an undecided
     cell (integer `mean` [#724], bool `add` [#726]) cannot be made `Supported`
     OR `Rejected` without someone writing the normative sentence and crossing
@@ -87,7 +86,7 @@ reference lane needs conformance rows too):
 | build gates | B | generated early-UX gates per [#730] Phase 3's gate contract (earlier/more specific, never the sole defense) |
 | backend dispatch | B | macro-generated skeletons; missing arm = compile error |
 | conformance suite | A x B | every (`Supported`, `Implemented`) cell executed in every backend, exact agreement or [#732]'s tolerance table; every `Rejected`/`Unimplemented` cell asserts its diagnostic from every stage that renders it |
-| [#733] citations | A + B | the table schema requires controlling atom revisions; the future OpenSpec-type tool/Buoy policy checks authority, freshness, and selected-surface completeness |
+| [#733] citations | A + B | the table schema requires controlling atom revisions; the pinned Buoy policy and Chelis shell adapter check authority, freshness, and selected-surface completeness |
 
 ## Seed decisions the table must ship with
 
@@ -115,9 +114,9 @@ authored:
 ## Open questions (decided at [#729] Phase 4 entry, recorded here)
 
 1. Machine form: `const` Rust table vs a checked-in data file with a
-   build-script parser (proposal: `const` Rust in one crate; the pinned future
-   tool's versioned adapters read authorities and table metadata, and Chelis
-   does not add a second provenance parser).
+   build-script parser (proposal: `const` Rust in one crate; the pinned Buoy
+   shell and versioned Chelis adapter read authorities and table metadata, and
+   Chelis does not add a second provenance parser).
 2. Whether `c-host` and `c-dag` stay distinct backends in B (proposal:
    yes - the audit's divergences between them, [#691] vs host-lane
    exactness, are per-path facts).

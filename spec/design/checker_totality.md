@@ -5,7 +5,7 @@
 `spec/04-type-system.md` (what "checked" means per construct; its §10
 carries this plan's decided contract as current blockquote authorities
 [04-TOT-1..3], whose semantics this plan ratifies independently of their
-future chelis#733 migration), the repo
+later chelis#733 migration through the pinned Buoy shell-side integration), the repo
 Contract Invariants ("if a command reports perfect success, its error list
 must be empty"), and the audit record in
 `docs/investigations/numeric_audit_next_sweeps.md` (sweep 6) /

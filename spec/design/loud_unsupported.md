@@ -5,7 +5,8 @@
 freeze). Phases 2-3 pending. Tracking issue: [#730].
 **Owning specs:** `spec/05-risc-primitives.md` (op support statements;
 its §7 carries this plan's ratified contract as current blockquote authorities
-[05-UNS-1..4], independently of their future chelis#733 migration),
+[05-UNS-1..4], independently of their later chelis#733 migration through the
+pinned Buoy shell-side integration),
 `spec/04-type-system.md` §1.1.1 (deferred dtypes precedent), the repo
 Contract Invariants ("if a command reports perfect success, its error list
 must be empty"), and the audit record in

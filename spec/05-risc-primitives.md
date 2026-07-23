@@ -602,8 +602,8 @@ sandboxed runtime exec helper) is tracked in Chelis-Lang/chelis#267.
 
 Transitional blockquote authority per `spec/design/spec_provenance.md` §C1,
 matching the §7/§8 atoms of this file. The block remains normative until it is
-selected for fixture-proven migration through the future OpenSpec-type
-provenance tool in chelis#733 Phase 1; no semantic revision is embedded here.
+selected for fixture-proven migration through the pinned Buoy shell-side
+integration in chelis#733 Phase 1; no semantic revision is embedded here.
 
 > **[05-RNG-1]** For a fixed compiler version and target, evaluating a
 > `with seed(N)` program twice SHALL yield byte-identical output, and two
@@ -1158,8 +1158,8 @@ rule) are that plan's Phases 2-3. The delivery plan and full
 elaboration (the failure channel, the census, the ratchets) is
 `spec/design/loud_unsupported.md`. Atom IDs are stable, and the current
 blockquote authorities remain normative until selected for chelis#733 Phase 1
-migration. Full revisions are attached and checked through the future
-OpenSpec-type provenance tool, not a Chelis provenance lint.
+migration. Full revisions are attached and checked through the pinned Buoy
+shell-side integration, not a Chelis provenance lint.
 
 > **[05-UNS-1]** When any stage encounters a case it does not support -
 > an op, builtin, dtype, kernel, construct, or parameter shape - it
@@ -1217,7 +1217,7 @@ through its pre-contract paths (chelis#716, #723, #726's C half, #748,
 #749) until chelis#732 Phase 2 lands the generated print helper. Atom IDs are
 stable, and the current blockquote authorities remain normative until selected
 for chelis#733 Phase 1 migration. Full revisions are attached and checked
-through the future OpenSpec-type provenance tool. The delivery plan and full
+through the pinned Buoy shell-side integration. The delivery plan and full
 elaboration is `spec/design/faithful_observation.md` (meta chelis#728).
 
 > **[05-OBS-1]** Every exit that renders a stored numeric value as text -

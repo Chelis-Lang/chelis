@@ -22,7 +22,7 @@ The plan set: [`dtype_semantics.md`](dtype_semantics.md) ([#729]), [`loud_unsupp
 | [#703] unsupported cases substitute values instead of failing | [`loud_unsupported.md`](loud_unsupported.md) - Result-typed failure channel, the 18-row census sweep, un-writability ratchets (lint, newtype, tripwire), gates demoted to UX | [#730] |
 | [#709] unrecognized constructs silently exempt from checking (+[#710]'s silent half) | [`checker_totality.md`](checker_totality.md) - loud wildcard + handle-effect case, ErrorWitness token (silent Type::Error unconstructible), totality invariant, DeepTag exhaustiveness | [#731] |
 | [#728] the observation channel is not dtype-faithful | [`faithful_observation.md`](faithful_observation.md) - one Rust formatter, generated C print helper, round-trip invariant, tolerance table; landable before [#729]; unblocks [#687] | [#732] |
-| spec silence + stale claims ([#694]; the unauthored cells) | [`spec_provenance.md`](spec_provenance.md) - OpenSpec plans changes after Phase 0 activation, while a future OpenSpec-type tool integrates Buoy for repository-independent authority, freshness, coverage, and impact enforcement; adoption is advisory first and blocks only after the pinned tool, pinned Buoy, and Chelis configuration oracles are green | [#733] |
+| spec silence + stale claims ([#694]; the unauthored cells) | [`spec_provenance.md`](spec_provenance.md) - OpenSpec plans changes after Phase 0 activation, while a pinned Buoy shell and one-way Chelis adapter provide repository-independent authority, freshness, coverage, and impact enforcement; design/fixtures may proceed now, advisory execution waits for Buoy's final oracle, and blocking waits for the adapter and Chelis configuration oracles | [#733] |
 
 Supporting: [`capability_table.md`](capability_table.md) (schema; rides [#729] Phase 4),
 [`docs/agent_quality_architecture.md`](../../docs/agent_quality_architecture.md) ([#740]), the seeded atoms
@@ -68,10 +68,12 @@ landed with Wave 1 (above); the remaining Wave 2 set is [#732] Phase 2
 (the generated C side: fixes [#716]/[#723] outright and gives the
 refactor its byte-exact instrument) in parallel with [#731] Phases 2-3 (the
 witness token + DeepTag) and [#730] Phase 2 (the lint ratchets). [#733]'s
-Phase 1 advisory Buoy-backed tool pilot may ride alongside: OpenSpec still
-plans new normative text, atom IDs remain stable, and the pinned future tool
-reports malformed authorities and stale registrations without blocking
-existing Chelis commands or adding a direct Buoy dependency to Chelis.
+Phase 1's Buoy shell-side design and fixture preparation may ride alongside:
+OpenSpec still plans new normative text and atom IDs remain stable. The
+executable advisory pilot waits for the selected Buoy revision's standalone
+`devenv test` final oracle and the shell-adapter prerequisites; once admitted,
+it reports malformed authorities and stale registrations without blocking
+existing Chelis commands or coupling `buoy-core` back to Chelis.
 [#732] Phase 2 additionally gates the ECOSYSTEM's compiled-lane
 validation: no shell runs a compiled binary today, and [#754]'s
 cross-lane agreement gate (the mechanism [#738]'s conform row points
@@ -84,7 +86,7 @@ validated by everything Waves 0-2 built.
 **Wave 4 - the permanent guards.** [#729] Phase 4 delivers the capability
 table per [`capability_table.md`](capability_table.md); [#730] Phase 3 (gates become UX) and [#733]
 Phase 3 (the first blocking provenance ratchet) ships with it only after
-the advisory tool pilot and change-impact phases are green; [#732] Phase 3
+the advisory Buoy pilot and change-impact phases are green; [#732] Phase 3
 (the tolerance table + the [#687] handshake) closes the oracle. Citation
 presence may land before blocking freshness and coverage, but every
 selected capability row ultimately binds one current controlling atom
@@ -112,7 +114,8 @@ row (SATISFIED 2026-07-17: PR #760 merged, [#719] closed - the row may
 be authored when Phase 3 arrives); downstream of the set, [#754]'s
 ecosystem gate is hard-gated on [#732] Phase 2's byte-identical
 rendering. Not drawn (for legibility): OpenSpec remains [#733]'s planning
-workflow while a future OpenSpec-type tool integrates Buoy for enforcement.
+workflow while a pinned Buoy shell and one-way Chelis adapter provide
+enforcement.
 The graph is acyclic. Node colors
 are the waves above: grey = Wave 0, green = Wave 1, blue = Wave 2, orange =
 Wave 3, purple = Wave 4 (so [#733]'s advisory Buoy pilot, blue, may ride Wave
@@ -133,7 +136,7 @@ flowchart TB
   subgraph S733["#733 spec provenance"]
     direction TB
     n733p0["P0 · OpenSpec adoption<br/>+ PR review routing"]:::w0
-    n733p1["P1 · advisory Buoy-backed tool"]:::w2
+    n733p1["P1 · advisory Buoy shell<br/>+ Chelis adapter"]:::w2
     n733p2["P2 · neutral change impact"]:::w2
     n733p3["P3 · blocking coverage<br/>+ surface ratchet"]:::w4
     n733p0 --> n733p1 --> n733p2 --> n733p3
@@ -282,8 +285,8 @@ formal development (the canonical calculus; our spec text lags it):
   spec-atom TRANSCRIPTION behind [#733], not design. Coordination note
   for [#733]: these atoms cite theorems in ANOTHER repo's formal
   development. Buoy's atom revision covers the normative spec text, not the
-  external theorem, so the future OpenSpec-type provenance tool must define a
-  separate cross-repo theorem binding before these atoms land.
+  external theorem, so the Chelis/Buoy shell integration must define a separate
+  cross-repo theorem binding before these atoms land.
 - **The RNG-reproducibility call is MADE and partly shipped** (Jeff,
   2026-07-18, the [decision memo on
   #735](https://github.com/Chelis-Lang/chelis/issues/735#issuecomment-5013424269)):

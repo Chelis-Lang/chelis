@@ -15,8 +15,8 @@ Phases 2-3 remain. Tracking issue: [#732].
 **Owning specs:** `spec/05-risc-primitives.md` (its §8 carries this
 plan's ratified contract as current blockquote authorities [05-OBS-1..5]; the
 per-op tolerance table lands into the same section at Phase 3, while
-chelis#733 later migrates authority form and revisions through the future
-OpenSpec-type provenance tool), `spec/04-type-system.md` (dtype value-set
+chelis#733 later migrates authority form and revisions through the pinned Buoy
+shell-side integration), `spec/04-type-system.md` (dtype value-set
 definitions, shared with `spec/design/dtype_semantics.md` §C1), and the audit
 record in
 `docs/investigations/numeric_audit_next_sweeps.md` (sweeps 1, 3) /
