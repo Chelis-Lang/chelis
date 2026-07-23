@@ -1218,8 +1218,10 @@ zero, or a raw call target.
 Residuals are per-atom noted below; [05-UNS-4]'s gate demotion is that
 plan's Phase 3. The delivery plan and full elaboration (the failure
 channel, the census, the typed ratchets) is
-`spec/design/loud_unsupported.md`. Atom IDs are stable and are the
-citation grammar (chelis#733 re-scope: no rev hashes).
+`spec/design/loud_unsupported.md`. Atom IDs are stable, and the current
+blockquote authorities remain normative until selected for chelis#733 Phase 1
+migration. Full revisions are attached and checked through the pinned Buoy
+shell-side integration, not a Chelis provenance lint.
 
 > **[05-UNS-1]** When any stage encounters a case it does not support -
 > an op, builtin, dtype, kernel, construct, or parameter shape - it

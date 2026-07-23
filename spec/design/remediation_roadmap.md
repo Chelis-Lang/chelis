@@ -65,16 +65,11 @@ fresh-context red-teamed (QUALIFIED PASS x3) with every confirmed
 finding folded in before merge; the red teams' discoveries are filed as
 [#794]/[#795]/[#796].
 
-**Wave 2 - the independently-landable value work.** STATUS 2026-07-22:
-[#731] Phase 2 is complete: the witness token, append-only checker-owned
-diagnostic session, verified effects-only checked transformation (no public
-raw reconstruction), explicit binder scope, authoritative annotation-owner
-epochs, annotated-tree finalization, and SCC-scoped recursive prebinding are
-the checker-totality boundary.
-Phase 3 (`DeepTag`) remains open. [#732] Phase 1 landed with Wave 1 (above);
-the remaining Wave 2 set is [#732] Phase 2 (the generated C side: fixes
-[#716]/[#723] outright and gives the refactor its byte-exact instrument) in
-parallel with [#731] Phase 3. [#730] Phase 2's final typed implementation is in
+**Wave 2 - the independently-landable value work.** [#732] Phase 1
+landed with Wave 1 (above); the remaining Wave 2 set is [#732] Phase 2
+(the generated C side: fixes [#716]/[#723] outright and gives the
+refactor its byte-exact instrument) in parallel with [#731] Phases 2-3 (the
+witness token + DeepTag). [#730] Phase 2's final typed implementation is in
 PR [#799] (acceptance validation pending): closed vocabularies, staged
 HostType/ABI separation, and structured emission. Its initial source-lint
 approach was explicitly re-planned after execution showed incomplete and
@@ -82,13 +77,13 @@ false-positive behavior; the lint was extracted to PR [#815] and is not a
 Wave 2 dependency. Its one authoritative completion oracle is
 `.venv/bin/python scripts/loud_unsupported_phase2_oracle.py`; acceptance
 requires exit 0 with final line `PHASE 2 ORACLE: PASS` plus the plan-set's
-fresh-context adversarial review. [#733]
-Phase 1's Buoy shell-side design and fixture preparation may ride alongside:
-OpenSpec still plans new normative text and atom IDs remain stable. The
-executable advisory pilot waits for the selected Buoy revision's standalone
-`devenv test` final oracle and the shell-adapter prerequisites; once admitted,
-it reports malformed authorities and stale registrations without blocking
-existing Chelis commands or coupling `buoy-core` back to Chelis.
+fresh-context adversarial review. [#733] Phase 1's Buoy shell-side design
+and fixture preparation may ride alongside: OpenSpec still plans new
+normative text and atom IDs remain stable. The executable advisory pilot
+waits for the selected Buoy revision's standalone `devenv test` final
+oracle and the shell-adapter prerequisites; once admitted, it reports
+malformed authorities and stale registrations without blocking existing
+Chelis commands or coupling `buoy-core` back to Chelis.
 [#732] Phase 2 additionally gates the ECOSYSTEM's compiled-lane
 validation: no shell runs a compiled binary today, and [#754]'s
 cross-lane agreement gate (the mechanism [#738]'s conform row points
@@ -170,7 +165,7 @@ flowchart TB
     direction TB
     n731p0["P0 · Type::Error census<br/>+ red totality invariant (LANDED)"]:::w0
     n731p1["P1 · loud wildcard + handle-effect case<br/>+ #710 guard sweep (LANDED)"]:::w1
-    n731p2["P2 · witnessed append-only session<br/>+ owner-stamp invariant (IMPLEMENTED)"]:::w2
+    n731p2["P2 · ErrorWitness token,<br/>invariant always-on"]:::w2
     n731p3["P3 · DeepTag exhaustive dispatch"]:::w2
     n731p0 --> n731p1 --> n731p2 --> n731p3
   end
