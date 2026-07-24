@@ -486,6 +486,66 @@ fn escaping_explicit_symlink_root_fails_loudly_through_cli() {
         ));
 }
 
+#[cfg(unix)]
+#[test]
+fn trailing_slash_spellings_cannot_bypass_explicit_root_rejection_through_cli() {
+    use std::os::unix::fs::symlink;
+
+    let repository = tempdir().unwrap();
+    let external = tempdir().unwrap();
+    let root = repository.path();
+    write_spec(root);
+    fs::write(
+        root.join("chelis-lint.toml"),
+        "version = 1\nspec = \"spec/01-nomenclature.md\"\n",
+    )
+    .unwrap();
+    fs::write(external.path().join("outside.ch"), "def BadName() = 1\n").unwrap();
+    let external_link = root.join("external-link");
+    symlink(external.path(), &external_link).unwrap();
+
+    // POSIX lstat on `link/` dereferences the final component; the CLI
+    // must still detect the link and fail loudly for the slash spelling.
+    let mut slash_spelling = external_link.into_os_string();
+    slash_spelling.push("/");
+    chelis_lint(Path::new(&slash_spelling))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("external-link"))
+        .stderr(predicate::str::contains(
+            "outside the repository policy boundary",
+        ));
+
+    let broken = root.join("broken-link");
+    symlink("missing-target", &broken).unwrap();
+    let mut broken_slash = broken.into_os_string();
+    broken_slash.push("/");
+    chelis_lint(Path::new(&broken_slash))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("broken-link"))
+        .stderr(predicate::str::contains("cannot be resolved"));
+
+    let looped = root.join("self-loop");
+    symlink("self-loop", &looped).unwrap();
+    chelis_lint(&looped)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("self-loop"))
+        .stderr(predicate::str::contains("cannot be resolved"));
+
+    fs::create_dir_all(root.join("shared")).unwrap();
+    fs::write(root.join("shared/inside.ch"), "def inside() = 1\n").unwrap();
+    let internal_link = root.join("internal-link");
+    symlink("shared", &internal_link).unwrap();
+    let mut internal_slash = internal_link.into_os_string();
+    internal_slash.push("/");
+    chelis_lint(Path::new(&internal_slash))
+        .assert()
+        .success()
+        .stdout("");
+}
+
 #[test]
 fn subdirectory_cwd_lint_applies_repository_policy_through_cli() {
     let temp = tempdir().unwrap();

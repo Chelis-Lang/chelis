@@ -8460,6 +8460,13 @@ fn cmd_lint(
                     p
                 }
             };
+            // A trailing separator makes POSIX `lstat` dereference a
+            // final-component symlink (the slash asserts "directory",
+            // forcing resolution), so `is_symlink()` would report false
+            // for `link/` and the escaping-link rejection would be
+            // bypassed by a one-character spelling. `components()` drops
+            // the trailing separator; probe and walk the stripped form.
+            let absolute: PathBuf = absolute.components().collect();
             match std::fs::symlink_metadata(&absolute) {
                 Ok(metadata) if !metadata.file_type().is_symlink() => {
                     std::fs::canonicalize(&absolute).unwrap_or(absolute)
