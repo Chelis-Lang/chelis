@@ -12,8 +12,13 @@ reductions, storage, `to_tensor`/`to_list`, and the wire are already
 exact, and narrow widths trap exactly); (b) the DAG literal payloads
 (`RiscOp::Const`/`ConstTensor`, `Vec<f64>`) still collapse int64
 literals that lower into the tensor lane - filed as [#856], witnessed by
-the still-ignored chelis#684 binding-form rows. Phases 2-5 remain.
-Tracking issue: [#729].
+the still-ignored chelis#684 binding-form rows. Phase 1 was red-teamed
+per the repo protocol on PR #857: round 1 (fresh context) returned
+QUALIFIED PASS with six findings, all folded on the branch, and filed
+discoveries [#856]/#860/#861; round 2 (fresh context) verified every
+fold by execution and returned QUALIFIED PASS with one doc-only finding
+(R2-1, the scalar-vs-tensor cast-surface split above), folded. Phases
+2-5 remain. Tracking issue: [#729].
 **Owning specs:** `spec/04-type-system.md` (gains an authored overflow/rounding
 section, today silent), `spec/05-risc-primitives.md` (op result semantics),
 and the audit record in `docs/investigations/numeric_audit_next_sweeps.md` /
@@ -289,15 +294,30 @@ a lane (proposal defaults: float->float is RNE at the target width;
 float->int truncates toward zero with the out-of-range rule authored,
 not accidental; int->narrower-int gets ONE authored rule), with
 capability-table rows and cross-lane oracle coverage like any other
-cell. What Phase 1 SHIPPED (2026-07-24, one shared ladder for both eval
-surfaces in `chelis_ir::eval`): float->float finalizes (RNE at the
-target width, so f16/bf16 casts genuinely round); int->float finalizes
-from the exact integer; the OUT-OF-RANGE rules keep their pre-refactor
-behavior verbatim until [#759] authors them - float->int truncates
-toward zero and SATURATES (`cast(3.5, int32) = 3`,
-`cast(300.0, int8) = 127`), int->narrower-int WRAPS two's-complement,
-and any-to-bool encodes nonzero-to-1. Spelling and atom land with
-Phase 2's kernel work; cells ratified at Phase 4.
+cell. What Phase 1 SHIPPED (2026-07-24; execution-verified by the PR
+#857 round-2 red team, R2-1) is SPLIT BY SURFACE, and [#759] must author
+ONE rule per direction to end the split:
+
+- **Tensor surfaces** (both eval lanes; the one shared ladder in
+  `chelis_ir::eval`, which the host tensor cast delegates to):
+  float->float finalizes (RNE at the target width, so f16/bf16 casts
+  genuinely round); int->float finalizes from the exact integer; the
+  OUT-OF-RANGE rules keep their pre-refactor behavior verbatim -
+  float->int truncates toward zero and SATURATES
+  (`cast(3.5, int8) = 3`, `cast(300.0, int8) = 127`),
+  int->narrower-int WRAPS two's-complement (int32 `300 -> int8` is
+  `44`), and any-to-bool encodes nonzero-to-1 (`cast(2, bool) = true`).
+- **The host SCALAR surface** does NOT take the ladder: scalar casts
+  construct through `scalar_like_int`/finalize, so an out-of-range
+  result TRAPS (`cast(300.0, int8)` and `cast(cast(300, int32), int8)`
+  both raise `numeric trap: overflow in arithmetic at int8`), and
+  scalar->bool has no arm at all (a loud "unsupported cast" error).
+  The wrap->trap change on this surface arrived with Phase 1's eval
+  adoption (the deleted `from_i64_as` wrapping constructor) - a
+  strict/loud, section-C1-conforming direction, disclosed on PR #857.
+
+Spelling and atoms land with Phase 2's kernel work; cells ratified at
+Phase 4.
 
 ## C4. The observation contract (formatting; fixes [#728])
 
