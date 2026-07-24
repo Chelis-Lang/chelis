@@ -573,7 +573,7 @@ fn c_f16_tensor_literal_constructs() {
          out = print(f())\n",
         "f16_literal",
     )
-    .expect("chelis#716: an f16 tensor literal must be constructible at runtime");
+    .expect("chelis#714/[#729] ingress: a typed f16 to_tensor literal must construct");
     common::assert_elements_in_domain(
         "f16",
         stdout.lines().next().unwrap_or("").trim(),

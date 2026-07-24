@@ -1288,8 +1288,9 @@ runtime's `chelis_format_shortest` (byte-locked against
 `format_element`), `to_list` reads every dtype (chelis#716, #723,
 #726's C half, #748, #749 fixed; close on the PR #863 merge), and
 cross-lane byte equality holds for identical stored bits at matching
-rendered widths. Annexed deviations, each issue-linked with an ignored
-red cell in the observation harness: the deliberate eval tensor width
+rendered widths. Annexed deviations, each issue-linked (chelis#864 and
+chelis#865 carry ignored red cells in the observation harness): the
+deliberate eval tensor width
 note in section 8.1 (chelis#729's metadata repair); eval's LABELED-ROOT
 render of cast-constructed f64 tensors, which the stale F32 precision
 tag narrows below the stored width (chelis#864, the chelis#717 family -

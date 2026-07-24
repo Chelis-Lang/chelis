@@ -17,8 +17,8 @@ generated from an exhaustive `Prim` match, `to_list`'s F16/BF16 arms,
 and §C2.3 cross-lane byte equality locked for identical stored bits -
 [#716]/[#723]/[#726]-C/[#748]/[#749] fixed by un-ignoring their red
 cells (close the issues on the PR #863 merge). Four recorded
-boundaries, each issue-linked (the first three with ignored red cells
-in the harness): eval TENSOR float elements still render at the stored
+boundaries, each issue-linked ([#864] and [#865] with ignored red
+cells in the harness): eval TENSOR float elements still render at the stored
 f64 width (the deliberate §8.1 width note, [#729]'s metadata repair),
 so non-dyadic narrow-float tensor cells stay width-divergent across
 lanes until then; eval's LABELED ROOT of a cast-constructed f64 tensor
@@ -416,7 +416,7 @@ the round-trip harness green on every exit in both lanes; the
 `c_dag_kernels_compute_correct_f16_bits_despite_print` byte-decode lock
 retired per its own instructions (replaced by the direct print row).
 
-**Delivered** (2026-07-24), with three recorded notes. (1) The
+**Delivered** (2026-07-24), with four recorded notes. (1) The
 `chelis_format_shortest` routine lives in the Rust runtime library, so
 the wide widths use `{:?}` formatting directly - the normative grammar's
 own definition and the exact code path `format_element` takes - while
