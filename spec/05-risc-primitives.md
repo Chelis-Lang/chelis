@@ -1286,11 +1286,20 @@ onto the same grammar: the emitted print helper is GENERATED from an
 exhaustive `Prim` match, every compiled float exit routes through the
 runtime's `chelis_format_shortest` (byte-locked against
 `format_element`), `to_list` reads every dtype (chelis#716, #723,
-#726's C half, #748, #749 closed), and cross-lane byte equality holds
-for identical stored bits at matching widths. The deliberate eval
-tensor width note in section 8.1 remains (chelis#729's metadata
-repair), and unit-valued single-print-root LABELING diverges
-(chelis#862 - a root-naming issue outside these atoms). Atom IDs are
+#726's C half, #748, #749 fixed; close on the PR #863 merge), and
+cross-lane byte equality holds for identical stored bits at matching
+rendered widths. Annexed deviations, each issue-linked with an ignored
+red cell in the observation harness: the deliberate eval tensor width
+note in section 8.1 (chelis#729's metadata repair); eval's LABELED-ROOT
+render of cast-constructed f64 tensors, which the stale F32 precision
+tag narrows below the stored width (chelis#864, the chelis#717 family -
+an [05-OBS-1] violation in the eval lane); the compiled lane's untagged
+f64 value box, which renders narrower float elements (f32 as well as
+f16/bf16) at f64-image width through `to_list` and list/tuple boxing -
+faithful parse-back, not the own-width shortest form (chelis#865, the
+chelis#729/#686 capacity family); and unit-valued single-print-root
+LABELING (chelis#862 - a root-naming issue outside these atoms). Atom
+IDs are
 stable, and the current blockquote authorities remain normative until selected
 for chelis#733 Phase 1 migration. Full revisions are attached and checked
 through the pinned Buoy shell-side integration. The delivery plan and full
@@ -1303,15 +1312,19 @@ elaboration is `spec/design/faithful_observation.md` (meta chelis#728).
 > other and with the stored bits.
 
 *(Both lanes conformant since chelis#732 Phase 2, with one deliberate
-width note recorded in §8.1 and one annexed value-layer exception: an
+width note recorded in §8.1 and two annexed value-layer exceptions,
+each an issue-linked ignored red cell in the observation harness: an
 int64 SCALAR ROOT above 2^53 renders the f64-collapsed stored value at
 the labeled root while `print`/`to_string` of the same def are exact -
 the interpreter's rank-0 realization collapses the value BEFORE the
 renderer sees it (chelis#684, [#729]'s value layer; surfaced by PR
-#792's red team). Rendering reports the collapsed bits faithfully; the
-cell is an issue-linked ignored red test in the observation harness and
-returns with chelis#729. The C lane's former violations (chelis#716,
-#723, #748, #749) closed at Phase 2 by un-ignoring their red cells.)*
+#792's red team); and the eval LABELED ROOT of a `cast(<tensor>, f64)`
+result renders through the stale F32 precision tag - text that no
+longer parses back to the stored bits at the declared width - while
+`print` of the same tensor shows the stored f64 bits (chelis#864, the
+chelis#717 family; surfaced by PR #863's red team). Both return with
+chelis#729. The C lane's former violations (chelis#716, #723, #748,
+#749) went green at Phase 2 by un-ignoring their red cells.)*
 
 > **[05-OBS-2]** Integer dtypes SHALL print as integers with all digits
 > exact; floats SHALL print the shortest string that round-trips at
@@ -1323,8 +1336,14 @@ returns with chelis#729. The C lane's former violations (chelis#716,
 grammar at Phase 1 (integers lost the `.0`, bool tensors print
 `true`/`false`, scalars render at own width) and Phase 2's generated
 helper brought the compiled lane onto the identical grammar - exact
-integer printf at width (chelis#723 closed), `chelis_format_shortest`
-replacing the `%.1f`/`%.16g` split (chelis#748 closed).)*
+integer printf at width (chelis#723 fixed), `chelis_format_shortest`
+replacing the `%.1f`/`%.16g` split (chelis#748 fixed). One annexed
+own-width deviation: the compiled lane's untagged f64 value box renders
+narrower float elements (f32/f16/bf16 reached through `to_list` or
+list/tuple boxing) at their exact f64-image width - the text parses
+back to the stored bits at the element's width, but is not the shortest
+own-width form until the box learns element widths (chelis#865, the
+chelis#729/#686 capacity family).)*
 
 > **[05-OBS-3]** Cross-lane VALUE differences are permitted only for the
 > ops listed in the per-op tolerance table (to be authored into this

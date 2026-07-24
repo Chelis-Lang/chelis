@@ -37,6 +37,8 @@
 //! | cell | issue |
 //! |---|---|
 //! | eval int64 SCALAR ROOT above 2^53 (rank-0 f64 realization collapses the value before the renderer) | chelis#684 ([#729] value layer; PR #792 red-team F1) |
+//! | eval LABELED ROOT of a cast-constructed f64 tensor (the stale F32 tag narrows the root render while print shows the stored bits) | chelis#864 (chelis#717 family, [#729] value layer; PR #863 red-team F1) |
+//! | compiled boxed renders of f32 elements (the untagged f64 box carries f64-image digits, not the own-width shortest form) | chelis#865 ([#729]/[#686] capacity family; PR #863 red-team F2) |
 //!
 //! The six C-side cells went green at chelis#732 Phase 2 (un-ignored per
 //! §B2.3, each on its original assertion): #716 print + to_list, #723,
@@ -1094,6 +1096,77 @@ fn eval_int64_scalar_root_above_2p53_renders_exact() {
         root, "sroot = 9007199254740993",
         "the labeled root must carry the exact stored int64; [05-OBS-1] \
          intra-lane exit agreement is broken by the rank-0 realization"
+    );
+}
+
+/// RED (chelis#864; chelis#717's stale-tag family, [#729] value layer;
+/// PR #863 red-team F1): eval's LABELED ROOT renders a cast-constructed
+/// f64 tensor through the stale F32 precision tag while the print
+/// transcript renders the stored f64 bits - [05-OBS-1]'s intra-lane exit
+/// agreement broken inside eval, and the root text no longer parses back
+/// to the stored bits at the declared f64 width. The compiled lane
+/// renders all exits identically (the correct behavior). The trigger is
+/// `cast(<tensor>, f64)` leaving the runtime tag at F32; the frozen F64
+/// table never constructs that shape (`via_cast=false`), which is how
+/// the cell hid from the corpus. Un-ignore when [#729] repairs the tag.
+#[test]
+#[ignore = "chelis#864 (chelis#717 stale-tag family, [#729] value layer): eval's labeled \
+            root renders a cast-constructed f64 tensor at the F32 tag width while print \
+            renders the stored f64 bits. Un-ignore when the tag repair lands. Run with \
+            `cargo test -p chelis-cli --test observation_roundtrip_harness -- --ignored`."]
+fn eval_f64_cast_tensor_root_renders_stored_width() {
+    let program = "module M.Main\n\
+         def mk() -> tensor[2, f64] = cast(to_tensor([0.1, 0.3]), f64)\n\
+         shown = print(mk())\n\
+         troot = mk()\n";
+    let out = eval_stdout(program).expect("eval");
+    let tlines = tensor_lines(&out);
+    assert_eq!(tlines.len(), 2, "transcript and root renders:\n{out}");
+    // Green half (control): the transcript renders the STORED bits (the
+    // f64 images of the f32-constructed elements) at the stored width.
+    assert_eq!(
+        tlines[0], "tensor(shape=[2], data=[0.10000000149011612, 0.30000001192092896])",
+        "the print transcript must keep rendering the stored bits"
+    );
+    // Red half: the labeled root must agree with the transcript
+    // ([05-OBS-1] intra-lane exit agreement). Today it renders `0.1, 0.3`
+    // through the stale F32 tag - text that parses to DIFFERENT f64 bits.
+    assert_eq!(
+        tlines[1],
+        format!("troot = {}", tlines[0]),
+        "the labeled root must render the same stored bits as print"
+    );
+}
+
+/// RED (chelis#865; [#729]/[#686] capacity family; PR #863 red-team F2):
+/// the compiled lane's `chelis_value` box has one untagged f64 float
+/// slot, so to_list renders of f32 elements carry the f64-image digits
+/// instead of the [05-OBS-2] shortest-at-own-width form (eval says
+/// `[0.1, 0.3]`; C says the 17-digit images). Every render is FAITHFUL -
+/// the text parses back to the same stored f32 bits, which is why the
+/// value-level green rows above pass - but the bytes are not the
+/// own-width shortest form and diverge from eval. Un-ignore when the box
+/// learns element widths.
+#[test]
+#[ignore = "chelis#865 ([#729]/[#686] capacity family): the compiled lane's untagged f64 \
+            value box renders f32 to_list elements at f64-image width instead of the \
+            own-width shortest form. Un-ignore when the box learns element widths. Run \
+            with `cargo test -p chelis-cli --test observation_roundtrip_harness -- --ignored`."]
+fn c_boxed_f32_renders_at_own_width() {
+    if !c_toolchain_available() {
+        panic!("needs a host C toolchain");
+    }
+    let program = "module M.Main\nout = print(to_list(to_tensor([0.1, 0.3])))\n";
+    let out = c_stdout(program, "obs_boxed_f32").expect("C lane");
+    let lline = list_lines(&out)
+        .first()
+        .copied()
+        .unwrap_or_else(|| panic!("no to_list render in:\n{out}"))
+        .to_string();
+    assert_eq!(
+        list_payload_elems(&lline),
+        ["0.1", "0.3"],
+        "boxed f32 elements must render shortest at their own width ([05-OBS-2]): {lline}"
     );
 }
 

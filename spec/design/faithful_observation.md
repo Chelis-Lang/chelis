@@ -15,13 +15,21 @@ Phase 2 (the generated C side and the C-side §B2.1 migration) landed
 2026-07-24: `chelis_format_shortest` in the runtime, the print helper
 generated from an exhaustive `Prim` match, `to_list`'s F16/BF16 arms,
 and §C2.3 cross-lane byte equality locked for identical stored bits -
-[#716]/[#723]/[#726]-C/[#748]/[#749] closed by un-ignoring. Two
-recorded boundaries: eval TENSOR float elements still render at the
-stored f64 width (the deliberate §8.1 width note, [#729]'s metadata
-repair), so non-dyadic narrow-float tensor cells stay width-divergent
-across lanes until then; and unit-valued single-print-root labeling
-diverges ([#862], a root-labeling discovery outside the [05-OBS]
-atoms). Phase 3 remains. Tracking issue: [#732].
+[#716]/[#723]/[#726]-C/[#748]/[#749] fixed by un-ignoring their red
+cells (close the issues on the PR #863 merge). Four recorded
+boundaries, each issue-linked (the first three with ignored red cells
+in the harness): eval TENSOR float elements still render at the stored
+f64 width (the deliberate §8.1 width note, [#729]'s metadata repair),
+so non-dyadic narrow-float tensor cells stay width-divergent across
+lanes until then; eval's LABELED ROOT of a cast-constructed f64 tensor
+narrows through the stale F32 tag ([#864], the [#717] family - an
+[05-OBS-1] violation inside eval, surfaced by PR #863's red team); the
+compiled lane's untagged f64 value box renders narrower float elements
+(f32 as well as f16/bf16) at f64-image width through `to_list` and
+list/tuple boxing - faithful parse-back, not own-width shortest
+([#865], the [#729]/[#686] capacity family); and unit-valued
+single-print-root labeling diverges ([#862], a root-labeling discovery
+outside the [05-OBS] atoms). Phase 3 remains. Tracking issue: [#732].
 **Owning specs:** `spec/05-risc-primitives.md` (its §8 carries this
 plan's ratified contract as current blockquote authorities [05-OBS-1..5]; the
 per-op tolerance table lands into the same section at Phase 3, while
@@ -424,6 +432,16 @@ heap list print. (3) §C2.3's byte-identity lock runs where stored bits
 AND rendered widths agree; the eval tensor width note (spec/05 §8.1)
 keeps non-dyadic narrow-float tensor cells width-divergent until [#729],
 and the [#862] unit-root labeling discovery is filed, not absorbed.
+(4) PR #863's fresh-context red team (round 1) surfaced two further
+width-annex gaps, filed per §B2.5 and annexed at spec/05 §8 with
+ignored red cells: [#864] (eval's labeled-root render of
+`cast(<tensor>, f64)` results narrows through the stale F32 tag - an
+eval-lane [05-OBS-1] violation the harness's `via_cast=false` F64 table
+structurally never constructed) and [#865] (the compiled lane's
+untagged f64 value box renders f32 - not only f16/bf16 - elements at
+f64-image width through `to_list`/boxing; faithful but not own-width
+shortest). Both are [#729]-family value/capacity repairs; rendering is
+not the fix site for either.
 
 ## Phase 3 - the tolerance table and the [#687] handshake
 
@@ -532,3 +550,6 @@ guaranteed to be a real value bug wearing its own name.
 [#730]: https://github.com/Chelis-Lang/chelis/issues/730
 [#732]: https://github.com/Chelis-Lang/chelis/issues/732
 [#754]: https://github.com/Chelis-Lang/chelis/issues/754
+[#865]: https://github.com/Chelis-Lang/chelis/issues/865
+[#864]: https://github.com/Chelis-Lang/chelis/issues/864
+[#862]: https://github.com/Chelis-Lang/chelis/issues/862

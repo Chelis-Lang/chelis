@@ -549,13 +549,20 @@ fn c_to_list_of_f16_tensor_works() {
     );
 }
 
-/// Observed today: the branded runtime abort `unsupported: destination dtype`
-/// (chelis-runtime lib.rs:2182). The build gate admits the program
-/// (cli_admits_bf16_f16_target_c.rs locks that), then the runtime cannot
-/// construct the value the program starts from.
+/// Observed today (re-verified at chelis#732 Phase 2 round 1): the BUILD
+/// rejects the typed literal with `unsupported: dtype \`f16\` on C host
+/// ABI selection (codegen:c) ... chelis#714` - the post-PR-#799 typed
+/// host boundary refuses before the former runtime `to_tensor` abort
+/// (chelis-runtime's destination-dtype arm) can be reached. Either way
+/// the failure is loud and the case is INGRESS: `to_tensor` literal
+/// construction is chelis#714/[#729] territory per faithful_observation
+/// section I1, which is why chelis#732 Phase 2's to_list/print exit work
+/// left this cell ignored.
 #[test]
-#[ignore = "chelis#716: an f16 to_tensor literal aborts at runtime in the compiled lane; \
-            eval evaluates it fine. Run with \
+#[ignore = "chelis#714/[#729] ingress (formerly filed under the chelis#716 umbrella): a \
+            typed f16 to_tensor literal is rejected at build by the C host ABI boundary; \
+            eval evaluates it fine. Un-ignore when narrow-float literal construction \
+            lands. Run with \
             `cargo test -p chelis-cli --test narrow_dtype_matrix -- --ignored`."]
 fn c_f16_tensor_literal_constructs() {
     if !c_toolchain_available() {
