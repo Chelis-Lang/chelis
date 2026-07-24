@@ -38,6 +38,8 @@ The configuration summarizes Chelis-specific boundaries and artifact rules. It p
 
 A governed branch adds one lifecycle. A planning-only commit containing the lifecycle marker, proposal, and requirement deltas must be an ancestor of the first production change. This gives the checker repository-owned, provider-independent ordering evidence and makes a collapsed "plan plus implementation" commit fail visibly.
 
+For this adoption branch the planning-only ancestor is commit `1297dfac`, and the pull-request citation format is one body line starting at column one reading exactly `OpenSpec-Change: <change-id>`; the ordering and routing fixtures in `scripts/test_check_openspec.py` encode both.
+
 The pull-request body still cites the exact change identifier for human routing. That citation and GitHub review state are process evidence; the Git history and committed artifacts remain the durable validation inputs. The checker reads only the bounded event payload already available to the job and uses no API token.
 
 **Alternative rejected:** Trusting commit-message trailers, labels, timestamps, or live review queries as the sole proof that planning preceded implementation. They are mutable, spoofable, unavailable on some events, or require broader credentials.

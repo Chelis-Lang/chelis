@@ -1,8 +1,8 @@
 ## 1. Bootstrap and review entry
 
 - [x] 1.1 Initialize the canonical `openspec/` root with Chelis-specific context and artifact rules while keeping Phase 0 inactive.
-- [ ] 1.2 Obtain human review of the proposal and requirement deltas before the first checker, workflow, or other production implementation commit.
-- [ ] 1.3 Record the planning-only ancestor and exact pull-request citation format used by ordering and routing fixtures.
+- [x] 1.2 Obtain human review of the proposal and requirement deltas before the first checker, workflow, or other production implementation commit.
+- [x] 1.3 Record the planning-only ancestor and exact pull-request citation format used by ordering and routing fixtures.
 
 ## 2. Test-first governance contracts
 
