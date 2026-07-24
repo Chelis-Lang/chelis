@@ -259,3 +259,54 @@ fn grad_without_abs_is_correct_in_both_lanes() {
         );
     }
 }
+
+// ===========================================================================
+// chelis#856 - the `fail` placeholder's MESSAGE must not reach numeric IR
+// ===========================================================================
+
+/// The `fail` lowering arm (chelis#616) plants a masked zero `Const` at the
+/// branch's rank and used to lower its own arguments for effect, discarding
+/// the results. Those arguments are STRINGS, so the discarded work pushed a
+/// `Prim::String` literal through `lower_lit`. That was harmless while a
+/// constant was a bare `f64` (it smuggled `Const { value: 0.0 }` typed
+/// `string` into the DAG); once chelis#856 sealed the payloads it reached
+/// `finalize_scalar`'s `Prim::String` arm, which is an
+/// unreachable-by-construction `panic!`, and every `grad`/`vmap` over a
+/// `fail`-guarded function died with the bare panic string
+/// "finalize_scalar: string is not a numeric dtype ...". The message is
+/// host-lane data and is no longer lowered at all.
+///
+/// `sum` has gradient 1 everywhere; the 4-element input does not take the
+/// guard.
+#[test]
+fn issue_856_grad_through_fail_guarded_branch_lowers() {
+    let program = "def loss(x: tensor[4, f32]) -> f32 = \
+         if gt(cast(2, int64), cast(shape(x, cast(0, int32)), int64)) \
+         then fail(\"kernel exceeds input length\") \
+         else tensor_to_scalar(sum(x, cast(0, int32)))\n\
+         out = grad(loss)(to_tensor([cast(1.0, f32), cast(2.0, f32), \
+         cast(3.0, f32), cast(4.0, f32)]))\n";
+    let line =
+        eval_first_line(program).expect("grad over a `fail`-guarded body must lower (chelis#856)");
+    assert!(
+        line.contains("data=[1.0, 1.0, 1.0, 1.0]"),
+        "grad of sum(x) wrt x is 1 everywhere; got: {line}"
+    );
+}
+
+/// Negative parity for the row above: dropping the message from the DAG
+/// lane must not drop it from the program. When the guard IS taken the
+/// host lane still owns `fail` and still reports the exact message.
+#[test]
+fn issue_856_fail_message_survives_when_the_guard_is_taken() {
+    let program = "def loss(x: tensor[1, f32]) -> f32 = \
+         if gt(cast(2, int64), cast(shape(x, cast(0, int32)), int64)) \
+         then fail(\"kernel exceeds input length\") \
+         else tensor_to_scalar(sum(x, cast(0, int32)))\n\
+         out = loss(to_tensor([cast(1.0, f32)]))\n";
+    let err = eval_first_line(program).expect_err("the taken `fail` branch must abort");
+    assert!(
+        err.contains("kernel exceeds input length"),
+        "the taken `fail` must report its own message; got: {err}"
+    );
+}

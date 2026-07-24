@@ -5153,6 +5153,22 @@ impl LowerCtx {
         // collapsed int64 above 2^53); an out-of-domain literal at its
         // ascribed dtype is a loud lowering diagnostic, not a wrap.
         let prim = ty.precision;
+        // A string literal is not a numeric constant and has no sealed
+        // payload to finalize: `finalize_scalar`'s `Prim::String` arm is
+        // an unreachable-by-construction PANIC, so reaching it here would
+        // surface as a bare panic-string diagnostic instead of a cited
+        // one. The DAG has no string vocabulary at all, so this is a
+        // lowering rejection, not a value. The one reachable path was
+        // `fail`'s message argument, closed at its own arm below.
+        if prim == Prim::String {
+            raise_lowering_error(
+                "a string literal has no numeric IR constant and cannot be lowered \
+                 into the RISC DAG; strings are host-lane values \
+                 (spec/05-risc-primitives.md; chelis#856)",
+                elems.first().map(Expr::span),
+                self.current_span_id.clone(),
+            )
+        }
         let raw = if let Some(val_expr) = elems.get(2) {
             match val_expr {
                 Expr::Atom(Atom::Int(n), _) => chelis_types::RawScalar::Int(*n),
@@ -8299,9 +8315,16 @@ impl LowerCtx {
             // order; `lower_if` ties the placeholder's shape to the sibling
             // branch via a shape-dep).
             "fail" => {
-                for arg in args {
-                    let _ = self.lower_expr(arg);
-                }
+                // The message argument is NOT lowered. It is a string, and
+                // the DAG has no string vocabulary: the nodes it produced
+                // were discarded here and dropped by DCE, so their only
+                // effect was to push a `Prim::String` literal through
+                // `lower_lit`. Pre-#856 that smuggled a junk
+                // `Const { value: 0.0 }` typed `string` into the IR; with
+                // sealed payloads it hits `finalize_scalar`'s
+                // unreachable-by-construction panic and takes down any
+                // `grad`/`vmap` over a function containing `fail(...)`.
+                // Abort semantics (and the message) live in the host lane.
                 let dims = ty
                     .dims
                     .iter()
@@ -13390,6 +13413,43 @@ mod tests {
         let dag = parse_and_lower(src);
         let node = dag.get(NodeId(0)).unwrap();
         assert_eq!(node.output_type.precision, Prim::F64);
+    }
+
+    /// Negative parity for the row above, and the structural backstop for
+    /// chelis#856's reachable-`Prim::String` bug: `finalize_scalar`'s
+    /// string arm is an unreachable-by-construction `panic!`, so a string
+    /// literal that reached `lower_lit` surfaced as a bare panic string
+    /// rather than a cited diagnostic. The DAG has no string vocabulary;
+    /// a string literal is a lowering rejection, and it says so.
+    #[test]
+    fn lower_lit_rejects_a_string_literal_with_a_cited_diagnostic() {
+        let expr = chelis_deep::parser::parse_str("(lit {type: (t-prim {} string)} \"hi\")")
+            .expect("parse failed")
+            .into_iter()
+            .next()
+            .expect("one expression");
+        let Expr::List(list, _) = &expr else {
+            panic!("expected a list");
+        };
+        let elems = list.elements.clone();
+        let outcome = catch_lowering(move || {
+            let mut ctx = LowerCtx::new(HashMap::new(), HashMap::new(), LinearityInfo::default());
+            let _ = ctx.lower_lit(&elems);
+        });
+        let Err(diagnostic) = outcome else {
+            panic!("a string literal has no numeric IR constant and must not lower");
+        };
+        let message = diagnostic.to_string();
+        assert!(
+            message.contains("string literal has no numeric IR constant"),
+            "the rejection must be the cited lowering diagnostic, not \
+             `finalize_scalar`'s unreachable-arm panic; got: {message}"
+        );
+        assert!(
+            !message.contains("is not a numeric dtype and has no finalize semantics"),
+            "the unreachable-by-construction panic must not be the user-facing \
+             message; got: {message}"
+        );
     }
 
     #[test]
