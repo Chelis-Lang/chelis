@@ -1,0 +1,30 @@
+name: OpenSpec governance
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: openspec-governance-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  openspec-governance:
+    name: openspec-governance
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Run OpenSpec governance
+        uses: Chelis-Lang/ci/actions/openspec-governance@2906e03880a2ea7d553b0959c246991b1b058990 # accepted 2026-07-24, run 30116322777
