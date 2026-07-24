@@ -22,25 +22,51 @@ pub fn constant_fold(dag: &mut Dag) {
     // (when distinct from the operation's) and each operand's existing
     // `merged_spans` — i.e. the operand's full provenance flowing onto
     // the folded result.
-    let mut replacements: Vec<(NodeId, f64, Vec<String>)> = Vec::new();
+    let mut replacements: Vec<(NodeId, chelis_types::ScalarValue, Vec<String>)> = Vec::new();
+
+    // The fold computes on the f64 wide image (the chelis#680 residue;
+    // exact integer folding arrives with the Phase 2 kernel split) and
+    // FINALIZES the result at the node's dtype through the sealed
+    // module. Two decline rules keep the fold conservative per the
+    // section C2 contract: an integer payload whose f64 image is not
+    // exact declines (never bake a collapsed value in, chelis#856), and
+    // a result that does not finalize at the node's dtype declines
+    // (never bake a trap away nor in - the runtime evaluates the
+    // unfolded graph and traps with its full diagnostic).
+    let wide_image = |value: &chelis_types::ScalarValue| -> Option<f64> {
+        if let Some(i) = value.as_i64_exact()
+            && (i as f64) as i128 != i as i128
+        {
+            return None;
+        }
+        Some(value.as_f64_lossy())
+    };
 
     for node in dag.nodes() {
         if node.inputs.len() == 2 {
             let lhs = dag.get(node.inputs[0]);
             let rhs = dag.get(node.inputs[1]);
             if let (Some(l), Some(r)) = (lhs, rhs)
-                && let (RiscOp::Const { value: lv }, RiscOp::Const { value: rv }) = (&l.op, &r.op)
+                && let (RiscOp::Const { value: lval }, RiscOp::Const { value: rval }) =
+                    (&l.op, &r.op)
+                && let (Some(lv), Some(rv)) = (wide_image(lval), wide_image(rval))
             {
                 let result = match &node.op {
                     RiscOp::Add => Some(lv + rv),
                     RiscOp::Mul => Some(lv * rv),
                     RiscOp::CmpLt => Some(if lv < rv { 1.0 } else { 0.0 }),
-                    RiscOp::MaxElem => Some(if lv >= rv { *lv } else { *rv }),
+                    RiscOp::MaxElem => Some(if lv >= rv { lv } else { rv }),
                     _ => None,
                 };
-                if let Some(val) = result {
+                if let Some(val) = result
+                    && let Ok(sealed) = chelis_types::scalar_from_f64(
+                        "const",
+                        node.output_type.precision,
+                        val,
+                    )
+                {
                     let merge_spans = collect_operand_spans(node, &[l, r]);
-                    replacements.push((node.id, val, merge_spans));
+                    replacements.push((node.id, sealed, merge_spans));
                 }
             }
         }
@@ -48,7 +74,8 @@ pub fn constant_fold(dag: &mut Dag) {
         if node.inputs.len() == 1 {
             let input = dag.get(node.inputs[0]);
             if let Some(inp) = input
-                && let RiscOp::Const { value: v } = &inp.op
+                && let RiscOp::Const { value: inner } = &inp.op
+                && let Some(v) = wide_image(inner)
             {
                 let result = match &node.op {
                     RiscOp::Neg => Some(-v),
@@ -65,9 +92,15 @@ pub fn constant_fold(dag: &mut Dag) {
                     RiscOp::Round => Some(v.round_ties_even()),
                     _ => None,
                 };
-                if let Some(val) = result {
+                if let Some(val) = result
+                    && let Ok(sealed) = chelis_types::scalar_from_f64(
+                        "const",
+                        node.output_type.precision,
+                        val,
+                    )
+                {
                     let merge_spans = collect_operand_spans(node, &[inp]);
-                    replacements.push((node.id, val, merge_spans));
+                    replacements.push((node.id, sealed, merge_spans));
                 }
             }
         }
@@ -328,47 +361,61 @@ mod tests {
     #[test]
     fn constant_fold_add() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
-        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32(), None);
+        let a = dag.add_node(RiscOp::synth_const(scalar_f32().precision, 1.0),
+            vec![],
+            scalar_f32(), None);
+        let b = dag.add_node(RiscOp::synth_const(scalar_f32().precision, 2.0),
+            vec![],
+            scalar_f32(), None);
         dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
 
         constant_fold(&mut dag);
 
         let result = dag.get(NodeId(2)).unwrap();
-        assert_eq!(result.op, RiscOp::Const { value: 3.0 });
+        assert_eq!(result.op, RiscOp::synth_const(chelis_types::types::Prim::F32, 3.0));
         assert!(result.inputs.is_empty());
     }
 
     #[test]
     fn constant_fold_mul() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 3.0 }, vec![], scalar_f32(), None);
-        let b = dag.add_node(RiscOp::Const { value: 4.0 }, vec![], scalar_f32(), None);
+        let a = dag.add_node(RiscOp::synth_const(scalar_f32().precision, 3.0),
+            vec![],
+            scalar_f32(), None);
+        let b = dag.add_node(RiscOp::synth_const(scalar_f32().precision, 4.0),
+            vec![],
+            scalar_f32(), None);
         dag.add_node(RiscOp::Mul, vec![a, b], scalar_f32(), None);
 
         constant_fold(&mut dag);
 
         let result = dag.get(NodeId(2)).unwrap();
-        assert_eq!(result.op, RiscOp::Const { value: 12.0 });
+        assert_eq!(result.op, RiscOp::synth_const(chelis_types::types::Prim::F32, 12.0));
     }
 
     #[test]
     fn constant_fold_neg() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 5.0 }, vec![], scalar_f32(), None);
+        let a = dag.add_node(RiscOp::synth_const(scalar_f32().precision, 5.0),
+            vec![],
+            scalar_f32(), None);
         dag.add_node(RiscOp::Neg, vec![a], scalar_f32(), None);
 
         constant_fold(&mut dag);
 
         let result = dag.get(NodeId(1)).unwrap();
-        assert_eq!(result.op, RiscOp::Const { value: -5.0 });
+        assert_eq!(result.op, RiscOp::synth_const(chelis_types::types::Prim::F32, -5.0));
     }
 
     #[test]
     fn dce_removes_dead_nodes() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
-        let _dead = dag.add_node(RiscOp::Const { value: 99.0 }, vec![], scalar_f32(), None);
+        let a = dag.add_node(RiscOp::synth_const(scalar_f32().precision, 1.0),
+            vec![],
+            scalar_f32(), None);
+        let _dead = dag.add_node(RiscOp::synth_const(scalar_f32().precision, 99.0),
+            vec![],
+            scalar_f32(), None);
         let live = dag.add_node(RiscOp::Neg, vec![a], scalar_f32(), None);
         dag.add_root(live);
 
@@ -380,14 +427,18 @@ mod tests {
     #[test]
     fn dce_keeps_store_nodes() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
+        let a = dag.add_node(RiscOp::synth_const(scalar_f32().precision, 1.0),
+            vec![],
+            scalar_f32(), None);
         dag.add_node(
             RiscOp::Store { name: "out".into() },
             vec![a],
             scalar_f32(),
             None,
         );
-        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32(), None);
+        let b = dag.add_node(RiscOp::synth_const(scalar_f32().precision, 2.0),
+            vec![],
+            scalar_f32(), None);
         let live = dag.add_node(RiscOp::Neg, vec![b], scalar_f32(), None);
         dag.add_root(live);
 
@@ -399,8 +450,12 @@ mod tests {
     #[test]
     fn cse_deduplicates_consts() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
-        let b = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
+        let a = dag.add_node(RiscOp::synth_const(scalar_f32().precision, 1.0),
+            vec![],
+            scalar_f32(), None);
+        let b = dag.add_node(RiscOp::synth_const(scalar_f32().precision, 1.0),
+            vec![],
+            scalar_f32(), None);
         let sum = dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
         dag.add_root(sum);
 
@@ -416,8 +471,12 @@ mod tests {
     #[test]
     fn dce_keeps_all_roots() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
-        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32(), None);
+        let a = dag.add_node(RiscOp::synth_const(scalar_f32().precision, 1.0),
+            vec![],
+            scalar_f32(), None);
+        let b = dag.add_node(RiscOp::synth_const(scalar_f32().precision, 2.0),
+            vec![],
+            scalar_f32(), None);
         dag.add_root(a);
         dag.add_root(b);
 

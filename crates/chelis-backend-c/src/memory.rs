@@ -376,7 +376,9 @@ mod tests {
     #[test]
     fn planner_reuses_non_overlapping_slots() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(4), None);
+        let a = dag.add_node(RiscOp::synth_const(vec_f32(4).precision, 1.0),
+            vec![],
+            vec_f32(4), None);
         let b = dag.add_node(RiscOp::Neg, vec![a], vec_f32(4), None);
         let c = dag.add_node(RiscOp::Neg, vec![b], vec_f32(4), None);
         dag.add_root(c);
@@ -391,8 +393,12 @@ mod tests {
     #[test]
     fn planner_keeps_overlapping_values_separate() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(4), None);
-        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], vec_f32(4), None);
+        let a = dag.add_node(RiscOp::synth_const(vec_f32(4).precision, 1.0),
+            vec![],
+            vec_f32(4), None);
+        let b = dag.add_node(RiscOp::synth_const(vec_f32(4).precision, 2.0),
+            vec![],
+            vec_f32(4), None);
         let c = dag.add_node(RiscOp::Add, vec![a, b], vec_f32(4), None);
         dag.add_root(c);
 
@@ -421,7 +427,9 @@ mod tests {
     #[test]
     fn metadata_view_extends_source_lifetime() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(4), None);
+        let a = dag.add_node(RiscOp::synth_const(vec_f32(4).precision, 1.0),
+            vec![],
+            vec_f32(4), None);
         let v = dag.add_node(
             RiscOp::Expand {
                 axis: 0,
@@ -434,7 +442,9 @@ mod tests {
             },
             None,
         );
-        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], vec_f32(4), None);
+        let b = dag.add_node(RiscOp::synth_const(vec_f32(4).precision, 2.0),
+            vec![],
+            vec_f32(4), None);
         let c = dag.add_node(RiscOp::Neg, vec![v], vec_f32(4), None);
         dag.add_root(c);
 
@@ -449,7 +459,9 @@ mod tests {
     #[test]
     fn store_outputs_are_standalone_not_slots() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(4), None);
+        let a = dag.add_node(RiscOp::synth_const(vec_f32(4).precision, 1.0),
+            vec![],
+            vec_f32(4), None);
         let s = dag.add_node(
             RiscOp::Store { name: "out".into() },
             vec![a],
@@ -469,9 +481,13 @@ mod tests {
     #[test]
     fn terminal_drop_closes_slot_lifetime_for_reuse() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(4), None);
+        let a = dag.add_node(RiscOp::synth_const(vec_f32(4).precision, 1.0),
+            vec![],
+            vec_f32(4), None);
         let drop = dag.add_node(RiscOp::Drop, vec![a], vec_f32(4), None);
-        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], vec_f32(4), None);
+        let b = dag.add_node(RiscOp::synth_const(vec_f32(4).precision, 2.0),
+            vec![],
+            vec_f32(4), None);
         dag.add_root(b);
 
         let plan = build_plan(&dag, &[b]);
@@ -496,16 +512,22 @@ mod tests {
     #[test]
     fn symbolic_exact_match_reuses_but_non_match_falls_back() {
         let mut exact = Dag::new();
-        let a = exact.add_node(RiscOp::Const { value: 1.0 }, vec![], sym_f32("n"), None);
+        let a = exact.add_node(RiscOp::synth_const(sym_f32("n").precision, 1.0),
+            vec![],
+            sym_f32("n"), None);
         let b = exact.add_node(RiscOp::Neg, vec![a], sym_f32("n"), None);
         let c = exact.add_node(RiscOp::Neg, vec![b], sym_f32("n"), None);
         exact.add_root(c);
         assert_eq!(build_plan(&exact, &[c]).slots().len(), 2);
 
         let mut mismatch = Dag::new();
-        let a = mismatch.add_node(RiscOp::Const { value: 1.0 }, vec![], sym_f32("m"), None);
+        let a = mismatch.add_node(RiscOp::synth_const(sym_f32("m").precision, 1.0),
+            vec![],
+            sym_f32("m"), None);
         let _b = mismatch.add_node(RiscOp::Neg, vec![a], sym_f32("m"), None);
-        let c = mismatch.add_node(RiscOp::Const { value: 2.0 }, vec![], sym_f32("n"), None);
+        let c = mismatch.add_node(RiscOp::synth_const(sym_f32("n").precision, 2.0),
+            vec![],
+            sym_f32("n"), None);
         mismatch.add_root(c);
         assert_eq!(build_plan(&mismatch, &[c]).slots().len(), 3);
     }
@@ -521,7 +543,9 @@ mod tests {
             DimInfo::Named("m".into(), None),
         ]);
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mn.clone(), None);
+        let a = dag.add_node(RiscOp::synth_const(mn.precision, 1.0),
+            vec![],
+            mn.clone(), None);
         let b = dag.add_node(RiscOp::Neg, vec![a], mn, None);
         let c = dag.add_node(RiscOp::Neg, vec![b], nm, None);
         dag.add_root(c);
@@ -540,7 +564,9 @@ mod tests {
         let n = sym_f32("n");
         let n_by_one = tensor_f32(vec![DimInfo::Named("n".into(), None), DimInfo::Lit(1)]);
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], n_by_one, None);
+        let a = dag.add_node(RiscOp::synth_const(n_by_one.precision, 1.0),
+            vec![],
+            n_by_one, None);
         let b = dag.add_node(RiscOp::Neg, vec![a], n.clone(), None);
         let c = dag.add_node(RiscOp::Neg, vec![b], n, None);
         dag.add_root(c);
@@ -565,7 +591,9 @@ mod tests {
             DimInfo::Named("y".into(), None),
         ]);
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mn.clone(), None);
+        let a = dag.add_node(RiscOp::synth_const(mn.precision, 1.0),
+            vec![],
+            mn.clone(), None);
         let b = dag.add_node(RiscOp::Neg, vec![a], mn, None);
         let c = dag.add_node(RiscOp::Neg, vec![b], xy, None);
         dag.add_root(c);
@@ -610,7 +638,9 @@ mod tests {
     #[test]
     fn cleanup_frees_wrappers_at_epilogue_then_slots() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(4), None);
+        let a = dag.add_node(RiscOp::synth_const(vec_f32(4).precision, 1.0),
+            vec![],
+            vec_f32(4), None);
         let b = dag.add_node(RiscOp::Neg, vec![a], vec_f32(4), None);
         dag.add_root(b);
 

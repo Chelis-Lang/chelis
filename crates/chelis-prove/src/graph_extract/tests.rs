@@ -425,14 +425,37 @@ fn non_finite_const_from_real_source_is_rejected_not_corrupted() {
         matches!(err, GraphExtractError::NonFiniteValue { .. }),
         "expected NonFiniteValue, got {err:?}"
     );
+
+    // chelis#729 rework: the sealed payload finalizes at the ascribed
+    // dtype, so a value that overflows ITS OWN dtype (1e300 at f32 is
+    // +inf per [04-NUM-2]) is honestly non-finite and takes the same
+    // rejection; the pre-sealed payload carried the finite f64 fiction
+    // and slipped past this guard.
+    let err = box_range_goal_from_source(
+        "out = (1.0e300 : tensor[f32])\n",
+        SourceKind::Surf,
+        input_box(&[("x", -1.0, 1.0)]),
+        output_range("out", 0.0, 1.0),
+    )
+    .expect_err("an f32-overflowing const finalizes to inf and must be rejected");
+    assert!(
+        matches!(err, GraphExtractError::NonFiniteValue { .. }),
+        "expected NonFiniteValue for the finalized f32 inf, got {err:?}"
+    );
 }
 
 #[test]
 fn finite_extreme_const_from_real_source_still_passes_and_hashes() {
     // The positive twin: a finite extreme (1e300) is NOT non-finite, so it
     // serializes as a real JSON number and produces a populated goal.
+    // RE-AUTHORED at the chelis#729 rework (chelis#856): the fixture was
+    // `1.0e300 : tensor[f32]`, which only passed because the pre-sealed
+    // payload carried the un-finalized f64 image; the honest f32 value
+    // of 1e300 is +inf ([04-NUM-2] overflow), which the guard now
+    // correctly rejects (see the rejected twin below). A finite extreme
+    // needs a dtype that can hold it, so the fixture moves to f64.
     let extracted = box_range_goal_from_source(
-        "out = (1.0e300 : tensor[f32])\n",
+        "out = (1.0e300 : tensor[f64])\n",
         SourceKind::Surf,
         input_box(&[("x", -1.0, 1.0)]),
         output_range("out", 0.0, 1.0),
@@ -452,7 +475,10 @@ fn each_non_finite_const_variant_is_rejected() {
     // +inf, -inf, and NaN would all serialize to the same `null` (the
     // collision). Each must be rejected so the collision is never reachable.
     for value in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
-        let err = extract_single_op(WireRiscOp::Const { value })
+        let err = extract_single_op(WireRiscOp::Const {
+            value: chelis_types::scalar_from_f64("test", chelis_types::types::Prim::F64, value)
+                .expect("float finalize is total"),
+        })
             .expect_err("a non-finite Const must be rejected");
         match err {
             GraphExtractError::NonFiniteValue { node, field } => {
@@ -503,7 +529,12 @@ fn every_f64_bearing_op_field_is_guarded() {
         ),
         (
             WireRiscOp::Const {
-                value: f64::INFINITY,
+                value: chelis_types::scalar_from_f64(
+                    "test",
+                    chelis_types::types::Prim::F64,
+                    f64::INFINITY,
+                )
+                .expect("float finalize is total"),
             },
             "value",
         ),
@@ -549,7 +580,7 @@ fn finite_f64_bearing_ops_pass_the_finite_guard() {
             padding: vec![(WireRtDim::Lit { value: 0 }, WireRtDim::Lit { value: 0 })],
             fill: 0.0,
         },
-        WireRiscOp::Const { value: 3.5 },
+        WireRiscOp::Const { value: chelis_types::scalar_from_f64("test", chelis_types::types::Prim::F64, 3.5).expect("finite f64") },
     ];
     for op in finite_ops {
         let extracted =

@@ -172,9 +172,15 @@ fn check_finite_floats(wire_dag: &WireDag) -> Result<(), GraphExtractError> {
             }
             WireRiscOp::Dropout { rate, .. } => reject_if_non_finite(id, "rate", *rate)?,
             WireRiscOp::Pad { fill, .. } => reject_if_non_finite(id, "fill", *fill)?,
-            WireRiscOp::Const { value } => reject_if_non_finite(id, "value", *value)?,
+            // Wire v4 (chelis#856): the constant payloads are sealed
+            // dtype-tagged values. Prove's real-envelope reading takes
+            // the f64 image (integer payloads are always finite; the
+            // exact-env swap is the chelis#688 Phase 2 work).
+            WireRiscOp::Const { value } => {
+                reject_if_non_finite(id, "value", value.as_f64_lossy())?
+            }
             WireRiscOp::ConstTensor { data } => {
-                for v in data.iter() {
+                for v in data.to_f64_lossy_vec() {
                     if !v.is_finite() {
                         return Err(GraphExtractError::NonFiniteValue {
                             node: id,
@@ -480,7 +486,15 @@ const _: () = {
     // op group (`WireRtDim` carries no float field), so the box/range
     // float-bound extraction contract is unchanged; the version moves
     // because the reshape payload shape itself changed.
-    assert!(WIRE_DAG_SCHEMA_VERSION == 3);
+    // Moved to `4` for the chelis#729 rework (chelis#856): the constant
+    // payloads (`Const::value`, `ConstTensor::data`) became sealed
+    // dtype-tagged values with finalize-on-decode. The float-bound
+    // extraction reads their f64 images through the named-lossy
+    // accessors, so the box/range contract is unchanged in value terms;
+    // integer constants above 2^53 are now representable on the wire and
+    // still enter the real envelope through the same lossy image (the
+    // exact-envelope swap is the chelis#688 Phase 2 work).
+    assert!(WIRE_DAG_SCHEMA_VERSION == 4);
 };
 
 #[cfg(test)]

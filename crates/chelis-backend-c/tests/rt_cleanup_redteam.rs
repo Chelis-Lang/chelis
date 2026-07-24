@@ -811,7 +811,7 @@ fn bf16_const_fill_pinned_bit_patterns_for_0_1_0_01_pi() {
     for &(value, expected) in cases {
         let n = 4;
         let mut dag = Dag::new();
-        dag.add_node(RiscOp::Const { value }, vec![], vec_ty(n, Prim::Bf16), None);
+        dag.add_node(RiscOp::synth_const(Prim::Bf16, value), vec![], vec_ty(n, Prim::Bf16), None);
         let result = codegen(&dag, "bf16_const_extra").unwrap();
         let main_c = format!(
             r#"{HARNESS}
@@ -856,7 +856,7 @@ fn f16_const_fill_pinned_bit_patterns_for_0_1_0_01_pi() {
     for &(value, expected) in cases {
         let n = 4;
         let mut dag = Dag::new();
-        dag.add_node(RiscOp::Const { value }, vec![], vec_ty(n, Prim::F16), None);
+        dag.add_node(RiscOp::synth_const(Prim::F16, value), vec![], vec_ty(n, Prim::F16), None);
         let result = codegen(&dag, "f16_const_extra").unwrap();
         let main_c = format!(
             r#"{HARNESS}
@@ -908,9 +908,9 @@ fn cast_f32_to_bf16_preserves_value_per_ieee_754() {
     let n = 4;
     let mut dag = Dag::new();
     let src = dag.add_node(
-        RiscOp::Const { value: 1.5_f64 },
-        vec![],
-        vec_ty(n, Prim::F32),
+        RiscOp::synth_const(vec_ty(n, Prim::F32).precision, 1.5_f64),
+            vec![],
+            vec_ty(n, Prim::F32),
         None,
     );
     dag.add_node(
@@ -957,9 +957,9 @@ fn cast_bf16_to_f32_preserves_value_per_ieee_754() {
     let n = 4;
     let mut dag = Dag::new();
     let src = dag.add_node(
-        RiscOp::Const { value: 1.5_f64 },
-        vec![],
-        vec_ty(n, Prim::Bf16),
+        RiscOp::synth_const(vec_ty(n, Prim::Bf16).precision, 1.5_f64),
+            vec![],
+            vec_ty(n, Prim::Bf16),
         None,
     );
     dag.add_node(
@@ -1005,9 +1005,9 @@ fn cast_f32_to_f16_preserves_value_per_ieee_754() {
     let n = 4;
     let mut dag = Dag::new();
     let src = dag.add_node(
-        RiscOp::Const { value: 1.5_f64 },
-        vec![],
-        vec_ty(n, Prim::F32),
+        RiscOp::synth_const(vec_ty(n, Prim::F32).precision, 1.5_f64),
+            vec![],
+            vec_ty(n, Prim::F32),
         None,
     );
     dag.add_node(

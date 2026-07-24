@@ -972,11 +972,9 @@ fn run_cast_f32_to_reduced(test_name: &str, dst: Prim, value: f32, tol: f64) {
     let n = 4;
     let mut dag = Dag::new();
     let src = dag.add_node(
-        RiscOp::Const {
-            value: value as f64,
-        },
-        vec![],
-        vec_ty(n, Prim::F32),
+        RiscOp::synth_const(vec_ty(n, Prim::F32).precision, value as f64),
+            vec![],
+            vec_ty(n, Prim::F32),
         None,
     );
     dag.add_node(
@@ -1036,11 +1034,9 @@ fn run_cast_reduced_to_f32(test_name: &str, src: Prim, value: f32, tol: f64) {
     let n = 4;
     let mut dag = Dag::new();
     let c = dag.add_node(
-        RiscOp::Const {
-            value: value as f64,
-        },
-        vec![],
-        vec_ty(n, src),
+        RiscOp::synth_const(vec_ty(n, src).precision, value as f64),
+            vec![],
+            vec_ty(n, src),
         None,
     );
     dag.add_node(
@@ -1088,11 +1084,9 @@ fn run_cast_reduced_to_reduced(test_name: &str, src: Prim, dst: Prim, value: f32
     let n = 4;
     let mut dag = Dag::new();
     let c = dag.add_node(
-        RiscOp::Const {
-            value: value as f64,
-        },
-        vec![],
-        vec_ty(n, src),
+        RiscOp::synth_const(vec_ty(n, src).precision, value as f64),
+            vec![],
+            vec_ty(n, src),
         None,
     );
     dag.add_node(
@@ -1215,9 +1209,9 @@ fn cast_f32_to_f16_sweep_non_round_values() {
 fn eval_last_helper_returns_const_value() {
     let mut dag = Dag::new();
     dag.add_node(
-        RiscOp::Const { value: 7.0 },
-        vec![],
-        scalar_ty(Prim::F32),
+        RiscOp::synth_const(scalar_ty(Prim::F32).precision, 7.0),
+            vec![],
+            scalar_ty(Prim::F32),
         None,
     );
     let vals = eval_last(&dag);

@@ -1279,7 +1279,15 @@ pub struct WireRecordPatternField {
 ///   extents), and `WireRtDim` gained the `Sym` variant. A reshape target
 ///   now serializes as a bound-tagged value (`lit` / `node` / `sym`), not
 ///   a dim-info object, so a pinned consumer must observe the bump.
-pub const WIRE_DAG_SCHEMA_VERSION: u32 = 3;
+/// - `4`: chelis#729 rework (chelis#856, the fifth storage layer) —
+///   `WireRiscOp::Const::value` changed from a bare f64 to the sealed
+///   dtype-tagged scalar payload and `WireRiscOp::ConstTensor::data`
+///   from `Vec<f64>` to the sealed per-dtype storage payload. Integer
+///   constants now travel exact at width (no f64 collapse above 2^53)
+///   and decoding finalizes through the dtype_semantics module
+///   (finalize-on-decode; corrupt reduced-float images are a loud
+///   decode error).
+pub const WIRE_DAG_SCHEMA_VERSION: u32 = 4;
 
 /// Backwards-compat default for [`WireDag::schema_version`]. A wire
 /// payload predating WI-2 carries no `schema_version`; it is the
@@ -1608,10 +1616,12 @@ pub enum WireRiscOp {
         strides: Vec<WireRtDim>,
     },
     Const {
-        value: f64,
+        /// Sealed dtype-tagged scalar (wire v4; finalize-on-decode).
+        value: chelis_types::ScalarValue,
     },
     ConstTensor {
-        data: Vec<f64>,
+        /// Sealed per-dtype storage (wire v4; finalize-on-decode).
+        data: chelis_types::TensorStorage,
     },
     Shape {
         axis: usize,

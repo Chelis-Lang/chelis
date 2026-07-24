@@ -282,7 +282,7 @@ fn spec_relu_decomposes_to_max_elem() {
     let has_const_zero = dag
         .nodes()
         .iter()
-        .any(|n| matches!(n.op, RiscOp::Const { value } if value == 0.0));
+        .any(|n| matches!(n.op, RiscOp::Const { value } if value.as_f64_lossy() == 0.0));
     assert!(has_max_elem, "relu should decompose to MaxElem");
     assert!(has_const_zero, "relu should decompose with Const(0)");
     // No standalone Relu op should exist in the DAG.
@@ -524,8 +524,12 @@ fn spec_generated_c_compiles() {
         return;
     }
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
-    let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32(), None);
+    let a = dag.add_node(RiscOp::synth_const(scalar_f32().precision, 1.0),
+            vec![],
+            scalar_f32(), None);
+    let b = dag.add_node(RiscOp::synth_const(scalar_f32().precision, 2.0),
+            vec![],
+            scalar_f32(), None);
     let c = dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
     dag.add_root(c);
 
@@ -545,8 +549,12 @@ fn spec_add_numerical_correctness() {
         return;
     }
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
-    let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32(), None);
+    let a = dag.add_node(RiscOp::synth_const(scalar_f32().precision, 1.0),
+            vec![],
+            scalar_f32(), None);
+    let b = dag.add_node(RiscOp::synth_const(scalar_f32().precision, 2.0),
+            vec![],
+            scalar_f32(), None);
     let c = dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
     dag.add_root(c);
 
@@ -567,8 +575,12 @@ fn spec_relu_numerical_correctness() {
     // relu(const(-1)) -> 0.0
     {
         let mut dag = Dag::new();
-        let x = dag.add_node(RiscOp::Const { value: -1.0 }, vec![], scalar_f32(), None);
-        let zero = dag.add_node(RiscOp::Const { value: 0.0 }, vec![], scalar_f32(), None);
+        let x = dag.add_node(RiscOp::synth_const(scalar_f32().precision, -1.0),
+            vec![],
+            scalar_f32(), None);
+        let zero = dag.add_node(RiscOp::synth_const(scalar_f32().precision, 0.0),
+            vec![],
+            scalar_f32(), None);
         let r = dag.add_node(RiscOp::MaxElem, vec![x, zero], scalar_f32(), None);
         dag.add_root(r);
 
@@ -579,8 +591,12 @@ fn spec_relu_numerical_correctness() {
     // relu(const(5)) -> 5.0
     {
         let mut dag = Dag::new();
-        let x = dag.add_node(RiscOp::Const { value: 5.0 }, vec![], scalar_f32(), None);
-        let zero = dag.add_node(RiscOp::Const { value: 0.0 }, vec![], scalar_f32(), None);
+        let x = dag.add_node(RiscOp::synth_const(scalar_f32().precision, 5.0),
+            vec![],
+            scalar_f32(), None);
+        let zero = dag.add_node(RiscOp::synth_const(scalar_f32().precision, 0.0),
+            vec![],
+            scalar_f32(), None);
         let r = dag.add_node(RiscOp::MaxElem, vec![x, zero], scalar_f32(), None);
         dag.add_root(r);
 

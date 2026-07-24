@@ -10,9 +10,10 @@ cited saturating adapter, so int64 exactness above 2^53 for scalar and
 elementwise ops waits for the Phase 2 kernel split (chelis#680; integer
 reductions, storage, `to_tensor`/`to_list`, and the wire are already
 exact, and narrow widths trap exactly); (b) the DAG literal payloads
-(`RiscOp::Const`/`ConstTensor`, `Vec<f64>`) still collapse int64
-literals that lower into the tensor lane - filed as [#856], witnessed by
-the still-ignored chelis#684 binding-form rows. Phase 1 was red-teamed
+(`RiscOp::Const`/`ConstTensor`) collapsed int64 literals that lower
+into the tensor lane - filed as [#856] and FIXED at the Phase 1 rework
+(the fifth storage layer, §C3); the chelis#684 binding-form rows are
+green and un-ignored. Phase 1 was red-teamed
 per the repo protocol on PR #857: round 1 (fresh context) returned
 QUALIFIED PASS with six findings, all folded on the branch, and filed
 discoveries [#856]/#860/#861; round 2 (fresh context) verified every
@@ -243,15 +244,30 @@ pub fn finalize_tensor(prim: Prim, raw: RawTensor) -> Result<TensorValue, Numeri
 This is the **storage decision** ([#684]/[#686]/[#685]): per-dtype buffers, not
 finalize-on-write over `Vec<f64>` - f64 storage cannot represent exact
 int64 above 2^53 regardless of write discipline, so it fails [#684] by
-construction. The decision is expressed at all four declaration layers in
-ONE change set (Phase 1): `chelis-ir/src/eval.rs` (`TensorValue`),
-`chelis-compiler-api/src/schema.rs` (wire schema - `data` becomes a tagged
-per-dtype payload; this is a wire-format break, versioned as such),
-`bindings/python/chelis/__init__.py` (per-dtype tuples / numpy dtypes,
-ending the `np.float64` cast of [#685]), and prove's env (§C5-consumer
-table). Partial adoption of the storage decision is forbidden: it is the
-one all-layers-or-nothing element of this plan, because a mixed state
-re-creates the very boundary bugs ([#684]/[#686]) it exists to end.
+construction. The decision is expressed at all FIVE declaration layers:
+the original four in ONE change set (Phase 1) - `chelis-ir/src/eval.rs`
+(`TensorValue`), `chelis-compiler-api/src/schema.rs` (wire schema -
+`data` becomes a tagged per-dtype payload; this is a wire-format break,
+versioned as such), `bindings/python/chelis/__init__.py` (per-dtype
+tuples / numpy dtypes, ending the `np.float64` cast of [#685]), and
+prove's env (§C5-consumer table) - plus the FIFTH layer the plan's
+original enumeration missed and [#856] filed: the IR constant payloads
+(`RiscOp::Const`/`ConstTensor`), delivered at the Phase 1 rework
+(2026-07-24). Those payloads are now the SEALED module types
+(`ScalarValue`/`TensorStorage`), so a numeric value in the IR cannot
+exist un-finalized: literals finalize once in `lower_lit` at their
+desugarer-ascribed dtype (integer atoms travel their exact i64),
+compiler-synthesized constants construct through
+`RiscOp::synth_const`/`synth_const_tensor`, the `WireDag` carries the
+dtype-tagged payloads (v4, finalize-on-decode with loud rejection of
+corrupt reduced-float images), the bincode caches bumped
+(`CHELIS_CTX_V6`, stdlib format 3), and constant folds decline rather
+than bake a collapsed integer or a trap in. Partial adoption of the
+storage decision is forbidden: it is the one all-layers-or-nothing
+element of this plan, because a mixed state re-creates the very
+boundary bugs ([#684]/[#686]) it exists to end. The mechanical
+no-sixth-layer census over every remaining f64/Vec<f64> payload field
+is recorded on PR #857.
 
 **Access for consumers.** Reads are free-form (`as_f64_lossy()` explicitly
 named lossy, `as_i64_exact() -> Option<i64>`, typed slices per dtype).

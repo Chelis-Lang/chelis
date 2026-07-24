@@ -3726,7 +3726,7 @@ mod tests {
             None,
         );
         let indices = dag.add_node(
-            RiscOp::Const { value: 0.0 },
+            RiscOp::synth_const(tensor_type(vec![4], chelis_types::types::Prim::Int64).precision, 0.0),
             vec![],
             tensor_type(vec![4], chelis_types::types::Prim::Int64),
             None,
@@ -3758,7 +3758,7 @@ mod tests {
             None,
         );
         let indices = dag.add_node(
-            RiscOp::Const { value: 0.0 },
+            RiscOp::synth_const(tensor_type(vec![4], chelis_types::types::Prim::Int32).precision, 0.0),
             vec![],
             tensor_type(vec![4], chelis_types::types::Prim::Int32),
             None,

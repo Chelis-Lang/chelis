@@ -94,7 +94,7 @@ def main() -> tensor[3, f32] =
     let has_const_5 = dag
         .nodes()
         .iter()
-        .any(|n| matches!(&n.op, RiscOp::Const { value } if (*value - 5.0).abs() < f64::EPSILON));
+        .any(|n| matches!(&n.op, RiscOp::Const { value } if (value.as_f64_lossy() - 5.0).abs() < f64::EPSILON));
     assert!(has_const_5, "expected a Const(5.0) node for uniform data");
 }
 

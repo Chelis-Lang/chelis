@@ -174,7 +174,7 @@ fn shape_node_is_ad_transparent_with_zero_adjoint() {
         .dag
         .nodes()
         .iter()
-        .any(|n| matches!(&n.op, RiscOp::Const { value } if *value == 0.0));
+        .any(|n| matches!(&n.op, RiscOp::Const { value } if value.as_f64_lossy() == 0.0));
     assert!(
         has_zero_const,
         "Shape adjoint must route a zero cotangent to the input"

@@ -696,13 +696,10 @@ fn int64_suffix_literal_bare_expression_is_exact() {
     );
 }
 
-/// The same i64-suffixed literal through a top-level BINDING still
-/// collapses: the binding lowers through the DAG literal payload.
+/// The same i64-suffixed literal through a top-level BINDING. Fixed at
+/// the chelis#729 rework (chelis#856): the DAG literal payload is the
+/// sealed dtype-true scalar, so the binding form is exact.
 #[test]
-#[ignore = "chelis#856: the binding form lowers the suffixed literal through the f64 \
-            Const/ConstTensor DAG payload and prints 9007199254740992; storage itself is \
-            exact since chelis#729 Phase 1. Run with \
-            `cargo test -p chelis-cli --test precision_matrix -- --ignored`."]
 fn int64_suffix_literal_binding_is_exact() {
     let got = eval_program_first_line("module M.Main\nx = 9007199254740993i64\nout = print(x)\n")
         .expect("eval");
@@ -956,10 +953,6 @@ fn bare_expression_keeps_int64_exact() {
 /// Verified: prints `tensor(shape=[], data=[9007199254740992.0])`. An
 /// UNannotated top-level binding is enough to promote and corrupt.
 #[test]
-#[ignore = "chelis#856 (was chelis#684): storage is per-dtype and exact since chelis#729 \
-            Phase 1, but the binding lowers through the DAG literal payload \
-            (Const/ConstTensor, Vec<f64>), which still collapses the value before storage \
-            sees it. Run with `cargo test -p chelis-cli --test precision_matrix -- --ignored`."]
 fn unannotated_top_level_binding_keeps_int64_exact() {
     let got = eval_program_first_line(
         "module M.Main\nx = cast(9007199254740993, int64)\nout = print(x)\n",
@@ -976,10 +969,6 @@ fn unannotated_top_level_binding_keeps_int64_exact() {
 /// Verified: identical corruption to the unannotated form. Proves the promotion
 /// is caused by the BINDING, not by the type annotation.
 #[test]
-#[ignore = "chelis#856 (was chelis#684): storage is per-dtype and exact since chelis#729 \
-            Phase 1, but the binding lowers through the DAG literal payload \
-            (Const/ConstTensor, Vec<f64>), which still collapses the value before storage \
-            sees it. Run with `cargo test -p chelis-cli --test precision_matrix -- --ignored`."]
 fn annotated_top_level_binding_keeps_int64_exact() {
     let got = eval_program_first_line(
         "module M.Main\nx: int64 = cast(9007199254740993, int64)\nout = print(x)\n",
@@ -1012,10 +1001,6 @@ fn def_body_keeps_int64_exact() {
 /// Fan-out: binding used twice (auto-copy per the implicit-linearity rules).
 /// Both reads must agree with each other and with the true value.
 #[test]
-#[ignore = "chelis#856 (was chelis#684): storage is per-dtype and exact since chelis#729 \
-            Phase 1, but the binding lowers through the DAG literal payload \
-            (Const/ConstTensor, Vec<f64>), which still collapses the value before storage \
-            sees it. Run with `cargo test -p chelis-cli --test precision_matrix -- --ignored`."]
 fn int64_binding_fanout_keeps_both_reads_exact_and_equal() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("f.ch");
