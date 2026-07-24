@@ -14,7 +14,9 @@ disagree, the plan wins and this doc has a bug.
 The plan set: [`dtype_semantics.md`](dtype_semantics.md) ([#729]), [`loud_unsupported.md`](loud_unsupported.md) ([#730]),
 [`checker_totality.md`](checker_totality.md) ([#731]), [`faithful_observation.md`](faithful_observation.md) ([#732]),
 [`spec_provenance.md`](spec_provenance.md) ([#733]), plus the [`capability_table.md`](capability_table.md) schema (rides
-[#729] Phase 4) and the audit record under `docs/investigations/`.
+[#729] Phase 4), the post-PR-[#799] function-value correction
+[`host_function_values.md`](host_function_values.md), and the audit record
+under `docs/investigations/`.
 
 ## The class map
 
@@ -69,16 +71,32 @@ finding folded in before merge; the red teams' discoveries are filed as
 landed with Wave 1 (above); the remaining Wave 2 set is [#732] Phase 2
 (the generated C side: fixes [#716]/[#723] outright and gives the
 refactor its byte-exact instrument) in parallel with [#731] Phases 2-3 (the
-witness token + DeepTag). [#730] Phase 2's final typed implementation is in
-PR [#799] (acceptance validation pending): closed vocabularies, staged
+witness token + DeepTag). [#730] Phase 2's typed implementation landed in
+merged PR [#799]: closed vocabularies, staged
 HostType/ABI separation, and structured emission. Its initial source-lint
 approach was explicitly re-planned after execution showed incomplete and
 false-positive behavior; the lint was extracted to PR [#815] and is not a
 Wave 2 dependency. Its one authoritative completion oracle is
 `.venv/bin/python scripts/loud_unsupported_phase2_oracle.py`; acceptance
 requires exit 0 with final line `PHASE 2 ORACLE: PASS` plus the plan-set's
-fresh-context adversarial review. [#733] Phase 1's Buoy shell-side design
-and fixture preparation may ride alongside: OpenSpec still plans new
+fresh-context adversarial review.
+
+The 2026-07-24 post-merge audit filed [#866]-[#868]. These do not reopen the
+no-silent-substitution result, but they show that the intended
+logical-resolution/target-capability split and §C2 provenance channel are
+incomplete. The correction is sequenced:
+
+1. [#868] threads `Unsupported` locations through every producer, compiler
+   API, and CLI surface.
+2. [#866]/[#867] add the typed shared `FunctionValue` representation and move
+   every first-class C rejection into the private projection, using the live
+   span channel and citing [#879].
+3. [#879] later owns an actual general C-host closure ABI; it is not part of
+   either remediation PR.
+
+The owning contract, exact IR shape, tests, and two aspirational oracles are
+in [`host_function_values.md`](host_function_values.md). [#733] Phase 1's
+Buoy shell-side design and fixture preparation may ride alongside: OpenSpec still plans new
 normative text and atom IDs remain stable. The executable advisory pilot
 waits for the selected Buoy revision's standalone `devenv test` final
 oracle and the shell-adapter prerequisites; once admitted, it reports
@@ -413,6 +431,9 @@ Wave 0's own discoveries, claimed at filing: [#744]/[#745] -> [#730]
 (the generated formatter kills both); [#753] -> [#729] (spec/04
 [04-NUM-7] + the capability seed row); [#755]/[#756] -> [#731] (census
 extensions; die at the Phase 1-2 sweep and witness migration).
+Post-PR-[#799] findings [#866]/[#867]/[#868] ->
+[`host_function_values.md`](host_function_values.md) FV1/FV2; [#879] is the
+separate capability owner for a future general C-host closure ABI.
 
 Closed by the 2026-07-18/19 fix batch and removed from the ledger
 above: [#747] (PR #767), [#721] (PR #768), [#750] (PR #774). Filed and
@@ -565,6 +586,10 @@ formal target, per its §C1.5) and [#730] makes unknown KINDS loud;
 [#796]: https://github.com/Chelis-Lang/chelis/issues/796
 [#799]: https://github.com/Chelis-Lang/chelis/pull/799
 [#815]: https://github.com/Chelis-Lang/chelis/pull/815
+[#866]: https://github.com/Chelis-Lang/chelis/issues/866
+[#867]: https://github.com/Chelis-Lang/chelis/issues/867
+[#868]: https://github.com/Chelis-Lang/chelis/issues/868
+[#879]: https://github.com/Chelis-Lang/chelis/issues/879
 [#833]: https://github.com/Chelis-Lang/chelis/issues/833
 [#840]: https://github.com/Chelis-Lang/chelis/issues/840
 [#841]: https://github.com/Chelis-Lang/chelis/issues/841

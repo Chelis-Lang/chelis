@@ -1,4 +1,4 @@
-# The Capability Table: schema for the op x dtype x lane authority
+# The Capability Table: schema for operation/construct x lane authority
 
 **Status:** Schema contract, pre-implementation. The table is delivered by
 `spec/design/dtype_semantics.md` ([#729]) Phase 4. This document owns the
@@ -7,7 +7,8 @@ schema consumed by [#729] Phase 4, `loud_unsupported.md` [#730] Phase 3, and
 entry and may then change only through this document and every consuming
 plan in one change set.
 **Owning specs:** `spec/05-risc-primitives.md` (op semantics the rows
-cite), `spec/04-type-system.md` (dtype rules), and the four sibling plans.
+cite), `spec/04-type-system.md` (dtype and function-value rules),
+`host_function_values.md` (construct rows), and the four sibling plans.
 
 ## The two-table design
 
@@ -21,7 +22,7 @@ re-exports from `chelis-types`. `chelis-vocab` owns identity and wire
 representation only. Numeric finalization, storage, operation semantics, and
 kernel behavior remain in `dtype_semantics.md` and its consumers.
 
-The schema separates target-independent operation semantics from
+The schema separates target-independent operation/construct semantics from
 per-backend implementation status.
 
 The same separation governs host types. `HostTypeTerm -> ConcreteHostType` is
@@ -38,7 +39,23 @@ substitute int64, f32, `void *`, or a default emitted value.
 
 ### Table A - the semantic table (target-independent; the checker's law)
 
-One row per **(builtin, surface, dtype)**:
+One row per closed `CapabilitySubject`:
+
+```rust
+pub enum CapabilitySubject {
+    Operation {
+        builtin: BuiltinId,
+        surface: Surface,
+        dtype: Prim,
+    },
+    Construct {
+        construct: ConstructId,
+        context: ConstructContext,
+    },
+}
+```
+
+Operation subjects keep the original **(builtin, surface, dtype)** axes:
 
 - **builtin** - the user-facing name (`add`, `mean`, `bitand`, `abs`,
   `reduce_window_max`, `to_string`, ...). NOT `RiscOp`: several audited
@@ -66,20 +83,40 @@ One row per **(builtin, surface, dtype)**:
   - `Rejected.reason` is the user-facing diagnostic fragment, rendered in
     `loud_unsupported.md` §C2's format by whichever stage reports it.
 
-Effects are NOT rows (they are constructs, not ops - `EffectKind` +
-checker totality, [#730]/[#731]). Movement ops and reductions are ordinary
+Construct subjects cover executable language constructs whose logical
+validity and backend availability can differ. Their axes are:
+
+- **construct** - a closed `ConstructId`, initially `FunctionValue`;
+- **context** - the semantic placement being decided, initially
+  `ContextualCallback | FirstClassValue`; and
+- **cell** - the same `Supported { sig, atom }` or
+  `Rejected { reason, atom }`. For constructs, `sig` is the checked
+  type/placement contract rather than a builtin signature.
+
+Returned, stored, dynamically selected, capturing, and transformed function
+values are fixtures for `FunctionValue / FirstClassValue`, not separate
+syntax-policy rows. See `host_function_values.md` §3.
+
+Effects are NOT rows: an effect kind is not by itself an executable
+operation or value placement. `EffectKind` plus checker totality remains
+owned by [#730]/[#731]. Movement ops and reductions are ordinary operation
 rows; parameter constraints (axis validity, window literalness per [#725]'s
 resolution) live in `sig`, not in extra axes.
 
 ### Table B - the backend table (per-target reality)
 
-One row per **(A-row, backend)**, backends = `eval | c-host | c-dag |
-hip | metal` (eval is a backend here on purpose: [#717] proved the
-reference lane needs conformance rows too):
+One row per **(A-row, applicable backend)**. Applicability is returned by an
+exhaustive generated function over `CapabilitySubject`; it is not an
+author-controlled optional list. Operation subjects use
+`eval | c-host | c-dag | hip | metal` (eval is a backend here on purpose:
+[#717] proved the reference lane needs conformance rows too).
+`FunctionValue` subjects use `eval | c-host`: `c-dag` cannot consume host
+values, and a HIP/Metal host fallback selects the `c-host` cell and reports
+`codegen:c` rather than claiming a native GPU-host ABI.
 
-- **cell** - `Implemented { kernel-ref }` or `Unimplemented { issue,
+- **cell** - `Implemented { implementation-ref }` or `Unimplemented { issue,
   diagnostic }` or `RejectedByDesign { reason, atom }`:
-  - `Implemented`: names the kernel/template/host-op the dispatch
+  - `Implemented`: names the kernel/template/host-op/contextual adapter the dispatch
     generator wires; the macro-generated skeleton makes an A-`Supported`
     row with no B-cell in some backend a **compile error in that
     backend** - the "add a builtin" inversion.
@@ -102,7 +139,7 @@ reference lane needs conformance rows too):
 | `chelis check` reporting | A | check always reports A-`Rejected` cells because they are target-independent type facts; B-level rejections surface at build where the target is known |
 | build gates | B | generated early-UX gates per [#730] Phase 3's gate contract (earlier/more specific, never the sole defense) |
 | backend dispatch | B | macro-generated skeletons; missing arm = compile error |
-| conformance suite | A x B | every (`Supported`, `Implemented`) cell executed in every backend, exact agreement or [#732]'s tolerance table; every `Rejected`/`Unimplemented` cell asserts its diagnostic from every stage that renders it |
+| conformance suite | A x B | every (`Supported`, `Implemented`) cell executed in every applicable backend, exact agreement or [#732]'s tolerance table; every `Rejected`/`Unimplemented` cell asserts its diagnostic from every stage that renders it |
 | [#733] citations | A + B | the table schema requires controlling atom revisions; the pinned Buoy policy and Chelis shell adapter check authority, freshness, and selected-surface completeness |
 
 ## Seed decisions the table must ship with
@@ -127,6 +164,8 @@ authored:
 | `to_string` x Tensor/List ([#734]) | `Supported` (eval already stringifies); C B-cell `Unimplemented { issue: #734 }` until the emitter renders via [#732]'s formatter |
 | `wrap_add`/`wrap_sub`/`wrap_mul` x (both surfaces) x int widths (spec/04 [04-NUM-7], [#753]) | A `Supported` on int8/16/32/64, `Rejected` on bool/float ("no modular arithmetic on non-integer dtypes; see [04-NUM-7]"); B-cells `Unimplemented { issue: #753 }` until kernels land ([#729] Phase 2's natural moment; SMT lowers to `bvadd`/`bvsub`/`bvmul` exactly, no tolerance row) |
 | named lossy cast x directions x dtypes ([#759]) | the explicit truncating/narrowing rung over the checked-cast default (same discipline as [#753]): per-direction rules authored as atoms - proposals: float->float RNE at target width; float->int truncate-toward-zero with an authored out-of-range rule; int->narrower-int ONE authored rule; never the default; bool out of scope per [04-NUM-4]; B-cells land with [#729] Phase 2's kernel work |
+| `FunctionValue / ContextualCallback` ([#866]) | A `Supported`; eval `Implemented` by runtime closures/transforms; C-host `Implemented` only through exact declared callback parameters, direct named/forwarded callback arguments, inline higher-order callback bodies, and eliminated direct applications |
+| `FunctionValue / FirstClassValue` ([#866], [#867]) | A `Supported` per `spec/03-deep-syntax.md` §4.2 and `spec/04-type-system.md` §8.3; eval `Implemented` by `RuntimeValue::{Closure, Transform}`; C-host `Unimplemented { issue: #879 }` for returned, stored, selected, capturing, or transformed values until a general ABI lands |
 
 ## Open questions (decided at [#729] Phase 4 entry, recorded here)
 
@@ -139,8 +178,9 @@ authored:
    exactness, are per-path facts).
 3. Signature language for `sig` (how much shape/param constraint is
    expressible; where [#725]'s "window must be literal" rule sits).
-4. Row count management (builtins x 2 surfaces x 10 dtypes is a few
-   thousand cells; the dtype-class authoring macro's ergonomics).
+4. Row count management (operation subjects still expand builtins x 2
+   surfaces x 10 dtypes to a few thousand cells; construct subjects do not
+   acquire meaningless dtype/surface axes).
 
 [#682]: https://github.com/Chelis-Lang/chelis/issues/682
 [#690]: https://github.com/Chelis-Lang/chelis/issues/690
@@ -165,3 +205,6 @@ authored:
 [#753]: https://github.com/Chelis-Lang/chelis/issues/753
 [#759]: https://github.com/Chelis-Lang/chelis/issues/759
 [#717]: https://github.com/Chelis-Lang/chelis/issues/717
+[#866]: https://github.com/Chelis-Lang/chelis/issues/866
+[#867]: https://github.com/Chelis-Lang/chelis/issues/867
+[#879]: https://github.com/Chelis-Lang/chelis/issues/879

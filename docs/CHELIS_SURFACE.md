@@ -262,6 +262,25 @@ Higher-order ones (`map`/`filter`/`fold`/`scan`/`partition`/`flat_map`) take cal
 functions — the DAG has no function-pointer node, which is why they are host-lane.
 The host lane is eager (no lazy list fusion).
 
+The C host supports callbacks only contextually:
+
+- function-typed parameters and named/forwarded callback arguments use exact typed C
+  function pointers;
+- inline callbacks are emitted into the containing combinator loop; and
+- immediately applied lambdas or known transforms are reduced/specialized before
+  emission.
+
+This is not a general C closure ABI. No standalone C value carries a code pointer plus
+captured environment, ownership, aggregate/collection storage, return, or indirect-call
+rules. The language and evaluator support first-class closures and transformed
+callables, but the C-host cell is `Unimplemented { issue: chelis#879 }`.
+
+The post-PR-799 correction in
+[`spec/design/host_function_values.md`](../spec/design/host_function_values.md) is not
+implemented yet: some anonymous/capturing/stored forms still reject during shared
+lowering instead of reaching the attributed `codegen:c` decision (chelis#866), and
+unsupported diagnostics still drop their span (chelis#868).
+
 ### 3.4 Collections, strings, conversions
 
 - **Dict:** `dict_of`, `dict_get`, `dict_contains`, `dict_remove`, `dict_insert`,
@@ -381,6 +400,10 @@ native compiler** — `chelis build` emits source + flags; the user runs `gcc`/`
 > (`host_program_requires_host_backend`), `--target hip`/`metal` fall back to C
 > codegen for the whole program.
 
+Consequently a HIP/Metal build that reaches a host function-value limitation currently
+uses the C-host capability decision and should report `codegen:c`; that fallback is not
+evidence of a native HIP/Metal closure ABI.
+
 ### 6.2 DAG-lane GPU coverage gaps
 
 | Op / feature | C | HIP | Metal |
@@ -445,6 +468,12 @@ IR-level transforms a user applies (AD is an IR transform, not a library):
 
 `grad`/`vmap` over a body reaching a host-only builder (`tensor_scan`) are rejected at
 the transform boundary (reachability-scoped).
+
+Direct `grad`/`vmap`/`vmap-grad` applications can be specialized into the DAG and remain
+the compiled fast path. Binding, returning, storing, or dynamically selecting the
+function produced by `grad`/`vmap`/`jit` is a first-class function-value use: evaluator
+support exists, while C-host support is tracked by chelis#879. See
+[`spec/design/host_function_values.md`](../spec/design/host_function_values.md).
 
 ---
 
@@ -533,5 +562,6 @@ is a tested-not-proven trusted base.
 | [`spec/design/differentiable_language.md`](../spec/design/differentiable_language.md) | D1–D5 AD roadmap — what NOT to design around |
 | [`spec/design/rank_polymorphism.md`](../spec/design/rank_polymorphism.md) | `..r` polymorphism |
 | [`spec/design/implicit_linearity.md`](../spec/design/implicit_linearity.md) | why `copy()`/`drop()` exist |
+| [`spec/design/host_function_values.md`](../spec/design/host_function_values.md) | typed closures, contextual C callbacks, and the unimplemented general C-host ABI |
 | [`spec/design/chelis_canonical_reference.md`](../spec/design/chelis_canonical_reference.md) | core vs std vs shell scope taxonomy |
 | [`spec/design/shell_repo_contract.md`](../spec/design/shell_repo_contract.md) | what a downstream shell's `CHELIS_SURFACE.md` view must carry |

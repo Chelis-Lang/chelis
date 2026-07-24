@@ -4,6 +4,8 @@
 implementation plan and named-oracle record; the active contract is in §2.
 **Owners:** chelis-core (this repo). Octant ships span-attributed Deep upstream.
 **Companion specs:** `spec/03-deep-syntax.md` §1.1.1 (the `span` key + `span_*` namespace + synthesized markers); `spec/design/chelis_trust_stack.md` (audit story).
+Unsupported-diagnostic provenance is specified jointly with
+`spec/design/host_function_values.md` §6 and tracked by chelis#868.
 
 ---
 
@@ -217,6 +219,50 @@ file through the Surf path, rename the extension or pipe through
 `chelis surf`. Conflicting cases (e.g., `--deep` with garbage in the file)
 produce the parse error from `chelis-deep`, not a silent fallback to Surf.
 
+### 2.6 Unsupported diagnostics (S7; ratified, implementation pending)
+
+Backend emission is not the only terminal audit sink. If compilation stops
+before producing source, the structured `Unsupported` diagnostic must retain
+the location of the rejected node.
+
+`Unsupported.span: Option<SpanRef>` may carry:
+
+- a numeric source byte offset and length when the producer still owns the
+  source `Expr`;
+- the opaque `span_id` already carried by a `DagNode` or `HostExpr`; or
+- both when both are available.
+
+The compiler API exposes the numeric range through its existing optional
+`Diagnostic.span` and the opaque identifier through a new optional
+`Diagnostic.span_id`. CLI rendering uses the same diagnostic. A producer must
+not parse an opaque `surf:<start>..<end>` ID to reconstruct a numeric range.
+
+The per-path rules are:
+
+| Rejection path | Provenance source |
+|---|---|
+| checker/lowering while a Deep `Expr` is in scope | byte offset + length from the expression, plus `Expr::span_id()` |
+| DAG backend | current `DagNode.span_id` |
+| host-expression backend | current `HostExpr.span_id` |
+| C ABI selection for a binding or expression result | containing binding value or expression `span_id` |
+| C ABI selection for a function result | function body `span_id` |
+| C ABI selection for a parameter or contextual callback signature | optional `span_id` preserved on `HostParam` / `HostCallback` |
+| runtime or infrastructure failure with no source node | explicit `None`; no fabricated location |
+
+Logical type values remain span-free. Type-driven target decisions receive
+the containing value/parameter provenance as a separate argument, so source
+location does not become type identity.
+
+The located rendering is the additive §C2 form in
+`spec/design/loud_unsupported.md`; the old spanless bytes remain frozen.
+Opaque IDs are escaped so one source ID cannot inject a second diagnostic
+line.
+
+**Current divergence:** `Unsupported::with_span` has no production callers,
+constructors default to `None`, its `Display` ignores the field, and
+`unsupported_stage_error` discards it. This section records the S7 target,
+not shipped behavior, until the S7 oracle below passes.
+
 ## 3. Phasing
 
 Each phase has one named acceptance oracle. A phase is not done until the
@@ -350,6 +396,37 @@ range, and (d) the emitted C compiles via gcc.
 bar as S5: span-survival is a customer-visible audit promise; any
 gap between sidecar and emitted C breaks the trust stack.
 
+### S7 — Unsupported diagnostic provenance (chelis#868)
+
+This remediation is sequenced before the shared function-value boundary so
+the later C-host rejection can use the live location channel.
+
+1. Write the diagnostic/API/CLI and producer-census tests first.
+2. Require every `Unsupported` constructor to take an explicit optional
+   `SpanRef`; remove the unused post-construction builder.
+3. Implement the located §C2 rendering while preserving spanless bytes.
+4. Add optional `Diagnostic.span_id` and move both structured location forms
+   through `unsupported_stage_error`.
+5. Thread existing Deep, DAG, and host-expression provenance through every
+   production producer; add parameter/callback provenance required by
+   type-driven C projection.
+6. Keep a reviewed negative allowlist for genuinely source-free producers.
+
+**Oracle:**
+
+```sh
+.venv/bin/python scripts/unsupported_span_oracle.py
+```
+
+Success is exit 0 with final line `UNSUPPORTED SPAN ORACLE: PASS`. The runner
+covers spanless byte compatibility, ID/range/both/empty-ID cases, compiler
+API JSON, both public compile entry points, CLI localization, representative
+C-host/C-DAG/HIP/Metal rejections, and the constructor census.
+
+🔴 **Red-team gate after S7.** A fresh local subagent drives at least one
+unsupported source case through each public compiler surface and verifies
+that the diagnostic identifies the rejected node without inventing a span.
+
 ## 4. Canary verification
 
 Post-S5, the audit chain is exercised end-to-end:
@@ -384,5 +461,7 @@ post-roadmap); span performance optimization until profiling shows cost.
 
 Existing programs without span metadata compile and run unchanged. All span
 fields are optional; missing metadata is the normal case for hand-written
-Chelis. Workspace test suite is the regression backstop; any test that
-wasn't red before this work and is red after is a regression.
+Chelis. Existing structured consumers see only the additive optional
+`span_id` field, and spanless unsupported messages remain byte-identical.
+Workspace test suite is the regression backstop; any test that wasn't red
+before this work and is red after is a regression.

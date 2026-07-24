@@ -450,8 +450,28 @@ Core transforms remain first-class:
   transform away before ordinary DAG codegen
 - the shipped executable `vmap(grad(f))` path now also supports flat tuple-valued
   gradient payloads from multi-parameter `grad(..., wrt=(...))`
-- first-class stored/returned transformed function values remain out of the executable
-  path for now
+- first-class stored/returned transformed function values are valid logical values and
+  run in the evaluator's `RuntimeValue::Transform` path; the C-host Table-B cell remains
+  unimplemented under chelis#879
+
+Functions and closures follow the same logical/target split. Deep specifies explicit
+closure construction (§4.2), and the type system specifies by-value capture ownership
+(`spec/04-type-system.md` §8.3). The evaluator has first-class `Closure` and
+`Transform` values. The C host currently has only contextual mechanisms:
+
+- direct named calls use generated symbols;
+- declared callback parameters and named/forwarded arguments use exact typed function
+  pointers;
+- inline collection callbacks are emitted into their containing loops; and
+- immediately applied lambdas and transforms are reduced or specialized away.
+
+There is no standalone C value with code-pointer, environment, ownership, storage,
+return, and indirect-application rules. Returned, stored, selected, or capturing
+function values therefore remain an unimplemented C-host capability, not a
+target-independent language rejection. The shared typed representation and C-private
+rejection correction are specified in
+[`host_function_values.md`](host_function_values.md); the current early-rejection
+divergence is tracked by chelis#866 and diagnostic provenance by chelis#868.
 
 Implementation-surface note:
 

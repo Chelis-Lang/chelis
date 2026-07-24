@@ -1,15 +1,17 @@
 # Loud Unsupported: the failure-channel contract
 
 **Status:** Phases 0-1 are complete (Phase 0: PR [#746]; Phase 1: PR
-[#791]). Phase 2's implementation is complete in PR [#799]: the
+[#791]). Phase 2 landed in merged PR [#799]: the
 `EffectKind`/`RuntimeDType` identities and consumers, generated Rust/C dtype
 agreement, staged `HostTypeTerm -> ConcreteHostType -> HostAbiType` boundary,
-and closed structured C-expression AST are implemented. Phase acceptance
-still requires the authoritative oracle
-(`.venv/bin/python scripts/loud_unsupported_phase2_oracle.py`) and a fresh
-adversarial review; this status does not claim that validation early. Count
+and closed structured C-expression AST are implemented. The post-merge audit
+found two contract residues: three function-value forms still reject in
+shared target-free lowering ([#866]/[#867]), and `Unsupported.span` is not
+threaded or surfaced ([#868]). Their ratified repair is
+`host_function_values.md`; the original Phase 2 oracle remains historical
+evidence, not evidence that those newly filed residues are fixed. Count
 baselines and the token tripwire are supporting checks, not completion
-evidence. Phase 3 is pending.
+evidence. Phase 3 and the two remediation phases are pending.
 Tracking issue: [#730].
 
 **Implementation record (re-planned 2026-07-22).** The initial Phase 2 draft
@@ -193,7 +195,9 @@ Normative, per encounter with an unsupported case, in every stage:
 
 ## C2. The diagnostic shape contract
 
-One error kind, one shape, every stage. Frozen at Phase 1 exit.
+One error kind, one shape, every stage. The spanless rendering froze at
+Phase 1 exit. The 2026-07 [#868] amendment below defines the additive located
+form without changing any spanless byte.
 
 ```rust
 pub struct Unsupported {
@@ -221,7 +225,7 @@ Implemented as `chelis_types::unsupported::Unsupported`. The span field is
 boxed so the `Err` variant stays small on Result-typed emission paths; this is
 a representation detail, not a contract change.
 
-**Message format (frozen):**
+**Spanless message format (frozen):**
 `unsupported: <what> on <context> (<stage>); <hint>` - branded with the
 literal prefix `unsupported:` so tests and shells can match it. The three
 existing exemplary messages are the calibration set and must remain
@@ -235,6 +239,35 @@ conformant when migrated:
   literal storage (runtime); ...` (migrated to the branded shape at
   Phase 1; the pre-migration spelling was
   `to_tensor: unsupported destination dtype ...`).
+
+**Located message amendment (ratified; implementation pending [#868]):**
+
+```text
+unsupported: <what> on <context> (<stage>) at source span `<id>`; <hint>
+unsupported: <what> on <context> (<stage>) at bytes <start>..<end>; <hint>
+unsupported: <what> on <context> (<stage>) at byte <offset>; <hint>
+```
+
+A non-empty opaque `span_id` wins the prose rendering; structured output may
+carry it and a numeric range together. Empty IDs fall back to a numeric
+location or the frozen spanless form. Opaque IDs are escaped for backslash,
+backtick, line terminators, and control characters so a diagnostic cannot
+inject another output line. A length without an offset remains structured but
+does not render a location.
+
+`Unsupported::new` and every convenience constructor will require an explicit
+`Option<SpanRef>`; the unused post-construction `with_span` builder is
+removed. `None` remains legal only when the producing stage genuinely has no
+source location. This is an explicit call-site decision, not a default.
+
+The compiler API diagnostic adds optional `span_id` alongside its existing
+numeric `span`. `unsupported_stage_error` moves both fields from
+`Unsupported`; it must not hardcode `None`. See `host_function_values.md` §6
+and `chelis_span_survival.md` §2.6 for the producer rules and oracle.
+
+**Current divergence:** until [#868] lands, all production constructors still
+default the field to `None`, `Display` omits it, and the compiler envelope
+drops it. The ratified form above must not be cited as shipped behavior.
 
 **Surfacing per surface:** `chelis check` -> JSON error entry, score < 1,
 carrying the machine-readable kind (`unsupported`) and the `what` payload
@@ -570,11 +603,27 @@ conversion rejects `Function`; the callback constructor is private and is
 available only for declared callback parameters and direct statically-known
 callback arguments. It recursively requires ordinary value ABIs for every
 parameter and result. A callback therefore has no standalone C type spelling,
-and the former `Function -> void *` arm does not exist. Function results,
-bindings, ADT fields, collection elements, dynamic callback selection, and
-indirect values cannot acquire the callback variant. Both public compiler APIs
-cross this same projection and return its structured `Unsupported` before any
-C source or header is produced.
+and the former `Function -> void *` arm does not exist.
+
+The logical expression boundary must make the same distinction without
+rejecting a valid value early. Shared `HostExpr` carries a typed
+`FunctionValue` with exact signature and
+`Reference | Closure | Transformed` origin through
+`HostTypeTerm -> ConcreteHostType`. The private C projection adapts only the
+contextual cases above. Function results, bindings, ADT fields, collection
+elements, dynamic callback selection, captures, indirect values, and
+transform-produced values then return
+`UnsupportedKind::HostAbi`/`Stage::Codegen("c")` citing [#879]. The projected
+C program uses an uninhabited function-value payload, so the emitter cannot
+receive one. Both public compiler APIs cross this projection before any C
+source or header is produced.
+
+**Current divergence:** PR [#799] already enforces the C-private result for
+returned named and dynamically selected values, but returned anonymous,
+capturing, and inline-ADT-stored functions currently fail in shared lowering.
+[#866] moves those forms to the boundary above and adds named-function-in-ADT
+negative parity. `host_function_values.md` owns the exact representation,
+capture analysis, projection, and phase oracle.
 
 Positive/negative parity covers: every concrete primitive; each named variable
 kind; missing versus malformed syntax; empty-list inference; `Never`
@@ -877,6 +926,8 @@ boundary, pinned:
 | 1 | [#699] (+[#722]'s eval half via the raise), [#682], [#704], [#705], [#715] (stub half), [#689], [#692], [#725], [#734], the [#709]-adjacent effect catch-all; [#714]/[#718] downgraded from silent-wrong to cleanly-rejected |
 | 2 | the future supply of the class (bottom vocabularies + Result decoding + exhaustive consumers + structured emission) |
 | 3 | [#697], [#698], [#705]'s gate half; gate rot as a class |
+| FV1 | [#868]: every `Unsupported` producer makes an explicit span decision and both API/CLI surfaces preserve it |
+| FV2 | [#866]/[#867]: valid logical function values survive shared lowering and the C-private rejection cites [#879] |
 
 ## Settled ownership and remaining phase decisions
 
@@ -886,6 +937,8 @@ boundary, pinned:
 | 2 | whether `check` reports target-independent unsupported constructs | yes: Table A rejections are type-level facts; Table B rejections surface at build where the target is known | `capability_table.md` §Derivations |
 | 3 | source-inventory mechanics | the token/count baseline remains blocking only while typed boundaries are incomplete and is never a completion oracle | tripwire test + §C4.5 |
 | 4 | which gates survive Phase 3 as early-UX vs die | Phase 3 | §C5 rows 17-18 + gate contract |
+| 5 | whether closures are target-independent rejections | no: the language and evaluator support them; shared IR represents them and the C-host Table-B cell rejects first-class values until [#879] | `host_function_values.md` §§1-5 |
+| 6 | whether a missing `Unsupported` span may be implicit | no: constructors require an explicit optional span; genuinely source-free producers pass reviewed `None` | §C2 + `host_function_values.md` §6 |
 
 ## Contract summary
 
@@ -937,3 +990,7 @@ an unsupported case and a plausible wrong number.
 [#791]: https://github.com/Chelis-Lang/chelis/pull/791
 [#799]: https://github.com/Chelis-Lang/chelis/pull/799
 [#815]: https://github.com/Chelis-Lang/chelis/pull/815
+[#866]: https://github.com/Chelis-Lang/chelis/issues/866
+[#867]: https://github.com/Chelis-Lang/chelis/issues/867
+[#868]: https://github.com/Chelis-Lang/chelis/issues/868
+[#879]: https://github.com/Chelis-Lang/chelis/issues/879

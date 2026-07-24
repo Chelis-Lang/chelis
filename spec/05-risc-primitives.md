@@ -1187,13 +1187,16 @@ These C implementations are the ground truth. The GPU backend (Phase 1) must pro
 ## 7. The Unsupported-Case Response Contract (Decided 2026-07; Implementation Tracked As chelis#730)
 
 **Status banner - read before citing.** RATIFIED and enforced for the
-censused live sites by chelis#730 Phase 1. Phase 2's implementation is complete
-in PR #799: dependency-bottom `EffectKind`/`RuntimeDType` identities,
+censused live sites by chelis#730 Phase 1. Phase 2 landed in merged PR #799:
+dependency-bottom `EffectKind`/`RuntimeDType` identities,
 Result-only boundary decoders, exhaustive consumers, immediate invalid-ID
 rejection, generated Rust/C dtype agreement, the staged host-type/ABI
-boundary, and the structured C-expression AST. Phase acceptance still
-requires its authoritative oracle and fresh adversarial review. Count
-baselines and the token tripwire are supporting checks, not the authority.
+boundary, and the structured C-expression AST. Post-merge issues
+chelis#866-chelis#868 record two remaining contract gaps: valid
+function-value forms do not all reach the target boundary, and unsupported
+diagnostics do not carry their declared span. Their ratified repair is
+`spec/design/host_function_values.md`. Count baselines and the token tripwire
+are supporting checks, not the authority.
 
 The implementation was explicitly re-planned on 2026-07-22 after execution
 showed that the initial source lint was neither complete nor false-positive
@@ -1215,6 +1218,20 @@ cross a private callback-declarator path; general function values do not.
 Function results, stored function values, and dynamically selected callables
 return `Unsupported` before emission, and no function type maps to `void *`,
 zero, or a raw call target.
+
+This is a backend limitation, not a target-independent language rejection.
+Explicit closure construction (`spec/03-deep-syntax.md` §4.2) and by-value
+capture ownership (`spec/04-type-system.md` §8.3) remain language facts.
+Shared host IR must represent a well-typed `Reference`, `Closure`, or
+`Transformed` function value through logical resolution. The private C
+projection alone rejects first-class returns, bindings, captures, dynamic
+selection, ADT/collection storage, and stored transform results as
+`Unimplemented { issue: chelis#879 }`. Exact contextual callback
+declarators, named/forwarded callbacks, inline higher-order callback bodies,
+and immediately specialized calls remain implemented. The detailed
+representation, negative parity, and phase oracles are owned by
+`spec/design/host_function_values.md`.
+
 Residuals are per-atom noted below; [05-UNS-4]'s gate demotion is that
 plan's Phase 3. The delivery plan and full elaboration (the failure
 channel, the census, the typed ratchets) is

@@ -15,6 +15,46 @@ Transformations are functions from DAGs to DAGs. They take a function (represent
 
 This document also covers the optimization passes that operate on RISC DAGs (Section 5) and the rules governing how transformations compose (Section 6).
 
+### 1.1 Transform-produced function values
+
+`grad(f)`, `vmap(f)`, their normalized combined `vmap-grad` form, and
+`jit(f)` are function-producing expressions. Their type is a function type
+even when the compiler can eliminate a direct application immediately.
+
+Two execution contexts are distinct:
+
+1. **Direct application/specialization.** Forms such as
+   `grad(f)(args...)`, `vmap(f)(args...)`, and
+   `vmap(grad(f))(args...)` may lower directly into an ordinary transformed
+   DAG. Existing beta-reduction and specialization behavior remains the
+   supported compiled fast path.
+2. **First-class value use.** Binding, returning, storing, dynamically
+   selecting, or later applying the transform result requires a function
+   value to survive shared lowering. It is valid logical Chelis and the
+   evaluator represents `grad`/`vmap` with `RuntimeValue::Transform`; `jit`
+   evaluates transparently to its inner callable. The C host has no general
+   first-class function-value ABI, so its Table-B cell is
+   `Unimplemented { issue: chelis#879 }`.
+
+Shared host IR represents a surviving transform value as a typed
+`HostFunctionValueOrigin::Transformed`, with normalized configuration:
+
+```rust
+Grad { wrt: Option<Vec<usize>> }
+Vmap { axis: usize }
+VmapGrad { wrt: Option<Vec<usize>>, axis: usize }
+Jit
+```
+
+The input is itself a typed function-valued host expression. Raw Deep
+`grad`/`vmap`/`jit` syntax and unresolved callable markers are not the
+representation. The exact shared-IR and C-boundary plan is
+`spec/design/host_function_values.md`.
+
+Until that plan's function-boundary phase lands, some first-class forms still
+fail early in shared host lowering. That is a tracked implementation
+divergence (chelis#866), not the semantic contract above.
+
 ---
 
 ## 2. grad -- Reverse-Mode Automatic Differentiation
@@ -549,8 +589,8 @@ If `f` takes multiple arguments, each tensor argument gains the batch dimension:
 
 **vmap of vmap:** repeated application adds multiple batch axes. The shipped IR rewrite
 supports nested vectorization. The executable source subset currently targets direct
-`vmap(f)(args...)` applications rather than arbitrary stored higher-order transform
-values.
+`vmap(f)(args...)` applications. Stored higher-order transform values remain
+valid logical/evaluator values but are unimplemented for the C host per §1.1.
 
 **vmap of grad:**
 
