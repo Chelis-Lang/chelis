@@ -2097,6 +2097,60 @@ fn c_nested_tensor_truncates_at_32_with_marker() {
     );
 }
 
+/// The compiled-lane scalar `to_string` trio (PR #863 round-1 F1;
+/// census row C7, appended per §B2.5): for every stringifiable scalar
+/// dtype, `print(to_string(x))` and `print(x)` must agree byte-for-byte
+/// within the compiled lane (§C2.2 intra-lane exit agreement) AND the
+/// full stdout must be byte-identical to eval's (§C2.3). The f32 row is
+/// the fixed funnel: the pre-fix emission promoted f32 through
+/// `chelis_string_from_f64`, so `to_string(cast(0.1, f32))` printed the
+/// f64-image digits while `print` of the same stored value printed
+/// `0.1`. The other rows lock the widths that were already correct.
+/// (f16/bf16 scalars have no C-host ABI cell and cannot reach
+/// `to_string`; their absence is chelis#714's, not this row's.)
+#[test]
+fn c_scalar_to_string_matches_print_exit_across_dtypes() {
+    if !c_toolchain_available() {
+        eprintln!("skipping: no host C toolchain");
+        return;
+    }
+    let rows: &[(&str, &str, &str)] = &[
+        ("f32", "cast(0.1, f32)", "0.1"),
+        ("f32-dyadic", "cast(0.75, f32)", "0.75"),
+        (
+            "f64",
+            "cast(0.30000000000000004, f64)",
+            "0.30000000000000004",
+        ),
+        ("f64-integral", "cast(6.0, f64)", "6.0"),
+        ("int64", "cast(9007199254740993, int64)", "9007199254740993"),
+        ("int32", "cast(2147483647, int32)", "2147483647"),
+        ("bool", "and(true, true)", "true"),
+    ];
+    for (label, expr, expected) in rows {
+        let program = format!(
+            "module M.Main\n\
+             def run() -> string = to_string({expr})\n\
+             shown = print(run())\n\
+             also = print({expr})\n"
+        );
+        let name = format!("obs_tostr_{}", label.replace('-', "_"));
+        let c_out = c_stdout(&program, &name).unwrap_or_else(|e| panic!("[{label}] C lane: {e}"));
+        let eval_out = eval_stdout(&program).unwrap_or_else(|e| panic!("[{label}] eval: {e}"));
+        let c_lines: Vec<&str> = c_out.lines().collect();
+        assert!(
+            c_lines.len() >= 2 && c_lines[0] == *expected && c_lines[1] == *expected,
+            "[{label}] the to_string and print exits must both render `{expected}` \
+             within the compiled lane, got:\n{c_out}"
+        );
+        assert_eq!(
+            eval_out, c_out,
+            "[{label}] §C2.3: the scalar to_string trio must be byte-identical \
+             across lanes:\n--- eval ---\n{eval_out}\n--- c ---\n{c_out}"
+        );
+    }
+}
+
 // ===========================================================================
 // GREEN - chelis#732 Phase 2: §C2.3 cross-lane byte equality (frozen at
 // this phase's exit for identical stored bits)

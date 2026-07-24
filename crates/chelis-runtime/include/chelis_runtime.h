@@ -186,6 +186,11 @@ bool chelis_string_ends_with(chelis_string value, chelis_string suffix);
 int64_t chelis_string_len(chelis_string value);
 chelis_string chelis_string_from_int64(int64_t value);
 chelis_string chelis_string_from_f64(double value);
+/* chelis#732 Phase 2 (PR #863 round-1 F1): to_string of an f32 scalar is an
+ * observation exit and renders at the value's OWN width per [05-OBS-2]; the
+ * former emission promoted f32 through chelis_string_from_f64 and carried
+ * f64-image digits, splitting to_string from print of the same value. */
+chelis_string chelis_string_from_f32(float value);
 chelis_string chelis_string_from_bool(bool value);
 chelis_option_i64 chelis_parse_int64(chelis_string value);
 chelis_option_f64 chelis_parse_f64(chelis_string value);

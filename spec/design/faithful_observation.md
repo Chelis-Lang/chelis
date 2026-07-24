@@ -228,15 +228,32 @@ For every dtype and every storable value:
    shortest-round-trip routine (next item); f16/bf16 decoded via the
    same conversion helpers the WS-1 kernels already use, then formatted
    at THEIR width.
-3. **Shortest-round-trip in C** without vendoring a big formatter: the
-   runtime gains `chelis_format_shortest(double v, int width_kind, char*
-   buf)` implemented as the precision-escalation loop - try
-   `%.{p}g` for p = 1..17 (f64) / 1..9 (f32) / 1..5 (f16/bf16 via their
-   exact double value), `strtod` back, stop at the first exact
-   round-trip - then normalize specials and exponent digits to §C1.3's
-   grammar. Simple, portable, provably shortest-in-digits; printing is
-   not a hot path. (Vendoring Ryū is the recorded alternative if the
-   loop's cost ever matters - open question 2.)
+3. **The compiled lane's formatting routine** (§C3.3; rewritten at
+   Phase 2 landing to state the SHIPPED architecture - the B1 row's
+   frozen requirement is grammar identity to Rust `{:?}`, and this text
+   previously described a pre-implementation sketch): the runtime gains
+   `chelis_format_shortest(double v, int width_kind, char* buf)`,
+   exported from the Rust runtime staticlib every compiled binary links.
+   `v` is the exact double image of the stored float (every supported
+   width widens losslessly), `width_kind` is the value's `RuntimeDType`
+   id, and an unknown or non-float id aborts loudly with the raw id. The
+   wide widths (f32/f64) format via `{:?}` itself - the normative
+   grammar's own definition and the exact code path `format_element`
+   takes, so grammar identity holds by construction and no platform
+   printf variance exists to normalize. The half widths (f16/bf16, which
+   Rust cannot format natively) use the ratified §8.1 escalation: digit
+   counts 1..=5, the correctly rounded scientific form plus its two
+   decimal-grid neighbors at each count, first round-tripping count
+   wins, same-length ties break to the numerically closest then the
+   even mantissa. Byte equality against `format_element` is locked by
+   test - exhaustively over all 65536 bit patterns per half format,
+   table- and sweep-driven for f32/f64. (The originally sketched
+   `%.{p}g`/`strtod` escalation-plus-normalization existed to
+   approximate exactly this from C; implemented faithfully it can still
+   diverge from `{:?}` at same-length ties - the executed example is
+   f32 1916442.25, where `{:?}` renders `1916442.3` and the loop's
+   nearest-candidate rule renders `1916442.2` - so the loop would
+   VIOLATE the frozen grammar and is not an admissible implementation.)
 4. **`to_list` completes its per-dtype reads**: the runtime's `to_list`
    gains F16/BF16 arms (reading the 2-byte buffers via the existing
    conversion helpers) instead of the current `runtime_fail!`, and its
@@ -428,7 +445,11 @@ list-element ABI state (`ReducedFloatBoxed`) in the C backend: PR #799's
 typed boundary had begun rejecting `list[f16]` wholesale at build (the
 census recorded the older runtime abort); the named state keeps every
 scalar-materialization path loudly rejected per [#714] while letting the
-heap list print. (3) §C2.3's byte-identity lock runs where stored bits
+heap list print. The state is recorded in `loud_unsupported.md` §C6.3
+(the boundary's owning doc; their interlock-edits-are-bidirectional
+rule) and its Phase 2 oracle gained an added-variant `HostAbiType`
+mutation leg, so a new ABI variant is a compile-error work-list at
+every exhaustive consumer. (3) §C2.3's byte-identity lock runs where stored bits
 AND rendered widths agree; the eval tensor width note (spec/05 §8.1)
 keeps non-dyadic narrow-float tensor cells width-divergent until [#729],
 and the [#862] unit-root labeling discovery is filed, not absorbed.
@@ -518,7 +539,7 @@ never as tolerance.
 | # | question | decided in | recorded where |
 |---|---|---|---|
 | 1 | exact number grammar edge set | DECIDED 2026-07-17 (mechanics; exact constants pinned by P1's tests): `{:?}`'s e-notation thresholds are captured empirically and recorded as NORMATIVE CONSTANTS in §C1.3, so a rustc formatting change breaks our tests loudly instead of silently shifting the grammar the generated C must match. f16/bf16 shortest-digit = the shortest string whose parse-back (strtod to f64, then round to the half width - safe by the same excess-precision argument as [04-NUM-1]'s single-rounding rule) yields the stored bits, verified EXHAUSTIVELY over all 65536 bit patterns per format (a required P1 deliverable - the narrow widths are fully enumerable, so no boundary-case debate survives). DELIVERED at P1 (2026-07-20): constants pinned and rustc-locked, both exhaustive half-format tests landed in `chelis-types::observation` | §C1.3 + spec/05 §8.1 + the formatter's unit tests |
-| 2 | precision-escalation loop vs vendored Ryū for the C routine | Phase 2 (loop is the default; revisit only on measured cost) | §C3.3 |
+| 2 | precision-escalation loop vs vendored Ryū for the C routine | DECIDED at Phase 2: neither - the routine lives in the Rust runtime staticlib, so f32/f64 use `{:?}` directly (grammar identity by construction) and f16/bf16 use the ratified §8.1 escalation; a faithful printf-loop emulation diverges from `{:?}` at same-length ties (f32 1916442.25 -> loop `1916442.2` vs `{:?}` `1916442.3`), so the loop was never grammar-admissible for the wide widths | §C3.3 |
 | 3 | whether the wire schema renders numbers as JSON numbers or strings for int64 once [#729]'s storage lands | with [#729] Phase 1 | schema.rs + both docs' §I1 |
 | 4 | truncation story | DECIDED 2026-07-17: ONE rule at every exit in both lanes - truncate tensor element rendering at 32 with the marker `, ...` (C's existing form). P0's census proved "keep as-is" was incoherent (three stories: eval transcript unlimited, eval root `+ ...`@32, C `, ...`@32). Eval-transcript's unlimited printing is REMOVED in the migration (the one place §B2.1's carve-out changes how MUCH is printed, flagged with §B2.2 bit-level companions); print-based cross-lane comparison beyond 32 never worked (the C lane already capped), and full-element fidelity is `to_list`'s and the wire's job, never print's. The threshold is one documented constant; configurability deferred until a real need | §C1.5 |
 

@@ -1188,6 +1188,15 @@ pub unsafe extern "C" fn chelis_string_from_f64(value: f64) -> chelis_string {
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn chelis_string_from_f32(value: f32) -> chelis_string {
+    // chelis#732 Phase 2 (PR #863 round-1 F1): an f32 scalar's `to_string`
+    // renders at ITS width ([05-OBS-2]); the pre-fix emission promoted
+    // through `chelis_string_from_f64` and carried the f64-image digits,
+    // splitting the exit from `print` of the same stored value.
+    new_runtime_string(format_shortest(f64::from(value), RuntimeDType::F32))
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn chelis_string_from_bool(value: bool) -> chelis_string {
     new_runtime_string(if value { "true" } else { "false" }.to_owned())
 }

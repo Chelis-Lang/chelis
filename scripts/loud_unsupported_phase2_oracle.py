@@ -7,7 +7,10 @@ the two privacy compile-fail doctests, a structural endpoint scan, and a
 controlled vocabulary mutation that adds one fully-decodable variant to BOTH
 closed vocabularies (``EffectKind`` and ``RuntimeDType``) in a single
 workspace check, requiring non-exhaustive compile errors at each vocabulary's
-independent consumers. The endpoint scan rejects the former Unit and
+independent consumers, plus a controlled ``HostAbiType`` mutation (the
+backend's crate-private typed ABI vocabulary, section C6.3; gained the
+``ReducedFloatBoxed`` boxed-only list-element state at chelis#732 Phase 2)
+that must go red at the ABI owner's and the emitter's exhaustive matches. The endpoint scan rejects the former Unit and
 raw-generic-field escape hatches in addition to the legacy host-type and
 expression-emission endpoints. The mutation touches only the vocabulary
 owner, refuses to run over a dirty owner file, and restores the original bytes
@@ -27,6 +30,7 @@ from contextlib import contextmanager
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 VOCAB_SOURCE = Path("crates/chelis-vocab/src/lib.rs")
+HOST_ABI_SOURCE = Path("crates/chelis-backend-c/src/host_abi.rs")
 
 FOCUSED_COMMANDS: tuple[tuple[str, ...], ...] = (
     ("cargo", "nextest", "run", "-p", "chelis-vocab"),
@@ -233,6 +237,41 @@ def temporary_vocab_mutation(path: Path) -> Iterator[None]:
             raise OracleFailure(f"failed to restore controlled mutation: {path}")
 
 
+def mutate_host_abi_type(source: str) -> str:
+    """Add one ABI variant so every exhaustive HostAbiType consumer goes red.
+
+    HostAbiType is the crate-private section C6.3 typed-state boundary in the
+    C backend (chelis#730 Phase 2), extended by chelis#732 Phase 2 with the
+    boxed-only ``ReducedFloatBoxed`` list-element state. A new variant with no
+    arms anywhere must be a compile-error work-list at the owner's
+    ``c_type_name`` matches and the emitter's boxing/unboxing/print consumers,
+    never a silent fall-through.
+    """
+
+    replacements = (
+        (
+            "    ReducedFloatBoxed(Prim),\n    Adt(String, Vec<HostAbiType>),",
+            "    ReducedFloatBoxed(Prim),\n"
+            "    Phase2OracleAbi,\n"
+            "    Adt(String, Vec<HostAbiType>),",
+        ),
+    )
+    return apply_anchored_replacements(source, replacements, "HostAbiType")
+
+
+@contextmanager
+def temporary_host_abi_mutation(path: Path) -> Iterator[None]:
+    original = path.read_bytes()
+    mutated_text = mutate_host_abi_type(original.decode("utf-8"))
+    path.write_bytes(mutated_text.encode("utf-8"))
+    try:
+        yield
+    finally:
+        path.write_bytes(original)
+        if path.read_bytes() != original:
+            raise OracleFailure(f"failed to restore controlled mutation: {path}")
+
+
 def assert_vocab_source_clean(env: dict[str, str]) -> None:
     completed = subprocess.run(
         ("git", "status", "--porcelain", "--", str(VOCAB_SOURCE)),
@@ -288,6 +327,72 @@ def run_vocab_mutation(env: dict[str, str]) -> None:
             tail = "\n".join(output.splitlines()[-80:])
             raise OracleFailure(
                 "vocabulary mutation failed without the required exhaustive "
+                f"consumer evidence {missing}:\n{tail}"
+            )
+    print("  mutation produced the expected downstream compile failures", flush=True)
+
+
+def assert_host_abi_source_clean(env: dict[str, str]) -> None:
+    completed = subprocess.run(
+        ("git", "status", "--porcelain", "--", str(HOST_ABI_SOURCE)),
+        cwd=REPO_ROOT,
+        env=env,
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if completed.returncode != 0:
+        raise OracleFailure(f"could not inspect host ABI source: {completed.stderr}")
+    if completed.stdout.strip():
+        raise OracleFailure(
+            "controlled mutation requires a clean ABI owner; commit or stash "
+            f"changes to {HOST_ABI_SOURCE}"
+        )
+
+
+def run_host_abi_mutation(env: dict[str, str]) -> None:
+    assert_host_abi_source_clean(env)
+    source_path = REPO_ROOT / HOST_ABI_SOURCE
+    command = (
+        "cargo",
+        "check",
+        "-p",
+        "chelis-backend-c",
+        "--all-targets",
+        "--keep-going",
+    )
+    print(
+        f"+ controlled HostAbiType mutation: {command_text(command)}",
+        flush=True,
+    )
+    with temporary_host_abi_mutation(source_path):
+        completed = subprocess.run(
+            command,
+            cwd=REPO_ROOT,
+            env=env,
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+        output = completed.stdout
+        if completed.returncode == 0:
+            raise OracleFailure("an added HostAbiType variant compiled successfully")
+        required_evidence = (
+            "non-exhaustive patterns",
+            # The ABI owner's own exhaustive matches (c_type_name and the
+            # Option-inner spelling table).
+            "crates/chelis-backend-c/src/host_abi.rs",
+            # The emitter's exhaustive consumers (boxing, unboxing, print,
+            # declaration paths).
+            "crates/chelis-backend-c/src/host_emit.rs",
+        )
+        missing = [needle for needle in required_evidence if needle not in output]
+        if missing:
+            tail = "\n".join(output.splitlines()[-80:])
+            raise OracleFailure(
+                "HostAbiType mutation failed without the required exhaustive "
                 f"consumer evidence {missing}:\n{tail}"
             )
     print("  mutation produced the expected downstream compile failures", flush=True)
@@ -394,6 +499,7 @@ def main() -> int:
             run_success(command, env=env)
         run_endpoint_scan()
         run_vocab_mutation(env)
+        run_host_abi_mutation(env)
     except OracleFailure as error:
         print(f"PHASE 2 ORACLE: FAIL: {error}", file=sys.stderr)
         return 1

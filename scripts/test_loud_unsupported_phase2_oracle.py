@@ -80,6 +80,33 @@ class LoudUnsupportedPhase2OracleTests(unittest.TestCase):
             "_ =>", mutated.split("impl RuntimeDType", 1)[1].split("\n}\n", 1)[0]
         )
 
+    def test_host_abi_mutation_updates_owner_without_arming_the_variant(self) -> None:
+        source = (oracle.REPO_ROOT / oracle.HOST_ABI_SOURCE).read_text(encoding="utf-8")
+        mutated = oracle.mutate_host_abi_type(source)
+        self.assertNotEqual(mutated, source)
+        self.assertIn("Phase2OracleAbi,", mutated)
+        # The variant is added to the DECLARATION only: no consumer arm is
+        # pre-wired, so every exhaustive match must go red under cargo check.
+        self.assertEqual(mutated.count("Phase2OracleAbi"), 1)
+
+    def test_host_abi_mutation_refuses_a_drifted_owner_shape(self) -> None:
+        source = (oracle.REPO_ROOT / oracle.HOST_ABI_SOURCE).read_text(encoding="utf-8")
+        drifted = source.replace("ReducedFloatBoxed(Prim),", "ReducedFloatBoxed(Prim), /* moved */")
+        with self.assertRaisesRegex(oracle.OracleFailure, "HostAbiType owner shape drifted"):
+            oracle.mutate_host_abi_type(drifted)
+
+    def test_host_abi_mutation_restores_original_bytes_on_failure(self) -> None:
+        source = (oracle.REPO_ROOT / oracle.HOST_ABI_SOURCE).read_bytes()
+        with tempfile.TemporaryDirectory() as raw_dir:
+            path = Path(raw_dir) / "host_abi.rs"
+            path.write_bytes(source)
+            with self.assertRaisesRegex(RuntimeError, "probe failed"):
+                with oracle.temporary_host_abi_mutation(path):
+                    mutated = path.read_text(encoding="utf-8")
+                    self.assertIn("Phase2OracleAbi", mutated)
+                    raise RuntimeError("probe failed")
+            self.assertEqual(path.read_bytes(), source)
+
     def test_dtype_mutation_refuses_a_drifted_owner_shape(self) -> None:
         source = (oracle.REPO_ROOT / oracle.VOCAB_SOURCE).read_text(encoding="utf-8")
         drifted = source.replace("8 => Ok(Self::I16),", "8 => Ok(Self::I16), /* moved */")

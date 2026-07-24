@@ -2826,11 +2826,14 @@ impl<'a> HostEmitter<'a> {
                     HostType::Int8 | HostType::Int16 | HostType::Int32 | HostType::Int64 => {
                         EmittedExpr::call("chelis_string_from_int64", [arg(0)])
                     }
-                    // f32 promotes to double for formatting (lossless); there is
-                    // no separate f32 formatter in the runtime.
-                    HostType::Float64 | HostType::Float32 => {
-                        EmittedExpr::call("chelis_string_from_f64", [arg(0)])
-                    }
+                    HostType::Float64 => EmittedExpr::call("chelis_string_from_f64", [arg(0)]),
+                    // to_string is an observation exit: the f32 scalar
+                    // renders at ITS width through the runtime's own-width
+                    // formatter ([05-OBS-2]; the former promote-to-double
+                    // funnel carried f64-image digits and split this exit
+                    // from `print` of the same stored value - PR #863
+                    // round-1 F1).
+                    HostType::Float32 => EmittedExpr::call("chelis_string_from_f32", [arg(0)]),
                     HostType::Bool => EmittedExpr::call("chelis_string_from_bool", [arg(0)]),
                     HostType::String => arg(0),
                     // chelis#730 Phase 1 (census row 3, chelis#734): to_string
