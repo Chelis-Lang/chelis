@@ -339,6 +339,19 @@ The exact Deep grammar and binder rules are normative in spec/03 §2.5.1/§2.6.
    applies). This invariant is the tripwire that outlives everyone's
    memory of this document; with §C3 in place it should be structurally
    impossible to trip, and it stays on precisely to verify that claim.
+
+   **Scope note (2026-07-24): both halves of this invariant are tag-keyed
+   and therefore quantify over the checked result, not over the source
+   program.** A node with no recognized tag is exempt from the stamp
+   requirement (`infer.rs`, `requires_stamp = tag.is_some_and(...)`), from
+   child ownership classification (the `None if tag.is_none()` recursion
+   arm), and from owner registration (`register_annotation_owners`'s
+   `if let Some(tag)`) - so a node the checker never visits satisfies the
+   invariant vacuously. [#858] is the open instance, and [#874] tracks the
+   class. The complementary obligation - every runtime node in the *parsed
+   program* is stamped, dispositioned, or diagnosed - is not part of §C4.1.
+   `DeepTag` exhaustiveness (Phase 3) does not close it either: an untagged
+   list has no tag to be exhaustive over.
 2. **`DeepTag` enum at the chokepoints** (Phase 3): the parser already
    validates strings against the closed vocabulary; it starts producing
    `DeepTag` (string kept alongside for spans/printing). `infer_expr`,
@@ -540,6 +553,21 @@ replaces this oracle.
 **You inherit:** a checker that cannot silently exempt (Phase 2) - this
 phase is about the NEXT tag, not the current ones.
 
+**Why this phase is not only about tag 63.** The parser enforces the closed
+vocabulary (`chelis-deep/src/validate.rs`, promoted to a hard error by
+`parse_str_strict`), so a tag that is *unknown* never reaches a consumer -
+[#710]'s probe confirmed the `infer_expr` catch-all is dead for parsed input.
+What the parser cannot catch is a tag that IS in the vocabulary and has no
+decided disposition at a given consumer. That population is not hypothetical:
+Phase 3 found **31 of the 62 tags with no expression-position case in
+`infer_expr`**, every one of them previously falling through the unknown-tag
+wildcard and being reported with a message claiming it was outside the
+vocabulary it is listed in. `block` is the clearest case - spec/03 §2.3
+presents it as an ordinary expression, and the checker has never had a case
+for it ([#859]). So the phase closes two things: the future supply (tag 63)
+and the present backlog (known tags, no disposition), and the second is what
+the wildcard was actively mis-describing.
+
 **You deliver:**
 
 1. `enum DeepTag` (62 variants, `parse`/`as_str`, produced by the Deep
@@ -556,7 +584,9 @@ phase is about the NEXT tag, not the current ones.
 **Frozen at your exit:** the variant set = the vocabulary, changing only
 per B1's one-change-set rule.
 
-**Explicitly not yours:** adding tag 63 or any vocabulary change.
+**Explicitly not yours:** adding tag 63 or any vocabulary change. (Giving an
+already-in-vocabulary tag a real checker case - as opposed to an explicit
+loud disposition - is also out of scope; `block` is filed as [#859].)
 
 **Oracle:** the build itself - the mutation test: adding a scratch
 variant to `DeepTag` must produce compile errors in `infer.rs` AND
@@ -622,3 +652,6 @@ Deep tag without a checker disposition uncompilable through exhaustive
 [#755]: https://github.com/Chelis-Lang/chelis/issues/755
 [#756]: https://github.com/Chelis-Lang/chelis/issues/756
 [#833]: https://github.com/Chelis-Lang/chelis/issues/833
+[#858]: https://github.com/Chelis-Lang/chelis/issues/858
+[#859]: https://github.com/Chelis-Lang/chelis/issues/859
+[#874]: https://github.com/Chelis-Lang/chelis/issues/874
