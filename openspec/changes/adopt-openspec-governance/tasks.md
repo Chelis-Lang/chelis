@@ -6,17 +6,17 @@
 
 ## 2. Test-first governance contracts
 
-- [ ] 2.1 Add `scripts/test_check_openspec.py` fixtures for argument parsing, injected executable selection, exact OpenSpec 1.6.0 verification, bounded events, and unresolvable history.
-- [ ] 2.2 Add positive and planted negative fixtures for planning-before-implementation ordering, one-lifecycle branch scope, PR citation matching, and exact maintenance exemptions including the mandatory `spec/**` rejection.
-- [ ] 2.3 Add positive and planted negative fixtures for built-in schema enforcement, symlink rejection, artifact/scenario coherence, task completion, archive naming, and replayed delta-to-baseline synchronization.
+- [x] 2.1 Add `scripts/test_check_openspec.py` fixtures for argument parsing, injected executable selection, exact OpenSpec 1.6.0 verification, bounded events, and unresolvable history.
+- [x] 2.2 Add positive and planted negative fixtures for planning-before-implementation ordering, one-lifecycle branch scope, PR citation matching, and exact maintenance exemptions including the mandatory `spec/**` rejection.
+- [x] 2.3 Add positive and planted negative fixtures for built-in schema enforcement, symlink rejection, artifact/scenario coherence, task completion, archive naming, and replayed delta-to-baseline synchronization.
 - [ ] 2.4 Add the named `openspec_adoption` suite that proves configuration, instructions, review routing, docs-only boundaries, and Phase 0 inactive/activation messaging.
 
 ## 3. Chelis-owned checker
 
-- [ ] 3.1 Implement stdlib Python functions for merge-base diffing, lifecycle and exemption classification, planning-order checks, event citation extraction, and regular-file boundaries until the focused fixtures pass.
-- [ ] 3.2 Implement strict OpenSpec validation, apply-readiness and task checks, active/pre-archive rules, archive replay, and baseline synchronization checks until the focused fixtures pass.
-- [ ] 3.3 Implement the fixed `--self-test --merge-bound --base <base>` interface plus an explicit local pre-archive mode, honoring `GIT_BIN` and `OPENSPEC_BIN` and failing closed on every invalid prerequisite.
-- [ ] 3.4 Document the local checker commands, expected success conditions, and the owning Phase 0 oracle without implying that planning validates compiler behavior.
+- [x] 3.1 Implement stdlib Python functions for merge-base diffing, lifecycle and exemption classification, planning-order checks, event citation extraction, and regular-file boundaries until the focused fixtures pass.
+- [x] 3.2 Implement strict OpenSpec validation, apply-readiness and task checks, active/pre-archive rules, archive replay, and baseline synchronization checks until the focused fixtures pass.
+- [x] 3.3 Implement the fixed `--self-test --merge-bound --base <base>` interface plus an explicit local pre-archive mode, honoring `GIT_BIN` and `OPENSPEC_BIN` and failing closed on every invalid prerequisite.
+- [x] 3.4 Document the local checker commands, expected success conditions, and the owning Phase 0 oracle without implying that planning validates compiler behavior.
 
 ## 4. Contributor and review routing
 
