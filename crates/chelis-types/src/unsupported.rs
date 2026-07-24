@@ -38,10 +38,13 @@ pub enum UnsupportedKind {
     Construct(String),
     /// A host-lane type that never resolved to a concrete representation.
     HostType(String),
-    /// A fully resolved host-lane value class with no ABI representation
-    /// on the requesting target (the section C6.3 "known logical type
-    /// without target representation" state). Distinct from [`HostType`],
-    /// whose term never resolved at all.
+    /// A host-lane value class the requesting target cannot represent:
+    /// either a fully resolved type with no target ABI (the section C6.3
+    /// "known logical type without target representation" state) or a
+    /// callable use the host lowerer could not resolve to any
+    /// representable value (the internal unresolved-callee markers).
+    /// Distinct from [`HostType`], which is reserved for a type TERM
+    /// that never resolved.
     ///
     /// [`HostType`]: UnsupportedKind::HostType
     HostAbi(String),
