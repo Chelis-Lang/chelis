@@ -403,7 +403,7 @@ x = test_assert_close_tensor(actual, expected, nan_tol, "nan-tol")
 
 fn first_tensor_data(outcome: &RuntimeOutcome, name: &str) -> Vec<f64> {
     match outcome.host_bindings.get(name) {
-        Some(RuntimeValue::Tensor(t)) => t.value.data.clone(),
+        Some(RuntimeValue::Tensor(t)) => t.value.to_f64_lossy_vec().clone(),
         other => panic!("expected tensor binding {name}, got {other:?}"),
     }
 }
@@ -800,14 +800,14 @@ fn host_runtime_trace_f32_matches_torch_stride4_cascade() {
     let torch_bits = 0x4125e023_u32;
     let left_fold_bits = 0x4125e024_u32;
     assert_eq!(
-        (out.value.data[0] as f32).to_bits(),
+        (out.value.to_f64_lossy_vec()[0] as f32).to_bits(),
         torch_bits,
         "trace must be bit-exact with torch.trace (stride-4 cascade, #170); got {} (bits {:#x})",
-        out.value.data[0],
-        (out.value.data[0] as f32).to_bits(),
+        out.value.to_f64_lossy_vec()[0],
+        (out.value.to_f64_lossy_vec()[0] as f32).to_bits(),
     );
     assert_ne!(
-        (out.value.data[0] as f32).to_bits(),
+        (out.value.to_f64_lossy_vec()[0] as f32).to_bits(),
         left_fold_bits,
         "regression: trace matches the old f32 left-fold value the cascade replaced (#170)",
     );
@@ -839,10 +839,11 @@ fn host_runtime_trace_f64_matches_eval_cascade() {
     let out = tensor_trace_value(&tensor, 0, 1).expect("trace must evaluate");
     assert_eq!(out.value.shape, Vec::<usize>::new(), "trace is a scalar");
     assert_eq!(
-        out.value.data[0], 12.0,
+        out.value.to_f64_lossy_vec()[0],
+        12.0,
         "f64 trace eval must use the stride-4 cascade (== compiled, == torch); \
          got {}. A left-fold gives 0.0.",
-        out.value.data[0],
+        out.value.to_f64_lossy_vec()[0],
     );
 }
 
@@ -869,12 +870,12 @@ fn host_runtime_reduce_window_max_min_drop_nan() {
     .expect("reduce_window max must evaluate");
     assert_eq!(max.value.shape, vec![2]);
     assert!(
-        max.value.data.iter().all(|v| !v.is_nan()),
+        max.value.to_f64_lossy_vec().iter().all(|v| !v.is_nan()),
         "windowed max must DROP NaN (not propagate); got {:?}",
-        max.value.data,
+        max.value.to_f64_lossy_vec(),
     );
     assert_eq!(
-        max.value.data,
+        max.value.to_f64_lossy_vec(),
         vec![1.0, 2.0],
         "windowed max drops NaN -> the non-NaN operand",
     );
@@ -887,12 +888,12 @@ fn host_runtime_reduce_window_max_min_drop_nan() {
     )
     .expect("reduce_window min must evaluate");
     assert!(
-        min.value.data.iter().all(|v| !v.is_nan()),
+        min.value.to_f64_lossy_vec().iter().all(|v| !v.is_nan()),
         "windowed min must DROP NaN (not propagate); got {:?}",
-        min.value.data,
+        min.value.to_f64_lossy_vec(),
     );
     assert_eq!(
-        min.value.data,
+        min.value.to_f64_lossy_vec(),
         vec![1.0, 2.0],
         "windowed min drops NaN -> the non-NaN operand",
     );
@@ -929,7 +930,7 @@ fn host_runtime_matmul_f32_keeps_f64_accumulator_not_strict_f32() {
     };
     let out = tensor_matmul_host(&lhs, &rhs).expect("matmul must evaluate");
     assert_eq!(
-        out.value.data,
+        out.value.to_f64_lossy_vec(),
         vec![40.0_f64],
         "f32 matmul keeps the higher-precision f64 eval accumulator (#170 decision): \
          the forty 1.0s survive (=> 40.0); a strict-f32 fold would absorb them (=> 0.0)"
@@ -955,10 +956,10 @@ fn host_runtime_einsum_f32_keeps_f64_accumulator_not_strict_f32() {
     };
     let out = tensor_einsum_value("ik,kj->ij", &lhs, &rhs).expect("einsum must evaluate");
     assert_eq!(
-        out.value.data,
+        out.value.to_f64_lossy_vec(),
         vec![40.0_f64],
         "f32 einsum keeps the f64 eval accumulator (#170 decision); got {:?}",
-        out.value.data
+        out.value.to_f64_lossy_vec()
     );
 }
 
@@ -1240,9 +1241,12 @@ y = softmax(x, cast(0, int32))
     assert_eq!(first_tensor_shape(&outcome, "y"), vec![3]);
     let data = first_tensor_data(&outcome, "y");
     for value in &data {
-        assert!(
-            (*value - 1.0 / 3.0).abs() < 1e-9,
-            "uniform softmax element should be 1/3, got {value}"
+        // chelis#729 Phase 1: the f32-typed softmax result finalizes at
+        // f32, so each element is exactly the f32 image of 1/3.
+        assert_eq!(
+            *value,
+            (1.0f32 / 3.0f32) as f64,
+            "uniform softmax element should be f32(1/3), got {value}"
         );
     }
 }
@@ -1310,11 +1314,11 @@ fn host_runtime_softmax_positive_infinity_yields_nan_like_torch() {
         precision: Prim::F32,
     };
     let out = tensor_softmax_host(&tensor, 0).expect("+Inf softmax must not error in host runtime");
-    assert_eq!(out.value.data.len(), 3);
+    assert_eq!(out.value.len(), 3);
     assert!(
-        out.value.data.iter().all(|v| v.is_nan()),
+        out.value.to_f64_lossy_vec().iter().all(|v| v.is_nan()),
         "softmax of a slice containing +Inf must be all-NaN (torch parity, #173); got {:?}",
-        out.value.data
+        out.value.to_f64_lossy_vec()
     );
 }
 
@@ -1330,9 +1334,9 @@ fn host_runtime_softmax_two_positive_infinities_yield_nan_like_torch() {
     };
     let out = tensor_softmax_host(&tensor, 0).expect("two +Inf softmax must not error");
     assert!(
-        out.value.data.iter().all(|v| v.is_nan()),
+        out.value.to_f64_lossy_vec().iter().all(|v| v.is_nan()),
         "softmax of a slice with multiple +Inf must be all-NaN (torch parity, #173); got {:?}",
-        out.value.data
+        out.value.to_f64_lossy_vec()
     );
 }
 
@@ -1350,9 +1354,9 @@ fn host_runtime_softmax_all_negative_infinity_yields_nan_like_torch() {
     };
     let out = tensor_softmax_host(&tensor, 0).expect("all -Inf softmax must not error");
     assert!(
-        out.value.data.iter().all(|v| v.is_nan()),
+        out.value.to_f64_lossy_vec().iter().all(|v| v.is_nan()),
         "softmax of an all-(-Inf) slice must be all-NaN (torch parity, #173); got {:?}",
-        out.value.data
+        out.value.to_f64_lossy_vec()
     );
 }
 
@@ -1370,19 +1374,19 @@ fn host_runtime_softmax_mixed_negative_infinity_is_finite_like_torch() {
     };
     let out = tensor_softmax_host(&tensor, 0).expect("mixed -Inf softmax must not error");
     assert!(
-        out.value.data.iter().all(|v| !v.is_nan()),
+        out.value.to_f64_lossy_vec().iter().all(|v| !v.is_nan()),
         "mixed -Inf (no +Inf) softmax must be finite, not NaN; got {:?}",
-        out.value.data
+        out.value.to_f64_lossy_vec()
     );
     assert!(
-        out.value.data[1].abs() < 1e-9,
+        out.value.to_f64_lossy_vec()[1].abs() < 1e-9,
         "the -Inf position must be 0"
     );
     assert!(
-        (out.value.data[0] - 0.268_941_4).abs() < 1e-5
-            && (out.value.data[2] - 0.731_058_6).abs() < 1e-5,
+        (out.value.to_f64_lossy_vec()[0] - 0.268_941_4).abs() < 1e-5
+            && (out.value.to_f64_lossy_vec()[2] - 0.731_058_6).abs() < 1e-5,
         "mixed -Inf softmax must match torch [0.2689, 0, 0.7311]; got {:?}",
-        out.value.data
+        out.value.to_f64_lossy_vec()
     );
 }
 
@@ -1397,9 +1401,9 @@ fn host_runtime_softmax_nan_input_propagates_nan() {
     };
     let out = tensor_softmax_host(&tensor, 0).expect("NaN softmax does not error");
     assert!(
-        out.value.data.iter().all(|v| v.is_nan()),
+        out.value.to_f64_lossy_vec().iter().all(|v| v.is_nan()),
         "NaN must propagate to every output element; got {:?}",
-        out.value.data
+        out.value.to_f64_lossy_vec()
     );
 }
 
@@ -1454,9 +1458,9 @@ fn host_runtime_max_reduce_propagates_nan_like_torch() {
         };
         let out = tensor_reduce_host(&tensor, 0, ReduceOp::Max).expect("max reduce");
         assert!(
-            out.value.data[0].is_nan(),
+            out.value.to_f64_lossy_vec()[0].is_nan(),
             "max_reduce of a slice with NaN@{pos} must be NaN (torch parity, #172); got {:?}",
-            out.value.data
+            out.value.to_f64_lossy_vec()
         );
     }
 }
@@ -1473,9 +1477,9 @@ fn host_runtime_min_reduce_propagates_nan_like_torch() {
         };
         let out = tensor_reduce_host(&tensor, 0, ReduceOp::Min).expect("min reduce");
         assert!(
-            out.value.data[0].is_nan(),
+            out.value.to_f64_lossy_vec()[0].is_nan(),
             "min_reduce of a slice with NaN@{pos} must be NaN (torch parity, #172); got {:?}",
-            out.value.data
+            out.value.to_f64_lossy_vec()
         );
     }
 }
@@ -1490,8 +1494,8 @@ fn host_runtime_max_reduce_no_nan_is_unchanged() {
     };
     let max = tensor_reduce_host(&tensor, 0, ReduceOp::Max).expect("max reduce");
     let min = tensor_reduce_host(&tensor, 0, ReduceOp::Min).expect("min reduce");
-    assert_eq!(max.value.data, vec![3.0]);
-    assert_eq!(min.value.data, vec![1.0]);
+    assert_eq!(max.value.to_f64_lossy_vec(), vec![3.0]);
+    assert_eq!(min.value.to_f64_lossy_vec(), vec![1.0]);
 }
 
 // ----------------------------------------------------------------
@@ -1504,34 +1508,24 @@ fn host_runtime_max_reduce_no_nan_is_unchanged() {
 // ----------------------------------------------------------------
 
 #[test]
-fn scalar_constructor_rejects_dtype_bits_mismatch() {
-    // Every cross-pair of `dtype != bits.dtype()` must error.
-    let mismatches: &[(Prim, ScalarBits)] = &[
-        (Prim::F16, ScalarBits::F32(0.0)),
-        (Prim::Bf16, ScalarBits::F64(0.0)),
-        (Prim::F32, ScalarBits::F64(0.0)),
-        (Prim::F64, ScalarBits::F32(0.0)),
-        (Prim::Int8, ScalarBits::I32(0)),
-        (Prim::Int16, ScalarBits::I64(0)),
-        (Prim::Int32, ScalarBits::I64(0)),
-        (Prim::Int64, ScalarBits::I8(0)),
-        (Prim::F32, ScalarBits::I32(0)),
-        (Prim::Int32, ScalarBits::F32(0.0)),
-    ];
-    for (dtype, bits) in mismatches {
-        let result = RuntimeValue::scalar(*dtype, *bits);
-        let err = result.unwrap_err_or_else(|_| {
-            panic!(
-                "RuntimeValue::scalar({}, {bits:?}) must reject the \
-                 dtype/bits mismatch (bits dtype is {})",
-                dtype.name(),
-                bits.dtype().name()
-            )
-        });
-        assert!(
-            err.contains("dtype/bits mismatch"),
-            "rejection diagnostic must mention dtype/bits mismatch, got: {err}"
-        );
+fn scalar_construction_is_sealed_and_width_checked() {
+    // chelis#729 Phase 1 re-authoring: the old dtype/bits mismatch this
+    // test enumerated is now UNREPRESENTABLE - the sealed ScalarValue's
+    // storage variant IS the dtype, and the only constructors are the
+    // dtype-semantics module's finalize/ingress chokepoints. What remains
+    // testable at this level is the width discipline those constructors
+    // enforce: out-of-width integers trap instead of wrapping, and every
+    // constructed scalar reports the dtype it was finalized at.
+    let trapped = RuntimeValue::scalar_like_int(Prim::Int8, 200)
+        .expect_err("int8 cannot hold 200; finalize must trap, not wrap");
+    assert!(
+        trapped.contains("overflow"),
+        "the trap must carry the branded overflow diagnostic, got: {trapped}"
+    );
+    let ok = RuntimeValue::scalar_like_int(Prim::Int8, 127).expect("127 fits int8");
+    match ok {
+        RuntimeValue::Scalar(payload) => assert_eq!(payload.dtype(), Prim::Int8),
+        other => panic!("expected RuntimeValue::Scalar, got {other:?}"),
     }
 }
 
@@ -1568,74 +1562,25 @@ impl<T, E> UnwrapErrOr<T, E> for Result<T, E> {
 // than silently constructing an invariant-broken value.
 // ----------------------------------------------------------------
 
-/// RT-1 closed finding C1: post-fix evidence that the only
-/// in-tree construction path enforces the dtype/bits invariant.
+/// RT-1 closed finding C1, strengthened by chelis#729 Phase 1: the
+/// dtype/bits mismatch the pre-fix red team constructed is now
+/// UNREPRESENTABLE, not merely rejected. `RuntimeValue::Scalar` wraps the
+/// sealed `chelis_types::ScalarValue`, whose storage variant IS the
+/// dtype; there is no (dtype, bits) pair to disagree, and the only
+/// constructors are the dtype-semantics module's finalize/ingress
+/// chokepoints. This pin documents the strengthening and asserts the
+/// module constructor reports the dtype it stored at.
 #[test]
-fn rt1_struct_literal_for_mismatched_scalar_payload_is_blocked_post_c1() {
-    // The pre-fix RT-1 test built
-    //     RuntimeValue::Scalar { dtype: F16, bits: ScalarBits::F32(1.5) }
-    // verbatim. With the C1 refactor that line no longer compiles
-    // because `RuntimeValue::Scalar` is now `Scalar(ScalarPayload)`
-    // and `ScalarPayload` has private fields.
-    //
-    // The runtime-side invariant pin: the only legal construction
-    // path (`ScalarPayload::new`) rejects the same mismatched pair
-    // with the typed `ScalarMismatchError`.
-    let err = ScalarPayload::new(Prim::F16, ScalarBits::F32(1.5))
-        .expect_err("post-C1: every Scalar construction path enforces the invariant");
-    assert_eq!(err.dtype, Prim::F16);
-    assert_eq!(err.bits_dtype, Prim::F32);
-    assert_eq!(
-        err.dtype,
-        Prim::F16,
-        "post-C1: the requested dtype field is preserved in the error"
-    );
-    assert_ne!(
-        err.dtype, err.bits_dtype,
-        "post-C1: the typed error names both sides of the contradiction"
-    );
-}
-
-/// C1 (WS-A0 RT-1 fixup): `ScalarPayload::new` rejects every
-/// mismatched dtype/bits pair. Before C1, an in-crate caller could
-/// write `RuntimeValue::Scalar { dtype: F16, bits: ScalarBits::F32(_) }`
-/// directly and bypass the constructor's invariant check; the
-/// `Scalar(ScalarPayload)` tuple variant + private payload fields
-/// make struct-literal initialization syntactically impossible.
-/// Pin the rejection at the typed-error boundary.
-#[test]
-fn scalar_payload_rejects_mismatched_dtype_bits_pair() {
-    // The only legal construction path is `ScalarPayload::new`.
-    // Hand-build a mismatched (F16 dtype, F32 bits) pair and assert
-    // it errors with the typed `ScalarMismatchError`.
-    let err = ScalarPayload::new(Prim::F16, ScalarBits::F32(1.5))
-        .expect_err("mismatched dtype/bits pair must error");
-    assert_eq!(err.dtype, Prim::F16);
-    assert_eq!(err.bits_dtype, Prim::F32);
-    // The display form names the spec invariant so the diagnostic
-    // is greppable.
-    let msg = err.to_string();
-    assert!(
-        msg.contains("ScalarPayload dtype/bits mismatch"),
-        "diagnostic must name the invariant; got: {msg}"
-    );
-    assert!(
-        msg.contains("spec/04-type-system.md §1.1"),
-        "diagnostic must cite the §1.1 spec invariant; got: {msg}"
-    );
-}
-
-/// C1: the convenience constructor `RuntimeValue::scalar` routes
-/// through `ScalarPayload::new` and lifts the error to a stringly
-/// API for compat. Pin that the mismatched pair still errors.
-#[test]
-fn runtime_value_scalar_constructor_rejects_mismatched_pair() {
-    let err = RuntimeValue::scalar(Prim::F16, ScalarBits::F32(1.5))
-        .expect_err("constructor must propagate ScalarPayload::new rejection");
-    assert!(
-        err.contains("dtype/bits mismatch"),
-        "constructor error must propagate the invariant; got: {err}"
-    );
+fn scalar_payload_dtype_is_the_storage_variant() {
+    let value =
+        chelis_types::scalar_from_f64("test", Prim::F16, 1.5).expect("1.5 finalizes at f16");
+    assert_eq!(value.prim(), Prim::F16);
+    let payload = match RuntimeValue::from_scalar_value(value) {
+        RuntimeValue::Scalar(payload) => payload,
+        other => panic!("expected RuntimeValue::Scalar, got {other:?}"),
+    };
+    assert_eq!(payload.dtype(), Prim::F16);
+    assert_eq!(payload.as_f64(), 1.5);
 }
 
 /// E2 (WS-A0 RT-1 fixup): `prim_from_name` must panic on the
@@ -1694,28 +1639,26 @@ def main -> bf16 = add(cast(1.0, bf16), cast(1.0, f16))
 }
 
 #[test]
-fn scalar_constructor_accepts_matching_dtype_bits_pairs() {
-    // Sanity sibling: every matching pair across the active dtype
-    // set must succeed and round-trip the dtype back through
-    // `bits.dtype()`.
-    let pairs: &[(Prim, ScalarBits)] = &[
-        (Prim::Int8, ScalarBits::I8(7)),
-        (Prim::Int16, ScalarBits::I16(123)),
-        (Prim::Int32, ScalarBits::I32(-42)),
-        (Prim::Int64, ScalarBits::I64(1_000_000)),
-        (Prim::F32, ScalarBits::F32(1.5)),
-        (Prim::F64, ScalarBits::F64(2.5)),
-        (Prim::F16, ScalarBits::F16(half::f16::from_f32(0.25))),
-        (Prim::Bf16, ScalarBits::Bf16(half::bf16::from_f32(0.25))),
-    ];
-    for (dtype, bits) in pairs {
-        let v = RuntimeValue::scalar(*dtype, *bits)
-            .expect("matching dtype/bits pair must construct cleanly");
+fn scalar_constructor_accepts_every_active_numeric_dtype() {
+    // Sanity sibling (re-authored for chelis#729 Phase 1): every active
+    // numeric dtype constructs through the module's ingress constructors
+    // and reports itself back from the sealed storage.
+    for (dtype, value) in [
+        (Prim::Int8, 7.0),
+        (Prim::Int16, 123.0),
+        (Prim::Int32, -42.0),
+        (Prim::Int64, 1_000_000.0),
+        (Prim::F32, 1.5),
+        (Prim::F64, 2.5),
+        (Prim::F16, 0.25),
+        (Prim::Bf16, 0.25),
+    ] {
+        let v = RuntimeValue::scalar_like_float(dtype, value)
+            .unwrap_or_else(|e| panic!("{} must construct: {e}", dtype.name()));
         match v {
             RuntimeValue::Scalar(payload) => {
-                assert_eq!(payload.dtype(), *dtype);
-                assert_eq!(payload.bits().dtype(), *dtype);
-                assert_eq!(payload.bits(), *bits);
+                assert_eq!(payload.dtype(), dtype);
+                assert_eq!(payload.as_f64(), value);
             }
             other => panic!("expected RuntimeValue::Scalar, got {other:?}"),
         }
@@ -1729,10 +1672,10 @@ fn scalar_constructor_accepts_matching_dtype_bits_pairs() {
 // ===========================================================================
 
 fn tensor_value(precision: Prim, shape: Vec<usize>, data: Vec<f64>) -> RuntimeValue {
-    RuntimeValue::Tensor(RuntimeTensorValue {
-        value: IrTensorValue { shape, data },
-        precision,
-    })
+    RuntimeValue::Tensor(
+        RuntimeTensorValue::from_wide("test", precision, shape, data)
+            .expect("test fixtures carry in-domain values"),
+    )
 }
 
 /// Integer/bool tensor elements render per their tag's class
@@ -1766,28 +1709,29 @@ fn render_value_tensor_elements_follow_tag_class() {
 /// int8-tagged slot holding 400 renders 400.0's bits faithfully rather
 /// than a wrapped/saturated lie.
 #[test]
-fn render_value_prints_bits_when_tag_and_storage_disagree() {
-    assert_eq!(
-        render_value(&tensor_value(Prim::Int64, vec![1], vec![187.5])),
-        "tensor(shape=[1], data=[187.5])"
+fn tag_storage_disagreement_is_unconstructible() {
+    // chelis#729 Phase 1 re-authoring: this test used to pin FAITHFUL
+    // MISREPORTING - an integer/bool-tagged buffer holding out-of-domain
+    // f64 bits rendered the stored bits. Per-dtype sealed storage makes
+    // that state unrepresentable: the construction chokepoint traps at
+    // finalize instead, so nothing out-of-domain can reach the renderer.
+    let trapped = RuntimeTensorValue::from_wide("test", Prim::Int64, vec![1], vec![187.5])
+        .expect_err("a fractional value in an int64 buffer must Domain-trap");
+    assert!(
+        trapped.contains("domain"),
+        "branded domain trap, got: {trapped}"
     );
-    assert_eq!(
-        render_value(&tensor_value(Prim::Bool, vec![1], vec![2.0])),
-        "tensor(shape=[1], data=[2.0])"
+    let trapped = RuntimeTensorValue::from_wide("test", Prim::Bool, vec![1], vec![2.0])
+        .expect_err("2.0 in a bool buffer must Domain-trap");
+    assert!(
+        trapped.contains("domain"),
+        "branded domain trap, got: {trapped}"
     );
-    assert_eq!(
-        render_value(&tensor_value(Prim::Int8, vec![1], vec![400.0])),
-        "tensor(shape=[1], data=[400.0])"
-    );
-    // Above the exact i64 range: the stored f64 renders, not a saturated
-    // integer near-miss.
-    assert_eq!(
-        render_value(&tensor_value(
-            Prim::Int64,
-            vec![1],
-            vec![18446744073709551616.0]
-        )),
-        "tensor(shape=[1], data=[1.8446744073709552e19])"
+    let trapped = RuntimeTensorValue::from_wide("test", Prim::Int8, vec![1], vec![400.0])
+        .expect_err("400 in an int8 buffer must Overflow-trap");
+    assert!(
+        trapped.contains("overflow"),
+        "branded overflow trap, got: {trapped}"
     );
 }
 
@@ -1833,15 +1777,13 @@ fn render_value_truncates_at_32_with_marker() {
 /// scalar prints its shortest-at-f32 digits, not the f64 image.
 #[test]
 fn render_value_scalars_render_at_own_width() {
-    let f32_scalar = RuntimeValue::scalar(Prim::F32, ScalarBits::F32(0.1)).expect("scalar");
+    let f32_scalar = RuntimeValue::scalar_like_float(Prim::F32, 0.1f32 as f64).expect("scalar");
     assert_eq!(render_value(&f32_scalar), "0.1");
-    let f16_scalar = RuntimeValue::scalar(Prim::F16, ScalarBits::F16(half::f16::from_f32(2048.0)))
-        .expect("scalar");
+    let f16_scalar = RuntimeValue::scalar_like_float(Prim::F16, 2048.0).expect("scalar");
     assert_eq!(render_value(&f16_scalar), "2048.0");
-    let i64_scalar =
-        RuntimeValue::scalar(Prim::Int64, ScalarBits::I64(9007199254740993)).expect("scalar");
+    let i64_scalar = RuntimeValue::scalar_like_int(Prim::Int64, 9007199254740993).expect("scalar");
     assert_eq!(render_value(&i64_scalar), "9007199254740993");
-    let f64_scalar = RuntimeValue::scalar(Prim::F64, ScalarBits::F64(f64::MAX)).expect("scalar");
+    let f64_scalar = RuntimeValue::scalar_like_float(Prim::F64, f64::MAX).expect("scalar");
     assert_eq!(render_value(&f64_scalar), "1.7976931348623157e308");
 }
 
@@ -1858,6 +1800,10 @@ fn render_value_scalars_render_at_own_width() {
 /// under an integer tag print the f64 bits.
 #[test]
 fn rt792_render_value_int64_tag_pow63_boundaries() {
+    // chelis#729 Phase 1 re-authoring: in-range integral values store and
+    // render exactly; the out-of-range and fractional rows that used to
+    // render as faithful f64 bits now trap at the construction chokepoint
+    // (see tag_storage_disagreement_is_unconstructible).
     assert_eq!(
         render_value(&tensor_value(
             Prim::Int64,
@@ -1870,29 +1816,9 @@ fn rt792_render_value_int64_tag_pow63_boundaries() {
         render_value(&tensor_value(
             Prim::Int64,
             vec![1],
-            vec![9223372036854775808.0]
-        )),
-        "tensor(shape=[1], data=[9.223372036854776e18])"
-    );
-    assert_eq!(
-        render_value(&tensor_value(
-            Prim::Int64,
-            vec![1],
             vec![9223372036854774784.0]
         )),
         "tensor(shape=[1], data=[9223372036854774784])"
-    );
-    assert_eq!(
-        render_value(&tensor_value(Prim::Int64, vec![1], vec![187.5])),
-        "tensor(shape=[1], data=[187.5])"
-    );
-    assert_eq!(
-        render_value(&tensor_value(Prim::Int64, vec![1], vec![f64::INFINITY])),
-        "tensor(shape=[1], data=[inf])"
-    );
-    assert_eq!(
-        render_value(&tensor_value(Prim::Int64, vec![1], vec![f64::NAN])),
-        "tensor(shape=[1], data=[NaN])"
     );
 }
 
@@ -1906,22 +1832,19 @@ fn rt792_render_value_int64_tag_pow63_boundaries() {
 /// prints `0` (integers have no signed zero - the sign bit there is an
 /// f64-backing-store artifact, not integer state).
 #[test]
-fn rt792_render_value_bool_tag_negative_zero_prints_bits() {
+fn rt792_render_value_bool_tag_negative_zero_is_false() {
+    // chelis#729 Phase 1 re-authoring: -0.0 equals 0, a member of bool's
+    // {0, 1} set, so it finalizes to false (the old faithful-misreport
+    // "-0.0" row required a tag/storage disagreement that is now
+    // unrepresentable; non-members like 2.0 and 0.5 trap at the
+    // chokepoint instead - see tag_storage_disagreement_is_unconstructible).
     assert_eq!(
         render_value(&tensor_value(Prim::Bool, vec![1], vec![-0.0])),
-        "tensor(shape=[1], data=[-0.0])"
+        "tensor(shape=[1], data=[false])"
     );
     assert_eq!(
         render_value(&tensor_value(Prim::Bool, vec![1], vec![0.0])),
         "tensor(shape=[1], data=[false])"
-    );
-    assert_eq!(
-        render_value(&tensor_value(Prim::Bool, vec![1], vec![2.0])),
-        "tensor(shape=[1], data=[2.0])"
-    );
-    assert_eq!(
-        render_value(&tensor_value(Prim::Bool, vec![1], vec![0.5])),
-        "tensor(shape=[1], data=[0.5])"
     );
     assert_eq!(
         render_value(&tensor_value(Prim::Int32, vec![1], vec![-0.0])),

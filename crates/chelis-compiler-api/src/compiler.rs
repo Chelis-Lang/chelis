@@ -1335,15 +1335,7 @@ fn eval_compiled(
 
     let bindings = bindings
         .into_iter()
-        .map(|(name, value)| {
-            (
-                name,
-                IrTensorValue {
-                    shape: value.shape,
-                    data: value.data,
-                },
-            )
-        })
+        .map(|(name, value)| (name, IrTensorValue::from_vec(value.shape, value.data)))
         .collect::<HashMap<_, _>>();
 
     let roots = compiled
@@ -1388,13 +1380,13 @@ fn eval_compiled(
             .ok_or_else(|| {
                 stage_error("eval", format!("missing node {}", node_id.0), "eval_error")
             })?;
-        tensor_values_by_name.insert(
-            name.clone(),
-            RuntimeTensorValue {
-                value: value.clone(),
-                precision,
-            },
+        debug_assert_eq!(
+            value.prim(),
+            precision,
+            "the DAG evaluator finalizes at the root's declared dtype"
         );
+        let _ = precision;
+        tensor_values_by_name.insert(name.clone(), RuntimeTensorValue::new(value.clone()));
     }
 
     // When a selected-roots filter is set (eval_selected / eval_many), push it

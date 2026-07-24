@@ -160,13 +160,12 @@ fn structural_decode(
         ExecutionValue::Bool { value } => Ok(RuntimeValue::Bool(*value)),
         ExecutionValue::String { value } => Ok(RuntimeValue::String(value.clone())),
         ExecutionValue::Unit => Ok(RuntimeValue::Unit),
-        ExecutionValue::Tensor { value } => Ok(RuntimeValue::Tensor(RuntimeTensorValue {
-            value: IrTensorValue::from_vec(value.shape.clone(), value.data.clone()),
-            // No declared element precision at the top level; default to
-            // f64 (the wire tensor dtype). Field-position decode overrides
-            // this with the declared field precision.
-            precision: Prim::F64,
-        })),
+        // No declared element precision at the top level; the wire buffer
+        // decodes at f64 (its carrying dtype). Field-position decode
+        // ingress-finalizes at the declared field precision instead.
+        ExecutionValue::Tensor { value } => Ok(RuntimeValue::Tensor(RuntimeTensorValue::new(
+            IrTensorValue::from_vec(value.shape.clone(), value.data.clone()),
+        ))),
         ExecutionValue::List { value } => {
             let items = value
                 .iter()
@@ -304,10 +303,17 @@ fn decode_tensor_field(
     payload: &ExecutionValue,
 ) -> Result<RuntimeValue, DecodeError> {
     match payload {
-        ExecutionValue::Tensor { value } => Ok(RuntimeValue::Tensor(RuntimeTensorValue {
-            value: IrTensorValue::from_vec(value.shape.clone(), value.data.clone()),
-            precision: prim,
-        })),
+        ExecutionValue::Tensor { value } => {
+            let storage = chelis_types::finalize_tensor(
+                "decode",
+                prim,
+                chelis_types::RawTensor::Float(value.data.clone()),
+            )
+            .map_err(|trap| DecodeError::Structural(trap.to_string()))?;
+            Ok(RuntimeValue::Tensor(RuntimeTensorValue::new(
+                IrTensorValue::from_storage(value.shape.clone(), storage),
+            )))
+        }
         other => Err(DecodeError::Structural(format!(
             "constructor `{ctor}` field `{field}` expects a tensor of `{}`, payload supplied {}",
             prim.name(),
@@ -477,7 +483,15 @@ type Holder = | Holder { weights: tensor[3, f32] }
         match &fields[0] {
             RuntimeValue::Tensor(t) => {
                 assert_eq!(t.value.shape, vec![3]);
-                assert_eq!(t.value.data, vec![0.1, 0.2, 0.7]);
+                // chelis#729 Phase 1: the declared f32 field ingress-
+                // finalizes the wire f64 payload at f32 (per-dtype
+                // storage; [04-NUM-1..2]), so the stored elements are the
+                // exact f32 images of the wire values.
+                assert_eq!(t.value.prim(), chelis_types::types::Prim::F32);
+                assert_eq!(
+                    t.value.to_f64_lossy_vec(),
+                    vec![0.1f32 as f64, 0.2f32 as f64, 0.7f32 as f64]
+                );
             }
             other => panic!("expected tensor field, got {other:?}"),
         }

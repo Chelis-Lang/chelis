@@ -583,7 +583,7 @@ fn check_representation_finite(
 ) -> Result<(), InvariantViolation> {
     match value {
         RuntimeValue::Scalar(payload) if payload.dtype().is_float() => {
-            let v = payload.bits().as_f64();
+            let v = payload.as_f64();
             if !v.is_finite() {
                 return Err(InvariantViolation::NonFiniteRepresentation {
                     type_name: type_name.to_string(),
@@ -594,12 +594,12 @@ fn check_representation_finite(
             Ok(())
         }
         RuntimeValue::Tensor(tensor) => {
-            for (index, elem) in tensor.value.data.iter().enumerate() {
+            for (index, elem) in tensor.value.to_f64_lossy_vec().into_iter().enumerate() {
                 if !elem.is_finite() {
                     return Err(InvariantViolation::NonFiniteRepresentation {
                         type_name: type_name.to_string(),
                         field_path: format!("{path}[{index}]"),
-                        detail: describe_non_finite(*elem),
+                        detail: describe_non_finite(elem),
                     });
                 }
             }

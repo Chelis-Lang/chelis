@@ -101,6 +101,34 @@ impl TensorValue {
             self.storage.element_f64_lossy(0)
         }
     }
+
+    /// Public compute-op constructor for the host runtime lane: finalize a
+    /// wide f64 buffer at `prim` (the same path this evaluator's own ops
+    /// take, including the chelis#680 integer saturate adapter).
+    pub fn finalize_from_wide(
+        op: &'static str,
+        prim: Prim,
+        shape: Vec<usize>,
+        wide: Vec<f64>,
+    ) -> Result<Self, String> {
+        finalize_wide(op, prim, shape, wide)
+    }
+
+    /// Public exact-integer constructor for paths that computed in i64.
+    pub fn finalize_from_wide_int(
+        op: &'static str,
+        prim: Prim,
+        shape: Vec<usize>,
+        wide: Vec<i64>,
+    ) -> Result<Self, String> {
+        finalize_wide_int(op, prim, shape, wide)
+    }
+}
+
+/// Public tensor `cast` for the host runtime lane; same per-direction
+/// ladder as this evaluator's `RiscOp::Cast` arm (see [`cast_value`]).
+pub fn cast_tensor(input: &TensorValue, src: Prim, dst: Prim) -> Result<TensorValue, String> {
+    cast_value(input, src, dst)
 }
 
 /// Value equality for tests and fixtures: shapes equal and element values
@@ -210,12 +238,15 @@ fn ingress_to_declared(
 }
 
 /// The chelis#680 Phase 1 residue adapter: integer-family elementwise ops
-/// still compute their wide value through the unsplit f64 closures, and
-/// this saturating cast (Rust `as`: truncating, saturating, NaN to 0)
-/// converts it for `finalize_tensor`'s exact integer row. For int8/16/32
-/// the f64 wide value is exact, so traps are exact; for int64 above 2^53
-/// the collapse/saturation predates finalize and is closed by the Phase 2
-/// kernel split, not here.
+/// still compute their wide value through the unsplit f64 closures. An
+/// INTEGRAL wide value saturates through Rust `as` (exact for
+/// int8/16/32, saturating at the int64 boundary exactly as before this
+/// refactor; the Phase 2 kernel split computes integers in i64 and
+/// retires this). A NON-integral or non-finite wide value is NOT
+/// truncated: it stays on the float raw path so finalize Domain-traps,
+/// because a fractional result in an integer-typed position is the
+/// substituted-value laundering this plan forbids (the chelis#724
+/// integer-mean 187.5 is the live example).
 fn wide_i64_saturating(x: f64) -> i64 {
     x as i64
 }
@@ -231,8 +262,12 @@ fn finalize_wide(
 ) -> Result<TensorValue, String> {
     let raw = if prim.is_float() {
         RawTensor::Float(wide)
-    } else {
+    } else if wide.iter().all(|x| x.is_finite() && x.fract() == 0.0) {
         RawTensor::Int(wide.into_iter().map(wide_i64_saturating).collect())
+    } else {
+        // A fractional/non-finite element at an integer or bool dtype
+        // must Domain-trap through finalize, never truncate.
+        RawTensor::Float(wide)
     };
     let storage = finalize_tensor(op, prim, raw).map_err(|trap| trap.to_string())?;
     Ok(TensorValue::from_storage(shape, storage))
@@ -265,7 +300,7 @@ fn finalize_wide_int(
 /// image form works on the f64 widening, so its int64 exactness matches
 /// the fold's (Phase 2 territory); the tensor lane uses [`cast_value`],
 /// which reads storage exactly.
-pub(crate) fn convert_cast_data(x: f64, src: Prim, dst: Prim) -> f64 {
+pub fn convert_cast_data(x: f64, src: Prim, dst: Prim) -> f64 {
     // Project the source into the wide reading its family defines.
     let as_int: Option<i64> = match src {
         Prim::Int8 | Prim::Int16 | Prim::Int32 | Prim::Int64 => Some(wide_i64_saturating(x)),

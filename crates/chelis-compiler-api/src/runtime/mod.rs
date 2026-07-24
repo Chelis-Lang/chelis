@@ -35,6 +35,41 @@ pub struct RuntimeTensorValue {
     pub(crate) precision: Prim,
 }
 
+impl RuntimeTensorValue {
+    /// Wrap finalized storage; the precision tag IS the storage dtype
+    /// (chelis#729 Phase 1: the tag can no longer disagree with the
+    /// buffer, which was the probe-2 F32-pin defect class).
+    pub(crate) fn new(value: IrTensorValue) -> Self {
+        Self {
+            precision: value.prim(),
+            value,
+        }
+    }
+
+    /// Compute-op constructor: finalize a wide f64 buffer at `prim`
+    /// (routes through the dtype-semantics module; integer widths trap
+    /// on overflow, floats round once at width).
+    pub(crate) fn from_wide(
+        op: &'static str,
+        prim: Prim,
+        shape: Vec<usize>,
+        wide: Vec<f64>,
+    ) -> Result<Self, String> {
+        IrTensorValue::finalize_from_wide(op, prim, shape, wide).map(Self::new)
+    }
+
+    /// Exact-integer compute-op constructor for paths that computed in
+    /// i64.
+    pub(crate) fn from_wide_int(
+        op: &'static str,
+        prim: Prim,
+        shape: Vec<usize>,
+        wide: Vec<i64>,
+    ) -> Result<Self, String> {
+        IrTensorValue::finalize_from_wide_int(op, prim, shape, wide).map(Self::new)
+    }
+}
+
 /// Kind of transform captured by [`RuntimeValue::Transform`].
 ///
 /// Bucket 1 closure: the host runtime needs to honor `grad`, `vmap`, and
@@ -53,180 +88,52 @@ pub enum TransformKind {
     Vmap,
 }
 
-/// Per-dtype scalar storage used by [`RuntimeValue::Scalar`].
+/// Sealed payload for [`RuntimeValue::Scalar`] (WS-A0 RT-1 fixup C1;
+/// chelis#729 Phase 1 rebased it onto the dtype-semantics module).
 ///
-/// The variant carries the value at exactly the precision the program
-/// has assigned. Construction goes through
-/// [`RuntimeValue::scalar`]/[`RuntimeValue::int`]/[`RuntimeValue::float`]
-/// (or one of the typed `int_*`/`float_*` constructors) so the
-/// `dtype`-vs-`bits` invariant cannot be silently violated. See
-/// `spec/04-type-system.md` §1.1 for the active dtype set.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum ScalarBits {
-    I8(i8),
-    I16(i16),
-    I32(i32),
-    I64(i64),
-    F16(half::f16),
-    Bf16(half::bf16),
-    F32(f32),
-    F64(f64),
-}
-
-impl ScalarBits {
-    /// The Prim that **must** match the surrounding `Scalar { dtype, bits }`
-    /// payload's `dtype` field. The constructor [`RuntimeValue::scalar`]
-    /// enforces that invariant.
-    pub(crate) fn dtype(&self) -> Prim {
-        match self {
-            ScalarBits::I8(_) => Prim::Int8,
-            ScalarBits::I16(_) => Prim::Int16,
-            ScalarBits::I32(_) => Prim::Int32,
-            ScalarBits::I64(_) => Prim::Int64,
-            ScalarBits::F16(_) => Prim::F16,
-            ScalarBits::Bf16(_) => Prim::Bf16,
-            ScalarBits::F32(_) => Prim::F32,
-            ScalarBits::F64(_) => Prim::F64,
-        }
-    }
-
-    /// View any integer scalar as i64. Float scalars truncate toward zero
-    /// (same convention as the existing `as i64` cast paths the host lane
-    /// already used pre-refactor).
-    pub(crate) fn as_i64(&self) -> i64 {
-        match self {
-            ScalarBits::I8(v) => *v as i64,
-            ScalarBits::I16(v) => *v as i64,
-            ScalarBits::I32(v) => *v as i64,
-            ScalarBits::I64(v) => *v,
-            ScalarBits::F16(v) => f32::from(*v) as i64,
-            ScalarBits::Bf16(v) => f32::from(*v) as i64,
-            ScalarBits::F32(v) => *v as i64,
-            ScalarBits::F64(v) => *v as i64,
-        }
-    }
-
-    /// View any numeric scalar as f64. Integer scalars widen losslessly
-    /// up to i32; i64 may lose precision past 2^53 (matches IEEE-754
-    /// double semantics, which is what the pre-refactor host lane did).
-    pub(crate) fn as_f64(&self) -> f64 {
-        match self {
-            ScalarBits::I8(v) => *v as f64,
-            ScalarBits::I16(v) => *v as f64,
-            ScalarBits::I32(v) => *v as f64,
-            ScalarBits::I64(v) => *v as f64,
-            ScalarBits::F16(v) => f32::from(*v) as f64,
-            ScalarBits::Bf16(v) => f32::from(*v) as f64,
-            ScalarBits::F32(v) => *v as f64,
-            ScalarBits::F64(v) => *v,
-        }
-    }
-
-    /// Re-pack an `f64` as the same dtype as `self`. Used by binary ops
-    /// that compute in `f64` and need to stash the result back at the
-    /// operand's dtype.
-    pub(crate) fn from_f64_as(dtype: Prim, value: f64) -> Result<Self, String> {
-        Ok(match dtype {
-            Prim::Int8 => ScalarBits::I8(value as i8),
-            Prim::Int16 => ScalarBits::I16(value as i16),
-            Prim::Int32 => ScalarBits::I32(value as i32),
-            Prim::Int64 => ScalarBits::I64(value as i64),
-            Prim::F16 => ScalarBits::F16(half::f16::from_f32(value as f32)),
-            Prim::Bf16 => ScalarBits::Bf16(half::bf16::from_f32(value as f32)),
-            Prim::F32 => ScalarBits::F32(value as f32),
-            Prim::F64 => ScalarBits::F64(value),
-            other => {
-                return Err(format!(
-                    "cannot pack scalar bits at non-numeric dtype `{}`",
-                    other.name()
-                ));
-            }
-        })
-    }
-
-    /// Re-pack an `i64` as the same dtype as `self`.
-    pub(crate) fn from_i64_as(dtype: Prim, value: i64) -> Result<Self, String> {
-        Ok(match dtype {
-            Prim::Int8 => ScalarBits::I8(value as i8),
-            Prim::Int16 => ScalarBits::I16(value as i16),
-            Prim::Int32 => ScalarBits::I32(value as i32),
-            Prim::Int64 => ScalarBits::I64(value),
-            Prim::F16 => ScalarBits::F16(half::f16::from_f32(value as f32)),
-            Prim::Bf16 => ScalarBits::Bf16(half::bf16::from_f32(value as f32)),
-            Prim::F32 => ScalarBits::F32(value as f32),
-            Prim::F64 => ScalarBits::F64(value as f64),
-            other => {
-                return Err(format!(
-                    "cannot pack scalar bits at non-numeric dtype `{}`",
-                    other.name()
-                ));
-            }
-        })
-    }
-}
-
-/// Sealed payload for [`RuntimeValue::Scalar`] (WS-A0 RT-1 fixup C1).
-///
-/// The dtype/bits pairing is enforced inside [`ScalarPayload::new`] —
-/// the inner fields are private so no caller (in or out of this crate)
-/// can construct a payload via struct-literal syntax that bypasses the
-/// invariant. This is the structural fix for the silent-init pattern
-/// the RT-1 review found: with a `pub(crate) Scalar { dtype, bits }`
-/// variant, any in-crate caller could write
-/// `RuntimeValue::Scalar { dtype: F16, bits: ScalarBits::F32(_) }`
-/// directly and skip the `RuntimeValue::scalar()` invariant check.
+/// The payload wraps `chelis_types::dtype_semantics::ScalarValue`, whose
+/// storage variant IS the dtype, so a dtype/bits mismatch is
+/// unrepresentable and every construction runs through the module's
+/// `finalize_scalar` / `scalar_from_*` chokepoints (the section C3
+/// privacy contract). The former in-crate `ScalarBits` enum and its
+/// wrapping `from_f64_as` / `from_i64_as` raw constructors are deleted.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ScalarPayload {
-    dtype: Prim,
-    bits: ScalarBits,
+    value: chelis_types::ScalarValue,
 }
-
-/// Error returned by [`ScalarPayload::new`] when the requested dtype
-/// disagrees with the bits-variant's intrinsic dtype. Replaces the
-/// stringly-typed error returned by the old `RuntimeValue::scalar`
-/// constructor so the C1 invariant has a typed failure path.
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct ScalarMismatchError {
-    pub dtype: Prim,
-    pub bits_dtype: Prim,
-}
-
-impl std::fmt::Display for ScalarMismatchError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "ScalarPayload dtype/bits mismatch: dtype={} but bits carry dtype {} \
-             (spec/04-type-system.md §1.1)",
-            self.dtype.name(),
-            self.bits_dtype.name(),
-        )
-    }
-}
-
-impl std::error::Error for ScalarMismatchError {}
 
 impl ScalarPayload {
-    /// Construct a payload with the dtype/bits invariant enforced.
-    /// Returns [`ScalarMismatchError`] for mismatched pairs (e.g.
-    /// `dtype = F16, bits = F32(_)`).
-    pub(crate) fn new(dtype: Prim, bits: ScalarBits) -> Result<Self, ScalarMismatchError> {
-        if dtype != bits.dtype() {
-            return Err(ScalarMismatchError {
-                dtype,
-                bits_dtype: bits.dtype(),
-            });
-        }
-        Ok(Self { dtype, bits })
+    /// Wrap a module-finalized scalar.
+    pub(crate) fn from_value(value: chelis_types::ScalarValue) -> Self {
+        Self { value }
     }
 
-    /// Read the source-level dtype.
+    /// Read the source-level dtype (the storage variant's own dtype).
     pub(crate) fn dtype(&self) -> Prim {
-        self.dtype
+        self.value.prim()
     }
 
-    /// Read the dtype-tagged storage.
-    pub(crate) fn bits(&self) -> ScalarBits {
-        self.bits
+    /// The sealed scalar itself, for finalize-driven flows and the
+    /// observation channel (`element_ref`).
+    pub(crate) fn value(&self) -> chelis_types::ScalarValue {
+        self.value
+    }
+
+    /// View any numeric scalar as f64. Exact for every float width and
+    /// for integers up to 2^53; int64 may lose precision past 2^53 (the
+    /// named-lossy read of the dtype-semantics contract).
+    pub(crate) fn as_f64(&self) -> f64 {
+        self.value.as_f64_lossy()
+    }
+
+    /// View any integer scalar as exact i64; float scalars truncate
+    /// toward zero (the pre-refactor host-lane convention for the few
+    /// float-permissive integer read sites).
+    pub(crate) fn as_i64(&self) -> i64 {
+        match self.value.as_i64_exact() {
+            Some(v) => v,
+            None => self.value.as_f64_lossy() as i64,
+        }
     }
 }
 
@@ -283,53 +190,38 @@ pub enum RuntimeValue {
 }
 
 impl RuntimeValue {
-    /// Construct a `Scalar` payload, asserting that `dtype` matches the
-    /// `bits` variant. Returns an error for mismatched pairs (e.g.
-    /// `dtype = F16, bits = F32(_)`) so the WS-A0 invariant from
-    /// `spec/04-type-system.md` §1.1 is enforced at every construction
-    /// site, not silently elided. Used by every typed-literal lowering
-    /// path; ad-hoc internal sites that already have the dtype + bits
-    /// in sync should prefer one of the typed `int_*` / `float_*`
-    /// constructors below.
-    #[allow(
-        dead_code,
-        reason = "WS-A0 invariant constructor; used by acceptance tests"
-    )]
-    pub(crate) fn scalar(dtype: Prim, bits: ScalarBits) -> Result<Self, String> {
-        ScalarPayload::new(dtype, bits)
-            .map(RuntimeValue::Scalar)
-            .map_err(|e| e.to_string())
+    /// Wrap a module-finalized scalar (the WS-A0 invariant holds by
+    /// construction: the storage variant IS the dtype).
+    pub(crate) fn from_scalar_value(value: chelis_types::ScalarValue) -> Self {
+        RuntimeValue::Scalar(ScalarPayload::from_value(value))
     }
 
     /// Default-narrowed integer literal per spec §5.3: bare integer
     /// values default to `int32` unless the surrounding context says
-    /// otherwise.
+    /// otherwise. The checker range-guards literals (spec §5.6), so the
+    /// ingress constructor cannot trap here.
     pub(crate) fn int_lit(value: i64) -> Self {
-        // C1 (WS-A0 RT-1 fixup): route every internal construction
-        // through `ScalarPayload::new` so the dtype/bits invariant is
-        // enforced uniformly. The pair is hardcoded matching, so
-        // `expect` here is a structural assertion, not a runtime check.
-        RuntimeValue::Scalar(
-            ScalarPayload::new(Prim::Int32, ScalarBits::I32(value as i32))
-                .expect("int_lit pair is invariant-correct by construction"),
+        Self::from_scalar_value(
+            chelis_types::scalar_from_i64("literal", Prim::Int32, value)
+                .expect("checker range-guards int literals at their dtype"),
         )
     }
 
     /// Default-narrowed float literal per spec §5.3: bare float values
-    /// default to `f32`.
+    /// default to `f32` (finalize applies the f32 rounding).
     pub(crate) fn float_lit(value: f64) -> Self {
-        RuntimeValue::Scalar(
-            ScalarPayload::new(Prim::F32, ScalarBits::F32(value as f32))
-                .expect("float_lit pair is invariant-correct by construction"),
+        Self::from_scalar_value(
+            chelis_types::scalar_from_f64("literal", Prim::F32, value)
+                .expect("float finalize is total"),
         )
     }
 
     /// Computed integer value preserving full i64 precision (e.g. `len`,
     /// shape sizes, parsed `to_int` results). Carries dtype `int64`.
     pub(crate) fn int64(value: i64) -> Self {
-        RuntimeValue::Scalar(
-            ScalarPayload::new(Prim::Int64, ScalarBits::I64(value))
-                .expect("int64 pair is invariant-correct by construction"),
+        Self::from_scalar_value(
+            chelis_types::scalar_from_i64("int64", Prim::Int64, value)
+                .expect("int64 ingress from i64 is total"),
         )
     }
 
@@ -337,26 +229,26 @@ impl RuntimeValue {
     /// parse results, scalar reductions over f64 tensors). Carries dtype
     /// `f64`.
     pub(crate) fn float64(value: f64) -> Self {
-        RuntimeValue::Scalar(
-            ScalarPayload::new(Prim::F64, ScalarBits::F64(value))
-                .expect("float64 pair is invariant-correct by construction"),
+        Self::from_scalar_value(
+            chelis_types::scalar_from_f64("float64", Prim::F64, value)
+                .expect("f64 finalize is total"),
         )
     }
 
-    /// Construct a scalar at the dtype of an existing scalar (used by
-    /// arithmetic ops to keep result-precision = operand-precision).
+    /// Construct a scalar at the dtype of an existing scalar from an
+    /// exact i64 wide value. Finalize applies the section C1 rule, so an
+    /// out-of-width integer TRAPS (chelis#680's decided contract)
+    /// instead of wrapping through the deleted `from_i64_as` cast.
     pub(crate) fn scalar_like_int(template_dtype: Prim, value: i64) -> Result<Self, String> {
-        let bits = ScalarBits::from_i64_as(template_dtype, value)?;
-        ScalarPayload::new(template_dtype, bits)
-            .map(RuntimeValue::Scalar)
-            .map_err(|e| e.to_string())
+        chelis_types::scalar_from_i64("arithmetic", template_dtype, value)
+            .map(Self::from_scalar_value)
+            .map_err(|trap| trap.to_string())
     }
 
     pub(crate) fn scalar_like_float(template_dtype: Prim, value: f64) -> Result<Self, String> {
-        let bits = ScalarBits::from_f64_as(template_dtype, value)?;
-        ScalarPayload::new(template_dtype, bits)
-            .map(RuntimeValue::Scalar)
-            .map_err(|e| e.to_string())
+        chelis_types::scalar_from_f64("arithmetic", template_dtype, value)
+            .map(Self::from_scalar_value)
+            .map_err(|trap| trap.to_string())
     }
 
     /// True for any [`RuntimeValue::Scalar`] whose dtype is integer-typed
@@ -384,9 +276,7 @@ impl RuntimeValue {
     /// View this value as i64 if it is an integer-typed scalar.
     pub fn as_i64(&self) -> Option<i64> {
         match self {
-            RuntimeValue::Scalar(payload) if payload.dtype().is_integer() => {
-                Some(payload.bits().as_i64())
-            }
+            RuntimeValue::Scalar(payload) if payload.dtype().is_integer() => Some(payload.as_i64()),
             _ => None,
         }
     }
@@ -395,9 +285,7 @@ impl RuntimeValue {
     /// `as_i64` for the float row.
     pub fn as_f64(&self) -> Option<f64> {
         match self {
-            RuntimeValue::Scalar(payload) if payload.dtype().is_float() => {
-                Some(payload.bits().as_f64())
-            }
+            RuntimeValue::Scalar(payload) if payload.dtype().is_float() => Some(payload.as_f64()),
             _ => None,
         }
     }
@@ -702,19 +590,18 @@ pub(crate) fn runtime_value_to_schema(value: &RuntimeValue) -> Result<ExecutionV
         RuntimeValue::Tensor(tensor) => ExecutionValue::Tensor {
             value: TensorValue {
                 shape: tensor.value.shape.clone(),
-                data: tensor.value.data.clone(),
+                data: tensor.value.to_f64_lossy_vec(),
             },
         },
         RuntimeValue::Scalar(payload) => {
             let dtype = payload.dtype();
-            let bits = payload.bits();
             if dtype.is_integer() {
                 ExecutionValue::Int64 {
-                    value: bits.as_i64(),
+                    value: payload.as_i64(),
                 }
             } else if dtype.is_float() {
                 ExecutionValue::Float64 {
-                    value: bits.as_f64(),
+                    value: payload.as_f64(),
                 }
             } else {
                 return Err(format!(
