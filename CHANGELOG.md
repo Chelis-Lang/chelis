@@ -4,37 +4,7 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/).
 
-## [0.17.1] — 2026-07-23
-
-The first cut of the numeric-remediation "loud checking" work: cases that
-used to substitute a plausible value or silently skip checking now fail
-loudly. Some programs that previously compiled or scored a perfect check are
-now rejected at the offending site — see **Changed** for the migration.
-
-### Changed
-
-- **Unsupported cases fail loudly instead of substituting a value**
-  (chelis#730 Phase 1). `chelis build` / `chelis eval` now return a branded
-  `unsupported:` error where a stage used to emit a plausible default (a
-  literal `0`, a dropped operand, an f32 kernel over an int64 buffer, an
-  empty window, a discarded effect handler). A program that "worked" by
-  relying on one of these silent substitutions now errors at that site.
-- **`with seed(...)` requires an int64-suffixed integer literal**
-  (chelis#731 Phase 1). `with seed(42)` is rejected; write
-  `with seed(42i64)`. The seed width is now explicit in the source
-  (spec/02 §P10a); an unsuffixed literal defaults to `int32` and is a type
-  error naming the suffix.
-- **`with seed` / `with device` bodies are now type-checked** (chelis#709,
-  chelis#710). An ill-typed body inside a handler — previously invisible to
-  the checker, so `chelis check` reported a perfect score — is caught, and
-  the enclosing function's declared return type is enforced. Malformed
-  `fn` / `let` / `if` / `app` forms and unknown effect kinds are rejected
-  with `MalformedForm` / `UnknownForm` diagnostics rather than a silent
-  `Type::Error`.
-- **`chelis eval` output is dtype-faithful** (chelis#732 Phase 1). Integers
-  print as integers (not `750.0`), `bool` prints `true` / `false`, and floats
-  print shortest-round-trip for their own width. The compiled-C lane is
-  brought to byte-identical rendering in a later release.
+## [Unreleased]
 
 ### Fixed
 
@@ -98,6 +68,41 @@ now rejected at the offending site — see **Changed** for the migration.
   `cd sub && chelis lint --check .` applies the same repository exclusions as
   the absolute spelling. One traversal policy load is now shared per lint
   invocation across the walker and every rule's `prepare_run` hook.
+
+## [0.17.1] — 2026-07-23
+
+The first cut of the numeric-remediation "loud checking" work: cases that
+used to substitute a plausible value or silently skip checking now fail
+loudly. Some programs that previously compiled or scored a perfect check are
+now rejected at the offending site — see **Changed** for the migration.
+
+### Changed
+
+- **Unsupported cases fail loudly instead of substituting a value**
+  (chelis#730 Phase 1). `chelis build` / `chelis eval` now return a branded
+  `unsupported:` error where a stage used to emit a plausible default (a
+  literal `0`, a dropped operand, an f32 kernel over an int64 buffer, an
+  empty window, a discarded effect handler). A program that "worked" by
+  relying on one of these silent substitutions now errors at that site.
+- **`with seed(...)` requires an int64-suffixed integer literal**
+  (chelis#731 Phase 1). `with seed(42)` is rejected; write
+  `with seed(42i64)`. The seed width is now explicit in the source
+  (spec/02 §P10a); an unsuffixed literal defaults to `int32` and is a type
+  error naming the suffix.
+- **`with seed` / `with device` bodies are now type-checked** (chelis#709,
+  chelis#710). An ill-typed body inside a handler — previously invisible to
+  the checker, so `chelis check` reported a perfect score — is caught, and
+  the enclosing function's declared return type is enforced. Malformed
+  `fn` / `let` / `if` / `app` forms and unknown effect kinds are rejected
+  with `MalformedForm` / `UnknownForm` diagnostics rather than a silent
+  `Type::Error`.
+- **`chelis eval` output is dtype-faithful** (chelis#732 Phase 1). Integers
+  print as integers (not `750.0`), `bool` prints `true` / `false`, and floats
+  print shortest-round-trip for their own width. The compiled-C lane is
+  brought to byte-identical rendering in a later release.
+
+### Fixed
+
 - **Correctly-rounded f32 `sqrt`** in the C backend; the Accelerate `vvsqrtf`
   path is dropped (chelis#719).
 - **`uniform_like` is bit-identical across the eval, C, and HIP lanes** — a
