@@ -228,6 +228,22 @@ def _read_root_scalar(root_value: object) -> float | None:
     if ty == "tensor":
         if isinstance(val, dict):
             data = val.get("data")
+            # Execution wire v2 (chelis#729): the tensor payload is the
+            # tagged per-dtype form {"dtype": ..., "values": [...]}. The
+            # legacy v1 bare-array shape is still read so the runner can
+            # replay archived v1 outputs.
+            if isinstance(data, dict):
+                values = data.get("values")
+                if (
+                    isinstance(values, list)
+                    and len(values) > 0
+                    and isinstance(values[0], (bool, int, float))
+                ):
+                    first = values[0]
+                    if isinstance(first, bool):
+                        return 1.0 if first else 0.0
+                    return float(first)
+                return None
             if isinstance(data, list) and len(data) > 0 and isinstance(data[0], (int, float)):
                 return float(data[0])
         return None

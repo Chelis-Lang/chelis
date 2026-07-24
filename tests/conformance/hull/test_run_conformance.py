@@ -213,6 +213,23 @@ class EvalClassificationTests(unittest.TestCase):
         self.assertEqual(r.bucket, "agree")
 
     def test_eval_tensor_scalar(self):
+        # Execution wire v2 (chelis#729): tagged per-dtype payload.
+        rec = eval_record("3.0")
+        r = rc.classify_program(
+            rec,
+            0,
+            eval_json(
+                {
+                    "type": "tensor",
+                    "value": {"shape": [], "data": {"dtype": "f32", "values": [3.0]}},
+                }
+            ),
+        )
+        self.assertEqual(r.bucket, "agree")
+
+    def test_eval_tensor_scalar_v1_legacy_shape_still_reads(self):
+        # The runner tolerates the pre-v2 bare-array shape so archived v1
+        # outputs remain replayable.
         rec = eval_record("3.0")
         r = rc.classify_program(
             rec, 0, eval_json({"type": "tensor", "value": {"shape": [], "data": [3.0]}})
