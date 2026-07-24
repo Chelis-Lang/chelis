@@ -22,17 +22,26 @@ locked here:
       parity proxy: >= 2 scenarios per requirement);
   (i) task completion, archive naming, and replayed delta-to-baseline
       synchronization;
-  (j) the self-test control inventory covers the twelve planted-negative
-      controls named in the design, and `self_test()` reports no failures.
+  (j) the self-test control inventory covers the fifteen planted-negative
+      controls named in the design, and `self_test()` reports no failures;
+  (k) red-team regression coverage: direct baseline `openspec/specs/`
+      mutation without a same-diff archive, archived deltas missing
+      requirement blocks or scenario parity at merge time, merge-commit
+      content unattributable to any branch commit (evil merge), and
+      unrecognized `openspec/` paths all fail closed, while the fully
+      synchronized archived control fixture stays green end-to-end.
 
 Every positive test has a planted-negative sibling (repo Negative Test
 Parity rule).
 """
 
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import stat
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -265,6 +274,33 @@ class TestClassification(unittest.TestCase):
         self.assertEqual(frozenset(), cls.production)
         self.assertEqual(frozenset(), cls.spec)
 
+    def test_baseline_spec_paths_classified(self):
+        path = "openspec/specs/some-capability/spec.md"
+        cls = co.classify_paths([path])
+        self.assertEqual(frozenset([path]), cls.baseline_specs)
+        self.assertEqual(frozenset(), cls.unrecognized)
+        self.assertEqual(frozenset(), cls.production)
+
+    def test_non_spec_file_under_baseline_tree_unrecognized(self):
+        path = "openspec/specs/some-capability/notes.md"
+        cls = co.classify_paths([path])
+        self.assertEqual(frozenset(), cls.baseline_specs)
+        self.assertEqual(frozenset([path]), cls.unrecognized)
+
+    def test_config_yaml_recognized(self):
+        cls = co.classify_paths(["openspec/config.yaml"])
+        self.assertEqual(frozenset(), cls.unrecognized)
+
+    def test_unknown_governance_path_unrecognized(self):
+        cls = co.classify_paths(["openspec/notes/hack.txt"])
+        self.assertEqual(frozenset(["openspec/notes/hack.txt"]), cls.unrecognized)
+
+    def test_nested_exemption_path_unrecognized(self):
+        path = "openspec/exemptions/nested/2026-07-24-fix.toml"
+        cls = co.classify_paths([path])
+        self.assertEqual(frozenset(), cls.exemptions)
+        self.assertEqual(frozenset([path]), cls.unrecognized)
+
 
 class TestBranchScope(unittest.TestCase):
     def _cls(self, paths):
@@ -342,6 +378,41 @@ class TestBranchScope(unittest.TestCase):
         self.assertNotEqual(
             [],
             co.check_branch_scope(cls, inherited_ids=frozenset(), mode="merge-bound"),
+        )
+
+    def test_unrecognized_governance_path_rejected(self):
+        cls = self._cls(["openspec/notes/hack.txt"])
+        self.assertNotEqual(
+            [],
+            co.check_branch_scope(cls, inherited_ids=frozenset(), mode="merge-bound"),
+        )
+
+    def test_baseline_mutation_without_archive_rejected_at_merge_bound(self):
+        cls = self._cls(["openspec/specs/some-capability/spec.md"])
+        self.assertNotEqual(
+            [],
+            co.check_branch_scope(cls, inherited_ids=frozenset(), mode="merge-bound"),
+        )
+
+    def test_baseline_change_with_archive_accepted_at_merge_bound(self):
+        cls = self._cls(
+            [
+                f"openspec/changes/archive/2026-07-24-{CHANGE_ID}/proposal.md",
+                "openspec/specs/some-capability/spec.md",
+            ]
+        )
+        self.assertEqual(
+            [],
+            co.check_branch_scope(cls, inherited_ids=frozenset(), mode="merge-bound"),
+        )
+
+    def test_baseline_mutation_rejected_at_pre_archive(self):
+        cls = self._cls(
+            [MARKER, PROPOSAL, "openspec/specs/some-capability/spec.md"]
+        )
+        self.assertNotEqual(
+            [],
+            co.check_branch_scope(cls, inherited_ids=frozenset(), mode="pre-archive"),
         )
 
 
@@ -451,6 +522,31 @@ class TestPlanningOrder(unittest.TestCase):
         self.assertEqual([], co.check_planning_order(commits, CHANGE_ID))
 
 
+class TestCommitCoverage(unittest.TestCase):
+    def test_attributed_changes_accepted(self):
+        commits = [
+            ("a" * 40, frozenset([MARKER, PROPOSAL, DELTA])),
+            ("b" * 40, frozenset(["crates/foo/src/lib.rs"])),
+        ]
+        changed = frozenset([MARKER, "crates/foo/src/lib.rs"])
+        self.assertEqual([], co.check_commit_coverage(changed, commits))
+
+    def test_merge_hidden_change_rejected(self):
+        commits = [("a" * 40, frozenset([MARKER, PROPOSAL, DELTA]))]
+        changed = frozenset([MARKER, "crates/foo/src/lib.rs"])
+        self.assertNotEqual([], co.check_commit_coverage(changed, commits))
+
+    def test_reverted_path_outside_endpoint_diff_accepted(self):
+        commits = [("a" * 40, frozenset([MARKER, "crates/foo/src/lib.rs"]))]
+        changed = frozenset([MARKER])
+        self.assertEqual([], co.check_commit_coverage(changed, commits))
+
+    def test_empty_commit_list_with_changes_rejected(self):
+        self.assertNotEqual(
+            [], co.check_commit_coverage(frozenset(["crates/foo/src/lib.rs"]), [])
+        )
+
+
 class TestDeltaShape(unittest.TestCase):
     GOOD = (
         "## ADDED Requirements\n\n"
@@ -477,6 +573,42 @@ class TestDeltaShape(unittest.TestCase):
     def test_unknown_operation_rejected(self):
         text = self.GOOD.replace("## ADDED Requirements", "## INVENTED Requirements")
         self.assertNotEqual([], co.check_delta_shape(text))
+
+
+class TestArchiveDeltas(unittest.TestCase):
+    def _archive(self, tmp, delta_text):
+        archive_dir = Path(tmp) / "2026-07-24-x-change"
+        if delta_text is None:
+            archive_dir.mkdir(parents=True)
+        else:
+            spec_dir = archive_dir / "specs" / "cap"
+            spec_dir.mkdir(parents=True)
+            (spec_dir / "spec.md").write_text(delta_text, encoding="utf-8")
+        return archive_dir
+
+    def test_well_formed_archive_delta_accepted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            errors, deltas = co.check_archive_deltas(
+                self._archive(tmp, TestDeltaShape.GOOD), "2026-07-24-x-change"
+            )
+            self.assertEqual([], errors)
+            self.assertIn("cap", deltas)
+
+    def test_archive_without_delta_specs_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            errors, deltas = co.check_archive_deltas(
+                self._archive(tmp, None), "2026-07-24-x-change"
+            )
+            self.assertNotEqual([], errors)
+            self.assertEqual({}, deltas)
+
+    def test_single_scenario_archive_delta_rejected(self):
+        text = TestDeltaShape.GOOD.split("#### Scenario: It fails")[0]
+        with tempfile.TemporaryDirectory() as tmp:
+            errors, _ = co.check_archive_deltas(
+                self._archive(tmp, text), "2026-07-24-x-change"
+            )
+            self.assertNotEqual([], errors)
 
 
 class TestTasks(unittest.TestCase):
@@ -552,6 +684,9 @@ class TestSelfTest(unittest.TestCase):
         "active-merge-state",
         "malformed-archive",
         "unsynchronized-delta",
+        "unarchived-baseline-mutation",
+        "merge-hidden-change",
+        "unrecognized-governance-path",
     }
 
     def test_control_inventory_is_complete(self):
@@ -559,6 +694,183 @@ class TestSelfTest(unittest.TestCase):
 
     def test_self_test_passes(self):
         self.assertEqual([], co.self_test())
+
+
+class TestRepositoryFixtures(unittest.TestCase):
+    """End-to-end merge-bound runs against throwaway git repositories.
+
+    Regression fixtures for the 2026-07-24 red-team findings: each
+    negative fixture mirrors a reproduction that previously exited 0.
+    """
+
+    LIFECYCLE = "x-change"
+    ARCHIVE = "2026-07-24-x-change"
+    BASELINE = (
+        "### Requirement: Example holds\n"
+        "The system SHALL hold.\n\n"
+        "#### Scenario: It works\n"
+        "- **WHEN** input is valid\n"
+        "- **THEN** it SHALL pass\n\n"
+        "#### Scenario: It fails\n"
+        "- **WHEN** input is invalid\n"
+        "- **THEN** it SHALL fail\n"
+    )
+
+    def _git(self, repo, *args):
+        subprocess.run(
+            [
+                "git",
+                "-c",
+                "user.name=fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                *args,
+            ],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+
+    def _write(self, repo, relative, text):
+        path = Path(repo) / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+
+    def _commit(self, repo, message):
+        self._git(repo, "add", "-A")
+        self._git(repo, "commit", "-q", "-m", message)
+
+    def _init_repo(self, tmp):
+        repo = Path(tmp) / "repo"
+        repo.mkdir()
+        self._git(repo, "init", "-q", "-b", "main")
+        self._write(repo, "README.md", "base\n")
+        self._commit(repo, "base")
+        self._git(repo, "checkout", "-q", "-b", "feature")
+        return repo
+
+    def _fake_openspec(self, tmp):
+        path = Path(tmp) / "fake_openspec"
+        path.write_text(
+            "#!/usr/bin/env python3\n"
+            "import sys\n"
+            "if '--version' in sys.argv:\n"
+            "    print('1.6.0')\n",
+            encoding="utf-8",
+        )
+        path.chmod(0o755)
+        return path
+
+    def _merge_bound(self, tmp, repo):
+        cwd = os.getcwd()
+        stderr = io.StringIO()
+        os.chdir(repo)
+        try:
+            with contextlib.redirect_stderr(stderr):
+                code = co.main(
+                    ["--merge-bound", "--base", "main"],
+                    environ={
+                        "OPENSPEC_BIN": str(self._fake_openspec(tmp)),
+                        "PATH": os.environ.get("PATH", os.defpath),
+                    },
+                )
+        finally:
+            os.chdir(cwd)
+        return code, stderr.getvalue()
+
+    def _plan(self, repo, delta_text):
+        prefix = f"openspec/changes/{self.LIFECYCLE}"
+        self._write(repo, f"{prefix}/.openspec.yaml", "schema: spec-driven\n")
+        self._write(repo, f"{prefix}/proposal.md", "## Why\n\nFixture.\n")
+        self._write(repo, f"{prefix}/specs/cap/spec.md", delta_text)
+        self._commit(repo, "plan")
+
+    def _archive_lifecycle(self, repo, baseline=None, keep_specs=True):
+        prefix = f"openspec/changes/{self.LIFECYCLE}"
+        target = f"openspec/changes/archive/{self.ARCHIVE}"
+        Path(repo, target).mkdir(parents=True, exist_ok=True)
+        self._git(repo, "mv", prefix + "/.openspec.yaml", target)
+        self._git(repo, "mv", prefix + "/proposal.md", target)
+        if keep_specs:
+            self._git(repo, "mv", prefix + "/specs", target + "/specs")
+        else:
+            self._git(repo, "rm", "-q", "-r", prefix + "/specs")
+        self._write(repo, f"{target}/tasks.md", "- [x] 1.1 Done.\n")
+        if baseline is not None:
+            self._write(repo, "openspec/specs/cap/spec.md", baseline)
+        self._commit(repo, "archive")
+
+    def test_synchronized_archived_control_accepted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._init_repo(tmp)
+            self._plan(repo, TestDeltaShape.GOOD)
+            self._write(repo, "crates/foo.rs", "fn main() {}\n")
+            self._commit(repo, "impl")
+            self._archive_lifecycle(repo, baseline=self.BASELINE)
+            code, stderr = self._merge_bound(tmp, repo)
+            self.assertEqual(0, code, stderr)
+
+    def test_direct_baseline_mutation_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._init_repo(tmp)
+            self._write(repo, "openspec/specs/cap/spec.md", self.BASELINE)
+            self._commit(repo, "mutate baseline")
+            code, stderr = self._merge_bound(tmp, repo)
+            self.assertEqual(1, code)
+            self.assertIn("without an archived lifecycle", stderr)
+            self.assertIn("do not equal the replayed", stderr)
+
+    def test_single_scenario_archived_delta_rejected(self):
+        single_delta = TestDeltaShape.GOOD.split("#### Scenario: It fails")[0]
+        single_baseline = self.BASELINE.split("#### Scenario: It fails")[0]
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._init_repo(tmp)
+            self._plan(repo, single_delta)
+            self._write(repo, "crates/foo.rs", "fn main() {}\n")
+            self._commit(repo, "impl")
+            self._archive_lifecycle(repo, baseline=single_baseline)
+            code, stderr = self._merge_bound(tmp, repo)
+            self.assertEqual(1, code)
+            self.assertIn("needs at least two scenarios", stderr)
+
+    def test_empty_archived_delta_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._init_repo(tmp)
+            self._plan(repo, TestDeltaShape.GOOD)
+            self._write(repo, "crates/foo.rs", "fn main() {}\n")
+            self._commit(repo, "impl")
+            self._archive_lifecycle(repo, baseline=None, keep_specs=False)
+            code, stderr = self._merge_bound(tmp, repo)
+            self.assertEqual(1, code)
+            self.assertIn("no requirement delta specs", stderr)
+
+    def test_evil_merge_hidden_production_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._init_repo(tmp)
+            self._plan(repo, TestDeltaShape.GOOD)
+            self._git(repo, "checkout", "-q", "main")
+            self._git(repo, "checkout", "-q", "-b", "side")
+            self._write(repo, "side.txt", "side\n")
+            self._commit(repo, "side")
+            self._git(repo, "checkout", "-q", "feature")
+            self._git(repo, "merge", "-q", "--no-ff", "--no-commit", "side")
+            self._write(repo, "crates/evil.rs", "fn main() {}\n")
+            self._commit(repo, "evil merge")
+            self._archive_lifecycle(repo, baseline=self.BASELINE)
+            code, stderr = self._merge_bound(tmp, repo)
+            self.assertEqual(1, code)
+            self.assertIn("not attributable", stderr)
+            self.assertIn("crates/evil.rs", stderr)
+
+    def test_unrecognized_governance_path_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._init_repo(tmp)
+            self._write(repo, "openspec/notes/hack.txt", "hidden\n")
+            self._commit(repo, "notes")
+            code, stderr = self._merge_bound(tmp, repo)
+            self.assertEqual(1, code)
+            self.assertIn("unrecognized governance path", stderr)
 
 
 if __name__ == "__main__":

@@ -36,7 +36,7 @@ The configuration summarizes Chelis-specific boundaries and artifact rules. It p
 
 ### 2. Make planning order a Git property
 
-A governed branch adds one lifecycle. A planning-only commit containing the lifecycle marker, proposal, and requirement deltas must be an ancestor of the first production change. This gives the checker repository-owned, provider-independent ordering evidence and makes a collapsed "plan plus implementation" commit fail visibly.
+A governed branch adds one lifecycle. A planning-only commit containing the lifecycle marker, proposal, and requirement deltas must be an ancestor of the first production change. This gives the checker repository-owned, provider-independent ordering evidence and makes a collapsed "plan plus implementation" commit fail visibly. Every path in the endpoint diff must additionally be attributable to at least one branch commit's own diff, so a merge commit that introduces content absent from both parents (an evil merge) fails the ordering control instead of hiding production work from it.
 
 For this adoption branch the planning-only ancestor is commit `1297dfac`, and the pull-request citation format is one body line starting at column one reading exactly `OpenSpec-Change: <change-id>`; the ordering and routing fixtures in `scripts/test_check_openspec.py` encode both.
 
@@ -54,7 +54,7 @@ Every path under `spec/**` is normative for Phase 0 routing even when it is Mark
 
 Local pre-archive validation may accept one complete active lifecycle while requiring unchanged baseline `openspec/specs/`. Merge-bound validation accepts no active lifecycle: it requires a date-stamped archive, complete described tasks, strict validation, and baseline specs that equal replaying the archived delta against the comparison-base specs.
 
-This keeps proposal-time deltas reviewable and prevents early baseline edits from masking archive collisions. OpenSpec completion does not replace the owning Chelis executable oracle named by the tasks.
+This keeps proposal-time deltas reviewable and prevents early baseline edits from masking archive collisions. A branch that edits baseline `openspec/specs/` without a same-diff archived lifecycle fails both modes: pre-archive rejects any baseline change outright, and merge-bound replays an empty delta so every direct mutation reports drift. Archived deltas are also re-checked at merge time for requirement blocks and scenario parity, and an archive with no delta specs at all is rejected. OpenSpec completion does not replace the owning Chelis executable oracle named by the tasks.
 
 **Alternative rejected:** Allowing active changes to merge or trusting an archive move without replaying synchronization. Either permits unfinished intent or stale baseline requirements to report green.
 
@@ -62,7 +62,7 @@ This keeps proposal-time deltas reviewable and prevents early baseline edits fro
 
 `scripts/check_openspec.py` is stdlib-only Python 3.11+ and exposes pure functions suitable for `scripts/test_check_openspec.py`. It has explicit local pre-archive and merge-bound modes, accepts the central action's combined `--self-test --merge-bound --base` invocation, honors injected `GIT_BIN` and `OPENSPEC_BIN`, and independently verifies exact OpenSpec 1.6.0.
 
-Self-test fixtures mutate temporary copies and must demonstrate failure for each critical control: malformed specs, absent negative scenarios, artifact drift, planning-order collapse, citation mismatch, branch-scope ambiguity, invalid exemptions, symlinks, unchecked tasks, active merge state, malformed archives, and unsynchronized deltas.
+Self-test fixtures mutate temporary copies and must demonstrate failure for each critical control: malformed specs, absent negative scenarios, artifact drift, planning-order collapse, citation mismatch, branch-scope ambiguity, invalid exemptions, symlinks, unchecked tasks, active merge state, malformed archives, unsynchronized deltas, unarchived baseline mutation, merge-hidden changes, and unrecognized governance paths. Paths under `openspec/` that match no known governance class (lifecycle, archive, exemption, baseline `specs/<capability>/spec.md`, or `config.yaml`) are rejected rather than silently ignored.
 
 **Alternative rejected:** Copying the central hosted fixture checker. That file proves launcher mechanics only and contains no Chelis policy.
 
@@ -95,6 +95,7 @@ This branch may prepare the complete surface while policy remains pending. Befor
 
 - **[Draft implementation PRs remain red in merge-bound mode while their lifecycle is active]** → Document and provide a local pre-archive mode; require green only after final synchronization and archive.
 - **[The exact maintenance path creates ceremony for tiny edits]** → Keep the TOML schema minimal and deterministic; never relax the mandatory `spec/**` lifecycle path.
+- **[An exemption manifest can mislabel a behavior change as maintenance]** → The checker certifies manifest shape and exact path scope only; behavior preservation is not mechanically verifiable and stays delegated to human review of every exemption branch.
 - **[A large checker becomes a second policy language]** → Derive every control from these specs, keep functions dependency-free and testable, and reject unrelated provenance or compiler semantics.
 - **[Private action access fails only on GitHub]** → Treat the exact consumer-hosted run as required evidence and retain the unactivated workflow state for rollback.
 - **[Current branches predate activation]** → Apply the policy only after the evidence-gated merge and document how already-open branches acquire one lifecycle or exemption before their next merge-bound run.

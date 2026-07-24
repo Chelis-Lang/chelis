@@ -49,6 +49,8 @@ CHANGES_PREFIX = "openspec/changes/"
 ARCHIVE_PREFIX = "openspec/changes/archive/"
 EXEMPTIONS_PREFIX = "openspec/exemptions/"
 GOVERNANCE_PREFIX = "openspec/"
+BASELINE_SPEC = re.compile(r"^openspec/specs/[^/]+/spec\.md$")
+GOVERNANCE_ROOT_FILES = frozenset({"openspec/config.yaml"})
 SPEC_PREFIX = "spec/"
 MARKER_NAME = ".openspec.yaml"
 PLANNING_NEUTRAL = frozenset({".gitignore", ".gitattributes"})
@@ -72,6 +74,9 @@ SELF_TEST_CONTROLS = (
     "active-merge-state",
     "malformed-archive",
     "unsynchronized-delta",
+    "unarchived-baseline-mutation",
+    "merge-hidden-change",
+    "unrecognized-governance-path",
 )
 
 
@@ -202,9 +207,11 @@ class Classification:
     archives: frozenset[str]
     exemptions: frozenset[str]
     governance: frozenset[str]
+    baseline_specs: frozenset[str]
     spec: frozenset[str]
     production: frozenset[str]
     hidden: frozenset[str]
+    unrecognized: frozenset[str]
 
 
 def _hidden_component(path: str) -> bool:
@@ -223,9 +230,11 @@ def classify_paths(paths) -> Classification:
     archives: set[str] = set()
     exemptions: set[str] = set()
     governance: set[str] = set()
+    baseline: set[str] = set()
     spec: set[str] = set()
     production: set[str] = set()
     hidden: set[str] = set()
+    unrecognized: set[str] = set()
     for path in paths:
         if path.startswith(GOVERNANCE_PREFIX):
             governance.add(path)
@@ -233,6 +242,8 @@ def classify_paths(paths) -> Classification:
                 remainder = path[len(ARCHIVE_PREFIX) :]
                 if "/" in remainder:
                     archives.add(remainder.split("/", 1)[0])
+                else:
+                    unrecognized.add(path)
             elif path.startswith(CHANGES_PREFIX):
                 remainder = path[len(CHANGES_PREFIX) :]
                 if "/" in remainder:
@@ -240,8 +251,17 @@ def classify_paths(paths) -> Classification:
                     active.add(lifecycle)
                     if _hidden_component(remainder.split("/", 1)[1]):
                         hidden.add(path)
+                else:
+                    unrecognized.add(path)
             elif path.startswith(EXEMPTIONS_PREFIX):
-                exemptions.add(path)
+                if "/" in path[len(EXEMPTIONS_PREFIX) :]:
+                    unrecognized.add(path)
+                else:
+                    exemptions.add(path)
+            elif BASELINE_SPEC.match(path):
+                baseline.add(path)
+            elif path not in GOVERNANCE_ROOT_FILES:
+                unrecognized.add(path)
         elif path.startswith(SPEC_PREFIX):
             spec.add(path)
         elif path in PLANNING_NEUTRAL:
@@ -253,9 +273,11 @@ def classify_paths(paths) -> Classification:
         archives=frozenset(archives),
         exemptions=frozenset(exemptions),
         governance=frozenset(governance),
+        baseline_specs=frozenset(baseline),
         spec=frozenset(spec),
         production=frozenset(production),
         hidden=frozenset(hidden),
+        unrecognized=frozenset(unrecognized),
     )
 
 
@@ -269,6 +291,8 @@ def check_branch_scope(
     errors = []
     for path in sorted(classification.hidden):
         errors.append(f"hidden dot-prefixed lifecycle path is not evidence: {path}")
+    for path in sorted(classification.unrecognized):
+        errors.append(f"unrecognized governance path is not valid evidence: {path}")
     touched_inherited = classification.active_lifecycles & inherited_ids
     for lifecycle in sorted(touched_inherited):
         errors.append(
@@ -295,10 +319,20 @@ def check_branch_scope(
             errors.append(
                 "governed paths changed without an archived lifecycle or exemption"
             )
+        if classification.baseline_specs and not classification.archives:
+            errors.append(
+                "baseline openspec/specs changed without an archived lifecycle "
+                "in the same change set"
+            )
     else:
         if governed and not (new_lifecycles or classification.exemptions):
             errors.append(
                 "governed paths changed without a lifecycle or maintenance exemption"
+            )
+        if classification.baseline_specs:
+            errors.append(
+                "baseline openspec/specs must remain unchanged during "
+                "pre-archive validation"
             )
     return errors
 
@@ -394,6 +428,20 @@ def check_planning_order(commits, lifecycle_id: str) -> list[str]:
     return errors
 
 
+def check_commit_coverage(changed, commits) -> list[str]:
+    attributed: set[str] = set()
+    for _sha, paths in commits:
+        attributed.update(paths)
+    unattributed = sorted(set(changed) - attributed)
+    if unattributed:
+        return [
+            "changed paths are not attributable to any branch commit "
+            "(merge-introduced content bypasses ordering review): "
+            + ", ".join(unattributed)
+        ]
+    return []
+
+
 def check_delta_shape(text: str) -> list[str]:
     errors = []
     for match in re.finditer(r"^## (\S+) Requirements *$", text, re.MULTILINE):
@@ -439,6 +487,26 @@ def check_tasks(text: str) -> list[str]:
     if boxes == 0:
         errors.append("task list contains no checkbox tasks")
     return errors
+
+
+def check_archive_deltas(
+    archive_dir: Path, archive: str
+) -> tuple[list[str], dict[str, dict[str, dict[str, str]]]]:
+    errors: list[str] = []
+    deltas: dict[str, dict[str, dict[str, str]]] = {}
+    delta_files = sorted(archive_dir.glob("specs/*/spec.md"))
+    if not delta_files:
+        errors.append(
+            f"archived lifecycle has no requirement delta specs: {archive}"
+        )
+    for delta_file in delta_files:
+        text = delta_file.read_text(encoding="utf-8")
+        errors += check_delta_shape(text)
+        try:
+            deltas[delta_file.parent.name] = parse_delta(text)
+        except CheckError as error:
+            errors.append(f"{delta_file}: {error}")
+    return errors, deltas
 
 
 def check_archive_name(name: str) -> list[str]:
@@ -577,6 +645,23 @@ def self_test() -> list[str]:
             {"cap": {"R": block + "drift\n"}},
             {"cap": {"added": {"R": block}}},
         ),
+        "unarchived-baseline-mutation": _rejects(
+            check_branch_scope,
+            classify_paths(["openspec/specs/cap/spec.md"]),
+            frozenset(),
+            "merge-bound",
+        ),
+        "merge-hidden-change": _rejects(
+            check_commit_coverage,
+            frozenset({"crates/x.rs"}),
+            [("a" * 40, frozenset({marker}))],
+        ),
+        "unrecognized-governance-path": _rejects(
+            check_branch_scope,
+            classify_paths(["openspec/notes/hack.txt"]),
+            frozenset(),
+            "pre-archive",
+        ),
     }
     with tempfile.TemporaryDirectory() as tmp:
         target = Path(tmp) / "real.json"
@@ -703,10 +788,12 @@ def _run_repository_checks(mode: str, base: str, environ) -> list[str]:
     classification = classify_paths(changed)
     inherited = _inherited_lifecycles(git, merge_base)
     errors += check_branch_scope(classification, inherited, mode)
+    commits = _branch_commits(git, merge_base)
+    errors += check_commit_coverage(changed, commits)
     new_lifecycles = classification.active_lifecycles - inherited
 
     for lifecycle in sorted(new_lifecycles):
-        errors += check_planning_order(_branch_commits(git, merge_base), lifecycle)
+        errors += check_planning_order(commits, lifecycle)
         change_dir = root / "openspec" / "changes" / lifecycle
         delta_files = sorted(change_dir.glob("specs/*/spec.md"))
         for delta_file in delta_files:
@@ -721,6 +808,7 @@ def _run_repository_checks(mode: str, base: str, environ) -> list[str]:
                 errors += check_artifact_coherence(declared, present)
         errors += _check_citation_from_event(environ, lifecycle)
 
+    deltas: dict[str, dict[str, dict[str, str]]] = {}
     for archive in sorted(classification.archives):
         errors += check_archive_name(archive)
         match = ARCHIVE_NAME.match(archive)
@@ -728,28 +816,25 @@ def _run_repository_checks(mode: str, base: str, environ) -> list[str]:
             # Ordering must hold at merge time too: by then the lifecycle
             # is archived (no longer active), but the branch commits still
             # show whether planning preceded production work.
-            errors += check_planning_order(
-                _branch_commits(git, merge_base), match.group(4)
-            )
+            errors += check_planning_order(commits, match.group(4))
         archive_dir = root / "openspec" / "changes" / "archive" / archive
         tasks_file = archive_dir / "tasks.md"
         if tasks_file.is_file():
             errors += check_tasks(tasks_file.read_text(encoding="utf-8"))
         else:
             errors.append(f"archived lifecycle has no tasks.md: {archive}")
-        deltas: dict[str, dict[str, dict[str, str]]] = {}
-        for delta_file in sorted(archive_dir.glob("specs/*/spec.md")):
-            try:
-                deltas[delta_file.parent.name] = parse_delta(
-                    delta_file.read_text(encoding="utf-8")
-                )
-            except CheckError as error:
-                errors.append(f"{delta_file}: {error}")
+        archive_errors, archive_deltas = check_archive_deltas(archive_dir, archive)
+        errors += archive_errors
+        deltas.update(archive_deltas)
+        if match is not None:
+            errors += _check_citation_from_event(environ, match.group(4))
+    if classification.archives or classification.baseline_specs:
+        # Baseline openspec/specs must always equal the comparison base
+        # plus the replayed archived deltas; a diff with baseline edits
+        # but no archive replays an empty delta and fails on any drift.
         base_specs = _specs_at(git, merge_base, root)
         head_specs = _specs_at(git, None, root)
         errors += check_synchronization(base_specs, head_specs, deltas)
-        if match is not None:
-            errors += _check_citation_from_event(environ, match.group(4))
 
     for exemption in sorted(classification.exemptions):
         name = exemption.rsplit("/", 1)[-1]
