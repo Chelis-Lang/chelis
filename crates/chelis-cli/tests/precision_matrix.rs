@@ -710,6 +710,42 @@ fn int64_suffix_literal_binding_is_exact() {
 }
 
 // ===========================================================================
+// PIPE-FORM ACCEPTANCE BYPASS (rt857 F1): `x |> recip` escapes the
+// checker's float-only rejection that the direct form gets (the
+// chelis#860-filed acceptance-list bypass, a chelis#709-class hole killed
+// by the Phase 4 table-derived acceptance). The runtime is the last line:
+// a fractional wide at an integer dtype must Domain-trap, never truncate
+// to a substituted 0 (the chelis#729 Phase 1 scalar guard).
+// ===========================================================================
+
+/// The program must FAIL LOUDLY on every polarity: today the pipe form
+/// reaches the runtime and Domain-traps; once the checker hole closes it
+/// is rejected at check time. Either way it must never succeed and print
+/// a substituted value (pre-fix it printed `0` and exited 0).
+#[test]
+fn int_recip_through_pipe_fails_loud_never_zero() {
+    for (expr, label) in [
+        ("cast(2, int32) |> recip", "int32"),
+        ("cast(2, int8) |> recip", "int8"),
+        ("cast(2, int64) |> recip", "int64"),
+    ] {
+        match eval_lane_str(expr) {
+            Ok(v) => panic!(
+                "{label}: `{expr}` must fail loudly (trap or checker rejection), \
+                 but it succeeded and returned {v}"
+            ),
+            Err(stderr) => assert!(
+                stderr.contains("numeric trap: domain")
+                    || stderr.contains("does not accept argument type")
+                    || stderr.contains("not admitted"),
+                "{label}: `{expr}` failed but without the branded domain trap or \
+                 the float-only rejection. Got: {stderr}"
+            ),
+        }
+    }
+}
+
+// ===========================================================================
 // OVERFLOW: per #680, errors not wraps, at EVERY width.
 //
 // Today there are TWO different behaviors split by width, neither authored:

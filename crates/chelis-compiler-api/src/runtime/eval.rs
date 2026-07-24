@@ -2188,16 +2188,13 @@ impl<'a> EvalContext<'a> {
             }
             // Activation primitives (Bucket 3).
             //
-            // Each activation must produce values byte-identical (to documented
-            // float tolerance) to the C backend's `chelis_host_*_f32` helpers
-            // emitted from `crates/chelis-backend-c/src/host_emit.rs`. Those
-            // helpers run all math through `float` (single precision); we
-            // therefore route every transcendental through `f32` here too —
-            // widening only happens at the very end when we re-store as
-            // `f64`-shaped tensor data. The closures themselves accept and
-            // return `f64` so `tensor_float_unop_f32` can cast at the
-            // boundary, which means `(x as f32).exp() as f64` and never
-            // `f64::exp(x)`.
+            // Per-dtype since chelis#729 Phase 1 (`tensor_float_unop`):
+            // an f64 tensor computes through the f64 activation body at
+            // full precision, while f32/f16/bf16 tensors keep the f32
+            // bodies (byte-identical, to documented float tolerance, with
+            // the C backend's `chelis_host_*_f32` helpers emitted from
+            // `crates/chelis-backend-c/src/host_emit.rs`) and finalize
+            // once at their own width.
             "relu" => {
                 let tensor = expect_tensor_arg(args, 0)?;
                 tensor_float_unop(&tensor, activation_relu_f64, activation_relu_f32)

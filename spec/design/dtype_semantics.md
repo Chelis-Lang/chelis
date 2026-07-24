@@ -278,18 +278,26 @@ hatch is the ONE deliberate hole, kept greppable.
   the DAG evaluator's Load ingress).
 
 **The cast ladder (2026-07 review; [#759]).** The explicit `cast`
-surface mirrors the read-side split above: the CHECKED cast is the
-default - `convert_cast_data` is a thin wrapper over `finalize_scalar`
-(consumer map), so a cast whose value does not survive the target dtype
-traps per §C1/§C2 - and a NAMED lossy/truncating form ([#759]) is the
-explicit escape hatch, the same species as [#753]'s `wrap_*`: never the
-default, greppable, per-direction semantics AUTHORED as an atom rather
-than inherited from a lane (proposal defaults: float->float is RNE at
-the target width; float->int truncates toward zero with the
-out-of-range rule authored, not accidental; int->narrower-int gets ONE
-authored rule), with capability-table rows and cross-lane oracle
-coverage like any other cell. Spelling and atom land with Phase 2's
-kernel work; cells ratified at Phase 4.
+surface mirrors the read-side split above as the PHASE 2 TARGET: the
+CHECKED cast becomes the default - `convert_cast_data` a thin wrapper
+over `finalize_scalar` (consumer map), so a cast whose value does not
+survive the target dtype traps per §C1/§C2 - and a NAMED
+lossy/truncating form ([#759]) becomes the explicit escape hatch, the
+same species as [#753]'s `wrap_*`: never the default, greppable,
+per-direction semantics AUTHORED as an atom rather than inherited from
+a lane (proposal defaults: float->float is RNE at the target width;
+float->int truncates toward zero with the out-of-range rule authored,
+not accidental; int->narrower-int gets ONE authored rule), with
+capability-table rows and cross-lane oracle coverage like any other
+cell. What Phase 1 SHIPPED (2026-07-24, one shared ladder for both eval
+surfaces in `chelis_ir::eval`): float->float finalizes (RNE at the
+target width, so f16/bf16 casts genuinely round); int->float finalizes
+from the exact integer; the OUT-OF-RANGE rules keep their pre-refactor
+behavior verbatim until [#759] authors them - float->int truncates
+toward zero and SATURATES (`cast(3.5, int32) = 3`,
+`cast(300.0, int8) = 127`), int->narrower-int WRAPS two's-complement,
+and any-to-bool encodes nonzero-to-1. Spelling and atom land with
+Phase 2's kernel work; cells ratified at Phase 4.
 
 ## C4. The observation contract (formatting; fixes [#728])
 
@@ -710,7 +718,7 @@ substitute fixes (needed for [#722]'s C half regardless of this plan).
 | 2 | integer `mean` / bool arithmetic / int floor-ceil-round capability rows | cells DECIDED 2026-07 on the issues ([#724] reject; [#726] reject + first-class `count`; [#712]/[#715] support - see capability_table.md's seed rows); Phase 4 ratifies each as an atom | capability table + spec/05 |
 | 3 | trap surface form and exact strings | Phase 2 | §C2 + `pub const` in the module |
 | 4 | crate placement | DECIDED 2026-07-17: a `chelis-types` MODULE. `Prim` already lives there (`types.rs`); the checker already consumes value-domain semantics (literal range diagnostics today, table-A acceptance at Phase 4); every §C5 consumer already depends on the crate; and §C3's privacy contract is module-scoped (`pub(in dtype_semantics)`), so the firewall is identical to a crate boundary. Constraint check passed: chelis-runtime stays dependency-light (libc+memmap2 only) - the generated helpers are emitted by chelis-backend-c, and C-side parity is enforced by tests, not a link edge. Discipline: the module stays import-clean (only `Prim` + std from the surrounding crate) so a later lift to a leaf crate remains mechanical. This also fixes [#732] Phase 1's `format_element` placement as FINAL (its §C3.1 pre-[#729] fallback is the answer - no Wave 2 -> Wave 3 migration) | §C5 + this doc + faithful_observation.md §C3.1 |
-| 5 | wire-schema versioning mechanics for the storage change | DECIDED at Phase 1 landing (2026-07-24): `EXECUTION_VALUE_SCHEMA_VERSION = 2` in `schema.rs`. The tensor payload is the tagged per-dtype `TensorElements` (`{"dtype": ..., "values": [...]}`; integer families exact at width, f16/bf16 as their exact f64 images, bool as true/false); `EvalResult` stamps `schema_version` (serde default 1 on deserialize, so a version-less payload identifies a v1 producer loudly); v1 clients posting the old bare-array `data` binding get a serde error naming the field, never a reinterpretation. The manifest is NOT bitten: `chelis_manifest_spec.md` carries type strings, not `ExecutionValue` payloads. The constant is independent of `WIRE_DAG_SCHEMA_VERSION` (which still governs `WireDag`) | schema.rs |
+| 5 | wire-schema versioning mechanics for the storage change | DECIDED at Phase 1 landing (2026-07-24): `EXECUTION_VALUE_SCHEMA_VERSION = 2` in `schema.rs`. The tensor payload is the tagged per-dtype `TensorElements` (`{"dtype": ..., "values": [...]}`; integer families exact at width, f16/bf16 as their exact f64 images, bool as true/false); `EvalResult` stamps `schema_version` (serde default 1 on deserialize, so a version-less payload identifies a v1 producer loudly); v1 clients posting the old bare-array `data` binding fail loudly at serde (a type error at the payload position; the untagged-enum message does not name the field), never a reinterpretation. The manifest is NOT bitten: `chelis_manifest_spec.md` carries type strings, not `ExecutionValue` payloads. The constant is independent of `WIRE_DAG_SCHEMA_VERSION` (which still governs `WireDag`) | schema.rs |
 
 [#387]: https://github.com/Chelis-Lang/chelis/issues/387
 [#680]: https://github.com/Chelis-Lang/chelis/issues/680

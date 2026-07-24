@@ -117,21 +117,19 @@ pub struct Span {
 /// result with no version field takes [`legacy_execution_value_version`]
 /// (1), so consumers can distinguish a v1 producer loudly instead of
 /// misreading its payload. Tensor BINDINGS in requests changed shape with
-/// v2, so a v1 client posting the old bare-array `data` gets a serde
-/// error naming the field rather than a silent reinterpretation. This
-/// constant governs the execution payload only; `WIRE_DAG_SCHEMA_VERSION`
-/// below governs the `WireDag` surface and is independent.
+/// v2, so a v1 client posting the old bare-array `data` fails loudly at
+/// serde with a type error at the payload position (the message is
+/// serde's untagged-enum wording, e.g. "invalid type: floating point
+/// `1.0`, expected variant identifier" - loud, though it does not name
+/// the `data` field), never a silent reinterpretation. This constant
+/// governs the execution payload only; `WIRE_DAG_SCHEMA_VERSION` below
+/// governs the `WireDag` surface and is independent.
 pub const EXECUTION_VALUE_SCHEMA_VERSION: u32 = 2;
 
 /// Serde default for [`EvalResult::schema_version`]: a payload with no
 /// version field predates v2.
 pub fn legacy_execution_value_version() -> u32 {
     1
-}
-
-/// Serde default used when SERIALIZING new results.
-pub fn current_execution_value_version() -> u32 {
-    EXECUTION_VALUE_SCHEMA_VERSION
 }
 
 /// Per-dtype tensor element payload (execution wire v2; the chelis#729

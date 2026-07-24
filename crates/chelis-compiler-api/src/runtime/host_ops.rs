@@ -361,8 +361,7 @@ pub(super) fn dispatch_scalar_binop(
             // runs through finalize, which traps out-of-width results.
             let (ldt, rdt) = (lp.dtype(), rp.dtype());
             let result_dtype = if ldt == rdt { ldt } else { Prim::Int64 };
-            let value = op(lp.as_f64(), rp.as_f64()) as i64;
-            RuntimeValue::scalar_like_int(result_dtype, value)
+            RuntimeValue::scalar_from_int_wide(result_dtype, op(lp.as_f64(), rp.as_f64()))
         }
         (RuntimeValue::Scalar(lp), RuntimeValue::Scalar(rp))
             if lp.dtype().is_float() && rp.dtype().is_float() =>
@@ -425,7 +424,7 @@ pub(super) fn numeric_unop(
     match args.first() {
         Some(RuntimeValue::Tensor(tensor)) => tensor_numeric_unop(tensor, &op),
         Some(RuntimeValue::Scalar(payload)) if payload.dtype().is_integer() => {
-            RuntimeValue::scalar_like_int(payload.dtype(), op(payload.as_f64()) as i64)
+            RuntimeValue::scalar_from_int_wide(payload.dtype(), op(payload.as_f64()))
         }
         Some(RuntimeValue::Scalar(payload)) if payload.dtype().is_float() => {
             RuntimeValue::scalar_like_float(payload.dtype(), op(payload.as_f64()))
