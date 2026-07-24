@@ -535,6 +535,23 @@ fitness/cascade/handler/owner-stamp controls. The compile-fail witness doctests
 and `scripts/gate.py --local` are required supporting evidence, but neither
 replaces this oracle.
 
+The witness doctests are `crates/chelis-types/src/errors.rs`'s eight
+` ```compile_fail ` blocks. `cargo nextest` does not execute doctests, so
+until chelis#875 they ran in no continuous job and this paragraph claimed
+supporting evidence the repo was not producing. They are now driven by the
+`cargo test -p chelis-types --doc` stage in `scripts/gate.py`, which is in
+both the `--local` subset and CI's `lint-and-unit` job.
+
+Scope of the guarantee, so this section does not read stronger than the
+mechanism: the witness makes a `Type::Error` **without a diagnostic**
+unconstructible. It says nothing about an ordinary type standing in as a
+verdict for an unrecognized construct, which is the same class defect one
+substitution away (chelis#873: `infer_atom` returned `Type::Unit` for a form
+it could not type, and `chelis check` scored those programs 1.0). No
+constructor gate can close that variant, because the types it borrows are
+legitimately constructible. It is held behaviorally, by the score-surface
+corpus in `crates/chelis-cli/tests/issue_731_fitness_honesty_corpus.rs`.
+
 ## Phase 3 - `DeepTag` at the chokepoints
 
 **You inherit:** a checker that cannot silently exempt (Phase 2) - this
