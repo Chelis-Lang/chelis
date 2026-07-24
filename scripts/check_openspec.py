@@ -723,6 +723,14 @@ def _run_repository_checks(mode: str, base: str, environ) -> list[str]:
 
     for archive in sorted(classification.archives):
         errors += check_archive_name(archive)
+        match = ARCHIVE_NAME.match(archive)
+        if match is not None:
+            # Ordering must hold at merge time too: by then the lifecycle
+            # is archived (no longer active), but the branch commits still
+            # show whether planning preceded production work.
+            errors += check_planning_order(
+                _branch_commits(git, merge_base), match.group(4)
+            )
         archive_dir = root / "openspec" / "changes" / "archive" / archive
         tasks_file = archive_dir / "tasks.md"
         if tasks_file.is_file():
@@ -740,7 +748,6 @@ def _run_repository_checks(mode: str, base: str, environ) -> list[str]:
         base_specs = _specs_at(git, merge_base, root)
         head_specs = _specs_at(git, None, root)
         errors += check_synchronization(base_specs, head_specs, deltas)
-        match = ARCHIVE_NAME.match(archive)
         if match is not None:
             errors += _check_citation_from_event(environ, match.group(4))
 

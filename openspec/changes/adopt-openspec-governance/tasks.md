@@ -33,7 +33,7 @@
 
 ## 6. Validation and activation handoff
 
-- [ ] 6.1 Run the focused checker and `openspec_adoption` suites with the uv-managed Python and fix every positive or planted-negative failure.
+- [x] 6.1 Run the focused checker and `openspec_adoption` suites with the uv-managed Python and fix every positive or planted-negative failure.
 - [ ] 6.2 Run `openspec validate --all --strict --no-interactive` and the relevant existing script tests, requiring all artifacts and tasks to report complete.
 - [ ] 6.3 Run the repository's required fresh-context adversarial review against both capability specs and execute its new falsification cases.
 - [ ] 6.4 Prepare the synchronized archive and verify that the final PR state invokes the exact private action; merge and activate Phase 0 only after that hosted governance check and the complete Chelis suite are green.

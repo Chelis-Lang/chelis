@@ -105,6 +105,11 @@ NON_GATE_WORKFLOWS = {
     # caches to hold the pool under the 10GB LRU budget; runs no per-PR gate
     # command. Out of gate.py scope by design.
     "cache-prune.yml",
+    # OpenSpec governance gate (adopt-openspec-governance). Runs the pinned
+    # Chelis-Lang/ci shared action, which launches scripts/check_openspec.py;
+    # planning-evidence enforcement only, no cargo/chelis command the per-PR
+    # developer gate owns. Out of gate.py scope by design.
+    "openspec-governance.yml",
 }
 
 
