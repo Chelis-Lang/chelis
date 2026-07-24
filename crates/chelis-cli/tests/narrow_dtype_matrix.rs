@@ -18,8 +18,9 @@
 //! * the **eval scalar lane** rounds f16/bf16 per-op correctly (IEEE
 //!   sequential rounding, locked below);
 //! * the **C DAG kernels** compute correctly-rounded f16/bf16 values (WS-1) -
-//!   proven here by decoding the misprinted bytes, so the lock survives the
-//!   broken print path;
+//!   originally proven here by decoding the misprinted bytes; since
+//!   chelis#732 Phase 2 the faithful print renders them directly
+//!   (`c_print_of_f16_tensor_prints_f16_values`, un-ignored);
 //! * **HIP rejects** f16/bf16 compute ops with a clean diagnostic and
 //!   **Metal emits properly typed** `half`/`bfloat` kernels - the two
 //!   backends that get it right;
@@ -94,46 +95,6 @@ fn build_and_run_c(program: &str, name: &str) -> Result<(String, String), String
         ));
     }
     Ok((emitted, String::from_utf8_lossy(&run.stdout).into_owned()))
-}
-
-/// Build + link + run, keeping the run OUTCOME: `Ok((run_ok, stdout,
-/// stderr))`, or `Err(build/link stderr)`. For rows whose contract is a
-/// runtime ABORT (census row 10 interim-hardening), where
-/// `build_and_run_c`'s nonzero-exit-is-Err folding would hide the
-/// distinction between a build failure and the asserted abort.
-fn c_run_outcome_full(program: &str, name: &str) -> Result<(bool, String, String), String> {
-    let dir = tempdir().expect("tempdir");
-    let path = dir.path().join(format!("{name}.ch"));
-    let out_dir = dir.path().join(format!("{name}-out"));
-    write_file(&path, program);
-    let built = Command::cargo_bin("chelis")
-        .expect("binary")
-        .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .args([
-            "build",
-            path.to_str().unwrap(),
-            "--target",
-            "c",
-            "--output",
-            out_dir.to_str().unwrap(),
-        ])
-        .output()
-        .expect("chelis build should run");
-    if !built.status.success() {
-        return Err(String::from_utf8_lossy(&built.stderr).into_owned());
-    }
-    let status = common::link_generated(&out_dir, &format!("{name}.c"), name);
-    if !status.success() {
-        return Err(format!("link failed: {status}"));
-    }
-    let run = std::process::Command::new(out_dir.join(name))
-        .output()
-        .expect("compiled binary should run");
-    Ok((
-        run.status.success(),
-        String::from_utf8_lossy(&run.stdout).into_owned(),
-        String::from_utf8_lossy(&run.stderr).into_owned(),
-    ))
 }
 
 /// `chelis eval` a full program; first printed line or stderr.
