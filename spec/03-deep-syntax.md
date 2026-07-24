@@ -359,6 +359,57 @@ An opaque `deftype` may additionally carry a **declared invariant**
 | `t-unit` | `(t-unit {})` | Unit type |
 | `t-tuple` | `(t-tuple {} type₁ type₂ ...)` | Tuple type |
 
+#### 2.5.1 Type-expression resolution and binders
+
+Type expressions are recursively resolved before they may enter the checked
+environment or a cached compiler context. Resolution is fail-closed:
+
+- `t-prim` has exactly one symbol child and that symbol is in the active or
+  explicitly-reserved primitive vocabulary owned by `spec/04-type-system.md`
+  §1.1. An unknown primitive name is a type error, not an inference hole.
+- `t-adt` has a symbol head naming a precollected `deftype` or `typealias`
+  header and exactly that header's declared number of type arguments. Headers
+  are collected before bodies are resolved, so self-recursive and forward
+  nominal references are legal; unknown names and wrong arities are errors.
+  The precollected header environment remains active for the entire check unit,
+  including annotations in declaration bodies. A rejected declaration body is
+  not installed in the reusable ADT/alias registry, but its already-declared
+  header remains visible until the failing check ends so downstream references
+  do not add a spurious `unknown nominal` cascade.
+- `t-var`, `d-var`, and `d-rank` introduce no binding by themselves. A name is
+  legal only when the surrounding resolution context supplies it: the
+  explicit parameter list of a `deftype`/`typealias`, the implicit-generic
+  binder set of one `defsig`, or trusted compiler-generated metadata. The
+  special `(t-var {} _)` form is an inference hole only at a use site that
+  explicitly admits holes; it is not a way to leave a declaration field or
+  alias body unresolved.
+- A `defsig` implicitly binds each well-formed `t-var`/`d-var`/`d-rank` name on
+  first occurrence and reuses that binding throughout the signature. A
+  `deftype` or `typealias` binds only names in its explicit parameter list;
+  an undeclared variable name is an error. Surf declaration desugaring is
+  scope-aware: a declared parameter becomes the corresponding variable form
+  at a type/dimension/rank use site, while an unlisted symbolic tensor axis is
+  emitted as `d-name` rather than inventing an implicit declaration binder.
+- `t-fn` has at least one child (the last is its return type), `t-ref` has
+  exactly one child, `t-tensor` has at least one child (the last is a
+  primitive or bound type-variable precision), `t-unit` has no children, and
+  every nested type and dimension child must resolve. Resolution never drops
+  an invalid child, substitutes a wildcard/fresh variable for malformed
+  input, or admits an unchecked nominal name.
+- A bare atom or an expression tag in a type position is malformed. The sole
+  compatibility exception is the historically accepted active primitive
+  symbol in a `cast` target (for example `(cast {} x f16)`); it resolves with
+  the same meaning as `(t-prim {} f16)`. Bare forms remain non-canonical and
+  are not accepted in declaration fields, aliases, signatures, or metadata.
+  Both cast spellings cross this same resolver before cast semantics are
+  classified: canonical `t-prim` still requires exactly one symbol child, so
+  `(cast {} x (t-prim {} f16 extra))` is malformed rather than a cast to
+  `f16` with an ignored child.
+
+Each invalid type expression produces one owning checker diagnostic. Parents
+propagate that witnessed failure without re-reporting it, so a malformed
+nested type cannot be silently accepted or produce diagnostic spray.
+
 ### 2.6 Dimension Expressions
 
 | Tag | Form | Semantics |
@@ -367,6 +418,12 @@ An opaque `deftype` may additionally carry a **declared invariant**
 | `d-var` | `(d-var {} a)` | Dimension variable (polymorphic) |
 | `d-lit` | `(d-lit {} 512)` | Literal dimension size |
 | `d-rank` | `(d-rank {} r)` | Rank variable — a name-preserving spread standing for a run of dims (rank polymorphism). Tier-2 uses it as the sole dim child; Tier-3 (§4.5.3) allows it interleaved with concrete anchors (`(t-tensor {} (d-rank {} pre) (d-name {} seq) (d-rank {} post) (t-prim {} f32))`). A given rank name appears at most once per `t-tensor`. |
+
+Every dimension tag has exactly one child: a symbol for `d-name`, `d-var`,
+and `d-rank`, or an integer for `d-lit`. Unknown tags, missing/extra children,
+wrong child kinds, and unbound `d-var`/`d-rank` names are type-resolution
+errors. `d-name` is a concrete symbolic axis label (with `*` the explicit
+wildcard spelling); it does not allocate an inference variable.
 
 ### 2.7 Transforms
 
@@ -658,6 +715,9 @@ EOF         ← !.
 - `(fn {} params body)` — exactly 2 children; first must be `(params ...)`.
 - `(let {} bindings body)` — exactly 2 children; first must be `(bind ...)`.
 - `(app {} func arg...)` — at least 1 child (the function).
+- Type/dimension nodes obey the recursive shapes and binder rules in
+  §2.5.1/§2.6. The type checker owns these semantic checks because nominal
+  headers and binder context are not available to the syntax parser.
 
 ### 8.3 Unknown Tags
 Unknown tags are parse errors in strict mode (canonical validation). In fitness-scoring mode, unknown tags are parsed as generic nodes and penalized in the fitness score.

@@ -34,7 +34,24 @@ use chelis_deep::{Atom, Expr};
 use chelis_pred::{PredAmenability, PredGrammarError};
 
 use crate::errors::{CheckError, CheckErrorKind};
+use crate::session::DiagnosticSink;
 use crate::types::Prim;
+
+trait DiagnosticOutput {
+    fn push_error(&mut self, error: CheckError);
+}
+
+impl DiagnosticOutput for Vec<CheckError> {
+    fn push_error(&mut self, error: CheckError) {
+        self.push(error);
+    }
+}
+
+impl DiagnosticOutput for DiagnosticSink<'_> {
+    fn push_error(&mut self, error: CheckError) {
+        self.push(error);
+    }
+}
 
 /// Whether a primitive name is a SCALAR in the V1 invariant value class: the
 /// numeric and boolean prims an invariant predicate can actually be verified
@@ -56,6 +73,17 @@ pub fn invariant_value_class_prim(name: &str) -> bool {
 /// Validate every declared type invariant in a program (RFC D-WF).
 /// Pushes one [`CheckError`] per well-formedness violation found.
 pub fn validate_type_invariants_in_program(exprs: &[Expr], errors: &mut Vec<CheckError>) {
+    validate_type_invariants(exprs, errors);
+}
+
+pub(crate) fn validate_type_invariants_in_program_with_sink(
+    exprs: &[Expr],
+    errors: &mut DiagnosticSink<'_>,
+) {
+    validate_type_invariants(exprs, errors);
+}
+
+fn validate_type_invariants(exprs: &[Expr], errors: &mut impl DiagnosticOutput) {
     let items = flatten_with_modules(exprs);
 
     // Collect, per module key, the names of zero-arg constant defs. A
@@ -100,7 +128,7 @@ fn validate_one_deftype(
     deftype: &Expr,
     in_module_constants: &HashSet<String>,
     deftypes: &HashMap<String, &Expr>,
-    errors: &mut Vec<CheckError>,
+    errors: &mut impl DiagnosticOutput,
 ) {
     let invariant = meta_value(deftype, "invariant");
     let Some(invariant_fn) = invariant else {
@@ -110,7 +138,7 @@ fn validate_one_deftype(
 
     // Check 1: invariant requires opaque: true.
     if !has_true_meta(deftype, "opaque") {
-        errors.push(err(format!(
+        errors.push_error(err(format!(
             "invariant on type `{type_name}` requires `@opaque`: \
              assumption injection is unsound for a forgeable type"
         )));
@@ -140,7 +168,7 @@ fn validate_representation(
     deftype: &Expr,
     type_name: &str,
     deftypes: &HashMap<String, &Expr>,
-    errors: &mut Vec<CheckError>,
+    errors: &mut impl DiagnosticOutput,
 ) {
     let variants: Vec<&Expr> = children(deftype)
         .iter()
@@ -149,7 +177,7 @@ fn validate_representation(
         .collect();
 
     if variants.len() != 1 {
-        errors.push(err(format!(
+        errors.push_error(err(format!(
             "opaque type `{type_name}` with an invariant must have exactly one \
              record-shaped variant; found {} variants",
             variants.len()
@@ -162,7 +190,7 @@ fn validate_representation(
         .skip(1) // skip the variant name symbol
         .collect();
     if fields.is_empty() || !fields.iter().all(|f| tag(f) == Some("field")) {
-        errors.push(err(format!(
+        errors.push_error(err(format!(
             "opaque type `{type_name}` with an invariant must have a single \
              record-shaped variant (named fields)"
         )));
@@ -176,7 +204,7 @@ fn validate_representation(
         };
         let mut visiting = HashSet::new();
         if !is_value_class_type(field_ty, deftypes, &mut visiting) {
-            errors.push(err(format!(
+            errors.push_error(err(format!(
                 "field `{field_name}` of opaque type `{type_name}` is not in the V1 \
                  invariant value class (scalar primitives, fixed-shape numeric \
                  tensors, or nested single-variant records of those)"
@@ -285,13 +313,13 @@ fn validate_predicate(
     deftype: &Expr,
     type_name: &str,
     in_module_constants: &HashSet<String>,
-    errors: &mut Vec<CheckError>,
+    errors: &mut impl DiagnosticOutput,
 ) {
     // Grammar (D-WF).
     match chelis_pred::predicate_in_grammar(invariant_fn) {
         Ok(()) => {}
         Err(grammar_err) => {
-            errors.push(err(format!(
+            errors.push_error(err(format!(
                 "invariant on type `{type_name}` is outside the predicate grammar: {}",
                 describe_grammar_error(&grammar_err)
             )));
@@ -304,7 +332,7 @@ fn validate_predicate(
     // Free variables subset {binder} union {in-module constants}.
     for fv in chelis_pred::predicate_free_vars(invariant_fn) {
         if !in_module_constants.contains(&fv) {
-            errors.push(err(format!(
+            errors.push_error(err(format!(
                 "invariant on type `{type_name}` references `{fv}`, which is not the \
                  binder or an in-module zero-argument constant"
             )));
@@ -317,7 +345,7 @@ fn validate_predicate(
     if let Some(body) = fn_body(invariant_fn)
         && !is_boolean_shaped(body)
     {
-        errors.push(err(format!(
+        errors.push_error(err(format!(
             "invariant on type `{type_name}` must be a boolean predicate at the top"
         )));
     }
@@ -328,7 +356,7 @@ fn validate_predicate(
     match meta_value(deftype, "invariant_amenability").and_then(str_value) {
         Some(recorded) => {
             if PredAmenability::from_str(recorded) != Some(recomputed) {
-                errors.push(err(format!(
+                errors.push_error(err(format!(
                     "invariant on type `{type_name}` records amenability `{recorded}`, \
                      but the predicate classifies as `{}`",
                     recomputed.as_str()
@@ -336,7 +364,7 @@ fn validate_predicate(
             }
         }
         None => {
-            errors.push(err(format!(
+            errors.push_error(err(format!(
                 "invariant on type `{type_name}` is missing the \
                  `invariant_amenability` metadata key (expected `{}`)",
                 recomputed.as_str()

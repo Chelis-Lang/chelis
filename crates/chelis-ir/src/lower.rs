@@ -11125,12 +11125,20 @@ impl LowerCtx {
         {
             return node;
         }
-        if n.output_type.dims.is_empty() {
-            // Bottom placeholder: a fresh Const at the if's rank with
-            // anonymous symbolic dims (the checker's symbol for an unbound
-            // axis may be declared later in program order; the shape-dep
-            // carries the actual extent source). The rank-0 original is left
-            // unconsumed for DCE.
+        let already_ranked_but_anonymous = n.output_type.dims.len() == out_ty.dims.len()
+            && n.output_type
+                .dims
+                .iter()
+                .any(|d| matches!(d, DimInfo::Named(_, None)));
+        if n.output_type.dims.is_empty() || already_ranked_but_anonymous {
+            // Emit a fresh Const at the if's rank with anonymous symbolic
+            // dims (the checker's symbol for an unbound axis may be declared
+            // later in program order; the shape-dep carries the actual
+            // extent source). This must happen after the sibling even when
+            // authoritative inference already gave the original `fail`
+            // placeholder the correct rank: DAG rebuilds remap in node order,
+            // so a forward shape-dep from that early Const to the later
+            // sibling is dropped. The original is left unconsumed for DCE.
             let dims = out_ty
                 .dims
                 .iter()
@@ -11151,14 +11159,6 @@ impl LowerCtx {
             self.dag.add_shape_dep(conformed, sibling);
             conformed
         } else {
-            if n.output_type.dims.len() == out_ty.dims.len()
-                && n.output_type
-                    .dims
-                    .iter()
-                    .any(|d| matches!(d, DimInfo::Named(_, None)))
-            {
-                self.dag.add_shape_dep(node, sibling);
-            }
             node
         }
     }
@@ -11286,6 +11286,58 @@ mod tests {
             let _ = ctx.lower_expr(expr);
         }
         ctx.dag
+    }
+
+    #[test]
+    fn typed_fail_placeholder_keeps_a_backward_shape_dependency() {
+        let mut ctx = LowerCtx::new(
+            std::collections::HashMap::new(),
+            std::collections::HashMap::new(),
+            LinearityInfo::default(),
+        );
+        let out_ty = TensorType {
+            dims: vec![DimInfo::Named("result".to_string(), None)],
+            precision: Prim::F32,
+        };
+        // Primary owner inference now gives `fail(...)` the enclosing
+        // tensor result type, so the initial placeholder can already have
+        // the right rank even though its extent remains anonymous.
+        let early_placeholder = ctx.dag.add_node(
+            RiscOp::Const { value: 0.0 },
+            vec![],
+            TensorType {
+                dims: vec![DimInfo::Named(String::new(), None)],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        // The sibling is lowered later for `if fail(...) else <body>`.
+        let sibling = ctx.dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            out_ty.clone(),
+            None,
+        );
+        let conformed = ctx.conform_branch_placeholder(early_placeholder, &out_ty, sibling);
+        let placeholder = ctx.dag.get(conformed).expect("conformed placeholder node");
+        let [shape_source] = placeholder.shape_deps.as_slice() else {
+            panic!(
+                "the placeholder needs exactly one sibling shape source: {:?}",
+                placeholder.shape_deps
+            );
+        };
+        assert_ne!(
+            conformed, early_placeholder,
+            "a later sibling requires a fresh, topologically ordered placeholder"
+        );
+        assert_eq!(*shape_source, sibling);
+        assert!(
+            shape_source.0 < placeholder.id.0,
+            "shape-only dependencies must point backward so remapping passes preserve them: \
+             source={} placeholder={}",
+            shape_source.0,
+            placeholder.id.0
+        );
     }
 
     fn non_drop_len(dag: &Dag) -> usize {

@@ -17,6 +17,18 @@
 //!   the new source is re-compiled; the C/D/E/F `_with_context` variants
 //!   stack the new code on top of the cached library state.
 //!
+//! ## Checker-state deserialization boundary
+//!
+//! `CompiledContext` contains only checker-success artifacts: construction
+//! fails before a `TypeEnv`/`CheckedProgram` is returned when diagnostics are
+//! non-empty, and the checker totality invariant forbids `Type::Error` in a
+//! successful result. Decode verifies the cache format/build identity and
+//! payload integrity, but it does not rerun semantic checking. The ADT
+//! registry's provisional `TypeResolutionEnv` is serde-skipped; a later
+//! stacked check reconstructs it from validated ADT/alias definitions plus
+//! that check unit's declarations. Rejected declaration headers therefore
+//! cannot persist in either the reef context or the stdlib sub-context.
+//!
 //! See `/home/jeff/.claude/plans/now-plan-out-the-shimmying-wand.md`
 //! for the full plan.
 

@@ -2,14 +2,15 @@ use std::collections::{HashMap, HashSet};
 
 use chelis_deep::Span;
 use chelis_deep::ast::{Atom, Expr, List, MetaMap};
-use chelis_types::CheckedProgram;
 use chelis_types::types::{Effect, EffectSet};
+use chelis_types::{CheckedProgram, InferResult};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EffectErrorKind {
     UnhandledEffect,
     InvalidHandler,
     BuildTargetMismatch,
+    TypeTotality,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,10 +52,9 @@ pub fn check_program(program: &CheckedProgram) -> Result<CheckedProgram, Vec<Eff
     validate_declared_vs_inferred(&annotated_exprs, &effects_by_def, &mut errors);
 
     if errors.is_empty() {
-        Ok(CheckedProgram::from_parts(
-            annotated_exprs,
-            program.type_env().clone(),
-        ))
+        program
+            .try_with_effect_annotations(annotated_exprs)
+            .map_err(type_totality_errors)
     } else {
         Err(errors)
     }
@@ -119,13 +119,32 @@ pub fn check_effects_with_context(
     validate_declared_vs_inferred(&annotated_exprs, &effects_by_def, &mut errors);
 
     if errors.is_empty() {
-        Ok(CheckedProgram::from_parts(
-            annotated_exprs,
-            new_program.type_env().clone(),
-        ))
+        new_program
+            .try_with_effect_annotations(annotated_exprs)
+            .map_err(type_totality_errors)
     } else {
         Err(errors)
     }
+}
+
+fn type_totality_errors(result: InferResult) -> Vec<EffectError> {
+    if result.errors.is_empty() {
+        return vec![EffectError {
+            kind: EffectErrorKind::TypeTotality,
+            message: "internal: checked-program reconstruction failed without a type diagnostic"
+                .to_string(),
+            suggestions: vec![],
+        }];
+    }
+    result
+        .errors
+        .into_iter()
+        .map(|error| EffectError {
+            kind: EffectErrorKind::TypeTotality,
+            message: error.message,
+            suggestions: error.suggestions,
+        })
+        .collect()
 }
 
 /// Validate that the program's target-relevant constructs are admissible
@@ -1036,6 +1055,57 @@ mod tests {
         let deep = desugar_program(&decls);
         let checked = chelis_types::check_ir_program(&deep).expect("type check");
         check_program(&checked).expect("effect check")
+    }
+
+    #[test]
+    fn effect_annotation_reconstruction_preserves_type_context() {
+        let decls = parse_surf("def add_one(x: int32) -> int32 = add(x, 1)").expect("surf parse");
+        let deep = desugar_program(&decls);
+        let typed = chelis_types::check_ir_program(&deep).expect("type check");
+        let expected_type_env = typed.type_env().clone();
+        let expected_signatures = typed.signature_inference().clone();
+
+        let reconstructed = check_program(&typed).expect("effect check");
+        assert_eq!(reconstructed.type_env(), &expected_type_env);
+        assert_eq!(reconstructed.signature_inference(), &expected_signatures);
+    }
+
+    #[test]
+    fn literal_random_and_resource_handlers_cross_the_type_effect_boundary() {
+        for source in [
+            r#"(def {} value
+                   (handle-effect {effect: random}
+                     (lit {type: (t-prim {} int64)} 7)
+                     (lit {type: (t-prim {} int32)} 1)))"#,
+            r#"(def {} value
+                   (handle-effect {effect: resource}
+                     (lit {type: (t-prim {} string)} "cpu")
+                     (lit {type: (t-prim {} int32)} 1)))"#,
+        ] {
+            let deep = parse_str(source).expect("Deep handler fixture parses");
+            let typed = chelis_types::check_ir_program(&deep).expect("type boundary accepts");
+            check_program(&typed).expect("effects boundary accepts literal handler");
+        }
+    }
+
+    #[test]
+    fn nonliteral_handlers_are_rejected_once_by_the_effect_owner() {
+        for (effect, expected) in [
+            ("random", "requires an int literal seed"),
+            ("resource", "requires a string literal device"),
+        ] {
+            let source = format!(
+                "(def {{}} value (handle-effect {{effect: {effect}}} \
+                 (var {{}} computed_handler) (lit {{type: (t-prim {{}} int32)}} 1)))"
+            );
+            let deep = parse_str(&source).expect("Deep handler fixture parses");
+            let typed = chelis_types::check_ir_program(&deep)
+                .expect("handler payload is owned by the effects gate");
+            let errors = check_program(&typed).expect_err("nonliteral handler must reject");
+            assert_eq!(errors.len(), 1, "one effects owner diagnostic: {errors:?}");
+            assert_eq!(errors[0].kind, EffectErrorKind::InvalidHandler);
+            assert!(errors[0].message.contains(expected), "{errors:?}");
+        }
     }
 
     #[test]

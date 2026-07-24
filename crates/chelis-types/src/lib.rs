@@ -2,6 +2,7 @@
 
 pub mod adt;
 pub mod context;
+pub(crate) mod deep_type;
 pub mod env;
 pub mod errors;
 pub mod fitness;
@@ -11,6 +12,7 @@ pub mod linearity;
 pub mod observation;
 pub(crate) mod opacity;
 pub(crate) mod pipe_stage;
+pub(crate) mod session;
 pub mod types;
 pub mod unify;
 pub mod unsupported;

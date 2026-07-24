@@ -792,9 +792,19 @@ Distinguished from ADTs by absence of `|`.
 ```
 type Weights = tensor[hidden, hidden, f32]
 type Pair[a, b] = (a, b)
+type Matrix[p, rows] = tensor[rows, p]
 ```
 
 **⟹** `(typealias {} Weights () (t-tensor {} ...))` / `(typealias {} Pair (a b) (t-tuple {} ...))`
+
+The optional parameter list is the exact binder scope for an alias body (and
+the same rule applies to ADT field types). A listed name is emitted according
+to its position: `p` in the precision slot becomes `(t-var {} p)`, while
+`rows` in a dimension slot becomes `(d-var {} rows)`. An unlisted dimension
+identifier is a concrete symbolic dimension and becomes `d-name`, even when it
+is a single lowercase letter: `type Weights = tensor[n, f32]` therefore emits
+`(d-name {} n)`, not an implicit dimension binder. Signatures retain their
+separate implicit-quantification rule from P4/§5.8.
 
 Parser disambiguation: after `type Name =`, if next non-whitespace is `|`, it's an ADT. Otherwise alias.
 

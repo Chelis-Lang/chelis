@@ -149,13 +149,15 @@ site handles it, and terminal failures emit a targeted chelis#338
 diagnostic, never the old `unknown runtime name` error. The Tier-3 corpus
 now asserts eval-vs-backend agreement (the Tier-2 oracle) at ranks 2/3/4
 with non-square operands, plus a parity-corners suite
-(`named_axis_eval_parity_corners`). Pinned residuals (eval declines with a
-targeted chelis#338 diagnostic while the backend builds; never wrong
-numerics): a shape-rewriting pipe stage (e.g. `|> permute(1, 0) |>
-sum(seq)`, `pipe_rewriting_stage_then_named_reduce_is_a_pinned_gap`); a
+(`named_axis_eval_parity_corners`). PR #800 closed the shape-rewriting pipe
+residual (`|> permute(1, 0) |> sum(seq)`): authoritative owner inference
+preserves the stage's named output type, and
+`pipe_rewriting_stage_then_named_reduce_eval_matches_backend` now enforces
+eval-vs-backend parity. Remaining pinned residuals decline with a targeted
+chelis#338 diagnostic while the backend builds, never with wrong numerics: a
 match-pattern-bound operand (`match_pattern_operand_is_a_pinned_gap`);
-closure-captured free tensor vars and unannotated HOF lambda params share
-the same decline class (untested corners, same diagnostic).
+closure-captured free tensor vars and unannotated HOF lambda params share the
+same decline class (untested corners, same diagnostic).
 
 *Elementwise output-type fix (chelis#346 red team).* The unary and Tier-2
 elementwise lowering arms (neg/recip/exp/log/sin/sqrt/cos/tan/atan/abs/

@@ -481,7 +481,7 @@ def make_w(x: f32) -> Wrapper = Full { inner: T { value: 99.0 } }
 #[test]
 fn cr14_record_field_ref_to_opaque_is_covered_or_rejected() {
     // CR-14: a record field of type `&T` (a borrow of the opaque type) was
-    // mapped to Type::Error by type_from_deep, so the T inside the borrow
+    // mapped to the inert placeholder by type_from_deep, so the T inside the borrow
     // was hidden and the producer silently missed. A `t-ref` now recurses,
     // so the record-with-ref-field producer is covered-or-rejected.
     assert_record_alias_rejected(

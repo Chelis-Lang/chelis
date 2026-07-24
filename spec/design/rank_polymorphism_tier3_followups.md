@@ -28,12 +28,13 @@ Follow-up status:
   output types that stay symbolic inside a rank-poly inline, so
   `sum(exp(x), seq)`-class bodies miscomputed on BOTH lanes (backend
   garbage since #337, masked by a check-only corpus test; now executable
-  and pinned). Pinned decline-not-wrong residuals: a shape-rewriting pipe
-  stage and a match-pattern-bound operand
-  (`pipe_rewriting_stage_then_named_reduce_is_a_pinned_gap`,
-  `match_pattern_operand_is_a_pinned_gap`). See the "Eval support" and
-  "Elementwise output-type fix" notes in
-  `spec/design/rank_polymorphism.md`.
+  and pinned). The shape-rewriting pipe residual closed in PR #800:
+  authoritative owner inference now preserves the `permute` stage's named
+  output type through eval, locked by
+  `pipe_rewriting_stage_then_named_reduce_eval_matches_backend`. The remaining
+  pinned decline-not-wrong residual is a match-pattern-bound operand
+  (`match_pattern_operand_is_a_pinned_gap`). See the "Eval support" and
+  "Elementwise output-type fix" notes in `spec/design/rank_polymorphism.md`.
 - **#340** — `max_reduce`/`min_reduce`/`prod_reduce`/`argmax`/`argmin` in a `..r`
   body (they route through the host scalar lane and don't compile; currently
   *rejected at check time* to keep check↔backend in sync). **The remaining

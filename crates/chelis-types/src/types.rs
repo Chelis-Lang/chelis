@@ -8,6 +8,8 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+use crate::errors::ErrorWitness;
+
 /// A unique identifier for a type variable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TypeVar(pub u32);
@@ -381,8 +383,13 @@ pub enum Type {
     Tuple(Vec<Type>),
     /// Unit type.
     Unit,
-    /// Error sentinel — used for partial inference past errors.
-    Error,
+    /// Error sentinel -- used for partial inference past errors. Carries a
+    /// zero-sized [`ErrorWitness`](crate::errors::ErrorWitness) that can only
+    /// be minted by `crate::errors::report` (which pushes a diagnostic) or
+    /// `crate::errors::propagate` (cascade from an existing witness), so a
+    /// silent `Type::Error` is unconstructible outside the diagnostics module
+    /// (spec/design/checker_totality.md §C3, chelis#731 Phase 2).
+    Error(ErrorWitness),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -509,7 +516,7 @@ impl fmt::Display for Type {
                 write!(f, "({})", strs.join(", "))
             }
             Type::Unit => write!(f, "unit"),
-            Type::Error => write!(f, "<error>"),
+            Type::Error(_) => write!(f, "<error>"),
         }
     }
 }

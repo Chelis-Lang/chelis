@@ -34,10 +34,28 @@ pub enum SizeProvenance {
     ShapeSourced,
 }
 
+/// Lexical type-variable scope for resolving source annotations during one
+/// check. A top-level `defsig` owns the names; cloned [`Env`] values carry the
+/// scope through nested `fn`/`let`/`match` inference and discard it when that
+/// declaration's cloned environment is dropped.
+///
+/// This is deliberately check-time-only. It must never enter a serialized
+/// [`crate::TypeEnv`], because a later stacked check owns a different set of
+/// declarations and therefore a different lexical binder scope.
+#[derive(Debug, Clone, Default)]
+struct TypeResolutionScope {
+    binders: Option<HashSet<String>>,
+}
+
 /// Type environment (Γ): maps names to polymorphic type schemes.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Env {
     bindings: HashMap<String, Scheme>,
+    /// Current declaration's type/dimension/rank binders. Installed only on
+    /// the cloned environment used to infer that declaration, inherited by
+    /// nested lexical clones, and omitted from cached checker state.
+    #[serde(skip)]
+    type_resolution_scope: TypeResolutionScope,
     /// chelis#397/#469: provenance of `let`-bound `int`-valued names, so a
     /// runtime `expand` size built from a `let` binding can be checked for
     /// materializability. Cloned at every lexical scope boundary along with
@@ -62,6 +80,20 @@ impl Env {
     /// Look up a name. Returns None if unbound.
     pub fn lookup(&self, name: &str) -> Option<&Scheme> {
         self.bindings.get(name)
+    }
+
+    /// Install the binder set owned by the declaration whose body is about to
+    /// be inferred. Callers use a cloned `Env`, so this scope cannot leak to a
+    /// sibling declaration or back into a reusable library snapshot.
+    pub(crate) fn set_type_resolution_binders(&mut self, binders: Option<&HashSet<String>>) {
+        self.type_resolution_scope.binders = binders.cloned();
+    }
+
+    /// Binder names visible to a nested source annotation in this lexical
+    /// environment. Absence means closed input: named `t-var`/`d-var`/
+    /// `d-rank` nodes do not allocate inference variables.
+    pub(crate) fn type_resolution_binders(&self) -> Option<&HashSet<String>> {
+        self.type_resolution_scope.binders.as_ref()
     }
 
     /// Record the size provenance of a `let`-bound name (chelis#397/#469).
@@ -134,6 +166,14 @@ impl Env {
     /// Extend the environment with a new binding.
     pub fn bind(&mut self, name: String, scheme: Scheme) {
         self.bindings.insert(name, scheme);
+    }
+
+    /// Remove a temporary inference binding before generalizing an SCC.
+    /// Recursive function components are prebound monomorphically while
+    /// their bodies are inferred, then all provisional members are removed
+    /// together so their resolved types can be generalized as one unit.
+    pub(crate) fn remove_binding(&mut self, name: &str) {
+        self.bindings.remove(name);
     }
 
     /// Instantiate a polymorphic scheme with fresh variables.
@@ -293,7 +333,7 @@ fn collect_tvars(ty: &Type, vars: &mut Vec<TypeVar>) {
                 vars.push(*v);
             }
         }
-        Type::Prim(_) | Type::Unit | Type::Error => {}
+        Type::Prim(_) | Type::Unit | Type::Error(_) => {}
     }
 }
 

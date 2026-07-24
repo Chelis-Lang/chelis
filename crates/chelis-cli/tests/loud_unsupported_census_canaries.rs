@@ -272,10 +272,17 @@ const BOGUS_CAST_TPRIM: &str = "(def {}\n  out\n  (app {}\n    (var {} print)\n 
 const BOGUS_CAST_BARE: &str = "(def {}\n  out\n  (app {}\n    (var {} print)\n    (cast {}\n      \
      (lit {type: (t-prim {} f32)} 1.5)\n      bogus_dtype)))\n";
 
-/// **Canary (green): the eval-lane guard holds.** Both bogus-cast spellings
-/// are rejected loudly by eval before the F32 fallback can matter (the
-/// audit-backlog item 6 refutation, re-executed at P0). The build lane is
-/// the live half - see `dp_bogus_cast_target_must_not_build_silently`.
+/// **Canary (green): a bogus cast target is rejected loudly, never computed
+/// with an F32 fallback.** Both spellings are rejected before eval can matter
+/// (the audit-backlog item 6 refutation, re-executed at P0). As of chelis#756
+/// (chelis#731 Phase 2) the CHECK lane now guards this ahead of the eval-lane
+/// guard: the deep-type converter no longer reduces an unknown/malformed cast
+/// target to a silent `Type::Error`, so `infer_cast` reports "cast target
+/// `<name>` is not a recognized primitive type" at check, and `eval_first_line`
+/// (which runs check before eval) surfaces that rejection. The census intent
+/// -- loud rejection, no silent F32 fallback -- is preserved and strengthened.
+/// The build lane is the live half - see
+/// `dp_bogus_cast_target_must_not_build_silently`.
 ///
 /// lower.rs:9833's sibling default (input precision when a DAG node lookup
 /// fails) has no user-facing driver at all (an internal desync is required),
@@ -283,16 +290,15 @@ const BOGUS_CAST_BARE: &str = "(def {}\n  out\n  (app {}\n    (var {} print)\n  
 /// at Phase 1 regardless.
 #[test]
 fn canary_dp_cast_bogus_dtype_is_guarded() {
-    for (dp, expect) in [
-        (BOGUS_CAST_TPRIM, "not a recognized primitive type"),
-        (BOGUS_CAST_BARE, "cast missing target type"),
-    ] {
+    // chelis#756: both spellings now name the bogus target and are rejected at
+    // check ("not a recognized primitive type"), ahead of the eval guard.
+    for dp in [BOGUS_CAST_TPRIM, BOGUS_CAST_BARE] {
         let eval_err = eval_first_line(dp, ".dp")
-            .expect_err("census row 13: eval must reject a bogus cast target, not compute");
+            .expect_err("census row 13: a bogus cast target must be rejected, not computed");
         assert!(
-            eval_err.contains(expect),
-            "the eval guard must reject with the clean diagnostic {expect:?}; \
-             got: {eval_err}"
+            eval_err.contains("not a recognized primitive type")
+                || eval_err.contains("cast missing target type"),
+            "the guard must reject a bogus cast target loudly; got: {eval_err}"
         );
     }
 }

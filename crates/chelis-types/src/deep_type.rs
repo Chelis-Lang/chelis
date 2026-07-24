@@ -1,0 +1,614 @@
+//! Fail-closed resolution of Deep type and dimension expressions.
+//!
+//! This is the single boundary that may translate Deep type syntax into the
+//! checker's internal [`Type`]. Resolution is context-sensitive: declarations
+//! choose how names become binders, while ordinary source annotations are
+//! closed. A failure reports exactly once and returns an [`ErrorWitness`]
+//! instead of inventing a variable, wildcard, or partial type.
+
+use std::collections::{HashMap, HashSet};
+
+use chelis_deep::ast as deep;
+
+use crate::adt::AdtRegistry;
+use crate::errors::{CheckError, CheckErrorKind, ErrorWitness, report_witness};
+use crate::session::DiagnosticSink;
+use crate::types::{Dim, DimVar, Prim, RankVar, TensorPrec, Type, TypeVar, VarGen};
+
+/// A type that crossed the Deep syntax boundary without a silent fallback.
+/// The tuple field is private so callers cannot assert resolution without
+/// going through [`DeepTypeResolver::resolve`].
+#[derive(Debug, Clone)]
+pub(crate) struct ResolvedDeepType(Type);
+
+impl ResolvedDeepType {
+    pub(crate) fn into_type(self) -> Type {
+        self.0
+    }
+}
+
+/// Cast-target syntax after it has crossed the same canonical-form and arity
+/// checks as every other Deep type consumer. Bare primitive spellings remain a
+/// compatibility surface; canonical `t-prim` records whether the historical
+/// zero-arity nominal spelling is eligible for the opacity checks.
+#[derive(Debug, Clone)]
+pub(crate) enum ResolvedCastTarget {
+    PrimitiveSpelling { name: String, canonical: bool },
+    Type(ResolvedDeepType),
+}
+
+/// The checker surface that owns a type expression. Included in diagnostics
+/// so malformed nested syntax points to the boundary that interpreted it.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum TypeUseSite {
+    DeftypeField,
+    TypeAliasBody,
+    Defsig,
+    Annotation,
+    CastTarget,
+    CompilerMetadata,
+}
+
+impl TypeUseSite {
+    fn label(self) -> &'static str {
+        match self {
+            Self::DeftypeField => "deftype field",
+            Self::TypeAliasBody => "typealias body",
+            Self::Defsig => "defsig",
+            Self::Annotation => "type annotation",
+            Self::CastTarget => "cast target",
+            Self::CompilerMetadata => "compiler-generated type metadata",
+        }
+    }
+}
+
+/// Source location owned by one type-resolution root. Explicit producer span
+/// metadata wins; otherwise the structural AST range is retained and exposed
+/// through a stable `source:<start>..<end>` identifier as well as the byte
+/// offset. The value is copied out of the AST so resolver reuse is safe.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct TypeDiagnosticLocation {
+    span_offset: Option<usize>,
+    span_id: Option<String>,
+}
+
+impl TypeDiagnosticLocation {
+    pub(crate) fn from_expr(expr: &deep::Expr) -> Option<Self> {
+        let structural = expr.span();
+        let explicit_id = expr.span_id().map(str::to_string);
+        let span_offset = explicit_id
+            .as_deref()
+            .and_then(span_offset_from_id)
+            .or_else(|| (structural.len > 0).then_some(structural.offset));
+        let span_id = explicit_id.or_else(|| {
+            (structural.len > 0)
+                .then(|| format!("source:{}..{}", structural.offset, structural.end()))
+        });
+        (span_offset.is_some() || span_id.is_some()).then_some(Self {
+            span_offset,
+            span_id,
+        })
+    }
+
+    pub(crate) fn attach(&self, mut error: CheckError) -> CheckError {
+        if error.span_offset.is_none() {
+            error.span_offset = self.span_offset;
+        }
+        if error.span_id.is_none() {
+            error.span_id.clone_from(&self.span_id);
+        }
+        error
+    }
+}
+
+fn span_offset_from_id(span_id: &str) -> Option<usize> {
+    span_id
+        .rfind(':')
+        .map(|index| &span_id[index + 1..])
+        .unwrap_or(span_id)
+        .split_once("..")
+        .and_then(|(start, _)| start.parse::<usize>().ok())
+}
+
+/// Which names a Deep type expression may bind.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum BinderMode<'a> {
+    /// User input outside a binder declaration. Only `_` is a legal inference
+    /// hole; other `t-var` / `d-var` / `d-rank` names are unbound.
+    ClosedInput,
+    /// A `deftype` or `typealias` parameter list explicitly names every legal
+    /// type, dimension, and rank binder.
+    Explicit(&'a HashSet<String>),
+    /// A `defsig` implicitly quantifies each named type/dimension/rank variable.
+    ImplicitGeneric,
+    /// Metadata emitted by a checked compiler pass may carry generated names.
+    TrustedCompilerMetadata,
+}
+
+/// Nominal declaration headers visible while resolving one check unit.
+///
+/// This is the explicit, runtime-only half of declaration state. It may
+/// contain self/forward headers whose bodies have not yet validated; only
+/// successfully resolved declarations enter [`AdtRegistry::defs`] or
+/// [`AdtRegistry::aliases`]. The registry's serde representation skips this
+/// environment and reconstructs it from those validated definitions before a
+/// later check.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct TypeResolutionEnv {
+    arities: HashMap<String, usize>,
+}
+
+impl TypeResolutionEnv {
+    pub(crate) fn from_registry(registry: &AdtRegistry) -> Self {
+        let mut headers = Self::default();
+        // Checker-native nominal surfaces that are typed structurally by
+        // builtin rules instead of carrying registry variants.
+        for (name, arity) in [("Dict", 2), ("Result", 2), ("String", 0)] {
+            headers.arities.insert(name.to_string(), arity);
+        }
+        for (name, definition) in &registry.defs {
+            headers
+                .arities
+                .insert(name.clone(), definition.type_params.len());
+        }
+        for (name, definition) in &registry.aliases {
+            headers
+                .arities
+                .insert(name.clone(), definition.params.len());
+        }
+        headers
+    }
+
+    pub(crate) fn insert(&mut self, name: impl Into<String>, arity: usize) {
+        self.arities.entry(name.into()).or_insert(arity);
+    }
+
+    pub(crate) fn extend_from(&mut self, other: &Self) {
+        for (name, arity) in &other.arities {
+            self.arities.insert(name.clone(), *arity);
+        }
+    }
+
+    fn arity(&self, name: &str) -> Option<usize> {
+        self.arities.get(name).copied()
+    }
+}
+
+/// Stateful resolver for one binder scope. Sharing an instance across field
+/// types or signature components preserves repeated variable identity.
+pub(crate) struct DeepTypeResolver<'resolver, 'session, 'binders> {
+    use_site: TypeUseSite,
+    binder_mode: BinderMode<'binders>,
+    headers: &'resolver TypeResolutionEnv,
+    vg: &'resolver mut VarGen,
+    errors: &'resolver mut DiagnosticSink<'session>,
+    type_vars: HashMap<String, TypeVar>,
+    dim_vars: HashMap<String, DimVar>,
+    rank_vars: HashMap<String, RankVar>,
+    owner_location: Option<TypeDiagnosticLocation>,
+    resolution_location: Option<TypeDiagnosticLocation>,
+    current_location: Option<TypeDiagnosticLocation>,
+}
+
+impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binders> {
+    pub(crate) fn new(
+        use_site: TypeUseSite,
+        binder_mode: BinderMode<'binders>,
+        headers: &'resolver TypeResolutionEnv,
+        vg: &'resolver mut VarGen,
+        errors: &'resolver mut DiagnosticSink<'session>,
+    ) -> Self {
+        let mut resolver = Self {
+            use_site,
+            binder_mode,
+            headers,
+            vg,
+            errors,
+            type_vars: HashMap::new(),
+            dim_vars: HashMap::new(),
+            rank_vars: HashMap::new(),
+            owner_location: None,
+            resolution_location: None,
+            current_location: None,
+        };
+        if let BinderMode::Explicit(names) = binder_mode {
+            // Nominal parameters are type arguments even when their occurrence
+            // in a field is dimension- or rank-kinded.
+            for name in names {
+                resolver
+                    .type_vars
+                    .insert(name.clone(), resolver.vg.fresh_tvar());
+            }
+        }
+        resolver
+    }
+
+    /// Provide the source construct that owns this resolver use site. The
+    /// resolved type expression remains the preferred location; this owner is
+    /// the fallback for synthesized children such as a Surf cast target.
+    pub(crate) fn with_diagnostic_owner(mut self, owner: &deep::Expr) -> Self {
+        self.owner_location = TypeDiagnosticLocation::from_expr(owner);
+        self
+    }
+
+    pub(crate) fn resolve(&mut self, expr: &deep::Expr) -> Result<ResolvedDeepType, ErrorWitness> {
+        self.begin_resolution(expr);
+        self.resolve_type(expr).map(ResolvedDeepType)
+    }
+
+    /// Resolve cast-target syntax through this boundary before semantic cast
+    /// classification. In particular, canonical `t-prim` uses `one_symbol`,
+    /// so an extra child cannot be ignored by a cast-only fast path.
+    pub(crate) fn resolve_cast_target(
+        &mut self,
+        expr: &deep::Expr,
+    ) -> Result<ResolvedCastTarget, ErrorWitness> {
+        self.begin_resolution(expr);
+        if let Some(name) = symbol_name(expr) {
+            return Ok(ResolvedCastTarget::PrimitiveSpelling {
+                name: name.to_string(),
+                canonical: false,
+            });
+        }
+        if let deep::Expr::List(list, _) = expr {
+            let (tag, children) = self.type_form(list)?;
+            if tag == "t-prim" {
+                let name = self.one_symbol(tag, children)?;
+                return Ok(ResolvedCastTarget::PrimitiveSpelling {
+                    name: name.to_string(),
+                    canonical: true,
+                });
+            }
+        }
+        self.resolve(expr).map(ResolvedCastTarget::Type)
+    }
+
+    pub(crate) fn type_var(&self, name: &str) -> Option<TypeVar> {
+        self.type_vars.get(name).copied()
+    }
+
+    pub(crate) fn type_vars(&self) -> Vec<TypeVar> {
+        let mut vars: Vec<_> = self.type_vars.values().copied().collect();
+        vars.sort_by_key(|var| var.0);
+        vars
+    }
+
+    pub(crate) fn dim_vars(&self) -> Vec<DimVar> {
+        let mut vars: Vec<_> = self.dim_vars.values().copied().collect();
+        vars.sort_by_key(|var| var.0);
+        vars
+    }
+
+    pub(crate) fn rank_vars(&self) -> Vec<RankVar> {
+        let mut vars: Vec<_> = self.rank_vars.values().copied().collect();
+        vars.sort_by_key(|var| var.0);
+        vars
+    }
+
+    pub(crate) fn diagnostic_location(&self) -> Option<TypeDiagnosticLocation> {
+        self.current_location
+            .clone()
+            .or_else(|| self.resolution_location.clone())
+            .or_else(|| self.owner_location.clone())
+    }
+
+    fn begin_resolution(&mut self, expr: &deep::Expr) {
+        self.resolution_location =
+            TypeDiagnosticLocation::from_expr(expr).or_else(|| self.owner_location.clone());
+        self.current_location = self.resolution_location.clone();
+    }
+
+    fn enter_expr(&mut self, expr: &deep::Expr) {
+        self.current_location = TypeDiagnosticLocation::from_expr(expr)
+            .or_else(|| self.resolution_location.clone())
+            .or_else(|| self.owner_location.clone());
+    }
+
+    fn resolve_type(&mut self, expr: &deep::Expr) -> Result<Type, ErrorWitness> {
+        self.enter_expr(expr);
+        let deep::Expr::List(list, _) = expr else {
+            return Err(self.malformed(format!(
+                "{} must use a canonical Deep type form; bare `{}` is not a type",
+                self.use_site.label(),
+                render_expr(expr)
+            )));
+        };
+        let (tag, children) = self.type_form(list)?;
+        match tag {
+            "t-prim" => {
+                let name = self.one_symbol(tag, children)?;
+                Prim::parse_name(name).map(Type::Prim).ok_or_else(|| {
+                    self.type_error(format!(
+                        "unknown primitive type `{name}` in {}",
+                        self.use_site.label()
+                    ))
+                })
+            }
+            "t-var" => {
+                let name = self.one_symbol(tag, children)?;
+                self.resolve_type_var(name).map(Type::Var)
+            }
+            "t-fn" => {
+                if children.is_empty() {
+                    return Err(self.malformed(format!(
+                        "malformed `t-fn` in {}: expected at least a return type",
+                        self.use_site.label()
+                    )));
+                }
+                let mut parts = Vec::with_capacity(children.len());
+                for child in children {
+                    parts.push(self.resolve_type(child)?);
+                }
+                let ret = parts.pop().expect("non-empty checked above");
+                Ok(Type::Fn(parts, Box::new(ret)))
+            }
+            "t-ref" => {
+                self.exact_arity(tag, children, 1)?;
+                Ok(Type::Ref(Box::new(self.resolve_type(&children[0])?)))
+            }
+            "t-tensor" => {
+                if children.is_empty() {
+                    return Err(self.malformed(format!(
+                        "malformed `t-tensor` in {}: expected dimensions followed by a precision",
+                        self.use_site.label()
+                    )));
+                }
+                let mut dims = Vec::with_capacity(children.len().saturating_sub(1));
+                for child in &children[..children.len() - 1] {
+                    dims.push(self.resolve_dim(child)?);
+                }
+                let precision = match self.resolve_type(&children[children.len() - 1])? {
+                    Type::Prim(prim) => TensorPrec::Concrete(prim),
+                    Type::Var(var) => TensorPrec::Var(var),
+                    other => {
+                        return Err(self.type_error(format!(
+                            "tensor precision in {} must be `t-prim` or a legal `t-var`, got `{other}`",
+                            self.use_site.label()
+                        )));
+                    }
+                };
+                Ok(Type::Tensor(dims, precision))
+            }
+            "t-adt" => {
+                let Some(name) = children.first().and_then(symbol_name) else {
+                    return Err(self.malformed(format!(
+                        "malformed `t-adt` in {}: expected a nominal type name followed by type arguments",
+                        self.use_site.label()
+                    )));
+                };
+                let Some(expected) = self.headers.arity(name) else {
+                    return Err(self.type_error(format!(
+                        "unknown nominal type `{name}` in {}",
+                        self.use_site.label()
+                    )));
+                };
+                let actual = children.len() - 1;
+                if actual != expected {
+                    return Err(self.type_error(format!(
+                        "nominal type `{name}` in {} expects {expected} type argument(s), got {actual}",
+                        self.use_site.label()
+                    )));
+                }
+                let mut args = Vec::with_capacity(actual);
+                for child in &children[1..] {
+                    args.push(self.resolve_type(child)?);
+                }
+                Ok(Type::Adt(name.to_string(), args))
+            }
+            "t-tuple" => {
+                let mut elements = Vec::with_capacity(children.len());
+                for child in children {
+                    elements.push(self.resolve_type(child)?);
+                }
+                Ok(Type::Tuple(elements))
+            }
+            "t-unit" => {
+                self.exact_arity(tag, children, 0)?;
+                Ok(Type::Unit)
+            }
+            other => Err(self.malformed(format!(
+                "unknown Deep type tag `{other}` in {}",
+                self.use_site.label()
+            ))),
+        }
+    }
+
+    fn resolve_dim(&mut self, expr: &deep::Expr) -> Result<Dim, ErrorWitness> {
+        self.enter_expr(expr);
+        let deep::Expr::List(list, _) = expr else {
+            return Err(self.malformed(format!(
+                "tensor dimension in {} must use a canonical Deep dimension form, got `{}`",
+                self.use_site.label(),
+                render_expr(expr)
+            )));
+        };
+        let (tag, children) = self.type_form(list)?;
+        match tag {
+            "d-name" => {
+                let name = self.one_symbol(tag, children)?;
+                if name == "*" {
+                    Ok(Dim::Wildcard)
+                } else {
+                    Ok(Dim::Name(name.to_string()))
+                }
+            }
+            "d-var" => {
+                let name = self.one_symbol(tag, children)?;
+                self.resolve_dim_var(name).map(Dim::Var)
+            }
+            "d-rank" => {
+                let name = self.one_symbol(tag, children)?;
+                self.resolve_rank_var(name).map(Dim::Rank)
+            }
+            "d-lit" => {
+                self.exact_arity(tag, children, 1)?;
+                match &children[0] {
+                    deep::Expr::Atom(deep::Atom::Int(value), _) => Ok(Dim::Lit(*value)),
+                    _ => Err(self.malformed(format!(
+                        "malformed `d-lit` in {}: expected one integer child",
+                        self.use_site.label()
+                    ))),
+                }
+            }
+            other => Err(self.malformed(format!(
+                "unknown Deep dimension tag `{other}` in {}",
+                self.use_site.label()
+            ))),
+        }
+    }
+
+    fn resolve_type_var(&mut self, name: &str) -> Result<TypeVar, ErrorWitness> {
+        if name == "_" {
+            return self
+                .allows_hole()
+                .then(|| self.vg.fresh_tvar())
+                .ok_or_else(|| self.unbound("type", name));
+        }
+        if !self.allows_name(name) {
+            return Err(self.unbound("type", name));
+        }
+        Ok(*self
+            .type_vars
+            .entry(name.to_string())
+            .or_insert_with(|| self.vg.fresh_tvar()))
+    }
+
+    fn resolve_dim_var(&mut self, name: &str) -> Result<DimVar, ErrorWitness> {
+        if name == "_" {
+            return self
+                .allows_hole()
+                .then(|| self.vg.fresh_dvar())
+                .ok_or_else(|| self.unbound("dimension", name));
+        }
+        if !self.allows_name(name) {
+            return Err(self.unbound("dimension", name));
+        }
+        Ok(*self
+            .dim_vars
+            .entry(name.to_string())
+            .or_insert_with(|| self.vg.fresh_dvar()))
+    }
+
+    fn resolve_rank_var(&mut self, name: &str) -> Result<RankVar, ErrorWitness> {
+        if name == "_" {
+            return self
+                .allows_hole()
+                .then(|| self.vg.fresh_rvar())
+                .ok_or_else(|| self.unbound("rank", name));
+        }
+        if !self.allows_name(name) {
+            return Err(self.unbound("rank", name));
+        }
+        Ok(*self
+            .rank_vars
+            .entry(name.to_string())
+            .or_insert_with(|| self.vg.fresh_rvar()))
+    }
+
+    fn allows_name(&self, name: &str) -> bool {
+        match self.binder_mode {
+            BinderMode::ClosedInput => false,
+            BinderMode::Explicit(names) => names.contains(name),
+            BinderMode::ImplicitGeneric | BinderMode::TrustedCompilerMetadata => true,
+        }
+    }
+
+    fn allows_hole(&self) -> bool {
+        !matches!(self.binder_mode, BinderMode::Explicit(_))
+    }
+
+    fn type_form<'b>(
+        &mut self,
+        list: &'b deep::List,
+    ) -> Result<(&'b str, &'b [deep::Expr]), ErrorWitness> {
+        let Some(tag) = list.elements.first().and_then(symbol_name) else {
+            return Err(self.malformed(format!(
+                "malformed Deep type form in {}: expected a tag symbol",
+                self.use_site.label()
+            )));
+        };
+        if !matches!(list.elements.get(1), Some(deep::Expr::Map(_, _))) {
+            return Err(self.malformed(format!(
+                "malformed `{tag}` in {}: the metadata map must be present at element 1",
+                self.use_site.label()
+            )));
+        }
+        Ok((tag, &list.elements[2..]))
+    }
+
+    fn one_symbol<'b>(
+        &mut self,
+        tag: &str,
+        children: &'b [deep::Expr],
+    ) -> Result<&'b str, ErrorWitness> {
+        self.exact_arity(tag, children, 1)?;
+        symbol_name(&children[0]).ok_or_else(|| {
+            self.malformed(format!(
+                "malformed `{tag}` in {}: expected one symbol child",
+                self.use_site.label()
+            ))
+        })
+    }
+
+    fn exact_arity(
+        &mut self,
+        tag: &str,
+        children: &[deep::Expr],
+        expected: usize,
+    ) -> Result<(), ErrorWitness> {
+        if children.len() == expected {
+            Ok(())
+        } else {
+            Err(self.malformed(format!(
+                "malformed `{tag}` in {}: expected {expected} child(ren), got {}",
+                self.use_site.label(),
+                children.len()
+            )))
+        }
+    }
+
+    fn unbound(&mut self, kind: &str, name: &str) -> ErrorWitness {
+        self.type_error(format!(
+            "undeclared {kind} variable `{name}` in {}",
+            self.use_site.label()
+        ))
+    }
+
+    fn malformed(&mut self, message: String) -> ErrorWitness {
+        let error = CheckError::new(CheckErrorKind::MalformedForm, message, vec![]);
+        let error = self
+            .diagnostic_location()
+            .map_or(error.clone(), |location| location.attach(error));
+        report_witness(self.errors, error)
+    }
+
+    fn type_error(&mut self, message: String) -> ErrorWitness {
+        let error = CheckError::new(CheckErrorKind::TypeMismatch, message, vec![]);
+        let error = self
+            .diagnostic_location()
+            .map_or(error.clone(), |location| location.attach(error));
+        report_witness(self.errors, error)
+    }
+}
+
+fn symbol_name(expr: &deep::Expr) -> Option<&str> {
+    match expr {
+        deep::Expr::Atom(deep::Atom::Symbol(name), _) => Some(name),
+        _ => None,
+    }
+}
+
+fn render_expr(expr: &deep::Expr) -> String {
+    match expr {
+        deep::Expr::Atom(deep::Atom::Symbol(name), _) => name.clone(),
+        deep::Expr::Atom(atom, _) => format!("{atom:?}"),
+        deep::Expr::List(list, _) => list
+            .elements
+            .first()
+            .and_then(symbol_name)
+            .unwrap_or("<list>")
+            .to_string(),
+        deep::Expr::Map(_, _) => "<metadata-map>".to_string(),
+        deep::Expr::MetaExpr(_, _) => "<metadata-expression>".to_string(),
+    }
+}

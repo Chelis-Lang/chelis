@@ -2313,14 +2313,52 @@ chelis#731 Phase 3.)*
 > typed result SHALL contain no error-typed expression: `Type::Error`
 > without a corresponding reported diagnostic SHALL be unconstructible.
 
-*(The four Phase 0 holes and the chelis#710 malformed-form family are
-closed at chelis#731 Phase 1, and the totality-invariant harness
-(`crates/chelis-cli/tests/issue_731_totality_invariant.rs`) plus the
-fitness-honesty corpus (§C4.4) enforce it. Structural
-unconstructibility of a silent `Type::Error` - the `ErrorWitness` token -
-is chelis#731 Phase 2; the Surf-reachable chelis#755 (field access) and
-chelis#756 (deep-type conversion) sites remain silent until that global
-migration.)*
+*(Structurally honored as of chelis#731 Phase 2: `Type::Error` carries a
+private `ErrorWitness`. A fresh witness is minted only by
+`chelis_types::errors::report`, which appends the owning diagnostic through
+the checker's private `DiagnosticSink`; `propagate` copies an existing witness
+for cascade suppression. The sink is append-only, and the shared
+`session::run_result` boundary vetoes `Ok` whenever that authoritative vector
+is non-empty. A planted bare `Type::Error` fails to compile outside the
+diagnostics module.)*
+
+*(Fresh inference results converge on `finalize_checked_program`, which
+validates the annotated runtime tree's required function, pattern, and
+expression stamps, with incoming and inferred signature metadata as
+backstops. Annotation consumes canonical stamps from the owning
+`InferenceProduct` epoch; it does not semantically re-infer a node under a
+fresh substitution. The exhaustive child-role classification includes an
+effects-owned `EffectHandler` payload and a type-owned handled body. Public raw
+`from_parts`/`try_from_parts` reconstruction does not exist. The effects-owned
+tree transformation is fallible
+`CheckedProgram::try_with_effect_annotations`: it requires identical roots,
+spans, atoms, children, and all metadata except the effects-owned `effects`
+entry; preserves the checked type environment, signature inference, and
+linearity; and reruns totality validation. The
+effects pass maps a violation to one `TypeTotality` error. Other operations
+have disjoint ownership: `CheckedProgram::with_linearity` changes only
+linearity metadata, and `CheckedProgram::compose` combines two
+already-successful, context-stacked checked halves. Neither rewrites
+type-owned tree structure.)*
+
+*(The Surf-reachable chelis#755 field-access and chelis#756 deep-type sites are
+closed here. Deep type and dimension resolution has one centralized, located,
+witnessed boundary: `DeepTypeResolver` returns a resolved type or an
+`ErrorWitness` minted while appending the exact owning diagnostic. Recursive
+parents propagate without re-reporting. Binder visibility is an explicit,
+serde-skipped `TypeResolutionScope` field on the cloned lexical `Env`, never
+ambient process/thread state. Binder modes distinguish closed input, explicit
+`deftype`/`typealias` binders, implicit-generic `defsig` binders, and trusted
+compiler metadata. Nominal headers and arities are precollected for the full
+check unit, preserving legal self/forward references while preventing unknown
+names, wrong arities, malformed nested nodes, and bare declaration-field types
+from entering a successful/cacheable context. Bare and canonical cast targets
+use the same boundary and exact-arity checks. Recursive functions are
+prebound only within genuine SCCs, inferred/generalized as a unit, with no
+post-report diagnostic deletion. The Phase 0 invariant mirror, fitness-honesty
+corpus, cascade-count corpus, and checker-totality Phase 2 oracle in
+`spec/design/checker_totality.md` enforce these claims. See spec/03
+§2.5.1/§2.6.)*
 
 > **[04-TOT-3]** A structurally malformed Deep form that reaches the
 > checker SHALL be rejected with a diagnostic naming the tag and the

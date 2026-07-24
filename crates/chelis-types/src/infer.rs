@@ -10,11 +10,33 @@ use chelis_deep::ast as deep;
 use crate::adt::{AdtRegistry, CallShape};
 use crate::builtins;
 use crate::context::{TypeEnv, TypeEnvInner};
+use crate::deep_type::{
+    BinderMode, DeepTypeResolver, ResolvedCastTarget, TypeDiagnosticLocation, TypeResolutionEnv,
+    TypeUseSite,
+};
 use crate::env::Env;
 use crate::errors::*;
 use crate::linearity::LinearityInfo;
+use crate::session::DiagnosticSink;
 use crate::types::*;
 use crate::unify::*;
+
+trait DiagnosticOutput {
+    fn push(&mut self, error: CheckError);
+}
+
+#[cfg(test)]
+impl DiagnosticOutput for Vec<CheckError> {
+    fn push(&mut self, error: CheckError) {
+        Vec::push(self, error);
+    }
+}
+
+impl DiagnosticOutput for DiagnosticSink<'_> {
+    fn push(&mut self, error: CheckError) {
+        DiagnosticSink::push(self, error);
+    }
+}
 
 use std::cell::{Cell, RefCell};
 
@@ -247,7 +269,7 @@ impl StackExhaustionScope {
     /// second call is a no-op. Call after the whole pipeline has run and
     /// before the empty-errors gate, so exhaustion always surfaces as a hard
     /// check failure.
-    fn drain_into(&self, errors: &mut Vec<CheckError>) {
+    fn drain_into(&self, errors: &mut impl DiagnosticOutput) {
         if let Some((site, span_id)) = STACK_EXHAUSTED.with(|cell| cell.borrow_mut().take()) {
             errors.push(stack_depth_error(&site, span_id.as_deref()));
         }
@@ -358,48 +380,706 @@ fn stack_depth_error(site: &str, span_id: Option<&str>) -> CheckError {
     )
 }
 
-thread_local! {
-    /// Per-annotation-pass map from a def name to its declared
-    /// parameter type *expressions*, taken verbatim from the matching
-    /// `(defsig name (t-fn arg-exprs... ret))` node.
-    ///
-    /// `annotate_fn_children` consults this when stamping a def's
-    /// `(params ...)` node so a parameter whose type comes from a
-    /// separate `sig` declaration gets the declared type -- preserving
-    /// `&` borrow wrappers -- written where IR lowering reads it.
-    /// Defs with no `defsig` are absent from the map and keep bare
-    /// params, leaving read-only/borrow inference to
-    /// `infer_signature_metadata`.
-    ///
-    /// Populated for the duration of `annotate_ir_program` /
-    /// `annotate_ir_program_with_context` and cleared afterwards.
-    static DECLARED_SIG_PARAM_TYPES: RefCell<HashMap<String, Vec<deep::Expr>>> =
-        RefCell::new(HashMap::new());
+#[derive(Clone)]
+struct DeclaredSigMetadata {
+    param_types: Vec<deep::Expr>,
+    binders: HashSet<String>,
 }
 
-/// Scan `exprs` for `(defsig name (t-fn ...))` nodes and install a
-/// name -> declared-param-type-exprs map into `DECLARED_SIG_PARAM_TYPES`
-/// for the duration of the returned guard. Restores the previous map
-/// (typically empty) on drop so nested / re-entrant annotation passes
-/// do not leak state.
-fn install_declared_sig_param_types(exprs: &[deep::Expr]) -> DeclaredSigGuard {
-    let mut map: HashMap<String, Vec<deep::Expr>> = HashMap::new();
-    for expr in exprs {
+/// Explicit annotation-time declaration context. The declared signature map
+/// belongs to one annotation unit; `current_type_binders` is narrowed to the
+/// `def` whose children are being annotated and is passed through every
+/// recursive annotation call.
+#[derive(Clone, Copy)]
+struct AnnotationResolutionContext<'a> {
+    declared_signatures: &'a HashMap<String, DeclaredSigMetadata>,
+}
+
+impl<'a> AnnotationResolutionContext<'a> {
+    fn root(declared_signatures: &'a HashMap<String, DeclaredSigMetadata>) -> Self {
+        Self {
+            declared_signatures,
+        }
+    }
+
+    fn declared_signature(self, name: &str) -> Option<&'a DeclaredSigMetadata> {
+        self.declared_signatures.get(name)
+    }
+}
+
+/// Semantic role of one tagged Deep node's child in checker-owned type
+/// stamping. This is deliberately distinct from the child's syntactic tag:
+/// a `lit` is a runtime expression under `app`, but the same shape is selector
+/// syntax in `tuple-get`, `grad`, or `vmap`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ChildStampRole {
+    /// Traversed by ordinary expression inference.
+    RuntimeExpr,
+    /// Compiler/source syntax which is preserved verbatim.
+    Syntax,
+    /// A field, axis, projection, or transform selector.
+    Selector,
+    /// Handler payload syntax whose literal-form contract is owned by
+    /// `chelis-effects`, not expression inference.
+    EffectHandler,
+    /// A declaration, parameter, or binding name.
+    Binder,
+    /// Type/dimension syntax resolved by its owning type consumer.
+    Type,
+    /// Traversed by a dedicated inference owner rather than `infer_expr` on
+    /// the structural parent (module declarations, patterns, helper nodes,
+    /// and synthesized pipe stages).
+    ExplicitInferenceBypass,
+}
+
+/// Exhaustive child-role table for the canonical closed Deep vocabulary.
+///
+/// Returning `None` is a loud version-skew signal, never permission to treat
+/// an unknown child as a runtime expression. The completeness test below
+/// iterates `chelis_deep::validate::VALID_TAGS`, the grammar's single source
+/// of truth, so adding a tag requires an explicit ownership decision here.
+fn child_stamp_role(tag: &str, index: usize, _arity: usize) -> Option<ChildStampRole> {
+    use ChildStampRole::{
+        Binder, EffectHandler, ExplicitInferenceBypass, RuntimeExpr, Selector, Syntax, Type,
+    };
+
+    Some(match tag {
+        // Module wrappers are not inferred as one expression. Their
+        // declarations each own a separate inference epoch.
+        "module" => {
+            if index == 0 {
+                Binder
+            } else {
+                ExplicitInferenceBypass
+            }
+        }
+        "import" | "import-all" | "export" => Syntax,
+
+        // Declarations.
+        "def" => {
+            if index == 0 {
+                Binder
+            } else {
+                RuntimeExpr
+            }
+        }
+        "defsig" => {
+            if index == 0 {
+                Binder
+            } else {
+                Type
+            }
+        }
+        "deftype" | "typealias" | "variant" | "field" => {
+            if index == 0 {
+                Binder
+            } else {
+                Type
+            }
+        }
+        "defdim" => Binder,
+
+        // Expressions and their structural helper positions.
+        "fn" => {
+            if index == 0 {
+                Binder
+            } else {
+                RuntimeExpr
+            }
+        }
+        "app" | "if" | "block" | "tuple" | "par" | "jit" | "realize" | "copy" | "borrow"
+        | "unquote" | "splice" => RuntimeExpr,
+        "handle-effect" => {
+            if index == 0 {
+                EffectHandler
+            } else {
+                RuntimeExpr
+            }
+        }
+        "let" => {
+            if index == 0 {
+                ExplicitInferenceBypass
+            } else {
+                RuntimeExpr
+            }
+        }
+        "match" => {
+            if index == 0 {
+                RuntimeExpr
+            } else {
+                ExplicitInferenceBypass
+            }
+        }
+        "arm" => {
+            if index == 0 {
+                ExplicitInferenceBypass
+            } else {
+                RuntimeExpr
+            }
+        }
+        "var" | "lit" => Syntax,
+        "record" => {
+            if index == 0 {
+                Type
+            } else {
+                ExplicitInferenceBypass
+            }
+        }
+        "access" => {
+            if index == 0 {
+                RuntimeExpr
+            } else {
+                Selector
+            }
+        }
+        "pipe" => {
+            if index == 0 {
+                RuntimeExpr
+            } else {
+                ExplicitInferenceBypass
+            }
+        }
+        "tuple-get" => {
+            if index == 0 {
+                RuntimeExpr
+            } else {
+                Selector
+            }
+        }
+        "record-update" => {
+            if index == 0 {
+                RuntimeExpr
+            } else {
+                ExplicitInferenceBypass
+            }
+        }
+
+        // Pattern nodes are consumed by the primary pattern traversal.
+        "pat-var" => Binder,
+        "pat-lit" => Syntax,
+        "pat-ctor" | "pat-record" => {
+            if index == 0 {
+                Selector
+            } else {
+                ExplicitInferenceBypass
+            }
+        }
+        "pat-tuple" => ExplicitInferenceBypass,
+        "pat-wild" => Syntax,
+        "pat-as" => {
+            if index == 0 {
+                Binder
+            } else {
+                ExplicitInferenceBypass
+            }
+        }
+
+        // Type and dimension nodes are owned recursively by DeepTypeResolver,
+        // never by expression annotation.
+        "t-prim" | "t-fn" | "t-tensor" | "t-adt" | "t-var" | "t-ref" | "t-unit" | "t-tuple"
+        | "d-name" | "d-var" | "d-lit" | "d-rank" => Type,
+
+        // Transform-specific selector/type positions.
+        "grad" | "vmap" => {
+            if index == 0 {
+                RuntimeExpr
+            } else {
+                Selector
+            }
+        }
+        "cast" => {
+            if index == 0 {
+                RuntimeExpr
+            } else {
+                Type
+            }
+        }
+
+        // Quoted children and effect/resource payloads are syntax data.
+        "quote" | "effects" | "resource" => Syntax,
+
+        // Structural helper nodes. `kv` is also used by pattern records, so
+        // its value/pattern slot is an explicit owning traversal in both
+        // contexts; canonical runtime values still record their normal stamp.
+        "params" => Binder,
+        "bind" => {
+            if index.is_multiple_of(2) {
+                Binder
+            } else {
+                RuntimeExpr
+            }
+        }
+        "kv" => {
+            if index == 0 {
+                Selector
+            } else {
+                ExplicitInferenceBypass
+            }
+        }
+
+        _ => return None,
+    })
+}
+
+/// One checker operation's typed inference result. The product is private,
+/// session-local, and never serialized: annotation consumes it immediately
+/// after the owning inference traversal completes.
+#[derive(Default)]
+struct InferenceProduct {
+    typed_nodes: usize,
+    total_nodes: usize,
+    next_epoch: u64,
+    active_epoch: Option<TypeStampEpoch>,
+    owner_types: HashMap<usize, FinalOwnerType>,
+    type_headers: TypeResolutionEnv,
+}
+
+struct TypeStampEpoch {
+    id: u64,
+    owners: HashMap<usize, StampRequirement>,
+    writes: HashMap<usize, Vec<OwnerTypeWrite>>,
+}
+
+#[derive(Clone, Copy)]
+struct StampRequirement {
+    role: &'static str,
+    stamp_required: bool,
+}
+
+struct OwnerTypeWrite {
+    ty: Type,
+    source: &'static str,
+}
+
+struct FinalOwnerType {
+    epoch: u64,
+    ty: Type,
+}
+
+impl InferenceProduct {
+    fn stats(&self) -> InferStats {
+        InferStats {
+            typed_nodes: self.typed_nodes,
+            total_nodes: self.total_nodes,
+        }
+    }
+
+    fn begin_root(&mut self, root: &deep::Expr, errors: &mut DiagnosticSink<'_>) {
+        assert!(
+            self.active_epoch.is_none(),
+            "type-stamp epochs must not overlap"
+        );
+        let id = self.next_epoch;
+        self.next_epoch += 1;
+        let mut epoch = TypeStampEpoch {
+            id,
+            owners: HashMap::new(),
+            writes: HashMap::new(),
+        };
+        register_annotation_owners(root, &mut epoch, errors);
+        self.active_epoch = Some(epoch);
+    }
+
+    fn record_canonical(&mut self, expr: &deep::Expr, ty: Type) {
+        self.record(expr, ty, "canonical infer_expr traversal");
+    }
+
+    fn record_bypass(&mut self, expr: &deep::Expr, ty: Type, source: &'static str) {
+        self.record(expr, ty, source);
+    }
+
+    fn record(&mut self, expr: &deep::Expr, ty: Type, source: &'static str) {
+        let Some(epoch) = self.active_epoch.as_mut() else {
+            return;
+        };
+        let key = expr_key(expr);
+        if !epoch.owners.contains_key(&key) {
+            return;
+        }
+        epoch
+            .writes
+            .entry(key)
+            .or_default()
+            .push(OwnerTypeWrite { ty, source });
+    }
+
+    fn finish_root(&mut self, subst: &Subst, errors: &mut DiagnosticSink<'_>) {
+        let Some(epoch) = self.active_epoch.take() else {
+            errors.push(internal_owner_stamp_error(
+                "attempted to finish a type-stamp epoch that was not active".to_string(),
+            ));
+            return;
+        };
+
+        for (key, requirement) in epoch.owners {
+            let Some(writes) = epoch.writes.get(&key) else {
+                // Missing owners are diagnosed at the exact annotation lookup,
+                // where the original construct and role are still available.
+                continue;
+            };
+            let mut resolved = writes
+                .iter()
+                .map(|write| (subst.apply(&write.ty), write.source));
+            let Some((canonical, canonical_source)) = resolved.next() else {
+                continue;
+            };
+            for (candidate, candidate_source) in resolved {
+                if !owner_types_compatible(&canonical, &candidate) {
+                    errors.push(internal_owner_stamp_error(format!(
+                        "conflicting authoritative type writes for {} in epoch {}: \
+                         `{canonical}` from {canonical_source} vs `{candidate}` from \
+                         {candidate_source}",
+                        requirement.role, epoch.id
+                    )));
+                }
+            }
+            if requirement.stamp_required {
+                self.owner_types.insert(
+                    key,
+                    FinalOwnerType {
+                        epoch: epoch.id,
+                        ty: canonical,
+                    },
+                );
+            }
+        }
+    }
+
+    fn owner_type(
+        &self,
+        expr: &deep::Expr,
+        role: &'static str,
+        errors: &mut DiagnosticSink<'_>,
+    ) -> Option<Type> {
+        match self.owner_types.get(&expr_key(expr)) {
+            Some(owner) => {
+                let _owning_epoch = owner.epoch;
+                Some(owner.ty.clone())
+            }
+            None => {
+                let construct = match expr {
+                    deep::Expr::List(list, _) => get_tag(list).unwrap_or("<untagged-list>"),
+                    deep::Expr::Atom(_, _) => "<atom>",
+                    deep::Expr::Map(_, _) => "<map>",
+                    deep::Expr::MetaExpr(_, _) => "<meta-expr>",
+                };
+                errors.push(internal_owner_stamp_error(format!(
+                    "missing authoritative type stamp for {role} `{construct}`"
+                )));
+                None
+            }
+        }
+    }
+
+    fn current_owner_type(
+        &self,
+        expr: &deep::Expr,
+        subst: &Subst,
+        errors: &mut DiagnosticSink<'_>,
+    ) -> Option<Type> {
+        let Some(epoch) = self.active_epoch.as_ref() else {
+            errors.push(internal_owner_stamp_error(
+                "canonical inference requested a stamp outside an active epoch".to_string(),
+            ));
+            return None;
+        };
+        let Some(writes) = epoch.writes.get(&expr_key(expr)) else {
+            errors.push(internal_owner_stamp_error(
+                "canonical inference could not find an already-inferred child stamp".to_string(),
+            ));
+            return None;
+        };
+        let mut resolved = writes.iter().map(|write| subst.apply(&write.ty));
+        let canonical = resolved.next()?;
+        if resolved.any(|candidate| !owner_types_compatible(&canonical, &candidate)) {
+            errors.push(internal_owner_stamp_error(
+                "canonical inference observed conflicting child stamps".to_string(),
+            ));
+            return None;
+        }
+        Some(canonical)
+    }
+}
+
+fn expr_key(expr: &deep::Expr) -> usize {
+    std::ptr::from_ref(expr).addr()
+}
+
+fn owner_types_compatible(left: &Type, right: &Type) -> bool {
+    let mut compatibility_subst = Subst::new();
+    unify(left, right, &mut compatibility_subst).is_ok()
+}
+
+fn internal_owner_stamp_error(message: String) -> CheckError {
+    CheckError::new(
+        CheckErrorKind::Other,
+        format!("internal: annotation owner-stamp invariant violated: {message}"),
+        vec![],
+    )
+}
+
+fn register_annotation_owners(
+    expr: &deep::Expr,
+    epoch: &mut TypeStampEpoch,
+    errors: &mut DiagnosticSink<'_>,
+) {
+    stack_guard!("register_annotation_owners", expr);
+    let deep::Expr::List(list, _) = expr else {
+        if let deep::Expr::MetaExpr(meta, _) = expr {
+            register_annotation_owners(&meta.expr, epoch, errors);
+        }
+        return;
+    };
+    let tag = get_tag(list);
+    if let Some(tag) = tag {
+        let (role, stamp_required) = if tag == "fn" {
+            ("function node", true)
+        } else if should_attach_type_metadata(tag) {
+            ("metadata-eligible expression", true)
+        } else if matches!(tag, "pat-var" | "pat-as") {
+            ("pattern binding", true)
+        } else {
+            ("semantic runtime node", false)
+        };
+        register_owner(epoch, expr, role, stamp_required);
+    }
+    let kids = children(list);
+    for (index, child) in kids.iter().enumerate() {
+        match child_stamp_role(tag.unwrap_or("<untagged-list>"), index, kids.len()) {
+            Some(ChildStampRole::RuntimeExpr | ChildStampRole::ExplicitInferenceBypass) => {
+                register_annotation_owners(child, epoch, errors);
+            }
+            Some(
+                ChildStampRole::Syntax
+                | ChildStampRole::Selector
+                | ChildStampRole::EffectHandler
+                | ChildStampRole::Binder
+                | ChildStampRole::Type,
+            ) => {}
+            None if tag.is_none() => {
+                // Empty guards and other untagged structural lists carry no
+                // owner themselves. Preserve the historical recursive walk
+                // for malformed nested input; its owning checker will reject
+                // the shape before annotation is returned.
+                register_annotation_owners(child, epoch, errors);
+            }
+            None => {
+                errors.push(internal_owner_stamp_error(format!(
+                    "Deep tag `{}` has no child ownership classification",
+                    tag.unwrap_or("<untagged-list>")
+                )));
+                return;
+            }
+        }
+    }
+}
+
+fn register_owner(
+    epoch: &mut TypeStampEpoch,
+    expr: &deep::Expr,
+    role: &'static str,
+    stamp_required: bool,
+) {
+    epoch
+        .owners
+        .entry(expr_key(expr))
+        .or_insert(StampRequirement {
+            role,
+            stamp_required,
+        });
+}
+
+#[cfg(test)]
+pub(crate) enum TypeStampMutationCase {
+    Missing,
+    CompatibleRepeat,
+    IncompatibleRepeat,
+    UnregisteredSynthesized,
+    RuntimeNonStampOwnerLookup,
+}
+
+#[cfg(test)]
+pub(crate) fn run_type_stamp_mutation_case(
+    case: TypeStampMutationCase,
+    errors: &mut DiagnosticSink<'_>,
+) -> bool {
+    let owner = node_expr("app", vec![]);
+    let mut product = InferenceProduct::default();
+    product.begin_root(&owner, errors);
+    match case {
+        TypeStampMutationCase::Missing => {
+            product.finish_root(&Subst::new(), errors);
+            product.owner_type(&owner, "test owner", errors).is_none()
+        }
+        TypeStampMutationCase::CompatibleRepeat => {
+            let ty = Type::Prim(Prim::Int64);
+            product.record_canonical(&owner, ty.clone());
+            product.record_bypass(&owner, ty.clone(), "compatible test repeat");
+            product.finish_root(&Subst::new(), errors);
+            product.owner_type(&owner, "test owner", errors) == Some(ty)
+        }
+        TypeStampMutationCase::IncompatibleRepeat => {
+            product.record_canonical(&owner, Type::Prim(Prim::Int64));
+            product.record_bypass(&owner, Type::Prim(Prim::String), "incompatible test repeat");
+            product.finish_root(&Subst::new(), errors);
+            true
+        }
+        TypeStampMutationCase::UnregisteredSynthesized => {
+            let synthesized = node_expr("var", vec![symbol_expr("temporary")]);
+            product.record_bypass(
+                &synthesized,
+                Type::Prim(Prim::Int64),
+                "unregistered synthesized test node",
+            );
+            product.record_canonical(&owner, Type::Prim(Prim::Int64));
+            product.finish_root(&Subst::new(), errors);
+            product
+                .owner_type(&synthesized, "synthesized test node", errors)
+                .is_none()
+        }
+        TypeStampMutationCase::RuntimeNonStampOwnerLookup => {
+            let runtime_child = node_expr("var", vec![symbol_expr("x")]);
+            let root = node_expr("app", vec![runtime_child]);
+            let mut product = InferenceProduct::default();
+            product.begin_root(&root, errors);
+            let deep::Expr::List(root_list, _) = &root else {
+                unreachable!("node_expr produces a list")
+            };
+            let runtime_child = &children(root_list)[0];
+            product.record_canonical(runtime_child, Type::Prim(Prim::Int64));
+            product.current_owner_type(runtime_child, &Subst::new(), errors)
+                == Some(Type::Prim(Prim::Int64))
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) enum FinalizationMutationCase {
+    MissingRuntimeStamp,
+    SilentErrorOwner,
+    SilentErrorSignature,
+}
+
+#[cfg(test)]
+pub(crate) fn run_finalization_mutation_case(
+    case: FinalizationMutationCase,
+    errors: &mut DiagnosticSink<'_>,
+) {
+    let runtime = node_expr("app", vec![]);
+    let mut signature_context = SignatureInferenceMetadata::default();
+    let annotated = match case {
+        FinalizationMutationCase::MissingRuntimeStamp => vec![runtime],
+        FinalizationMutationCase::SilentErrorOwner => {
+            let mut product = InferenceProduct::default();
+            product.begin_root(&runtime, errors);
+            product.record_canonical(&runtime, crate::errors::error_sentinel_for_test());
+            product.finish_root(&Subst::new(), errors);
+            annotate_ir_program(std::slice::from_ref(&runtime), &product, errors)
+        }
+        FinalizationMutationCase::SilentErrorSignature => {
+            let error_ty = crate::errors::error_sentinel_for_test();
+            signature_context.functions.insert(
+                "poison".to_string(),
+                FunctionSignatureInference {
+                    name: "poison".to_string(),
+                    recursive_cycle: false,
+                    checked_signature: error_ty.clone(),
+                    display_signature: error_ty,
+                    params: vec![],
+                },
+            );
+            vec![]
+        }
+    };
+    let _ = finalize_checked_program(
+        annotated,
+        HashMap::new(),
+        &signature_context,
+        &TypeResolutionEnv::default(),
+        errors,
+    );
+}
+
+/// Collect the declared signature metadata owned by one inference or
+/// annotation unit. The returned map is passed explicitly; nested, sequential,
+/// and parallel checks cannot observe another unit's declarations.
+fn collect_declared_sig_metadata<'a>(
+    exprs: impl IntoIterator<Item = &'a deep::Expr>,
+) -> HashMap<String, DeclaredSigMetadata> {
+    let exprs = exprs.into_iter().collect::<Vec<_>>();
+    let mut map: HashMap<String, DeclaredSigMetadata> = HashMap::new();
+    for expr in &exprs {
         collect_defsig_param_types(expr, &mut map);
     }
-    let previous =
-        DECLARED_SIG_PARAM_TYPES.with(|cell| std::mem::replace(&mut *cell.borrow_mut(), map));
-    DeclaredSigGuard { previous }
+    for expr in exprs {
+        extend_declared_sig_binders_from_def_params(expr, &mut map);
+    }
+    map
 }
 
-struct DeclaredSigGuard {
-    previous: HashMap<String, Vec<deep::Expr>>,
-}
-
-impl Drop for DeclaredSigGuard {
-    fn drop(&mut self) {
-        let restored = std::mem::take(&mut self.previous);
-        DECLARED_SIG_PARAM_TYPES.with(|cell| *cell.borrow_mut() = restored);
+/// Merge declaration-owned binders preserved by an explicit generic `def`
+/// into the matching standalone signature's scope. Surf suppresses the
+/// synthesized `defsig` when a same-name explicit `sig` exists; in that case
+/// the `def f[piece](x: tensor[piece, ...])` parameter syntax is the only Deep
+/// node that still distinguishes the bound `d-var piece` from an ordinary
+/// closed annotation. Restricting this merge to names that already own a
+/// `defsig` keeps an unrelated direct-Deep `(d-var ...)` annotation closed.
+fn extend_declared_sig_binders_from_def_params(
+    expr: &deep::Expr,
+    map: &mut HashMap<String, DeclaredSigMetadata>,
+) {
+    stack_guard!("extend_declared_sig_binders_from_def_params", expr);
+    let deep::Expr::List(list, _) = expr else {
+        return;
+    };
+    if get_tag(list) == Some("module") {
+        for child in children(list) {
+            extend_declared_sig_binders_from_def_params(child, map);
+        }
+        return;
+    }
+    if get_tag(list) != Some("def") {
+        return;
+    }
+    let kids = children(list);
+    let (Some(name), Some(deep::Expr::List(fn_list, _))) =
+        (kids.first().and_then(symbol_name), kids.get(1))
+    else {
+        return;
+    };
+    if get_tag(fn_list) != Some("fn") {
+        return;
+    }
+    let Some(params) = children(fn_list).first() else {
+        return;
+    };
+    let Some(metadata) = map.get_mut(name) else {
+        return;
+    };
+    let deep::Expr::List(params_list, _) = params else {
+        return;
+    };
+    for param in children(params_list) {
+        let type_expr = match param {
+            deep::Expr::MetaExpr(meta, _) => meta
+                .entries
+                .iter()
+                .find(|(key, _)| key == "type")
+                .map(|(_, value)| value),
+            deep::Expr::List(param_list, _) => param_list.elements.get(1).and_then(|meta| {
+                let deep::Expr::Map(meta, _) = meta else {
+                    return None;
+                };
+                meta.entries
+                    .iter()
+                    .find(|(key, _)| key == "type")
+                    .map(|(_, value)| value)
+            }),
+            _ => None,
+        };
+        if let Some(type_expr) = type_expr {
+            metadata.binders.extend(deep_type_binder_names(type_expr));
+        }
     }
 }
 
@@ -407,7 +1087,7 @@ impl Drop for DeclaredSigGuard {
 /// descending through `(module ...)` wrappers. Only the leading
 /// argument type expressions are stored (the trailing return type is
 /// dropped). A re-declared name keeps the first sig seen.
-fn collect_defsig_param_types(expr: &deep::Expr, map: &mut HashMap<String, Vec<deep::Expr>>) {
+fn collect_defsig_param_types(expr: &deep::Expr, map: &mut HashMap<String, DeclaredSigMetadata>) {
     // Bail before unbounded recursion exhausts the native stack on a
     // deeply-nested input. No error vector here; `stack_guard_tripped`
     // records the bail so the check entry boundary fails hard with a located
@@ -437,15 +1117,37 @@ fn collect_defsig_param_types(expr: &deep::Expr, map: &mut HashMap<String, Vec<d
                 return;
             }
             let fn_kids = children(fn_list);
-            if fn_kids.len() < 2 {
+            if fn_kids.is_empty() {
                 return;
             }
             // All but the trailing return type are parameter types.
             let param_type_exprs: Vec<deep::Expr> = fn_kids[..fn_kids.len() - 1].to_vec();
-            map.entry(name.to_string()).or_insert(param_type_exprs);
+            map.entry(name.to_string())
+                .or_insert_with(|| DeclaredSigMetadata {
+                    param_types: param_type_exprs,
+                    binders: deep_type_binder_names(&kids[1]),
+                });
         }
         _ => {}
     }
+}
+
+fn deep_type_binder_names(type_expr: &deep::Expr) -> HashSet<String> {
+    let mut names = HashSet::new();
+    let mut pending = vec![type_expr];
+    while let Some(current) = pending.pop() {
+        let deep::Expr::List(type_list, _) = current else {
+            continue;
+        };
+        if matches!(get_tag(type_list), Some("t-var" | "d-var" | "d-rank"))
+            && let Some(variable) = children(type_list).first().and_then(symbol_name)
+            && variable != "_"
+        {
+            names.insert(variable.to_string());
+        }
+        pending.extend(children(type_list));
+    }
+    names
 }
 
 /// Result of running type inference on a program.
@@ -456,41 +1158,47 @@ pub struct InferResult {
     pub total_nodes: usize,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct InferStats {
+    pub(crate) typed_nodes: usize,
+    pub(crate) total_nodes: usize,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CheckedProgram {
     annotated_exprs: Vec<deep::Expr>,
     type_env: HashMap<String, deep::Expr>,
     linearity: LinearityInfo,
     signature_inference: SignatureInferenceMetadata,
+    type_headers: TypeResolutionEnv,
 }
 
 impl CheckedProgram {
-    pub fn from_parts(
+    #[cfg(test)]
+    pub(crate) fn unchecked_for_linearity_diagnostic_test(
         annotated_exprs: Vec<deep::Expr>,
         type_env: HashMap<String, deep::Expr>,
     ) -> Self {
-        let signature_inference = infer_signature_metadata(&annotated_exprs, &type_env);
         Self {
             annotated_exprs,
             type_env,
             linearity: LinearityInfo::default(),
-            signature_inference,
+            signature_inference: SignatureInferenceMetadata::default(),
+            type_headers: TypeResolutionEnv::default(),
         }
     }
 
-    pub fn from_parts_with_signature_context(
+    /// Replace only effects-owned metadata on an already-checked program.
+    ///
+    /// Every span, atom, child, and non-`effects` metadata entry must remain
+    /// byte-for-byte identical to `self`. The returned program preserves the
+    /// original type/signature/linearity contexts and crosses the same
+    /// fallible totality boundary as a fresh checker result.
+    pub fn try_with_effect_annotations(
+        &self,
         annotated_exprs: Vec<deep::Expr>,
-        type_env: HashMap<String, deep::Expr>,
-        signature_context: &SignatureInferenceMetadata,
-    ) -> Self {
-        let signature_inference =
-            infer_signature_metadata_with_context(&annotated_exprs, &type_env, signature_context);
-        Self {
-            annotated_exprs,
-            type_env,
-            linearity: LinearityInfo::default(),
-            signature_inference,
-        }
+    ) -> Result<Self, InferResult> {
+        crate::session::try_checked_program_with_effect_annotations(self, annotated_exprs)
     }
 
     pub fn exprs(&self) -> &[deep::Expr] {
@@ -511,6 +1219,10 @@ impl CheckedProgram {
 
     pub fn signature_inference(&self) -> &SignatureInferenceMetadata {
         &self.signature_inference
+    }
+
+    pub(crate) fn type_headers(&self) -> &TypeResolutionEnv {
+        &self.type_headers
     }
 
     pub fn with_linearity(mut self, linearity: LinearityInfo) -> Self {
@@ -567,12 +1279,63 @@ impl CheckedProgram {
                 .insert(name.clone(), sig.clone());
         }
 
+        let mut type_headers = library.type_headers.clone();
+        type_headers.extend_from(&new_code.type_headers);
+
         Self {
             annotated_exprs,
             type_env,
             linearity,
             signature_inference,
+            type_headers,
         }
+    }
+}
+
+/// The sole construction boundary for checked results. It observes the
+/// authoritative session sink before adding an invariant diagnostic, so a
+/// real root error is never duplicated by the totality backstop.
+fn finalize_checked_program(
+    annotated_exprs: Vec<deep::Expr>,
+    type_env: HashMap<String, deep::Expr>,
+    signature_context: &SignatureInferenceMetadata,
+    type_headers: &TypeResolutionEnv,
+    errors: &mut DiagnosticSink<'_>,
+) -> CheckedProgram {
+    let signature_inference = infer_signature_metadata_with_context_and_headers(
+        &annotated_exprs,
+        &type_env,
+        signature_context,
+        type_headers,
+        errors,
+    );
+    let checked = CheckedProgram {
+        annotated_exprs,
+        type_env,
+        linearity: LinearityInfo::default(),
+        signature_inference,
+        type_headers: type_headers.clone(),
+    };
+
+    validate_checked_program_totality(&checked, signature_context, errors);
+    checked
+}
+
+fn validate_checked_program_totality(
+    checked: &CheckedProgram,
+    signature_context: &SignatureInferenceMetadata,
+    errors: &mut DiagnosticSink<'_>,
+) {
+    if !errors.is_empty() {
+        return;
+    }
+    let mut traces = totality_invariant_traces(signature_context);
+    traces.extend(annotated_totality_invariant_traces(
+        checked.annotated_exprs(),
+    ));
+    traces.extend(totality_invariant_traces(checked.signature_inference()));
+    if !traces.is_empty() {
+        errors.push(totality_violation_error(&traces));
     }
 }
 
@@ -606,15 +1369,165 @@ pub struct ParamSignatureInference {
     pub display_type: Type,
 }
 
+pub(crate) fn checked_program_with_effect_annotations_in_session(
+    original: &CheckedProgram,
+    annotated_exprs: Vec<deep::Expr>,
+    errors: &mut DiagnosticSink<'_>,
+) -> CheckedProgram {
+    if !effects_only_rewrite_matches(original.annotated_exprs(), &annotated_exprs) {
+        errors.push(CheckError::new(
+            CheckErrorKind::Other,
+            "checked-program effects-only reannotation changed a span, atom, child, or non-`effects` metadata entry"
+                .to_string(),
+            vec![
+                "Run type checking again for structural, body, type, `eff`, or source-span changes"
+                    .to_string(),
+            ],
+        ));
+    }
+
+    let checked = CheckedProgram {
+        annotated_exprs,
+        type_env: original.type_env.clone(),
+        linearity: original.linearity.clone(),
+        signature_inference: original.signature_inference.clone(),
+        type_headers: original.type_headers.clone(),
+    };
+    validate_checked_program_totality(&checked, original.signature_inference(), errors);
+    checked
+}
+
+fn effects_only_rewrite_matches(original: &[deep::Expr], candidate: &[deep::Expr]) -> bool {
+    original.len() == candidate.len()
+        && original
+            .iter()
+            .zip(candidate)
+            .all(|(before, after)| effects_only_expr_matches(before, after))
+        && candidate.iter().all(effect_metadata_is_singular)
+}
+
+fn effects_only_expr_matches(before: &deep::Expr, after: &deep::Expr) -> bool {
+    stack_guard!("effects_only_expr_matches", before, false);
+    match (before, after) {
+        (deep::Expr::Atom(before_atom, before_span), deep::Expr::Atom(after_atom, after_span)) => {
+            before_atom == after_atom && before_span == after_span
+        }
+        (deep::Expr::Map(before_map, before_span), deep::Expr::Map(after_map, after_span)) => {
+            before_span == after_span
+                && metadata_entries_match(&before_map.entries, &after_map.entries, false)
+        }
+        (
+            deep::Expr::MetaExpr(before_meta, before_span),
+            deep::Expr::MetaExpr(after_meta, after_span),
+        ) => {
+            before_span == after_span
+                && metadata_entries_match(&before_meta.entries, &after_meta.entries, false)
+                && effects_only_expr_matches(&before_meta.expr, &after_meta.expr)
+        }
+        (deep::Expr::List(before_list, before_span), deep::Expr::List(after_list, after_span)) => {
+            before_span == after_span
+                && before_list.elements.len() == after_list.elements.len()
+                && before_list
+                    .elements
+                    .iter()
+                    .zip(&after_list.elements)
+                    .enumerate()
+                    .all(|(index, (before_element, after_element))| {
+                        if index == 1
+                            && let (
+                                deep::Expr::Map(before_map, before_map_span),
+                                deep::Expr::Map(after_map, after_map_span),
+                            ) = (before_element, after_element)
+                        {
+                            return before_map_span == after_map_span
+                                && metadata_entries_match(
+                                    &before_map.entries,
+                                    &after_map.entries,
+                                    true,
+                                );
+                        }
+                        effects_only_expr_matches(before_element, after_element)
+                    })
+        }
+        _ => false,
+    }
+}
+
+fn metadata_entries_match(
+    before: &[(String, deep::Expr)],
+    after: &[(String, deep::Expr)],
+    ignore_effects: bool,
+) -> bool {
+    let mut before_entries = before
+        .iter()
+        .filter(|(key, _)| !ignore_effects || key != "effects");
+    let mut after_entries = after
+        .iter()
+        .filter(|(key, _)| !ignore_effects || key != "effects");
+    loop {
+        match (before_entries.next(), after_entries.next()) {
+            (Some((before_key, before_value)), Some((after_key, after_value))) => {
+                if before_key != after_key || !effects_only_expr_matches(before_value, after_value)
+                {
+                    return false;
+                }
+            }
+            (None, None) => return true,
+            _ => return false,
+        }
+    }
+}
+
+fn effect_metadata_is_singular(expr: &deep::Expr) -> bool {
+    stack_guard!("effect_metadata_is_singular", expr, false);
+    match expr {
+        deep::Expr::Atom(_, _) => true,
+        deep::Expr::Map(map, _) => map
+            .entries
+            .iter()
+            .all(|(_, value)| effect_metadata_is_singular(value)),
+        deep::Expr::MetaExpr(meta, _) => {
+            effect_metadata_is_singular(&meta.expr)
+                && meta
+                    .entries
+                    .iter()
+                    .all(|(_, value)| effect_metadata_is_singular(value))
+        }
+        deep::Expr::List(list, _) => {
+            let singular_here = match list.elements.get(1) {
+                Some(deep::Expr::Map(map, _)) => {
+                    map.entries
+                        .iter()
+                        .filter(|(key, _)| key == "effects")
+                        .count()
+                        <= 1
+                }
+                _ => true,
+            };
+            singular_here && list.elements.iter().all(effect_metadata_is_singular)
+        }
+    }
+}
+
 /// Run type inference on a list of top-level Deep expressions.
 pub fn infer_program(exprs: &[deep::Expr]) -> InferResult {
     // WI-1 follow-up: run the whole pipeline on a grown stack so a deeply
     // nested but finite program checks end-to-end instead of tripping a
     // per-site `stack_guard!` partway through one of the recursive passes.
-    with_grown_stack(|| infer_program_inner(exprs))
+    crate::session::infer_program(exprs)
 }
 
-fn infer_program_inner(exprs: &[deep::Expr]) -> InferResult {
+pub(crate) fn infer_program_in_session(
+    exprs: &[deep::Expr],
+    errors: &mut DiagnosticSink<'_>,
+) -> InferStats {
+    infer_program_with_product_in_session(exprs, errors).stats()
+}
+
+fn infer_program_with_product_in_session(
+    exprs: &[deep::Expr],
+    errors: &mut DiagnosticSink<'_>,
+) -> InferenceProduct {
     // Reset the stack-exhaustion flag for this check unit; `drain` below
     // turns any walker stack bail into a hard located error so deep input
     // can never produce a silent green / partial result.
@@ -623,34 +1536,26 @@ fn infer_program_inner(exprs: &[deep::Expr]) -> InferResult {
     let mut subst = Subst::new();
     let mut adt_reg = AdtRegistry::new();
     builtins::register_prelude_adts(&mut env, &mut vg, &mut adt_reg);
-    let mut errors = Vec::new();
-    let mut typed_nodes = 0;
-    let mut total_nodes = 0;
+    let mut product = InferenceProduct::default();
 
     // RFC v4b (RT-1 F2): reject a named module opened by more than one
     // wrapper in this check unit (module-identity forgery).
-    detect_module_reopens(exprs, &mut errors);
+    detect_module_reopens(exprs, errors);
     // RFC v5 (RT-1 F2 bypass): reject the reef linker's reserved
     // internal-name format in programs not produced by the linker.
-    detect_forged_linker_names(exprs, &mut errors);
+    detect_forged_linker_names(exprs, errors);
 
     // First pass: collect deftype and defsig declarations. Descend through
     // `(module {} name ...)` wrappers so declarations in every idiomatic
     // Surf source (every .ch starts with `module X`) get collected.
     let items = top_level_decl_items_with_modules(exprs);
-    collect_all_declarations(
-        &items,
-        &mut env,
-        &mut vg,
-        &mut subst,
-        &mut adt_reg,
-        &mut errors,
-    );
+    collect_all_declarations(&items, &mut env, &mut vg, &mut subst, &mut adt_reg, errors);
+    product.type_headers = adt_reg.resolution_env().clone();
 
     // Checker-enforced opacity (RFC D-CHECK): install the per-run
     // context so the inference hooks see module identity, exports,
     // and producer text. Dropped at the end of this function.
-    let opacity_meta = build_opacity_meta(&items, &adt_reg, &mut vg);
+    let opacity_meta = build_opacity_meta(&items, &adt_reg, &env);
     let _opacity_guard = crate::opacity::install_opacity_context(
         crate::opacity::OpacityContextData::from_meta(opacity_meta),
     );
@@ -659,29 +1564,70 @@ fn infer_program_inner(exprs: &[deep::Expr]) -> InferResult {
     // declaration pass — without it, the entire HM checker is a no-op on
     // module-wrapped programs.
     let user_def_names = collect_user_def_names(&top_level_decl_items(exprs));
-    for (module, expr) in &items {
-        let decl_name = top_level_decl_name(expr);
-        crate::opacity::set_current_item(
-            crate::opacity::module_key_for_item(module.as_deref(), decl_name),
-            decl_name.map(str::to_string),
-        );
-        infer_top_level(
-            expr,
-            &mut env,
-            &mut vg,
-            &mut subst,
-            &adt_reg,
-            &mut errors,
-            &mut typed_nodes,
-            &mut total_nodes,
-            &user_def_names,
-        );
-        // Issue #256 round 2: re-check each deferred borrow against the
-        // now-complete substitution (see `validate_deferred_borrow_vars`).
-        validate_deferred_borrow_vars(&subst, &adt_reg, &mut errors);
-        // D-CHECK: drain the per-def deferred-access ledger (see
-        // `validate_deferred_opaque_uses`).
-        validate_deferred_opaque_uses(&subst, &adt_reg, &mut errors);
+    let declared_signatures = collect_declared_sig_metadata(items.iter().map(|(_, expr)| *expr));
+    let metadata_prebound_names = HashSet::new();
+    let inference_groups = primary_inference_groups(exprs, &items);
+    for group in inference_groups {
+        let provisional_types = if group.recursive {
+            prebind_recursive_function_schemes(
+                &group.indices,
+                &items,
+                &declared_signatures,
+                &metadata_prebound_names,
+                &mut env,
+                &mut vg,
+            )
+        } else {
+            HashMap::new()
+        };
+        let mut deferred_bindings = Vec::new();
+        for declaration_index in group.indices {
+            let (module, expr) = &items[declaration_index];
+            product.begin_root(expr, errors);
+            let decl_name = top_level_decl_name(expr);
+            crate::opacity::set_current_item(
+                crate::opacity::module_key_for_item(module.as_deref(), decl_name),
+                decl_name.map(str::to_string),
+            );
+            if let Some(binding) = infer_top_level(
+                expr,
+                &mut env,
+                &mut vg,
+                &mut subst,
+                &adt_reg,
+                errors,
+                &mut product,
+                None,
+                provisional_types.get(&declaration_index),
+                group.recursive,
+                &user_def_names,
+                &declared_signatures,
+            ) {
+                deferred_bindings.push(binding);
+            }
+            product.finish_root(&subst, errors);
+            // Issue #256 round 2: re-check each deferred borrow against the
+            // now-complete substitution (see `validate_deferred_borrow_vars`).
+            validate_deferred_borrow_vars(&subst, &adt_reg, errors);
+            // D-CHECK: drain the per-def deferred-access ledger (see
+            // `validate_deferred_opaque_uses`).
+            validate_deferred_opaque_uses(&subst, &adt_reg, errors);
+        }
+        if group.recursive {
+            for (name, _) in &deferred_bindings {
+                env.remove_binding(name);
+            }
+            let schemes = deferred_bindings
+                .into_iter()
+                .map(|(name, ty)| {
+                    let scheme = env.generalize(&ty, &subst);
+                    (name, scheme)
+                })
+                .collect::<Vec<_>>();
+            for (name, scheme) in schemes {
+                env.bind(name, scheme);
+            }
+        }
     }
     crate::opacity::set_current_item(None, None);
 
@@ -689,24 +1635,20 @@ fn infer_program_inner(exprs: &[deep::Expr]) -> InferResult {
     // by the Phase 0f backend (f16/bf16/f8e4m3). These would silently get
     // downcast to f32 by the current build targets, violating the "no implicit
     // precision promotion" rule. f64 is supported as of v0.2.3.
-    validate_tensor_precisions_in_program(exprs, &mut errors);
-    crate::invariants::validate_type_invariants_in_program(exprs, &mut errors);
+    validate_tensor_precisions_in_program(exprs, errors);
+    crate::invariants::validate_type_invariants_in_program_with_sink(exprs, errors);
 
     // WS-A8 cross-row enforcement: reject `matmul`/transcendental ops that
     // are reached through a polymorphic-precision sig instantiated at a
     // dtype the spec rules forbid (§5.7.2 / §5.4).
     let local_ir_env = build_ir_type_env(exprs);
-    validate_polymorphic_op_constraints(exprs, &local_ir_env, &mut errors);
+    validate_polymorphic_op_constraints(exprs, &local_ir_env, errors);
 
     // If any walker bailed on a nearly-exhausted stack during this run,
     // surface it as a hard located failure (covered-or-rejected).
-    stack_scope.drain_into(&mut errors);
+    stack_scope.drain_into(errors);
 
-    InferResult {
-        errors,
-        typed_nodes,
-        total_nodes,
-    }
+    product
 }
 
 pub fn check_ir_program(exprs: &[deep::Expr]) -> Result<CheckedProgram, InferResult> {
@@ -725,11 +1667,13 @@ pub fn check_ir_program(exprs: &[deep::Expr]) -> Result<CheckedProgram, InferRes
 /// [`check_ir_with_context`]. The library state is `Arc`-shared and
 /// never mutated, so concurrent reads are cheap.
 pub fn build_type_env_from_library(library_exprs: &[deep::Expr]) -> Result<TypeEnv, InferResult> {
-    // WI-1 follow-up: grow the stack for the whole library pipeline.
-    with_grown_stack(|| build_type_env_from_library_inner(library_exprs))
+    crate::session::build_type_env_from_library(library_exprs)
 }
 
-fn build_type_env_from_library_inner(library_exprs: &[deep::Expr]) -> Result<TypeEnv, InferResult> {
+pub(crate) fn build_type_env_from_library_in_session(
+    library_exprs: &[deep::Expr],
+    errors: &mut DiagnosticSink<'_>,
+) -> Result<TypeEnv, InferStats> {
     // Reset the stack-exhaustion flag for this check unit; drained below
     // before the empty-errors gate (covered-or-rejected on deep input).
     let stack_scope = StackExhaustionScope::enter();
@@ -755,28 +1699,27 @@ fn build_type_env_from_library_inner(library_exprs: &[deep::Expr]) -> Result<Typ
     let library_ir = build_ir_type_env(library_exprs);
     log_sub("build_ir_type_env_initial", &mut sub_t);
 
-    let mut result = infer_ir_program_with_state(
+    let product = infer_ir_program_with_state(
         library_exprs,
-        &library_ir,
         &mut state,
         /* combined_ir_for_validate = */ &library_ir,
         /* run_validate_passes_on = */ None,
+        errors,
     );
+    let stats = product.stats();
     log_sub("infer_ir_program_with_state", &mut sub_t);
-    validate_ir_program(library_exprs, &library_ir, &mut result.errors);
+    validate_ir_program(library_exprs, &library_ir, errors);
     log_sub("validate_ir_program", &mut sub_t);
-    validate_tensor_precisions_in_program(library_exprs, &mut result.errors);
-    crate::invariants::validate_type_invariants_in_program(library_exprs, &mut result.errors);
+    validate_tensor_precisions_in_program(library_exprs, errors);
+    crate::invariants::validate_type_invariants_in_program_with_sink(library_exprs, errors);
     log_sub("validate_tensor_precisions", &mut sub_t);
-    validate_polymorphic_op_constraints(library_exprs, &library_ir, &mut result.errors);
+    validate_polymorphic_op_constraints(library_exprs, &library_ir, errors);
     log_sub("validate_polymorphic_op_constraints", &mut sub_t);
-    suppress_unbound_for_cycle_members(library_exprs, &mut result.errors);
-    log_sub("suppress_unbound_for_cycle", &mut sub_t);
     // Surface a stack-exhaustion bail from the passes above as a hard
     // located error before the gate (and before the errors drain below).
-    stack_scope.drain_into(&mut result.errors);
-    if !result.errors.is_empty() {
-        return Err(result);
+    stack_scope.drain_into(errors);
+    if !errors.is_empty() {
+        return Err(stats);
     }
 
     // Capture library def names — needed by new-code cycle / unbound
@@ -792,11 +1735,6 @@ fn build_type_env_from_library_inner(library_exprs: &[deep::Expr]) -> Result<Typ
     }
     log_sub("collect_library_def_names", &mut sub_t);
 
-    // Drain accumulated errors back into the state's storage; they were
-    // empty above so this is a no-op, but the call site is symmetric
-    // with check_ir_with_context.
-    let _ = result.errors.drain(..);
-
     // Build a richer `ir_types` by annotating library exprs against
     // the now-populated state and re-extracting type metadata. The raw
     // `library_ir` (built from un-annotated source) only catches defs
@@ -808,16 +1746,14 @@ fn build_type_env_from_library_inner(library_exprs: &[deep::Expr]) -> Result<Typ
     // calls `annotate_ir_program` then `build_ir_type_env` on
     // the annotated result.
     //
-    // Install the declared-`defsig` parameter type map so library defs
-    // with separate `sig` declarations get borrow-correct
-    // `(params ...)` stamps, consistent with every other annotation
-    // entry point.
-    let _declared_sig_guard = install_declared_sig_param_types(library_exprs);
+    // Pass this unit's declared signatures directly into annotation so
+    // separate-`sig` parameter stamps and binder scopes cannot observe a
+    // different sequential, nested, or parallel check.
+    let declared_signatures = collect_declared_sig_metadata(library_exprs);
+    let annotation_context = AnnotationResolutionContext::root(&declared_signatures);
     let library_annotated: Vec<deep::Expr> = library_exprs
         .iter()
-        .map(|e| {
-            annotate_expr_with_scope(e, &state.env, &state.var_gen, &state.subst, &state.adt_reg)
-        })
+        .map(|e| annotate_expr_with_scope(e, &product, annotation_context, errors))
         .collect();
     log_sub("annotate_library_exprs_outer_loop", &mut sub_t);
     let library_ir_annotated = build_ir_type_env(&library_annotated);
@@ -826,14 +1762,9 @@ fn build_type_env_from_library_inner(library_exprs: &[deep::Expr]) -> Result<Typ
     // The annotation loop above recurses (annotate_expr_with_scope); if it
     // bailed on low stack, reject rather than return a partially-annotated
     // library context.
-    let mut post_annotate_errors = Vec::new();
-    stack_scope.drain_into(&mut post_annotate_errors);
-    if !post_annotate_errors.is_empty() {
-        return Err(InferResult {
-            errors: post_annotate_errors,
-            typed_nodes: 0,
-            total_nodes: 0,
-        });
+    stack_scope.drain_into(errors);
+    if !errors.is_empty() {
+        return Err(stats);
     }
 
     Ok(TypeEnv::from_inner(TypeEnvInner {
@@ -875,8 +1806,7 @@ fn build_type_env_from_library_inner(library_exprs: &[deep::Expr]) -> Result<Typ
 /// 1. Build the per-decl `IrTypeEnv` from un-annotated source.
 /// 2. Run `infer_ir_program_with_state` once, populating `state`.
 /// 3. Run all validators (`validate_ir_program`,
-///    `validate_tensor_precisions_in_program`,
-///    `suppress_unbound_for_cycle_members`).
+///    `validate_tensor_precisions_in_program`).
 /// 4. Annotate the library exprs once using the populated `state.env`.
 /// 5. Build `library_ir_annotated` from the annotated exprs.
 /// 6. Compose the `TypeEnv` from `state` + `library_ir_annotated`.
@@ -885,6 +1815,13 @@ fn build_type_env_from_library_inner(library_exprs: &[deep::Expr]) -> Result<Typ
 pub fn build_compiled_library_context(
     library_exprs: &[deep::Expr],
 ) -> Result<(TypeEnv, CheckedProgram), InferResult> {
+    crate::session::build_compiled_library_context(library_exprs)
+}
+
+pub(crate) fn build_compiled_library_context_in_session(
+    library_exprs: &[deep::Expr],
+    errors: &mut DiagnosticSink<'_>,
+) -> Result<(TypeEnv, CheckedProgram), InferStats> {
     // Reset the stack-exhaustion flag for this check unit; drained into the
     // error vector below before the empty-errors gate (and again after the
     // annotation pass) so a deep-input stack bail on the library-compile path
@@ -898,23 +1835,23 @@ pub fn build_compiled_library_context(
 
     let library_ir = build_ir_type_env(library_exprs);
 
-    let mut result = infer_ir_program_with_state(
+    let product = infer_ir_program_with_state(
         library_exprs,
-        &library_ir,
         &mut state,
         /* combined_ir_for_validate = */ &library_ir,
         /* run_validate_passes_on = */ None,
+        errors,
     );
-    validate_ir_program(library_exprs, &library_ir, &mut result.errors);
-    validate_tensor_precisions_in_program(library_exprs, &mut result.errors);
-    crate::invariants::validate_type_invariants_in_program(library_exprs, &mut result.errors);
-    validate_polymorphic_op_constraints(library_exprs, &library_ir, &mut result.errors);
-    suppress_unbound_for_cycle_members(library_exprs, &mut result.errors);
+    let stats = product.stats();
+    validate_ir_program(library_exprs, &library_ir, errors);
+    validate_tensor_precisions_in_program(library_exprs, errors);
+    crate::invariants::validate_type_invariants_in_program_with_sink(library_exprs, errors);
+    validate_polymorphic_op_constraints(library_exprs, &library_ir, errors);
     // Surface any stack-exhaustion bail from the passes above as a hard
     // located error (covered-or-rejected) before the empty-errors gate.
-    stack_scope.drain_into(&mut result.errors);
-    if !result.errors.is_empty() {
-        return Err(result);
+    stack_scope.drain_into(errors);
+    if !errors.is_empty() {
+        return Err(stats);
     }
 
     // Capture library def names before consuming `state` into `TypeEnv`.
@@ -928,34 +1865,25 @@ pub fn build_compiled_library_context(
         }
     }
 
-    // Drain accumulated errors back into the state's storage; they were
-    // empty above so this is a no-op, but the call site is symmetric
-    // with check_ir_with_context.
-    let _ = result.errors.drain(..);
-
     // SINGLE annotation pass — feeds both the TypeEnv's
     // `ir_types` AND the returned CheckedProgram's `annotated_exprs`.
     // Previously `build_type_env_from_library` did one annotation here
     // (~13.8s on Coral) and `check_ir_with_context(empty, library)`
     // did a separate, redundant inference+annotation pass (~16.8s).
     //
-    // Install the declared-`defsig` parameter type map so the `def`
-    // arm of `annotate_expr_with_scope` stamps borrow-correct types
-    // onto each library def's `(params ...)` node -- the library
-    // compile path is exactly where chelis-std's separate-`sig` defs
-    // (`School.Loss.CrossEntropy.loss` etc.) are annotated.
-    let _declared_sig_guard = install_declared_sig_param_types(library_exprs);
+    // The explicit annotation context supplies this unit's separate-`sig`
+    // parameter metadata and per-def binder scope to the recursive pass.
+    let declared_signatures = collect_declared_sig_metadata(library_exprs);
+    let annotation_context = AnnotationResolutionContext::root(&declared_signatures);
     let library_annotated: Vec<deep::Expr> = library_exprs
         .iter()
-        .map(|e| {
-            annotate_expr_with_scope(e, &state.env, &state.var_gen, &state.subst, &state.adt_reg)
-        })
+        .map(|e| annotate_expr_with_scope(e, &product, annotation_context, errors))
         .collect();
     // Annotation also recurses (annotate_expr_with_scope); if it bailed on
     // low stack, reject rather than return a partially-annotated program.
-    stack_scope.drain_into(&mut result.errors);
-    if !result.errors.is_empty() {
-        return Err(result);
+    stack_scope.drain_into(errors);
+    if !errors.is_empty() {
+        return Err(stats);
     }
     let library_ir_annotated = build_ir_type_env(&library_annotated);
 
@@ -974,7 +1902,16 @@ pub fn build_compiled_library_context(
     // empty outer scope, `context.inner().ir_types` is empty, so the
     // union step is a no-op and `annotated_type_env ==
     // library_ir_annotated`.
-    let checked = CheckedProgram::from_parts(library_annotated, library_ir_annotated);
+    let checked = finalize_checked_program(
+        library_annotated,
+        library_ir_annotated,
+        &SignatureInferenceMetadata::default(),
+        &product.type_headers,
+        errors,
+    );
+    if !errors.is_empty() {
+        return Err(stats);
+    }
 
     Ok((type_env, checked))
 }
@@ -1013,6 +1950,14 @@ pub fn build_compiled_library_context_with_base(
     base: &TypeEnv,
     library_exprs: &[deep::Expr],
 ) -> Result<(TypeEnv, CheckedProgram), InferResult> {
+    crate::session::build_compiled_library_context_with_base(base, library_exprs)
+}
+
+pub(crate) fn build_compiled_library_context_with_base_in_session(
+    base: &TypeEnv,
+    library_exprs: &[deep::Expr],
+    errors: &mut DiagnosticSink<'_>,
+) -> Result<(TypeEnv, CheckedProgram), InferStats> {
     // Reset the stack-exhaustion flag for this check unit; drained into the
     // error vector below before the empty-errors gate (and again after the
     // annotation pass) so a deep-input stack bail on the layered
@@ -1033,31 +1978,27 @@ pub fn build_compiled_library_context_with_base(
         .collect();
 
     // Base is already validated; run inference + validators on
-    // `library_exprs` only. The IR env passed to inference is the
+    // `library_exprs` only. Inference's canonical collector binds the
     // `library_exprs`' own declared types (base schemes are already in
     // `state.env`); the combined IR env is supplied to the validators so
     // `(var basefoo)` references resolve to the base's declared type.
-    let mut result = infer_ir_program_with_state(
+    let product = infer_ir_program_with_state(
         library_exprs,
-        &new_ir,
         &mut state,
         &combined_ir,
         /* run_validate_passes_on = */ None,
+        errors,
     );
-    validate_ir_program(library_exprs, &combined_ir, &mut result.errors);
-    validate_tensor_precisions_in_program(library_exprs, &mut result.errors);
-    crate::invariants::validate_type_invariants_in_program(library_exprs, &mut result.errors);
-    validate_polymorphic_op_constraints(library_exprs, &combined_ir, &mut result.errors);
-    suppress_unbound_for_cycle_members_against_context(
-        library_exprs,
-        &base.inner().library_def_names,
-        &mut result.errors,
-    );
+    let stats = product.stats();
+    validate_ir_program(library_exprs, &combined_ir, errors);
+    validate_tensor_precisions_in_program(library_exprs, errors);
+    crate::invariants::validate_type_invariants_in_program_with_sink(library_exprs, errors);
+    validate_polymorphic_op_constraints(library_exprs, &combined_ir, errors);
     // Surface any stack-exhaustion bail from the passes above as a hard
     // located error (covered-or-rejected) before the empty-errors gate.
-    stack_scope.drain_into(&mut result.errors);
-    if !result.errors.is_empty() {
-        return Err(result);
+    stack_scope.drain_into(errors);
+    if !errors.is_empty() {
+        return Err(stats);
     }
 
     // Capture `library_exprs` def names, unioned with the base's, so a
@@ -1073,25 +2014,22 @@ pub fn build_compiled_library_context_with_base(
         }
     }
 
-    let _ = result.errors.drain(..);
-
     // Annotate ONLY the `library_exprs`, starting from the populated
     // `state` so base names resolve during annotation. Install the
-    // declared-`defsig` parameter type map for this layer's exprs so
-    // separate-`sig` defs get borrow-correct `(params ...)` stamps,
-    // matching `build_compiled_library_context`.
-    let _declared_sig_guard = install_declared_sig_param_types(library_exprs);
+    // explicit declared-signature context for this layer's exprs so
+    // separate-`sig` defs get borrow-correct `(params ...)` stamps without
+    // inheriting binders from the base context.
+    let declared_signatures = collect_declared_sig_metadata(library_exprs);
+    let annotation_context = AnnotationResolutionContext::root(&declared_signatures);
     let library_annotated: Vec<deep::Expr> = library_exprs
         .iter()
-        .map(|e| {
-            annotate_expr_with_scope(e, &state.env, &state.var_gen, &state.subst, &state.adt_reg)
-        })
+        .map(|e| annotate_expr_with_scope(e, &product, annotation_context, errors))
         .collect();
     // Annotation also recurses (annotate_expr_with_scope); if it bailed on
     // low stack, reject rather than return a partially-annotated program.
-    stack_scope.drain_into(&mut result.errors);
-    if !result.errors.is_empty() {
-        return Err(result);
+    stack_scope.drain_into(errors);
+    if !errors.is_empty() {
+        return Err(stats);
     }
     let new_ir_annotated = build_ir_type_env(&library_annotated);
 
@@ -1124,7 +2062,16 @@ pub fn build_compiled_library_context_with_base(
             .entry(name.clone())
             .or_insert_with(|| ty.clone());
     }
-    let checked = CheckedProgram::from_parts(library_annotated, checked_type_env);
+    let checked = finalize_checked_program(
+        library_annotated,
+        checked_type_env,
+        &SignatureInferenceMetadata::default(),
+        &product.type_headers,
+        errors,
+    );
+    if !errors.is_empty() {
+        return Err(stats);
+    }
 
     Ok((type_env, checked))
 }
@@ -1164,19 +2111,15 @@ pub fn check_ir_with_signature_context(
     signature_context: &SignatureInferenceMetadata,
     new_exprs: &[deep::Expr],
 ) -> Result<CheckedProgram, InferResult> {
-    // WI-1 follow-up: grow the stack for the whole check pipeline. This is the
-    // funnel for `check_ir_program` and `check_ir_with_context`, so wrapping
-    // here grows the stack for all three.
-    with_grown_stack(|| {
-        check_ir_with_signature_context_inner(context, signature_context, new_exprs)
-    })
+    crate::session::check_ir_with_signature_context(context, signature_context, new_exprs)
 }
 
-fn check_ir_with_signature_context_inner(
+pub(crate) fn check_ir_with_signature_context_in_session(
     context: &TypeEnv,
     signature_context: &SignatureInferenceMetadata,
     new_exprs: &[deep::Expr],
-) -> Result<CheckedProgram, InferResult> {
+    errors: &mut DiagnosticSink<'_>,
+) -> Result<CheckedProgram, InferStats> {
     // Reset the stack-exhaustion flag for this check unit; drained into the
     // error vector below before the empty-errors gate so a deep-input stack
     // bail always fails the check (never a silent green / partial result).
@@ -1208,48 +2151,43 @@ fn check_ir_with_signature_context_inner(
     log_sub("build_ir_and_combine", &mut sub_t);
 
     // Library is already validated; only run validate / inference on
-    // new exprs. The IR env passed to inference is the new-code's
+    // new exprs. Inference's canonical collector binds the new-code's
     // own declared types (library schemes are already in state.env).
-    let mut result = infer_ir_program_with_state(
+    let product = infer_ir_program_with_state(
         new_exprs,
-        &new_ir,
         &mut state,
         &combined_ir,
         /* run_validate_passes_on = */ None,
+        errors,
     );
+    let stats = product.stats();
     log_sub("infer_ir_program_with_state", &mut sub_t);
     // Run cycle / shape / precision validators on new_exprs only. The
     // combined IR env is supplied so `(var libfoo)` references
     // resolve to the library's declared type during shape validation.
-    validate_ir_program(new_exprs, &combined_ir, &mut result.errors);
+    validate_ir_program(new_exprs, &combined_ir, errors);
     log_sub("validate_ir_program", &mut sub_t);
-    validate_tensor_precisions_in_program(new_exprs, &mut result.errors);
-    crate::invariants::validate_type_invariants_in_program(new_exprs, &mut result.errors);
+    validate_tensor_precisions_in_program(new_exprs, errors);
+    crate::invariants::validate_type_invariants_in_program_with_sink(new_exprs, errors);
     log_sub("validate_tensor_precisions", &mut sub_t);
-    validate_polymorphic_op_constraints(new_exprs, &combined_ir, &mut result.errors);
+    validate_polymorphic_op_constraints(new_exprs, &combined_ir, errors);
     log_sub("validate_polymorphic_op_constraints", &mut sub_t);
-    suppress_unbound_for_cycle_members_against_context(
-        new_exprs,
-        &context.inner().library_def_names,
-        &mut result.errors,
-    );
-    log_sub("suppress_unbound_for_cycle", &mut sub_t);
     // Surface any stack-exhaustion bail from the passes above as a hard
     // located error (covered-or-rejected) before the empty-errors gate.
-    stack_scope.drain_into(&mut result.errors);
-    if !result.errors.is_empty() {
-        return Err(result);
+    stack_scope.drain_into(errors);
+    if !errors.is_empty() {
+        return Err(stats);
     }
 
     // Annotate ONLY the new-code exprs, starting from the library
     // snapshot state so library names resolve during annotation.
-    let annotated_exprs = annotate_ir_program_with_context(context, new_exprs);
-    log_sub("annotate_ir_program_with_context", &mut sub_t);
+    let annotated_exprs = annotate_ir_program(new_exprs, &product, errors);
+    log_sub("annotate_ir_program", &mut sub_t);
     // Annotation also recurses (annotate_expr_with_scope); if it bailed on
     // low stack, reject rather than return a partially-annotated program.
-    stack_scope.drain_into(&mut result.errors);
-    if !result.errors.is_empty() {
-        return Err(result);
+    stack_scope.drain_into(errors);
+    if !errors.is_empty() {
+        return Err(stats);
     }
     // Surface library declared types in the returned type_env so downstream
     // passes (lower, effects, linearity) can resolve `(var libname)` calls
@@ -1262,166 +2200,117 @@ fn check_ir_with_signature_context_inner(
             .or_insert_with(|| ty.clone());
     }
     log_sub("annotated_type_env_build", &mut sub_t);
-    Ok(CheckedProgram::from_parts_with_signature_context(
+    let checked = finalize_checked_program(
         annotated_exprs,
         annotated_type_env,
         signature_context,
-    ))
+        &product.type_headers,
+        errors,
+    );
+    if !errors.is_empty() {
+        return Err(stats);
+    }
+    Ok(checked)
 }
 
 pub fn check_typed_program(exprs: &[deep::Expr]) -> Result<CheckedProgram, InferResult> {
-    // WI-1 follow-up: grow the stack so both the inference call below and the
-    // annotation pass run with headroom on deep input.
-    with_grown_stack(|| check_typed_program_inner(exprs))
+    crate::session::check_typed_program(exprs)
 }
 
-fn check_typed_program_inner(exprs: &[deep::Expr]) -> Result<CheckedProgram, InferResult> {
+pub(crate) fn check_typed_program_in_session(
+    exprs: &[deep::Expr],
+    errors: &mut DiagnosticSink<'_>,
+) -> Result<CheckedProgram, InferStats> {
     // Outermost scope covers both inference (which has its own inner scope)
     // and the annotation pass below, so a bail in either surfaces as a hard
     // located failure rather than a partially-annotated `Ok`.
     let stack_scope = StackExhaustionScope::enter();
-    let mut result = infer_program(exprs);
-    if result.errors.is_empty() {
-        let annotated_exprs = annotate_ir_program(exprs);
+    let product = infer_program_with_product_in_session(exprs, errors);
+    let stats = product.stats();
+    if errors.is_empty() {
+        let annotated_exprs = annotate_ir_program(exprs, &product, errors);
         let annotated_type_env = build_ir_type_env(&annotated_exprs);
         // Annotation recurses; reject if it bailed on low stack.
-        stack_scope.drain_into(&mut result.errors);
-        if !result.errors.is_empty() {
-            return Err(result);
+        stack_scope.drain_into(errors);
+        if !errors.is_empty() {
+            return Err(stats);
         }
-        Ok(CheckedProgram::from_parts(
+        let checked = finalize_checked_program(
             annotated_exprs,
             annotated_type_env,
-        ))
+            &SignatureInferenceMetadata::default(),
+            &product.type_headers,
+            errors,
+        );
+        if !errors.is_empty() {
+            return Err(stats);
+        }
+        Ok(checked)
     } else {
-        Err(result)
+        Err(stats)
     }
 }
 
 pub fn infer_ir_program(exprs: &[deep::Expr]) -> InferResult {
-    // WI-1 follow-up: grow the stack for the whole pipeline.
-    with_grown_stack(|| infer_ir_program_inner(exprs))
+    crate::session::infer_ir_program(exprs)
 }
 
-fn infer_ir_program_inner(exprs: &[deep::Expr]) -> InferResult {
+pub(crate) fn infer_ir_program_in_session(
+    exprs: &[deep::Expr],
+    errors: &mut DiagnosticSink<'_>,
+) -> InferStats {
     let stack_scope = StackExhaustionScope::enter();
     let type_env = build_ir_type_env(exprs);
-    let mut result = infer_ir_program_with_env(exprs, &type_env);
-    validate_ir_program(exprs, &type_env, &mut result.errors);
-    validate_tensor_precisions_in_program(exprs, &mut result.errors);
-    crate::invariants::validate_type_invariants_in_program(exprs, &mut result.errors);
-    validate_polymorphic_op_constraints(exprs, &type_env, &mut result.errors);
-    suppress_unbound_for_cycle_members(exprs, &mut result.errors);
+    let stats = infer_ir_program_with_env(exprs, &type_env, errors);
+    validate_ir_program(exprs, &type_env, errors);
+    validate_tensor_precisions_in_program(exprs, errors);
+    crate::invariants::validate_type_invariants_in_program_with_sink(exprs, errors);
+    validate_polymorphic_op_constraints(exprs, &type_env, errors);
     // Surface any walker stack bail as a hard located error.
-    stack_scope.drain_into(&mut result.errors);
-    result
+    stack_scope.drain_into(errors);
+    stats
 }
 
-/// When a binding cycle is detected, the inference pass that processed
-/// the cycle in textual order often reports `UnboundVariable` for the
-/// later cycle members (the lookup landed before the subsequent def was
-/// elaborated). Those errors are spurious noise — the names ARE defined,
-/// they're just circularly. Drop any `UnboundVariable` whose name matches
-/// a top-level def.
-fn suppress_unbound_for_cycle_members(exprs: &[deep::Expr], errors: &mut Vec<CheckError>) {
-    let mut def_names: HashSet<String> = HashSet::new();
-    for expr in top_level_decl_items(exprs) {
-        if let deep::Expr::List(list, _) = expr
-            && get_tag(list) == Some("def")
-            && let Some(name) = children(list).first().and_then(symbol_name)
-        {
-            def_names.insert(name.to_string());
-        }
-    }
-    errors.retain(|err| {
-        if !matches!(err.kind, CheckErrorKind::UnboundVariable) {
-            return true;
-        }
-        let name_start = match err.message.find("unbound variable: ") {
-            Some(start) => start + "unbound variable: ".len(),
-            None => return true,
-        };
-        let name = err.message[name_start..]
-            .split_whitespace()
-            .next()
-            .unwrap_or("");
-        !def_names.contains(name)
-    });
-}
-
-/// Stacked-context variant of `suppress_unbound_for_cycle_members`.
-///
-/// Drops `UnboundVariable` errors whose name matches either a new-code
-/// def OR a library def — the latter is needed because a library def
-/// referenced from the new code might temporarily look unbound during
-/// inference if the inferred error path runs before the env scheme
-/// lookup, but the name IS in the library context.
-fn suppress_unbound_for_cycle_members_against_context(
-    new_exprs: &[deep::Expr],
-    library_def_names: &HashSet<String>,
-    errors: &mut Vec<CheckError>,
-) {
-    let mut def_names: HashSet<String> = library_def_names.clone();
-    for expr in top_level_decl_items(new_exprs) {
-        if let deep::Expr::List(list, _) = expr
-            && get_tag(list) == Some("def")
-            && let Some(name) = children(list).first().and_then(symbol_name)
-        {
-            def_names.insert(name.to_string());
-        }
-    }
-    errors.retain(|err| {
-        if !matches!(err.kind, CheckErrorKind::UnboundVariable) {
-            return true;
-        }
-        let name_start = match err.message.find("unbound variable: ") {
-            Some(start) => start + "unbound variable: ".len(),
-            None => return true,
-        };
-        let name = err.message[name_start..]
-            .split_whitespace()
-            .next()
-            .unwrap_or("");
-        !def_names.contains(name)
-    });
-}
-
-fn infer_ir_program_with_env(exprs: &[deep::Expr], type_env: &IrTypeEnv) -> InferResult {
+fn infer_ir_program_with_env(
+    exprs: &[deep::Expr],
+    type_env: &IrTypeEnv,
+    errors: &mut DiagnosticSink<'_>,
+) -> InferStats {
     // Backwards-compat wrapper. Callers (like `infer_ir_program` and
     // `check_typed_program` callers) run `validate_ir_program`
     // separately, so we pass `None` here to skip the embedded validate.
     let empty_inner = crate::context::TypeEnv::empty();
     let mut state = empty_inner.inner().clone();
     infer_ir_program_with_state(
-        exprs, type_env, &mut state, type_env, /* run_validate_passes_on = */ None,
+        exprs, &mut state, type_env, /* run_validate_passes_on = */ None, errors,
     )
+    .stats()
 }
 
 /// Run the inference / IR binding / shape-validation passes against
 /// `state`, mutating it as it goes. Library state should be supplied by
 /// pre-cloning a snapshot; pass `&[]`-derived state for the monolithic
-/// path. `new_ir_types` are bound into `state.env` here; the
+/// path. Source IR types are collected with their exact final declaration
+/// origins and bound into `state.env` here; the
 /// `combined_ir` is what `validate_ir_program` consults so
 /// new-code shape validation can look up declared types of library
 /// references.
 fn infer_ir_program_with_state(
     exprs: &[deep::Expr],
-    new_ir_types: &IrTypeEnv,
     state: &mut TypeEnvInner,
     combined_ir: &IrTypeEnv,
     run_validate_passes_on: Option<&[deep::Expr]>,
-) -> InferResult {
-    let mut errors = Vec::new();
-    let mut typed_nodes = 0;
-    let mut total_nodes = 0;
+    errors: &mut DiagnosticSink<'_>,
+) -> InferenceProduct {
+    let mut product = InferenceProduct::default();
 
     // RFC v4b (RT-1 F2): reject a named module opened by more than one
     // wrapper in this check unit (module-identity forgery). Reef-linked
     // decls carry no wrappers, so this only fires on hand-written `.dp`.
-    detect_module_reopens(exprs, &mut errors);
+    detect_module_reopens(exprs, errors);
     // RFC v5 (RT-1 F2 bypass): reject the reef linker's reserved
     // internal-name format in programs not produced by the linker.
-    detect_forged_linker_names(exprs, &mut errors);
+    detect_forged_linker_names(exprs, errors);
 
     // Descend through `(module {} name ...)` wrappers: every idiomatic
     // Surf source wraps its declarations in `module X`, and without
@@ -1433,28 +2322,49 @@ fn infer_ir_program_with_state(
         &mut state.var_gen,
         &mut state.subst,
         &mut state.adt_reg,
-        &mut errors,
+        errors,
     );
+    product.type_headers = state.adt_reg.resolution_env().clone();
 
     // Checker-enforced opacity (RFC D-CHECK): accumulate this phase's
     // program-shape metadata into the persistent state (so the
     // stacked library/new-code paths keep library exports visible)
     // and install the per-run context for the inference hooks.
-    let phase_meta = build_opacity_meta(&items, &state.adt_reg, &mut state.var_gen);
+    let phase_meta = build_opacity_meta(&items, &state.adt_reg, &state.env);
     state.opacity.merge_from(&phase_meta);
     let _opacity_guard = crate::opacity::install_opacity_context(
         crate::opacity::OpacityContextData::from_meta(state.opacity.clone()),
     );
 
-    for (name, ty_expr) in new_ir_types {
-        let ty = deep_type_to_resolved_type(
+    // The canonical collector returns each final name-keyed IR type together
+    // with the exact flattened declaration ordinal that produced it. Duplicate
+    // names intentionally retain last-declaration-wins semantics, while the
+    // origin keeps an owning witness from leaking into an earlier body.
+    let collected_ir_types = collect_ir_types_with_origins(items.iter().map(|(_, expr)| *expr));
+
+    let mut prebound_type_failures = HashMap::new();
+    for (name, ty_expr) in &collected_ir_types.type_env {
+        match resolve_deep_type(
             ty_expr,
             &mut state.var_gen,
             &state.adt_reg,
-            &mut HashMap::new(),
-        );
-        let scheme = state.env.generalize(&ty, &state.subst);
-        state.env.bind(name.clone(), scheme);
+            TypeUseSite::CompilerMetadata,
+            BinderMode::TrustedCompilerMetadata,
+            errors,
+        ) {
+            Ok(ty) => {
+                let scheme = state.env.generalize(&ty, &state.subst);
+                state.env.bind(name.clone(), scheme);
+            }
+            Err(witness) => {
+                // The prebinding pass owns this diagnostic. Carry its witness
+                // into the matching def-body pass so a literal/ascription
+                // consumer propagates the same failure instead of resolving
+                // the cloned metadata and reporting it a second time.
+                let declaration_index = collected_ir_types.final_origin_by_name[name];
+                prebound_type_failures.insert(declaration_index, witness);
+            }
+        }
     }
 
     // Per-decl profile: when CHELIS_PROFILE_COMPILE_CONTEXT_DETAIL=1, emit
@@ -1464,41 +2374,86 @@ fn infer_ir_program_with_state(
         .map(|v| v == "1")
         .unwrap_or(false);
     let user_def_names = collect_user_def_names(&top_level_decl_items(exprs));
-    for (module, expr) in &items {
-        let t0 = if detail_profile {
-            Some(std::time::Instant::now())
+    let declared_signatures = collect_declared_sig_metadata(items.iter().map(|(_, expr)| *expr));
+    let metadata_prebound_names = collected_ir_types
+        .type_env
+        .keys()
+        .cloned()
+        .collect::<HashSet<_>>();
+    let inference_groups = primary_inference_groups(exprs, &items);
+    for group in inference_groups {
+        let provisional_types = if group.recursive {
+            prebind_recursive_function_schemes(
+                &group.indices,
+                &items,
+                &declared_signatures,
+                &metadata_prebound_names,
+                &mut state.env,
+                &mut state.var_gen,
+            )
         } else {
-            None
+            HashMap::new()
         };
-        let decl_name = top_level_decl_name(expr);
-        crate::opacity::set_current_item(
-            crate::opacity::module_key_for_item(module.as_deref(), decl_name),
-            decl_name.map(str::to_string),
-        );
-        infer_top_level(
-            expr,
-            &mut state.env,
-            &mut state.var_gen,
-            &mut state.subst,
-            &state.adt_reg,
-            &mut errors,
-            &mut typed_nodes,
-            &mut total_nodes,
-            &user_def_names,
-        );
-        if let Some(t0) = t0 {
-            let elapsed = t0.elapsed();
-            let name = top_level_decl_name(expr).unwrap_or("<anon>");
-            eprintln!("infer_ir_decl: {:>8.4}s {}", elapsed.as_secs_f64(), name);
+        let mut deferred_bindings = Vec::new();
+        for declaration_index in group.indices {
+            let (module, expr) = &items[declaration_index];
+            product.begin_root(expr, errors);
+            let t0 = if detail_profile {
+                Some(std::time::Instant::now())
+            } else {
+                None
+            };
+            let decl_name = top_level_decl_name(expr);
+            crate::opacity::set_current_item(
+                crate::opacity::module_key_for_item(module.as_deref(), decl_name),
+                decl_name.map(str::to_string),
+            );
+            if let Some(binding) = infer_top_level(
+                expr,
+                &mut state.env,
+                &mut state.var_gen,
+                &mut state.subst,
+                &state.adt_reg,
+                errors,
+                &mut product,
+                prebound_type_failures.get(&declaration_index),
+                provisional_types.get(&declaration_index),
+                group.recursive,
+                &user_def_names,
+                &declared_signatures,
+            ) {
+                deferred_bindings.push(binding);
+            }
+            product.finish_root(&state.subst, errors);
+            if let Some(t0) = t0 {
+                let elapsed = t0.elapsed();
+                let name = top_level_decl_name(expr).unwrap_or("<anon>");
+                eprintln!("infer_ir_decl: {:>8.4}s {}", elapsed.as_secs_f64(), name);
+            }
+            // Issue #256 round 2: drain the deferred-borrow ledger for this
+            // def and re-check each recorded variable against the now-complete
+            // substitution. Draining per-def keeps error attribution local and
+            // prevents one def's deferrals from leaking into the next.
+            validate_deferred_borrow_vars(&state.subst, &state.adt_reg, errors);
+            // D-CHECK: drain the per-def deferred-access ledger (see
+            // `validate_deferred_opaque_uses`).
+            validate_deferred_opaque_uses(&state.subst, &state.adt_reg, errors);
         }
-        // Issue #256 round 2: drain the deferred-borrow ledger for this
-        // def and re-check each recorded variable against the now-complete
-        // substitution. Draining per-def keeps error attribution local and
-        // prevents one def's deferrals from leaking into the next.
-        validate_deferred_borrow_vars(&state.subst, &state.adt_reg, &mut errors);
-        // D-CHECK: drain the per-def deferred-access ledger (see
-        // `validate_deferred_opaque_uses`).
-        validate_deferred_opaque_uses(&state.subst, &state.adt_reg, &mut errors);
+        if group.recursive {
+            for (name, _) in &deferred_bindings {
+                state.env.remove_binding(name);
+            }
+            let schemes = deferred_bindings
+                .into_iter()
+                .map(|(name, ty)| {
+                    let scheme = state.env.generalize(&ty, &state.subst);
+                    (name, scheme)
+                })
+                .collect::<Vec<_>>();
+            for (name, scheme) in schemes {
+                state.env.bind(name, scheme);
+            }
+        }
     }
     crate::opacity::set_current_item(None, None);
 
@@ -1517,45 +2472,215 @@ fn infer_ir_program_with_state(
     }
 
     if let Some(target_exprs) = run_validate_passes_on {
-        validate_ir_program(target_exprs, combined_ir, &mut errors);
+        validate_ir_program(target_exprs, combined_ir, errors);
     }
 
-    InferResult {
-        errors,
-        typed_nodes,
-        total_nodes,
+    product
+}
+
+/// Primary body-inference schedule. Function declarations inside a lexical
+/// module use the same dependency/SCC planner as signature inference, so a
+/// forward helper's body-derived scheme is available to its caller. Bare defs
+/// and every non-function declaration retain textual order. The returned
+/// values are original flattened ordinals: scheduling never changes diagnostic
+/// ownership, collected-type origins, or output order.
+fn primary_inference_schedule(
+    exprs: &[deep::Expr],
+    items: &[(Option<String>, &deep::Expr)],
+) -> Vec<usize> {
+    let module_fn_by_key = items
+        .iter()
+        .enumerate()
+        .filter_map(|(index, (module, expr))| {
+            module.as_ref()?;
+            let deep::Expr::List(list, _) = expr else {
+                return None;
+            };
+            if get_tag(list) != Some("def")
+                || children(list)
+                    .get(1)
+                    .and_then(as_tagged_list_expr("fn"))
+                    .is_none()
+            {
+                return None;
+            }
+            Some((expr_key(expr), index))
+        })
+        .collect::<HashMap<_, _>>();
+    if module_fn_by_key.is_empty() {
+        return (0..items.len()).collect();
     }
+
+    let ordered_module_fns = signature_inference_def_order(exprs)
+        .into_iter()
+        .filter_map(|expr| module_fn_by_key.get(&expr_key(expr)).copied())
+        .collect::<Vec<_>>();
+    let module_fn_indices = module_fn_by_key.values().copied().collect::<HashSet<_>>();
+    let insertion = module_fn_indices.iter().copied().min().unwrap_or(0);
+    let mut schedule = Vec::with_capacity(items.len());
+    for index in 0..items.len() {
+        if index == insertion {
+            schedule.extend(ordered_module_fns.iter().copied());
+        }
+        if !module_fn_indices.contains(&index) {
+            schedule.push(index);
+        }
+    }
+    schedule
+}
+
+#[derive(Debug)]
+struct PrimaryInferenceGroup {
+    indices: Vec<usize>,
+    recursive: bool,
+}
+
+/// Group the flat primary schedule into recursive SCC inference units.
+/// Acyclic bare functions stay in textual order; acyclic module functions
+/// retain dependency order. Only a genuine recursive component is grouped
+/// and prebound, so a bare acyclic forward helper remains unavailable.
+fn primary_inference_groups(
+    exprs: &[deep::Expr],
+    items: &[(Option<String>, &deep::Expr)],
+) -> Vec<PrimaryInferenceGroup> {
+    let schedule = primary_inference_schedule(exprs, items);
+    let item_by_key = items
+        .iter()
+        .enumerate()
+        .map(|(index, (_, expr))| (expr_key(expr), index))
+        .collect::<HashMap<_, _>>();
+    let recursive_components = function_inference_sccs(exprs)
+        .into_iter()
+        .filter(|component| component.recursive)
+        .map(|component| {
+            component
+                .members
+                .into_iter()
+                .filter_map(|expr| item_by_key.get(&expr_key(expr)).copied())
+                .collect::<Vec<_>>()
+        })
+        .filter(|indices| !indices.is_empty())
+        .collect::<Vec<_>>();
+    let mut component_by_index = HashMap::new();
+    for (component_index, indices) in recursive_components.iter().enumerate() {
+        for index in indices {
+            component_by_index.insert(*index, component_index);
+        }
+    }
+
+    let mut emitted_components = HashSet::new();
+    let mut groups = Vec::new();
+    for index in schedule {
+        let Some(component_index) = component_by_index.get(&index).copied() else {
+            groups.push(PrimaryInferenceGroup {
+                indices: vec![index],
+                recursive: false,
+            });
+            continue;
+        };
+        if emitted_components.insert(component_index) {
+            groups.push(PrimaryInferenceGroup {
+                indices: recursive_components[component_index].clone(),
+                recursive: true,
+            });
+        }
+    }
+    groups
+}
+
+/// Install monomorphic arity-shaped types for the un-signed members of one
+/// recursive SCC. The component is removed and generalized as a unit after
+/// every body has unified with its provisional type.
+fn prebind_recursive_function_schemes(
+    indices: &[usize],
+    items: &[(Option<String>, &deep::Expr)],
+    declared_signatures: &HashMap<String, DeclaredSigMetadata>,
+    metadata_prebound_names: &HashSet<String>,
+    env: &mut Env,
+    vg: &mut VarGen,
+) -> HashMap<usize, Type> {
+    let mut provisional = HashMap::new();
+    for index in indices {
+        let expr = items[*index].1;
+        let deep::Expr::List(list, _) = expr else {
+            continue;
+        };
+        let kids = children(list);
+        let (Some(name), Some(fn_list)) = (
+            kids.first().and_then(symbol_name),
+            kids.get(1).and_then(as_tagged_list_expr("fn")),
+        ) else {
+            continue;
+        };
+        if declared_signatures.contains_key(name) || metadata_prebound_names.contains(name) {
+            continue;
+        }
+        let Some(params) = children(fn_list).first() else {
+            continue;
+        };
+        let arity = match params {
+            deep::Expr::List(params, _) if get_tag(params) == Some("params") => {
+                children(params).len()
+            }
+            _ => continue,
+        };
+        let ty = Type::Fn(
+            (0..arity).map(|_| vg.fresh_type()).collect(),
+            Box::new(vg.fresh_type()),
+        );
+        env.bind(name.to_string(), Scheme::mono(ty.clone()));
+        provisional.insert(*index, ty);
+    }
+    provisional
 }
 
 type IrTypeEnv = HashMap<String, deep::Expr>;
 
+/// Canonical IR type collection result. The type environment retains the
+/// historical last-declaration-wins behavior for duplicate names; the paired
+/// ordinal identifies the exact flattened declaration that produced each
+/// final entry.
+struct CollectedIrTypes {
+    type_env: IrTypeEnv,
+    final_origin_by_name: HashMap<String, usize>,
+}
+
 fn build_ir_type_env(exprs: &[deep::Expr]) -> IrTypeEnv {
-    let mut env = HashMap::new();
-    for expr in top_level_decl_items(exprs) {
-        collect_ir_types(expr, &mut env);
-    }
-    env
+    collect_ir_types_with_origins(top_level_decl_items(exprs)).type_env
 }
 
-fn collect_ir_types(expr: &deep::Expr, env: &mut IrTypeEnv) {
-    let deep::Expr::List(list, _) = expr else {
-        return;
-    };
-    if get_tag(list) != Some("def") {
-        return;
+fn collect_ir_types_with_origins<'a>(
+    items: impl IntoIterator<Item = &'a deep::Expr>,
+) -> CollectedIrTypes {
+    let mut type_env = HashMap::new();
+    let mut final_origin_by_name = HashMap::new();
+    for (declaration_index, expr) in items.into_iter().enumerate() {
+        let deep::Expr::List(list, _) = expr else {
+            continue;
+        };
+        if get_tag(list) != Some("def") {
+            continue;
+        }
+        let kids = children(list);
+        let (Some(name), Some(body)) = (kids.first().and_then(symbol_name), kids.get(1)) else {
+            continue;
+        };
+        if let Some(ty) = expr_type_expr(body, &type_env) {
+            type_env.insert(name.to_string(), ty);
+            final_origin_by_name.insert(name.to_string(), declaration_index);
+        }
     }
-    let kids = children(list);
-    if kids.len() < 2 {
-        return;
-    }
-    if let Some(name) = symbol_name(&kids[0])
-        && let Some(ty) = expr_type_expr(&kids[1], env)
-    {
-        env.insert(name.to_string(), ty);
+    CollectedIrTypes {
+        type_env,
+        final_origin_by_name,
     }
 }
 
-fn validate_ir_program(exprs: &[deep::Expr], type_env: &IrTypeEnv, errors: &mut Vec<CheckError>) {
+fn validate_ir_program(
+    exprs: &[deep::Expr],
+    type_env: &IrTypeEnv,
+    errors: &mut DiagnosticSink<'_>,
+) {
     detect_top_level_binding_cycles(exprs, errors);
     detect_trivial_non_terminating_fns(exprs, errors);
     let mut static_env = HashMap::new();
@@ -1586,7 +2711,7 @@ fn validate_ir_program(exprs: &[deep::Expr], type_env: &IrTypeEnv, errors: &mut 
 /// `(app (var name) ...)` with the def's own name as the callee. Real
 /// recursive fns with a base case inside `if`/`match` (e.g. `fact n = if
 /// n <= 1 then 1 else mul(n, fact(n-1))`) are NOT flagged.
-fn detect_trivial_non_terminating_fns(exprs: &[deep::Expr], errors: &mut Vec<CheckError>) {
+fn detect_trivial_non_terminating_fns(exprs: &[deep::Expr], errors: &mut DiagnosticSink<'_>) {
     // Collect each def's "terminal callees" — the top-level fn names
     // reached at every tail position of the body. `Some(set)` means
     // every tail is a call; the set is who's called. `None` means the
@@ -1969,13 +3094,13 @@ fn top_level_decl_items_with_modules(exprs: &[deep::Expr]) -> Vec<(Option<String
 /// re-opened name. Surf emits one module per file and reef strips
 /// wrappers before inference, so this only fires on hand-written `.dp`
 /// (the forge surface).
-fn detect_module_reopens(exprs: &[deep::Expr], errors: &mut Vec<CheckError>) {
+fn detect_module_reopens(exprs: &[deep::Expr], errors: &mut DiagnosticSink<'_>) {
     fn walk(
         expr: &deep::Expr,
         prefix: Option<&str>,
         seen: &mut HashSet<String>,
         reported: &mut HashSet<String>,
-        errors: &mut Vec<CheckError>,
+        errors: &mut DiagnosticSink<'_>,
     ) {
         let deep::Expr::List(list, _) = expr else {
             return;
@@ -2067,7 +3192,7 @@ fn detect_module_reopens(exprs: &[deep::Expr], errors: &mut Vec<CheckError>) {
 /// linker's own output is accepted). The linker also re-mangles every
 /// user source name, so user code inside a real package cannot smuggle
 /// a clean mangled name into linked output.
-fn detect_forged_linker_names(exprs: &[deep::Expr], errors: &mut Vec<CheckError>) {
+fn detect_forged_linker_names(exprs: &[deep::Expr], errors: &mut DiagnosticSink<'_>) {
     if crate::opacity::linked_program() {
         return;
     }
@@ -2089,17 +3214,12 @@ fn detect_forged_linker_names(exprs: &[deep::Expr], errors: &mut Vec<CheckError>
     }
 }
 
-fn infer_signature_metadata(
-    exprs: &[deep::Expr],
-    type_env: &HashMap<String, deep::Expr>,
-) -> SignatureInferenceMetadata {
-    infer_signature_metadata_with_context(exprs, type_env, &SignatureInferenceMetadata::default())
-}
-
-fn infer_signature_metadata_with_context(
+fn infer_signature_metadata_with_context_and_headers(
     exprs: &[deep::Expr],
     type_env: &HashMap<String, deep::Expr>,
     signature_context: &SignatureInferenceMetadata,
+    type_headers: &TypeResolutionEnv,
+    errors: &mut DiagnosticSink<'_>,
 ) -> SignatureInferenceMetadata {
     let defsig_names = collect_defsig_names(exprs);
     let recursive_members = recursive_call_cycle_members(exprs);
@@ -2129,7 +3249,10 @@ fn infer_signature_metadata_with_context(
             let Some(fn_list) = kids.get(1).and_then(as_tagged_list_expr("fn")) else {
                 continue;
             };
-            let Some(checked_signature) = type_env.get(name).and_then(type_from_deep_expr) else {
+            let Some(checked_signature) = type_env
+                .get(name)
+                .and_then(|expr| type_from_deep_expr(expr, type_headers, errors))
+            else {
                 continue;
             };
             let Type::Fn(checked_args, checked_ret) = checked_signature.clone() else {
@@ -2159,7 +3282,14 @@ fn infer_signature_metadata_with_context(
                     && type_contains_tensor(&checked_type)
                     && !matches!(checked_type, Type::Ref(_));
                 let inferred_read_only = can_infer
-                    && !param_has_consuming_use(body, pname, &available_signatures, type_env);
+                    && !param_has_consuming_use_with_headers(
+                        body,
+                        pname,
+                        &available_signatures,
+                        type_env,
+                        type_headers,
+                        errors,
+                    );
                 let display_type = if inferred_read_only {
                     Type::Ref(Box::new(checked_type.clone()))
                 } else {
@@ -2196,7 +3326,17 @@ fn infer_signature_metadata_with_context(
     SignatureInferenceMetadata { functions }
 }
 
-fn signature_inference_def_order(exprs: &[deep::Expr]) -> Vec<&deep::Expr> {
+struct FunctionInferenceComponent<'a> {
+    members: Vec<&'a deep::Expr>,
+    recursive: bool,
+}
+
+/// Canonical dependency/SCC planner for top-level function declarations.
+/// Components are returned callee-first; member order within one SCC remains
+/// source order. Primary module scheduling and signature inference both
+/// consume this plan, while bare acyclic primary inference deliberately keeps
+/// its historical textual order.
+fn function_inference_sccs(exprs: &[deep::Expr]) -> Vec<FunctionInferenceComponent<'_>> {
     let def_items = top_level_decl_items(exprs)
         .into_iter()
         .filter_map(|expr| {
@@ -2215,10 +3355,6 @@ fn signature_inference_def_order(exprs: &[deep::Expr]) -> Vec<&deep::Expr> {
         .iter()
         .map(|(name, _)| name.clone())
         .collect::<HashSet<_>>();
-    let def_by_name = def_items
-        .iter()
-        .map(|(name, expr)| (name.clone(), *expr))
-        .collect::<HashMap<_, _>>();
     let mut graph = HashMap::<String, HashSet<String>>::new();
     for (name, expr) in &def_items {
         let deep::Expr::List(list, _) = expr else {
@@ -2242,45 +3378,101 @@ fn signature_inference_def_order(exprs: &[deep::Expr]) -> Vec<&deep::Expr> {
         graph.insert(name.clone(), calls);
     }
 
-    fn visit<'a>(
-        name: &str,
-        graph: &HashMap<String, HashSet<String>>,
-        def_by_name: &HashMap<String, &'a deep::Expr>,
-        visiting: &mut HashSet<String>,
-        visited: &mut HashSet<String>,
-        out: &mut Vec<&'a deep::Expr>,
-    ) {
-        if visited.contains(name) || !visiting.insert(name.to_string()) {
-            return;
+    let mut assigned = HashSet::new();
+    let mut unordered = Vec::<FunctionInferenceComponent<'_>>::new();
+    for (name, _) in &def_items {
+        if assigned.contains(name) {
+            continue;
         }
-        if let Some(callees) = graph.get(name) {
-            let mut callees = callees.iter().collect::<Vec<_>>();
-            callees.sort();
-            for callee in callees {
-                visit(callee, graph, def_by_name, visiting, visited, out);
+        let member_names = def_items
+            .iter()
+            .filter_map(|(candidate, _)| {
+                let same_component = candidate == name
+                    || (reaches_name(candidate, name, &graph, &mut HashSet::new())
+                        && reaches_name(name, candidate, &graph, &mut HashSet::new()));
+                same_component.then_some(candidate.clone())
+            })
+            .collect::<HashSet<_>>();
+        assigned.extend(member_names.iter().cloned());
+        let members = def_items
+            .iter()
+            .filter_map(|(candidate, expr)| member_names.contains(candidate).then_some(*expr))
+            .collect::<Vec<_>>();
+        let recursive = members.len() > 1
+            || graph
+                .get(name)
+                .is_some_and(|callees| callees.contains(name));
+        unordered.push(FunctionInferenceComponent { members, recursive });
+    }
+
+    let mut component_by_name = HashMap::new();
+    for (component_index, component) in unordered.iter().enumerate() {
+        for expr in &component.members {
+            if let deep::Expr::List(list, _) = expr
+                && let Some(name) = children(list).first().and_then(symbol_name)
+            {
+                component_by_name.insert(name.to_string(), component_index);
             }
         }
-        visiting.remove(name);
-        visited.insert(name.to_string());
-        if let Some(expr) = def_by_name.get(name) {
-            out.push(*expr);
+    }
+    let mut component_graph = vec![HashSet::<usize>::new(); unordered.len()];
+    for (caller, callees) in &graph {
+        let Some(caller_component) = component_by_name.get(caller).copied() else {
+            continue;
+        };
+        for callee in callees {
+            if let Some(callee_component) = component_by_name.get(callee).copied()
+                && callee_component != caller_component
+            {
+                component_graph[caller_component].insert(callee_component);
+            }
         }
     }
 
-    let mut out = Vec::new();
+    fn visit_component(
+        component: usize,
+        graph: &[HashSet<usize>],
+        visiting: &mut HashSet<usize>,
+        visited: &mut HashSet<usize>,
+        out: &mut Vec<usize>,
+    ) {
+        if visited.contains(&component) || !visiting.insert(component) {
+            return;
+        }
+        let mut dependencies = graph[component].iter().copied().collect::<Vec<_>>();
+        dependencies.sort_unstable();
+        for dependency in dependencies {
+            visit_component(dependency, graph, visiting, visited, out);
+        }
+        visiting.remove(&component);
+        visited.insert(component);
+        out.push(component);
+    }
+
+    let mut order = Vec::new();
     let mut visiting = HashSet::new();
     let mut visited = HashSet::new();
-    for (name, _) in &def_items {
-        visit(
-            name,
-            &graph,
-            &def_by_name,
+    for component in 0..unordered.len() {
+        visit_component(
+            component,
+            &component_graph,
             &mut visiting,
             &mut visited,
-            &mut out,
+            &mut order,
         );
     }
-    out
+    let mut slots = unordered.into_iter().map(Some).collect::<Vec<_>>();
+    order
+        .into_iter()
+        .filter_map(|index| slots[index].take())
+        .collect()
+}
+
+fn signature_inference_def_order(exprs: &[deep::Expr]) -> Vec<&deep::Expr> {
+    function_inference_sccs(exprs)
+        .into_iter()
+        .flat_map(|component| component.members)
+        .collect()
 }
 
 fn collect_defsig_names(exprs: &[deep::Expr]) -> HashSet<String> {
@@ -2297,59 +3489,17 @@ fn collect_defsig_names(exprs: &[deep::Expr]) -> HashSet<String> {
 }
 
 fn recursive_call_cycle_members(exprs: &[deep::Expr]) -> HashSet<String> {
-    let mut def_names = HashSet::new();
-    let mut graph: HashMap<String, HashSet<String>> = HashMap::new();
-
-    for expr in top_level_decl_items(exprs) {
-        if let deep::Expr::List(list, _) = expr
-            && get_tag(list) == Some("def")
-            && let Some(name) = children(list).first().and_then(symbol_name)
-            && children(list)
-                .get(1)
-                .and_then(as_tagged_list_expr("fn"))
-                .is_some()
-        {
-            def_names.insert(name.to_string());
-        }
-    }
-
-    for expr in top_level_decl_items(exprs) {
-        let deep::Expr::List(list, _) = expr else {
-            continue;
-        };
-        if get_tag(list) != Some("def") {
-            continue;
-        }
-        let kids = children(list);
-        let Some(name) = kids.first().and_then(symbol_name) else {
-            continue;
-        };
-        let Some(fn_list) = kids.get(1).and_then(as_tagged_list_expr("fn")) else {
-            continue;
-        };
-        let fn_kids = children(fn_list);
-        let Some(params) = fn_kids.first() else {
-            continue;
-        };
-        let Some(body) = fn_kids.get(1) else {
-            continue;
-        };
-        let mut bound = vec![
-            param_source_infos(params)
-                .into_iter()
-                .map(|(n, _)| n)
-                .collect(),
-        ];
-        let mut calls = HashSet::new();
-        collect_top_level_calls(body, &def_names, &mut bound, &mut calls);
-        graph.insert(name.to_string(), calls);
-    }
-
     let mut recursive = HashSet::new();
-    for name in &def_names {
-        let mut visited = HashSet::new();
-        if reaches_name(name, name, &graph, &mut visited) {
-            recursive.insert(name.clone());
+    for component in function_inference_sccs(exprs) {
+        if !component.recursive {
+            continue;
+        }
+        for expr in component.members {
+            if let deep::Expr::List(list, _) = expr
+                && let Some(name) = children(list).first().and_then(symbol_name)
+            {
+                recursive.insert(name.to_string());
+            }
         }
     }
     recursive
@@ -2478,9 +3628,53 @@ pub(crate) fn param_has_consuming_use(
     param: &str,
     available_signatures: &HashMap<String, Type>,
     type_env: &HashMap<String, deep::Expr>,
+    type_headers: &TypeResolutionEnv,
+) -> Result<bool, InferResult> {
+    crate::session::param_has_consuming_use(
+        expr,
+        param,
+        available_signatures,
+        type_env,
+        type_headers,
+    )
+}
+
+pub(crate) fn param_has_consuming_use_in_session(
+    expr: &deep::Expr,
+    param: &str,
+    available_signatures: &HashMap<String, Type>,
+    type_env: &HashMap<String, deep::Expr>,
+    type_headers: &TypeResolutionEnv,
+    errors: &mut DiagnosticSink<'_>,
+) -> bool {
+    param_has_consuming_use_with_headers(
+        expr,
+        param,
+        available_signatures,
+        type_env,
+        type_headers,
+        errors,
+    )
+}
+
+fn param_has_consuming_use_with_headers(
+    expr: &deep::Expr,
+    param: &str,
+    available_signatures: &HashMap<String, Type>,
+    type_env: &HashMap<String, deep::Expr>,
+    type_headers: &TypeResolutionEnv,
+    errors: &mut DiagnosticSink<'_>,
 ) -> bool {
     let mut bound = Vec::new();
-    param_has_consuming_use_inner(expr, param, &mut bound, available_signatures, type_env)
+    param_has_consuming_use_inner(
+        expr,
+        param,
+        &mut bound,
+        available_signatures,
+        type_env,
+        type_headers,
+        errors,
+    )
 }
 
 fn param_has_consuming_use_inner(
@@ -2489,26 +3683,66 @@ fn param_has_consuming_use_inner(
     bound: &mut Vec<HashSet<String>>,
     available_signatures: &HashMap<String, Type>,
     type_env: &HashMap<String, deep::Expr>,
+    type_headers: &TypeResolutionEnv,
+    errors: &mut DiagnosticSink<'_>,
 ) -> bool {
     stack_guard!("param_has_consuming_use_inner", expr, false);
     match expr {
         deep::Expr::Atom(_, _) => false,
         deep::Expr::Map(map, _) => map.entries.iter().any(|(_, value)| {
-            param_has_consuming_use_inner(value, param, bound, available_signatures, type_env)
+            param_has_consuming_use_inner(
+                value,
+                param,
+                bound,
+                available_signatures,
+                type_env,
+                type_headers,
+                errors,
+            )
         }),
-        deep::Expr::MetaExpr(meta, _) => {
-            param_has_consuming_use_inner(&meta.expr, param, bound, available_signatures, type_env)
-        }
+        deep::Expr::MetaExpr(meta, _) => param_has_consuming_use_inner(
+            &meta.expr,
+            param,
+            bound,
+            available_signatures,
+            type_env,
+            type_headers,
+            errors,
+        ),
         deep::Expr::List(list, _) => match get_tag(list) {
             Some("var") => var_name_list(list) == Some(param) && !is_bound_name(param, bound),
             Some("borrow") | Some("copy") => children(list).first().is_some_and(|child| {
-                param_nested_consuming_use(child, param, bound, available_signatures, type_env)
+                param_nested_consuming_use(
+                    child,
+                    param,
+                    bound,
+                    available_signatures,
+                    type_env,
+                    type_headers,
+                    errors,
+                )
             }),
             Some("drop") | Some("realize") => children(list)
                 .first()
                 .is_some_and(|child| expr_mentions_unshadowed_name(child, param, bound)),
-            Some("app") => app_consumes_param(list, param, bound, available_signatures, type_env),
-            Some("pipe") => pipe_consumes_param(list, param, bound, available_signatures, type_env),
+            Some("app") => app_consumes_param(
+                list,
+                param,
+                bound,
+                available_signatures,
+                type_env,
+                type_headers,
+                errors,
+            ),
+            Some("pipe") => pipe_consumes_param(
+                list,
+                param,
+                bound,
+                available_signatures,
+                type_env,
+                type_headers,
+                errors,
+            ),
             Some("fn") => {
                 let kids = children(list);
                 if kids.len() < 2 {
@@ -2535,6 +3769,8 @@ fn param_has_consuming_use_inner(
                             bound,
                             available_signatures,
                             type_env,
+                            type_headers,
+                            errors,
                         ) {
                             return true;
                         }
@@ -2551,6 +3787,8 @@ fn param_has_consuming_use_inner(
                     bound,
                     available_signatures,
                     type_env,
+                    type_headers,
+                    errors,
                 );
                 bound.pop();
                 result
@@ -2578,12 +3816,16 @@ fn param_has_consuming_use_inner(
                         bound,
                         available_signatures,
                         type_env,
+                        type_headers,
+                        errors,
                     ) || param_has_consuming_use_inner(
                         &arm_kids[2],
                         param,
                         bound,
                         available_signatures,
                         type_env,
+                        type_headers,
+                        errors,
                     );
                     bound.pop();
                     if consumes {
@@ -2593,7 +3835,15 @@ fn param_has_consuming_use_inner(
                 false
             }
             _ => children(list).iter().any(|child| {
-                param_has_consuming_use_inner(child, param, bound, available_signatures, type_env)
+                param_has_consuming_use_inner(
+                    child,
+                    param,
+                    bound,
+                    available_signatures,
+                    type_env,
+                    type_headers,
+                    errors,
+                )
             }),
         },
     }
@@ -2605,11 +3855,21 @@ fn param_nested_consuming_use(
     bound: &mut Vec<HashSet<String>>,
     available_signatures: &HashMap<String, Type>,
     type_env: &HashMap<String, deep::Expr>,
+    type_headers: &TypeResolutionEnv,
+    errors: &mut DiagnosticSink<'_>,
 ) -> bool {
     if is_direct_unshadowed_var(expr, param, bound) {
         return false;
     }
-    param_has_consuming_use_inner(expr, param, bound, available_signatures, type_env)
+    param_has_consuming_use_inner(
+        expr,
+        param,
+        bound,
+        available_signatures,
+        type_env,
+        type_headers,
+        errors,
+    )
 }
 
 fn app_consumes_param(
@@ -2618,12 +3878,22 @@ fn app_consumes_param(
     bound: &mut Vec<HashSet<String>>,
     available_signatures: &HashMap<String, Type>,
     type_env: &HashMap<String, deep::Expr>,
+    type_headers: &TypeResolutionEnv,
+    errors: &mut DiagnosticSink<'_>,
 ) -> bool {
     let kids = children(list);
     let callee = kids.first().and_then(var_name_expr);
     if let Some(func) = kids.first()
         && !matches!(callee, Some(name) if name != param)
-        && param_has_consuming_use_inner(func, param, bound, available_signatures, type_env)
+        && param_has_consuming_use_inner(
+            func,
+            param,
+            bound,
+            available_signatures,
+            type_env,
+            type_headers,
+            errors,
+        )
     {
         return true;
     }
@@ -2634,12 +3904,27 @@ fn app_consumes_param(
             continue;
         }
         if is_direct_unshadowed_var(arg, param, bound) {
-            if callee_arg_is_borrowed(callee, index, available_signatures, type_env) {
+            if callee_arg_is_borrowed(
+                callee,
+                index,
+                available_signatures,
+                type_env,
+                type_headers,
+                errors,
+            ) {
                 continue;
             }
             return true;
         }
-        if param_has_consuming_use_inner(arg, param, bound, available_signatures, type_env) {
+        if param_has_consuming_use_inner(
+            arg,
+            param,
+            bound,
+            available_signatures,
+            type_env,
+            type_headers,
+            errors,
+        ) {
             return true;
         }
     }
@@ -2652,6 +3937,8 @@ fn pipe_consumes_param(
     bound: &mut Vec<HashSet<String>>,
     available_signatures: &HashMap<String, Type>,
     type_env: &HashMap<String, deep::Expr>,
+    type_headers: &TypeResolutionEnv,
+    errors: &mut DiagnosticSink<'_>,
 ) -> bool {
     let kids = children(list);
     if kids.is_empty() {
@@ -2675,6 +3962,8 @@ fn pipe_consumes_param(
                 piped_arg_index,
                 available_signatures,
                 type_env,
+                type_headers,
+                errors,
             ) {
                 return true;
             }
@@ -2684,6 +3973,8 @@ fn pipe_consumes_param(
             bound,
             available_signatures,
             type_env,
+            type_headers,
+            errors,
         ) {
             return true;
         }
@@ -2697,6 +3988,8 @@ fn callee_arg_is_borrowed(
     index: usize,
     available_signatures: &HashMap<String, Type>,
     type_env: &HashMap<String, deep::Expr>,
+    type_headers: &TypeResolutionEnv,
+    errors: &mut DiagnosticSink<'_>,
 ) -> bool {
     let Some(callee) = callee else {
         return false;
@@ -2706,7 +3999,9 @@ fn callee_arg_is_borrowed(
     {
         return true;
     }
-    if let Some(Type::Fn(args, _)) = type_env.get(callee).and_then(type_from_deep_expr)
+    if let Some(Type::Fn(args, _)) = type_env
+        .get(callee)
+        .and_then(|expr| type_from_deep_expr(expr, type_headers, errors))
         && args.get(index).is_some_and(|ty| matches!(ty, Type::Ref(_)))
     {
         return true;
@@ -2759,11 +4054,22 @@ fn expr_mentions_unshadowed_name(
     }
 }
 
-fn type_from_deep_expr(expr: &deep::Expr) -> Option<Type> {
+fn type_from_deep_expr(
+    expr: &deep::Expr,
+    headers: &TypeResolutionEnv,
+    errors: &mut DiagnosticSink<'_>,
+) -> Option<Type> {
     let mut vg = VarGen::default();
-    let mut tvar_map = HashMap::new();
-    let ty = deep_type_to_type(expr, &mut vg, &mut tvar_map);
-    (!matches!(ty, Type::Error)).then_some(ty)
+    DeepTypeResolver::new(
+        TypeUseSite::CompilerMetadata,
+        BinderMode::TrustedCompilerMetadata,
+        headers,
+        &mut vg,
+        errors,
+    )
+    .resolve(expr)
+    .ok()
+    .map(|ty| ty.into_type())
 }
 
 fn type_contains_tensor(ty: &Type) -> bool {
@@ -2771,7 +4077,7 @@ fn type_contains_tensor(ty: &Type) -> bool {
         Type::Tensor(_, _) => true,
         Type::Ref(inner) => type_contains_tensor(inner),
         Type::Adt(_, args) | Type::Tuple(args) => args.iter().any(type_contains_tensor),
-        Type::Fn(_, _) | Type::Prim(_) | Type::Var(_) | Type::Unit | Type::Error => false,
+        Type::Fn(_, _) | Type::Prim(_) | Type::Var(_) | Type::Unit | Type::Error(_) => false,
     }
 }
 
@@ -2797,7 +4103,7 @@ fn type_carries_tensor_with_carriers(ty: &Type, carriers: &HashSet<String>) -> b
                     .iter()
                     .any(|a| type_carries_tensor_with_carriers(a, carriers))
         }
-        Type::Fn(_, _) | Type::Prim(_) | Type::Var(_) | Type::Unit | Type::Error => false,
+        Type::Fn(_, _) | Type::Prim(_) | Type::Var(_) | Type::Unit | Type::Error(_) => false,
     }
 }
 
@@ -2867,7 +4173,7 @@ fn adt_carrier_set(adt_reg: &AdtRegistry) -> HashSet<String> {
 fn validate_deferred_borrow_vars(
     subst: &Subst,
     adt_reg: &AdtRegistry,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
 ) {
     let deferred = subst.take_deferred_borrow_vars();
     if deferred.is_empty() {
@@ -2897,7 +4203,7 @@ fn validate_deferred_borrow_vars(
                 type_carries_tensor_with_carriers(peeled, &carriers)
             }
             // Don't double-report an inner that already failed inference.
-            Type::Error => true,
+            Type::Error(_) => true,
             // Never pinned, or pinned to a concretely-non-tensor value.
             Type::Var(_) | Type::Prim(_) | Type::Unit | Type::Fn(_, _) => false,
             // `Ref` is fully peeled above; treat as sound to avoid a
@@ -2925,7 +4231,7 @@ fn validate_deferred_borrow_vars(
 fn validate_deferred_opaque_uses(
     subst: &Subst,
     adt_reg: &AdtRegistry,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
 ) {
     let mut any_opaque_in_scope: Option<bool> = None;
     for (tv, use_kind) in subst.take_deferred_opaque_uses() {
@@ -3080,7 +4386,7 @@ fn is_bound_name(name: &str, bound: &[HashSet<String>]) -> bool {
 /// intermediate hops) is treated as a declaration of an external input, not as
 /// a cycle. Any cycle of length >= 2 (e.g. `a -> b -> a`, `a -> b -> c -> a`)
 /// is a real binding cycle and is reported as a `CycleDetected` error.
-fn detect_top_level_binding_cycles(exprs: &[deep::Expr], errors: &mut Vec<CheckError>) {
+fn detect_top_level_binding_cycles(exprs: &[deep::Expr], errors: &mut DiagnosticSink<'_>) {
     let mut def_names: Vec<String> = Vec::new();
     let mut def_name_set: HashSet<String> = HashSet::new();
     let mut def_bodies: HashMap<String, &deep::Expr> = HashMap::new();
@@ -3234,7 +4540,7 @@ fn detect_top_level_binding_cycles(exprs: &[deep::Expr], errors: &mut Vec<CheckE
         value_stack: &mut Vec<String>,
         path: &mut Vec<String>,
         reported: &mut HashSet<Vec<String>>,
-        errors: &mut Vec<CheckError>,
+        errors: &mut DiagnosticSink<'_>,
     ) {
         color.insert(node.to_string(), Color::Gray);
         let this_is_value = is_value(node);
@@ -3484,7 +4790,7 @@ fn collect_eager_refs(
 /// ascriptions, defsig tensor types, parameter type annotations, literal
 /// type metadata, and any cast target that produces a tensor with an
 /// unsupported element precision.
-fn validate_tensor_precisions_in_program(exprs: &[deep::Expr], errors: &mut Vec<CheckError>) {
+fn validate_tensor_precisions_in_program(exprs: &[deep::Expr], errors: &mut impl DiagnosticOutput) {
     let mut seen: HashSet<(String, String)> = HashSet::new();
     // Descend through `(module {} name ...)` wrappers so per-def dedup
     // keeps each def's tensor types in their own key space (otherwise
@@ -3511,7 +4817,7 @@ fn validate_tensor_precisions_in_program(exprs: &[deep::Expr], errors: &mut Vec<
 
 fn walk_for_tensor_precision(
     expr: &deep::Expr,
-    errors: &mut Vec<CheckError>,
+    errors: &mut impl DiagnosticOutput,
     seen: &mut HashSet<(String, String)>,
     def_context: &str,
 ) {
@@ -3595,7 +4901,8 @@ fn walk_for_tensor_precision(
                         // param without a surrounding sig that quantified
                         // it) where the closed primitive set must apply.
                         // Without this guard the name silently collapses
-                        // to `Type::Error` via `deep_type_to_type_inner`'s
+                        // to a witnessed resolution failure at the centralized
+                        // Deep type boundary's
                         // `Prim::parse_name` fall-through and the
                         // permissive unify rule absorbs the mismatch.
                         errors.push(CheckError::new(
@@ -3679,7 +4986,7 @@ fn walk_for_tensor_precision(
 fn validate_polymorphic_op_constraints(
     exprs: &[deep::Expr],
     type_env: &IrTypeEnv,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
 ) {
     let defs_with_bodies = collect_def_bodies(exprs);
     let defsigs = collect_defsig_exprs(exprs);
@@ -3872,7 +5179,7 @@ fn walk_for_poly_op_constraint_violations(
     defs: &DefBodyMap,
     type_env: &IrTypeEnv,
     scope: &HashMap<String, deep::Expr>,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
 ) {
     stack_guard!("walk_for_poly_op_constraint_violations", expr);
     match expr {
@@ -3910,7 +5217,7 @@ fn check_app_for_poly_op_constraint(
     defs: &DefBodyMap,
     type_env: &IrTypeEnv,
     scope: &HashMap<String, deep::Expr>,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
 ) {
     let kids = children(list);
     let Some(callee_expr) = kids.first() else {
@@ -4133,7 +5440,7 @@ fn walk_body_for_restricted_ops(
     subst: &HashMap<String, String>,
     callee_name: &str,
     call_site_list: &deep::List,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
 ) {
     stack_guard!("walk_body_for_restricted_ops", expr);
     if let deep::Expr::List(list, _) = expr
@@ -4234,7 +5541,7 @@ fn check_restricted_op_in_body(
     subst: &HashMap<String, String>,
     callee_name: &str,
     call_site_list: &deep::List,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
 ) {
     if !INTEGER_REJECTED_OPS.contains(&op_name)
         && !TRANSCENDENTAL_FLOAT_ONLY_OPS.contains(&op_name)
@@ -4374,7 +5681,7 @@ fn validate_ir_expr(
     type_env: &IrTypeEnv,
     static_env: &mut HashMap<String, StaticValue>,
     failed_let_names: &mut HashSet<String>,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
 ) -> StaticValue {
     stack_guard!("validate_ir_expr", expr, StaticValue::Unknown);
     match expr {
@@ -4671,7 +5978,7 @@ fn validate_static_builtin_application(
     name: &str,
     args: &[StaticValue],
     expr: &deep::Expr,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
 ) -> StaticValue {
     match name {
         "pad_sequences" => static_pad_sequences(args),
@@ -4730,7 +6037,7 @@ fn static_to_tensor(args: &[StaticValue]) -> StaticValue {
 fn static_concat(
     args: &[StaticValue],
     expr: &deep::Expr,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
 ) -> StaticValue {
     let (Some(StaticValue::List(parts)), Some(StaticValue::Int(axis))) =
         (args.first(), args.get(1))
@@ -4790,7 +6097,7 @@ fn static_concat(
 fn static_split(
     args: &[StaticValue],
     expr: &deep::Expr,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
 ) -> StaticValue {
     let (
         Some(StaticValue::Tensor(tensor)),
@@ -4830,7 +6137,7 @@ fn static_split(
 fn static_gather(
     args: &[StaticValue],
     expr: &deep::Expr,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
 ) -> StaticValue {
     let (
         Some(StaticValue::Tensor(tensor)),
@@ -4864,7 +6171,7 @@ fn static_gather(
 fn static_scatter(
     args: &[StaticValue],
     expr: &deep::Expr,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
 ) -> StaticValue {
     let (
         Some(StaticValue::Tensor(base)),
@@ -4939,7 +6246,7 @@ fn static_scatter(
 fn static_scatter_replace(
     args: &[StaticValue],
     expr: &deep::Expr,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
 ) -> StaticValue {
     let (
         Some(StaticValue::Tensor(base)),
@@ -5001,7 +6308,7 @@ fn static_scatter_replace(
 fn static_clamp(
     args: &[StaticValue],
     expr: &deep::Expr,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
 ) -> StaticValue {
     let (
         Some(StaticValue::Tensor(input)),
@@ -5027,7 +6334,7 @@ fn static_clamp(
 fn static_einsum(
     args: &[StaticValue],
     expr: &deep::Expr,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
 ) -> StaticValue {
     let (
         Some(StaticValue::String(equation)),
@@ -5114,26 +6421,28 @@ fn resolve_axis_pair_member(
     tensor_ty: &Type,
     default: usize,
     list: &deep::List,
-    errors: &mut Vec<CheckError>,
-) -> Result<usize, ()> {
+    errors: &mut DiagnosticSink<'_>,
+) -> Result<usize, Type> {
     // Issue #216: use the cast-aware extractor so `cast(N, int32)`-wrapped
     // axis literals trip the infer-time bounds check instead of slipping
     // through to host-runtime defense-in-depth.
+    // chelis#731 §C3: the out-of-bounds `Err` now carries the
+    // witness-`Type::Error` from `report`, so the caller propagates it.
     match axis_expr.and_then(extract_int_for_dim) {
         Some(raw) => match tensor_ty {
             Type::Tensor(dims, _) => match normalize_static_axis(dims.len(), raw) {
                 Some(axis) => Ok(axis),
-                None => {
-                    errors.push(CheckError::new(
+                None => Err(report(
+                    errors,
+                    CheckError::new(
                         CheckErrorKind::TypeMismatch,
                         with_macro_provenance(
                             &deep::Expr::List(list.clone(), zero_span()),
                             format!("{op} axis {raw} out of bounds for rank {}", dims.len()),
                         ),
                         vec![],
-                    ));
-                    Err(())
-                }
+                    ),
+                )),
             },
             // Non-tensor operand: keep a non-negative literal verbatim
             // and let the downstream shape checker surface the real
@@ -5156,36 +6465,38 @@ fn resolve_axis_pair_member(
 /// downstream shape checker surfaces any real mismatch. The negative
 /// normalization itself only needs the operand rank, which a
 /// `Type::Tensor` always carries.
+/// Resolve a builtin's axis argument. On the out-of-bounds failure path it
+/// reports a diagnostic and returns the witness-carrying `Type::Error` as the
+/// `Err` value (chelis#731 §C3), so the caller propagates it with a plain
+/// `return` rather than minting a fresh `Type::Error`.
 fn resolve_builtin_axis(
     op: &str,
     axis_expr: Option<&deep::Expr>,
     tensor_ty: &Type,
     list: &deep::List,
-    errors: &mut Vec<CheckError>,
-) -> Option<usize> {
+    errors: &mut DiagnosticSink<'_>,
+) -> Result<usize, Type> {
     // Issue #216: cast-aware extractor; see `resolve_axis_pair_member`.
     let raw_axis = axis_expr.and_then(extract_int_for_dim);
     match (tensor_ty, raw_axis) {
         (Type::Tensor(dims, _), Some(raw)) => match normalize_static_axis(dims.len(), raw) {
-            Some(axis) => Some(axis),
-            None => {
-                errors.push(CheckError::new(
+            Some(axis) => Ok(axis),
+            None => Err(report(
+                errors,
+                CheckError::new(
                     CheckErrorKind::TypeMismatch,
                     with_macro_provenance(
                         &deep::Expr::List(list.clone(), zero_span()),
                         format!("{op} axis {raw} out of bounds for rank {}", dims.len()),
                     ),
                     vec![],
-                ));
-                None
-            }
+                ),
+            )),
         },
-        _ => Some(
-            raw_axis
-                .filter(|raw| *raw >= 0)
-                .map(|raw| raw as usize)
-                .unwrap_or(0),
-        ),
+        _ => Ok(raw_axis
+            .filter(|raw| *raw >= 0)
+            .map(|raw| raw as usize)
+            .unwrap_or(0)),
     }
 }
 
@@ -5223,7 +6534,7 @@ fn ravel_index(indices: &[usize], shape: &[usize]) -> usize {
     flat
 }
 
-fn push_static_runtime_error(expr: &deep::Expr, errors: &mut Vec<CheckError>, message: String) {
+fn push_static_runtime_error(expr: &deep::Expr, errors: &mut DiagnosticSink<'_>, message: String) {
     errors.push(CheckError::new(
         CheckErrorKind::Other,
         with_macro_provenance(expr, message),
@@ -5231,241 +6542,43 @@ fn push_static_runtime_error(expr: &deep::Expr, errors: &mut Vec<CheckError>, me
     ));
 }
 
-fn annotate_ir_program(exprs: &[deep::Expr]) -> Vec<deep::Expr> {
-    // Preserve historical behavior: build a fresh annotation state from
-    // `builtin_env()` + an EMPTY ADT registry (no prelude registration).
-    // This is asymmetric with `infer_ir_program_with_env` (which DOES
-    // register prelude ADTs), but downstream tooling — the host pipeline's
-    // `expr_type` reader, eval-result root expansion via
-    // `extend_root_names_from_value` — depends on this asymmetric type
-    // metadata shape. Phase C does NOT touch this; the
-    // `_with_context` variant accepts a non-empty context and uses
-    // library state as-is.
-    let (mut env, mut vg) = builtins::builtin_env();
-    let mut subst = Subst::new();
-    let mut adt_reg = AdtRegistry::new();
-    builtins::register_prelude_adts(&mut env, &mut vg, &mut adt_reg);
-    let mut declaration_errors = Vec::new();
-
-    // Declared `defsig` parameter type expressions, visible to the
-    // `def` arm of `annotate_expr_with_scope` for the duration of this
-    // pass. Restored on drop.
-    let _declared_sig_guard = install_declared_sig_param_types(exprs);
-    let user_def_names = collect_user_def_names(&top_level_decl_items(exprs));
-
-    // Descend through `(module {} name ...)` wrappers when collecting
-    // declarations, matching `infer_program`. Without this, module-
-    // wrapped user ADTs and defsigs never reach `env` / `adt_reg`
-    // during annotation, so `pat-record`'s constructor lookup (#181)
-    // and every other annotation-time env query for a user-declared
-    // name silently misses. See `infer_program` for the parallel
-    // iteration.
-    collect_all_declarations(
-        &top_level_decl_items_with_modules(exprs),
-        &mut env,
-        &mut vg,
-        &mut subst,
-        &mut adt_reg,
-        &mut declaration_errors,
-    );
-
-    let detail_profile = std::env::var_os("CHELIS_PROFILE_COMPILE_CONTEXT_DETAIL")
-        .map(|v| v == "1")
-        .unwrap_or(false);
-    let mut annotated = Vec::with_capacity(exprs.len());
-    for expr in exprs {
-        let t0 = if detail_profile {
-            Some(std::time::Instant::now())
-        } else {
-            None
-        };
-        // Run `infer_top_level` on the unit being annotated; for a
-        // `(module {} ...)` wrapper, this means inferring every inner
-        // decl before annotating the wrapper, so that annotation's
-        // recursive walk sees fully-inferred bindings for each inner
-        // decl. For a bare top-level decl, this preserves the original
-        // per-expr alternation (infer THIS decl, then annotate THIS
-        // decl) that signature-inference forward-reference assertions
-        // depend on. (closes #181)
-        let mut step_errors = Vec::new();
-        let mut typed_nodes = 0;
-        let mut total_nodes = 0;
-        for decl in top_level_decl_items(std::slice::from_ref(expr)) {
-            infer_top_level(
-                decl,
-                &mut env,
-                &mut vg,
-                &mut subst,
-                &adt_reg,
-                &mut step_errors,
-                &mut typed_nodes,
-                &mut total_nodes,
-                &user_def_names,
-            );
-        }
-
-        let annotated_expr = annotate_expr_with_scope(expr, &env, &vg, &subst, &adt_reg);
-        if let Some(t0) = t0 {
-            let elapsed = t0.elapsed();
-            let label = top_level_decl_name(expr)
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| "<anon>".to_string());
-            eprintln!(
-                "annotate_ir_decl: {:>8.4}s {}",
-                elapsed.as_secs_f64(),
-                label
-            );
-        }
-        annotated.push(annotated_expr);
-    }
-
-    annotated
-}
-
-/// Annotate `exprs` with inferred types, using `context` as the outer
-/// scope. Library schemes are visible during inference; only the
-/// new-code exprs are returned in the annotated result.
-///
-/// When the context is empty (`library_def_count() == 0`) this falls
-/// back to [`annotate_ir_program`] to preserve the legacy
-/// "no-prelude" annotation shape that downstream tooling depends on.
-/// Once a non-empty library context is supplied, the library's prelude
-/// ADTs and decls are visible during annotation.
-fn annotate_ir_program_with_context(context: &TypeEnv, exprs: &[deep::Expr]) -> Vec<deep::Expr> {
-    if context.library_def_count() == 0 {
-        return annotate_ir_program(exprs);
-    }
-    let mut state = context.inner().clone();
-    let mut declaration_errors = Vec::new();
-
-    // Declared `defsig` parameter type expressions for the new-code
-    // exprs being annotated here. Restored on drop.
-    let _declared_sig_guard = install_declared_sig_param_types(exprs);
-    let user_def_names = collect_user_def_names(&top_level_decl_items(exprs));
-
-    // Descend through `(module {} name ...)` wrappers when collecting
-    // declarations; mirrors the `infer_program` shape and the parallel
-    // fix in `annotate_ir_program`. (closes #181)
-    collect_all_declarations(
-        &top_level_decl_items_with_modules(exprs),
-        &mut state.env,
-        &mut state.var_gen,
-        &mut state.subst,
-        &mut state.adt_reg,
-        &mut declaration_errors,
-    );
-
-    let detail_profile = std::env::var_os("CHELIS_PROFILE_COMPILE_CONTEXT_DETAIL")
-        .map(|v| v == "1")
-        .unwrap_or(false);
-    let mut annotated = Vec::with_capacity(exprs.len());
-    for expr in exprs {
-        let t0 = if detail_profile {
-            Some(std::time::Instant::now())
-        } else {
-            None
-        };
-        // See the parallel comment in `annotate_ir_program`: infer
-        // every inner decl of a module wrapper before annotating, so
-        // user-declared ADT constructors and defsigs are visible at
-        // annotation time; preserve per-expr alternation otherwise.
-        let mut step_errors = Vec::new();
-        let mut typed_nodes = 0;
-        let mut total_nodes = 0;
-        for decl in top_level_decl_items(std::slice::from_ref(expr)) {
-            infer_top_level(
-                decl,
-                &mut state.env,
-                &mut state.var_gen,
-                &mut state.subst,
-                &state.adt_reg,
-                &mut step_errors,
-                &mut typed_nodes,
-                &mut total_nodes,
-                &user_def_names,
-            );
-        }
-
-        let annotated_expr = annotate_expr_with_scope(
-            expr,
-            &state.env,
-            &state.var_gen,
-            &state.subst,
-            &state.adt_reg,
-        );
-        if let Some(t0) = t0 {
-            let elapsed = t0.elapsed();
-            // exprs here is at the module-wrapper level; pull a label.
-            let label = top_level_decl_name(expr)
-                .map(|s| s.to_string())
-                .or_else(|| module_name(expr).map(|m| format!("module:{m}")))
-                .unwrap_or_else(|| "<anon>".to_string());
-            eprintln!(
-                "annotate_ir_decl: {:>8.4}s {}",
-                elapsed.as_secs_f64(),
-                label
-            );
-        }
-        annotated.push(annotated_expr);
-    }
-
-    annotated
-}
-
-/// Extract the module name from a `(module {} name ...)` expr for
-/// profile labeling. Returns `None` if `expr` is not a module.
-fn module_name(expr: &deep::Expr) -> Option<&str> {
-    let deep::Expr::List(list, _) = expr else {
-        return None;
-    };
-    if get_tag(list) != Some("module") {
-        return None;
-    }
-    children(list).first().and_then(symbol_name)
+fn annotate_ir_program(
+    exprs: &[deep::Expr],
+    product: &InferenceProduct,
+    errors: &mut DiagnosticSink<'_>,
+) -> Vec<deep::Expr> {
+    let items = top_level_decl_items_with_modules(exprs);
+    let declared_signatures = collect_declared_sig_metadata(items.iter().map(|(_, expr)| *expr));
+    let annotation_context = AnnotationResolutionContext::root(&declared_signatures);
+    exprs
+        .iter()
+        .map(|expr| annotate_expr_with_scope(expr, product, annotation_context, errors))
+        .collect()
 }
 
 fn annotate_expr_with_scope(
     expr: &deep::Expr,
-    env: &Env,
-    vg: &VarGen,
-    subst: &Subst,
-    adt_reg: &AdtRegistry,
+    product: &InferenceProduct,
+    annotation_context: AnnotationResolutionContext<'_>,
+    errors: &mut DiagnosticSink<'_>,
 ) -> deep::Expr {
     // Bail value is the identity (unannotated) expr: annotation is a
     // best-effort pass and the entry boundary fails the check anyway.
     stack_guard!("annotate_expr_with_scope", expr, expr.clone());
     match expr {
         deep::Expr::Atom(_, _) => expr.clone(),
-        deep::Expr::Map(map, span) => deep::Expr::Map(
-            deep::MetaMap {
-                entries: map
-                    .entries
-                    .iter()
-                    .map(|(key, value)| {
-                        (
-                            key.clone(),
-                            annotate_expr_with_scope(value, env, vg, subst, adt_reg),
-                        )
-                    })
-                    .collect(),
-            },
-            *span,
-        ),
+        // Metadata values are source/compiler context, not runtime children
+        // owned by expression inference. Preserve them verbatim.
+        deep::Expr::Map(map, span) => deep::Expr::Map(map.clone(), *span),
         deep::Expr::MetaExpr(meta, span) => deep::Expr::MetaExpr(
             deep::MetaExpr {
                 expr: Box::new(annotate_expr_with_scope(
-                    &meta.expr, env, vg, subst, adt_reg,
+                    &meta.expr,
+                    product,
+                    annotation_context,
+                    errors,
                 )),
-                entries: meta
-                    .entries
-                    .iter()
-                    .map(|(key, value)| {
-                        (
-                            key.clone(),
-                            annotate_expr_with_scope(value, env, vg, subst, adt_reg),
-                        )
-                    })
-                    .collect(),
+                entries: meta.entries.clone(),
             },
             *span,
         ),
@@ -5477,7 +6590,12 @@ fn annotate_expr_with_scope(
                             .elements
                             .iter()
                             .map(|element| {
-                                annotate_expr_with_scope(element, env, vg, subst, adt_reg)
+                                annotate_expr_with_scope(
+                                    element,
+                                    product,
+                                    annotation_context,
+                                    errors,
+                                )
                             })
                             .collect(),
                     },
@@ -5486,14 +6604,20 @@ fn annotate_expr_with_scope(
             }
 
             let tag = get_tag(list);
+            let def_name = (tag == Some("def"))
+                .then(|| children(list).first().and_then(symbol_name))
+                .flatten();
+            let declared_sig =
+                def_name.and_then(|name| annotation_context.declared_signature(name));
             let (annotated_children, fn_ty_override) = match tag {
                 Some("fn") => {
-                    let (kids, fn_ty) = annotate_fn_children(list, env, vg, subst, adt_reg, None);
+                    let (kids, fn_ty) =
+                        annotate_fn_children(list, expr, product, None, annotation_context, errors);
                     (kids, Some(fn_ty))
                 }
                 // `(def name (fn ...))`: when the def has a separate
                 // `defsig`, its declared parameter type expressions
-                // (captured verbatim in `DECLARED_SIG_PARAM_TYPES`)
+                // (captured verbatim in `annotation_context`)
                 // preserve `&` borrow wrappers that neither the bare
                 // `fn` literal nor the inferred function type carry.
                 // Stamp those onto the def's `(params ...)` node so a
@@ -5505,70 +6629,121 @@ fn annotate_expr_with_scope(
                 Some("def") => {
                     let kids = children(list);
                     let declared_param_types =
-                        kids.first().and_then(symbol_name).and_then(|name| {
-                            DECLARED_SIG_PARAM_TYPES.with(|cell| cell.borrow().get(name).cloned())
-                        });
+                        declared_sig.map(|metadata| metadata.param_types.as_slice());
                     let annotated: Vec<deep::Expr> = kids
                         .iter()
-                        .map(|child| {
-                            if let (Some(declared), deep::Expr::List(fn_list, fn_span)) =
-                                (declared_param_types.as_ref(), child)
+                        .enumerate()
+                        .map(|(index, child)| {
+                            let role = child_stamp_role("def", index, kids.len());
+                            if let (
+                                Some(ChildStampRole::RuntimeExpr),
+                                Some(declared),
+                                deep::Expr::List(fn_list, fn_span),
+                            ) = (role, declared_param_types.as_ref(), child)
                                 && get_tag(fn_list) == Some("fn")
                             {
                                 let (fn_kids, fn_ty) = annotate_fn_children(
                                     fn_list,
-                                    env,
-                                    vg,
-                                    subst,
-                                    adt_reg,
+                                    child,
+                                    product,
                                     Some(declared),
+                                    annotation_context,
+                                    errors,
                                 );
                                 let mut elements = vec![
                                     fn_list.elements[0].clone(),
                                     annotated_meta_map_with_override(
                                         fn_list,
                                         child,
-                                        env,
-                                        vg,
-                                        subst,
-                                        adt_reg,
+                                        product,
                                         Some(fn_ty),
+                                        errors,
                                     ),
                                 ];
                                 elements.extend(fn_kids);
                                 deep::Expr::List(deep::List { elements }, *fn_span)
                             } else {
-                                annotate_expr_with_scope(child, env, vg, subst, adt_reg)
+                                annotate_child_for_role(
+                                    "def",
+                                    index,
+                                    kids.len(),
+                                    child,
+                                    product,
+                                    annotation_context,
+                                    errors,
+                                )
                             }
                         })
                         .collect();
                     (annotated, None)
                 }
-                Some("let") => (annotate_let_children(list, env, vg, subst, adt_reg), None),
-                Some("match") => (annotate_match_children(list, env, vg, subst, adt_reg), None),
-                _ => (
-                    children(list)
-                        .iter()
-                        .map(|child| annotate_expr_with_scope(child, env, vg, subst, adt_reg))
-                        .collect(),
+                Some(tag) => (
+                    annotate_children_by_role(tag, list, product, annotation_context, errors),
                     None,
                 ),
+                None => (children(list).to_vec(), None),
             };
 
             let mut elements = vec![
                 list.elements[0].clone(),
-                annotated_meta_map_with_override(
-                    list,
-                    expr,
-                    env,
-                    vg,
-                    subst,
-                    adt_reg,
-                    fn_ty_override,
-                ),
+                annotated_meta_map_with_override(list, expr, product, fn_ty_override, errors),
             ];
             elements.extend(annotated_children);
             deep::Expr::List(deep::List { elements }, *span)
+        }
+    }
+}
+
+fn annotate_children_by_role(
+    tag: &str,
+    list: &deep::List,
+    product: &InferenceProduct,
+    annotation_context: AnnotationResolutionContext<'_>,
+    errors: &mut DiagnosticSink<'_>,
+) -> Vec<deep::Expr> {
+    let kids = children(list);
+    kids.iter()
+        .enumerate()
+        .map(|(index, child)| {
+            annotate_child_for_role(
+                tag,
+                index,
+                kids.len(),
+                child,
+                product,
+                annotation_context,
+                errors,
+            )
+        })
+        .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn annotate_child_for_role(
+    parent_tag: &str,
+    index: usize,
+    arity: usize,
+    child: &deep::Expr,
+    product: &InferenceProduct,
+    annotation_context: AnnotationResolutionContext<'_>,
+    errors: &mut DiagnosticSink<'_>,
+) -> deep::Expr {
+    match child_stamp_role(parent_tag, index, arity) {
+        Some(ChildStampRole::RuntimeExpr | ChildStampRole::ExplicitInferenceBypass) => {
+            annotate_expr_with_scope(child, product, annotation_context, errors)
+        }
+        Some(
+            ChildStampRole::Syntax
+            | ChildStampRole::Selector
+            | ChildStampRole::EffectHandler
+            | ChildStampRole::Binder
+            | ChildStampRole::Type,
+        ) => child.clone(),
+        None => {
+            errors.push(internal_owner_stamp_error(format!(
+                "Deep tag `{parent_tag}` has no child ownership classification"
+            )));
+            child.clone()
         }
     }
 }
@@ -5658,406 +6833,62 @@ fn annotate_params_node(
 /// `None` and keep bare params.
 fn annotate_fn_children(
     list: &deep::List,
-    env: &Env,
-    vg: &VarGen,
-    subst: &Subst,
-    adt_reg: &AdtRegistry,
+    owner_expr: &deep::Expr,
+    product: &InferenceProduct,
     declared_param_type_exprs: Option<&[deep::Expr]>,
+    annotation_context: AnnotationResolutionContext<'_>,
+    errors: &mut DiagnosticSink<'_>,
 ) -> (Vec<deep::Expr>, Type) {
     let kids = children(list);
     if kids.is_empty() {
-        return (vec![], Type::Error);
+        return (vec![], Type::Unit);
     }
 
-    let fn_ty = infer_expr_in_scope(
-        &deep::Expr::List(list.clone(), span_of_list(list)),
-        env,
-        vg,
-        subst,
-        adt_reg,
-    );
-    let resolved_fn_ty = subst.apply(&fn_ty);
-    let param_types = match &resolved_fn_ty {
-        Type::Fn(args, _) => args.clone(),
-        _ => Vec::new(),
-    };
-
-    let mut param_vg = vg.clone();
-    let raw_params = extract_params(&kids[0], &mut param_vg, adt_reg);
-    // issue #319: when the def carries a separate `sig`, the `fn`
-    // literal's params are bare symbols, so the inference above seeds
-    // each with an unconstrained fresh tvar — the body's shape-sensitive
-    // ops (`matmul`, `permute`) then annotate as bare type variables
-    // rather than resolved tensor types. Recovering the declared param
-    // types from `declared_param_type_exprs` and binding them into
-    // `fn_env` lets the recursive body annotation resolve those ops to
-    // their true `tensor[...]` shapes. Without this, IR lowering reads a
-    // rank-0 `default_type()` off a `(t-var ...)` body-node annotation
-    // and `tier2::lower_matmul` panics with `expects rank >= 2`.
-    //
-    // A SHARED `tvar_map`/`dvar_map` is used across every declared param
-    // so a dim/precision variable that recurs across parameters (e.g.
-    // `tensor[s, d, p]` for `q`, `k`, and `v`) maps to the SAME `DimVar`
-    // / `TypeVar` — preserving the inter-parameter shape relationships
-    // (`q: [s, d]`, `kt: [d, s]` ⇒ `matmul(q, kt): [s, s]`) that the
-    // matmul typing rule depends on. `param_vg` (the cloned `VarGen`)
-    // feeds fresh-var allocation so it does not perturb the caller's.
-    //
-    // We cannot advance the CALLER's `vg` past these param-type vars:
-    // `vg: &VarGen` is borrowed SHARED in this post-inference annotation
-    // pass, and threading `&mut VarGen` through the whole annotation
-    // call-chain is a far larger change for a pass whose vars never escape.
-    // Instead we feed the already-advanced `param_vg` clone to the body
-    // annotation below (see the body call) — the "advance the counter" fix
-    // scoped to exactly where it matters.
-    //
-    // chelis#773 — why the body pass MUST mint from `param_vg`, not `vg`:
-    // `infer_expr_in_scope` (the per-node re-inference the annotation runs)
-    // CLONES the `VarGen` it is given and instantiates each builtin scheme
-    // (`matmul`, `mul`, …) from that clone. If it cloned the un-advanced
-    // `vg`, a scheme's fresh parameter/return var would numerically COLLIDE
-    // with a param-type var — e.g. the `tensor[s, d, p]` precision
-    // `TypeVar(N)` and `matmul`'s instantiated first-param `TypeVar(N)`.
-    // `unify` then attempts `Tensor([.., .., Var(N)]) ~ Var(N)`, the
-    // occurs-check rejects it, and the body op collapses to `Type::Error`,
-    // cascading down the let-chain. Before #773 that Error was swallowed by
-    // `infer_app`'s arg-Error short-circuit (every downstream op collapsed
-    // to a clean `Error`, so the negative-parity test saw no bare `t-var`);
-    // removing that short-circuit exposed the collision as a bare-`t-var`
-    // result on the shape-computed `matmul` override
-    // (`check_matmul_signature` returns `subst.apply(ret_tv)` — an unbound
-    // `Var` — when an operand is `Error`). Because `param_vg` has already
-    // consumed every param-type var, feeding it to the body pass makes
-    // every scheme-instantiated var strictly greater, so no collision can
-    // occur. Nothing from `param_vg` flows back into the caller's
-    // `vg`/`subst` or the program's global type state; the annotation runs
-    // in its own throwaway `Subst`. (Re-using the already-resolved declared
-    // `Fn` type — as the WS-A7 `infer_def_body_with_sig` inference path
-    // does — would also work, but is not reachable from this post-inference
-    // annotation pass, which has no access to that resolved type or the
-    // error vector.)
-    let declared_param_types: Vec<Option<Type>> = match declared_param_type_exprs {
-        Some(declared) => {
-            let mut tvar_map: HashMap<String, TypeVar> = HashMap::new();
-            let mut dvar_map: HashMap<String, DimVar> = HashMap::new();
-            // Tier-2 rank polymorphism (#286): a `..r` rank var recurring
-            // across params must map to the SAME `RankVar`, so the rvar map
-            // is shared across the declared params exactly like tvar/dvar.
-            let mut rvar_map = HashMap::new();
-            declared
-                .iter()
-                .map(|expr| {
-                    if is_wildcard_tvar_expr(expr) {
-                        None
-                    } else {
-                        match deep_type_to_type_inner(
-                            expr,
-                            &mut param_vg,
-                            &mut tvar_map,
-                            &mut dvar_map,
-                            &mut rvar_map,
-                        ) {
-                            Type::Error => None,
-                            ty => Some(ty),
-                        }
-                    }
-                })
-                .collect()
-        }
-        None => Vec::new(),
-    };
-    let mut fn_env = env.clone();
-    for (index, (name, maybe_ty)) in raw_params.iter().enumerate() {
-        let ty = maybe_ty
-            .clone()
-            .or_else(|| declared_param_types.get(index).cloned().flatten())
-            .or_else(|| param_types.get(index).cloned())
-            .unwrap_or(Type::Error);
-        fn_env.bind(name.clone(), Scheme::mono(ty));
-        // chelis#397/#469: a fresh parameter has no size provenance; clear any
-        // entry inherited from an outer name it shadows (BLOCKER C).
-        fn_env.clear_size_provenance(name);
-        // chelis#631: same for a shadowed list-literal length.
-        fn_env.clear_list_literal_len(name);
-    }
-
-    // Only stamp parameter types when they come from the def's
-    // declared `sig`. A bare `fn` literal with no declared signature
-    // keeps bare params: the inferred function type loses `&` borrow
-    // wrappers, and stamping it would also pre-empt the
-    // read-only/borrow inference that `infer_signature_metadata`
-    // performs on parameters left bare.
+    let resolved_fn_ty = product
+        .owner_type(owner_expr, "function node", errors)
+        .unwrap_or(Type::Unit);
+    // Issue #319/#773: declared parameter syntax is copied from the owning
+    // `sig` so borrow wrappers and shared symbolic variables remain exact.
+    // Body expression types are not recomputed here: they come from the
+    // completed `InferenceProduct` epoch, eliminating the former fresh-var /
+    // fresh-substitution annotation collision. A bare `fn` with no declared
+    // signature keeps bare parameters so signature metadata can still infer
+    // its read-only display form.
     let annotated_params = match declared_param_type_exprs {
         Some(declared) => annotate_params_node(&kids[0], declared),
         None => kids[0].clone(),
     };
-    let mut result = vec![annotate_expr_with_scope(
-        &annotated_params,
-        env,
-        vg,
-        subst,
-        adt_reg,
-    )];
+    debug_assert_eq!(
+        child_stamp_role("fn", 0, kids.len()),
+        Some(ChildStampRole::Binder)
+    );
+    // The params node is the binder owner's completed output. A typed
+    // parameter is represented as `(name {type: ...})`, which is binder
+    // syntax rather than an expression tagged `name`; recursively feeding it
+    // back through expression annotation would misreport every valid stamped
+    // parameter as `UnknownForm`. Malformed params are rejected by
+    // the primary parameter owner, exactly once, through the session sink.
+    let mut result = vec![annotated_params];
     if let Some(body) = kids.get(1) {
-        // chelis#773: mint body-annotation vars from the advanced
-        // `param_vg` (past every param-type var) when the params were
-        // seeded from a declared sig, so builtin-scheme instantiation
-        // cannot collide with a param-type var (see the note above). Bare
-        // `fn` literals (no declared sig) keep the caller's `vg`.
-        let body_vg: &VarGen = if declared_param_type_exprs.is_some() {
-            &param_vg
-        } else {
-            vg
-        };
-        result.push(annotate_expr_with_scope(
-            body, &fn_env, body_vg, subst, adt_reg,
+        result.push(annotate_child_for_role(
+            "fn",
+            1,
+            kids.len(),
+            body,
+            product,
+            annotation_context,
+            errors,
         ));
     }
     (result, resolved_fn_ty)
 }
 
-fn annotate_let_children(
-    list: &deep::List,
-    env: &Env,
-    vg: &VarGen,
-    subst: &Subst,
-    adt_reg: &AdtRegistry,
-) -> Vec<deep::Expr> {
-    let kids = children(list);
-    if kids.len() < 2 {
-        return kids.to_vec();
-    }
-
-    let mut let_env = env.clone();
-    let annotated_bind = if let deep::Expr::List(bind_list, bind_span) = &kids[0] {
-        let bind_kids = children(bind_list);
-        let mut bind_elements = vec![bind_list.elements[0].clone(), bind_list.elements[1].clone()];
-        let mut i = 0;
-        while i + 1 < bind_kids.len() {
-            bind_elements.push(bind_kids[i].clone());
-            let value = annotate_expr_with_scope(&bind_kids[i + 1], &let_env, vg, subst, adt_reg);
-            let value_ty = infer_expr_in_scope(&bind_kids[i + 1], &let_env, vg, subst, adt_reg);
-            if let Some(name) = symbol_name(&bind_kids[i]) {
-                // chelis#631: the annotation pass stamps each node's type
-                // through its own env walk (it does not share infer_let's
-                // scope), so the list-literal length must be recorded here
-                // too or the STAMPED concat type — what the host lane
-                // reads — degrades to the wildcard fallback.
-                note_list_literal_binding(&mut let_env, name, &bind_kids[i + 1]);
-                let_env.bind(name.to_string(), let_env.generalize(&value_ty, subst));
-            }
-            bind_elements.push(value);
-            i += 2;
-        }
-        deep::Expr::List(
-            deep::List {
-                elements: bind_elements,
-            },
-            *bind_span,
-        )
-    } else {
-        annotate_expr_with_scope(&kids[0], env, vg, subst, adt_reg)
-    };
-
-    vec![
-        annotated_bind,
-        annotate_expr_with_scope(&kids[1], &let_env, vg, subst, adt_reg),
-    ]
-}
-
-fn annotate_match_children(
-    list: &deep::List,
-    env: &Env,
-    vg: &VarGen,
-    subst: &Subst,
-    adt_reg: &AdtRegistry,
-) -> Vec<deep::Expr> {
-    let kids = children(list);
-    if kids.is_empty() {
-        return vec![];
-    }
-
-    let scrutinee = annotate_expr_with_scope(&kids[0], env, vg, subst, adt_reg);
-    let scrutinee_ty = infer_expr_in_scope(&kids[0], env, vg, subst, adt_reg);
-    let mut result = vec![scrutinee];
-
-    for arm in &kids[1..] {
-        if let deep::Expr::List(arm_list, arm_span) = arm
-            && get_tag(arm_list) == Some("arm")
-        {
-            let arm_kids = children(arm_list);
-            let mut arm_env = env.clone();
-            // `pattern_vg` and `pattern_subst` are clones rather than
-            // shared refs with the outer state. The clone is safe
-            // because the primary inference pass (`infer_program` →
-            // `infer_top_level` → `infer_match`) has already executed
-            // `pattern_bindings` against the unshared outer `subst`,
-            // populating it with the same type-parameter unifications
-            // we're about to (re-)derive here. So the body annotation
-            // below using the outer `subst` sees the same mappings the
-            // pattern-binding stamper would have written to
-            // `pattern_subst`. If a future caller invokes
-            // `annotate_ir_program` against a `Subst` that hasn't been
-            // pre-populated by `infer_program`, this invariant breaks
-            // and body-annotation type variables go stale; that's a bug
-            // in the caller, not here.
-            let mut pattern_vg = vg.clone();
-            let mut pattern_subst = subst.clone();
-            let mut pattern_errors = Vec::new();
-            let mut covered = Vec::new();
-            let mut wildcard = false;
-            if let Some(pattern) = arm_kids.first() {
-                pattern_bindings(
-                    pattern,
-                    &scrutinee_ty,
-                    &mut arm_env,
-                    &mut pattern_vg,
-                    &mut pattern_subst,
-                    adt_reg,
-                    &mut pattern_errors,
-                    &mut covered,
-                    &mut wildcard,
-                );
-            }
-
-            let mut elements = vec![arm_list.elements[0].clone(), arm_list.elements[1].clone()];
-            if let Some(pattern) = arm_kids.first() {
-                // Stamp pattern-binding types onto `pat-var`/`pat-as`
-                // nodes so the linearity checker (which consumes the
-                // annotated Deep) can declare scope entries with the
-                // resolved binding type rather than `None`. Without
-                // this, a destructured tensor field's `&x` borrow
-                // fails the linearity check because `expr_type` can't
-                // resolve the binding's type. (closes #181)
-                let annotated_pattern = annotate_expr_with_scope(pattern, env, vg, subst, adt_reg);
-                let annotated_pattern =
-                    stamp_pattern_binding_types(&annotated_pattern, &arm_env, &pattern_subst);
-                elements.push(annotated_pattern);
-            }
-            if let Some(guard) = arm_kids.get(1) {
-                elements.push(annotate_expr_with_scope(
-                    guard, &arm_env, vg, subst, adt_reg,
-                ));
-            }
-            if let Some(body) = arm_kids.get(2) {
-                elements.push(annotate_expr_with_scope(body, &arm_env, vg, subst, adt_reg));
-            }
-            result.push(deep::Expr::List(deep::List { elements }, *arm_span));
-            continue;
-        }
-        result.push(annotate_expr_with_scope(arm, env, vg, subst, adt_reg));
-    }
-
-    result
-}
-
-/// Walk a pattern AST and stamp the resolved binding type onto each
-/// `pat-var` (and `pat-as`) node's metadata map under the `type` key.
-///
-/// The binding type is looked up by name in `arm_env`, which was just
-/// populated by `pattern_bindings` against `pattern_subst`. We re-apply
-/// `pattern_subst` here so any post-unify substitutions (e.g. the ADT
-/// type-parameter pinning that happens when `pat-record` unifies the
-/// constructor's return ADT against the scrutinee) flow into the
-/// stamped metadata.
-///
-/// The downstream consumer is `linearity::check_match`, which reads
-/// each pattern var's stamped `:type` to populate the arm's
-/// `LinearScope`. Without this, destructured field bindings stay
-/// untyped at linearity time and `&field` fails `expr_is_owned_or_borrow_linear`.
-/// (closes #181)
-fn stamp_pattern_binding_types(
-    pat: &deep::Expr,
-    arm_env: &Env,
-    pattern_subst: &Subst,
-) -> deep::Expr {
-    stack_guard!("stamp_pattern_binding_types", pat, pat.clone());
-    match pat {
-        deep::Expr::Atom(_, _) | deep::Expr::Map(_, _) => pat.clone(),
-        deep::Expr::MetaExpr(meta, span) => deep::Expr::MetaExpr(
-            deep::MetaExpr {
-                expr: Box::new(stamp_pattern_binding_types(
-                    &meta.expr,
-                    arm_env,
-                    pattern_subst,
-                )),
-                entries: meta.entries.clone(),
-            },
-            *span,
-        ),
-        deep::Expr::List(list, span) => {
-            let tag = get_tag(list);
-            let kids = children(list);
-            let needs_type_stamp = matches!(tag, Some("pat-var") | Some("pat-as"));
-
-            // The binding's name lives at the first child for both
-            // `pat-var` and `pat-as`. Other pattern tags carry no
-            // direct binding here (their sub-patterns recurse).
-            //
-            // The `Type::Error` filter is intentional: when a pattern
-            // earlier in the same arm raised an error (e.g., unknown
-            // record field), `pattern_bindings` stores `Type::Error`
-            // for the bind name. Stamping that onto the metadata would
-            // round-trip through `type_to_deep_expr` as
-            // `(t-var {} _)` (see line ~4962) and the linearity check
-            // would read it as an opaque type variable, possibly
-            // surfacing a cascading "borrow requires tensor or
-            // tensor-carrying input, got ?N" on top of the original
-            // unknown-field error. Suppressing the stamp here lets the
-            // linearity check fall through to its `None`-typed path,
-            // which already produces a cleaner "borrowed arguments
-            // must be tensor or tensor-carrying values" diagnostic
-            // without inventing a fictional type for the binding.
-            let resolved_ty = if needs_type_stamp {
-                kids.first()
-                    .and_then(symbol_name)
-                    .and_then(|name| arm_env.lookup(name))
-                    .map(|scheme| pattern_subst.apply(&scheme.body))
-                    .filter(|ty| !matches!(ty, Type::Error))
-            } else {
-                None
-            };
-
-            let meta_expr =
-                match list.elements.get(1) {
-                    Some(deep::Expr::Map(meta, meta_span)) => {
-                        if let Some(ty) = resolved_ty.as_ref() {
-                            let mut entries = meta.entries.clone();
-                            let ty_expr = type_to_deep_expr(ty);
-                            if let Some((_, existing)) =
-                                entries.iter_mut().find(|(key, _)| key == "type")
-                            {
-                                *existing = ty_expr;
-                            } else {
-                                entries.push(("type".to_string(), ty_expr));
-                            }
-                            deep::Expr::Map(deep::MetaMap { entries }, *meta_span)
-                        } else {
-                            list.elements[1].clone()
-                        }
-                    }
-                    _ => list.elements.get(1).cloned().unwrap_or_else(|| {
-                        deep::Expr::Map(deep::MetaMap { entries: vec![] }, *span)
-                    }),
-                };
-
-            let mut elements = vec![list.elements[0].clone(), meta_expr];
-            for child in kids {
-                elements.push(stamp_pattern_binding_types(child, arm_env, pattern_subst));
-            }
-            deep::Expr::List(deep::List { elements }, *span)
-        }
-    }
-}
-
 fn annotated_meta_map_with_override(
     list: &deep::List,
     expr: &deep::Expr,
-    env: &Env,
-    vg: &VarGen,
-    subst: &Subst,
-    adt_reg: &AdtRegistry,
+    product: &InferenceProduct,
     precomputed_ty: Option<Type>,
+    errors: &mut DiagnosticSink<'_>,
 ) -> deep::Expr {
     let meta_span = match list.elements.get(1) {
         Some(deep::Expr::Map(_, span)) => *span,
@@ -6070,8 +6901,9 @@ fn annotated_meta_map_with_override(
     let ty_for_meta = if let Some(tag) = get_tag(list) {
         match (tag, precomputed_ty) {
             ("fn", Some(ty)) => Some(ty),
+            ("pat-var" | "pat-as", _) => product.owner_type(expr, "pattern binding", errors),
             (t, _) if should_attach_type_metadata(t) => {
-                Some(infer_expr_in_scope(expr, env, vg, subst, adt_reg))
+                product.owner_type(expr, "metadata-eligible expression", errors)
             }
             _ => None,
         }
@@ -6080,7 +6912,7 @@ fn annotated_meta_map_with_override(
     };
 
     if let Some(ty) = ty_for_meta
-        && !matches!(ty, Type::Error)
+        && !matches!(ty, Type::Error(_))
     {
         let ty_expr = type_to_deep_expr(&ty);
         if let Some((_, existing)) = entries.iter_mut().find(|(key, _)| key == "type") {
@@ -6091,32 +6923,6 @@ fn annotated_meta_map_with_override(
     }
 
     deep::Expr::Map(deep::MetaMap { entries }, meta_span)
-}
-
-fn infer_expr_in_scope(
-    expr: &deep::Expr,
-    env: &Env,
-    vg: &VarGen,
-    _subst: &Subst,
-    adt_reg: &AdtRegistry,
-) -> Type {
-    let mut env = env.clone();
-    let mut vg = vg.clone();
-    let mut subst = Subst::new();
-    let mut errors = Vec::new();
-    let mut typed_nodes = 0;
-    let mut total_nodes = 0;
-    let ty = infer_expr(
-        expr,
-        &mut env,
-        &mut vg,
-        &mut subst,
-        adt_reg,
-        &mut errors,
-        &mut typed_nodes,
-        &mut total_nodes,
-    );
-    subst.apply(&ty)
 }
 
 fn should_attach_type_metadata(tag: &str) -> bool {
@@ -6189,7 +6995,7 @@ fn type_to_deep_expr(ty: &Type) -> deep::Expr {
         Type::Var(var) => node_expr("t-var", vec![symbol_expr(&format!("t{}", var.0))]),
         Type::Tuple(types) => node_expr("t-tuple", types.iter().map(type_to_deep_expr).collect()),
         Type::Unit => node_expr("t-unit", vec![]),
-        Type::Error => node_expr("t-var", vec![symbol_expr("_")]),
+        Type::Error(_) => node_expr("t-var", vec![symbol_expr("_")]),
     }
 }
 
@@ -6486,7 +7292,7 @@ fn validate_ir_builtin_symbolic_requirements(
     func_name: &str,
     type_env: &IrTypeEnv,
     failed_let_names: &HashSet<String>,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
 ) {
     match func_name {
         "conv2d" => validate_conv2d_symbolic_requirements(list, type_env, failed_let_names, errors),
@@ -6630,8 +7436,16 @@ fn validate_conv2d_symbolic_requirements(
     list: &deep::List,
     type_env: &IrTypeEnv,
     failed_let_names: &HashSet<String>,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
 ) {
+    // The inference pass owns builtin arity diagnostics. This validator only
+    // owns the symbolic requirements of the canonical 4-argument call:
+    // (app {} (var conv2d) input kernel stride padding). Returning here keeps
+    // malformed calls total and prevents a secondary validator diagnostic.
+    let [_, _, _, input, kernel, _, _] = list.elements.as_slice() else {
+        return;
+    };
+
     // RT-205 round-2 F3: if either tensor arg is a `(var <name>)`
     // whose `name` is in the failed-derivation set, the owning
     // diagnostic was already emitted for the let-binding's own RHS.
@@ -6649,11 +7463,8 @@ fn validate_conv2d_symbolic_requirements(
     // symbolic batch through. All OTHER input axes (in_c, h, w) and
     // all kernel axes must remain concrete -- they appear in the
     // im2col/matmul lowering and must be statically knowable.
-    if !conv2d_input_dims_concrete_modulo_batch(list.elements.get(3).map(peel_borrow), type_env)
-        || !expr_tensor_type_is_concrete(
-            list.elements.get(4).expect("arity already implicit"),
-            type_env,
-        )
+    if !conv2d_input_dims_concrete_modulo_batch(Some(peel_borrow(input)), type_env)
+        || !expr_tensor_type_is_concrete(kernel, type_env)
     {
         errors.push(validator_error(
             CheckErrorKind::DimensionMismatch,
@@ -7132,7 +7943,7 @@ fn extract_typed_scalar_literal(
     list: &deep::List,
     idx: usize,
     label: &str,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
 ) -> Option<i64> {
     let Some(arg) = list.elements.get(idx) else {
         // Arity mismatch is caught elsewhere; bail without piling on.
@@ -7258,6 +8069,133 @@ fn type_expr_is_ir_concrete(expr: &deep::Expr) -> bool {
 
 // ── Helpers ──────────────────────────────────────────────────────
 
+/// chelis#731 Phase 2 ([04-TOT-2] / spec/design/checker_totality.md §C4.1):
+/// the ALWAYS-ON totality invariant. After a check completes with an EMPTY
+/// error vector, the typed result must contain no error-typed node. With the
+/// §C3 `ErrorWitness` token a silent `Type::Error` is unconstructible (every
+/// `Type::Error` is minted by `report`, which pushes a diagnostic, or
+/// `propagate`, which is downstream of one), so `errors.is_empty()`
+/// structurally implies no fresh error was produced. This pass stays on as
+/// the standing tripwire that verifies the claim -- it is a pushed internal
+/// error, never a panic (the checker is reachable-input territory).
+///
+/// The shared finalizer checks both authoritative surfaces: every runtime
+/// expression/pattern/function node in annotated Deep must carry the stamp
+/// produced by its owning inference epoch, and the signature-inference table
+/// must contain no structural `Type::Error`. The signature table remains the
+/// value-level backstop; the annotated tree now has no re-inference gap.
+fn annotated_totality_invariant_traces(exprs: &[deep::Expr]) -> Vec<String> {
+    fn walk(expr: &deep::Expr, traces: &mut Vec<String>) {
+        match expr {
+            deep::Expr::Atom(_, _) | deep::Expr::Map(_, _) => {}
+            deep::Expr::MetaExpr(meta, _) => walk(&meta.expr, traces),
+            deep::Expr::List(list, _) => {
+                let tag = get_tag(list);
+                let requires_stamp = tag.is_some_and(|tag| {
+                    tag == "fn"
+                        || matches!(tag, "pat-var" | "pat-as")
+                        || should_attach_type_metadata(tag)
+                });
+                if requires_stamp
+                    && !get_meta(list)
+                        .is_some_and(|meta| meta.entries.iter().any(|(key, _)| key == "type"))
+                {
+                    traces.push(format!(
+                        "annotated `{}` node is missing its type stamp",
+                        tag.unwrap_or("<untagged-list>")
+                    ));
+                }
+
+                let kids = children(list);
+                for (index, child) in kids.iter().enumerate() {
+                    match child_stamp_role(tag.unwrap_or("<untagged-list>"), index, kids.len()) {
+                        Some(
+                            ChildStampRole::RuntimeExpr | ChildStampRole::ExplicitInferenceBypass,
+                        ) => walk(child, traces),
+                        Some(
+                            ChildStampRole::Syntax
+                            | ChildStampRole::Selector
+                            | ChildStampRole::EffectHandler
+                            | ChildStampRole::Binder
+                            | ChildStampRole::Type,
+                        ) => {}
+                        None if tag.is_none() => walk(child, traces),
+                        None => {
+                            traces.push(format!(
+                                "annotated Deep tag `{}` has no child ownership classification",
+                                tag.unwrap_or("<untagged-list>")
+                            ));
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let mut traces = Vec::new();
+    for expr in exprs {
+        walk(expr, &mut traces);
+    }
+    traces
+}
+
+fn totality_invariant_traces(sig: &SignatureInferenceMetadata) -> Vec<String> {
+    let mut out = Vec::new();
+    for (name, f) in &sig.functions {
+        if type_carries_error(&f.checked_signature) {
+            out.push(format!(
+                "function `{name}` checked_signature carries Type::Error"
+            ));
+        }
+        if type_carries_error(&f.display_signature) {
+            out.push(format!(
+                "function `{name}` display_signature carries Type::Error"
+            ));
+        }
+        for param in &f.params {
+            if type_carries_error(&param.checked_type) || type_carries_error(&param.display_type) {
+                out.push(format!(
+                    "function `{name}` parameter #{} carries Type::Error",
+                    param.index
+                ));
+            }
+        }
+    }
+    out
+}
+
+/// True if `ty` is, or structurally contains, a `Type::Error`.
+fn type_carries_error(ty: &Type) -> bool {
+    match ty {
+        Type::Error(_) => true,
+        Type::Fn(args, ret) => args.iter().any(type_carries_error) || type_carries_error(ret),
+        Type::Ref(inner) => type_carries_error(inner),
+        Type::Adt(_, args) => args.iter().any(type_carries_error),
+        Type::Tuple(elems) => elems.iter().any(type_carries_error),
+        Type::Prim(_) | Type::Tensor(_, _) | Type::Var(_) | Type::Unit => false,
+    }
+}
+
+/// Build the internal diagnostic for a totality-invariant violation
+/// ([04-TOT-2]). Only reachable if the §C3 witness token were bypassed (a
+/// deserialization mint or a genuine bug); it names the offending nodes so a
+/// regression is localizable rather than a bare "internal error".
+fn totality_violation_error(traces: &[String]) -> CheckError {
+    CheckError::new(
+        CheckErrorKind::Other,
+        format!(
+            "internal: [04-TOT-2] totality invariant violated -- the check reported \
+             success (empty error vector) but the typed result carries {} silent \
+             Type::Error verdict(s): {} (spec/design/checker_totality.md \u{00a7}C4.1; \
+             chelis#731 Phase 2)",
+            traces.len(),
+            traces.join("; ")
+        ),
+        vec![],
+    )
+}
+
 fn get_tag(list: &deep::List) -> Option<&str> {
     if let Some(deep::Expr::Atom(deep::Atom::Symbol(tag), _)) = list.elements.first() {
         Some(tag.as_str())
@@ -7286,18 +8224,91 @@ fn malformed_form(
     list: &deep::List,
     tag: &str,
     expected: &str,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
 ) -> Type {
     let found = children(list).len();
-    errors.push(CheckError::new(
-        CheckErrorKind::MalformedForm,
-        format!(
-            "malformed `{tag}`: expected {expected}, found a `{tag}` with {found} \
-             child element(s) (spec/03-deep-syntax.md; chelis#731 [04-TOT-3])"
+    report(
+        errors,
+        CheckError::new(
+            CheckErrorKind::MalformedForm,
+            format!(
+                "malformed `{tag}`: expected {expected}, found a `{tag}` with {found} \
+                 child element(s) (spec/03-deep-syntax.md; chelis#731 [04-TOT-3])"
+            ),
+            vec![],
         ),
-        vec![],
-    ));
-    Type::Error
+    )
+}
+
+/// chelis#731 Phase 2 (spec/design/checker_totality.md §C3): cascade
+/// suppression helper. When one of `tys` already typed as `Type::Error(w)`,
+/// return `Some(propagate(w))` so the enclosing node re-types as `Type::Error`
+/// WITHOUT re-reporting -- the pre-token permissive behavior where an error's
+/// descendants unify freely so one root cause does not spray a dozen
+/// secondary diagnostics. Returns `None` when no operand is an error, so the
+/// caller falls through to its normal typing. The witness is threaded from
+/// the real upstream `report`, keeping the cascade provably downstream of a
+/// reported error.
+fn propagate_if_error<'a>(tys: impl IntoIterator<Item = &'a Type>) -> Option<Type> {
+    tys.into_iter().find_map(|ty| match ty {
+        Type::Error(w) => Some(propagate(w)),
+        _ => None,
+    })
+}
+
+/// chelis#731 Phase 2 (spec/design/checker_totality.md §C3): report a
+/// wrong-arity call of a shape-polymorphic builtin. Before the witness-token
+/// migration these arity guards returned a SILENT `Type::Error` -- an
+/// `einsum(a, b)` (two args) scored a perfect 1.0, the chelis#709 defect on
+/// the builtin lane. The guard now pushes an `ArityMismatch` naming the
+/// builtin and the expected/found counts, so the malformed call is rejected
+/// with a diagnostic instead of exempted from checking.
+/// Span-free sibling of [`report_builtin_arity`] for the `check_*_signature`
+/// helpers, which receive `arg_tys`/`errors` but not the `(list)` node. Same
+/// chelis#731 §C3 role: a wrong-arity signature-checked builtin used to return
+/// a silent `Type::Error`; it now reports an `ArityMismatch`. `expected` is a
+/// prose description ("at least 2 arguments", "3 or 4 arguments") since these
+/// guards range over exact and minimum arities.
+fn report_builtin_arity_bare(
+    errors: &mut DiagnosticSink<'_>,
+    builtin: &str,
+    expected: &str,
+    got: usize,
+) -> Type {
+    report(
+        errors,
+        CheckError::new(
+            CheckErrorKind::ArityMismatch,
+            format!(
+                "builtin `{builtin}` expects {expected}, got {got} argument(s) \
+                 (chelis#731 [04-TOT-3])"
+            ),
+            vec![],
+        ),
+    )
+}
+
+fn report_builtin_arity(
+    errors: &mut DiagnosticSink<'_>,
+    list: &deep::List,
+    builtin: &str,
+    expected: usize,
+    got: usize,
+) -> Type {
+    report(
+        errors,
+        CheckError::new(
+            CheckErrorKind::ArityMismatch,
+            with_macro_provenance(
+                &deep::Expr::List(list.clone(), zero_span()),
+                format!(
+                    "builtin `{builtin}` expects {expected} argument(s), got {got} \
+                     (chelis#731 [04-TOT-3])"
+                ),
+            ),
+            vec![],
+        ),
+    )
 }
 
 /// True when a `uniform_like` low/high bound is a statically-resolvable numeric
@@ -7660,7 +8671,8 @@ fn param_bound_dvars(decl_ty: &Type) -> HashSet<DimVar> {
 /// How the concat arm can see the list's elements (chelis#594).
 enum ConcatListInfo {
     /// A literal `Cons` chain at the call site: each element's full dim
-    /// vector, in list order (re-inferred read-only at the concat site).
+    /// vector, in list order (read from the current inference epoch's
+    /// already-recorded child types).
     /// Ragged literal extents SUM.
     Direct(Vec<Vec<Dim>>),
     /// A variable (or anything else): only a binding-carried literal
@@ -7905,14 +8917,18 @@ fn resolve_type_aliases_inner(
     }
 }
 
-fn deep_type_to_resolved_type(
+fn resolve_deep_type(
     expr: &deep::Expr,
     vg: &mut VarGen,
     adt_reg: &AdtRegistry,
-    tvar_map: &mut HashMap<String, TypeVar>,
-) -> Type {
-    let ty = deep_type_to_type(expr, vg, tvar_map);
-    resolve_type_aliases(&ty, adt_reg)
+    use_site: TypeUseSite,
+    binder_mode: BinderMode<'_>,
+    errors: &mut DiagnosticSink<'_>,
+) -> Result<Type, ErrorWitness> {
+    let mut resolver =
+        DeepTypeResolver::new(use_site, binder_mode, adt_reg.resolution_env(), vg, errors);
+    let ty = resolver.resolve(expr)?.into_type();
+    Ok(resolve_type_aliases(&ty, adt_reg))
 }
 
 // ── Declaration collection (first pass) ──────────────────────────
@@ -7943,7 +8959,7 @@ fn collect_all_declarations(
     vg: &mut VarGen,
     subst: &mut Subst,
     adt_reg: &mut AdtRegistry,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
 ) {
     // chelis#258 (main): duplicate-def / builtin-shadowing rejection runs
     // over the bare item list. Our `items` is paired with module keys, so
@@ -7952,6 +8968,11 @@ fn collect_all_declarations(
     report_duplicate_defs(&bare_items, errors);
     report_duplicate_defsigs(&bare_items, errors);
     report_builtin_shadowing(&bare_items, errors);
+    let resolution_env = precollect_type_resolution_env(items, adt_reg);
+    // Install the provisional self/forward header scope explicitly in this
+    // per-check registry clone. Declaration bodies resolve against it, while
+    // only successful bodies enter the validated maps that survive serde.
+    adt_reg.install_resolution_env(resolution_env.clone());
     for (module, expr) in items {
         collect_declarations(
             expr,
@@ -7960,6 +8981,7 @@ fn collect_all_declarations(
             vg,
             subst,
             adt_reg,
+            &resolution_env,
             errors,
             DeclPhase::Aliases,
         );
@@ -7972,10 +8994,46 @@ fn collect_all_declarations(
             vg,
             subst,
             adt_reg,
+            &resolution_env,
             errors,
             DeclPhase::Rest,
         );
     }
+}
+
+/// Collect nominal names and arities before resolving any declaration body.
+/// This permits self and forward references without registering an unchecked
+/// definition in the serde-backed ADT registry.
+fn precollect_type_resolution_env(
+    items: &[(Option<String>, &deep::Expr)],
+    adt_reg: &AdtRegistry,
+) -> TypeResolutionEnv {
+    let mut headers = TypeResolutionEnv::from_registry(adt_reg);
+    for (_, expr) in items {
+        let deep::Expr::List(list, _) = expr else {
+            continue;
+        };
+        if !matches!(get_tag(list), Some("deftype") | Some("typealias")) {
+            continue;
+        }
+        let kids = children(list);
+        let (Some(name), Some(deep::Expr::List(params, _))) =
+            (kids.first().and_then(symbol_name), kids.get(1))
+        else {
+            continue;
+        };
+        if get_tag(params) == Some("variant") {
+            // Legacy Deep permits omitting the explicit empty parameter list.
+            headers.insert(name, 0);
+        } else if params
+            .elements
+            .iter()
+            .all(|param| symbol_name(param).is_some())
+        {
+            headers.insert(name, params.elements.len());
+        }
+    }
+    headers
 }
 
 /// Build the program-shape opacity metadata (RFC D-CHECK) from the
@@ -7988,7 +9046,7 @@ fn collect_all_declarations(
 fn build_opacity_meta(
     items: &[(Option<String>, &deep::Expr)],
     adt_reg: &AdtRegistry,
-    vg: &mut VarGen,
+    env: &Env,
 ) -> crate::opacity::OpacityModuleMeta {
     let mut meta = crate::opacity::OpacityModuleMeta::default();
     // Declared signature types (from `defsig` nodes) for producer
@@ -8049,10 +9107,9 @@ fn build_opacity_meta(
         };
         meta.bindings.insert(name.to_string(), target);
         if get_tag(list) == Some("defsig")
-            && let Some(ty_expr) = kids.get(1)
+            && let Some(scheme) = env.lookup(name)
         {
-            let ty = deep_type_to_resolved_type(ty_expr, vg, adt_reg, &mut HashMap::new());
-            declared_sigs.insert(name.to_string(), ty);
+            declared_sigs.insert(name.to_string(), scheme.body.clone());
         }
     }
     // Producer enumeration per opaque type: exported bindings of the
@@ -8119,7 +9176,7 @@ fn build_opacity_meta(
 /// on its own a duplicate definition. `items` is already flattened past
 /// `module` wrappers, and the prelude lives in the builtin env rather than as
 /// `def` nodes here, so only genuine in-program user redefinitions match.
-fn report_duplicate_defs(items: &[&deep::Expr], errors: &mut Vec<CheckError>) {
+fn report_duplicate_defs(items: &[&deep::Expr], errors: &mut DiagnosticSink<'_>) {
     let mut seen: HashSet<&str> = HashSet::new();
     for expr in items {
         let deep::Expr::List(list, _) = expr else {
@@ -8150,7 +9207,7 @@ fn report_duplicate_defs(items: &[&deep::Expr], errors: &mut Vec<CheckError>) {
 /// `defsig`s for a name otherwise feed several last-write-wins maps
 /// (`collect_declarations`, declared-param-type collection, signature metadata)
 /// and make the enforced signature order-dependent.
-fn report_duplicate_defsigs(items: &[&deep::Expr], errors: &mut Vec<CheckError>) {
+fn report_duplicate_defsigs(items: &[&deep::Expr], errors: &mut DiagnosticSink<'_>) {
     let mut seen: HashSet<&str> = HashSet::new();
     for expr in items {
         let deep::Expr::List(list, _) = expr else {
@@ -8200,7 +9257,7 @@ fn report_duplicate_defsigs(items: &[&deep::Expr], errors: &mut Vec<CheckError>)
 ///
 /// An inline-annotated `def` desugars to a `defsig` AND a `def` with the
 /// same name; report once per name, as the `def` (what the user wrote).
-fn report_builtin_shadowing(items: &[&deep::Expr], errors: &mut Vec<CheckError>) {
+fn report_builtin_shadowing(items: &[&deep::Expr], errors: &mut DiagnosticSink<'_>) {
     let decl_name = |expr: &deep::Expr, tag: &str| -> Option<String> {
         let deep::Expr::List(list, _) = expr else {
             return None;
@@ -8258,7 +9315,8 @@ fn collect_declarations(
     vg: &mut VarGen,
     subst: &mut Subst,
     adt_reg: &mut AdtRegistry,
-    errors: &mut Vec<CheckError>,
+    headers: &TypeResolutionEnv,
+    errors: &mut DiagnosticSink<'_>,
     phase: DeclPhase,
 ) {
     let list = match expr {
@@ -8323,9 +9381,12 @@ fn collect_declarations(
             {
                 errors.push(crate::opacity::unmoduled_opaque_error(name));
             }
-            let ctors = adt_reg.register_deftype(kids, vg, opaque, defining_module);
-            for (name, scheme) in ctors {
-                env.bind(name, scheme);
+            if let Ok(ctors) =
+                adt_reg.register_deftype(kids, vg, headers, errors, opaque, defining_module)
+            {
+                for (name, scheme) in ctors {
+                    env.bind(name, scheme);
+                }
             }
         }
         "defsig" => {
@@ -8333,9 +9394,18 @@ fn collect_declarations(
             if kids.len() >= 2
                 && let Some(name) = symbol_name(&kids[0])
             {
-                let ty = deep_type_to_resolved_type(&kids[1], vg, adt_reg, &mut HashMap::new());
-                let scheme = env.generalize(&ty, subst);
-                env.bind(name.to_string(), scheme);
+                let mut resolver = DeepTypeResolver::new(
+                    TypeUseSite::Defsig,
+                    BinderMode::ImplicitGeneric,
+                    headers,
+                    vg,
+                    errors,
+                );
+                if let Ok(ty) = resolver.resolve(&kids[1]) {
+                    let ty = resolve_type_aliases(&ty.into_type(), adt_reg);
+                    let scheme = env.generalize(&ty, subst);
+                    env.bind(name.to_string(), scheme);
+                }
             }
         }
         "typealias" => {
@@ -8363,16 +9433,30 @@ fn collect_declarations(
                     _ => Vec::new(),
                 };
 
-                let mut tvar_map = HashMap::new();
-                let mut param_vars = Vec::with_capacity(params.len());
-                for param in &params {
-                    let tv = vg.fresh_tvar();
-                    tvar_map.insert(param.clone(), tv);
-                    param_vars.push(tv);
+                let explicit_params: HashSet<String> = params.iter().cloned().collect();
+                let mut resolver = DeepTypeResolver::new(
+                    TypeUseSite::TypeAliasBody,
+                    BinderMode::Explicit(&explicit_params),
+                    headers,
+                    vg,
+                    errors,
+                );
+                if let Ok(aliased_ty) = resolver.resolve(&kids[2]) {
+                    let param_vars = params
+                        .iter()
+                        .map(|param| {
+                            resolver.type_var(param).expect(
+                                "explicit alias params are pre-bound as nominal type arguments",
+                            )
+                        })
+                        .collect();
+                    adt_reg.register_alias(
+                        name.to_string(),
+                        params,
+                        param_vars,
+                        aliased_ty.into_type(),
+                    );
                 }
-
-                let aliased_ty = deep_type_to_type(&kids[2], vg, &mut tvar_map);
-                adt_reg.register_alias(name.to_string(), params, param_vars, aliased_ty);
             }
         }
         _ => {}
@@ -8389,7 +9473,7 @@ fn type_contains_rank(ty: &Type) -> bool {
         Type::Ref(inner) => type_contains_rank(inner),
         Type::Adt(_, args) => args.iter().any(type_contains_rank),
         Type::Tuple(ts) => ts.iter().any(type_contains_rank),
-        Type::Prim(_) | Type::Var(_) | Type::Unit | Type::Error => false,
+        Type::Prim(_) | Type::Var(_) | Type::Unit | Type::Error(_) => false,
     }
 }
 
@@ -8433,7 +9517,7 @@ fn check_rank_body_discipline(
     def_name: &str,
     expr: &deep::Expr,
     user_def_names: &HashSet<String>,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
 ) {
     stack_guard!("check_rank_body_discipline", expr);
     let deep::Expr::List(list, _) = expr else {
@@ -8551,39 +9635,50 @@ fn infer_top_level(
     vg: &mut VarGen,
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
-    errors: &mut Vec<CheckError>,
-    typed_nodes: &mut usize,
-    total_nodes: &mut usize,
+    errors: &mut DiagnosticSink<'_>,
+    product: &mut InferenceProduct,
+    prebound_type_failure: Option<&ErrorWitness>,
+    provisional_recursive_type: Option<&Type>,
+    defer_recursive_binding: bool,
     user_def_names: &HashSet<String>,
-) {
+    declared_signatures: &HashMap<String, DeclaredSigMetadata>,
+) -> Option<(String, Type)> {
     let list = match expr {
         deep::Expr::List(list, _) => list,
-        _ => return,
+        _ => return None,
     };
 
-    let tag = match get_tag(list) {
-        Some(t) => t,
-        None => return,
-    };
+    let tag = get_tag(list)?;
 
     // Skip deftype/defsig/typealias (already processed in first pass)
     if tag == "deftype" || tag == "defsig" || tag == "typealias" {
-        return;
+        return None;
     }
 
     let kids = children(list);
 
     if tag == "def" && kids.len() >= 2 {
-        let name = match symbol_name(&kids[0]) {
-            Some(n) => n.to_string(),
-            None => return,
-        };
+        let name = symbol_name(&kids[0])?.to_string();
 
         // Save declared type from defsig BEFORE inferring (it may get overwritten)
-        let declared_ty = env.lookup(&name).map(|s| {
-            let s = s.clone();
-            env.instantiate(&s, vg)
-        });
+        let declared_ty = if provisional_recursive_type.is_none() {
+            env.lookup(&name).map(|s| {
+                let s = s.clone();
+                env.instantiate(&s, vg)
+            })
+        } else {
+            None
+        };
+        // A declaration's signature owns the only named binders legal in its
+        // nested source annotations. Infer against a lexical clone so the
+        // scope follows nested env clones but cannot leak to the next `def`
+        // or into the reusable top-level environment.
+        let mut body_env = env.clone();
+        body_env.set_type_resolution_binders(
+            declared_signatures
+                .get(&name)
+                .map(|metadata| &metadata.binders),
+        );
 
         let errors_before_body = errors.len();
         // WS-A7: when the body is a bare-arg `(fn (params) body)` and the
@@ -8604,29 +9699,27 @@ fn infer_top_level(
         // bare params with the declared type here makes the bare-arg path
         // behave the same as the annotated path. See
         // `crates/chelis-cli/tests/bareref_return_inference.rs`.
-        let body_ty = if let Some(decl_ty) = &declared_ty {
-            infer_def_body_with_sig(
+        let body_ty = if let Some(witness) = prebound_type_failure {
+            propagate(witness)
+        } else if let Some(decl_ty) = &declared_ty {
+            let inferred = infer_def_body_with_sig(
                 &kids[1],
                 decl_ty,
-                env,
+                &mut body_env,
                 vg,
                 subst,
                 adt_reg,
                 errors,
-                typed_nodes,
-                total_nodes,
-            )
-        } else {
-            infer_expr(
+                product,
+            );
+            product.record_bypass(
                 &kids[1],
-                env,
-                vg,
-                subst,
-                adt_reg,
-                errors,
-                typed_nodes,
-                total_nodes,
-            )
+                inferred.clone(),
+                "declared-signature function inference",
+            );
+            inferred
+        } else {
+            infer_expr(&kids[1], &mut body_env, vg, subst, adt_reg, errors, product)
         };
         // Did the body's inference report any UnboundVariable diagnostic?
         // We use this to discriminate WS-A5 RT-3a F1's masked-by-Error
@@ -8637,8 +9730,8 @@ fn infer_top_level(
         // F1 detector double-reports on legitimate code that exercises
         // type-checker gaps (record construction, region effects) which
         // the permissive unify rule was implicitly tolerating.
-        let body_has_unbound_diagnostic = errors[errors_before_body..]
-            .iter()
+        let body_has_unbound_diagnostic = errors
+            .iter_from(errors_before_body)
             .any(|e| matches!(e.kind, CheckErrorKind::UnboundVariable));
 
         // Enforce defsig: body must match declared signature.
@@ -8763,9 +9856,9 @@ fn infer_top_level(
             // inference gap that has already been surfaced upstream
             // and should not double-report the def-level diagnostic).
             let body_return_collapsed = match (&resolved_body, &resolved_decl) {
-                (Type::Error, decl) => !matches!(decl, Type::Error),
+                (Type::Error(_), decl) => !matches!(decl, Type::Error(_)),
                 (Type::Fn(_, ret), Type::Fn(_, decl_ret))
-                    if matches!(**ret, Type::Error) && !matches!(**decl_ret, Type::Error) =>
+                    if matches!(**ret, Type::Error(_)) && !matches!(**decl_ret, Type::Error(_)) =>
                 {
                     true
                 }
@@ -8819,11 +9912,17 @@ fn infer_top_level(
             // wildcards (the RT-39+44 soundness boundary, commit 8067c9ce).
             let param_dvars = param_bound_dvars(&resolved_decl);
             narrow_wildcards_with(&resolved_body, &resolved_decl, &param_dvars)
+        } else if let Some(provisional) = provisional_recursive_type {
+            if let Err(error) = unify(&body_ty, provisional, subst) {
+                errors.push(error.into());
+            }
+            subst.apply(provisional)
         } else {
             body_ty
         };
 
-        let scheme = env.generalize(&scheme_body, subst);
+        product.record_bypass(expr, scheme_body.clone(), "top-level declaration inference");
+
         // chelis#397/#469: record the size provenance of a top-level value
         // binding (e.g. `zero_count = sub(cast(0, int32), cast(0, int32))`)
         // BEFORE binding it, so a later `expand(b, 0, zero_count)` recovers
@@ -8842,23 +9941,39 @@ fn infer_top_level(
         }
         // chelis#631: same discipline for list-literal lengths.
         note_list_literal_binding(env, &name, &kids[1]);
-        env.bind(name, scheme);
+        if defer_recursive_binding {
+            Some((name, scheme_body))
+        } else {
+            let scheme = env.generalize(&scheme_body, subst);
+            env.bind(name, scheme);
+            None
+        }
     } else {
         // Any other top-level expression
-        let _ = infer_expr(
-            expr,
-            env,
-            vg,
-            subst,
-            adt_reg,
-            errors,
-            typed_nodes,
-            total_nodes,
-        );
+        let _ = infer_expr(expr, env, vg, subst, adt_reg, errors, product);
+        None
     }
 }
 
 // ── Core inference ───────────────────────────────────────────────
+
+/// Exact ownership record for a root expression consumer that resolves its
+/// own `type:` metadata. `infer_let` uses this instead of inferring ownership
+/// from a generic `Type::Error`: an unrelated RHS failure must not suppress an
+/// independently malformed let ascription.
+enum OwnedTypeMetadataResolution {
+    Resolved(Type),
+    Failed(ErrorWitness),
+}
+
+/// Named type/dimension/rank variables in source annotations are closed by
+/// default. Only the lexical environment cloned for a matching `defsig` body
+/// exposes an explicit binder set.
+fn annotation_binder_mode(env: &Env) -> BinderMode<'_> {
+    env.type_resolution_binders()
+        .map(BinderMode::Explicit)
+        .unwrap_or(BinderMode::ClosedInput)
+}
 
 #[allow(clippy::too_many_arguments)]
 fn infer_expr(
@@ -8867,9 +9982,22 @@ fn infer_expr(
     vg: &mut VarGen,
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
-    errors: &mut Vec<CheckError>,
-    typed_nodes: &mut usize,
-    total_nodes: &mut usize,
+    errors: &mut DiagnosticSink<'_>,
+    product: &mut InferenceProduct,
+) -> Type {
+    infer_expr_with_type_metadata_ownership(expr, env, vg, subst, adt_reg, errors, product, None)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn infer_expr_with_type_metadata_ownership(
+    expr: &deep::Expr,
+    env: &mut Env,
+    vg: &mut VarGen,
+    subst: &mut Subst,
+    adt_reg: &AdtRegistry,
+    errors: &mut DiagnosticSink<'_>,
+    product: &mut InferenceProduct,
+    type_metadata_resolution: Option<&mut Option<OwnedTypeMetadataResolution>>,
 ) -> Type {
     // Bail before a deeply-nested `app` tree exhausts the native stack and
     // aborts the process (this is the gdb-pinned real-pricer crash site):
@@ -8882,9 +10010,9 @@ fn infer_expr(
     // annotate / clone / drop passes -- runs inside the grown segment and this
     // guard does not fire; it remains the safety net for input deeper than the
     // grown segment can hold (covered-or-rejected).
-    stack_guard!("infer_expr", expr, Type::Error);
+    stack_guard!("infer_expr", expr, vg.fresh_type());
 
-    *total_nodes += 1;
+    product.total_nodes += 1;
 
     let result = match expr {
         deep::Expr::Atom(atom, _) => infer_atom(atom),
@@ -8892,157 +10020,26 @@ fn infer_expr(
             let tag = get_tag(list);
             match tag {
                 Some("var") => infer_var(list, env, vg, subst, adt_reg, errors),
-                Some("lit") => infer_lit(list, vg, adt_reg, errors),
-                Some("app") => infer_app(
-                    list,
-                    env,
-                    vg,
-                    subst,
-                    adt_reg,
-                    errors,
-                    typed_nodes,
-                    total_nodes,
-                ),
-                Some("fn") => infer_fn(
-                    list,
-                    env,
-                    vg,
-                    subst,
-                    adt_reg,
-                    errors,
-                    typed_nodes,
-                    total_nodes,
-                ),
-                Some("let") => infer_let(
-                    list,
-                    env,
-                    vg,
-                    subst,
-                    adt_reg,
-                    errors,
-                    typed_nodes,
-                    total_nodes,
-                ),
-                Some("if") => infer_if(
-                    list,
-                    env,
-                    vg,
-                    subst,
-                    adt_reg,
-                    errors,
-                    typed_nodes,
-                    total_nodes,
-                ),
-                Some("match") => infer_match(
-                    list,
-                    env,
-                    vg,
-                    subst,
-                    adt_reg,
-                    errors,
-                    typed_nodes,
-                    total_nodes,
-                ),
-                Some("pipe") => infer_pipe(
-                    list,
-                    env,
-                    vg,
-                    subst,
-                    adt_reg,
-                    errors,
-                    typed_nodes,
-                    total_nodes,
-                ),
-                Some("tuple") => infer_tuple(
-                    list,
-                    env,
-                    vg,
-                    subst,
-                    adt_reg,
-                    errors,
-                    typed_nodes,
-                    total_nodes,
-                ),
-                Some("tuple-get") => infer_tuple_get(
-                    list,
-                    env,
-                    vg,
-                    subst,
-                    adt_reg,
-                    errors,
-                    typed_nodes,
-                    total_nodes,
-                ),
-                Some("record") => infer_record(
-                    list,
-                    env,
-                    vg,
-                    subst,
-                    adt_reg,
-                    errors,
-                    typed_nodes,
-                    total_nodes,
-                ),
-                Some("access") => infer_access(
-                    list,
-                    env,
-                    vg,
-                    subst,
-                    adt_reg,
-                    errors,
-                    typed_nodes,
-                    total_nodes,
-                ),
-                Some("record-update") => infer_record_update(
-                    list,
-                    env,
-                    vg,
-                    subst,
-                    adt_reg,
-                    errors,
-                    typed_nodes,
-                    total_nodes,
-                ),
-                Some("cast") => infer_cast(
-                    list,
-                    env,
-                    vg,
-                    subst,
-                    adt_reg,
-                    errors,
-                    typed_nodes,
-                    total_nodes,
-                ),
-                Some("grad") => infer_grad(
-                    list,
-                    env,
-                    vg,
-                    subst,
-                    adt_reg,
-                    errors,
-                    typed_nodes,
-                    total_nodes,
-                ),
-                Some("vmap") => infer_vmap(
-                    list,
-                    env,
-                    vg,
-                    subst,
-                    adt_reg,
-                    errors,
-                    typed_nodes,
-                    total_nodes,
-                ),
-                Some("def") => infer_def(
-                    list,
-                    env,
-                    vg,
-                    subst,
-                    adt_reg,
-                    errors,
-                    typed_nodes,
-                    total_nodes,
-                ),
+                Some("lit") => infer_lit(list, env, vg, adt_reg, errors, type_metadata_resolution),
+                Some("app") => infer_app(list, env, vg, subst, adt_reg, errors, product),
+                Some("fn") => infer_fn(list, env, vg, subst, adt_reg, errors, product),
+                Some("let") => infer_let(list, env, vg, subst, adt_reg, errors, product),
+                Some("if") => infer_if(list, env, vg, subst, adt_reg, errors, product),
+                Some("match") => infer_match(list, env, vg, subst, adt_reg, errors, product),
+                Some("pipe") => infer_pipe(list, env, vg, subst, adt_reg, errors, product),
+                Some("tuple") => infer_tuple(list, env, vg, subst, adt_reg, errors, product),
+                Some("tuple-get") => {
+                    infer_tuple_get(list, env, vg, subst, adt_reg, errors, product)
+                }
+                Some("record") => infer_record(list, env, vg, subst, adt_reg, errors, product),
+                Some("access") => infer_access(list, env, vg, subst, adt_reg, errors, product),
+                Some("record-update") => {
+                    infer_record_update(list, env, vg, subst, adt_reg, errors, product)
+                }
+                Some("cast") => infer_cast(list, env, vg, subst, adt_reg, errors, product),
+                Some("grad") => infer_grad(list, env, vg, subst, adt_reg, errors, product),
+                Some("vmap") => infer_vmap(list, env, vg, subst, adt_reg, errors, product),
+                Some("def") => infer_def(list, env, vg, subst, adt_reg, errors, product),
                 Some("defsig") => {
                     // Already handled in first pass
                     Type::Unit
@@ -9069,16 +10066,7 @@ fn infer_expr(
                     let kids = children(list);
                     let mut last_ty = Type::Unit;
                     for kid in kids {
-                        last_ty = infer_expr(
-                            kid,
-                            env,
-                            vg,
-                            subst,
-                            adt_reg,
-                            errors,
-                            typed_nodes,
-                            total_nodes,
-                        );
+                        last_ty = infer_expr(kid, env, vg, subst, adt_reg, errors, product);
                     }
                     last_ty
                 }
@@ -9088,16 +10076,7 @@ fn infer_expr(
                     // wrapped expression.
                     let kids = children(list);
                     if let Some(inner) = kids.first() {
-                        infer_expr(
-                            inner,
-                            env,
-                            vg,
-                            subst,
-                            adt_reg,
-                            errors,
-                            typed_nodes,
-                            total_nodes,
-                        )
+                        infer_expr(inner, env, vg, subst, adt_reg, errors, product)
                     } else {
                         malformed_form(list, "jit", "one wrapped expression", errors)
                     }
@@ -9105,16 +10084,7 @@ fn infer_expr(
                 Some("realize") => {
                     let kids = children(list);
                     if let Some(inner) = kids.first() {
-                        infer_expr(
-                            inner,
-                            env,
-                            vg,
-                            subst,
-                            adt_reg,
-                            errors,
-                            typed_nodes,
-                            total_nodes,
-                        )
+                        infer_expr(inner, env, vg, subst, adt_reg, errors, product)
                     } else {
                         malformed_form(list, "realize", "one wrapped expression", errors)
                     }
@@ -9122,30 +10092,21 @@ fn infer_expr(
                 Some("copy") => {
                     let kids = children(list);
                     if let Some(inner) = kids.first() {
-                        let inner_ty = infer_expr(
-                            inner,
-                            env,
-                            vg,
-                            subst,
-                            adt_reg,
-                            errors,
-                            typed_nodes,
-                            total_nodes,
-                        );
+                        let inner_ty = infer_expr(inner, env, vg, subst, adt_reg, errors, product);
                         let resolved = subst.apply(&inner_ty);
                         match resolved {
-                            Type::Tensor(_, _) | Type::Error => resolved,
+                            Type::Tensor(_, _) | Type::Error(_) => resolved,
                             Type::Ref(inner) if matches!(inner.as_ref(), Type::Tensor(_, _)) => {
                                 *inner
                             }
-                            _ => {
-                                errors.push(CheckError::new(
+                            _ => report(
+                                errors,
+                                CheckError::new(
                                     CheckErrorKind::TypeMismatch,
                                     format!("copy requires tensor input, got {resolved}"),
                                     vec!["Wrap only tensor values in copy".to_string()],
-                                ));
-                                Type::Error
-                            }
+                                ),
+                            ),
                         }
                     } else {
                         malformed_form(list, "copy", "one wrapped expression", errors)
@@ -9154,22 +10115,14 @@ fn infer_expr(
                 Some("borrow") => {
                     let kids = children(list);
                     if let Some(inner) = kids.first() {
-                        let inner_ty = infer_expr(
-                            inner,
-                            env,
-                            vg,
-                            subst,
-                            adt_reg,
-                            errors,
-                            typed_nodes,
-                            total_nodes,
-                        );
+                        let inner_ty = infer_expr(inner, env, vg, subst, adt_reg, errors, product);
                         let resolved = subst.apply(&inner_ty);
                         match resolved {
                             Type::Ref(_) => resolved,
-                            Type::Tensor(_, _) | Type::Adt(_, _) | Type::Tuple(_) | Type::Error => {
-                                Type::Ref(Box::new(resolved))
-                            }
+                            Type::Tensor(_, _)
+                            | Type::Adt(_, _)
+                            | Type::Tuple(_)
+                            | Type::Error(_) => Type::Ref(Box::new(resolved)),
                             // Issue #256: when the borrow inner is still an
                             // unresolved type variable (e.g. the output of a
                             // polymorphic-return call whose dim variables
@@ -9203,29 +10156,24 @@ fn infer_expr(
                                 subst.record_deferred_borrow_var(tv);
                                 Type::Ref(Box::new(Type::Var(tv)))
                             }
-                            _ => {
-                                errors.push(CheckError::new(
+                            _ => report(
+                                errors,
+                                CheckError::new(
                                     CheckErrorKind::TypeMismatch,
-                                    format!("borrow requires tensor or tensor-carrying input, got {resolved}"),
+                                    format!(
+                                        "borrow requires tensor or tensor-carrying input, got {resolved}"
+                                    ),
                                     vec!["Use `&x` only with tensor values".to_string()],
-                                ));
-                                Type::Error
-                            }
+                                ),
+                            ),
                         }
                     } else {
                         malformed_form(list, "borrow", "one wrapped expression", errors)
                     }
                 }
-                Some("handle-effect") => infer_handle_effect(
-                    list,
-                    env,
-                    vg,
-                    subst,
-                    adt_reg,
-                    errors,
-                    typed_nodes,
-                    total_nodes,
-                ),
+                Some("handle-effect") => {
+                    infer_handle_effect(list, env, vg, subst, adt_reg, errors, product)
+                }
                 _ => {
                     // chelis#731 [04-TOT-1] / §C1.2: a Deep tag reached
                     // dispatch with no checker case. The parser already
@@ -9235,35 +10183,31 @@ fn infer_expr(
                     // would exempt the whole subtree from checking (the
                     // chelis#709 class defect: the default must be to fail).
                     let named = tag.unwrap_or("<none>");
-                    errors.push(CheckError::new(
-                        CheckErrorKind::UnknownForm,
-                        format!(
-                            "unknown Deep tag `{named}` has no checker disposition \
+                    report(
+                        errors,
+                        CheckError::new(
+                            CheckErrorKind::UnknownForm,
+                            format!(
+                                "unknown Deep tag `{named}` has no checker disposition \
                              (not in the 62-tag closed vocabulary of \
                              spec/03-deep-syntax.md; chelis#731 [04-TOT-1])"
+                            ),
+                            vec![],
                         ),
-                        vec![],
-                    ));
-                    Type::Error
+                    )
                 }
             }
         }
         deep::Expr::Map(_, _) => Type::Unit,
-        deep::Expr::MetaExpr(meta, _) => infer_expr(
-            &meta.expr,
-            env,
-            vg,
-            subst,
-            adt_reg,
-            errors,
-            typed_nodes,
-            total_nodes,
-        ),
+        deep::Expr::MetaExpr(meta, _) => {
+            infer_expr(&meta.expr, env, vg, subst, adt_reg, errors, product)
+        }
     };
 
-    if !matches!(result, Type::Error) {
-        *typed_nodes += 1;
+    if !matches!(result, Type::Error(_)) {
+        product.typed_nodes += 1;
     }
+    product.record_canonical(expr, result.clone());
 
     result
 }
@@ -9301,9 +10245,8 @@ fn infer_handle_effect(
     vg: &mut VarGen,
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
-    errors: &mut Vec<CheckError>,
-    typed_nodes: &mut usize,
-    total_nodes: &mut usize,
+    errors: &mut DiagnosticSink<'_>,
+    product: &mut InferenceProduct,
 ) -> Type {
     let kids = children(list);
     // Structural arity: spec/03-deep-syntax.md gives `handle-effect` EXACTLY
@@ -9410,16 +10353,7 @@ fn infer_handle_effect(
     // chelis#709 fix -- the enclosing `def` signature is now enforced against
     // the body, so an int64 body in an `-> f32` def, or a tensor body from a
     // scalar-typed fn, is a type error caught before any backend sees it.
-    infer_expr(
-        body,
-        env,
-        vg,
-        subst,
-        adt_reg,
-        errors,
-        typed_nodes,
-        total_nodes,
-    )
+    infer_expr(body, env, vg, subst, adt_reg, errors, product)
 }
 
 /// Classification of a `random`-effect seed handler for the checker's
@@ -9505,7 +10439,7 @@ fn infer_atom(atom: &deep::Atom) -> Type {
         deep::Atom::Float(_) => Type::Prim(Prim::F32),
         deep::Atom::Bool(_) => Type::Prim(Prim::Bool),
         deep::Atom::Str(_) => Type::Prim(Prim::String),
-        deep::Atom::Symbol(_) | deep::Atom::Keyword(_) => Type::Error,
+        deep::Atom::Symbol(_) | deep::Atom::Keyword(_) => Type::Unit,
     }
 }
 
@@ -9515,7 +10449,7 @@ fn infer_var(
     vg: &mut VarGen,
     subst: &Subst,
     adt_reg: &AdtRegistry,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
 ) -> Type {
     let kids = children(list);
     if let Some(name) = kids.first().and_then(|e| symbol_name(e)) {
@@ -9544,8 +10478,7 @@ fn infer_var(
                 }
                 err.span_id = Some(sid.to_string());
             }
-            errors.push(err);
-            return Type::Error;
+            return report(errors, err);
         }
         if let Some(scheme) = env
             .lookup(name)
@@ -9578,8 +10511,7 @@ fn infer_var(
                 }
                 err.span_id = Some(sid.to_string());
             }
-            errors.push(err);
-            Type::Error
+            report(errors, err)
         }
     } else {
         malformed_form(list, "var", "a symbol name as its first child", errors)
@@ -9588,9 +10520,11 @@ fn infer_var(
 
 fn infer_lit(
     list: &deep::List,
+    env: &Env,
     vg: &mut VarGen,
     adt_reg: &AdtRegistry,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
+    mut type_metadata_resolution: Option<&mut Option<OwnedTypeMetadataResolution>>,
 ) -> Type {
     let meta = get_meta(list);
     let kids = children(list);
@@ -9686,7 +10620,7 @@ fn infer_lit(
                     )],
                 ));
             }
-            return Type::Error;
+            return vg.fresh_type();
         }
     }
 
@@ -9694,7 +10628,25 @@ fn infer_lit(
     if let Some(meta) = meta {
         for (key, val) in &meta.entries {
             if key == "type" {
-                let resolved = deep_type_to_resolved_type(val, vg, adt_reg, &mut HashMap::new());
+                let resolved = match resolve_deep_type(
+                    val,
+                    vg,
+                    adt_reg,
+                    TypeUseSite::Annotation,
+                    annotation_binder_mode(env),
+                    errors,
+                ) {
+                    Ok(ty) => ty,
+                    Err(witness) => {
+                        if let Some(owner) = type_metadata_resolution.as_deref_mut() {
+                            *owner = Some(OwnedTypeMetadataResolution::Failed(witness));
+                        }
+                        return propagate(&witness);
+                    }
+                };
+                if let Some(owner) = type_metadata_resolution.as_deref_mut() {
+                    *owner = Some(OwnedTypeMetadataResolution::Resolved(resolved.clone()));
+                }
                 // RFC D-CHECK lit-forge gate: `{type: (t-adt ...)}`
                 // metadata on a literal outside the defining module
                 // forges an opaque value. Reachable from BOTH
@@ -9702,7 +10654,7 @@ fn infer_lit(
                 // (`0.5 : Probability`) and block-binding ascription
                 // desugar to exactly this metadata (RT-0), so the
                 // gate is not scoped to `.dp` ingestion.
-                // `deep_type_to_resolved_type` expands transparent
+                // `resolve_deep_type` expands transparent
                 // aliases, so `0.5 : P2` cannot launder the gate.
                 if let Type::Adt(adt_name, _) = &resolved {
                     crate::opacity::check_opaque_use(
@@ -9727,21 +10679,23 @@ fn infer_lit(
                 // form. Without this guard the bare-form path would
                 // silently default to int32 and wrap.
                 if i32::try_from(*n).is_err() {
-                    errors.push(CheckError::new(
-                        CheckErrorKind::TypeMismatch,
-                        format!(
-                            "literal {n} out of range for default int32; use the \
+                    report(
+                        errors,
+                        CheckError::new(
+                            CheckErrorKind::TypeMismatch,
+                            format!(
+                                "literal {n} out of range for default int32; use the \
                              `{n}i64` literal suffix or an explicit cast({n}, int64) \
                              (spec/04-type-system.md §5.3, §5.5)"
-                        ),
-                        vec![format!(
-                            "spec/04-type-system.md §5.3: integer literals default \
+                            ),
+                            vec![format!(
+                                "spec/04-type-system.md §5.3: integer literals default \
                              to int32; the lexer parses at i64 so out-of-range \
                              tokens can be diagnosed before the narrowing rather \
                              than wrapping silently"
-                        )],
-                    ));
-                    Type::Error
+                            )],
+                        ),
+                    )
                 } else {
                     Type::Prim(Prim::Int32)
                 }
@@ -9763,13 +10717,12 @@ fn infer_app(
     vg: &mut VarGen,
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
-    errors: &mut Vec<CheckError>,
-    typed_nodes: &mut usize,
-    total_nodes: &mut usize,
+    errors: &mut DiagnosticSink<'_>,
+    product: &mut InferenceProduct,
 ) -> Type {
     let kids = children(list);
     if kids.is_empty() {
-        return Type::Error;
+        return malformed_form(list, "app", "a callee expression", errors);
     }
 
     // Check if func is a comparison op (for special return type handling)
@@ -9787,68 +10740,23 @@ fn infer_app(
     };
 
     if matches!(func_name.as_deref(), Some("permute")) {
-        return infer_permute_app(
-            list,
-            env,
-            vg,
-            subst,
-            adt_reg,
-            errors,
-            typed_nodes,
-            total_nodes,
-        );
+        return infer_permute_app(list, env, vg, subst, adt_reg, errors, product);
     }
 
     if matches!(func_name.as_deref(), Some("reshape")) {
-        return infer_reshape_app(
-            list,
-            env,
-            vg,
-            subst,
-            adt_reg,
-            errors,
-            typed_nodes,
-            total_nodes,
-        );
+        return infer_reshape_app(list, env, vg, subst, adt_reg, errors, product);
     }
 
     if matches!(func_name.as_deref(), Some("shrink")) {
-        return infer_shrink_app(
-            list,
-            env,
-            vg,
-            subst,
-            adt_reg,
-            errors,
-            typed_nodes,
-            total_nodes,
-        );
+        return infer_shrink_app(list, env, vg, subst, adt_reg, errors, product);
     }
 
     if matches!(func_name.as_deref(), Some("pad")) {
-        return infer_pad_app(
-            list,
-            env,
-            vg,
-            subst,
-            adt_reg,
-            errors,
-            typed_nodes,
-            total_nodes,
-        );
+        return infer_pad_app(list, env, vg, subst, adt_reg, errors, product);
     }
 
     if matches!(func_name.as_deref(), Some("stride")) {
-        return infer_stride_app(
-            list,
-            env,
-            vg,
-            subst,
-            adt_reg,
-            errors,
-            typed_nodes,
-            total_nodes,
-        );
+        return infer_stride_app(list, env, vg, subst, adt_reg, errors, product);
     }
 
     // chelis#339: the anchored named-axis expand form `expand(x, new, size,
@@ -9858,16 +10766,7 @@ fn infer_app(
     // `infer_permute_app` pattern); 2-/3-arg expand keeps the generic path,
     // which reaches `check_expand_signature` with the scheme intact.
     if matches!(func_name.as_deref(), Some("expand")) && kids.len() >= 5 {
-        return infer_expand_app(
-            list,
-            env,
-            vg,
-            subst,
-            adt_reg,
-            errors,
-            typed_nodes,
-            total_nodes,
-        );
+        return infer_expand_app(list, env, vg, subst, adt_reg, errors, product);
     }
 
     // chelis#339 Part 2: variadic named-axis reduction `sum(x, seq, head)`.
@@ -9898,8 +10797,7 @@ fn infer_app(
             subst,
             adt_reg,
             errors,
-            typed_nodes,
-            total_nodes,
+            product,
         );
     }
 
@@ -9917,8 +10815,7 @@ fn infer_app(
             subst,
             adt_reg,
             errors,
-            typed_nodes,
-            total_nodes,
+            product,
         );
     }
 
@@ -9984,28 +10881,23 @@ fn infer_app(
             .iter()
             .all(|(field_name, _)| field_name.is_some())
     {
-        errors.push(CheckError::new(
-            CheckErrorKind::TypeMismatch,
-            format!("{fname} is a record constructor and must use named fields: {fname} {{ ... }}"),
-            vec![],
-        ));
-        return Type::Error;
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::TypeMismatch,
+                format!(
+                    "{fname} is a record constructor and must use named fields: {fname} {{ ... }}"
+                ),
+                vec![],
+            ),
+        );
     }
 
     let func_ty = {
         let _ctor_guard = ctor_lookup_name
             .as_ref()
             .map(|_| crate::opacity::suppress_ctor_reference_check());
-        infer_expr(
-            &kids[0],
-            env,
-            vg,
-            subst,
-            adt_reg,
-            errors,
-            typed_nodes,
-            total_nodes,
-        )
+        infer_expr(&kids[0], env, vg, subst, adt_reg, errors, product)
     };
     // A reduction's axis argument may name a *dimension* of the operand
     // (`sum(x, seq)`, Tier-3 named-axis reduction, spec §4.5.3), not a bound
@@ -10049,16 +10941,7 @@ fn infer_app(
             {
                 Type::Prim(Prim::Int32)
             } else {
-                infer_expr(
-                    arg,
-                    env,
-                    vg,
-                    subst,
-                    adt_reg,
-                    errors,
-                    typed_nodes,
-                    total_nodes,
-                )
+                infer_expr(arg, env, vg, subst, adt_reg, errors, product)
             }
         })
         .collect();
@@ -10089,8 +10972,8 @@ fn infer_app(
     // `arg_tys[2]`), and now that no argument short-circuits here, an
     // Error-typed size slot always reaches the per-form located diagnostic.
     // A genuinely sourced size never infers to `Error`.
-    if matches!(func_ty, Type::Error) {
-        return Type::Error;
+    if let Some(err) = propagate_if_error([&func_ty]) {
+        return err;
     }
 
     // Issue Chelis-Lang/chelis#218 R3 HIGH-CONCAT: when `Cons` is
@@ -10134,28 +11017,29 @@ fn infer_app(
                 // a rank-mixed literal. The dim slot `k` is a
                 // dimension variable, not a shape-vector variable;
                 // see spec/04-type-system.md §4.5.1.
-                errors.push(CheckError::new(
-                    CheckErrorKind::DimensionMismatch,
-                    with_macro_provenance(
-                        &deep::Expr::List(list.clone(), zero_span()),
-                        format!(
-                            "list element rank mismatch: {} dims vs {} dims; \
+                return report(
+                    errors,
+                    CheckError::new(
+                        CheckErrorKind::DimensionMismatch,
+                        with_macro_provenance(
+                            &deep::Expr::List(list.clone(), zero_span()),
+                            format!(
+                                "list element rank mismatch: {} dims vs {} dims; \
                              List[tensor[...]] requires rank-uniform elements \
                              (the dim slot is a dimension variable, not a \
                              shape-vector variable). Reshape or flatten \
                              elements to a common rank before listing \
                              (spec/04-type-system.md §4.5.1).",
-                            head_dims.len(),
-                            tail_dims.len(),
+                                head_dims.len(),
+                                tail_dims.len(),
+                            ),
                         ),
+                        vec![],
                     ),
-                    vec![],
-                ));
-                return Type::Error;
+                );
             }
             if let Err(te) = unify_tensor_prec(head_prec, &tail_prec, subst) {
-                errors.push(te.into());
-                return Type::Error;
+                return report(errors, te.into());
             }
             // Per-axis join (chelis#218 concat ergonomics, tightened
             // by chelis#272). Resolve each dim through the current
@@ -10206,8 +11090,7 @@ fn infer_app(
                     // identity and `check_declared_dvars_rigid` can fire.
                     _ => {
                         if let Err(te) = unify_dim(&hr, &tr, subst) {
-                            errors.push(te.into());
-                            return Type::Error;
+                            return report(errors, te.into());
                         }
                         subst.apply_dim(&hr)
                     }
@@ -10326,10 +11209,10 @@ fn infer_app(
                     let resolved = type_for_readonly_check(arg_ty, subst);
                     let ok = match fname.as_str() {
                         "matmul" | "layer_norm" | "normalize" => {
-                            matches!(resolved, Type::Tensor(_, _) | Type::Var(_) | Type::Error)
+                            matches!(resolved, Type::Tensor(_, _) | Type::Var(_) | Type::Error(_))
                         }
                         "add" | "mul" | "sub" | "max_elem" | "min_elem" | "neg" => {
-                            matches!(resolved, Type::Tensor(_, _) | Type::Var(_) | Type::Error)
+                            matches!(resolved, Type::Tensor(_, _) | Type::Var(_) | Type::Error(_))
                                 || matches!(resolved, Type::Prim(prec) if prec.is_numeric())
                         }
                         "floor_div" => {
@@ -10337,7 +11220,7 @@ fn infer_app(
                             // and float operands (round toward -inf for
                             // ints, `floor(a/b)` for floats), so any
                             // numeric precision is admissible.
-                            matches!(resolved, Type::Tensor(_, _) | Type::Var(_) | Type::Error)
+                            matches!(resolved, Type::Tensor(_, _) | Type::Var(_) | Type::Error(_))
                                 || matches!(resolved, Type::Prim(prec) if prec.is_numeric())
                         }
                         "div" => {
@@ -10352,7 +11235,7 @@ fn infer_app(
                             // site.
                             matches!(
                                 resolved,
-                                Type::Tensor(_, TensorPrec::Var(_)) | Type::Var(_) | Type::Error
+                                Type::Tensor(_, TensorPrec::Var(_)) | Type::Var(_) | Type::Error(_)
                             ) || matches!(resolved, Type::Tensor(_, TensorPrec::Concrete(p)) if p.is_float())
                                 || matches!(resolved, Type::Prim(prec) if prec.is_float())
                         }
@@ -10363,7 +11246,7 @@ fn infer_app(
                             // are accepted for polymorphic bodies.
                             matches!(
                                 resolved,
-                                Type::Tensor(_, TensorPrec::Var(_)) | Type::Var(_) | Type::Error
+                                Type::Tensor(_, TensorPrec::Var(_)) | Type::Var(_) | Type::Error(_)
                             ) || matches!(resolved, Type::Tensor(_, TensorPrec::Concrete(p)) if p.is_integer())
                                 || matches!(resolved, Type::Prim(prec) if prec.is_integer())
                         }
@@ -10384,16 +11267,16 @@ fn infer_app(
                             // call site.
                             matches!(
                                 resolved,
-                                Type::Tensor(_, TensorPrec::Var(_)) | Type::Var(_) | Type::Error
+                                Type::Tensor(_, TensorPrec::Var(_)) | Type::Var(_) | Type::Error(_)
                             ) || matches!(resolved, Type::Tensor(_, TensorPrec::Concrete(p)) if p.is_float())
                                 || matches!(resolved, Type::Prim(prec) if prec.is_float())
                         }
                         "cmplt" | "lt" | "gt" | "lte" | "gte" => {
-                            matches!(resolved, Type::Tensor(_, _) | Type::Var(_) | Type::Error)
+                            matches!(resolved, Type::Tensor(_, _) | Type::Var(_) | Type::Error(_))
                                 || matches!(resolved, Type::Prim(prec) if prec.is_numeric())
                         }
                         "eq" | "neq" => {
-                            matches!(resolved, Type::Tensor(_, _) | Type::Var(_) | Type::Error)
+                            matches!(resolved, Type::Tensor(_, _) | Type::Var(_) | Type::Error(_))
                                 || matches!(resolved, Type::Prim(_))
                         }
                         "and" | "or" | "not" => {
@@ -10401,10 +11284,10 @@ fn infer_app(
                                 resolved,
                                 Type::Tensor(_, TensorPrec::Concrete(Prim::Bool))
                                     | Type::Var(_)
-                                    | Type::Error
+                                    | Type::Error(_)
                             ) || matches!(resolved, Type::Prim(Prim::Bool))
                         }
-                        _ => matches!(resolved, Type::Tensor(_, _) | Type::Var(_) | Type::Error),
+                        _ => matches!(resolved, Type::Tensor(_, _) | Type::Var(_) | Type::Error(_)),
                     };
                     if !ok {
                         // WS-A8: surface a §5.4 citation when a
@@ -10502,15 +11385,17 @@ fn infer_app(
                                 vec![],
                             )
                         };
-                        errors.push(CheckError::new(
-                            kind,
-                            with_macro_provenance(
-                                &deep::Expr::List(list.clone(), zero_span()),
-                                message,
+                        return report(
+                            errors,
+                            CheckError::new(
+                                kind,
+                                with_macro_provenance(
+                                    &deep::Expr::List(list.clone(), zero_span()),
+                                    message,
+                                ),
+                                hints,
                             ),
-                            hints,
-                        ));
-                        return Type::Error;
+                        );
                     }
                 }
             }
@@ -10531,17 +11416,19 @@ fn infer_app(
                 if let Some(first_arg) = arg_tys.first() {
                     let resolved = type_for_readonly_check(first_arg, subst);
                     match &resolved {
-                        Type::Tensor(_, _) | Type::Var(_) | Type::Error => {}
+                        Type::Tensor(_, _) | Type::Var(_) | Type::Error(_) => {}
                         _ => {
-                            errors.push(CheckError::new(
-                                CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
-                                    format!("{} expects tensor input, got {}", fname, resolved),
+                            return report(
+                                errors,
+                                CheckError::new(
+                                    CheckErrorKind::TypeMismatch,
+                                    with_macro_provenance(
+                                        &deep::Expr::List(list.clone(), zero_span()),
+                                        format!("{} expects tensor input, got {}", fname, resolved),
+                                    ),
+                                    vec![],
                                 ),
-                                vec![],
-                            ));
-                            return Type::Error;
+                            );
                         }
                     }
                     // WS-A8 / RT-3 F3: softmax is a transcendental row
@@ -10554,41 +11441,45 @@ fn infer_app(
                         && let Type::Tensor(_, TensorPrec::Concrete(p)) = &resolved
                         && !p.is_float()
                     {
-                        errors.push(CheckError::new(
-                            CheckErrorKind::PrecisionMismatch,
-                            with_macro_provenance(
-                                &deep::Expr::List(list.clone(), zero_span()),
-                                format!(
-                                    "softmax on operand precision `{}` is not admitted per \
+                        return report(
+                            errors,
+                            CheckError::new(
+                                CheckErrorKind::PrecisionMismatch,
+                                with_macro_provenance(
+                                    &deep::Expr::List(list.clone(), zero_span()),
+                                    format!(
+                                        "softmax on operand precision `{}` is not admitted per \
                                      spec/04-type-system.md \u{00a7}5.4: transcendental \
                                      operations are restricted to f32, f64, bf16, f16 \
                                      (not integer)",
-                                    p.name()
+                                        p.name()
+                                    ),
                                 ),
-                            ),
-                            vec![format!(
-                                "spec/04-type-system.md \u{00a7}5.4: cast to a float \
+                                vec![format!(
+                                    "spec/04-type-system.md \u{00a7}5.4: cast to a float \
                                  precision before applying softmax."
-                            )],
-                        ));
-                        return Type::Error;
+                                )],
+                            ),
+                        );
                     }
                 }
 
                 if let Some(axis_arg) = arg_tys.get(1) {
                     let resolved = subst.apply(axis_arg);
                     match &resolved {
-                        Type::Prim(Prim::Int32) | Type::Var(_) | Type::Error => {}
+                        Type::Prim(Prim::Int32) | Type::Var(_) | Type::Error(_) => {}
                         _ => {
-                            errors.push(CheckError::new(
-                                CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
-                                    format!("{} expects int32 axis, got {}", fname, resolved),
+                            return report(
+                                errors,
+                                CheckError::new(
+                                    CheckErrorKind::TypeMismatch,
+                                    with_macro_provenance(
+                                        &deep::Expr::List(list.clone(), zero_span()),
+                                        format!("{} expects int32 axis, got {}", fname, resolved),
+                                    ),
+                                    vec![],
                                 ),
-                                vec![],
-                            ));
-                            return Type::Error;
+                            );
                         }
                     }
                 }
@@ -10606,18 +11497,20 @@ fn infer_app(
                     && let Some(raw) = kids.get(2).and_then(extract_int_for_dim)
                     && normalize_static_axis(dims.len(), raw).is_none()
                 {
-                    errors.push(CheckError::new(
-                        CheckErrorKind::DimensionMismatch,
-                        with_macro_provenance(
-                            &deep::Expr::List(list.clone(), zero_span()),
-                            format!(
-                                "softmax axis {raw} is out of bounds for rank {} tensor",
-                                dims.len()
+                    return report(
+                        errors,
+                        CheckError::new(
+                            CheckErrorKind::DimensionMismatch,
+                            with_macro_provenance(
+                                &deep::Expr::List(list.clone(), zero_span()),
+                                format!(
+                                    "softmax axis {raw} is out of bounds for rank {} tensor",
+                                    dims.len()
+                                ),
                             ),
+                            vec![],
                         ),
-                        vec![],
-                    ));
-                    return Type::Error;
+                    );
                 }
             }
 
@@ -10629,33 +11522,37 @@ fn infer_app(
                     match &resolved {
                         Type::Tensor(_, prim) if prim.is_float() => {}
                         Type::Tensor(_, _) => {
-                            errors.push(CheckError::new(
-                                CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
-                                    format!(
-                                        "uniform_like expects a float tensor template, got {}",
-                                        resolved
+                            return report(
+                                errors,
+                                CheckError::new(
+                                    CheckErrorKind::TypeMismatch,
+                                    with_macro_provenance(
+                                        &deep::Expr::List(list.clone(), zero_span()),
+                                        format!(
+                                            "uniform_like expects a float tensor template, got {}",
+                                            resolved
+                                        ),
                                     ),
+                                    vec![],
                                 ),
-                                vec![],
-                            ));
-                            return Type::Error;
+                            );
                         }
-                        Type::Var(_) | Type::Error => {}
+                        Type::Var(_) | Type::Error(_) => {}
                         _ => {
-                            errors.push(CheckError::new(
-                                CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
-                                    format!(
-                                        "uniform_like expects tensor template input, got {}",
-                                        resolved
+                            return report(
+                                errors,
+                                CheckError::new(
+                                    CheckErrorKind::TypeMismatch,
+                                    with_macro_provenance(
+                                        &deep::Expr::List(list.clone(), zero_span()),
+                                        format!(
+                                            "uniform_like expects tensor template input, got {}",
+                                            resolved
+                                        ),
                                     ),
+                                    vec![],
                                 ),
-                                vec![],
-                            ));
-                            return Type::Error;
+                            );
                         }
                     }
                 }
@@ -10663,38 +11560,42 @@ fn infer_app(
                 for (index, arg_ty) in arg_tys.iter().enumerate().skip(1).take(2) {
                     let resolved = type_for_readonly_check(arg_ty, subst);
                     match &resolved {
-                        Type::Prim(Prim::F32) | Type::Var(_) | Type::Error => {}
+                        Type::Prim(Prim::F32) | Type::Var(_) | Type::Error(_) => {}
                         _ => {
-                            errors.push(CheckError::new(
-                                CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
-                                    format!(
-                                        "uniform_like expects f32 bounds for args 2-3, got {}",
-                                        resolved
+                            return report(
+                                errors,
+                                CheckError::new(
+                                    CheckErrorKind::TypeMismatch,
+                                    with_macro_provenance(
+                                        &deep::Expr::List(list.clone(), zero_span()),
+                                        format!(
+                                            "uniform_like expects f32 bounds for args 2-3, got {}",
+                                            resolved
+                                        ),
                                     ),
+                                    vec![],
                                 ),
-                                vec![],
-                            ));
-                            return Type::Error;
+                            );
                         }
                     }
 
                     if let Some(expr) = kids.get(index + 1)
                         && !is_static_numeric_bound(expr)
                     {
-                        errors.push(CheckError::new(
-                            CheckErrorKind::TypeMismatch,
-                            with_macro_provenance(
-                                &deep::Expr::List(list.clone(), zero_span()),
-                                "uniform_like currently requires literal low/high bounds \
+                        return report(
+                            errors,
+                            CheckError::new(
+                                CheckErrorKind::TypeMismatch,
+                                with_macro_provenance(
+                                    &deep::Expr::List(list.clone(), zero_span()),
+                                    "uniform_like currently requires literal low/high bounds \
                                  (a numeric literal, optionally negated or cast to a float \
                                  type); a runtime-computed bound is not supported"
-                                    .to_string(),
+                                        .to_string(),
+                                ),
+                                vec![],
                             ),
-                            vec![],
-                        ));
-                        return Type::Error;
+                        );
                     }
                 }
             }
@@ -10705,17 +11606,19 @@ fn infer_app(
                 if let Some(first_arg) = arg_tys.first() {
                     let resolved = type_for_readonly_check(first_arg, subst);
                     match &resolved {
-                        Type::Tensor(_, _) | Type::Var(_) | Type::Error => {}
+                        Type::Tensor(_, _) | Type::Var(_) | Type::Error(_) => {}
                         _ => {
-                            errors.push(CheckError::new(
-                                CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
-                                    format!("dropout expects tensor input, got {}", resolved),
+                            return report(
+                                errors,
+                                CheckError::new(
+                                    CheckErrorKind::TypeMismatch,
+                                    with_macro_provenance(
+                                        &deep::Expr::List(list.clone(), zero_span()),
+                                        format!("dropout expects tensor input, got {}", resolved),
+                                    ),
+                                    vec![],
                                 ),
-                                vec![],
-                            ));
-                            return Type::Error;
+                            );
                         }
                     }
                 }
@@ -10723,17 +11626,19 @@ fn infer_app(
                 if let Some(rate_arg) = arg_tys.get(1) {
                     let resolved = subst.apply(rate_arg);
                     match &resolved {
-                        Type::Prim(Prim::F32) | Type::Var(_) | Type::Error => {}
+                        Type::Prim(Prim::F32) | Type::Var(_) | Type::Error(_) => {}
                         _ => {
-                            errors.push(CheckError::new(
-                                CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
-                                    format!("dropout expects f32 rate, got {}", resolved),
+                            return report(
+                                errors,
+                                CheckError::new(
+                                    CheckErrorKind::TypeMismatch,
+                                    with_macro_provenance(
+                                        &deep::Expr::List(list.clone(), zero_span()),
+                                        format!("dropout expects f32 rate, got {}", resolved),
+                                    ),
+                                    vec![],
                                 ),
-                                vec![],
-                            ));
-                            return Type::Error;
+                            );
                         }
                     }
                 }
@@ -10746,38 +11651,42 @@ fn infer_app(
                     let resolved = type_for_readonly_check(arg_ty, subst);
                     if index < 2 {
                         match &resolved {
-                            Type::Tensor(_, _) | Type::Var(_) | Type::Error => {}
+                            Type::Tensor(_, _) | Type::Var(_) | Type::Error(_) => {}
                             _ => {
-                                errors.push(CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
-                                        format!(
-                                            "conv2d expects tensor inputs for args 1-2, got {}",
-                                            resolved
+                                return report(
+                                    errors,
+                                    CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            format!(
+                                                "conv2d expects tensor inputs for args 1-2, got {}",
+                                                resolved
+                                            ),
                                         ),
+                                        vec![],
                                     ),
-                                    vec![],
-                                ));
-                                return Type::Error;
+                                );
                             }
                         }
                     } else {
                         match &resolved {
-                            Type::Prim(Prim::Int32) | Type::Var(_) | Type::Error => {}
+                            Type::Prim(Prim::Int32) | Type::Var(_) | Type::Error(_) => {}
                             _ => {
-                                errors.push(CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
-                                        format!(
-                                            "conv2d expects int32 stride/padding, got {}",
-                                            resolved
+                                return report(
+                                    errors,
+                                    CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            format!(
+                                                "conv2d expects int32 stride/padding, got {}",
+                                                resolved
+                                            ),
                                         ),
+                                        vec![],
                                     ),
-                                    vec![],
-                                ));
-                                return Type::Error;
+                                );
                             }
                         }
                     }
@@ -10790,11 +11699,11 @@ fn infer_app(
                 let lhs = arg_tys
                     .first()
                     .map(|ty| subst.apply(ty))
-                    .unwrap_or(Type::Error);
+                    .unwrap_or_else(|| vg.fresh_type());
                 let rhs = arg_tys
                     .get(1)
                     .map(|ty| subst.apply(ty))
-                    .unwrap_or(Type::Error);
+                    .unwrap_or_else(|| vg.fresh_type());
                 match (&lhs, &rhs) {
                     (Type::Prim(lhs_prec), Type::Prim(rhs_prec))
                         if lhs_prec.is_integer()
@@ -10809,22 +11718,24 @@ fn infer_app(
                     (Type::Prim(lhs_prec), Type::Var(_)) if lhs_prec.is_integer() => {
                         return lhs;
                     }
-                    (Type::Var(_), Type::Var(_)) | (Type::Error, _) | (_, Type::Error) => {
+                    (Type::Var(_), Type::Var(_)) | (Type::Error(_), _) | (_, Type::Error(_)) => {
                         return lhs;
                     }
                     _ => {
-                        errors.push(CheckError::new(
-                            CheckErrorKind::TypeMismatch,
-                            with_macro_provenance(
-                                &deep::Expr::List(list.clone(), zero_span()),
-                                format!(
-                                    "{} requires matching integer arguments, got {} and {}",
-                                    fname, lhs, rhs
+                        return report(
+                            errors,
+                            CheckError::new(
+                                CheckErrorKind::TypeMismatch,
+                                with_macro_provenance(
+                                    &deep::Expr::List(list.clone(), zero_span()),
+                                    format!(
+                                        "{} requires matching integer arguments, got {} and {}",
+                                        fname, lhs, rhs
+                                    ),
                                 ),
+                                vec![],
                             ),
-                            vec![],
-                        ));
-                        return Type::Error;
+                        );
                     }
                 }
             }
@@ -10835,30 +11746,32 @@ fn infer_app(
                 let lhs = arg_tys
                     .first()
                     .map(|ty| subst.apply(ty))
-                    .unwrap_or(Type::Error);
+                    .unwrap_or_else(|| vg.fresh_type());
                 let rhs = arg_tys
                     .get(1)
                     .map(|ty| subst.apply(ty))
-                    .unwrap_or(Type::Error);
+                    .unwrap_or_else(|| vg.fresh_type());
                 let lhs_ok = matches!(&lhs, Type::Prim(prec) if prec.is_integer())
-                    || matches!(&lhs, Type::Var(_) | Type::Error);
+                    || matches!(&lhs, Type::Var(_) | Type::Error(_));
                 let rhs_ok = matches!(&rhs, Type::Prim(prec) if prec.is_integer())
-                    || matches!(&rhs, Type::Var(_) | Type::Error);
+                    || matches!(&rhs, Type::Var(_) | Type::Error(_));
                 if lhs_ok && rhs_ok {
                     return lhs;
                 }
-                errors.push(CheckError::new(
-                    CheckErrorKind::TypeMismatch,
-                    with_macro_provenance(
-                        &deep::Expr::List(list.clone(), zero_span()),
-                        format!(
-                            "{} requires integer lhs and shift amount, got {} and {}",
-                            fname, lhs, rhs
+                return report(
+                    errors,
+                    CheckError::new(
+                        CheckErrorKind::TypeMismatch,
+                        with_macro_provenance(
+                            &deep::Expr::List(list.clone(), zero_span()),
+                            format!(
+                                "{} requires integer lhs and shift amount, got {} and {}",
+                                fname, lhs, rhs
+                            ),
                         ),
+                        vec![],
                     ),
-                    vec![],
-                ));
-                return Type::Error;
+                );
             }
 
             // chelis#778 follow-up: a shape-computed builtin override derives
@@ -10866,11 +11779,9 @@ fn infer_app(
             // `subst.apply(ret_tv)`. When an operand type is `Error`, the
             // Error-permissive per-slot unify above (`(Error, _) => Ok(())`)
             // never bound `ret_tv`, so the override would leak an unbound
-            // `Var` as the call's result type. In the post-inference
-            // type-annotation/writeback pass — which re-infers a node in a
-            // scope where its operands can be unbound and thus `Error` — that
-            // bare `Var` is then degraded to a rank-0 default `TensorType`
-            // that CLOBBERS the node's concrete type annotation, ICEing the IR
+            // `Var` as the call's result type. That bare `Var` would be
+            // degraded to a rank-0 default `TensorType` during writeback and
+            // CLOBBER the node's concrete type annotation, ICEing the IR
             // lowering (`conv2d output height axis requires a statically known
             // axis`; #778's short-circuit removal exposed this). Returning
             // `Type::Error` instead restores the pre-#778 downstream shape
@@ -10894,10 +11805,20 @@ fn infer_app(
                         | "conv2d"
                 ) && arg_tys
                     .iter()
-                    .any(|ty| matches!(subst.apply(ty), Type::Error))
+                    .any(|ty| matches!(subst.apply(ty), Type::Error(_)))
             });
             if shape_override_operand_error {
-                result_ty = Type::Error;
+                // Cascade: a shape-computed builtin operand already typed as
+                // `Type::Error`; propagate its witness rather than mint a fresh
+                // error (chelis#731 §C3). The `.any(... Error ...)` guard above
+                // guarantees a witness is present, so the fallback is inert.
+                result_ty = arg_tys
+                    .iter()
+                    .find_map(|ty| match subst.apply(ty) {
+                        Type::Error(w) => Some(propagate(&w)),
+                        _ => None,
+                    })
+                    .unwrap_or(result_ty);
             } else if let Some(ref fname) = func_name {
                 match fname.as_str() {
                     "matmul" => {
@@ -10972,32 +11893,36 @@ fn infer_app(
                         Type::Tensor(_, TensorPrec::Concrete(Prim::Bool))
                         | Type::Prim(Prim::Bool)
                         | Type::Var(_)
-                        | Type::Error => {} // OK
+                        | Type::Error(_) => {} // OK
                         Type::Tensor(_, prec) => {
-                            errors.push(CheckError::new(
-                                CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
-                                    format!(
-                                        "{} requires tensor[D, bool] arguments, got tensor[D, {}]",
-                                        fname,
-                                        prec.name()
+                            return report(
+                                errors,
+                                CheckError::new(
+                                    CheckErrorKind::TypeMismatch,
+                                    with_macro_provenance(
+                                        &deep::Expr::List(list.clone(), zero_span()),
+                                        format!(
+                                            "{} requires tensor[D, bool] arguments, got tensor[D, {}]",
+                                            fname,
+                                            prec.name()
+                                        ),
                                     ),
+                                    vec!["Logical ops only work on bool tensors".to_string()],
                                 ),
-                                vec!["Logical ops only work on bool tensors".to_string()],
-                            ));
-                            return Type::Error;
+                            );
                         }
                         other => {
-                            errors.push(CheckError::new(
-                                CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
-                                    format!("{} requires bool arguments, got {}", fname, other),
+                            return report(
+                                errors,
+                                CheckError::new(
+                                    CheckErrorKind::TypeMismatch,
+                                    with_macro_provenance(
+                                        &deep::Expr::List(list.clone(), zero_span()),
+                                        format!("{} requires bool arguments, got {}", fname, other),
+                                    ),
+                                    vec!["Logical ops only work on bool values".to_string()],
                                 ),
-                                vec!["Logical ops only work on bool values".to_string()],
-                            ));
-                            return Type::Error;
+                            );
                         }
                     }
                 }
@@ -11038,19 +11963,21 @@ fn infer_app(
                     "fail" => {
                         if let Some(first_arg) = arg_tys.first() {
                             match subst.apply(first_arg) {
-                                Type::Prim(Prim::String) | Type::Var(_) | Type::Error => {
+                                Type::Prim(Prim::String) | Type::Var(_) | Type::Error(_) => {
                                     return Type::Var(vg.fresh_tvar());
                                 }
                                 other => {
-                                    errors.push(CheckError::new(
-                                        CheckErrorKind::TypeMismatch,
-                                        with_macro_provenance(
-                                            &deep::Expr::List(list.clone(), zero_span()),
-                                            format!("fail expects string input, got {other}"),
+                                    return report(
+                                        errors,
+                                        CheckError::new(
+                                            CheckErrorKind::TypeMismatch,
+                                            with_macro_provenance(
+                                                &deep::Expr::List(list.clone(), zero_span()),
+                                                format!("fail expects string input, got {other}"),
+                                            ),
+                                            vec![],
                                         ),
-                                        vec![],
-                                    ));
-                                    return Type::Error;
+                                    );
                                 }
                             }
                         }
@@ -11063,19 +11990,23 @@ fn infer_app(
                     "string_len" => {
                         if let Some(first_arg) = arg_tys.first() {
                             match subst.apply(first_arg) {
-                                Type::Prim(Prim::String) | Type::Var(_) | Type::Error => {
+                                Type::Prim(Prim::String) | Type::Var(_) | Type::Error(_) => {
                                     return Type::Prim(Prim::Int64);
                                 }
                                 other => {
-                                    errors.push(CheckError::new(
-                                        CheckErrorKind::TypeMismatch,
-                                        with_macro_provenance(
-                                            &deep::Expr::List(list.clone(), zero_span()),
-                                            format!("string_len expects string input, got {other}"),
+                                    return report(
+                                        errors,
+                                        CheckError::new(
+                                            CheckErrorKind::TypeMismatch,
+                                            with_macro_provenance(
+                                                &deep::Expr::List(list.clone(), zero_span()),
+                                                format!(
+                                                    "string_len expects string input, got {other}"
+                                                ),
+                                            ),
+                                            vec![],
                                         ),
-                                        vec![],
-                                    ));
-                                    return Type::Error;
+                                    );
                                 }
                             }
                         }
@@ -11083,19 +12014,21 @@ fn infer_app(
                     "string_concat" => {
                         for arg_ty in &arg_tys {
                             match subst.apply(arg_ty) {
-                                Type::Prim(Prim::String) | Type::Var(_) | Type::Error => {}
+                                Type::Prim(Prim::String) | Type::Var(_) | Type::Error(_) => {}
                                 other => {
-                                    errors.push(CheckError::new(
-                                        CheckErrorKind::TypeMismatch,
-                                        with_macro_provenance(
-                                            &deep::Expr::List(list.clone(), zero_span()),
-                                            format!(
-                                                "string_concat expects string arguments, got {other}"
+                                    return report(
+                                        errors,
+                                        CheckError::new(
+                                            CheckErrorKind::TypeMismatch,
+                                            with_macro_provenance(
+                                                &deep::Expr::List(list.clone(), zero_span()),
+                                                format!(
+                                                    "string_concat expects string arguments, got {other}"
+                                                ),
                                             ),
+                                            vec![],
                                         ),
-                                        vec![],
-                                    ));
-                                    return Type::Error;
+                                    );
                                 }
                             }
                         }
@@ -11104,39 +12037,43 @@ fn infer_app(
                     "string_slice" => {
                         if let Some(first_arg) = arg_tys.first() {
                             match subst.apply(first_arg) {
-                                Type::Prim(Prim::String) | Type::Var(_) | Type::Error => {}
+                                Type::Prim(Prim::String) | Type::Var(_) | Type::Error(_) => {}
                                 other => {
-                                    errors.push(CheckError::new(
-                                        CheckErrorKind::TypeMismatch,
-                                        with_macro_provenance(
-                                            &deep::Expr::List(list.clone(), zero_span()),
-                                            format!(
-                                                "string_slice expects string input, got {other}"
+                                    return report(
+                                        errors,
+                                        CheckError::new(
+                                            CheckErrorKind::TypeMismatch,
+                                            with_macro_provenance(
+                                                &deep::Expr::List(list.clone(), zero_span()),
+                                                format!(
+                                                    "string_slice expects string input, got {other}"
+                                                ),
                                             ),
+                                            vec![],
                                         ),
-                                        vec![],
-                                    ));
-                                    return Type::Error;
+                                    );
                                 }
                             }
                         }
                         for (index, arg_ty) in arg_tys.iter().enumerate().skip(1) {
                             match subst.apply(arg_ty) {
                                 Type::Prim(precision) if precision.is_integer() => {}
-                                Type::Var(_) | Type::Error => {}
+                                Type::Var(_) | Type::Error(_) => {}
                                 other => {
-                                    errors.push(CheckError::new(
-                                        CheckErrorKind::TypeMismatch,
-                                        with_macro_provenance(
-                                            &deep::Expr::List(list.clone(), zero_span()),
-                                            format!(
-                                                "string_slice expects integer index arguments; arg {} was {other}",
-                                                index + 1
+                                    return report(
+                                        errors,
+                                        CheckError::new(
+                                            CheckErrorKind::TypeMismatch,
+                                            with_macro_provenance(
+                                                &deep::Expr::List(list.clone(), zero_span()),
+                                                format!(
+                                                    "string_slice expects integer index arguments; arg {} was {other}",
+                                                    index + 1
+                                                ),
                                             ),
+                                            vec![],
                                         ),
-                                        vec![],
-                                    ));
-                                    return Type::Error;
+                                    );
                                 }
                             }
                         }
@@ -11145,20 +12082,22 @@ fn infer_app(
                     "string_contains" | "string_starts_with" | "string_ends_with" => {
                         for arg_ty in &arg_tys {
                             match subst.apply(arg_ty) {
-                                Type::Prim(Prim::String) | Type::Var(_) | Type::Error => {}
+                                Type::Prim(Prim::String) | Type::Var(_) | Type::Error(_) => {}
                                 other => {
-                                    errors.push(CheckError::new(
-                                        CheckErrorKind::TypeMismatch,
-                                        with_macro_provenance(
-                                            &deep::Expr::List(list.clone(), zero_span()),
-                                            format!(
-                                                "{} expects string arguments, got {other}",
-                                                fname
+                                    return report(
+                                        errors,
+                                        CheckError::new(
+                                            CheckErrorKind::TypeMismatch,
+                                            with_macro_provenance(
+                                                &deep::Expr::List(list.clone(), zero_span()),
+                                                format!(
+                                                    "{} expects string arguments, got {other}",
+                                                    fname
+                                                ),
                                             ),
+                                            vec![],
                                         ),
-                                        vec![],
-                                    ));
-                                    return Type::Error;
+                                    );
                                 }
                             }
                         }
@@ -11167,21 +12106,23 @@ fn infer_app(
                     "string_trim" => {
                         if let Some(first_arg) = arg_tys.first() {
                             match subst.apply(first_arg) {
-                                Type::Prim(Prim::String) | Type::Var(_) | Type::Error => {
+                                Type::Prim(Prim::String) | Type::Var(_) | Type::Error(_) => {
                                     return Type::Prim(Prim::String);
                                 }
                                 other => {
-                                    errors.push(CheckError::new(
-                                        CheckErrorKind::TypeMismatch,
-                                        with_macro_provenance(
-                                            &deep::Expr::List(list.clone(), zero_span()),
-                                            format!(
-                                                "string_trim expects string input, got {other}"
+                                    return report(
+                                        errors,
+                                        CheckError::new(
+                                            CheckErrorKind::TypeMismatch,
+                                            with_macro_provenance(
+                                                &deep::Expr::List(list.clone(), zero_span()),
+                                                format!(
+                                                    "string_trim expects string input, got {other}"
+                                                ),
                                             ),
+                                            vec![],
                                         ),
-                                        vec![],
-                                    ));
-                                    return Type::Error;
+                                    );
                                 }
                             }
                         }
@@ -11192,22 +12133,24 @@ fn infer_app(
                     "to_int" => {
                         if let Some(first_arg) = arg_tys.first() {
                             match subst.apply(first_arg) {
-                                Type::Prim(Prim::String) | Type::Var(_) | Type::Error => {
+                                Type::Prim(Prim::String) | Type::Var(_) | Type::Error(_) => {
                                     return Type::Adt(
                                         "Option".to_string(),
                                         vec![Type::Prim(Prim::Int64)],
                                     );
                                 }
                                 other => {
-                                    errors.push(CheckError::new(
-                                        CheckErrorKind::TypeMismatch,
-                                        with_macro_provenance(
-                                            &deep::Expr::List(list.clone(), zero_span()),
-                                            format!("to_int expects string input, got {other}"),
+                                    return report(
+                                        errors,
+                                        CheckError::new(
+                                            CheckErrorKind::TypeMismatch,
+                                            with_macro_provenance(
+                                                &deep::Expr::List(list.clone(), zero_span()),
+                                                format!("to_int expects string input, got {other}"),
+                                            ),
+                                            vec![],
                                         ),
-                                        vec![],
-                                    ));
-                                    return Type::Error;
+                                    );
                                 }
                             }
                         }
@@ -11215,22 +12158,26 @@ fn infer_app(
                     "to_float" => {
                         if let Some(first_arg) = arg_tys.first() {
                             match subst.apply(first_arg) {
-                                Type::Prim(Prim::String) | Type::Var(_) | Type::Error => {
+                                Type::Prim(Prim::String) | Type::Var(_) | Type::Error(_) => {
                                     return Type::Adt(
                                         "Option".to_string(),
                                         vec![Type::Prim(Prim::F64)],
                                     );
                                 }
                                 other => {
-                                    errors.push(CheckError::new(
-                                        CheckErrorKind::TypeMismatch,
-                                        with_macro_provenance(
-                                            &deep::Expr::List(list.clone(), zero_span()),
-                                            format!("to_float expects string input, got {other}"),
+                                    return report(
+                                        errors,
+                                        CheckError::new(
+                                            CheckErrorKind::TypeMismatch,
+                                            with_macro_provenance(
+                                                &deep::Expr::List(list.clone(), zero_span()),
+                                                format!(
+                                                    "to_float expects string input, got {other}"
+                                                ),
+                                            ),
+                                            vec![],
                                         ),
-                                        vec![],
-                                    ));
-                                    return Type::Error;
+                                    );
                                 }
                             }
                         }
@@ -11238,19 +12185,21 @@ fn infer_app(
                     "rank" => {
                         if let Some(first_arg) = arg_tys.first() {
                             match type_for_readonly_check(first_arg, subst) {
-                                Type::Tensor(_, _) | Type::Var(_) | Type::Error => {
+                                Type::Tensor(_, _) | Type::Var(_) | Type::Error(_) => {
                                     return Type::Prim(Prim::Int32);
                                 }
                                 other => {
-                                    errors.push(CheckError::new(
-                                        CheckErrorKind::TypeMismatch,
-                                        with_macro_provenance(
-                                            &deep::Expr::List(list.clone(), zero_span()),
-                                            format!("rank expects tensor input, got {other}"),
+                                    return report(
+                                        errors,
+                                        CheckError::new(
+                                            CheckErrorKind::TypeMismatch,
+                                            with_macro_provenance(
+                                                &deep::Expr::List(list.clone(), zero_span()),
+                                                format!("rank expects tensor input, got {other}"),
+                                            ),
+                                            vec![],
                                         ),
-                                        vec![],
-                                    ));
-                                    return Type::Error;
+                                    );
                                 }
                             }
                         }
@@ -11259,17 +12208,19 @@ fn infer_app(
                         let input_dims = if let Some(first_arg) = arg_tys.first() {
                             match type_for_readonly_check(first_arg, subst) {
                                 Type::Tensor(dims, _) => Some(dims),
-                                Type::Var(_) | Type::Error => None,
+                                Type::Var(_) | Type::Error(_) => None,
                                 other => {
-                                    errors.push(CheckError::new(
-                                        CheckErrorKind::TypeMismatch,
-                                        with_macro_provenance(
-                                            &deep::Expr::List(list.clone(), zero_span()),
-                                            format!("shape expects tensor input, got {other}"),
+                                    return report(
+                                        errors,
+                                        CheckError::new(
+                                            CheckErrorKind::TypeMismatch,
+                                            with_macro_provenance(
+                                                &deep::Expr::List(list.clone(), zero_span()),
+                                                format!("shape expects tensor input, got {other}"),
+                                            ),
+                                            vec![],
                                         ),
-                                        vec![],
-                                    ));
-                                    return Type::Error;
+                                    );
                                 }
                             }
                         } else {
@@ -11283,49 +12234,55 @@ fn infer_app(
                             && let Some(axis) = extract_int_for_dim(axis_expr)
                         {
                             if axis < 0 {
-                                errors.push(CheckError::new(
-                                    CheckErrorKind::DimensionMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
-                                        format!("shape requires non-negative axis, got {axis}"),
+                                return report(
+                                    errors,
+                                    CheckError::new(
+                                        CheckErrorKind::DimensionMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            format!("shape requires non-negative axis, got {axis}"),
+                                        ),
+                                        vec![],
                                     ),
-                                    vec![],
-                                ));
-                                return Type::Error;
+                                );
                             }
                             if let Some(dims) = input_dims.as_ref() {
                                 let axis = axis as usize;
                                 if axis >= dims.len() {
-                                    errors.push(CheckError::new(
-                                        CheckErrorKind::DimensionMismatch,
-                                        with_macro_provenance(
-                                            &deep::Expr::List(list.clone(), zero_span()),
-                                            format!(
-                                                "shape axis {axis} is out of bounds for rank {} tensor",
-                                                dims.len()
+                                    return report(
+                                        errors,
+                                        CheckError::new(
+                                            CheckErrorKind::DimensionMismatch,
+                                            with_macro_provenance(
+                                                &deep::Expr::List(list.clone(), zero_span()),
+                                                format!(
+                                                    "shape axis {axis} is out of bounds for rank {} tensor",
+                                                    dims.len()
+                                                ),
                                             ),
+                                            vec![],
                                         ),
-                                        vec![],
-                                    ));
-                                    return Type::Error;
+                                    );
                                 }
                             }
                         }
                         if let Some(axis_arg) = arg_tys.get(1) {
                             match subst.apply(axis_arg) {
-                                Type::Prim(Prim::Int32) | Type::Var(_) | Type::Error => {
+                                Type::Prim(Prim::Int32) | Type::Var(_) | Type::Error(_) => {
                                     return Type::Prim(Prim::Int32);
                                 }
                                 other => {
-                                    errors.push(CheckError::new(
-                                        CheckErrorKind::TypeMismatch,
-                                        with_macro_provenance(
-                                            &deep::Expr::List(list.clone(), zero_span()),
-                                            format!("shape expects int32 axis, got {other}"),
+                                    return report(
+                                        errors,
+                                        CheckError::new(
+                                            CheckErrorKind::TypeMismatch,
+                                            with_macro_provenance(
+                                                &deep::Expr::List(list.clone(), zero_span()),
+                                                format!("shape expects int32 axis, got {other}"),
+                                            ),
+                                            vec![],
                                         ),
-                                        vec![],
-                                    ));
-                                    return Type::Error;
+                                    );
                                 }
                             }
                         }
@@ -11333,19 +12290,21 @@ fn infer_app(
                     "numel" => {
                         if let Some(first_arg) = arg_tys.first() {
                             match type_for_readonly_check(first_arg, subst) {
-                                Type::Tensor(_, _) | Type::Var(_) | Type::Error => {
+                                Type::Tensor(_, _) | Type::Var(_) | Type::Error(_) => {
                                     return Type::Prim(Prim::Int64);
                                 }
                                 other => {
-                                    errors.push(CheckError::new(
-                                        CheckErrorKind::TypeMismatch,
-                                        with_macro_provenance(
-                                            &deep::Expr::List(list.clone(), zero_span()),
-                                            format!("numel expects tensor input, got {other}"),
+                                    return report(
+                                        errors,
+                                        CheckError::new(
+                                            CheckErrorKind::TypeMismatch,
+                                            with_macro_provenance(
+                                                &deep::Expr::List(list.clone(), zero_span()),
+                                                format!("numel expects tensor input, got {other}"),
+                                            ),
+                                            vec![],
                                         ),
-                                        vec![],
-                                    ));
-                                    return Type::Error;
+                                    );
                                 }
                             }
                         }
@@ -11355,16 +12314,18 @@ fn infer_app(
                             match type_for_readonly_check(first_arg, subst) {
                                 Type::Tensor(dims, precision) => {
                                     if !dims.is_empty() {
-                                        errors.push(CheckError::new(
-                                            CheckErrorKind::TypeMismatch,
-                                            with_macro_provenance(
-                                                &deep::Expr::List(list.clone(), zero_span()),
-                                                "tensor_to_scalar expects a rank-0 tensor"
-                                                    .to_string(),
+                                        return report(
+                                            errors,
+                                            CheckError::new(
+                                                CheckErrorKind::TypeMismatch,
+                                                with_macro_provenance(
+                                                    &deep::Expr::List(list.clone(), zero_span()),
+                                                    "tensor_to_scalar expects a rank-0 tensor"
+                                                        .to_string(),
+                                                ),
+                                                vec![],
                                             ),
-                                            vec![],
-                                        ));
-                                        return Type::Error;
+                                        );
                                     }
                                     // tensor_to_scalar requires a fully
                                     // resolved precision. Polymorphic precision
@@ -11375,19 +12336,21 @@ fn infer_app(
                                         TensorPrec::Var(_) => result_ty,
                                     };
                                 }
-                                Type::Var(_) | Type::Error => return result_ty,
+                                Type::Var(_) | Type::Error(_) => return result_ty,
                                 other => {
-                                    errors.push(CheckError::new(
-                                        CheckErrorKind::TypeMismatch,
-                                        with_macro_provenance(
-                                            &deep::Expr::List(list.clone(), zero_span()),
-                                            format!(
-                                                "tensor_to_scalar expects tensor input, got {other}"
+                                    return report(
+                                        errors,
+                                        CheckError::new(
+                                            CheckErrorKind::TypeMismatch,
+                                            with_macro_provenance(
+                                                &deep::Expr::List(list.clone(), zero_span()),
+                                                format!(
+                                                    "tensor_to_scalar expects tensor input, got {other}"
+                                                ),
                                             ),
+                                            vec![],
                                         ),
-                                        vec![],
-                                    ));
-                                    return Type::Error;
+                                    );
                                 }
                             }
                         }
@@ -11398,81 +12361,94 @@ fn infer_app(
                                 Type::Prim(precision) if !matches!(precision, Prim::String) => {
                                     return Type::Tensor(vec![], TensorPrec::Concrete(precision));
                                 }
-                                Type::Var(_) | Type::Error => return result_ty,
+                                Type::Var(_) | Type::Error(_) => return result_ty,
                                 other => {
-                                    errors.push(CheckError::new(
-                                        CheckErrorKind::TypeMismatch,
-                                        with_macro_provenance(
-                                            &deep::Expr::List(list.clone(), zero_span()),
-                                            format!(
-                                                "scalar_to_tensor expects scalar numeric/bool input, got {other}"
+                                    return report(
+                                        errors,
+                                        CheckError::new(
+                                            CheckErrorKind::TypeMismatch,
+                                            with_macro_provenance(
+                                                &deep::Expr::List(list.clone(), zero_span()),
+                                                format!(
+                                                    "scalar_to_tensor expects scalar numeric/bool input, got {other}"
+                                                ),
                                             ),
+                                            vec![],
                                         ),
-                                        vec![],
-                                    ));
-                                    return Type::Error;
+                                    );
                                 }
                             }
                         }
                     }
                     "einsum" => {
                         if arg_tys.len() != 3 {
-                            return Type::Error;
+                            return report_builtin_arity(errors, list, fname, 3, arg_tys.len());
                         }
                         let Some(equation) = kids.get(1).and_then(extract_string_literal) else {
-                            errors.push(CheckError::new(
-                                CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
-                                    "einsum expects a string equation as its first argument"
-                                        .to_string(),
+                            return report(
+                                errors,
+                                CheckError::new(
+                                    CheckErrorKind::TypeMismatch,
+                                    with_macro_provenance(
+                                        &deep::Expr::List(list.clone(), zero_span()),
+                                        "einsum expects a string equation as its first argument"
+                                            .to_string(),
+                                    ),
+                                    vec![],
                                 ),
-                                vec![],
-                            ));
-                            return Type::Error;
+                            );
                         };
                         if equation.contains("...") {
-                            errors.push(CheckError::new(
-                                CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
-                                    "einsum ellipsis support is deferred in 3h".to_string(),
+                            return report(
+                                errors,
+                                CheckError::new(
+                                    CheckErrorKind::TypeMismatch,
+                                    with_macro_provenance(
+                                        &deep::Expr::List(list.clone(), zero_span()),
+                                        "einsum ellipsis support is deferred in 3h".to_string(),
+                                    ),
+                                    vec![],
                                 ),
-                                vec![],
-                            ));
-                            return Type::Error;
+                            );
                         }
                         return result_ty;
                     }
                     "gather" => {
                         if arg_tys.len() != 3 {
-                            return Type::Error;
+                            return report_builtin_arity(errors, list, fname, 3, arg_tys.len());
                         }
                         let tensor_ty = type_for_readonly_check(&arg_tys[0], subst);
                         let indices_ty = type_for_readonly_check(&arg_tys[1], subst);
-                        let Some(axis) =
-                            resolve_builtin_axis("gather", kids.get(3), &tensor_ty, list, errors)
-                        else {
-                            return Type::Error;
+                        let axis = match resolve_builtin_axis(
+                            "gather",
+                            kids.get(3),
+                            &tensor_ty,
+                            list,
+                            errors,
+                        ) {
+                            Ok(axis) => axis,
+                            Err(err) => return err,
                         };
                         match infer_gather_result_type(&tensor_ty, &indices_ty, axis) {
                             Ok(ty) => return ty,
                             Err(message) => {
-                                errors.push(CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
-                                        message,
+                                return report(
+                                    errors,
+                                    CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            message,
+                                        ),
+                                        vec![],
                                     ),
-                                    vec![],
-                                ));
-                                return Type::Error;
+                                );
                             }
                         }
                     }
                     "where" => {
                         if arg_tys.len() != 3 {
-                            return Type::Error;
+                            return report_builtin_arity(errors, list, fname, 3, arg_tys.len());
                         }
                         let cond_ty = type_for_readonly_check(&arg_tys[0], subst);
                         let then_ty = type_for_readonly_check(&arg_tys[1], subst);
@@ -11487,76 +12463,83 @@ fn infer_app(
                                     || cond_dims != then_dims
                                     || then_dims != else_dims
                                 {
-                                    errors.push(CheckError::new(
-                                        CheckErrorKind::TypeMismatch,
-                                        with_macro_provenance(
-                                            &deep::Expr::List(list.clone(), zero_span()),
-                                            format!(
-                                                "where expects cond/both branches to have matching tensor shapes and branch precision, got {cond_ty}, {then_ty}, and {else_ty}"
+                                    return report(
+                                        errors,
+                                        CheckError::new(
+                                            CheckErrorKind::TypeMismatch,
+                                            with_macro_provenance(
+                                                &deep::Expr::List(list.clone(), zero_span()),
+                                                format!(
+                                                    "where expects cond/both branches to have matching tensor shapes and branch precision, got {cond_ty}, {then_ty}, and {else_ty}"
+                                                ),
                                             ),
+                                            vec![],
                                         ),
-                                        vec![],
-                                    ));
-                                    return Type::Error;
+                                    );
                                 }
                                 return Type::Tensor(then_dims.clone(), then_prec.clone());
                             }
                             (Type::Var(_), _, _)
                             | (_, Type::Var(_), _)
                             | (_, _, Type::Var(_))
-                            | (Type::Error, _, _)
-                            | (_, Type::Error, _)
-                            | (_, _, Type::Error) => return result_ty,
+                            | (Type::Error(_), _, _)
+                            | (_, Type::Error(_), _)
+                            | (_, _, Type::Error(_)) => return result_ty,
                             _ => {
-                                errors.push(CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
-                                        format!(
-                                            "where expects a bool tensor condition and matching tensor branches, got {cond_ty}, {then_ty}, and {else_ty}"
+                                return report(
+                                    errors,
+                                    CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            format!(
+                                                "where expects a bool tensor condition and matching tensor branches, got {cond_ty}, {then_ty}, and {else_ty}"
+                                            ),
                                         ),
+                                        vec![],
                                     ),
-                                    vec![],
-                                ));
-                                return Type::Error;
+                                );
                             }
                         }
                     }
                     "cumsum" => {
                         if arg_tys.len() != 2 {
-                            return Type::Error;
+                            return report_builtin_arity(errors, list, fname, 2, arg_tys.len());
                         }
                         let cumsum_operand = type_for_readonly_check(&arg_tys[0], subst);
-                        let Some(_axis) = resolve_builtin_axis(
+                        let _axis = match resolve_builtin_axis(
                             "cumsum",
                             kids.get(2),
                             &cumsum_operand,
                             list,
                             errors,
-                        ) else {
-                            return Type::Error;
+                        ) {
+                            Ok(axis) => axis,
+                            Err(err) => return err,
                         };
                         match cumsum_operand {
                             Type::Tensor(dims, precision) => {
                                 return Type::Tensor(dims, precision);
                             }
-                            Type::Var(_) | Type::Error => return result_ty,
+                            Type::Var(_) | Type::Error(_) => return result_ty,
                             other => {
-                                errors.push(CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
-                                        format!("cumsum expects tensor input, got {other}"),
+                                return report(
+                                    errors,
+                                    CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            format!("cumsum expects tensor input, got {other}"),
+                                        ),
+                                        vec![],
                                     ),
-                                    vec![],
-                                ));
-                                return Type::Error;
+                                );
                             }
                         }
                     }
                     "diagonal" => {
                         if arg_tys.len() != 3 {
-                            return Type::Error;
+                            return report_builtin_arity(errors, list, fname, 3, arg_tys.len());
                         }
                         let diagonal_operand = type_for_readonly_check(&arg_tys[0], subst);
                         let axis1 = match resolve_axis_pair_member(
@@ -11568,7 +12551,7 @@ fn infer_app(
                             errors,
                         ) {
                             Ok(axis) => axis,
-                            Err(()) => return Type::Error,
+                            Err(err) => return err,
                         };
                         let axis2 = match resolve_axis_pair_member(
                             "diagonal",
@@ -11579,26 +12562,28 @@ fn infer_app(
                             errors,
                         ) {
                             Ok(axis) => axis,
-                            Err(()) => return Type::Error,
+                            Err(err) => return err,
                         };
                         match infer_diagonal_result_type(&diagonal_operand, axis1, axis2) {
                             Ok(ty) => return ty,
                             Err(message) => {
-                                errors.push(CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
-                                        message,
+                                return report(
+                                    errors,
+                                    CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            message,
+                                        ),
+                                        vec![],
                                     ),
-                                    vec![],
-                                ));
-                                return Type::Error;
+                                );
                             }
                         }
                     }
                     "trace" => {
                         if arg_tys.len() != 3 {
-                            return Type::Error;
+                            return report_builtin_arity(errors, list, fname, 3, arg_tys.len());
                         }
                         let trace_operand = type_for_readonly_check(&arg_tys[0], subst);
                         let axis1 = match resolve_axis_pair_member(
@@ -11610,7 +12595,7 @@ fn infer_app(
                             errors,
                         ) {
                             Ok(axis) => axis,
-                            Err(()) => return Type::Error,
+                            Err(err) => return err,
                         };
                         let axis2 = match resolve_axis_pair_member(
                             "trace",
@@ -11621,26 +12606,28 @@ fn infer_app(
                             errors,
                         ) {
                             Ok(axis) => axis,
-                            Err(()) => return Type::Error,
+                            Err(err) => return err,
                         };
                         match infer_trace_result_type(&trace_operand, axis1, axis2) {
                             Ok(ty) => return ty,
                             Err(message) => {
-                                errors.push(CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
-                                        message,
+                                return report(
+                                    errors,
+                                    CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            message,
+                                        ),
+                                        vec![],
                                     ),
-                                    vec![],
-                                ));
-                                return Type::Error;
+                                );
                             }
                         }
                     }
                     "clamp" => {
                         if arg_tys.len() != 3 {
-                            return Type::Error;
+                            return report_builtin_arity(errors, list, fname, 3, arg_tys.len());
                         }
                         let input_ty = type_for_readonly_check(&arg_tys[0], subst);
                         let low_ty = type_for_readonly_check(&arg_tys[1], subst);
@@ -11660,48 +12647,57 @@ fn infer_app(
                                 {
                                     return input_ty;
                                 }
-                                errors.push(CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
-                                        format!(
-                                            "clamp expects tensor input plus scalar-tensor or matching-shape tensor bounds of the same precision, got {input_ty}, {low_ty}, and {high_ty}"
+                                return report(
+                                    errors,
+                                    CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            format!(
+                                                "clamp expects tensor input plus scalar-tensor or matching-shape tensor bounds of the same precision, got {input_ty}, {low_ty}, and {high_ty}"
+                                            ),
                                         ),
+                                        vec![],
                                     ),
-                                    vec![],
-                                ));
-                                return Type::Error;
+                                );
                             }
                             (Type::Var(_), _, _)
                             | (_, Type::Var(_), _)
                             | (_, _, Type::Var(_))
-                            | (Type::Error, _, _)
-                            | (_, Type::Error, _)
-                            | (_, _, Type::Error) => return result_ty,
+                            | (Type::Error(_), _, _)
+                            | (_, Type::Error(_), _)
+                            | (_, _, Type::Error(_)) => return result_ty,
                             _ => {
-                                errors.push(CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
-                                        format!(
-                                            "clamp expects tensor input and tensor bounds, got {input_ty}, {low_ty}, and {high_ty}"
+                                return report(
+                                    errors,
+                                    CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            format!(
+                                                "clamp expects tensor input and tensor bounds, got {input_ty}, {low_ty}, and {high_ty}"
+                                            ),
                                         ),
+                                        vec![],
                                     ),
-                                    vec![],
-                                ));
-                                return Type::Error;
+                                );
                             }
                         }
                     }
                     "sort" => {
                         if arg_tys.len() != 2 {
-                            return Type::Error;
+                            return report_builtin_arity(errors, list, fname, 2, arg_tys.len());
                         }
                         let sort_operand = type_for_readonly_check(&arg_tys[0], subst);
-                        let Some(_axis) =
-                            resolve_builtin_axis("sort", kids.get(2), &sort_operand, list, errors)
-                        else {
-                            return Type::Error;
+                        let _axis = match resolve_builtin_axis(
+                            "sort",
+                            kids.get(2),
+                            &sort_operand,
+                            list,
+                            errors,
+                        ) {
+                            Ok(axis) => axis,
+                            Err(err) => return err,
                         };
                         match sort_operand {
                             Type::Tensor(dims, precision) => {
@@ -11710,65 +12706,76 @@ fn infer_app(
                                     Type::Tensor(dims, TensorPrec::Concrete(Prim::Int64)),
                                 ]);
                             }
-                            Type::Var(_) | Type::Error => return result_ty,
+                            Type::Var(_) | Type::Error(_) => return result_ty,
                             other => {
-                                errors.push(CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
-                                        format!("sort expects tensor input, got {other}"),
+                                return report(
+                                    errors,
+                                    CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            format!("sort expects tensor input, got {other}"),
+                                        ),
+                                        vec![],
                                     ),
-                                    vec![],
-                                ));
-                                return Type::Error;
+                                );
                             }
                         }
                     }
                     "scatter" => {
                         if arg_tys.len() != 5 {
-                            return Type::Error;
+                            return report_builtin_arity(errors, list, fname, 5, arg_tys.len());
                         }
                         let base_ty = subst.apply(&arg_tys[0]);
                         let indices_ty = subst.apply(&arg_tys[1]);
                         let updates_ty = subst.apply(&arg_tys[2]);
-                        let Some(axis) =
-                            resolve_builtin_axis("scatter", kids.get(4), &base_ty, list, errors)
-                        else {
-                            return Type::Error;
+                        let axis = match resolve_builtin_axis(
+                            "scatter",
+                            kids.get(4),
+                            &base_ty,
+                            list,
+                            errors,
+                        ) {
+                            Ok(axis) => axis,
+                            Err(err) => return err,
                         };
                         let mode = kids.get(5).and_then(extract_string_literal);
                         match mode.as_deref() {
                             Some("replace") | Some("add") => {}
                             _ => {
-                                errors.push(CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
-                                        "scatter mode must be \"replace\" or \"add\"".to_string(),
+                                return report(
+                                    errors,
+                                    CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            "scatter mode must be \"replace\" or \"add\""
+                                                .to_string(),
+                                        ),
+                                        vec![],
                                     ),
-                                    vec![],
-                                ));
-                                return Type::Error;
+                                );
                             }
                         }
                         match infer_gather_result_type(&base_ty, &indices_ty, axis) {
                             Ok(expected_updates) => {
                                 if let Err(te) = unify(&expected_updates, &updates_ty, subst) {
-                                    errors.push(te.into());
-                                    return Type::Error;
+                                    return report(errors, te.into());
                                 }
                                 return base_ty;
                             }
                             Err(message) => {
-                                errors.push(CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
-                                        message,
+                                return report(
+                                    errors,
+                                    CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            message,
+                                        ),
+                                        vec![],
                                     ),
-                                    vec![],
-                                ));
-                                return Type::Error;
+                                );
                             }
                         }
                     }
@@ -11779,38 +12786,40 @@ fn infer_app(
                         // (rejected via AdError::NotSupported); see
                         // spec/05-risc-primitives.md §3.5.
                         if arg_tys.len() != 4 {
-                            return Type::Error;
+                            return report_builtin_arity(errors, list, fname, 4, arg_tys.len());
                         }
                         let base_ty = subst.apply(&arg_tys[0]);
                         let indices_ty = subst.apply(&arg_tys[1]);
                         let updates_ty = subst.apply(&arg_tys[2]);
-                        let Some(axis) = resolve_builtin_axis(
+                        let axis = match resolve_builtin_axis(
                             "scatter_replace",
                             kids.get(4),
                             &base_ty,
                             list,
                             errors,
-                        ) else {
-                            return Type::Error;
+                        ) {
+                            Ok(axis) => axis,
+                            Err(err) => return err,
                         };
                         match infer_gather_result_type(&base_ty, &indices_ty, axis) {
                             Ok(expected_updates) => {
                                 if let Err(te) = unify(&expected_updates, &updates_ty, subst) {
-                                    errors.push(te.into());
-                                    return Type::Error;
+                                    return report(errors, te.into());
                                 }
                                 return base_ty;
                             }
                             Err(message) => {
-                                errors.push(CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
-                                        message,
+                                return report(
+                                    errors,
+                                    CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            message,
+                                        ),
+                                        vec![],
                                     ),
-                                    vec![],
-                                ));
-                                return Type::Error;
+                                );
                             }
                         }
                     }
@@ -11820,119 +12829,132 @@ fn infer_app(
                                 Type::Adt(name, _) if name == "List" || name == "Dict" => {
                                     return Type::Prim(Prim::Int64);
                                 }
-                                Type::Var(_) | Type::Error => return Type::Prim(Prim::Int64),
+                                Type::Var(_) | Type::Error(_) => return Type::Prim(Prim::Int64),
                                 Type::Ref(inner) if matches!(&*inner, Type::Adt(name, _) if name == "List" || name == "Dict") =>
                                 {
-                                    errors.push(CheckError::new(
-                                        CheckErrorKind::TypeMismatch,
-                                        with_macro_provenance(
-                                            &deep::Expr::List(list.clone(), zero_span()),
-                                            format!(
-                                                "len auto-borrows its List/Dict argument, so an explicit `&` is not a \
+                                    return report(
+                                        errors,
+                                        CheckError::new(
+                                            CheckErrorKind::TypeMismatch,
+                                            with_macro_provenance(
+                                                &deep::Expr::List(list.clone(), zero_span()),
+                                                format!(
+                                                    "len auto-borrows its List/Dict argument, so an explicit `&` is not a \
                                                  supported surface form: write `len(xs)`, not `len(&xs)` (got &{inner})"
+                                                ),
                                             ),
+                                            vec![],
                                         ),
-                                        vec![],
-                                    ));
-                                    return Type::Error;
+                                    );
                                 }
                                 other => {
-                                    errors.push(CheckError::new(
-                                        CheckErrorKind::TypeMismatch,
-                                        with_macro_provenance(
-                                            &deep::Expr::List(list.clone(), zero_span()),
-                                            format!("len expects List or Dict input, got {other}"),
+                                    return report(
+                                        errors,
+                                        CheckError::new(
+                                            CheckErrorKind::TypeMismatch,
+                                            with_macro_provenance(
+                                                &deep::Expr::List(list.clone(), zero_span()),
+                                                format!(
+                                                    "len expects List or Dict input, got {other}"
+                                                ),
+                                            ),
+                                            vec![],
                                         ),
-                                        vec![],
-                                    ));
-                                    return Type::Error;
+                                    );
                                 }
                             }
                         }
                     }
                     "index" => {
                         if arg_tys.len() != 2 {
-                            return Type::Error;
+                            return report_builtin_arity(errors, list, fname, 2, arg_tys.len());
                         }
                         let list_arg = subst.apply(&arg_tys[0]);
                         let index_arg = subst.apply(&arg_tys[1]);
                         if !matches!(index_arg, Type::Prim(prec) if prec.is_integer())
-                            && !matches!(index_arg, Type::Var(_) | Type::Error)
+                            && !matches!(index_arg, Type::Var(_) | Type::Error(_))
                         {
-                            errors.push(CheckError::new(
-                                CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
-                                    format!("index expects integer index, got {index_arg}"),
+                            return report(
+                                errors,
+                                CheckError::new(
+                                    CheckErrorKind::TypeMismatch,
+                                    with_macro_provenance(
+                                        &deep::Expr::List(list.clone(), zero_span()),
+                                        format!("index expects integer index, got {index_arg}"),
+                                    ),
+                                    vec![],
                                 ),
-                                vec![],
-                            ));
-                            return Type::Error;
+                            );
                         }
                         match list_arg {
                             Type::Adt(name, mut args) if name == "List" && args.len() == 1 => {
                                 return args.remove(0);
                             }
-                            Type::Var(_) | Type::Error => return result_ty,
+                            Type::Var(_) | Type::Error(_) => return result_ty,
                             Type::Ref(inner) if matches!(&*inner, Type::Adt(name, _) if name == "List") =>
                             {
-                                errors.push(CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
-                                        format!(
-                                            "index auto-borrows its List argument, so an explicit `&` is not a \
+                                return report(
+                                    errors,
+                                    CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            format!(
+                                                "index auto-borrows its List argument, so an explicit `&` is not a \
                                              supported surface form: write `index(xs, i)`, not `index(&xs, i)` (got &{inner})"
+                                            ),
                                         ),
+                                        vec![],
                                     ),
-                                    vec![],
-                                ));
-                                return Type::Error;
+                                );
                             }
                             other => {
-                                errors.push(CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
-                                        format!("index expects List input, got {other}"),
+                                return report(
+                                    errors,
+                                    CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            format!("index expects List input, got {other}"),
+                                        ),
+                                        vec![],
                                     ),
-                                    vec![],
-                                ));
-                                return Type::Error;
+                                );
                             }
                         }
                     }
                     "append" => {
                         if arg_tys.len() != 2 {
-                            return Type::Error;
+                            return report_builtin_arity(errors, list, fname, 2, arg_tys.len());
                         }
                         let list_arg = subst.apply(&arg_tys[0]);
                         let value_arg = subst.apply(&arg_tys[1]);
                         match list_arg {
                             Type::Adt(name, args) if name == "List" && args.len() == 1 => {
                                 if let Err(te) = unify(&args[0], &value_arg, subst) {
-                                    errors.push(te.into());
-                                    return Type::Error;
+                                    return report(errors, te.into());
                                 }
                                 return Type::Adt("List".to_string(), vec![subst.apply(&args[0])]);
                             }
-                            Type::Var(_) | Type::Error => return result_ty,
+                            Type::Var(_) | Type::Error(_) => return result_ty,
                             other => {
-                                errors.push(CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
-                                        format!("append expects List input, got {other}"),
+                                return report(
+                                    errors,
+                                    CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            format!("append expects List input, got {other}"),
+                                        ),
+                                        vec![],
                                     ),
-                                    vec![],
-                                ));
-                                return Type::Error;
+                                );
                             }
                         }
                     }
                     "concat" => {
                         if arg_tys.len() != 2 {
-                            return Type::Error;
+                            return report_builtin_arity(errors, list, fname, 2, arg_tys.len());
                         }
                         let lhs = subst.apply(&arg_tys[0]);
                         let rhs = subst.apply(&arg_tys[1]);
@@ -11947,14 +12969,10 @@ fn infer_app(
                                 // elements decide the concat-axis extent.
                                 // kids[1] is the list expr, kids[2] the
                                 // axis expr (cast-aware extraction, #216).
-                                // A DIRECT literal chain re-infers each
-                                // element read-only (a fresh env/vg clone
-                                // per element; the elements were already
-                                // inferred as part of the list arg, so
-                                // this is a bounded second pass over
-                                // typically-tiny exprs) so ragged extents
-                                // can SUM; through a binding only the
-                                // length survives.
+                                // A DIRECT literal chain consumes the element
+                                // types already produced while inferring the
+                                // list argument, so ragged extents can SUM
+                                // without a second semantic traversal.
                                 let raw_axis = kids.get(2).and_then(extract_int_for_dim);
                                 let list_info =
                                     match kids.get(1).and_then(collect_cons_chain_for_shape) {
@@ -11962,10 +12980,10 @@ fn infer_app(
                                             elements
                                                 .iter()
                                                 .map(|elem| {
-                                                    match subst.apply(&infer_expr_in_scope(
-                                                        elem, env, vg, subst, adt_reg,
-                                                    )) {
-                                                        Type::Tensor(dims, _) => dims,
+                                                    match product
+                                                        .current_owner_type(elem, subst, errors)
+                                                    {
+                                                        Some(Type::Tensor(dims, _)) => dims,
                                                         _ => Vec::new(),
                                                     }
                                                 })
@@ -11979,15 +12997,17 @@ fn infer_app(
                                 match tensor_concat_result_type(&lhs_args[0], raw_axis, list_info) {
                                     Ok(ty) => return ty,
                                     Err(message) => {
-                                        errors.push(CheckError::new(
-                                            CheckErrorKind::TypeMismatch,
-                                            with_macro_provenance(
-                                                &deep::Expr::List(list.clone(), zero_span()),
-                                                message,
+                                        return report(
+                                            errors,
+                                            CheckError::new(
+                                                CheckErrorKind::TypeMismatch,
+                                                with_macro_provenance(
+                                                    &deep::Expr::List(list.clone(), zero_span()),
+                                                    message,
+                                                ),
+                                                vec![],
                                             ),
-                                            vec![],
-                                        ));
-                                        return Type::Error;
+                                        );
                                     }
                                 }
                             }
@@ -11998,8 +13018,7 @@ fn infer_app(
                                     && rhs_args.len() == 1 =>
                             {
                                 if let Err(te) = unify(&lhs_args[0], &rhs_args[0], subst) {
-                                    errors.push(te.into());
-                                    return Type::Error;
+                                    return report(errors, te.into());
                                 }
                                 return Type::Adt(
                                     "List".to_string(),
@@ -12008,61 +13027,67 @@ fn infer_app(
                             }
                             (Type::Var(_), _)
                             | (_, Type::Var(_))
-                            | (Type::Error, _)
-                            | (_, Type::Error) => {
+                            | (Type::Error(_), _)
+                            | (_, Type::Error(_)) => {
                                 return result_ty;
                             }
                             (lhs, rhs) => {
-                                errors.push(CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
-                                        format!(
-                                            "concat expects matching List inputs, got {lhs} and {rhs}"
+                                return report(
+                                    errors,
+                                    CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            format!(
+                                                "concat expects matching List inputs, got {lhs} and {rhs}"
+                                            ),
                                         ),
+                                        vec![],
                                     ),
-                                    vec![],
-                                ));
-                                return Type::Error;
+                                );
                             }
                         }
                     }
                     "split" => {
                         if arg_tys.len() != 3 {
-                            return Type::Error;
+                            return report_builtin_arity(errors, list, fname, 3, arg_tys.len());
                         }
                         let tensor_ty = type_for_readonly_check(&arg_tys[0], subst);
                         let axis_ty = subst.apply(&arg_tys[1]);
                         let sizes_ty = subst.apply(&arg_tys[2]);
                         if !matches!(axis_ty, Type::Prim(prec) if prec.is_integer())
-                            && !matches!(axis_ty, Type::Var(_) | Type::Error)
+                            && !matches!(axis_ty, Type::Var(_) | Type::Error(_))
                         {
-                            errors.push(CheckError::new(
-                                CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
-                                    format!("split expects integer axis, got {axis_ty}"),
+                            return report(
+                                errors,
+                                CheckError::new(
+                                    CheckErrorKind::TypeMismatch,
+                                    with_macro_provenance(
+                                        &deep::Expr::List(list.clone(), zero_span()),
+                                        format!("split expects integer axis, got {axis_ty}"),
+                                    ),
+                                    vec![],
                                 ),
-                                vec![],
-                            ));
-                            return Type::Error;
+                            );
                         }
                         match (tensor_ty, sizes_ty) {
                             (Type::Tensor(dims, precision), Type::Adt(name, args))
                                 if name == "List" && args.len() == 1 =>
                             {
                                 if !matches!(&args[0], Type::Prim(prec) if prec.is_integer())
-                                    && !matches!(&args[0], Type::Var(_) | Type::Error)
+                                    && !matches!(&args[0], Type::Var(_) | Type::Error(_))
                                 {
-                                    errors.push(CheckError::new(
-                                        CheckErrorKind::TypeMismatch,
-                                        with_macro_provenance(
-                                            &deep::Expr::List(list.clone(), zero_span()),
-                                            "split expects List[int] sizes".to_string(),
+                                    return report(
+                                        errors,
+                                        CheckError::new(
+                                            CheckErrorKind::TypeMismatch,
+                                            with_macro_provenance(
+                                                &deep::Expr::List(list.clone(), zero_span()),
+                                                "split expects List[int] sizes".to_string(),
+                                            ),
+                                            vec![],
                                         ),
-                                        vec![],
-                                    ));
-                                    return Type::Error;
+                                    );
                                 }
                                 // Negative axes index from the end.
                                 // Issue #216: cast-aware so a
@@ -12073,18 +13098,23 @@ fn infer_app(
                                     Some(raw) => match normalize_static_axis(dims.len(), raw) {
                                         Some(axis) => axis,
                                         None => {
-                                            errors.push(CheckError::new(
-                                                CheckErrorKind::TypeMismatch,
-                                                with_macro_provenance(
-                                                    &deep::Expr::List(list.clone(), zero_span()),
-                                                    format!(
-                                                        "split axis {raw} out of bounds for rank {}",
-                                                        dims.len()
+                                            return report(
+                                                errors,
+                                                CheckError::new(
+                                                    CheckErrorKind::TypeMismatch,
+                                                    with_macro_provenance(
+                                                        &deep::Expr::List(
+                                                            list.clone(),
+                                                            zero_span(),
+                                                        ),
+                                                        format!(
+                                                            "split axis {raw} out of bounds for rank {}",
+                                                            dims.len()
+                                                        ),
                                                     ),
+                                                    vec![],
                                                 ),
-                                                vec![],
-                                            ));
-                                            return Type::Error;
+                                            );
                                         }
                                     },
                                     None => 0,
@@ -12098,81 +13128,89 @@ fn infer_app(
                             }
                             (Type::Var(_), _)
                             | (_, Type::Var(_))
-                            | (Type::Error, _)
-                            | (_, Type::Error) => {
+                            | (Type::Error(_), _)
+                            | (_, Type::Error(_)) => {
                                 return result_ty;
                             }
                             (tensor_ty, sizes_ty) => {
-                                errors.push(CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
-                                        format!(
-                                            "split expects tensor input and List[int] sizes, got {tensor_ty} and {sizes_ty}"
+                                return report(
+                                    errors,
+                                    CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            format!(
+                                                "split expects tensor input and List[int] sizes, got {tensor_ty} and {sizes_ty}"
+                                            ),
                                         ),
+                                        vec![],
                                     ),
-                                    vec![],
-                                ));
-                                return Type::Error;
+                                );
                             }
                         }
                     }
                     "take" | "drop" => {
                         if arg_tys.len() != 2 {
-                            return Type::Error;
+                            return report_builtin_arity(errors, list, fname, 2, arg_tys.len());
                         }
                         let op_name = func_name.as_deref().unwrap_or("collection helper");
                         let list_arg = subst.apply(&arg_tys[0]);
                         let count_arg = subst.apply(&arg_tys[1]);
                         if !matches!(count_arg, Type::Prim(prec) if prec.is_integer())
-                            && !matches!(count_arg, Type::Var(_) | Type::Error)
+                            && !matches!(count_arg, Type::Var(_) | Type::Error(_))
                         {
-                            errors.push(CheckError::new(
-                                CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
-                                    format!("{op_name} expects integer count, got {count_arg}"),
+                            return report(
+                                errors,
+                                CheckError::new(
+                                    CheckErrorKind::TypeMismatch,
+                                    with_macro_provenance(
+                                        &deep::Expr::List(list.clone(), zero_span()),
+                                        format!("{op_name} expects integer count, got {count_arg}"),
+                                    ),
+                                    vec![],
                                 ),
-                                vec![],
-                            ));
-                            return Type::Error;
+                            );
                         }
                         match list_arg {
                             Type::Adt(name, args) if name == "List" && args.len() == 1 => {
                                 return Type::Adt("List".to_string(), vec![args[0].clone()]);
                             }
-                            Type::Var(_) | Type::Error => return result_ty,
+                            Type::Var(_) | Type::Error(_) => return result_ty,
                             other => {
-                                errors.push(CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
-                                        format!("{op_name} expects List input, got {other}"),
+                                return report(
+                                    errors,
+                                    CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            format!("{op_name} expects List input, got {other}"),
+                                        ),
+                                        vec![],
                                     ),
-                                    vec![],
-                                ));
-                                return Type::Error;
+                                );
                             }
                         }
                     }
                     "chunk" => {
                         if arg_tys.len() != 2 {
-                            return Type::Error;
+                            return report_builtin_arity(errors, list, fname, 2, arg_tys.len());
                         }
                         let list_arg = subst.apply(&arg_tys[0]);
                         let count_arg = subst.apply(&arg_tys[1]);
                         if !matches!(count_arg, Type::Prim(prec) if prec.is_integer())
-                            && !matches!(count_arg, Type::Var(_) | Type::Error)
+                            && !matches!(count_arg, Type::Var(_) | Type::Error(_))
                         {
-                            errors.push(CheckError::new(
-                                CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
-                                    format!("chunk expects integer size, got {count_arg}"),
+                            return report(
+                                errors,
+                                CheckError::new(
+                                    CheckErrorKind::TypeMismatch,
+                                    with_macro_provenance(
+                                        &deep::Expr::List(list.clone(), zero_span()),
+                                        format!("chunk expects integer size, got {count_arg}"),
+                                    ),
+                                    vec![],
                                 ),
-                                vec![],
-                            ));
-                            return Type::Error;
+                            );
                         }
                         match list_arg {
                             Type::Adt(name, args) if name == "List" && args.len() == 1 => {
@@ -12181,38 +13219,44 @@ fn infer_app(
                                     vec![Type::Adt("List".to_string(), vec![args[0].clone()])],
                                 );
                             }
-                            Type::Var(_) | Type::Error => return result_ty,
+                            Type::Var(_) | Type::Error(_) => return result_ty,
                             other => {
-                                errors.push(CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
-                                        format!("chunk expects List input, got {other}"),
+                                return report(
+                                    errors,
+                                    CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            format!("chunk expects List input, got {other}"),
+                                        ),
+                                        vec![],
                                     ),
-                                    vec![],
-                                ));
-                                return Type::Error;
+                                );
                             }
                         }
                     }
                     "range" => {
                         if arg_tys.len() != 2 {
-                            return Type::Error;
+                            return report_builtin_arity(errors, list, fname, 2, arg_tys.len());
                         }
                         for arg_ty in &arg_tys {
                             match subst.apply(arg_ty) {
                                 Type::Prim(prec) if prec.is_integer() => {}
-                                Type::Var(_) | Type::Error => {}
+                                Type::Var(_) | Type::Error(_) => {}
                                 other => {
-                                    errors.push(CheckError::new(
-                                        CheckErrorKind::TypeMismatch,
-                                        with_macro_provenance(
-                                            &deep::Expr::List(list.clone(), zero_span()),
-                                            format!("range expects integer arguments, got {other}"),
+                                    return report(
+                                        errors,
+                                        CheckError::new(
+                                            CheckErrorKind::TypeMismatch,
+                                            with_macro_provenance(
+                                                &deep::Expr::List(list.clone(), zero_span()),
+                                                format!(
+                                                    "range expects integer arguments, got {other}"
+                                                ),
+                                            ),
+                                            vec![],
                                         ),
-                                        vec![],
-                                    ));
-                                    return Type::Error;
+                                    );
                                 }
                             }
                         }
@@ -12220,7 +13264,7 @@ fn infer_app(
                     }
                     "map" => {
                         if arg_tys.len() != 2 {
-                            return Type::Error;
+                            return report_builtin_arity(errors, list, fname, 2, arg_tys.len());
                         }
                         let elem_ty = vg.fresh_type();
                         let out_ty = vg.fresh_type();
@@ -12229,22 +13273,20 @@ fn infer_app(
                             &Type::Fn(vec![elem_ty.clone()], Box::new(out_ty.clone())),
                             subst,
                         ) {
-                            errors.push(te.into());
-                            return Type::Error;
+                            return report(errors, te.into());
                         }
                         if let Err(te) = unify(
                             &subst.apply(&arg_tys[1]),
                             &Type::Adt("List".to_string(), vec![elem_ty]),
                             subst,
                         ) {
-                            errors.push(te.into());
-                            return Type::Error;
+                            return report(errors, te.into());
                         }
                         return Type::Adt("List".to_string(), vec![subst.apply(&out_ty)]);
                     }
                     "filter" => {
                         if arg_tys.len() != 2 {
-                            return Type::Error;
+                            return report_builtin_arity(errors, list, fname, 2, arg_tys.len());
                         }
                         let elem_ty = vg.fresh_type();
                         let list_expr = deep::Expr::List(list.clone(), zero_span());
@@ -12253,27 +13295,28 @@ fn infer_app(
                             &Type::Fn(vec![elem_ty.clone()], Box::new(Type::Prim(Prim::Bool))),
                             subst,
                         ) {
-                            errors.push(collection_helper_type_error(
-                                &list_expr,
-                                "filter",
-                                "expects a callback that returns bool",
-                                te,
-                            ));
-                            return Type::Error;
+                            return report(
+                                errors,
+                                collection_helper_type_error(
+                                    &list_expr,
+                                    "filter",
+                                    "expects a callback that returns bool",
+                                    te,
+                                ),
+                            );
                         }
                         if let Err(te) = unify(
                             &subst.apply(&arg_tys[1]),
                             &Type::Adt("List".to_string(), vec![elem_ty.clone()]),
                             subst,
                         ) {
-                            errors.push(te.into());
-                            return Type::Error;
+                            return report(errors, te.into());
                         }
                         return Type::Adt("List".to_string(), vec![subst.apply(&elem_ty)]);
                     }
                     "fold" => {
                         if arg_tys.len() != 3 {
-                            return Type::Error;
+                            return report_builtin_arity(errors, list, fname, 3, arg_tys.len());
                         }
                         let acc_ty = vg.fresh_type();
                         let elem_ty = vg.fresh_type();
@@ -12286,36 +13329,39 @@ fn infer_app(
                             ),
                             subst,
                         ) {
-                            errors.push(collection_helper_type_error(
-                                &list_expr,
-                                "fold",
-                                "expects a callback whose accumulator/result type matches the initial accumulator",
-                                te,
-                            ));
-                            return Type::Error;
+                            return report(
+                                errors,
+                                collection_helper_type_error(
+                                    &list_expr,
+                                    "fold",
+                                    "expects a callback whose accumulator/result type matches the initial accumulator",
+                                    te,
+                                ),
+                            );
                         }
                         if let Err(te) = unify(&subst.apply(&arg_tys[1]), &acc_ty.clone(), subst) {
-                            errors.push(collection_helper_type_error(
-                                &list_expr,
-                                "fold",
-                                "expects a callback whose accumulator/result type matches the initial accumulator",
-                                te,
-                            ));
-                            return Type::Error;
+                            return report(
+                                errors,
+                                collection_helper_type_error(
+                                    &list_expr,
+                                    "fold",
+                                    "expects a callback whose accumulator/result type matches the initial accumulator",
+                                    te,
+                                ),
+                            );
                         }
                         if let Err(te) = unify(
                             &subst.apply(&arg_tys[2]),
                             &Type::Adt("List".to_string(), vec![elem_ty]),
                             subst,
                         ) {
-                            errors.push(te.into());
-                            return Type::Error;
+                            return report(errors, te.into());
                         }
                         return subst.apply(&acc_ty);
                     }
                     "scan" => {
                         if arg_tys.len() != 3 {
-                            return Type::Error;
+                            return report_builtin_arity(errors, list, fname, 3, arg_tys.len());
                         }
                         let acc_ty = vg.fresh_type();
                         let elem_ty = vg.fresh_type();
@@ -12328,30 +13374,33 @@ fn infer_app(
                             ),
                             subst,
                         ) {
-                            errors.push(collection_helper_type_error(
-                                &list_expr,
-                                "scan",
-                                "expects a callback whose accumulator/result type matches the initial accumulator",
-                                te,
-                            ));
-                            return Type::Error;
+                            return report(
+                                errors,
+                                collection_helper_type_error(
+                                    &list_expr,
+                                    "scan",
+                                    "expects a callback whose accumulator/result type matches the initial accumulator",
+                                    te,
+                                ),
+                            );
                         }
                         if let Err(te) = unify(&subst.apply(&arg_tys[1]), &acc_ty.clone(), subst) {
-                            errors.push(collection_helper_type_error(
-                                &list_expr,
-                                "scan",
-                                "expects a callback whose accumulator/result type matches the initial accumulator",
-                                te,
-                            ));
-                            return Type::Error;
+                            return report(
+                                errors,
+                                collection_helper_type_error(
+                                    &list_expr,
+                                    "scan",
+                                    "expects a callback whose accumulator/result type matches the initial accumulator",
+                                    te,
+                                ),
+                            );
                         }
                         if let Err(te) = unify(
                             &subst.apply(&arg_tys[2]),
                             &Type::Adt("List".to_string(), vec![elem_ty]),
                             subst,
                         ) {
-                            errors.push(te.into());
-                            return Type::Error;
+                            return report(errors, te.into());
                         }
                         return Type::Adt("List".to_string(), vec![subst.apply(&acc_ty)]);
                     }
@@ -12366,20 +13415,22 @@ fn infer_app(
                         // that at execution time. At type-check time we accept
                         // any Type::Prim and let unification do the rest.
                         if arg_tys.len() != 3 {
-                            return Type::Error;
+                            return report_builtin_arity(errors, list, fname, 3, arg_tys.len());
                         }
                         let elem_ty = vg.fresh_type();
                         let int64 = Type::Prim(Prim::Int64);
                         let list_expr = deep::Expr::List(list.clone(), zero_span());
                         // arg 0: initial accumulator of type T.
                         if let Err(te) = unify(&subst.apply(&arg_tys[0]), &elem_ty.clone(), subst) {
-                            errors.push(collection_helper_type_error(
-                                &list_expr,
-                                "tensor_scan",
-                                "expects an initial value whose type matches the callback element type",
-                                te,
-                            ));
-                            return Type::Error;
+                            return report(
+                                errors,
+                                collection_helper_type_error(
+                                    &list_expr,
+                                    "tensor_scan",
+                                    "expects an initial value whose type matches the callback element type",
+                                    te,
+                                ),
+                            );
                         }
                         // arg 1: callback `(T, int64) -> T`.
                         if let Err(te) = unify(
@@ -12390,23 +13441,27 @@ fn infer_app(
                             ),
                             subst,
                         ) {
-                            errors.push(collection_helper_type_error(
-                                &list_expr,
-                                "tensor_scan",
-                                "expects a callback (T, int64) -> T",
-                                te,
-                            ));
-                            return Type::Error;
+                            return report(
+                                errors,
+                                collection_helper_type_error(
+                                    &list_expr,
+                                    "tensor_scan",
+                                    "expects a callback (T, int64) -> T",
+                                    te,
+                                ),
+                            );
                         }
                         // arg 2: length `n: int64`.
                         if let Err(te) = unify(&subst.apply(&arg_tys[2]), &int64, subst) {
-                            errors.push(collection_helper_type_error(
-                                &list_expr,
-                                "tensor_scan",
-                                "expects a length `n: int64`",
-                                te,
-                            ));
-                            return Type::Error;
+                            return report(
+                                errors,
+                                collection_helper_type_error(
+                                    &list_expr,
+                                    "tensor_scan",
+                                    "expects a length `n: int64`",
+                                    te,
+                                ),
+                            );
                         }
                         // Element type must be a concrete scalar Prim once
                         // unified. If it's still a Var the call site is
@@ -12426,24 +13481,26 @@ fn infer_app(
                                 TensorPrec::Var(*tv)
                             }
                             other => {
-                                errors.push(CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &list_expr,
-                                        format!(
-                                            "tensor_scan element type must be a scalar primitive, got {other}"
+                                return report(
+                                    errors,
+                                    CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &list_expr,
+                                            format!(
+                                                "tensor_scan element type must be a scalar primitive, got {other}"
+                                            ),
                                         ),
+                                        vec![],
                                     ),
-                                    vec![],
-                                ));
-                                return Type::Error;
+                                );
                             }
                         };
                         return Type::Tensor(vec![Dim::Wildcard], precision);
                     }
                     "partition" => {
                         if arg_tys.len() != 2 {
-                            return Type::Error;
+                            return report_builtin_arity(errors, list, fname, 2, arg_tys.len());
                         }
                         let elem_ty = vg.fresh_type();
                         let list_expr = deep::Expr::List(list.clone(), zero_span());
@@ -12452,28 +13509,29 @@ fn infer_app(
                             &Type::Fn(vec![elem_ty.clone()], Box::new(Type::Prim(Prim::Bool))),
                             subst,
                         ) {
-                            errors.push(collection_helper_type_error(
-                                &list_expr,
-                                "partition",
-                                "expects a callback that returns bool",
-                                te,
-                            ));
-                            return Type::Error;
+                            return report(
+                                errors,
+                                collection_helper_type_error(
+                                    &list_expr,
+                                    "partition",
+                                    "expects a callback that returns bool",
+                                    te,
+                                ),
+                            );
                         }
                         if let Err(te) = unify(
                             &subst.apply(&arg_tys[1]),
                             &Type::Adt("List".to_string(), vec![elem_ty.clone()]),
                             subst,
                         ) {
-                            errors.push(te.into());
-                            return Type::Error;
+                            return report(errors, te.into());
                         }
                         let out_list = Type::Adt("List".to_string(), vec![subst.apply(&elem_ty)]);
                         return Type::Tuple(vec![out_list.clone(), out_list]);
                     }
                     "flat_map" => {
                         if arg_tys.len() != 2 {
-                            return Type::Error;
+                            return report_builtin_arity(errors, list, fname, 2, arg_tys.len());
                         }
                         let elem_ty = vg.fresh_type();
                         let out_elem_ty = vg.fresh_type();
@@ -12485,16 +13543,14 @@ fn infer_app(
                             ),
                             subst,
                         ) {
-                            errors.push(te.into());
-                            return Type::Error;
+                            return report(errors, te.into());
                         }
                         if let Err(te) = unify(
                             &subst.apply(&arg_tys[1]),
                             &Type::Adt("List".to_string(), vec![elem_ty]),
                             subst,
                         ) {
-                            errors.push(te.into());
-                            return Type::Error;
+                            return report(errors, te.into());
                         }
                         return Type::Adt("List".to_string(), vec![subst.apply(&out_elem_ty)]);
                     }
@@ -12513,45 +13569,49 @@ fn infer_app(
                                                 vec![inner_args[0].clone()],
                                             );
                                         }
-                                        Type::Var(_) | Type::Error => return result_ty,
+                                        Type::Var(_) | Type::Error(_) => return result_ty,
                                         other => {
-                                            errors.push(CheckError::new(
-                                                CheckErrorKind::TypeMismatch,
-                                                with_macro_provenance(
-                                                    &deep::Expr::List(
-                                                        list.clone(),
-                                                        zero_span(),
+                                            return report(
+                                                errors,
+                                                CheckError::new(
+                                                    CheckErrorKind::TypeMismatch,
+                                                    with_macro_provenance(
+                                                        &deep::Expr::List(
+                                                            list.clone(),
+                                                            zero_span(),
+                                                        ),
+                                                        format!(
+                                                            "flatten expects List[List[T]] input, got List[{other}]"
+                                                        ),
                                                     ),
-                                                    format!(
-                                                        "flatten expects List[List[T]] input, got List[{other}]"
-                                                    ),
+                                                    vec![],
                                                 ),
-                                                vec![],
-                                            ));
-                                            return Type::Error;
+                                            );
                                         }
                                     }
                                 }
-                                Type::Var(_) | Type::Error => return result_ty,
+                                Type::Var(_) | Type::Error(_) => return result_ty,
                                 other => {
-                                    errors.push(CheckError::new(
-                                        CheckErrorKind::TypeMismatch,
-                                        with_macro_provenance(
-                                            &deep::Expr::List(list.clone(), zero_span()),
-                                            format!(
-                                                "flatten expects List[List[T]] input, got {other}"
+                                    return report(
+                                        errors,
+                                        CheckError::new(
+                                            CheckErrorKind::TypeMismatch,
+                                            with_macro_provenance(
+                                                &deep::Expr::List(list.clone(), zero_span()),
+                                                format!(
+                                                    "flatten expects List[List[T]] input, got {other}"
+                                                ),
                                             ),
+                                            vec![],
                                         ),
-                                        vec![],
-                                    ));
-                                    return Type::Error;
+                                    );
                                 }
                             }
                         }
                     }
                     "zip" => {
                         if arg_tys.len() != 2 {
-                            return Type::Error;
+                            return report_builtin_arity(errors, list, fname, 2, arg_tys.len());
                         }
                         let lhs = subst.apply(&arg_tys[0]);
                         let rhs = subst.apply(&arg_tys[1]);
@@ -12572,20 +13632,22 @@ fn infer_app(
                             }
                             (Type::Var(_), _)
                             | (_, Type::Var(_))
-                            | (Type::Error, _)
-                            | (_, Type::Error) => {
+                            | (Type::Error(_), _)
+                            | (_, Type::Error(_)) => {
                                 return result_ty;
                             }
                             (lhs, rhs) => {
-                                errors.push(CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
-                                        format!("zip expects List inputs, got {lhs} and {rhs}"),
+                                return report(
+                                    errors,
+                                    CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            format!("zip expects List inputs, got {lhs} and {rhs}"),
+                                        ),
+                                        vec![],
                                     ),
-                                    vec![],
-                                ));
-                                return Type::Error;
+                                );
                             }
                         }
                     }
@@ -12601,17 +13663,21 @@ fn infer_app(
                                         ])],
                                     );
                                 }
-                                Type::Var(_) | Type::Error => return result_ty,
+                                Type::Var(_) | Type::Error(_) => return result_ty,
                                 other => {
-                                    errors.push(CheckError::new(
-                                        CheckErrorKind::TypeMismatch,
-                                        with_macro_provenance(
-                                            &deep::Expr::List(list.clone(), zero_span()),
-                                            format!("enumerate expects List input, got {other}"),
+                                    return report(
+                                        errors,
+                                        CheckError::new(
+                                            CheckErrorKind::TypeMismatch,
+                                            with_macro_provenance(
+                                                &deep::Expr::List(list.clone(), zero_span()),
+                                                format!(
+                                                    "enumerate expects List input, got {other}"
+                                                ),
+                                            ),
+                                            vec![],
                                         ),
-                                        vec![],
-                                    ));
-                                    return Type::Error;
+                                    );
                                 }
                             }
                         }
@@ -12625,19 +13691,24 @@ fn infer_app(
                                             match &items[0] {
                                                 Type::Prim(Prim::Int64)
                                                 | Type::Prim(Prim::String) => {}
-                                                Type::Var(_) | Type::Error => return result_ty,
+                                                Type::Var(_) | Type::Error(_) => return result_ty,
                                                 other => {
-                                                    errors.push(CheckError::new(
-                                                        CheckErrorKind::TypeMismatch,
-                                                        with_macro_provenance(
-                                                            &deep::Expr::List(list.clone(), zero_span()),
-                                                            format!(
-                                                                "dict_of keys must be int64 or string, got {other}"
+                                                    return report(
+                                                        errors,
+                                                        CheckError::new(
+                                                            CheckErrorKind::TypeMismatch,
+                                                            with_macro_provenance(
+                                                                &deep::Expr::List(
+                                                                    list.clone(),
+                                                                    zero_span(),
+                                                                ),
+                                                                format!(
+                                                                    "dict_of keys must be int64 or string, got {other}"
+                                                                ),
                                                             ),
+                                                            vec![],
                                                         ),
-                                                        vec![],
-                                                    ));
-                                                    return Type::Error;
+                                                    );
                                                 }
                                             }
                                             return Type::Adt(
@@ -12645,48 +13716,54 @@ fn infer_app(
                                                 vec![items[0].clone(), items[1].clone()],
                                             );
                                         }
-                                        Type::Var(_) | Type::Error => return result_ty,
+                                        Type::Var(_) | Type::Error(_) => return result_ty,
                                         other => {
-                                            errors.push(CheckError::new(
-                                                CheckErrorKind::TypeMismatch,
-                                                with_macro_provenance(
-                                                    &deep::Expr::List(list.clone(), zero_span()),
-                                                    format!(
-                                                        "dict_of expects List[(K, V)] input, got List[{other}]"
+                                            return report(
+                                                errors,
+                                                CheckError::new(
+                                                    CheckErrorKind::TypeMismatch,
+                                                    with_macro_provenance(
+                                                        &deep::Expr::List(
+                                                            list.clone(),
+                                                            zero_span(),
+                                                        ),
+                                                        format!(
+                                                            "dict_of expects List[(K, V)] input, got List[{other}]"
+                                                        ),
                                                     ),
+                                                    vec![],
                                                 ),
-                                                vec![],
-                                            ));
-                                            return Type::Error;
+                                            );
                                         }
                                     }
                                 }
-                                Type::Var(_) | Type::Error => return result_ty,
+                                Type::Var(_) | Type::Error(_) => return result_ty,
                                 other => {
-                                    errors.push(CheckError::new(
-                                        CheckErrorKind::TypeMismatch,
-                                        with_macro_provenance(
-                                            &deep::Expr::List(list.clone(), zero_span()),
-                                            format!("dict_of expects List input, got {other}"),
+                                    return report(
+                                        errors,
+                                        CheckError::new(
+                                            CheckErrorKind::TypeMismatch,
+                                            with_macro_provenance(
+                                                &deep::Expr::List(list.clone(), zero_span()),
+                                                format!("dict_of expects List input, got {other}"),
+                                            ),
+                                            vec![],
                                         ),
-                                        vec![],
-                                    ));
-                                    return Type::Error;
+                                    );
                                 }
                             }
                         }
                     }
                     "dict_get" => {
                         if arg_tys.len() != 2 {
-                            return Type::Error;
+                            return report_builtin_arity(errors, list, fname, 2, arg_tys.len());
                         }
                         match (subst.apply(&arg_tys[0]), subst.apply(&arg_tys[1])) {
                             (Type::Adt(name, args), key_ty)
                                 if name == "Dict" && args.len() == 2 =>
                             {
                                 if let Err(te) = unify(&args[0], &key_ty, subst) {
-                                    errors.push(te.into());
-                                    return Type::Error;
+                                    return report(errors, te.into());
                                 }
                                 return Type::Adt(
                                     "Option".to_string(),
@@ -12695,69 +13772,73 @@ fn infer_app(
                             }
                             (Type::Var(_), _)
                             | (_, Type::Var(_))
-                            | (Type::Error, _)
-                            | (_, Type::Error) => {
+                            | (Type::Error(_), _)
+                            | (_, Type::Error(_)) => {
                                 return result_ty;
                             }
                             (dict_ty, key_ty) => {
-                                errors.push(CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
-                                        format!("dict_get expects Dict[K, V] and K, got {dict_ty} and {key_ty}"),
+                                return report(
+                                    errors,
+                                    CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            format!(
+                                                "dict_get expects Dict[K, V] and K, got {dict_ty} and {key_ty}"
+                                            ),
+                                        ),
+                                        vec![],
                                     ),
-                                    vec![],
-                                ));
-                                return Type::Error;
+                                );
                             }
                         }
                     }
                     "dict_contains" => {
                         if arg_tys.len() != 2 {
-                            return Type::Error;
+                            return report_builtin_arity(errors, list, fname, 2, arg_tys.len());
                         }
                         match (subst.apply(&arg_tys[0]), subst.apply(&arg_tys[1])) {
                             (Type::Adt(name, args), key_ty)
                                 if name == "Dict" && args.len() == 2 =>
                             {
                                 if let Err(te) = unify(&args[0], &key_ty, subst) {
-                                    errors.push(te.into());
-                                    return Type::Error;
+                                    return report(errors, te.into());
                                 }
                                 return Type::Prim(Prim::Bool);
                             }
                             (Type::Var(_), _)
                             | (_, Type::Var(_))
-                            | (Type::Error, _)
-                            | (_, Type::Error) => {
+                            | (Type::Error(_), _)
+                            | (_, Type::Error(_)) => {
                                 return result_ty;
                             }
                             (dict_ty, key_ty) => {
-                                errors.push(CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
-                                        format!(
-                                            "dict_contains expects Dict[K, V] and K, got {dict_ty} and {key_ty}"
+                                return report(
+                                    errors,
+                                    CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            format!(
+                                                "dict_contains expects Dict[K, V] and K, got {dict_ty} and {key_ty}"
+                                            ),
                                         ),
+                                        vec![],
                                     ),
-                                    vec![],
-                                ));
-                                return Type::Error;
+                                );
                             }
                         }
                     }
                     "dict_remove" => {
                         if arg_tys.len() != 2 {
-                            return Type::Error;
+                            return report_builtin_arity(errors, list, fname, 2, arg_tys.len());
                         }
                         match (subst.apply(&arg_tys[0]), subst.apply(&arg_tys[1])) {
                             (Type::Adt(name, args), key_ty)
                                 if name == "Dict" && args.len() == 2 =>
                             {
                                 if let Err(te) = unify(&args[0], &key_ty, subst) {
-                                    errors.push(te.into());
-                                    return Type::Error;
+                                    return report(errors, te.into());
                                 }
                                 return Type::Adt(
                                     "Dict".to_string(),
@@ -12766,28 +13847,30 @@ fn infer_app(
                             }
                             (Type::Var(_), _)
                             | (_, Type::Var(_))
-                            | (Type::Error, _)
-                            | (_, Type::Error) => {
+                            | (Type::Error(_), _)
+                            | (_, Type::Error(_)) => {
                                 return result_ty;
                             }
                             (dict_ty, key_ty) => {
-                                errors.push(CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
-                                        format!(
-                                            "dict_remove expects Dict[K, V] and K, got {dict_ty} and {key_ty}"
+                                return report(
+                                    errors,
+                                    CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            format!(
+                                                "dict_remove expects Dict[K, V] and K, got {dict_ty} and {key_ty}"
+                                            ),
                                         ),
+                                        vec![],
                                     ),
-                                    vec![],
-                                ));
-                                return Type::Error;
+                                );
                             }
                         }
                     }
                     "dict_insert" => {
                         if arg_tys.len() != 3 {
-                            return Type::Error;
+                            return report_builtin_arity(errors, list, fname, 3, arg_tys.len());
                         }
                         match (
                             subst.apply(&arg_tys[0]),
@@ -12798,12 +13881,10 @@ fn infer_app(
                                 if name == "Dict" && args.len() == 2 =>
                             {
                                 if let Err(te) = unify(&args[0], &key_ty, subst) {
-                                    errors.push(te.into());
-                                    return Type::Error;
+                                    return report(errors, te.into());
                                 }
                                 if let Err(te) = unify(&args[1], &value_ty, subst) {
-                                    errors.push(te.into());
-                                    return Type::Error;
+                                    return report(errors, te.into());
                                 }
                                 return Type::Adt(
                                     "Dict".to_string(),
@@ -12813,29 +13894,31 @@ fn infer_app(
                             (Type::Var(_), _, _)
                             | (_, Type::Var(_), _)
                             | (_, _, Type::Var(_))
-                            | (Type::Error, _, _)
-                            | (_, Type::Error, _)
-                            | (_, _, Type::Error) => {
+                            | (Type::Error(_), _, _)
+                            | (_, Type::Error(_), _)
+                            | (_, _, Type::Error(_)) => {
                                 return result_ty;
                             }
                             (dict_ty, key_ty, value_ty) => {
-                                errors.push(CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
-                                        format!(
-                                            "dict_insert expects Dict[K, V], K, and V, got {dict_ty}, {key_ty}, and {value_ty}"
+                                return report(
+                                    errors,
+                                    CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            format!(
+                                                "dict_insert expects Dict[K, V], K, and V, got {dict_ty}, {key_ty}, and {value_ty}"
+                                            ),
                                         ),
+                                        vec![],
                                     ),
-                                    vec![],
-                                ));
-                                return Type::Error;
+                                );
                             }
                         }
                     }
                     "dict_merge" => {
                         if arg_tys.len() != 2 {
-                            return Type::Error;
+                            return report_builtin_arity(errors, list, fname, 2, arg_tys.len());
                         }
                         match (subst.apply(&arg_tys[0]), subst.apply(&arg_tys[1])) {
                             (Type::Adt(lhs_name, lhs_args), Type::Adt(rhs_name, rhs_args))
@@ -12845,12 +13928,10 @@ fn infer_app(
                                     && rhs_args.len() == 2 =>
                             {
                                 if let Err(te) = unify(&lhs_args[0], &rhs_args[0], subst) {
-                                    errors.push(te.into());
-                                    return Type::Error;
+                                    return report(errors, te.into());
                                 }
                                 if let Err(te) = unify(&lhs_args[1], &rhs_args[1], subst) {
-                                    errors.push(te.into());
-                                    return Type::Error;
+                                    return report(errors, te.into());
                                 }
                                 return Type::Adt(
                                     "Dict".to_string(),
@@ -12859,22 +13940,24 @@ fn infer_app(
                             }
                             (Type::Var(_), _)
                             | (_, Type::Var(_))
-                            | (Type::Error, _)
-                            | (_, Type::Error) => {
+                            | (Type::Error(_), _)
+                            | (_, Type::Error(_)) => {
                                 return result_ty;
                             }
                             (lhs_ty, rhs_ty) => {
-                                errors.push(CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
-                                        format!(
-                                            "dict_merge expects matching Dict inputs, got {lhs_ty} and {rhs_ty}"
+                                return report(
+                                    errors,
+                                    CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            format!(
+                                                "dict_merge expects matching Dict inputs, got {lhs_ty} and {rhs_ty}"
+                                            ),
                                         ),
+                                        vec![],
                                     ),
-                                    vec![],
-                                ));
-                                return Type::Error;
+                                );
                             }
                         }
                     }
@@ -12884,17 +13967,21 @@ fn infer_app(
                                 Type::Adt(name, args) if name == "Dict" && args.len() == 2 => {
                                     return Type::Adt("List".to_string(), vec![args[0].clone()]);
                                 }
-                                Type::Var(_) | Type::Error => return result_ty,
+                                Type::Var(_) | Type::Error(_) => return result_ty,
                                 other => {
-                                    errors.push(CheckError::new(
-                                        CheckErrorKind::TypeMismatch,
-                                        with_macro_provenance(
-                                            &deep::Expr::List(list.clone(), zero_span()),
-                                            format!("dict_keys expects Dict input, got {other}"),
+                                    return report(
+                                        errors,
+                                        CheckError::new(
+                                            CheckErrorKind::TypeMismatch,
+                                            with_macro_provenance(
+                                                &deep::Expr::List(list.clone(), zero_span()),
+                                                format!(
+                                                    "dict_keys expects Dict input, got {other}"
+                                                ),
+                                            ),
+                                            vec![],
                                         ),
-                                        vec![],
-                                    ));
-                                    return Type::Error;
+                                    );
                                 }
                             }
                         }
@@ -12905,17 +13992,21 @@ fn infer_app(
                                 Type::Adt(name, args) if name == "Dict" && args.len() == 2 => {
                                     return Type::Adt("List".to_string(), vec![args[1].clone()]);
                                 }
-                                Type::Var(_) | Type::Error => return result_ty,
+                                Type::Var(_) | Type::Error(_) => return result_ty,
                                 other => {
-                                    errors.push(CheckError::new(
-                                        CheckErrorKind::TypeMismatch,
-                                        with_macro_provenance(
-                                            &deep::Expr::List(list.clone(), zero_span()),
-                                            format!("dict_values expects Dict input, got {other}"),
+                                    return report(
+                                        errors,
+                                        CheckError::new(
+                                            CheckErrorKind::TypeMismatch,
+                                            with_macro_provenance(
+                                                &deep::Expr::List(list.clone(), zero_span()),
+                                                format!(
+                                                    "dict_values expects Dict input, got {other}"
+                                                ),
+                                            ),
+                                            vec![],
                                         ),
-                                        vec![],
-                                    ));
-                                    return Type::Error;
+                                    );
                                 }
                             }
                         }
@@ -12929,17 +14020,21 @@ fn infer_app(
                                         vec![Type::Tuple(vec![args[0].clone(), args[1].clone()])],
                                     );
                                 }
-                                Type::Var(_) | Type::Error => return result_ty,
+                                Type::Var(_) | Type::Error(_) => return result_ty,
                                 other => {
-                                    errors.push(CheckError::new(
-                                        CheckErrorKind::TypeMismatch,
-                                        with_macro_provenance(
-                                            &deep::Expr::List(list.clone(), zero_span()),
-                                            format!("dict_entries expects Dict input, got {other}"),
+                                    return report(
+                                        errors,
+                                        CheckError::new(
+                                            CheckErrorKind::TypeMismatch,
+                                            with_macro_provenance(
+                                                &deep::Expr::List(list.clone(), zero_span()),
+                                                format!(
+                                                    "dict_entries expects Dict input, got {other}"
+                                                ),
+                                            ),
+                                            vec![],
                                         ),
-                                        vec![],
-                                    ));
-                                    return Type::Error;
+                                    );
                                 }
                             }
                         }
@@ -12965,7 +14060,7 @@ fn infer_app(
                             // the to_tensor app's `type:` metadata) sees a
                             // sound shape instead of `Dim::Wildcard`.
                             let resolved = subst.apply(first_arg);
-                            if matches!(resolved, Type::Var(_) | Type::Error) {
+                            if matches!(resolved, Type::Var(_) | Type::Error(_)) {
                                 return result_ty;
                             }
                             match peel_to_tensor_argument(&resolved) {
@@ -12974,17 +14069,19 @@ fn infer_app(
                                         // Defensive: a bare scalar should never
                                         // hit this branch (the typer requires
                                         // a `List` head), but guard anyway.
-                                        errors.push(CheckError::new(
-                                            CheckErrorKind::TypeMismatch,
-                                            with_macro_provenance(
-                                                &deep::Expr::List(list.clone(), zero_span()),
-                                                format!(
-                                                    "to_tensor expects List input, got {resolved}"
+                                        return report(
+                                            errors,
+                                            CheckError::new(
+                                                CheckErrorKind::TypeMismatch,
+                                                with_macro_provenance(
+                                                    &deep::Expr::List(list.clone(), zero_span()),
+                                                    format!(
+                                                        "to_tensor expects List input, got {resolved}"
+                                                    ),
                                                 ),
+                                                vec![],
                                             ),
-                                            vec![],
-                                        ));
-                                        return Type::Error;
+                                        );
                                     }
                                     // R2 HIGH-A: try the static-shape walker
                                     // on the actual argument expression
@@ -13003,28 +14100,34 @@ fn infer_app(
                                 }
                                 ToTensorPeel::Pending => return result_ty,
                                 ToTensorPeel::BadInner(inner) => {
-                                    errors.push(CheckError::new(
-                                        CheckErrorKind::TypeMismatch,
-                                        with_macro_provenance(
-                                            &deep::Expr::List(list.clone(), zero_span()),
-                                            format!(
-                                                "to_tensor expects numeric or bool elements at the innermost level, got {inner}"
+                                    return report(
+                                        errors,
+                                        CheckError::new(
+                                            CheckErrorKind::TypeMismatch,
+                                            with_macro_provenance(
+                                                &deep::Expr::List(list.clone(), zero_span()),
+                                                format!(
+                                                    "to_tensor expects numeric or bool elements at the innermost level, got {inner}"
+                                                ),
                                             ),
+                                            vec![],
                                         ),
-                                        vec![],
-                                    ));
-                                    return Type::Error;
+                                    );
                                 }
                                 ToTensorPeel::NotList => {
-                                    errors.push(CheckError::new(
-                                        CheckErrorKind::TypeMismatch,
-                                        with_macro_provenance(
-                                            &deep::Expr::List(list.clone(), zero_span()),
-                                            format!("to_tensor expects List input, got {resolved}"),
+                                    return report(
+                                        errors,
+                                        CheckError::new(
+                                            CheckErrorKind::TypeMismatch,
+                                            with_macro_provenance(
+                                                &deep::Expr::List(list.clone(), zero_span()),
+                                                format!(
+                                                    "to_tensor expects List input, got {resolved}"
+                                                ),
+                                            ),
+                                            vec![],
                                         ),
-                                        vec![],
-                                    ));
-                                    return Type::Error;
+                                    );
                                 }
                             }
                         }
@@ -13034,18 +14137,20 @@ fn infer_app(
                             match type_for_readonly_check(first_arg, subst) {
                                 Type::Tensor(dims, precision) => {
                                     if dims.len() != 1 {
-                                        errors.push(CheckError::new(
-                                            CheckErrorKind::TypeMismatch,
-                                            with_macro_provenance(
-                                                &deep::Expr::List(list.clone(), zero_span()),
-                                                format!(
-                                                    "to_list expects a rank-1 tensor, got rank {} tensor",
-                                                    dims.len()
+                                        return report(
+                                            errors,
+                                            CheckError::new(
+                                                CheckErrorKind::TypeMismatch,
+                                                with_macro_provenance(
+                                                    &deep::Expr::List(list.clone(), zero_span()),
+                                                    format!(
+                                                        "to_list expects a rank-1 tensor, got rank {} tensor",
+                                                        dims.len()
+                                                    ),
                                                 ),
+                                                vec![],
                                             ),
-                                            vec![],
-                                        ));
-                                        return Type::Error;
+                                        );
                                     }
                                     // to_list requires a fully resolved
                                     // precision: a polymorphic precision must
@@ -13057,41 +14162,47 @@ fn infer_app(
                                         TensorPrec::Var(_) => return result_ty,
                                     };
                                     if !precision.is_numeric() && !matches!(precision, Prim::Bool) {
-                                        errors.push(CheckError::new(
-                                            CheckErrorKind::TypeMismatch,
-                                            with_macro_provenance(
-                                                &deep::Expr::List(list.clone(), zero_span()),
-                                                format!(
-                                                    "to_list expects numeric or bool tensor input, got {precision:?}"
+                                        return report(
+                                            errors,
+                                            CheckError::new(
+                                                CheckErrorKind::TypeMismatch,
+                                                with_macro_provenance(
+                                                    &deep::Expr::List(list.clone(), zero_span()),
+                                                    format!(
+                                                        "to_list expects numeric or bool tensor input, got {precision:?}"
+                                                    ),
                                                 ),
+                                                vec![],
                                             ),
-                                            vec![],
-                                        ));
-                                        return Type::Error;
+                                        );
                                     }
                                     return Type::Adt(
                                         "List".to_string(),
                                         vec![Type::Prim(precision)],
                                     );
                                 }
-                                Type::Var(_) | Type::Error => return result_ty,
+                                Type::Var(_) | Type::Error(_) => return result_ty,
                                 other => {
-                                    errors.push(CheckError::new(
-                                        CheckErrorKind::TypeMismatch,
-                                        with_macro_provenance(
-                                            &deep::Expr::List(list.clone(), zero_span()),
-                                            format!("to_list expects Tensor input, got {other}"),
+                                    return report(
+                                        errors,
+                                        CheckError::new(
+                                            CheckErrorKind::TypeMismatch,
+                                            with_macro_provenance(
+                                                &deep::Expr::List(list.clone(), zero_span()),
+                                                format!(
+                                                    "to_list expects Tensor input, got {other}"
+                                                ),
+                                            ),
+                                            vec![],
                                         ),
-                                        vec![],
-                                    ));
-                                    return Type::Error;
+                                    );
                                 }
                             }
                         }
                     }
                     "pad_sequences" => {
                         if arg_tys.len() != 2 {
-                            return Type::Error;
+                            return report_builtin_arity(errors, list, fname, 2, arg_tys.len());
                         }
                         let seqs_ty = subst.apply(&arg_tys[0]);
                         let pad_ty = subst.apply(&arg_tys[1]);
@@ -13104,8 +14215,7 @@ fn infer_app(
                                         if inner_name == "List" && inner_args.len() == 1 =>
                                     {
                                         if let Err(te) = unify(&inner_args[0], &pad_ty, subst) {
-                                            errors.push(te.into());
-                                            return Type::Error;
+                                            return report(errors, te.into());
                                         }
                                         match subst.apply(&inner_args[0]) {
                                             Type::Prim(precision) if precision.is_numeric() => {
@@ -13114,66 +14224,71 @@ fn infer_app(
                                                     TensorPrec::Concrete(precision),
                                                 );
                                             }
-                                            Type::Var(_) | Type::Error => return result_ty,
+                                            Type::Var(_) | Type::Error(_) => return result_ty,
                                             other => {
-                                                errors.push(CheckError::new(
-                                                    CheckErrorKind::TypeMismatch,
-                                                    with_macro_provenance(
-                                                        &deep::Expr::List(
-                                                            list.clone(),
-                                                            zero_span(),
+                                                return report(
+                                                    errors,
+                                                    CheckError::new(
+                                                        CheckErrorKind::TypeMismatch,
+                                                        with_macro_provenance(
+                                                            &deep::Expr::List(
+                                                                list.clone(),
+                                                                zero_span(),
+                                                            ),
+                                                            format!(
+                                                                "pad_sequences expects numeric nested lists, got {other}"
+                                                            ),
                                                         ),
-                                                        format!(
-                                                            "pad_sequences expects numeric nested lists, got {other}"
-                                                        ),
+                                                        vec![],
                                                     ),
-                                                    vec![],
-                                                ));
-                                                return Type::Error;
+                                                );
                                             }
                                         }
                                     }
                                     other => {
-                                        errors.push(CheckError::new(
-                                            CheckErrorKind::TypeMismatch,
-                                            with_macro_provenance(
-                                                &deep::Expr::List(list.clone(), zero_span()),
-                                                format!(
-                                                    "pad_sequences expects List[List[T]], got List[{other}]"
+                                        return report(
+                                            errors,
+                                            CheckError::new(
+                                                CheckErrorKind::TypeMismatch,
+                                                with_macro_provenance(
+                                                    &deep::Expr::List(list.clone(), zero_span()),
+                                                    format!(
+                                                        "pad_sequences expects List[List[T]], got List[{other}]"
+                                                    ),
                                                 ),
+                                                vec![],
                                             ),
-                                            vec![],
-                                        ));
-                                        return Type::Error;
+                                        );
                                     }
                                 }
                             }
-                            Type::Var(_) | Type::Error => return result_ty,
+                            Type::Var(_) | Type::Error(_) => return result_ty,
                             other => {
-                                errors.push(CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
-                                        format!(
-                                            "pad_sequences expects List[List[T]] input, got {other}"
+                                return report(
+                                    errors,
+                                    CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            format!(
+                                                "pad_sequences expects List[List[T]] input, got {other}"
+                                            ),
                                         ),
+                                        vec![],
                                     ),
-                                    vec![],
-                                ));
-                                return Type::Error;
+                                );
                             }
                         }
                     }
                     "pad_sequences_to" => {
                         if arg_tys.len() != 3 {
-                            return Type::Error;
+                            return report_builtin_arity(errors, list, fname, 3, arg_tys.len());
                         }
                         let seqs_ty = subst.apply(&arg_tys[0]);
                         let width_ty = subst.apply(&arg_tys[1]);
                         let pad_ty = subst.apply(&arg_tys[2]);
                         if let Err(te) = unify(&width_ty, &Type::Prim(Prim::Int64), subst) {
-                            errors.push(te.into());
-                            return Type::Error;
+                            return report(errors, te.into());
                         }
                         // The padded (axis-1) dimension equals the `width`
                         // argument. When `width` is a literal — including
@@ -13198,8 +14313,7 @@ fn infer_app(
                                         if inner_name == "List" && inner_args.len() == 1 =>
                                     {
                                         if let Err(te) = unify(&inner_args[0], &pad_ty, subst) {
-                                            errors.push(te.into());
-                                            return Type::Error;
+                                            return report(errors, te.into());
                                         }
                                         match subst.apply(&inner_args[0]) {
                                             Type::Prim(precision) if precision.is_numeric() => {
@@ -13208,53 +14322,59 @@ fn infer_app(
                                                     TensorPrec::Concrete(precision),
                                                 );
                                             }
-                                            Type::Var(_) | Type::Error => return result_ty,
+                                            Type::Var(_) | Type::Error(_) => return result_ty,
                                             other => {
-                                                errors.push(CheckError::new(
-                                                    CheckErrorKind::TypeMismatch,
-                                                    with_macro_provenance(
-                                                        &deep::Expr::List(
-                                                            list.clone(),
-                                                            zero_span(),
+                                                return report(
+                                                    errors,
+                                                    CheckError::new(
+                                                        CheckErrorKind::TypeMismatch,
+                                                        with_macro_provenance(
+                                                            &deep::Expr::List(
+                                                                list.clone(),
+                                                                zero_span(),
+                                                            ),
+                                                            format!(
+                                                                "pad_sequences_to expects numeric nested lists, got {other}"
+                                                            ),
                                                         ),
-                                                        format!(
-                                                            "pad_sequences_to expects numeric nested lists, got {other}"
-                                                        ),
+                                                        vec![],
                                                     ),
-                                                    vec![],
-                                                ));
-                                                return Type::Error;
+                                                );
                                             }
                                         }
                                     }
                                     other => {
-                                        errors.push(CheckError::new(
-                                            CheckErrorKind::TypeMismatch,
-                                            with_macro_provenance(
-                                                &deep::Expr::List(list.clone(), zero_span()),
-                                                format!(
-                                                    "pad_sequences_to expects List[List[T]], got List[{other}]"
+                                        return report(
+                                            errors,
+                                            CheckError::new(
+                                                CheckErrorKind::TypeMismatch,
+                                                with_macro_provenance(
+                                                    &deep::Expr::List(list.clone(), zero_span()),
+                                                    format!(
+                                                        "pad_sequences_to expects List[List[T]], got List[{other}]"
+                                                    ),
                                                 ),
+                                                vec![],
                                             ),
-                                            vec![],
-                                        ));
-                                        return Type::Error;
+                                        );
                                     }
                                 }
                             }
-                            Type::Var(_) | Type::Error => return result_ty,
+                            Type::Var(_) | Type::Error(_) => return result_ty,
                             other => {
-                                errors.push(CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
-                                        format!(
-                                            "pad_sequences_to expects List[List[T]] input, got {other}"
+                                return report(
+                                    errors,
+                                    CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            format!(
+                                                "pad_sequences_to expects List[List[T]] input, got {other}"
+                                            ),
                                         ),
+                                        vec![],
                                     ),
-                                    vec![],
-                                ));
-                                return Type::Error;
+                                );
                             }
                         }
                     }
@@ -13302,8 +14422,7 @@ fn infer_app(
                     e.span_offset = Some(off);
                 }
             }
-            errors.push(e);
-            Type::Error
+            report(errors, e)
         }
     }
 }
@@ -13531,7 +14650,7 @@ fn types_structurally_equal(a: &Type, b: &Type) -> bool {
                 && types_structurally_equal(r1, r2)
         }
         (Type::Var(_), Type::Var(_)) => true,
-        (Type::Error, _) | (_, Type::Error) => true,
+        (Type::Error(_), _) | (_, Type::Error(_)) => true,
         _ => false,
     }
 }
@@ -13560,35 +14679,27 @@ fn infer_reduction_app(
     vg: &mut VarGen,
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
-    errors: &mut Vec<CheckError>,
-    typed_nodes: &mut usize,
-    total_nodes: &mut usize,
+    errors: &mut DiagnosticSink<'_>,
+    product: &mut InferenceProduct,
 ) -> Type {
     if fname == "argmax_reduce" || fname == "argmin_reduce" {
-        errors.push(CheckError::new(
-            CheckErrorKind::ArityMismatch,
-            format!(
-                "{fname} is an index-returning reduction and has no variadic \
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::ArityMismatch,
+                format!(
+                    "{fname} is an index-returning reduction and has no variadic \
                  named-axis form: an index along one axis is not composable with a \
                  second reduction (spec/04-type-system.md \u{00a7}4.5.3). Reduce one \
                  axis at a time."
+                ),
+                vec![],
             ),
-            vec![],
-        ));
-        return Type::Error;
+        );
     }
 
     let kids = children(list);
-    let _func_ty = infer_expr(
-        &kids[0],
-        env,
-        vg,
-        subst,
-        adt_reg,
-        errors,
-        typed_nodes,
-        total_nodes,
-    );
+    let _func_ty = infer_expr(&kids[0], env, vg, subst, adt_reg, errors, product);
     let arg_tys: Vec<Type> = kids[1..]
         .iter()
         .enumerate()
@@ -13599,21 +14710,12 @@ fn infer_reduction_app(
             if index >= 1 && symbolic_dim_ref_name(arg).is_some() {
                 Type::Prim(Prim::Int32)
             } else {
-                infer_expr(
-                    arg,
-                    env,
-                    vg,
-                    subst,
-                    adt_reg,
-                    errors,
-                    typed_nodes,
-                    total_nodes,
-                )
+                infer_expr(arg, env, vg, subst, adt_reg, errors, product)
             }
         })
         .collect();
-    if arg_tys.iter().any(|ty| matches!(ty, Type::Error)) {
-        return Type::Error;
+    if let Some(err) = propagate_if_error(&arg_tys) {
+        return err;
     }
 
     let result_ty = Type::Var(vg.fresh_tvar());
@@ -13635,34 +14737,26 @@ fn infer_expand_app(
     vg: &mut VarGen,
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
-    errors: &mut Vec<CheckError>,
-    typed_nodes: &mut usize,
-    total_nodes: &mut usize,
+    errors: &mut DiagnosticSink<'_>,
+    product: &mut InferenceProduct,
 ) -> Type {
     let kids = children(list);
     if kids.len() != 5 {
-        errors.push(CheckError::new(
-            CheckErrorKind::ArityMismatch,
-            format!(
-                "expand expects (tensor, axis, size) or the named-axis form \
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::ArityMismatch,
+                format!(
+                    "expand expects (tensor, axis, size) or the named-axis form \
                  (tensor, name, size, anchor), got {} arguments",
-                kids.len() - 1
+                    kids.len() - 1
+                ),
+                vec![],
             ),
-            vec![],
-        ));
-        return Type::Error;
+        );
     }
 
-    let _func_ty = infer_expr(
-        &kids[0],
-        env,
-        vg,
-        subst,
-        adt_reg,
-        errors,
-        typed_nodes,
-        total_nodes,
-    );
+    let _func_ty = infer_expr(&kids[0], env, vg, subst, adt_reg, errors, product);
     let arg_tys: Vec<Type> = kids[1..]
         .iter()
         .enumerate()
@@ -13675,16 +14769,7 @@ fn infer_expand_app(
             {
                 Type::Prim(Prim::Int32)
             } else {
-                infer_expr(
-                    arg,
-                    env,
-                    vg,
-                    subst,
-                    adt_reg,
-                    errors,
-                    typed_nodes,
-                    total_nodes,
-                )
+                infer_expr(arg, env, vg, subst, adt_reg, errors, product)
             }
         })
         .collect();
@@ -13694,29 +14779,33 @@ fn infer_expand_app(
     // check below (`check_named_expand_signature` reads the size from the raw
     // AST), rather than being silently accepted. Mirrors the generic-path
     // exemption in `infer_app`.
-    if arg_tys
-        .iter()
-        .enumerate()
-        .any(|(index, ty)| index != 2 && matches!(ty, Type::Error))
-    {
-        return Type::Error;
+    if let Some(err) = propagate_if_error(
+        arg_tys
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| *index != 2)
+            .map(|(_, ty)| ty),
+    ) {
+        return err;
     }
     // The size slot must still be an int32 (a literal, a symbolic dim, or a
     // runtime int32 expression — §4.7.2); a non-int size is a type error the
     // arity-3 scheme would otherwise have caught.
     let size_ty = subst.apply(&arg_tys[2]);
     match size_ty {
-        Type::Prim(Prim::Int32) | Type::Var(_) | Type::Error => {}
+        Type::Prim(Prim::Int32) | Type::Var(_) | Type::Error(_) => {}
         other => {
-            errors.push(CheckError::new(
-                CheckErrorKind::TypeMismatch,
-                with_macro_provenance(
-                    &deep::Expr::List(list.clone(), zero_span()),
-                    format!("expand expects an int32 size, got {other}"),
+            return report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::TypeMismatch,
+                    with_macro_provenance(
+                        &deep::Expr::List(list.clone(), zero_span()),
+                        format!("expand expects an int32 size, got {other}"),
+                    ),
+                    vec![],
                 ),
-                vec![],
-            ));
-            return Type::Error;
+            );
         }
     }
 
@@ -13756,89 +14845,65 @@ fn infer_permute_app(
     vg: &mut VarGen,
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
-    errors: &mut Vec<CheckError>,
-    typed_nodes: &mut usize,
-    total_nodes: &mut usize,
+    errors: &mut DiagnosticSink<'_>,
+    product: &mut InferenceProduct,
 ) -> Type {
     let kids = children(list);
     if kids.len() < 2 {
-        errors.push(CheckError::new(
-            CheckErrorKind::ArityMismatch,
-            "permute expects a tensor followed by one or more axis indices".to_string(),
-            vec![],
-        ));
-        return Type::Error;
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::ArityMismatch,
+                "permute expects a tensor followed by one or more axis indices".to_string(),
+                vec![],
+            ),
+        );
     }
 
-    let _func_ty = infer_expr(
-        &kids[0],
-        env,
-        vg,
-        subst,
-        adt_reg,
-        errors,
-        typed_nodes,
-        total_nodes,
-    );
-    let input_ty = infer_expr(
-        &kids[1],
-        env,
-        vg,
-        subst,
-        adt_reg,
-        errors,
-        typed_nodes,
-        total_nodes,
-    );
+    let _func_ty = infer_expr(&kids[0], env, vg, subst, adt_reg, errors, product);
+    let input_ty = infer_expr(&kids[1], env, vg, subst, adt_reg, errors, product);
     let axis_tys: Vec<Type> = kids[2..]
         .iter()
-        .map(|arg| {
-            infer_expr(
-                arg,
-                env,
-                vg,
-                subst,
-                adt_reg,
-                errors,
-                typed_nodes,
-                total_nodes,
-            )
-        })
+        .map(|arg| infer_expr(arg, env, vg, subst, adt_reg, errors, product))
         .collect();
 
-    if matches!(input_ty, Type::Error) || axis_tys.iter().any(|ty| matches!(ty, Type::Error)) {
-        return Type::Error;
+    if let Some(err) = propagate_if_error(std::iter::once(&input_ty).chain(axis_tys.iter())) {
+        return err;
     }
 
     for axis_ty in &axis_tys {
         let resolved = subst.apply(axis_ty);
         match resolved {
-            Type::Prim(Prim::Int32) | Type::Var(_) | Type::Error => {}
+            Type::Prim(Prim::Int32) | Type::Var(_) | Type::Error(_) => {}
             other => {
-                errors.push(CheckError::new(
-                    CheckErrorKind::TypeMismatch,
-                    with_macro_provenance(
-                        &deep::Expr::List(list.clone(), zero_span()),
-                        format!("permute expects int32 axis indices, got {other}"),
+                return report(
+                    errors,
+                    CheckError::new(
+                        CheckErrorKind::TypeMismatch,
+                        with_macro_provenance(
+                            &deep::Expr::List(list.clone(), zero_span()),
+                            format!("permute expects int32 axis indices, got {other}"),
+                        ),
+                        vec![],
                     ),
-                    vec![],
-                ));
-                return Type::Error;
+                );
             }
         }
     }
 
     let input_ty = type_for_readonly_check(&input_ty, subst);
     let Type::Tensor(dims, prec) = input_ty else {
-        if matches!(input_ty, Type::Var(_) | Type::Error) {
+        if matches!(input_ty, Type::Var(_) | Type::Error(_)) {
             return input_ty;
         }
-        errors.push(CheckError::new(
-            CheckErrorKind::TypeMismatch,
-            format!("permute expects tensor input, got {input_ty}"),
-            vec![],
-        ));
-        return Type::Error;
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::TypeMismatch,
+                format!("permute expects tensor input, got {input_ty}"),
+                vec![],
+            ),
+        );
     };
 
     // Uses `extract_int_for_dim` so `cast(N, int32)`-wrapped literal
@@ -13855,41 +14920,47 @@ fn infer_permute_app(
     };
 
     if axes.len() != dims.len() {
-        errors.push(CheckError::new(
-            CheckErrorKind::ArityMismatch,
-            format!(
-                "permute expects {} axis indices for rank {} tensor, got {}",
-                dims.len(),
-                dims.len(),
-                axes.len()
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::ArityMismatch,
+                format!(
+                    "permute expects {} axis indices for rank {} tensor, got {}",
+                    dims.len(),
+                    dims.len(),
+                    axes.len()
+                ),
+                vec![],
             ),
-            vec![],
-        ));
-        return Type::Error;
+        );
     }
 
     let mut seen = HashSet::new();
     let mut reordered = Vec::with_capacity(dims.len());
     for axis in axes {
         if axis < 0 || axis as usize >= dims.len() {
-            errors.push(CheckError::new(
-                CheckErrorKind::DimensionMismatch,
-                format!(
-                    "permute axis {axis} is out of bounds for rank {} tensor",
-                    dims.len()
+            return report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::DimensionMismatch,
+                    format!(
+                        "permute axis {axis} is out of bounds for rank {} tensor",
+                        dims.len()
+                    ),
+                    vec![],
                 ),
-                vec![],
-            ));
-            return Type::Error;
+            );
         }
         let axis = axis as usize;
         if !seen.insert(axis) {
-            errors.push(CheckError::new(
-                CheckErrorKind::DimensionMismatch,
-                format!("permute axis {axis} appears more than once"),
-                vec![],
-            ));
-            return Type::Error;
+            return report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::DimensionMismatch,
+                    format!("permute axis {axis} appears more than once"),
+                    vec![],
+                ),
+            );
         }
         reordered.push(dims[axis].clone());
     }
@@ -13904,59 +14975,32 @@ fn infer_reshape_app(
     vg: &mut VarGen,
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
-    errors: &mut Vec<CheckError>,
-    typed_nodes: &mut usize,
-    total_nodes: &mut usize,
+    errors: &mut DiagnosticSink<'_>,
+    product: &mut InferenceProduct,
 ) -> Type {
     let kids = children(list);
     if kids.len() < 2 || kids.len() > 3 {
-        errors.push(CheckError::new(
-            CheckErrorKind::ArityMismatch,
-            "reshape expects a tensor and an optional shape list".to_string(),
-            vec![],
-        ));
-        return Type::Error;
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::ArityMismatch,
+                "reshape expects a tensor and an optional shape list".to_string(),
+                vec![],
+            ),
+        );
     }
 
-    let _func_ty = infer_expr(
-        &kids[0],
-        env,
-        vg,
-        subst,
-        adt_reg,
-        errors,
-        typed_nodes,
-        total_nodes,
-    );
-    let input_ty = infer_expr(
-        &kids[1],
-        env,
-        vg,
-        subst,
-        adt_reg,
-        errors,
-        typed_nodes,
-        total_nodes,
-    );
+    let _func_ty = infer_expr(&kids[0], env, vg, subst, adt_reg, errors, product);
+    let input_ty = infer_expr(&kids[1], env, vg, subst, adt_reg, errors, product);
     let input_var_name = symbolic_dim_ref_name(&kids[1]).map(|s| s.to_string());
     match type_for_readonly_check(&input_ty, subst) {
         Type::Prim(precision) => {
             if let Some(shape_expr) = kids.get(2) {
-                let shape_ty = infer_expr(
-                    shape_expr,
-                    env,
-                    vg,
-                    subst,
-                    adt_reg,
-                    errors,
-                    typed_nodes,
-                    total_nodes,
-                );
+                let shape_ty = infer_expr(shape_expr, env, vg, subst, adt_reg, errors, product);
                 let expected_shape_ty =
                     Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int64)]);
                 if let Err(te) = unify(&shape_ty, &expected_shape_ty, subst) {
-                    errors.push(te.into());
-                    return Type::Error;
+                    return report(errors, te.into());
                 }
                 let dims = reshape_output_dims(shape_expr, input_var_name.as_deref(), &[], subst);
                 return Type::Tensor(dims, TensorPrec::Concrete(precision));
@@ -13966,21 +15010,11 @@ fn infer_reshape_app(
         }
         Type::Tensor(input_dims, precision) => {
             if let Some(shape_expr) = kids.get(2) {
-                let shape_ty = infer_expr(
-                    shape_expr,
-                    env,
-                    vg,
-                    subst,
-                    adt_reg,
-                    errors,
-                    typed_nodes,
-                    total_nodes,
-                );
+                let shape_ty = infer_expr(shape_expr, env, vg, subst, adt_reg, errors, product);
                 let expected_shape_ty =
                     Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int64)]);
                 if let Err(te) = unify(&shape_ty, &expected_shape_ty, subst) {
-                    errors.push(te.into());
-                    return Type::Error;
+                    return report(errors, te.into());
                 }
                 let dims =
                     reshape_output_dims(shape_expr, input_var_name.as_deref(), &input_dims, subst);
@@ -13989,35 +15023,25 @@ fn infer_reshape_app(
 
             Type::Tensor(vec![Dim::Wildcard], precision)
         }
-        Type::Var(_) | Type::Error => {
+        Type::Var(_) | Type::Error(_) => {
             if let Some(shape_expr) = kids.get(2) {
-                let shape_ty = infer_expr(
-                    shape_expr,
-                    env,
-                    vg,
-                    subst,
-                    adt_reg,
-                    errors,
-                    typed_nodes,
-                    total_nodes,
-                );
+                let shape_ty = infer_expr(shape_expr, env, vg, subst, adt_reg, errors, product);
                 let expected_shape_ty =
                     Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int64)]);
                 if let Err(te) = unify(&shape_ty, &expected_shape_ty, subst) {
-                    errors.push(te.into());
-                    return Type::Error;
+                    return report(errors, te.into());
                 }
             }
             input_ty
         }
-        _ => {
-            errors.push(CheckError::new(
+        _ => report(
+            errors,
+            CheckError::new(
                 CheckErrorKind::TypeMismatch,
                 "reshape expects tensor input".to_string(),
                 vec![],
-            ));
-            Type::Error
-        }
+            ),
+        ),
     }
 }
 
@@ -14040,88 +15064,63 @@ fn infer_shrink_app(
     vg: &mut VarGen,
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
-    errors: &mut Vec<CheckError>,
-    typed_nodes: &mut usize,
-    total_nodes: &mut usize,
+    errors: &mut DiagnosticSink<'_>,
+    product: &mut InferenceProduct,
 ) -> Type {
     let kids = children(list);
     if kids.len() != 3 {
-        errors.push(CheckError::new(
+        return report(errors, CheckError::new(
             CheckErrorKind::ArityMismatch,
             "shrink expects a tensor and a list of [start, end] bounds pairs, one pair per axis"
                 .to_string(),
             vec![],
         ));
-        return Type::Error;
     }
 
-    let _func_ty = infer_expr(
-        &kids[0],
-        env,
-        vg,
-        subst,
-        adt_reg,
-        errors,
-        typed_nodes,
-        total_nodes,
-    );
-    let input_ty = infer_expr(
-        &kids[1],
-        env,
-        vg,
-        subst,
-        adt_reg,
-        errors,
-        typed_nodes,
-        total_nodes,
-    );
-    let bounds_ty = infer_expr(
-        &kids[2],
-        env,
-        vg,
-        subst,
-        adt_reg,
-        errors,
-        typed_nodes,
-        total_nodes,
-    );
+    let _func_ty = infer_expr(&kids[0], env, vg, subst, adt_reg, errors, product);
+    let input_ty = infer_expr(&kids[1], env, vg, subst, adt_reg, errors, product);
+    let bounds_ty = infer_expr(&kids[2], env, vg, subst, adt_reg, errors, product);
 
-    if matches!(input_ty, Type::Error) || matches!(bounds_ty, Type::Error) {
-        return Type::Error;
+    if let Some(err) = propagate_if_error([&input_ty, &bounds_ty]) {
+        return err;
     }
 
     // The bounds argument must be a `List[List[Int32]]`.
     let int_list = Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int32)]);
     let expected_bounds_ty = Type::Adt("List".to_string(), vec![int_list]);
     if let Err(_te) = unify(&bounds_ty, &expected_bounds_ty, subst) {
-        errors.push(CheckError::new(
-            CheckErrorKind::TypeMismatch,
-            with_macro_provenance(
-                &deep::Expr::List(list.clone(), zero_span()),
-                format!(
-                    "shrink expects a list of [start, end] int32 bounds pairs, got {}",
-                    subst.apply(&bounds_ty)
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::TypeMismatch,
+                with_macro_provenance(
+                    &deep::Expr::List(list.clone(), zero_span()),
+                    format!(
+                        "shrink expects a list of [start, end] int32 bounds pairs, got {}",
+                        subst.apply(&bounds_ty)
+                    ),
                 ),
+                vec![],
             ),
-            vec![],
-        ));
-        return Type::Error;
+        );
     }
 
     let input_resolved = type_for_readonly_check(&input_ty, subst);
     let (dims, prec) = match input_resolved {
         Type::Tensor(dims, prec) => (dims, prec),
-        Type::Var(_) | Type::Error => return subst.apply(&input_ty),
+        Type::Var(_) | Type::Error(_) => return subst.apply(&input_ty),
         other => {
-            errors.push(CheckError::new(
-                CheckErrorKind::TypeMismatch,
-                with_macro_provenance(
-                    &deep::Expr::List(list.clone(), zero_span()),
-                    format!("shrink expects tensor input, got {other}"),
+            return report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::TypeMismatch,
+                    with_macro_provenance(
+                        &deep::Expr::List(list.clone(), zero_span()),
+                        format!("shrink expects tensor input, got {other}"),
+                    ),
+                    vec![],
                 ),
-                vec![],
-            ));
-            return Type::Error;
+            );
         }
     };
 
@@ -14143,33 +15142,37 @@ fn infer_shrink_app(
             return Type::Tensor(vec![Dim::Wildcard; dims.len()], prec);
         }
         PairListShape::Malformed { axis, reason } => {
-            errors.push(CheckError::new(
-                CheckErrorKind::TypeMismatch,
-                with_macro_provenance(
-                    &deep::Expr::List(list.clone(), zero_span()),
-                    format!("shrink axis {axis} pair {reason}"),
+            return report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::TypeMismatch,
+                    with_macro_provenance(
+                        &deep::Expr::List(list.clone(), zero_span()),
+                        format!("shrink axis {axis} pair {reason}"),
+                    ),
+                    vec![],
                 ),
-                vec![],
-            ));
-            return Type::Error;
+            );
         }
     };
 
     if bounds.len() != dims.len() {
-        errors.push(CheckError::new(
-            CheckErrorKind::ArityMismatch,
-            with_macro_provenance(
-                &deep::Expr::List(list.clone(), zero_span()),
-                format!(
-                    "shrink expects {} bounds pairs for rank {} tensor, got {}",
-                    dims.len(),
-                    dims.len(),
-                    bounds.len()
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::ArityMismatch,
+                with_macro_provenance(
+                    &deep::Expr::List(list.clone(), zero_span()),
+                    format!(
+                        "shrink expects {} bounds pairs for rank {} tensor, got {}",
+                        dims.len(),
+                        dims.len(),
+                        bounds.len()
+                    ),
                 ),
+                vec![],
             ),
-            vec![],
-        ));
-        return Type::Error;
+        );
     }
 
     let mut out_dims = Vec::with_capacity(dims.len());
@@ -14187,43 +15190,49 @@ fn infer_shrink_app(
             continue;
         };
         if *start < 0 || *end < 0 {
-            errors.push(CheckError::new(
-                CheckErrorKind::DimensionMismatch,
-                with_macro_provenance(
-                    &deep::Expr::List(list.clone(), zero_span()),
-                    format!("shrink axis {axis} bound [{start}, {end}] has negative endpoint"),
+            return report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::DimensionMismatch,
+                    with_macro_provenance(
+                        &deep::Expr::List(list.clone(), zero_span()),
+                        format!("shrink axis {axis} bound [{start}, {end}] has negative endpoint"),
+                    ),
+                    vec![],
                 ),
-                vec![],
-            ));
-            return Type::Error;
+            );
         }
         if *start >= *end {
-            errors.push(CheckError::new(
-                CheckErrorKind::DimensionMismatch,
-                with_macro_provenance(
-                    &deep::Expr::List(list.clone(), zero_span()),
-                    format!(
-                        "shrink axis {axis} bound [{start}, {end}] is empty or inverted (start >= end)"
+            return report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::DimensionMismatch,
+                    with_macro_provenance(
+                        &deep::Expr::List(list.clone(), zero_span()),
+                        format!(
+                            "shrink axis {axis} bound [{start}, {end}] is empty or inverted (start >= end)"
+                        ),
                     ),
+                    vec![],
                 ),
-                vec![],
-            ));
-            return Type::Error;
+            );
         }
         if let Dim::Lit(input_dim) = dim
             && *end > *input_dim
         {
-            errors.push(CheckError::new(
-                CheckErrorKind::DimensionMismatch,
-                with_macro_provenance(
-                    &deep::Expr::List(list.clone(), zero_span()),
-                    format!(
-                        "shrink axis {axis} bound [{start}, {end}] is out of range for input dim {input_dim}"
+            return report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::DimensionMismatch,
+                    with_macro_provenance(
+                        &deep::Expr::List(list.clone(), zero_span()),
+                        format!(
+                            "shrink axis {axis} bound [{start}, {end}] is out of range for input dim {input_dim}"
+                        ),
                     ),
+                    vec![],
                 ),
-                vec![],
-            ));
-            return Type::Error;
+            );
         }
         out_dims.push(Dim::Lit(end - start));
     }
@@ -14249,74 +15258,49 @@ fn infer_stride_app(
     vg: &mut VarGen,
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
-    errors: &mut Vec<CheckError>,
-    typed_nodes: &mut usize,
-    total_nodes: &mut usize,
+    errors: &mut DiagnosticSink<'_>,
+    product: &mut InferenceProduct,
 ) -> Type {
     let kids = children(list);
     if kids.len() < 3 {
-        errors.push(CheckError::new(
-            CheckErrorKind::ArityMismatch,
-            "stride expects a tensor followed by one positive int32 stride per axis".to_string(),
-            vec![],
-        ));
-        return Type::Error;
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::ArityMismatch,
+                "stride expects a tensor followed by one positive int32 stride per axis"
+                    .to_string(),
+                vec![],
+            ),
+        );
     }
 
-    let _func_ty = infer_expr(
-        &kids[0],
-        env,
-        vg,
-        subst,
-        adt_reg,
-        errors,
-        typed_nodes,
-        total_nodes,
-    );
-    let input_ty = infer_expr(
-        &kids[1],
-        env,
-        vg,
-        subst,
-        adt_reg,
-        errors,
-        typed_nodes,
-        total_nodes,
-    );
+    let _func_ty = infer_expr(&kids[0], env, vg, subst, adt_reg, errors, product);
+    let input_ty = infer_expr(&kids[1], env, vg, subst, adt_reg, errors, product);
     let stride_tys: Vec<Type> = kids[2..]
         .iter()
-        .map(|arg| {
-            infer_expr(
-                arg,
-                env,
-                vg,
-                subst,
-                adt_reg,
-                errors,
-                typed_nodes,
-                total_nodes,
-            )
-        })
+        .map(|arg| infer_expr(arg, env, vg, subst, adt_reg, errors, product))
         .collect();
 
-    if matches!(input_ty, Type::Error) || stride_tys.iter().any(|ty| matches!(ty, Type::Error)) {
-        return Type::Error;
+    if let Some(err) = propagate_if_error(std::iter::once(&input_ty).chain(stride_tys.iter())) {
+        return err;
     }
 
     for stride_ty in &stride_tys {
         let resolved = subst.apply(stride_ty);
         match resolved {
-            Type::Prim(Prim::Int32) | Type::Var(_) | Type::Error => {}
+            Type::Prim(Prim::Int32) | Type::Var(_) | Type::Error(_) => {}
             other => {
-                errors.push(CheckError::new(
-                    CheckErrorKind::TypeMismatch,
-                    with_macro_provenance(
-                        &deep::Expr::List(list.clone(), zero_span()),
-                        format!("stride expects int32 strides, got {other}"),
+                return report(
+                    errors,
+                    CheckError::new(
+                        CheckErrorKind::TypeMismatch,
+                        with_macro_provenance(
+                            &deep::Expr::List(list.clone(), zero_span()),
+                            format!("stride expects int32 strides, got {other}"),
+                        ),
+                        vec![],
                     ),
-                    vec![],
-                ));
-                return Type::Error;
+                );
             }
         }
     }
@@ -14324,17 +15308,19 @@ fn infer_stride_app(
     let input_resolved = type_for_readonly_check(&input_ty, subst);
     let (dims, prec) = match input_resolved {
         Type::Tensor(dims, prec) => (dims, prec),
-        Type::Var(_) | Type::Error => return subst.apply(&input_ty),
+        Type::Var(_) | Type::Error(_) => return subst.apply(&input_ty),
         other => {
-            errors.push(CheckError::new(
-                CheckErrorKind::TypeMismatch,
-                with_macro_provenance(
-                    &deep::Expr::List(list.clone(), zero_span()),
-                    format!("stride expects tensor input, got {other}"),
+            return report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::TypeMismatch,
+                    with_macro_provenance(
+                        &deep::Expr::List(list.clone(), zero_span()),
+                        format!("stride expects tensor input, got {other}"),
+                    ),
+                    vec![],
                 ),
-                vec![],
-            ));
-            return Type::Error;
+            );
         }
     };
 
@@ -14349,20 +15335,22 @@ fn infer_stride_app(
     let strides: Vec<Option<i64>> = kids[2..].iter().map(extract_int_for_dim).collect();
 
     if strides.len() != dims.len() {
-        errors.push(CheckError::new(
-            CheckErrorKind::ArityMismatch,
-            with_macro_provenance(
-                &deep::Expr::List(list.clone(), zero_span()),
-                format!(
-                    "stride expects {} strides for rank {} tensor, got {}",
-                    dims.len(),
-                    dims.len(),
-                    strides.len()
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::ArityMismatch,
+                with_macro_provenance(
+                    &deep::Expr::List(list.clone(), zero_span()),
+                    format!(
+                        "stride expects {} strides for rank {} tensor, got {}",
+                        dims.len(),
+                        dims.len(),
+                        strides.len()
+                    ),
                 ),
+                vec![],
             ),
-            vec![],
-        ));
-        return Type::Error;
+        );
     }
 
     let mut out_dims = Vec::with_capacity(dims.len());
@@ -14373,17 +15361,19 @@ fn infer_stride_app(
             continue;
         };
         if *step <= 0 {
-            errors.push(CheckError::new(
-                CheckErrorKind::DimensionMismatch,
-                with_macro_provenance(
-                    &deep::Expr::List(list.clone(), zero_span()),
-                    format!(
-                        "stride axis {axis} step {step} must be positive (zero or negative strides are not allowed)"
+            return report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::DimensionMismatch,
+                    with_macro_provenance(
+                        &deep::Expr::List(list.clone(), zero_span()),
+                        format!(
+                            "stride axis {axis} step {step} must be positive (zero or negative strides are not allowed)"
+                        ),
                     ),
+                    vec![],
                 ),
-                vec![],
-            ));
-            return Type::Error;
+            );
         }
         let step_us = *step as usize;
         match dim {
@@ -14426,96 +15416,62 @@ fn infer_pad_app(
     vg: &mut VarGen,
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
-    errors: &mut Vec<CheckError>,
-    typed_nodes: &mut usize,
-    total_nodes: &mut usize,
+    errors: &mut DiagnosticSink<'_>,
+    product: &mut InferenceProduct,
 ) -> Type {
     let kids = children(list);
     if kids.len() != 4 {
-        errors.push(CheckError::new(
+        return report(errors, CheckError::new(
             CheckErrorKind::ArityMismatch,
             "pad expects a tensor, a list of [lo, hi] padding pairs (one per axis), and a fill scalar".to_string(),
             vec![],
         ));
-        return Type::Error;
     }
 
-    let _func_ty = infer_expr(
-        &kids[0],
-        env,
-        vg,
-        subst,
-        adt_reg,
-        errors,
-        typed_nodes,
-        total_nodes,
-    );
-    let input_ty = infer_expr(
-        &kids[1],
-        env,
-        vg,
-        subst,
-        adt_reg,
-        errors,
-        typed_nodes,
-        total_nodes,
-    );
-    let padding_ty = infer_expr(
-        &kids[2],
-        env,
-        vg,
-        subst,
-        adt_reg,
-        errors,
-        typed_nodes,
-        total_nodes,
-    );
-    let fill_ty = infer_expr(
-        &kids[3],
-        env,
-        vg,
-        subst,
-        adt_reg,
-        errors,
-        typed_nodes,
-        total_nodes,
-    );
+    let _func_ty = infer_expr(&kids[0], env, vg, subst, adt_reg, errors, product);
+    let input_ty = infer_expr(&kids[1], env, vg, subst, adt_reg, errors, product);
+    let padding_ty = infer_expr(&kids[2], env, vg, subst, adt_reg, errors, product);
+    let fill_ty = infer_expr(&kids[3], env, vg, subst, adt_reg, errors, product);
 
-    if matches!(input_ty, Type::Error) || matches!(padding_ty, Type::Error) {
-        return Type::Error;
+    if let Some(err) = propagate_if_error([&input_ty, &padding_ty]) {
+        return err;
     }
 
     let int_list = Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int32)]);
     let expected_padding_ty = Type::Adt("List".to_string(), vec![int_list]);
     if let Err(_te) = unify(&padding_ty, &expected_padding_ty, subst) {
-        errors.push(CheckError::new(
-            CheckErrorKind::TypeMismatch,
-            with_macro_provenance(
-                &deep::Expr::List(list.clone(), zero_span()),
-                format!(
-                    "pad expects a list of [lo, hi] int32 padding pairs, got {}",
-                    subst.apply(&padding_ty)
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::TypeMismatch,
+                with_macro_provenance(
+                    &deep::Expr::List(list.clone(), zero_span()),
+                    format!(
+                        "pad expects a list of [lo, hi] int32 padding pairs, got {}",
+                        subst.apply(&padding_ty)
+                    ),
                 ),
+                vec![],
             ),
-            vec![],
-        ));
-        return Type::Error;
+        );
     }
 
     let input_resolved = type_for_readonly_check(&input_ty, subst);
     let (dims, prec) = match input_resolved {
         Type::Tensor(dims, prec) => (dims, prec),
-        Type::Var(_) | Type::Error => return subst.apply(&input_ty),
+        Type::Var(_) | Type::Error(_) => return subst.apply(&input_ty),
         other => {
-            errors.push(CheckError::new(
-                CheckErrorKind::TypeMismatch,
-                with_macro_provenance(
-                    &deep::Expr::List(list.clone(), zero_span()),
-                    format!("pad expects tensor input, got {other}"),
+            return report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::TypeMismatch,
+                    with_macro_provenance(
+                        &deep::Expr::List(list.clone(), zero_span()),
+                        format!("pad expects tensor input, got {other}"),
+                    ),
+                    vec![],
                 ),
-                vec![],
-            ));
-            return Type::Error;
+            );
         }
     };
 
@@ -14539,18 +15495,20 @@ fn infer_pad_app(
         }
     };
     if let Err(_te) = unify(&fill_ty, &expected_fill_ty, subst) {
-        errors.push(CheckError::new(
-            CheckErrorKind::TypeMismatch,
-            with_macro_provenance(
-                &deep::Expr::List(list.clone(), zero_span()),
-                format!(
-                    "pad fill must be a scalar of the input tensor precision ({expected_fill_ty}), got {}",
-                    subst.apply(&fill_ty)
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::TypeMismatch,
+                with_macro_provenance(
+                    &deep::Expr::List(list.clone(), zero_span()),
+                    format!(
+                        "pad fill must be a scalar of the input tensor precision ({expected_fill_ty}), got {}",
+                        subst.apply(&fill_ty)
+                    ),
                 ),
+                vec![],
             ),
-            vec![],
-        ));
-        return Type::Error;
+        );
     }
 
     let padding: Vec<Option<(i64, i64)>> = match cons_chain_int_pairs(&kids[2]) {
@@ -14562,33 +15520,37 @@ fn infer_pad_app(
             return Type::Tensor(vec![Dim::Wildcard; dims.len()], prec);
         }
         PairListShape::Malformed { axis, reason } => {
-            errors.push(CheckError::new(
-                CheckErrorKind::TypeMismatch,
-                with_macro_provenance(
-                    &deep::Expr::List(list.clone(), zero_span()),
-                    format!("pad axis {axis} pair {reason}"),
+            return report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::TypeMismatch,
+                    with_macro_provenance(
+                        &deep::Expr::List(list.clone(), zero_span()),
+                        format!("pad axis {axis} pair {reason}"),
+                    ),
+                    vec![],
                 ),
-                vec![],
-            ));
-            return Type::Error;
+            );
         }
     };
 
     if padding.len() != dims.len() {
-        errors.push(CheckError::new(
-            CheckErrorKind::ArityMismatch,
-            with_macro_provenance(
-                &deep::Expr::List(list.clone(), zero_span()),
-                format!(
-                    "pad expects {} padding pairs for rank {} tensor, got {}",
-                    dims.len(),
-                    dims.len(),
-                    padding.len()
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::ArityMismatch,
+                with_macro_provenance(
+                    &deep::Expr::List(list.clone(), zero_span()),
+                    format!(
+                        "pad expects {} padding pairs for rank {} tensor, got {}",
+                        dims.len(),
+                        dims.len(),
+                        padding.len()
+                    ),
                 ),
+                vec![],
             ),
-            vec![],
-        ));
-        return Type::Error;
+        );
     }
 
     let mut out_dims = Vec::with_capacity(dims.len());
@@ -14599,15 +15561,17 @@ fn infer_pad_app(
             continue;
         };
         if *lo < 0 || *hi < 0 {
-            errors.push(CheckError::new(
-                CheckErrorKind::DimensionMismatch,
-                with_macro_provenance(
-                    &deep::Expr::List(list.clone(), zero_span()),
-                    format!("pad axis {axis} padding [{lo}, {hi}] has negative entry"),
+            return report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::DimensionMismatch,
+                    with_macro_provenance(
+                        &deep::Expr::List(list.clone(), zero_span()),
+                        format!("pad axis {axis} padding [{lo}, {hi}] has negative entry"),
+                    ),
+                    vec![],
                 ),
-                vec![],
-            ));
-            return Type::Error;
+            );
         }
         match dim {
             Dim::Lit(input_dim) => {
@@ -14650,114 +15614,82 @@ fn infer_reduce_window_app(
     vg: &mut VarGen,
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
-    errors: &mut Vec<CheckError>,
-    typed_nodes: &mut usize,
-    total_nodes: &mut usize,
+    errors: &mut DiagnosticSink<'_>,
+    product: &mut InferenceProduct,
 ) -> Type {
     let kids = children(list);
     if kids.len() != 4 {
-        errors.push(CheckError::new(
-            CheckErrorKind::ArityMismatch,
-            format!(
-                "{name} expects 3 arguments (tensor, window_shape, strides), got {}",
-                kids.len().saturating_sub(1)
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::ArityMismatch,
+                format!(
+                    "{name} expects 3 arguments (tensor, window_shape, strides), got {}",
+                    kids.len().saturating_sub(1)
+                ),
+                vec![],
             ),
-            vec![],
-        ));
-        return Type::Error;
+        );
     }
-    let _func_ty = infer_expr(
-        &kids[0],
-        env,
-        vg,
-        subst,
-        adt_reg,
-        errors,
-        typed_nodes,
-        total_nodes,
-    );
-    let input_ty = infer_expr(
-        &kids[1],
-        env,
-        vg,
-        subst,
-        adt_reg,
-        errors,
-        typed_nodes,
-        total_nodes,
-    );
-    let window_ty = infer_expr(
-        &kids[2],
-        env,
-        vg,
-        subst,
-        adt_reg,
-        errors,
-        typed_nodes,
-        total_nodes,
-    );
-    let stride_ty = infer_expr(
-        &kids[3],
-        env,
-        vg,
-        subst,
-        adt_reg,
-        errors,
-        typed_nodes,
-        total_nodes,
-    );
+    let _func_ty = infer_expr(&kids[0], env, vg, subst, adt_reg, errors, product);
+    let input_ty = infer_expr(&kids[1], env, vg, subst, adt_reg, errors, product);
+    let window_ty = infer_expr(&kids[2], env, vg, subst, adt_reg, errors, product);
+    let stride_ty = infer_expr(&kids[3], env, vg, subst, adt_reg, errors, product);
 
-    if matches!(input_ty, Type::Error)
-        || matches!(window_ty, Type::Error)
-        || matches!(stride_ty, Type::Error)
-    {
-        return Type::Error;
+    if let Some(err) = propagate_if_error([&input_ty, &window_ty, &stride_ty]) {
+        return err;
     }
 
     let int_list = Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int32)]);
     if let Err(_te) = unify(&window_ty, &int_list, subst) {
-        errors.push(CheckError::new(
-            CheckErrorKind::TypeMismatch,
-            with_macro_provenance(
-                &deep::Expr::List(list.clone(), zero_span()),
-                format!(
-                    "{name} expects window_shape to be List[int32], got {}",
-                    subst.apply(&window_ty)
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::TypeMismatch,
+                with_macro_provenance(
+                    &deep::Expr::List(list.clone(), zero_span()),
+                    format!(
+                        "{name} expects window_shape to be List[int32], got {}",
+                        subst.apply(&window_ty)
+                    ),
                 ),
+                vec![],
             ),
-            vec![],
-        ));
-        return Type::Error;
+        );
     }
     if let Err(_te) = unify(&stride_ty, &int_list, subst) {
-        errors.push(CheckError::new(
-            CheckErrorKind::TypeMismatch,
-            with_macro_provenance(
-                &deep::Expr::List(list.clone(), zero_span()),
-                format!(
-                    "{name} expects strides to be List[int32], got {}",
-                    subst.apply(&stride_ty)
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::TypeMismatch,
+                with_macro_provenance(
+                    &deep::Expr::List(list.clone(), zero_span()),
+                    format!(
+                        "{name} expects strides to be List[int32], got {}",
+                        subst.apply(&stride_ty)
+                    ),
                 ),
+                vec![],
             ),
-            vec![],
-        ));
-        return Type::Error;
+        );
     }
 
     let input_resolved = type_for_readonly_check(&input_ty, subst);
     let (dims, prec) = match input_resolved {
         Type::Tensor(dims, prec) => (dims, prec),
-        Type::Var(_) | Type::Error => return subst.apply(&input_ty),
+        Type::Var(_) | Type::Error(_) => return subst.apply(&input_ty),
         other => {
-            errors.push(CheckError::new(
-                CheckErrorKind::TypeMismatch,
-                with_macro_provenance(
-                    &deep::Expr::List(list.clone(), zero_span()),
-                    format!("{name} expects tensor input, got {other}"),
+            return report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::TypeMismatch,
+                    with_macro_provenance(
+                        &deep::Expr::List(list.clone(), zero_span()),
+                        format!("{name} expects tensor input, got {other}"),
+                    ),
+                    vec![],
                 ),
-                vec![],
-            ));
-            return Type::Error;
+            );
         }
     };
 
@@ -14772,67 +15704,77 @@ fn infer_reduce_window_app(
     };
 
     if window_shape.is_empty() || strides.is_empty() {
-        errors.push(CheckError::new(
-            CheckErrorKind::ArityMismatch,
-            with_macro_provenance(
-                &deep::Expr::List(list.clone(), zero_span()),
-                format!("{name} requires a non-empty window_shape and strides"),
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::ArityMismatch,
+                with_macro_provenance(
+                    &deep::Expr::List(list.clone(), zero_span()),
+                    format!("{name} requires a non-empty window_shape and strides"),
+                ),
+                vec![],
             ),
-            vec![],
-        ));
-        return Type::Error;
+        );
     }
     if window_shape.len() != strides.len() {
-        errors.push(CheckError::new(
-            CheckErrorKind::ArityMismatch,
-            with_macro_provenance(
-                &deep::Expr::List(list.clone(), zero_span()),
-                format!(
-                    "{name} window_shape (len {}) and strides (len {}) must agree",
-                    window_shape.len(),
-                    strides.len()
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::ArityMismatch,
+                with_macro_provenance(
+                    &deep::Expr::List(list.clone(), zero_span()),
+                    format!(
+                        "{name} window_shape (len {}) and strides (len {}) must agree",
+                        window_shape.len(),
+                        strides.len()
+                    ),
                 ),
+                vec![],
             ),
-            vec![],
-        ));
-        return Type::Error;
+        );
     }
     let n = window_shape.len();
     if dims.len() < n {
-        errors.push(CheckError::new(
-            CheckErrorKind::DimensionMismatch,
-            with_macro_provenance(
-                &deep::Expr::List(list.clone(), zero_span()),
-                format!("{name} window arity {n} exceeds tensor rank {}", dims.len()),
-            ),
-            vec![],
-        ));
-        return Type::Error;
-    }
-    for (i, &w) in window_shape.iter().enumerate() {
-        if w <= 0 {
-            errors.push(CheckError::new(
+        return report(
+            errors,
+            CheckError::new(
                 CheckErrorKind::DimensionMismatch,
                 with_macro_provenance(
                     &deep::Expr::List(list.clone(), zero_span()),
-                    format!("{name} window_shape[{i}] = {w} must be >= 1"),
+                    format!("{name} window arity {n} exceeds tensor rank {}", dims.len()),
                 ),
                 vec![],
-            ));
-            return Type::Error;
+            ),
+        );
+    }
+    for (i, &w) in window_shape.iter().enumerate() {
+        if w <= 0 {
+            return report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::DimensionMismatch,
+                    with_macro_provenance(
+                        &deep::Expr::List(list.clone(), zero_span()),
+                        format!("{name} window_shape[{i}] = {w} must be >= 1"),
+                    ),
+                    vec![],
+                ),
+            );
         }
     }
     for (i, &s) in strides.iter().enumerate() {
         if s <= 0 {
-            errors.push(CheckError::new(
-                CheckErrorKind::DimensionMismatch,
-                with_macro_provenance(
-                    &deep::Expr::List(list.clone(), zero_span()),
-                    format!("{name} strides[{i}] = {s} must be >= 1"),
+            return report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::DimensionMismatch,
+                    with_macro_provenance(
+                        &deep::Expr::List(list.clone(), zero_span()),
+                        format!("{name} strides[{i}] = {s} must be >= 1"),
+                    ),
+                    vec![],
                 ),
-                vec![],
-            ));
-            return Type::Error;
+            );
         }
     }
     let leading = dims.len() - n;
@@ -14845,18 +15787,20 @@ fn infer_reduce_window_app(
                 let w = window_shape[i];
                 let s = strides[i];
                 if *in_dim < w {
-                    errors.push(CheckError::new(
-                        CheckErrorKind::DimensionMismatch,
-                        with_macro_provenance(
-                            &deep::Expr::List(list.clone(), zero_span()),
-                            format!(
-                                "{name} axis {} input dim {in_dim} < window_shape[{i}] = {w}",
-                                leading + i
+                    return report(
+                        errors,
+                        CheckError::new(
+                            CheckErrorKind::DimensionMismatch,
+                            with_macro_provenance(
+                                &deep::Expr::List(list.clone(), zero_span()),
+                                format!(
+                                    "{name} axis {} input dim {in_dim} < window_shape[{i}] = {w}",
+                                    leading + i
+                                ),
                             ),
+                            vec![],
                         ),
-                        vec![],
-                    ));
-                    return Type::Error;
+                    );
                 }
                 // `in_dim >= w` (checked above) and `s >= 1` guarantee
                 // `out = floor((in_dim - w) / s) + 1 >= 1`, so the Valid
@@ -15405,10 +16349,10 @@ fn check_layer_norm_signature(
     result_ty: &Type,
     _vg: &mut VarGen,
     subst: &mut Subst,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
 ) -> Type {
     if arg_tys.len() != 3 {
-        return Type::Error;
+        return report_builtin_arity_bare(errors, "layer_norm", "3 arguments", arg_tys.len());
     }
 
     let x_ty = type_for_readonly_check(&arg_tys[0], subst);
@@ -15417,95 +16361,107 @@ fn check_layer_norm_signature(
 
     let (x_dims, x_prec) = match x_ty {
         Type::Tensor(dims, prec) => (dims, prec),
-        Type::Var(_) | Type::Error => return subst.apply(result_ty),
+        Type::Var(_) | Type::Error(_) => return subst.apply(result_ty),
         other => {
-            errors.push(CheckError::new(
-                CheckErrorKind::TypeMismatch,
-                format!("layer_norm expects tensor input, got {other}"),
-                vec![],
-            ));
-            return Type::Error;
+            return report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::TypeMismatch,
+                    format!("layer_norm expects tensor input, got {other}"),
+                    vec![],
+                ),
+            );
         }
     };
 
     let (gamma_dims, gamma_prec) = match gamma_ty {
         Type::Tensor(dims, prec) => (dims, prec),
-        Type::Var(_) | Type::Error => return subst.apply(result_ty),
+        Type::Var(_) | Type::Error(_) => return subst.apply(result_ty),
         other => {
-            errors.push(CheckError::new(
-                CheckErrorKind::TypeMismatch,
-                format!("layer_norm expects tensor gamma, got {other}"),
-                vec![],
-            ));
-            return Type::Error;
+            return report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::TypeMismatch,
+                    format!("layer_norm expects tensor gamma, got {other}"),
+                    vec![],
+                ),
+            );
         }
     };
 
     let (beta_dims, beta_prec) = match beta_ty {
         Type::Tensor(dims, prec) => (dims, prec),
-        Type::Var(_) | Type::Error => return subst.apply(result_ty),
+        Type::Var(_) | Type::Error(_) => return subst.apply(result_ty),
         other => {
-            errors.push(CheckError::new(
-                CheckErrorKind::TypeMismatch,
-                format!("layer_norm expects tensor beta, got {other}"),
-                vec![],
-            ));
-            return Type::Error;
+            return report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::TypeMismatch,
+                    format!("layer_norm expects tensor beta, got {other}"),
+                    vec![],
+                ),
+            );
         }
     };
 
     if x_dims.is_empty() {
-        errors.push(CheckError::new(
-            CheckErrorKind::DimensionMismatch,
-            "layer_norm expects rank >= 1 input tensor".to_string(),
-            vec![],
-        ));
-        return Type::Error;
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::DimensionMismatch,
+                "layer_norm expects rank >= 1 input tensor".to_string(),
+                vec![],
+            ),
+        );
     }
     if gamma_dims.len() != 1 {
-        errors.push(CheckError::new(
-            CheckErrorKind::DimensionMismatch,
-            format!(
-                "layer_norm expects rank-1 gamma, got rank {}",
-                gamma_dims.len()
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::DimensionMismatch,
+                format!(
+                    "layer_norm expects rank-1 gamma, got rank {}",
+                    gamma_dims.len()
+                ),
+                vec![],
             ),
-            vec![],
-        ));
-        return Type::Error;
+        );
     }
     if beta_dims.len() != 1 {
-        errors.push(CheckError::new(
-            CheckErrorKind::DimensionMismatch,
-            format!(
-                "layer_norm expects rank-1 beta, got rank {}",
-                beta_dims.len()
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::DimensionMismatch,
+                format!(
+                    "layer_norm expects rank-1 beta, got rank {}",
+                    beta_dims.len()
+                ),
+                vec![],
             ),
-            vec![],
-        ));
-        return Type::Error;
+        );
     }
     if x_prec != gamma_prec || x_prec != beta_prec {
-        errors.push(CheckError::new(
-            CheckErrorKind::PrecisionMismatch,
-            format!(
-                "layer_norm requires matching precisions, got {}, {}, {}",
-                x_prec.name(),
-                gamma_prec.name(),
-                beta_prec.name()
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::PrecisionMismatch,
+                format!(
+                    "layer_norm requires matching precisions, got {}, {}, {}",
+                    x_prec.name(),
+                    gamma_prec.name(),
+                    beta_prec.name()
+                ),
+                vec!["Insert explicit cast".to_string()],
             ),
-            vec!["Insert explicit cast".to_string()],
-        ));
-        return Type::Error;
+        );
     }
 
     let hidden_dim = x_dims.last().cloned().expect("checked non-empty");
     if let Err(te) = unify_dim(&hidden_dim, &gamma_dims[0], subst) {
-        errors.push(te.into());
-        return Type::Error;
+        return report(errors, te.into());
     }
     if let Err(te) = unify_dim(&hidden_dim, &beta_dims[0], subst) {
-        errors.push(te.into());
-        return Type::Error;
+        return report(errors, te.into());
     }
 
     let canonical = Type::Tensor(
@@ -15513,8 +16469,7 @@ fn check_layer_norm_signature(
         x_prec,
     );
     if let Err(te) = unify(result_ty, &canonical, subst) {
-        errors.push(te.into());
-        return Type::Error;
+        return report(errors, te.into());
     }
     subst.apply(&canonical)
 }
@@ -15580,10 +16535,10 @@ fn check_conv2d_signature(
     result_ty: &Type,
     vg: &mut VarGen,
     subst: &mut Subst,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
 ) -> Type {
     if arg_tys.len() < 2 {
-        return Type::Error;
+        return report_builtin_arity_bare(errors, "conv2d", "at least 2 arguments", arg_tys.len());
     }
 
     let input_ty = type_for_readonly_check(&arg_tys[0], subst);
@@ -15591,66 +16546,75 @@ fn check_conv2d_signature(
 
     let (input_dims, input_prec) = match input_ty {
         Type::Tensor(dims, prec) => (dims, prec),
-        Type::Var(_) | Type::Error => return subst.apply(result_ty),
+        Type::Var(_) | Type::Error(_) => return subst.apply(result_ty),
         other => {
-            errors.push(CheckError::new(
-                CheckErrorKind::TypeMismatch,
-                format!("conv2d expects tensor input, got {other}"),
-                vec![],
-            ));
-            return Type::Error;
+            return report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::TypeMismatch,
+                    format!("conv2d expects tensor input, got {other}"),
+                    vec![],
+                ),
+            );
         }
     };
     let (kernel_dims, kernel_prec) = match kernel_ty {
         Type::Tensor(dims, prec) => (dims, prec),
-        Type::Var(_) | Type::Error => return subst.apply(result_ty),
+        Type::Var(_) | Type::Error(_) => return subst.apply(result_ty),
         other => {
-            errors.push(CheckError::new(
-                CheckErrorKind::TypeMismatch,
-                format!("conv2d expects tensor kernel, got {other}"),
-                vec![],
-            ));
-            return Type::Error;
+            return report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::TypeMismatch,
+                    format!("conv2d expects tensor kernel, got {other}"),
+                    vec![],
+                ),
+            );
         }
     };
 
     if input_dims.len() != 4 {
-        errors.push(CheckError::new(
-            CheckErrorKind::DimensionMismatch,
-            format!(
-                "conv2d expects rank-4 input tensor, got rank {}",
-                input_dims.len()
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::DimensionMismatch,
+                format!(
+                    "conv2d expects rank-4 input tensor, got rank {}",
+                    input_dims.len()
+                ),
+                vec![],
             ),
-            vec![],
-        ));
-        return Type::Error;
+        );
     }
     if kernel_dims.len() != 4 {
-        errors.push(CheckError::new(
-            CheckErrorKind::DimensionMismatch,
-            format!(
-                "conv2d expects rank-4 kernel tensor, got rank {}",
-                kernel_dims.len()
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::DimensionMismatch,
+                format!(
+                    "conv2d expects rank-4 kernel tensor, got rank {}",
+                    kernel_dims.len()
+                ),
+                vec![],
             ),
-            vec![],
-        ));
-        return Type::Error;
+        );
     }
     if input_prec != kernel_prec {
-        errors.push(CheckError::new(
-            CheckErrorKind::PrecisionMismatch,
-            format!(
-                "conv2d requires matching input/kernel precision, got {} and {}",
-                input_prec.name(),
-                kernel_prec.name()
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::PrecisionMismatch,
+                format!(
+                    "conv2d requires matching input/kernel precision, got {} and {}",
+                    input_prec.name(),
+                    kernel_prec.name()
+                ),
+                vec!["Insert explicit cast".to_string()],
             ),
-            vec!["Insert explicit cast".to_string()],
-        ));
-        return Type::Error;
+        );
     }
     if let Err(te) = unify_dim(&input_dims[1], &kernel_dims[1], subst) {
-        errors.push(te.into());
-        return Type::Error;
+        return report(errors, te.into());
     }
 
     // RT-205 F8: when stride/padding are integer literals and the
@@ -15679,39 +16643,40 @@ fn check_conv2d_signature(
         input_prec.clone(),
     );
     if let Err(te) = unify(result_ty, &output_template, subst) {
-        errors.push(te.into());
-        return Type::Error;
+        return report(errors, te.into());
     }
 
     let resolved_output = subst.apply(&output_template);
     if let Type::Tensor(out_dims, out_prec) = &resolved_output {
         if out_dims.len() != 4 {
-            errors.push(CheckError::new(
-                CheckErrorKind::DimensionMismatch,
-                format!("conv2d result must be rank 4, got rank {}", out_dims.len()),
-                vec![],
-            ));
-            return Type::Error;
+            return report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::DimensionMismatch,
+                    format!("conv2d result must be rank 4, got rank {}", out_dims.len()),
+                    vec![],
+                ),
+            );
         }
         if *out_prec != input_prec {
-            errors.push(CheckError::new(
-                CheckErrorKind::PrecisionMismatch,
-                format!(
-                    "conv2d result precision must match input/kernel precision {}, got {}",
-                    input_prec.name(),
-                    out_prec.name()
+            return report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::PrecisionMismatch,
+                    format!(
+                        "conv2d result precision must match input/kernel precision {}, got {}",
+                        input_prec.name(),
+                        out_prec.name()
+                    ),
+                    vec!["Insert explicit cast".to_string()],
                 ),
-                vec!["Insert explicit cast".to_string()],
-            ));
-            return Type::Error;
+            );
         }
         if let Err(te) = unify_dim(&out_dims[0], &input_dims[0], subst) {
-            errors.push(te.into());
-            return Type::Error;
+            return report(errors, te.into());
         }
         if let Err(te) = unify_dim(&out_dims[1], &kernel_dims[0], subst) {
-            errors.push(te.into());
-            return Type::Error;
+            return report(errors, te.into());
         }
     }
 
@@ -15722,10 +16687,10 @@ fn check_matmul_signature(
     arg_tys: &[Type],
     result_ty: &Type,
     subst: &mut Subst,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
 ) -> Type {
     if arg_tys.len() != 2 {
-        return Type::Error;
+        return report_builtin_arity_bare(errors, "matmul", "2 arguments", arg_tys.len());
     }
 
     let lhs = type_for_readonly_check(&arg_tys[0], subst);
@@ -15733,40 +16698,46 @@ fn check_matmul_signature(
 
     let (lhs_dims, lhs_prec) = match lhs {
         Type::Tensor(dims, prec) => (dims, prec),
-        Type::Var(_) | Type::Error => return subst.apply(result_ty),
+        Type::Var(_) | Type::Error(_) => return subst.apply(result_ty),
         other => {
-            errors.push(CheckError::new(
-                CheckErrorKind::TypeMismatch,
-                format!("matmul expects tensor lhs, got {other}"),
-                vec![],
-            ));
-            return Type::Error;
+            return report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::TypeMismatch,
+                    format!("matmul expects tensor lhs, got {other}"),
+                    vec![],
+                ),
+            );
         }
     };
     let (rhs_dims, rhs_prec) = match rhs {
         Type::Tensor(dims, prec) => (dims, prec),
-        Type::Var(_) | Type::Error => return subst.apply(result_ty),
+        Type::Var(_) | Type::Error(_) => return subst.apply(result_ty),
         other => {
-            errors.push(CheckError::new(
-                CheckErrorKind::TypeMismatch,
-                format!("matmul expects tensor rhs, got {other}"),
-                vec![],
-            ));
-            return Type::Error;
+            return report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::TypeMismatch,
+                    format!("matmul expects tensor rhs, got {other}"),
+                    vec![],
+                ),
+            );
         }
     };
 
     if lhs_prec != rhs_prec {
-        errors.push(CheckError::new(
-            CheckErrorKind::PrecisionMismatch,
-            format!(
-                "matmul requires matching precisions, got {} and {}",
-                lhs_prec.name(),
-                rhs_prec.name()
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::PrecisionMismatch,
+                format!(
+                    "matmul requires matching precisions, got {} and {}",
+                    lhs_prec.name(),
+                    rhs_prec.name()
+                ),
+                vec!["Insert explicit cast".to_string()],
             ),
-            vec!["Insert explicit cast".to_string()],
-        ));
-        return Type::Error;
+        );
     }
     // RT-2 fixup B6: per spec/04-type-system.md §5.7.2, the active
     // matmul signature does not admit integer operand precisions
@@ -15775,45 +16746,48 @@ fn check_matmul_signature(
     // here, not as a downstream IR-verify or codegen failure. The
     // verify-layer F1 guard remains as defense in depth.
     if lhs_prec.is_integer() {
-        errors.push(CheckError::new(
-            CheckErrorKind::PrecisionMismatch,
-            format!(
-                "matmul on integer operand precision `{}` is not admitted in this \
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::PrecisionMismatch,
+                format!(
+                    "matmul on integer operand precision `{}` is not admitted in this \
                  cycle per spec/04-type-system.md §5.7.2: integer matmul not admitted \
                  (the spec deliberately defers the integer-matmul accumulator rule; \
                  use reduce_sum over an explicit expand+mul lowering for integer \
                  inner products)",
-                lhs_prec.name()
-            ),
-            vec![format!(
-                "spec/04-type-system.md §5.7.2: there is no current backend that \
+                    lhs_prec.name()
+                ),
+                vec![format!(
+                    "spec/04-type-system.md §5.7.2: there is no current backend that \
                  supports integer BLAS, and an integer-matmul surface raises \
                  questions (saturating vs wrapping accumulator, signed-vs-unsigned \
                  interaction with §1.1.2) that are out of scope here. Integer \
                  reduce_sum is supported per §5.7.1."
-            )],
-        ));
-        return Type::Error;
+                )],
+            ),
+        );
     }
     if lhs_dims.len() < 2 || rhs_dims.len() < 2 {
-        errors.push(CheckError::new(
-            CheckErrorKind::DimensionMismatch,
-            format!(
-                "matmul expects tensors of rank >= 2, got rank {} and {}",
-                lhs_dims.len(),
-                rhs_dims.len()
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::DimensionMismatch,
+                format!(
+                    "matmul expects tensors of rank >= 2, got rank {} and {}",
+                    lhs_dims.len(),
+                    rhs_dims.len()
+                ),
+                vec![],
             ),
-            vec![],
-        ));
-        return Type::Error;
+        );
     }
     if let Err(te) = unify_dim(
         &lhs_dims[lhs_dims.len() - 1],
         &rhs_dims[rhs_dims.len() - 2],
         subst,
     ) {
-        errors.push(te.into());
-        return Type::Error;
+        return report(errors, te.into());
     }
 
     let lhs_lead = &lhs_dims[..lhs_dims.len() - 2];
@@ -15836,8 +16810,7 @@ fn check_matmul_signature(
                     lhs_applied
                 } else {
                     if let Err(te) = unify_dim(&lhs_applied, &rhs_applied, subst) {
-                        errors.push(te.into());
-                        return Type::Error;
+                        return report(errors, te.into());
                     }
                     subst.apply_dim(&lhs_applied)
                 }
@@ -15853,8 +16826,7 @@ fn check_matmul_signature(
 
     let canonical = Type::Tensor(out_dims, lhs_prec);
     if let Err(te) = unify(result_ty, &canonical, subst) {
-        errors.push(te.into());
-        return Type::Error;
+        return report(errors, te.into());
     }
     subst.apply(&canonical)
 }
@@ -15865,23 +16837,25 @@ fn check_reduction_signature(
     arg_tys: &[Type],
     result_ty: &Type,
     subst: &mut Subst,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
 ) -> Type {
     if arg_tys.len() < 2 {
-        return Type::Error;
+        return report_builtin_arity_bare(errors, name, "at least 2 arguments", arg_tys.len());
     }
 
     let input_ty = type_for_readonly_check(&arg_tys[0], subst);
     let (dims, prec) = match input_ty {
         Type::Tensor(dims, prec) => (dims, prec),
-        Type::Var(_) | Type::Error => return subst.apply(result_ty),
+        Type::Var(_) | Type::Error(_) => return subst.apply(result_ty),
         other => {
-            errors.push(CheckError::new(
-                CheckErrorKind::TypeMismatch,
-                format!("{name} expects tensor input, got {other}"),
-                vec![],
-            ));
-            return Type::Error;
+            return report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::TypeMismatch,
+                    format!("{name} expects tensor input, got {other}"),
+                    vec![],
+                ),
+            );
         }
     };
 
@@ -15915,15 +16889,17 @@ fn check_reduction_signature(
         match normalize_static_axis(dims.len(), raw) {
             Some(axis) => remove.push(axis),
             None => {
-                errors.push(CheckError::new(
-                    CheckErrorKind::DimensionMismatch,
-                    format!(
-                        "{name} axis {raw} is out of bounds for rank {} tensor",
-                        dims.len()
+                return report(
+                    errors,
+                    CheckError::new(
+                        CheckErrorKind::DimensionMismatch,
+                        format!(
+                            "{name} axis {raw} is out of bounds for rank {} tensor",
+                            dims.len()
+                        ),
+                        vec![],
                     ),
-                    vec![],
-                ));
-                return Type::Error;
+                );
             }
         }
     } else {
@@ -15932,36 +16908,40 @@ fn check_reduction_signature(
             // operand is rank-spread (index meaningless at symbolic rank) or it
             // is mixed with other axes. Direct the user to name each axis.
             if extract_int_for_dim(ax).is_some() {
-                errors.push(CheckError::new(
-                    CheckErrorKind::DimensionMismatch,
-                    format!(
-                        "{name}: a positional integer axis is only valid as the single axis of a \
+                return report(
+                    errors,
+                    CheckError::new(
+                        CheckErrorKind::DimensionMismatch,
+                        format!(
+                            "{name}: a positional integer axis is only valid as the single axis of a \
                          concrete-rank operand; on a rank-spread operand or for multiple axes, \
                          name each axis (e.g. `{name}(x, seq)` or `{name}(x, seq, head)`) so it \
                          is located by name (spec/04-type-system.md \u{00a7}4.5.3)"
+                        ),
+                        vec![],
                     ),
-                    vec![],
-                ));
-                return Type::Error;
+                );
             }
             // Issue #259: a non-literal, non-name axis (a runtime `int32`
             // binding) cannot determine which dimension is removed; emit the
             // targeted compile-time-constant diagnostic rather than leaking an
             // unresolved output type downstream.
             let Some(axis_name) = symbolic_dim_ref_name(ax) else {
-                errors.push(CheckError::new(
-                    CheckErrorKind::DimensionMismatch,
-                    format!(
-                        "{name} axis must be a compile-time constant or a named axis of the \
+                return report(
+                    errors,
+                    CheckError::new(
+                        CheckErrorKind::DimensionMismatch,
+                        format!(
+                            "{name} axis must be a compile-time constant or a named axis of the \
                          operand, got {}",
-                        describe_axis_arg(Some(ax)),
-                    ),
-                    vec![format!(
-                        "Pass a literal axis (e.g. `{name}(x, 0)`) on a concrete-rank operand, or \
+                            describe_axis_arg(Some(ax)),
+                        ),
+                        vec![format!(
+                            "Pass a literal axis (e.g. `{name}(x, 0)`) on a concrete-rank operand, or \
                          name the axis (e.g. `{name}(x, seq)`) to reduce by name."
-                    )],
-                ));
-                return Type::Error;
+                        )],
+                    ),
+                );
             };
             let hits: Vec<usize> = dims
                 .iter()
@@ -15974,29 +16954,33 @@ fn check_reduction_signature(
                     // chelis#339: a duplicate axis name in the variadic list
                     // is a hard error, never a silent deduplication.
                     if remove.contains(i) {
-                        errors.push(CheckError::new(
-                            CheckErrorKind::DimensionMismatch,
-                            format!(
-                                "{name}: duplicate reduction axis `{axis_name}`; each named \
+                        return report(
+                            errors,
+                            CheckError::new(
+                                CheckErrorKind::DimensionMismatch,
+                                format!(
+                                    "{name}: duplicate reduction axis `{axis_name}`; each named \
                                  axis may appear at most once in a variadic reduction \
                                  (spec/04-type-system.md \u{00a7}4.5.3)"
+                                ),
+                                vec![],
                             ),
-                            vec![],
-                        ));
-                        return Type::Error;
+                        );
                     }
                     remove.push(*i);
                 }
                 [] if has_spread => {
-                    errors.push(CheckError::new(
-                        CheckErrorKind::DimensionMismatch,
-                        format!(
-                            "{name}: rank-spread operand has no named `{axis_name}` axis to \
+                    return report(
+                        errors,
+                        CheckError::new(
+                            CheckErrorKind::DimensionMismatch,
+                            format!(
+                                "{name}: rank-spread operand has no named `{axis_name}` axis to \
                              reduce (spec/04-type-system.md \u{00a7}4.5.3)"
+                            ),
+                            vec![],
                         ),
-                        vec![],
-                    ));
-                    return Type::Error;
+                    );
                 }
                 [] => {
                     // Concrete operand: `axis_name` is neither a literal nor a
@@ -16004,30 +16988,34 @@ fn check_reduction_signature(
                     // runtime `int32` binding (issue #259) and a mistyped/absent
                     // axis name — so the message stays neutral between them
                     // rather than asserting "runtime value".
-                    errors.push(CheckError::new(
-                        CheckErrorKind::DimensionMismatch,
-                        format!(
-                            "{name} axis `{axis_name}` is neither a compile-time constant nor a \
+                    return report(
+                        errors,
+                        CheckError::new(
+                            CheckErrorKind::DimensionMismatch,
+                            format!(
+                                "{name} axis `{axis_name}` is neither a compile-time constant nor a \
                              named axis of the operand: a reduction axis must be a literal or \
                              `cast(N, int32)` constant, or the name of an existing axis"
-                        ),
-                        vec![format!(
-                            "Pass a literal axis (e.g. `{name}(x, 0)`) or `cast(N, int32)`, or \
+                            ),
+                            vec![format!(
+                                "Pass a literal axis (e.g. `{name}(x, 0)`) or `cast(N, int32)`, or \
                              name an existing axis of the operand (e.g. `{name}(x, seq)`)."
-                        )],
-                    ));
-                    return Type::Error;
+                            )],
+                        ),
+                    );
                 }
                 _ => {
-                    errors.push(CheckError::new(
-                        CheckErrorKind::DimensionMismatch,
-                        format!(
-                            "{name}: named axis `{axis_name}` is ambiguous; it appears more than \
+                    return report(
+                        errors,
+                        CheckError::new(
+                            CheckErrorKind::DimensionMismatch,
+                            format!(
+                                "{name}: named axis `{axis_name}` is ambiguous; it appears more than \
                              once in the operand shape"
+                            ),
+                            vec![],
                         ),
-                        vec![],
-                    ));
-                    return Type::Error;
+                    );
                 }
             }
         }
@@ -16072,12 +17060,14 @@ fn check_reduction_signature(
             TensorPrec::Concrete(p) => match p.default_reduce_sum_result_precision() {
                 Ok(rp) => TensorPrec::Concrete(rp),
                 Err(msg) => {
-                    errors.push(CheckError::new(
-                        CheckErrorKind::TypeMismatch,
-                        format!("sum: {msg}"),
-                        vec![],
-                    ));
-                    return Type::Error;
+                    return report(
+                        errors,
+                        CheckError::new(
+                            CheckErrorKind::TypeMismatch,
+                            format!("sum: {msg}"),
+                            vec![],
+                        ),
+                    );
                 }
             },
             TensorPrec::Var(_) => prec.clone(),
@@ -16096,33 +17086,34 @@ fn check_reduction_signature(
         if let Type::Tensor(_, declared_prec) = resolved_result
             && declared_prec != result_prec
         {
-            errors.push(CheckError::new(
-                CheckErrorKind::PrecisionMismatch,
-                format!(
-                    "sum on operand precision `{}` produces result precision `{}` per \
+            return report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::PrecisionMismatch,
+                    format!(
+                        "sum on operand precision `{}` produces result precision `{}` per \
                      spec/04-type-system.md §5.7.1 (the §5.7.1 result-precision table \
                      widens narrow integer operands to int32 to prevent silent overflow); \
                      declared result precision `{}` is incompatible. Use `tensor[{}]` or \
                      omit the result type to accept the spec default.",
-                    prec.render(),
-                    result_prec.render(),
-                    declared_prec.render(),
-                    result_prec.render(),
-                ),
-                vec![format!(
-                    "spec/04-type-system.md §5.7.1: `reduce_sum` on `{}` operands \
+                        prec.render(),
+                        result_prec.render(),
+                        declared_prec.render(),
+                        result_prec.render(),
+                    ),
+                    vec![format!(
+                        "spec/04-type-system.md §5.7.1: `reduce_sum` on `{}` operands \
                      produces a `{}` result by default to prevent silent overflow",
-                    prec.render(),
-                    result_prec.render(),
-                )],
-            ));
-            return Type::Error;
+                        prec.render(),
+                        result_prec.render(),
+                    )],
+                ),
+            );
         }
     }
     let canonical = Type::Tensor(out_dims, result_prec);
     if let Err(te) = unify(result_ty, &canonical, subst) {
-        errors.push(te.into());
-        return Type::Error;
+        return report(errors, te.into());
     }
     subst.apply(&canonical)
 }
@@ -16136,23 +17127,25 @@ fn check_expand_signature(
     size_class: SizeClass,
     env: &Env,
     subst: &mut Subst,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
 ) -> Type {
     if arg_tys.len() != 3 && arg_tys.len() != 4 {
-        return Type::Error;
+        return report_builtin_arity_bare(errors, "expand", "3 or 4 arguments", arg_tys.len());
     }
 
     let input_ty = type_for_readonly_check(&arg_tys[0], subst);
     let (input_dims, input_prec) = match input_ty {
         Type::Tensor(dims, prec) => (dims, prec),
-        Type::Var(_) | Type::Error => return subst.apply(result_ty),
+        Type::Var(_) | Type::Error(_) => return subst.apply(result_ty),
         other => {
-            errors.push(CheckError::new(
-                CheckErrorKind::TypeMismatch,
-                format!("expand expects tensor input, got {other}"),
-                vec![],
-            ));
-            return Type::Error;
+            return report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::TypeMismatch,
+                    format!("expand expects tensor input, got {other}"),
+                    vec![],
+                ),
+            );
         }
     };
 
@@ -16185,31 +17178,35 @@ fn check_expand_signature(
     // From here on the call is the positional concrete-rank form. A fourth
     // (anchor) argument is only meaningful in the named-axis form.
     if arg_exprs.len() == 4 {
-        errors.push(CheckError::new(
-            CheckErrorKind::DimensionMismatch,
-            "expand takes a fourth (anchor) argument only in the named-axis form \
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::DimensionMismatch,
+                "expand takes a fourth (anchor) argument only in the named-axis form \
              `expand(x, new, size, anchor)`, where `new` names the inserted axis \
              (spec/04-type-system.md \u{00a7}4.5.3)"
-                .to_string(),
-            vec![],
-        ));
-        return Type::Error;
+                    .to_string(),
+                vec![],
+            ),
+        );
     }
     // A positional index is meaningless at symbolic rank: against a spread
     // there is no fixed position to insert at. Mirror the reduction arm —
     // name the inserted axis instead.
     if has_spread {
-        errors.push(CheckError::new(
-            CheckErrorKind::DimensionMismatch,
-            "expand: a positional integer axis is only valid on a concrete-rank \
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::DimensionMismatch,
+                "expand: a positional integer axis is only valid on a concrete-rank \
              operand; on a rank-spread operand, name the inserted axis (e.g. \
              `expand(x, one, 1)` for a trailing insert, or `expand(x, c, n, seq)` \
              to insert before the named `seq` anchor) so the insertion point stays \
              name-anchored (spec/04-type-system.md \u{00a7}4.5.3)"
-                .to_string(),
-            vec![],
-        ));
-        return Type::Error;
+                    .to_string(),
+                vec![],
+            ),
+        );
     }
 
     // Uses `extract_int_for_dim` so `cast(N, int32)`-wrapped literal
@@ -16219,12 +17216,14 @@ fn check_expand_signature(
     let axis = match arg_exprs.get(1).and_then(extract_int_for_dim) {
         Some(axis) if axis >= 0 => axis as usize,
         Some(axis) => {
-            errors.push(CheckError::new(
-                CheckErrorKind::DimensionMismatch,
-                format!("expand requires non-negative axis, got {axis}"),
-                vec![],
-            ));
-            return Type::Error;
+            return report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::DimensionMismatch,
+                    format!("expand requires non-negative axis, got {axis}"),
+                    vec![],
+                ),
+            );
         }
         // Issue #259: the input is a concrete tensor (past the
         // `Var | Error` guard above), so the output shape is determinable
@@ -16236,32 +17235,36 @@ fn check_expand_signature(
         // `borrow requires tensor or tensor-carrying input, got ?N`. Emit a
         // targeted diagnostic at the expand call site naming the root cause.
         None => {
-            errors.push(CheckError::new(
-                CheckErrorKind::DimensionMismatch,
-                format!(
-                    "expand axis must be a compile-time constant for the output \
+            return report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::DimensionMismatch,
+                    format!(
+                        "expand axis must be a compile-time constant for the output \
                      shape to be inferable, got {}",
-                    describe_axis_arg(arg_exprs.get(1)),
-                ),
-                vec![
-                    "Pass a literal axis (e.g. `expand(x, 0, n)`) or a `cast(N, int32)` \
+                        describe_axis_arg(arg_exprs.get(1)),
+                    ),
+                    vec![
+                        "Pass a literal axis (e.g. `expand(x, 0, n)`) or a `cast(N, int32)` \
                      literal. The axis selects where the new dimension is inserted, so \
                      it must be known at compile time."
-                        .to_string(),
-                ],
-            ));
-            return Type::Error;
+                            .to_string(),
+                    ],
+                ),
+            );
         }
     };
     let size = match arg_exprs.get(2).and_then(extract_int_for_dim) {
         Some(size) if size > 0 => Dim::Lit(size),
         Some(size) => {
-            errors.push(CheckError::new(
-                CheckErrorKind::DimensionMismatch,
-                format!("expand requires positive size, got {size}"),
-                vec![],
-            ));
-            return Type::Error;
+            return report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::DimensionMismatch,
+                    format!("expand requires positive size, got {size}"),
+                    vec![],
+                ),
+            );
         }
         // A non-literal runtime size. chelis#397/#469: discriminate by
         // PROVENANCE (computed by the caller as `size_class`), not by the
@@ -16276,8 +17279,7 @@ fn check_expand_signature(
         // bare-`var`, `cast(var, _)`, `let`-bound, and arithmetic.
         None => {
             if size_class == SizeClass::Sourceless {
-                errors.push(sourceless_expand_size_error(arg_exprs.get(2)));
-                return Type::Error;
+                return report(errors, sourceless_expand_size_error(arg_exprs.get(2)));
             }
             // A bare `var` naming a genuine §4.7.2 Form-2 symbolic dim — a
             // declared dim parameter (not a value binding) or a dim carried
@@ -16299,75 +17301,84 @@ fn check_expand_signature(
     let canonical = match resolved_result {
         Type::Tensor(out_dims, out_prec) => {
             if out_prec != input_prec {
-                errors.push(CheckError::new(
-                    CheckErrorKind::PrecisionMismatch,
-                    format!(
-                        "expand output precision {} does not match input precision {}",
-                        out_prec.name(),
-                        input_prec.name()
+                return report(
+                    errors,
+                    CheckError::new(
+                        CheckErrorKind::PrecisionMismatch,
+                        format!(
+                            "expand output precision {} does not match input precision {}",
+                            out_prec.name(),
+                            input_prec.name()
+                        ),
+                        vec![],
                     ),
-                    vec![],
-                ));
-                return Type::Error;
+                );
             }
             if out_dims.len() == input_dims.len() + 1 {
                 if axis > input_dims.len() {
-                    errors.push(CheckError::new(
-                        CheckErrorKind::DimensionMismatch,
-                        format!(
-                            "expand insert axis {axis} is out of bounds for rank {} tensor",
-                            input_dims.len()
+                    return report(
+                        errors,
+                        CheckError::new(
+                            CheckErrorKind::DimensionMismatch,
+                            format!(
+                                "expand insert axis {axis} is out of bounds for rank {} tensor",
+                                input_dims.len()
+                            ),
+                            vec![],
                         ),
-                        vec![],
-                    ));
-                    return Type::Error;
+                    );
                 }
                 let mut expected = input_dims.clone();
                 expected.insert(axis, size.clone());
                 Type::Tensor(expected, input_prec)
             } else if out_dims.len() == input_dims.len() {
                 if axis >= input_dims.len() {
-                    errors.push(CheckError::new(
-                        CheckErrorKind::DimensionMismatch,
-                        format!(
-                            "expand axis {axis} is out of bounds for rank {} tensor",
-                            input_dims.len()
+                    return report(
+                        errors,
+                        CheckError::new(
+                            CheckErrorKind::DimensionMismatch,
+                            format!(
+                                "expand axis {axis} is out of bounds for rank {} tensor",
+                                input_dims.len()
+                            ),
+                            vec![],
                         ),
-                        vec![],
-                    ));
-                    return Type::Error;
+                    );
                 }
                 let mut expected = input_dims.clone();
                 expected[axis] = size.clone();
                 Type::Tensor(expected, input_prec)
             } else {
-                errors.push(CheckError::new(
-                    CheckErrorKind::DimensionMismatch,
-                    format!(
-                        "expand output rank {} must equal input rank {} or {}",
-                        out_dims.len(),
-                        input_dims.len(),
-                        input_dims.len() + 1
+                return report(
+                    errors,
+                    CheckError::new(
+                        CheckErrorKind::DimensionMismatch,
+                        format!(
+                            "expand output rank {} must equal input rank {} or {}",
+                            out_dims.len(),
+                            input_dims.len(),
+                            input_dims.len() + 1
+                        ),
+                        vec![],
                     ),
-                    vec![],
-                ));
-                return Type::Error;
+                );
             }
         }
-        Type::Var(_) | Type::Error => return subst.apply(result_ty),
+        Type::Var(_) | Type::Error(_) => return subst.apply(result_ty),
         other => {
-            errors.push(CheckError::new(
-                CheckErrorKind::TypeMismatch,
-                format!("expand expects tensor output, got {other}"),
-                vec![],
-            ));
-            return Type::Error;
+            return report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::TypeMismatch,
+                    format!("expand expects tensor output, got {other}"),
+                    vec![],
+                ),
+            );
         }
     };
 
     if let Err(te) = unify(result_ty, &canonical, subst) {
-        errors.push(te.into());
-        return Type::Error;
+        return report(errors, te.into());
     }
     subst.apply(&canonical)
 }
@@ -16389,7 +17400,7 @@ fn check_named_expand_signature(
     input_prec: TensorPrec,
     result_ty: &Type,
     subst: &mut Subst,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
 ) -> Type {
     // The inserted name must not collide with an existing named axis: a
     // duplicate dim name would make every later by-name lookup (reduction,
@@ -16398,17 +17409,19 @@ fn check_named_expand_signature(
         .iter()
         .any(|d| matches!(d, Dim::Name(n) if n == new_name))
     {
-        errors.push(CheckError::new(
-            CheckErrorKind::DimensionMismatch,
-            format!(
-                "expand: inserted axis `{new_name}` already names an axis of the operand; \
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::DimensionMismatch,
+                format!(
+                    "expand: inserted axis `{new_name}` already names an axis of the operand; \
                  a duplicate dim name would make later by-name axis lookups ambiguous \
                  (spec/04-type-system.md \u{00a7}4.5.3). Pick a fresh name for the inserted \
                  axis."
+                ),
+                vec![],
             ),
-            vec![],
-        ));
-        return Type::Error;
+        );
     }
 
     // The named-insert size must be a positive compile-time literal (a bare
@@ -16419,26 +17432,30 @@ fn check_named_expand_signature(
     // checker rejects the form outright rather than letting a check-clean
     // program break downstream (chelis#339).
     let Some(size) = arg_exprs.get(2).and_then(extract_int_for_dim) else {
-        errors.push(CheckError::new(
-            CheckErrorKind::DimensionMismatch,
-            format!(
-                "expand: the named-axis insert form requires a compile-time literal size \
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::DimensionMismatch,
+                format!(
+                    "expand: the named-axis insert form requires a compile-time literal size \
                  (a literal or `cast(N, int32)` constant), got {}; the inserted axis's \
                  extent must be stampable onto the new named dim at lowering \
                  (spec/04-type-system.md \u{00a7}4.5.3)",
-                describe_axis_arg(arg_exprs.get(2)),
+                    describe_axis_arg(arg_exprs.get(2)),
+                ),
+                vec![],
             ),
-            vec![],
-        ));
-        return Type::Error;
+        );
     };
     if size <= 0 {
-        errors.push(CheckError::new(
-            CheckErrorKind::DimensionMismatch,
-            format!("expand requires positive size, got {size}"),
-            vec![],
-        ));
-        return Type::Error;
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::DimensionMismatch,
+                format!("expand requires positive size, got {size}"),
+                vec![],
+            ),
+        );
     }
 
     // Resolve the insertion point: before the unique named anchor (4-arg
@@ -16446,16 +17463,18 @@ fn check_named_expand_signature(
     let insert_at = match arg_exprs.get(3) {
         Some(anchor_expr) => {
             let Some(anchor) = symbolic_dim_ref_name(anchor_expr) else {
-                errors.push(CheckError::new(
-                    CheckErrorKind::DimensionMismatch,
-                    format!(
-                        "expand anchor must name an existing axis of the operand, got {} \
+                return report(
+                    errors,
+                    CheckError::new(
+                        CheckErrorKind::DimensionMismatch,
+                        format!(
+                            "expand anchor must name an existing axis of the operand, got {} \
                          (spec/04-type-system.md \u{00a7}4.5.3)",
-                        describe_axis_arg(arg_exprs.get(3)),
+                            describe_axis_arg(arg_exprs.get(3)),
+                        ),
+                        vec![],
                     ),
-                    vec![],
-                ));
-                return Type::Error;
+                );
             };
             let hits: Vec<usize> = input_dims
                 .iter()
@@ -16466,41 +17485,47 @@ fn check_named_expand_signature(
             match hits.as_slice() {
                 [i] => *i,
                 [] if has_spread => {
-                    errors.push(CheckError::new(
-                        CheckErrorKind::DimensionMismatch,
-                        format!(
-                            "expand: rank-spread operand has no named `{anchor}` axis to \
+                    return report(
+                        errors,
+                        CheckError::new(
+                            CheckErrorKind::DimensionMismatch,
+                            format!(
+                                "expand: rank-spread operand has no named `{anchor}` axis to \
                              anchor the insertion; insertion strictly inside an opaque \
                              spread has no anchor and is rejected \
                              (spec/04-type-system.md \u{00a7}4.5.3)"
+                            ),
+                            vec![],
                         ),
-                        vec![],
-                    ));
-                    return Type::Error;
+                    );
                 }
                 [] => {
-                    errors.push(CheckError::new(
-                        CheckErrorKind::DimensionMismatch,
-                        format!(
-                            "expand anchor `{anchor}` is not a named axis of the operand: \
+                    return report(
+                        errors,
+                        CheckError::new(
+                            CheckErrorKind::DimensionMismatch,
+                            format!(
+                                "expand anchor `{anchor}` is not a named axis of the operand: \
                              the named-axis form inserts at the trailing end or immediately \
                              before an existing named anchor (spec/04-type-system.md \
                              \u{00a7}4.5.3)"
+                            ),
+                            vec![],
                         ),
-                        vec![],
-                    ));
-                    return Type::Error;
+                    );
                 }
                 _ => {
-                    errors.push(CheckError::new(
-                        CheckErrorKind::DimensionMismatch,
-                        format!(
-                            "expand: anchor `{anchor}` is ambiguous; it appears more than \
+                    return report(
+                        errors,
+                        CheckError::new(
+                            CheckErrorKind::DimensionMismatch,
+                            format!(
+                                "expand: anchor `{anchor}` is ambiguous; it appears more than \
                              once in the operand shape (spec/04-type-system.md \u{00a7}4.5.3)"
+                            ),
+                            vec![],
                         ),
-                        vec![],
-                    ));
-                    return Type::Error;
+                    );
                 }
             }
         }
@@ -16513,8 +17538,7 @@ fn check_named_expand_signature(
     out_dims.insert(insert_at, Dim::Name(new_name.to_string()));
     let canonical = Type::Tensor(out_dims, input_prec);
     if let Err(te) = unify(result_ty, &canonical, subst) {
-        errors.push(te.into());
-        return Type::Error;
+        return report(errors, te.into());
     }
     subst.apply(&canonical)
 }
@@ -16552,7 +17576,7 @@ fn peel_to_tensor_argument(ty: &Type) -> ToTensorPeel<'_> {
                     precision: *precision,
                 };
             }
-            Type::Var(_) | Type::Error => {
+            Type::Var(_) | Type::Error(_) => {
                 return ToTensorPeel::Pending;
             }
             other => {
@@ -17057,7 +18081,7 @@ fn describe_axis_arg(axis_expr: Option<&deep::Expr>) -> String {
 fn check_declared_dvars_rigid(
     declared_dvars: &[DimVar],
     subst: &Subst,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
 ) {
     // First resolved dim seen -> the declared dvar that produced it.
     // A second declared dvar resolving to the same dim is a collapse.
@@ -17150,7 +18174,7 @@ fn check_return_only_dvars_rigid(
     decl_ty: &Type,
     param_dvars: &[DimVar],
     subst: &Subst,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
 ) {
     let Type::Fn(decl_params, decl_ret) = decl_ty else {
         return;
@@ -17247,7 +18271,7 @@ fn check_return_only_dvars_rigid(
 fn check_list_elem_rigid_dim_vs_wildcard(
     decl_ty: &Type,
     body_ty: &Type,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
 ) {
     match (decl_ty, body_ty) {
         // Descend through the function type to its return position.
@@ -17311,18 +18335,17 @@ fn infer_fn(
     vg: &mut VarGen,
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
-    errors: &mut Vec<CheckError>,
-    typed_nodes: &mut usize,
-    total_nodes: &mut usize,
+    errors: &mut DiagnosticSink<'_>,
+    product: &mut InferenceProduct,
 ) -> Type {
     let kids = children(list);
     if kids.is_empty() {
-        return Type::Error;
+        return malformed_form(list, "fn", "parameters and a body", errors);
     }
 
     // kids[0] = (params {} x1 ... xn)
     // kids[1] = body
-    let params = extract_params(&kids[0], vg, adt_reg);
+    let params = extract_params(&kids[0], vg, adt_reg, errors, annotation_binder_mode(env));
     let mut param_types = Vec::new();
     let mut fn_env = env.clone();
 
@@ -17359,18 +18382,9 @@ fn infer_fn(
     let body = if kids.len() > 1 {
         &kids[1]
     } else {
-        return Type::Error;
+        return malformed_form(list, "fn", "a body expression", errors);
     };
-    let body_ty = infer_expr(
-        body,
-        &mut fn_env,
-        vg,
-        subst,
-        adt_reg,
-        errors,
-        typed_nodes,
-        total_nodes,
-    );
+    let body_ty = infer_expr(body, &mut fn_env, vg, subst, adt_reg, errors, product);
 
     check_declared_dvars_rigid(&declared_dvars, subst, errors);
 
@@ -17398,60 +18412,32 @@ fn infer_def_body_with_sig(
     vg: &mut VarGen,
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
-    errors: &mut Vec<CheckError>,
-    typed_nodes: &mut usize,
-    total_nodes: &mut usize,
+    errors: &mut DiagnosticSink<'_>,
+    product: &mut InferenceProduct,
 ) -> Type {
     // Match: body is `(fn (params ...) body-expr)` AND decl is `Fn(args, ret)`.
     let fn_list = match body {
         deep::Expr::List(list, _) if get_tag(list) == Some("fn") => list,
         _ => {
-            return infer_expr(
-                body,
-                env,
-                vg,
-                subst,
-                adt_reg,
-                errors,
-                typed_nodes,
-                total_nodes,
-            );
+            return infer_expr(body, env, vg, subst, adt_reg, errors, product);
         }
     };
     let (decl_args, decl_ret) = match decl_ty {
         Type::Fn(args, ret) => (args, ret.as_ref()),
         _ => {
-            return infer_expr(
-                body,
-                env,
-                vg,
-                subst,
-                adt_reg,
-                errors,
-                typed_nodes,
-                total_nodes,
-            );
+            return infer_expr(body, env, vg, subst, adt_reg, errors, product);
         }
     };
 
     let kids = children(fn_list);
     if kids.len() < 2 {
-        return Type::Error;
+        return malformed_form(fn_list, "fn", "parameters and a body", errors);
     }
-    let params = extract_params(&kids[0], vg, adt_reg);
+    let params = extract_params(&kids[0], vg, adt_reg, errors, annotation_binder_mode(env));
     if params.len() != decl_args.len() {
         // Arity mismatch between params and sig: fall back so the post-body
         // unify produces a clear ArityMismatch diagnostic.
-        return infer_expr(
-            body,
-            env,
-            vg,
-            subst,
-            adt_reg,
-            errors,
-            typed_nodes,
-            total_nodes,
-        );
+        return infer_expr(body, env, vg, subst, adt_reg, errors, product);
     }
 
     let mut param_types = Vec::with_capacity(params.len());
@@ -17479,16 +18465,7 @@ fn infer_def_body_with_sig(
     // tensor[n, f32] = y`, so checking here (pre-sig-unify) would miss
     // it. Running it only at the caller also avoids double-reporting.
     let body_expr = &kids[1];
-    let body_ty = infer_expr(
-        body_expr,
-        &mut fn_env,
-        vg,
-        subst,
-        adt_reg,
-        errors,
-        typed_nodes,
-        total_nodes,
-    );
+    let body_ty = infer_expr(body_expr, &mut fn_env, vg, subst, adt_reg, errors, product);
 
     let resolved_params: Vec<Type> = param_types.iter().map(|t| subst.apply(t)).collect();
     let resolved_body = subst.apply(&body_ty);
@@ -17504,61 +18481,68 @@ fn extract_params(
     expr: &deep::Expr,
     vg: &mut VarGen,
     adt_reg: &AdtRegistry,
+    errors: &mut DiagnosticSink<'_>,
+    binder_mode: BinderMode<'_>,
 ) -> Vec<(String, Option<Type>)> {
-    match expr {
-        deep::Expr::List(list, _) => {
-            let tag = get_tag(list);
-            let elems = if tag == Some("params") {
-                children(list)
-            } else {
-                &list.elements
-            };
-            elems
-                .iter()
-                .filter_map(|e| match e {
-                    deep::Expr::Atom(deep::Atom::Symbol(s), _) => Some((s.to_string(), None)),
-                    deep::Expr::MetaExpr(meta, _) => {
-                        let deep::Expr::Atom(deep::Atom::Symbol(name), _) = meta.expr.as_ref()
-                        else {
-                            return None;
-                        };
-                        let ty_ann = meta.entries.iter().find_map(|(key, val)| {
-                            (key == "type").then(|| {
-                                deep_type_to_resolved_type(val, vg, adt_reg, &mut HashMap::new())
-                            })
+    let deep::Expr::List(list, _) = expr else {
+        return vec![];
+    };
+    let elems = if get_tag(list) == Some("params") {
+        children(list)
+    } else {
+        &list.elements
+    };
+    let mut resolver = DeepTypeResolver::new(
+        TypeUseSite::Annotation,
+        binder_mode,
+        adt_reg.resolution_env(),
+        vg,
+        errors,
+    );
+    let mut params = Vec::with_capacity(elems.len());
+
+    for expr in elems {
+        match expr {
+            deep::Expr::Atom(deep::Atom::Symbol(name), _) => {
+                params.push((name.to_string(), None));
+            }
+            deep::Expr::MetaExpr(meta, _) => {
+                let deep::Expr::Atom(deep::Atom::Symbol(name), _) = meta.expr.as_ref() else {
+                    continue;
+                };
+                let annotation =
+                    meta.entries
+                        .iter()
+                        .find(|(key, _)| key == "type")
+                        .map(|(_, value)| match resolver.resolve(value) {
+                            Ok(ty) => resolve_type_aliases(&ty.into_type(), adt_reg),
+                            Err(witness) => propagate(&witness),
                         });
-                        Some((name.to_string(), ty_ann))
-                    }
-                    deep::Expr::List(plist, _) => {
-                        // Typed param: (name {type: T}) — elements[0] is the name symbol,
-                        // elements[1] is the metadata map with type annotation
-                        if let Some(deep::Expr::Atom(deep::Atom::Symbol(name), _)) =
-                            plist.elements.first()
-                        {
-                            let mut ty_ann = None;
-                            if let Some(deep::Expr::Map(meta, _)) = plist.elements.get(1) {
-                                for (key, val) in &meta.entries {
-                                    if key == "type" {
-                                        ty_ann = Some(deep_type_to_resolved_type(
-                                            val,
-                                            vg,
-                                            adt_reg,
-                                            &mut HashMap::new(),
-                                        ));
-                                    }
-                                }
-                            }
-                            Some((name.to_string(), ty_ann))
-                        } else {
-                            None
-                        }
-                    }
+                params.push((name.to_string(), annotation));
+            }
+            deep::Expr::List(param_list, _) => {
+                // Typed param: (name {type: T}) — elements[0] is the name symbol,
+                // elements[1] is the metadata map with type annotation.
+                let Some(name) = param_list.elements.first().and_then(symbol_name) else {
+                    continue;
+                };
+                let annotation = match param_list.elements.get(1) {
+                    Some(deep::Expr::Map(meta, _)) => meta
+                        .entries
+                        .iter()
+                        .find(|(key, _)| key == "type")
+                        .map(|(_, value)| match resolver.resolve(value) {
+                            Ok(ty) => resolve_type_aliases(&ty.into_type(), adt_reg),
+                            Err(witness) => propagate(&witness),
+                        }),
                     _ => None,
-                })
-                .collect()
+                };
+                params.push((name.to_string(), annotation));
+            }
+            _ => {}
         }
-        _ => vec![],
     }
+    params
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -17568,13 +18552,12 @@ fn infer_let(
     vg: &mut VarGen,
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
-    errors: &mut Vec<CheckError>,
-    typed_nodes: &mut usize,
-    total_nodes: &mut usize,
+    errors: &mut DiagnosticSink<'_>,
+    product: &mut InferenceProduct,
 ) -> Type {
     let kids = children(list);
     if kids.len() < 2 {
-        return Type::Error;
+        return malformed_form(list, "let", "bindings and a body", errors);
     }
 
     // kids[0] = (bind {} x1 e1 x2 e2 ...)
@@ -17588,15 +18571,16 @@ fn infer_let(
         while i + 1 < bind_children.len() {
             if let Some(name) = symbol_name(&bind_children[i]) {
                 let rhs_expr = &bind_children[i + 1];
-                let expr_ty = infer_expr(
+                let mut rhs_type_metadata_resolution = None;
+                let expr_ty = infer_expr_with_type_metadata_ownership(
                     rhs_expr,
                     &mut let_env,
                     vg,
                     subst,
                     adt_reg,
                     errors,
-                    typed_nodes,
-                    total_nodes,
+                    product,
+                    Some(&mut rhs_type_metadata_resolution),
                 );
 
                 // chelis#159: block-scoped `let name: T = expr` desugars
@@ -17616,12 +18600,27 @@ fn infer_let(
                         .find(|(k, _)| k == "type")
                         .map(|(_, v)| v)
                 {
-                    let declared_ty = deep_type_to_resolved_type(
-                        declared_ty_expr,
-                        vg,
-                        adt_reg,
-                        &mut HashMap::new(),
-                    );
+                    let declared_ty = match &rhs_type_metadata_resolution {
+                        // A root metadata-aware RHS consumer records the exact
+                        // result it owns. Reuse that result here so the same
+                        // ascription is neither resolved nor reported twice.
+                        Some(OwnedTypeMetadataResolution::Resolved(ty)) => ty.clone(),
+                        Some(OwnedTypeMetadataResolution::Failed(witness)) => propagate(witness),
+                        // No ownership record means any `expr_ty` error came
+                        // from the RHS itself. Resolve the ascription as its
+                        // own root so two independent failures both surface.
+                        None => match resolve_deep_type(
+                            declared_ty_expr,
+                            vg,
+                            adt_reg,
+                            TypeUseSite::Annotation,
+                            annotation_binder_mode(&let_env),
+                            errors,
+                        ) {
+                            Ok(ty) => ty,
+                            Err(witness) => propagate(&witness),
+                        },
+                    };
                     if let Err(e) = unify(&expr_ty, &declared_ty, subst) {
                         errors.push(CheckError::new(
                             check_error_kind_from_type_error_kind(&e.kind),
@@ -17685,16 +18684,7 @@ fn infer_let(
         }
     }
 
-    infer_expr(
-        &kids[1],
-        &mut let_env,
-        vg,
-        subst,
-        adt_reg,
-        errors,
-        typed_nodes,
-        total_nodes,
-    )
+    infer_expr(&kids[1], &mut let_env, vg, subst, adt_reg, errors, product)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -17704,25 +18694,20 @@ fn infer_if(
     vg: &mut VarGen,
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
-    errors: &mut Vec<CheckError>,
-    typed_nodes: &mut usize,
-    total_nodes: &mut usize,
+    errors: &mut DiagnosticSink<'_>,
+    product: &mut InferenceProduct,
 ) -> Type {
     let kids = children(list);
     if kids.len() < 3 {
-        return Type::Error;
+        return malformed_form(
+            list,
+            "if",
+            "a condition, a then-branch, and an else-branch",
+            errors,
+        );
     }
 
-    let cond_ty = infer_expr(
-        &kids[0],
-        env,
-        vg,
-        subst,
-        adt_reg,
-        errors,
-        typed_nodes,
-        total_nodes,
-    );
+    let cond_ty = infer_expr(&kids[0], env, vg, subst, adt_reg, errors, product);
 
     // Condition should be bool (or tensor[D, bool])
     if let Err(_te) = unify(&cond_ty, &Type::Prim(Prim::Bool), subst) {
@@ -17733,26 +18718,8 @@ fn infer_if(
         ));
     }
 
-    let then_ty = infer_expr(
-        &kids[1],
-        env,
-        vg,
-        subst,
-        adt_reg,
-        errors,
-        typed_nodes,
-        total_nodes,
-    );
-    let else_ty = infer_expr(
-        &kids[2],
-        env,
-        vg,
-        subst,
-        adt_reg,
-        errors,
-        typed_nodes,
-        total_nodes,
-    );
+    let then_ty = infer_expr(&kids[1], env, vg, subst, adt_reg, errors, product);
+    let else_ty = infer_expr(&kids[2], env, vg, subst, adt_reg, errors, product);
 
     match unify(&then_ty, &else_ty, subst) {
         Ok(()) => subst.apply(&then_ty),
@@ -17780,9 +18747,8 @@ fn infer_match(
     vg: &mut VarGen,
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
-    errors: &mut Vec<CheckError>,
-    typed_nodes: &mut usize,
-    total_nodes: &mut usize,
+    errors: &mut DiagnosticSink<'_>,
+    product: &mut InferenceProduct,
 ) -> Type {
     let kids = children(list);
     if kids.is_empty() {
@@ -17794,16 +18760,7 @@ fn infer_match(
         );
     }
 
-    let scrutinee_ty = infer_expr(
-        &kids[0],
-        env,
-        vg,
-        subst,
-        adt_reg,
-        errors,
-        typed_nodes,
-        total_nodes,
-    );
+    let scrutinee_ty = infer_expr(&kids[0], env, vg, subst, adt_reg, errors, product);
 
     // chelis#710 [04-TOT-3]: a match with a scrutinee but no arms is
     // malformed. Return early so the exhaustiveness check below cannot also
@@ -17849,9 +18806,25 @@ fn infer_match(
                     subst,
                     adt_reg,
                     errors,
+                    product,
                     &mut covered_variants,
                     &mut has_wildcard,
                 );
+
+                let guard = &arm_kids[1];
+                let empty_guard = matches!(guard, deep::Expr::List(guard_list, _) if guard_list.elements.is_empty());
+                if !empty_guard {
+                    let guard_ty =
+                        infer_expr(guard, &mut arm_env, vg, subst, adt_reg, errors, product);
+                    let resolved_guard = subst.apply(&guard_ty);
+                    if !matches!(resolved_guard, Type::Prim(Prim::Bool) | Type::Error(_)) {
+                        errors.push(CheckError::new(
+                            CheckErrorKind::TypeMismatch,
+                            format!("match arm guard must be bool, got {resolved_guard}"),
+                            vec![],
+                        ));
+                    }
+                }
 
                 let body_ty = infer_expr(
                     &arm_kids[2],
@@ -17860,8 +18833,7 @@ fn infer_match(
                     subst,
                     adt_reg,
                     errors,
-                    typed_nodes,
-                    total_nodes,
+                    product,
                 );
 
                 match &result_ty {
@@ -17901,7 +18873,10 @@ fn infer_match(
         }
     }
 
-    result_ty.unwrap_or(Type::Error)
+    // A match with no arms is screened by the `(match {})` malformed guard
+    // upstream, so `result_ty` is `Some` for any well-formed match; the
+    // fallback is a fresh var (never a silent `Type::Error`, chelis#731 §C3).
+    result_ty.unwrap_or_else(|| vg.fresh_type())
 }
 
 /// True for arm patterns that match every value of the scrutinee:
@@ -17928,7 +18903,8 @@ fn pattern_bindings(
     vg: &mut VarGen,
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
+    product: &mut InferenceProduct,
     covered_variants: &mut Vec<String>,
     has_wildcard: &mut bool,
 ) {
@@ -17940,6 +18916,7 @@ fn pattern_bindings(
             "pat-var" => {
                 if let Some(name) = kids.first().and_then(|e| symbol_name(e)) {
                     let resolved = subst.apply(scrutinee_ty);
+                    product.record_bypass(pat, resolved.clone(), "pattern binding traversal");
                     env.bind(name.to_string(), Scheme::mono(resolved));
                 }
             }
@@ -18037,6 +19014,7 @@ fn pattern_bindings(
                                             subst,
                                             adt_reg,
                                             errors,
+                                            product,
                                             covered_variants,
                                             has_wildcard,
                                         );
@@ -18055,6 +19033,7 @@ fn pattern_bindings(
                 // (pat-as {} name inner_pat): bind name to scrutinee type, recurse into inner_pat
                 if let Some(name) = kids.first().and_then(|e| symbol_name(e)) {
                     let resolved = subst.apply(scrutinee_ty);
+                    product.record_bypass(pat, resolved.clone(), "pattern binding traversal");
                     env.bind(name.to_string(), Scheme::mono(resolved));
                 }
                 if kids.len() >= 2 {
@@ -18066,6 +19045,7 @@ fn pattern_bindings(
                         subst,
                         adt_reg,
                         errors,
+                        product,
                         covered_variants,
                         has_wildcard,
                     );
@@ -18247,21 +19227,23 @@ fn pattern_bindings(
                                             }
                                         } else if !known_field_set.is_empty() {
                                             // Unknown field name — error
-                                            errors.push(CheckError::new(
-                                                CheckErrorKind::TypeMismatch,
-                                                format!(
-                                                    "unknown record field '{}' in pattern for {}",
-                                                    n, ctor_name
+                                            report(
+                                                errors,
+                                                CheckError::new(
+                                                    CheckErrorKind::TypeMismatch,
+                                                    format!(
+                                                        "unknown record field '{}' in pattern for {}",
+                                                        n, ctor_name
+                                                    ),
+                                                    vec![format!(
+                                                        "known fields: {:?}",
+                                                        declared_field_names
+                                                            .iter()
+                                                            .filter_map(|f| f.as_deref())
+                                                            .collect::<Vec<_>>()
+                                                    )],
                                                 ),
-                                                vec![format!(
-                                                    "known fields: {:?}",
-                                                    declared_field_names
-                                                        .iter()
-                                                        .filter_map(|f| f.as_deref())
-                                                        .collect::<Vec<_>>()
-                                                )],
-                                            ));
-                                            Type::Error
+                                            )
                                         } else {
                                             vg.fresh_type() // no ADT info available
                                         }
@@ -18276,6 +19258,7 @@ fn pattern_bindings(
                                     subst,
                                     adt_reg,
                                     errors,
+                                    product,
                                     covered_variants,
                                     has_wildcard,
                                 );
@@ -18319,6 +19302,7 @@ fn pattern_bindings(
                         subst,
                         adt_reg,
                         errors,
+                        product,
                         covered_variants,
                         has_wildcard,
                     );
@@ -18336,25 +19320,15 @@ fn infer_pipe(
     vg: &mut VarGen,
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
-    errors: &mut Vec<CheckError>,
-    typed_nodes: &mut usize,
-    total_nodes: &mut usize,
+    errors: &mut DiagnosticSink<'_>,
+    product: &mut InferenceProduct,
 ) -> Type {
     let kids = children(list);
     if kids.is_empty() {
         return malformed_form(list, "pipe", "at least one stage", errors);
     }
 
-    let mut current_ty = infer_expr(
-        &kids[0],
-        env,
-        vg,
-        subst,
-        adt_reg,
-        errors,
-        typed_nodes,
-        total_nodes,
-    );
+    let mut current_ty = infer_expr(&kids[0], env, vg, subst, adt_reg, errors, product);
 
     for stage in &kids[1..] {
         // If the stage is the canonical bare-keyword / `cast(type)` pipe-stage
@@ -18377,20 +19351,10 @@ fn infer_pipe(
                 subst,
                 adt_reg,
                 errors,
-                typed_nodes,
-                total_nodes,
+                product,
             )
         } else {
-            infer_expr(
-                stage,
-                env,
-                vg,
-                subst,
-                adt_reg,
-                errors,
-                typed_nodes,
-                total_nodes,
-            )
+            infer_expr(stage, env, vg, subst, adt_reg, errors, product)
         };
         let ret_tv = vg.fresh_type();
         let stage_arg_tys = auto_borrow_call_arg_types(&stage_ty, vec![current_ty.clone()], subst);
@@ -18411,8 +19375,7 @@ fn infer_pipe(
                         e.span_offset = Some(off);
                     }
                 }
-                errors.push(e);
-                return Type::Error;
+                return report(errors, e);
             }
         }
     }
@@ -18476,17 +19439,25 @@ fn infer_pipe_stage_lambda(
     vg: &mut VarGen,
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
-    errors: &mut Vec<CheckError>,
-    typed_nodes: &mut usize,
-    total_nodes: &mut usize,
+    errors: &mut DiagnosticSink<'_>,
+    product: &mut InferenceProduct,
 ) -> Type {
     let deep::Expr::List(list, _) = stage else {
-        return Type::Error;
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::MalformedForm,
+                "malformed pipe stage: expected a list-form stage node \
+                 (spec/03-deep-syntax.md; chelis#731 [04-TOT-3])"
+                    .to_string(),
+                vec![],
+            ),
+        );
     };
     let kids = children(list);
     let body = match kids.get(1) {
         Some(body) => body,
-        None => return Type::Error,
+        None => return malformed_form(list, "pipe stage", "a body", errors),
     };
 
     let mut fn_env = env.clone();
@@ -18497,20 +19468,13 @@ fn infer_pipe_stage_lambda(
     // chelis#631: same for a shadowed list-literal length.
     fn_env.clear_list_literal_len(param_name);
 
-    let body_ty = infer_expr(
-        body,
-        &mut fn_env,
-        vg,
-        subst,
-        adt_reg,
-        errors,
-        typed_nodes,
-        total_nodes,
-    );
+    let body_ty = infer_expr(body, &mut fn_env, vg, subst, adt_reg, errors, product);
 
     let resolved_param = subst.apply(&param_ty);
     let resolved_body = subst.apply(&body_ty);
-    Type::Fn(vec![resolved_param], Box::new(resolved_body))
+    let stage_ty = Type::Fn(vec![resolved_param], Box::new(resolved_body));
+    product.record_bypass(stage, stage_ty.clone(), "synthesized pipe-stage inference");
+    stage_ty
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -18520,14 +19484,13 @@ fn infer_tuple(
     vg: &mut VarGen,
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
-    errors: &mut Vec<CheckError>,
-    typed_nodes: &mut usize,
-    total_nodes: &mut usize,
+    errors: &mut DiagnosticSink<'_>,
+    product: &mut InferenceProduct,
 ) -> Type {
     let kids = children(list);
     let elems: Vec<Type> = kids
         .iter()
-        .map(|e| infer_expr(e, env, vg, subst, adt_reg, errors, typed_nodes, total_nodes))
+        .map(|e| infer_expr(e, env, vg, subst, adt_reg, errors, product))
         .collect();
     Type::Tuple(elems)
 }
@@ -18573,25 +19536,15 @@ fn infer_tuple_get(
     vg: &mut VarGen,
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
-    errors: &mut Vec<CheckError>,
-    typed_nodes: &mut usize,
-    total_nodes: &mut usize,
+    errors: &mut DiagnosticSink<'_>,
+    product: &mut InferenceProduct,
 ) -> Type {
     let kids = children(list);
     if kids.len() < 2 {
         return malformed_form(list, "tuple-get", "a tuple expression and an index", errors);
     }
 
-    let tuple_ty = infer_expr(
-        &kids[0],
-        env,
-        vg,
-        subst,
-        adt_reg,
-        errors,
-        typed_nodes,
-        total_nodes,
-    );
+    let tuple_ty = infer_expr(&kids[0], env, vg, subst, adt_reg, errors, product);
     let resolved = subst.apply(&tuple_ty);
 
     // The Surf `.N` desugar emits the projection index as a `lit` node
@@ -18613,37 +19566,40 @@ fn infer_tuple_get(
             // silently swallowed — both are undiagnosed `Type::Error`
             // under an empty error vector, the §04-TOT-2 hole this fix
             // otherwise closes (chelis#707, rt-707).
-            errors.push(CheckError::new(
-                CheckErrorKind::TupleIndexOutOfBounds,
-                format!(
-                    "invalid tuple index: expected a non-negative integer \
+            return report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::TupleIndexOutOfBounds,
+                    format!(
+                        "invalid tuple index: expected a non-negative integer \
                      literal, found {}",
-                    describe_tuple_index(&kids[1]),
+                        describe_tuple_index(&kids[1]),
+                    ),
+                    vec![],
                 ),
-                vec![],
-            ));
-            return Type::Error;
+            );
         }
     };
-
     match resolved {
         Type::Tuple(ref elems) => {
             if index < elems.len() {
                 elems[index].clone()
             } else {
-                errors.push(CheckError::new(
-                    CheckErrorKind::TupleIndexOutOfBounds,
-                    format!(
-                        "tuple index {} out of bounds for tuple of size {}",
-                        index,
-                        elems.len()
+                report(
+                    errors,
+                    CheckError::new(
+                        CheckErrorKind::TupleIndexOutOfBounds,
+                        format!(
+                            "tuple index {} out of bounds for tuple of size {}",
+                            index,
+                            elems.len()
+                        ),
+                        vec![],
                     ),
-                    vec![],
-                ));
-                Type::Error
+                )
             }
         }
-        Type::Error => Type::Error,
+        Type::Error(w) => propagate(&w),
         // The target is not yet known to be a tuple — e.g. an
         // unannotated closure parameter (a `fold` accumulator)
         // constrained only structurally by its own projections. This
@@ -18656,14 +19612,14 @@ fn infer_tuple_get(
         // targets while the `Tuple` arm now carries the real element
         // type for concrete tuples.
         Type::Var(_) => vg.fresh_type(),
-        _ => {
-            errors.push(CheckError::new(
+        _ => report(
+            errors,
+            CheckError::new(
                 CheckErrorKind::TypeMismatch,
                 format!("expected tuple type, got {resolved}"),
                 vec![],
-            ));
-            Type::Error
-        }
+            ),
+        ),
     }
 }
 
@@ -18704,9 +19660,8 @@ fn infer_record(
     vg: &mut VarGen,
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
-    errors: &mut Vec<CheckError>,
-    typed_nodes: &mut usize,
-    total_nodes: &mut usize,
+    errors: &mut DiagnosticSink<'_>,
+    product: &mut InferenceProduct,
 ) -> Type {
     let kids = children(list);
     let Some(head) = kids.first().and_then(symbol_name) else {
@@ -18726,24 +19681,17 @@ fn infer_record(
                 && get_tag(kv_list) == Some("kv")
                 && let Some(value) = children(kv_list).get(1)
             {
-                infer_expr(
-                    value,
-                    env,
-                    vg,
-                    subst,
-                    adt_reg,
-                    errors,
-                    typed_nodes,
-                    total_nodes,
-                );
+                infer_expr(value, env, vg, subst, adt_reg, errors, product);
             }
         }
-        errors.push(CheckError::new(
-            CheckErrorKind::TypeMismatch,
-            format!("unknown record constructor `{head}`"),
-            vec![format!("declare `type {head} = | {head} {{ ... }}`")],
-        ));
-        return Type::Error;
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::TypeMismatch,
+                format!("unknown record constructor `{head}`"),
+                vec![format!("declare `type {head} = | {head} {{ ... }}`")],
+            ),
+        );
     };
     // chelis#317: a registry-known but OUT-OF-SCOPE record constructor (a
     // type-only import constructing e.g. `AdamState { ... }`, whose ADT is in
@@ -18759,30 +19707,23 @@ fn infer_record(
                 && get_tag(kv_list) == Some("kv")
                 && let Some(value) = children(kv_list).get(1)
             {
-                infer_expr(
-                    value,
-                    env,
-                    vg,
-                    subst,
-                    adt_reg,
-                    errors,
-                    typed_nodes,
-                    total_nodes,
-                );
+                infer_expr(value, env, vg, subst, adt_reg, errors, product);
             }
         }
-        errors.push(CheckError::new(
-            CheckErrorKind::UnknownConstructor,
-            with_macro_provenance(
-                &deep::Expr::List(list.clone(), zero_span()),
-                format!("unknown constructor: {head}"),
-            ),
-            vec![format!(
-                "Constructor '{head}' is not in scope. Declare it locally or \
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::UnknownConstructor,
+                with_macro_provenance(
+                    &deep::Expr::List(list.clone(), zero_span()),
+                    format!("unknown constructor: {head}"),
+                ),
+                vec![format!(
+                    "Constructor '{head}' is not in scope. Declare it locally or \
                  add it to an import (e.g. `import Mod ({head})`)"
-            )],
-        ));
-        return Type::Error;
+                )],
+            ),
+        );
     }
     // RFC D-CHECK: record construction of an out-of-module opaque
     // type is rejected; inference continues so the literal still
@@ -18809,7 +19750,7 @@ fn infer_record(
     // deftype registered last.
     let (instantiated_arg_types, instantiated_ret) = match adt_reg.lookup(adt_name) {
         Some(adt_def) => instantiate_variant_of(adt_def, variant, vg),
-        None => (Vec::new(), Type::Error),
+        None => (Vec::new(), vg.fresh_type()),
     };
 
     for kv_expr in kids.iter().skip(1) {
@@ -18825,16 +19766,7 @@ fn infer_record(
         else {
             continue;
         };
-        let value_ty = infer_expr(
-            value,
-            env,
-            vg,
-            subst,
-            adt_reg,
-            errors,
-            typed_nodes,
-            total_nodes,
-        );
+        let value_ty = infer_expr(value, env, vg, subst, adt_reg, errors, product);
         if known_field_set.contains(field_name) {
             let pos = declared_field_names
                 .iter()
@@ -18938,9 +19870,8 @@ fn infer_access(
     vg: &mut VarGen,
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
-    errors: &mut Vec<CheckError>,
-    typed_nodes: &mut usize,
-    total_nodes: &mut usize,
+    errors: &mut DiagnosticSink<'_>,
+    product: &mut InferenceProduct,
 ) -> Type {
     let kids = children(list);
     if kids.len() < 2 {
@@ -18951,16 +19882,7 @@ fn infer_access(
             errors,
         );
     }
-    let target_ty = infer_expr(
-        &kids[0],
-        env,
-        vg,
-        subst,
-        adt_reg,
-        errors,
-        typed_nodes,
-        total_nodes,
-    );
+    let target_ty = infer_expr(&kids[0], env, vg, subst, adt_reg, errors, product);
     let Some(field_name) = symbol_name(&kids[1]) else {
         return malformed_form(
             list,
@@ -18986,51 +19908,105 @@ fn infer_access(
                 errors,
             );
             let Some(variant) = single_record_variant(adt_reg, adt_name) else {
-                // Multi-variant or positional-field ADT: field access
-                // is not defined for it; conservative status quo
-                // (silently untyped) to keep the blast radius of the
-                // new inference at the single-record idiom.
-                return Type::Error;
+                // chelis#755 (discovered-hole conversion, chelis#731 Phase 2):
+                // field access on a multi-variant or positional-field ADT is
+                // not defined. This used to return a SILENT `Type::Error`
+                // ("conservative status quo") so `s.radius` on a two-variant
+                // `Shape` scored a perfect 1.0 and only failed at runtime
+                // (`unknown record constructor`). It is now an explicit
+                // rejection with a diagnostic (spec/design/checker_totality.md
+                // §C3; the sanctioned direction from chelis#755).
+                return report(
+                    errors,
+                    CheckError::new(
+                        CheckErrorKind::TypeMismatch,
+                        format!(
+                            "field access `.{field_name}` is only defined on a \
+                             single-record-variant type; `{adt_name}` is a \
+                             multi-variant or positional-field type (chelis#755)"
+                        ),
+                        vec![
+                            "pattern-match on the variants with `match` to read \
+                             their fields"
+                                .to_string(),
+                        ],
+                    ),
+                );
             };
             let pos = variant
                 .fields
                 .iter()
                 .position(|(n, _)| n.as_deref() == Some(field_name));
             let Some(pos) = pos else {
-                errors.push(CheckError::new(
-                    CheckErrorKind::TypeMismatch,
-                    format!("unknown record field '{field_name}' on {adt_name}"),
-                    vec![format!(
-                        "known fields: {:?}",
-                        variant
-                            .fields
-                            .iter()
-                            .filter_map(|(n, _)| n.as_deref())
-                            .collect::<Vec<_>>()
-                    )],
-                ));
-                return Type::Error;
+                return report(
+                    errors,
+                    CheckError::new(
+                        CheckErrorKind::TypeMismatch,
+                        format!("unknown record field '{field_name}' on {adt_name}"),
+                        vec![format!(
+                            "known fields: {:?}",
+                            variant
+                                .fields
+                                .iter()
+                                .filter_map(|(n, _)| n.as_deref())
+                                .collect::<Vec<_>>()
+                        )],
+                    ),
+                );
             };
             let field_types =
                 instantiated_field_types(adt_name, variant, &resolved, adt_reg, vg, subst);
             match field_types.get(pos) {
                 Some(ty) => subst.apply(ty),
-                None => Type::Error,
+                // `pos` came from a validated `.position(...)` hit, so the
+                // field-type list should always be at least that long; a
+                // shorter list is an internal inconsistency between the
+                // variant's field names and its instantiated field types.
+                // Report it loudly rather than exempt the access silently
+                // (chelis#731 §C3).
+                None => report(
+                    errors,
+                    CheckError::new(
+                        CheckErrorKind::TypeMismatch,
+                        format!(
+                            "internal: field `{field_name}` of `{adt_name}` resolved \
+                             to position {pos} but no instantiated field type is \
+                             available (chelis#731 [04-TOT-2])"
+                        ),
+                        vec![],
+                    ),
+                ),
             }
         }
         Type::Var(tv) => {
             // Target not yet pinned (e.g. unannotated lambda param):
-            // register in the deferred-access ledger so a later pin to
-            // an out-of-module opaque ADT is still rejected at
-            // def-level resolution (D-CHECK). The result type keeps
-            // the conservative status quo.
+            // register in the deferred-access ledger so a later pin to an
+            // out-of-module opaque ADT is still rejected at def-level
+            // resolution (D-CHECK). chelis#755 / chelis#731 Phase 2: the
+            // result is now a FRESH type variable, not a silent `Type::Error`
+            // -- the access type is genuinely "unknown until the target is
+            // pinned", an explicit typed rule (the alternative chelis#755
+            // sanctions) rather than an exemption. Unification narrows it, and
+            // the deferred ledger still catches an out-of-module opaque pin.
             subst.record_deferred_opaque_use(tv, crate::unify::DeferredOpaqueUse::Access);
-            Type::Error
+            vg.fresh_type()
         }
-        // Conservative status quo for non-record targets: `access` on
-        // tensors/prims/tuples stays silently untyped in W1 rather
-        // than newly rejecting shapes the corpus may rely on.
-        _ => Type::Error,
+        // chelis#755 (discovered-hole conversion, chelis#731 Phase 2): field
+        // access on a non-record value (a tensor, prim, tuple, function, ...)
+        // used to return a SILENT `Type::Error` so `x.field` on an `f32`
+        // scored 1.0 and only failed at runtime. It is now an explicit
+        // rejection with a diagnostic.
+        other => report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::TypeMismatch,
+                format!(
+                    "field access `.{field_name}` expects a record value, got a \
+                     value of type `{other}` (chelis#755)"
+                ),
+                vec![],
+            ),
+        ),
     }
 }
 
@@ -19043,9 +20019,8 @@ fn infer_record_update(
     vg: &mut VarGen,
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
-    errors: &mut Vec<CheckError>,
-    typed_nodes: &mut usize,
-    total_nodes: &mut usize,
+    errors: &mut DiagnosticSink<'_>,
+    product: &mut InferenceProduct,
 ) -> Type {
     let kids = children(list);
     if kids.is_empty() {
@@ -19056,16 +20031,7 @@ fn infer_record_update(
             errors,
         );
     }
-    let target_ty = infer_expr(
-        &kids[0],
-        env,
-        vg,
-        subst,
-        adt_reg,
-        errors,
-        typed_nodes,
-        total_nodes,
-    );
+    let target_ty = infer_expr(&kids[0], env, vg, subst, adt_reg, errors, product);
     // Infer the update values regardless of target resolution so
     // nested errors surface exactly once.
     let mut kv_pairs: Vec<(&str, Type)> = Vec::new();
@@ -19082,16 +20048,7 @@ fn infer_record_update(
         else {
             continue;
         };
-        let value_ty = infer_expr(
-            value,
-            env,
-            vg,
-            subst,
-            adt_reg,
-            errors,
-            typed_nodes,
-            total_nodes,
-        );
+        let value_ty = infer_expr(value, env, vg, subst, adt_reg, errors, product);
         kv_pairs.push((field_name, value_ty));
     }
     let mut resolved = subst.apply(&target_ty);
@@ -19110,7 +20067,23 @@ fn infer_record_update(
                 errors,
             );
             let Some(variant) = single_record_variant(adt_reg, adt_name) else {
-                return Type::Error;
+                // chelis#755 sibling (record-update, chelis#731 Phase 2):
+                // functional record update on a multi-variant / positional
+                // ADT is not defined; this used to return a silent
+                // `Type::Error`. Reject it with a diagnostic like the field
+                // access path.
+                return report(
+                    errors,
+                    CheckError::new(
+                        CheckErrorKind::TypeMismatch,
+                        format!(
+                            "record update is only defined on a single-record-variant \
+                             type; `{adt_name}` is a multi-variant or positional-field \
+                             type (chelis#755)"
+                        ),
+                        vec![],
+                    ),
+                );
             };
             let field_types =
                 instantiated_field_types(adt_name, variant, &resolved, adt_reg, vg, subst);
@@ -19150,15 +20123,15 @@ fn infer_record_update(
             // The update returns the target's (still-unresolved) type.
             Type::Var(tv)
         }
-        Type::Error => Type::Error,
-        other => {
-            errors.push(CheckError::new(
+        Type::Error(w) => propagate(&w),
+        other => report(
+            errors,
+            CheckError::new(
                 CheckErrorKind::TypeMismatch,
                 format!("record-update requires a record-typed target, got {other}"),
                 vec![],
-            ));
-            Type::Error
-        }
+            ),
+        ),
     }
 }
 
@@ -19169,152 +20142,175 @@ fn infer_cast(
     vg: &mut VarGen,
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
-    errors: &mut Vec<CheckError>,
-    typed_nodes: &mut usize,
-    total_nodes: &mut usize,
+    errors: &mut DiagnosticSink<'_>,
+    product: &mut InferenceProduct,
 ) -> Type {
     let kids = children(list);
     if kids.len() < 2 {
         return malformed_form(list, "cast", "an expression and a target type", errors);
     }
 
-    let expr_ty = infer_expr(
-        &kids[0],
-        env,
-        vg,
-        subst,
-        adt_reg,
-        errors,
-        typed_nodes,
-        total_nodes,
-    );
+    let expr_ty = infer_expr(&kids[0], env, vg, subst, adt_reg, errors, product);
     let resolved = subst.apply(&expr_ty);
 
-    // RFC D-CHECK cast gates: cast-into an out-of-module opaque type
-    // (both Deep target shapes, `t-prim` and `t-adt`, with aliases
-    // expanded) and cast-out of an out-of-module opaque value. Each
-    // pushes one OpaqueTypeViolation and returns the TRUE type of the
-    // expression so no error cascades; inside the defining module the
-    // existing cast semantics (including `CastNonTensor` for ADT
-    // sources) are unchanged.
-    if let Some(target_adt) = cast_target_adt_name(&kids[1], adt_reg) {
-        if crate::opacity::check_opaque_use(
-            crate::opacity::OpaqueAction::CastInto,
-            &target_adt,
-            adt_reg,
+    // Every target spelling first crosses the centralized resolver. Bare
+    // primitive symbols are retained for historical compatibility; canonical
+    // `t-prim` still goes through the resolver's metadata and exact-arity
+    // checks before semantic cast classification.
+    let cast_owner = deep::Expr::List(list.clone(), span_of_list(list));
+    let (resolved_target, target_location) = {
+        let mut resolver = DeepTypeResolver::new(
+            TypeUseSite::CastTarget,
+            BinderMode::ClosedInput,
+            adt_reg.resolution_env(),
+            vg,
             errors,
-        ) {
-            return Type::Adt(target_adt, Vec::new());
-        }
-    } else {
-        let mut peeled = &resolved;
-        while let Type::Ref(inner) = peeled {
-            peeled = inner.as_ref();
-        }
-        if let Type::Adt(source_adt, _) = peeled {
-            let source_adt = source_adt.clone();
-            if crate::opacity::check_opaque_use(
-                crate::opacity::OpaqueAction::CastOut,
-                &source_adt,
-                adt_reg,
-                errors,
-            ) {
-                return match deep_type_to_resolved_type(&kids[1], vg, adt_reg, &mut HashMap::new())
-                {
-                    Type::Prim(p) => Type::Prim(p),
-                    _ => Type::Error,
-                };
+        )
+        .with_diagnostic_owner(&cast_owner);
+        let target = match resolver.resolve_cast_target(&kids[1]) {
+            Ok(target) => target,
+            Err(witness) => return propagate(&witness),
+        };
+        (target, resolver.diagnostic_location())
+    };
+    let target_ty = match resolved_target {
+        ResolvedCastTarget::PrimitiveSpelling { name, canonical } => {
+            // A1 (WS-A0 RT-1 fixup): per spec/04-type-system.md §1.1.2,
+            // unsigned integer types remain explicitly out of scope. Keep the
+            // owning precision diagnostic after syntax has validated.
+            if let Some(diag) = unsigned_family_diagnostic(&name, /* tensor = */ false) {
+                let diag = target_location
+                    .as_ref()
+                    .map_or(diag.clone(), |location| location.attach(diag));
+                return report(errors, diag);
+            }
+            match Prim::parse_name(&name) {
+                Some(prim) => Type::Prim(prim),
+                // RFC D-CHECK's historical Deep compatibility spelling uses
+                // `(t-prim {} Nominal)` for cast-into probes. It is eligible
+                // only after exact canonical syntax validation and only for a
+                // registered zero-arity ADT or transparent alias target.
+                None if canonical => match cast_target_nominal_name(&name, adt_reg) {
+                    Some(target) => Type::Adt(target, Vec::new()),
+                    None => {
+                        return report_unknown_cast_target(errors, &name, target_location.as_ref());
+                    }
+                },
+                None => {
+                    return report_unknown_cast_target(errors, &name, target_location.as_ref());
+                }
             }
         }
+        ResolvedCastTarget::Type(ty) => resolve_type_aliases(&ty.into_type(), adt_reg),
+    };
+
+    // RFC D-CHECK cast gates operate on the same resolved target as ordinary
+    // cast typing, including transparent alias expansion.
+    if let Type::Adt(target_adt, _) = &target_ty
+        && crate::opacity::check_opaque_use(
+            crate::opacity::OpaqueAction::CastInto,
+            target_adt,
+            adt_reg,
+            errors,
+        )
+    {
+        return target_ty;
+    }
+    let mut peeled = &resolved;
+    while let Type::Ref(inner) = peeled {
+        peeled = inner.as_ref();
+    }
+    if let Type::Adt(source_adt, _) = peeled
+        && crate::opacity::check_opaque_use(
+            crate::opacity::OpaqueAction::CastOut,
+            source_adt,
+            adt_reg,
+            errors,
+        )
+    {
+        return target_ty;
     }
 
-    // kids[1] = (t-prim {} new_precision)
-    // A1 (WS-A0 RT-1 fixup): per spec/04-type-system.md §1.1.2, unsigned
-    // integer types (u8/u16/u32/u64 and the uint8/uint16/uint32/uint64
-    // alias family) are explicitly out of scope for this cycle. They
-    // never resolve through `Prim::parse_name`, so without this guard
-    // `cast(_, u8)` would silently fall through to `Type::Error` with
-    // no diagnostic — exactly the silent-cast pattern §1.1.1 was added
-    // to avoid for f8e4m3. Mirror the f8e4m3 rejection path here.
-    if let Some(name) = cast_target_prim_name(&kids[1])
-        && let Some(diag) = unsigned_family_diagnostic(name, /* tensor = */ false)
-    {
-        errors.push(diag);
-        return Type::Error;
-    }
-    let new_prec = match deep_type_to_resolved_type(&kids[1], vg, adt_reg, &mut HashMap::new()) {
+    let new_prec = match target_ty {
         Type::Prim(p) => p,
-        _ => return Type::Error,
+        other => {
+            return report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::CastNonTensor,
+                    format!(
+                        "cast target `{other}` is not a recognized primitive type (chelis#756)"
+                    ),
+                    vec![
+                        "cast targets a scalar primitive: f32, f64, bf16, f16, bool, \
+                     int8, int16, int32, int64"
+                            .to_string(),
+                    ],
+                ),
+            );
+        }
     };
 
     match resolved {
         Type::Tensor(dims, _) => {
             if !new_prec.is_valid_tensor_precision() {
-                push_unsupported_precision_error(errors, new_prec, /* tensor = */ true);
-                return Type::Error;
+                return push_unsupported_precision_error(
+                    errors, new_prec, /* tensor = */ true,
+                );
             }
             Type::Tensor(dims, TensorPrec::Concrete(new_prec))
         }
         Type::Prim(_) => {
             if !new_prec.is_valid_scalar_cast_target() {
-                push_unsupported_precision_error(errors, new_prec, /* tensor = */ false);
-                return Type::Error;
+                return push_unsupported_precision_error(
+                    errors, new_prec, /* tensor = */ false,
+                );
             }
             Type::Prim(new_prec)
         }
-        Type::Error => Type::Error,
-        _ => {
-            errors.push(CheckError::new(
+        Type::Error(w) => propagate(&w),
+        _ => report(
+            errors,
+            CheckError::new(
                 CheckErrorKind::CastNonTensor,
                 format!("cast requires tensor or prim type, got {resolved}"),
                 vec![],
-            ));
-            Type::Error
-        }
+            ),
+        ),
     }
 }
 
-/// The nominal ADT a cast target names, if any: `(t-adt {} Name)` or
-/// a `(t-prim {} Name)` whose name is not a primitive but resolves in
-/// the ADT registry, with transparent aliases expanded to the nominal
-/// entry. Returns `None` for genuine primitive targets.
-fn cast_target_adt_name(expr: &deep::Expr, adt_reg: &AdtRegistry) -> Option<String> {
-    let deep::Expr::List(list, _) = expr else {
-        return None;
-    };
-    let name = children(list).first().and_then(symbol_name)?;
-    match get_tag(list) {
-        Some("t-adt") => {}
-        Some("t-prim") => {
-            if Prim::parse_name(name).is_some() {
-                return None;
-            }
-        }
-        _ => return None,
-    }
-    if adt_reg.lookup(name).is_some() {
+fn cast_target_nominal_name(name: &str, adt_reg: &AdtRegistry) -> Option<String> {
+    if adt_reg
+        .lookup(name)
+        .is_some_and(|definition| definition.type_params.is_empty())
+    {
         return Some(name.to_string());
     }
-    if let Some(alias) = adt_reg.resolve_alias(name)
-        && let Type::Adt(target, _) = &alias.body
-    {
-        return Some(target.clone());
-    }
-    None
+    adt_reg
+        .resolve_alias(name)
+        .and_then(|alias| match (&alias.params[..], &alias.body) {
+            ([], Type::Adt(target, args)) if args.is_empty() => Some(target.clone()),
+            _ => None,
+        })
 }
 
-/// Extract the symbol-name from a `(t-prim {} <name>)` Deep node so a
-/// rejection path can run before `Prim::parse_name` returns `None` and
-/// erases the spelling. Returns `None` for any other shape.
-fn cast_target_prim_name(expr: &deep::Expr) -> Option<&str> {
-    let list = match expr {
-        deep::Expr::List(l, _) => l,
-        _ => return None,
-    };
-    if get_tag(list) != Some("t-prim") {
-        return None;
-    }
-    children(list).first().and_then(symbol_name)
+fn report_unknown_cast_target(
+    errors: &mut DiagnosticSink<'_>,
+    name: &str,
+    location: Option<&TypeDiagnosticLocation>,
+) -> Type {
+    let error = CheckError::new(
+        CheckErrorKind::CastNonTensor,
+        format!("cast target `{name}` is not a recognized primitive type (chelis#756)"),
+        vec![
+            "cast targets a scalar primitive: f32, f64, bf16, f16, bool, \
+             int8, int16, int32, int64"
+                .to_string(),
+        ],
+    );
+    let error = location.map_or(error.clone(), |location| location.attach(error));
+    report(errors, error)
 }
 
 /// True if `name` is one of the unsigned integer dtype names that
@@ -19357,11 +20353,19 @@ fn unsigned_family_diagnostic(name: &str, tensor: bool) -> Option<CheckError> {
 /// (`spec/04-type-system.md` §1.1.1) gets a specific diagnostic citing the
 /// owning spec section so producers can resolve the deferral state without
 /// guessing.
-fn push_unsupported_precision_error(errors: &mut Vec<CheckError>, new_prec: Prim, tensor: bool) {
+/// chelis#731 Phase 2 (§C3): report an unsupported cast precision and return
+/// the witness-carrying `Type::Error`. Every caller does `return
+/// push_unsupported_precision_error(...)`, so the push and the error return
+/// are one expression.
+fn push_unsupported_precision_error(
+    errors: &mut DiagnosticSink<'_>,
+    new_prec: Prim,
+    tensor: bool,
+) -> Type {
     let surface = if tensor { "tensor element" } else { "scalar" };
     let active_set = "f32, f64, bf16, f16, bool, int8, int16, int32, int64";
-    if matches!(new_prec, Prim::F8e4m3) {
-        errors.push(CheckError::new(
+    let err = if matches!(new_prec, Prim::F8e4m3) {
+        CheckError::new(
             CheckErrorKind::UnsupportedTensorPrecision,
             format!(
                 "cannot cast {surface} to `f8e4m3`: f8e4m3 is deferred per \
@@ -19373,9 +20377,9 @@ fn push_unsupported_precision_error(errors: &mut Vec<CheckError>, new_prec: Prim
                  {active_set} instead, or follow spec/04-type-system.md §1.1.1 \
                  for the deferral rationale"
             )],
-        ));
+        )
     } else {
-        errors.push(CheckError::new(
+        CheckError::new(
             CheckErrorKind::UnsupportedTensorPrecision,
             format!(
                 "cannot cast {surface} to unsupported precision `{}` \
@@ -19383,8 +20387,9 @@ fn push_unsupported_precision_error(errors: &mut Vec<CheckError>, new_prec: Prim
                 new_prec.name()
             ),
             vec![format!("Use a supported {surface} precision")],
-        ));
-    }
+        )
+    };
+    report(errors, err)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -19394,45 +20399,40 @@ fn infer_grad(
     vg: &mut VarGen,
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
-    errors: &mut Vec<CheckError>,
-    typed_nodes: &mut usize,
-    total_nodes: &mut usize,
+    errors: &mut DiagnosticSink<'_>,
+    product: &mut InferenceProduct,
 ) -> Type {
     let kids = children(list);
     if kids.is_empty() {
         return malformed_form(list, "grad", "a function argument to differentiate", errors);
     }
 
-    let f_ty = infer_expr(
-        &kids[0],
-        env,
-        vg,
-        subst,
-        adt_reg,
-        errors,
-        typed_nodes,
-        total_nodes,
-    );
+    let f_ty = infer_expr(&kids[0], env, vg, subst, adt_reg, errors, product);
     let resolved = subst.apply(&f_ty);
 
     match resolved {
         Type::Fn(args, ret) => {
             let ret = *ret;
             if !grad_output_supported(&ret) {
-                errors.push(CheckError::new(
-                    CheckErrorKind::Other,
-                    format!("grad requires a scalar floating output, got {}", ret),
-                    vec!["Reduce the function result to a scalar before applying grad".to_string()],
-                ));
-                return Type::Error;
+                return report(
+                    errors,
+                    CheckError::new(
+                        CheckErrorKind::Other,
+                        format!("grad requires a scalar floating output, got {}", ret),
+                        vec![
+                            "Reduce the function result to a scalar before applying grad"
+                                .to_string(),
+                        ],
+                    ),
+                );
             }
 
             match grad_result_type(list, &args, adt_reg, errors) {
                 Some(grad_ret) => Type::Fn(args, Box::new(grad_ret)),
-                None => Type::Error,
+                None => vg.fresh_type(),
             }
         }
-        Type::Error => Type::Error,
+        Type::Error(w) => propagate(&w),
         _ => {
             // Can't determine function structure, return fresh var
             vg.fresh_type()
@@ -19452,7 +20452,7 @@ fn grad_result_type(
     list: &deep::List,
     args: &[Type],
     adt_reg: &AdtRegistry,
-    errors: &mut Vec<CheckError>,
+    errors: &mut DiagnosticSink<'_>,
 ) -> Option<Type> {
     let targets = if let Some(indices) = grad_wrt_indices(list, errors)? {
         let mut selected = Vec::with_capacity(indices.len());
@@ -19501,7 +20501,10 @@ fn grad_result_type(
     })
 }
 
-fn grad_wrt_indices(list: &deep::List, errors: &mut Vec<CheckError>) -> Option<Option<Vec<usize>>> {
+fn grad_wrt_indices(
+    list: &deep::List,
+    errors: &mut DiagnosticSink<'_>,
+) -> Option<Option<Vec<usize>>> {
     let kids = children(list);
     let Some(wrt_expr) = kids.get(1) else {
         return Some(None);
@@ -19609,9 +20612,8 @@ fn infer_vmap(
     vg: &mut VarGen,
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
-    errors: &mut Vec<CheckError>,
-    typed_nodes: &mut usize,
-    total_nodes: &mut usize,
+    errors: &mut DiagnosticSink<'_>,
+    product: &mut InferenceProduct,
 ) -> Type {
     let kids = children(list);
     if kids.is_empty() {
@@ -19624,25 +20626,18 @@ fn infer_vmap(
     // ints, so this is defense-in-depth for Deep-direct callers.
     let axis = kids.get(1).and_then(extract_int_for_dim).unwrap_or(0);
     if axis < 0 {
-        errors.push(CheckError::new(
-            CheckErrorKind::DimensionMismatch,
-            format!("vmap axis must be non-negative, got {axis}"),
-            vec!["Use `vmap(f)` or `vmap(f, axis=n)` with n >= 0".to_string()],
-        ));
-        return Type::Error;
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::DimensionMismatch,
+                format!("vmap axis must be non-negative, got {axis}"),
+                vec!["Use `vmap(f)` or `vmap(f, axis=n)` with n >= 0".to_string()],
+            ),
+        );
     }
     let axis = axis as usize;
 
-    let f_ty = infer_expr(
-        &kids[0],
-        env,
-        vg,
-        subst,
-        adt_reg,
-        errors,
-        typed_nodes,
-        total_nodes,
-    );
+    let f_ty = infer_expr(&kids[0], env, vg, subst, adt_reg, errors, product);
     let resolved = subst.apply(&f_ty);
 
     match resolved {
@@ -19656,27 +20651,27 @@ fn infer_vmap(
 
             match (args, ret) {
                 (Ok(args), Ok(ret)) => Type::Fn(args, Box::new(ret)),
-                (Err(message), _) | (_, Err(message)) => {
-                    errors.push(CheckError::new(
+                (Err(message), _) | (_, Err(message)) => report(
+                    errors,
+                    CheckError::new(
                         CheckErrorKind::DimensionMismatch,
                         message,
                         vec![
                             "Choose an axis that is in bounds for every vmapped tensor".to_string(),
                         ],
-                    ));
-                    Type::Error
-                }
+                    ),
+                ),
             }
         }
-        Type::Error => Type::Error,
-        other => {
-            errors.push(CheckError::new(
+        Type::Error(w) => propagate(&w),
+        other => report(
+            errors,
+            CheckError::new(
                 CheckErrorKind::TypeMismatch,
                 format!("vmap expects a function, got {other}"),
                 vec!["Apply `vmap` to a named function or inline lambda".to_string()],
-            ));
-            Type::Error
-        }
+            ),
+        ),
     }
 }
 
@@ -19743,9 +20738,8 @@ fn infer_def(
     vg: &mut VarGen,
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
-    errors: &mut Vec<CheckError>,
-    typed_nodes: &mut usize,
-    total_nodes: &mut usize,
+    errors: &mut DiagnosticSink<'_>,
+    product: &mut InferenceProduct,
 ) -> Type {
     let kids = children(list);
     if kids.len() < 2 {
@@ -19757,16 +20751,7 @@ fn infer_def(
         None => return malformed_form(list, "def", "a symbol name as its first child", errors),
     };
 
-    let body_ty = infer_expr(
-        &kids[1],
-        env,
-        vg,
-        subst,
-        adt_reg,
-        errors,
-        typed_nodes,
-        total_nodes,
-    );
+    let body_ty = infer_expr(&kids[1], env, vg, subst, adt_reg, errors, product);
     let scheme = env.generalize(&body_ty, subst);
     // chelis#397/#469: record the size provenance (see `infer_top_level` /
     // `infer_let`) so a later `expand` size built from this binding can be
@@ -19786,193 +20771,58 @@ fn infer_def(
     body_ty
 }
 
-// ── Type conversion from Deep AST ───────────────────────────────
-
-/// Convert a Deep type expression to an internal Type.
-/// `tvar_map` maps type variable names to TypeVars (created on demand).
-/// `dvar_map` maps dimension variable names to DimVars (created on demand).
-fn deep_type_to_type(
-    expr: &deep::Expr,
-    vg: &mut VarGen,
-    tvar_map: &mut HashMap<String, TypeVar>,
-) -> Type {
-    let mut dvar_map = HashMap::new();
-    let mut rvar_map = HashMap::new();
-    deep_type_to_type_inner(expr, vg, tvar_map, &mut dvar_map, &mut rvar_map)
-}
-
-fn deep_type_to_type_inner(
-    expr: &deep::Expr,
-    vg: &mut VarGen,
-    tvar_map: &mut HashMap<String, TypeVar>,
-    dvar_map: &mut HashMap<String, DimVar>,
-    rvar_map: &mut HashMap<String, RankVar>,
-) -> Type {
-    stack_guard!("deep_type_to_type_inner", expr, Type::Error);
-    match expr {
-        deep::Expr::List(list, _) => {
-            let tag = get_tag(list).unwrap_or("");
-            let kids = children(list);
-            match tag {
-                "t-prim" => {
-                    if let Some(name) = kids.first().and_then(|e| symbol_name(e)) {
-                        Prim::parse_name(name)
-                            .map(Type::Prim)
-                            .unwrap_or(Type::Error)
-                    } else {
-                        Type::Error
-                    }
-                }
-                "t-var" => {
-                    if let Some(name) = kids.first().and_then(|e| symbol_name(e)) {
-                        if name == "_" {
-                            vg.fresh_type()
-                        } else {
-                            let tv = *tvar_map
-                                .entry(name.to_string())
-                                .or_insert_with(|| vg.fresh_tvar());
-                            Type::Var(tv)
-                        }
-                    } else {
-                        Type::Error
-                    }
-                }
-                "t-fn" => {
-                    if kids.is_empty() {
-                        return Type::Error;
-                    }
-                    let args: Vec<Type> = kids[..kids.len() - 1]
-                        .iter()
-                        .map(|c| deep_type_to_type_inner(c, vg, tvar_map, dvar_map, rvar_map))
-                        .collect();
-                    let ret = deep_type_to_type_inner(
-                        &kids[kids.len() - 1],
-                        vg,
-                        tvar_map,
-                        dvar_map,
-                        rvar_map,
-                    );
-                    Type::Fn(args, Box::new(ret))
-                }
-                "t-ref" => {
-                    if kids.len() != 1 {
-                        return Type::Error;
-                    }
-                    Type::Ref(Box::new(deep_type_to_type_inner(
-                        &kids[0], vg, tvar_map, dvar_map, rvar_map,
-                    )))
-                }
-                "t-tensor" => {
-                    if kids.is_empty() {
-                        return Type::Error;
-                    }
-                    let prec_expr = &kids[kids.len() - 1];
-                    // WS-A5 (spec/04-type-system.md §5.8): the precision
-                    // slot may be a concrete primitive (`(t-prim {} f32)`)
-                    // or a sig-quantified type variable (`(t-var {} p)`).
-                    // Both shapes are well-formed; any other shape (e.g.,
-                    // a `t-fn` or a `t-prim` with an unknown name) is an
-                    // ill-formed tensor and is reduced to `Type::Error`.
-                    let prec = match deep_type_to_type_inner(
-                        prec_expr, vg, tvar_map, dvar_map, rvar_map,
-                    ) {
-                        Type::Prim(p) => TensorPrec::Concrete(p),
-                        Type::Var(v) => TensorPrec::Var(v),
-                        _ => return Type::Error,
-                    };
-                    let dims: Vec<Dim> = kids[..kids.len() - 1]
-                        .iter()
-                        .filter_map(|c| parse_dim(c, vg, dvar_map, rvar_map))
-                        .collect();
-                    Type::Tensor(dims, prec)
-                }
-                "t-adt" => {
-                    if let Some(name) = kids.first().and_then(|e| symbol_name(e)) {
-                        let args: Vec<Type> = kids[1..]
-                            .iter()
-                            .map(|c| deep_type_to_type_inner(c, vg, tvar_map, dvar_map, rvar_map))
-                            .collect();
-                        Type::Adt(name.to_string(), args)
-                    } else {
-                        Type::Error
-                    }
-                }
-                "t-tuple" => {
-                    let elems: Vec<Type> = kids
-                        .iter()
-                        .map(|c| deep_type_to_type_inner(c, vg, tvar_map, dvar_map, rvar_map))
-                        .collect();
-                    Type::Tuple(elems)
-                }
-                "t-unit" => Type::Unit,
-                _ => Type::Error,
-            }
-        }
-        _ => Type::Error,
-    }
-}
-
-/// Parse a dimension expression from Deep AST, with support for dim variables
-/// and rank variables. `rvar_map` memoizes `..r` names to a single `RankVar`
-/// so the same rank variable shared across tensor positions ties together.
-fn parse_dim(
-    expr: &deep::Expr,
-    vg: &mut VarGen,
-    dvar_map: &mut HashMap<String, DimVar>,
-    rvar_map: &mut HashMap<String, RankVar>,
-) -> Option<Dim> {
-    match expr {
-        deep::Expr::List(list, _) => {
-            let tag = get_tag(list).unwrap_or("");
-            let kids = children(list);
-            match tag {
-                "d-name" => {
-                    if let Some(name) = kids.first().and_then(|e| symbol_name(e)) {
-                        if name == "*" {
-                            Some(Dim::Wildcard)
-                        } else {
-                            Some(Dim::Name(name.to_string()))
-                        }
-                    } else {
-                        None
-                    }
-                }
-                "d-var" => {
-                    if let Some(name) = kids.first().and_then(|e| symbol_name(e)) {
-                        let dv = *dvar_map
-                            .entry(name.to_string())
-                            .or_insert_with(|| vg.fresh_dvar());
-                        Some(Dim::Var(dv))
-                    } else {
-                        Some(vg.fresh_dim())
-                    }
-                }
-                "d-lit" => {
-                    if let Some(deep::Expr::Atom(deep::Atom::Int(n), _)) = kids.first() {
-                        Some(Dim::Lit(*n))
-                    } else {
-                        None
-                    }
-                }
-                "d-rank" => {
-                    let name = kids
-                        .first()
-                        .and_then(|e| symbol_name(e))
-                        .unwrap_or("_")
-                        .to_string();
-                    let rv = *rvar_map.entry(name).or_insert_with(|| vg.fresh_rvar());
-                    Some(Dim::Rank(rv))
-                }
-                _ => None,
-            }
-        }
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn child_stamp_roles_cover_the_canonical_deep_vocabulary() {
+        for tag in chelis_deep::validate::VALID_TAGS {
+            assert!(
+                child_stamp_role(tag, 0, 3).is_some(),
+                "canonical Deep tag `{tag}` needs an explicit child ownership classification"
+            );
+        }
+        assert_eq!(child_stamp_role("checker-version-skew", 0, 1), None);
+    }
+
+    #[test]
+    fn structural_child_stamp_roles_match_owner_positions() {
+        use ChildStampRole::{
+            Binder, EffectHandler, ExplicitInferenceBypass, RuntimeExpr, Selector, Type,
+        };
+        let cases = [
+            ("module", 0, 2, Binder),
+            ("module", 1, 2, ExplicitInferenceBypass),
+            ("def", 0, 2, Binder),
+            ("def", 1, 2, RuntimeExpr),
+            ("fn", 0, 2, Binder),
+            ("fn", 1, 2, RuntimeExpr),
+            ("handle-effect", 0, 2, EffectHandler),
+            ("handle-effect", 1, 2, RuntimeExpr),
+            ("bind", 0, 4, Binder),
+            ("bind", 1, 4, RuntimeExpr),
+            ("arm", 0, 3, ExplicitInferenceBypass),
+            ("arm", 1, 3, RuntimeExpr),
+            ("record", 0, 2, Type),
+            ("record", 1, 2, ExplicitInferenceBypass),
+            ("access", 1, 2, Selector),
+            ("tuple-get", 1, 2, Selector),
+            ("cast", 1, 2, Type),
+            ("grad", 1, 2, Selector),
+            ("vmap", 1, 2, Selector),
+            ("pat-as", 0, 2, Binder),
+            ("pat-as", 1, 2, ExplicitInferenceBypass),
+            ("t-tensor", 0, 2, Type),
+        ];
+        for (tag, index, arity, expected) in cases {
+            assert_eq!(
+                child_stamp_role(tag, index, arity),
+                Some(expected),
+                "wrong child role for `{tag}` child {index}"
+            );
+        }
+    }
 
     fn check(src: &str) -> InferResult {
         let exprs = chelis_deep::parser::parse_str(src).unwrap();
@@ -23142,7 +23992,7 @@ out = f(to_tensor([1.0, 2.0, 3.0]))
     #[test]
     fn surf_polymorphic_tuple_fold_with_tensor_slot_annotates_ir() {
         let program = surf_tuple_fold_tensor_slot_program();
-        let _ = annotate_ir_program(&program);
+        check_typed_program(&program).expect("annotation should succeed without overflowing");
     }
 
     #[test]

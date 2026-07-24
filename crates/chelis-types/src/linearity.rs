@@ -264,6 +264,7 @@ struct Checker {
     /// inference that the inferencer already computed. Closes the
     /// chelis#229 sibling-sweep gap.
     signature_inference: SignatureInferenceMetadata,
+    type_headers: crate::deep_type::TypeResolutionEnv,
     /// Depth counter for desugarer-synthesized destructure scopes
     /// (`__chelis_tmp_N` bind chains tagged with `destructure: true`
     /// in their meta-map). Incremented by `check_let` when entering
@@ -331,6 +332,7 @@ pub fn check_linearity(program: &CheckedProgram) -> Result<CheckedProgram, Vec<C
         top_level_types: program.type_env().clone(),
         tensor_carrying_adts,
         signature_inference: program.signature_inference().clone(),
+        type_headers: program.type_headers().clone(),
         destructure_scope_depth: 0,
     };
     let mut scope = LinearScope::default();
@@ -446,12 +448,15 @@ pub fn check_linearity_with_context(
             .functions
             .insert(name.clone(), sig.clone());
     }
+    let mut merged_type_headers = library_program.type_headers().clone();
+    merged_type_headers.extend_from(new_program.type_headers());
     let mut checker = Checker {
         errors: Vec::new(),
         info: LinearityInfo::default(),
         top_level_types: new_program.type_env().clone(),
         tensor_carrying_adts,
         signature_inference: merged_signature_inference,
+        type_headers: merged_type_headers,
         destructure_scope_depth: 0,
     };
 
@@ -873,7 +878,15 @@ impl Checker {
                 name.as_str(),
                 &available_signatures,
                 &self.top_level_types,
-            );
+                &self.type_headers,
+            )
+            .unwrap_or_else(|result| {
+                // The resolver diagnostic is part of linearity's
+                // authoritative error result. Classify conservatively while
+                // the walk finishes, but never expose that fallback as Ok.
+                self.errors.extend(result.errors);
+                true
+            });
             if body_consumes {
                 self.read_or_error(name.as_str(), expr, outer_scope);
                 outer_scope.consume(
@@ -2259,5 +2272,41 @@ mod tests {
         let pat = node("pat-wild", vec![], vec![]);
         let bindings = pattern_named_types(&pat);
         assert!(bindings.is_empty());
+    }
+
+    #[test]
+    fn malformed_callee_type_reaches_linearity_exactly_once() {
+        let captured = node("x", vec![("type", tensor_4_f32())], vec![]);
+        let inner_body = node(
+            "app",
+            vec![],
+            vec![
+                node("var", vec![], vec![sym("poison")]),
+                node("var", vec![], vec![sym("x")]),
+            ],
+        );
+        let inner_fn = node(
+            "fn",
+            vec![],
+            vec![node("params", vec![], vec![]), inner_body],
+        );
+        let outer_fn = node(
+            "fn",
+            vec![],
+            vec![node("params", vec![], vec![captured]), inner_fn],
+        );
+        let program = CheckedProgram::unchecked_for_linearity_diagnostic_test(
+            vec![node("def", vec![], vec![sym("outer"), outer_fn])],
+            HashMap::from([("poison".to_string(), node("t-fn", vec![], vec![]))]),
+        );
+
+        let errors = check_linearity(&program)
+            .expect_err("malformed callee metadata must make linearity fail");
+        assert_eq!(
+            errors.len(),
+            1,
+            "the resolver diagnostic must join the authoritative linearity result exactly once: {errors:?}"
+        );
+        assert!(errors[0].message.contains("malformed `t-fn`"));
     }
 }
