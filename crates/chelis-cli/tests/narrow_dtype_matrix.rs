@@ -654,9 +654,6 @@ fn c_f16_tensor_literal_constructs() {
 /// above), and the C DAG kernels get it right (bit-locked above); only the
 /// eval tensor lane skips the rounding.
 #[test]
-#[ignore = "chelis#717: eval f16 tensor add produces 2049.0, which is not representable in \
-            f16; correct is 2048.0. Run with \
-            `cargo test -p chelis-cli --test narrow_dtype_matrix -- --ignored`."]
 fn eval_tensor_f16_add_rounds_to_f16() {
     let line = eval_first_line(
         "module M.Main\n\
@@ -677,9 +674,6 @@ fn eval_tensor_f16_add_rounds_to_f16() {
 /// bf16 sibling. Observed today: `data=[257.0, 0.75]`; 257 is not a bf16
 /// value (mantissa 8 bits).
 #[test]
-#[ignore = "chelis#717: eval bf16 tensor add produces 257.0, not representable in bf16; \
-            correct is 256.0. Run with \
-            `cargo test -p chelis-cli --test narrow_dtype_matrix -- --ignored`."]
 fn eval_tensor_bf16_add_rounds_to_bf16() {
     let line = eval_first_line(
         "module M.Main\n\
@@ -699,9 +693,6 @@ fn eval_tensor_bf16_add_rounds_to_bf16() {
 /// (`crates/chelis-ir/src/eval.rs:142-146` routes Bf16|F16 through the f32
 /// arm). Observed today: 2049.0 survives a cast to f16.
 #[test]
-#[ignore = "chelis#717: eval tensor cast(x, f16) leaves 2049.0 in the tensor (narrows only \
-            to f32); correct is 2048.0. Run with \
-            `cargo test -p chelis-cli --test narrow_dtype_matrix -- --ignored`."]
 fn eval_tensor_cast_to_f16_rounds() {
     let line = eval_first_line(
         "module M.Main\n\

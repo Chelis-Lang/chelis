@@ -285,10 +285,6 @@ fn eval_f32_tensor_tan_and_sqrt_do_narrow_to_f32() {
 /// for an f64 tensor. Eight significant digits of a declared-f64 value are
 /// silently gone.
 #[test]
-#[ignore = "chelis#717: eval computes f64 tensor tan through f32 (tensor_float_unop_f32) \
-            and prints 14.101419448852539; the f64 answer is 14.10141994717172 and the \
-            compiled C lane produces it. Run with \
-            `cargo test -p chelis-cli --test eval_tensor_narrowing_matrix -- --ignored`."]
 fn eval_f64_tensor_tan_keeps_f64_precision() {
     let line = eval_first_line(&f64_unop_program("tan", "1.5", "3.0")).expect("eval should run");
     assert!(
@@ -299,9 +295,6 @@ fn eval_f64_tensor_tan_keeps_f64_precision() {
 
 /// Observed today: 1.4142135381698608 = f32(sqrt(2)).
 #[test]
-#[ignore = "chelis#717: eval computes f64 tensor sqrt through f32 and prints \
-            1.4142135381698608 (= f32(sqrt 2)); the f64 answer is 1.4142135623730951. Run \
-            with `cargo test -p chelis-cli --test eval_tensor_narrowing_matrix -- --ignored`."]
 fn eval_f64_tensor_sqrt_keeps_f64_precision() {
     let line = eval_first_line(&f64_unop_program("sqrt", "2.0", "3.0")).expect("eval should run");
     assert!(
@@ -312,9 +305,6 @@ fn eval_f64_tensor_sqrt_keeps_f64_precision() {
 
 /// Observed today: 7.389056205749512 = f32(exp(2)).
 #[test]
-#[ignore = "chelis#717: eval computes f64 tensor exp through f32 and prints \
-            7.389056205749512; the f64 answer is 7.38905609893065. Run with \
-            `cargo test -p chelis-cli --test eval_tensor_narrowing_matrix -- --ignored`."]
 fn eval_f64_tensor_exp_keeps_f64_precision() {
     let line = eval_first_line(&f64_unop_program("exp", "2.0", "3.0")).expect("eval should run");
     assert!(
@@ -332,9 +322,6 @@ fn eval_f64_tensor_exp_keeps_f64_precision() {
 /// Computing in f64 and rounding once IS correctly rounded for f32 - eval
 /// just skips the rounding step for add.
 #[test]
-#[ignore = "chelis#717: eval f32 tensor add(0.1, 0.2) prints 0.30000000447034836, not an \
-            f32 value; correct f32 sum is 0.30000001192092896 and the C lane produces it. \
-            Run with `cargo test -p chelis-cli --test eval_tensor_narrowing_matrix -- --ignored`."]
 fn eval_f32_tensor_add_rounds_to_f32() {
     let line = eval_first_line(
         "module M.Main\n\
@@ -354,9 +341,6 @@ fn eval_f32_tensor_add_rounds_to_f32() {
 
 /// Observed today: 0.3333333333333333 (raw f64 quotient).
 #[test]
-#[ignore = "chelis#717: eval f32 tensor div(1, 3) prints 0.3333333333333333 (f64, not an \
-            f32 value); correct f32 quotient is 0.3333333432674408. Run with \
-            `cargo test -p chelis-cli --test eval_tensor_narrowing_matrix -- --ignored`."]
 fn eval_f32_tensor_div_rounds_to_f32() {
     let line = eval_first_line(
         "module M.Main\n\
@@ -375,9 +359,6 @@ fn eval_f32_tensor_div_rounds_to_f32() {
 /// Observed today: 0.6666666666666666 (raw f64). Note the irony: recip is on
 /// the very op list #695 names as living on the lossy f64 helpers.
 #[test]
-#[ignore = "chelis#717: eval f32 tensor recip(1.5) prints 0.6666666666666666 (f64, not an \
-            f32 value); correct f32 value is 0.6666666865348816. Run with \
-            `cargo test -p chelis-cli --test eval_tensor_narrowing_matrix -- --ignored`."]
 fn eval_f32_tensor_recip_rounds_to_f32() {
     let line = eval_first_line(
         "module M.Main\n\

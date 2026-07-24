@@ -258,9 +258,6 @@ fn c_int64_tensor_sum_is_exact_via_to_list() {
 /// Observed today: eval prints [9007199254740992] - the Vec<f64> storage
 /// (#684) collapses the element before the sum ever runs.
 #[test]
-#[ignore = "chelis#684: eval's int64 tensor sum returns 9007199254740992 (f64 storage); the \
-            exact answer 9007199254740993 is what the C lane already produces. Run with \
-            `cargo test -p chelis-cli --test reduction_and_bitwise_matrix -- --ignored`."]
 fn eval_int64_tensor_sum_is_exact_at_2p53() {
     assert_eq!(
         eval_first_line(I64_SUM_2P53).expect("eval"),
@@ -298,8 +295,11 @@ fn c_int64_tensor_print_is_exact_above_2p53() {
 /// int64-typed tensor), compiled C prints 187.0. This row asserts only lane
 /// AGREEMENT, not which of the three defensible semantics lands.
 #[test]
-#[ignore = "chelis#724: mean of an int64 tensor - eval 187.5, compiled C 187.0, checker \
-            blessed both. Lanes must agree once the semantics are authored. Run with \
+#[ignore = "chelis#724 (decided: reject): since chelis#729 Phase 1 the eval half REJECTS - \
+            the lowered mean Domain-traps at the int64 div (numeric trap: domain in div at \
+            int64) instead of storing 187.5. The compiled lane still prints 187.0, so lane \
+            agreement (both rejecting) lands with the capability-cell wiring in the v0.19 \
+            window. Run with \
             `cargo test -p chelis-cli --test reduction_and_bitwise_matrix -- --ignored`."]
 fn int64_tensor_mean_lanes_agree() {
     if !c_toolchain_available() {
