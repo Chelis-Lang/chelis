@@ -2284,10 +2284,13 @@ still widen/wrap (chelis#718, Phase 3).)*
 > that would produce any other value in a bool-typed position SHALL be
 > rejected by the checker or trap.
 
-*(Value half honored in eval since chelis#729 Phase 1: bool storage is
-{0, 1} and arithmetic leaving the set Domain-traps. The checker-level
-rejection is the decided chelis#726 capability cell, ratified with the
-Phase 4 table.)*
+*(Honored on both halves: bool storage is {0, 1} since chelis#729
+Phase 1 and arithmetic leaving the set Domain-traps; the decided
+chelis#726 checker-level rejection landed at the chelis#729 Phase 1
+rework - `add`/`sub`/`mul`/`neg`/`floor_div` and `sum`/`prod_reduce`
+reject bool operands at check time on every application form, with the
+runtime trap kept as defense in depth. The Phase 4 table mechanizes
+the cell.)*
 
 > **[04-NUM-5]** Comparisons SHALL compare finalized values: a cast's
 > rounding applies before any comparison reads it, including in

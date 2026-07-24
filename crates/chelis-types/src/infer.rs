@@ -5535,6 +5535,311 @@ const INTEGER_ONLY_DIV_OPS: &[&str] = &["trunc_div"];
 
 const INTEGER_REJECTED_OPS: &[&str] = &["matmul"];
 
+/// The shared tensor/scalar builtins whose per-argument dtype acceptance
+/// runs through [`operand_dtype_rejection`]. File-level (not local to
+/// `infer_app`) so the direct-application post-check and the pipe-stage
+/// check in `infer_pipe` consult the same roster (chelis#860).
+const TENSOR_OPS: &[&str] = &[
+    "add",
+    "mul",
+    "sub",
+    "div",
+    "floor_div",
+    "trunc_div",
+    "neg",
+    "recip",
+    "exp",
+    "log",
+    "sin",
+    "sqrt",
+    "relu",
+    "sigmoid",
+    "tanh",
+    "silu",
+    "gelu",
+    "matmul",
+    "layer_norm",
+    "max_elem",
+    "min_elem",
+    "normalize",
+    "cmplt",
+    "eq",
+    "neq",
+    "lt",
+    "gt",
+    "lte",
+    "gte",
+    "and",
+    "or",
+    "not",
+];
+
+/// Elementwise arithmetic ops whose bool-operand rejection is the
+/// decided chelis#726 capability cell (spec/04-type-system.md section 9
+/// [04-NUM-4]): bool is exactly {0, 1} and not numeric, so arithmetic
+/// on it is a check-time error on every surface and in every
+/// application form. `div` and `trunc_div` already reject bool through
+/// their numeric-family arms; `and`/`or`/`not` remain the bool ops.
+const BOOL_REJECTED_ARITH_OPS: &[&str] = &["add", "sub", "mul", "neg", "floor_div"];
+
+/// Value-accumulating reductions under the same chelis#726 cell: a bool
+/// sum or product leaves {0, 1}, so the operand is rejected at check
+/// time and the counting idiom is an explicit cast
+/// (`sum(cast(x, int64), 0)`). A first-class `count` builtin is the
+/// chelis#726 thread's decided future surface. `mean` is float-only per
+/// the chelis#724 decision and carries its own row below.
+const BOOL_REJECTED_REDUCTION_OPS: &[&str] = &["sum", "prod_reduce"];
+
+/// THE post-desugar operand-dtype policy chokepoint (chelis#860): one
+/// acceptance decision per (builtin, resolved operand type), consulted
+/// by EVERY application surface - direct application (`infer_app`'s
+/// post-unify check), reduction first-argument checks, and pipe stages
+/// (`infer_pipe`; the bare-callee stage form previously skipped the
+/// acceptance check entirely, which was the chelis#860 bypass). The
+/// polymorphic cross-row pass (`check_restricted_op_in_body`) mirrors
+/// these rows with instantiation context until the chelis#729 Phase 4
+/// capability table derives both from one source.
+///
+/// Returns the rejection diagnostic (kind, message, hints) for an
+/// inadmissible operand, or `None` for an admissible one. Unresolved
+/// `Var`/`Error` types are admissible here by design: polymorphic
+/// bodies check at instantiation through the cross-row pass.
+fn operand_dtype_rejection(
+    fname: &str,
+    resolved: &Type,
+) -> Option<(CheckErrorKind, String, Vec<String>)> {
+    // The decided capability cells (chelis#724/#726) come first so both
+    // surfaces get the cell's own diagnostic rather than the generic
+    // acceptance fallthrough.
+    let bool_operand = matches!(
+        resolved,
+        Type::Tensor(_, TensorPrec::Concrete(Prim::Bool)) | Type::Prim(Prim::Bool)
+    );
+    if bool_operand
+        && (BOOL_REJECTED_ARITH_OPS.contains(&fname)
+            || BOOL_REJECTED_REDUCTION_OPS.contains(&fname))
+    {
+        return Some((
+            CheckErrorKind::PrecisionMismatch,
+            format!(
+                "{fname} on bool operands is not admitted per the chelis#726 \
+                 capability decision and spec/04-type-system.md section 9 \
+                 [04-NUM-4]: bool is exactly {{0, 1}} and not a numeric dtype, \
+                 so arithmetic on it has no authored meaning"
+            ),
+            vec![
+                "chelis#726: cast explicitly to count or accumulate \
+                 (`sum(cast(x, int64), 0)`); use `and`/`or`/`not` for bool \
+                 logic."
+                    .to_string(),
+            ],
+        ));
+    }
+    if fname == "mean" {
+        let non_float_elem = match resolved {
+            Type::Tensor(_, TensorPrec::Concrete(p)) if !p.is_float() => Some(p.name()),
+            Type::Prim(p) if !p.is_float() => Some(p.name()),
+            _ => None,
+        };
+        if let Some(prim_name) = non_float_elem {
+            return Some((
+                CheckErrorKind::PrecisionMismatch,
+                format!(
+                    "mean on operand precision `{prim_name}` is not admitted per \
+                     the chelis#724 capability decision: mean is float-only \
+                     (f32, f64, bf16, f16). An integer mean has no authored \
+                     rounding, and a fractional result inside an integer \
+                     tensor violates spec/04-type-system.md section 9 \
+                     [04-NUM-1]"
+                ),
+                vec![
+                    "chelis#724: cast to a float precision first, e.g. \
+                     `mean(cast(x, f32), 0)`."
+                        .to_string(),
+                ],
+            ));
+        }
+        return None;
+    }
+    if fname == "softmax" {
+        if let Type::Tensor(_, TensorPrec::Concrete(p)) = resolved
+            && !p.is_float()
+        {
+            return Some((
+                CheckErrorKind::PrecisionMismatch,
+                format!(
+                    "softmax on operand precision `{}` is not admitted per \
+                     spec/04-type-system.md \u{00a7}5.4: transcendental \
+                     operations are restricted to f32, f64, bf16, f16 \
+                     (not integer)",
+                    p.name()
+                ),
+                vec![
+                    "spec/04-type-system.md \u{00a7}5.4: cast to a float \
+                     precision before applying softmax."
+                        .to_string(),
+                ],
+            ));
+        }
+        return None;
+    }
+    if !TENSOR_OPS.contains(&fname) {
+        return None;
+    }
+    let ok = match fname {
+        "matmul" | "layer_norm" | "normalize" => {
+            matches!(resolved, Type::Tensor(_, _) | Type::Var(_) | Type::Error(_))
+        }
+        "add" | "mul" | "sub" | "max_elem" | "min_elem" | "neg" => {
+            matches!(resolved, Type::Tensor(_, _) | Type::Var(_) | Type::Error(_))
+                || matches!(resolved, Type::Prim(prec) if prec.is_numeric())
+        }
+        "floor_div" => {
+            // chelis#178: `floor_div` accepts both integer and float
+            // operands (round toward -inf for ints, `floor(a/b)` for
+            // floats), so any numeric precision is admissible.
+            matches!(resolved, Type::Tensor(_, _) | Type::Var(_) | Type::Error(_))
+                || matches!(resolved, Type::Prim(prec) if prec.is_numeric())
+        }
+        "div" => {
+            // chelis#178: `div` is float-only. Integer operands are a
+            // type error pointing at `floor_div` / `trunc_div` (see the
+            // rejection diagnostic below). An unresolved
+            // `TensorPrec::Var(_)` is accepted so a polymorphic body
+            // type-checks; the cross-row pass
+            // `validate_polymorphic_op_constraints` catches integer
+            // instantiations at the call site.
+            matches!(
+                resolved,
+                Type::Tensor(_, TensorPrec::Var(_)) | Type::Var(_) | Type::Error(_)
+            ) || matches!(resolved, Type::Tensor(_, TensorPrec::Concrete(p)) if p.is_float())
+                || matches!(resolved, Type::Prim(prec) if prec.is_float())
+        }
+        "trunc_div" => {
+            // chelis#178: `trunc_div` is integer-only (the C/Rust
+            // truncating quotient). Float operands are a type error.
+            // Unresolved precision vars are accepted for polymorphic
+            // bodies.
+            matches!(
+                resolved,
+                Type::Tensor(_, TensorPrec::Var(_)) | Type::Var(_) | Type::Error(_)
+            ) || matches!(resolved, Type::Tensor(_, TensorPrec::Concrete(p)) if p.is_integer())
+                || matches!(resolved, Type::Prim(prec) if prec.is_integer())
+        }
+        "exp" | "log" | "sin" | "sqrt" | "relu" | "sigmoid" | "tanh" | "silu" | "gelu"
+        | "recip" => {
+            // WS-A8 / RT-3 F3: spec/04-type-system.md §5.4 restricts
+            // transcendental ops to float precisions (f32, f64, bf16,
+            // f16). Tensors carrying an unresolved `TensorPrec::Var(_)`
+            // are accepted here so a polymorphic body type-checks; the
+            // cross-row enforcement pass catches integer instantiations
+            // at the call site.
+            matches!(
+                resolved,
+                Type::Tensor(_, TensorPrec::Var(_)) | Type::Var(_) | Type::Error(_)
+            ) || matches!(resolved, Type::Tensor(_, TensorPrec::Concrete(p)) if p.is_float())
+                || matches!(resolved, Type::Prim(prec) if prec.is_float())
+        }
+        "cmplt" | "lt" | "gt" | "lte" | "gte" => {
+            matches!(resolved, Type::Tensor(_, _) | Type::Var(_) | Type::Error(_))
+                || matches!(resolved, Type::Prim(prec) if prec.is_numeric())
+        }
+        "eq" | "neq" => {
+            matches!(resolved, Type::Tensor(_, _) | Type::Var(_) | Type::Error(_))
+                || matches!(resolved, Type::Prim(_))
+        }
+        "and" | "or" | "not" => {
+            matches!(
+                resolved,
+                Type::Tensor(_, TensorPrec::Concrete(Prim::Bool)) | Type::Var(_) | Type::Error(_)
+            ) || matches!(resolved, Type::Prim(Prim::Bool))
+        }
+        _ => matches!(resolved, Type::Tensor(_, _) | Type::Var(_) | Type::Error(_)),
+    };
+    if ok {
+        return None;
+    }
+    // WS-A8: surface a §5.4 citation when a transcendental rejects an
+    // integer tensor.
+    let is_transcendental = matches!(
+        fname,
+        "exp" | "log" | "sin" | "sqrt" | "relu" | "sigmoid" | "tanh" | "silu" | "gelu" | "recip"
+    );
+    let resolved_int_prec = match resolved {
+        Type::Tensor(_, TensorPrec::Concrete(p)) if p.is_integer() => Some(p.name()),
+        Type::Prim(p) if p.is_integer() => Some(p.name()),
+        _ => None,
+    };
+    let resolved_float_prec = match resolved {
+        Type::Tensor(_, TensorPrec::Concrete(p)) if p.is_float() => Some(p.name()),
+        Type::Prim(p) if p.is_float() => Some(p.name()),
+        _ => None,
+    };
+    if is_transcendental
+        && let Type::Tensor(_, TensorPrec::Concrete(p)) = resolved
+        && !p.is_float()
+    {
+        Some((
+            CheckErrorKind::PrecisionMismatch,
+            format!(
+                "{fname} on operand precision `{}` is not admitted per \
+                 spec/04-type-system.md \u{00a7}5.4: transcendental \
+                 operations are restricted to f32, f64, bf16, f16 (not \
+                 integer)",
+                p.name()
+            ),
+            vec![format!(
+                "spec/04-type-system.md \u{00a7}5.4: cast to a float \
+                 precision before applying `{fname}`."
+            )],
+        ))
+    } else if fname == "div"
+        && let Some(pname) = resolved_int_prec
+    {
+        // chelis#178: integer `div` is rejected; point the user at the
+        // integer-division ops.
+        Some((
+            CheckErrorKind::PrecisionMismatch,
+            format!(
+                "div on integer operand precision `{pname}` is not admitted \
+                 per spec/05-risc-primitives.md \u{00a7}2.1: `div` is \
+                 float-only (IEEE-754). Use `floor_div` (round toward -inf) \
+                 or `trunc_div` (round toward zero) for integers."
+            ),
+            vec![
+                "spec/05-risc-primitives.md \u{00a7}2.1: integer division \
+                 uses `floor_div` or `trunc_div`; `div` requires float \
+                 operands."
+                    .to_string(),
+            ],
+        ))
+    } else if fname == "trunc_div"
+        && let Some(pname) = resolved_float_prec
+    {
+        // chelis#178: `trunc_div` is integer-only.
+        Some((
+            CheckErrorKind::PrecisionMismatch,
+            format!(
+                "trunc_div on float operand precision `{pname}` is not \
+                 admitted per spec/05-risc-primitives.md \u{00a7}2.1: \
+                 `trunc_div` is integer-only. Use `div` for IEEE-754 float \
+                 division, or `floor_div` for a floored float quotient."
+            ),
+            vec![
+                "spec/05-risc-primitives.md \u{00a7}2.1: `trunc_div` requires \
+                 integer operands."
+                    .to_string(),
+            ],
+        ))
+    } else {
+        Some((
+            CheckErrorKind::TypeMismatch,
+            format!("{fname} does not accept argument type {resolved} in this context"),
+            vec![],
+        ))
+    }
+}
+
 fn check_restricted_op_in_body(
     op_name: &str,
     op_args: &[deep::Expr],
@@ -5548,6 +5853,9 @@ fn check_restricted_op_in_body(
         && !TRANSCENDENTAL_FLOAT_ONLY_OPS.contains(&op_name)
         && !FLOAT_ONLY_DIV_OPS.contains(&op_name)
         && !INTEGER_ONLY_DIV_OPS.contains(&op_name)
+        && !BOOL_REJECTED_ARITH_OPS.contains(&op_name)
+        && !BOOL_REJECTED_REDUCTION_OPS.contains(&op_name)
+        && op_name != "mean"
     {
         return;
     }
@@ -5555,7 +5863,7 @@ fn check_restricted_op_in_body(
     // the call-site substitution. The arg may be either a direct
     // `(var x)` reference to a body param OR a deeper expression — for
     // the latter we look at its annotated type's precision slot.
-    for arg in op_args {
+    for (arg_idx, arg) in op_args.iter().enumerate() {
         let resolved_prim = resolve_arg_precision_through_subst(arg, param_to_prec, subst);
         let Some(prim_name) = resolved_prim else {
             continue;
@@ -5564,6 +5872,54 @@ fn check_restricted_op_in_body(
             continue;
         };
         let _ = call_site_list; // span hint reserved for future plumbing
+        // The chelis#726 / chelis#724 capability cells, mirrored from
+        // `operand_dtype_rejection` with instantiation context (the
+        // chelis#729 Phase 4 table derives both from one source).
+        // Reductions gate on the data argument only; the axis argument
+        // is int32 by signature and must not false-positive.
+        let first_data_arg = arg_idx == 0;
+        if matches!(prim, Prim::Bool)
+            && (BOOL_REJECTED_ARITH_OPS.contains(&op_name)
+                || (BOOL_REJECTED_REDUCTION_OPS.contains(&op_name) && first_data_arg))
+        {
+            errors.push(CheckError::new(
+                CheckErrorKind::PrecisionMismatch,
+                format!(
+                    "{op_name} on bool operands is not admitted per the chelis#726 \
+                     capability decision and spec/04-type-system.md section 9 \
+                     [04-NUM-4]: bool is exactly {{0, 1}} and not a numeric dtype. \
+                     Reached through the polymorphic sig for `{callee_name}` \
+                     instantiated at `bool`; the restriction fires on every bool \
+                     instantiation, including via stdlib wrappers."
+                ),
+                vec![
+                    "chelis#726: cast explicitly to count or accumulate \
+                     (`sum(cast(x, int64), 0)`); use `and`/`or`/`not` for bool \
+                     logic."
+                        .to_string(),
+                ],
+            ));
+            return;
+        }
+        if op_name == "mean" && first_data_arg && !prim.is_float() {
+            errors.push(CheckError::new(
+                CheckErrorKind::PrecisionMismatch,
+                format!(
+                    "mean on operand precision `{prim_name}` is not admitted per the \
+                     chelis#724 capability decision: mean is float-only (f32, f64, \
+                     bf16, f16). Reached through the polymorphic sig for \
+                     `{callee_name}` instantiated at `{prim_name}`; the restriction \
+                     fires on every non-float instantiation, including via stdlib \
+                     wrappers."
+                ),
+                vec![
+                    "chelis#724: cast to a float precision first, e.g. \
+                     `mean(cast(x, f32), 0)`."
+                        .to_string(),
+                ],
+            ));
+            return;
+        }
         if INTEGER_REJECTED_OPS.contains(&op_name) && prim.is_integer() {
             errors.push(CheckError::new(
                 CheckErrorKind::PrecisionMismatch,
@@ -11155,41 +11511,6 @@ fn infer_app(
     let unify_arg_tys = auto_borrow_call_arg_types(&func_ty, unify_arg_tys, subst);
     let expected_fn = Type::Fn(unify_arg_tys, Box::new(ret_tv.clone()));
 
-    const TENSOR_OPS: &[&str] = &[
-        "add",
-        "mul",
-        "sub",
-        "div",
-        "floor_div",
-        "trunc_div",
-        "neg",
-        "recip",
-        "exp",
-        "log",
-        "sin",
-        "sqrt",
-        "relu",
-        "sigmoid",
-        "tanh",
-        "silu",
-        "gelu",
-        "matmul",
-        "layer_norm",
-        "max_elem",
-        "min_elem",
-        "normalize",
-        "cmplt",
-        "eq",
-        "neq",
-        "lt",
-        "gt",
-        "lte",
-        "gte",
-        "and",
-        "or",
-        "not",
-    ];
-
     const LOGICAL_OPS: &[&str] = &["and", "or", "not"];
     const INT_BINOPS: &[&str] = &["mod", "bitand", "bitor", "bitxor"];
     const INT_SHIFT_OPS: &[&str] = &["shl", "shr"];
@@ -11198,190 +11519,19 @@ fn infer_app(
         Ok(()) => {
             let mut result_ty = subst.apply(&ret_tv);
 
-            // Post-check: shared builtins can operate on either tensors or host scalars.
+            // Post-check: shared builtins can operate on either tensors or
+            // host scalars. The per-argument dtype acceptance itself lives
+            // in `operand_dtype_rejection` (the chelis#860 chokepoint,
+            // shared with `infer_pipe`'s bare-callee stages); this site
+            // supplies the application provenance.
             if let Some(ref fname) = func_name
                 && TENSOR_OPS.contains(&fname.as_str())
             {
                 for arg_ty in &arg_tys {
                     let resolved = type_for_readonly_check(arg_ty, subst);
-                    let ok = match fname.as_str() {
-                        "matmul" | "layer_norm" | "normalize" => {
-                            matches!(resolved, Type::Tensor(_, _) | Type::Var(_) | Type::Error(_))
-                        }
-                        "add" | "mul" | "sub" | "max_elem" | "min_elem" | "neg" => {
-                            matches!(resolved, Type::Tensor(_, _) | Type::Var(_) | Type::Error(_))
-                                || matches!(resolved, Type::Prim(prec) if prec.is_numeric())
-                        }
-                        "floor_div" => {
-                            // chelis#178: `floor_div` accepts both integer
-                            // and float operands (round toward -inf for
-                            // ints, `floor(a/b)` for floats), so any
-                            // numeric precision is admissible.
-                            matches!(resolved, Type::Tensor(_, _) | Type::Var(_) | Type::Error(_))
-                                || matches!(resolved, Type::Prim(prec) if prec.is_numeric())
-                        }
-                        "div" => {
-                            // chelis#178: `div` is float-only. Integer
-                            // operands are a type error pointing at
-                            // `floor_div` / `trunc_div` (see the rejection
-                            // diagnostic below). An unresolved
-                            // `TensorPrec::Var(_)` is accepted so a
-                            // polymorphic body type-checks; the cross-row
-                            // pass `validate_polymorphic_op_constraints`
-                            // catches integer instantiations at the call
-                            // site.
-                            matches!(
-                                resolved,
-                                Type::Tensor(_, TensorPrec::Var(_)) | Type::Var(_) | Type::Error(_)
-                            ) || matches!(resolved, Type::Tensor(_, TensorPrec::Concrete(p)) if p.is_float())
-                                || matches!(resolved, Type::Prim(prec) if prec.is_float())
-                        }
-                        "trunc_div" => {
-                            // chelis#178: `trunc_div` is integer-only (the
-                            // C/Rust truncating quotient). Float operands
-                            // are a type error. Unresolved precision vars
-                            // are accepted for polymorphic bodies.
-                            matches!(
-                                resolved,
-                                Type::Tensor(_, TensorPrec::Var(_)) | Type::Var(_) | Type::Error(_)
-                            ) || matches!(resolved, Type::Tensor(_, TensorPrec::Concrete(p)) if p.is_integer())
-                                || matches!(resolved, Type::Prim(prec) if prec.is_integer())
-                        }
-                        "exp" | "log" | "sin" | "sqrt" | "relu" | "sigmoid" | "tanh" | "silu"
-                        | "gelu" | "recip" => {
-                            // WS-A8 / RT-3 F3: spec/04-type-system.md §5.4
-                            // restricts transcendental ops to float
-                            // precisions (f32, f64, bf16, f16). The
-                            // tensor form was previously admitted with
-                            // any precision, slipping integer instantiations
-                            // past the type checker; the scalar form
-                            // already enforced this. Tensors carrying
-                            // an unresolved `TensorPrec::Var(_)` are
-                            // accepted here so a polymorphic body
-                            // type-checks; the cross-row enforcement
-                            // pass `validate_polymorphic_op_constraints`
-                            // catches integer instantiations at the
-                            // call site.
-                            matches!(
-                                resolved,
-                                Type::Tensor(_, TensorPrec::Var(_)) | Type::Var(_) | Type::Error(_)
-                            ) || matches!(resolved, Type::Tensor(_, TensorPrec::Concrete(p)) if p.is_float())
-                                || matches!(resolved, Type::Prim(prec) if prec.is_float())
-                        }
-                        "cmplt" | "lt" | "gt" | "lte" | "gte" => {
-                            matches!(resolved, Type::Tensor(_, _) | Type::Var(_) | Type::Error(_))
-                                || matches!(resolved, Type::Prim(prec) if prec.is_numeric())
-                        }
-                        "eq" | "neq" => {
-                            matches!(resolved, Type::Tensor(_, _) | Type::Var(_) | Type::Error(_))
-                                || matches!(resolved, Type::Prim(_))
-                        }
-                        "and" | "or" | "not" => {
-                            matches!(
-                                resolved,
-                                Type::Tensor(_, TensorPrec::Concrete(Prim::Bool))
-                                    | Type::Var(_)
-                                    | Type::Error(_)
-                            ) || matches!(resolved, Type::Prim(Prim::Bool))
-                        }
-                        _ => matches!(resolved, Type::Tensor(_, _) | Type::Var(_) | Type::Error(_)),
-                    };
-                    if !ok {
-                        // WS-A8: surface a §5.4 citation when a
-                        // transcendental rejects an integer tensor.
-                        let is_transcendental = matches!(
-                            fname.as_str(),
-                            "exp"
-                                | "log"
-                                | "sin"
-                                | "sqrt"
-                                | "relu"
-                                | "sigmoid"
-                                | "tanh"
-                                | "silu"
-                                | "gelu"
-                                | "recip"
-                        );
-                        let resolved_int_prec = match &resolved {
-                            Type::Tensor(_, TensorPrec::Concrete(p)) if p.is_integer() => {
-                                Some(p.name())
-                            }
-                            Type::Prim(p) if p.is_integer() => Some(p.name()),
-                            _ => None,
-                        };
-                        let resolved_float_prec = match &resolved {
-                            Type::Tensor(_, TensorPrec::Concrete(p)) if p.is_float() => {
-                                Some(p.name())
-                            }
-                            Type::Prim(p) if p.is_float() => Some(p.name()),
-                            _ => None,
-                        };
-                        let (kind, message, hints) = if is_transcendental
-                            && let Type::Tensor(_, TensorPrec::Concrete(p)) = &resolved
-                            && !p.is_float()
-                        {
-                            (
-                                CheckErrorKind::PrecisionMismatch,
-                                format!(
-                                    "{fname} on operand precision `{}` is not admitted per \
-                                     spec/04-type-system.md \u{00a7}5.4: transcendental \
-                                     operations are restricted to f32, f64, bf16, f16 (not \
-                                     integer)",
-                                    p.name()
-                                ),
-                                vec![format!(
-                                    "spec/04-type-system.md \u{00a7}5.4: cast to a float \
-                                     precision before applying `{fname}`."
-                                )],
-                            )
-                        } else if fname == "div"
-                            && let Some(pname) = resolved_int_prec
-                        {
-                            // chelis#178: integer `div` is rejected; point
-                            // the user at the integer-division ops.
-                            (
-                                CheckErrorKind::PrecisionMismatch,
-                                format!(
-                                    "div on integer operand precision `{pname}` is not admitted \
-                                     per spec/05-risc-primitives.md \u{00a7}2.1: `div` is \
-                                     float-only (IEEE-754). Use `floor_div` (round toward -inf) \
-                                     or `trunc_div` (round toward zero) for integers."
-                                ),
-                                vec![
-                                    "spec/05-risc-primitives.md \u{00a7}2.1: integer division \
-                                     uses `floor_div` or `trunc_div`; `div` requires float \
-                                     operands."
-                                        .to_string(),
-                                ],
-                            )
-                        } else if fname == "trunc_div"
-                            && let Some(pname) = resolved_float_prec
-                        {
-                            // chelis#178: `trunc_div` is integer-only.
-                            (
-                                CheckErrorKind::PrecisionMismatch,
-                                format!(
-                                    "trunc_div on float operand precision `{pname}` is not \
-                                     admitted per spec/05-risc-primitives.md \u{00a7}2.1: \
-                                     `trunc_div` is integer-only. Use `div` for IEEE-754 float \
-                                     division, or `floor_div` for a floored float quotient."
-                                ),
-                                vec![
-                                    "spec/05-risc-primitives.md \u{00a7}2.1: `trunc_div` requires \
-                                     integer operands."
-                                        .to_string(),
-                                ],
-                            )
-                        } else {
-                            (
-                                CheckErrorKind::TypeMismatch,
-                                format!(
-                                    "{fname} does not accept argument type {resolved} in this \
-                                     context"
-                                ),
-                                vec![],
-                            )
-                        };
+                    if let Some((kind, message, hints)) =
+                        operand_dtype_rejection(fname, &resolved)
+                    {
                         return report(
                             errors,
                             CheckError::new(
@@ -11428,34 +11578,26 @@ fn infer_app(
                             );
                         }
                     }
-                    // WS-A8 / RT-3 F3: softmax is a transcendental row
-                    // op per spec/04-type-system.md \u{00a7}5.4 and must
-                    // reject integer operand precisions. Polymorphic
-                    // (`Var`) precisions are accepted here so a poly
-                    // body type-checks; the cross-row enforcement pass
-                    // catches integer call-site instantiations.
-                    if fname == "softmax"
-                        && let Type::Tensor(_, TensorPrec::Concrete(p)) = &resolved
-                        && !p.is_float()
+                    // The operand-dtype policy on the reduced tensor: the
+                    // chelis#724 float-only mean cell, the chelis#726 bool
+                    // sum/product cell, and softmax's section 5.4 row (the
+                    // former WS-A8 / RT-3 F3 inline check) all live in the
+                    // shared chelis#860 chokepoint. Polymorphic (`Var`)
+                    // precisions are accepted so a poly body type-checks;
+                    // the cross-row enforcement pass catches call-site
+                    // instantiations.
+                    if let Some((kind, message, hints)) =
+                        operand_dtype_rejection(fname, &resolved)
                     {
                         return report(
                             errors,
                             CheckError::new(
-                                CheckErrorKind::PrecisionMismatch,
+                                kind,
                                 with_macro_provenance(
                                     &deep::Expr::List(list.clone(), zero_span()),
-                                    format!(
-                                        "softmax on operand precision `{}` is not admitted per \
-                                     spec/04-type-system.md \u{00a7}5.4: transcendental \
-                                     operations are restricted to f32, f64, bf16, f16 \
-                                     (not integer)",
-                                        p.name()
-                                    ),
+                                    message,
                                 ),
-                                vec![format!(
-                                    "spec/04-type-system.md \u{00a7}5.4: cast to a float \
-                                 precision before applying softmax."
-                                )],
+                                hints,
                             ),
                         );
                     }
@@ -19353,6 +19495,29 @@ fn infer_pipe(
         } else {
             infer_expr(stage, env, vg, subst, adt_reg, errors, product)
         };
+        // The chelis#860 chokepoint at the pipe's application site: a
+        // bare-callee stage (`x |> recip`) applies its builtin to the
+        // piped value without an `app` node, so the acceptance check in
+        // `infer_app` never sees it. Consult the same operand-dtype
+        // policy the direct form uses; without this,
+        // `cast(2, int32) |> recip` reached the runtime (chelis#860).
+        if let Some(fname) = bare_var_stage_name(stage) {
+            let resolved = type_for_readonly_check(&current_ty, subst);
+            if let Some((kind, message, hints)) = operand_dtype_rejection(fname, &resolved) {
+                let mut e = CheckError::new(kind, message, hints);
+                if let Some(id) = stage.span_id() {
+                    e.span_offset = parse_span_offset(id);
+                    e.span_id = Some(id.to_string());
+                } else {
+                    let off = stage.span().offset;
+                    if off > 0 {
+                        e.span_offset = Some(off);
+                    }
+                }
+                return report(errors, e);
+            }
+        }
+
         let ret_tv = vg.fresh_type();
         let stage_arg_tys = auto_borrow_call_arg_types(&stage_ty, vec![current_ty.clone()], subst);
         let expected = Type::Fn(stage_arg_tys, Box::new(ret_tv.clone()));
@@ -19378,6 +19543,22 @@ fn infer_pipe(
     }
 
     current_ty
+}
+
+/// The callee name of a bare-reference pipe stage: `x |> recip`
+/// desugars the stage to a plain `(var recip)` node, which `infer_pipe`
+/// applies by unification with no `app` node in sight. Those stages
+/// consult [`operand_dtype_rejection`] directly (chelis#860).
+/// Lambda-shaped stages return `None`; their bodies contain real `app`
+/// nodes the `infer_app` chokepoint already checks.
+fn bare_var_stage_name(stage: &deep::Expr) -> Option<&str> {
+    let deep::Expr::List(list, _) = stage else {
+        return None;
+    };
+    if get_tag(list) != Some("var") {
+        return None;
+    }
+    children(list).first().and_then(symbol_name)
 }
 
 /// If `stage` is a `(fn (params x) body)` Deep node with exactly one

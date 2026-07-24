@@ -710,18 +710,20 @@ fn int64_suffix_literal_binding_is_exact() {
 }
 
 // ===========================================================================
-// PIPE-FORM ACCEPTANCE BYPASS (rt857 F1): `x |> recip` escapes the
-// checker's float-only rejection that the direct form gets (the
-// chelis#860-filed acceptance-list bypass, a chelis#709-class hole killed
-// by the Phase 4 table-derived acceptance). The runtime is the last line:
-// a fractional wide at an integer dtype must Domain-trap, never truncate
-// to a substituted 0 (the chelis#729 Phase 1 scalar guard).
+// PIPE-FORM ACCEPTANCE BYPASS (rt857 F1 / chelis#860): `x |> recip` used
+// to escape the checker's float-only rejection that the direct form gets
+// (a chelis#709-class acceptance hole). CLOSED at the chelis#729 rework:
+// bare pipe stages consult the shared operand-dtype chokepoint, so the
+// rejection is now check-time (see issue_860_checker_chokepoint.rs). The
+// runtime Domain trap remains behind it as defense in depth (the
+// chelis#729 Phase 1 scalar guard).
 // ===========================================================================
 
-/// The program must FAIL LOUDLY on every polarity: today the pipe form
-/// reaches the runtime and Domain-traps; once the checker hole closes it
-/// is rejected at check time. Either way it must never succeed and print
-/// a substituted value (pre-fix it printed `0` and exited 0).
+/// The program must FAIL LOUDLY on every polarity: since the chelis#860
+/// fix that failure is the check-time rejection; the runtime Domain trap
+/// is the defense-in-depth backstop this row keeps honest. Either way it
+/// must never succeed and print a substituted value (pre-fix it printed
+/// `0` and exited 0).
 #[test]
 fn int_recip_through_pipe_fails_loud_never_zero() {
     for (expr, label) in [
