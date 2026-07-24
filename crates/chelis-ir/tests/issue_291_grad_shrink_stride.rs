@@ -141,7 +141,11 @@ fn issue_291_grad_through_stride_is_exact_scatter() {
         TensorValue::from_vec(vec![4], vec![10.0, 20.0, 30.0, 40.0]),
     );
     let vals = eval_tensor(&result.dag, &inputs).expect("grad DAG eval");
-    assert_close("grad_stride_2", &vals[&grad_x].data, &[1.0, 0.0, 1.0, 0.0]);
+    assert_close(
+        "grad_stride_2",
+        &vals[&grad_x].to_f64_lossy_vec(),
+        &[1.0, 0.0, 1.0, 0.0],
+    );
     assert_eq!(
         vals[&grad_x].shape,
         vec![4],
@@ -186,7 +190,7 @@ fn issue_291_grad_stride_routes_nonuniform_cotangent() {
     // df/dx = [2*3, 0, 2*5, 0] = [6, 0, 10, 0].
     assert_close(
         "grad_stride_nonuniform",
-        &vals[&grad_x].data,
+        &vals[&grad_x].to_f64_lossy_vec(),
         &[6.0, 0.0, 10.0, 0.0],
     );
 }
@@ -210,7 +214,7 @@ fn issue_291_grad_stride_non_dividing_step() {
     let vals = eval_tensor(&result.dag, &inputs).expect("grad eval");
     assert_close(
         "grad_stride_5_by_2",
-        &vals[&grad_x].data,
+        &vals[&grad_x].to_f64_lossy_vec(),
         &[1.0, 0.0, 1.0, 0.0, 1.0],
     );
     assert_eq!(vals[&grad_x].shape, vec![5]);
@@ -233,7 +237,7 @@ fn issue_291_grad_stride_step_three() {
     let vals = eval_tensor(&result.dag, &inputs).expect("grad eval");
     assert_close(
         "grad_stride_4_by_3",
-        &vals[&grad_x].data,
+        &vals[&grad_x].to_f64_lossy_vec(),
         &[1.0, 0.0, 0.0, 1.0],
     );
 }
@@ -286,7 +290,7 @@ fn issue_291_grad_stride_two_axes() {
         1.0, 0.0, 1.0, 0.0,
         0.0, 0.0, 0.0, 0.0,
     ];
-    assert_close("grad_stride_2x2", &vals[&grad_x].data, &want);
+    assert_close("grad_stride_2x2", &vals[&grad_x].to_f64_lossy_vec(), &want);
     assert_eq!(vals[&grad_x].shape, vec![4, 4]);
 }
 
@@ -335,7 +339,7 @@ fn issue_291_grad_stride_mixed_identity_axis() {
         1.0, 0.0, 1.0, 0.0,
         1.0, 0.0, 1.0, 0.0,
     ];
-    assert_close("grad_stride_1x2", &vals[&grad_x].data, &want);
+    assert_close("grad_stride_1x2", &vals[&grad_x].to_f64_lossy_vec(), &want);
     assert_eq!(vals[&grad_x].shape, vec![3, 4]);
 }
 
@@ -371,22 +375,24 @@ fn issue_291_grad_stride_matches_finite_difference() {
     let mut inputs = HashMap::new();
     inputs.insert("x".into(), base.clone());
     let analytic = eval_tensor(&result.dag, &inputs).expect("analytic eval")[&grad_x]
-        .data
+        .to_f64_lossy_vec()
         .clone();
 
     let h = 1e-3;
     let mut numerical = [0.0f64; 4];
     for (j, slot) in numerical.iter_mut().enumerate() {
-        let mut plus = base.clone();
-        let mut minus = base.clone();
-        plus.data[j] += h;
-        minus.data[j] -= h;
+        let mut plus_data = base.to_f64_lossy_vec();
+        let mut minus_data = base.to_f64_lossy_vec();
+        plus_data[j] += h;
+        minus_data[j] -= h;
+        let plus = TensorValue::from_vec(base.shape.clone(), plus_data);
+        let minus = TensorValue::from_vec(base.shape.clone(), minus_data);
         let mut ip = HashMap::new();
         ip.insert("x".into(), plus);
         let mut im = HashMap::new();
         im.insert("x".into(), minus);
-        let fp = eval_tensor(&dag, &ip).expect("plus eval")[&out].data[0];
-        let fm = eval_tensor(&dag, &im).expect("minus eval")[&out].data[0];
+        let fp = eval_tensor(&dag, &ip).expect("plus eval")[&out].to_f64_lossy_vec()[0];
+        let fm = eval_tensor(&dag, &im).expect("minus eval")[&out].to_f64_lossy_vec()[0];
         *slot = (fp - fm) / (2.0 * h);
     }
     for (i, (a, n)) in analytic.iter().zip(numerical.iter()).enumerate() {
@@ -411,7 +417,11 @@ fn issue_291_grad_stride_step_exceeds_axis() {
     let mut inputs = HashMap::new();
     inputs.insert("x".into(), TensorValue::from_vec(vec![2], vec![10.0, 20.0]));
     let vals = eval_tensor(&result.dag, &inputs).expect("grad eval");
-    assert_close("grad_stride_2_by_5", &vals[&grad_x].data, &[1.0, 0.0]);
+    assert_close(
+        "grad_stride_2_by_5",
+        &vals[&grad_x].to_f64_lossy_vec(),
+        &[1.0, 0.0],
+    );
     assert_eq!(vals[&grad_x].shape, vec![2]);
 }
 
@@ -432,7 +442,7 @@ fn issue_291_grad_stride_step_equals_axis() {
     let vals = eval_tensor(&result.dag, &inputs).expect("grad eval");
     assert_close(
         "grad_stride_4_by_4",
-        &vals[&grad_x].data,
+        &vals[&grad_x].to_f64_lossy_vec(),
         &[1.0, 0.0, 0.0, 0.0],
     );
     assert_eq!(vals[&grad_x].shape, vec![4]);
@@ -491,7 +501,7 @@ fn issue_291_grad_stride_supports_higher_order_ad() {
     // d/dx (2*x0 + 2*x2) = [2, 0, 2, 0]; independent of the skipped slots.
     assert_close(
         "grad_grad_stride_2",
-        &vals[&grad2_x].data,
+        &vals[&grad2_x].to_f64_lossy_vec(),
         &[2.0, 0.0, 2.0, 0.0],
     );
     assert_eq!(vals[&grad2_x].shape, vec![4]);
@@ -535,17 +545,14 @@ fn issue_291_grad_stride_symbolic_axis_is_runtime_upsample() {
     let mut inputs = HashMap::new();
     inputs.insert(
         "x".to_string(),
-        TensorValue {
-            data: vec![1.0, 2.0, 3.0, 4.0],
-            shape: vec![4],
-        },
+        TensorValue::from_vec(vec![4], vec![1.0, 2.0, 3.0, 4.0]),
     );
     let vals =
         eval_tensor_roots_with_strict(&grad.dag, &[grad_x], |name| inputs.get(name).cloned())
             .expect("runtime strided adjoint evaluates");
     // f(x) = sum(stride(x, 2)) = x0 + x2, so df/dx = [1, 0, 1, 0].
     assert_eq!(vals[&grad_x].shape, vec![4]);
-    assert_eq!(vals[&grad_x].data, vec![1.0, 0.0, 1.0, 0.0]);
+    assert_eq!(vals[&grad_x].to_f64_lossy_vec(), vec![1.0, 0.0, 1.0, 0.0]);
 }
 
 // --- SHRINK: IR-level controls (the adjoint itself was already
@@ -589,7 +596,7 @@ fn issue_291_grad_through_shrink_is_exact_pad() {
     let vals = eval_tensor(&result.dag, &inputs).expect("grad eval");
     assert_close(
         "grad_shrink_0_2",
-        &vals[&grad_x].data,
+        &vals[&grad_x].to_f64_lossy_vec(),
         &[1.0, 1.0, 0.0, 0.0],
     );
     assert_eq!(vals[&grad_x].shape, vec![4]);
@@ -634,7 +641,7 @@ fn issue_291_grad_shrink_interior_nonuniform() {
     // df/dx = [0, 2*4, 2*6, 0] = [0, 8, 12, 0].
     assert_close(
         "grad_shrink_interior",
-        &vals[&grad_x].data,
+        &vals[&grad_x].to_f64_lossy_vec(),
         &[0.0, 8.0, 12.0, 0.0],
     );
 }

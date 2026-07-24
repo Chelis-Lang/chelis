@@ -104,28 +104,22 @@ fn scatter_replace_forward_last_write_wins_with_deterministic_order() {
     let mut inputs: HashMap<String, TensorValue> = HashMap::new();
     inputs.insert(
         "target".to_string(),
-        TensorValue {
-            data: vec![100.0, 200.0, 300.0, 400.0, 500.0, 600.0],
-            shape: vec![3, 2],
-        },
+        TensorValue::from_vec(vec![3, 2], vec![100.0, 200.0, 300.0, 400.0, 500.0, 600.0]),
     );
     inputs.insert(
         "indices".to_string(),
-        TensorValue {
-            data: vec![1.0, 1.0, 1.0, 1.0],
-            shape: vec![4],
-        },
+        TensorValue::from_vec(vec![4], vec![1.0, 1.0, 1.0, 1.0]),
     );
     inputs.insert(
         "updates".to_string(),
-        TensorValue {
-            // Row 0: [10, 11]
-            // Row 1: [20, 21]
-            // Row 2: [30, 31]
-            // Row 3: [40, 41] ← LAST in flat order, must win.
-            data: vec![10.0, 11.0, 20.0, 21.0, 30.0, 31.0, 40.0, 41.0],
-            shape: vec![4, 2],
-        },
+        // Row 0: [10, 11]
+        // Row 1: [20, 21]
+        // Row 2: [30, 31]
+        // Row 3: [40, 41] ← LAST in flat order, must win.
+        TensorValue::from_vec(
+            vec![4, 2],
+            vec![10.0, 11.0, 20.0, 21.0, 30.0, 31.0, 40.0, 41.0],
+        ),
     );
     let vals = eval_tensor_with(&dag, |n| inputs.get(n).cloned()).expect("scatter_replace eval");
     let out = &vals[&scatter];
@@ -136,10 +130,10 @@ fn scatter_replace_forward_last_write_wins_with_deterministic_order() {
     let expected = [100.0, 200.0, 40.0, 41.0, 500.0, 600.0];
     for (i, want) in expected.iter().enumerate() {
         assert!(
-            (out.data[i] - want).abs() < 1e-9,
+            (out.to_f64_lossy_vec()[i] - want).abs() < 1e-9,
             "scatter_replace last-write-wins at flat index {i}: \
              expected {want}, got {} (deterministic-order rule violated)",
-            out.data[i]
+            out.to_f64_lossy_vec()[i]
         );
     }
 }
@@ -186,26 +180,17 @@ fn scatter_replace_forward_distinct_indices_writes_each_cell_once() {
     let mut inputs: HashMap<String, TensorValue> = HashMap::new();
     inputs.insert(
         "target".to_string(),
-        TensorValue {
-            data: vec![100.0, 200.0, 300.0, 400.0, 500.0, 600.0],
-            shape: vec![3, 2],
-        },
+        TensorValue::from_vec(vec![3, 2], vec![100.0, 200.0, 300.0, 400.0, 500.0, 600.0]),
     );
     // 2 → 0 → 1: row order in target after scatter is updates[1] /
     // updates[2] / updates[0].
     inputs.insert(
         "indices".to_string(),
-        TensorValue {
-            data: vec![2.0, 0.0, 1.0],
-            shape: vec![3],
-        },
+        TensorValue::from_vec(vec![3], vec![2.0, 0.0, 1.0]),
     );
     inputs.insert(
         "updates".to_string(),
-        TensorValue {
-            data: vec![10.0, 11.0, 20.0, 21.0, 30.0, 31.0],
-            shape: vec![3, 2],
-        },
+        TensorValue::from_vec(vec![3, 2], vec![10.0, 11.0, 20.0, 21.0, 30.0, 31.0]),
     );
     let vals = eval_tensor_with(&dag, |n| inputs.get(n).cloned()).expect("scatter_replace eval");
     let out = &vals[&scatter];
@@ -214,9 +199,9 @@ fn scatter_replace_forward_distinct_indices_writes_each_cell_once() {
     let expected = [20.0, 21.0, 30.0, 31.0, 10.0, 11.0];
     for (i, want) in expected.iter().enumerate() {
         assert!(
-            (out.data[i] - want).abs() < 1e-9,
+            (out.to_f64_lossy_vec()[i] - want).abs() < 1e-9,
             "scatter_replace distinct-indices at flat {i}: expected {want}, got {}",
-            out.data[i]
+            out.to_f64_lossy_vec()[i]
         );
     }
 }
@@ -454,10 +439,7 @@ fn scatter_add_ad_path_unchanged_after_scatter_landed() {
     let mut inputs: HashMap<String, TensorValue> = HashMap::new();
     inputs.insert(
         "table".to_string(),
-        TensorValue {
-            data: vec![1.0, 2.0, 3.0, 4.0],
-            shape: vec![2, 2],
-        },
+        TensorValue::from_vec(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0]),
     );
     let vals =
         eval_tensor_with(&grad.dag, |n| inputs.get(n).cloned()).expect("backward eval succeeded");
@@ -466,9 +448,9 @@ fn scatter_add_ad_path_unchanged_after_scatter_landed() {
     let expected = [3.0, 3.0, 0.0, 0.0];
     for (i, want) in expected.iter().enumerate() {
         assert!(
-            (dtable.data[i] - want).abs() < 1e-6,
+            (dtable.to_f64_lossy_vec()[i] - want).abs() < 1e-6,
             "ScatterAdd accumulation regressed: expected dtable[{i}]={want}, got {}",
-            dtable.data[i]
+            dtable.to_f64_lossy_vec()[i]
         );
     }
 }

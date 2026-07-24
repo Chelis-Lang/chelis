@@ -1987,8 +1987,20 @@ mod tests {
     use crate::eval::{TensorValue, eval_scalar};
     use std::collections::HashMap;
 
+    // chelis#729 Phase 1: these fixtures verify the AUTODIFF machinery
+    // against f64-precision finite differences, so the DAG type is f64.
+    // (Pre-refactor they were typed f32 but evaluated at raw f64, the
+    // chelis#717 shape; per-dtype finalize now makes an f32-typed DAG
+    // genuinely round at f32, which the matrix suites cover.)
     fn scalar_f32() -> TensorType {
         TensorType::scalar_f32()
+    }
+
+    fn scalar_f64() -> TensorType {
+        TensorType {
+            dims: vec![],
+            precision: Prim::F64,
+        }
     }
 
     /// Build a unary DAG: Load("x") -> op -> output.
@@ -1999,10 +2011,10 @@ mod tests {
         let x = dag.add_node(
             RiscOp::Load { name: "x".into() },
             vec![],
-            scalar_f32(),
+            scalar_f64(),
             None,
         );
-        let y = op_fn(&mut dag, x, &scalar_f32());
+        let y = op_fn(&mut dag, x, &scalar_f64());
         (dag, x, y)
     }
 
@@ -2014,16 +2026,16 @@ mod tests {
         let x = dag.add_node(
             RiscOp::Load { name: "x".into() },
             vec![],
-            scalar_f32(),
+            scalar_f64(),
             None,
         );
         let y = dag.add_node(
             RiscOp::Load { name: "y".into() },
             vec![],
-            scalar_f32(),
+            scalar_f64(),
             None,
         );
-        let out = op_fn(&mut dag, x, y, &scalar_f32());
+        let out = op_fn(&mut dag, x, y, &scalar_f64());
         (dag, x, y, out)
     }
 
@@ -2182,10 +2194,10 @@ mod tests {
         let x = dag.add_node(
             RiscOp::Load { name: "x".into() },
             vec![],
-            scalar_f32(),
+            scalar_f64(),
             None,
         );
-        let x_sq = dag.add_node(RiscOp::Mul, vec![x, x], scalar_f32(), None);
+        let x_sq = dag.add_node(RiscOp::Mul, vec![x, x], scalar_f64(), None);
 
         let (a, n) = finite_diff(&dag, x_sq, x, "x", &[], 3.0, 1e-5);
         assert_grad_close(a, n);
@@ -2237,23 +2249,23 @@ mod tests {
         let x = dag.add_node(
             RiscOp::Load { name: "x".into() },
             vec![],
-            scalar_f32(),
+            scalar_f64(),
             None,
         );
         let y = dag.add_node(
             RiscOp::Load { name: "y".into() },
             vec![],
-            scalar_f32(),
+            scalar_f64(),
             None,
         );
         let z = dag.add_node(
             RiscOp::Load { name: "z".into() },
             vec![],
-            scalar_f32(),
+            scalar_f64(),
             None,
         );
-        let xy = dag.add_node(RiscOp::Mul, vec![x, y], scalar_f32(), None);
-        let out = dag.add_node(RiscOp::Add, vec![xy, z], scalar_f32(), None);
+        let xy = dag.add_node(RiscOp::Mul, vec![x, y], scalar_f64(), None);
+        let out = dag.add_node(RiscOp::Add, vec![xy, z], scalar_f64(), None);
 
         let grad_result = grad_dag(&dag, out, &[x, y, z]).unwrap();
         let mut inputs = HashMap::new();
@@ -2277,11 +2289,11 @@ mod tests {
         let x = dag.add_node(
             RiscOp::Load { name: "x".into() },
             vec![],
-            scalar_f32(),
+            scalar_f64(),
             None,
         );
-        let sum1 = dag.add_node(RiscOp::Add, vec![x, x], scalar_f32(), None);
-        let out = dag.add_node(RiscOp::Add, vec![sum1, x], scalar_f32(), None);
+        let sum1 = dag.add_node(RiscOp::Add, vec![x, x], scalar_f64(), None);
+        let out = dag.add_node(RiscOp::Add, vec![sum1, x], scalar_f64(), None);
 
         let grad_result = grad_dag(&dag, out, &[x]).unwrap();
         let mut inputs = HashMap::new();
@@ -2309,14 +2321,14 @@ mod tests {
     #[test]
     fn grad_const_no_gradient() {
         let mut dag = Dag::new();
-        let c = dag.add_node(RiscOp::Const { value: 5.0 }, vec![], scalar_f32(), None);
+        let c = dag.add_node(RiscOp::Const { value: 5.0 }, vec![], scalar_f64(), None);
         let x = dag.add_node(
             RiscOp::Load { name: "x".into() },
             vec![],
-            scalar_f32(),
+            scalar_f64(),
             None,
         );
-        let out = dag.add_node(RiscOp::Mul, vec![x, c], scalar_f32(), None);
+        let out = dag.add_node(RiscOp::Mul, vec![x, c], scalar_f64(), None);
 
         let grad_result = grad_dag(&dag, out, &[x]).unwrap();
         assert!(!grad_result.grad_nodes.contains_key(&c));
@@ -2357,7 +2369,7 @@ mod tests {
         );
         let vals = eval_tensor(&grad_result.dag, &inputs).unwrap();
         let grad = &vals[&grad_result.grad_nodes[&x]];
-        assert_eq!(grad.data, vec![1.0, 1.0, 1.0]);
+        assert_eq!(grad.to_f64_lossy_vec(), vec![1.0, 1.0, 1.0]);
     }
 
     #[test]
@@ -2367,10 +2379,10 @@ mod tests {
         let x = dag.add_node(
             RiscOp::Load { name: "x".into() },
             vec![],
-            scalar_f32(),
+            scalar_f64(),
             None,
         );
-        let x_sq = dag.add_node(RiscOp::Mul, vec![x, x], scalar_f32(), None);
+        let x_sq = dag.add_node(RiscOp::Mul, vec![x, x], scalar_f64(), None);
 
         // First derivative
         let first = grad_dag(&dag, x_sq, &[x]).unwrap();
@@ -2393,14 +2405,14 @@ mod tests {
         let x = dag.add_node(
             RiscOp::Load { name: "x".into() },
             vec![],
-            scalar_f32(),
+            scalar_f64(),
             None,
         );
-        let exp_x = dag.add_node(RiscOp::Exp, vec![x], scalar_f32(), None);
+        let exp_x = dag.add_node(RiscOp::Exp, vec![x], scalar_f64(), None);
         let out = dag.add_node(
             RiscOp::Store { name: "out".into() },
             vec![exp_x],
-            scalar_f32(),
+            scalar_f64(),
             None,
         );
 
@@ -2414,7 +2426,7 @@ mod tests {
         let x = dag.add_node(
             RiscOp::Load { name: "x".into() },
             vec![],
-            scalar_f32(),
+            scalar_f64(),
             None,
         );
         let f64_ty = TensorType {
@@ -2429,7 +2441,7 @@ mod tests {
             f64_ty,
             None,
         );
-        let out = dag.add_node(RiscOp::Exp, vec![casted], scalar_f32(), None);
+        let out = dag.add_node(RiscOp::Exp, vec![casted], scalar_f64(), None);
 
         let grad_result = grad_dag(&dag, out, &[x]).unwrap();
         let mut inputs = HashMap::new();
@@ -2542,7 +2554,7 @@ mod tests {
         let vals = eval_tensor(&grad_result.dag, &inputs).unwrap();
         let grad = &vals[&grad_result.grad_nodes[&x]];
         // d(sum(reshape(x)))/dx = ones
-        assert_eq!(grad.data, vec![1.0, 1.0, 1.0, 1.0, 1.0, 1.0]);
+        assert_eq!(grad.to_f64_lossy_vec(), vec![1.0, 1.0, 1.0, 1.0, 1.0, 1.0]);
         assert_eq!(grad.shape, vec![6]);
     }
 
@@ -2604,7 +2616,7 @@ mod tests {
         let vals = eval_tensor(&grad_result.dag, &inputs).unwrap();
         let grad = &vals[&grad_result.grad_nodes[&x]];
         // d(sum(permute(x)))/dx = ones, shape should be 2x3
-        assert_eq!(grad.data, vec![1.0, 1.0, 1.0, 1.0, 1.0, 1.0]);
+        assert_eq!(grad.to_f64_lossy_vec(), vec![1.0, 1.0, 1.0, 1.0, 1.0, 1.0]);
         assert_eq!(grad.shape, vec![2, 3]);
     }
 
@@ -2666,7 +2678,7 @@ mod tests {
         let vals = eval_tensor(&grad_result.dag, &inputs).unwrap();
         let grad = &vals[&grad_result.grad_nodes[&x]];
         // expand by 2 then sum -> each element counted twice -> gradient = 2
-        assert_eq!(grad.data, vec![2.0, 2.0, 2.0]);
+        assert_eq!(grad.to_f64_lossy_vec(), vec![2.0, 2.0, 2.0]);
         assert_eq!(grad.shape, vec![3]);
     }
 
@@ -2677,11 +2689,11 @@ mod tests {
         let x = dag.add_node(
             RiscOp::Load { name: "x".into() },
             vec![],
-            scalar_f32(),
+            scalar_f64(),
             None,
         );
-        let five = dag.add_node(RiscOp::Const { value: 5.0 }, vec![], scalar_f32(), None);
-        let out = dag.add_node(RiscOp::Mul, vec![five, x], scalar_f32(), None);
+        let five = dag.add_node(RiscOp::Const { value: 5.0 }, vec![], scalar_f64(), None);
+        let out = dag.add_node(RiscOp::Mul, vec![five, x], scalar_f64(), None);
 
         let (a, n) = finite_diff(&dag, out, x, "x", &[], 3.0, 1e-5);
         assert_grad_close(a, n);
@@ -2695,11 +2707,11 @@ mod tests {
         let x = dag.add_node(
             RiscOp::Load { name: "x".into() },
             vec![],
-            scalar_f32(),
+            scalar_f64(),
             None,
         );
-        let x_sq = dag.add_node(RiscOp::Mul, vec![x, x], scalar_f32(), None);
-        let out = dag.add_node(RiscOp::Log, vec![x_sq], scalar_f32(), None);
+        let x_sq = dag.add_node(RiscOp::Mul, vec![x, x], scalar_f64(), None);
+        let out = dag.add_node(RiscOp::Log, vec![x_sq], scalar_f64(), None);
 
         let x0 = 3.0;
         let (a, n) = finite_diff(&dag, out, x, "x", &[], x0, 1e-5);
@@ -2715,11 +2727,11 @@ mod tests {
         let x = dag.add_node(
             RiscOp::Load { name: "x".into() },
             vec![],
-            scalar_f32(),
+            scalar_f64(),
             None,
         );
-        let x_sq = dag.add_node(RiscOp::Mul, vec![x, x], scalar_f32(), None);
-        let out = dag.add_node(RiscOp::Sin, vec![x_sq], scalar_f32(), None);
+        let x_sq = dag.add_node(RiscOp::Mul, vec![x, x], scalar_f64(), None);
+        let out = dag.add_node(RiscOp::Sin, vec![x_sq], scalar_f64(), None);
 
         let x0 = 1.5;
         let (a, n) = finite_diff(&dag, out, x, "x", &[], x0, 1e-5);
@@ -2788,7 +2800,7 @@ mod tests {
         let _x = dag.add_node(
             RiscOp::Load { name: "x".into() },
             vec![],
-            scalar_f32(),
+            scalar_f64(),
             None,
         );
         // NodeId(999) doesn't exist — should return None
@@ -2825,17 +2837,17 @@ mod tests {
         let x = dag.add_node(
             RiscOp::Load { name: "x".into() },
             vec![],
-            scalar_f32(),
+            scalar_f64(),
             None,
         );
         let y = dag.add_node(
             RiscOp::Load { name: "y".into() },
             vec![],
-            scalar_f32(),
+            scalar_f64(),
             None,
         );
-        let add_node = dag.add_node(RiscOp::Add, vec![x, y], scalar_f32(), None);
-        let out = dag.add_node(RiscOp::Exp, vec![add_node], scalar_f32(), None);
+        let add_node = dag.add_node(RiscOp::Add, vec![x, y], scalar_f64(), None);
+        let out = dag.add_node(RiscOp::Exp, vec![add_node], scalar_f64(), None);
 
         // wrt the Add node, not a leaf
         let grad_result = grad_dag(&dag, out, &[add_node]).unwrap();
@@ -3043,10 +3055,10 @@ mod tests {
         let x = dag.add_node(
             RiscOp::Load { name: "x".into() },
             vec![],
-            scalar_f32(),
+            scalar_f64(),
             None,
         );
-        let c = dag.add_node(RiscOp::Const { value: 42.0 }, vec![], scalar_f32(), None);
+        let c = dag.add_node(RiscOp::Const { value: 42.0 }, vec![], scalar_f64(), None);
         // output is a constant, doesn't depend on x
         let grad_result = grad_dag(&dag, c, &[x]).unwrap();
         // x might not even be in grad_nodes since no path from c to x
@@ -3070,13 +3082,13 @@ mod tests {
         let x = dag.add_node(
             RiscOp::Load { name: "x".into() },
             vec![],
-            scalar_f32(),
+            scalar_f64(),
             None,
         );
-        let s1 = dag.add_node(RiscOp::Add, vec![x, x], scalar_f32(), None);
-        let s2 = dag.add_node(RiscOp::Add, vec![s1, x], scalar_f32(), None);
-        let s3 = dag.add_node(RiscOp::Add, vec![s2, x], scalar_f32(), None);
-        let out = dag.add_node(RiscOp::Add, vec![s3, x], scalar_f32(), None);
+        let s1 = dag.add_node(RiscOp::Add, vec![x, x], scalar_f64(), None);
+        let s2 = dag.add_node(RiscOp::Add, vec![s1, x], scalar_f64(), None);
+        let s3 = dag.add_node(RiscOp::Add, vec![s2, x], scalar_f64(), None);
+        let out = dag.add_node(RiscOp::Add, vec![s3, x], scalar_f64(), None);
 
         let grad_result = grad_dag(&dag, out, &[x]).unwrap();
         let mut inputs = HashMap::new();
@@ -3132,11 +3144,11 @@ mod tests {
 
         let mat23_ty = TensorType {
             dims: vec![DimInfo::Lit(2), DimInfo::Lit(3)],
-            precision: chelis_types::types::Prim::F32,
+            precision: chelis_types::types::Prim::F64,
         };
         let vec3_ty = TensorType {
             dims: vec![DimInfo::Lit(3)],
-            precision: chelis_types::types::Prim::F32,
+            precision: chelis_types::types::Prim::F64,
         };
 
         let mut dag = Dag::new();
@@ -3155,10 +3167,10 @@ mod tests {
         let out = dag.add_node(
             RiscOp::Sum {
                 axis: 0,
-                accumulator: chelis_types::types::Prim::F32,
+                accumulator: chelis_types::types::Prim::F64,
             },
             vec![maxr],
-            scalar_f32(),
+            scalar_f64(),
             None,
         );
 
@@ -3179,7 +3191,12 @@ mod tests {
         let grad = &vals[&grad_result.grad_nodes[&x]];
 
         let expected_grad = [0.0, 1.0, 0.0, 1.0, 0.0, 1.0];
-        for (i, (actual, expected)) in grad.data.iter().zip(expected_grad.iter()).enumerate() {
+        for (i, (actual, expected)) in grad
+            .to_f64_lossy_vec()
+            .iter()
+            .zip(expected_grad.iter())
+            .enumerate()
+        {
             assert!(
                 (actual - expected).abs() < 1e-6,
                 "max_reduce gradient at index {i}: expected {expected}, got {actual}"
@@ -3200,7 +3217,7 @@ mod tests {
                 TensorValue::from_vec(vec![2, 3], data_plus),
             );
             let vals_plus = eval_tensor(&dag, &inputs_plus).unwrap();
-            let f_plus = vals_plus[&out].data[0];
+            let f_plus = vals_plus[&out].to_f64_lossy_vec()[0];
 
             let mut inputs_minus = HashMap::new();
             inputs_minus.insert(
@@ -3208,10 +3225,10 @@ mod tests {
                 TensorValue::from_vec(vec![2, 3], data_minus),
             );
             let vals_minus = eval_tensor(&dag, &inputs_minus).unwrap();
-            let f_minus = vals_minus[&out].data[0];
+            let f_minus = vals_minus[&out].to_f64_lossy_vec()[0];
 
             let numerical = (f_plus - f_minus) / (2.0 * h);
-            let analytical = grad.data[elem_idx];
+            let analytical = grad.to_f64_lossy_vec()[elem_idx];
             assert!(
                 (analytical - numerical).abs() < 1e-3,
                 "max_reduce finite diff at elem {elem_idx}: analytical={analytical}, numerical={numerical}"
@@ -3279,10 +3296,10 @@ mod tests {
         // the gradient is INFLATED when there are ties. The correct subgradient
         // should only assign gradient to ONE element per reduction, not all ties.
         let _expected_if_all_ties = [1.0, 1.0, 1.0, 0.0];
-        let grad_col0 = grad.data[0] + grad.data[2]; // should be 1.0 but will be 2.0
+        let grad_col0 = grad.to_f64_lossy_vec()[0] + grad.to_f64_lossy_vec()[2]; // should be 1.0 but will be 2.0
         eprintln!(
             "FINDING: max_reduce with ties: gradient = {:?}, column 0 sum = {grad_col0}",
-            grad.data
+            grad.to_f64_lossy_vec()
         );
         if (grad_col0 - 2.0).abs() < 1e-6 {
             eprintln!(
@@ -3300,11 +3317,11 @@ mod tests {
 
         let mat23_ty = TensorType {
             dims: vec![DimInfo::Lit(2), DimInfo::Lit(3)],
-            precision: chelis_types::types::Prim::F32,
+            precision: chelis_types::types::Prim::F64,
         };
         let vec2_ty = TensorType {
             dims: vec![DimInfo::Lit(2)],
-            precision: chelis_types::types::Prim::F32,
+            precision: chelis_types::types::Prim::F64,
         };
 
         let mut dag = Dag::new();
@@ -3323,10 +3340,10 @@ mod tests {
         let out = dag.add_node(
             RiscOp::Sum {
                 axis: 0,
-                accumulator: chelis_types::types::Prim::F32,
+                accumulator: chelis_types::types::Prim::F64,
             },
             vec![maxr],
-            scalar_f32(),
+            scalar_f64(),
             None,
         );
 
@@ -3349,7 +3366,12 @@ mod tests {
         let grad = &vals[&grad_result.grad_nodes[&x]];
 
         let expected_grad = [0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
-        for (i, (actual, expected)) in grad.data.iter().zip(expected_grad.iter()).enumerate() {
+        for (i, (actual, expected)) in grad
+            .to_f64_lossy_vec()
+            .iter()
+            .zip(expected_grad.iter())
+            .enumerate()
+        {
             assert!(
                 (actual - expected).abs() < 1e-6,
                 "max_reduce axis=1 gradient at index {i}: expected {expected}, got {actual}"
@@ -3370,7 +3392,7 @@ mod tests {
                 TensorValue::from_vec(vec![2, 3], data_plus),
             );
             let vals_plus = eval_tensor(&dag, &inputs_plus).unwrap();
-            let f_plus = vals_plus[&out].data[0];
+            let f_plus = vals_plus[&out].to_f64_lossy_vec()[0];
 
             let mut inputs_minus = HashMap::new();
             inputs_minus.insert(
@@ -3378,10 +3400,10 @@ mod tests {
                 TensorValue::from_vec(vec![2, 3], data_minus),
             );
             let vals_minus = eval_tensor(&dag, &inputs_minus).unwrap();
-            let f_minus = vals_minus[&out].data[0];
+            let f_minus = vals_minus[&out].to_f64_lossy_vec()[0];
 
             let numerical = (f_plus - f_minus) / (2.0 * h);
-            let analytical = grad.data[elem_idx];
+            let analytical = grad.to_f64_lossy_vec()[elem_idx];
             assert!(
                 (analytical - numerical).abs() < 1e-3,
                 "max_reduce axis=1 finite diff at elem {elem_idx}: analytical={analytical}, numerical={numerical}"
@@ -3429,16 +3451,16 @@ mod tests {
         let a = dag.add_node(
             RiscOp::Load { name: "a".into() },
             vec![],
-            scalar_f32(),
+            scalar_f64(),
             None,
         );
         let b = dag.add_node(
             RiscOp::Load { name: "b".into() },
             vec![],
-            scalar_f32(),
+            scalar_f64(),
             None,
         );
-        let out = crate::tier2::lower_div(&mut dag, a, b, &scalar_f32(), None);
+        let out = crate::tier2::lower_div(&mut dag, a, b, &scalar_f64(), None);
 
         // Test d/da
         let (ana_a, num_a) = finite_diff(&dag, out, a, "a", &[("b", 3.0)], 6.0, 1e-5);
@@ -3508,7 +3530,7 @@ mod tests {
         let vals = eval_tensor(&grad_result.dag, &inputs).unwrap();
         let grad = &vals[&grad_result.grad_nodes[&x]];
         // d(sum(pad(x)))/dx = ones (pad adds zeros, but gradient only flows to original elements)
-        assert_eq!(grad.data, vec![1.0, 1.0, 1.0]);
+        assert_eq!(grad.to_f64_lossy_vec(), vec![1.0, 1.0, 1.0]);
     }
 
     #[test]
@@ -3560,10 +3582,10 @@ mod tests {
         let grad = &vals[&grad_result.grad_nodes[&x]];
         // d(sum(shrink(x, [1,4])))/dx = [0, 1, 1, 1, 0]
         assert_eq!(
-            grad.data,
+            grad.to_f64_lossy_vec(),
             vec![0.0, 1.0, 1.0, 1.0, 0.0],
             "shrink gradient mismatch: got {:?}",
-            grad.data
+            grad.to_f64_lossy_vec()
         );
     }
 
@@ -3601,10 +3623,10 @@ mod tests {
         let x = dag.add_node(
             RiscOp::Load { name: "x".into() },
             vec![],
-            scalar_f32(),
+            scalar_f64(),
             None,
         );
-        let out = dag.add_node(RiscOp::Log, vec![x], scalar_f32(), None);
+        let out = dag.add_node(RiscOp::Log, vec![x], scalar_f64(), None);
 
         let first = grad_dag(&dag, out, &[x]).unwrap();
         let dx_node = first.grad_nodes[&x];
@@ -3674,10 +3696,10 @@ mod tests {
         let vals = eval_tensor(&grad_result.dag, &inputs).unwrap();
         let grad = &vals[&grad_result.grad_nodes[&x]];
         assert_eq!(
-            grad.data,
+            grad.to_f64_lossy_vec(),
             vec![1.0, 0.0, 1.0, 0.0],
             "stride gradient must scatter into strided slots: got {:?}",
-            grad.data
+            grad.to_f64_lossy_vec()
         );
     }
 
@@ -3759,7 +3781,12 @@ mod tests {
         let vals = eval_tensor(&grad_result.dag, &inputs).unwrap();
         let grad = &vals[&grad_result.grad_nodes[&x]];
         let expected = [1.0, 0.0, 1.0, 0.0, 1.0, 0.0];
-        for (i, (got, want)) in grad.data.iter().zip(expected.iter()).enumerate() {
+        for (i, (got, want)) in grad
+            .to_f64_lossy_vec()
+            .iter()
+            .zip(expected.iter())
+            .enumerate()
+        {
             assert!(
                 (got - want).abs() < 1e-6,
                 "min_reduce grad index {i}: expected {want}, got {got}"
@@ -3792,7 +3819,12 @@ mod tests {
         let vals = eval_tensor(&grad_result.dag, &inputs).unwrap();
         let grad = &vals[&grad_result.grad_nodes[&x]];
         let expected = [60.0, 40.0, 30.0, 24.0];
-        for (i, (got, want)) in grad.data.iter().zip(expected.iter()).enumerate() {
+        for (i, (got, want)) in grad
+            .to_f64_lossy_vec()
+            .iter()
+            .zip(expected.iter())
+            .enumerate()
+        {
             assert!(
                 (got - want).abs() < 1e-4,
                 "prod_reduce grad index {i}: expected {want}, got {got}"
@@ -3831,11 +3863,16 @@ mod tests {
         );
         let vals = eval_tensor(&grad_result.dag, &inputs).unwrap();
         let grad = &vals[&grad_result.grad_nodes[&x]];
-        for v in &grad.data {
+        for v in &grad.to_f64_lossy_vec() {
             assert!(v.is_finite(), "prod_reduce grad must be finite; got {v}");
         }
         let expected = [0.0, 40.0, 0.0, 0.0];
-        for (i, (got, want)) in grad.data.iter().zip(expected.iter()).enumerate() {
+        for (i, (got, want)) in grad
+            .to_f64_lossy_vec()
+            .iter()
+            .zip(expected.iter())
+            .enumerate()
+        {
             assert!(
                 (got - want).abs() < 1e-4,
                 "prod_reduce zero-element grad index {i}: expected {want}, got {got}"
@@ -3864,7 +3901,7 @@ mod tests {
                 accumulator: chelis_types::types::Prim::F32,
             },
             vec![am],
-            scalar_f32(),
+            scalar_f64(),
             None,
         );
 
@@ -3904,7 +3941,7 @@ mod tests {
                 accumulator: chelis_types::types::Prim::F32,
             },
             vec![am],
-            scalar_f32(),
+            scalar_f64(),
             None,
         );
 
@@ -4131,12 +4168,12 @@ mod tests {
         let x = dag.add_node(
             RiscOp::Load { name: "x".into() },
             vec![],
-            scalar_f32(),
+            scalar_f64(),
             None,
         );
-        let half = dag.add_node(RiscOp::Const { value: 0.5 }, vec![], scalar_f32(), None);
-        let xp = dag.add_node(RiscOp::Add, vec![x, half], scalar_f32(), None);
-        let out = dag.add_node(RiscOp::Cos, vec![xp], scalar_f32(), None);
+        let half = dag.add_node(RiscOp::Const { value: 0.5 }, vec![], scalar_f64(), None);
+        let xp = dag.add_node(RiscOp::Add, vec![x, half], scalar_f64(), None);
+        let out = dag.add_node(RiscOp::Cos, vec![xp], scalar_f64(), None);
 
         let x0 = 0.7_f64;
         let (a, n) = finite_diff(&dag, out, x, "x", &[], x0, 1e-5);
@@ -4352,10 +4389,7 @@ mod tests {
         let mut inputs = HashMap::new();
         inputs.insert(
             "x".to_string(),
-            TensorValue {
-                data: vec![1.0, 2.0, 3.0, 4.0, 5.0],
-                shape: vec![5],
-            },
+            TensorValue::from_vec(vec![5], vec![1.0, 2.0, 3.0, 4.0, 5.0]),
         );
         let grad_node = grad_result.grad_nodes[&x];
         let values =
@@ -4364,7 +4398,10 @@ mod tests {
             })
             .expect("runtime strided-axis adjoint must evaluate");
         assert_eq!(values[&grad_node].shape, vec![5]);
-        assert_eq!(values[&grad_node].data, vec![1.0, 0.0, 1.0, 0.0, 1.0]);
+        assert_eq!(
+            values[&grad_node].to_f64_lossy_vec(),
+            vec![1.0, 0.0, 1.0, 0.0, 1.0]
+        );
     }
 
     /// ProdReduce along the concrete axis of a `[batch, 3]` input: backward
@@ -4433,7 +4470,7 @@ mod tests {
             },
             None,
         );
-        let prod = dag.add_node(RiscOp::ProdReduce { axis: 0 }, vec![x], scalar_f32(), None);
+        let prod = dag.add_node(RiscOp::ProdReduce { axis: 0 }, vec![x], scalar_f64(), None);
         let _ = grad_dag(&dag, prod, &[x]);
     }
 
@@ -4511,7 +4548,7 @@ mod tests {
                 accumulator: chelis_types::types::Prim::F32,
             },
             vec![shrunk],
-            scalar_f32(),
+            scalar_f64(),
             None,
         );
         let _ = grad_dag(&dag, out, &[x]);

@@ -277,7 +277,7 @@ fn eval_does_not_mutate_spans() {
         .collect();
 
     let result = eval_tensor_roots_with(&dag, &[sum], |_| None).expect("eval scalar");
-    assert_eq!(result[&sum].data, vec![7.0]);
+    assert_eq!(result[&sum].to_f64_lossy_vec(), vec![7.0]);
 
     let post_spans: Vec<(Option<String>, Vec<String>)> = dag
         .nodes()

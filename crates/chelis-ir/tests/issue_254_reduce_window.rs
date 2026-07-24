@@ -89,7 +89,7 @@ fn reduce_window_max_strided_overlap_smoke() {
     //  [10 11 12]
     //  [14 15 16]]
     assert_eq!(
-        out.data,
+        out.to_f64_lossy_vec(),
         vec![6.0, 7.0, 8.0, 10.0, 11.0, 12.0, 14.0, 15.0, 16.0]
     );
 }
@@ -125,7 +125,7 @@ fn reduce_window_min_strided_overlap_smoke() {
     let out = eval_with_input(&dag, &name, vec![1, 1, 4, 4], data);
     assert_eq!(out.shape, vec![1, 1, 3, 3]);
     assert_eq!(
-        out.data,
+        out.to_f64_lossy_vec(),
         vec![1.0, 2.0, 3.0, 5.0, 6.0, 7.0, 9.0, 10.0, 11.0]
     );
 }
@@ -148,7 +148,7 @@ fn reduce_window_sum_strided_overlap_smoke() {
     // 2x2 sums:
     // [[1+2+4+5=12, 2+3+5+6=16],
     //  [4+5+7+8=24, 5+6+8+9=28]]
-    assert_eq!(out.data, vec![12.0, 16.0, 24.0, 28.0]);
+    assert_eq!(out.to_f64_lossy_vec(), vec![12.0, 16.0, 24.0, 28.0]);
 }
 
 #[test]
@@ -164,7 +164,7 @@ fn reduce_window_mean_strided_overlap_smoke() {
     let out = eval_with_input(&dag, &name, vec![1, 1, 3, 3], data);
     assert_eq!(out.shape, vec![1, 1, 2, 2]);
     // Mean = sum / window_volume (= 4): 12/4=3, 16/4=4, 24/4=6, 28/4=7.
-    assert_eq!(out.data, vec![3.0, 4.0, 6.0, 7.0]);
+    assert_eq!(out.to_f64_lossy_vec(), vec![3.0, 4.0, 6.0, 7.0]);
 }
 
 /// Stride > 1 makes the output spatially non-overlapping: [1,1,4,4]
@@ -188,7 +188,7 @@ fn reduce_window_max_non_overlapping_pool2d() {
     //  -------+------   max →
     //  [ 9 10 | 11 12]   14 | 16
     //  [13 14 | 15 16]]
-    assert_eq!(out.data, vec![6.0, 8.0, 14.0, 16.0]);
+    assert_eq!(out.to_f64_lossy_vec(), vec![6.0, 8.0, 14.0, 16.0]);
 }
 
 /// Rank-3 input with rank-2 windowed reduction: the leading axis
@@ -212,7 +212,7 @@ fn reduce_window_max_passes_through_leading_axes() {
     // Slice 0: max windows of 1..9 with window [2,2] stride [1,1]
     // [[5, 6], [8, 9]]; slice 1: same +100.
     assert_eq!(
-        out.data,
+        out.to_f64_lossy_vec(),
         vec![5.0, 6.0, 8.0, 9.0, 105.0, 106.0, 108.0, 109.0]
     );
 }
@@ -334,14 +334,11 @@ fn reduce_window_grad_lowers_to_adjoint_and_evaluates() {
     let mut inputs = HashMap::new();
     inputs.insert(
         "x".to_string(),
-        TensorValue {
-            data: vec![10.0, 20.0, 30.0, 40.0],
-            shape: vec![4],
-        },
+        TensorValue::from_vec(vec![4], vec![10.0, 20.0, 30.0, 40.0]),
     );
     let vals = eval_tensor(&grad_result.dag, &inputs).unwrap();
     let grad = &vals[&grad_result.grad_nodes[&load]];
     assert_eq!(grad.shape, vec![4]);
     // Windows [0,1], [1,2], [2,3]: ends covered once, interior twice.
-    assert_eq!(grad.data, vec![1.0, 2.0, 2.0, 1.0]);
+    assert_eq!(grad.to_f64_lossy_vec(), vec![1.0, 2.0, 2.0, 1.0]);
 }

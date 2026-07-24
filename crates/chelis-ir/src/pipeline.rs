@@ -103,8 +103,10 @@ mod tests {
         assert_eq!(actual.len(), expected.len(), "root count mismatch");
         for (actual_tensor, expected_tensor) in actual.iter().zip(expected.iter()) {
             assert_eq!(actual_tensor.shape, expected_tensor.shape, "shape mismatch");
-            for (actual_value, expected_value) in
-                actual_tensor.data.iter().zip(expected_tensor.data.iter())
+            for (actual_value, expected_value) in actual_tensor
+                .to_f64_lossy_vec()
+                .iter()
+                .zip(expected_tensor.to_f64_lossy_vec().iter())
             {
                 assert!(
                     (actual_value - expected_value).abs() <= tol,

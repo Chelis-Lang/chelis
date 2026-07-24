@@ -52,7 +52,12 @@ fn assert_outputs_close(a: &[TensorValue], b: &[TensorValue], tol: f64, context:
     assert_eq!(a.len(), b.len(), "{context}: different number of outputs");
     for (i, (va, vb)) in a.iter().zip(b.iter()).enumerate() {
         assert_eq!(va.shape, vb.shape, "{context} output {i}: shapes differ");
-        for (j, (xa, xb)) in va.data.iter().zip(vb.data.iter()).enumerate() {
+        for (j, (xa, xb)) in va
+            .to_f64_lossy_vec()
+            .iter()
+            .zip(vb.to_f64_lossy_vec().iter())
+            .enumerate()
+        {
             assert!(
                 (xa - xb).abs() < tol,
                 "{context} output {i} element {j}: {xa} vs {xb} (diff {})",

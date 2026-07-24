@@ -145,17 +145,14 @@ fn gather_via_section_3_5_lowering_accumulates_duplicate_indices() {
     let mut inputs: HashMap<String, TensorValue> = HashMap::new();
     inputs.insert(
         "table".to_string(),
-        TensorValue {
-            data: vec![1.0, 2.0, 3.0, 4.0],
-            shape: vec![2, 2],
-        },
+        TensorValue::from_vec(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0]),
     );
     let fwd_vals = eval_tensor_with(&dag, |n| inputs.get(n).cloned()).expect("forward eval");
     let fwd_out = &fwd_vals[&s2];
     assert!(
-        (fwd_out.data[0] - 9.0).abs() < 1e-6,
+        (fwd_out.to_f64_lossy_vec()[0] - 9.0).abs() < 1e-6,
         "forward sanity: expected 3*(1+2)=9.0, got {}",
-        fwd_out.data[0]
+        fwd_out.to_f64_lossy_vec()[0]
     );
 
     // Backward: differentiate the scalar w.r.t. table.
@@ -172,10 +169,10 @@ fn gather_via_section_3_5_lowering_accumulates_duplicate_indices() {
     let expected = [3.0, 3.0, 0.0, 0.0];
     for (i, want) in expected.iter().enumerate() {
         assert!(
-            (dtable.data[i] - want).abs() < 1e-6,
+            (dtable.to_f64_lossy_vec()[i] - want).abs() < 1e-6,
             "duplicate-index grad table[{i}]: expected {want}, got {} \
              (silent-drop bug? see crate-level docs)",
-            dtable.data[i]
+            dtable.to_f64_lossy_vec()[i]
         );
     }
 }
@@ -226,10 +223,7 @@ fn first_class_gather_adjoint_scatter_add_accumulates_duplicate_indices() {
     let mut inputs: HashMap<String, TensorValue> = HashMap::new();
     inputs.insert(
         "table".to_string(),
-        TensorValue {
-            data: vec![1.0, 2.0, 3.0, 4.0],
-            shape: vec![2, 2],
-        },
+        TensorValue::from_vec(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0]),
     );
     let grad = grad_dag_checked(&dag, s2, &[table]).expect("grad through gather must succeed");
     let grad_node = grad.grad_nodes[&table];
@@ -240,9 +234,9 @@ fn first_class_gather_adjoint_scatter_add_accumulates_duplicate_indices() {
     let expected = [3.0, 3.0, 0.0, 0.0];
     for (i, want) in expected.iter().enumerate() {
         assert!(
-            (dtable.data[i] - want).abs() < 1e-6,
+            (dtable.to_f64_lossy_vec()[i] - want).abs() < 1e-6,
             "first-class gather grad table[{i}]: expected {want}, got {}",
-            dtable.data[i]
+            dtable.to_f64_lossy_vec()[i]
         );
     }
 }
@@ -293,10 +287,7 @@ fn first_class_gather_axis1_adjoint_scatter_add_accumulates_duplicate_indices() 
     let mut inputs: HashMap<String, TensorValue> = HashMap::new();
     inputs.insert(
         "table".to_string(),
-        TensorValue {
-            data: vec![1.0, 2.0, 3.0, 10.0, 20.0, 30.0],
-            shape: vec![2, 3],
-        },
+        TensorValue::from_vec(vec![2, 3], vec![1.0, 2.0, 3.0, 10.0, 20.0, 30.0]),
     );
     let grad = grad_dag_checked(&dag, s2, &[table]).expect("grad through axis-1 gather");
     let grad_node = grad.grad_nodes[&table];
@@ -307,9 +298,9 @@ fn first_class_gather_axis1_adjoint_scatter_add_accumulates_duplicate_indices() 
     let expected = [4.0, 0.0, 0.0, 4.0, 0.0, 0.0];
     for (i, want) in expected.iter().enumerate() {
         assert!(
-            (dtable.data[i] - want).abs() < 1e-6,
+            (dtable.to_f64_lossy_vec()[i] - want).abs() < 1e-6,
             "axis-1 gather grad table[{i}]: expected {want}, got {}",
-            dtable.data[i]
+            dtable.to_f64_lossy_vec()[i]
         );
     }
 }

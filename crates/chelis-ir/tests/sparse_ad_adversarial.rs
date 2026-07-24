@@ -131,17 +131,11 @@ fn gather_axis0_distinct_indices_gradient_is_one_per_picked_row() {
     let mut inputs: HashMap<String, TensorValue> = HashMap::new();
     inputs.insert(
         "table".to_string(),
-        TensorValue {
-            data: vec![1.0; 8],
-            shape: vec![4, 2],
-        },
+        TensorValue::from_vec(vec![4, 2], vec![1.0; 8]),
     );
     inputs.insert(
         "indices".to_string(),
-        TensorValue {
-            data: vec![0.0, 2.0, 3.0],
-            shape: vec![3],
-        },
+        TensorValue::from_vec(vec![3], vec![0.0, 2.0, 3.0]),
     );
     let vals = eval_tensor_with(&grad.dag, |n| inputs.get(n).cloned()).expect("bwd eval");
     let dtable = &vals[&grad_node];
@@ -151,9 +145,9 @@ fn gather_axis0_distinct_indices_gradient_is_one_per_picked_row() {
     let expected = [1.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0];
     for (i, want) in expected.iter().enumerate() {
         assert!(
-            (dtable.data[i] - want).abs() < 1e-6,
+            (dtable.to_f64_lossy_vec()[i] - want).abs() < 1e-6,
             "distinct-index grad at table[{i}]: expected {want}, got {}",
-            dtable.data[i]
+            dtable.to_f64_lossy_vec()[i]
         );
     }
 }
@@ -179,17 +173,11 @@ fn gather_axis0_mixed_indices_gradient_matches_per_row_counts() {
     let mut inputs: HashMap<String, TensorValue> = HashMap::new();
     inputs.insert(
         "table".to_string(),
-        TensorValue {
-            data: vec![1.0; 8],
-            shape: vec![4, 2],
-        },
+        TensorValue::from_vec(vec![4, 2], vec![1.0; 8]),
     );
     inputs.insert(
         "indices".to_string(),
-        TensorValue {
-            data: vec![0.0, 0.0, 2.0, 0.0],
-            shape: vec![4],
-        },
+        TensorValue::from_vec(vec![4], vec![0.0, 0.0, 2.0, 0.0]),
     );
     let vals = eval_tensor_with(&grad.dag, |n| inputs.get(n).cloned()).expect("bwd eval");
     let dtable = &vals[&grad_node];
@@ -198,9 +186,9 @@ fn gather_axis0_mixed_indices_gradient_matches_per_row_counts() {
     let expected = [3.0, 3.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0];
     for (i, want) in expected.iter().enumerate() {
         assert!(
-            (dtable.data[i] - want).abs() < 1e-6,
+            (dtable.to_f64_lossy_vec()[i] - want).abs() < 1e-6,
             "mixed-index grad at table[{i}]: expected {want}, got {}",
-            dtable.data[i]
+            dtable.to_f64_lossy_vec()[i]
         );
     }
 }
@@ -258,17 +246,11 @@ fn gather_axis1_mixed_indices_gradient_matches_per_column_counts() {
     let mut inputs: HashMap<String, TensorValue> = HashMap::new();
     inputs.insert(
         "table".to_string(),
-        TensorValue {
-            data: vec![1.0; 10],
-            shape: vec![2, 5],
-        },
+        TensorValue::from_vec(vec![2, 5], vec![1.0; 10]),
     );
     inputs.insert(
         "indices".to_string(),
-        TensorValue {
-            data: vec![0.0, 2.0, 0.0, 4.0],
-            shape: vec![4],
-        },
+        TensorValue::from_vec(vec![4], vec![0.0, 2.0, 0.0, 4.0]),
     );
     let vals = eval_tensor_with(&grad.dag, |n| inputs.get(n).cloned()).expect("bwd eval");
     let dtable = &vals[&grad_node];
@@ -277,9 +259,9 @@ fn gather_axis1_mixed_indices_gradient_matches_per_column_counts() {
     let expected = [2.0, 0.0, 1.0, 0.0, 1.0, 2.0, 0.0, 1.0, 0.0, 1.0];
     for (i, want) in expected.iter().enumerate() {
         assert!(
-            (dtable.data[i] - want).abs() < 1e-6,
+            (dtable.to_f64_lossy_vec()[i] - want).abs() < 1e-6,
             "axis-1 mixed-index grad at table[{i}]: expected {want}, got {}",
-            dtable.data[i]
+            dtable.to_f64_lossy_vec()[i]
         );
     }
 }
@@ -317,18 +299,12 @@ fn gather_eval_out_of_bounds_index_panics_fail_closed() {
     let mut inputs: HashMap<String, TensorValue> = HashMap::new();
     inputs.insert(
         "table".to_string(),
-        TensorValue {
-            data: vec![1.0; 6],
-            shape: vec![3, 2],
-        },
+        TensorValue::from_vec(vec![3, 2], vec![1.0; 6]),
     );
     // Index 5 is way out of range for a 3-row table.
     inputs.insert(
         "indices".to_string(),
-        TensorValue {
-            data: vec![1.0, 5.0],
-            shape: vec![2],
-        },
+        TensorValue::from_vec(vec![2], vec![1.0, 5.0]),
     );
     let _ = eval_tensor_with(&dag, |n| inputs.get(n).cloned()).unwrap();
 }
@@ -364,17 +340,11 @@ fn gather_eval_negative_index_panics_fail_closed() {
     let mut inputs: HashMap<String, TensorValue> = HashMap::new();
     inputs.insert(
         "table".to_string(),
-        TensorValue {
-            data: vec![1.0; 6],
-            shape: vec![3, 2],
-        },
+        TensorValue::from_vec(vec![3, 2], vec![1.0; 6]),
     );
     inputs.insert(
         "indices".to_string(),
-        TensorValue {
-            data: vec![0.0, -1.0],
-            shape: vec![2],
-        },
+        TensorValue::from_vec(vec![2], vec![0.0, -1.0]),
     );
     let _ = eval_tensor_with(&dag, |n| inputs.get(n).cloned()).unwrap();
 }
@@ -417,24 +387,15 @@ fn scatter_add_eval_out_of_bounds_index_panics_fail_closed() {
     let mut inputs: HashMap<String, TensorValue> = HashMap::new();
     inputs.insert(
         "target".to_string(),
-        TensorValue {
-            data: vec![0.0; 6],
-            shape: vec![3, 2],
-        },
+        TensorValue::from_vec(vec![3, 2], vec![0.0; 6]),
     );
     inputs.insert(
         "indices".to_string(),
-        TensorValue {
-            data: vec![1.0, 9.0],
-            shape: vec![2],
-        },
+        TensorValue::from_vec(vec![2], vec![1.0, 9.0]),
     );
     inputs.insert(
         "updates".to_string(),
-        TensorValue {
-            data: vec![1.0; 4],
-            shape: vec![2, 2],
-        },
+        TensorValue::from_vec(vec![2, 2], vec![1.0; 4]),
     );
     let _ = eval_tensor_with(&dag, |n| inputs.get(n).cloned()).unwrap();
 }
@@ -477,24 +438,15 @@ fn scatter_replace_eval_out_of_bounds_index_panics_fail_closed() {
     let mut inputs: HashMap<String, TensorValue> = HashMap::new();
     inputs.insert(
         "target".to_string(),
-        TensorValue {
-            data: vec![0.0; 6],
-            shape: vec![3, 2],
-        },
+        TensorValue::from_vec(vec![3, 2], vec![0.0; 6]),
     );
     inputs.insert(
         "indices".to_string(),
-        TensorValue {
-            data: vec![1.0, 9.0],
-            shape: vec![2],
-        },
+        TensorValue::from_vec(vec![2], vec![1.0, 9.0]),
     );
     inputs.insert(
         "updates".to_string(),
-        TensorValue {
-            data: vec![1.0; 4],
-            shape: vec![2, 2],
-        },
+        TensorValue::from_vec(vec![2, 2], vec![1.0; 4]),
     );
     let _ = eval_tensor_with(&dag, |n| inputs.get(n).cloned()).unwrap();
 }

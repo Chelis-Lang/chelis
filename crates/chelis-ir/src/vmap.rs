@@ -155,7 +155,10 @@ mod tests {
             )]),
         );
         assert_eq!(actual.shape, vec![2, 3]);
-        assert_eq!(actual.data, vec![-1.0, -2.0, -3.0, -4.0, 5.0, -6.0]);
+        assert_eq!(
+            actual.to_f64_lossy_vec(),
+            vec![-1.0, -2.0, -3.0, -4.0, 5.0, -6.0]
+        );
     }
 
     #[test]
@@ -194,7 +197,7 @@ mod tests {
             )]),
         );
         assert_eq!(actual.shape, vec![2, 2]);
-        assert_eq!(actual.data, vec![6.0, 15.0, 60.0, 24.0]);
+        assert_eq!(actual.to_f64_lossy_vec(), vec![6.0, 15.0, 60.0, 24.0]);
     }
 
     #[test]

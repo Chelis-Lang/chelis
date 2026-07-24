@@ -63,8 +63,16 @@ fn shape_node_evaluates_to_runtime_extent() {
     );
     let values = eval_tensor_with(&dag, |name| inputs.get(name).cloned()).expect("eval");
     assert_eq!(values[&s0].shape, Vec::<usize>::new(), "extent is a scalar");
-    assert_eq!(values[&s0].data, vec![2.0], "axis 0 extent == 2");
-    assert_eq!(values[&s1].data, vec![3.0], "axis 1 extent == 3");
+    assert_eq!(
+        values[&s0].to_f64_lossy_vec(),
+        vec![2.0],
+        "axis 0 extent == 2"
+    );
+    assert_eq!(
+        values[&s1].to_f64_lossy_vec(),
+        vec![3.0],
+        "axis 1 extent == 3"
+    );
 }
 
 // ---------------------------------------------------------------------------

@@ -69,7 +69,7 @@ def main() -> tensor[3, f32] =
     assert_eq!(roots.len(), 1);
     let result = &values[&roots[0]];
     assert_eq!(result.shape, vec![3]);
-    assert_eq!(result.data, vec![1.0, 2.0, 3.0]);
+    assert_eq!(result.to_f64_lossy_vec(), vec![1.0, 2.0, 3.0]);
 }
 
 /// A uniform-value to_tensor still uses the efficient Const (single-value) path.
@@ -170,7 +170,7 @@ def main() -> tensor[4, f32] =
     assert_eq!(roots.len(), 1);
     let result = &values[&roots[0]];
     assert_eq!(result.shape, vec![4]);
-    assert_eq!(result.data, vec![-1.0, 0.0, -3.5, 2.5]);
+    assert_eq!(result.to_f64_lossy_vec(), vec![-1.0, 0.0, -3.5, 2.5]);
 }
 
 /// Verify ConstTensor data is preserved exactly (bit-for-bit) through
@@ -188,11 +188,16 @@ def main() -> tensor[3, f32] =
 
     let result = &values[&roots[0]];
     assert_eq!(result.shape, vec![3]);
-    // These values can't be represented exactly in f32, but the f64 pipeline
-    // should preserve them at f64 precision before backend truncation.
-    assert!((result.data[0] - 0.1).abs() < 1e-15, "first element");
-    assert!((result.data[1] - 0.2).abs() < 1e-15, "second element");
-    assert!((result.data[2] - 0.3).abs() < 1e-15, "third element");
+    // chelis#729 Phase 1 re-authoring: an f32-typed ConstTensor stores the
+    // exact f32 image of each literal (per-dtype storage + finalize,
+    // spec/04 section 9 [04-NUM-1..2]). The pre-refactor expectation kept
+    // raw f64 values inside an f32 tensor, which is the chelis#717 defect
+    // class this phase ends; bit-exactness is now AT THE DTYPE.
+    assert_eq!(result.prim(), chelis_types::types::Prim::F32);
+    assert_eq!(
+        result.to_f64_lossy_vec(),
+        vec![0.1f32 as f64, 0.2f32 as f64, 0.3f32 as f64]
+    );
 }
 
 /// Verify a 2D tensor literal with non-uniform rows lowers to ConstTensor.
@@ -218,7 +223,10 @@ def main() -> tensor[2, 3, f32] =
     let values = eval_tensor_roots_with(&dag, &roots, |_name| None).expect("eval succeeds");
     let result = &values[&roots[0]];
     assert_eq!(result.shape, vec![2, 3]);
-    assert_eq!(result.data, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    assert_eq!(
+        result.to_f64_lossy_vec(),
+        vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+    );
 }
 
 /// Verify ConstTensor works through grad: constant has zero gradient.
@@ -247,10 +255,7 @@ def main(x: tensor[3, f32]) -> tensor[3, f32] =
     assert!(!roots.is_empty(), "should have at least one root");
     let values = eval_tensor_roots_with(&dag, &roots, |name| {
         if name == "x" {
-            Some(TensorValue {
-                data: vec![1.0, 1.0, 1.0],
-                shape: vec![3],
-            })
+            Some(TensorValue::from_vec(vec![3], vec![1.0, 1.0, 1.0]))
         } else {
             None
         }
@@ -259,7 +264,7 @@ def main(x: tensor[3, f32]) -> tensor[3, f32] =
 
     // Check that results contain no NaN.
     for (root, val) in &values {
-        for (i, &v) in val.data.iter().enumerate() {
+        for (i, &v) in val.to_f64_lossy_vec().iter().enumerate() {
             assert!(
                 v.is_finite(),
                 "NaN/Inf in gradient result at root={root:?}, index={i}"
@@ -304,7 +309,7 @@ def main() -> tensor[4, int32] =
     let roots: Vec<NodeId> = dag.roots().to_vec();
     let values = eval_tensor_roots_with(&dag, &roots, |_name| None).expect("eval succeeds");
     let result = &values[&roots[0]];
-    assert_eq!(result.data, vec![10.0, 20.0, 30.0, 40.0]);
+    assert_eq!(result.to_f64_lossy_vec(), vec![10.0, 20.0, 30.0, 40.0]);
 }
 
 /// Diagnostic: verify that the dangling-node issue in full-pipeline grad

@@ -12993,7 +12993,7 @@ mod tests {
         );
         let vals = eval_tensor(&result.dag, &inputs).expect("windowed max_reduce grad eval");
         assert_eq!(
-            vals[&grad_x].data,
+            vals[&grad_x].to_f64_lossy_vec(),
             vec![0.0, 0.0, 1.0, 1.0],
             "subgradient must route to each column's argmax (issue #320)",
         );
@@ -13070,7 +13070,7 @@ mod tests {
         );
         let vals = eval_tensor(&result.dag, &inputs).expect("grad eval");
         assert_eq!(
-            vals[&grad_x].data,
+            vals[&grad_x].to_f64_lossy_vec(),
             vec![2.0, 2.0, 2.0],
             "d sum(2x) / dx must be [2, 2, 2] (chelis#369)",
         );
@@ -13090,7 +13090,7 @@ mod tests {
                 TensorValue::from_vec(vec![3], base.to_vec()),
             );
             eval_tensor(&result.dag, &ip).expect("analytic grad eval")[&grad_x]
-                .data
+                .to_f64_lossy_vec()
                 .clone()
         };
         let h = 1e-3;
@@ -13109,8 +13109,8 @@ mod tests {
                 "x".to_string(),
                 TensorValue::from_vec(vec![3], minus.to_vec()),
             );
-            let fp = eval_tensor(&dag, &ip).expect("plus eval")[&loss].data[0];
-            let fm = eval_tensor(&dag, &im).expect("minus eval")[&loss].data[0];
+            let fp = eval_tensor(&dag, &ip).expect("plus eval")[&loss].to_f64_lossy_vec()[0];
+            let fm = eval_tensor(&dag, &im).expect("minus eval")[&loss].to_f64_lossy_vec()[0];
             let numerical = (fp - fm) / (2.0 * h);
             assert!(
                 (a - numerical).abs() < 1e-3,
@@ -13173,7 +13173,7 @@ mod tests {
         );
         let vals = eval_tensor(&result.dag, &inputs).expect("windowed gather grad eval");
         assert_eq!(
-            vals[&grad_x].data,
+            vals[&grad_x].to_f64_lossy_vec(),
             vec![1.0, 0.0, 1.0, 0.0],
             "scatter-add adjoint must route to gathered source slots (issue #320)",
         );
@@ -14842,9 +14842,9 @@ mod regression_tests {
         let output = &result[roots.last().unwrap()];
         assert_eq!(output.shape, vec![1], "gradient shape must be [1]");
         assert!(
-            (output.data[0] - 6.0_f64).abs() < 1e-5,
+            (output.to_f64_lossy_vec()[0] - 6.0_f64).abs() < 1e-5,
             "gradient of sum(mul(x,x),0) at x=[3.0] must be 6.0, got {:?}",
-            output.data
+            output.to_f64_lossy_vec()
         );
     }
 
@@ -14909,9 +14909,9 @@ mod regression_tests {
         let output = &result[roots.last().unwrap()];
         assert_eq!(output.shape, vec![1], "gradient shape must be [1]");
         assert!(
-            (output.data[0] - 6.0_f64).abs() < 1e-5,
+            (output.to_f64_lossy_vec()[0] - 6.0_f64).abs() < 1e-5,
             "gradient of sum(mul(x,x),0) at x=[3.0] must be 6.0, got {:?}",
-            output.data
+            output.to_f64_lossy_vec()
         );
     }
 }

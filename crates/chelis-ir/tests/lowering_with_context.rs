@@ -207,15 +207,19 @@ fn parity_monolithic_vs_composed_for_library_snippet_pairs() {
             case.label,
         );
         assert_eq!(
-            mono_root.data, composed_root.data,
+            mono_root.to_f64_lossy_vec(),
+            composed_root.to_f64_lossy_vec(),
             "[{}] root value must agree byte-for-byte: mono={:?} composed={:?}",
-            case.label, mono_root.data, composed_root.data,
+            case.label,
+            mono_root.to_f64_lossy_vec(),
+            composed_root.to_f64_lossy_vec(),
         );
         // Spot-check the actual numeric expectation so that an
         // evaluator-side bug masking BOTH paths into wrongness doesn't
         // slip past.
         assert_eq!(
-            composed_root.data, case.expected,
+            composed_root.to_f64_lossy_vec(),
+            case.expected,
             "[{}] composed root value must equal the spot-checked expectation",
             case.label,
         );
@@ -346,8 +350,8 @@ fn library_dag_is_not_mutated_by_lower_program_with_context() {
     let evaled_a = eval_dag_root_values(&_composed_dag, &HashMap::new());
     let evaled_b = eval_dag_root_values(&again, &HashMap::new());
     assert_eq!(
-        evaled_a.last().map(|v| v.data.clone()),
-        evaled_b.last().map(|v| v.data.clone()),
+        evaled_a.last().map(|v| v.to_f64_lossy_vec().clone()),
+        evaled_b.last().map(|v| v.to_f64_lossy_vec().clone()),
         "repeated composed lowering must be deterministic",
     );
 }

@@ -30,7 +30,7 @@
 //! a coordinated future implementation.
 
 use chelis_ir::dag::{Dag, DimExpr, DimInfo, NodeId, RiscOp, TensorType};
-use chelis_ir::eval::eval_tensor;
+use chelis_ir::eval::{TensorValue, eval_tensor};
 use chelis_ir::grad::{AdError, grad_dag, grad_dag_checked};
 use chelis_types::types::Prim;
 use std::collections::HashMap;
@@ -96,13 +96,13 @@ fn tensor_2d(data: Vec<Vec<f64>>) -> chelis_ir::eval::TensorValue {
 
 fn tensor_eq_close(label: &str, got: &chelis_ir::eval::TensorValue, want: &[f64]) {
     assert_eq!(
-        got.data.len(),
+        got.len(),
         want.len(),
         "{label}: shape mismatch: got {} elems, want {} elems",
-        got.data.len(),
+        got.len(),
         want.len()
     );
-    for (i, (g, w)) in got.data.iter().zip(want.iter()).enumerate() {
+    for (i, (g, w)) in got.to_f64_lossy_vec().iter().zip(want.iter()).enumerate() {
         assert!(
             (g - w).abs() < 1e-5,
             "{label}: elem {i} mismatch: got {g}, want {w}",
@@ -202,7 +202,7 @@ fn issue_199_blas_matmul_grad_matches_finite_difference() {
     inputs.insert("a".into(), a_val.clone());
     inputs.insert("b".into(), b_val.clone());
     let analytical_values = eval_tensor(&result.dag, &inputs).expect("analytical eval");
-    let analytical_grad = &analytical_values[&grad_a].data;
+    let analytical_grad = &analytical_values[&grad_a].to_f64_lossy_vec();
 
     // Numerical: central differences over each element of A.
     let h = 1e-3;
@@ -211,19 +211,21 @@ fn issue_199_blas_matmul_grad_matches_finite_difference() {
     let mut numerical = vec![0.0f64; m * k];
     for i in 0..m {
         for j in 0..k {
-            let mut a_plus = a_val.clone();
-            let mut a_minus = a_val.clone();
             let idx = i * k + j;
-            a_plus.data[idx] += h;
-            a_minus.data[idx] -= h;
+            let mut plus_data = a_val.to_f64_lossy_vec();
+            let mut minus_data = a_val.to_f64_lossy_vec();
+            plus_data[idx] += h;
+            minus_data[idx] -= h;
+            let a_plus = TensorValue::from_vec(a_val.shape.clone(), plus_data);
+            let a_minus = TensorValue::from_vec(a_val.shape.clone(), minus_data);
             let mut inputs_p = inputs.clone();
             inputs_p.insert("a".into(), a_plus);
             let f_plus_map = eval_tensor(&dag, &inputs_p).expect("plus eval");
-            let f_plus = f_plus_map[&out].data[0];
+            let f_plus = f_plus_map[&out].to_f64_lossy_vec()[0];
             let mut inputs_m = inputs.clone();
             inputs_m.insert("a".into(), a_minus);
             let f_minus_map = eval_tensor(&dag, &inputs_m).expect("minus eval");
-            let f_minus = f_minus_map[&out].data[0];
+            let f_minus = f_minus_map[&out].to_f64_lossy_vec()[0];
             numerical[idx] = (f_plus - f_minus) / (2.0 * h);
         }
     }

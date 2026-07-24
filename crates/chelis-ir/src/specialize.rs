@@ -1207,8 +1207,8 @@ mod tests {
         let before = crate::eval::eval_tensor(&dag, &inputs).expect("dense gather eval");
         let after = crate::eval::eval_tensor(&specialized, &inputs).expect("specialized eval");
         assert_eq!(
-            before[&gathered].data,
-            after[specialized.roots().first().expect("root")].data
+            before[&gathered].to_f64_lossy_vec(),
+            after[specialized.roots().first().expect("root")].to_f64_lossy_vec()
         );
     }
 
@@ -1331,11 +1331,11 @@ mod tests {
         let before = crate::eval::eval_tensor(&dag, &inputs).expect("one_hot eval");
         let after = crate::eval::eval_tensor(&specialized, &inputs).expect("lowered eval");
         assert_eq!(
-            before[&one_hot].data,
-            after[specialized.roots().first().expect("root")].data
+            before[&one_hot].to_f64_lossy_vec(),
+            after[specialized.roots().first().expect("root")].to_f64_lossy_vec()
         );
         assert_eq!(
-            after[specialized.roots().first().expect("root")].data,
+            after[specialized.roots().first().expect("root")].to_f64_lossy_vec(),
             vec![0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
         );
     }
