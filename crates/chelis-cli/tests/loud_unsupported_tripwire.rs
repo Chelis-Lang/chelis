@@ -284,10 +284,16 @@ const BASELINE: &[Entry] = &[
     (
         Pat::UnwrapOrNumericLiteral,
         "crates/chelis-ir/src/lower.rs",
-        13,
-        "structural at the P1 baseline: recursion-depth counter, \
-         desync-guarded rank/extent reads, the uniform-ConstTensor \
-         first-element read (non-empty by the windows(2) guard). FLAGGED, \
+        12,
+        "structural at the P1 baseline: recursion-depth counter and \
+         desync-guarded rank/extent reads. The uniform-ConstTensor \
+         first-element read LEFT this census at chelis#856 (13 -> 12, per \
+         spec/design/loud_unsupported.md B1: removals only with the site's \
+         fix): the sealed constant payload turned `unwrap_or(0.0)` on a \
+         raw f64 buffer into `unwrap_or(RawScalar::Int(0))` on a buffer \
+         the `windows(2)` guard already proved non-empty, and the value \
+         now finalizes at the node's dtype or raises a cited lowering \
+         diagnostic, so no numeric default survives the site. FLAGGED, \
          not proven: conv2d's present-but-non-literal stride unwrap_or(1) \
          / padding unwrap_or(0) - the chelis#776 shape (census row 23) - \
          and the with-seed defaults, whose effects-checker cover the \
