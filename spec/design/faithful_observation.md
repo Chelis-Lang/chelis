@@ -1,6 +1,6 @@
 # Faithful Observation: one dtype-true formatter for every exit, both lanes
 
-**Status:** Phases 0-1 LANDED. Phase 0 (the round-trip harness and the
+**Status:** Phases 0-2 LANDED. Phase 0 (the round-trip harness and the
 exit census) landed 2026-07-17 (PR #752, tightened by PR #774). Phase 1
 (the formatter, eval adoption, and the eval-side §B2.1 migration) landed
 2026-07-20: `format_element` lives at `chelis-types::observation`, every
@@ -11,7 +11,17 @@ annexed value-layer exception, surfaced by PR #792's red team: int64
 scalar roots above 2^53 render the f64-collapsed stored value at the
 labeled root ([#684]'s rank-0 realization, repaired by [#729]; the
 exception and its ignored red cell are recorded at spec/05 §8).
-Phases 2-3 remain. Tracking issue: [#732].
+Phase 2 (the generated C side and the C-side §B2.1 migration) landed
+2026-07-24: `chelis_format_shortest` in the runtime, the print helper
+generated from an exhaustive `Prim` match, `to_list`'s F16/BF16 arms,
+and §C2.3 cross-lane byte equality locked for identical stored bits -
+[#716]/[#723]/[#726]-C/[#748]/[#749] closed by un-ignoring. Two
+recorded boundaries: eval TENSOR float elements still render at the
+stored f64 width (the deliberate §8.1 width note, [#729]'s metadata
+repair), so non-dyadic narrow-float tensor cells stay width-divergent
+across lanes until then; and unit-valued single-print-root labeling
+diverges ([#862], a root-labeling discovery outside the [05-OBS]
+atoms). Phase 3 remains. Tracking issue: [#732].
 **Owning specs:** `spec/05-risc-primitives.md` (its §8 carries this
 plan's ratified contract as current blockquote authorities [05-OBS-1..5]; the
 per-op tolerance table lands into the same section at Phase 3, while
@@ -397,6 +407,23 @@ today - that divergence is [#729]'s subject matter and stays visible
 the round-trip harness green on every exit in both lanes; the
 `c_dag_kernels_compute_correct_f16_bits_despite_print` byte-decode lock
 retired per its own instructions (replaced by the direct print row).
+
+**Delivered** (2026-07-24), with three recorded notes. (1) The
+`chelis_format_shortest` routine lives in the Rust runtime library, so
+the wide widths use `{:?}` formatting directly - the normative grammar's
+own definition and the exact code path `format_element` takes - while
+f16/bf16 use the ratified escalation search; the C-side sketch's
+printf/strtod loop and normalization pass exist to approximate exactly
+this from C, and byte equality is still locked by test (exhaustive per
+half format). (2) `to_list` completion required naming a boxed-only
+list-element ABI state (`ReducedFloatBoxed`) in the C backend: PR #799's
+typed boundary had begun rejecting `list[f16]` wholesale at build (the
+census recorded the older runtime abort); the named state keeps every
+scalar-materialization path loudly rejected per [#714] while letting the
+heap list print. (3) §C2.3's byte-identity lock runs where stored bits
+AND rendered widths agree; the eval tensor width note (spec/05 §8.1)
+keeps non-dyadic narrow-float tensor cells width-divergent until [#729],
+and the [#862] unit-root labeling discovery is filed, not absorbed.
 
 ## Phase 3 - the tolerance table and the [#687] handshake
 

@@ -1276,14 +1276,21 @@ plan's Phase 3.)*
 
 ---
 
-## 8. Observation And Formatting Contract (Ratified At chelis#732 Phase 1; Eval Lane Conformant, C Lane Tracked For Phase 2)
+## 8. Observation And Formatting Contract (Ratified At chelis#732 Phase 1; Both Lanes Conformant Since Phase 2)
 
 **Status banner:** atoms [05-OBS-1..5] were RATIFIED at chelis#732
 Phase 1 (2026-07-20), which landed `format_element` (the single
 renderer, `chelis-types::observation`) and routed every EVAL-lane exit
-through it. The eval lane conforms; the compiled C lane still renders
-through its pre-contract paths (chelis#716, #723, #726's C half, #748,
-#749) until chelis#732 Phase 2 lands the generated print helper. Atom IDs are
+through it. chelis#732 Phase 2 (2026-07-24) brought the compiled C lane
+onto the same grammar: the emitted print helper is GENERATED from an
+exhaustive `Prim` match, every compiled float exit routes through the
+runtime's `chelis_format_shortest` (byte-locked against
+`format_element`), `to_list` reads every dtype (chelis#716, #723,
+#726's C half, #748, #749 closed), and cross-lane byte equality holds
+for identical stored bits at matching widths. The deliberate eval
+tensor width note in section 8.1 remains (chelis#729's metadata
+repair), and unit-valued single-print-root LABELING diverges
+(chelis#862 - a root-naming issue outside these atoms). Atom IDs are
 stable, and the current blockquote authorities remain normative until selected
 for chelis#733 Phase 1 migration. Full revisions are attached and checked
 through the pinned Buoy shell-side integration. The delivery plan and full
@@ -1295,7 +1302,7 @@ elaboration is `spec/design/faithful_observation.md` (meta chelis#728).
 > own dtype width, and all exits within a lane SHALL agree with each
 > other and with the stored bits.
 
-*(Eval lane conformant since chelis#732 Phase 1, with one deliberate
+*(Both lanes conformant since chelis#732 Phase 2, with one deliberate
 width note recorded in §8.1 and one annexed value-layer exception: an
 int64 SCALAR ROOT above 2^53 renders the f64-collapsed stored value at
 the labeled root while `print`/`to_string` of the same def are exact -
@@ -1303,8 +1310,8 @@ the interpreter's rank-0 realization collapses the value BEFORE the
 renderer sees it (chelis#684, [#729]'s value layer; surfaced by PR
 #792's red team). Rendering reports the collapsed bits faithfully; the
 cell is an issue-linked ignored red test in the observation harness and
-returns with chelis#729. Not honored in the C lane: chelis#716, #723,
-#748, #749 - Phase 2's oracle.)*
+returns with chelis#729. The C lane's former violations (chelis#716,
+#723, #748, #749) closed at Phase 2 by un-ignoring their red cells.)*
 
 > **[05-OBS-2]** Integer dtypes SHALL print as integers with all digits
 > exact; floats SHALL print the shortest string that round-trips at
@@ -1312,12 +1319,12 @@ returns with chelis#729. Not honored in the C lane: chelis#716, #723,
 > number grammar (digit selection, exponent form, special-value
 > spellings) SHALL be identical across lanes and is pinned in §8.1.
 
-*(Eval lane conformant since chelis#732 Phase 1 - integers lost the
-`.0`, bool tensors print `true`/`false`, scalars render at own width.
-Not honored in the C lane: integers still print float-formatted with
-lossy int64 digits (chelis#723) and the `%.1f`/`%.16g` split still
-diverges from §8.1 (chelis#748); cross-lane grammar identity arrives
-with Phase 2's generated helper.)*
+*(Both lanes conformant since chelis#732 Phase 2: eval adopted the
+grammar at Phase 1 (integers lost the `.0`, bool tensors print
+`true`/`false`, scalars render at own width) and Phase 2's generated
+helper brought the compiled lane onto the identical grammar - exact
+integer printf at width (chelis#723 closed), `chelis_format_shortest`
+replacing the `%.1f`/`%.16g` split (chelis#748 closed).)*
 
 > **[05-OBS-3]** Cross-lane VALUE differences are permitted only for the
 > ops listed in the per-op tolerance table (to be authored into this
@@ -1355,8 +1362,8 @@ stored value until chelis#729 repairs the realization's storage.)*
 threshold is one documented constant, `TENSOR_RENDER_LIMIT`. Eval lane
 conformant since chelis#732 Phase 1 - the formerly unlimited transcript
 and the labeled root's former `+ ...` marker both moved in the §B2.1
-migration. Not honored in the C lane's nested-in-list tensor renderer:
-10-element cut with NO marker, chelis#749.)*
+migration. The C lane's nested-in-list renderer (formerly a 10-element
+cut with NO marker, chelis#749) adopted the same rule at Phase 2.)*
 
 ### 8.1 The Number Grammar (Normative Constants, Frozen At chelis#732 Phase 1)
 
