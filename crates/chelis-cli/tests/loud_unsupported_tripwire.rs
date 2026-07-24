@@ -342,14 +342,16 @@ const BASELINE: &[Entry] = &[
     (
         Pat::UnwrapOrNumericLiteral,
         "crates/chelis-compiler-api/src/runtime/eval.rs",
-        3,
+        2,
         "with-seed default (mirrors lower.rs; the chelis#793 negative-seed \
-         repro is now checker-rejected) and a scalarization first-element \
-         read; plus the `map_or(-1_i64, ...)` process-exit-code default \
-         (proven-structural: a signal-killed child has no exit code, and -1 \
-         is the conventional sentinel, not a chelis#703 value substitution) \
-         newly counted by the rt791 F6 widening; P1-frozen for the Phase 2 \
-         lint audit",
+         repro is now checker-rejected); plus the `map_or(-1_i64, ...)` \
+         process-exit-code default (proven-structural: a signal-killed \
+         child has no exit code, and -1 is the conventional sentinel, not \
+         a chelis#703 value substitution) newly counted by the rt791 F6 \
+         widening. The former scalarization first-element read was FIXED \
+         by chelis#729 Phase 1 (tensor_to_scalar reads the sealed storage \
+         and errors loudly on an empty buffer), shrinking this row per B1; \
+         P1-frozen for the Phase 2 lint audit",
     ),
     (
         Pat::UnwrapOrNumericLiteral,

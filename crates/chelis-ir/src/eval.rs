@@ -2081,11 +2081,24 @@ where
                 // the final node-level finalize below converts the 0/1
                 // tail to bool storage.
                 let chain_prim = if out_prim == Prim::Bool {
-                    externals
-                        .first()
-                        .map(|v| v.prim())
-                        .filter(|p| p.is_float() || p.is_integer())
-                        .unwrap_or(Prim::F64)
+                    match externals.first().map(|v| v.prim()) {
+                        Some(p) if p.is_float() || p.is_integer() => p,
+                        Some(other) => {
+                            return Err(format!(
+                                "fused chain at node {}: bool output with a non-numeric \
+                                 first external ({}); cannot determine the chain dtype",
+                                node.id.0,
+                                other.name()
+                            ));
+                        }
+                        None => {
+                            return Err(format!(
+                                "fused chain at node {}: bool output with no external \
+                                 inputs; cannot determine the chain dtype",
+                                node.id.0
+                            ));
+                        }
+                    }
                 } else {
                     out_prim
                 };

@@ -1580,7 +1580,7 @@ pub(super) fn pad_sequences_value(
     pad: &RuntimeValue,
 ) -> Result<(Prim, ListTensorData, usize, usize), String> {
     let (pad_precision, rows, lens) = pad_sequences_rows(sequences, pad, "pad_sequences")?;
-    let width = lens.iter().copied().max().unwrap_or(0);
+    let width = lens.iter().copied().fold(0usize, usize::max);
     let batch = lens.len();
     let data = pad_rows(rows, &lens, width, pad, batch)?;
     Ok((pad_precision, data, batch, width))

@@ -146,6 +146,8 @@ fn uppercase_reference_resolves_to_value_not_constructor() {
         .get("value")
         .and_then(|v| v.get("value"))
         .and_then(|v| v.get("data"))
+        // Execution wire v2 (chelis#729): tagged per-dtype payload.
+        .and_then(|d| d.get("values"))
         .and_then(Value::as_array)
         .and_then(|d| d.first())
         .and_then(Value::as_f64)

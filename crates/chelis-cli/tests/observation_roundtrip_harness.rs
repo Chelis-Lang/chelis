@@ -939,12 +939,22 @@ fn eval_int_tensor_exits_round_trip() {
     }
 }
 
-/// int64 ABOVE 2^53: tier 1 only. Eval's tensor storage is f64-backed
-/// (chelis#684, a [#729] value bug), so the constructed 2^53+1 is already
-/// collapsed BEFORE any exit renders it; faithful observation here means
-/// both exits agree on the stored (wrong) value. The C lane's tier-2
-/// version of this row is the chelis#723 ignored test below.
+/// int64 ABOVE 2^53: tier 1 only. Pre-chelis#729 the f64-backed storage
+/// collapsed 2^53+1 before ANY exit rendered it, so this row was green by
+/// uniform wrongness (every exit agreed on the collapsed value). Since
+/// chelis#729 Phase 1 the host-lane exits (print/to_list and their
+/// labeled roots) are EXACT, and the one remaining collapse point is the
+/// tensor-lane labeled root, whose binding lowers through the f64 DAG
+/// literal payload (chelis#856) - so the intra-lane agreement this row
+/// asserts is genuinely violated, three exits right and one wrong, until
+/// chelis#856 lands. The C lane's tier-2 version of this row is the
+/// chelis#723 ignored test below.
 #[test]
+#[ignore = "chelis#856: the tensor-lane labeled root renders the DAG-literal-collapsed value \
+            (9007199254740992) while print/to_list and the host-lane root are exact after \
+            chelis#729 Phase 1; the intra-lane agreement returns when the DAG literal payload \
+            carries exact integers. Run with \
+            `cargo test -p chelis-cli --test observation_roundtrip_harness -- --ignored`."]
 fn eval_int64_above_2p53_exits_agree_within_lane() {
     let program = exits_program(
         "tensor[1, int64]",

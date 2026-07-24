@@ -681,7 +681,10 @@ fn i64_max_literal_is_exact() {
 /// narrow_dtype_matrix, reached through the SUFFIX form).
 #[test]
 fn f16_suffix_literal_computes_at_f16() {
-    assert_eq!(eval_lane_str("mul(0.1f16, 0.1f16)").expect("eval"), "0.009995");
+    assert_eq!(
+        eval_lane_str("mul(0.1f16, 0.1f16)").expect("eval"),
+        "0.009995"
+    );
 }
 
 /// An i64-suffixed literal above 2^53 is exact as a bare expression.
@@ -701,10 +704,8 @@ fn int64_suffix_literal_bare_expression_is_exact() {
             exact since chelis#729 Phase 1. Run with \
             `cargo test -p chelis-cli --test precision_matrix -- --ignored`."]
 fn int64_suffix_literal_binding_is_exact() {
-    let got = eval_program_first_line(
-        "module M.Main\nx = 9007199254740993i64\nout = print(x)\n",
-    )
-    .expect("eval");
+    let got = eval_program_first_line("module M.Main\nx = 9007199254740993i64\nout = print(x)\n")
+        .expect("eval");
     assert_eq!(got, "9007199254740993");
 }
 
