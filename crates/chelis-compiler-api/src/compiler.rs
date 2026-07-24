@@ -4,7 +4,7 @@ use chelis_backend_c::CodegenResult;
 use chelis_backend_hip::HipCodegenResult;
 use chelis_deep::Expr as DeepExpr;
 use chelis_ir::dag::{Dag, DimInfo, FusedInput, FusedStepOp, NodeId, RiscOp, RtDim, TensorType};
-use chelis_ir::eval::{self, TensorValue as IrTensorValue};
+use chelis_ir::eval::{self};
 use chelis_ir::lower::top_level_lowering_map;
 use chelis_surf::ast::{
     BinOp, Decl, Expr, ImportKind, LetBinding, LetPattern, Literal, MatchArm, Param, Pattern,

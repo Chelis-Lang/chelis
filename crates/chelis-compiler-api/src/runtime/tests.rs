@@ -1529,37 +1529,12 @@ fn scalar_construction_is_sealed_and_width_checked() {
     }
 }
 
-/// Tiny helper: `Result::unwrap_err` panics on `Ok` with `Debug`
-/// formatting, but `RuntimeValue` doesn't implement `Debug` cleanly
-/// for a small printout here. This wrapper takes a closure for the
-/// panic message instead.
-trait UnwrapErrOr<T, E> {
-    fn unwrap_err_or_else(self, on_ok: impl FnOnce(T) -> E) -> E;
-}
-
-impl<T, E> UnwrapErrOr<T, E> for Result<T, E> {
-    fn unwrap_err_or_else(self, on_ok: impl FnOnce(T) -> E) -> E {
-        match self {
-            Ok(v) => on_ok(v),
-            Err(e) => e,
-        }
-    }
-}
-
 // ----------------------------------------------------------------
-// RT-1 finding (C1): the original RT-1 test landed in
-// origin/rt1-redteam-findings exercised
-//
-//     RuntimeValue::Scalar { dtype: F16, bits: ScalarBits::F32(_) }
-//
-// directly — that struct-literal form bypassed the
-// `RuntimeValue::scalar()` invariant check. Post-C1 the variant is
-// a tuple over the sealed `ScalarPayload` newtype; the same code
-// would no longer compile because the variant is no longer
-// struct-shaped and the payload's fields are private. Pin the
-// closed-finding evidence directly: the only construction path
-// (`ScalarPayload::new`) returns the typed mismatch error rather
-// than silently constructing an invariant-broken value.
+// RT-1 finding (C1), history: the original RT-1 test exercised
+// `RuntimeValue::Scalar { dtype: F16, bits: ScalarBits::F32(_) }`
+// directly, then C1 sealed the payload so the literal no longer
+// compiled, and chelis#729 Phase 1 removed the (dtype, bits) pair
+// entirely - the storage variant IS the dtype.
 // ----------------------------------------------------------------
 
 /// RT-1 closed finding C1, strengthened by chelis#729 Phase 1: the

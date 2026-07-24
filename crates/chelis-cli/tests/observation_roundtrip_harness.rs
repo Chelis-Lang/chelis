@@ -815,16 +815,11 @@ fn c_lane_rows(r: &FRow) -> bool {
 /// value class. Faithful rendering makes the value bug visible instead of
 /// laundered (faithful_observation.md, non-goals) - the cell returns when
 /// [#729] repairs the to_list value path.
-const EVAL_F64_LIST_EXCLUDED: &[&str] = &[
-    "f64-max",
-    "f64-min-subnormal",
-    "f64-min-normal",
-    "f64-tenth",
-    "f64-17-digit",
-    "f64-2p53",
-    "f64-2p53-plus-2",
-    "f64-audit-e19",
-];
+/// chelis#729 Phase 1 un-excluded the list: per-dtype storage grounded
+/// the runtime precision tag (an f64-element `to_tensor` is F64-tagged
+/// end to end), so `to_list` reads exact f64 elements and every row
+/// round-trips. The empty list stays as the mechanism plus this record.
+const EVAL_F64_LIST_EXCLUDED: &[&str] = &[];
 
 fn eval_f64_list_rows(r: &FRow) -> bool {
     !EVAL_F64_LIST_EXCLUDED.contains(&r.label)

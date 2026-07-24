@@ -510,7 +510,7 @@ fn tensor_numeric_unop(
         .value
         .to_f64_lossy_vec()
         .into_iter()
-        .map(|value| op(value))
+        .map(op)
         .collect();
     RuntimeTensorValue::from_wide(
         "arithmetic",
@@ -1325,13 +1325,6 @@ pub(super) fn cast_tensor_value(
         .map(|value| RuntimeValue::Tensor(RuntimeTensorValue::new(value)))
 }
 
-/// Element-wise scalar conversion image. Delegates to the shared
-/// per-direction cast ladder in `chelis_ir::eval::convert_cast_data`
-/// (chelis#729 Phase 1: one authored ladder, no per-surface duplicate).
-pub(super) fn convert_scalar_data(x: f64, src: Prim, dst: Prim) -> f64 {
-    chelis_ir::eval::convert_cast_data(x, src, dst)
-}
-
 /// Bucket 4b: recursively flatten a nested numeric/bool list into a
 /// rank-N tensor. Every nesting level contributes one outer dimension;
 /// the innermost level must be uniformly numeric or bool. All sibling
@@ -1756,7 +1749,7 @@ pub(super) fn tensor_reduce_host(
             .to_i64_exact_vec()
             .expect("integer tensor storage reads exactly");
         let mut out: Vec<Option<i64>> = vec![None; out_numel];
-        for out_linear in 0..out_numel {
+        for (out_linear, slot_cell) in out.iter_mut().enumerate() {
             let out_indices = linear_to_indices(out_linear, &out_shape);
             for k in 0..axis_len {
                 let mut in_indices = Vec::with_capacity(rank);
@@ -1770,8 +1763,7 @@ pub(super) fn tensor_reduce_host(
                     }
                 }
                 let value = data[indices_to_linear(&in_indices, &tensor.value.shape)];
-                let slot = &mut out[out_linear];
-                let next = match (op, *slot) {
+                let next = match (op, *slot_cell) {
                     (ReduceOp::Sum, None) => value,
                     (ReduceOp::Sum, Some(acc)) => acc.checked_add(value).ok_or_else(|| {
                         chelis_types::NumericTrap::Overflow {
@@ -1796,7 +1788,7 @@ pub(super) fn tensor_reduce_host(
                         unreachable!("integer fold guard excludes arg reductions")
                     }
                 };
-                *slot = Some(next);
+                *slot_cell = Some(next);
             }
         }
         let wide: Vec<i64> = out
@@ -2974,9 +2966,8 @@ pub(super) fn tensor_scatter_elements_value(
         .to_i64_exact_vec()
         .expect("integer tensor storage reads exactly");
     let mut writes = Vec::with_capacity(updates.value.len());
-    for linear in 0..updates.value.len() {
+    for (linear, &value) in index_values.iter().enumerate() {
         let coord = linear_to_indices(linear, &updates.value.shape);
-        let value = index_values[linear];
         if value < 0 || value as usize >= data.value.shape[axis] {
             return Err(format!(
                 "scatter_elements index {value} out of bounds at axis {axis}"
