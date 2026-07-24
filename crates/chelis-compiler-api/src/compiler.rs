@@ -40,6 +40,10 @@ const RUNTIME_H: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../chelis-runtime/include/chelis_runtime.h"
 ));
+const RUNTIME_DTYPE_H: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../chelis-runtime/include/chelis_runtime_dtype.h"
+));
 const BLAS_H: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../chelis-runtime/include/chelis_blas.h"
@@ -734,16 +738,26 @@ pub fn compile(request: CompileRequest) -> Result<CompileResult> {
 
 pub fn compile_for_execution(request: CompileRequest) -> Result<CompiledExecutionArtifact> {
     let compiled = compile_source(request.source_kind, &request.source)?;
-    let host_compiled = chelis_ir::host::lower_compiled_program(&compiled.checked);
+    reject_host_only_builtins_before_host_lowering(&compiled.checked, request.target)?;
+    let host_compiled =
+        chelis_ir::host::try_lower_compiled_program(&compiled.checked).map_err(|diagnostic| {
+            stage_error_with_span(
+                "lower",
+                diagnostic.to_string(),
+                "lower_error",
+                deep_span_to_schema(diagnostic.span),
+            )
+        })?;
     let func_name = request
         .entry_name
         .unwrap_or_else(|| "chelis_main".to_string());
 
     // Reject host-runtime-only builtins early for any compiled-backend
-    // target. Without this guard `chelis build` silently emits a C stub
-    // like `__binding_0_value = /* unsupported builtin tensor_scan */ 0`
-    // and the compiled program returns garbage at runtime. See
-    // spec/05-risc-primitives.md §3.6 for the host-only contract.
+    // target so both public compiler APIs preserve the owning builtin's
+    // specific diagnostic. The fallible emitter independently rejects an
+    // unknown compiled-lane builtin; this gate improves ordering and context,
+    // and is not the correctness boundary. See spec/05-risc-primitives.md
+    // §3.6 and spec/design/loud_unsupported.md §C6.3.
     if let Some(host_program) = host_compiled.host.as_ref() {
         reject_host_only_builtins(host_program, request.target)?;
     }
@@ -1977,6 +1991,10 @@ fn compile_result_c(
                 contents: RUNTIME_H.to_string(),
             },
             GeneratedFile {
+                path: "chelis_runtime_dtype.h".to_string(),
+                contents: RUNTIME_DTYPE_H.to_string(),
+            },
+            GeneratedFile {
                 path: "chelis_blas.h".to_string(),
                 contents: BLAS_H.to_string(),
             },
@@ -2007,6 +2025,10 @@ fn compile_result_hip(
             GeneratedFile {
                 path: "chelis_runtime.h".to_string(),
                 contents: RUNTIME_H.to_string(),
+            },
+            GeneratedFile {
+                path: "chelis_runtime_dtype.h".to_string(),
+                contents: RUNTIME_DTYPE_H.to_string(),
             },
             GeneratedFile {
                 path: "chelis_hip_runtime.h".to_string(),
@@ -2042,6 +2064,10 @@ fn compile_result_hip_host(
             GeneratedFile {
                 path: "chelis_runtime.h".to_string(),
                 contents: RUNTIME_H.to_string(),
+            },
+            GeneratedFile {
+                path: "chelis_runtime_dtype.h".to_string(),
+                contents: RUNTIME_DTYPE_H.to_string(),
             },
             GeneratedFile {
                 path: "chelis_hip_runtime.h".to_string(),
@@ -2264,15 +2290,43 @@ fn reject_unsupported_reduce_window_precision(dag: &Dag, target: &str) -> Result
 
 /// Host-only builtins that have no compiled-backend lowering. Calls
 /// to these from a `chelis build` program must fail at compile time
-/// with a clear error rather than silently emit a `/* unsupported
-/// builtin */ 0` C stub. Spec: `spec/05-risc-primitives.md` §3.6.
+/// with the owning early diagnostic. The emitter's Result boundary remains
+/// the independent safety mechanism. Spec: `spec/05-risc-primitives.md` §3.6.
 const HOST_ONLY_BUILTINS: &[&str] = &["tensor_scan"];
 
-fn reject_host_only_builtins(
-    program: &chelis_ir::host::HostProgram,
+fn host_only_builtin_error(name: &str, target: CompileTarget) -> CompilerError {
+    let target_label = match target {
+        CompileTarget::C => "c",
+        CompileTarget::Hip => "hip",
+    };
+    let unsupported =
+        chelis_types::unsupported::Unsupported::compiled_host_only_builtin(name, target_label);
+    stage_error("compile", unsupported.to_string(), "unsupported_feature")
+}
+
+/// Reject direct host-runtime-only calls on checked Deep before host lowering
+/// descends into their callback arguments. This preserves the owning builtin
+/// diagnostic even when an argument is itself intentionally unrepresentable
+/// in compiled code (for example `tensor_scan(..., fn (...), ...)`). The
+/// concrete-HostProgram scan below remains the second boundary for aliases
+/// and other shapes materialized by lowering.
+fn reject_host_only_builtins_before_host_lowering(
+    program: &CheckedProgram,
     target: CompileTarget,
 ) -> Result<()> {
-    use chelis_ir::host::{HostCallback, HostCallbackKind, HostExpr, HostExprKind};
+    if let Some(name) = chelis_ir::host::find_direct_builtin_call(program, HOST_ONLY_BUILTINS) {
+        return Err(host_only_builtin_error(&name, target));
+    }
+    Ok(())
+}
+
+fn reject_host_only_builtins(
+    program: &chelis_ir::host::ConcreteHostProgram,
+    target: CompileTarget,
+) -> Result<()> {
+    use chelis_ir::host::{
+        ConcreteHostCallback, ConcreteHostExpr, ConcreteHostExprKind, HostCallbackKind,
+    };
 
     // A higher-order helper's callback can itself reach a host-only
     // builtin (e.g. `map(fn (x) -> tensor_scan(...), xs)`). An *inline*
@@ -2280,18 +2334,18 @@ fn reject_host_only_builtins(
     // callback refers to a top-level function by name; that function's
     // body is scanned separately when we walk `program.functions`, so we
     // do not need to chase the reference here.
-    fn scan_callback(callback: &HostCallback, found: &mut Option<String>) {
+    fn scan_callback(callback: &ConcreteHostCallback, found: &mut Option<String>) {
         if let HostCallbackKind::Inline { body, .. } = &callback.kind {
             scan_expr(body, found);
         }
     }
 
-    fn scan_expr(expr: &HostExpr, found: &mut Option<String>) {
+    fn scan_expr(expr: &ConcreteHostExpr, found: &mut Option<String>) {
         if found.is_some() {
             return;
         }
         match &expr.kind {
-            HostExprKind::Builtin { name, args, .. } => {
+            ConcreteHostExprKind::Builtin { name, args, .. } => {
                 if HOST_ONLY_BUILTINS.contains(&name.as_str()) {
                     *found = Some(name.clone());
                     return;
@@ -2300,17 +2354,17 @@ fn reject_host_only_builtins(
                     scan_expr(arg, found);
                 }
             }
-            HostExprKind::Call { args, .. } => {
+            ConcreteHostExprKind::Call { args, .. } => {
                 for arg in args {
                     scan_expr(arg, found);
                 }
             }
-            HostExprKind::TensorCall { args, .. } => {
+            ConcreteHostExprKind::TensorCall { args, .. } => {
                 for arg in args {
                     scan_expr(arg, found);
                 }
             }
-            HostExprKind::If {
+            ConcreteHostExprKind::If {
                 cond,
                 then_expr,
                 else_expr,
@@ -2320,24 +2374,24 @@ fn reject_host_only_builtins(
                 scan_expr(then_expr, found);
                 scan_expr(else_expr, found);
             }
-            HostExprKind::Let { bindings, body, .. } => {
+            ConcreteHostExprKind::Let { bindings, body, .. } => {
                 for binding in bindings {
                     scan_expr(&binding.value, found);
                 }
                 scan_expr(body, found);
             }
-            HostExprKind::List(items, _) | HostExprKind::Tuple(items, _) => {
+            ConcreteHostExprKind::List(items, _) | ConcreteHostExprKind::Tuple(items, _) => {
                 for item in items {
                     scan_expr(item, found);
                 }
             }
-            HostExprKind::AdtConstruct { fields, .. } => {
+            ConcreteHostExprKind::AdtConstruct { fields, .. } => {
                 for field in fields {
                     scan_expr(field, found);
                 }
             }
-            HostExprKind::AdtFieldAccess { base, .. } => scan_expr(base, found),
-            HostExprKind::MatchOption {
+            ConcreteHostExprKind::AdtFieldAccess { base, .. } => scan_expr(base, found),
+            ConcreteHostExprKind::MatchOption {
                 scrutinee,
                 some_expr,
                 none_expr,
@@ -2347,7 +2401,7 @@ fn reject_host_only_builtins(
                 scan_expr(some_expr, found);
                 scan_expr(none_expr, found);
             }
-            HostExprKind::MatchAdt {
+            ConcreteHostExprKind::MatchAdt {
                 scrutinee,
                 arms,
                 default_expr,
@@ -2361,20 +2415,20 @@ fn reject_host_only_builtins(
                     scan_expr(d, found);
                 }
             }
-            HostExprKind::Map { callback, list, .. }
-            | HostExprKind::Filter { callback, list, .. }
-            | HostExprKind::Partition { callback, list, .. }
-            | HostExprKind::FlatMap { callback, list, .. } => {
+            ConcreteHostExprKind::Map { callback, list, .. }
+            | ConcreteHostExprKind::Filter { callback, list, .. }
+            | ConcreteHostExprKind::Partition { callback, list, .. }
+            | ConcreteHostExprKind::FlatMap { callback, list, .. } => {
                 scan_callback(callback, found);
                 scan_expr(list, found);
             }
-            HostExprKind::Fold {
+            ConcreteHostExprKind::Fold {
                 callback,
                 init,
                 list,
                 ..
             }
-            | HostExprKind::Scan {
+            | ConcreteHostExprKind::Scan {
                 callback,
                 init,
                 list,
@@ -2384,7 +2438,7 @@ fn reject_host_only_builtins(
                 scan_expr(init, found);
                 scan_expr(list, found);
             }
-            HostExprKind::WithSeed { seed, body, .. } => {
+            ConcreteHostExprKind::WithSeed { seed, body, .. } => {
                 scan_expr(seed, found);
                 scan_expr(body, found);
             }
@@ -2392,26 +2446,19 @@ fn reject_host_only_builtins(
         }
     }
 
-    let target_label = match target {
-        CompileTarget::C => "c",
-        CompileTarget::Hip => "hip",
-    };
-
     // This walk is deliberately whole-program (every global value AND
     // every function body), NOT scoped to the build entry's reachable
     // call graph. That asymmetry with the reachability-scoped AD guard
     // in `runtime.rs::find_reachable_host_only_builtin_call` is
     // intentional: `chelis_backend_c::host_emit` emits *every*
     // `program.functions` entry unconditionally (no dead-code pruning),
-    // so a `tensor_scan` call inside an otherwise-unreferenced helper
-    // still reaches the C emitter and produces the silent
-    // `/* unsupported builtin tensor_scan */ 0` stub. Rejecting only the
-    // entry-reachable subset would let that broken stub ship in a build
-    // the user believes succeeded. The AD guard can scope to the
-    // transform target because AD lowers only that target's subgraph;
-    // `chelis build` has no such pruning, so the guard must match the
-    // emitter's whole-program scope. (If backend dead-function pruning
-    // lands later, this can be narrowed to the emitted set in lockstep.)
+    // so a `tensor_scan` call inside an otherwise-unreferenced helper still
+    // reaches the C emitter's fallible builtin boundary. The gate walks the
+    // same emitted set to preserve the earlier, builtin-specific diagnostic;
+    // it is not the sole defense. The AD guard can scope to the transform
+    // target because AD lowers only that target's subgraph. If backend
+    // dead-function pruning lands later, this can be narrowed to the emitted
+    // set in lockstep.
     let mut found: Option<String> = None;
     for global in &program.globals {
         scan_expr(&global.value, &mut found);
@@ -2429,17 +2476,7 @@ fn reject_host_only_builtins(
     }
 
     if let Some(name) = found {
-        return Err(stage_error(
-            "compile",
-            format!(
-                "`chelis build --target {target_label}` cannot lower host-runtime-only \
-                 builtin `{name}`; this helper is host-only by design (see \
-                 spec/05-risc-primitives.md §3.6 Host-Runtime Builders). Use `chelis eval` \
-                 / `chelis test` to run programs that call `{name}`, or rewrite the \
-                 caller to use tensor-lane primitives that lower to the RISC DAG."
-            ),
-            "unsupported_feature",
-        ));
+        return Err(host_only_builtin_error(&name, target));
     }
 
     Ok(())
@@ -4471,7 +4508,8 @@ def load_tokenizer(path: string) -> Option[Tokenizer] =
         )
         .expect("compile");
 
-        let host = chelis_ir::host::lower_compiled_program(&compiled.checked)
+        let host = chelis_ir::host::try_lower_compiled_program(&compiled.checked)
+            .expect("checked host program must lower")
             .host
             .expect("host lowering");
         let lowered = chelis_ir::lower::top_level_lowering_map(
@@ -4499,23 +4537,28 @@ def load_tokenizer(path: string) -> Option[Tokenizer] =
 
         assert_eq!(
             find_ret("parse_line"),
-            Some(chelis_ir::host::HostType::Option(Box::new(
-                chelis_ir::host::HostType::List(Box::new(chelis_ir::host::HostType::String))
-            ))),
+            Some(chelis_ir::host_type_state::ConcreteHostType::Option(
+                Box::new(chelis_ir::host_type_state::ConcreteHostType::List(
+                    Box::new(chelis_ir::host_type_state::ConcreteHostType::String)
+                ))
+            )),
             "available functions: {available:#?}\nlowered: {lowered_debug:#?}\nchecked:\n{checked_text}"
         );
         assert_eq!(
             find_ret("json_string"),
-            Some(chelis_ir::host::HostType::Option(Box::new(
-                chelis_ir::host::HostType::String
-            ))),
+            Some(chelis_ir::host_type_state::ConcreteHostType::Option(
+                Box::new(chelis_ir::host_type_state::ConcreteHostType::String)
+            )),
             "available functions: {available:#?}\nlowered: {lowered_debug:#?}\nchecked:\n{checked_text}"
         );
         assert_eq!(
             find_ret("load_tokenizer"),
-            Some(chelis_ir::host::HostType::Option(Box::new(
-                chelis_ir::host::HostType::Adt("Tokenizer".to_string(), Vec::new())
-            ))),
+            Some(chelis_ir::host_type_state::ConcreteHostType::Option(
+                Box::new(chelis_ir::host_type_state::ConcreteHostType::Adt(
+                    "Tokenizer".to_string(),
+                    Vec::new()
+                ))
+            )),
             "available functions: {available:#?}\nlowered: {lowered_debug:#?}\nchecked:\n{checked_text}"
         );
     }

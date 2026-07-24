@@ -38,6 +38,13 @@ pub enum UnsupportedKind {
     Construct(String),
     /// A host-lane type that never resolved to a concrete representation.
     HostType(String),
+    /// A fully resolved host-lane value class with no ABI representation
+    /// on the requesting target (the section C6.3 "known logical type
+    /// without target representation" state). Distinct from [`HostType`],
+    /// whose term never resolved at all.
+    ///
+    /// [`HostType`]: UnsupportedKind::HostType
+    HostAbi(String),
 }
 
 impl fmt::Display for UnsupportedKind {
@@ -49,6 +56,9 @@ impl fmt::Display for UnsupportedKind {
             UnsupportedKind::EffectKind(name) => write!(f, "effect kind `{name}`"),
             UnsupportedKind::Construct(what) => write!(f, "{what}"),
             UnsupportedKind::HostType(name) => write!(f, "unresolved host type `{name}`"),
+            UnsupportedKind::HostAbi(name) => {
+                write!(f, "{name} with no target ABI representation")
+            }
         }
     }
 }
@@ -126,6 +136,20 @@ impl Unsupported {
         }
     }
 
+    /// The single target-build diagnostic for a host-runtime-only builtin.
+    /// Both the compiler API and CLI call this before host expression
+    /// lowering, then retain their concrete-HostProgram scans as a second
+    /// boundary. Keeping construction here prevents the two public build
+    /// entry points from drifting in kind, stage, or remediation text.
+    pub fn compiled_host_only_builtin(name: impl Into<String>, target: &'static str) -> Self {
+        Self::new(
+            UnsupportedKind::Builtin(name.into()),
+            format!("`chelis build --target {target}` host emission"),
+            Stage::Codegen(target),
+            "host-only builtin; run it under `chelis eval` or `chelis test`, or rewrite the caller to use tensor-lane primitives (spec/05-risc-primitives.md §3.6; chelis#705)",
+        )
+    }
+
     /// Attach a span reference.
     #[must_use]
     pub fn with_span(mut self, span: SpanRef) -> Self {
@@ -180,6 +204,7 @@ mod tests {
             UnsupportedKind::EffectKind("teleport".into()),
             UnsupportedKind::Construct("a non-literal window list".into()),
             UnsupportedKind::HostType("f16".into()),
+            UnsupportedKind::HostAbi("function value `increment`".into()),
         ];
         for kind in kinds {
             let rendered =

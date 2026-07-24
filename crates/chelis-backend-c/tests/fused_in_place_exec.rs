@@ -91,6 +91,7 @@ fn compile_and_run(
     fs::write(tmp.path().join("model.c"), c_source).unwrap();
     for header in [
         "chelis_runtime.h",
+        "chelis_runtime_dtype.h",
         "chelis_blas.h",
         "chelis_simd.h",
         "chelis_math.h",

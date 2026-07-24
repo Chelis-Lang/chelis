@@ -539,11 +539,15 @@ whose printed strings are the expected values for yours.
 
 **You deliver:**
 
-1. `parse_host_type` (`chelis-ir/src/host.rs:7572`) and
-   `infer_builtin_host_type_from_arg_tys` (`:7861`) lose their defaults;
-   narrow scalar types get real `HostType` representations backed by
-   per-dtype C storage. The `HostType::Unknown -> int64_t/void*` path for
-   numeric types becomes unreachable ([#714]).
+1. Inherit [#730]'s completed
+   `HostTypeTerm -> ConcreteHostType -> HostAbiType` boundary: exact narrow
+   scalar identity already survives host lowering, `int8`/`int16` already
+   select their exact existing C integer ABIs, and the former
+   `HostType::Unknown -> int64_t/void*` route is unrepresentable. This phase
+   adds the per-dtype operation semantics and overflow traps for those integer
+   ABIs. For f16/bf16 it adds exact C storage and rounding, then changes the
+   target decision from structured rejection to the new ABI representation
+   ([#714]); it does not reopen or duplicate the host-type boundary.
 2. Scalar C arithmetic at width with generated trap guards emitting §C2's
    frozen strings (the `chelis_int_div_guard` pattern, generalized), and
    f16/bf16 scalar C storage/rounding matching §C1 (likely via uint16
@@ -611,6 +615,37 @@ Phase 1).
 **Oracle:** the generated matrix is the named suite (this phase's single
 authoritative oracle per the repo contract); mutation check: deleting any
 lane's arm for a Supported cell must fail the BUILD, not just the tests.
+
+---
+
+## I1. Interlock with loud unsupported ([#730])
+
+The plans share representation identities and backend call sites but own
+different decisions:
+
+- `RuntimeDType` in `chelis-vocab` owns stable ABI identity, external
+  spelling, and byte width. It does not define finalization, value domains,
+  storage, cast behavior, operation legality, or kernel behavior; those remain
+  owned by this document.
+- `loud_unsupported.md` defines how every negative decision reaches the user.
+  This document defines correct behavior for supported cells. A cell may move
+  from silently wrong to loudly rejected under [#730], then to correctly
+  implemented under this plan; it may never move through a substituted value.
+- `HostTypeTerm -> ConcreteHostType` preserves checked logical identity and
+  does not consult a backend. `ConcreteHostType -> HostAbiType` consumes the
+  target implementation decision. Table B is the permanent authority for
+  that decision.
+- Before Table B is generated, [#730] may use only a private exhaustive target
+  adapter whose negative decisions cite a spec atom or implementation issue.
+  Phase 4 replaces those decisions without changing the HostType/ABI boundary.
+- Table A rejections are reported by the checker because they are
+  target-independent. Table B `Unimplemented` and `RejectedByDesign` cells are
+  reported by build/lowering where the target is known, using [#730]'s
+  diagnostic contract.
+
+Neither plan may duplicate the other's authority. Any change to this boundary
+updates this section, `loud_unsupported.md` §I1, and
+`capability_table.md` in the same change set.
 
 ---
 

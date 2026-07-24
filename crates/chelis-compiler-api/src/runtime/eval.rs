@@ -1,11 +1,12 @@
 use std::collections::HashMap;
 use std::fs;
 
-use chelis_deep::Span;
 use chelis_deep::ast::{Atom, Expr, List};
+use chelis_deep::{Span, decode_effect_kind};
 use chelis_ir::eval::TensorValue as IrTensorValue;
 use chelis_ir::tier2;
 use chelis_types::types::Prim;
+use chelis_vocab::EffectKind;
 
 use super::host_ops::*;
 use super::named_axis::*;
@@ -168,69 +169,64 @@ impl<'a> EvalContext<'a> {
             }
             Some("handle-effect") => {
                 let kids = children(list);
-                let effect = get_meta(list)
-                    .and_then(|meta| {
-                        meta.entries
-                            .iter()
-                            .find(|(key, _)| key == "effect")
-                            .and_then(|(_, value)| symbol_name(value))
-                    })
-                    .unwrap_or_default();
-                if effect == "random" {
-                    let seed_expr = kids
-                        .first()
-                        .ok_or_else(|| "handle-effect missing seed".to_string())?;
-                    // chelis#771: read a *literal* seed at full i64 width so
-                    // the evaluator derives the same u64 seed as the compiled
-                    // C lane. `literal_seed_i64` peels `(lit …)` to the raw
-                    // `Atom::Int`, mirroring host lowering (host.rs reads the
-                    // raw atom and ignores the int32 default meta). Routing the
-                    // literal through `eval_expr` -> `eval_lit` instead narrows
-                    // it to int32 (spec/04-type-system.md §5.3 default),
-                    // truncating then sign-extending any seed >= 2^31 into an
-                    // unrelated stream. The seed is designed int64
-                    // (spec/design/checker_totality.md §C1.5 item 5).
-                    //
-                    // The `eval_expr` fallback below is defensive/forward-looking,
-                    // not a live narrowing path: computed (non-literal) seeds are
-                    // currently gate-REJECTED in both lanes by chelis-effects'
-                    // `validate_handler_expr` (a `random` handler whose seed is
-                    // not an int literal errors "with seed(...) currently requires
-                    // an int literal seed" in check, eval, AND build). That gate's
-                    // accept set is exactly this peel's accept set, so every seed
-                    // that reaches here is a literal read at full width and the
-                    // fallback never runs on a checked path. It would only narrow
-                    // if #731 Phase 1 relaxes the gate to admit computed seeds.
-                    let seed = match literal_seed_i64(seed_expr) {
-                        Some(value) => value as u64,
-                        None => {
-                            let seed = self.eval_expr(seed_expr)?;
-                            match seed.as_i64() {
-                                Some(value) => value as u64,
-                                None => {
-                                    return Err(format!(
-                                        "with seed expects int seed, got {seed:?}"
-                                    ));
+                match decode_effect_kind(list)
+                    .map_err(|error| format!("{error} in `handle-effect` evaluation"))?
+                {
+                    EffectKind::Random => {
+                        let seed_expr = kids
+                            .first()
+                            .ok_or_else(|| "handle-effect missing seed".to_string())?;
+                        // chelis#771: read a *literal* seed at full i64 width so
+                        // the evaluator derives the same u64 seed as the compiled
+                        // C lane. `literal_seed_i64` peels `(lit …)` to the raw
+                        // `Atom::Int`, mirroring host lowering (host.rs reads the
+                        // raw atom and ignores the int32 default meta). Routing the
+                        // literal through `eval_expr` -> `eval_lit` instead narrows
+                        // it to int32 (spec/04-type-system.md §5.3 default),
+                        // truncating then sign-extending any seed >= 2^31 into an
+                        // unrelated stream. The seed is designed int64
+                        // (spec/design/checker_totality.md §C1.5 item 5).
+                        //
+                        // The `eval_expr` fallback below is defensive/forward-looking,
+                        // not a live narrowing path: computed (non-literal) seeds are
+                        // currently gate-REJECTED in both lanes by chelis-effects'
+                        // `validate_handler_expr` (a `random` handler whose seed is
+                        // not an int literal errors "with seed(...) currently requires
+                        // an int literal seed" in check, eval, AND build). That gate's
+                        // accept set is exactly this peel's accept set, so every seed
+                        // that reaches here is a literal read at full width and the
+                        // fallback never runs on a checked path. It would only narrow
+                        // if #731 Phase 1 relaxes the gate to admit computed seeds.
+                        let seed = match literal_seed_i64(seed_expr) {
+                            Some(value) => value as u64,
+                            None => {
+                                let seed = self.eval_expr(seed_expr)?;
+                                match seed.as_i64() {
+                                    Some(value) => value as u64,
+                                    None => {
+                                        return Err(format!(
+                                            "with seed expects int seed, got {seed:?}"
+                                        ));
+                                    }
                                 }
                             }
-                        }
-                    };
-                    let saved_seed = self.random_seed;
-                    let saved_counter = self.random_counter;
-                    self.random_seed = Some(seed);
-                    self.random_counter = 0;
-                    let value = self.eval_expr(
+                        };
+                        let saved_seed = self.random_seed;
+                        let saved_counter = self.random_counter;
+                        self.random_seed = Some(seed);
+                        self.random_counter = 0;
+                        let value = self.eval_expr(
+                            kids.get(1)
+                                .ok_or_else(|| "handle-effect missing body".to_string())?,
+                        );
+                        self.random_seed = saved_seed;
+                        self.random_counter = saved_counter;
+                        value
+                    }
+                    EffectKind::Resource => self.eval_expr(
                         kids.get(1)
                             .ok_or_else(|| "handle-effect missing body".to_string())?,
-                    );
-                    self.random_seed = saved_seed;
-                    self.random_counter = saved_counter;
-                    value
-                } else {
-                    self.eval_expr(
-                        kids.get(1)
-                            .ok_or_else(|| "handle-effect missing body".to_string())?,
-                    )
+                    ),
                 }
             }
             other => Err(format!(

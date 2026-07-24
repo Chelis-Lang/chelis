@@ -343,8 +343,7 @@ The exact Deep grammar and binder rules are normative in spec/03 §2.5.1/§2.6.
    validates strings against the closed vocabulary; it starts producing
    `DeepTag` (string kept alongside for spans/printing). `infer_expr`,
    `lower_expr`, and the `.dp` structural validators match the enum
-   **exhaustively - no `_` arm** ([#730]'s `rust-no-wildcard-dispatch`
-   lint adds `DeepTag` to its enum list, §I1). Tag 63 then stops the build
+   **exhaustively - no `_` arm**. Tag 63 then stops the build
    at every consumer that has not chosen a disposition. Raw-string entry
    points (anything that never went through the parser) keep the §C1.2
    loud arm.
@@ -359,8 +358,9 @@ The exact Deep grammar and binder rules are normative in spec/03 §2.5.1/§2.6.
    or weakened.
 4. **The fitness-honesty corpus**: the permanent CI suite contains
    known-ill-typed programs - the wrapper battery plus every
-   census-verified silent-hole repro ([#709]/[#710]/[#755]/[#756] and
-   future finds) - asserting every member scores strictly below 1.0;
+   census-verified silent-hole repro ([#709]/[#710]/[#755]/[#756],
+   [#833]'s declaration-only `total_nodes == 0` hole, and future
+   finds) - asserting every member scores strictly below 1.0;
    any member scoring 1.0 fails the build. This is the continuous,
    corpus-level enforcement of §C1.3, standing even after §C3 makes
    violations unconstructible. Margin thresholds (e.g. < 0.9) are
@@ -549,8 +549,9 @@ phase is about the NEXT tag, not the current ones.
    Some("...")` chains at those three chokepoints retire. (Printers and
    producers may migrate opportunistically; they are not chokepoints -
    they cannot exempt or substitute.)
-3. `DeepTag` added to [#730]'s lint enum list (§I1); the §C1.2 loud arm
-   retained only at raw-string entry boundaries.
+3. The §C1.2 loud arm is retained only at raw-string entry boundaries.
+   `DeepTag` exhaustiveness is proved by its typed consumers and mutation
+   oracle; it does not depend on [#730]'s extracted source lint.
 
 **Frozen at your exit:** the variant set = the vocabulary, changing only
 per B1's one-change-set rule.
@@ -573,9 +574,8 @@ the scratch variant deleted); the canary and full matrix stay green.
   first, it matches the two kind strings with a loud else and migrates to
   the enum when available; the bogus-effect `.dp` repro must be rejected
   by whichever side lands first, and BOTH once both land (checker: unknown
-  kind is `MalformedForm`; lowering: its catch-all raises). `DeepTag`
-  joins the `rust-no-wildcard-dispatch` enum list on landing (their B1
-  freeze anticipates the addition).
+  kind is `MalformedForm`; lowering: its catch-all raises). `DeepTag` remains
+  owned by this plan and its added-variant compile oracle.
 - **With [#729] (`dtype_semantics.md`)**: none structural. Phase 4's
   capability table derives op x dtype acceptance; this plan governs
   CONSTRUCT-level totality. The two meet only in that both make `chelis
@@ -621,3 +621,4 @@ Deep tag without a checker disposition uncompilable through exhaustive
 [#731]: https://github.com/Chelis-Lang/chelis/issues/731
 [#755]: https://github.com/Chelis-Lang/chelis/issues/755
 [#756]: https://github.com/Chelis-Lang/chelis/issues/756
+[#833]: https://github.com/Chelis-Lang/chelis/issues/833

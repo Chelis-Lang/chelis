@@ -9,5 +9,6 @@ repository.workspace = true
 crate-type = ["staticlib", "rlib"]
 
 [dependencies]
+chelis-vocab.workspace = true
 libc.workspace = true
 memmap2 = "0.9"

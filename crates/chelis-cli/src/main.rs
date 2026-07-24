@@ -30,6 +30,10 @@ const RUNTIME_H: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../chelis-runtime/include/chelis_runtime.h"
 ));
+const RUNTIME_DTYPE_H: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../chelis-runtime/include/chelis_runtime_dtype.h"
+));
 const BLAS_H: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../chelis-runtime/include/chelis_blas.h"
@@ -124,6 +128,7 @@ fn copy_runtime_artifacts(
     extras: ExtraRuntimeArtifacts,
 ) -> Result<PathBuf, Box<dyn std::error::Error>> {
     fs::write(runtime_dir.join("chelis_runtime.h"), RUNTIME_H)?;
+    fs::write(runtime_dir.join("chelis_runtime_dtype.h"), RUNTIME_DTYPE_H)?;
     fs::write(runtime_dir.join("chelis_blas.h"), BLAS_H)?;
     fs::write(runtime_dir.join("chelis_simd.h"), SIMD_H)?;
     fs::write(runtime_dir.join("chelis_math.h"), MATH_H)?;
@@ -2472,6 +2477,7 @@ fn cmd_build(
     {
         let full_checked = checked_program_with_effects(&full_deep_exprs)
             .map_err(|e| format!("Check errors: {e}"))?;
+        reject_host_only_builtins_before_host_lowering(&full_checked, target)?;
         chelis_ir::host::try_lower_compiled_program(&full_checked)
             .map_err(|diagnostic| format!("Lowering error: {diagnostic}"))?
             .host
@@ -2509,6 +2515,7 @@ fn cmd_build(
     };
     chelis_effects::validate_build_target(&checked, target)
         .map_err(|errors| format_effect_errors(&errors))?;
+    reject_host_only_builtins_before_host_lowering(&checked, target)?;
     let mut compiled_program = chelis_ir::host::try_lower_compiled_program(&checked)
         .map_err(|diagnostic| format!("Lowering error: {diagnostic}"))?;
     emit_summary_rejections(compiled_program.host.as_ref());
@@ -2531,7 +2538,7 @@ fn cmd_build(
             .map(|binding| {
                 let mut binding = binding.clone();
                 binding.display_name = match binding.ty {
-                    chelis_ir::host::HostType::Fn(_, _) => None,
+                    chelis_ir::ConcreteHostType::Function(_, _) => None,
                     _ => host_display_root_name(&binding.name, &entry_display_root_names).or_else(
                         || {
                             // Tuple-typed top-level bindings get their root
@@ -2540,7 +2547,7 @@ fn cmd_build(
                             // eval-side behavior). Surface a synthetic
                             // tuple-prefix display name so the C emitter
                             // can render the per-field "name.i = ..." lines.
-                            if matches!(&binding.ty, chelis_ir::host::HostType::Tuple(_)) {
+                            if matches!(&binding.ty, chelis_ir::ConcreteHostType::Tuple(_)) {
                                 host_display_tuple_root_prefix(
                                     &binding.name,
                                     &entry_display_root_names,
@@ -2582,7 +2589,22 @@ fn cmd_build(
                     || dag.roots().is_empty()
                     || !host_program.functions.is_empty())
             {
-                let unresolved = chelis_ir::host::host_program_unresolved_call_sites(host_program);
+                // AD-transform UX only: the grad/vmap workaround text fires
+                // for defs carrying an `__unresolved_grad`/`__unresolved_vmap`
+                // marker, or for any unresolved site in a program that
+                // directly applies `grad`/`vmap` (grad through host-lane
+                // fold/map lowers to the generic fallback). A program with
+                // NEITHER transform falls through to `codegen_host_program`,
+                // whose ABI projection rejects the unresolved callable value
+                // with the frozen `unsupported:` diagnostic; both public
+                // surfaces then agree (chelis#730).
+                let mut unresolved =
+                    chelis_ir::host::host_program_unresolved_transform_sites(host_program);
+                if unresolved.is_empty()
+                    && chelis_ir::host::checked_program_applies_ad_transform(&checked)
+                {
+                    unresolved = chelis_ir::host::host_program_unresolved_call_sites(host_program);
+                }
                 if !unresolved.is_empty() {
                     return Err(format!(
                         "`chelis build --target c` can't lower these defs. Their body \
@@ -2752,6 +2774,7 @@ fn cmd_build_deep(
         if target == "c" && pruned_deep_exprs.len() != deep_exprs.len() {
             let full_checked = checked_program_with_effects(&deep_exprs)
                 .map_err(|e| format!("Check errors: {e}"))?;
+            reject_host_only_builtins_before_host_lowering(&full_checked, target)?;
             chelis_ir::host::try_lower_compiled_program(&full_checked)
                 .map_err(|diagnostic| format!("Lowering error: {diagnostic}"))?
                 .host
@@ -2771,6 +2794,7 @@ fn cmd_build_deep(
         .map_err(|e| format!("Check errors: {e}"))?;
     chelis_effects::validate_build_target(&checked, target)
         .map_err(|errors| format_effect_errors(&errors))?;
+    reject_host_only_builtins_before_host_lowering(&checked, target)?;
     let mut compiled_program = chelis_ir::host::try_lower_compiled_program(&checked)
         .map_err(|diagnostic| format!("Lowering error: {diagnostic}"))?;
     emit_summary_rejections(compiled_program.host.as_ref());
@@ -2792,10 +2816,10 @@ fn cmd_build_deep(
             .map(|binding| {
                 let mut binding = binding.clone();
                 binding.display_name = match binding.ty {
-                    chelis_ir::host::HostType::Fn(_, _) => None,
+                    chelis_ir::ConcreteHostType::Function(_, _) => None,
                     _ => host_display_root_name(&binding.name, &entry_display_root_names).or_else(
                         || {
-                            if matches!(&binding.ty, chelis_ir::host::HostType::Tuple(_)) {
+                            if matches!(&binding.ty, chelis_ir::ConcreteHostType::Tuple(_)) {
                                 host_display_tuple_root_prefix(
                                     &binding.name,
                                     &entry_display_root_names,
@@ -2837,7 +2861,17 @@ fn cmd_build_deep(
                     || dag.roots().is_empty()
                     || !host_program.functions.is_empty())
             {
-                let unresolved = chelis_ir::host::host_program_unresolved_call_sites(host_program);
+                // Same split as the Surf lane: grad/vmap workaround text for
+                // transform markers or grad/vmap-applying programs; other
+                // unresolved callable values reach ABI projection's frozen
+                // diagnostic instead.
+                let mut unresolved =
+                    chelis_ir::host::host_program_unresolved_transform_sites(host_program);
+                if unresolved.is_empty()
+                    && chelis_ir::host::checked_program_applies_ad_transform(&checked)
+                {
+                    unresolved = chelis_ir::host::host_program_unresolved_call_sites(host_program);
+                }
                 if !unresolved.is_empty() {
                     return Err(format!(
                         "`chelis build --deep --target c` can't lower these defs: \
@@ -7018,15 +7052,32 @@ fn c_backend_supports_precision(precision: chelis_types::types::Prim) -> bool {
     )
 }
 
-/// Mirror of `reject_unsupported_c_precisions` for the host-program lane.
-///
-/// The C backend's `codegen_host_program` recursively invokes
-/// `CEmitter::emit_dag_with_options` on every `tensor_helper`'s DAG, which
-/// internally panics on unsupported precisions (`validate_supported_precisions`
-/// at chelis-backend-c::emit). For the DAG-only path the CLI guards the
-/// panic with `reject_unsupported_c_precisions`; this function does the
-/// same for the host-program lane (RT-4 F4: `def f(x: tensor[3, bf16]) ...`
-/// previously panicked with a Rust stack trace).
+/// Target-build builtins that must reject before host lowering examines an
+/// argument with no standalone compiled representation.
+const COMPILED_HOST_ONLY_BUILTINS: &[&str] = &["tensor_scan"];
+
+fn reject_host_only_builtins_before_host_lowering(
+    program: &chelis_types::CheckedProgram,
+    target: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let target = match target {
+        "c" => "c",
+        "hip" => "hip",
+        "metal" => "metal",
+        _ => return Ok(()),
+    };
+    if let Some(name) =
+        chelis_ir::host::find_direct_builtin_call(program, COMPILED_HOST_ONLY_BUILTINS)
+    {
+        return Err(
+            chelis_types::unsupported::Unsupported::compiled_host_only_builtin(name, target)
+                .to_string()
+                .into(),
+        );
+    }
+    Ok(())
+}
+
 /// Reject eval/test-only builtins that have no compiled-target lowering.
 ///
 /// Hull Phase 0a: `process_run` runs a subprocess from the IR evaluator
@@ -7036,7 +7087,7 @@ fn c_backend_supports_precision(precision: chelis_types::types::Prim) -> bool {
 /// silently fall through to `/* unsupported builtin */ 0` (a wrong value,
 /// not a diagnostic). This guard turns that into a clean build error.
 fn reject_eval_only_builtins_host(
-    program: &chelis_ir::host::HostProgram,
+    program: &chelis_ir::host::ConcreteHostProgram,
 ) -> Result<(), Box<dyn std::error::Error>> {
     for builtin in EVAL_ONLY_HOST_BUILTINS {
         if chelis_ir::host::host_program_uses_builtin(program, builtin) {
@@ -7051,14 +7102,23 @@ fn reject_eval_only_builtins_host(
     Ok(())
 }
 
+/// Mirror of `reject_unsupported_c_precisions` for the host-program lane.
+///
+/// The C backend's `codegen_host_program` recursively invokes
+/// `CEmitter::emit_dag_with_options` on every `tensor_helper`'s DAG, which
+/// internally panics on unsupported precisions (`validate_supported_precisions`
+/// at chelis-backend-c::emit). For the DAG-only path the CLI guards the
+/// panic with `reject_unsupported_c_precisions`; this function does the
+/// same for the host-program lane (RT-4 F4: `def f(x: tensor[3, bf16]) ...`
+/// previously panicked with a Rust stack trace).
 fn reject_unsupported_c_precisions_host(
-    program: &chelis_ir::host::HostProgram,
+    program: &chelis_ir::host::ConcreteHostProgram,
 ) -> Result<(), Box<dyn std::error::Error>> {
     fn check_host_type(
-        ty: &chelis_ir::host::HostType,
+        ty: &chelis_ir::ConcreteHostType,
         context: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        use chelis_ir::host::HostType;
+        use chelis_ir::ConcreteHostType as HostType;
         match ty {
             HostType::Tensor(t) if !c_backend_supports_precision(t.precision) => {
                 return Err(format!(
@@ -7082,7 +7142,7 @@ fn reject_unsupported_c_precisions_host(
                     check_host_type(item, context)?;
                 }
             }
-            HostType::Fn(params, ret) => {
+            HostType::Function(params, ret) => {
                 for p in params {
                     check_host_type(p, context)?;
                 }
@@ -7278,7 +7338,7 @@ fn reject_symbolic_windowed_reduce(
 /// (`codegen_host_program`) lowers `reduce_window_*` from these helper
 /// DAGs, so the pure-DAG guard alone would miss the node.
 fn reject_symbolic_windowed_reduce_host(
-    program: &chelis_ir::host::HostProgram,
+    program: &chelis_ir::host::ConcreteHostProgram,
     target: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     for helper in &program.global_tensor_helpers {
@@ -7334,7 +7394,7 @@ fn reject_unsupported_reduce_window_precision(
 /// tensor-helper DAG embedded in a host program, mirroring
 /// [`reject_symbolic_windowed_reduce_host`].
 fn reject_unsupported_reduce_window_precision_host(
-    program: &chelis_ir::host::HostProgram,
+    program: &chelis_ir::host::ConcreteHostProgram,
     target: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     for helper in &program.global_tensor_helpers {
@@ -7865,7 +7925,7 @@ fn checked_program_with_effects(
 /// `crates/chelis-cli/tests/cross_library_semantic_gap_diagnostics.rs`);
 /// this function is the human-readable rendering, not the matchable
 /// contract surface.
-fn emit_summary_rejections(host: Option<&chelis_ir::host::HostProgram>) {
+fn emit_summary_rejections(host: Option<&chelis_ir::host::ConcreteHostProgram>) {
     let Some(host) = host else {
         return;
     };
@@ -7889,7 +7949,7 @@ fn expanded_desugared_program(
 
 fn lower_checked_for_cli(
     checked: &chelis_types::CheckedProgram,
-    host_program: Option<&chelis_ir::host::HostProgram>,
+    host_program: Option<&chelis_ir::host::ConcreteHostProgram>,
 ) -> Result<chelis_ir::Dag, Box<dyn std::error::Error>> {
     match chelis_ir::lower::try_lower_program(checked) {
         Ok(dag) => Ok(dag),

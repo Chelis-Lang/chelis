@@ -19,6 +19,7 @@ pub mod unsupported;
 
 mod builtins;
 pub use builtins::{BUILTIN_NAMES, ShapeClass, builtin_env, shape_class};
+pub use chelis_vocab::EffectKind;
 pub use context::TypeEnv;
 pub use fitness::{
     FitnessReport, StructuralStats, check_ir_program as check_ir_fitness, check_program,

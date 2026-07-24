@@ -4,8 +4,9 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use chelis_deep::Span;
 use chelis_deep::ast as deep;
+use chelis_deep::{Span, decode_effect_kind};
+use chelis_vocab::EffectKind;
 
 use crate::adt::{AdtRegistry, CallShape};
 use crate::builtins;
@@ -10266,16 +10267,6 @@ fn infer_handle_effect(
     let handler = &kids[0];
     let body = &kids[1];
 
-    let effect = get_meta(list).and_then(|meta| {
-        meta.entries.iter().find_map(|(key, value)| {
-            if key == "effect" {
-                symbol_name(value)
-            } else {
-                None
-            }
-        })
-    });
-
     // The handler's LITERAL-ness (an int literal seed, a string literal device)
     // is enforced by the shared front-end effects gate (`chelis-effects`
     // `validate_handler_expr`, spec/02 §P5), which runs in check, build, and
@@ -10285,8 +10276,15 @@ fn infer_handle_effect(
     // "requires an int literal seed" message, and the effects gate already
     // rejects every non-literal form loudly and identically across lanes. The
     // checker's only handler-side addition is the int64-suffix rule below.
-    match effect {
-        Some("random") => {
+    //
+    // chelis#730 Phase 2 (section C4.4; the pinned §I1 interlock): the kind
+    // is parsed once into the closed [`EffectKind`] set - the same enum the
+    // lowering lanes now use - and dispatched with an exhaustive `match`
+    // over `EffectKind` (no wildcard arm). Adding a kind is a compile error
+    // here until this checker case handles it. Decode failures preserve the
+    // missing/malformed/unknown distinction from the shared Deep adapter.
+    match decode_effect_kind(list) {
+        Ok(EffectKind::Random) => {
             // Open question 1 (decided 2026-07-17): the seed is semantically
             // int64, and a seed written as an integer LITERAL must carry the
             // `i64` suffix (the reject-diagnostic half chelis#771 left to Phase
@@ -10326,21 +10324,20 @@ fn infer_handle_effect(
                 SeedLiteralForm::NotIntLiteral | SeedLiteralForm::ValidInt64 => {}
             }
         }
-        Some("resource") => {
+        Ok(EffectKind::Resource) => {
             // Device literal-ness is the effects gate's job; the device-name
             // vocabulary is not validated here (target knowledge, chelis#735).
         }
-        other => {
-            // §C1.5 / §I1: an unknown effect kind is malformed. chelis#730's
-            // lowering catch-all still lowers the body and silently drops the
-            // handler for an unknown kind (`lower_handle_effect`), so until its
-            // raise lands the checker is the loud gate for the bogus-effect
-            // `.dp`.
-            let named = other.unwrap_or("<missing>");
+        Err(error) => {
+            // §C1.5 / §I1: an unknown effect kind is malformed. Both the IR
+            // and host lowering lanes now raise a branded `unsupported:`
+            // diagnostic for an unknown kind too (chelis#730 Phase 1 rows
+            // 9/20), but the checker is the earliest competent stage and
+            // rejects it first here ([05-UNS-2]).
             errors.push(CheckError::new(
                 CheckErrorKind::MalformedForm,
                 format!(
-                    "unknown effect kind `{named}` in `handle-effect`: the checker \
+                    "{error} in `handle-effect`: the checker \
                      recognizes only `random` (with seed) and `resource` \
                      (with device) (spec/03-deep-syntax.md; chelis#730, chelis#731)"
                 ),

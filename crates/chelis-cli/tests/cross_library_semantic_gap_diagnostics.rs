@@ -50,7 +50,7 @@
 
 use chelis_ir::host::{
     HostFunctionSpecialization, SparseOpKind, SummaryRejection, SummaryRejectionClass,
-    SummaryRejectionDetail, host_program_summary_rejections, lower_compiled_program,
+    SummaryRejectionDetail, host_program_summary_rejections, try_lower_compiled_program,
 };
 use chelis_ir::{PayloadRole, WildcardLocation};
 use chelis_surf::desugar::desugar_program;
@@ -60,7 +60,7 @@ use chelis_types::{check_ir_program, check_linearity};
 
 /// Drive the full parse → desugar → typecheck → effect → linearity →
 /// host-lower chain on a flat Surf source. Returns the rejections
-/// collected by `lower_compiled_program`. Panics on any front-end
+/// collected by `try_lower_compiled_program`. Panics on any front-end
 /// error; the tests in this file expect well-typed input even when the
 /// callsite is summary-rejected.
 ///
@@ -72,7 +72,8 @@ fn rejections_for_source(source: &str) -> Vec<SummaryRejection> {
     let checked = check_ir_program(&deep).expect("check_ir_program");
     let checked = chelis_effects::check_program(&checked).expect("effect check");
     let checked = check_linearity(&checked).expect("linearity check");
-    let compiled = lower_compiled_program(&checked);
+    let compiled =
+        try_lower_compiled_program(&checked).expect("checked summary fixture must lower");
     let host = compiled
         .host
         .expect("host lowering must produce a HostProgram");
@@ -478,7 +479,8 @@ fn summarized_gather_helper_has_specialization() {
     let checked = check_ir_program(&deep).expect("check_ir_program");
     let checked = chelis_effects::check_program(&checked).expect("effect check");
     let checked = check_linearity(&checked).expect("linearity check");
-    let compiled = lower_compiled_program(&checked);
+    let compiled =
+        try_lower_compiled_program(&checked).expect("checked summary fixture must lower");
     let host = compiled
         .host
         .expect("host lowering must produce a HostProgram");

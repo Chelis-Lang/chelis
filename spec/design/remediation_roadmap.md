@@ -21,7 +21,7 @@ The plan set: [`dtype_semantics.md`](dtype_semantics.md) ([#729]), [`loud_unsupp
 | meta (the class) | method (design spec) | tracker |
 |---|---|---|
 | [#727] no dtype's semantics enforced at any single point ([#695] = its integer instance) | [`dtype_semantics.md`](dtype_semantics.md) - per-dtype finalizer behind private constructors, int/float kernel split, one storage decision, generated backend dispatch | [#729] |
-| [#703] unsupported cases substitute values instead of failing | [`loud_unsupported.md`](loud_unsupported.md) - Result-typed failure channel, the 18-row census sweep, un-writability ratchets (lint, newtype, tripwire), gates demoted to UX | [#730] |
+| [#703] unsupported cases substitute values instead of failing | [`loud_unsupported.md`](loud_unsupported.md) - Result-typed failure channels, the census sweep, dependency-bottom closed identities, fail-closed HostType/ABI states, structured emission, and gates demoted to UX | [#730] |
 | [#709] unrecognized constructs silently exempt from checking (+[#710]'s silent half) | [`checker_totality.md`](checker_totality.md) - loud wildcard + handle-effect case, ErrorWitness token (silent Type::Error unconstructible), totality invariant, DeepTag exhaustiveness | [#731] |
 | [#728] the observation channel is not dtype-faithful | [`faithful_observation.md`](faithful_observation.md) - one Rust formatter, generated C print helper, round-trip invariant, tolerance table; landable before [#729]; unblocks [#687] | [#732] |
 | spec silence + stale claims ([#694]; the unauthored cells) | [`spec_provenance.md`](spec_provenance.md) - OpenSpec plans changes after Phase 0 activation, while a pinned Buoy shell and one-way Chelis adapter provide repository-independent authority, freshness, coverage, and impact enforcement; design/fixtures may proceed now, advisory execution waits for Buoy's final oracle, and blocking waits for the adapter and Chelis configuration oracles | [#733] |
@@ -65,22 +65,25 @@ fresh-context red-teamed (QUALIFIED PASS x3) with every confirmed
 finding folded in before merge; the red teams' discoveries are filed as
 [#794]/[#795]/[#796].
 
-**Wave 2 - the independently-landable value work.** STATUS 2026-07-22:
-[#731] Phase 2 is complete: the witness token, append-only checker-owned
-diagnostic session, verified effects-only checked transformation (no public
-raw reconstruction), explicit binder scope, authoritative annotation-owner
-epochs, annotated-tree finalization, and SCC-scoped recursive prebinding are
-the checker-totality boundary.
-Phase 3 (`DeepTag`) remains open. [#732] Phase 1 landed with Wave 1 (above);
-the remaining Wave 2 set is [#732] Phase 2 (the generated C side: fixes
-[#716]/[#723] outright and gives the refactor its byte-exact instrument) in
-parallel with [#731] Phase 3 and [#730] Phase 2 (in PR #799). [#733]
-Phase 1's Buoy shell-side design and fixture preparation may ride alongside:
-OpenSpec still plans new normative text and atom IDs remain stable. The
-executable advisory pilot waits for the selected Buoy revision's standalone
-`devenv test` final oracle and the shell-adapter prerequisites; once admitted,
-it reports malformed authorities and stale registrations without blocking
-existing Chelis commands or coupling `buoy-core` back to Chelis.
+**Wave 2 - the independently-landable value work.** [#732] Phase 1
+landed with Wave 1 (above); the remaining Wave 2 set is [#732] Phase 2
+(the generated C side: fixes [#716]/[#723] outright and gives the
+refactor its byte-exact instrument) in parallel with [#731] Phases 2-3 (the
+witness token + DeepTag). [#730] Phase 2's final typed implementation is in
+PR [#799] (acceptance validation pending): closed vocabularies, staged
+HostType/ABI separation, and structured emission. Its initial source-lint
+approach was explicitly re-planned after execution showed incomplete and
+false-positive behavior; the lint was extracted to PR [#815] and is not a
+Wave 2 dependency. Its one authoritative completion oracle is
+`.venv/bin/python scripts/loud_unsupported_phase2_oracle.py`; acceptance
+requires exit 0 with final line `PHASE 2 ORACLE: PASS` plus the plan-set's
+fresh-context adversarial review. [#733] Phase 1's Buoy shell-side design
+and fixture preparation may ride alongside: OpenSpec still plans new
+normative text and atom IDs remain stable. The executable advisory pilot
+waits for the selected Buoy revision's standalone `devenv test` final
+oracle and the shell-adapter prerequisites; once admitted, it reports
+malformed authorities and stale registrations without blocking existing
+Chelis commands or coupling `buoy-core` back to Chelis.
 [#732] Phase 2 additionally gates the ECOSYSTEM's compiled-lane
 validation: no shell runs a compiled binary today, and [#754]'s
 cross-lane agreement gate (the mechanism [#738]'s conform row points
@@ -113,9 +116,9 @@ Dashed arrows are soft interlocks with a recommended direction; the
 alternative order is pinned in the owning docs' §I1 sections. Dotted
 arrowless links are shared-component coordination with no inherent
 order: [#730] Phase 2 delivers `EffectKind` and [#731] Phase 1 consumes
-it (string-match + loud else if it lands first); [#731] Phase 3's
-`DeepTag` joins [#730]'s lint enum list, whose freeze anticipates the
-addition. The thick red edges are the hard dependencies: inside the
+it (string-match + loud else if it lands first). `DeepTag` exhaustiveness is
+owned entirely by [#731] Phase 3; it has no dependency on the extracted
+[#730] source lint. The thick red edges are the hard dependencies: inside the
 plan set, [#719]'s fix precedes [#732] Phase 3's `sqrt = 0` tolerance
 row (SATISFIED 2026-07-17: PR #760 merged, [#719] closed - the row may
 be authored when Phase 3 arrives); downstream of the set, [#754]'s
@@ -153,7 +156,7 @@ flowchart TB
     direction TB
     n730p0["P0 · census re-verify + token tripwire<br/>+ rejected-cells corpus stub (LANDED)"]:::w0
     n730p1["P1 · Result channel + live-site sweep (LANDED)"]:::w1
-    n730p2["P2 · lint ratchet + EmittedExpr<br/>+ EffectKind enum"]:::w2
+    n730p2["P2 · typed vocabularies + Host ABI<br/>+ structured emission"]:::w2
     n730p3["P3 · gates become UX"]:::w4
     n730p0 --> n730p1 --> n730p2 --> n730p3
   end
@@ -162,7 +165,7 @@ flowchart TB
     direction TB
     n731p0["P0 · Type::Error census<br/>+ red totality invariant (LANDED)"]:::w0
     n731p1["P1 · loud wildcard + handle-effect case<br/>+ #710 guard sweep (LANDED)"]:::w1
-    n731p2["P2 · witnessed append-only session<br/>+ owner-stamp invariant (IMPLEMENTED)"]:::w2
+    n731p2["P2 · ErrorWitness token,<br/>invariant always-on"]:::w2
     n731p3["P3 · DeepTag exhaustive dispatch"]:::w2
     n731p0 --> n731p1 --> n731p2 --> n731p3
   end
@@ -391,11 +394,18 @@ the capability table's seed decisions, or by being closed.
 | [#794] | `.dp`-reachable lowering-side value substitutions the PR #793 red team confirmed: `extract_f64_value`'s catch-all folds a `(par ...)` bound's FIRST child (spec/03 says last), and `extract_usize_value` silently maps a negative `.dp` int64 seed to 0 | [#730] census extension rows. The checker side is already closed (PR #793 narrowed its accept-set to `lit` and rejects negative literal seeds), so both are checker-unreachable today - the lowering fix is defense-in-depth per §C1.4 |
 | [#795] | conv2d's present-but-non-literal stride/padding fall to `unwrap_or(1)`/`unwrap_or(0)` in lower.rs (the [#776] value-default shape; census row 23, discovered in [#730] Phase 1's sweep) | [#730] census row 23; liveness honestly not-execution-confirmed (the checker's shape rules may cover it) - §C1.4 raise-or-prove; tripwire-baselined interim |
 | [#796] | compiled-lane `test_*` assertion builtins: pre-[#730]-P1 binaries compiled assertions to inert `0` stubs (could never fail); now loudly rejected | op-owner work: real C emission arms, or an authored eval-only contract + an earlier gate; surfaced by [#730] Phase 1's bucket3 adjudication |
+| [#840] | `chelis build` reports success but emits non-compiling C for defs named after C keywords (`double`, `long`, ...) - the identifier cousin of [#751] | standalone `chelis-backend-c` emission fix at the `CIdentifier`/`EmittedExpr` chokepoint (mangle or reject loudly, never uncompilable C from exit 0); joins [#751]/[#761] in [#763]'s corpus curation; found by the PR [#799] red team (F2), likely pre-existing |
+| [#841] | host lowering's in-band `call`/`__unresolved_*` string sentinels collide with legal user identifiers and freeze wrong-reason diagnostics (fail-closed, but violates the supported-neighbor discipline) | [#730] family; durable fix is a typed marker vocabulary (the [#731] Phase 2 `ErrorWitness` shape, sequenced after PR #800); natural moment [#730] Phase 3's gate dedupe; found by the PR [#799] red team (F3) |
+| [#847] | `grad` over a function-valued model parameter unifies independently declared rigid dim params `n` and `m` at check time (the generic Jacobian-row wrapper is rejected; the concrete-dim variant checks) | [#731] family: the function-valued-parameter typing channel, the over-unification flip side of [#780]'s silent acceptance; sequenced behind [#731] Phase 1-2 so lambda/function-param binding semantics are decided once inside the track, or standalone earlier if it keeps blocking Nautilus.CurveFit |
+| [#850] | a call to a `sig`-declared export with no `def` body passes `chelis check` at score 1.0 with an EMPTY error list, and `chelis build` lowers it to an undeclared C function that fails only at the native toolchain (surfaced via Std.Io.Parquet) | two-part, the [#689] shape: the CHECK half is [#731]'s silent-exemption class (a declaration without runtime backing must be a check-time rejection or a typed capability; joins the §C4.4 fitness-honesty corpus), the BUILD half is the [#703]/[#730] emission-honesty class (undeclared-call C joins the uncompilable-C family with [#751]/[#840] and is a [#763] corpus cell; emitter-side rejection as defense in depth) |
+| [#851] | match-arm pattern binders leak into top-level cycle detection: a valid program whose top-level binding name matches a pattern binder anywhere in its call graph is rejected with a false `binding cycle` (0.17.1) | standalone checker fix in the [#780]/[#783] binder/scoping channel (between [#731]'s discipline and [#730]'s supported-neighbor rule): a checker false positive rather than totality work, but the binder-scope decision must not contradict what [#731] Phase 1-2 decides for lambda parameters |
 
 Also tracked to closure but already claimed (listed for completeness):
 [#680]/[#684]/[#685]/[#686]/[#688] -> [#729]; [#682]/[#692]/[#697]/[#698]/[#699]/[#704]/[#705]/[#725] ->
 [#730] (both halves: the builtin-coverage half at Phase 1's typed emitter,
-the gate half at Phase 3's dedupe); [#709]/[#710] -> [#731]; [#716]/[#723] -> [#732]; [#694] -> [#733]; [#711]/[#720] ->
+the gate half at Phase 3's dedupe); [#709]/[#710]/[#833] -> [#731]
+([#833] is the declaration-only `total_nodes == 0` score hole; §C4.4's
+fitness-honesty corpus row at Phase 1); [#716]/[#723] -> [#732]; [#694] -> [#733]; [#711]/[#720] ->
 [#729] Phase 2 / [#720]'s own note; [#712]/[#715]/[#724]/[#726] -> capability table
 seed decisions; [#722] -> [#730] Phase 1 (loud) then [#729]/table (computed).
 Wave 0's own discoveries, claimed at filing: [#744]/[#745] -> [#730]
@@ -553,3 +563,11 @@ formal target, per its §C1.5) and [#730] makes unknown KINDS loud;
 [#794]: https://github.com/Chelis-Lang/chelis/issues/794
 [#795]: https://github.com/Chelis-Lang/chelis/issues/795
 [#796]: https://github.com/Chelis-Lang/chelis/issues/796
+[#799]: https://github.com/Chelis-Lang/chelis/pull/799
+[#815]: https://github.com/Chelis-Lang/chelis/pull/815
+[#833]: https://github.com/Chelis-Lang/chelis/issues/833
+[#840]: https://github.com/Chelis-Lang/chelis/issues/840
+[#841]: https://github.com/Chelis-Lang/chelis/issues/841
+[#847]: https://github.com/Chelis-Lang/chelis/issues/847
+[#850]: https://github.com/Chelis-Lang/chelis/issues/850
+[#851]: https://github.com/Chelis-Lang/chelis/issues/851

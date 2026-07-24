@@ -1,8 +1,24 @@
 # Loud Unsupported: the failure-channel contract
 
-**Status:** Phases 0-1 implemented (Phase 0: PR [#746]; Phase 1: PR
-[#791] - the failure channel, the live-site sweep, and the section C2/C3
-freeze). Phases 2-3 pending. Tracking issue: [#730].
+**Status:** Phases 0-1 are complete (Phase 0: PR [#746]; Phase 1: PR
+[#791]). Phase 2's implementation is complete in PR [#799]: the
+`EffectKind`/`RuntimeDType` identities and consumers, generated Rust/C dtype
+agreement, staged `HostTypeTerm -> ConcreteHostType -> HostAbiType` boundary,
+and closed structured C-expression AST are implemented. Phase acceptance
+still requires the authoritative oracle
+(`.venv/bin/python scripts/loud_unsupported_phase2_oracle.py`) and a fresh
+adversarial review; this status does not claim that validation early. Count
+baselines and the token tripwire are supporting checks, not completion
+evidence. Phase 3 is pending.
+Tracking issue: [#730].
+
+**Implementation record (re-planned 2026-07-22).** The initial Phase 2 draft
+treated a large source lint as a recurrence proof. Execution demonstrated
+both laundering paths and false positives, so that mechanism was extracted to
+PR [#815] and removed from this phase's acceptance argument. The final design
+is the typed boundary specified here: failures are not type terms, unresolved
+terms cannot enter codegen, target capability selection is fallible, and an
+unknown builtin name has no structured expression identity.
 **Owning specs:** `spec/05-risc-primitives.md` (op support statements;
 its §7 carries this plan's ratified contract as current blockquote authorities
 [05-UNS-1..4], independently of their later chelis#733 migration through the
@@ -12,8 +28,10 @@ Contract Invariants ("if a command reports perfect success, its error list
 must be empty"), and the audit record in
 `docs/investigations/numeric_audit_next_sweeps.md` /
 `docs/investigations/numeric_audit_structural_prevention.md` (items 3, 8).
-**Class fixed:** [#703] (unsupported cases silently substitute a value
-instead of failing). Sibling plans: `spec/design/dtype_semantics.md`
+**Class:** [#703] (unsupported cases silently substitute a value instead of
+failing). Phase 1 removed the censused live instances; Phase 2 implements the
+typed recurrence proof, with acceptance validation still pending. Sibling
+plans: `spec/design/dtype_semantics.md`
 ([#729]) owns what SUPPORTED cells compute; this plan owns what every
 UNSUPPORTED encounter does. §I1 pins the interlock. [#709]'s checker
 analogue is item 5 of the prevention doc and is NOT this plan (see
@@ -45,19 +63,18 @@ chose independently.
 This plan: (1) gives every stage a **failure channel** (Result-typed
 emission; lowering already has `raise_lowering_error`), (2) converts every
 censused site to the diagnostic row, (3) makes new silent fallbacks
-**unwritable or undetectable-free** via three ratchets (a chelis-lint rule
-against wildcard arms on closed enums, an `Unsupported`-only fallback type
-for open-set dispatch, and a token tripwire), and (4) demotes the
+**structurally unrealizable** through dependency-bottom closed vocabularies,
+fallible boundary decoding, and exhaustive typed consumers, with narrow token
+and count inventories retained only as defense-in-depth evidence, and (4) demotes the
 pre-codegen gates from safety mechanism to early-UX, because a gate that is
 the only line of defense rots (the one-entry `HOST_ONLY_BUILTINS` allowlist
 let five builtins walk past it, [#682]/[#705]).
 
-**Verdict on scope** (the question this document answers first): not a
-rewrite. No storage, no wire format, no semantics change. One moderate,
-mechanical plumbing refactor (the emitter Result channel), a bounded
-remediation sweep over a censused site list, and permanent guardrails. The
-long-tail guarantee for op x dtype cells arrives via [#729] Phase 4's
-capability table and is deliberately not duplicated here.
+**Scope:** this contract changes failure representation and compiler-state
+boundaries. It does not change numeric storage, wire-format IDs, dtype
+semantics, or the set of supported operation cells. The long-tail op x dtype
+guarantee belongs to [#729] Phase 4's capability table and is not duplicated
+here.
 
 ## Why not a pile of patches, in one table
 
@@ -73,14 +90,16 @@ mechanism existed next door and was not called.
 
 Optionality is the root cause. A patch adds another optional mechanism;
 this plan removes the option: after Phase 1 the fallible signature is the
-only signature, and after Phase 2 the silent arm is a lint/build failure.
+only signature, and after Phase 2 raw input is decoded once into a closed
+type and every semantic consumer must exhaust that type. Adding a variant
+then creates a rustc work-list; no source scanner is part of that proof.
 
 ## Non-goals
 
 - **Not [#709].** The checker's `Type::Error`-without-diagnostic hole is the
   same disease in a different organ with a different fix - now its own
   plan (`spec/design/checker_totality.md`, [#731]). One shared piece
-  lands here: the `EffectKind` enum (§C4.4), because its catch-all is a
+  lands here: the `EffectKind` enum (§C4.1-2), because its catch-all is a
   lowering-side substitution proven live via `.dp`.
 - **Not [#727]/[#729].** This plan never decides what an op computes or which
   cells are supported. Where a site is both silently-substituting AND
@@ -94,6 +113,28 @@ only signature, and after Phase 2 the silent arm is a lint/build failure.
 - **Not a diagnostics-UX project.** §C2 fixes the *shape* of unsupported
   diagnostics; wording polish beyond the contract is out of scope.
 
+## Class ownership
+
+The remediation plans share types and call sites but own different decisions:
+
+| decision | authority |
+|---|---|
+| closed compiler/runtime identity and stable ABI spelling | this contract: `EffectKind` and `RuntimeDType` in `chelis-vocab` |
+| dtype rounding, overflow, storage, casts, and operation semantics | `dtype_semantics.md` ([#729]) |
+| target-independent operation acceptance | capability Table A ([#729] Phase 4) |
+| per-backend implementation status | capability Table B ([#729] Phase 4) |
+| failure channel and `unsupported:` rendering | this contract |
+| checker error totality | `checker_totality.md` ([#731]) |
+| value observation and formatting | `faithful_observation.md` ([#732]) |
+| atom/issue authority for capability decisions | `spec_provenance.md` ([#733]) |
+
+`RuntimeDType` owns representation identity only: stable numeric IDs,
+canonical names, generated C macro names, and byte widths. It SHALL NOT own
+numeric finalization, value domains, cast behavior, operation legality, or
+kernel availability. `HostTypeTerm` and `ConcreteHostType` preserve checked
+logical identity; they SHALL NOT form a second checker or dtype-semantics
+layer.
+
 ## Vocabulary
 
 - **Substitution site** - a code location that, on an unsupported input,
@@ -106,11 +147,12 @@ only signature, and after Phase 2 the silent arm is a lint/build failure.
 - **Failure channel** - the typed path by which a stage reports
   "unsupported" to its caller and ultimately to the user.
 - **Ratchet** - a mechanism that makes the count of silent fallbacks
-  monotonically non-increasing (lint, tripwire, type privacy).
+  monotonically non-increasing (typed boundaries, mutation oracles, and the
+  source tripwire).
 
 ---
 
-# Part I - the normative contracts (§C1-§C5)
+# Part I - the normative contracts (§C1-§C6)
 
 ## C1. The response contract
 
@@ -175,11 +217,9 @@ pub struct Unsupported {
 }
 ```
 
-Implemented as `chelis_types::unsupported::Unsupported` (per open
-question 1: one shared type at the workspace bottom; the span field is
-boxed in the implementation so the Err variant stays small on the
-Result-typed emission paths - a representation detail, not a shape
-change).
+Implemented as `chelis_types::unsupported::Unsupported`. The span field is
+boxed so the `Err` variant stays small on Result-typed emission paths; this is
+a representation detail, not a contract change.
 
 **Message format (frozen):**
 `unsupported: <what> on <context> (<stage>); <hint>` - branded with the
@@ -198,17 +238,16 @@ conformant when migrated:
 
 **Surfacing per surface:** `chelis check` -> JSON error entry, score < 1,
 carrying the machine-readable kind (`unsupported`) and the `what` payload
-as structured fields - the branded string is the RENDERING of the
-contract, not the contract; agents match the structured kind, never
-regex over prose (2026-07 review integration);
+as structured fields - the branded string is the RENDERING of the contract,
+not the contract; machine consumers match the structured kind, never prose;
 `chelis build`/`eval` -> `error:` line + nonzero exit; compiled binary
 (dynamic-only cases) -> stderr + nonzero exit. The [#687] oracle corpus
 gains a rejected-cells section asserting these strings byte-for-byte per
 lane (a rejection emitted differently per lane is lane skew, [#712]'s
 shape).
 
-**Authored vs accidental (2026-07 review):** a deliberately-unsupported
-case cites the spec atom that decides it (the [#733] linkage); a
+**Authored versus unimplemented:** a deliberately unsupported case cites the
+spec atom that decides it (the [#733] linkage); a
 not-yet-implemented case cites its issue. The capability table makes
 the distinction structural - `Rejected(atom)` vs `Unimplemented
 { issue }` - and this contract's `hint` carries the same citation at
@@ -219,13 +258,14 @@ because nobody built it yet" are never conflated again.
 
 Per stage, what exists and what this plan builds:
 
-| stage | today | after Phase 1 |
+| stage | today | target state |
 |---|---|---|
 | lowering (`chelis-ir/src/lower.rs`) | `raise_lowering_error` exists and works (used by `lower_unsupported`) | unchanged mechanism; every censused lowering site calls it |
-| host-type resolution (`chelis-ir/src/host.rs`) | infallible `-> HostType`, silent `Unknown`/`Int64` defaults | numeric-prim resolution returns `Result<HostType, Unsupported>`; `Unknown` remains legal ONLY for genuinely polymorphic signatures (the documented rank/precision-poly cases), never as a numeric fallback |
+| host-type resolution (`chelis-ir/src/host.rs`) | infallible `-> HostType`, with one `Unknown` state shared by malformed/missing metadata, polymorphism, inference, bottom, and unimplemented logical dtypes | syntax decoding returns `Result<HostTypeTerm, HostTypeDecodeError>`; named type/precision/rank variables, inference variables, and `Never` are distinct terms; resolution returns `Result<ConcreteHostType, HostTypeResolutionError>` and never chooses a default |
+| host ABI selection (`chelis-ir` -> C host emitter) | infallible `HostType -> &'static str`; `Unknown -> void*`, plus zero defaults in boxing/unboxing | `ConcreteHostType -> Result<HostAbiType, Unsupported>`; the emitter accepts only `HostAbiType`; a known logical type with an unimplemented target representation is a Table-B `Unimplemented` diagnostic, never a type-erasure or emitted value |
 | C host emitter (`chelis-backend-c/src/host_emit.rs`) | **no channel**: expression builders return `String`, statement emitters return `()` | expression builders return `Result<EmittedExpr, Unsupported>`; statement emitters `Result<(), Unsupported>`; the compile entry surfaces the first error as a §C2 diagnostic. This is THE plumbing refactor - mechanical (`?` all the way up), moderate in size, and the enabling move for everything else |
 | DAG C emitter (`chelis-backend-c/src/emit.rs`) | panics ([#692]) | same Result channel; the reduce-family panic arms become diagnostics |
-| HIP emitter | gate rejects much; `elem_kind` substitutes F32 ([#689]) | `elem_kind` returns `Result`; its `_` arm deleted (§C4.1) |
+| HIP emitter | gate rejects much; `elem_kind` substitutes F32 ([#689]) | `elem_kind` returns `Result`; its `_` arm deleted (§C4.2) |
 | runtime (`chelis-runtime`) | `runtime_fail!` aborts exist and are the right shape | unchanged; used only for dynamic-only cases per §C1.2 |
 
 **The speculative-sub-lowering laundering rule (Phase 1 addition; the
@@ -244,45 +284,73 @@ FATAL raise when the host fallback would mis-emit the same construct
 acceptable only where the host fallback legitimately owns the form,
 because its own unsupported terminal is now loud.
 
-**The `EmittedExpr` rule:** the C expression type is a newtype over
-`String` whose constructors are the typed builders. There is deliberately
-no `EmittedExpr::raw(String)` on the unsupported path - the only way to
-respond to an unmatched builtin is to construct `Unsupported`. The audit's
-`format!("/* unsupported builtin {other} */ 0")` becomes unwritable, not
-just unfashionable. (A `raw` constructor may exist `pub(crate)` for the
-legitimate template snippets; the lint in §C4.2 patrols its use sites.)
+**The `EmittedExpr` rule:** `EmittedExpr` is a private structured
+C-expression representation with typed builders. Open-set dispatch returns
+`Result<EmittedExpr, Unsupported>`; an unmatched case has no expression
+constructor. Rendering to `String` occurs only after a structured expression
+has been constructed. A general raw-string constructor is not part of the
+Phase 2 completion surface.
 
-## C4. The ratchets (making reintroduction near-impossible)
+## C4. The ratchets (making reintroduction structurally unrealizable)
 
-Four mechanisms, ordered by strength. §C3 removes the *need* to
-substitute; these remove the *ability*:
+The primary mechanisms are typed and exhaustive. A lexical rule may detect a
+known spelling, but it SHALL NOT be cited as proof that a substitution cannot
+be represented.
 
-1. **Closed enums match exhaustively.** No `_` arm over `Prim`,
-   `RiscOp`, `ElemKind`, `UnsupportedKind`, or the CHELIS dtype ids in the
-   numeric/backends crates. Adding a variant then produces a compile-error
-   work-list at every dispatch site. Where an arm is genuinely N/A it says
-   so per-variant (`Prim::String => unreachable-per-<cited guarantee>` or
-   a §C1.4 raise).
-2. **The lint rule** (new, in `chelis-lint`, which already lints Rust
-   source for §8.6): `rust-no-wildcard-dispatch` - a blocking rule that
-   forbids `_ =>` / `default:`-emitting arms in matches over a configured
-   list of enum types within configured crates, with a per-site allowlist
-   file that requires a written justification string. The rule also flags
-   `unwrap_or_default()` / `unwrap_or(Prim::` / `unwrap_or(HostType::` in
-   the same crates. This is the ratchet's enforcement: rustc cannot forbid
-   wildcards; the repo gate can.
-3. **The token tripwire** (test, land-first, cheapest): a unit test in the
-   workspace that greps the source tree for the recidivist tokens -
-   `*/ 0"`, `<value>`, `unwrap_or_default()` and `unwrap_or(Prim::` in
-   lowering/emission paths, `=> ElemKind::` wildcards - against the §C5
-   census. Any NEW site fails with a message pointing at this document.
-   Exists purely to bridge until 1+2 land and to catch generated-string
-   contexts the lint cannot see.
-4. **`EffectKind` becomes an enum** (shared deliverable with [#709]'s plan):
-   `lower_handle_effect`'s `_ if elems.len() >= 4 => lower body, drop
-   handler` catch-all is deleted; unknown effect kinds in `.dp` input get
-   a §C2 diagnostic. (Proven live today: `effect: teleport` builds and
-   runs.)
+1. **One dependency-bottom vocabulary owner.** `chelis-vocab` has no Chelis
+   dependencies and owns `EffectKind` and `RuntimeDType`. Each vocabulary is
+   declared once with its canonical external spelling or integer ID. It has no
+   `Unknown` variant, implements no `Default`, and exposes only `Result`
+   decoders. Effect metadata decoding distinguishes `Missing`, `Malformed`,
+   and `Unknown { symbol }`; runtime dtype decoding preserves the invalid raw
+   ID. `chelis-types` is not the owner: it depends on `chelis-deep` and
+   `chelis-pred`, while the runtime must consume the same dtype vocabulary
+   without depending on the checker. This bottom placement also leaves a
+   cycle-free placement for the `Prim` and `BuiltinId` identities required by
+   the capability table. Semantic behavior remains in `dtype_semantics.md`.
+2. **Decode once, then exhaust.** Raw strings and raw dtype integers exist
+   only at serialization/FFI boundaries. `chelis-deep` adapts metadata shape
+   into the bottom crate's effect decoder; every checker, effects, lowering,
+   evaluator, and decompiler decision receives `EffectKind`. The C runtime
+   decodes `chelis_tensor.dtype` and dtype arguments immediately; sizing and
+   reading helpers accept `RuntimeDType`, never `c_int`. Matches over these
+   enums have no wildcard arm. Adding a variant is therefore a compile-error
+   work-list at every semantic consumer.
+3. **Generated Rust/C dtype agreement.** The `RuntimeDType` declaration is
+   the sole source for Rust IDs, canonical names, C macro names, and byte
+   widths. It generates a checked-in C header fragment consumed by the host,
+   HIP, and Metal runtime headers. A byte-for-byte regeneration test and a
+   Rust round-trip table test lock agreement. Every generated C size switch
+   has an aborting `default` that prints the raw ID; no default may select f32.
+4. **Structured emission.** Open-set builtin dispatch returns
+   `Result<EmittedExpr, Unsupported>`. `EmittedExpr` is a private C AST with
+   typed builders and no general raw-string construction path.
+5. **Source inventories are supporting evidence.** The token/count tripwire
+   stays blocking while the typed migration is incomplete. It is neither a
+   site identity nor an exhaustiveness proof: aliases, bindings, indirection,
+   equivalent numeric-default spellings, count relocation, and in-crate raw
+   emission can evade it. The corresponding typed mutation oracle is the
+   authority.
+6. **Host types are a staged typed pipeline.** The host-type layer consumes
+   checked type metadata; it does not re-infer source types. `HostTypeTerm`
+   preserves exact
+   logical scalar precision and gives named type, precision, rank, inference,
+   and bottom states distinct variants. Missing and malformed metadata are
+   `HostTypeDecodeError`, not terms. Only `HostTypeTerm::into_concrete` may
+   produce `ConcreteHostType`, and it returns `HostTypeResolutionError` while
+   any variable or `Never` remains. Target ABI selection consumes only
+   `ConcreteHostType` plus the target capability decision and returns
+   `Result<HostAbiType, Unsupported>`; backend emitters consume only
+   `HostAbiType`. `int8` and `int16` select their exact existing
+   `int8_t`/`int16_t` C representations; `f16` and `bf16` remain known
+   logical types while the C-host capability cell rejects their scalar
+   representation pending [#729]'s grounded storage and rounding. There is
+   no `Unknown` variant, no `Default`, and no
+   conversion from a decode/resolution failure to a concrete or ABI type.
+   Before Table B is generated, the target selector is a private exhaustive
+   adapter whose rejection arms cite a spec atom or implementation issue.
+   [#729] Phase 4 replaces that adapter's decisions without changing this
+   typed boundary.
 
 ## C5. The census (normative appendix; Phase 0 re-verifies by execution)
 
@@ -350,6 +418,175 @@ message points at `faithful_observation.md` §B2.4).
 Phase 0 freezes this table into the tripwire; additions after that are
 either new work (filed + censused) or regressions (red gate).
 
+## C6. Phase 2 ownership and consumer contract
+
+This inventory is normative. A consumer may be removed only when the
+underlying behavior is removed. A newly discovered consumer is added here
+before implementation proceeds (B2.5).
+
+### C6.1 Dependency placement and effect consumers
+
+`chelis-vocab` is the dependency-bottom owner because `chelis-types` depends
+on front-end crates while `chelis-runtime` must remain independent of the
+checker. These are the permitted edges:
+
+| crate | edge/purpose | cycle audit |
+|---|---|---|
+| `chelis-deep` | `chelis-vocab`; adapt Deep metadata into `EffectKindInput` | vocab has no reverse edge |
+| `chelis-surf` | `chelis-vocab`; canonical effect serialization/decompilation | already depends on Deep, never on types |
+| `chelis-types` | `chelis-vocab`; checker dispatch; temporarily re-export `EffectKind` for source compatibility | vocab does not depend on Deep/Pred/types |
+| `chelis-effects` | `chelis-vocab`; direct semantic dispatch | its existing types/Deep edges remain above vocab |
+| `chelis-ir` | `chelis-vocab`; IR and host lowering dispatch | its existing types/Deep edges remain above vocab |
+| `chelis-compiler-api` | `chelis-vocab`; evaluator dispatch and wire adapters | already sits above effects/IR/types |
+| `chelis-runtime` | `chelis-vocab`; immediate FFI dtype decoding | vocab adds no libc/runtime edge |
+| C/HIP/Metal backends | `chelis-vocab`; `Prim -> RuntimeDType -> C macro` mapping | all already sit above IR/types |
+| `chelis-python` | `chelis-vocab`; remove the local `CHELIS_F32 = 0` copy | already sits above compiler-api/backend C |
+
+The capability-table identity types `Prim` and `BuiltinId` also belong in
+`chelis-vocab`, with compatibility re-exports from `chelis-types` during the
+move. Their dtype semantics remain in `chelis-types::dtype_semantics`. No
+Deep/runtime/backend edge points upward from vocab.
+
+The effect consumer set is exhaustive for the current tree:
+
+| boundary/consumer | required typed behavior |
+|---|---|
+| `chelis-vocab::{EffectKind, EffectKindInput, EffectKindDecodeError}` | single declaration; `decode -> Result`; distinct missing/malformed/unknown errors; canonical `symbol()` inverse |
+| `chelis-deep` effect-metadata adapter | map absent key, non-symbol value, and unknown symbol without collapsing them |
+| `chelis-types::infer::infer_handle_effect` | consume the adapter result; exhaust `EffectKind`; map each decode error to a checker diagnostic |
+| `chelis-effects::infer_handle_effects` | exhaustively remove the handled kind; decode failures enter `EffectError` |
+| `chelis-effects::validate_handler_expr` | exhaustive per-kind validation; decode failures are errors |
+| `chelis-effects::validate_build_target_expr` | exhaustive typed target policy |
+| `chelis-ir::lower::lower_handle_effect` | consume `Result`; exhaust `Random`/`Resource`; preserve distinct diagnostic payloads |
+| `chelis-ir::host::lower_host_expr` | consume `Result`; no empty sentinel or raw comparison |
+| `chelis-compiler-api::runtime::eval::HostEvaluator::eval_expr` | exhaustive typed evaluation; every decode error is `Err` |
+| `chelis-surf::desugar` `WithSeed`/`WithDevice` | emit `EffectKind::symbol()` |
+| both `chelis-surf::decompile_handle_effect` implementations | decode once; exhaust known kinds; preserve malformed/unknown Deep only through an explicit observation path |
+
+The added-kind mutation oracle inserts a temporary variant in the single
+vocab declaration and builds `chelis-deep`, `chelis-surf`, `chelis-types`,
+`chelis-effects`, `chelis-ir`, and `chelis-compiler-api`. Every semantic row
+above must produce a non-exhaustive-match error until it makes an explicit
+decision. The source-inventory test only proves there is no untyped consumer
+outside that rustc oracle; it is not itself the exhaustiveness mechanism.
+
+### C6.2 Runtime dtype boundaries and consumers
+
+`RuntimeDType` owns the stable ABI IDs `F32=0`, `F64=1`, `I32=2`, `Bool=3`,
+`I64=4`, `Bf16=5`, `F16=6`, `I8=7`, and `I16=8`, together with canonical
+language spellings, C macro spellings, and byte widths. These are
+representation facts, not dtype semantics. `chelis_tensor.dtype` and the C
+ABI arguments remain `int`; that is the wire representation, not the
+internal type.
+
+| boundary/consumer | required typed behavior |
+|---|---|
+| `chelis-runtime/include/chelis_runtime.h` and HIP/Metal runtime headers | include a generated dtype fragment from the vocab declaration; remove handwritten ID/size copies |
+| `chelis-runtime::{CHELIS_*}` | compatibility constants derive from `RuntimeDType::id()`, never literal integers |
+| `TensorElement::DTYPE` / `DtypeMismatch` | carry `RuntimeDType`; decode the tensor field before comparing or accessing |
+| `chelis_alloc`, `chelis_alloc_view`, `chelis_dtype_size`, `chelis_tensor_from_value_list_typed` | decode the inbound `c_int` immediately; invalid IDs abort with the raw ID before allocation, sizing, or element access |
+| `tensor_elem_size` | signature is `fn(RuntimeDType) -> usize`; exhaustive, no fallback |
+| `read_index_slot`, `chelis_tensor_to_f64`, list-from-tensor, comparison/where/cumsum/sort/trace/clamp/einsum, and tensor formatting | decode once, pass `RuntimeDType` into typed read helpers, and match exhaustively |
+| clone/concat/split/gather/scatter/diagonal/contiguous byte-copy paths | decode before byte-width calculation; pass `RuntimeDType` to sizing; raw integers may be copied back only into the ABI field via `id()` |
+| C/HIP/Metal `dtype_macro` and sparse/dtype-arm helpers | return `RuntimeDType` first and obtain the C spelling from the vocab declaration; no repeated `Prim -> "CHELIS_*"` tables |
+| `chelis-python` tensor construction | use `RuntimeDType::F32.id()`; remove the local numeric constant |
+
+The negative suite covers `-1`, the first unused ID (`9` for this frozen
+table), `i32::MIN`, and `i32::MAX`. Each must fail at the decoder. Runtime
+subprocess tests then pass those IDs to each public FFI dtype boundary and
+assert nonzero exit before any allocation-size result or buffer read can be
+observed. Positive coverage round-trips every ID and compares the generated C
+fragment byte-for-byte with its checked-in artifact.
+
+The runtime subprocess suite drives every raw dtype argument boundary plus a
+tensor-field read with ID `9` and requires nonzero exit carrying the raw ID.
+The added-dtype mutation oracle requires a compile error at every exhaustive
+consumer until the new representation identity is handled explicitly. It is
+executed by the Phase 2 oracle's controlled vocabulary mutation, which adds a
+fully-decodable tenth `RuntimeDType` variant alongside the `EffectKind`
+mutation in one workspace check and requires non-exhaustive-match errors in
+`crates/chelis-runtime/src/lib.rs`, the runtime FFI's exhaustive dtype
+boundary.
+
+### C6.3 Host-type state and ABI boundary
+
+The host-type boundary must represent every pre-codegen state explicitly.
+Source counts are not an allowlist or an oracle; the completion proof is the
+typed boundary that prevents unresolved state from entering codegen.
+
+| semantic class | required representation |
+|---|---|---|
+| missing or malformed checked metadata/type syntax | `HostTypeDecodeError::{MissingTypeMetadata, MalformedTypeSyntax, UnknownPrimitive}`; no term is manufactured |
+| legitimate type polymorphism | named `TypeVariable`, `HostPrecisionTerm::Variable`, and ordered `HostShapeSlot::RankVariable` entries; specialization or a resolution error before codegen |
+| underconstrained inference | stable `HostInferenceVar` identity; unresolved variables return `HostTypeResolutionError` |
+| invalid builtin result inference | typed error, distinct from a valid underconstrained inference variable |
+| bottom/divergence | `HostTypeTerm::Never`; joins may eliminate bottom, but `Never` has no value or ABI representation |
+| known logical type without target representation | exact `Prim` in `ConcreteHostType`; target selection returns `Unsupported` from the capability decision |
+| emitter expectation/refinement | resolution before emission; helpers receive concrete element/parameter ABI types |
+| declaration, boxing, unboxing, call, and callback representation | exhaustive `HostAbiType`; no `void *`, numeric zero, or other default for an unsupported state |
+
+The staged source contract is:
+
+1. `decode_host_type(...) -> Result<HostTypeTerm, HostTypeDecodeError>` owns raw
+   Deep syntax and metadata.
+2. Inference and specialization operate on `HostTypeTerm`. A successful
+   `into_concrete` is the only path to `ConcreteHostType`.
+3. Target selection consumes `ConcreteHostType` and an authoritative target
+   capability decision, returning `Result<HostAbiType, Unsupported>`. Before
+   Table B exists, the decision comes from a private exhaustive adapter whose
+   negative arms cite a spec atom or implementation issue.
+4. Host codegen accepts `HostAbiType` only. Its declaration, boxing, unboxing,
+   call, and callback matches are exhaustive and cannot observe a term or
+   resolution error.
+
+Any compatibility bridge used while implementing this boundary is private,
+cannot convert to `ConcreteHostType` or `HostAbiType`, and cannot be passed to
+emission. The Phase 2 endpoint contains no legacy `HostType::Unknown` and no
+such bridge. Compile-time function signatures, not a source count, prove that
+only resolved types reach codegen.
+
+Every production compiler entry point returns host decode, inference,
+resolution, and target-selection failures through its declared `Result`.
+There is no public infallible host-lowering wrapper and no production caller
+may turn one of those failures into a panic. Host-expression lowering is also
+`Result`-typed: an unrecognized or malformed Deep expression returns a lowering
+diagnostic instead of constructing a placeholder expression. `Unit` is created
+only by the language's empty-tuple form and cannot be used as a temporary
+replacement during refinement or conformance.
+
+A generic ADT declaration is not a concrete field layout. Constructor,
+pattern, and direct or nested field-access lowering must supply an applied ADT
+type to one substitution operation, which returns either fully instantiated
+fields or a typed arity/name/unresolved-term error. No lookup API exposes the
+declaration's field terms as concrete fields. Direct anonymous callback
+applications are specialized before host emission; an unresolved callable is
+never represented by a null function pointer or numeric value. An expression
+node may inhabit only its resolved ABI type: in particular, `Unit` emission
+cannot satisfy a function, callback, or numeric ABI expectation.
+
+The C ABI vocabulary distinguishes a typed callback declarator from a
+first-class function value. General `ConcreteHostType -> HostAbiType`
+conversion rejects `Function`; the callback constructor is private and is
+available only for declared callback parameters and direct statically-known
+callback arguments. It recursively requires ordinary value ABIs for every
+parameter and result. A callback therefore has no standalone C type spelling,
+and the former `Function -> void *` arm does not exist. Function results,
+bindings, ADT fields, collection elements, dynamic callback selection, and
+indirect values cannot acquire the callback variant. Both public compiler APIs
+cross this same projection and return its structured `Unsupported` before any
+C source or header is produced.
+
+Positive/negative parity covers: every concrete primitive; each named variable
+kind; missing versus malformed syntax; empty-list inference; `Never`
+value-boundary rejection; supported ABI representations; and known logical
+f16/bf16 values rejected by an unimplemented C-host ABI cell. Exact int8/int16
+ABI selection is positive parity because those representations already exist.
+The negative ABI tests assert the structured `UnsupportedKind::Dtype` and
+`Stage::Codegen("c")`, not diagnostic prose alone. Resolved non-scalar value
+classes the target cannot represent (function values) carry the distinct
+`UnsupportedKind::HostAbi`; the unresolved-term `UnsupportedKind::HostType`
+state is never used for a type that did resolve.
+
 ---
 
 # Part II - process rules at every boundary
@@ -361,7 +598,8 @@ either new work (filed + censused) or regressions (red gate).
 | §C2 `Unsupported` shape + message format | Phase 1 | this doc + [#687] rejected-corpus update, same PR |
 | §C3 channel signatures (`Result` plumbing shape) | Phase 1 | this doc |
 | §C5 census (as tripwire baseline) | Phase 0 | append-only via filed issue; removals only with the site's fix |
-| §C4.2 lint rule config (enum list, crate list, allowlist) | Phase 2 | this doc + lint-rule spec (`spec/01-nomenclature.md` registration) |
+| §C4 vocabulary declarations and typed consumer inventory | Phase 2 | this doc + owning active spec, with an added-variant mutation oracle in the same change |
+| §C4.5 source-inventory tripwire | temporary during Phase 2 | this doc + the tripwire test; never a completion oracle |
 | gate inventory (§C5 rows 17-18 resolution) | Phase 3 | this doc |
 
 ## B2. Invariants that hold across every boundary
@@ -414,7 +652,7 @@ surface.
    settled: probed 2026-07-16, live, filed as [#734]
    (`issue_734_tostring_placeholder.rs`); P0 carries that status into the
    verified census. Discrepancies edit the census (B2.5 protocol).
-2. **The token tripwire test** (§C4.3) with the verified census as its
+2. **The token tripwire test** (§C4.5) with the verified census as its
    allowlist, wired into the default workspace run (it is a fast grep).
 3. **The [#687] rejected-cells corpus stub**: the existing loud-failure
    locks (HIP/Metal/runtime strings) collected into one table-driven test
@@ -423,7 +661,7 @@ surface.
 **Frozen at your exit:** the census baseline (append-only); the tripwire
 is live in CI.
 
-**Explicitly not yours:** fixing anything; the lint rule; any plumbing.
+**Explicitly not yours:** fixing anything or adding plumbing.
 
 **Oracle:** the tripwire test green on the current tree and demonstrably
 red on a planted `*/ 0` fallback (the test's own negative test); every
@@ -476,7 +714,7 @@ single-dedicated-change rule for diagnostic-wording migration.
 
 **Explicitly not yours:** making any unsupported thing SUPPORTED (that is
 [#729]'s or an op-owner's work; see §I1 for what your rejections do to
-existing red tests); the lint rule; gate deletion.
+existing red tests); gate deletion.
 
 **Oracle:** `issue_703_silent_placeholders.rs` fully green and
 un-ignored; `scalar_stub_matrix.rs`'s stub-marker assertions green
@@ -486,45 +724,72 @@ ignored with updated notes); `reduce_window_nonliteral_matrix.rs` green
 row 1's raise (a loud lowering error, not zero gradients); the tripwire
 census shrinks to rows 10, 17, 18.
 
-## Phase 2 - un-writability (the lint ratchet)
+## Phase 2 - un-writability (typed closed vocabularies)
+
+**Status: IMPLEMENTED IN PR [#799]; ACCEPTANCE PENDING.** Items 1-5 below are
+implemented. The token/count tripwire remains a supporting check. Phase 2 is
+complete only after the authoritative oracle is green and a fresh adversarial
+review confirms that unresolved host types cannot enter codegen and
+unsupported open-set dispatch cannot construct an emitted expression.
 
 **You inherit:** a tree with no live silent fallbacks (Phase 1) and the
 tripwire proving it.
 
 **You deliver:**
 
-1. **`rust-no-wildcard-dispatch`** in chelis-lint (§C4.2): blocking, with
-   the enum list (`Prim`, `RiscOp`, `ElemKind`, dtype-id constants), the
-   crate list (chelis-ir, chelis-backend-c, chelis-backend-hip,
-   chelis-compiler-api numeric modules, chelis-runtime; candidate
-   addition per Jeff's reflexive finding on [#738]/[#739]:
-   chelis-conformance, whose `check_row` `other =>` arm returns a silent
-   `Verdict::Manual` for un-dispatched MANIFEST rows - the class inside
-   the soundness auditor itself; coordinate with the conform
-   workstream), the
-   justification-string allowlist mechanism, and registration in the lint
-   rule spec per repo convention. Plus its own positive/negative rule
-   tests (the lint crate's standard).
-2. **Wildcard removal** across the listed crates so the rule lands green
-   with a minimal allowlist (target: single digits, each with a written
-   justification).
-3. **The `EmittedExpr` newtype** (§C3) if not already forced by Phase 1's
-   plumbing; the `pub(crate) raw` constructor's use sites enumerated in
-   the allowlist.
-4. `EffectKind` enum (§C4.4), closing census row 9's future-kinds hole
-   permanently.
+1. The dependency-free `chelis-vocab` crate and its single declarations for
+   `EffectKind` and `RuntimeDType`, with Result-only decoders and the positive
+   and negative tests in §C4.1.
+2. The end-to-end `EffectKind` migration in §C6.1. No semantic consumer may
+   compare the metadata string. The added-variant mutation must fail every
+   named consumer until it explicitly handles the new kind.
+3. The runtime dtype migration in §C6.2: generated Rust/C agreement,
+   immediate FFI decoding, typed sizing/reading helpers, and invalid-ID tests
+   for `-1`, the first unused ID, and both `i32` extrema.
+4. The HostType state/ABI split in §C4.6 and §C6.3: Result-only syntax
+   decoding, named polymorphic and inference states, `Never`, resolution to
+   `ConcreteHostType`, and fallible target conversion to `HostAbiType`
+   authorized by the target capability decision. Before Table B exists, the
+   private exhaustive adapter cites a spec atom or implementation issue for
+   every negative decision. Host codegen accepts only the resolved ABI
+   vocabulary; host-expression lowering rejects unhandled forms through its
+   own `Result`; generic ADT fields cross the boundary only after applied-type
+   substitution; and the legacy `Unknown`, placeholder-`Unit`, and emitted
+   default-value escape hatches are deleted.
+5. The private structured C-expression AST described in §C4.4, replacing
+   `EmittedExpr::raw` as a general construction path.
+6. Keep the token/count tripwire green as supporting evidence. Its baseline
+   does not freeze as the safety authority.
 
-**Frozen at your exit:** the lint config (B1). From here, a new silent
-fallback requires editing an allowlist file with a justification -
-reviewable by construction.
+**Frozen at your exit:** the two vocabulary declarations, their external
+spellings/IDs, the typed consumer inventories, and the generated-header
+contract. From here, a new kind or dtype forces a compile-error work-list in
+every semantic consumer.
 
-**Explicitly not yours:** [#709]'s DeepTag enum (same pattern, checker
-crates, tracked there - coordinate the lint's enum list so it can adopt
-DeepTag later without a config freeze exception).
+**Explicitly not yours:** dtype finalization/storage/kernel semantics or the
+Table A/B policy ([#729]); [#709]'s `DeepTag` enum ([#731]); observation
+formatting ([#732]); capability atom authorship ([#733]).
 
-**Oracle:** `chelis lint --check .` green with the new rule enabled and
-red on a planted wildcard arm in a listed crate (the rule's negative
-test); the tripwire baseline unchanged.
+**Authoritative oracle (owner: Phase 2):**
+
+```sh
+.venv/bin/python scripts/loud_unsupported_phase2_oracle.py
+```
+
+Success means exit 0 with the final line `PHASE 2 ORACLE: PASS`. This single
+runner executes the closed-vocabulary suite, generated-header and invalid-ID
+runtime checks, §C6.3 term-state and public-API parity (including generic ADT
+specialization, direct/nested field access, callable-value rejection, and
+empty-list failure propagation), exact inline and named callback and
+reduced-float ABI cells, structured-emission and private-ABI compile-fail
+checks, the endpoint scan for unresolved, placeholder-`Unit`, and raw generic
+field escape hatches, and a controlled temporary vocabulary mutation that adds
+one fully-decodable variant to each closed vocabulary (`EffectKind` and
+`RuntimeDType`) in a single workspace check. The mutation must produce
+non-exhaustive-match errors in each vocabulary's independent semantic
+consumers and the runner must restore the owner source byte-for-byte.
+The tripwire remains supporting evidence executed by the normal gate; it is
+not a second completion oracle.
 
 ## Phase 3 - gates become UX, not safety
 
@@ -543,7 +808,7 @@ no longer load-carrying for correctness) and the census rows 17-18.
 2. **The gate contract**, recorded in this doc: a gate may only ever make
    a diagnostic EARLIER or MORE SPECIFIC; it may never be the sole
    defense, and a gate/emitter disagreement is a bug in the gate. The
-   enforcement ladder (2026-07 review): compile-error > lint > tripwire
+   enforcement ladder: compile-error > lint > tripwire
    > gate > prose - a gate that is load-bearing for correctness is on
    the wrong rung.
 3. Deletion of gates that now only duplicate emitter rejections, with the
@@ -574,6 +839,20 @@ boundary, pinned:
   they are *cleanly rejected*; after [#729]'s Phases 2-3 they are
   *computed*. The intermediate rejected state is an improvement and is
   expected to persist for a while.
+- **Identity is not semantics.** `RuntimeDType` supplies stable ABI identity,
+  spelling, and width. [#729] supplies finalization, storage, operation
+  semantics, and kernel behavior. Neither layer may duplicate the other.
+- **Existing exact integer ABIs are not reclassified as unsupported.** C
+  already has `int8_t` and `int16_t`, and the checked in-range controls use
+  them without type erasure. Phase 2 therefore selects those exact
+  `HostAbiType` variants. [#729] still owns overflow traps and per-operation
+  semantics. Reduced-float scalars are different: no exact host storage and
+  rounding path exists yet, so their former widened-double green cases are
+  rejected rather than preserved as proof artifacts.
+- **Resolution is not capability policy.** `HostTypeTerm -> ConcreteHostType`
+  preserves checked logical identity without consulting a backend.
+  `ConcreteHostType -> HostAbiType` consumes the target decision. The private
+  pre-table adapter is replaced by Table B without changing the boundary.
 - **Test semantics across the interlock:** audit tests asserting final
   correct VALUES (e.g. `f16_scalar_fraction_survives_compilation`) stay
   `#[ignore]`d through this plan - their ignore notes gain one line
@@ -596,26 +875,26 @@ boundary, pinned:
 |---|---|
 | 0 | census verified; tripwire live; regressions detectable |
 | 1 | [#699] (+[#722]'s eval half via the raise), [#682], [#704], [#705], [#715] (stub half), [#689], [#692], [#725], [#734], the [#709]-adjacent effect catch-all; [#714]/[#718] downgraded from silent-wrong to cleanly-rejected |
-| 2 | the entire FUTURE supply of the class (lint + newtype + enums) |
+| 2 | the future supply of the class (bottom vocabularies + Result decoding + exhaustive consumers + structured emission) |
 | 3 | [#697], [#698], [#705]'s gate half; gate rot as a class |
 
-## Open questions and where they get decided
+## Settled ownership and remaining phase decisions
 
 | # | question | decided in | recorded where |
 |---|---|---|---|
-| 1 | `Unsupported`: one shared type vs per-crate mirrors | DECIDED 2026-07-17: ONE shared type, defined in `chelis-types` beside the dtype_semantics module and the future capability table (whose `Rejected` cells both the checker and the backends render into it). No cycles: chelis-types sits at the workspace bottom and every producer (chelis-ir, all backends, compiler-api) already depends on it (verified against the Cargo graph). Lowering's existing error type absorbs it via `From<Unsupported>`, not replacement. Per-crate mirrors would be the scatter pattern in miniature | §C2/§C3 of this doc |
-| 2 | whether `check` should pre-report target-independent unsupported constructs | **RESOLVED** by `capability_table.md`: yes for semantic-table (A) rejections - they are target-independent type facts; target-level (B) rejections surface at build | `capability_table.md` §Derivations |
-| 3 | lint allowlist mechanics (inline justification comment vs allowlist file) - follow whatever §8.6's rule already does for exceptions | Phase 2 | lint rule spec |
+| 1 | shared error/vocabulary ownership | `Unsupported` remains in `chelis-types`; closed cross-layer identity lives in dependency-free `chelis-vocab`; per-crate mirrors are forbidden | §C2, §C4.1, §C6 |
+| 2 | whether `check` reports target-independent unsupported constructs | yes: Table A rejections are type-level facts; Table B rejections surface at build where the target is known | `capability_table.md` §Derivations |
+| 3 | source-inventory mechanics | the token/count baseline remains blocking only while typed boundaries are incomplete and is never a completion oracle | tripwire test + §C4.5 |
 | 4 | which gates survive Phase 3 as early-UX vs die | Phase 3 | §C5 rows 17-18 + gate contract |
 
-## The one-sentence summary for a reviewer
+## Contract summary
 
 Give every stage a way to say no (Result-typed emission), convert the ten
-live yes-anyway sites to §C2 diagnostics, then take the pen away: no
-wildcard arms over closed enums (lint), no raw strings on the unsupported
-path (newtype), no unwrap_or in lowering (lint + tripwire), and gates
-demoted to UX so the type system, not a one-entry allowlist, is the thing
-standing between an unsupported case and a plausible wrong number.
+live yes-anyway sites to §C2 diagnostics, then take the pen away: decode raw
+symbols and dtype IDs once into dependency-bottom closed types, exhaust those
+types at every semantic consumer, build C expressions structurally, and keep
+gates/lexical scans as UX and evidence rather than the thing standing between
+an unsupported case and a plausible wrong number.
 
 [#387]: https://github.com/Chelis-Lang/chelis/issues/387
 [#680]: https://github.com/Chelis-Lang/chelis/issues/680
@@ -656,3 +935,5 @@ standing between an unsupported case and a plausible wrong number.
 [#776]: https://github.com/Chelis-Lang/chelis/issues/776
 [#782]: https://github.com/Chelis-Lang/chelis/pull/782
 [#791]: https://github.com/Chelis-Lang/chelis/pull/791
+[#799]: https://github.com/Chelis-Lang/chelis/pull/799
+[#815]: https://github.com/Chelis-Lang/chelis/pull/815

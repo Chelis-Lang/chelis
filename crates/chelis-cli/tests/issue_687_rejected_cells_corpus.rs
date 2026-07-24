@@ -14,8 +14,8 @@
 //! - Metal: `metal_dtype_emission_and_bool_add.rs::
 //!   metal_rejects_f64_with_a_specific_diagnostic` and
 //!   `::metal_rank2_fallback_is_a_named_abort_stub`
-//! - runtime to_tensor: the abort at `chelis-runtime/src/lib.rs` (the
-//!   section C2 calibration set's third exemplar)
+//! - C-host reduced-float selection: typed build rejection before the
+//!   former widened scalar path can reach runtime
 //! - runtime int-div guard: `ws2b_numeric_identifier_divergence.rs`'s
 //!   `INT_DIV_ZERO_DIAGNOSTIC` rows (chelis#387 family)
 //!
@@ -187,6 +187,18 @@ const BUILD_REJECTION_ROWS: &[(&str, &str, &str, &[&str])] = &[
         &["unsupported:", "window", "(lowering)"],
     ),
     (
+        "c_to_tensor_narrow_dtype",
+        "def f() -> tensor[2, f16] = to_tensor([cast(2049.0, f16), cast(0.75, f16)])\n\
+         out = print(f())\n",
+        "c",
+        &[
+            "unsupported:",
+            "dtype `f16`",
+            "C host ABI selection",
+            "(codegen:c)",
+        ],
+    ),
+    (
         "hip_int64_neg",
         "def f(x: tensor[4, int64]) -> tensor[4, int64] = neg(x)\n",
         "hip",
@@ -238,28 +250,14 @@ fn metal_rank2_abort_stub_names_itself_in_the_emission() {
 // ===========================================================================
 
 /// (name, program, stderr substring of the abort).
-const RUNTIME_ABORT_ROWS: &[(&str, &str, &str)] = &[
-    (
-        // The section C2 calibration set's runtime exemplar: host-lane
-        // narrow-float literal storage aborts with the branded to_tensor
-        // message (today's loud behavior; chelis#716 tracks making the f16
-        // literal constructible, which updates this row in the same PR).
-        "to_tensor_narrow_dtype",
-        "def f() -> tensor[2, f16] = to_tensor([cast(2049.0, f16), cast(0.75, f16)])\n\
-         out = print(f())\n",
-        "unsupported: destination dtype",
-        // (chelis#730 Phase 1 migrated the runtime exemplar to the frozen
-        // branded shape; the dtype payload and the on-clause follow.)
-    ),
-    (
-        // chelis#387 family: the portable integer div-by-zero guard, with a
-        // runtime-computed divisor so nothing constant-folds it away.
-        "int_div_by_zero",
-        "def d(x: int64, y: int64, z: int64) -> int64 = trunc_div(x, sub(y, z))\n\
+const RUNTIME_ABORT_ROWS: &[(&str, &str, &str)] = &[(
+    // chelis#387 family: the portable integer div-by-zero guard, with a
+    // runtime-computed divisor so nothing constant-folds it away.
+    "int_div_by_zero",
+    "def d(x: int64, y: int64, z: int64) -> int64 = trunc_div(x, sub(y, z))\n\
          out = d(cast(7, int64), cast(5, int64), cast(5, int64))\n",
-        "integer division or remainder by zero",
-    ),
-];
+    "integer division or remainder by zero",
+)];
 
 /// Every runtime rejected cell aborts (nonzero exit) with its pinned
 /// message on stderr, and never prints a result value.

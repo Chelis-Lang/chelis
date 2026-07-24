@@ -7,6 +7,7 @@ use std::collections::{HashMap, HashSet};
 
 use chelis_deep::Span;
 use chelis_deep::ast as deep;
+use chelis_vocab::EffectKind;
 
 use crate::ast::*;
 
@@ -1448,7 +1449,10 @@ impl DesugarCtx {
             ),
             Expr::WithSeed(seed, body, _) => node_meta(
                 "handle-effect",
-                meta_with_entries(vec![("effect".to_string(), sym("random"))]),
+                meta_with_entries(vec![(
+                    "effect".to_string(),
+                    sym(EffectKind::Random.symbol()),
+                )]),
                 vec![
                     self.desugar_expr_with_scope(seed, local_fn_params),
                     self.desugar_expr_with_scope(body, local_fn_params),
@@ -1456,7 +1460,10 @@ impl DesugarCtx {
             ),
             Expr::WithDevice(device, body, _) => node_meta(
                 "handle-effect",
-                meta_with_entries(vec![("effect".to_string(), sym("resource"))]),
+                meta_with_entries(vec![(
+                    "effect".to_string(),
+                    sym(EffectKind::Resource.symbol()),
+                )]),
                 vec![
                     self.desugar_expr_with_scope(device, local_fn_params),
                     self.desugar_expr_with_scope(body, local_fn_params),

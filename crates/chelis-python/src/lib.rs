@@ -14,6 +14,7 @@ use chelis_compiler_api::schema::{
     CheckRequest, CompileRequest, CompileTarget, DecompileRequest, DesugarRequest, EvalRequest,
     SourceKind, TensorValue, ValidateMode, ValidateRequest,
 };
+use chelis_vocab::RuntimeDType;
 use libloading::Library;
 use pyo3::create_exception;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
@@ -28,6 +29,10 @@ const RUNTIME_H: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../chelis-runtime/include/chelis_runtime.h"
 ));
+const RUNTIME_DTYPE_H: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../chelis-runtime/include/chelis_runtime_dtype.h"
+));
 const BLAS_H: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../chelis-runtime/include/chelis_blas.h"
@@ -41,7 +46,7 @@ const MATH_H: &str = include_str!(concat!(
     "/../chelis-runtime/include/chelis_math.h"
 ));
 
-const CHELIS_F32: i32 = 0;
+const CHELIS_F32: i32 = RuntimeDType::F32.id();
 const CHELIS_MAX_DIM: usize = 8;
 const DLPACK_CPU_DEVICE_TYPE: i32 = 1;
 const DLPACK_ROCM_DEVICE_TYPE: i32 = 10;
@@ -762,6 +767,7 @@ fn write_generated_files_inner(
 fn write_runtime_headers_inner(root: &Path) -> Result<(), String> {
     for (name, content) in [
         ("chelis_runtime.h", RUNTIME_H),
+        ("chelis_runtime_dtype.h", RUNTIME_DTYPE_H),
         ("chelis_blas.h", BLAS_H),
         ("chelis_simd.h", SIMD_H),
         ("chelis_math.h", MATH_H),

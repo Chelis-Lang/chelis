@@ -3622,32 +3622,10 @@ impl HipEmitter {
     }
 
     fn dtype_macro(ty: &TensorType) -> &'static str {
-        match ty.precision {
-            Prim::F32 => "CHELIS_F32",
-            Prim::F64 => "CHELIS_F64",
-            Prim::Bool => "CHELIS_BOOL",
-            // WS-A4: admit narrow signed integer dtypes per spec/04-type-system.md §1.1.
-            // Element widths are honored by the runtime allocator
-            // (chelis-runtime/src/lib.rs), and i8/i16 elementwise / reduce_sum
-            // kernels are dispatched via the dtype-suffixed kernel-name path
-            // (kernel_add_i8, kernel_sum_ax0_i8_i32, …) so generated HIP
-            // source operates on the correct C++ type.
-            Prim::Int8 => "CHELIS_I8",
-            Prim::Int16 => "CHELIS_I16",
-            Prim::Int32 => "CHELIS_I32",
-            Prim::Int64 => "CHELIS_I64",
-            // WS-A3: bf16 / f16 admitted alongside the f32 family.
-            // Maps to the matching `CHELIS_BF16` / `CHELIS_F16`
-            // constants in
-            // `crates/chelis-runtime/include/chelis_runtime.h`.
-            Prim::Bf16 => "CHELIS_BF16",
-            Prim::F16 => "CHELIS_F16",
-            other => panic!(
-                "HIP backend supports f32/f64/bf16/f16/bool/int8/int16/int32/int64 \
-                 tensors today; got `{}`.",
-                other.name()
-            ),
-        }
+        ty.precision
+            .runtime_dtype()
+            .unwrap_or_else(|error| panic!("HIP backend does not support this tensor: {error}"))
+            .c_macro()
     }
 
     /// WS-A4: kernel-name suffix encoding the source-level dtype, used

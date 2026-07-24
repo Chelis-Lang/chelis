@@ -24,7 +24,7 @@
 
 use chelis_ir::host::{
     SummaryRejection, SummaryRejectionClass, SummaryRejectionDetail,
-    host_program_summary_rejections, lower_compiled_program,
+    host_program_summary_rejections, try_lower_compiled_program,
 };
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str;
@@ -39,7 +39,7 @@ fn rejections_for_source(source: &str) -> Vec<SummaryRejection> {
     let checked = check_ir_program(&deep).expect("check_ir_program");
     let checked = chelis_effects::check_program(&checked).expect("effect check");
     let checked = check_linearity(&checked).expect("linearity check");
-    let compiled = lower_compiled_program(&checked);
+    let compiled = try_lower_compiled_program(&checked).expect("checked BLAS fixture must lower");
     let host = compiled
         .host
         .expect("host lowering must produce a HostProgram");

@@ -1187,12 +1187,37 @@ These C implementations are the ground truth. The GPU backend (Phase 1) must pro
 ## 7. The Unsupported-Case Response Contract (Decided 2026-07; Implementation Tracked As chelis#730)
 
 **Status banner - read before citing.** RATIFIED and enforced for the
-censused live sites by chelis#730 Phase 1 (the Result-typed failure
-channel, the branded `unsupported:` diagnostic, and the live-site
-sweep; PR chelis#791). Residuals are per-atom noted below; the ratchets
-that make regressions unwritable ([05-UNS-4]'s gate demotion, the lint
-rule) are that plan's Phases 2-3. The delivery plan and full
-elaboration (the failure channel, the census, the ratchets) is
+censused live sites by chelis#730 Phase 1. Phase 2's implementation is complete
+in PR #799: dependency-bottom `EffectKind`/`RuntimeDType` identities,
+Result-only boundary decoders, exhaustive consumers, immediate invalid-ID
+rejection, generated Rust/C dtype agreement, the staged host-type/ABI
+boundary, and the structured C-expression AST. Phase acceptance still
+requires its authoritative oracle and fresh adversarial review. Count
+baselines and the token tripwire are supporting checks, not the authority.
+
+The implementation was explicitly re-planned on 2026-07-22 after execution
+showed that the initial source lint was neither complete nor false-positive
+free. That lint moved to PR #815; it is not part of this atom's proof. The
+final enforcement is the typed construction boundary described below.
+
+The HostType contract consumes checked type metadata, preserves named
+polymorphism, inference identity, bottom, and exact dtype, and permits only a
+resolved `ConcreteHostType` plus an authoritative target capability decision
+to produce `HostAbiType`. Codegen accepts only the ABI vocabulary. This
+contract owns failure representation; grounded dtype semantics and Table A/B
+policy remain owned by chelis#729. The current C decision selects exact
+`int8_t`/`int16_t` ABI variants because those representations already exist,
+while f16/bf16 scalar values reject at selection until chelis#729 supplies
+exact storage and rounding; an accidentally-green widened value is not a
+supported ABI cell.
+Typed C callback parameters and direct statically-known callback arguments
+cross a private callback-declarator path; general function values do not.
+Function results, stored function values, and dynamically selected callables
+return `Unsupported` before emission, and no function type maps to `void *`,
+zero, or a raw call target.
+Residuals are per-atom noted below; [05-UNS-4]'s gate demotion is that
+plan's Phase 3. The delivery plan and full elaboration (the failure
+channel, the census, the typed ratchets) is
 `spec/design/loud_unsupported.md`. Atom IDs are stable, and the current
 blockquote authorities remain normative until selected for chelis#733 Phase 1
 migration. Full revisions are attached and checked through the pinned Buoy
@@ -1202,6 +1227,13 @@ shell-side integration, not a Chelis provenance lint.
 > an op, builtin, dtype, kernel, construct, or parameter shape - it
 > SHALL respond with a diagnostic through its failure channel. No stage
 > SHALL substitute a value, type, dtype, kernel, or emission.
+
+For closed compiler/runtime vocabularies, "SHALL NOT substitute" is enforced
+by construction: raw symbols and numeric IDs are converted through a
+`Result` decoder into a no-`Unknown`, no-`Default` enum at the first boundary;
+all semantic matches are exhaustive and wildcard-free. An unknown runtime
+dtype ID must fail before sizing or buffer access. A source-text scanner or
+count allowlist is supporting evidence only and cannot satisfy [05-UNS-1].
 
 *(Enforced since chelis#730 Phase 1 for the censused sites: the
 formerly substituting encounters of chelis#682/#689/#699/#714/#715/
