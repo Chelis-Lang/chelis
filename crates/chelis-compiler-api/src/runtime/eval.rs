@@ -798,6 +798,18 @@ impl<'a> EvalContext<'a> {
                         .cloned()
                         .flatten()
                         .or_else(|| arg_type_exprs.get(index).cloned().flatten());
+                    // chelis#729 Phase 1: a tensor argument ingress-finalizes
+                    // at the param's DECLARED element dtype (the host-lane
+                    // mirror of the DAG evaluator's Load ingress). Without
+                    // this, an Int64-tagged `to_tensor` literal flows into an
+                    // int8-typed param and the arithmetic runs at the wrong
+                    // width (the chelis#718 eval-tensor cell).
+                    let arg = match (declared.as_ref().and_then(declared_tensor_prim), arg) {
+                        (Some(prim), RuntimeValue::Tensor(tensor)) => {
+                            RuntimeValue::Tensor(ingress_tensor_to_declared(tensor, prim)?)
+                        }
+                        (_, arg) => arg,
+                    };
                     self.binding_types.insert(param.clone(), declared);
                     self.bindings.insert(param, arg);
                 }

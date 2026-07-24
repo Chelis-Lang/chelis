@@ -196,6 +196,18 @@ fn c_f32_tensor_add_rounds_to_f32() {
     );
 }
 
+/// Parse the flat `data=[..]` payload at f32 width (the eval f32 tensor
+/// exit's own width per spec/05 section 8.1; parsing shortest-at-f32
+/// digits as f64 would manufacture a non-f32 value).
+fn parse_data_f32(line: &str) -> Vec<f32> {
+    let start = line.find("data=[").expect("data marker") + "data=[".len();
+    let end = start + line[start..].find(']').expect("closing bracket");
+    line[start..end]
+        .split(',')
+        .map(|s| s.trim().parse::<f32>().expect("numeric"))
+        .collect()
+}
+
 /// Parse the flat `data=[..]` payload of a printed tensor line.
 fn parse_data(line: &str) -> Vec<f64> {
     let start = line.find("data=[").expect("data marker") + "data=[".len();
@@ -235,18 +247,18 @@ fn eval_f32_tensor_tan_and_sqrt_do_narrow_to_f32() {
     // f32-representability property mechanically; the hand-rolled loop
     // below stays as the original control (controls never move).
     common::assert_elements_in_domain("f32", &line, "eval_f32_tan");
-    let values = parse_data(&line);
+    // chelis#729 Phase 1 width migration (spec/05 section 8.1's recorded
+    // note: own-width tensor digits arrive when #729 repairs the storage,
+    // which is this change): eval f32 tensor elements now render
+    // shortest-round-trip AT F32 WIDTH, so the parse-back property check
+    // reads them at f32 and the exact strings below carry f32 digits.
+    let values = parse_data_f32(&line);
     for (v, truth) in values
         .iter()
         .zip([14.10141994717172_f64, -0.1425465430742778])
     {
         assert!(
-            (*v as f32) as f64 == *v,
-            "eval f32 tensor tan must produce f32-representable values \
-             (the narrowing under test); got non-f32 {v} in: {line}"
-        );
-        assert!(
-            (v - truth).abs() < 1e-4 * truth.abs().max(1.0),
+            (f64::from(*v) - truth).abs() < 1e-4 * truth.abs().max(1.0),
             "tan value implausibly far from tan(x); got {v} in: {line}"
         );
     }
@@ -258,7 +270,7 @@ fn eval_f32_tensor_tan_and_sqrt_do_narrow_to_f32() {
     .expect("eval should run");
     common::assert_elements_in_domain("f32", &line, "eval_f32_sqrt");
     assert!(
-        line.contains("data=[1.2247449159622192, 1.7320507764816284]"),
+        line.contains("data=[1.2247449, 1.7320508]"),
         "eval f32 tensor sqrt narrows through f32 today (and is correctly \
          rounded on every platform per IEEE-754, unlike the C lane's \
          vvsqrtf - chelis#719); got: {line}"
@@ -334,8 +346,9 @@ fn eval_f32_tensor_add_rounds_to_f32() {
     // domain checker is the mechanical form of this cell's claim.
     common::assert_elements_in_domain("f32", &line, "eval_f32_tensor_add");
     assert!(
-        line.contains("0.30000001192092896"),
-        "f32 tensor add must round its result to f32; got: {line}"
+        line.contains("data=[0.3, 3.0]"),
+        "f32 tensor add must round its result to f32 (rendered at f32 \
+         width per spec/05 section 8.1); got: {line}"
     );
 }
 
@@ -353,8 +366,9 @@ fn eval_f32_tensor_div_rounds_to_f32() {
     .expect("eval should run");
     common::assert_elements_in_domain("f32", &line, "eval_f32_tensor_div");
     assert!(
-        line.contains("0.3333333432674408"),
-        "f32 tensor div must round its result to f32; got: {line}"
+        line.contains("data=[0.33333334, 0.6666667]"),
+        "f32 tensor div must round its result to f32 (rendered at f32 \
+         width per spec/05 section 8.1); got: {line}"
     );
 }
 
@@ -373,7 +387,8 @@ fn eval_f32_tensor_recip_rounds_to_f32() {
     .expect("eval should run");
     common::assert_elements_in_domain("f32", &line, "eval_f32_tensor_recip");
     assert!(
-        line.contains("0.6666666865348816"),
-        "f32 tensor recip must round its result to f32; got: {line}"
+        line.contains("data=[0.6666667, 0.33333334]"),
+        "f32 tensor recip must round its result to f32 (rendered at f32 \
+         width per spec/05 section 8.1); got: {line}"
     );
 }

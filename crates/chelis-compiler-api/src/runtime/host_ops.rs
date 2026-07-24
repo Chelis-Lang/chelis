@@ -1135,6 +1135,36 @@ pub(super) fn tensor_bool_unop(
     RuntimeTensorValue::from_wide_int("bool", Prim::Bool, tensor.value.shape.clone(), data)
 }
 
+/// Declared-tensor element dtype of a Deep type expression: `Some(prim)`
+/// exactly when the expression is a `t-tensor` whose element type is an
+/// active tensor dtype.
+pub(super) fn declared_tensor_prim(expr: &Expr) -> Option<Prim> {
+    let list = as_list(expr)?;
+    if tag(list) != Some("t-tensor") {
+        return None;
+    }
+    extract_prim_from_type_expr(expr)
+}
+
+/// Ingress-finalize a tensor value at a declared element dtype (the
+/// host-lane mirror of the DAG evaluator's Load ingress; chelis#729
+/// Phase 1). Identity when the dtypes already agree; float targets apply
+/// the dtype's rounding, integer/bool targets domain-check loudly.
+pub(super) fn ingress_tensor_to_declared(
+    tensor: RuntimeTensorValue,
+    prim: Prim,
+) -> Result<RuntimeTensorValue, String> {
+    if tensor.precision == prim {
+        return Ok(tensor);
+    }
+    let storage = chelis_types::finalize_tensor("param", prim, tensor.value.storage().to_raw())
+        .map_err(|trap| trap.to_string())?;
+    Ok(RuntimeTensorValue::new(IrTensorValue::from_storage(
+        tensor.value.shape.clone(),
+        storage,
+    )))
+}
+
 pub(super) fn expect_tensor_arg(
     args: &[RuntimeValue],
     index: usize,
