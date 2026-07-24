@@ -298,7 +298,7 @@ out = d(cast(to_tensor([7, -7]), int64), cast(to_tensor([2, 2]), int64))\n";
     let stdout = compile_and_run_emitted(build.path(), &build.path().join("inttruncdiv.c"));
     assert_eq!(
         binding_line(&stdout, "out"),
-        "out = tensor(shape=[2], data=[3.0, -3.0])",
+        "out = tensor(shape=[2], data=[3, -3])",
         "integer trunc_div must truncate toward zero (7/2=3, -7/2=-3); stdout={stdout:?}",
     );
 
@@ -306,7 +306,7 @@ out = d(cast(to_tensor([7, -7]), int64), cast(to_tensor([2, 2]), int64))\n";
     assert_eq!(
         tensor_ints(&stdout, "out"),
         tensor_ints(&eval_out, "out"),
-        "eval and C backend must agree on the VALUES of integer trunc_div (values; byte parity returns at chelis#732 Phase 2)",
+        "eval and C backend must agree on the VALUES of integer trunc_div (the byte-form assertions above are chelis#732 Phase 2's)",
     );
 }
 
@@ -324,7 +324,7 @@ out = d(cast(to_tensor([7, -7]), int64), cast(to_tensor([2, 2]), int64))\n";
     let stdout = compile_and_run_emitted(build.path(), &build.path().join("intfloordiv.c"));
     assert_eq!(
         binding_line(&stdout, "out"),
-        "out = tensor(shape=[2], data=[3.0, -4.0])",
+        "out = tensor(shape=[2], data=[3, -4])",
         "integer floor_div must round toward -inf (7/2=3, -7/2=-4); stdout={stdout:?}",
     );
 
@@ -332,7 +332,7 @@ out = d(cast(to_tensor([7, -7]), int64), cast(to_tensor([2, 2]), int64))\n";
     assert_eq!(
         tensor_ints(&stdout, "out"),
         tensor_ints(&eval_out, "out"),
-        "eval and C backend must agree on the VALUES of integer floor_div (values; byte parity returns at chelis#732 Phase 2)",
+        "eval and C backend must agree on the VALUES of integer floor_div (the byte-form assertions above are chelis#732 Phase 2's)",
     );
 }
 
@@ -684,7 +684,7 @@ out = am(to_tensor([[1.0, 9.0, 3.0], [7.0, 5.0, 6.0]]))\n";
     let stdout = compile_and_run_emitted(build.path(), &build.path().join("argmax.c"));
     assert_eq!(
         binding_line(&stdout, "out"),
-        "out = tensor(shape=[2], data=[1.0, 0.0])",
+        "out = tensor(shape=[2], data=[1, 0])",
         "argmax of row 0 is index 1, row 1 is index 0; stdout={stdout:?}",
     );
     // The reinterpreted-f32-bits signature must never appear.
@@ -697,7 +697,7 @@ out = am(to_tensor([[1.0, 9.0, 3.0], [7.0, 5.0, 6.0]]))\n";
     assert_eq!(
         tensor_ints(&stdout, "out"),
         tensor_ints(&eval_out, "out"),
-        "eval and C backend must agree on the VALUES of argmax int64 indices (#347) (values; byte parity returns at chelis#732 Phase 2)",
+        "eval and C backend must agree on the VALUES of argmax int64 indices (#347) (the byte-form assertions above are chelis#732 Phase 2's)",
     );
 }
 
@@ -711,7 +711,7 @@ out = am(to_tensor([[1.0, 9.0, 3.0], [7.0, 5.0, 6.0]]))\n";
     let stdout = compile_and_run_emitted(build.path(), &build.path().join("argmin.c"));
     assert_eq!(
         binding_line(&stdout, "out"),
-        "out = tensor(shape=[2], data=[0.0, 1.0])",
+        "out = tensor(shape=[2], data=[0, 1])",
         "argmin of row 0 is index 0, row 1 is index 1; stdout={stdout:?}",
     );
     assert!(
@@ -723,7 +723,7 @@ out = am(to_tensor([[1.0, 9.0, 3.0], [7.0, 5.0, 6.0]]))\n";
     assert_eq!(
         tensor_ints(&stdout, "out"),
         tensor_ints(&eval_out, "out"),
-        "eval and C backend must agree on the VALUES of argmin int64 indices (#347) (values; byte parity returns at chelis#732 Phase 2)",
+        "eval and C backend must agree on the VALUES of argmin int64 indices (#347) (the byte-form assertions above are chelis#732 Phase 2's)",
     );
 }
 

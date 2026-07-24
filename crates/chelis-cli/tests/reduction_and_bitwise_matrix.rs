@@ -222,9 +222,11 @@ fn int64_max_reduce_does_not_panic_the_compiler() {
         "the compiler must not panic; stderr: {stderr}"
     );
     if ok {
+        // chelis#732 Phase 2: rank-0 renders bare ([05-OBS-4]) and int64
+        // prints exact integers ([05-OBS-2]) in the compiled lane too.
         assert_eq!(
             stdout.as_deref(),
-            Some("tensor(shape=[], data=[400.0])"),
+            Some("400"),
             "if it builds, it must be correct"
         );
     }
@@ -268,13 +270,12 @@ fn eval_int64_tensor_sum_is_exact_at_2p53() {
     );
 }
 
-/// Observed today: the direct tensor print of the SAME exact sum shows
-/// ...992.0 - `case CHELIS_I64: value = (double)...` in the emitted print
-/// helper (host_emit.rs) cannot carry the value `to_list` just proved.
+/// Green since chelis#732 Phase 2 (un-ignored per the plan's B2.3): the
+/// generated print helper prints int64 elements through `long long`
+/// printf, so the direct tensor print carries the SAME exact sum `to_list`
+/// proved. (The pre-fix helper's `(double)` cast printed ...992.0,
+/// chelis#723.)
 #[test]
-#[ignore = "chelis#723: the C tensor print helper renders int64 through double; the exact \
-            sum 9007199254740993 prints as 9007199254740992.0. Run with \
-            `cargo test -p chelis-cli --test reduction_and_bitwise_matrix -- --ignored`."]
 fn c_int64_tensor_print_is_exact_above_2p53() {
     if !c_toolchain_available() {
         panic!("needs a host C toolchain");
@@ -328,40 +329,24 @@ fn int64_tensor_mean_lanes_agree() {
 // ===========================================================================
 
 /// All seven f32 reductions agree across lanes on exactly-representable
-/// values. Per-lane expected strings since chelis#732 Phase 1: eval
-/// renders the rank-0 result bare ([05-OBS-4]) and integers as integers
-/// ([05-OBS-2]) while the compiled lane keeps its pre-contract wrapper
-/// until the Phase 2 migration - the VALUES are asserted equal across
-/// lanes, and byte-identical rendering returns at Phase 2 (§C2.3).
+/// values - byte-identically since chelis#732 Phase 2 (§C2.3): both lanes
+/// render the rank-0 result bare ([05-OBS-4]) and integers as integers
+/// ([05-OBS-2]). (The Phase 1 interim carried per-lane expected strings
+/// while the compiled lane kept its pre-contract wrapper.)
 #[test]
 fn f32_reductions_agree_across_lanes() {
     if !c_toolchain_available() {
         eprintln!("skipping: no host C toolchain");
         return;
     }
-    for (op, ret, eval_expected, c_expected) in [
-        ("sum", "f32", "9.0", "tensor(shape=[], data=[9.0])"),
-        ("mean", "f32", "2.25", "tensor(shape=[], data=[2.25])"),
-        ("max_reduce", "f32", "4.5", "tensor(shape=[], data=[4.5])"),
-        ("min_reduce", "f32", "0.5", "tensor(shape=[], data=[0.5])"),
-        (
-            "prod_reduce",
-            "f32",
-            "8.4375",
-            "tensor(shape=[], data=[8.4375])",
-        ),
-        (
-            "argmax_reduce",
-            "int64",
-            "1",
-            "tensor(shape=[], data=[1.0])",
-        ),
-        (
-            "argmin_reduce",
-            "int64",
-            "3",
-            "tensor(shape=[], data=[3.0])",
-        ),
+    for (op, ret, expected) in [
+        ("sum", "f32", "9.0"),
+        ("mean", "f32", "2.25"),
+        ("max_reduce", "f32", "4.5"),
+        ("min_reduce", "f32", "0.5"),
+        ("prod_reduce", "f32", "8.4375"),
+        ("argmax_reduce", "int64", "1"),
+        ("argmin_reduce", "int64", "3"),
     ] {
         let program = format!(
             "module M.Main\n\
@@ -370,10 +355,10 @@ fn f32_reductions_agree_across_lanes() {
         );
         let eval_got = eval_first_line(&program).expect("eval");
         common::assert_elements_in_domain(ret, &eval_got, op);
-        assert_eq!(eval_got, eval_expected, "{op} (eval)");
+        assert_eq!(eval_got, expected, "{op} (eval)");
         let c_got = c_first_line(&program, &format!("red_{op}"));
         common::assert_elements_in_domain(ret, &c_got, op);
-        assert_eq!(c_got, c_expected, "{op} (C)");
+        assert_eq!(c_got, expected, "{op} (C)");
     }
 }
 
@@ -389,71 +374,58 @@ fn int64_sum_agrees_across_lanes_in_range() {
          def f(x: tensor[4, int64]) -> tensor[int64] = sum(x, 0)\n\
          out = print(f(to_tensor([cast(100, int64), cast(400, int64), \
          cast(200, int64), cast(50, int64)])))\n";
-    // chelis#732 P1 migration: eval renders the rank-0 int64 result bare
-    // ([05-OBS-4]) as an exact integer ([05-OBS-2]); the compiled lane
-    // keeps its pre-contract form until Phase 2. Same VALUE, 750, both.
+    // chelis#732 Phase 2: BOTH lanes render the rank-0 int64 result bare
+    // ([05-OBS-4]) as an exact integer ([05-OBS-2]) - byte-identical.
     assert_eq!(eval_first_line(program).expect("eval"), "750");
-    assert_eq!(
-        c_first_line(program, "i64_sum_range"),
-        "tensor(shape=[], data=[750.0])"
-    );
+    assert_eq!(c_first_line(program, "i64_sum_range"), "750");
 }
 
 /// **The Bool dtype is clean end-to-end in both lanes** - probed rather than
 /// believing either reading of the "bool storage today is 4-byte
 /// f32-encoded" comment (chelis-runtime lib.rs:144-152). Whatever the
-/// storage is, the values are right.
-/// Per-lane expected strings since chelis#732 Phase 1: eval prints bool
-/// tensor elements as true/false ([05-OBS-2], chelis#726's eval half)
-/// while the compiled lane keeps its pre-contract 1.0/0.0 form until the
-/// Phase 2 generated printer (its red cell is the observation harness's
-/// `c_bool_tensor_print_matches_to_list_exit`). Values agree; byte parity
-/// returns at Phase 2.
+/// storage is, the values are right. Since chelis#732 Phase 2 BOTH lanes
+/// print bool tensor elements as `true`/`false` ([05-OBS-2], chelis#726
+/// closed), so each row carries ONE expected string, byte-identical
+/// across lanes.
 #[test]
 fn bool_dtype_is_clean_in_both_lanes() {
-    let rows: &[(&str, &str, &str)] = &[
+    let rows: &[(&str, &str)] = &[
         (
             "module M.Main\ndef run() -> bool = and(true, not(false))\nout = print(run())\n",
-            "true",
             "true",
         ),
         (
             "module M.Main\ndef f() -> tensor[3, bool] = to_tensor([true, false, true])\nout = print(f())\n",
             "tensor(shape=[3], data=[true, false, true])",
-            "tensor(shape=[3], data=[1.0, 0.0, 1.0])",
         ),
         (
             "module M.Main\nout = print(to_list(to_tensor([true, false, true])))\n",
-            "[true, false, true]",
             "[true, false, true]",
         ),
         (
             "module M.Main\ndef f(x: tensor[3, bool]) -> tensor[3, bool] = not(x)\nout = print(f(to_tensor([true, false, true])))\n",
             "tensor(shape=[3], data=[false, true, false])",
-            "tensor(shape=[3], data=[0.0, 1.0, 0.0])",
         ),
         (
             "module M.Main\ndef run() -> int64 = cast(true, int64)\nout = print(run())\n",
-            "1",
             "1",
         ),
         (
             "module M.Main\ndef f(x: tensor[2, f32], y: tensor[2, f32]) -> tensor[2, bool] = cmplt(x, y)\nout = print(f(to_tensor([1.0, 3.0]), to_tensor([2.0, 2.0])))\n",
             "tensor(shape=[2], data=[true, false])",
-            "tensor(shape=[2], data=[1.0, 0.0])",
         ),
     ];
     let have_cc = c_toolchain_available();
-    for (i, (program, eval_expected, c_expected)) in rows.iter().enumerate() {
+    for (i, (program, expected)) in rows.iter().enumerate() {
         assert_eq!(
             eval_first_line(program).expect("eval"),
-            *eval_expected,
+            *expected,
             "bool row {i} (eval)"
         );
         if have_cc {
             assert_eq!(
                 c_first_line(program, &format!("bool_row_{i}")),
-                *c_expected,
+                *expected,
                 "bool row {i} (C)"
             );
         }

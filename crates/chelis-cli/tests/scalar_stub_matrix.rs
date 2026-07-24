@@ -330,10 +330,10 @@ fn working_f64_scalar_ops_agree_across_lanes() {
         ("abs(cast(-1.5, f64))", "1.5", "1.5", "ctl64_abs"),
         ("neg(cast(1.5, f64))", "-1.5", "-1.5", "ctl64_neg"),
         ("sqrt(cast(2.25, f64))", "1.5", "1.5", "ctl64_sqrt"),
-        ("exp(cast(0.0, f64))", "1.0", "1", "ctl64_exp"),
-        ("log(cast(1.0, f64))", "0.0", "0", "ctl64_log"),
-        ("sin(cast(0.0, f64))", "0.0", "0", "ctl64_sin"),
-        ("cos(cast(0.0, f64))", "1.0", "1", "ctl64_cos"),
+        ("exp(cast(0.0, f64))", "1.0", "1.0", "ctl64_exp"),
+        ("log(cast(1.0, f64))", "0.0", "0.0", "ctl64_log"),
+        ("sin(cast(0.0, f64))", "0.0", "0.0", "ctl64_sin"),
+        ("cos(cast(0.0, f64))", "1.0", "1.0", "ctl64_cos"),
         (
             "add(cast(1.5, f64), cast(0.25, f64))",
             "1.75",
@@ -355,7 +355,7 @@ fn working_f64_scalar_ops_agree_across_lanes() {
         (
             "div(cast(1.5, f64), cast(0.25, f64))",
             "6.0",
-            "6",
+            "6.0",
             "ctl64_div",
         ),
     ] {
@@ -515,10 +515,10 @@ fn working_f32_scalar_ops_agree_across_lanes() {
         ("abs(cast(-1.5, f32))", "1.5", "1.5", "ctl_abs"),
         ("neg(cast(1.5, f32))", "-1.5", "-1.5", "ctl_neg"),
         ("sqrt(cast(2.25, f32))", "1.5", "1.5", "ctl_sqrt"),
-        ("exp(cast(0.0, f32))", "1.0", "1", "ctl_exp"),
-        ("log(cast(1.0, f32))", "0.0", "0", "ctl_log"),
-        ("sin(cast(0.0, f32))", "0.0", "0", "ctl_sin"),
-        ("cos(cast(0.0, f32))", "1.0", "1", "ctl_cos"),
+        ("exp(cast(0.0, f32))", "1.0", "1.0", "ctl_exp"),
+        ("log(cast(1.0, f32))", "0.0", "0.0", "ctl_log"),
+        ("sin(cast(0.0, f32))", "0.0", "0.0", "ctl_sin"),
+        ("cos(cast(0.0, f32))", "1.0", "1.0", "ctl_cos"),
         (
             "add(cast(1.5, f32), cast(0.25, f32))",
             "1.75",
@@ -540,7 +540,7 @@ fn working_f32_scalar_ops_agree_across_lanes() {
         (
             "div(cast(1.5, f32), cast(0.25, f32))",
             "6.0",
-            "6",
+            "6.0",
             "ctl_div",
         ),
     ] {

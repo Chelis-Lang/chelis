@@ -1181,130 +1181,19 @@ fn eval_supports_phase3h_tensor_structural_ops() {
         ));
 }
 
-/// Interim cross-lane stdout comparator (chelis#732 Phase 1 to Phase 2).
-///
-/// The Phase 1 eval-side migration moved eval's rendering onto the
-/// [05-OBS] grammar (integer elements without `.0`, bool `true`/`false`,
-/// bare rank-0 scalars, own-width float scalars) while the compiled lane
-/// keeps its pre-contract printf forms until the Phase 2 generated
-/// printer, so byte equality between the lanes is structurally impossible
-/// for those render classes this cycle. This comparator holds the line:
-/// same line count, same binding names, and every printed VALUE token
-/// pair numerically identical (bool spellings map to 1/0; the comparison
-/// is exact f64 bit equality after parse, never a tolerance). It is
-/// shape-blind on the rank-0 wrapper by construction - exactly the render
-/// class Phase 2 reconciles - and is DELETED when Phase 2 restores the
-/// plain byte-equality assertion (chelis#732).
+/// Cross-lane stdout comparison is plain BYTE equality since chelis#732
+/// Phase 2 (section C2.3): both lanes render identical stored bits through
+/// the one frozen [05-OBS] grammar, so the Phase 1 interim value
+/// comparator that lived here is deleted as that phase promised. Any
+/// difference is a real divergence and reports as the raw diff.
 fn assert_stdout_value_parity(c_out: &[u8], eval_out: &[u8], label: &str) {
     let c_text = String::from_utf8_lossy(c_out);
     let eval_text = String::from_utf8_lossy(eval_out);
-    let c_lines: Vec<&str> = c_text.lines().collect();
-    let eval_lines: Vec<&str> = eval_text.lines().collect();
     assert_eq!(
-        c_lines.len(),
-        eval_lines.len(),
-        "[{label}] line count mismatch:\n--- c ---\n{c_text}\n--- eval ---\n{eval_text}"
+        c_text, eval_text,
+        "[{label}] compiled and eval stdout must be byte-identical \
+         (chelis#732 section C2.3)"
     );
-    // Every bracketed `marker` segment on the line, inner text.
-    let segments = |payload: &str, marker: &str| -> Vec<String> {
-        let mut out = Vec::new();
-        let mut rest = payload;
-        while let Some(start) = rest.find(marker) {
-            let inner = &rest[start + marker.len()..];
-            let end = inner.find(']').unwrap_or_else(|| {
-                panic!("[{label}] unterminated `{marker}` segment in `{payload}`")
-            });
-            out.push(inner[..end].to_string());
-            rest = &inner[end + 1..];
-        }
-        out
-    };
-    let tokens = |line: &str| -> (Option<String>, Vec<String>, Vec<f64>) {
-        let (name, payload) = match line.split_once(" = ") {
-            Some((n, p)) if !line.trim_start().starts_with('[') => {
-                (Some(n.trim().to_string()), p.trim().to_string())
-            }
-            _ => (None, line.trim().to_string()),
-        };
-        // Every data segment is tokenized and every shape segment joins
-        // the comparison (PR #792 red-team F3: a second tensor's
-        // divergence, or a shape divergence with equal data, must fail).
-        // EMPTY shape segments (`shape=[]`, the rank-0 wrapper) are
-        // dropped: the compiled lane still prints the wrapper for rank-0
-        // tensors while eval renders them bare ([05-OBS-4]) - the
-        // sanctioned interim render class; the element itself is still
-        // bit-compared below.
-        let shapes: Vec<String> = segments(&payload, "shape=[")
-            .into_iter()
-            .filter(|s| !s.trim().is_empty())
-            .collect();
-        let bodies: Vec<String> = if payload.contains("data=[") {
-            segments(&payload, "data=[")
-        } else {
-            vec![
-                payload
-                    .chars()
-                    .filter(|c| *c != '[' && *c != ']' && *c != '(' && *c != ')')
-                    .collect(),
-            ]
-        };
-        let values = bodies
-            .iter()
-            .flat_map(|body| body.split(','))
-            .map(str::trim)
-            .filter(|t| !t.is_empty() && *t != "...")
-            .map(|t| match t {
-                "true" => 1.0,
-                "false" => 0.0,
-                other => {
-                    let v: f64 = other.parse().unwrap_or_else(|e| {
-                        panic!("[{label}] non-numeric token `{other}` in `{line}`: {e}")
-                    });
-                    // Integer-syntax tokens at or above 2^53 cannot be
-                    // compared through f64: distinct exact int64 renderings
-                    // collapse to one f64 (PR #792 red-team F3). Fail loud;
-                    // such a pair needs a width-exact comparison, not this
-                    // interim helper.
-                    if !other.contains('.') && !other.contains('e') && v.abs() >= 9007199254740992.0
-                    {
-                        panic!(
-                            "[{label}] exact-int64 token `{other}` at or above 2^53 \
-                             cannot be compared through f64 in `{line}`"
-                        );
-                    }
-                    v
-                }
-            })
-            .collect();
-        (name, shapes, values)
-    };
-    for (c_line, eval_line) in c_lines.iter().zip(eval_lines.iter()) {
-        if c_line == eval_line {
-            continue;
-        }
-        let (c_name, c_shapes, c_values) = tokens(c_line);
-        let (eval_name, eval_shapes, eval_values) = tokens(eval_line);
-        assert_eq!(
-            c_name, eval_name,
-            "[{label}] binding name mismatch:\n  c:    {c_line}\n  eval: {eval_line}"
-        );
-        assert_eq!(
-            c_shapes, eval_shapes,
-            "[{label}] shape mismatch:\n  c:    {c_line}\n  eval: {eval_line}"
-        );
-        assert_eq!(
-            c_values.len(),
-            eval_values.len(),
-            "[{label}] value count mismatch:\n  c:    {c_line}\n  eval: {eval_line}"
-        );
-        for (a, b) in c_values.iter().zip(eval_values.iter()) {
-            assert_eq!(
-                a.to_bits(),
-                b.to_bits(),
-                "[{label}] value divergence:\n  c:    {c_line}\n  eval: {eval_line}"
-            );
-        }
-    }
 }
 
 #[test]
@@ -8331,10 +8220,20 @@ loss_value = loss_tail(logits, labels)
         .expect("compiled binary must run");
     assert!(run.status.success(), "compiled binary exited non-zero");
     let stdout = String::from_utf8(run.stdout).expect("utf-8 stdout");
+    // [05-OBS-4] (chelis#732 Phase 2): the rank-0 result renders as the
+    // BARE scalar - the shape=[] wrapper is not an exit form.
+    let loss_line = stdout
+        .lines()
+        .find(|l| l.starts_with("loss_value = "))
+        .unwrap_or_else(|| panic!("no loss_value root in:\n{stdout}"));
     assert!(
-        stdout.contains("loss_value = tensor(shape=[], data=["),
-        "MNIST loss tail tensor[f32] result must print as rank-0 shape=[], got:\n{stdout}"
+        !loss_line.contains("tensor("),
+        "MNIST loss tail tensor[f32] rank-0 result must render bare ([05-OBS-4]), got:\n{stdout}"
     );
+    loss_line["loss_value = ".len()..]
+        .trim()
+        .parse::<f64>()
+        .unwrap_or_else(|e| panic!("bare rank-0 payload must parse as a float: {e}\n{stdout}"));
 }
 
 /// Bucket 4b regression: `chelis check`, `chelis eval --file`, and
@@ -8657,12 +8556,13 @@ fn build_c_higher_order_scalar_fn_param_emits_wrapper() {
         run_output.status,
     );
     let stdout = String::from_utf8(run_output.stdout).expect("utf-8 stdout");
-    // `square(3) = 9`. The host emit prints `result = 9` (no decimal
-    // point for whole values).
+    // `square(3) = 9.0`: integral floats keep one fractional digit in the
+    // frozen grammar ([05-OBS-2], chelis#732 Phase 2), byte-identical to
+    // eval.
     assert_eq!(
         stdout.trim_end(),
-        "result = 9",
-        "compiled binary stdout for `apply(square, 3.0)` must equal `9`; got: {stdout:?}",
+        "result = 9.0",
+        "compiled binary stdout for `apply(square, 3.0)` must equal `9.0`; got: {stdout:?}",
     );
 }
 
@@ -9173,63 +9073,8 @@ fn build_c_call_fresh_result_does_not_over_retain_under_valgrind() {
     );
 }
 
-// ===========================================================================
-// RT792 probes (PR #792 fresh-context red team, adopted): the interim
-// stdout comparator's former blind spots, now locked as loud failures.
-// The red team's originals demonstrated the holes; these assert the
-// tightened behavior.
-// ===========================================================================
-
-/// Distinct stored int64 values above 2^53 collapse to one f64 under a
-/// numeric parse, so the comparator refuses exact-int64 tokens in that
-/// range outright.
-#[test]
-#[should_panic(expected = "cannot be compared through f64")]
-fn rt792_stdout_parity_rejects_int64_tokens_above_2p53() {
-    assert_stdout_value_parity(
-        b"out = tensor(shape=[1], data=[9007199254740992.0])",
-        b"out = tensor(shape=[1], data=[9007199254740993])",
-        "rt792-int64-reject",
-    );
-}
-
-/// A value divergence in a SECOND tensor on the same line is detected:
-/// every `data=[..]` segment is tokenized.
-#[test]
-#[should_panic(expected = "value divergence")]
-fn rt792_stdout_parity_detects_second_tensor_divergence() {
-    assert_stdout_value_parity(
-        b"out = [tensor(shape=[1], data=[1.0]), tensor(shape=[1], data=[2.0])]",
-        b"out = [tensor(shape=[1], data=[1.0]), tensor(shape=[1], data=[999.0])]",
-        "rt792-second-tensor",
-    );
-}
-
-/// A shape divergence with equal data is detected.
-#[test]
-#[should_panic(expected = "shape mismatch")]
-fn rt792_stdout_parity_detects_shape_divergence() {
-    assert_stdout_value_parity(
-        b"out = tensor(shape=[2, 2], data=[1.0, 2.0, 3.0, 4.0])",
-        b"out = tensor(shape=[4], data=[1.0, 2.0, 3.0, 4.0])",
-        "rt792-shape",
-    );
-}
-
-/// Positive control: equal values across multiple segments in the
-/// migrated int-vs-float render forms are accepted, shapes matching;
-/// the rank-0 wrapper class (eval bare vs the compiled lane's
-/// `shape=[]` wrapper) stays accepted with its element bit-compared.
-#[test]
-fn rt792_stdout_parity_accepts_equal_values_across_segments() {
-    assert_stdout_value_parity(
-        b"out = [tensor(shape=[1], data=[1.0]), tensor(shape=[1], data=[2.0])]",
-        b"out = [tensor(shape=[1], data=[1]), tensor(shape=[1], data=[2])]",
-        "rt792-accept",
-    );
-    assert_stdout_value_parity(
-        b"tr = tensor(shape=[], data=[5.0])",
-        b"tr = 5.0",
-        "rt792-accept-rank0",
-    );
-}
+// The RT792 probes for the Phase 1 interim stdout comparator were
+// retired with the comparator itself (chelis#732 Phase 2): byte equality
+// reports every one of their divergence classes as a raw diff by
+// construction, and the accept-classes (int-vs-float renders, the rank-0
+// wrapper) no longer exist because the lanes render identically.

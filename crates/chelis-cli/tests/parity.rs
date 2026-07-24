@@ -24,13 +24,12 @@
 //! (`spec/design/dtype_semantics.md` §C4.5, to be authored into spec/05
 //! [05-OBS-3]) once it exists, never from a blanket re-parse.
 //!
-//! chelis#732 Phase 1 interim: the eval lane now renders in the ratified
-//! [05-OBS] grammar while the compiled lane keeps its pre-contract forms
-//! until Phase 2's generated printer, so a differing line pair is accepted
-//! ONLY through `migrated_render_equivalent` - same binding name, every
-//! value token BIT-IDENTICAL after parse (never a tolerance). Phase 2
-//! deletes that equivalence and restores plain byte equality on every
-//! line (its release valve for legitimate float-formatting differences).
+//! chelis#732 Phase 2 restored plain BYTE equality on every line: both
+//! lanes now render through the one frozen [05-OBS] grammar (eval via
+//! `format_element`, compiled C via the generated print helper and
+//! `chelis_format_shortest`), so the Phase 1 interim value-equivalence
+//! (`migrated_render_equivalent`) is deleted as that phase promised. Any
+//! line diff is a real divergence and reports raw.
 //!
 //! Examples that compile to an object only (no `main`) — i.e. files that
 //! define functions but never invoke them at top level — produce empty eval
@@ -277,129 +276,25 @@ fn assert_parity(eval_out: &[u8], c_out: &[u8], label: &str) -> Result<(), Strin
     }
 
     for (i, (e, c)) in eval_lines.iter().zip(c_lines.iter()).enumerate() {
-        if e != c && !migrated_render_equivalent(e, c) {
+        if e != c {
             return Err(format!(
-                "[{label}] line {i} differs between lanes (byte-exact contract; \
-                 the only sanctioned exception is the chelis#732 Phase 1 \
-                 grammar delta, which requires bit-identical values - see the \
-                 module docs):\n  eval: {e}\n  c:    {c}",
+                "[{label}] line {i} differs between lanes (byte-exact contract, \
+                 chelis#732 section C2.3; no render equivalence exists since \
+                 Phase 2):\n  eval: {e}\n  c:    {c}",
             ));
         }
     }
     Ok(())
 }
 
-/// The chelis#732 Phase 1 interim line equivalence: the eval lane now
-/// renders in the ratified [05-OBS] grammar (integer elements without
-/// `.0`, bool `true`/`false`, bare rank-0 scalars, own-width float digits)
-/// while the compiled lane keeps its pre-contract printf forms until the
-/// Phase 2 generated printer. Two differing lines are equivalent ONLY when
-/// the binding name matches and every printed value token pair is
-/// BIT-IDENTICAL after parse (bool spellings map to 1/0). This is not a
-/// tolerance - a real value divergence still fails - and the whole
-/// function is deleted at Phase 2 when byte equality returns.
-fn migrated_render_equivalent(eval_line: &str, c_line: &str) -> bool {
-    fn split_named(line: &str) -> (Option<&str>, &str) {
-        match line.split_once(" = ") {
-            Some((name, payload)) if !line.trim_start().starts_with('[') => {
-                (Some(name.trim()), payload.trim())
-            }
-            _ => (None, line.trim()),
-        }
-    }
-    /// One value token, or `None` when the token cannot be compared. An
-    /// integer-SYNTAX token at or above 2^53 refuses the f64 parse: two
-    /// distinct exact int64 renderings in that range collapse to one f64,
-    /// so "bit-identical after parse" would pass a real divergence
-    /// (PR #792 red-team F3). Refusing makes the pair non-equivalent and
-    /// the parity harness reports the raw line diff.
-    fn token_value(t: &str) -> Option<f64> {
-        match t {
-            "true" => Some(1.0),
-            "false" => Some(0.0),
-            other => {
-                let v: f64 = other.parse().ok()?;
-                if !other.contains('.') && !other.contains('e') && v.abs() >= 9007199254740992.0 {
-                    return None;
-                }
-                Some(v)
-            }
-        }
-    }
-    /// Every bracketed segment named `marker` on the line, inner text.
-    fn segments(payload: &str, marker: &str) -> Option<Vec<String>> {
-        let mut out = Vec::new();
-        let mut rest = payload;
-        while let Some(start) = rest.find(marker) {
-            let inner = &rest[start + marker.len()..];
-            let end = inner.find(']')?;
-            out.push(inner[..end].to_string());
-            rest = &inner[end + 1..];
-        }
-        Some(out)
-    }
-    /// All value tokens: every `data=[..]` segment when tensors are
-    /// present (PR #792 red-team F3: a second tensor's divergence must not
-    /// escape), the whole bracket-stripped payload otherwise.
-    fn value_tokens(payload: &str) -> Option<Vec<f64>> {
-        let bodies: Vec<String> = if payload.contains("data=[") {
-            segments(payload, "data=[")?
-        } else {
-            vec![
-                payload
-                    .chars()
-                    .filter(|ch| !matches!(ch, '[' | ']' | '(' | ')'))
-                    .collect(),
-            ]
-        };
-        bodies
-            .iter()
-            .flat_map(|body| body.split(','))
-            .map(str::trim)
-            .filter(|t| !t.is_empty() && *t != "...")
-            .map(token_value)
-            .collect()
-    }
-    let (eval_name, eval_payload) = split_named(eval_line);
-    let (c_name, c_payload) = split_named(c_line);
-    if eval_name != c_name {
-        return false;
-    }
-    // Tensor SHAPE tokens are part of the value (PR #792 red-team F3): a
-    // shape divergence with equal data must not pass. EMPTY shape
-    // segments (`shape=[]`, the rank-0 wrapper) are dropped first: the
-    // compiled lane still prints the wrapper for rank-0 tensors while
-    // eval renders them bare ([05-OBS-4]) - exactly the sanctioned
-    // interim render class, and its single element is still compared at
-    // the bit level below.
-    let nonempty = |shapes: Vec<String>| -> Vec<String> {
-        shapes
-            .into_iter()
-            .filter(|s| !s.trim().is_empty())
-            .collect()
-    };
-    match (
-        segments(eval_payload, "shape=["),
-        segments(c_payload, "shape=["),
-    ) {
-        (Some(eval_shapes), Some(c_shapes)) => {
-            if nonempty(eval_shapes) != nonempty(c_shapes) {
-                return false;
-            }
-        }
-        _ => return false,
-    }
-    match (value_tokens(eval_payload), value_tokens(c_payload)) {
-        (Some(eval_values), Some(c_values)) => {
-            eval_values.len() == c_values.len()
-                && eval_values
-                    .iter()
-                    .zip(&c_values)
-                    .all(|(a, b)| a.to_bits() == b.to_bits())
-        }
-        _ => false,
-    }
-}
+// The chelis#732 Phase 1 interim line equivalence
+// (`migrated_render_equivalent`) lived here while the compiled lane kept
+// its pre-contract printf forms; Phase 2's generated printer restored
+// byte equality on every line and the function is deleted as Phase 1
+// promised. Its red-team-hardened blind-spot behaviors (exact-int64
+// refusal above 2^53, second-tensor and shape divergences, the rank-0
+// wrapper class) are now simply line diffs, which byte equality reports
+// by construction.
 
 // -----------------------------------------------------------------------------
 // Shared per-file driver
@@ -639,91 +534,4 @@ fn parity_comparator_rejects_non_tensor_diff() {
     let a = b"len=4, items=4, shape=2x2\n";
     let b = b"len=5, items=4, shape=2x2\n";
     assert!(assert_parity(a, b, "byte-diff").is_err());
-}
-
-// ===========================================================================
-// RT792 probes (PR #792 fresh-context red team, adopted): the interim
-// equivalence's former blind spots, now locked as rejections. The red
-// team's originals demonstrated the holes; these assert the tightened
-// behavior.
-// ===========================================================================
-
-/// Two DIFFERENT stored int64 values above 2^53 (eval's exact digits vs
-/// C's through-double digits) parse to the SAME f64, so the equivalence
-/// REFUSES integer-syntax tokens in that range instead of comparing
-/// them; the pair reports as a raw line diff.
-#[test]
-fn rt792_migrated_equivalence_rejects_distinct_int64_above_2p53() {
-    assert!(!migrated_render_equivalent(
-        "out = tensor(shape=[1], data=[9007199254740993])",
-        "out = tensor(shape=[1], data=[9007199254740992.0])",
-    ));
-    // The refusal is syntactic, not value-based: even a WOULD-BE-equal
-    // pair refuses (byte-equal lines never reach the equivalence - the
-    // comparator short-circuits on equality first).
-    assert!(!migrated_render_equivalent(
-        "out = tensor(shape=[1], data=[9007199254740993])",
-        "out = tensor(shape=[1], data=[9007199254740993.0])",
-    ));
-}
-
-/// A value divergence in a SECOND tensor on the same line (a list of
-/// tensors) is detected: every `data=[..]` segment is tokenized.
-#[test]
-fn rt792_migrated_equivalence_detects_second_tensor_divergence() {
-    assert!(!migrated_render_equivalent(
-        "out = [tensor(shape=[1], data=[1.0]), tensor(shape=[1], data=[2.0])]",
-        "out = [tensor(shape=[1], data=[1.0]), tensor(shape=[1], data=[999.0])]",
-    ));
-    // Positive control: equal values across BOTH segments (int-vs-float
-    // render forms) are equivalent.
-    assert!(migrated_render_equivalent(
-        "out = [tensor(shape=[1], data=[1]), tensor(shape=[1], data=[2])]",
-        "out = [tensor(shape=[1], data=[1.0]), tensor(shape=[1], data=[2.0])]",
-    ));
-}
-
-/// A cross-lane SHAPE divergence with equal data is detected: shape
-/// segments are compared alongside the values.
-#[test]
-fn rt792_migrated_equivalence_detects_shape_divergence() {
-    assert!(!migrated_render_equivalent(
-        "out = tensor(shape=[2, 2], data=[1.0, 2.0, 3.0, 4.0])",
-        "out = tensor(shape=[4], data=[1.0, 2.0, 3.0, 4.0])",
-    ));
-    // Positive control: same shape, int-vs-float data forms.
-    assert!(migrated_render_equivalent(
-        "out = tensor(shape=[2, 2], data=[1, 2, 3, 4])",
-        "out = tensor(shape=[2, 2], data=[1.0, 2.0, 3.0, 4.0])",
-    ));
-    // Positive control: the rank-0 wrapper class (eval bare vs the
-    // compiled lane's `shape=[]` wrapper) is the sanctioned interim
-    // delta and stays equivalent - with its element still bit-compared.
-    assert!(migrated_render_equivalent(
-        "tr = 5.0",
-        "tr = tensor(shape=[], data=[5.0])",
-    ));
-    assert!(!migrated_render_equivalent(
-        "tr = 5.0",
-        "tr = tensor(shape=[], data=[5.5])",
-    ));
-}
-
-/// Control (red-team authored): a first-tensor value divergence IS
-/// detected.
-#[test]
-fn rt792_migrated_equivalence_detects_first_tensor_divergence() {
-    assert!(!migrated_render_equivalent(
-        "out = tensor(shape=[1], data=[1.0])",
-        "out = tensor(shape=[1], data=[1.5])",
-    ));
-}
-
-/// Control (red-team authored): a binding-name mismatch IS detected.
-#[test]
-fn rt792_migrated_equivalence_detects_name_mismatch() {
-    assert!(!migrated_render_equivalent(
-        "a = tensor(shape=[1], data=[1.0])",
-        "b = tensor(shape=[1], data=[1.0])",
-    ));
 }
