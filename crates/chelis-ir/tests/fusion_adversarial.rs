@@ -51,9 +51,12 @@ fn assert_close(a: &[TensorValue], b: &[TensorValue], tol: f64, label: &str) {
 fn adv1_long_chain_5_ops() {
     let mut dag = Dag::new();
     let x = load(&mut dag, "x", vec_f32(4));
-    let c = dag.add_node(RiscOp::synth_const(vec_f32(4).precision, 0.1),
-            vec![],
-            vec_f32(4), None);
+    let c = dag.add_node(
+        RiscOp::synth_const(vec_f32(4).precision, 0.1),
+        vec![],
+        vec_f32(4),
+        None,
+    );
     let a = dag.add_node(RiscOp::Add, vec![x, c], vec_f32(4), None);
     let b = dag.add_node(RiscOp::Neg, vec![a], vec_f32(4), None);
     let e = dag.add_node(RiscOp::Exp, vec![b], vec_f32(4), None);
@@ -130,9 +133,12 @@ fn adv2_mixed_unary_binary_chain() {
 fn adv3_external_input_used_by_multiple_steps() {
     let mut dag = Dag::new();
     let x = load(&mut dag, "x", vec_f32(4));
-    let c = dag.add_node(RiscOp::synth_const(vec_f32(4).precision, 2.0),
-            vec![],
-            vec_f32(4), None);
+    let c = dag.add_node(
+        RiscOp::synth_const(vec_f32(4).precision, 2.0),
+        vec![],
+        vec_f32(4),
+        None,
+    );
     // add(x, c) → mul(result, c)
     // Both steps use 'c' as an external input
     let a = dag.add_node(RiscOp::Add, vec![x, c], vec_f32(4), None);
@@ -395,9 +401,12 @@ fn adv9_cmplt_in_fused_chain_produces_float() {
 fn adv10_maxelem_in_fused_chain() {
     let mut dag = Dag::new();
     let x = load(&mut dag, "x", vec_f32(4));
-    let zero = dag.add_node(RiscOp::synth_const(vec_f32(4).precision, 0.0),
-            vec![],
-            vec_f32(4), None);
+    let zero = dag.add_node(
+        RiscOp::synth_const(vec_f32(4).precision, 0.0),
+        vec![],
+        vec_f32(4),
+        None,
+    );
     // relu = max(x, 0)
     let relu = dag.add_node(RiscOp::MaxElem, vec![x, zero], vec_f32(4), None);
     let result = dag.add_node(RiscOp::Neg, vec![relu], vec_f32(4), None);

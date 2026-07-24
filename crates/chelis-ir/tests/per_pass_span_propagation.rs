@@ -114,14 +114,14 @@ fn dce_preserves_span_id_and_merged_spans() {
     let mut dag = Dag::new();
     let a = dag.add_node(
         RiscOp::synth_const(scalar_f32().precision, 1.0),
-            vec![],
-            scalar_f32(),
+        vec![],
+        scalar_f32(),
         Some("dce.a".into()),
     );
     let b = dag.add_node(
         RiscOp::synth_const(scalar_f32().precision, 2.0),
-            vec![],
-            scalar_f32(),
+        vec![],
+        scalar_f32(),
         Some("dce.b".into()),
     );
     let live = dag.add_node(
@@ -135,8 +135,8 @@ fn dce_preserves_span_id_and_merged_spans() {
     // Add a dead node with its own span — it should be dropped entirely.
     let _dead = dag.add_node(
         RiscOp::synth_const(scalar_f32().precision, 99.0),
-            vec![],
-            scalar_f32(),
+        vec![],
+        scalar_f32(),
         Some("dce.dead".into()),
     );
     dag.add_root(live);
@@ -176,9 +176,12 @@ fn dce_preserves_span_id_and_merged_spans() {
 #[test]
 fn dce_does_not_fabricate_spans() {
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::synth_const(scalar_f32().precision, 1.0),
-            vec![],
-            scalar_f32(), None);
+    let a = dag.add_node(
+        RiscOp::synth_const(scalar_f32().precision, 1.0),
+        vec![],
+        scalar_f32(),
+        None,
+    );
     let live = dag.add_node(RiscOp::Neg, vec![a], scalar_f32(), None);
     dag.add_root(live);
 
@@ -206,14 +209,14 @@ fn verify_does_not_mutate_spans() {
     let mut dag = Dag::new();
     let a = dag.add_node(
         RiscOp::synth_const(scalar_f32().precision, 1.0),
-            vec![],
-            scalar_f32(),
+        vec![],
+        scalar_f32(),
         Some("verify.a".into()),
     );
     let b = dag.add_node(
         RiscOp::synth_const(scalar_f32().precision, 2.0),
-            vec![],
-            scalar_f32(),
+        vec![],
+        scalar_f32(),
         Some("verify.b".into()),
     );
     let sum = dag.add_node(
@@ -253,14 +256,14 @@ fn eval_does_not_mutate_spans() {
     let mut dag = Dag::new();
     let a = dag.add_node(
         RiscOp::synth_const(scalar_f32().precision, 3.0),
-            vec![],
-            scalar_f32(),
+        vec![],
+        scalar_f32(),
         Some("eval.a".into()),
     );
     let b = dag.add_node(
         RiscOp::synth_const(scalar_f32().precision, 4.0),
-            vec![],
-            scalar_f32(),
+        vec![],
+        scalar_f32(),
         Some("eval.b".into()),
     );
     let sum = dag.add_node(
@@ -306,14 +309,14 @@ fn constant_fold_inherits_op_span_and_merges_operands() {
     // 2 + 3 with three distinct spans on (literal, literal, op).
     let lit_a = dag.add_node(
         RiscOp::synth_const(scalar_f32().precision, 2.0),
-            vec![],
-            scalar_f32(),
+        vec![],
+        scalar_f32(),
         Some("lit.a".into()),
     );
     let lit_b = dag.add_node(
         RiscOp::synth_const(scalar_f32().precision, 3.0),
-            vec![],
-            scalar_f32(),
+        vec![],
+        scalar_f32(),
         Some("lit.b".into()),
     );
     let op = dag.add_node(
@@ -355,14 +358,14 @@ fn constant_fold_dedups_operand_span_matching_op_span() {
     // merged_spans should be empty (canonical-no-op dedup).
     let a = dag.add_node(
         RiscOp::synth_const(scalar_f32().precision, 1.0),
-            vec![],
-            scalar_f32(),
+        vec![],
+        scalar_f32(),
         Some("shared".into()),
     );
     let b = dag.add_node(
         RiscOp::synth_const(scalar_f32().precision, 2.0),
-            vec![],
-            scalar_f32(),
+        vec![],
+        scalar_f32(),
         Some("shared".into()),
     );
     let op = dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), Some("shared".into()));
@@ -386,8 +389,8 @@ fn constant_fold_unary_merges_operand_span() {
     let mut dag = Dag::new();
     let lit = dag.add_node(
         RiscOp::synth_const(scalar_f32().precision, 5.0),
-            vec![],
-            scalar_f32(),
+        vec![],
+        scalar_f32(),
         Some("u.lit".into()),
     );
     let op = dag.add_node(RiscOp::Neg, vec![lit], scalar_f32(), Some("u.neg".into()));
@@ -396,7 +399,9 @@ fn constant_fold_unary_merges_operand_span() {
     optimize::constant_fold(&mut dag);
 
     let folded = dag.get(op).expect("op node exists");
-    assert!(matches!(folded.op, RiscOp::Const { value } if (value.as_f64_lossy() + 5.0).abs() < f64::EPSILON));
+    assert!(
+        matches!(folded.op, RiscOp::Const { value } if (value.as_f64_lossy() + 5.0).abs() < f64::EPSILON)
+    );
     assert_eq!(folded.span_id.as_deref(), Some("u.neg"));
     assert_eq!(folded.merged_spans, vec!["u.lit".to_string()]);
 }
@@ -409,15 +414,15 @@ fn constant_fold_propagates_operand_merged_spans() {
     let mut dag = Dag::new();
     let lit_a = dag.add_node(
         RiscOp::synth_const(scalar_f32().precision, 1.0),
-            vec![],
-            scalar_f32(),
+        vec![],
+        scalar_f32(),
         Some("lit.a".into()),
     );
     dag.node_mut(lit_a).unwrap().merged_spans = vec!["lit.a.alias".into()];
     let lit_b = dag.add_node(
         RiscOp::synth_const(scalar_f32().precision, 2.0),
-            vec![],
-            scalar_f32(),
+        vec![],
+        scalar_f32(),
         Some("lit.b".into()),
     );
     let op = dag.add_node(
@@ -446,12 +451,18 @@ fn constant_fold_propagates_operand_merged_spans() {
 #[test]
 fn constant_fold_does_not_fabricate_spans() {
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::synth_const(scalar_f32().precision, 1.0),
-            vec![],
-            scalar_f32(), None);
-    let b = dag.add_node(RiscOp::synth_const(scalar_f32().precision, 2.0),
-            vec![],
-            scalar_f32(), None);
+    let a = dag.add_node(
+        RiscOp::synth_const(scalar_f32().precision, 1.0),
+        vec![],
+        scalar_f32(),
+        None,
+    );
+    let b = dag.add_node(
+        RiscOp::synth_const(scalar_f32().precision, 2.0),
+        vec![],
+        scalar_f32(),
+        None,
+    );
     let op = dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
     dag.add_root(op);
 
@@ -475,14 +486,14 @@ fn cse_merges_duplicate_span_into_survivor() {
     let mut dag = Dag::new();
     let a = dag.add_node(
         RiscOp::synth_const(scalar_f32().precision, 1.0),
-            vec![],
-            scalar_f32(),
+        vec![],
+        scalar_f32(),
         Some("cse.first".into()),
     );
     let b = dag.add_node(
         RiscOp::synth_const(scalar_f32().precision, 1.0),
-            vec![],
-            scalar_f32(),
+        vec![],
+        scalar_f32(),
         Some("cse.dup".into()),
     );
     let sum = dag.add_node(
@@ -530,14 +541,14 @@ fn cse_propagates_duplicate_merged_spans() {
     let mut dag = Dag::new();
     let a = dag.add_node(
         RiscOp::synth_const(scalar_f32().precision, 7.0),
-            vec![],
-            scalar_f32(),
+        vec![],
+        scalar_f32(),
         Some("cse.first".into()),
     );
     let b = dag.add_node(
         RiscOp::synth_const(scalar_f32().precision, 7.0),
-            vec![],
-            scalar_f32(),
+        vec![],
+        scalar_f32(),
         Some("cse.dup".into()),
     );
     // Stamp pre-existing merged_spans on the duplicate.
@@ -575,15 +586,15 @@ fn cse_preserves_survivor_merged_spans() {
     let mut dag = Dag::new();
     let a = dag.add_node(
         RiscOp::synth_const(scalar_f32().precision, 5.0),
-            vec![],
-            scalar_f32(),
+        vec![],
+        scalar_f32(),
         Some("cse.first".into()),
     );
     dag.node_mut(a).unwrap().merged_spans = vec!["cse.first.alias".into()];
     let b = dag.add_node(
         RiscOp::synth_const(scalar_f32().precision, 5.0),
-            vec![],
-            scalar_f32(),
+        vec![],
+        scalar_f32(),
         Some("cse.dup".into()),
     );
     let sum = dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
@@ -605,12 +616,18 @@ fn cse_preserves_survivor_merged_spans() {
 #[test]
 fn cse_does_not_fabricate_spans() {
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::synth_const(scalar_f32().precision, 1.0),
-            vec![],
-            scalar_f32(), None);
-    let b = dag.add_node(RiscOp::synth_const(scalar_f32().precision, 1.0),
-            vec![],
-            scalar_f32(), None);
+    let a = dag.add_node(
+        RiscOp::synth_const(scalar_f32().precision, 1.0),
+        vec![],
+        scalar_f32(),
+        None,
+    );
+    let b = dag.add_node(
+        RiscOp::synth_const(scalar_f32().precision, 1.0),
+        vec![],
+        scalar_f32(),
+        None,
+    );
     let sum = dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
     dag.add_root(sum);
 
@@ -638,9 +655,12 @@ fn cse_does_not_fabricate_spans() {
 #[test]
 fn tier2_sub_nodes_inherit_parent_span() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::synth_const(scalar_f32().precision, 0.5),
-            vec![],
-            scalar_f32(), None);
+    let x = dag.add_node(
+        RiscOp::synth_const(scalar_f32().precision, 0.5),
+        vec![],
+        scalar_f32(),
+        None,
+    );
     let result = tier2::lower_sigmoid(&mut dag, x, &scalar_f32(), Some("sigmoid.expr"));
 
     // The operand const has no span. The sub-nodes are Neg, Exp, Add,
@@ -679,12 +699,18 @@ fn tier2_sub_nodes_inherit_parent_span() {
 #[test]
 fn tier2_lower_div_synthesized_node_inherits_parent_span() {
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::synth_const(scalar_f32().precision, 6.0),
-            vec![],
-            scalar_f32(), None);
-    let b = dag.add_node(RiscOp::synth_const(scalar_f32().precision, 3.0),
-            vec![],
-            scalar_f32(), None);
+    let a = dag.add_node(
+        RiscOp::synth_const(scalar_f32().precision, 6.0),
+        vec![],
+        scalar_f32(),
+        None,
+    );
+    let b = dag.add_node(
+        RiscOp::synth_const(scalar_f32().precision, 3.0),
+        vec![],
+        scalar_f32(),
+        None,
+    );
     let result = tier2::lower_div(&mut dag, a, b, &scalar_f32(), Some("div.expr"));
 
     let node = dag.get(result).unwrap();
@@ -702,9 +728,12 @@ fn tier2_lower_div_synthesized_node_inherits_parent_span() {
 #[test]
 fn tier2_sub_nodes_use_synthesized_marker_when_parent_has_no_span() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::synth_const(scalar_f32().precision, 1.0),
-            vec![],
-            scalar_f32(), None);
+    let x = dag.add_node(
+        RiscOp::synth_const(scalar_f32().precision, 1.0),
+        vec![],
+        scalar_f32(),
+        None,
+    );
     // No parent span — sub-nodes should get __synthesized_tier2__.
     let _ = tier2::lower_relu(&mut dag, x, &scalar_f32(), None);
 
@@ -737,12 +766,18 @@ fn tier2_sub_nodes_use_synthesized_marker_when_parent_has_no_span() {
 #[test]
 fn tier2_lower_sub_inherits_parent_span() {
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::synth_const(scalar_f32().precision, 5.0),
-            vec![],
-            scalar_f32(), None);
-    let b = dag.add_node(RiscOp::synth_const(scalar_f32().precision, 3.0),
-            vec![],
-            scalar_f32(), None);
+    let a = dag.add_node(
+        RiscOp::synth_const(scalar_f32().precision, 5.0),
+        vec![],
+        scalar_f32(),
+        None,
+    );
+    let b = dag.add_node(
+        RiscOp::synth_const(scalar_f32().precision, 3.0),
+        vec![],
+        scalar_f32(),
+        None,
+    );
     // sub(a,b) = neg(b) + add(a, neg_b). Two synthesized nodes.
     let _ = tier2::lower_sub(&mut dag, a, b, &scalar_f32(), Some("sub.expr"));
     for node in dag.nodes() {
@@ -1116,14 +1151,14 @@ fn fusion_aggregates_contributors_spans() {
     let mut dag = Dag::new();
     let a = dag.add_node(
         RiscOp::synth_const(vec_f32(4).precision, 1.0),
-            vec![],
-            vec_f32(4),
+        vec![],
+        vec_f32(4),
         Some("fuse.a".into()),
     );
     let b = dag.add_node(
         RiscOp::synth_const(vec_f32(4).precision, 2.0),
-            vec![],
-            vec_f32(4),
+        vec![],
+        vec_f32(4),
         Some("fuse.b".into()),
     );
     // Three ops in chain: Add → Neg → Exp, each with its own span.
@@ -1165,14 +1200,14 @@ fn fusion_propagates_contributor_merged_spans() {
     let mut dag = Dag::new();
     let a = dag.add_node(
         RiscOp::synth_const(vec_f32(4).precision, 1.0),
-            vec![],
-            vec_f32(4),
+        vec![],
+        vec_f32(4),
         Some("fuse.a".into()),
     );
     let b = dag.add_node(
         RiscOp::synth_const(vec_f32(4).precision, 2.0),
-            vec![],
-            vec_f32(4),
+        vec![],
+        vec_f32(4),
         Some("fuse.b".into()),
     );
     let add = dag.add_node(
@@ -1243,12 +1278,18 @@ fn fusion_preserves_unfused_node_spans() {
 #[test]
 fn fusion_does_not_fabricate_spans() {
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::synth_const(vec_f32(4).precision, 1.0),
-            vec![],
-            vec_f32(4), None);
-    let b = dag.add_node(RiscOp::synth_const(vec_f32(4).precision, 2.0),
-            vec![],
-            vec_f32(4), None);
+    let a = dag.add_node(
+        RiscOp::synth_const(vec_f32(4).precision, 1.0),
+        vec![],
+        vec_f32(4),
+        None,
+    );
+    let b = dag.add_node(
+        RiscOp::synth_const(vec_f32(4).precision, 2.0),
+        vec![],
+        vec_f32(4),
+        None,
+    );
     let add = dag.add_node(RiscOp::Add, vec![a, b], vec_f32(4), None);
     let neg = dag.add_node(RiscOp::Neg, vec![add], vec_f32(4), None);
     dag.add_root(neg);
@@ -1276,8 +1317,8 @@ fn dce_with_remap_preserves_spans() {
     let mut dag = Dag::new();
     let a = dag.add_node(
         RiscOp::synth_const(scalar_f32().precision, 1.0),
-            vec![],
-            scalar_f32(),
+        vec![],
+        scalar_f32(),
         Some("dcer.a".into()),
     );
     let live = dag.add_node(RiscOp::Neg, vec![a], scalar_f32(), Some("dcer.live".into()));

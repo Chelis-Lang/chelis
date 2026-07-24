@@ -693,7 +693,12 @@ fn ws2_emit_const_f16_bf16_use_uint16_bit_pattern_not_msl_kernel_types() {
 
     fn build_const_root_dag(prec: Prim, value: f64) -> Dag {
         let mut dag = Dag::new();
-        let c = dag.add_node(RiscOp::synth_const(prec, value), vec![], vec_prec(4, prec), None);
+        let c = dag.add_node(
+            RiscOp::synth_const(prec, value),
+            vec![],
+            vec_prec(4, prec),
+            None,
+        );
         let stored = dag.add_node(
             RiscOp::Store { name: "out".into() },
             vec![c],
@@ -806,8 +811,8 @@ fn ws2_emit_const_f32_integer_bool_paths_unchanged() {
     let mut f32_dag = Dag::new();
     let c = f32_dag.add_node(
         RiscOp::synth_const(vec_prec(4, Prim::F32).precision, 2.5),
-            vec![],
-            vec_prec(4, Prim::F32),
+        vec![],
+        vec_prec(4, Prim::F32),
         None,
     );
     let stored = f32_dag.add_node(
@@ -835,8 +840,8 @@ fn ws2_emit_const_f32_integer_bool_paths_unchanged() {
     let mut i32_dag = Dag::new();
     let c = i32_dag.add_node(
         RiscOp::synth_const(vec_prec(4, Prim::Int32).precision, 7.0),
-            vec![],
-            vec_prec(4, Prim::Int32),
+        vec![],
+        vec_prec(4, Prim::Int32),
         None,
     );
     let stored = i32_dag.add_node(
@@ -864,8 +869,8 @@ fn ws2_emit_const_f32_integer_bool_paths_unchanged() {
     let mut bool_dag = Dag::new();
     let c = bool_dag.add_node(
         RiscOp::synth_const(vec_prec(4, Prim::Bool).precision, 1.0),
-            vec![],
-            vec_prec(4, Prim::Bool),
+        vec![],
+        vec_prec(4, Prim::Bool),
         None,
     );
     let stored = bool_dag.add_node(

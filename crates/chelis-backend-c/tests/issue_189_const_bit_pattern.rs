@@ -38,8 +38,8 @@ fn issue_189_f32_const_emits_exact_bit_pattern() {
     let mut dag = Dag::new();
     dag.add_node(
         RiscOp::synth_const(scalar(Prim::F32).precision, 0.000000123456789_f64),
-            vec![],
-            scalar(Prim::F32),
+        vec![],
+        scalar(Prim::F32),
         None,
     );
     let src = CEmitter::emit_dag(&dag, "test_fn").unwrap();
@@ -67,9 +67,12 @@ fn issue_189_f32_const_emits_exact_bit_pattern() {
 fn issue_189_f64_const_emits_exact_bit_pattern() {
     let mut dag = Dag::new();
     let v: f64 = 1.0e-300;
-    dag.add_node(RiscOp::synth_const(scalar(Prim::F64).precision, v),
-            vec![],
-            scalar(Prim::F64), None);
+    dag.add_node(
+        RiscOp::synth_const(scalar(Prim::F64).precision, v),
+        vec![],
+        scalar(Prim::F64),
+        None,
+    );
     let src = CEmitter::emit_dag(&dag, "test_fn").unwrap();
     let want_bits = v.to_bits();
     let needle = format!("0x{want_bits:016x}");
@@ -99,9 +102,12 @@ fn issue_189_f32_const_does_not_use_lossy_format() {
     ];
     for &v in values {
         let mut dag = Dag::new();
-        dag.add_node(RiscOp::synth_const(scalar(Prim::F32).precision, v),
+        dag.add_node(
+            RiscOp::synth_const(scalar(Prim::F32).precision, v),
             vec![],
-            scalar(Prim::F32), None);
+            scalar(Prim::F32),
+            None,
+        );
         let src = CEmitter::emit_dag(&dag, "test_fn").unwrap();
         let v32 = v as f32;
         let want_bits = v32.to_bits();
@@ -124,8 +130,8 @@ fn issue_189_f32_const_smallest_denormal_round_trips() {
     let mut dag = Dag::new();
     dag.add_node(
         RiscOp::synth_const(scalar(Prim::F32).precision, v as f64),
-            vec![],
-            scalar(Prim::F32),
+        vec![],
+        scalar(Prim::F32),
         None,
     );
     let src = CEmitter::emit_dag(&dag, "test_fn").unwrap();
@@ -145,9 +151,12 @@ fn issue_189_f64_const_one_ulp_pair_round_trips() {
     let v2: f64 = f64::from_bits(v1.to_bits() + 1);
     for v in [v1, v2] {
         let mut dag = Dag::new();
-        dag.add_node(RiscOp::synth_const(scalar(Prim::F64).precision, v),
+        dag.add_node(
+            RiscOp::synth_const(scalar(Prim::F64).precision, v),
             vec![],
-            scalar(Prim::F64), None);
+            scalar(Prim::F64),
+            None,
+        );
         let src = CEmitter::emit_dag(&dag, "test_fn").unwrap();
         let bits = v.to_bits();
         assert!(
@@ -318,9 +327,19 @@ fn issue_189_f32_const_byte_identical_to_eval_under_gcc() {
     let v: f64 = 0.000000123456789;
     let mut dag = Dag::new();
     dag.add_node(
-        RiscOp::synth_const(TensorType { dims: vec![chelis_ir::dag::DimInfo::Lit(1)], precision: Prim::F32, }.precision, v),
-            vec![],
-            TensorType { dims: vec![chelis_ir::dag::DimInfo::Lit(1)], precision: Prim::F32, },
+        RiscOp::synth_const(
+            TensorType {
+                dims: vec![chelis_ir::dag::DimInfo::Lit(1)],
+                precision: Prim::F32,
+            }
+            .precision,
+            v,
+        ),
+        vec![],
+        TensorType {
+            dims: vec![chelis_ir::dag::DimInfo::Lit(1)],
+            precision: Prim::F32,
+        },
         None,
     );
     let result = codegen(&dag, "test_const_f32").unwrap();
@@ -366,9 +385,19 @@ fn issue_189_f64_const_byte_identical_to_eval_under_gcc() {
     let v: f64 = 1.0e-300;
     let mut dag = Dag::new();
     dag.add_node(
-        RiscOp::synth_const(TensorType { dims: vec![chelis_ir::dag::DimInfo::Lit(1)], precision: Prim::F64, }.precision, v),
-            vec![],
-            TensorType { dims: vec![chelis_ir::dag::DimInfo::Lit(1)], precision: Prim::F64, },
+        RiscOp::synth_const(
+            TensorType {
+                dims: vec![chelis_ir::dag::DimInfo::Lit(1)],
+                precision: Prim::F64,
+            }
+            .precision,
+            v,
+        ),
+        vec![],
+        TensorType {
+            dims: vec![chelis_ir::dag::DimInfo::Lit(1)],
+            precision: Prim::F64,
+        },
         None,
     );
     let result = codegen(&dag, "test_const_f64").unwrap();

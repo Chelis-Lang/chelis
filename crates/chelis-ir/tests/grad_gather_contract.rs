@@ -64,9 +64,12 @@ fn gather_via_section_3_5_lowering_accumulates_duplicate_indices() {
 
     // one_hot encoding of indices=[0, 0, 0]: build via Const+Pad.
     //   start: [n=3, 1] of 1.0
-    let oh_col = dag.add_node(RiscOp::synth_const(t(vec![3, 1]).precision, 1.0),
-            vec![],
-            t(vec![3, 1]), None);
+    let oh_col = dag.add_node(
+        RiscOp::synth_const(t(vec![3, 1]).precision, 1.0),
+        vec![],
+        t(vec![3, 1]),
+        None,
+    );
     //   pad axis=1 by (0, 1) with fill 0 → [n=3, vocab=2] = [[1,0],[1,0],[1,0]]
     let one_hot = dag.add_node(
         RiscOp::Pad {
@@ -190,9 +193,12 @@ fn first_class_gather_adjoint_scatter_add_accumulates_duplicate_indices() {
         t(vec![2, 2]),
         None,
     );
-    let indices = dag.add_node(RiscOp::synth_const(t_i32(vec![3]).precision, 0.0),
-            vec![],
-            t_i32(vec![3]), None);
+    let indices = dag.add_node(
+        RiscOp::synth_const(t_i32(vec![3]).precision, 0.0),
+        vec![],
+        t_i32(vec![3]),
+        None,
+    );
     let gathered = dag.add_node(
         RiscOp::Gather { axis: 0 },
         vec![table, indices],
@@ -256,9 +262,12 @@ fn first_class_gather_axis1_adjoint_scatter_add_accumulates_duplicate_indices() 
         t(vec![2, 3]),
         None,
     );
-    let indices = dag.add_node(RiscOp::synth_const(t_i32(vec![4]).precision, 0.0),
-            vec![],
-            t_i32(vec![4]), None);
+    let indices = dag.add_node(
+        RiscOp::synth_const(t_i32(vec![4]).precision, 0.0),
+        vec![],
+        t_i32(vec![4]),
+        None,
+    );
     let gathered = dag.add_node(
         RiscOp::Gather { axis: 1 },
         vec![table, indices],

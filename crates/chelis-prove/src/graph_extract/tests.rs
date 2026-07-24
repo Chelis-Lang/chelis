@@ -479,7 +479,7 @@ fn each_non_finite_const_variant_is_rejected() {
             value: chelis_types::scalar_from_f64("test", chelis_types::types::Prim::F64, value)
                 .expect("float finalize is total"),
         })
-            .expect_err("a non-finite Const must be rejected");
+        .expect_err("a non-finite Const must be rejected");
         match err {
             GraphExtractError::NonFiniteValue { node, field } => {
                 assert_eq!(node, 0);
@@ -580,7 +580,10 @@ fn finite_f64_bearing_ops_pass_the_finite_guard() {
             padding: vec![(WireRtDim::Lit { value: 0 }, WireRtDim::Lit { value: 0 })],
             fill: 0.0,
         },
-        WireRiscOp::Const { value: chelis_types::scalar_from_f64("test", chelis_types::types::Prim::F64, 3.5).expect("finite f64") },
+        WireRiscOp::Const {
+            value: chelis_types::scalar_from_f64("test", chelis_types::types::Prim::F64, 3.5)
+                .expect("finite f64"),
+        },
     ];
     for op in finite_ops {
         let extracted =

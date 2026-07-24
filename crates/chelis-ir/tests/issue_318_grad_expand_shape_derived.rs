@@ -138,8 +138,8 @@ fn build_forward(extent: Extent, source_shape: &[usize]) -> (Dag, NodeId, NodeId
     // scalar_to_tensor(cast(c_val, f32)) -> f32 constant of `source_ty`.
     let raw = dag.add_node(
         RiscOp::synth_const(source_ty.precision, 3.0),
-            vec![],
-            source_ty.clone(),
+        vec![],
+        source_ty.clone(),
         None,
     );
     let c = dag.add_node(

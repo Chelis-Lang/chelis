@@ -11529,8 +11529,7 @@ fn infer_app(
             {
                 for arg_ty in &arg_tys {
                     let resolved = type_for_readonly_check(arg_ty, subst);
-                    if let Some((kind, message, hints)) =
-                        operand_dtype_rejection(fname, &resolved)
+                    if let Some((kind, message, hints)) = operand_dtype_rejection(fname, &resolved)
                     {
                         return report(
                             errors,
@@ -11586,8 +11585,7 @@ fn infer_app(
                     // precisions are accepted so a poly body type-checks;
                     // the cross-row enforcement pass catches call-site
                     // instantiations.
-                    if let Some((kind, message, hints)) =
-                        operand_dtype_rejection(fname, &resolved)
+                    if let Some((kind, message, hints)) = operand_dtype_rejection(fname, &resolved)
                     {
                         return report(
                             errors,

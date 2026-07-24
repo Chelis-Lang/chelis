@@ -330,10 +330,8 @@ fn float_pipe_stages_still_compute() {
         "0.5"
     );
     assert_eq!(
-        eval_program(
-            "module M.Main\nout = print(to_tensor([4.0]) |> sqrt)\n"
-        )
-        .expect("float pipe sqrt"),
+        eval_program("module M.Main\nout = print(to_tensor([4.0]) |> sqrt)\n")
+            .expect("float pipe sqrt"),
         "tensor(shape=[1], data=[2.0])"
     );
 }

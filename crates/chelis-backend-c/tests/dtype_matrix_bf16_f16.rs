@@ -425,14 +425,14 @@ fn bf16_add_agrees_with_evaluator() {
     let mut dag = Dag::new();
     let a = dag.add_node(
         RiscOp::synth_const(scalar_ty(Prim::Bf16).precision, 1.5),
-            vec![],
-            scalar_ty(Prim::Bf16),
+        vec![],
+        scalar_ty(Prim::Bf16),
         None,
     );
     let b = dag.add_node(
         RiscOp::synth_const(scalar_ty(Prim::Bf16).precision, 2.5),
-            vec![],
-            scalar_ty(Prim::Bf16),
+        vec![],
+        scalar_ty(Prim::Bf16),
         None,
     );
     dag.add_node(RiscOp::Add, vec![a, b], scalar_ty(Prim::Bf16), None);
@@ -469,14 +469,14 @@ fn f16_add_agrees_with_evaluator() {
     let mut dag = Dag::new();
     let a = dag.add_node(
         RiscOp::synth_const(scalar_ty(Prim::F16).precision, 1.5),
-            vec![],
-            scalar_ty(Prim::F16),
+        vec![],
+        scalar_ty(Prim::F16),
         None,
     );
     let b = dag.add_node(
         RiscOp::synth_const(scalar_ty(Prim::F16).precision, 2.5),
-            vec![],
-            scalar_ty(Prim::F16),
+        vec![],
+        scalar_ty(Prim::F16),
         None,
     );
     dag.add_node(RiscOp::Add, vec![a, b], scalar_ty(Prim::F16), None);
@@ -513,14 +513,14 @@ fn bf16_mul_agrees_with_evaluator() {
     let mut dag = Dag::new();
     let a = dag.add_node(
         RiscOp::synth_const(scalar_ty(Prim::Bf16).precision, 3.0),
-            vec![],
-            scalar_ty(Prim::Bf16),
+        vec![],
+        scalar_ty(Prim::Bf16),
         None,
     );
     let b = dag.add_node(
         RiscOp::synth_const(scalar_ty(Prim::Bf16).precision, 2.0),
-            vec![],
-            scalar_ty(Prim::Bf16),
+        vec![],
+        scalar_ty(Prim::Bf16),
         None,
     );
     dag.add_node(RiscOp::Mul, vec![a, b], scalar_ty(Prim::Bf16), None);
@@ -556,14 +556,14 @@ fn f16_mul_agrees_with_evaluator() {
     let mut dag = Dag::new();
     let a = dag.add_node(
         RiscOp::synth_const(scalar_ty(Prim::F16).precision, 3.0),
-            vec![],
-            scalar_ty(Prim::F16),
+        vec![],
+        scalar_ty(Prim::F16),
         None,
     );
     let b = dag.add_node(
         RiscOp::synth_const(scalar_ty(Prim::F16).precision, 2.0),
-            vec![],
-            scalar_ty(Prim::F16),
+        vec![],
+        scalar_ty(Prim::F16),
         None,
     );
     dag.add_node(RiscOp::Mul, vec![a, b], scalar_ty(Prim::F16), None);

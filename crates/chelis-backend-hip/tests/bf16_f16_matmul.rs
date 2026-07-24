@@ -102,14 +102,14 @@ fn bf16_plus_f32_add_is_rejected_by_ir_validation() {
     let mut dag = Dag::new();
     let a = dag.add_node(
         RiscOp::synth_const(matrix(2, 3, Prim::Bf16).precision, 1.0),
-            vec![],
-            matrix(2, 3, Prim::Bf16),
+        vec![],
+        matrix(2, 3, Prim::Bf16),
         None,
     );
     let b = dag.add_node(
         RiscOp::synth_const(matrix(2, 3, Prim::F32).precision, 1.0),
-            vec![],
-            matrix(2, 3, Prim::F32),
+        vec![],
+        matrix(2, 3, Prim::F32),
         None,
     );
     // Output dtype is intentionally one of the operand dtypes; the

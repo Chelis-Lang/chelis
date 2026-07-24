@@ -222,9 +222,12 @@ fn scatter_replace_ad_returns_structured_not_supported_error() {
         t(vec![3, 2]),
         None,
     );
-    let indices = dag.add_node(RiscOp::synth_const(t_i32(vec![2]).precision, 0.0),
-            vec![],
-            t_i32(vec![2]), None);
+    let indices = dag.add_node(
+        RiscOp::synth_const(t_i32(vec![2]).precision, 0.0),
+        vec![],
+        t_i32(vec![2]),
+        None,
+    );
     let updates = dag.add_node(
         RiscOp::Load {
             name: "updates".into(),
@@ -313,9 +316,12 @@ fn scatter_replace_unchecked_grad_dag_returns_none_not_silent_zero() {
         t(vec![3, 2]),
         None,
     );
-    let indices = dag.add_node(RiscOp::synth_const(t_i32(vec![2]).precision, 0.0),
-            vec![],
-            t_i32(vec![2]), None);
+    let indices = dag.add_node(
+        RiscOp::synth_const(t_i32(vec![2]).precision, 0.0),
+        vec![],
+        t_i32(vec![2]),
+        None,
+    );
     let updates = dag.add_node(
         RiscOp::Load {
             name: "updates".into(),
@@ -378,9 +384,12 @@ fn scatter_add_ad_path_unchanged_after_scatter_landed() {
     // All indices point to row 0 — three duplicate consumers of
     // table[0, :]. The gather-then-sum scalar gradient should
     // accumulate to dtable[0, *] = 3, dtable[1, *] = 0.
-    let indices = dag.add_node(RiscOp::synth_const(t_i32(vec![3]).precision, 0.0),
-            vec![],
-            t_i32(vec![3]), None);
+    let indices = dag.add_node(
+        RiscOp::synth_const(t_i32(vec![3]).precision, 0.0),
+        vec![],
+        t_i32(vec![3]),
+        None,
+    );
     let gathered = dag.add_node(
         RiscOp::Gather { axis: 0 },
         vec![table, indices],
@@ -475,9 +484,12 @@ fn scatter_replace_verifier_rejects_out_of_bounds_axis() {
         t(vec![3, 2]),
         None,
     );
-    let indices = dag.add_node(RiscOp::synth_const(t_i32(vec![2]).precision, 0.0),
-            vec![],
-            t_i32(vec![2]), None);
+    let indices = dag.add_node(
+        RiscOp::synth_const(t_i32(vec![2]).precision, 0.0),
+        vec![],
+        t_i32(vec![2]),
+        None,
+    );
     let updates = dag.add_node(
         RiscOp::Load {
             name: "updates".into(),

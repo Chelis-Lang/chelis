@@ -176,9 +176,7 @@ fn check_finite_floats(wire_dag: &WireDag) -> Result<(), GraphExtractError> {
             // dtype-tagged values. Prove's real-envelope reading takes
             // the f64 image (integer payloads are always finite; the
             // exact-env swap is the chelis#688 Phase 2 work).
-            WireRiscOp::Const { value } => {
-                reject_if_non_finite(id, "value", value.as_f64_lossy())?
-            }
+            WireRiscOp::Const { value } => reject_if_non_finite(id, "value", value.as_f64_lossy())?,
             WireRiscOp::ConstTensor { data } => {
                 for v in data.to_f64_lossy_vec() {
                     if !v.is_finite() {

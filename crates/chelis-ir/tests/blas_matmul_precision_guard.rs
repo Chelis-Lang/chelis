@@ -45,14 +45,14 @@ fn blas_matmul_f64_validates_cleanly_after_ws_a1_lift() {
     let mut dag = Dag::new();
     let a = dag.add_node(
         RiscOp::synth_const(matrix(2, 3, Prim::F64).precision, 1.0),
-            vec![],
-            matrix(2, 3, Prim::F64),
+        vec![],
+        matrix(2, 3, Prim::F64),
         None,
     );
     let b = dag.add_node(
         RiscOp::synth_const(matrix(3, 4, Prim::F64).precision, 1.0),
-            vec![],
-            matrix(3, 4, Prim::F64),
+        vec![],
+        matrix(3, 4, Prim::F64),
         None,
     );
     let matmul_op = RiscOp::matmul_default(
@@ -93,14 +93,14 @@ fn blas_matmul_bf16_admitted_after_ws_a3_lift() {
     let mut dag = Dag::new();
     let a = dag.add_node(
         RiscOp::synth_const(matrix(2, 3, Prim::Bf16).precision, 1.0),
-            vec![],
-            matrix(2, 3, Prim::Bf16),
+        vec![],
+        matrix(2, 3, Prim::Bf16),
         None,
     );
     let b = dag.add_node(
         RiscOp::synth_const(matrix(3, 4, Prim::Bf16).precision, 1.0),
-            vec![],
-            matrix(3, 4, Prim::Bf16),
+        vec![],
+        matrix(3, 4, Prim::Bf16),
         None,
     );
     let matmul_op = RiscOp::matmul_default(
@@ -129,14 +129,14 @@ fn blas_matmul_f16_admitted_after_ws_a3_lift() {
     let mut dag = Dag::new();
     let a = dag.add_node(
         RiscOp::synth_const(matrix(2, 3, Prim::F16).precision, 1.0),
-            vec![],
-            matrix(2, 3, Prim::F16),
+        vec![],
+        matrix(2, 3, Prim::F16),
         None,
     );
     let b = dag.add_node(
         RiscOp::synth_const(matrix(3, 4, Prim::F16).precision, 1.0),
-            vec![],
-            matrix(3, 4, Prim::F16),
+        vec![],
+        matrix(3, 4, Prim::F16),
         None,
     );
     let matmul_op = RiscOp::matmul_default(
@@ -164,14 +164,14 @@ fn blas_matmul_f32_validates_cleanly_under_f1_guard() {
     let mut dag = Dag::new();
     let a = dag.add_node(
         RiscOp::synth_const(matrix(2, 3, Prim::F32).precision, 1.0),
-            vec![],
-            matrix(2, 3, Prim::F32),
+        vec![],
+        matrix(2, 3, Prim::F32),
         None,
     );
     let b = dag.add_node(
         RiscOp::synth_const(matrix(3, 4, Prim::F32).precision, 1.0),
-            vec![],
-            matrix(3, 4, Prim::F32),
+        vec![],
+        matrix(3, 4, Prim::F32),
         None,
     );
     let matmul_op = RiscOp::matmul_default(

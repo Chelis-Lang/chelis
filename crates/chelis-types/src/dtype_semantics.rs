@@ -1449,18 +1449,24 @@ mod tests {
 
     #[test]
     fn cast_raw_to_bool_is_strict_zero_one_membership() {
-        assert!(!cast_raw("cast", RawScalar::Int(0), Prim::Bool)
-            .unwrap()
-            .as_bool_exact()
-            .unwrap());
-        assert!(cast_raw("cast", RawScalar::Int(1), Prim::Bool)
-            .unwrap()
-            .as_bool_exact()
-            .unwrap());
-        assert!(cast_raw("cast", RawScalar::Float(1.0), Prim::Bool)
-            .unwrap()
-            .as_bool_exact()
-            .unwrap());
+        assert!(
+            !cast_raw("cast", RawScalar::Int(0), Prim::Bool)
+                .unwrap()
+                .as_bool_exact()
+                .unwrap()
+        );
+        assert!(
+            cast_raw("cast", RawScalar::Int(1), Prim::Bool)
+                .unwrap()
+                .as_bool_exact()
+                .unwrap()
+        );
+        assert!(
+            cast_raw("cast", RawScalar::Float(1.0), Prim::Bool)
+                .unwrap()
+                .as_bool_exact()
+                .unwrap()
+        );
     }
 
     #[test]

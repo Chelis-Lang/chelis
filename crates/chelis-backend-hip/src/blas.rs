@@ -125,12 +125,18 @@ mod tests {
     #[test]
     fn detects_matmul_pattern() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::synth_const(mat_f32(2, 3).precision, 1.0),
+        let a = dag.add_node(
+            RiscOp::synth_const(mat_f32(2, 3).precision, 1.0),
             vec![],
-            mat_f32(2, 3), None);
-        let b = dag.add_node(RiscOp::synth_const(mat_f32(3, 4).precision, 1.0),
+            mat_f32(2, 3),
+            None,
+        );
+        let b = dag.add_node(
+            RiscOp::synth_const(mat_f32(3, 4).precision, 1.0),
             vec![],
-            mat_f32(3, 4), None);
+            mat_f32(3, 4),
+            None,
+        );
         let ea = dag.add_node(
             RiscOp::Expand {
                 axis: 2,

@@ -843,12 +843,14 @@ mod tests {
     #[test]
     fn identity_cast_does_not_hide_matmul() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::synth_const(mat(2, 3).precision, 1.0),
+        let a = dag.add_node(
+            RiscOp::synth_const(mat(2, 3).precision, 1.0),
             vec![],
             mat(2, 3),
             None,
         );
-        let b = dag.add_node(RiscOp::synth_const(mat(3, 4).precision, 1.0),
+        let b = dag.add_node(
+            RiscOp::synth_const(mat(3, 4).precision, 1.0),
             vec![],
             mat(3, 4),
             None,
@@ -994,7 +996,8 @@ mod tests {
     #[test]
     fn noncontiguous_operand_stays_on_generic_path() {
         let mut dag = Dag::new();
-        let base_a = dag.add_node(RiscOp::synth_const(mat(3, 2).precision, 1.0),
+        let base_a = dag.add_node(
+            RiscOp::synth_const(mat(3, 2).precision, 1.0),
             vec![],
             mat(3, 2),
             None,
@@ -1005,7 +1008,8 @@ mod tests {
             mat(2, 3),
             None,
         );
-        let b = dag.add_node(RiscOp::synth_const(mat(3, 4).precision, 1.0),
+        let b = dag.add_node(
+            RiscOp::synth_const(mat(3, 4).precision, 1.0),
             vec![],
             mat(3, 4),
             None,

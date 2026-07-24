@@ -177,12 +177,18 @@ mod tests {
         // A[2,3] @ B[3,4] -> C[2,4]
         // Lower as: expand A to [2,3,4], expand B to [2,3,4], mul, sum axis=1
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::synth_const(mat_f32(2, 3).precision, 1.0),
+        let a = dag.add_node(
+            RiscOp::synth_const(mat_f32(2, 3).precision, 1.0),
             vec![],
-            mat_f32(2, 3), None);
-        let b = dag.add_node(RiscOp::synth_const(mat_f32(3, 4).precision, 1.0),
+            mat_f32(2, 3),
+            None,
+        );
+        let b = dag.add_node(
+            RiscOp::synth_const(mat_f32(3, 4).precision, 1.0),
             vec![],
-            mat_f32(3, 4), None);
+            mat_f32(3, 4),
+            None,
+        );
         let ea = dag.add_node(
             RiscOp::Expand {
                 axis: 2,
@@ -223,9 +229,12 @@ mod tests {
     #[test]
     fn rejects_non_sum_node() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::synth_const(scalar_f32().precision, 1.0),
+        let a = dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, 1.0),
             vec![],
-            scalar_f32(), None);
+            scalar_f32(),
+            None,
+        );
         assert!(detect_matmul_pattern(&dag, a).is_none());
     }
 
@@ -233,9 +242,19 @@ mod tests {
     fn rejects_sum_without_mul_input() {
         let mut dag = Dag::new();
         let a = dag.add_node(
-            RiscOp::synth_const(TensorType { dims: vec![DimInfo::Lit(4)], precision: Prim::F32, }.precision, 1.0),
+            RiscOp::synth_const(
+                TensorType {
+                    dims: vec![DimInfo::Lit(4)],
+                    precision: Prim::F32,
+                }
+                .precision,
+                1.0,
+            ),
             vec![],
-            TensorType { dims: vec![DimInfo::Lit(4)], precision: Prim::F32, },
+            TensorType {
+                dims: vec![DimInfo::Lit(4)],
+                precision: Prim::F32,
+            },
             None,
         );
         let sum = dag.add_node(
@@ -254,12 +273,18 @@ mod tests {
     fn rejects_mismatched_k_dims() {
         // A[2,3] and B[5,4] — k_a=3 != k_b=5
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::synth_const(mat_f32(2, 3).precision, 1.0),
+        let a = dag.add_node(
+            RiscOp::synth_const(mat_f32(2, 3).precision, 1.0),
             vec![],
-            mat_f32(2, 3), None);
-        let b = dag.add_node(RiscOp::synth_const(mat_f32(5, 4).precision, 1.0),
+            mat_f32(2, 3),
+            None,
+        );
+        let b = dag.add_node(
+            RiscOp::synth_const(mat_f32(5, 4).precision, 1.0),
             vec![],
-            mat_f32(5, 4), None);
+            mat_f32(5, 4),
+            None,
+        );
         let ea = dag.add_node(
             RiscOp::Expand {
                 axis: 2,

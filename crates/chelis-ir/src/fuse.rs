@@ -453,12 +453,18 @@ mod tests {
     #[test]
     fn consumer_counts_basic() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::synth_const(scalar_f32().precision, 1.0),
+        let a = dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, 1.0),
             vec![],
-            scalar_f32(), None);
-        let b = dag.add_node(RiscOp::synth_const(scalar_f32().precision, 2.0),
+            scalar_f32(),
+            None,
+        );
+        let b = dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, 2.0),
             vec![],
-            scalar_f32(), None);
+            scalar_f32(),
+            None,
+        );
         let c = dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
         dag.add_root(c);
         let counts = build_consumer_counts(&dag);
@@ -470,12 +476,18 @@ mod tests {
     #[test]
     fn multi_consumer_blocks_chain() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::synth_const(vec_f32(4).precision, 1.0),
+        let a = dag.add_node(
+            RiscOp::synth_const(vec_f32(4).precision, 1.0),
             vec![],
-            vec_f32(4), None);
-        let b = dag.add_node(RiscOp::synth_const(vec_f32(4).precision, 2.0),
+            vec_f32(4),
+            None,
+        );
+        let b = dag.add_node(
+            RiscOp::synth_const(vec_f32(4).precision, 2.0),
             vec![],
-            vec_f32(4), None);
+            vec_f32(4),
+            None,
+        );
         let shared = dag.add_node(RiscOp::Add, vec![a, b], vec_f32(4), None);
         let _left = dag.add_node(RiscOp::Neg, vec![shared], vec_f32(4), None);
         let _right = dag.add_node(RiscOp::Exp, vec![shared], vec_f32(4), None);
@@ -496,12 +508,18 @@ mod tests {
     #[test]
     fn simple_chain_found() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::synth_const(vec_f32(4).precision, 1.0),
+        let a = dag.add_node(
+            RiscOp::synth_const(vec_f32(4).precision, 1.0),
             vec![],
-            vec_f32(4), None);
-        let b = dag.add_node(RiscOp::synth_const(vec_f32(4).precision, 2.0),
+            vec_f32(4),
+            None,
+        );
+        let b = dag.add_node(
+            RiscOp::synth_const(vec_f32(4).precision, 2.0),
             vec![],
-            vec_f32(4), None);
+            vec_f32(4),
+            None,
+        );
         let c = dag.add_node(RiscOp::Add, vec![a, b], vec_f32(4), None);
         let d = dag.add_node(RiscOp::Neg, vec![c], vec_f32(4), None);
         dag.add_root(d);
@@ -516,14 +534,20 @@ mod tests {
     fn fusion_preserves_unambiguous_external_reusable_input() {
         let mut dag = Dag::new();
         let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
-        let bias = dag.add_node(RiscOp::synth_const(vec_f32(4).precision, 1.0),
+        let bias = dag.add_node(
+            RiscOp::synth_const(vec_f32(4).precision, 1.0),
             vec![],
-            vec_f32(4), None);
+            vec_f32(4),
+            None,
+        );
         let add = dag.add_node(RiscOp::Add, vec![x, bias], vec_f32(4), None);
         dag.set_reusable_input(add, x);
-        let scale = dag.add_node(RiscOp::synth_const(vec_f32(4).precision, 2.0),
+        let scale = dag.add_node(
+            RiscOp::synth_const(vec_f32(4).precision, 2.0),
             vec![],
-            vec_f32(4), None);
+            vec_f32(4),
+            None,
+        );
         let mul = dag.add_node(RiscOp::Mul, vec![add, scale], vec_f32(4), None);
         dag.add_root(mul);
 

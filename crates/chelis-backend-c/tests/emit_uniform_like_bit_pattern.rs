@@ -33,9 +33,12 @@ fn f32_tensor(size: usize) -> TensorType {
 
 fn build_uniform_like_dag(low: f64, high: f64, seed: u64) -> Dag {
     let mut dag = Dag::new();
-    let template = dag.add_node(RiscOp::synth_const(f32_tensor(4).precision, 0.0),
-            vec![],
-            f32_tensor(4), None);
+    let template = dag.add_node(
+        RiscOp::synth_const(f32_tensor(4).precision, 0.0),
+        vec![],
+        f32_tensor(4),
+        None,
+    );
     dag.add_node(
         RiscOp::UniformLike { low, high, seed },
         vec![template],

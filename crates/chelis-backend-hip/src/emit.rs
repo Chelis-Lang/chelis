@@ -3827,9 +3827,12 @@ mod tests {
     fn fused_mul_reusable_input_dag() -> Dag {
         let mut dag = Dag::new();
         let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
-        let scale = dag.add_node(RiscOp::synth_const(vec_f32(4).precision, 2.0),
+        let scale = dag.add_node(
+            RiscOp::synth_const(vec_f32(4).precision, 2.0),
             vec![],
-            vec_f32(4), None);
+            vec_f32(4),
+            None,
+        );
         let ops = vec![FusedStep {
             op: FusedStepOp::Mul,
             input_indices: vec![FusedInput::External(0), FusedInput::External(1)],
@@ -3909,9 +3912,12 @@ mod tests {
     fn fused_without_reusable_input_keeps_non_in_place_kernel_shape() {
         let mut dag = Dag::new();
         let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
-        let scale = dag.add_node(RiscOp::synth_const(vec_f32(4).precision, 2.0),
+        let scale = dag.add_node(
+            RiscOp::synth_const(vec_f32(4).precision, 2.0),
             vec![],
-            vec_f32(4), None);
+            vec_f32(4),
+            None,
+        );
         let ops = vec![FusedStep {
             op: FusedStepOp::Mul,
             input_indices: vec![FusedInput::External(0), FusedInput::External(1)],
@@ -3943,7 +3949,12 @@ mod tests {
         // reparses to a different (zero) bit pattern.
         let value = 1e-40_f64;
         let mut dag = Dag::new();
-        let c = dag.add_node(RiscOp::synth_const(Prim::F32, value), vec![], vec_f32(4), None);
+        let c = dag.add_node(
+            RiscOp::synth_const(Prim::F32, value),
+            vec![],
+            vec_f32(4),
+            None,
+        );
         dag.add_root(c);
         let (hip, _) = HipEmitter::emit_dag(&dag, "test_fn").unwrap();
 
@@ -3972,7 +3983,12 @@ mod tests {
         // 1.0 / 3.0 has no exact decimal form; pin the exact f64 bits.
         let value = 1.0_f64 / 3.0_f64;
         let mut dag = Dag::new();
-        let c = dag.add_node(RiscOp::synth_const(Prim::F64, value), vec![], vec_f64(4), None);
+        let c = dag.add_node(
+            RiscOp::synth_const(Prim::F64, value),
+            vec![],
+            vec_f64(4),
+            None,
+        );
         dag.add_root(c);
         let (hip, _) = HipEmitter::emit_dag(&dag, "test_fn").unwrap();
 

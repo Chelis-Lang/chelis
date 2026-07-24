@@ -239,12 +239,18 @@ fn agreement_add() {
         return;
     }
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::synth_const(scalar_f32().precision, 3.0),
-            vec![],
-            scalar_f32(), None);
-    let b = dag.add_node(RiscOp::synth_const(scalar_f32().precision, 4.0),
-            vec![],
-            scalar_f32(), None);
+    let a = dag.add_node(
+        RiscOp::synth_const(scalar_f32().precision, 3.0),
+        vec![],
+        scalar_f32(),
+        None,
+    );
+    let b = dag.add_node(
+        RiscOp::synth_const(scalar_f32().precision, 4.0),
+        vec![],
+        scalar_f32(),
+        None,
+    );
     dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
 
     let eval_result = eval_last(&dag);
@@ -260,12 +266,18 @@ fn agreement_mul() {
         return;
     }
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::synth_const(scalar_f32().precision, 5.0),
-            vec![],
-            scalar_f32(), None);
-    let b = dag.add_node(RiscOp::synth_const(scalar_f32().precision, 6.0),
-            vec![],
-            scalar_f32(), None);
+    let a = dag.add_node(
+        RiscOp::synth_const(scalar_f32().precision, 5.0),
+        vec![],
+        scalar_f32(),
+        None,
+    );
+    let b = dag.add_node(
+        RiscOp::synth_const(scalar_f32().precision, 6.0),
+        vec![],
+        scalar_f32(),
+        None,
+    );
     dag.add_node(RiscOp::Mul, vec![a, b], scalar_f32(), None);
 
     let eval_result = eval_last(&dag);
@@ -281,9 +293,12 @@ fn agreement_neg() {
         return;
     }
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::synth_const(scalar_f32().precision, 7.0),
-            vec![],
-            scalar_f32(), None);
+    let a = dag.add_node(
+        RiscOp::synth_const(scalar_f32().precision, 7.0),
+        vec![],
+        scalar_f32(),
+        None,
+    );
     dag.add_node(RiscOp::Neg, vec![a], scalar_f32(), None);
 
     let eval_result = eval_last(&dag);
@@ -302,12 +317,18 @@ fn agreement_relu() {
     // relu(x) = max(x, 0) -- test with negative input
     {
         let mut dag = Dag::new();
-        let x = dag.add_node(RiscOp::synth_const(scalar_f32().precision, -2.0),
+        let x = dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, -2.0),
             vec![],
-            scalar_f32(), None);
-        let zero = dag.add_node(RiscOp::synth_const(scalar_f32().precision, 0.0),
+            scalar_f32(),
+            None,
+        );
+        let zero = dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, 0.0),
             vec![],
-            scalar_f32(), None);
+            scalar_f32(),
+            None,
+        );
         dag.add_node(RiscOp::MaxElem, vec![x, zero], scalar_f32(), None);
 
         let eval_result = eval_last(&dag);
@@ -319,12 +340,18 @@ fn agreement_relu() {
     // relu with positive input
     {
         let mut dag = Dag::new();
-        let x = dag.add_node(RiscOp::synth_const(scalar_f32().precision, 3.0),
+        let x = dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, 3.0),
             vec![],
-            scalar_f32(), None);
-        let zero = dag.add_node(RiscOp::synth_const(scalar_f32().precision, 0.0),
+            scalar_f32(),
+            None,
+        );
+        let zero = dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, 0.0),
             vec![],
-            scalar_f32(), None);
+            scalar_f32(),
+            None,
+        );
         dag.add_node(RiscOp::MaxElem, vec![x, zero], scalar_f32(), None);
 
         let eval_result = eval_last(&dag);
@@ -341,9 +368,12 @@ fn agreement_exp() {
         return;
     }
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::synth_const(scalar_f32().precision, 0.0),
-            vec![],
-            scalar_f32(), None);
+    let a = dag.add_node(
+        RiscOp::synth_const(scalar_f32().precision, 0.0),
+        vec![],
+        scalar_f32(),
+        None,
+    );
     dag.add_node(RiscOp::Exp, vec![a], scalar_f32(), None);
 
     let eval_result = eval_last(&dag);
@@ -445,14 +475,14 @@ fn agreement_bf16_add() {
     let mut dag = Dag::new();
     let a = dag.add_node(
         RiscOp::synth_const(scalar_ty(Prim::Bf16).precision, 1.5),
-            vec![],
-            scalar_ty(Prim::Bf16),
+        vec![],
+        scalar_ty(Prim::Bf16),
         None,
     );
     let b = dag.add_node(
         RiscOp::synth_const(scalar_ty(Prim::Bf16).precision, 2.5),
-            vec![],
-            scalar_ty(Prim::Bf16),
+        vec![],
+        scalar_ty(Prim::Bf16),
         None,
     );
     dag.add_node(RiscOp::Add, vec![a, b], scalar_ty(Prim::Bf16), None);
@@ -470,14 +500,14 @@ fn agreement_f16_add() {
     let mut dag = Dag::new();
     let a = dag.add_node(
         RiscOp::synth_const(scalar_ty(Prim::F16).precision, 1.5),
-            vec![],
-            scalar_ty(Prim::F16),
+        vec![],
+        scalar_ty(Prim::F16),
         None,
     );
     let b = dag.add_node(
         RiscOp::synth_const(scalar_ty(Prim::F16).precision, 2.5),
-            vec![],
-            scalar_ty(Prim::F16),
+        vec![],
+        scalar_ty(Prim::F16),
         None,
     );
     dag.add_node(RiscOp::Add, vec![a, b], scalar_ty(Prim::F16), None);
@@ -498,8 +528,8 @@ fn agreement_bf16_reduce_sum_matches_eval_within_tol() {
     let mut dag = Dag::new();
     let c = dag.add_node(
         RiscOp::synth_const(vec_ty(n, Prim::Bf16).precision, 0.25),
-            vec![],
-            vec_ty(n, Prim::Bf16),
+        vec![],
+        vec_ty(n, Prim::Bf16),
         None,
     );
     let sum = RiscOp::sum_default(0, Prim::Bf16).expect("sum constructs");

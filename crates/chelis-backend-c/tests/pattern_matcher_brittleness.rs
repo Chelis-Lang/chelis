@@ -54,12 +54,18 @@ fn canonical_matmul_pattern_is_detected() {
     //   p  = mul(ea, eb)                 -> [2, 3, 4]
     //   c  = sum(p, axis=1)              -> [2, 4]
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::synth_const(mat(2, 3).precision, 1.0),
-            vec![],
-            mat(2, 3), None);
-    let b = dag.add_node(RiscOp::synth_const(mat(3, 4).precision, 1.0),
-            vec![],
-            mat(3, 4), None);
+    let a = dag.add_node(
+        RiscOp::synth_const(mat(2, 3).precision, 1.0),
+        vec![],
+        mat(2, 3),
+        None,
+    );
+    let b = dag.add_node(
+        RiscOp::synth_const(mat(3, 4).precision, 1.0),
+        vec![],
+        mat(3, 4),
+        None,
+    );
     let ea = dag.add_node(
         RiscOp::Expand {
             axis: 2,
@@ -104,12 +110,18 @@ fn cast_perturbed_matmul_specializes_after_noop_cleanup() {
     // keys off `mul.inputs[i].op == Expand`, so any node in between hides
     // the Expand and the BLAS specializer falls through.
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::synth_const(mat(2, 3).precision, 1.0),
-            vec![],
-            mat(2, 3), None);
-    let b = dag.add_node(RiscOp::synth_const(mat(3, 4).precision, 1.0),
-            vec![],
-            mat(3, 4), None);
+    let a = dag.add_node(
+        RiscOp::synth_const(mat(2, 3).precision, 1.0),
+        vec![],
+        mat(2, 3),
+        None,
+    );
+    let b = dag.add_node(
+        RiscOp::synth_const(mat(3, 4).precision, 1.0),
+        vec![],
+        mat(3, 4),
+        None,
+    );
     let ea = dag.add_node(
         RiscOp::Expand {
             axis: 2,
@@ -197,12 +209,18 @@ fn cast_perturbed_matmul_specializes_after_noop_cleanup() {
 #[test]
 fn internal_one_hot_gather_tree_specializes_to_sparse_gather() {
     let mut dag = Dag::new();
-    let values = dag.add_node(RiscOp::synth_const(mat(3, 2).precision, 1.0),
-            vec![],
-            mat(3, 2), None);
-    let indices = dag.add_node(RiscOp::synth_const(vec_i64(4).precision, 0.0),
-            vec![],
-            vec_i64(4), None);
+    let values = dag.add_node(
+        RiscOp::synth_const(mat(3, 2).precision, 1.0),
+        vec![],
+        mat(3, 2),
+        None,
+    );
+    let indices = dag.add_node(
+        RiscOp::synth_const(vec_i64(4).precision, 0.0),
+        vec![],
+        vec_i64(4),
+        None,
+    );
     let one_hot = dag.add_node(RiscOp::OneHot { vocab: 3 }, vec![indices], mat(4, 3), None);
     let expanded_one_hot = dag.add_node(
         RiscOp::Expand {

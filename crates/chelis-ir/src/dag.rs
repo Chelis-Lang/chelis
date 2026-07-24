@@ -1020,15 +1020,16 @@ impl RiscOp {
     /// Bulk sibling of [`RiscOp::synth_const`] for synthesized constant
     /// tensors; same contract, wide f64 element images only.
     pub fn synth_const_tensor(prim: Prim, wide: Vec<f64>) -> RiscOp {
-        let data = chelis_types::finalize_tensor("const", prim, chelis_types::RawTensor::Float(wide))
-            .unwrap_or_else(|trap| {
-                panic!(
-                    "internal: synthesized constant tensor does not finalize at \
+        let data =
+            chelis_types::finalize_tensor("const", prim, chelis_types::RawTensor::Float(wide))
+                .unwrap_or_else(|trap| {
+                    panic!(
+                        "internal: synthesized constant tensor does not finalize at \
                      {}: {trap} (compiler-synthesized constants must be \
                      integral and in range by construction)",
-                    prim.name()
-                )
-            });
+                        prim.name()
+                    )
+                });
         RiscOp::ConstTensor { data }
     }
 
@@ -2395,9 +2396,12 @@ mod tests {
     #[test]
     fn add_const_node() {
         let mut dag = Dag::new();
-        let id = dag.add_node(RiscOp::synth_const(scalar_f32().precision, 42.0),
+        let id = dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, 42.0),
             vec![],
-            scalar_f32(), None);
+            scalar_f32(),
+            None,
+        );
         assert_eq!(id, NodeId(0));
         assert_eq!(dag.len(), 1);
         let node = dag.get(id).unwrap();
@@ -2408,12 +2412,18 @@ mod tests {
     #[test]
     fn add_binary_op() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::synth_const(scalar_f32().precision, 1.0),
+        let a = dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, 1.0),
             vec![],
-            scalar_f32(), None);
-        let b = dag.add_node(RiscOp::synth_const(scalar_f32().precision, 2.0),
+            scalar_f32(),
+            None,
+        );
+        let b = dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, 2.0),
             vec![],
-            scalar_f32(), None);
+            scalar_f32(),
+            None,
+        );
         let c = dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
         assert_eq!(dag.len(), 3);
         let node = dag.get(c).unwrap();
@@ -2520,9 +2530,12 @@ mod tests {
     #[test]
     fn topological_order() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::synth_const(scalar_f32().precision, 1.0),
+        let a = dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, 1.0),
             vec![],
-            scalar_f32(), None);
+            scalar_f32(),
+            None,
+        );
         let b = dag.add_node(RiscOp::Neg, vec![a], scalar_f32(), None);
         let order = dag.topological_order();
         assert_eq!(order, vec![a, b]);
@@ -2537,9 +2550,12 @@ mod tests {
     #[test]
     fn roots_can_be_registered() {
         let mut dag = Dag::new();
-        let id = dag.add_node(RiscOp::synth_const(scalar_f32().precision, 1.0),
+        let id = dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, 1.0),
             vec![],
-            scalar_f32(), None);
+            scalar_f32(),
+            None,
+        );
         dag.add_root(id);
         dag.add_root(id);
         assert_eq!(dag.roots(), &[id]);
@@ -2561,9 +2577,12 @@ mod tests {
         };
         let mut dag = Dag::new();
         dag.add_node(RiscOp::Load { name: "x".into() }, vec![], load_ty, None);
-        dag.add_node(RiscOp::synth_const(const_ty.precision, 1.0),
+        dag.add_node(
+            RiscOp::synth_const(const_ty.precision, 1.0),
             vec![],
-            const_ty, None);
+            const_ty,
+            None,
+        );
 
         let occurrences = symbolic_occurrences(&dag);
         // The Load is the canonical source. The sibling-sweep pass must
@@ -2595,9 +2614,12 @@ mod tests {
         let mut dag = Dag::new();
         // Only a Const with a polymorphic dim, no Load. There is no
         // input slot to pull the dim value from.
-        dag.add_node(RiscOp::synth_const(const_ty.precision, 1.0),
+        dag.add_node(
+            RiscOp::synth_const(const_ty.precision, 1.0),
             vec![],
-            const_ty, None);
+            const_ty,
+            None,
+        );
         let _ = symbolic_occurrences(&dag);
     }
 
@@ -3049,9 +3071,19 @@ mod tests {
         // (`Const` is not a Load and has no shape source), so the kept-axis
         // symbol is unrecoverable and the guard must panic.
         let src = dag.add_node(
-            RiscOp::synth_const(TensorType { dims: vec![DimInfo::Lit(3), DimInfo::Lit(4)], precision: Prim::F32, }.precision, 0.0),
+            RiscOp::synth_const(
+                TensorType {
+                    dims: vec![DimInfo::Lit(3), DimInfo::Lit(4)],
+                    precision: Prim::F32,
+                }
+                .precision,
+                0.0,
+            ),
             vec![],
-            TensorType { dims: vec![DimInfo::Lit(3), DimInfo::Lit(4)], precision: Prim::F32, },
+            TensorType {
+                dims: vec![DimInfo::Lit(3), DimInfo::Lit(4)],
+                precision: Prim::F32,
+            },
             None,
         );
         dag.add_node(

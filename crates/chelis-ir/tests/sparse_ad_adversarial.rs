@@ -466,9 +466,12 @@ fn scatter_ad_rejects_regardless_of_wrt_subset() {
         t(vec![3, 2]),
         None,
     );
-    let indices = dag.add_node(RiscOp::synth_const(t_i32(vec![2]).precision, 0.0),
-            vec![],
-            t_i32(vec![2]), None);
+    let indices = dag.add_node(
+        RiscOp::synth_const(t_i32(vec![2]).precision, 0.0),
+        vec![],
+        t_i32(vec![2]),
+        None,
+    );
     let updates = dag.add_node(
         RiscOp::Load {
             name: "updates".into(),
@@ -571,9 +574,12 @@ fn scatter_add_backward_op_returns_no_individual_adjoint() {
         t(vec![3, 2]),
         None,
     );
-    let indices = dag.add_node(RiscOp::synth_const(t_i32(vec![2]).precision, 0.0),
-            vec![],
-            t_i32(vec![2]), None);
+    let indices = dag.add_node(
+        RiscOp::synth_const(t_i32(vec![2]).precision, 0.0),
+        vec![],
+        t_i32(vec![2]),
+        None,
+    );
     let updates = dag.add_node(
         RiscOp::Load {
             name: "updates".into(),

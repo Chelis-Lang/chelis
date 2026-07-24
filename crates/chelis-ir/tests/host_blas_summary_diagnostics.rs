@@ -382,8 +382,8 @@ fn blas_non_load_operand_const_lhs_emits_structured_rejection() {
     // Inline constant as LHS (8x16).
     let a = dag.add_node(
         RiscOp::synth_const(mat(Prim::F32, 8, 16).precision, 1.0),
-            vec![],
-            mat(Prim::F32, 8, 16),
+        vec![],
+        mat(Prim::F32, 8, 16),
         None,
     );
     let b = dag.add_node(
@@ -454,8 +454,8 @@ fn blas_non_load_operand_const_rhs_emits_structured_rejection() {
     );
     let b = dag.add_node(
         RiscOp::synth_const(mat(Prim::F32, 16, 4).precision, 2.0),
-            vec![],
-            mat(Prim::F32, 16, 4),
+        vec![],
+        mat(Prim::F32, 16, 4),
         None,
     );
     let ea = dag.add_node(

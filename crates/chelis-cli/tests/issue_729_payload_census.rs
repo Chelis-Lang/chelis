@@ -71,9 +71,7 @@ fn raw_float_payload_fields(block: &str) -> Vec<String> {
             if let Some(name) = trimmed
                 .strip_suffix(&suffix_comma)
                 .or_else(|| trimmed.strip_suffix(&suffix_bare))
-                && name
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || c == '_')
+                && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
                 && !name.is_empty()
             {
                 out.push(format!("{name}: {ty}"));

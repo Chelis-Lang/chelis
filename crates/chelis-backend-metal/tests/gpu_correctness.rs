@@ -865,7 +865,12 @@ int main(void) {{
     const N: usize = 4;
     for (prec, value, expected_bits, func_name) in cases {
         let mut dag = Dag::new();
-        let c = dag.add_node(RiscOp::synth_const(prec, value), vec![], vec_prec(N, prec), None);
+        let c = dag.add_node(
+            RiscOp::synth_const(prec, value),
+            vec![],
+            vec_prec(N, prec),
+            None,
+        );
         let stored = dag.add_node(
             RiscOp::Store { name: "out".into() },
             vec![c],

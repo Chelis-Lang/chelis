@@ -338,7 +338,8 @@ fn cast_value(input: &TensorValue, src: Prim, dst: Prim) -> Result<TensorValue, 
     };
     let mut cast_values = Vec::with_capacity(raws.len());
     for raw in raws {
-        cast_values.push(chelis_types::cast_raw("cast", raw, dst).map_err(|trap| trap.to_string())?);
+        cast_values
+            .push(chelis_types::cast_raw("cast", raw, dst).map_err(|trap| trap.to_string())?);
     }
     if dst.is_float() {
         let out: Vec<f64> = cast_values.iter().map(|v| v.as_f64_lossy()).collect();
@@ -1737,9 +1738,7 @@ where
                 // does not survive the node's dtype traps loudly.
                 match value.as_i64_exact() {
                     Some(i) => finalize_wide_int("const", out_prim, shape, vec![i; n])?,
-                    None => {
-                        finalize_wide("const", out_prim, shape, vec![value.as_f64_lossy(); n])?
-                    }
+                    None => finalize_wide("const", out_prim, shape, vec![value.as_f64_lossy(); n])?,
                 }
             }
             RiscOp::ConstTensor { data } => {
@@ -1750,9 +1749,7 @@ where
                 // (chelis#856).
                 match data.to_i64_exact_vec() {
                     Some(ints) => finalize_wide_int("const", out_prim, shape, ints)?,
-                    None => {
-                        finalize_wide("const", out_prim, shape, data.to_f64_lossy_vec())?
-                    }
+                    None => finalize_wide("const", out_prim, shape, data.to_f64_lossy_vec())?,
                 }
             }
             RiscOp::Shape { axis } => {
@@ -2708,12 +2705,18 @@ mod tests {
     #[test]
     fn eval_add() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::synth_const(scalar_f32().precision, 1.0),
+        let a = dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, 1.0),
             vec![],
-            scalar_f32(), None);
-        let b = dag.add_node(RiscOp::synth_const(scalar_f32().precision, 2.0),
+            scalar_f32(),
+            None,
+        );
+        let b = dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, 2.0),
             vec![],
-            scalar_f32(), None);
+            scalar_f32(),
+            None,
+        );
         let c = dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
         let vals = eval_scalar(&dag, &HashMap::new());
         assert!((vals[&c] - 3.0).abs() < 1e-10);
@@ -2963,9 +2966,12 @@ mod tests {
             sym_ty.clone(),
             None,
         );
-        let one = dag.add_node(RiscOp::synth_const(scalar_f32().precision, 1.0),
+        let one = dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, 1.0),
             vec![],
-            scalar_f32(), None);
+            scalar_f32(),
+            None,
+        );
         let ones = dag.add_node(
             RiscOp::Expand {
                 axis: 0,
@@ -3006,9 +3012,12 @@ mod tests {
             sym_ty.clone(),
             None,
         );
-        let one = dag.add_node(RiscOp::synth_const(scalar_f32().precision, 1.0),
+        let one = dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, 1.0),
             vec![],
-            scalar_f32(), None);
+            scalar_f32(),
+            None,
+        );
         let ones = dag.add_node(
             RiscOp::Expand {
                 axis: 0,
@@ -3507,9 +3516,12 @@ mod tests {
             RiscOp::Argmin { axis: 7 },
         ] {
             let mut dag = Dag::new();
-            let x = dag.add_node(RiscOp::synth_const(row_f32(3).precision, 1.0),
-            vec![],
-            row_f32(3), None);
+            let x = dag.add_node(
+                RiscOp::synth_const(row_f32(3).precision, 1.0),
+                vec![],
+                row_f32(3),
+                None,
+            );
             dag.add_node(op, vec![x], scalar_f32(), None);
             let errs = verify(&dag);
             assert!(

@@ -274,8 +274,8 @@ fn const_operand_helper_silently_misses_blas_summary() {
     // Inline constant as the rhs (16x4).
     let b = dag.add_node(
         RiscOp::synth_const(mat(Prim::F32, 16, 4).precision, 2.0),
-            vec![],
-            mat(Prim::F32, 16, 4),
+        vec![],
+        mat(Prim::F32, 16, 4),
         None,
     );
     let ea = dag.add_node(

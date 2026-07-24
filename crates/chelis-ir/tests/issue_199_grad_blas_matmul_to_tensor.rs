@@ -261,9 +261,12 @@ fn issue_199_grad_with_unrelated_wrt_returns_no_grad_entry() {
         },
         None,
     );
-    let c = dag.add_node(RiscOp::synth_const(scalar_ty.precision, 3.0),
-            vec![],
-            scalar_ty, None);
+    let c = dag.add_node(
+        RiscOp::synth_const(scalar_ty.precision, 3.0),
+        vec![],
+        scalar_ty,
+        None,
+    );
     let result = grad_dag(&dag, c, &[unrelated]).expect(
         "grad of a pure constant w.r.t. an unrelated load should succeed; \
          the unrelated load simply receives no adjoint entry",

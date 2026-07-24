@@ -59,11 +59,8 @@ pub fn constant_fold(dag: &mut Dag) {
                     _ => None,
                 };
                 if let Some(val) = result
-                    && let Ok(sealed) = chelis_types::scalar_from_f64(
-                        "const",
-                        node.output_type.precision,
-                        val,
-                    )
+                    && let Ok(sealed) =
+                        chelis_types::scalar_from_f64("const", node.output_type.precision, val)
                 {
                     let merge_spans = collect_operand_spans(node, &[l, r]);
                     replacements.push((node.id, sealed, merge_spans));
@@ -93,11 +90,8 @@ pub fn constant_fold(dag: &mut Dag) {
                     _ => None,
                 };
                 if let Some(val) = result
-                    && let Ok(sealed) = chelis_types::scalar_from_f64(
-                        "const",
-                        node.output_type.precision,
-                        val,
-                    )
+                    && let Ok(sealed) =
+                        chelis_types::scalar_from_f64("const", node.output_type.precision, val)
                 {
                     let merge_spans = collect_operand_spans(node, &[inp]);
                     replacements.push((node.id, sealed, merge_spans));
@@ -361,61 +355,91 @@ mod tests {
     #[test]
     fn constant_fold_add() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::synth_const(scalar_f32().precision, 1.0),
+        let a = dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, 1.0),
             vec![],
-            scalar_f32(), None);
-        let b = dag.add_node(RiscOp::synth_const(scalar_f32().precision, 2.0),
+            scalar_f32(),
+            None,
+        );
+        let b = dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, 2.0),
             vec![],
-            scalar_f32(), None);
+            scalar_f32(),
+            None,
+        );
         dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
 
         constant_fold(&mut dag);
 
         let result = dag.get(NodeId(2)).unwrap();
-        assert_eq!(result.op, RiscOp::synth_const(chelis_types::types::Prim::F32, 3.0));
+        assert_eq!(
+            result.op,
+            RiscOp::synth_const(chelis_types::types::Prim::F32, 3.0)
+        );
         assert!(result.inputs.is_empty());
     }
 
     #[test]
     fn constant_fold_mul() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::synth_const(scalar_f32().precision, 3.0),
+        let a = dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, 3.0),
             vec![],
-            scalar_f32(), None);
-        let b = dag.add_node(RiscOp::synth_const(scalar_f32().precision, 4.0),
+            scalar_f32(),
+            None,
+        );
+        let b = dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, 4.0),
             vec![],
-            scalar_f32(), None);
+            scalar_f32(),
+            None,
+        );
         dag.add_node(RiscOp::Mul, vec![a, b], scalar_f32(), None);
 
         constant_fold(&mut dag);
 
         let result = dag.get(NodeId(2)).unwrap();
-        assert_eq!(result.op, RiscOp::synth_const(chelis_types::types::Prim::F32, 12.0));
+        assert_eq!(
+            result.op,
+            RiscOp::synth_const(chelis_types::types::Prim::F32, 12.0)
+        );
     }
 
     #[test]
     fn constant_fold_neg() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::synth_const(scalar_f32().precision, 5.0),
+        let a = dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, 5.0),
             vec![],
-            scalar_f32(), None);
+            scalar_f32(),
+            None,
+        );
         dag.add_node(RiscOp::Neg, vec![a], scalar_f32(), None);
 
         constant_fold(&mut dag);
 
         let result = dag.get(NodeId(1)).unwrap();
-        assert_eq!(result.op, RiscOp::synth_const(chelis_types::types::Prim::F32, -5.0));
+        assert_eq!(
+            result.op,
+            RiscOp::synth_const(chelis_types::types::Prim::F32, -5.0)
+        );
     }
 
     #[test]
     fn dce_removes_dead_nodes() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::synth_const(scalar_f32().precision, 1.0),
+        let a = dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, 1.0),
             vec![],
-            scalar_f32(), None);
-        let _dead = dag.add_node(RiscOp::synth_const(scalar_f32().precision, 99.0),
+            scalar_f32(),
+            None,
+        );
+        let _dead = dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, 99.0),
             vec![],
-            scalar_f32(), None);
+            scalar_f32(),
+            None,
+        );
         let live = dag.add_node(RiscOp::Neg, vec![a], scalar_f32(), None);
         dag.add_root(live);
 
@@ -427,18 +451,24 @@ mod tests {
     #[test]
     fn dce_keeps_store_nodes() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::synth_const(scalar_f32().precision, 1.0),
+        let a = dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, 1.0),
             vec![],
-            scalar_f32(), None);
+            scalar_f32(),
+            None,
+        );
         dag.add_node(
             RiscOp::Store { name: "out".into() },
             vec![a],
             scalar_f32(),
             None,
         );
-        let b = dag.add_node(RiscOp::synth_const(scalar_f32().precision, 2.0),
+        let b = dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, 2.0),
             vec![],
-            scalar_f32(), None);
+            scalar_f32(),
+            None,
+        );
         let live = dag.add_node(RiscOp::Neg, vec![b], scalar_f32(), None);
         dag.add_root(live);
 
@@ -450,12 +480,18 @@ mod tests {
     #[test]
     fn cse_deduplicates_consts() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::synth_const(scalar_f32().precision, 1.0),
+        let a = dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, 1.0),
             vec![],
-            scalar_f32(), None);
-        let b = dag.add_node(RiscOp::synth_const(scalar_f32().precision, 1.0),
+            scalar_f32(),
+            None,
+        );
+        let b = dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, 1.0),
             vec![],
-            scalar_f32(), None);
+            scalar_f32(),
+            None,
+        );
         let sum = dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
         dag.add_root(sum);
 
@@ -471,12 +507,18 @@ mod tests {
     #[test]
     fn dce_keeps_all_roots() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::synth_const(scalar_f32().precision, 1.0),
+        let a = dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, 1.0),
             vec![],
-            scalar_f32(), None);
-        let b = dag.add_node(RiscOp::synth_const(scalar_f32().precision, 2.0),
+            scalar_f32(),
+            None,
+        );
+        let b = dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, 2.0),
             vec![],
-            scalar_f32(), None);
+            scalar_f32(),
+            None,
+        );
         dag.add_root(a);
         dag.add_root(b);
 

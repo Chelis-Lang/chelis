@@ -29,7 +29,9 @@ fn stale_or_unknown_schema_version_is_rejected_naming_the_field() {
             .expect_err("a non-current schema_version must not parse");
         let msg = err.to_string();
         assert!(
-            msg.contains("schema_version") && msg.contains(&version.to_string()) && msg.contains('2'),
+            msg.contains("schema_version")
+                && msg.contains(&version.to_string())
+                && msg.contains('2'),
             "the rejection must name the field, the stale version, and the \
              supported version; got: {msg}"
         );

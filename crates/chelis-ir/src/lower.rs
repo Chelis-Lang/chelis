@@ -4904,10 +4904,7 @@ impl LowerCtx {
                 self.current_span_id.clone(),
             )),
             Atom::Bool(b) => LoweredValue::Node(self.dag.add_node(
-                RiscOp::synth_const(
-                    Self::default_type().precision,
-                    if *b { 1.0 } else { 0.0 },
-                ),
+                RiscOp::synth_const(Self::default_type().precision, if *b { 1.0 } else { 0.0 }),
                 vec![],
                 Self::default_type(),
                 self.current_span_id.clone(),
@@ -4980,8 +4977,8 @@ impl LowerCtx {
             // program that declares a signature or type alias.
             "defsig" | "deftype" | "typealias" => LoweredValue::Node(self.dag.add_node(
                 RiscOp::synth_const(Self::default_type().precision, 0.0),
-            vec![],
-            Self::default_type(),
+                vec![],
+                Self::default_type(),
                 self.current_span_id.clone(),
             )),
             _ => {
@@ -5001,8 +4998,8 @@ impl LowerCtx {
                 }
                 let mut last = LoweredValue::Node(self.dag.add_node(
                     RiscOp::synth_const(Self::default_type().precision, 0.0),
-            vec![],
-            Self::default_type(),
+                    vec![],
+                    Self::default_type(),
                     self.current_span_id.clone(),
                 ));
                 for elem in &elems[2..] {
@@ -6952,8 +6949,8 @@ impl LowerCtx {
                 last.unwrap_or_else(|| {
                     self.dag.add_node(
                         RiscOp::synth_const(Self::default_type().precision, 0.0),
-            vec![],
-            Self::default_type(),
+                        vec![],
+                        Self::default_type(),
                         self.current_span_id.clone(),
                     )
                 })
@@ -8402,11 +8399,7 @@ impl LowerCtx {
             .windows(2)
             .all(|pair| key(&pair[0]) == key(&pair[1]))
         {
-            let raw = literal
-                .data
-                .first()
-                .copied()
-                .unwrap_or(RawScalar::Int(0));
+            let raw = literal.data.first().copied().unwrap_or(RawScalar::Int(0));
             let value = match chelis_types::finalize_scalar("const", precision, raw) {
                 Ok(value) => value,
                 Err(trap) => raise_on(trap, self.current_span_id.clone()),
@@ -11456,9 +11449,19 @@ mod tests {
         // tensor result type, so the initial placeholder can already have
         // the right rank even though its extent remains anonymous.
         let early_placeholder = ctx.dag.add_node(
-            RiscOp::synth_const(TensorType { dims: vec![DimInfo::Named(String::new(), None)], precision: Prim::F32, }.precision, 0.0),
+            RiscOp::synth_const(
+                TensorType {
+                    dims: vec![DimInfo::Named(String::new(), None)],
+                    precision: Prim::F32,
+                }
+                .precision,
+                0.0,
+            ),
             vec![],
-            TensorType { dims: vec![DimInfo::Named(String::new(), None)], precision: Prim::F32, },
+            TensorType {
+                dims: vec![DimInfo::Named(String::new(), None)],
+                precision: Prim::F32,
+            },
             None,
         );
         // The sibling is lowered later for `if fail(...) else <body>`.
@@ -11508,7 +11511,10 @@ mod tests {
     fn lower_single_const() {
         let dag = parse_and_lower("(def {} x (lit {type: (t-prim {} f32)} 1.0))");
         assert_eq!(dag.len(), 1);
-        assert_eq!(dag.get(NodeId(0)).unwrap().op, RiscOp::synth_const(Prim::F32, 1.0));
+        assert_eq!(
+            dag.get(NodeId(0)).unwrap().op,
+            RiscOp::synth_const(Prim::F32, 1.0)
+        );
         assert!(verify::verify(&dag).is_empty());
     }
 
@@ -14277,9 +14283,18 @@ mod regression_tests {
         // Three Const nodes, one per child. The par node itself does not
         // produce an extra DAG node; its value is reused from the last child.
         assert_eq!(non_drop_len(&dag), 3);
-        assert_eq!(dag.get(NodeId(0)).unwrap().op, RiscOp::synth_const(Prim::F32, 1.0));
-        assert_eq!(dag.get(NodeId(1)).unwrap().op, RiscOp::synth_const(Prim::F32, 2.0));
-        assert_eq!(dag.get(NodeId(2)).unwrap().op, RiscOp::synth_const(Prim::F32, 3.0));
+        assert_eq!(
+            dag.get(NodeId(0)).unwrap().op,
+            RiscOp::synth_const(Prim::F32, 1.0)
+        );
+        assert_eq!(
+            dag.get(NodeId(1)).unwrap().op,
+            RiscOp::synth_const(Prim::F32, 2.0)
+        );
+        assert_eq!(
+            dag.get(NodeId(2)).unwrap().op,
+            RiscOp::synth_const(Prim::F32, 3.0)
+        );
     }
 
     #[test]
@@ -14299,7 +14314,10 @@ mod regression_tests {
         let src = "(copy {} (lit {type: (t-tensor {} (t-prim {} f32))} 7.0))";
         let dag = parse_and_lower(src);
         assert_eq!(non_drop_len(&dag), 2);
-        assert_eq!(dag.get(NodeId(0)).unwrap().op, RiscOp::synth_const(Prim::F32, 7.0));
+        assert_eq!(
+            dag.get(NodeId(0)).unwrap().op,
+            RiscOp::synth_const(Prim::F32, 7.0)
+        );
         assert_eq!(dag.get(NodeId(1)).unwrap().op, RiscOp::Copy);
         assert_eq!(dag.get(NodeId(1)).unwrap().inputs, vec![NodeId(0)]);
     }
@@ -14309,7 +14327,10 @@ mod regression_tests {
         let src = "(app {} (var {} drop) (lit {type: (t-tensor {} (t-prim {} f32))} 7.0))";
         let dag = parse_and_lower(src);
         assert_eq!(dag.len(), 2);
-        assert_eq!(dag.get(NodeId(0)).unwrap().op, RiscOp::synth_const(Prim::F32, 7.0));
+        assert_eq!(
+            dag.get(NodeId(0)).unwrap().op,
+            RiscOp::synth_const(Prim::F32, 7.0)
+        );
         assert_eq!(dag.get(NodeId(1)).unwrap().op, RiscOp::Drop);
         assert_eq!(dag.get(NodeId(1)).unwrap().inputs, vec![NodeId(0)]);
     }
@@ -14414,15 +14435,15 @@ mod regression_tests {
              (lit {type: (t-prim {} f32)} 9.0))",
         );
         assert!(
-            dag.nodes()
-                .iter()
-                .any(|node| matches!(node.op, RiscOp::Const { value } if value.as_f64_lossy() == 2.5)),
+            dag.nodes().iter().any(
+                |node| matches!(node.op, RiscOp::Const { value } if value.as_f64_lossy() == 2.5)
+            ),
             "taken branch's literal must be lowered: {dag:?}"
         );
         assert!(
-            !dag.nodes()
-                .iter()
-                .any(|node| matches!(node.op, RiscOp::Const { value } if value.as_f64_lossy() == 9.0)),
+            !dag.nodes().iter().any(
+                |node| matches!(node.op, RiscOp::Const { value } if value.as_f64_lossy() == 9.0)
+            ),
             "untaken branch's literal must not be lowered: {dag:?}"
         );
         assert!(
@@ -14445,15 +14466,15 @@ mod regression_tests {
              (arm {} (pat-ctor {} ModeB) () (lit {type: (t-prim {} f32)} 9.0)))",
         );
         assert!(
-            dag.nodes()
-                .iter()
-                .any(|node| matches!(node.op, RiscOp::Const { value } if value.as_f64_lossy() == 2.5)),
+            dag.nodes().iter().any(
+                |node| matches!(node.op, RiscOp::Const { value } if value.as_f64_lossy() == 2.5)
+            ),
             "arm selected by the pruned constructor must lower: {dag:?}"
         );
         assert!(
-            !dag.nodes()
-                .iter()
-                .any(|node| matches!(node.op, RiscOp::Const { value } if value.as_f64_lossy() == 9.0)),
+            !dag.nodes().iter().any(
+                |node| matches!(node.op, RiscOp::Const { value } if value.as_f64_lossy() == 9.0)
+            ),
             "dead arm must not lower: {dag:?}"
         );
     }
@@ -14471,15 +14492,15 @@ mod regression_tests {
              (lit {type: (t-prim {} f32)} 9.0))",
         );
         assert!(
-            dag.nodes()
-                .iter()
-                .any(|node| matches!(node.op, RiscOp::Const { value } if value.as_f64_lossy() == 2.5)),
+            dag.nodes().iter().any(
+                |node| matches!(node.op, RiscOp::Const { value } if value.as_f64_lossy() == 2.5)
+            ),
             "gte(3, 3) must fold true and take the then branch: {dag:?}"
         );
         assert!(
-            !dag.nodes()
-                .iter()
-                .any(|node| matches!(node.op, RiscOp::Const { value } if value.as_f64_lossy() == 9.0)),
+            !dag.nodes().iter().any(
+                |node| matches!(node.op, RiscOp::Const { value } if value.as_f64_lossy() == 9.0)
+            ),
             "untaken branch must not lower: {dag:?}"
         );
     }
@@ -14497,15 +14518,15 @@ mod regression_tests {
              (lit {type: (t-prim {} f32)} 9.0))",
         );
         assert!(
-            dag.nodes()
-                .iter()
-                .any(|node| matches!(node.op, RiscOp::Const { value } if value.as_f64_lossy() == 9.0)),
+            dag.nodes().iter().any(
+                |node| matches!(node.op, RiscOp::Const { value } if value.as_f64_lossy() == 9.0)
+            ),
             "cast truncation must select the else branch: {dag:?}"
         );
         assert!(
-            !dag.nodes()
-                .iter()
-                .any(|node| matches!(node.op, RiscOp::Const { value } if value.as_f64_lossy() == 2.5)),
+            !dag.nodes().iter().any(
+                |node| matches!(node.op, RiscOp::Const { value } if value.as_f64_lossy() == 2.5)
+            ),
             "then branch must not lower: {dag:?}"
         );
     }
@@ -14680,15 +14701,15 @@ mod regression_tests {
              (arm {} (pat-ctor {} ModeB) () (lit {type: (t-prim {} f32)} 9.0)))",
         );
         assert!(
-            dag.nodes()
-                .iter()
-                .any(|node| matches!(node.op, RiscOp::Const { value } if value.as_f64_lossy() == 2.5)),
+            dag.nodes().iter().any(
+                |node| matches!(node.op, RiscOp::Const { value } if value.as_f64_lossy() == 2.5)
+            ),
             "taken arm's literal must be lowered: {dag:?}"
         );
         assert!(
-            !dag.nodes()
-                .iter()
-                .any(|node| matches!(node.op, RiscOp::Const { value } if value.as_f64_lossy() == 9.0)),
+            !dag.nodes().iter().any(
+                |node| matches!(node.op, RiscOp::Const { value } if value.as_f64_lossy() == 9.0)
+            ),
             "dead arm's literal must not be lowered: {dag:?}"
         );
     }

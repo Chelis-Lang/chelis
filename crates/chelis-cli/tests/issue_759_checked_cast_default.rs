@@ -132,7 +132,12 @@ fn tensor_float_to_int_out_of_range_traps_overflow_not_saturate() {
 
 #[test]
 fn scalar_float_to_int_out_of_range_traps_overflow() {
-    assert_cast_traps("cast(300.0, int8)", "overflow", "int8", "scalar_f2i_overflow");
+    assert_cast_traps(
+        "cast(300.0, int8)",
+        "overflow",
+        "int8",
+        "scalar_f2i_overflow",
+    );
 }
 
 #[test]
@@ -208,7 +213,10 @@ fn tensor_cast_to_bool_rejects_nonzero_nonone_with_domain_trap() {
 fn scalar_cast_to_bool_works_under_the_strict_rule() {
     // Pre-rework the scalar surface had NO bool arm (loud "unsupported
     // cast"); the unified ladder gives it the same strict rule.
-    assert_eq!(eval_lane_str("cast(1, bool)").expect("cast(1, bool)"), "true");
+    assert_eq!(
+        eval_lane_str("cast(1, bool)").expect("cast(1, bool)"),
+        "true"
+    );
     assert_eq!(
         eval_lane_str("cast(0, bool)").expect("cast(0, bool)"),
         "false"

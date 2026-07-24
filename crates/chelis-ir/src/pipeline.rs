@@ -120,9 +120,12 @@ mod tests {
     fn grad_then_fuse_matches_unfused_grad() {
         let mut dag = Dag::new();
         let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
-        let c = dag.add_node(RiscOp::synth_const(vec_f32(4).precision, 2.0),
+        let c = dag.add_node(
+            RiscOp::synth_const(vec_f32(4).precision, 2.0),
             vec![],
-            vec_f32(4), None);
+            vec_f32(4),
+            None,
+        );
         let add = dag.add_node(RiscOp::Add, vec![x, c], vec_f32(4), None);
         let neg = dag.add_node(RiscOp::Neg, vec![add], vec_f32(4), None);
         let sum = dag.add_node(
@@ -162,9 +165,12 @@ mod tests {
     fn grad_rejects_fused_input_but_grad_then_fuse_succeeds() {
         let mut dag = Dag::new();
         let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
-        let c = dag.add_node(RiscOp::synth_const(vec_f32(4).precision, 1.0),
+        let c = dag.add_node(
+            RiscOp::synth_const(vec_f32(4).precision, 1.0),
             vec![],
-            vec_f32(4), None);
+            vec_f32(4),
+            None,
+        );
         let add = dag.add_node(RiscOp::Add, vec![x, c], vec_f32(4), None);
         let neg = dag.add_node(RiscOp::Neg, vec![add], vec_f32(4), None);
         let sum = dag.add_node(

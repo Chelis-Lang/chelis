@@ -293,8 +293,8 @@ fn scatter_elements_ad_returns_structured_not_supported_error() {
     );
     let indices = dag.add_node(
         RiscOp::synth_const(t_i32(vec![2, 2]).precision, 0.0),
-            vec![],
-            t_i32(vec![2, 2]),
+        vec![],
+        t_i32(vec![2, 2]),
         None,
     );
     let updates = dag.add_node(
