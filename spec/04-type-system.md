@@ -2205,13 +2205,19 @@ Scope:
 
 **Status banner - read before citing.** The atoms below are DECIDED
 normative semantics, authored 2026-07-16 out of the numeric audit
-(chelis#680-#734; metas #695/#727). They are NOT yet implemented: today's
-behavior diverges per the issue references in each atom's note, and the
-divergences are locked as issue-linked `#[ignore]`d tests. Those tests are
-visible known-failure records only: under `spec/design/spec_provenance.md`
-§C3-§C4, registration, freshness, execution, debt, and waiver remain separate,
-and an ignored test does not satisfy coverage. The delivery plan and the full
-elaboration (finalize semantics, kernel signatures, storage) is
+(chelis#680-#734; metas #695/#727) and RATIFIED at chelis#729 Phase 1
+(2026-07-24), which implemented their eval-lane core: the sealed
+`dtype_semantics` module in `chelis-types`, per-dtype tensor storage at
+all four section C3 declaration layers, and eval construction routed
+exclusively through `finalize_scalar`/`finalize_tensor`. Per-atom
+honesty notes below record what each atom's shipped coverage is; the
+compiled lanes remain wrong in their audited ways until Phases 2-3
+(their divergences stay locked as issue-linked `#[ignore]`d tests, which
+are visible known-failure records only: under
+`spec/design/spec_provenance.md` §C3-§C4, registration, freshness,
+execution, debt, and waiver remain separate, and an ignored test does
+not satisfy coverage). The delivery plan and the full elaboration
+(finalize semantics, kernel signatures, storage) is
 `spec/design/dtype_semantics.md`. Atom IDs are stable, and the current
 blockquote authorities remain normative until selected for fixture-proven
 migration in chelis#733 Phase 1. The pinned Buoy shell-side integration—not a
@@ -2223,7 +2229,11 @@ migration in chelis#733 Phase 1. The pinned Buoy shell-side integration—not a
 > comparison, fold, or output, in every lane and on every surface
 > (scalar and tensor alike).
 
-*(Not honored today: chelis#717, #714, #718, #720, #726.)*
+*(Honored in the eval lane since chelis#729 Phase 1 (tensor and scalar
+surfaces; per-dtype storage, finalize-per-op). Not yet honored in the
+compiled lanes: chelis#714, #718 C cells (Phase 3); compile-time folds
+wait for Phase 2 (chelis#720); the DAG literal-payload capacity gap is
+chelis#856.)*
 
 > **[04-NUM-2]** Float finalization SHALL be IEEE-754 round-to-nearest,
 > ties-to-even, at the dtype's own width (f64 identity; f32 24-bit,
@@ -2232,7 +2242,9 @@ migration in chelis#733 Phase 1. The pinned Buoy shell-side integration—not a
 > preserved. Computing a single op in f64 and rounding once is a
 > conforming implementation for f32/f16/bf16.
 
-*(Honored today only by the eval scalar lane; see chelis#717.)*
+*(Honored by the eval lane on both surfaces since chelis#729 Phase 1
+(chelis#717 fixed); the compiled narrow-float scalar lane waits for
+Phase 3, chelis#714.)*
 
 > **[04-NUM-3]** Integer op results that are not exactly representable
 > in the declared width SHALL trap with the branded overflow diagnostic;
@@ -2240,15 +2252,21 @@ migration in chelis#733 Phase 1. The pinned Buoy shell-side integration—not a
 > operations of [04-NUM-7]), saturate, or silently widen.
 > In-range integer arithmetic SHALL be exact at every width.
 
-*(Not honored today: int8/16/32 wrap in eval scalars, int64 saturates,
-the compiled scalar lane widens, the compiled tensor lane wraps -
-chelis#680/#718.)*
+*(Partially honored since chelis#729 Phase 1: eval traps at int8/16/32
+on both surfaces and at int64 on the tensor-reduction path, replacing
+the former wrap; eval int64 scalar/elementwise arithmetic still
+computes through an f64 wide value behind a cited saturating adapter
+until the Phase 2 kernel split (chelis#680), and the compiled lanes
+still widen/wrap (chelis#718, Phase 3).)*
 
 > **[04-NUM-4]** A `bool` value SHALL be exactly 0 or 1; arithmetic
 > that would produce any other value in a bool-typed position SHALL be
 > rejected by the checker or trap.
 
-*(Not honored today: chelis#726.)*
+*(Value half honored in eval since chelis#729 Phase 1: bool storage is
+{0, 1} and arithmetic leaving the set Domain-traps. The checker-level
+rejection is the decided chelis#726 capability cell, ratified with the
+Phase 4 table.)*
 
 > **[04-NUM-5]** Comparisons SHALL compare finalized values: a cast's
 > rounding applies before any comparison reads it, including in
@@ -2257,7 +2275,9 @@ chelis#680/#718.)*
 > branch that exact semantics would take, and SHALL never fold away or
 > introduce a trap.
 
-*(Not honored today: chelis#711, #720.)*
+*(Not honored today: chelis#711, #720; the fold work is chelis#729
+Phase 2's, which inherits the frozen trap semantics it needs to define
+"decline".)*
 
 > **[04-NUM-6]** `f64 add(2^53, 1) == 2^53` and every other correctly
 > rounded float result at the dtype's own mantissa boundary is CORRECT

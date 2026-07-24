@@ -9,8 +9,10 @@ and the contract is ratified as `spec/05-risc-primitives.md` §8 atoms
 [05-OBS-1..5] (the chelis#775 scalar-root decision is [05-OBS-4]). One
 annexed value-layer exception, surfaced by PR #792's red team: int64
 scalar roots above 2^53 render the f64-collapsed stored value at the
-labeled root ([#684]'s rank-0 realization, repaired by [#729]; the
-exception and its ignored red cell are recorded at spec/05 §8).
+labeled root ([#684]'s rank-0 realization; [#729] Phase 1 made the
+storage exact and the residual carrier is the DAG literal payload,
+chelis#856; the exception and its ignored red cell are recorded at
+spec/05 §8).
 Phases 2-3 remain. Tracking issue: [#732].
 **Owning specs:** `spec/05-risc-primitives.md` (its §8 carries this
 plan's ratified contract as current blockquote authorities [05-OBS-1..5]; the
@@ -130,12 +132,12 @@ Per-dtype rules:
    string that parses back to exactly the stored f64 / f32 / f16 / bf16
    value. This single rule replaces C's `%.1f`/`%.16g` split and eval's
    f64-width formatting, and is what makes byte-equal lane comparison
-   possible. (Phase 1 width note: eval TENSOR float elements still
-   render at the stored f64 width - the eval tensor store is f64-backed
-   and its precision tag is [#717]-unreliable, so narrowing at render
-   time would launder stored bits, which §C2.1 forbids. Scalar exits
-   render at own width now; own-width tensor digits arrive when [#729]
-   repairs the metadata. Recorded normatively at spec/05 §8.1.)
+   possible. (Width note, resolved: the Phase 1 interim rendered eval
+   TENSOR float elements at the stored f64 width because the pre-[#729]
+   tensor store was f64-backed with a [#717]-unreliable tag; [#729]
+   Phase 1's per-dtype storage removed that state, and own-width tensor
+   digits landed with it, 2026-07-24 - the deferred half of the §B2.1
+   migration. Recorded normatively at spec/05 §8.1.)
 3. **The number grammar is Rust `{:?}` (`Debug`) float formatting,
    normatively**: shortest round-trip digits, `inf`/`-inf`/`NaN`
    spellings, lowercase `e` with unpadded exponent (`1e-7`, not `1e-07`),

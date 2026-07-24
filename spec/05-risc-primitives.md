@@ -1300,10 +1300,12 @@ width note recorded in §8.1 and one annexed value-layer exception: an
 int64 SCALAR ROOT above 2^53 renders the f64-collapsed stored value at
 the labeled root while `print`/`to_string` of the same def are exact -
 the interpreter's rank-0 realization collapses the value BEFORE the
-renderer sees it (chelis#684, [#729]'s value layer; surfaced by PR
-#792's red team). Rendering reports the collapsed bits faithfully; the
-cell is an issue-linked ignored red test in the observation harness and
-returns with chelis#729. Not honored in the C lane: chelis#716, #723,
+renderer sees it (chelis#684; surfaced by PR #792's red team). After
+chelis#729 Phase 1 the STORAGE no longer collapses; the residual
+carrier is the DAG literal payload (`Const`/`ConstTensor`, `Vec<f64>`),
+tracked as chelis#856. Rendering reports the collapsed bits faithfully;
+the cell is an issue-linked ignored red test in the observation harness
+and returns with chelis#856. Not honored in the C lane: chelis#716, #723,
 #748, #749 - Phase 2's oracle.)*
 
 > **[05-OBS-2]** Integer dtypes SHALL print as integers with all digits
@@ -1344,7 +1346,8 @@ eval-interpreter storage artifact. Conformant in both lanes for the
 locked repro; general C-lane digit grammar is Phase 2. The bare-scalar
 rendering inherits [05-OBS-1]'s annexed chelis#684 exception: an int64
 scalar root above 2^53 renders bare but carries the f64-collapsed
-stored value until chelis#729 repairs the realization's storage.)*
+stored value until chelis#856 repairs the DAG literal payload (the
+storage itself is exact since chelis#729 Phase 1).)*
 
 > **[05-OBS-5]** Every exit in both lanes SHALL truncate tensor element
 > rendering after 32 elements, marking the cut with `, ...` inside the
@@ -1396,18 +1399,20 @@ never emits e-notation):
 - integer dtypes print exact base-10 digits (i64 formatting, never
   through double).
 
-**Eval width note (deliberate, chelis#732 Phase 1):** eval TENSOR float
-elements render at the stored f64 width, because the eval tensor store
-is f64-backed and its runtime precision tag is unreliable for float
-width (chelis#717); narrowing at render time would launder stored bits,
-which [05-OBS-1] forbids. Scalar exits render at their own width. Own-
-width tensor digits arrive when chelis#729 repairs the value metadata -
-a value-layer fix, not a grammar change.
+**Eval width note (resolved at chelis#729 Phase 1, 2026-07-24):** eval
+TENSOR float elements now render shortest-round-trip at their OWN width,
+the same rule scalar exits always had. The chelis#732 Phase 1 interim
+(f64-width tensor digits) existed only because the pre-#729 eval tensor
+store was f64-backed with an unreliable precision tag; per-dtype sealed
+storage removed that state, and the deferred half of the [#732] B2.1
+one-time migration (the tensor-width digit strings) landed with the
+storage change, exactly as this note recorded it would. This was a
+value-layer fix; the grammar above is unchanged.
 
-**Tag-vs-bits disagreements print the bits:** when an integer- or
-bool-tagged tensor slot stores a value outside the tag's value set (the
-live example: `mean` of an int64 tensor stores 187.5 - chelis#724
-domain territory), the element renders as the stored f64, so the value
-bug stays visible at the exit instead of being truncated into a
-well-formed lie. Rendering never repairs, rounds, or rejects stored
-values.
+**Tag-vs-bits disagreements are unrepresentable (chelis#729 Phase 1):**
+the storage variant IS the tag, and construction runs through
+`finalize_*`, which traps on non-members (the former live example,
+`mean` of an int64 tensor storing 187.5, now Domain-traps at the div
+instead of storing). The pre-#729 rule - print the stored bits, never
+repair - governed a state that can no longer be constructed; rendering
+still never repairs, rounds, or rejects stored values.
