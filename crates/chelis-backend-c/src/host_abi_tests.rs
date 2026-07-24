@@ -100,7 +100,10 @@ fn nested_values_cannot_hide_an_unsupported_scalar_abi() {
 #[test]
 fn reduced_float_boxed_element_has_no_scalar_c_spelling() {
     for precision in [Prim::F16, Prim::Bf16] {
-        assert_eq!(HostAbiType::ReducedFloatBoxed(precision).c_type_name(), None);
+        assert_eq!(
+            HostAbiType::ReducedFloatBoxed(precision).c_type_name(),
+            None
+        );
     }
 }
 

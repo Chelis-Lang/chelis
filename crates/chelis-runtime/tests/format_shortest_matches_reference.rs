@@ -20,9 +20,9 @@
 //! `runtime_dtype_invalid_ffi.rs`'s subprocess pattern - see
 //! `format_shortest_invalid_width.rs`.
 
-use chelis_runtime::{CHELIS_FORMAT_SHORTEST_BUF, chelis_format_shortest};
-use chelis_types::{ElementRef, format_element};
+use chelis_runtime::{chelis_format_shortest, CHELIS_FORMAT_SHORTEST_BUF};
 use chelis_types::types::Prim;
+use chelis_types::{format_element, ElementRef};
 use chelis_vocab::RuntimeDType;
 use std::ffi::CStr;
 use std::os::raw::c_char;

@@ -9,7 +9,7 @@
 use std::os::raw::c_char;
 use std::process::Command;
 
-use chelis_runtime::{CHELIS_FORMAT_SHORTEST_BUF, chelis_format_shortest};
+use chelis_runtime::{chelis_format_shortest, CHELIS_FORMAT_SHORTEST_BUF};
 
 const CHILD_CASE_ENV: &str = "CHELIS_FORMAT_SHORTEST_INVALID_CHILD_CASE";
 

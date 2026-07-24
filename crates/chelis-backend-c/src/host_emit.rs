@@ -722,9 +722,8 @@ fn print_helper_elem_case(prim: Prim) -> Option<Vec<String>> {
     // Integers: printf at width, all digits exact. int64 goes through
     // `long long` (>= 64 bits everywhere), NEVER through double
     // (chelis#723's lie was exactly that funnel).
-    let int_case = |dtype: RuntimeDType, print_expr: String| -> Vec<String> {
-        case(dtype, vec![print_expr])
-    };
+    let int_case =
+        |dtype: RuntimeDType, print_expr: String| -> Vec<String> { case(dtype, vec![print_expr]) };
     match prim {
         Prim::F64 => Some(float_case(RuntimeDType::F64, "((const double*)t->data)[i]")),
         Prim::F32 => Some(float_case(

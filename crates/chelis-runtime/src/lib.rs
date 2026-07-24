@@ -196,8 +196,8 @@ macro_rules! runtime_fail {
 // formatter (declared after `runtime_fail!` so the macro is in scope).
 mod format_shortest;
 
-pub use format_shortest::{CHELIS_FORMAT_SHORTEST_BUF, chelis_format_shortest};
 use format_shortest::format_shortest;
+pub use format_shortest::{chelis_format_shortest, CHELIS_FORMAT_SHORTEST_BUF};
 
 /// Decode an ABI dtype tag at the Rust FFI boundary.
 #[inline]
