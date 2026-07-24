@@ -1295,16 +1295,8 @@ pub(super) fn dict_lookup<'a>(
 /// `crates/chelis-backend-c/src/emit.rs::emit_cast`). This helper closes
 /// the runtime/host-lane gap that PR #58's red-team v2 surfaced.
 ///
-/// Storage for `IrTensorValue::data` is always `Vec<f64>` regardless of
-/// the logical tensor precision. Float<->float casts where the storage
-/// already covers both ranges (any `Prim::F64` source, or any `Prim::F32`
-/// source widening to `Prim::F64`) are identity at the data level. The
-/// `Prim::F64 -> Prim::F32` narrowing case rounds through `(x as f32) as
-/// f64` so the runtime honors the precision loss honestly. Integer
-/// targets truncate toward zero, matching the scalar arms above and
-/// `(int32_t)f` in the C backend. The output shape is preserved
-/// element-for-element (C8 in `crates/chelis-ir/src/verify.rs`: cast dims
-/// must not change).
+/// The output shape is preserved element-for-element (C8 in
+/// `crates/chelis-ir/src/verify.rs`: cast dims must not change).
 pub(super) fn cast_tensor_value(
     tensor: RuntimeTensorValue,
     target: &str,
@@ -1315,11 +1307,12 @@ pub(super) fn cast_tensor_value(
         value: ir_value,
         precision: src_prim,
     } = tensor;
-    // chelis#729 Phase 1: one cast ladder for both eval surfaces. The
-    // DAG evaluator's `cast_tensor` reads integer storage exactly and
-    // finalizes float targets at width (f16/bf16 casts genuinely round,
-    // chelis#717); the out-of-range integer rules keep their
-    // pre-refactor behavior verbatim until chelis#759 authors them.
+    // chelis#729: one CHECKED cast ladder for both eval surfaces
+    // (`chelis_types::cast_raw` via the DAG evaluator's `cast_tensor`).
+    // Integer storage reads exactly, float targets finalize at width
+    // (f16/bf16 casts genuinely round, chelis#717), and out-of-range or
+    // out-of-domain elements TRAP per spec/04 section 5.2; the named
+    // lossy forms remain chelis#759's future surface.
     chelis_ir::eval::cast_tensor(&ir_value, src_prim, target_prim)
         .map(|value| RuntimeValue::Tensor(RuntimeTensorValue::new(value)))
 }

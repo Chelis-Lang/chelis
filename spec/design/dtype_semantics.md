@@ -282,42 +282,51 @@ hatch is the ONE deliberate hole, kept greppable.
   their DECLARED param dtype at call binding (the host-lane mirror of
   the DAG evaluator's Load ingress).
 
-**The cast ladder (2026-07 review; [#759]).** The explicit `cast`
-surface mirrors the read-side split above as the PHASE 2 TARGET: the
-CHECKED cast becomes the default - `convert_cast_data` a thin wrapper
-over `finalize_scalar` (consumer map), so a cast whose value does not
-survive the target dtype traps per §C1/§C2 - and a NAMED
-lossy/truncating form ([#759]) becomes the explicit escape hatch, the
-same species as [#753]'s `wrap_*`: never the default, greppable,
-per-direction semantics AUTHORED as an atom rather than inherited from
-a lane (proposal defaults: float->float is RNE at the target width;
-float->int truncates toward zero with the out-of-range rule authored,
-not accidental; int->narrower-int gets ONE authored rule), with
-capability-table rows and cross-lane oracle coverage like any other
-cell. What Phase 1 SHIPPED (2026-07-24; execution-verified by the PR
-#857 round-2 red team, R2-1) is SPLIT BY SURFACE, and [#759] must author
-ONE rule per direction to end the split:
+**The cast ladder (AUTHORED at the 2026-07 chelis#729 Phase 1 rework;
+[#759]'s one-rule-per-direction obligation, executed).** This section
+previously recorded a split-by-surface state (the tensor surfaces kept
+the pre-refactor saturate/wrap/nonzero-to-1 ladder verbatim while the
+host scalar surface trapped; the R2-1 record). The rework REPLACES
+that split with ONE authored rule per direction, identical on every
+eval surface: the shared ladder is `chelis_types::cast_raw`, consumed
+by `chelis_ir::eval::convert_cast_data` / `cast_value` (the DAG
+evaluator and the host tensor cast's delegation) and by the host
+scalar `eval_cast` via `cast_scalar`. The CHECKED cast is the DEFAULT;
+ratified at spec/04 §5.2 in the same change set:
 
-- **Tensor surfaces** (both eval lanes; the one shared ladder in
-  `chelis_ir::eval`, which the host tensor cast delegates to):
-  float->float finalizes (RNE at the target width, so f16/bf16 casts
-  genuinely round); int->float finalizes from the exact integer; the
-  OUT-OF-RANGE rules keep their pre-refactor behavior verbatim -
-  float->int truncates toward zero and SATURATES
-  (`cast(3.5, int8) = 3`, `cast(300.0, int8) = 127`),
-  int->narrower-int WRAPS two's-complement (int32 `300 -> int8` is
-  `44`), and any-to-bool encodes nonzero-to-1 (`cast(2, bool) = true`).
-- **The host SCALAR surface** does NOT take the ladder: scalar casts
-  construct through `scalar_like_int`/finalize, so an out-of-range
-  result TRAPS (`cast(300.0, int8)` and `cast(cast(300, int32), int8)`
-  both raise `numeric trap: overflow in arithmetic at int8`), and
-  scalar->bool has no arm at all (a loud "unsupported cast" error).
-  The wrap->trap change on this surface arrived with Phase 1's eval
-  adoption (the deleted `from_i64_as` wrapping constructor) - a
-  strict/loud, section-C1-conforming direction, disclosed on PR #857.
+- any source -> float target: finalize (IEEE RNE at the target width;
+  overflow is the correctly signed infinity per [04-NUM-2]); total.
+- integer/bool source -> integer target: exact value; out of the
+  target range TRAPS `Overflow` (no wrap; int32 `300 -> int8` traps,
+  formerly `44`).
+- float source -> integer target: truncate toward zero (the authored
+  fractional rule: `cast(3.5, int8) = 3`), then the width check; out
+  of range TRAPS `Overflow` (no saturation; `cast(300.0, int8)` traps,
+  formerly `127`); NaN/inf TRAPS `Domain`.
+- any source -> bool target: STRICT {0, 1} membership - exactly 0/1
+  encodes false/true, anything else TRAPS `Domain` (`cast(2, bool)`
+  traps, formerly `true`). Scalar->bool now WORKS under this rule
+  (formerly a loud "unsupported cast" hole). Evidence for strict: the
+  2026-07-24 corpus sweep (grep plus full-suite execution under the
+  strict rule) found NO test, fixture, or example depending on the old
+  nonzero-to-1 encoding; the counting idiom already casts explicitly
+  (`sum(cast(x, int64))`).
+- **Fold rule (the §C2 decline clause, applied to casts):** a
+  compile-time constant fold whose cast would trap DECLINES TO FOLD -
+  the condition falls to runtime, where the trap fires with its full
+  diagnostic (`lower.rs`'s static-`if` Cast arm).
 
-Spelling and atoms land with Phase 2's kernel work; cells ratified at
-Phase 4.
+The trap op slot is `cast` (a real op name; the former host-scalar
+spelling `overflow in arithmetic at int8` is gone with the rewire, and
+[#861]'s naming decision set still owns the Phase 2 freeze). The NAMED
+lossy/truncating forms ([#759]) remain the future explicit escape
+hatch, the same species as [#753]'s `wrap_*`: never the default,
+greppable, with capability-table rows and cross-lane oracle coverage
+like any other cell. The compiled C lane stays documented-divergent
+until Phase 3 (issue-linked ignored rows in
+`crates/chelis-cli/tests/issue_759_checked_cast_default.rs`); spelling
+and atoms for the named forms land with Phase 2's kernel work; cells
+ratified at Phase 4.
 
 ## C4. The observation contract (formatting; fixes [#728])
 

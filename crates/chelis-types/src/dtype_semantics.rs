@@ -1203,4 +1203,121 @@ mod tests {
             "numeric trap: division by zero in trunc_div"
         );
     }
+
+    // ---- the checked cast ladder (chelis#759 one rule per direction;
+    // executed at the chelis#729 rework). Positive AND negative parity
+    // per direction, per the repo contract. ----
+
+    #[test]
+    fn cast_raw_to_float_finalizes_at_target_width() {
+        // 2049 is the first f16-unrepresentable integer; RNE rounds to 2048.
+        let v = cast_raw("cast", RawScalar::Float(2049.0), Prim::F16).unwrap();
+        assert_eq!(v.as_f64_lossy(), 2048.0);
+        // Exact-int source finalizes from the exact integer, same rule.
+        let v = cast_raw("cast", RawScalar::Int(2049), Prim::F16).unwrap();
+        assert_eq!(v.as_f64_lossy(), 2048.0);
+        // int64 above 2^53 to f64 is the LOSSY-BY-DESIGN float direction
+        // ([04-NUM-6]): RNE, never a trap.
+        let v = cast_raw("cast", RawScalar::Int(9_007_199_254_740_993), Prim::F64).unwrap();
+        assert_eq!(v.as_f64_lossy(), 9_007_199_254_740_992.0);
+    }
+
+    #[test]
+    fn cast_raw_float_overflowing_target_goes_to_infinity_per_ieee() {
+        // Float targets finalize per [04-NUM-2]: overflow is the correctly
+        // signed infinity, not a trap (65504 is f16::MAX).
+        let v = cast_raw("cast", RawScalar::Float(1.0e6), Prim::F16).unwrap();
+        assert_eq!(v.as_f64_lossy(), f64::INFINITY);
+    }
+
+    #[test]
+    fn cast_raw_int_to_narrower_int_in_range_is_exact() {
+        let v = cast_raw("cast", RawScalar::Int(127), Prim::Int8).unwrap();
+        assert_eq!(v.as_i64_exact(), Some(127));
+        let v = cast_raw("cast", RawScalar::Int(-128), Prim::Int8).unwrap();
+        assert_eq!(v.as_i64_exact(), Some(-128));
+    }
+
+    #[test]
+    fn cast_raw_int_to_narrower_int_out_of_range_traps_overflow_not_wrap() {
+        // Pre-rework this wrapped two's-complement (300 -> 44). The checked
+        // default TRAPS; wrapping is chelis#759's future NAMED form.
+        let err = cast_raw("cast", RawScalar::Int(300), Prim::Int8).unwrap_err();
+        assert_eq!(err.to_string(), "numeric trap: overflow in cast at int8");
+        let err = cast_raw("cast", RawScalar::Int(-129), Prim::Int8).unwrap_err();
+        assert_eq!(err.to_string(), "numeric trap: overflow in cast at int8");
+    }
+
+    #[test]
+    fn cast_raw_float_to_int_truncates_toward_zero_in_range() {
+        let v = cast_raw("cast", RawScalar::Float(3.5), Prim::Int8).unwrap();
+        assert_eq!(v.as_i64_exact(), Some(3));
+        let v = cast_raw("cast", RawScalar::Float(-3.5), Prim::Int8).unwrap();
+        assert_eq!(v.as_i64_exact(), Some(-3));
+    }
+
+    #[test]
+    fn cast_raw_float_to_int_out_of_range_traps_overflow_not_saturate() {
+        // Pre-rework this saturated (300.0 -> 127). The checked default
+        // TRAPS; saturation is chelis#759's future NAMED form.
+        let err = cast_raw("cast", RawScalar::Float(300.0), Prim::Int8).unwrap_err();
+        assert_eq!(err.to_string(), "numeric trap: overflow in cast at int8");
+        let err = cast_raw("cast", RawScalar::Float(1.0e300), Prim::Int64).unwrap_err();
+        assert_eq!(err.to_string(), "numeric trap: overflow in cast at int64");
+    }
+
+    #[test]
+    fn cast_raw_non_finite_float_to_int_traps_domain() {
+        let err = cast_raw("cast", RawScalar::Float(f64::NAN), Prim::Int32).unwrap_err();
+        assert_eq!(err.to_string(), "numeric trap: domain in cast at int32");
+        let err = cast_raw("cast", RawScalar::Float(f64::INFINITY), Prim::Int32).unwrap_err();
+        assert_eq!(err.to_string(), "numeric trap: domain in cast at int32");
+    }
+
+    #[test]
+    fn cast_raw_to_bool_is_strict_zero_one_membership() {
+        assert!(!cast_raw("cast", RawScalar::Int(0), Prim::Bool)
+            .unwrap()
+            .as_bool_exact()
+            .unwrap());
+        assert!(cast_raw("cast", RawScalar::Int(1), Prim::Bool)
+            .unwrap()
+            .as_bool_exact()
+            .unwrap());
+        assert!(cast_raw("cast", RawScalar::Float(1.0), Prim::Bool)
+            .unwrap()
+            .as_bool_exact()
+            .unwrap());
+    }
+
+    #[test]
+    fn cast_raw_to_bool_rejects_everything_outside_zero_one() {
+        // Pre-rework any nonzero encoded true. The checked default is
+        // STRICT {0, 1}; counting idioms cast explicitly instead.
+        for raw in [
+            RawScalar::Int(2),
+            RawScalar::Int(-1),
+            RawScalar::Float(0.5),
+            RawScalar::Float(f64::NAN),
+        ] {
+            let err = cast_raw("cast", raw, Prim::Bool).unwrap_err();
+            assert_eq!(err.to_string(), "numeric trap: domain in cast at bool");
+        }
+    }
+
+    #[test]
+    fn cast_scalar_same_prim_is_identity_and_routes_exact_wides() {
+        let v = scalar_from_i64("t", Prim::Int64, 9_007_199_254_740_993).unwrap();
+        // Identity short-circuit.
+        let same = cast_scalar("cast", v, Prim::Int64).unwrap();
+        assert_eq!(same.as_i64_exact(), Some(9_007_199_254_740_993));
+        // Exact integer wide: above 2^53 an int64 -> int64-family cast must
+        // not launder through f64 (that laundering is the chelis#684 bug
+        // shape this module exists to end).
+        let narrowed = cast_scalar("cast", v, Prim::Int32).unwrap_err();
+        assert_eq!(
+            narrowed.to_string(),
+            "numeric trap: overflow in cast at int32"
+        );
+    }
 }

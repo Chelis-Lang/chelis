@@ -1534,6 +1534,27 @@ cast(x: tensor[D, int32], f32) : tensor[D, f32]
 
 Cast is always explicit. The compiler never inserts implicit casts.
 
+**Value semantics (authored 2026-07 at the chelis#729 Phase 1 rework;
+chelis#759's one-rule-per-direction obligation).** A cast is a numeric
+op under §9's atoms: its result is finalized into the target dtype or
+traps ([04-NUM-1..3]), identically on the scalar and tensor surfaces.
+Per direction:
+
+- any source -> float target: IEEE RNE finalize at the target width
+  ([04-NUM-2]; overflow is the correctly signed infinity, never a trap).
+- integer/bool source -> integer target: exact value; out of the target
+  range traps `overflow` (no wrap).
+- float source -> integer target: truncate toward zero (the authored
+  fractional rule), then the width check; out of range traps `overflow`
+  (no saturation); NaN/±inf traps `domain`.
+- any source -> bool target: strict {0, 1} membership; exactly 0/1
+  encodes false/true, anything else traps `domain` ([04-NUM-4]).
+
+Named lossy/wrapping cast forms are the explicit escape hatch and are
+tracked as chelis#759 future surface. The compiled lanes adopt these
+semantics at chelis#729 Phase 3; until then their divergence is recorded
+as issue-linked ignored tests, per the §9 status banner.
+
 ### 5.3 Literal Types
 
 Integer literals default to `int32`. Float literals default to `f32`. These
