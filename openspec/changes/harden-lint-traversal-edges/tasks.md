@@ -43,7 +43,13 @@
 
 ## 7. Gates and evidence
 
-- [ ] 7.1 `cargo nextest run -p chelis-lint` and the standalone CLI traversal suite green in an isolated `CARGO_TARGET_DIR`
-- [ ] 7.2 `python3 scripts/gate.py --local` green (clippy `-D warnings`, fmt, `chelis lint --check .`, changed-crate nextest)
-- [ ] 7.3 Record one quiet-machine `chelis lint --check .` wall-clock run (clean worktree) in the change's validation notes as the #603 linearity evidence
+- [x] 7.1 `cargo nextest run -p chelis-lint` and the standalone CLI traversal suite green in an isolated `CARGO_TARGET_DIR`
+- [x] 7.2 `python3 scripts/gate.py --local` green (clippy `-D warnings`, fmt, `chelis lint --check .`, changed-crate nextest)
+- [x] 7.3 Record one quiet-machine `chelis lint --check .` wall-clock run (clean worktree) in the change's validation notes as the #603 linearity evidence
 - [ ] 7.4 Red team: fresh local subagent executes the flipped-assertion tests, the CLI rejection path, and the subdirectory-cwd probe against the spec deltas
+
+### Validation record (2026-07-23)
+
+- Gate: `gate.py --local` exit 0 — workspace clippy `-D warnings`, `cargo fmt --check`, `chelis lint --check .`, per-crate nextest: chelis-cli 1587/1587, chelis-lint 346/346 (isolated `CARGO_TARGET_DIR=target/agents/pr839`, rebased onto main 33dcf882 / v0.17.1).
+- 7.3 timing: `/usr/bin/time ./target/agents/pr839/debug/chelis lint --check .` on this checkout (23.5 GiB `target/` policy-excluded; one concurrent cargo job on another repo): exit 0, 520.9s wall / 358.8s user / 12.6s sys, ~27 MB max RSS, debug binary. Traversal cost is negligible (sys 12.6s); wall is per-rule CPU linear in the admitted corpus — the #603 O(files × repo-walk) pathology is gone (each admitted Surf candidate parses once per invocation, locked by `catalog_parses_each_admitted_surf_candidate_once_per_invocation`).
+- Environmental note: without `cargo` on PATH the same invocation exits 1 on 7 exception-covered paths — `detect_lint_workspace_root` shells out to `cargo locate-project`, and without it workspace-rooted exceptions cannot anchor. Pre-existing behavior, unchanged by this change.
