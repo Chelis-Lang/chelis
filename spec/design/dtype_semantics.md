@@ -18,7 +18,13 @@ per the repo protocol on PR #857: round 1 (fresh context) returned
 QUALIFIED PASS with six findings, all folded on the branch, and filed
 discoveries [#856]/#860/#861; round 2 (fresh context) verified every
 fold by execution and returned QUALIFIED PASS with one doc-only finding
-(R2-1, the scalar-vs-tensor cast-surface split above), folded. Phases
+(R2-1, the scalar-vs-tensor cast-surface split), folded. **Those two
+rounds stand for the PRE-rework head (f8bade2b).** The 2026-07-24
+Phase 1 REWORK on the same PR supersedes parts of what they validated -
+the checked-cast default replacing the R2-1 split (§C3's cast ladder),
+the chelis#724/#726/#860 checker rejections, the fifth storage layer
+([#856] fixed), and the execution-wire v1 deletion - and has NOT been
+red-teamed; fresh-context validation of the rework is pending. Phases
 2-5 remain. Tracking issue: [#729].
 **Owning specs:** `spec/04-type-system.md` (gains an authored overflow/rounding
 section, today silent), `spec/05-risc-primitives.md` (op result semantics),
