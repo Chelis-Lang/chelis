@@ -38,13 +38,23 @@
 //! ## Red set and boundary law
 //!
 //! The four known holes - a `with seed` body, a `with device` body
-//! (chelis#709), and the two chelis#710 forms (`(def {} orphan)`,
+//! (chelis#709), and two of the chelis#710 forms (`(def {} orphan)`,
 //! `(cast {} expr)` with no target) - were `#[ignore]`d red at Phase 0 and
 //! are flipped to green here by chelis#731 Phase 1 (the handle-effect case
 //! and the `MalformedForm` guard sweep). Per B2.1/B2.2 of the design doc
 //! the flip was ONLY by deleting the `#[ignore]` attribute; the assertions
 //! never weakened. The full corpus runs in the default suite. A new hole
 //! EXTENDS the census and gets filed - it does not edit this set silently.
+//!
+//! chelis#710 filed FOUR forms, not two. Phase 1 closed forms 1-3 (the two
+//! named above plus a `(t-prim {} bogus_dtype)` cast target, covered by
+//! `issue_756_cast_type_totality.rs`). Form 4 - a bare `Symbol` / `Keyword`
+//! atom in expression position - stayed live until chelis#873 threaded a
+//! diagnostic sink through `infer_atom`; its score-surface coverage lives in
+//! `issue_731_fitness_honesty_corpus.rs`
+//! (`bare_atom_expression_position_scores_below_one`, with the
+//! over-application guard in `structural_symbol_positions_still_score_one`).
+//! Naming the count here so the census does not understate the filed set.
 
 use chelis_deep::ast as deep;
 use chelis_types::types::Type;
