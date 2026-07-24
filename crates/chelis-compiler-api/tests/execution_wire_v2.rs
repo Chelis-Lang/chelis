@@ -5,12 +5,35 @@
 
 use chelis_compiler_api::schema::{EvalResult, ExecutionValue, TensorElements, TensorValue};
 
-/// A version-less result payload (a v1 producer) deserializes with
-/// `schema_version = 1`, so consumers can distinguish it loudly.
+/// A version-less result payload is REJECTED naming the field (the v1
+/// compat default was deleted at the chelis#729 rework: every
+/// reader/writer is in-repo, and per the chelis#730 closed-vocabulary
+/// doctrine a closed surface has no `Default`).
 #[test]
-fn versionless_result_defaults_to_v1() {
-    let result: EvalResult = serde_json::from_str(r#"{"roots":[]}"#).expect("v1 shape parses");
-    assert_eq!(result.schema_version, 1);
+fn versionless_result_is_rejected_naming_the_field() {
+    let err = serde_json::from_str::<EvalResult>(r#"{"roots":[]}"#)
+        .expect_err("a version-less payload must not parse");
+    assert!(
+        err.to_string().contains("schema_version"),
+        "the rejection must name the missing field; got: {err}"
+    );
+}
+
+/// A stale `schema_version` (1, or anything not the current constant) is
+/// rejected with a message naming the field and both versions.
+#[test]
+fn stale_or_unknown_schema_version_is_rejected_naming_the_field() {
+    for version in [1u32, 3, 999] {
+        let payload = format!(r#"{{"schema_version":{version},"roots":[]}}"#);
+        let err = serde_json::from_str::<EvalResult>(&payload)
+            .expect_err("a non-current schema_version must not parse");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("schema_version") && msg.contains(&version.to_string()) && msg.contains('2'),
+            "the rejection must name the field, the stale version, and the \
+             supported version; got: {msg}"
+        );
+    }
 }
 
 /// A freshly produced result stamps the current version (negative parity

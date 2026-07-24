@@ -113,23 +113,41 @@ pub struct Span {
 /// * v2: `TensorValue.data` is the tagged per-dtype [`TensorElements`]
 ///   payload below, and [`EvalResult`] stamps `schema_version: 2`.
 ///
-/// Mechanics: producers always stamp the current version; a deserialized
-/// result with no version field takes [`legacy_execution_value_version`]
-/// (1), so consumers can distinguish a v1 producer loudly instead of
-/// misreading its payload. Tensor BINDINGS in requests changed shape with
-/// v2, so a v1 client posting the old bare-array `data` fails loudly at
-/// serde with a type error at the payload position (the message is
-/// serde's untagged-enum wording, e.g. "invalid type: floating point
-/// `1.0`, expected variant identifier" - loud, though it does not name
-/// the `data` field), never a silent reinterpretation. This constant
+/// Mechanics (v1 compat DELETED at the chelis#729 rework): producers
+/// always stamp the current version, and `schema_version` is REQUIRED on
+/// decode and must equal this constant - a missing field is a loud serde
+/// "missing field `schema_version`" error, and a `1` (or any other
+/// value) is a loud error naming the field and both versions. Every
+/// reader and writer of this payload is in-repo, so there is no
+/// deployment that can legitimately present a version-less or v1
+/// payload; per the chelis#730 closed-vocabulary doctrine (closed types
+/// have no `Default` and no `Unknown`), the compat default was a spare
+/// key to a door that should have exactly one. Tensor BINDINGS in
+/// requests changed shape with v2, so a v1 client posting the old
+/// bare-array `data` also fails loudly at serde (a type error at the
+/// payload position), never a silent reinterpretation. This constant
 /// governs the execution payload only; `WIRE_DAG_SCHEMA_VERSION` below
-/// governs the `WireDag` surface and is independent.
+/// governs the `WireDag` surface and is independent (and, unlike this
+/// one, has a genuinely external consumer - see its note).
 pub const EXECUTION_VALUE_SCHEMA_VERSION: u32 = 2;
 
-/// Serde default for [`EvalResult::schema_version`]: a payload with no
-/// version field predates v2.
-pub fn legacy_execution_value_version() -> u32 {
-    1
+/// Field validator for [`EvalResult::schema_version`]: the field is
+/// required and must equal [`EXECUTION_VALUE_SCHEMA_VERSION`]. The
+/// error names the field so a stale producer is diagnosable from the
+/// message alone.
+fn require_execution_value_schema_version<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    use serde::de::Error;
+    let version = u32::deserialize(deserializer)?;
+    if version != EXECUTION_VALUE_SCHEMA_VERSION {
+        return Err(D::Error::custom(format!(
+            "unsupported `schema_version` {version} on the execution-value              payload: this reader supports exactly              {EXECUTION_VALUE_SCHEMA_VERSION} (the v1 compat path was              deleted at the chelis#729 rework; regenerate the payload              with a current producer)"
+        )));
+    }
+    Ok(version)
 }
 
 /// Per-dtype tensor element payload (execution wire v2; the chelis#729
@@ -703,8 +721,9 @@ pub struct EvaluatedRoot {
 pub struct EvalResult {
     /// Execution-payload wire version (see
     /// [`EXECUTION_VALUE_SCHEMA_VERSION`]): producers stamp the current
-    /// version; a deserialized result with no field is a v1 producer.
-    #[serde(default = "legacy_execution_value_version")]
+    /// version; decode REQUIRES the field and rejects any other version
+    /// loudly (the v1 compat default is gone, chelis#729 rework).
+    #[serde(deserialize_with = "require_execution_value_schema_version")]
     pub schema_version: u32,
     pub roots: Vec<EvaluatedRoot>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1289,8 +1308,15 @@ pub struct WireRecordPatternField {
 ///   decode error).
 pub const WIRE_DAG_SCHEMA_VERSION: u32 = 4;
 
-/// Backwards-compat default for [`WireDag::schema_version`]. A wire
-/// payload predating WI-2 carries no `schema_version`; it is the
+/// Backwards-compat default for [`WireDag::schema_version`]. KEPT at
+/// the chelis#729 rework (which deleted the sibling default on
+/// `EvalResult`) because the `WireDag` surface has a genuinely external
+/// consumer: Chelis-Lang/beacon ships its own parser with
+/// `SUPPORTED_SCHEMA_VERSIONS` covering 1-3 and content-addressed
+/// stored artifacts, so removing version-less acceptance here is a
+/// cross-repo decision, flagged on PR #857 rather than taken
+/// unilaterally. A wire payload predating WI-2 carries no
+/// `schema_version`; it is the
 /// pre-versioning surface, which is version `1`, so a missing field
 /// deserializes to the current baseline. This keeps deserialize additive
 /// (same rationale as [`default_sum_accumulator_name`]). The default is
