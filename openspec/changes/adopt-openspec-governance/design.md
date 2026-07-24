@@ -72,6 +72,17 @@ A dedicated `openspec-governance.yml` workflow uses `contents: read`, full-histo
 
 The pinned action SHA is the independently recorded accepted central revision: on 2026-07-24 its deterministic contract suite (18 tests) passed at a `2906e038` checkout, the hosted `openspec-governance-contract` lane was green at the same commit (<https://github.com/Chelis-Lang/ci/actions/runs/30116322777>), and `Chelis-Lang/ci` Actions access was verified organization-wide. Any later pin change requires re-recording this evidence.
 
+Consumer acceptance is hosted and Chelis-owned: the adoption pull request
+itself must show the `openspec-governance` check resolving the private
+action at the pinned SHA and executing this repository's checker — red
+while this lifecycle is active, green only after synchronization and
+archival. Branch protection adds the observed hosted context name only
+after the final archived state runs green; the name is read from the
+hosted run, never assumed. Rollback reverts or deletes
+`.github/workflows/openspec-governance.yml` or repins to another
+separately reviewed full SHA; it never changes compiler behavior,
+`spec/**` authority, or the recorded acceptance evidence.
+
 A separate workflow is preferred over inheriting `ci.yml`'s current workflow-wide write permission. Branch protection is updated only after observing the exact hosted context from the final archived adoption branch.
 
 **Alternative rejected:** `@main`, a mutable release tag, copied npm provisioning, or a required Nix bootstrap. Each weakens provenance or adds an unrelated failure domain.

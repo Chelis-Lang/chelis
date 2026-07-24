@@ -89,6 +89,13 @@ class TestWorkflow(unittest.TestCase):
         action_step = text.split("openspec-governance@")[1]
         self.assertNotIn("with:", action_step)
 
+    def test_no_duplicated_action_provisioning(self):
+        # The shared action owns Node setup, the npm-locked OpenSpec CLI,
+        # and the launcher; the consumer workflow must not duplicate them.
+        text = self._text().lower()
+        for fragment in ("setup-node", "npm", "setup-python", "fission-ai"):
+            self.assertNotIn(fragment, text, fragment)
+
     def test_supported_triggers_only(self):
         text = self._text()
         for trigger in ("pull_request", "push", "workflow_dispatch"):

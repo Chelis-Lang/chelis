@@ -27,9 +27,9 @@
 
 ## 5. Immutable GitHub integration
 
-- [ ] 5.1 Add a dedicated `contents: read` OpenSpec workflow with full-history credential-free checkout pinned to `3d3c42e5aac5ba805825da76410c181273ba90b1` and the shared action pinned to `2906e03880a2ea7d553b0959c246991b1b058990`.
-- [ ] 5.2 Add deterministic workflow-contract tests proving supported triggers, least privilege, immutable references, no secret forwarding, no caller inputs, and no duplicated Node/npm/OpenSpec provisioning.
-- [ ] 5.3 Document private-action access, the exact hosted consumer acceptance procedure, observed-check branch-protection handoff, and rollback while keeping Phase 0 pending before the final green merge.
+- [x] 5.1 Add a dedicated `contents: read` OpenSpec workflow with full-history credential-free checkout pinned to `3d3c42e5aac5ba805825da76410c181273ba90b1` and the shared action pinned to `2906e03880a2ea7d553b0959c246991b1b058990`.
+- [x] 5.2 Add deterministic workflow-contract tests proving supported triggers, least privilege, immutable references, no secret forwarding, no caller inputs, and no duplicated Node/npm/OpenSpec provisioning.
+- [x] 5.3 Document private-action access, the exact hosted consumer acceptance procedure, observed-check branch-protection handoff, and rollback while keeping Phase 0 pending before the final green merge.
 
 ## 6. Validation and activation handoff
 
