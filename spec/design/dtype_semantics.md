@@ -1,6 +1,19 @@
 # Grounded Dtype Semantics
 
-**Status:** Design proposal, pre-implementation. Tracking issue: [#729].
+**Status:** Phases 0-1 LANDED. Phase 0 (the detectors) landed 2026-07-16
+(PR #758). Phase 1 (the `dtype_semantics` module, the storage decision at
+its four layers, and eval adoption) landed 2026-07-24: eval is now the
+reference lane for storage and finalize behavior, with two recorded
+Phase 1 residues owned by later work: (a) integer ELEMENTWISE arithmetic
+still computes its wide value through the unsplit f64 closures behind a
+cited saturating adapter, so int64 exactness above 2^53 for scalar and
+elementwise ops waits for the Phase 2 kernel split (chelis#680; integer
+reductions, storage, `to_tensor`/`to_list`, and the wire are already
+exact, and narrow widths trap exactly); (b) the DAG literal payloads
+(`RiscOp::Const`/`ConstTensor`, `Vec<f64>`) still collapse int64
+literals that lower into the tensor lane - filed as [#856], witnessed by
+the still-ignored chelis#684 binding-form rows. Phases 2-5 remain.
+Tracking issue: [#729].
 **Owning specs:** `spec/04-type-system.md` (gains an authored overflow/rounding
 section, today silent), `spec/05-risc-primitives.md` (op result semantics),
 and the audit record in `docs/investigations/numeric_audit_next_sweeps.md` /
@@ -242,6 +255,27 @@ provably preserve elements may clone/re-slice storage without
 re-finalizing via a `pub(crate) fn reuse_storage` escape hatch whose doc
 contract is "element-preserving ops only"; every use site cites it. That
 hatch is the ONE deliberate hole, kept greppable.
+
+**Landed-signature notes (Phase 1, 2026-07-24; same protocol as the
+[#732] `ElementRef` note - the doc records the landed form):**
+
+- every constructor takes a leading `op: &'static str` so the C2 trap
+  message can name the operation (the sketch had no op channel);
+- `finalize_tensor` returns `TensorStorage` (shape stays with the
+  evaluator's `TensorValue`, which wraps the storage);
+- `F16`/`Bf16` buffers store `half::f16`/`half::bf16` (both
+  `repr(transparent)` over the sketch's `u16`);
+- the reuse hatch landed as the greppable `reuse_*` method family on
+  `TensorStorage` (`reuse_gather`, `reuse_fill_gather`,
+  `reuse_overwrite`), pub because its consumers live in `chelis-ir` and
+  `chelis-compiler-api`; the "element-preserving ops only" doc contract
+  and per-site citations are unchanged;
+- typed read slices landed as the borrowed `StorageView` enum;
+- the runtime's `ScalarPayload` wraps the module's sealed `ScalarValue`
+  (the old in-crate `ScalarBits` enum and its wrapping `from_*_as` raw
+  constructors are deleted), and tensor arguments ingress-finalize at
+  their DECLARED param dtype at call binding (the host-lane mirror of
+  the DAG evaluator's Load ingress).
 
 **The cast ladder (2026-07 review; [#759]).** The explicit `cast`
 surface mirrors the read-side split above: the CHECKED cast is the
@@ -676,7 +710,7 @@ substitute fixes (needed for [#722]'s C half regardless of this plan).
 | 2 | integer `mean` / bool arithmetic / int floor-ceil-round capability rows | cells DECIDED 2026-07 on the issues ([#724] reject; [#726] reject + first-class `count`; [#712]/[#715] support - see capability_table.md's seed rows); Phase 4 ratifies each as an atom | capability table + spec/05 |
 | 3 | trap surface form and exact strings | Phase 2 | §C2 + `pub const` in the module |
 | 4 | crate placement | DECIDED 2026-07-17: a `chelis-types` MODULE. `Prim` already lives there (`types.rs`); the checker already consumes value-domain semantics (literal range diagnostics today, table-A acceptance at Phase 4); every §C5 consumer already depends on the crate; and §C3's privacy contract is module-scoped (`pub(in dtype_semantics)`), so the firewall is identical to a crate boundary. Constraint check passed: chelis-runtime stays dependency-light (libc+memmap2 only) - the generated helpers are emitted by chelis-backend-c, and C-side parity is enforced by tests, not a link edge. Discipline: the module stays import-clean (only `Prim` + std from the surrounding crate) so a later lift to a leaf crate remains mechanical. This also fixes [#732] Phase 1's `format_element` placement as FINAL (its §C3.1 pre-[#729] fallback is the answer - no Wave 2 -> Wave 3 migration) | §C5 + this doc + faithful_observation.md §C3.1 |
-| 5 | wire-schema versioning mechanics for the storage change | Phase 1 | schema.rs + `spec/design/chelis_manifest_spec.md` if it bites the manifest |
+| 5 | wire-schema versioning mechanics for the storage change | DECIDED at Phase 1 landing (2026-07-24): `EXECUTION_VALUE_SCHEMA_VERSION = 2` in `schema.rs`. The tensor payload is the tagged per-dtype `TensorElements` (`{"dtype": ..., "values": [...]}`; integer families exact at width, f16/bf16 as their exact f64 images, bool as true/false); `EvalResult` stamps `schema_version` (serde default 1 on deserialize, so a version-less payload identifies a v1 producer loudly); v1 clients posting the old bare-array `data` binding get a serde error naming the field, never a reinterpretation. The manifest is NOT bitten: `chelis_manifest_spec.md` carries type strings, not `ExecutionValue` payloads. The constant is independent of `WIRE_DAG_SCHEMA_VERSION` (which still governs `WireDag`) | schema.rs |
 
 [#387]: https://github.com/Chelis-Lang/chelis/issues/387
 [#680]: https://github.com/Chelis-Lang/chelis/issues/680

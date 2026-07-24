@@ -1518,7 +1518,7 @@ fn eval_scalar_const(source: &str, name: &str) -> Option<f64> {
             && value.shape.is_empty()
             && value.data.len() == 1
         {
-            return Some(value.data[0]);
+            return Some(value.data.element_as_f64_lossy(0));
         }
     }
     None
@@ -1847,8 +1847,8 @@ fn flatten_field_value(
             if value.data.len() != count {
                 return Err("tensor field shape mismatch".to_string());
             }
-            for (i, v) in value.data.iter().enumerate() {
-                env.insert(format!("{field_path}.{i}"), *v);
+            for (i, v) in value.data.to_f64_lossy_vec().into_iter().enumerate() {
+                env.insert(format!("{field_path}.{i}"), v);
             }
         }
         crate::opaque::FieldType::Scalar(_) => {
@@ -1867,7 +1867,9 @@ fn flatten_field_value(
                 // FAIL-CLOSED naming the mismatch rather than silently using
                 // `data[0]` and dropping the rest (which could hide a NaN or
                 // out-of-band remaining element that is never checked).
-                ExecutionValue::Tensor { value } if value.data.len() == 1 => value.data[0],
+                ExecutionValue::Tensor { value } if value.data.len() == 1 => {
+                    value.data.element_as_f64_lossy(0)
+                }
                 ExecutionValue::Tensor { value } => {
                     return Err(format!(
                         "scalar field shape mismatch: declared Scalar but produced a tensor with {} elements",
@@ -2143,7 +2145,7 @@ mod finding_tests {
     // `BTreeMap`, and the private flatten/validate helpers into scope.
     use super::*;
     use crate::opaque::FieldType;
-    use chelis_compiler_api::schema::TensorValue;
+    use chelis_compiler_api::schema::{TensorElements, TensorValue};
     use chelis_pred::PredAmenability;
 
     /// A minimal single-scalar-field opaque invariant. `opaque_record_env`
@@ -2217,7 +2219,7 @@ mod finding_tests {
         let multi = ExecutionValue::Tensor {
             value: TensorValue {
                 shape: vec![3],
-                data: vec![0.5, f64::NAN, 0.5],
+                data: TensorElements::from_f64_vec(vec![0.5, f64::NAN, 0.5]),
             },
         };
         let err = flatten_field_value(&multi, &fty, "p.value", &mut env)
@@ -2241,7 +2243,7 @@ mod finding_tests {
         let single = ExecutionValue::Tensor {
             value: TensorValue {
                 shape: vec![1],
-                data: vec![0.5],
+                data: TensorElements::from_f64_vec(vec![0.5]),
             },
         };
         flatten_field_value(&single, &fty, "p.value", &mut env)

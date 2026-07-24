@@ -93,6 +93,49 @@ impl std::error::Error for DecodeError {}
 /// This is the experimental contract point future codecs MUST call before
 /// handing a value of an invariant-carrying opaque type to in-process code.
 /// See the module docs for the V1 reality (no production caller yet).
+/// Decode a wire tensor payload (execution wire v2, chelis#729 section
+/// C3) into per-dtype IR storage, exactly: integer families and bool
+/// pass through untouched; f16/bf16 finalize their exact f64 images at
+/// the half width (identity for images produced by a conforming
+/// encoder).
+pub(crate) fn wire_tensor_to_ir(
+    value: &crate::schema::TensorValue,
+) -> Result<chelis_ir::eval::TensorValue, String> {
+    use crate::schema::TensorElements;
+    use chelis_types::{RawTensor, finalize_tensor, types::Prim};
+    let (prim, raw) = match &value.data {
+        TensorElements::F64(v) => (Prim::F64, RawTensor::Float(v.clone())),
+        TensorElements::F32(v) => (
+            Prim::F32,
+            RawTensor::Float(v.iter().map(|&x| x as f64).collect()),
+        ),
+        TensorElements::F16(v) => (Prim::F16, RawTensor::Float(v.clone())),
+        TensorElements::Bf16(v) => (Prim::Bf16, RawTensor::Float(v.clone())),
+        TensorElements::Int64(v) => (Prim::Int64, RawTensor::Int(v.clone())),
+        TensorElements::Int32(v) => (
+            Prim::Int32,
+            RawTensor::Int(v.iter().map(|&x| x as i64).collect()),
+        ),
+        TensorElements::Int16(v) => (
+            Prim::Int16,
+            RawTensor::Int(v.iter().map(|&x| x as i64).collect()),
+        ),
+        TensorElements::Int8(v) => (
+            Prim::Int8,
+            RawTensor::Int(v.iter().map(|&x| x as i64).collect()),
+        ),
+        TensorElements::Bool(v) => (
+            Prim::Bool,
+            RawTensor::Int(v.iter().map(|&x| i64::from(x)).collect()),
+        ),
+    };
+    let storage = finalize_tensor("wire", prim, raw).map_err(|trap| trap.to_string())?;
+    Ok(chelis_ir::eval::TensorValue::from_storage(
+        value.shape.clone(),
+        storage,
+    ))
+}
+
 pub fn decode_adt_value(
     program_exprs: &[Expr],
     payload: &ExecutionValue,
@@ -160,11 +203,11 @@ fn structural_decode(
         ExecutionValue::Bool { value } => Ok(RuntimeValue::Bool(*value)),
         ExecutionValue::String { value } => Ok(RuntimeValue::String(value.clone())),
         ExecutionValue::Unit => Ok(RuntimeValue::Unit),
-        // No declared element precision at the top level; the wire buffer
-        // decodes at f64 (its carrying dtype). Field-position decode
-        // ingress-finalizes at the declared field precision instead.
+        // The wire payload carries its dtype (execution wire v2); decode
+        // it exactly at that dtype. Field-position decode additionally
+        // ingress-finalizes at the declared field precision below.
         ExecutionValue::Tensor { value } => Ok(RuntimeValue::Tensor(RuntimeTensorValue::new(
-            IrTensorValue::from_vec(value.shape.clone(), value.data.clone()),
+            wire_tensor_to_ir(value).map_err(DecodeError::Structural)?,
         ))),
         ExecutionValue::List { value } => {
             let items = value
@@ -304,12 +347,11 @@ fn decode_tensor_field(
 ) -> Result<RuntimeValue, DecodeError> {
     match payload {
         ExecutionValue::Tensor { value } => {
-            let storage = chelis_types::finalize_tensor(
-                "decode",
-                prim,
-                chelis_types::RawTensor::Float(value.data.clone()),
-            )
-            .map_err(|trap| DecodeError::Structural(trap.to_string()))?;
+            let tensor = wire_tensor_to_ir(value).map_err(DecodeError::Structural)?;
+            // Ingress-finalize at the DECLARED field precision (identity
+            // when the wire dtype already agrees).
+            let storage = chelis_types::finalize_tensor("decode", prim, tensor.storage().to_raw())
+                .map_err(|trap| DecodeError::Structural(trap.to_string()))?;
             Ok(RuntimeValue::Tensor(RuntimeTensorValue::new(
                 IrTensorValue::from_storage(value.shape.clone(), storage),
             )))
@@ -473,7 +515,7 @@ type Holder = | Holder { weights: tensor[3, f32] }
             fields: vec![ExecutionValue::Tensor {
                 value: TensorValue {
                     shape: vec![3],
-                    data: vec![0.1, 0.2, 0.7],
+                    data: crate::schema::TensorElements::from_f64_vec(vec![0.1, 0.2, 0.7]),
                 },
             }],
         };

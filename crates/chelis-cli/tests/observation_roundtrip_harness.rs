@@ -1687,14 +1687,14 @@ fn wire_execution_value_rendering_round_trips() {
     let tensor = ExecutionValue::Tensor {
         value: TensorValue {
             shape: vec![finite.len()],
-            data: finite.clone(),
+            data: chelis_compiler_api::schema::TensorElements::from_f64_vec(finite.clone()),
         },
     };
     let json = serde_json::to_string(&tensor).expect("serialize");
     let back: ExecutionValue = serde_json::from_str(&json).expect("parse");
     match back {
         ExecutionValue::Tensor { value } => {
-            for (a, b) in value.data.iter().zip(&finite) {
+            for (a, b) in value.data.to_f64_lossy_vec().iter().zip(&finite) {
                 assert_eq!(a.to_bits(), b.to_bits(), "wire tensor element drifted");
             }
         }

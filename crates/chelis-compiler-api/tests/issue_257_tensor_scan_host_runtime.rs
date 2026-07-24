@@ -72,8 +72,8 @@ out = tensor_scan(
     let result = eval_surf(src);
     let out = root_tensor(&result, "out");
     assert_eq!(out.shape, vec![20000]);
-    assert_eq!(out.data[0], 1.0);
-    assert_eq!(out.data[19999], 20000.0);
+    assert_eq!(out.data.element_as_f64_lossy(0), 1.0);
+    assert_eq!(out.data.element_as_f64_lossy(19999), 20000.0);
 }
 
 #[test]
@@ -90,8 +90,8 @@ out = tensor_scan(
     let result = eval_surf(src);
     let out = root_tensor(&result, "out");
     assert_eq!(out.shape, vec![40000]);
-    assert_eq!(out.data[0], 1.0);
-    assert_eq!(out.data[39999], 40000.0);
+    assert_eq!(out.data.element_as_f64_lossy(0), 1.0);
+    assert_eq!(out.data.element_as_f64_lossy(39999), 40000.0);
 }
 
 // ---------------------------------------------------------------------------
@@ -113,7 +113,7 @@ out = tensor_scan(
     let out = root_tensor(&result, "out");
     assert_eq!(out.shape, vec![8]);
     let expected: Vec<f64> = (1..=8).map(|v| v as f64).collect();
-    assert_eq!(out.data, expected);
+    assert_eq!(out.data.to_f64_lossy_vec(), expected);
 }
 
 #[test]
@@ -131,7 +131,7 @@ out = tensor_scan(
     let result = eval_surf(src);
     let out = root_tensor(&result, "out");
     assert_eq!(out.shape, vec![5]);
-    assert_eq!(out.data, vec![0.0, 1.0, 2.0, 3.0, 4.0]);
+    assert_eq!(out.data.to_f64_lossy_vec(), vec![0.0, 1.0, 2.0, 3.0, 4.0]);
 }
 
 #[test]
@@ -251,7 +251,7 @@ out = tensor_scan(
     let out = root_tensor(&result, "out");
     // Element zero is fn(initial=1.0, 0) = 2.0; 4, 8, 16 follow.
     assert_eq!(out.shape, vec![4]);
-    assert_eq!(out.data, vec![2.0, 4.0, 8.0, 16.0]);
+    assert_eq!(out.data.to_f64_lossy_vec(), vec![2.0, 4.0, 8.0, 16.0]);
 }
 
 #[test]
@@ -268,7 +268,7 @@ out = tensor_scan(
     let out = root_tensor(&result, "out");
     assert_eq!(out.shape, vec![4]);
     // not(true) = false (0); then not(false) = true (1); alternating.
-    assert_eq!(out.data, vec![0.0, 1.0, 0.0, 1.0]);
+    assert_eq!(out.data.to_f64_lossy_vec(), vec![0.0, 1.0, 0.0, 1.0]);
 }
 
 // ---------------------------------------------------------------------------
@@ -421,7 +421,7 @@ out = grad(target)(cast(1.0, f32))
         .expect("missing out root");
     // d/dx (2x) = 2.
     match &root.value {
-        ExecutionValue::Tensor { value } => assert_eq!(value.data, vec![2.0]),
+        ExecutionValue::Tensor { value } => assert_eq!(value.data.to_f64_lossy_vec(), vec![2.0]),
         other => panic!("expected scalar gradient tensor, got {other:?}"),
     }
 }

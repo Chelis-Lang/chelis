@@ -102,7 +102,13 @@ fn assert_close(actual: &TensorValue, expected: &TensorValue, tol: f64, label: &
         expected.data.len(),
         "{label}: length mismatch"
     );
-    for (i, (a, e)) in actual.data.iter().zip(expected.data.iter()).enumerate() {
+    for (i, (a, e)) in actual
+        .data
+        .to_f64_lossy_vec()
+        .iter()
+        .zip(expected.data.to_f64_lossy_vec().iter())
+        .enumerate()
+    {
         assert!(
             (a - e).abs() <= tol,
             "{label}: element {i} mismatch actual={a} expected={e}",
@@ -191,7 +197,7 @@ fn issue_319_control_inline_f32_sdpa_grad_lowers() {
     let grad = inline_f32_grad_result();
     assert_eq!(grad.shape, vec![2, 3], "issue #319 control: d/dq shape");
     assert!(
-        grad.data.iter().all(|v| v.is_finite()),
+        grad.data.to_f64_lossy_vec().iter().all(|v| v.is_finite()),
         "issue #319 control: gradient must be finite, got {:?}",
         grad.data,
     );
@@ -415,7 +421,9 @@ fn issue_319_reshape_precision_poly_verb_lowers() {
         &out,
         &TensorValue {
             shape: vec![6],
-            data: vec![1.0, 4.0, 2.0, 5.0, 3.0, 6.0],
+            data: chelis_compiler_api::schema::TensorElements::from_f64_vec(vec![
+                1.0, 4.0, 2.0, 5.0, 3.0, 6.0,
+            ]),
         },
         1e-6,
         "issue #319 reshape values",
@@ -439,7 +447,9 @@ fn issue_319_expand_precision_poly_verb_lowers() {
         &out,
         &TensorValue {
             shape: vec![2, 2],
-            data: vec![1.0, 1.0, 2.0, 2.0],
+            data: chelis_compiler_api::schema::TensorElements::from_f64_vec(vec![
+                1.0, 1.0, 2.0, 2.0,
+            ]),
         },
         1e-6,
         "issue #319 expand values",
@@ -473,7 +483,7 @@ fn issue_319_two_precision_vars_both_pinned_same_precision_grads() {
         &grad,
         &TensorValue {
             shape: vec![2, 3],
-            data: vec![1.0; 6],
+            data: chelis_compiler_api::schema::TensorElements::from_f64_vec(vec![1.0; 6]),
         },
         1e-6,
         "issue #319 two-pvar monomorphic grad = ones",
@@ -541,7 +551,7 @@ fn issue_319_distinct_precisions_not_force_merged() {
                     "issue #319 distinct-precision: f32 result must be exact (21.0), got {value}",
                 ),
                 ExecutionValue::Tensor { value } => {
-                    let s: f64 = value.data.iter().sum();
+                    let s: f64 = value.data.to_f64_lossy_vec().iter().sum();
                     assert!(
                         (s - 21.0).abs() < 1e-9,
                         "issue #319 distinct-precision: result must be 21.0, got {s}",

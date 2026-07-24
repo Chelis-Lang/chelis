@@ -23,7 +23,7 @@ pub use builtins::{BUILTIN_NAMES, ShapeClass, builtin_env, shape_class};
 pub use chelis_vocab::EffectKind;
 pub use context::TypeEnv;
 pub use dtype_semantics::{
-    NumericTrap, RawScalar, RawTensor, ScalarValue, TensorStorage, finalize_scalar,
+    NumericTrap, RawScalar, RawTensor, ScalarValue, StorageView, TensorStorage, finalize_scalar,
     finalize_tensor, scalar_from_f64, scalar_from_i64,
 };
 pub use fitness::{

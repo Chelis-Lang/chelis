@@ -222,6 +222,22 @@ enum Buf {
     Bool(Vec<u8>),
 }
 
+/// Read-only borrowed view of a [`TensorStorage`] buffer at its own
+/// width (section C3: reads are free-form; only construction is gated).
+#[derive(Debug, Clone, Copy)]
+pub enum StorageView<'a> {
+    F64(&'a [f64]),
+    F32(&'a [f32]),
+    F16(&'a [half::f16]),
+    Bf16(&'a [half::bf16]),
+    I64(&'a [i64]),
+    I32(&'a [i32]),
+    I16(&'a [i16]),
+    I8(&'a [i8]),
+    /// 0/1 bytes.
+    Bool(&'a [u8]),
+}
+
 /// A finalized element buffer at its dtype's own width. Construct via
 /// [`finalize_tensor`] or the `reuse_*` element-preserving family.
 #[derive(Debug, Clone, PartialEq)]
@@ -261,6 +277,23 @@ impl TensorStorage {
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    /// Borrowed per-dtype view of the buffer for exact egress (the wire
+    /// schema, typed consumers). A read-only API: no construction path
+    /// exists through it.
+    pub fn view(&self) -> StorageView<'_> {
+        match &self.buf {
+            Buf::F64(v) => StorageView::F64(v),
+            Buf::F32(v) => StorageView::F32(v),
+            Buf::F16(v) => StorageView::F16(v),
+            Buf::Bf16(v) => StorageView::Bf16(v),
+            Buf::I64(v) => StorageView::I64(v),
+            Buf::I32(v) => StorageView::I32(v),
+            Buf::I16(v) => StorageView::I16(v),
+            Buf::I8(v) => StorageView::I8(v),
+            Buf::Bool(v) => StorageView::Bool(v),
+        }
     }
 
     /// The wide intermediate view of the whole buffer, per family: floats

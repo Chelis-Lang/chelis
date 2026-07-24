@@ -226,7 +226,7 @@ fn eval_last(dag: &Dag) -> Vec<f64> {
     let inputs = HashMap::new();
     let vals = eval_tensor(dag, &inputs).unwrap();
     let last_id = NodeId(dag.len() - 1);
-    vals[&last_id].data.clone()
+    vals[&last_id].to_f64_lossy_vec().clone()
 }
 
 /// Build a vector-rooted unary kernel: input tensor of `vals` interpreted
@@ -444,7 +444,7 @@ fn bf16_div_agrees_with_evaluator() {
     .collect();
     let vals = eval_tensor(&dag, &inputs).unwrap();
     let last_id = NodeId(dag.len() - 1);
-    let expected = vals[&last_id].data.clone();
+    let expected = vals[&last_id].to_f64_lossy_vec().clone();
     run_binary_reduced(
         "bf16_div",
         Prim::Bf16,
@@ -495,7 +495,7 @@ fn f16_div_agrees_with_evaluator() {
     .collect();
     let vals = eval_tensor(&dag, &inputs).unwrap();
     let last_id = NodeId(dag.len() - 1);
-    let expected = vals[&last_id].data.clone();
+    let expected = vals[&last_id].to_f64_lossy_vec().clone();
     run_binary_reduced(
         "f16_div",
         Prim::F16,
@@ -529,7 +529,7 @@ fn unary_eval(op: RiscOp, prec: Prim, vals: &[f32]) -> Vec<f64> {
     .collect();
     let vals = eval_tensor(&dag, &inputs).unwrap();
     let last_id = NodeId(dag.len() - 1);
-    vals[&last_id].data.clone()
+    vals[&last_id].to_f64_lossy_vec().clone()
 }
 
 #[test]

@@ -2742,7 +2742,7 @@ fn run_cmplt_parity(
         TensorValue::from_vec(vec![n], b_vals.to_vec()),
     );
     let evaluated = eval_tensor(&dag, &inputs).expect("evaluator must succeed");
-    let expected: Vec<f64> = evaluated[&root].data.clone();
+    let expected: Vec<f64> = evaluated[&root].to_f64_lossy_vec().clone();
     assert_eq!(expected.len(), n);
 
     let dag = fuse(&dag);

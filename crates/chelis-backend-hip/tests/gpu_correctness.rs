@@ -584,7 +584,7 @@ fn expected_single_output(dag: &Dag, inputs: &[TestInput]) -> Vec<f32> {
             .expect("evaluator should succeed");
     let root = *dag.roots().first().expect("single root expected");
     values[&root]
-        .data
+        .to_f64_lossy_vec()
         .iter()
         .copied()
         .map(|x| x as f32)
@@ -1994,7 +1994,7 @@ fn append_case_lines_f64(
                 }
             ));
             for (idx, value) in input.data.iter().enumerate() {
-                // Cast through `double *` because chelis_tensor.data is
+                // Cast through `double *` because chelis_tensor.to_f64_lossy_vec() is
                 // typed `float *` historically; the wheel runtime stores
                 // f64 in 8-byte slots (`chelis_dtype_size`). Sibling of
                 // #250/#251/#252: exact f64 bit pattern via
@@ -2136,7 +2136,7 @@ fn expected_single_output_f64(dag: &Dag, inputs: &[TestInputF64]) -> Vec<f64> {
         eval_tensor_roots_with_strict(dag, dag.roots(), |name| input_map.get(name).cloned())
             .expect("evaluator should succeed");
     let root = *dag.roots().first().expect("single root expected");
-    values[&root].data.clone()
+    values[&root].to_f64_lossy_vec().clone()
 }
 
 fn assert_close_vec_f64(actual: &[f64], expected: &[f64], tol: f64) {

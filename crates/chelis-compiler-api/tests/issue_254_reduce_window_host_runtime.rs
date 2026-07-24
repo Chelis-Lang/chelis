@@ -63,7 +63,7 @@ out = run(make_x())
     let out = root_tensor(&result, "out");
     assert_eq!(out.shape, vec![1, 1, 3, 3], "Valid pooling output shape");
     assert_eq!(
-        out.data,
+        out.data.to_f64_lossy_vec(),
         vec![6.0, 7.0, 8.0, 10.0, 11.0, 12.0, 14.0, 15.0, 16.0]
     );
 }
@@ -85,7 +85,7 @@ out = run(make_x())
     assert_eq!(out.shape, vec![1, 1, 2, 2]);
     // 2x2 mins of [[1,5,3],[4,2,6],[7,8,9]]:
     // [1,5,4,2]→1, [5,3,2,6]→2, [4,2,7,8]→2, [2,6,8,9]→2.
-    assert_eq!(out.data, vec![1.0, 2.0, 2.0, 2.0]);
+    assert_eq!(out.data.to_f64_lossy_vec(), vec![1.0, 2.0, 2.0, 2.0]);
 }
 
 #[test]
@@ -103,7 +103,7 @@ out = run(make_x())
     let result = eval_surf(src);
     let out = root_tensor(&result, "out");
     assert_eq!(out.shape, vec![1, 1, 2, 2]);
-    assert_eq!(out.data, vec![12.0, 16.0, 24.0, 28.0]);
+    assert_eq!(out.data.to_f64_lossy_vec(), vec![12.0, 16.0, 24.0, 28.0]);
 }
 
 #[test]
@@ -121,7 +121,7 @@ out = run(make_x())
     let result = eval_surf(src);
     let out = root_tensor(&result, "out");
     assert_eq!(out.shape, vec![1, 1, 2, 2]);
-    assert_eq!(out.data, vec![3.0, 4.0, 6.0, 7.0]);
+    assert_eq!(out.data.to_f64_lossy_vec(), vec![3.0, 4.0, 6.0, 7.0]);
 }
 
 // -------- Negative coverage --------

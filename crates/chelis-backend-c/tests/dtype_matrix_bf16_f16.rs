@@ -417,7 +417,7 @@ fn eval_scalar(dag: &Dag) -> f64 {
     let inputs = HashMap::new();
     let vals = eval_tensor(dag, &inputs).unwrap();
     let last_id = chelis_ir::dag::NodeId(dag.len() - 1);
-    vals[&last_id].data[0]
+    vals[&last_id].element_f64_lossy(0)
 }
 
 #[test]

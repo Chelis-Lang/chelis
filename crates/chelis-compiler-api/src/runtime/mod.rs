@@ -5,7 +5,7 @@ use chelis_ir::eval::TensorValue as IrTensorValue;
 use chelis_ir::lower::top_level_lowering_map;
 use chelis_types::{CheckedProgram, types::Prim};
 
-use crate::schema::{DictEntryValue, ExecutionValue, TensorValue};
+use crate::schema::{DictEntryValue, ExecutionValue, TensorElements, TensorValue};
 
 mod eval;
 mod host_ops;
@@ -587,12 +587,35 @@ fn collect_top_level_items<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
 
 pub(crate) fn runtime_value_to_schema(value: &RuntimeValue) -> Result<ExecutionValue, String> {
     Ok(match value {
-        RuntimeValue::Tensor(tensor) => ExecutionValue::Tensor {
-            value: TensorValue {
-                shape: tensor.value.shape.clone(),
-                data: tensor.value.to_f64_lossy_vec(),
-            },
-        },
+        RuntimeValue::Tensor(tensor) => {
+            // Exact per-dtype egress (execution wire v2, chelis#729
+            // section C3): the storage view carries every element at its
+            // own width, so int64 crosses the wire exactly and every
+            // dtype keeps its tag.
+            let data = match tensor.value.storage().view() {
+                chelis_types::StorageView::F64(v) => TensorElements::F64(v.to_vec()),
+                chelis_types::StorageView::F32(v) => TensorElements::F32(v.to_vec()),
+                chelis_types::StorageView::F16(v) => {
+                    TensorElements::F16(v.iter().map(|&x| f64::from(x)).collect())
+                }
+                chelis_types::StorageView::Bf16(v) => {
+                    TensorElements::Bf16(v.iter().map(|&x| f64::from(x)).collect())
+                }
+                chelis_types::StorageView::I64(v) => TensorElements::Int64(v.to_vec()),
+                chelis_types::StorageView::I32(v) => TensorElements::Int32(v.to_vec()),
+                chelis_types::StorageView::I16(v) => TensorElements::Int16(v.to_vec()),
+                chelis_types::StorageView::I8(v) => TensorElements::Int8(v.to_vec()),
+                chelis_types::StorageView::Bool(v) => {
+                    TensorElements::Bool(v.iter().map(|&x| x != 0).collect())
+                }
+            };
+            ExecutionValue::Tensor {
+                value: TensorValue {
+                    shape: tensor.value.shape.clone(),
+                    data,
+                },
+            }
+        }
         RuntimeValue::Scalar(payload) => {
             let dtype = payload.dtype();
             if dtype.is_integer() {

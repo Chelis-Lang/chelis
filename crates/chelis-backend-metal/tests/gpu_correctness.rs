@@ -313,7 +313,7 @@ fn evaluator_single_output(dag: &Dag, inputs: &[TestInput]) -> Vec<f32> {
     let value = outputs
         .get(&roots[0])
         .unwrap_or_else(|| panic!("evaluator did not produce a value for root {:?}", roots[0]));
-    value.data.iter().map(|&v| v as f32).collect()
+    value.to_f64_lossy_vec().iter().map(|&v| v as f32).collect()
 }
 
 fn assert_close(actual: &[f32], expected: &[f32], abs_tol: f32, rel_tol: f32, label: &str) {

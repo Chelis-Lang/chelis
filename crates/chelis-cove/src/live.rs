@@ -4,7 +4,7 @@ use std::fmt::Write as _;
 use chelis_tide::compiler;
 use chelis_tide::schema::{
     CheckRequest, CompileRequest, CompileTarget, DesugarRequest, Diagnostic, EvalRequest,
-    ExecutionValue, LowerRequest, SourceKind, TensorValue, WireDimInfo, WireRiscOp,
+    ExecutionValue, LowerRequest, SourceKind, TensorElements, TensorValue, WireDimInfo, WireRiscOp,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -257,7 +257,7 @@ fn zero_bindings(source: &str) -> Result<BTreeMap<String, TensorValue>, String> 
             name,
             TensorValue {
                 shape,
-                data: vec![0.0; len],
+                data: TensorElements::from_f64_vec(vec![0.0; len]),
             },
         );
     }

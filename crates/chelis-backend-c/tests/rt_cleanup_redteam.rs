@@ -1078,24 +1078,24 @@ fn cross_backend_bf16_add_mul_chain_agrees_with_evaluator() {
 
     // Evaluator
     let mut inputs = std::collections::HashMap::new();
-    let a_eval = chelis_ir::eval::TensorValue {
-        data: vec![0.5, 1.5, 2.5, -0.25, 1.0, 2.0, -1.0, 0.125],
-        shape: vec![n],
-    };
-    let b_eval = chelis_ir::eval::TensorValue {
-        data: vec![0.25, 0.5, -1.5, 0.75, 0.125, -0.25, 1.0, 2.0],
-        shape: vec![n],
-    };
-    let c_eval = chelis_ir::eval::TensorValue {
-        data: vec![1.0, -1.0, 0.5, 2.0, 0.5, 1.0, -1.0, 1.0],
-        shape: vec![n],
-    };
+    let a_eval = chelis_ir::eval::TensorValue::from_vec(
+        vec![n],
+        vec![0.5, 1.5, 2.5, -0.25, 1.0, 2.0, -1.0, 0.125],
+    );
+    let b_eval = chelis_ir::eval::TensorValue::from_vec(
+        vec![n],
+        vec![0.25, 0.5, -1.5, 0.75, 0.125, -0.25, 1.0, 2.0],
+    );
+    let c_eval = chelis_ir::eval::TensorValue::from_vec(
+        vec![n],
+        vec![1.0, -1.0, 0.5, 2.0, 0.5, 1.0, -1.0, 1.0],
+    );
     inputs.insert("a".to_string(), a_eval.clone());
     inputs.insert("b".to_string(), b_eval.clone());
     inputs.insert("c".to_string(), c_eval.clone());
     let evals = chelis_ir::eval::eval_tensor(&dag, &inputs).unwrap();
     let last_id = NodeId(dag.len() - 1);
-    let eval_out = evals[&last_id].data.clone();
+    let eval_out = evals[&last_id].to_f64_lossy_vec().clone();
 
     // C backend
     let result = codegen(&dag, "bf16_chain").unwrap();

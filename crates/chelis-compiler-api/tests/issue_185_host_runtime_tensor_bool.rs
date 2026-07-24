@@ -58,7 +58,11 @@ out = and(&a, &b)
     let result = eval_surf(src);
     let out = root_tensor(&result, "out");
     assert_eq!(out.shape, vec![4], "tensor and shape");
-    assert_eq!(out.data, vec![1.0, 0.0, 0.0, 0.0], "tensor and data");
+    assert_eq!(
+        out.data.to_f64_lossy_vec(),
+        vec![1.0, 0.0, 0.0, 0.0],
+        "tensor and data"
+    );
 }
 
 #[test]
@@ -72,7 +76,11 @@ out = or(&a, &b)
     let result = eval_surf(src);
     let out = root_tensor(&result, "out");
     assert_eq!(out.shape, vec![4], "tensor or shape");
-    assert_eq!(out.data, vec![1.0, 1.0, 1.0, 0.0], "tensor or data");
+    assert_eq!(
+        out.data.to_f64_lossy_vec(),
+        vec![1.0, 1.0, 1.0, 0.0],
+        "tensor or data"
+    );
 }
 
 #[test]
@@ -85,7 +93,11 @@ out = not(&a)
     let result = eval_surf(src);
     let out = root_tensor(&result, "out");
     assert_eq!(out.shape, vec![4], "tensor not shape");
-    assert_eq!(out.data, vec![0.0, 0.0, 1.0, 1.0], "tensor not data");
+    assert_eq!(
+        out.data.to_f64_lossy_vec(),
+        vec![0.0, 0.0, 1.0, 1.0],
+        "tensor not data"
+    );
 }
 
 // ---------------------------------------------------------------------------

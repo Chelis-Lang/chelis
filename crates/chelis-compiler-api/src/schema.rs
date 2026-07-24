@@ -104,10 +104,125 @@ pub struct Span {
     pub len: usize,
 }
 
+/// Execution-payload wire version (chelis#729 Phase 1, the section C3
+/// storage decision's wire layer). Version history:
+///
+/// * v1 (implicit; no version field on the wire): `TensorValue.data` was
+///   an untagged `Vec<f64>`, which cannot carry exact int64 above 2^53
+///   (chelis#686) and erased every element dtype (chelis#685).
+/// * v2: `TensorValue.data` is the tagged per-dtype [`TensorElements`]
+///   payload below, and [`EvalResult`] stamps `schema_version: 2`.
+///
+/// Mechanics: producers always stamp the current version; a deserialized
+/// result with no version field takes [`legacy_execution_value_version`]
+/// (1), so consumers can distinguish a v1 producer loudly instead of
+/// misreading its payload. Tensor BINDINGS in requests changed shape with
+/// v2, so a v1 client posting the old bare-array `data` gets a serde
+/// error naming the field rather than a silent reinterpretation. This
+/// constant governs the execution payload only; `WIRE_DAG_SCHEMA_VERSION`
+/// below governs the `WireDag` surface and is independent.
+pub const EXECUTION_VALUE_SCHEMA_VERSION: u32 = 2;
+
+/// Serde default for [`EvalResult::schema_version`]: a payload with no
+/// version field predates v2.
+pub fn legacy_execution_value_version() -> u32 {
+    1
+}
+
+/// Serde default used when SERIALIZING new results.
+pub fn current_execution_value_version() -> u32 {
+    EXECUTION_VALUE_SCHEMA_VERSION
+}
+
+/// Per-dtype tensor element payload (execution wire v2; the chelis#729
+/// section C3 storage decision expressed at the wire layer). Integer
+/// families carry exact integers at width; `f16`/`bf16` carry the EXACT
+/// f64 images of the stored half-precision values (every half value is
+/// exactly representable in f64, and JSON numbers carry f64 exactly);
+/// bool carries true/false.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "dtype", content = "values", rename_all = "snake_case")]
+pub enum TensorElements {
+    F64(Vec<f64>),
+    F32(Vec<f32>),
+    F16(Vec<f64>),
+    Bf16(Vec<f64>),
+    Int64(Vec<i64>),
+    Int32(Vec<i32>),
+    Int16(Vec<i16>),
+    Int8(Vec<i8>),
+    Bool(Vec<bool>),
+}
+
+impl TensorElements {
+    pub fn len(&self) -> usize {
+        match self {
+            TensorElements::F64(v) => v.len(),
+            TensorElements::F32(v) => v.len(),
+            TensorElements::F16(v) => v.len(),
+            TensorElements::Bf16(v) => v.len(),
+            TensorElements::Int64(v) => v.len(),
+            TensorElements::Int32(v) => v.len(),
+            TensorElements::Int16(v) => v.len(),
+            TensorElements::Int8(v) => v.len(),
+            TensorElements::Bool(v) => v.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Widen every element to f64. Exact except for int64 magnitudes
+    /// above 2^53, hence the lossy name (the section C3 read-side
+    /// contract; consumers that need exact int64 match the variant).
+    pub fn to_f64_lossy_vec(&self) -> Vec<f64> {
+        match self {
+            TensorElements::F64(v) => v.clone(),
+            TensorElements::F32(v) => v.iter().map(|&x| x as f64).collect(),
+            TensorElements::F16(v) => v.clone(),
+            TensorElements::Bf16(v) => v.clone(),
+            TensorElements::Int64(v) => v.iter().map(|&x| x as f64).collect(),
+            TensorElements::Int32(v) => v.iter().map(|&x| x as f64).collect(),
+            TensorElements::Int16(v) => v.iter().map(|&x| x as f64).collect(),
+            TensorElements::Int8(v) => v.iter().map(|&x| x as f64).collect(),
+            TensorElements::Bool(v) => v.iter().map(|&x| if x { 1.0 } else { 0.0 }).collect(),
+        }
+    }
+
+    /// One element widened to f64 (same loss profile as
+    /// [`Self::to_f64_lossy_vec`]).
+    pub fn element_as_f64_lossy(&self, index: usize) -> f64 {
+        match self {
+            TensorElements::F64(v) => v[index],
+            TensorElements::F32(v) => v[index] as f64,
+            TensorElements::F16(v) => v[index],
+            TensorElements::Bf16(v) => v[index],
+            TensorElements::Int64(v) => v[index] as f64,
+            TensorElements::Int32(v) => v[index] as f64,
+            TensorElements::Int16(v) => v[index] as f64,
+            TensorElements::Int8(v) => v[index] as f64,
+            TensorElements::Bool(v) => {
+                if v[index] {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
+        }
+    }
+
+    /// Convenience f64 constructor for request builders and tests that
+    /// carry plain float payloads.
+    pub fn from_f64_vec(data: Vec<f64>) -> Self {
+        TensorElements::F64(data)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct TensorValue {
     pub shape: Vec<usize>,
-    pub data: Vec<f64>,
+    pub data: TensorElements,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -588,6 +703,11 @@ pub struct EvaluatedRoot {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EvalResult {
+    /// Execution-payload wire version (see
+    /// [`EXECUTION_VALUE_SCHEMA_VERSION`]): producers stamp the current
+    /// version; a deserialized result with no field is a v1 producer.
+    #[serde(default = "legacy_execution_value_version")]
+    pub schema_version: u32,
     pub roots: Vec<EvaluatedRoot>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub transcript: Vec<String>,

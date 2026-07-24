@@ -1335,8 +1335,13 @@ fn eval_compiled(
 
     let bindings = bindings
         .into_iter()
-        .map(|(name, value)| (name, IrTensorValue::from_vec(value.shape, value.data)))
-        .collect::<HashMap<_, _>>();
+        .map(|(name, value)| {
+            let tensor = crate::decode::wire_tensor_to_ir(&value).map_err(|message| {
+                stage_error("eval", format!("binding `{name}`: {message}"), "eval_error")
+            })?;
+            Ok((name, tensor))
+        })
+        .collect::<Result<HashMap<_, _>>>()?;
 
     let roots = compiled
         .tensor_root_names
@@ -1451,6 +1456,7 @@ fn eval_compiled(
         .collect::<Result<Vec<_>>>()?;
 
     Ok(EvalResult {
+        schema_version: crate::schema::EXECUTION_VALUE_SCHEMA_VERSION,
         roots,
         transcript: host_outcome.transcript,
     })
@@ -4244,7 +4250,7 @@ dims = (rank(x), shape(x, 1), numel(x))
                 "x".to_string(),
                 crate::schema::TensorValue {
                     shape: vec![2, 3],
-                    data: vec![0.0; 6],
+                    data: crate::schema::TensorElements::from_f64_vec(vec![0.0; 6]),
                 },
             )]),
         })
@@ -4572,7 +4578,7 @@ b: tensor[2, f32] = b
             "a".to_string(),
             crate::schema::TensorValue {
                 shape: vec![2],
-                data: vec![1.0, 2.0],
+                data: crate::schema::TensorElements::from_f64_vec(vec![1.0, 2.0]),
             },
         );
         // `b` is intentionally omitted so that evaluating root `b` fails.
@@ -4631,7 +4637,7 @@ b: tensor[2, f32] = b
             "a".to_string(),
             crate::schema::TensorValue {
                 shape: vec![2],
-                data: vec![1.0, 2.0],
+                data: crate::schema::TensorElements::from_f64_vec(vec![1.0, 2.0]),
             },
         );
 

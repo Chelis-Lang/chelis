@@ -75,8 +75,18 @@ class CompileResult:
 
 @dataclass(frozen=True)
 class TensorValue:
+    """A decoded wire tensor (execution wire v2, chelis#729).
+
+    ``dtype`` is the element dtype tag (``f64``/``f32``/``f16``/``bf16``/
+    ``int64``/``int32``/``int16``/``int8``/``bool``); ``data`` carries the
+    elements exactly at that dtype (Python ints for the integer families,
+    floats for the float families, bools for ``bool``), so exact int64
+    payloads survive the boundary (the old np.float64 collapse is gone).
+    """
+
     shape: tuple[int, ...]
-    data: tuple[float, ...]
+    data: tuple[Any, ...]
+    dtype: str = "f64"
 
 
 @dataclass(frozen=True)
@@ -267,9 +277,10 @@ def eval(
 ) -> EvalResult:
     """Evaluate Chelis source.
 
-    In Phase 3b this copies Python tensor inputs into the evaluator's internal
-    `Vec<f64>` representation. Zero-copy execution of compiled artifacts belongs to
-    `chelis.load()` in Phase `3b-ii`.
+    Tensor inputs cross the boundary as per-dtype payloads (execution wire
+    v2, chelis#729): the numpy array's dtype selects the wire tag, so
+    integer tensors stay exact end-to-end. Zero-copy execution of compiled
+    artifacts belongs to `chelis.load()` in Phase `3b-ii`.
     """
 
     serializable = {
@@ -350,10 +361,26 @@ def _diagnostic(payload: dict[str, Any]) -> Diagnostic:
     )
 
 
+_INT_DTYPES = ("int64", "int32", "int16", "int8")
+_FLOAT_DTYPES = ("f64", "f32", "f16", "bf16")
+
+
 def _tensor_value(payload: dict[str, Any]) -> TensorValue:
+    data = payload["data"]
+    dtype = data["dtype"]
+    values = data["values"]
+    if dtype in _INT_DTYPES:
+        decoded = tuple(int(value) for value in values)
+    elif dtype in _FLOAT_DTYPES:
+        decoded = tuple(float(value) for value in values)
+    elif dtype == "bool":
+        decoded = tuple(bool(value) for value in values)
+    else:
+        raise ChelisError(f"unknown tensor element dtype: {dtype}")
     return TensorValue(
         shape=tuple(int(dim) for dim in payload["shape"]),
-        data=tuple(float(value) for value in payload["data"]),
+        data=decoded,
+        dtype=dtype,
     )
 
 
@@ -388,12 +415,37 @@ def _execution_value(payload: dict[str, Any]) -> Any:
     raise ChelisError(f"unknown execution value type: {kind}")
 
 
+# numpy kind/itemsize -> execution wire v2 dtype tag. Unsigned and other
+# unmapped dtypes fall back to f64 (a widening that cannot silently
+# corrupt the mapped families; exact u64 above 2^63 is not representable
+# on the wire and should be provided as int64).
+_NUMPY_WIRE_DTYPES: dict[tuple[str, int], str] = {
+    ("f", 8): "f64",
+    ("f", 4): "f32",
+    ("f", 2): "f16",
+    ("i", 8): "int64",
+    ("i", 4): "int32",
+    ("i", 2): "int16",
+    ("i", 1): "int8",
+    ("b", 1): "bool",
+}
+
+
 def _tensor_value_payload(value: Any) -> dict[str, Any]:
     array = _tensor_to_numpy(value)
-    flat = np.asarray(array, dtype=np.float64).reshape(-1)
+    dtype = _NUMPY_WIRE_DTYPES.get((array.dtype.kind, array.dtype.itemsize))
+    if dtype in _INT_DTYPES:
+        flat = [int(v) for v in array.reshape(-1)]
+    elif dtype == "bool":
+        flat = [bool(v) for v in array.reshape(-1)]
+    elif dtype in _FLOAT_DTYPES:
+        flat = [float(v) for v in array.reshape(-1)]
+    else:
+        dtype = "f64"
+        flat = [float(v) for v in np.asarray(array, dtype=np.float64).reshape(-1)]
     return {
         "shape": [int(dim) for dim in array.shape],
-        "data": flat.tolist(),
+        "data": {"dtype": dtype, "values": flat},
     }
 
 
