@@ -9242,7 +9242,12 @@ impl LowerCtx {
                 RiscOp::Cast { new_precision } => {
                     let input_id = *node.inputs.first()?;
                     let src = self.dag.get(input_id)?.output_type.precision;
-                    crate::eval::convert_cast_data(input0?, src, *new_precision)
+                    // A trapping cast DECLINES TO FOLD (the section C2
+                    // fold rule for casts): the condition falls to
+                    // runtime, where the checked ladder traps with its
+                    // full diagnostic. A fold must never bake a trap
+                    // away nor bake one in.
+                    crate::eval::convert_cast_data(input0?, src, *new_precision).ok()?
                 }
                 RiscOp::Add => input0? + input1?,
                 RiscOp::Mul => input0? * input1?,

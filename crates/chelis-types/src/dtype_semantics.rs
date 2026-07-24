@@ -597,6 +597,65 @@ pub fn scalar_from_f64(op: &'static str, prim: Prim, v: f64) -> Result<ScalarVal
     finalize_scalar(op, prim, RawScalar::Float(v))
 }
 
+/// THE authored cast ladder (the chelis#759 one-rule-per-direction
+/// obligation, executed at the chelis#729 rework): the DEFAULT cast is
+/// CHECKED on every eval surface. Per direction:
+///
+/// * any source -> float target: finalize (IEEE RNE at the target
+///   width); total.
+/// * integer/bool source -> integer target: exact value; out of the
+///   target range TRAPS `Overflow` (no wrap).
+/// * float source -> integer target: truncate toward zero (the authored
+///   fractional rule, spec section 5.2), then range-check; out of range
+///   TRAPS `Overflow` (no saturation); NaN/inf TRAPS `Domain`.
+/// * any source -> bool target: STRICT {0, 1} membership; an exact 0/1
+///   encodes false/true, anything else TRAPS `Domain` (explicit over
+///   implicit; comparisons already produce bool, and the corpus sweep
+///   found no dependence on the old nonzero-to-1 encoding).
+///
+/// The named lossy/wrapping cast forms remain chelis#759's future
+/// surface; this function is the checked DEFAULT. The compiled C lane
+/// stays documented-divergent until chelis#729 Phase 3.
+pub fn cast_raw(op: &'static str, raw: RawScalar, dst: Prim) -> Result<ScalarValue, NumericTrap> {
+    match dst {
+        Prim::F64 | Prim::F32 | Prim::F16 | Prim::Bf16 => finalize_scalar(op, dst, raw),
+        Prim::Int8 | Prim::Int16 | Prim::Int32 | Prim::Int64 => match raw {
+            RawScalar::Int(i) => finalize_scalar(op, dst, RawScalar::Int(i)),
+            RawScalar::Float(x) => {
+                if !x.is_finite() {
+                    return Err(NumericTrap::Domain { op, prim: dst });
+                }
+                finalize_scalar(op, dst, RawScalar::Float(x.trunc()))
+            }
+        },
+        Prim::Bool => finalize_scalar(op, dst, raw),
+        Prim::F8e4m3 => panic!(
+            "cast_raw: f8e4m3 is not in the active dtype set \
+             (spec/04-type-system.md section 1.1.1); the checker rejects it, \
+             so no cast can target it (op {op})"
+        ),
+        Prim::String => panic!("cast_raw: string is not a numeric dtype (op {op})"),
+    }
+}
+
+/// [`cast_raw`] over a sealed scalar: the source family picks its exact
+/// wide reading (integers and bool exactly through i64, floats through
+/// their exact f64 image).
+pub fn cast_scalar(
+    op: &'static str,
+    value: ScalarValue,
+    dst: Prim,
+) -> Result<ScalarValue, NumericTrap> {
+    if value.prim() == dst {
+        return Ok(value);
+    }
+    let raw = match value.as_i64_exact() {
+        Some(i) => RawScalar::Int(i),
+        None => RawScalar::Float(value.as_f64_lossy()),
+    };
+    cast_raw(op, raw, dst)
+}
+
 /// Bulk finalize: one monomorphized loop per dtype, never per-element
 /// dynamic dispatch (the section C5 performance contract). Traps on the
 /// first offending element.

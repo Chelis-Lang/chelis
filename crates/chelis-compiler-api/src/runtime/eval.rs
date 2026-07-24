@@ -845,20 +845,31 @@ impl<'a> EvalContext<'a> {
         // host eval lane just needs to pick the right re-pack.
         let target_prim = prim_from_name(target)
             .ok_or_else(|| format!("cast target `{target}` is not a recognized primitive type"))?;
+        // The CHECKED default ladder (`chelis_types::cast_scalar`; the
+        // chelis#759 one-rule-per-direction obligation), identical to
+        // the tensor surfaces: out-of-range integer targets trap,
+        // fractional-to-integer truncates toward zero (authored), and a
+        // bool target requires exactly 0/1 (Domain trap otherwise).
         match (value, target_prim) {
             (RuntimeValue::Bool(value), Prim::Bool) => Ok(RuntimeValue::Bool(value)),
             (RuntimeValue::String(value), Prim::String) => Ok(RuntimeValue::String(value)),
-            (RuntimeValue::Scalar(payload), dst_dtype) if dst_dtype.is_integer() => {
-                RuntimeValue::scalar_like_int(dst_dtype, payload.as_i64())
+            (RuntimeValue::Scalar(payload), dst_dtype)
+                if dst_dtype.is_integer() || dst_dtype.is_float() || dst_dtype == Prim::Bool =>
+            {
+                let cast = chelis_types::cast_scalar("cast", payload.value(), dst_dtype)
+                    .map_err(|trap| trap.to_string())?;
+                match cast.as_bool_exact() {
+                    Some(flag) => Ok(RuntimeValue::Bool(flag)),
+                    None => Ok(RuntimeValue::from_scalar_value(cast)),
+                }
             }
-            (RuntimeValue::Scalar(payload), dst_dtype) if dst_dtype.is_float() => {
-                RuntimeValue::scalar_like_float(dst_dtype, payload.as_f64())
-            }
-            (RuntimeValue::Bool(value), dst_dtype) if dst_dtype.is_integer() => {
-                RuntimeValue::scalar_like_int(dst_dtype, if value { 1 } else { 0 })
-            }
-            (RuntimeValue::Bool(value), dst_dtype) if dst_dtype.is_float() => {
-                RuntimeValue::scalar_like_float(dst_dtype, if value { 1.0 } else { 0.0 })
+            (RuntimeValue::Bool(value), dst_dtype)
+                if dst_dtype.is_integer() || dst_dtype.is_float() =>
+            {
+                let raw = chelis_types::RawScalar::Int(if value { 1 } else { 0 });
+                let cast = chelis_types::cast_raw("cast", raw, dst_dtype)
+                    .map_err(|trap| trap.to_string())?;
+                Ok(RuntimeValue::from_scalar_value(cast))
             }
             (RuntimeValue::Tensor(tensor), _) => cast_tensor_value(tensor, target),
             (other, _) => Err(format!(

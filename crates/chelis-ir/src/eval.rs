@@ -24,7 +24,9 @@ use crate::dag::{
     Dag, DagNode, DimInfo, FusedInput, FusedStepOp, NodeId, ReduceWindowKind, RiscOp, RtDim,
     SHRINK_TO_END, SymbolicDimSource, TensorType, bind_symbolic_dims, symbolic_bindings,
 };
-use chelis_types::dtype_semantics::{RawTensor, TensorStorage, finalize_tensor, scalar_from_f64};
+use chelis_types::dtype_semantics::{
+    NumericTrap, RawScalar, RawTensor, TensorStorage, finalize_tensor, scalar_from_f64,
+};
 use chelis_types::types::Prim;
 
 #[derive(Debug, Clone)]
@@ -286,85 +288,36 @@ fn finalize_wide_int(
     Ok(TensorValue::from_storage(shape, storage))
 }
 
-/// Element-wise `cast` conversion for the DAG evaluator (#380), applied
-/// per-dtype (chelis#729 Phase 1). Float targets finalize (IEEE RNE at
-/// the target width, so f16/bf16 targets now genuinely round, chelis#717);
-/// float-to-integer truncates toward zero and SATURATES into the target
-/// range, and integer-to-narrower-integer WRAPS, both preserving the
-/// pre-refactor `as`-cast behavior verbatim until chelis#759 authors the
-/// out-of-range cast atoms; bool encodes nonzero-to-1.
+/// Element-wise `cast` conversion image for the DAG evaluator (#380) and
+/// lowering's static `if`-condition fold (chelis#620): the CHECKED
+/// default ladder (`chelis_types::cast_raw`; one authored rule per
+/// direction, both eval surfaces identical). Returns the trap so the
+/// fold can DECLINE TO FOLD on a trapping cast (the condition falls to
+/// runtime, where the trap fires with its full diagnostic) while the
+/// evaluator surfaces it loudly.
 ///
-/// `pub(crate)` so lowering's static `if`-condition fold (chelis#620)
-/// applies the exact same cast semantics as this evaluator; a fold/eval
-/// divergence there would silently select the wrong branch. This scalar
-/// image form works on the f64 widening, so its int64 exactness matches
-/// the fold's (Phase 2 territory); the tensor lane uses [`cast_value`],
-/// which reads storage exactly.
-pub fn convert_cast_data(x: f64, src: Prim, dst: Prim) -> f64 {
-    // Project the source into the wide reading its family defines.
-    let as_int: Option<i64> = match src {
-        Prim::Int8 | Prim::Int16 | Prim::Int32 | Prim::Int64 => Some(wide_i64_saturating(x)),
-        Prim::Bool => Some(if x != 0.0 { 1 } else { 0 }),
-        Prim::F32 | Prim::F64 | Prim::F16 | Prim::Bf16 => None,
-        Prim::F8e4m3 | Prim::String => None,
-    };
-    cast_wide_element(x, as_int, src, dst)
-}
-
-/// One element of the authored cast ladder, on the wide reading. `as_int`
-/// is `Some` exactly when the SOURCE family is integer/bool (the exact
-/// wide); float sources pass their f64 image in `x`.
-fn cast_wide_element(x: f64, as_int: Option<i64>, src: Prim, dst: Prim) -> f64 {
+/// The SOURCE projection keeps the chelis#680 residue: an
+/// integer-family source is read through the f64 wide with the
+/// saturating adapter until the Phase 2 kernel split, exactly like the
+/// arithmetic paths. The tensor lane ([`cast_value`]) reads storage
+/// exactly and does not share that residue.
+pub fn convert_cast_data(x: f64, src: Prim, dst: Prim) -> Result<f64, NumericTrap> {
     if src == dst {
-        return x;
+        return Ok(x);
     }
-    match dst {
-        Prim::F64 | Prim::F32 | Prim::F16 | Prim::Bf16 => {
-            let raw = match as_int {
-                Some(i) => chelis_types::dtype_semantics::RawScalar::Int(i),
-                None => chelis_types::dtype_semantics::RawScalar::Float(x),
-            };
-            chelis_types::dtype_semantics::finalize_scalar("cast", dst, raw)
-                .expect("float finalize is total")
-                .as_f64_lossy()
-        }
+    let raw = match src {
         Prim::Int8 | Prim::Int16 | Prim::Int32 | Prim::Int64 => {
-            let wide = match as_int {
-                // Integer source narrowing WRAPS (pre-refactor `as` cast
-                // semantics, preserved verbatim; chelis#759 authors the
-                // out-of-range rule).
-                Some(i) => match dst {
-                    Prim::Int8 => (i as i8) as i64,
-                    Prim::Int16 => (i as i16) as i64,
-                    Prim::Int32 => (i as i32) as i64,
-                    Prim::Int64 => i,
-                    other => unreachable!("outer match binds an integer dst, got {other:?}"),
-                },
-                // Float source truncates toward zero and SATURATES
-                // (pre-refactor `as` cast semantics; chelis#759).
-                None => match dst {
-                    Prim::Int8 => (x as i8) as i64,
-                    Prim::Int16 => (x as i16) as i64,
-                    Prim::Int32 => (x as i32) as i64,
-                    Prim::Int64 => x as i64,
-                    other => unreachable!("outer match binds an integer dst, got {other:?}"),
-                },
-            };
-            wide as f64
+            RawScalar::Int(wide_i64_saturating(x))
         }
-        Prim::Bool => {
-            let nonzero = match as_int {
-                Some(i) => i != 0,
-                None => x != 0.0,
-            };
-            if nonzero { 1.0 } else { 0.0 }
-        }
-        Prim::F8e4m3 => panic!(
-            "cast: f8e4m3 is not in the active dtype set (spec/04-type-system.md \
-             section 1.1.1); the checker rejects it before evaluation"
+        Prim::Bool => RawScalar::Int(if x != 0.0 { 1 } else { 0 }),
+        Prim::F32 | Prim::F64 | Prim::F16 | Prim::Bf16 => RawScalar::Float(x),
+        Prim::F8e4m3 | Prim::String => panic!(
+            "cast: `{}` is not a numeric source dtype (spec/04-type-system.md \
+             section 1.1.1); the checker rejects it before evaluation",
+            src.name()
         ),
-        Prim::String => panic!("cast: string is not a tensor element type"),
-    }
+    };
+    chelis_types::cast_raw("cast", raw, dst).map(|value| value.as_f64_lossy())
 }
 
 /// Tensor `cast`: per-dtype, exact where the family is exact. Integer
@@ -375,20 +328,28 @@ fn cast_value(input: &TensorValue, src: Prim, dst: Prim) -> Result<TensorValue, 
     if src == dst && input.prim() == dst {
         return Ok(input.clone());
     }
-    let wide: Vec<(f64, Option<i64>)> = match input.storage().to_raw() {
-        RawTensor::Int(v) => v.iter().map(|&i| (i as f64, Some(i))).collect(),
-        RawTensor::Float(v) => v.iter().map(|&x| (x, None)).collect(),
+    // The CHECKED default ladder (`chelis_types::cast_raw`), per element
+    // from the EXACT storage reading: integer/bool sources through i64,
+    // float sources through their exact f64 image. An out-of-range or
+    // out-of-domain element traps loudly instead of saturating/wrapping.
+    let raws: Vec<RawScalar> = match input.storage().to_raw() {
+        RawTensor::Int(v) => v.into_iter().map(RawScalar::Int).collect(),
+        RawTensor::Float(v) => v.into_iter().map(RawScalar::Float).collect(),
     };
+    let mut cast_values = Vec::with_capacity(raws.len());
+    for raw in raws {
+        cast_values.push(chelis_types::cast_raw("cast", raw, dst).map_err(|trap| trap.to_string())?);
+    }
     if dst.is_float() {
-        let out: Vec<f64> = wide
-            .into_iter()
-            .map(|(x, as_int)| cast_wide_element(x, as_int, src, dst))
-            .collect();
+        let out: Vec<f64> = cast_values.iter().map(|v| v.as_f64_lossy()).collect();
         finalize_wide("cast", dst, input.shape.clone(), out)
     } else {
-        let out: Vec<i64> = wide
-            .into_iter()
-            .map(|(x, as_int)| wide_i64_saturating(cast_wide_element(x, as_int, src, dst)))
+        let out: Vec<i64> = cast_values
+            .iter()
+            .map(|v| {
+                v.as_i64_exact()
+                    .expect("integer/bool cast results carry exact integers")
+            })
             .collect();
         finalize_wide_int("cast", dst, input.shape.clone(), out)
     }
