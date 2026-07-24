@@ -20,6 +20,17 @@
 //! branded string is the RENDERING of the contract; machine surfaces carry
 //! the structured kind and payload, and agents match those, never regex
 //! over prose.
+//!
+//! **Status: that structured surface is the TARGET, not what ships today.**
+//! Nothing on this path derives `Serialize`, and the compiler-api flattens
+//! an [`Unsupported`] into a flat `kind: "unsupported_feature"` envelope
+//! plus the rendered message (`unsupported_stage_error`). So today the
+//! branded prefix IS the machine surface, and matching it is legitimate.
+//! Prerequisites, in order: chelis#729 Phase 4's capability Table A (without
+//! it `chelis check` has no target-independent rejections to report, which
+//! is why nothing constructs [`Stage::Checker`]), then a structured payload
+//! slot on `schema::Diagnostic`. Tracked by the section C2 status note in
+//! `spec/design/loud_unsupported.md`.
 
 use std::fmt;
 

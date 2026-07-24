@@ -246,6 +246,22 @@ gains a rejected-cells section asserting these strings byte-for-byte per
 lane (a rejection emitted differently per lane is lane skew, [#712]'s
 shape).
 
+**STATUS (2026-07-24): the structured `chelis check` surface above is the
+TARGET, not current behavior.** Today no stage constructs `Stage::Checker`
+(`chelis check` never reaches lowering or codegen, so no `Unsupported` can
+arrive there), no type on the `Unsupported` path derives `Serialize`, and
+the build surface renders the branded string into a flat
+`kind: "unsupported_feature"` envelope
+(`crates/chelis-compiler-api/src/compiler.rs`, `unsupported_stage_error`).
+Consumers - including this plan's own rejected-cells corpus - match prose
+today. Two prerequisites, in order: [#729] Phase 4 supplies capability
+Table A, without which `check` has no target-independent rejections to
+report (`capability_table.md` §Derivations); then the structured payload
+must be plumbed onto `schema::Diagnostic`. Until both land, the
+`unsupported:` brand is the machine surface and tests may match it. The
+byte-for-byte per-lane corpus assertions likewise arrive with [#732]
+Phase 3; today's corpus is deliberately substring-level and says so.
+
 **Authored versus unimplemented:** a deliberately unsupported case cites the
 spec atom that decides it (the [#733] linkage); a
 not-yet-implemented case cites its issue. The capability table makes
