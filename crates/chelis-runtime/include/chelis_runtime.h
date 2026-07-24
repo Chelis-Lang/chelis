@@ -495,6 +495,22 @@ static inline int chelis_is_contiguous(const chelis_tensor *t) {
 chelis_tensor *chelis_contiguous(const chelis_tensor *t);
 void chelis_print_f32(const chelis_tensor *t);
 
+/* chelis#732 Phase 2 (faithful_observation.md section C3.3): THE float
+ * formatting routine for every compiled-lane exit. `value` is the exact
+ * double image of the stored float (every supported float width widens to
+ * double losslessly), `width_kind` is the value's CHELIS_* dtype id
+ * (CHELIS_F64 / CHELIS_F32 / CHELIS_F16 / CHELIS_BF16), and `buf` receives
+ * the NUL-terminated shortest string that parses back to exactly the
+ * stored bits at that width, in the frozen spec/05 section 8.1 grammar
+ * (`inf` / `-inf` / `NaN`, lowercase unpadded `e`, `-0.0` preserved,
+ * decimal form on the rendered magnitude in [1e-4, 1e16)). Byte-identical
+ * to the eval lane's reference renderer by test. A non-float width_kind or
+ * an unknown id aborts with the raw id; integers never route through this
+ * (they print exactly at their own width). `buf` must hold at least
+ * CHELIS_FORMAT_SHORTEST_BUF bytes. */
+#define CHELIS_FORMAT_SHORTEST_BUF 32
+void chelis_format_shortest(double value, int width_kind, char *buf);
+
 #ifdef __cplusplus
 }
 #endif

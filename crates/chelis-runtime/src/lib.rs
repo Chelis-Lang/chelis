@@ -192,6 +192,13 @@ macro_rules! runtime_fail {
     }};
 }
 
+// chelis#732 Phase 2: the compiled lane's shortest-round-trip float
+// formatter (declared after `runtime_fail!` so the macro is in scope).
+mod format_shortest;
+
+pub use format_shortest::{CHELIS_FORMAT_SHORTEST_BUF, chelis_format_shortest};
+use format_shortest::format_shortest;
+
 /// Decode an ABI dtype tag at the Rust FFI boundary.
 #[inline]
 pub fn decode_runtime_dtype(dtype: c_int) -> Result<RuntimeDType, RuntimeDTypeDecodeError> {
@@ -1173,7 +1180,11 @@ pub unsafe extern "C" fn chelis_string_from_int64(value: i64) -> chelis_string {
 
 #[no_mangle]
 pub unsafe extern "C" fn chelis_string_from_f64(value: f64) -> chelis_string {
-    new_runtime_string(format!("{}", value))
+    // chelis#732 Phase 2: `to_string` is an observation exit; the frozen
+    // section C1.3 grammar replaces the Display form (which never emitted
+    // e-notation and dropped the `.0` on integral values, so the compiled
+    // lane's `to_string` disagreed with eval's byte-for-byte).
+    new_runtime_string(format_shortest(value, RuntimeDType::F64))
 }
 
 #[no_mangle]
@@ -2314,8 +2325,19 @@ pub unsafe extern "C" fn chelis_list_from_tensor(tensor: *const chelis_tensor) -
                 let raw = *((*tensor).data as *const f32).add(i * stride);
                 chelis_value_from_f64(raw as f64)
             }
-            RuntimeDType::Bf16 | RuntimeDType::F16 => {
-                runtime_fail!("to_list expects a supported numeric or bool tensor input")
+            // chelis#732 Phase 2 (section C3.4, chelis#716's abort half):
+            // read the 2-byte storage and widen exactly. The list box is
+            // f64-valued, so the element leaves as the exact image of the
+            // stored half value (widening is lossless); the box renders at
+            // f64 width until the value box learns narrow-float widths
+            // (chelis#729's capacity side).
+            RuntimeDType::Bf16 => {
+                let bits = *((*tensor).data as *const u16).add(i * stride);
+                chelis_value_from_f64(f64::from(half::bf16::from_bits(bits)))
+            }
+            RuntimeDType::F16 => {
+                let bits = *((*tensor).data as *const u16).add(i * stride);
+                chelis_value_from_f64(f64::from(half::f16::from_bits(bits)))
             }
         };
         items.push(value);
@@ -3545,7 +3567,13 @@ unsafe fn write_stdout(text: &str) {
 unsafe fn value_to_string_inline(value: chelis_value) -> String {
     match value.tag {
         chelis_value_tag::CHELIS_VALUE_INT64 => value.as_.i64_.to_string(),
-        chelis_value_tag::CHELIS_VALUE_FLOAT64 => value.as_.f64_.to_string(),
+        // chelis#732 Phase 2: the boxed float renders in the frozen
+        // section C1.3 grammar at the box's f64 width (the pre-contract
+        // Display form had no e-notation and dropped the `.0` on integral
+        // values, diverging from the reference renderer).
+        chelis_value_tag::CHELIS_VALUE_FLOAT64 => {
+            format_shortest(value.as_.f64_, RuntimeDType::F64)
+        }
         chelis_value_tag::CHELIS_VALUE_BOOL => {
             if value.as_.boolean { "true" } else { "false" }.to_string()
         }
@@ -3788,8 +3816,68 @@ unsafe fn adt_to_string(adt: *const chelis_adt) -> String {
     out
 }
 
+/// One tensor element's text per the frozen observation contract
+/// (chelis#732 Phase 2). The read dispatch keeps each dtype's existing
+/// storage decode (I32/BOOL stay on the f32-encoded convention this site
+/// always used; storage migration is chelis#729's, rendering is ours):
+/// integers print as integers with all digits exact, bool prints
+/// `true`/`false`, and floats print shortest-round-trip at THEIR width
+/// through the same routine the generated C print helper calls.
+unsafe fn tensor_elem_to_string(t: *const chelis_tensor, dtype: RuntimeDType, i: usize) -> String {
+    let tm = t as *mut chelis_tensor;
+    match dtype {
+        RuntimeDType::F32 => {
+            let v = *f32::data_ptr_unchecked(tm).add(i);
+            format_shortest(f64::from(v), RuntimeDType::F32)
+        }
+        RuntimeDType::F64 => {
+            let v = *f64::data_ptr_unchecked(tm).add(i);
+            format_shortest(v, RuntimeDType::F64)
+        }
+        RuntimeDType::I64 => (*i64::data_ptr_unchecked(tm).add(i)).to_string(),
+        RuntimeDType::I32 => {
+            // f32-encoded storage at this site. An integral value prints
+            // as the exact integer; a slot whose stored bits fall outside
+            // the tag's value set renders the stored value faithfully
+            // (spec/05 section 8.1: tag-vs-bits disagreements print the
+            // bits, never a truncated lie).
+            let raw = f64::from(*data_as_f32_const(t).add(i));
+            if raw.fract() == 0.0 && raw.is_finite() {
+                (raw as i64).to_string()
+            } else {
+                format_shortest(raw, RuntimeDType::F64)
+            }
+        }
+        RuntimeDType::Bool => {
+            let raw = *data_as_f32_const(t).add(i);
+            if raw != 0.0 { "true" } else { "false" }.to_string()
+        }
+        RuntimeDType::I16 => (*((*t).data as *const i16).add(i)).to_string(),
+        RuntimeDType::I8 => (*((*t).data as *const i8).add(i)).to_string(),
+        // chelis#732 Phase 2 (chelis#749's f16-as-f32 shape): read the
+        // 2-byte storage and format at the value's own width.
+        RuntimeDType::Bf16 => {
+            let bits = *((*t).data as *const u16).add(i);
+            format_shortest(f64::from(half::bf16::from_bits(bits)), RuntimeDType::Bf16)
+        }
+        RuntimeDType::F16 => {
+            let bits = *((*t).data as *const u16).add(i);
+            format_shortest(f64::from(half::f16::from_bits(bits)), RuntimeDType::F16)
+        }
+    }
+}
+
+/// Elements rendered at every tensor exit before truncation applies
+/// ([05-OBS-5]); one documented constant, both lanes, marker `, ...`.
+const TENSOR_RENDER_LIMIT: usize = 32;
+
 unsafe fn tensor_to_string(t: *const chelis_tensor) -> String {
     let dtype = tensor_dtype(t, "tensor formatting");
+    // [05-OBS-4]: a rank-0 tensor renders as its single element, bare -
+    // the `tensor(shape=[], data=[..])` wrapper is not an exit form.
+    if (*t).ndim == 0 {
+        return tensor_elem_to_string(t, dtype, 0);
+    }
     let mut out = String::from("tensor(shape=[");
     for d in 0..(*t).ndim as usize {
         if d > 0 {
@@ -3798,50 +3886,17 @@ unsafe fn tensor_to_string(t: *const chelis_tensor) -> String {
         out.push_str(&(*t).shape[d].to_string());
     }
     out.push_str("], data=[");
-    let n = ((*t).size as usize).min(10);
-    // Dispatch on dtype outside the read loop so F64 / I64 produce
-    // their full-precision value rather than the previous
-    // f32-truncated read.  I32 and BOOL stay on f32-encoded storage.
-    let tm = t as *mut chelis_tensor;
-    let read: Box<dyn Fn(usize) -> f64> = match dtype {
-        RuntimeDType::F32 => {
-            let p = f32::data_ptr_unchecked(tm);
-            Box::new(move |i| *p.add(i) as f64)
-        }
-        RuntimeDType::F64 => {
-            let p = f64::data_ptr_unchecked(tm);
-            Box::new(move |i| *p.add(i))
-        }
-        RuntimeDType::I64 => {
-            let p = i64::data_ptr_unchecked(tm);
-            Box::new(move |i| *p.add(i) as f64)
-        }
-        RuntimeDType::I32 | RuntimeDType::Bool => {
-            let p = data_as_f32_const(t);
-            Box::new(move |i| *p.add(i) as f64)
-        }
-        RuntimeDType::I16 => {
-            let p = (*t).data as *const i16;
-            Box::new(move |i| *p.add(i) as f64)
-        }
-        RuntimeDType::I8 => {
-            let p = (*t).data as *const i8;
-            Box::new(move |i| *p.add(i) as f64)
-        }
-        RuntimeDType::Bf16 | RuntimeDType::F16 => {
-            runtime_fail!("tensor formatting unsupported dtype {}", dtype.name())
-        }
-    };
+    // [05-OBS-5]: truncate at 32 elements with the `, ...` marker (the
+    // pre-contract form here cut at 10 with NO marker, chelis#749).
+    let n = ((*t).size as usize).min(TENSOR_RENDER_LIMIT);
     for i in 0..n {
-        let value = read(i);
         if i > 0 {
             out.push_str(", ");
         }
-        if (value - value.round()).abs() < 1e-9 {
-            out.push_str(&format!("{value:.1}"));
-        } else {
-            out.push_str(&value.to_string());
-        }
+        out.push_str(&tensor_elem_to_string(t, dtype, i));
+    }
+    if (*t).size as usize > n {
+        out.push_str(", ...");
     }
     out.push_str("])");
     out
