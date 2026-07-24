@@ -58,12 +58,19 @@ DOC_EXACT_NAMES: frozenset[str] = frozenset(
 # change keeps coverage. Trailing slash is required so a sibling file
 # like `docsignore` does not match.
 DOC_DIR_PREFIXES: tuple[str, ...] = ("docs/",)
+# Every path under spec/ is normative even when it is Markdown
+# (spec/design/spec_provenance.md §C7, enforced by the
+# adopt-openspec-governance lifecycle): a spec edit must follow the
+# OpenSpec path and can never take the docs-only bypass.
+NON_DOC_PREFIXES: tuple[str, ...] = ("spec/",)
 
 
 def is_doc_path(path: str) -> bool:
     """True if `path` is documentation/prose under the allowlist."""
     norm = path.strip().strip('"')
     if not norm:
+        return False
+    if any(norm.startswith(prefix) for prefix in NON_DOC_PREFIXES):
         return False
     # Normalize to forward slashes; git emits POSIX separators already,
     # but be explicit so a stray backslash path is treated as code (it

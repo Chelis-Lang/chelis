@@ -1,0 +1,6 @@
+# Review routing for normative and governance trees (Phase 0,
+# spec/design/spec_provenance.md §C7). Provider-level process evidence
+# only: ownership here routes reviews, it never becomes canonical
+# Chelis or Buoy authority.
+/spec/ @brittonr
+/openspec/ @brittonr

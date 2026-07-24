@@ -9,7 +9,7 @@
 - [x] 2.1 Add `scripts/test_check_openspec.py` fixtures for argument parsing, injected executable selection, exact OpenSpec 1.6.0 verification, bounded events, and unresolvable history.
 - [x] 2.2 Add positive and planted negative fixtures for planning-before-implementation ordering, one-lifecycle branch scope, PR citation matching, and exact maintenance exemptions including the mandatory `spec/**` rejection.
 - [x] 2.3 Add positive and planted negative fixtures for built-in schema enforcement, symlink rejection, artifact/scenario coherence, task completion, archive naming, and replayed delta-to-baseline synchronization.
-- [ ] 2.4 Add the named `openspec_adoption` suite that proves configuration, instructions, review routing, docs-only boundaries, and Phase 0 inactive/activation messaging.
+- [x] 2.4 Add the named `openspec_adoption` suite that proves configuration, instructions, review routing, docs-only boundaries, and Phase 0 inactive/activation messaging.
 
 ## 3. Chelis-owned checker
 
@@ -20,10 +20,10 @@
 
 ## 4. Contributor and review routing
 
-- [ ] 4.1 Update canonical agent/contributor instructions with governed-change classification, planning-only commit ordering, requirement/design citations, archive flow, and the repository-owned maintenance manifest.
-- [ ] 4.2 Add or update the pull-request template and `spec/**` review routing so governed PRs cite one exact OpenSpec identifier and normative Markdown reaches the required reviewers.
-- [ ] 4.3 Update docs-only detection and its tests so every `spec/**` path is non-exempt while nonnormative documentation outside `spec/**` retains its intended lightweight path.
-- [ ] 4.4 Add review-routing and exemption negative tests proving labels, body claims, or uncovered paths cannot override committed governance evidence.
+- [x] 4.1 Update canonical agent/contributor instructions with governed-change classification, planning-only commit ordering, requirement/design citations, archive flow, and the repository-owned maintenance manifest.
+- [x] 4.2 Add or update the pull-request template and `spec/**` review routing so governed PRs cite one exact OpenSpec identifier and normative Markdown reaches the required reviewers.
+- [x] 4.3 Update docs-only detection and its tests so every `spec/**` path is non-exempt while nonnormative documentation outside `spec/**` retains its intended lightweight path.
+- [x] 4.4 Add review-routing and exemption negative tests proving labels, body claims, or uncovered paths cannot override committed governance evidence.
 
 ## 5. Immutable GitHub integration
 

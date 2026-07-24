@@ -214,6 +214,10 @@ class TestCitation(unittest.TestCase):
     def test_none_body_is_empty(self):
         self.assertEqual([], co.extract_citations(None))
 
+    def test_body_claims_are_not_citations(self):
+        body = "spec-exempt: true\nExempt: yes\nlabels: docs-only"
+        self.assertEqual([], co.extract_citations(body))
+
     def test_indented_citation_not_matched(self):
         body = f"  OpenSpec-Change: {CHANGE_ID}"
         self.assertEqual([], co.extract_citations(body))
