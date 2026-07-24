@@ -264,7 +264,7 @@ async fn eval_endpoint_uses_named_bindings_and_rejects_missing_inputs() {
         json!({
             "source_kind":"surf",
             "source":LOSS_PROGRAM,
-            "bindings":{"x":{"shape":[4],"data":[1.0,2.0,3.0,4.0]}}
+            "bindings":{"x":{"shape":[4],"data":{"dtype":"f32","values":[1.0,2.0,3.0,4.0]}}}
         }),
     )
     .await;
@@ -276,7 +276,7 @@ async fn eval_endpoint_uses_named_bindings_and_rejects_missing_inputs() {
         .find(|root| root["name"] == "loss")
         .expect("loss root");
     assert_eq!(loss_root["value"]["type"], "tensor");
-    assert_eq!(loss_root["value"]["value"]["data"][0], 2.5);
+    assert_eq!(loss_root["value"]["value"]["data"]["values"][0], 2.5);
 
     let (_, bad) = post_json(
         router(),
@@ -371,7 +371,7 @@ items = to_list(x)
         json!({
             "source_kind":"surf",
             "source":source,
-            "bindings":{"x":{"shape":[4],"data":[1.0,2.0,3.0,4.0]}}
+            "bindings":{"x":{"shape":[4],"data":{"dtype":"f32","values":[1.0,2.0,3.0,4.0]}}}
         }),
     )
     .await;
@@ -908,7 +908,7 @@ async fn router_handles_concurrent_requests() {
         json!({
             "source_kind":"surf",
             "source":LOSS_PROGRAM,
-            "bindings":{"x":{"shape":[4],"data":[1.0,2.0,3.0,4.0]}}
+            "bindings":{"x":{"shape":[4],"data":{"dtype":"f32","values":[1.0,2.0,3.0,4.0]}}}
         }),
     ));
     let (first, second) = tokio::join!(first, second);
