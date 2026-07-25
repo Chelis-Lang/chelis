@@ -2,7 +2,8 @@
 
 Run via: `python3 scripts/test_openspec_adoption.py` from repo root.
 
-Owning change: `openspec/changes/adopt-openspec-governance` (task 2.4).
+Owning change: `openspec/changes/archive/2026-07-24-adopt-openspec-governance`
+(task 2.4; archived at completion).
 What is locked here:
 
   (a) configuration: the canonical `openspec/` root exists, uses the
@@ -29,7 +30,13 @@ import unittest
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-CHANGE_DIR = REPO_ROOT / "openspec" / "changes" / "adopt-openspec-governance"
+CHANGE_DIR = (
+    REPO_ROOT
+    / "openspec"
+    / "changes"
+    / "archive"
+    / "2026-07-24-adopt-openspec-governance"
+)
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "openspec-governance.yml"
 
 ACCEPTED_ACTION_SHA = "2906e03880a2ea7d553b0959c246991b1b058990"

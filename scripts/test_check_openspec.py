@@ -2,8 +2,9 @@
 
 Run via: `python3 scripts/test_check_openspec.py` from repo root.
 
-Owning requirements: `openspec/changes/adopt-openspec-governance/specs/`
-(`spec-driven-change-governance` and `openspec-ci-governance`). What is
+Owning requirements: `openspec/specs/` (`spec-driven-change-governance`
+and `openspec-ci-governance`, synchronized from the archived
+`adopt-openspec-governance` lifecycle). What is
 locked here:
 
   (a) argument parsing: the shared action's fixed

@@ -1,6 +1,7 @@
 """OpenSpec governance checker (Chelis-owned; stdlib-only, Python 3.11+).
 
-Owning change: `openspec/changes/adopt-openspec-governance`. The shared
+Owning change: `openspec/changes/archive/2026-07-24-adopt-openspec-governance`
+(baseline requirements now live in `openspec/specs/`). The shared
 `Chelis-Lang/ci/actions/openspec-governance` action invokes exactly:
 
     python3 scripts/check_openspec.py --self-test --merge-bound --base <base>
