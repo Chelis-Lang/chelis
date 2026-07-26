@@ -1,0 +1,44 @@
+name: OpenSpec validation
+
+# Advisory, non-blocking structural validation of the openspec/ planning
+# tree. This is NOT a required status check: it does not gate merges, does
+# not govern spec/**, and enforces no lifecycle/citation/ordering rules. It
+# only runs `openspec validate` so a malformed OpenSpec artifact is caught
+# early. The eventual required-governance regime lives in
+# spec/design/spec_provenance.md (Phase 0) and is not activated here.
+
+on:
+  pull_request:
+    paths:
+      - "openspec/**"
+      - ".github/workflows/openspec-validate.yml"
+  push:
+    branches: [main]
+    paths:
+      - "openspec/**"
+      - ".github/workflows/openspec-validate.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: openspec-validate-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  openspec-validate:
+    name: openspec-validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install OpenSpec 1.6.0
+        run: npm install -g @fission-ai/openspec@1.6.0
+
+      - name: Validate OpenSpec tree
+        run: openspec validate --all --strict --no-interactive

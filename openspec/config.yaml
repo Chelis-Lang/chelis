@@ -19,7 +19,6 @@ rules:
     - Record fail-closed behavior, negative fixtures, migration or activation ordering, rollback, and hosted-versus-local evidence limits.
   specs:
     - Use SHALL requirements with positive and negative WHEN/THEN scenarios.
-    - Treat every spec/** edit as normative; it cannot use a documentation-only bypass.
     - Link existing owning spec sections instead of copying or weakening their contracts.
   tasks:
     - Order work as tests or fixtures, implementation, documentation or review routing, strict validation, adversarial validation, and hosted acceptance.

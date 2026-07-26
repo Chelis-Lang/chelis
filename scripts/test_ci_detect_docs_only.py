@@ -34,15 +34,8 @@ m = _load_module()
 class IsDocPathTests(unittest.TestCase):
     def test_markdown_is_doc(self):
         self.assertTrue(m.is_doc_path("README.md"))
+        self.assertTrue(m.is_doc_path("spec/00-overview.md"))
         self.assertTrue(m.is_doc_path("CHANGELOG.markdown"))
-
-    def test_spec_tree_is_normative_not_doc(self):
-        # spec/** is normative even as Markdown; it must never take the
-        # docs-only bypass (spec_provenance.md §C7, OpenSpec Phase 0).
-        self.assertFalse(m.is_doc_path("spec/00-overview.md"))
-        self.assertFalse(m.is_doc_path("spec/design/spec_provenance.md"))
-        self.assertFalse(m.is_docs_only(["spec/01-nomenclature.md"]))
-        self.assertFalse(m.is_docs_only(["README.md", "spec/01-nomenclature.md"]))
 
     def test_exact_names_are_doc(self):
         for name in ("LICENSE", "CODEOWNERS", "NOTICE", ".gitignore"):

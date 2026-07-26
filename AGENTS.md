@@ -83,55 +83,29 @@ not drift.
 
 If active docs disagree, fix the disagreement instead of adding a third explanation.
 
-## OpenSpec Change Governance
+## OpenSpec (initial adoption)
 
-Phase 0 of `spec/design/spec_provenance.md` activates with the merge of the
-`adopt-openspec-governance` lifecycle: OpenSpec is the required planning
-workflow for governed changes. The canonical planning tree is `openspec/`
-(built-in spec-driven schema); the executable enforcement is
-`scripts/check_openspec.py`, invoked by the pinned `openspec-governance`
-workflow on every pull request.
+The `openspec/` tree is the canonical OpenSpec planning root (built-in
+spec-driven schema). This is an **initial, non-blocking adoption**: OpenSpec
+is available for planning changes but is **not yet required** and does not
+gate merges. The eventual required-governance regime is described in
+`spec/design/spec_provenance.md` (Phase 0) and is future work — it is not
+activated here.
 
-- Every agent-authored feature or behavior change and **every `spec/**`
-  edit** creates or updates exactly one OpenSpec lifecycle before
-  implementation. Docs-only detection never exempts `spec/**`.
-- The lifecycle marker, proposal, and requirement deltas must land in a
-  planning-only ancestor commit before the branch's first production
-  commit. A collapsed plan-plus-code commit fails the gate.
-- One lifecycle (or one maintenance exemption) per branch, never both.
-- The implementation PR body cites its lifecycle with one line starting at
-  column one: `OpenSpec-Change: <change-id>`.
-- Behavior-preserving maintenance outside `spec/**` may instead add one
-  exact-path manifest `openspec/exemptions/YYYY-MM-DD-<kebab-id>.toml` with
-  `kind = "maintenance"`, a non-empty `reason`, and `paths` equal to the
-  complete changed non-governance set (root `.gitignore`/`.gitattributes`
-  are planning-neutral and excluded).
-- Merge-bound validation rejects active lifecycles: before merge,
-  synchronize delta specs into `openspec/specs/` and move the lifecycle to
-  `openspec/changes/archive/YYYY-MM-DD-<change-id>`.
-- Commit-ordering and commit-attribution evidence lives on the
-  pull-request lane and in local runs. Squash merges stay green
-  post-merge: the push run on `main` re-validates the diff-shaped
-  controls only, because a squash collapses the branch history those
-  two checks need.
-- OpenSpec green is planning evidence only; it never replaces the owning
-  executable acceptance oracle or `spec/**` authority, and provider labels,
-  reviews, or PR body claims never override committed governance evidence.
-
-Local commands (uv-managed Python; OpenSpec must be exactly 1.6.0):
+- CI validates the `openspec/` tree structurally through the
+  `openspec-validate` workflow (`openspec validate --all --strict`) under
+  `contents: read`. It is advisory: not a required status check, and it
+  never governs `spec/**` or blocks a merge.
+- Validate locally the same way (OpenSpec must be exactly 1.6.0):
 
 ```sh
-.venv/bin/python scripts/check_openspec.py --self-test
-.venv/bin/python scripts/check_openspec.py --pre-archive --base origin/main
-.venv/bin/python scripts/check_openspec.py --merge-bound --base origin/main
+openspec validate --all --strict --no-interactive
 ```
 
-`--pre-archive` is the in-development loop (accepts one active lifecycle);
-`--merge-bound` is what CI enforces (synchronized archive required, so
-draft implementation PRs stay red by design until archival). The Phase 0
-oracles are `scripts/test_check_openspec.py` and
-`scripts/test_openspec_adoption.py` plus the hosted `openspec-governance`
-check.
+- OpenSpec artifacts are planning evidence only. They never become Chelis
+  runtime, spec, coverage, or implementation-correctness authority, and
+  never override `spec/**` or an executable acceptance oracle. When an
+  OpenSpec artifact and `spec/**` disagree, `spec/**` is controlling.
 
 ### Public-Surface Change Rule
 
@@ -248,9 +222,7 @@ macOS.
 
 Documentation-only changes (Markdown/prose with no code, fixture, or
 example edits) are exempt from `--local`: skip the local gate, push,
-and require green CI instead. `spec/**` is never documentation-only:
-those edits are normative and carry an OpenSpec lifecycle (see
-OpenSpec Change Governance). The gate's clippy/build/test stages
+and require green CI instead. The gate's clippy/build/test stages
 cannot be affected by prose, and CI still runs the lint stage plus the
 Docs job (mdBook build and the `skill_suite` example validator), which
 cover everything a docs-only diff can break.
