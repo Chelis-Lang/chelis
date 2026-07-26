@@ -12,7 +12,7 @@ Chelis SHALL provide a dependency-free Python 3.11-or-newer checker as a regular
 - **THEN** validation SHALL fail without an ambient executable or alternate-path fallback
 
 ### Requirement: Deterministic controls fail closed
-The checker and `scripts/test_check_openspec.py` SHALL cover strict artifact validation, planning-before-implementation ordering, pull-request change citations, one-record branch scope, exact maintenance exemptions, symlink rejection, built-in schema selection, active-versus-archived state, complete described tasks, archive-date validity, and replayed delta-to-baseline synchronization. Each acceptance rule SHALL have at least one planted negative fixture proving rejection.
+The checker and `scripts/test_check_openspec.py` SHALL cover strict artifact validation, planning-before-implementation ordering, pull-request change citations, one-record branch scope, exact maintenance exemptions, symlink rejection, built-in schema selection, active-versus-archived state, complete described tasks, archive-date validity, delta operation heading and requirement-block shape, baseline-to-delta capability coverage, and replayed delta-to-baseline synchronization. Each acceptance rule SHALL have at least one planted negative fixture proving rejection.
 
 #### Scenario: Valid governed change is evaluated
 - **WHEN** one correctly ordered, complete, synchronized, and archived lifecycle is compared with its base
@@ -32,6 +32,10 @@ The CI workflow SHALL check out complete history with credentials persistence di
 #### Scenario: Comparison history is shallow or malformed
 - **WHEN** the selected base is malformed, absent, or cannot produce a merge base
 - **THEN** governance SHALL fail with a bounded diagnostic
+
+#### Scenario: Rapid pushes are each audited
+- **WHEN** two governed merges land on the protected branch in quick succession
+- **THEN** a later push-lane run SHALL NOT cancel the earlier one, so each squash-merged mainline diff is audited as its own diff
 
 #### Scenario: Squash-merged push is validated
 - **WHEN** a push event validates a mainline commit produced by a provider squash merge
@@ -61,7 +65,7 @@ OpenSpec governance SHALL run in a dedicated workflow or job with only `contents
 - **THEN** OpenSpec governance SHALL remain isolated under its explicit read-only permission boundary
 
 ### Requirement: Pull-request routing is event-visible but noncanonical
-On pull-request events the checker SHALL validate the repository-defined OpenSpec change citation from the bounded GitHub event payload and SHALL enforce that `spec/**` cannot use the documentation-only or maintenance path. Provider labels, timestamps, reviews, and body fields SHALL remain process-routing evidence only and SHALL NOT become Chelis product or future Buoy authority.
+On pull-request events the checker SHALL validate the repository-defined OpenSpec change citation from the bounded GitHub event payload and SHALL enforce that `spec/**` cannot use the documentation-only or maintenance path. The governance workflow SHALL re-evaluate a pull request when its body is edited, so a citation cannot be removed after a green run. Provider labels, timestamps, reviews, and body fields SHALL remain process-routing evidence only and SHALL NOT become Chelis product or future Buoy authority.
 
 #### Scenario: Governed PR cites its lifecycle
 - **WHEN** the pull-request citation exactly matches the branch lifecycle identifier
@@ -70,6 +74,10 @@ On pull-request events the checker SHALL validate the repository-defined OpenSpe
 #### Scenario: Provider metadata conflicts with repository evidence
 - **WHEN** a label, title, body, or review claims exemption or completion that committed artifacts do not establish
 - **THEN** repository-owned governance SHALL fail or remain incomplete
+
+#### Scenario: Citation removed by a later body edit
+- **WHEN** a pull-request body is edited to remove its OpenSpec-Change citation after a prior green run
+- **THEN** the governance workflow SHALL re-run on the edit and the citation control SHALL fail
 
 ### Requirement: Hosted consumer evidence gates activation
 Central deterministic and hosted self-tests SHALL NOT count as proof that Chelis can resolve the private action or that Chelis policy passes. Before Phase 0 activates, the complete Chelis pull-request suite SHALL execute the exact pinned action and checker from the final archived adoption branch, and the resulting governance check SHALL be eligible for branch protection. Rollback SHALL restore the prior workflow state or another separately reviewed immutable SHA without changing compiler behavior or weakening repository specifications.

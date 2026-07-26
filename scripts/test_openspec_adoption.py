@@ -109,6 +109,19 @@ class TestWorkflow(unittest.TestCase):
             self.assertIn(trigger, text)
         self.assertNotIn("schedule", text)
 
+    def test_pull_request_reruns_on_body_edit(self):
+        # The citation control reads the frozen event body, so a green run
+        # must not survive a later edit that removes the citation.
+        self.assertIn("edited", self._text())
+
+    def test_push_lane_runs_are_not_cancelled(self):
+        # Each mainline commit is the post-merge audit of a distinct
+        # squashed diff; a later push must not cancel the earlier audit.
+        self.assertIn(
+            "cancel-in-progress: ${{ github.event_name == 'pull_request' }}",
+            self._text(),
+        )
+
 
 class TestInstructionsAndRouting(unittest.TestCase):
     def test_agent_instructions_name_governed_changes(self):

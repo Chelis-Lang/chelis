@@ -345,6 +345,23 @@ class TestBranchScope(unittest.TestCase):
             co.check_branch_scope(cls, inherited_ids=frozenset(), mode="pre-archive"),
         )
 
+    def test_pre_archive_locally_archived_lifecycle_not_misreported(self):
+        # A branch that archived locally before running pre-archive still
+        # carries a record; the diagnostic must not claim it has none.
+        cls = self._cls(
+            [
+                f"openspec/changes/archive/2026-07-24-{CHANGE_ID}/proposal.md",
+                "crates/foo/src/lib.rs",
+            ]
+        )
+        errors = co.check_branch_scope(
+            cls, inherited_ids=frozenset(), mode="pre-archive"
+        )
+        self.assertNotIn(
+            "governed paths changed without a lifecycle or maintenance exemption",
+            errors,
+        )
+
     def test_lifecycle_plus_exemption_rejected(self):
         cls = self._cls(
             [MARKER, "openspec/exemptions/2026-07-24-fix-typo.toml"]
@@ -663,6 +680,54 @@ class TestDeltaShape(unittest.TestCase):
         self.assertNotEqual([], errors)
         self.assertIn("REMOVED plus ADDED", errors[0])
 
+    def test_double_space_heading_rejected(self):
+        # A near-miss heading (extra interior space) must not fold its
+        # blocks into the preceding section; both paths must reject it.
+        text = self.GOOD + (
+            "\n## REMOVED  Requirements\n\n### Requirement: Gone\nReason.\n"
+        )
+        errors = co.check_delta_shape(text)
+        self.assertNotEqual([], errors)
+        self.assertIn("malformed delta operation section", errors[0])
+        with self.assertRaises(co.CheckError):
+            co.parse_delta(text)
+
+    def test_preamble_requirement_block_rejected(self):
+        # A requirement block before the first operation heading is invisible
+        # to replay and cannot count as coverage.
+        text = (
+            "### Requirement: Ghost\nBody.\n\n"
+            "#### Scenario: a\n- x\n\n#### Scenario: b\n- y\n\n" + self.GOOD
+        )
+        errors = co.check_delta_shape(text)
+        self.assertNotEqual([], errors)
+        self.assertTrue(any("precedes the first delta operation" in e for e in errors))
+        with self.assertRaises(co.CheckError):
+            co.parse_delta(text)
+
+    def test_duplicate_requirement_name_rejected(self):
+        second = self.GOOD.replace("## ADDED Requirements\n\n", "")
+        errors = co.check_delta_shape(self.GOOD + "\n" + second)
+        self.assertNotEqual([], errors)
+        self.assertTrue(any("duplicate requirement block" in e for e in errors))
+
+    def test_removed_section_needs_no_scenarios(self):
+        # A REMOVED section names the requirement and its reason; it has no
+        # changed behavior to demonstrate, so the two-scenario parity rule
+        # does not apply.
+        text = (
+            "## REMOVED Requirements\n\n"
+            "### Requirement: Legacy path\n"
+            "**Reason**: superseded by the new flow.\n"
+        )
+        self.assertEqual([], co.check_delta_shape(text))
+
+    def test_added_section_still_needs_two_scenarios(self):
+        # Negative parity for the REMOVED relaxation: ADDED and MODIFIED
+        # sections keep the two-scenario requirement.
+        text = self.GOOD.split("#### Scenario: It fails")[0]
+        self.assertNotEqual([], co.check_delta_shape(text))
+
 
 class TestParseDelta(unittest.TestCase):
     def test_known_sections_parsed(self):
@@ -680,6 +745,35 @@ class TestParseDelta(unittest.TestCase):
         text = TestDeltaShape.GOOD.replace("## ADDED", "## added")
         with self.assertRaises(co.CheckError):
             co.parse_delta(text)
+
+    def test_removed_section_parsed(self):
+        text = (
+            "## REMOVED Requirements\n\n"
+            "### Requirement: Legacy path\n**Reason**: superseded.\n"
+        )
+        self.assertIn("Legacy path", co.parse_delta(text)["removed"])
+
+
+class TestBaselineDeltaCoverage(unittest.TestCase):
+    def test_covered_baseline_accepted(self):
+        self.assertEqual(
+            [],
+            co.check_baseline_delta_coverage(
+                frozenset({"openspec/specs/cap/spec.md"}), frozenset({"cap"})
+            ),
+        )
+
+    def test_uncovered_baseline_rejected(self):
+        errors = co.check_baseline_delta_coverage(
+            frozenset({"openspec/specs/other-cap/spec.md"}), frozenset({"cap"})
+        )
+        self.assertNotEqual([], errors)
+        self.assertIn("without a corresponding archived delta", errors[0])
+
+    def test_no_baseline_change_accepted(self):
+        self.assertEqual(
+            [], co.check_baseline_delta_coverage(frozenset(), frozenset())
+        )
 
 
 class TestArchiveDeltas(unittest.TestCase):
@@ -932,6 +1026,10 @@ class TestSelfTest(unittest.TestCase):
         "ordered-task-checkbox",
         "malformed-lifecycle-id",
         "lowercase-delta-operation",
+        "near-miss-delta-heading",
+        "preamble-delta-block",
+        "duplicate-delta-requirement",
+        "uncovered-baseline-mutation",
     }
 
     def test_control_inventory_is_complete(self):
@@ -1267,6 +1365,28 @@ class TestRepositoryFixtures(unittest.TestCase):
             code, stderr = self._merge_bound(tmp, repo)
             self.assertEqual(1, code)
             self.assertIn("disagree", stderr)
+
+    def test_uncovered_baseline_capability_rejected(self):
+        # Review regression: an archived change to one capability could
+        # smuggle prose edits into an unrelated capability's baseline spec,
+        # because requirement-block replay leaves non-requirement text
+        # unchecked. Tie every changed baseline file to a delta.
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._init_repo(tmp)
+            self._plan(repo, TestDeltaShape.GOOD)
+            self._write(repo, "crates/foo.rs", "fn main() {}\n")
+            self._commit(repo, "impl")
+            self._archive_lifecycle(repo, baseline=self.BASELINE)
+            self._write(
+                repo,
+                "openspec/specs/other-cap/spec.md",
+                "# Other Cap\n\n## Purpose\n\nRewritten prose.\n\n"
+                "## Requirements\n\n" + self.BASELINE,
+            )
+            self._commit(repo, "smuggle prose")
+            code, stderr = self._merge_bound(tmp, repo)
+            self.assertEqual(1, code)
+            self.assertIn("without a corresponding archived delta", stderr)
 
     def test_at_prefixed_path_cannot_forge_commit_boundary(self):
         # The commit log uses a NUL sentinel, so a committed path that

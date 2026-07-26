@@ -60,10 +60,26 @@ GOVERNANCE_ROOT_FILES = frozenset({"openspec/config.yaml"})
 SPEC_PREFIX = "spec/"
 MARKER_NAME = ".openspec.yaml"
 PLANNING_NEUTRAL = frozenset({".gitignore", ".gitattributes"})
-DELTA_OPERATIONS = ("ADDED", "MODIFIED", "REMOVED")
 RENAMED_GUIDANCE = (
     "RENAMED sections are unsupported; encode renames as REMOVED plus ADDED"
 )
+# Delta operation section headings. check_delta_shape and parse_delta share
+# these so a near-miss heading can never be visible to one path and invisible
+# to the other (the divergence that let "## REMOVED  Requirements" fold its
+# blocks into an adjacent section). CANONICAL matches only the exact form;
+# RESEMBLES matches any level-2 heading ending in "requirements", so a
+# wrong-case, extra-space, or RENAMED heading is rejected instead of ignored.
+CANONICAL_OPERATION_HEADING = re.compile(
+    r"^## (ADDED|MODIFIED|REMOVED) Requirements[ \t]*$", re.MULTILINE
+)
+_CANONICAL_LINE = re.compile(r"## (?:ADDED|MODIFIED|REMOVED) Requirements[ \t]*")
+RESEMBLES_OPERATION_HEADING = re.compile(
+    r"^##[ \t]+\S.*requirements[ \t]*$", re.IGNORECASE | re.MULTILINE
+)
+_RENAMED_LINE = re.compile(
+    r"##[ \t]+RENAMED[ \t]+Requirements[ \t]*", re.IGNORECASE
+)
+REQUIREMENT_HEADING = re.compile(r"^### Requirement:", re.MULTILINE)
 ARCHIVE_REQUIRED_FILES = (MARKER_NAME, "proposal.md", "tasks.md")
 LIFECYCLE_NAME = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 ARCHIVE_NAME = re.compile(r"^(\d{4})-(\d{2})-(\d{2})-([a-z0-9]+(?:-[a-z0-9]+)*)$")
@@ -106,6 +122,10 @@ SELF_TEST_CONTROLS = (
     "ordered-task-checkbox",
     "malformed-lifecycle-id",
     "lowercase-delta-operation",
+    "near-miss-delta-heading",
+    "preamble-delta-block",
+    "duplicate-delta-requirement",
+    "uncovered-baseline-mutation",
 )
 
 
@@ -366,7 +386,9 @@ def check_branch_scope(
                 "in the same change set"
             )
     else:
-        if governed and not (new_lifecycles or classification.exemptions):
+        if governed and not (
+            new_lifecycles or classification.exemptions or classification.archives
+        ):
             errors.append(
                 "governed paths changed without a lifecycle or maintenance exemption"
             )
@@ -511,24 +533,62 @@ def check_commit_coverage(changed, commits) -> list[str]:
     return []
 
 
-def check_delta_shape(text: str) -> list[str]:
-    errors = []
-    for match in re.finditer(r"^## (\S+) Requirements *$", text, re.MULTILINE):
-        if match.group(1).upper() == "RENAMED":
+def _delta_sections(text: str) -> tuple[list[tuple[str, str]], list[str]]:
+    """Split a delta spec into (operation, body) sections and report every
+    structural problem. A near-miss heading (wrong case, extra spaces,
+    RENAMED) and a requirement block preceding the first operation section
+    are rejected here so check_delta_shape and parse_delta cannot disagree
+    about what the schema is."""
+    errors: list[str] = []
+    for match in RESEMBLES_OPERATION_HEADING.finditer(text):
+        heading = match.group(0)
+        if _CANONICAL_LINE.fullmatch(heading):
+            continue
+        if _RENAMED_LINE.fullmatch(heading.strip()):
             errors.append(RENAMED_GUIDANCE)
-        elif match.group(1) not in DELTA_OPERATIONS:
-            errors.append(f"unknown delta operation section: {match.group(0)!r}")
-    requirements = re.split(r"^### Requirement: *", text, flags=re.MULTILINE)[1:]
-    if not requirements:
-        errors.append("delta spec declares no requirement blocks")
-    for block in requirements:
-        name = block.splitlines()[0].strip() if block.splitlines() else "?"
-        scenarios = len(re.findall(r"^#### Scenario: ", block, re.MULTILINE))
-        if scenarios < 2:
+        else:
             errors.append(
-                f"requirement '{name}' needs at least two scenarios "
-                "(positive and negative parity)"
+                f"malformed delta operation section: {heading.strip()!r}"
             )
+    canonical = list(CANONICAL_OPERATION_HEADING.finditer(text))
+    if canonical and REQUIREMENT_HEADING.search(text[: canonical[0].start()]):
+        errors.append(
+            "requirement block precedes the first delta operation section "
+            "and would not be replayed"
+        )
+    bounds = [match.start() for match in canonical] + [len(text)]
+    sections = [
+        (match.group(1), text[match.end() : bounds[index + 1]])
+        for index, match in enumerate(canonical)
+    ]
+    return sections, errors
+
+
+def check_delta_shape(text: str) -> list[str]:
+    sections, errors = _delta_sections(text)
+    seen: set[str] = set()
+    blocks = 0
+    for operation, body in sections:
+        for block in re.split(r"^### Requirement: *", body, flags=re.MULTILINE)[1:]:
+            blocks += 1
+            lines = block.splitlines()
+            name = lines[0].strip() if lines else "?"
+            if name in seen:
+                errors.append(f"duplicate requirement block: {name!r}")
+            seen.add(name)
+            # A REMOVED section names the requirement and its reason; it has
+            # no changed behavior to demonstrate, so it is exempt from the
+            # positive/negative scenario parity rule.
+            if operation == "REMOVED":
+                continue
+            scenarios = len(re.findall(r"^#### Scenario: ", block, re.MULTILINE))
+            if scenarios < 2:
+                errors.append(
+                    f"requirement '{name}' needs at least two scenarios "
+                    "(positive and negative parity)"
+                )
+    if blocks == 0:
+        errors.append("delta spec declares no requirement blocks")
     return errors
 
 
@@ -624,16 +684,16 @@ def parse_requirement_blocks(text: str) -> dict[str, str]:
 
 
 def parse_delta(text: str) -> dict[str, dict[str, str]]:
+    sections, errors = _delta_sections(text)
+    if errors:
+        raise CheckError(errors[0])
     delta: dict[str, dict[str, str]] = {}
-    sections = re.split(r"^## (\S+) Requirements *$", text, flags=re.MULTILINE)
-    for index in range(1, len(sections), 2):
-        if sections[index].upper() == "RENAMED":
-            raise CheckError(RENAMED_GUIDANCE)
-        if sections[index] not in DELTA_OPERATIONS:
-            raise CheckError(f"unknown delta operation: {sections[index]}")
-        operation = sections[index].lower()
-        blocks = parse_requirement_blocks(sections[index + 1])
-        delta.setdefault(operation, {}).update(blocks)
+    for operation, body in sections:
+        target = delta.setdefault(operation.lower(), {})
+        for name, block in parse_requirement_blocks(body).items():
+            if name in target:
+                raise CheckError(f"duplicate requirement block: {name}")
+            target[name] = block
     return delta
 
 
@@ -674,6 +734,26 @@ def check_synchronization(base_specs, head_specs, deltas) -> list[str]:
             errors.append(
                 f"baseline specs for '{capability}' do not equal the replayed "
                 f"archived delta (drift: {', '.join(drifted)})"
+            )
+    return errors
+
+
+def check_baseline_delta_coverage(
+    baseline_specs: frozenset[str], delta_capabilities: frozenset[str]
+) -> list[str]:
+    # Requirement-block replay leaves a baseline file's non-requirement
+    # prose (title, Purpose) unchecked, so an archived change to one
+    # capability could smuggle edits into an unrelated capability's
+    # baseline. Tie every changed baseline file to a delta: a capability
+    # whose baseline changed must own a delta in the same change set.
+    errors = []
+    for path in sorted(baseline_specs):
+        match = BASELINE_SPEC.match(path)
+        capability = path[len("openspec/specs/") :].split("/", 1)[0]
+        if match is None or capability not in delta_capabilities:
+            errors.append(
+                "baseline spec changed without a corresponding archived delta: "
+                f"{path}"
             )
     return errors
 
@@ -815,6 +895,31 @@ def self_test() -> list[str]:
         "malformed-lifecycle-id": _rejects(check_lifecycle_name, "Evil_Change"),
         "lowercase-delta-operation": _rejects(
             parse_delta, "## added Requirements\n\n### Requirement: R\nBody.\n"
+        ),
+        "near-miss-delta-heading": _rejects(
+            check_delta_shape,
+            "## ADDED Requirements\n\n### Requirement: R\nBody.\n\n"
+            "#### Scenario: a\n- x\n\n#### Scenario: b\n- y\n\n"
+            "## REMOVED  Requirements\n\n### Requirement: S\nGone.\n",
+        ),
+        "preamble-delta-block": _rejects(
+            check_delta_shape,
+            "### Requirement: Ghost\nBody.\n\n"
+            "#### Scenario: a\n- x\n\n#### Scenario: b\n- y\n\n"
+            "## ADDED Requirements\n\n### Requirement: R\nBody.\n\n"
+            "#### Scenario: a\n- x\n\n#### Scenario: b\n- y\n",
+        ),
+        "duplicate-delta-requirement": _rejects(
+            check_delta_shape,
+            "## ADDED Requirements\n\n### Requirement: R\nFirst.\n\n"
+            "#### Scenario: a\n- x\n\n#### Scenario: b\n- y\n\n"
+            "### Requirement: R\nSecond.\n\n"
+            "#### Scenario: a\n- x\n\n#### Scenario: b\n- y\n",
+        ),
+        "uncovered-baseline-mutation": _rejects(
+            check_baseline_delta_coverage,
+            frozenset({"openspec/specs/other-cap/spec.md"}),
+            frozenset({"cap"}),
         ),
     }
     with tempfile.TemporaryDirectory() as tmp:
@@ -1053,6 +1158,10 @@ def _run_repository_checks(mode: str, base: str, environ) -> list[str]:
         base_specs = _specs_at(git, merge_base, root)
         head_specs = _specs_at(git, None, root)
         errors += check_synchronization(base_specs, head_specs, deltas)
+        if classification.archives:
+            errors += check_baseline_delta_coverage(
+                classification.baseline_specs, frozenset(deltas)
+            )
 
     base_exemptions = _base_exemptions(git, merge_base)
     errors += check_exemption_novelty(classification.exemptions, base_exemptions)

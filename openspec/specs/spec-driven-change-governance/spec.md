@@ -66,7 +66,7 @@ A governed branch SHALL use one unique lowercase kebab-case change identifier. B
 - **THEN** the push run SHALL still enforce classification, branch-scope, archive, task, and synchronization controls
 
 ### Requirement: Planning artifacts stay coherent and addressable
-Each governed change SHALL identify every affected capability, include one delta specification per capability, record at least one positive and one negative WHEN/THEN scenario for each changed behavior, explain design and authority boundaries, and maintain an evidence-ordered task list. Proposal, delta specifications, design, and tasks SHALL remain mutually consistent. An implementation agent SHALL name the active change and the specific requirement or design section being implemented.
+Each governed change SHALL identify every affected capability, include one delta specification per capability, record at least one positive and one negative WHEN/THEN scenario for each changed behavior, explain design and authority boundaries, and maintain an evidence-ordered task list. Proposal, delta specifications, design, and tasks SHALL remain mutually consistent. An implementation agent SHALL name the active change and the specific requirement or design section being implemented. Delta operation section headings SHALL be exactly `## ADDED Requirements`, `## MODIFIED Requirements`, or `## REMOVED Requirements`; a near-miss heading, a requirement block preceding the first operation section, or a duplicate requirement name SHALL be rejected in both the shape check and the replay parser rather than silently reclassified. ADDED and MODIFIED requirements SHALL carry positive and negative scenarios; a REMOVED requirement SHALL name the requirement and its reason and is exempt from scenario parity.
 
 #### Scenario: Apply-ready plan is reviewed
 - **WHEN** proposal capabilities match delta specs, design resolves their implementation constraints, tasks derive from them, and strict validation succeeds
@@ -75,6 +75,14 @@ Each governed change SHALL identify every affected capability, include one delta
 #### Scenario: Artifact or citation drifts
 - **WHEN** a capability, requirement, scenario, design decision, task, or implementation citation is missing or contradicts another planning artifact
 - **THEN** governance validation SHALL fail or implementation SHALL pause until the artifacts are reconciled
+
+#### Scenario: Delta heading is a near-miss
+- **WHEN** a delta operation heading is misspelled, wrong-case, or extra-spaced, or a requirement block precedes the first operation section
+- **THEN** delta-shape validation SHALL reject it rather than fold its requirement blocks into an adjacent section
+
+#### Scenario: Requirement removal omits scenarios
+- **WHEN** a REMOVED section names a requirement and its reason without WHEN/THEN scenarios
+- **THEN** delta-shape validation SHALL accept it while still requiring positive and negative scenarios for ADDED and MODIFIED requirements
 
 ### Requirement: Change branches remain isolated
 A governed non-empty branch SHALL add exactly one lifecycle or exactly one maintenance exemption. It SHALL NOT combine multiple lifecycle identifiers, combine a lifecycle with an exemption, modify a lifecycle inherited from the comparison base, or hide lifecycle evidence in malformed or dot-prefixed paths. Independently reviewable work SHALL move to another branch and change.
