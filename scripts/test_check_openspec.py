@@ -291,6 +291,17 @@ class TestClassification(unittest.TestCase):
     def test_config_yaml_recognized(self):
         cls = co.classify_paths(["openspec/config.yaml"])
         self.assertEqual(frozenset(), cls.unrecognized)
+        self.assertEqual(frozenset(["openspec/config.yaml"]), cls.config)
+
+    def test_hidden_archive_path_flagged(self):
+        path = f"openspec/changes/archive/2026-07-24-{CHANGE_ID}/.hidden/e.md"
+        cls = co.classify_paths([path])
+        self.assertEqual(frozenset([path]), cls.hidden)
+
+    def test_archive_marker_dotfile_is_not_hidden(self):
+        path = f"openspec/changes/archive/2026-07-24-{CHANGE_ID}/.openspec.yaml"
+        cls = co.classify_paths([path])
+        self.assertEqual(frozenset(), cls.hidden)
 
     def test_unknown_governance_path_unrecognized(self):
         cls = co.classify_paths(["openspec/notes/hack.txt"])
@@ -414,6 +425,48 @@ class TestBranchScope(unittest.TestCase):
         self.assertNotEqual(
             [],
             co.check_branch_scope(cls, inherited_ids=frozenset(), mode="pre-archive"),
+        )
+
+    def test_config_change_without_lifecycle_rejected_at_merge_bound(self):
+        cls = self._cls(["openspec/config.yaml"])
+        self.assertNotEqual(
+            [],
+            co.check_branch_scope(cls, inherited_ids=frozenset(), mode="merge-bound"),
+        )
+
+    def test_config_change_with_archive_accepted_at_merge_bound(self):
+        cls = self._cls(
+            [
+                f"openspec/changes/archive/2026-07-24-{CHANGE_ID}/proposal.md",
+                "openspec/config.yaml",
+            ]
+        )
+        self.assertEqual(
+            [],
+            co.check_branch_scope(cls, inherited_ids=frozenset(), mode="merge-bound"),
+        )
+
+    def test_config_change_without_lifecycle_rejected_at_pre_archive(self):
+        cls = self._cls(["openspec/config.yaml"])
+        self.assertNotEqual(
+            [],
+            co.check_branch_scope(cls, inherited_ids=frozenset(), mode="pre-archive"),
+        )
+
+    def test_config_change_with_new_lifecycle_accepted_at_pre_archive(self):
+        cls = self._cls([MARKER, PROPOSAL, "openspec/config.yaml"])
+        self.assertEqual(
+            [],
+            co.check_branch_scope(cls, inherited_ids=frozenset(), mode="pre-archive"),
+        )
+
+    def test_hidden_archive_path_rejected(self):
+        cls = self._cls(
+            [f"openspec/changes/archive/2026-07-24-{CHANGE_ID}/.hidden/e.md"]
+        )
+        self.assertNotEqual(
+            [],
+            co.check_branch_scope(cls, inherited_ids=frozenset(), mode="merge-bound"),
         )
 
 
@@ -628,6 +681,17 @@ class TestTasks(unittest.TestCase):
     def test_empty_task_list_rejected(self):
         self.assertNotEqual([], co.check_tasks("no checkboxes at all\n"))
 
+    def test_capital_marker_rejected(self):
+        self.assertNotEqual([], co.check_tasks("- [X] 1.1 Done.\n"))
+
+    def test_nonstandard_marker_rejected(self):
+        text = "- [x] 1.1 Done.\n- [~] 1.2 Deferred.\n"
+        self.assertNotEqual([], co.check_tasks(text))
+
+    def test_markdown_link_item_is_not_a_checkbox(self):
+        text = "- [x] 1.1 Done.\n- [Evidence](https://example.invalid/run)\n"
+        self.assertEqual([], co.check_tasks(text))
+
 
 class TestArchiveName(unittest.TestCase):
     def test_valid_archive_name_accepted(self):
@@ -682,12 +746,16 @@ class TestSelfTest(unittest.TestCase):
         "invalid-exemption",
         "symlink-rejection",
         "unchecked-task",
+        "nonstandard-task-marker",
         "active-merge-state",
         "malformed-archive",
         "unsynchronized-delta",
         "unarchived-baseline-mutation",
         "merge-hidden-change",
         "unrecognized-governance-path",
+        "unguarded-config-mutation",
+        "inherited-exemption-mutation",
+        "hidden-archive-path",
     }
 
     def test_control_inventory_is_complete(self):
@@ -872,6 +940,76 @@ class TestRepositoryFixtures(unittest.TestCase):
             code, stderr = self._merge_bound(tmp, repo)
             self.assertEqual(1, code)
             self.assertIn("unrecognized governance path", stderr)
+
+    def test_new_exemption_accepted_at_merge_bound(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._init_repo(tmp)
+            self._write(repo, "README.md", "improved\n")
+            self._write(
+                repo,
+                "openspec/exemptions/2026-07-26-readme-touchup.toml",
+                'kind = "maintenance"\nreason = "editorial"\n'
+                'paths = ["README.md"]\n',
+            )
+            self._commit(repo, "maintenance")
+            code, stderr = self._merge_bound(tmp, repo)
+            self.assertEqual(0, code, stderr)
+
+    def test_inherited_exemption_mutation_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            self._git(repo, "init", "-q", "-b", "main")
+            self._write(repo, "README.md", "base\n")
+            self._write(
+                repo,
+                "openspec/exemptions/2026-01-01-old-cleanup.toml",
+                'kind = "maintenance"\nreason = "old cleanup"\npaths = []\n',
+            )
+            self._commit(repo, "base")
+            self._git(repo, "checkout", "-q", "-b", "feature")
+            self._write(
+                repo,
+                "openspec/exemptions/2026-01-01-old-cleanup.toml",
+                'kind = "maintenance"\nreason = "rewritten"\npaths = []\n',
+            )
+            self._commit(repo, "tamper")
+            code, stderr = self._merge_bound(tmp, repo)
+            self.assertEqual(1, code)
+            self.assertIn("inherited from the comparison base", stderr)
+
+    def test_wrong_openspec_version_fails_before_repo_checks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._init_repo(tmp)
+            self._write(repo, "crates/foo.rs", "fn main() {}\n")
+            self._commit(repo, "impl")
+            fake = Path(tmp) / "fake_openspec_wrong"
+            fake.write_text(
+                "#!/usr/bin/env python3\n"
+                "import sys\n"
+                "if '--version' in sys.argv:\n"
+                "    print('1.7.0')\n",
+                encoding="utf-8",
+            )
+            fake.chmod(0o755)
+            cwd = os.getcwd()
+            stderr = io.StringIO()
+            os.chdir(repo)
+            try:
+                with contextlib.redirect_stderr(stderr):
+                    code = co.main(
+                        ["--merge-bound", "--base", "main"],
+                        environ={
+                            "OPENSPEC_BIN": str(fake),
+                            "PATH": os.environ.get("PATH", os.defpath),
+                        },
+                    )
+            finally:
+                os.chdir(cwd)
+            self.assertEqual(1, code)
+            text = stderr.getvalue()
+            self.assertIn("version mismatch", text)
+            self.assertNotIn("governed paths changed", text)
 
 
 if __name__ == "__main__":

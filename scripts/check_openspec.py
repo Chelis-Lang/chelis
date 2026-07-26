@@ -60,7 +60,7 @@ ARCHIVE_NAME = re.compile(r"^(\d{4})-(\d{2})-(\d{2})-([a-z0-9]+(?:-[a-z0-9]+)*)$
 EXEMPTION_NAME = re.compile(
     r"^(\d{4})-(\d{2})-(\d{2})-([a-z0-9]+(?:-[a-z0-9]+)*)\.toml$"
 )
-CHECKBOX = re.compile(r"^- \[([ x])\] *(.*)$")
+CHECKBOX = re.compile(r"^- \[(.)\] *(.*)$")
 
 SELF_TEST_CONTROLS = (
     "malformed-spec",
@@ -72,12 +72,16 @@ SELF_TEST_CONTROLS = (
     "invalid-exemption",
     "symlink-rejection",
     "unchecked-task",
+    "nonstandard-task-marker",
     "active-merge-state",
     "malformed-archive",
     "unsynchronized-delta",
     "unarchived-baseline-mutation",
     "merge-hidden-change",
     "unrecognized-governance-path",
+    "unguarded-config-mutation",
+    "inherited-exemption-mutation",
+    "hidden-archive-path",
 )
 
 
@@ -209,6 +213,7 @@ class Classification:
     exemptions: frozenset[str]
     governance: frozenset[str]
     baseline_specs: frozenset[str]
+    config: frozenset[str]
     spec: frozenset[str]
     production: frozenset[str]
     hidden: frozenset[str]
@@ -232,6 +237,7 @@ def classify_paths(paths) -> Classification:
     exemptions: set[str] = set()
     governance: set[str] = set()
     baseline: set[str] = set()
+    config: set[str] = set()
     spec: set[str] = set()
     production: set[str] = set()
     hidden: set[str] = set()
@@ -242,7 +248,10 @@ def classify_paths(paths) -> Classification:
             if path.startswith(ARCHIVE_PREFIX):
                 remainder = path[len(ARCHIVE_PREFIX) :]
                 if "/" in remainder:
-                    archives.add(remainder.split("/", 1)[0])
+                    archive, rest = remainder.split("/", 1)
+                    archives.add(archive)
+                    if _hidden_component(rest):
+                        hidden.add(path)
                 else:
                     unrecognized.add(path)
             elif path.startswith(CHANGES_PREFIX):
@@ -261,7 +270,9 @@ def classify_paths(paths) -> Classification:
                     exemptions.add(path)
             elif BASELINE_SPEC.match(path):
                 baseline.add(path)
-            elif path not in GOVERNANCE_ROOT_FILES:
+            elif path in GOVERNANCE_ROOT_FILES:
+                config.add(path)
+            else:
                 unrecognized.add(path)
         elif path.startswith(SPEC_PREFIX):
             spec.add(path)
@@ -275,6 +286,7 @@ def classify_paths(paths) -> Classification:
         exemptions=frozenset(exemptions),
         governance=frozenset(governance),
         baseline_specs=frozenset(baseline),
+        config=frozenset(config),
         spec=frozenset(spec),
         production=frozenset(production),
         hidden=frozenset(hidden),
@@ -291,7 +303,7 @@ def check_branch_scope(
         raise CheckError(f"unknown branch-scope mode: {mode}")
     errors = []
     for path in sorted(classification.hidden):
-        errors.append(f"hidden dot-prefixed lifecycle path is not evidence: {path}")
+        errors.append(f"hidden dot-prefixed governance path is not evidence: {path}")
     for path in sorted(classification.unrecognized):
         errors.append(f"unrecognized governance path is not valid evidence: {path}")
     touched_inherited = classification.active_lifecycles & inherited_ids
@@ -334,6 +346,16 @@ def check_branch_scope(
             errors.append(
                 "baseline openspec/specs must remain unchanged during "
                 "pre-archive validation"
+            )
+    if classification.config:
+        if mode == "merge-bound":
+            governing = bool(classification.archives)
+        else:
+            governing = bool(new_lifecycles or classification.archives)
+        if not governing:
+            errors.append(
+                "openspec configuration changed without a governing lifecycle: "
+                + ", ".join(sorted(classification.config))
             )
     return errors
 
@@ -387,6 +409,15 @@ def check_exemption_manifest(
             f"declared {sorted(declared)}, changed {sorted(changed)}"
         )
     return errors
+
+
+def check_exemption_novelty(exemptions, base_paths) -> list[str]:
+    inherited = sorted(frozenset(exemptions) & frozenset(base_paths))
+    return [
+        "exemption manifest inherited from the comparison base must not "
+        f"change: {path}"
+        for path in inherited
+    ]
 
 
 def check_planning_order(commits, lifecycle_id: str) -> list[str]:
@@ -631,6 +662,9 @@ def self_test() -> list[str]:
             frozenset({"spec/x.md"}),
         ),
         "unchecked-task": _rejects(check_tasks, "- [ ] 1.1 Do the thing.\n"),
+        "nonstandard-task-marker": _rejects(
+            check_tasks, "- [x] 1.1 Done.\n- [~] 1.2 Deferred.\n"
+        ),
         "active-merge-state": _rejects(
             check_branch_scope,
             classify_paths([marker, proposal]),
@@ -662,6 +696,25 @@ def self_test() -> list[str]:
             classify_paths(["openspec/notes/hack.txt"]),
             frozenset(),
             "pre-archive",
+        ),
+        "unguarded-config-mutation": _rejects(
+            check_branch_scope,
+            classify_paths(["openspec/config.yaml"]),
+            frozenset(),
+            "merge-bound",
+        ),
+        "inherited-exemption-mutation": _rejects(
+            check_exemption_novelty,
+            frozenset({"openspec/exemptions/2026-01-01-old.toml"}),
+            frozenset({"openspec/exemptions/2026-01-01-old.toml"}),
+        ),
+        "hidden-archive-path": _rejects(
+            check_branch_scope,
+            classify_paths(
+                ["openspec/changes/archive/2026-07-24-x-change/.hidden/evil.md"]
+            ),
+            frozenset(),
+            "merge-bound",
         ),
     }
     with tempfile.TemporaryDirectory() as tmp:
@@ -767,6 +820,17 @@ def _inherited_lifecycles(git, merge_base: str) -> frozenset[str]:
     return frozenset(inherited)
 
 
+def _base_exemptions(git, merge_base: str) -> frozenset[str]:
+    try:
+        listed = _git_lines(
+            git,
+            ["ls-tree", "-r", "--name-only", merge_base, "--", EXEMPTIONS_PREFIX],
+        )
+    except CheckError:
+        return frozenset()
+    return frozenset(listed)
+
+
 def _proposal_capabilities(text: str) -> frozenset[str]:
     capabilities = set()
     section = re.split(r"^### New Capabilities *$", text, flags=re.MULTILINE)
@@ -781,6 +845,9 @@ def _run_repository_checks(mode: str, base: str, environ) -> list[str]:
     git = resolve_git(dict(environ))
     openspec = resolve_openspec(dict(environ))
     errors = verify_openspec(openspec)
+    if errors:
+        # Fail closed before trusting any output from a wrong-version tool.
+        return errors
     root = Path.cwd()
     merge_base = resolve_merge_base(git, base)
     changed = frozenset(
@@ -837,7 +904,9 @@ def _run_repository_checks(mode: str, base: str, environ) -> list[str]:
         head_specs = _specs_at(git, None, root)
         errors += check_synchronization(base_specs, head_specs, deltas)
 
-    for exemption in sorted(classification.exemptions):
+    base_exemptions = _base_exemptions(git, merge_base)
+    errors += check_exemption_novelty(classification.exemptions, base_exemptions)
+    for exemption in sorted(classification.exemptions - base_exemptions):
         name = exemption.rsplit("/", 1)[-1]
         exemption_file = root / exemption
         if exemption_file.is_symlink() or not exemption_file.is_file():
