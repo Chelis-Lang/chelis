@@ -109,6 +109,11 @@ workflow on every pull request.
 - Merge-bound validation rejects active lifecycles: before merge,
   synchronize delta specs into `openspec/specs/` and move the lifecycle to
   `openspec/changes/archive/YYYY-MM-DD-<change-id>`.
+- Commit-ordering and commit-attribution evidence lives on the
+  pull-request lane and in local runs. Squash merges stay green
+  post-merge: the push run on `main` re-validates the diff-shaped
+  controls only, because a squash collapses the branch history those
+  two checks need.
 - OpenSpec green is planning evidence only; it never replaces the owning
   executable acceptance oracle or `spec/**` authority, and provider labels,
   reviews, or PR body claims never override committed governance evidence.

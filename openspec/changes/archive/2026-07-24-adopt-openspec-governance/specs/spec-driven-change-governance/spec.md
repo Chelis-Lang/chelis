@@ -40,7 +40,7 @@ A maintenance exemption SHALL be a newly added regular non-symlink TOML file con
 - **THEN** significant implementation SHALL stop until the branch carries an apply-ready OpenSpec lifecycle
 
 ### Requirement: Planning precedes implementation and enters review visibly
-A governed branch SHALL use one unique lowercase kebab-case change identifier. Before its first production-code commit, the branch SHALL contain a planning-only ancestor commit that adds the lifecycle marker, proposal, and requirement deltas. Those artifacts SHALL identify affected owning specifications and positive and negative scenarios. The implementation pull request SHALL cite the identifier using the repository-defined OpenSpec change field so reviewers can enter the plan into the human review queue before evaluating implementation.
+A governed branch SHALL use one unique lowercase kebab-case change identifier. Before its first production-code commit, the branch SHALL contain a planning-only ancestor commit that adds the lifecycle marker, proposal, and requirement deltas. Those artifacts SHALL identify affected owning specifications and positive and negative scenarios. The implementation pull request SHALL cite the identifier using the repository-defined OpenSpec change field so reviewers can enter the plan into the human review queue before evaluating implementation. Ordering and commit attribution are branch-history evidence: pull-request validation and local runs SHALL enforce them over the branch's own commits, and a post-merge push run, whose provider squash merge collapsed that history into one mainline commit, SHALL skip only those history-shaped controls while keeping every diff-shaped control.
 
 #### Scenario: Planning commit precedes production work
 - **WHEN** the first production path is changed
@@ -53,6 +53,11 @@ A governed branch SHALL use one unique lowercase kebab-case change identifier. B
 #### Scenario: Pull request omits its change citation
 - **WHEN** a governed pull request does not cite its exact OpenSpec change identifier
 - **THEN** the PR gate SHALL fail even if local artifact validation succeeds
+
+#### Scenario: Squash merge reaches the post-merge push lane
+- **WHEN** a provider squash merge collapses an accepted branch into one mainline commit and the push-event run validates it
+- **THEN** commit-ordering and commit-attribution validation SHALL be scoped to pull-request and local runs
+- **THEN** the push run SHALL still enforce classification, branch-scope, archive, task, and synchronization controls
 
 ### Requirement: Planning artifacts stay coherent and addressable
 Each governed change SHALL identify every affected capability, include one delta specification per capability, record at least one positive and one negative WHEN/THEN scenario for each changed behavior, explain design and authority boundaries, and maintain an evidence-ordered task list. Proposal, delta specifications, design, and tasks SHALL remain mutually consistent. An implementation agent SHALL name the active change and the specific requirement or design section being implemented.

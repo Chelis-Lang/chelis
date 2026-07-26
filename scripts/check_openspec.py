@@ -17,6 +17,11 @@ Local commands and expected success conditions:
         exit 0 iff no active lifecycle remains: one synchronized, archived
         lifecycle (or one exemption) with every control green.
 
+On GitHub `push` events (the post-merge audit lane) the commit-ordering and
+commit-attribution controls are skipped: a squash merge collapses branch
+history into one mainline commit, so ordering evidence is owned by the
+pull-request lane and local runs. Every diff-shaped control still runs.
+
 `GIT_BIN` and `OPENSPEC_BIN` select the executables when set; OpenSpec must
 report exactly 1.6.0. Every policy or tool failure exits nonzero; there are
 no fallbacks. The unit suite is `scripts/test_check_openspec.py`; the Phase 0
@@ -60,14 +65,17 @@ RENAMED_GUIDANCE = (
     "RENAMED sections are unsupported; encode renames as REMOVED plus ADDED"
 )
 ARCHIVE_REQUIRED_FILES = (MARKER_NAME, "proposal.md", "tasks.md")
+LIFECYCLE_NAME = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 ARCHIVE_NAME = re.compile(r"^(\d{4})-(\d{2})-(\d{2})-([a-z0-9]+(?:-[a-z0-9]+)*)$")
 EXEMPTION_NAME = re.compile(
     r"^(\d{4})-(\d{2})-(\d{2})-([a-z0-9]+(?:-[a-z0-9]+)*)\.toml$"
 )
 # A checkbox marker is any bracketed text not followed by "(", so a
 # markdown link item like "- [Evidence](url)" is not a task while a
-# nonstandard marker like "- [wip]" is still policed.
-CHECKBOX = re.compile(r"^[-*+] \[([^\]]*)\](?!\() *(.*)$")
+# nonstandard marker like "- [wip]" is still policed. The list marker
+# covers bullets and ordered items with any interior whitespace because
+# GFM renders "-  [ ]" (two spaces) and "1. [ ]" as real checkboxes.
+CHECKBOX = re.compile(r"^(?:[-*+]|\d{1,9}[.)])\s+\[([^\]]*)\](?!\() *(.*)$")
 
 SELF_TEST_CONTROLS = (
     "malformed-spec",
@@ -94,6 +102,10 @@ SELF_TEST_CONTROLS = (
     "renamed-delta-operation",
     "incomplete-archive",
     "archived-exemption-mix",
+    "spaced-task-checkbox",
+    "ordered-task-checkbox",
+    "malformed-lifecycle-id",
+    "lowercase-delta-operation",
 )
 
 
@@ -502,7 +514,7 @@ def check_commit_coverage(changed, commits) -> list[str]:
 def check_delta_shape(text: str) -> list[str]:
     errors = []
     for match in re.finditer(r"^## (\S+) Requirements *$", text, re.MULTILINE):
-        if match.group(1) == "RENAMED":
+        if match.group(1).upper() == "RENAMED":
             errors.append(RENAMED_GUIDANCE)
         elif match.group(1) not in DELTA_OPERATIONS:
             errors.append(f"unknown delta operation section: {match.group(0)!r}")
@@ -536,8 +548,6 @@ def check_tasks(text: str) -> list[str]:
     boxes = 0
     for line in text.splitlines():
         stripped = line.strip()
-        if not stripped.startswith(("- [", "* [", "+ [")):
-            continue
         match = CHECKBOX.match(stripped)
         if match is None:
             continue
@@ -584,6 +594,12 @@ def check_archive_completeness(archive_dir: Path, archive: str) -> list[str]:
     ]
 
 
+def check_lifecycle_name(name: str) -> list[str]:
+    if LIFECYCLE_NAME.match(name) is None:
+        return [f"lifecycle identifier must be lowercase kebab-case: {name}"]
+    return []
+
+
 def check_archive_name(name: str) -> list[str]:
     match = ARCHIVE_NAME.match(name)
     if match is None or not _valid_stamp(*match.groups()[:3]):
@@ -611,11 +627,11 @@ def parse_delta(text: str) -> dict[str, dict[str, str]]:
     delta: dict[str, dict[str, str]] = {}
     sections = re.split(r"^## (\S+) Requirements *$", text, flags=re.MULTILINE)
     for index in range(1, len(sections), 2):
-        operation = sections[index].lower()
         if sections[index].upper() == "RENAMED":
             raise CheckError(RENAMED_GUIDANCE)
-        if sections[index].upper() not in DELTA_OPERATIONS:
+        if sections[index] not in DELTA_OPERATIONS:
             raise CheckError(f"unknown delta operation: {sections[index]}")
+        operation = sections[index].lower()
         blocks = parse_requirement_blocks(sections[index + 1])
         delta.setdefault(operation, {}).update(blocks)
     return delta
@@ -790,6 +806,16 @@ def self_test() -> list[str]:
             frozenset(),
             "merge-bound",
         ),
+        "spaced-task-checkbox": _rejects(
+            check_tasks, "- [x] 1.1 Done.\n-  [ ] 1.2 Hidden.\n"
+        ),
+        "ordered-task-checkbox": _rejects(
+            check_tasks, "- [x] 1.1 Done.\n1. [ ] 1.2 Hidden.\n"
+        ),
+        "malformed-lifecycle-id": _rejects(check_lifecycle_name, "Evil_Change"),
+        "lowercase-delta-operation": _rejects(
+            parse_delta, "## added Requirements\n\n### Requirement: R\nBody.\n"
+        ),
     }
     with tempfile.TemporaryDirectory() as tmp:
         target = Path(tmp) / "real.json"
@@ -929,6 +955,21 @@ def _proposal_capabilities(text: str) -> frozenset[str]:
     return frozenset(capabilities)
 
 
+def resolve_repo_root(git) -> Path:
+    completed = subprocess.run(
+        [str(git), "rev-parse", "--show-toplevel"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise CheckError(
+            "cannot resolve the repository root: "
+            "git rev-parse --show-toplevel failed"
+        )
+    return Path(completed.stdout.strip())
+
+
 def _run_repository_checks(mode: str, base: str, environ) -> list[str]:
     git = resolve_git(dict(environ))
     openspec = resolve_openspec(dict(environ))
@@ -936,7 +977,7 @@ def _run_repository_checks(mode: str, base: str, environ) -> list[str]:
     if errors:
         # Fail closed before trusting any output from a wrong-version tool.
         return errors
-    root = Path.cwd()
+    root = resolve_repo_root(git)
     merge_base = resolve_merge_base(git, base)
     changed = frozenset(
         _git_lines(git, ["diff", "--name-only", f"{merge_base}..HEAD"])
@@ -948,11 +989,19 @@ def _run_repository_checks(mode: str, base: str, environ) -> list[str]:
         classification.archives, _base_archives(git, merge_base)
     )
     commits = _branch_commits(git, merge_base)
-    errors += check_commit_coverage(changed, commits)
+    # A GitHub push event is the post-merge audit lane: a squash merge
+    # collapses branch history into one mainline commit, so ordering and
+    # attribution evidence exists only on the pull-request lane and in
+    # local runs. Every diff-shaped control below still runs on push.
+    ordered_history = environ.get("GITHUB_EVENT_NAME") != "push"
+    if ordered_history:
+        errors += check_commit_coverage(changed, commits)
     new_lifecycles = classification.active_lifecycles - inherited
 
     for lifecycle in sorted(new_lifecycles):
-        errors += check_planning_order(commits, lifecycle)
+        errors += check_lifecycle_name(lifecycle)
+        if ordered_history:
+            errors += check_planning_order(commits, lifecycle)
         change_dir = root / "openspec" / "changes" / lifecycle
         delta_files = sorted(change_dir.glob("specs/*/spec.md"))
         for delta_file in delta_files:
@@ -972,7 +1021,7 @@ def _run_repository_checks(mode: str, base: str, environ) -> list[str]:
     for archive in sorted(classification.archives):
         errors += check_archive_name(archive)
         match = ARCHIVE_NAME.match(archive)
-        if match is not None:
+        if match is not None and ordered_history:
             # Ordering must hold at merge time too: by then the lifecycle
             # is archived (no longer active), but the branch commits still
             # show whether planning preceded production work.

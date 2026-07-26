@@ -40,6 +40,8 @@ A governed branch adds one lifecycle. A planning-only commit containing the life
 
 For this adoption branch the planning-only ancestor is commit `1297dfac`, and the pull-request citation format is one body line starting at column one reading exactly `OpenSpec-Change: <change-id>`; the ordering and routing fixtures in `scripts/test_check_openspec.py` encode both.
 
+Ordering and attribution are pull-request-lane controls. This repository squash-merges pull requests, which collapses the planning ancestor into one mainline commit, so the post-merge push run enforces only the diff-shaped controls (classification, branch scope, archive shape, tasks, synchronization, strict validation) and never re-litigates commit ordering it can no longer observe. Branch protection on the pull-request check keeps the ordering evidence authoritative.
+
 The pull-request body still cites the exact change identifier for human routing. That citation and GitHub review state are process evidence; the Git history and committed artifacts remain the durable validation inputs. The checker reads only the bounded event payload already available to the job and uses no API token.
 
 **Alternative rejected:** Trusting commit-message trailers, labels, timestamps, or live review queries as the sole proof that planning preceded implementation. They are mutable, spoofable, unavailable on some events, or require broader credentials.

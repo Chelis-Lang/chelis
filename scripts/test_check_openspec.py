@@ -35,7 +35,13 @@ locked here:
       marker-dance laundering repro), incomplete archives, and
       `@`-prefixed paths forging commit boundaries all fail closed, while
       the fully synchronized archived control fixture stays green
-      end-to-end.
+      end-to-end. Fourth-pass regressions: the push-event lane skips only
+      commit-ordering/attribution (squash merges collapse branch
+      history) while every diff-shaped control still fails, double-space
+      and ordered-list checkboxes cannot hide from task policing, active
+      lifecycle identifiers must be lowercase kebab-case, and the
+      repository root is git-resolved so subdirectory runs behave
+      identically.
 
 Every positive test has a planted-negative sibling (repo Negative Test
 Parity rule).
@@ -651,6 +657,12 @@ class TestDeltaShape(unittest.TestCase):
         self.assertNotEqual([], errors)
         self.assertIn("REMOVED plus ADDED", errors[0])
 
+    def test_mixed_case_renamed_gets_guidance(self):
+        text = self.GOOD.replace("## ADDED Requirements", "## Renamed Requirements")
+        errors = co.check_delta_shape(text)
+        self.assertNotEqual([], errors)
+        self.assertIn("REMOVED plus ADDED", errors[0])
+
 
 class TestParseDelta(unittest.TestCase):
     def test_known_sections_parsed(self):
@@ -659,6 +671,13 @@ class TestParseDelta(unittest.TestCase):
 
     def test_renamed_section_rejected(self):
         text = "## RENAMED Requirements\n\n### Requirement: R\nBody.\n"
+        with self.assertRaises(co.CheckError):
+            co.parse_delta(text)
+
+    def test_lowercase_operation_rejected(self):
+        # parse_delta must agree with check_delta_shape: only the exact
+        # uppercase operation headings are part of the delta schema.
+        text = TestDeltaShape.GOOD.replace("## ADDED", "## added")
         with self.assertRaises(co.CheckError):
             co.parse_delta(text)
 
@@ -733,6 +752,33 @@ class TestTasks(unittest.TestCase):
         text = "- [x] 1.1 Done.\n- [wip] 1.2 In progress.\n"
         self.assertNotEqual([], co.check_tasks(text))
 
+    def test_double_space_bullet_unchecked_rejected(self):
+        # GFM renders "-  [ ]" (two spaces) as a real checkbox, so an
+        # unchecked task must not hide behind extra list-marker spacing.
+        text = "- [x] 1.1 Done.\n-  [ ] 1.2 Hidden.\n"
+        errors = co.check_tasks(text)
+        self.assertNotEqual([], errors)
+        self.assertIn("task is not complete", errors[0])
+
+    def test_double_space_bullet_complete_accepted(self):
+        self.assertEqual([], co.check_tasks("-  [x] 1.1 Done.\n"))
+
+    def test_tab_bullet_unchecked_rejected(self):
+        text = "- [x] 1.1 Done.\n-\t[ ] 1.2 Hidden.\n"
+        self.assertNotEqual([], co.check_tasks(text))
+
+    def test_ordered_item_unchecked_rejected(self):
+        # GFM renders ordered-list task items ("1. [ ]") as checkboxes.
+        text = "- [x] 1.1 Done.\n1. [ ] 1.2 Hidden.\n"
+        self.assertNotEqual([], co.check_tasks(text))
+
+    def test_ordered_item_complete_accepted(self):
+        self.assertEqual([], co.check_tasks("1. [x] 1.1 Done.\n"))
+
+    def test_ordered_link_item_is_not_a_checkbox(self):
+        text = "- [x] 1.1 Done.\n1. [Evidence](https://example.invalid/run)\n"
+        self.assertEqual([], co.check_tasks(text))
+
     def test_asterisk_bullet_unchecked_rejected(self):
         self.assertNotEqual([], co.check_tasks("* [ ] 1.1 Do the thing.\n"))
 
@@ -798,6 +844,20 @@ class TestProposalCapabilities(unittest.TestCase):
     def test_none_placeholder_declares_nothing(self):
         text = "### Modified Capabilities\n\nNone.\n"
         self.assertEqual(frozenset(), co._proposal_capabilities(text))
+
+
+class TestLifecycleName(unittest.TestCase):
+    def test_kebab_case_accepted(self):
+        self.assertEqual([], co.check_lifecycle_name(CHANGE_ID))
+
+    def test_uppercase_rejected(self):
+        self.assertNotEqual([], co.check_lifecycle_name("Adopt-Change"))
+
+    def test_underscore_rejected(self):
+        self.assertNotEqual([], co.check_lifecycle_name("evil_change"))
+
+    def test_dot_prefix_rejected(self):
+        self.assertNotEqual([], co.check_lifecycle_name(".evil"))
 
 
 class TestArchiveName(unittest.TestCase):
@@ -868,6 +928,10 @@ class TestSelfTest(unittest.TestCase):
         "renamed-delta-operation",
         "incomplete-archive",
         "archived-exemption-mix",
+        "spaced-task-checkbox",
+        "ordered-task-checkbox",
+        "malformed-lifecycle-id",
+        "lowercase-delta-operation",
     }
 
     def test_control_inventory_is_complete(self):
@@ -960,22 +1024,29 @@ class TestRepositoryFixtures(unittest.TestCase):
         path.chmod(0o755)
         return path
 
-    def _merge_bound(self, tmp, repo):
+    def _merge_bound(
+        self, tmp, repo, chdir=None, extra_env=None, mode="--merge-bound"
+    ):
         cwd = os.getcwd()
         stderr = io.StringIO()
-        os.chdir(repo)
+        os.chdir(chdir or repo)
+        environ = {
+            "OPENSPEC_BIN": str(self._fake_openspec(tmp)),
+            "PATH": os.environ.get("PATH", os.defpath),
+        }
+        environ.update(extra_env or {})
         try:
             with contextlib.redirect_stderr(stderr):
-                code = co.main(
-                    ["--merge-bound", "--base", "main"],
-                    environ={
-                        "OPENSPEC_BIN": str(self._fake_openspec(tmp)),
-                        "PATH": os.environ.get("PATH", os.defpath),
-                    },
-                )
+                code = co.main([mode, "--base", "main"], environ=environ)
         finally:
             os.chdir(cwd)
         return code, stderr.getvalue()
+
+    def _squash_feature(self, repo):
+        self._git(repo, "checkout", "-q", "main")
+        self._git(repo, "checkout", "-q", "-b", "release")
+        self._git(repo, "merge", "-q", "--squash", "feature")
+        self._commit(repo, "squashed merge")
 
     def _plan(self, repo, delta_text, proposal=None, lifecycle=None):
         prefix = f"openspec/changes/{lifecycle or self.LIFECYCLE}"
@@ -1209,6 +1280,81 @@ class TestRepositoryFixtures(unittest.TestCase):
             self._archive_lifecycle(repo, baseline=self.BASELINE)
             code, stderr = self._merge_bound(tmp, repo)
             self.assertEqual(0, code, stderr)
+
+    def test_squashed_push_event_accepted(self):
+        # A provider squash merge collapses the planning ancestor into one
+        # mainline commit; the post-merge push lane must validate every
+        # diff-shaped control without re-litigating commit ordering.
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._init_repo(tmp)
+            self._plan(repo, TestDeltaShape.GOOD)
+            self._write(repo, "crates/foo.rs", "fn main() {}\n")
+            self._commit(repo, "impl")
+            self._archive_lifecycle(repo, baseline=self.BASELINE)
+            self._squash_feature(repo)
+            code, stderr = self._merge_bound(
+                tmp, repo, extra_env={"GITHUB_EVENT_NAME": "push"}
+            )
+            self.assertEqual(0, code, stderr)
+
+    def test_squashed_history_still_rejected_off_the_push_lane(self):
+        # Negative parity: the push-lane carve-out must not leak into
+        # local or pull-request validation, where ordering evidence over
+        # real branch history is required.
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._init_repo(tmp)
+            self._plan(repo, TestDeltaShape.GOOD)
+            self._write(repo, "crates/foo.rs", "fn main() {}\n")
+            self._commit(repo, "impl")
+            self._archive_lifecycle(repo, baseline=self.BASELINE)
+            self._squash_feature(repo)
+            code, stderr = self._merge_bound(tmp, repo)
+            self.assertEqual(1, code)
+            self.assertIn("no planning commit", stderr)
+
+    def test_push_event_still_enforces_diff_controls(self):
+        # The push lane skips only ordering/attribution; a violated
+        # diff-shaped control (direct baseline mutation) still fails.
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._init_repo(tmp)
+            self._write(repo, "openspec/specs/cap/spec.md", self.BASELINE)
+            self._commit(repo, "mutate baseline")
+            code, stderr = self._merge_bound(
+                tmp, repo, extra_env={"GITHUB_EVENT_NAME": "push"}
+            )
+            self.assertEqual(1, code)
+            self.assertIn("do not equal the replayed", stderr)
+
+    def test_run_from_subdirectory_accepted(self):
+        # The checker resolves the repository root from git, so running
+        # from a subdirectory must behave identically to the root.
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._init_repo(tmp)
+            self._plan(repo, TestDeltaShape.GOOD)
+            self._write(repo, "crates/foo.rs", "fn main() {}\n")
+            self._commit(repo, "impl")
+            self._archive_lifecycle(repo, baseline=self.BASELINE)
+            code, stderr = self._merge_bound(
+                tmp, repo, chdir=Path(repo) / "crates"
+            )
+            self.assertEqual(0, code, stderr)
+
+    def test_active_lifecycle_accepted_at_pre_archive(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._init_repo(tmp)
+            self._plan(repo, TestDeltaShape.GOOD)
+            self._write(repo, "crates/foo.rs", "fn main() {}\n")
+            self._commit(repo, "impl")
+            code, stderr = self._merge_bound(tmp, repo, mode="--pre-archive")
+            self.assertEqual(0, code, stderr)
+
+    def test_uppercase_lifecycle_id_rejected_at_pre_archive(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._init_repo(tmp)
+            self._plan(repo, TestDeltaShape.GOOD, lifecycle="Evil_Change")
+            code, stderr = self._merge_bound(tmp, repo, mode="--pre-archive")
+            self.assertEqual(1, code)
+            self.assertIn("kebab-case", stderr)
 
     def test_wrong_openspec_version_fails_before_repo_checks(self):
         with tempfile.TemporaryDirectory() as tmp:

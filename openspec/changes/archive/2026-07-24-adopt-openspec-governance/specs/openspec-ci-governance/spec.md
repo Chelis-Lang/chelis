@@ -23,7 +23,7 @@ The checker and `scripts/test_check_openspec.py` SHALL cover strict artifact val
 - **THEN** the corresponding self-test SHALL fail for the intended reason
 
 ### Requirement: Event-bound comparisons use complete history
-The CI workflow SHALL check out complete history with credentials persistence disabled. Pull requests SHALL compare against `pull_request.base.sha`; ordinary pushes SHALL compare against the event's nonzero `before` SHA; workflow dispatch and zero-before pushes SHALL compare against `origin/main`. Event-provided SHAs SHALL be exactly 40 hexadecimal characters, and missing or unresolvable comparison objects SHALL fail rather than silently selecting another base.
+The CI workflow SHALL check out complete history with credentials persistence disabled. Pull requests SHALL compare against `pull_request.base.sha`; ordinary pushes SHALL compare against the event's nonzero `before` SHA; workflow dispatch and zero-before pushes SHALL compare against `origin/main`. Event-provided SHAs SHALL be exactly 40 hexadecimal characters, and missing or unresolvable comparison objects SHALL fail rather than silently selecting another base. Push-event runs validate the post-merge state: because a squash merge leaves no branch history to order, they SHALL enforce every diff-shaped control and SHALL NOT enforce commit-ordering or commit-attribution, which remain pull-request-lane and local-run controls.
 
 #### Scenario: Pull request runs
 - **WHEN** GitHub supplies a valid pull-request base SHA and full history contains its merge base
@@ -32,6 +32,11 @@ The CI workflow SHALL check out complete history with credentials persistence di
 #### Scenario: Comparison history is shallow or malformed
 - **WHEN** the selected base is malformed, absent, or cannot produce a merge base
 - **THEN** governance SHALL fail with a bounded diagnostic
+
+#### Scenario: Squash-merged push is validated
+- **WHEN** a push event validates a mainline commit produced by a provider squash merge
+- **THEN** the checker SHALL skip only the commit-ordering and commit-attribution controls
+- **THEN** any other violated control SHALL still fail the run
 
 ### Requirement: CI uses an immutable shared action
 Chelis SHALL invoke `Chelis-Lang/ci/actions/openspec-governance@2906e03880a2ea7d553b0959c246991b1b058990` after `actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1` with `fetch-depth: 0` and `persist-credentials: false`. Chelis SHALL NOT duplicate the shared action's Node setup, npm package metadata, lockfile, event-base launcher, or exact OpenSpec installation.
