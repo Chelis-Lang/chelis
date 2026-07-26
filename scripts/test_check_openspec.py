@@ -314,6 +314,13 @@ class TestClassification(unittest.TestCase):
         cls = co.classify_paths([path])
         self.assertEqual(frozenset(), cls.hidden)
 
+    def test_nested_marker_dotfile_is_hidden(self):
+        # The marker is evidence only at the record root; a .openspec.yaml
+        # buried a level deeper is a hidden path, not evidence.
+        path = f"openspec/changes/archive/2026-07-24-{CHANGE_ID}/specs/.openspec.yaml"
+        cls = co.classify_paths([path])
+        self.assertEqual(frozenset([path]), cls.hidden)
+
     def test_unknown_governance_path_unrecognized(self):
         cls = co.classify_paths(["openspec/notes/hack.txt"])
         self.assertEqual(frozenset(["openspec/notes/hack.txt"]), cls.unrecognized)
@@ -390,6 +397,39 @@ class TestBranchScope(unittest.TestCase):
             co.check_branch_scope(
                 cls, inherited_ids=frozenset([CHANGE_ID]), mode="pre-archive"
             ),
+        )
+
+    def test_active_lifecycle_plus_archive_rejected_at_pre_archive(self):
+        # One record per branch: an active lifecycle alongside an archived
+        # one is two records, and must be caught at pre-archive (merge-bound
+        # already rejects the unarchived active lifecycle separately).
+        cls = self._cls(
+            [
+                MARKER,
+                "openspec/changes/archive/2026-07-24-other-change/proposal.md",
+            ]
+        )
+        errors = co.check_branch_scope(
+            cls, inherited_ids=frozenset(), mode="pre-archive"
+        )
+        self.assertTrue(
+            any("active lifecycle with an archived lifecycle" in e for e in errors)
+        )
+
+    def test_archival_endpoint_diff_is_not_a_mix(self):
+        # Positive sibling: a normal create-then-archive nets to archive-only
+        # in the endpoint diff (no active record), so it is not flagged.
+        cls = self._cls(
+            [
+                f"openspec/changes/archive/2026-07-24-{CHANGE_ID}/proposal.md",
+                f"openspec/changes/archive/2026-07-24-{CHANGE_ID}/.openspec.yaml",
+            ]
+        )
+        errors = co.check_branch_scope(
+            cls, inherited_ids=frozenset(), mode="merge-bound"
+        )
+        self.assertNotIn(
+            "branch mixes an active lifecycle with an archived lifecycle", errors
         )
 
     def test_hidden_governance_path_rejected(self):
@@ -728,6 +768,45 @@ class TestDeltaShape(unittest.TestCase):
         text = self.GOOD.split("#### Scenario: It fails")[0]
         self.assertNotEqual([], co.check_delta_shape(text))
 
+    def test_fenced_worked_example_accepted(self):
+        # A delta that documents the delta format inside a code fence must
+        # not have the fenced headings parsed as live structure. The real
+        # requirement keeps its two real scenarios and the delta is clean.
+        text = (
+            "## ADDED Requirements\n\n"
+            "### Requirement: Authoring guide\n"
+            "Authors write deltas like this:\n\n"
+            "```\n"
+            "## ADDED Requirements\n\n"
+            "### Requirement: Example\n"
+            "Body.\n"
+            "```\n\n"
+            "#### Scenario: It works\n- **WHEN** x\n- **THEN** y\n\n"
+            "#### Scenario: It fails\n- **WHEN** a\n- **THEN** b\n"
+        )
+        self.assertEqual([], co.check_delta_shape(text))
+
+    def test_fenced_scenarios_do_not_satisfy_parity(self):
+        # Negative parity: '#### Scenario:' lines hidden inside a code fence
+        # are not real behavioral scenarios and must not satisfy the
+        # two-scenario rule.
+        text = (
+            "## ADDED Requirements\n\n"
+            "### Requirement: Sneaky\n"
+            "No real scenarios.\n\n"
+            "```\n#### Scenario: fake positive\n"
+            "#### Scenario: fake negative\n```\n"
+        )
+        errors = co.check_delta_shape(text)
+        self.assertNotEqual([], errors)
+        self.assertTrue(any("at least two scenarios" in e for e in errors))
+
+    def test_fenced_h2_requirements_heading_not_flagged(self):
+        # A level-2 heading ending in 'requirements' that lives inside a
+        # fence is not a near-miss operation heading.
+        text = self.GOOD + "\n```\n## Reserved requirements\ncode\n```\n"
+        self.assertEqual([], co.check_delta_shape(text))
+
 
 class TestParseDelta(unittest.TestCase):
     def test_known_sections_parsed(self):
@@ -752,6 +831,31 @@ class TestParseDelta(unittest.TestCase):
             "### Requirement: Legacy path\n**Reason**: superseded.\n"
         )
         self.assertIn("Legacy path", co.parse_delta(text)["removed"])
+
+    def test_fenced_requirement_is_not_a_real_block(self):
+        # A '### Requirement:' inside a code fence is body text of the
+        # enclosing requirement, not a second block; replay must not invent
+        # a phantom requirement from a worked example.
+        text = (
+            "## ADDED Requirements\n\n"
+            "### Requirement: Guide\n"
+            "Example:\n\n```\n### Requirement: Phantom\nBody.\n```\n\n"
+            "#### Scenario: a\n- x\n\n#### Scenario: b\n- y\n"
+        )
+        parsed = co.parse_delta(text)
+        self.assertEqual(["Guide"], list(parsed["added"]))
+
+    def test_parse_requirement_blocks_rejects_duplicate(self):
+        with self.assertRaises(co.CheckError):
+            co.parse_requirement_blocks(
+                "### Requirement: R\nFirst.\n\n### Requirement: R\nSecond.\n"
+            )
+
+    def test_parse_requirement_blocks_unique_accepted(self):
+        blocks = co.parse_requirement_blocks(
+            "### Requirement: A\nOne.\n\n### Requirement: B\nTwo.\n"
+        )
+        self.assertEqual(["A", "B"], list(blocks))
 
 
 class TestBaselineDeltaCoverage(unittest.TestCase):
@@ -1030,6 +1134,10 @@ class TestSelfTest(unittest.TestCase):
         "preamble-delta-block",
         "duplicate-delta-requirement",
         "uncovered-baseline-mutation",
+        "fenced-scenario-bypass",
+        "duplicate-baseline-requirement",
+        "nested-hidden-marker",
+        "active-archive-mix",
     }
 
     def test_control_inventory_is_complete(self):

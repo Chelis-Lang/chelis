@@ -80,6 +80,11 @@ _RENAMED_LINE = re.compile(
     r"##[ \t]+RENAMED[ \t]+Requirements[ \t]*", re.IGNORECASE
 )
 REQUIREMENT_HEADING = re.compile(r"^### Requirement:", re.MULTILINE)
+# Fenced code block delimiter (CommonMark: up to three leading spaces, then a
+# run of >= 3 backticks or tildes). Structural markdown scans mask fenced
+# content so an operation heading, requirement, or scenario written inside a
+# worked example is never mistaken for live delta structure.
+FENCE_DELIMITER = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 ARCHIVE_REQUIRED_FILES = (MARKER_NAME, "proposal.md", "tasks.md")
 LIFECYCLE_NAME = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 ARCHIVE_NAME = re.compile(r"^(\d{4})-(\d{2})-(\d{2})-([a-z0-9]+(?:-[a-z0-9]+)*)$")
@@ -126,6 +131,10 @@ SELF_TEST_CONTROLS = (
     "preamble-delta-block",
     "duplicate-delta-requirement",
     "uncovered-baseline-mutation",
+    "fenced-scenario-bypass",
+    "duplicate-baseline-requirement",
+    "nested-hidden-marker",
+    "active-archive-mix",
 )
 
 
@@ -265,11 +274,14 @@ class Classification:
 
 
 def _hidden_component(path: str) -> bool:
+    # The lifecycle marker is the only permitted dotfile, and only as the
+    # sole path component (a marker at any deeper level, e.g.
+    # specs/.openspec.yaml, is a hidden path, not evidence).
     parts = path.split("/")
-    for index, part in enumerate(parts):
+    for part in parts:
         if not part.startswith("."):
             continue
-        if index == len(parts) - 1 and part == MARKER_NAME:
+        if len(parts) == 1 and part == MARKER_NAME:
             continue
         return True
     return False
@@ -362,6 +374,12 @@ def check_branch_scope(
         )
     if new_lifecycles and classification.exemptions:
         errors.append("branch mixes a lifecycle with a maintenance exemption")
+    if new_lifecycles and classification.archives:
+        # One lifecycle per branch: an active lifecycle alongside an archived
+        # one (of any change) is two records. A legitimate create-then-archive
+        # nets to archive-only in the endpoint diff, so this never fires on
+        # normal archival.
+        errors.append("branch mixes an active lifecycle with an archived lifecycle")
     if classification.archives and classification.exemptions:
         errors.append(
             "branch mixes an archived lifecycle with a maintenance exemption"
@@ -533,14 +551,46 @@ def check_commit_coverage(changed, commits) -> list[str]:
     return []
 
 
-def _delta_sections(text: str) -> tuple[list[tuple[str, str]], list[str]]:
-    """Split a delta spec into (operation, body) sections and report every
-    structural problem. A near-miss heading (wrong case, extra spaces,
-    RENAMED) and a requirement block preceding the first operation section
-    are rejected here so check_delta_shape and parse_delta cannot disagree
-    about what the schema is."""
+def _mask_fences(text: str) -> str:
+    """Return text with every fenced-code-block line blanked (characters ->
+    spaces, newlines kept) so structural markdown scans never see a heading,
+    requirement, or scenario marker that lives inside a code fence. Offsets
+    are preserved exactly, so a caller can locate structure in the masked
+    view and slice the original text at the same positions."""
+    masked: list[str] = []
+    fence: tuple[str, int] | None = None
+    for line in text.split("\n"):
+        match = FENCE_DELIMITER.match(line)
+        if fence is None:
+            if match is not None:
+                fence = (match.group(1)[0], len(match.group(1)))
+                masked.append(" " * len(line))
+            else:
+                masked.append(line)
+        else:
+            char, length = fence
+            masked.append(" " * len(line))
+            if (
+                match is not None
+                and match.group(1)[0] == char
+                and len(match.group(1)) >= length
+                and match.group(2).strip() == ""
+            ):
+                fence = None
+    return "\n".join(masked)
+
+
+def _delta_sections(text: str) -> tuple[list[tuple[str, str, str]], list[str]]:
+    """Split a delta spec into (operation, body, masked_body) sections and
+    report every structural problem. Scans run over the fence-masked view so
+    a heading written inside a worked example is neither counted as live
+    structure nor rejected as a near-miss. A near-miss heading (wrong case,
+    extra spaces, RENAMED) and a requirement block preceding the first
+    operation section are rejected here so check_delta_shape and parse_delta
+    cannot disagree about what the schema is."""
     errors: list[str] = []
-    for match in RESEMBLES_OPERATION_HEADING.finditer(text):
+    masked = _mask_fences(text)
+    for match in RESEMBLES_OPERATION_HEADING.finditer(masked):
         heading = match.group(0)
         if _CANONICAL_LINE.fullmatch(heading):
             continue
@@ -550,15 +600,19 @@ def _delta_sections(text: str) -> tuple[list[tuple[str, str]], list[str]]:
             errors.append(
                 f"malformed delta operation section: {heading.strip()!r}"
             )
-    canonical = list(CANONICAL_OPERATION_HEADING.finditer(text))
-    if canonical and REQUIREMENT_HEADING.search(text[: canonical[0].start()]):
+    canonical = list(CANONICAL_OPERATION_HEADING.finditer(masked))
+    if canonical and REQUIREMENT_HEADING.search(masked[: canonical[0].start()]):
         errors.append(
             "requirement block precedes the first delta operation section "
             "and would not be replayed"
         )
     bounds = [match.start() for match in canonical] + [len(text)]
     sections = [
-        (match.group(1), text[match.end() : bounds[index + 1]])
+        (
+            match.group(1),
+            text[match.end() : bounds[index + 1]],
+            masked[match.end() : bounds[index + 1]],
+        )
         for index, match in enumerate(canonical)
     ]
     return sections, errors
@@ -568,8 +622,12 @@ def check_delta_shape(text: str) -> list[str]:
     sections, errors = _delta_sections(text)
     seen: set[str] = set()
     blocks = 0
-    for operation, body in sections:
-        for block in re.split(r"^### Requirement: *", body, flags=re.MULTILINE)[1:]:
+    for operation, _body, masked_body in sections:
+        # Split and count over the fence-masked body: a '#### Scenario:' line
+        # hidden inside a code fence must not satisfy the parity rule.
+        for block in re.split(
+            r"^### Requirement: *", masked_body, flags=re.MULTILINE
+        )[1:]:
             blocks += 1
             lines = block.splitlines()
             name = lines[0].strip() if lines else "?"
@@ -671,14 +729,24 @@ def check_archive_name(name: str) -> list[str]:
 
 
 def parse_requirement_blocks(text: str) -> dict[str, str]:
+    # Locate requirement headings in the fence-masked view so a
+    # '### Requirement:' inside a worked example is body text, not a real
+    # block, then slice the original text so the block body keeps its literal
+    # (fenced) content for drift comparison. Duplicate names are rejected
+    # rather than silently collapsed last-wins.
+    masked = _mask_fences(text)
+    headings = list(re.finditer(r"^### Requirement: *", masked, flags=re.MULTILINE))
     blocks: dict[str, str] = {}
-    pieces = re.split(r"^### Requirement: *", text, flags=re.MULTILINE)[1:]
-    for piece in pieces:
-        lines = piece.splitlines()
+    for index, heading in enumerate(headings):
+        start = heading.end()
+        end = headings[index + 1].start() if index + 1 < len(headings) else len(text)
+        lines = text[start:end].splitlines()
         if not lines:
             continue
         name = lines[0].strip()
         body = "\n".join(lines[1:]).strip("\n")
+        if name in blocks:
+            raise CheckError(f"duplicate requirement block: {name}")
         blocks[name] = f"### Requirement: {name}\n{body}\n"
     return blocks
 
@@ -688,7 +756,7 @@ def parse_delta(text: str) -> dict[str, dict[str, str]]:
     if errors:
         raise CheckError(errors[0])
     delta: dict[str, dict[str, str]] = {}
-    for operation, body in sections:
+    for operation, body, _masked_body in sections:
         target = delta.setdefault(operation.lower(), {})
         for name, block in parse_requirement_blocks(body).items():
             if name in target:
@@ -921,6 +989,32 @@ def self_test() -> list[str]:
             frozenset({"openspec/specs/other-cap/spec.md"}),
             frozenset({"cap"}),
         ),
+        "fenced-scenario-bypass": _rejects(
+            check_delta_shape,
+            "## ADDED Requirements\n\n### Requirement: R\nBody.\n\n"
+            "```\n#### Scenario: fenced positive\n"
+            "#### Scenario: fenced negative\n```\n",
+        ),
+        "duplicate-baseline-requirement": _rejects(
+            parse_requirement_blocks,
+            "### Requirement: R\nFirst.\n\n### Requirement: R\nSecond.\n",
+        ),
+        "nested-hidden-marker": _rejects(
+            check_branch_scope,
+            classify_paths(
+                [f"{ARCHIVE_PREFIX}2026-07-24-x-change/specs/{MARKER_NAME}"]
+            ),
+            frozenset(),
+            "merge-bound",
+        ),
+        "active-archive-mix": _rejects(
+            check_branch_scope,
+            classify_paths(
+                [marker, f"{ARCHIVE_PREFIX}2026-07-24-other-change/proposal.md"]
+            ),
+            frozenset(),
+            "pre-archive",
+        ),
     }
     with tempfile.TemporaryDirectory() as tmp:
         target = Path(tmp) / "real.json"
@@ -985,9 +1079,14 @@ def _specs_at(git, revision: str | None, root: Path) -> dict[str, dict[str, str]
     if revision is None:
         base = root / "openspec" / "specs"
         for spec_file in sorted(base.glob("*/spec.md")):
-            specs[spec_file.parent.name] = parse_requirement_blocks(
-                spec_file.read_text(encoding="utf-8")
-            )
+            try:
+                specs[spec_file.parent.name] = parse_requirement_blocks(
+                    spec_file.read_text(encoding="utf-8")
+                )
+            except CheckError as error:
+                raise CheckError(
+                    f"openspec/specs/{spec_file.parent.name}/spec.md: {error}"
+                ) from error
         return specs
     try:
         listed = _git_lines(
@@ -1007,7 +1106,10 @@ def _specs_at(git, revision: str | None, root: Path) -> dict[str, dict[str, str]
         )
         if completed.returncode != 0:
             raise CheckError(f"cannot read {path} at {revision}")
-        specs[match.group(1)] = parse_requirement_blocks(completed.stdout)
+        try:
+            specs[match.group(1)] = parse_requirement_blocks(completed.stdout)
+        except CheckError as error:
+            raise CheckError(f"{path} at {revision}: {error}") from error
     return specs
 
 
