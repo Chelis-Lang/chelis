@@ -23,14 +23,19 @@ locked here:
       parity proxy: >= 2 scenarios per requirement);
   (i) task completion, archive naming, and replayed delta-to-baseline
       synchronization;
-  (j) the self-test control inventory covers the fifteen planted-negative
-      controls named in the design, and `self_test()` reports no failures;
-  (k) red-team regression coverage: direct baseline `openspec/specs/`
-      mutation without a same-diff archive, archived deltas missing
-      requirement blocks or scenario parity at merge time, merge-commit
-      content unattributable to any branch commit (evil merge), and
-      unrecognized `openspec/` paths all fail closed, while the fully
-      synchronized archived control fixture stays green end-to-end.
+  (j) the self-test control inventory covers every planted-negative
+      control named in `SELF_TEST_CONTROLS`, and `self_test()` reports
+      no failures;
+  (k) red-team and review regression coverage: direct baseline
+      `openspec/specs/` mutation without a same-diff archive, archived
+      deltas missing requirement blocks or scenario parity at merge time,
+      merge-commit content unattributable to any branch commit (evil
+      merge), unrecognized `openspec/` paths, mutation of an archived
+      lifecycle inherited from the comparison base (including the
+      marker-dance laundering repro), incomplete archives, and
+      `@`-prefixed paths forging commit boundaries all fail closed, while
+      the fully synchronized archived control fixture stays green
+      end-to-end.
 
 Every positive test has a planted-negative sibling (repo Negative Test
 Parity rule).
@@ -628,6 +633,23 @@ class TestDeltaShape(unittest.TestCase):
         text = self.GOOD.replace("## ADDED Requirements", "## INVENTED Requirements")
         self.assertNotEqual([], co.check_delta_shape(text))
 
+    def test_renamed_operation_rejected_with_guidance(self):
+        text = self.GOOD.replace("## ADDED Requirements", "## RENAMED Requirements")
+        errors = co.check_delta_shape(text)
+        self.assertNotEqual([], errors)
+        self.assertIn("REMOVED plus ADDED", errors[0])
+
+
+class TestParseDelta(unittest.TestCase):
+    def test_known_sections_parsed(self):
+        parsed = co.parse_delta(TestDeltaShape.GOOD)
+        self.assertIn("Example holds", parsed["added"])
+
+    def test_renamed_section_rejected(self):
+        text = "## RENAMED Requirements\n\n### Requirement: R\nBody.\n"
+        with self.assertRaises(co.CheckError):
+            co.parse_delta(text)
+
 
 class TestArchiveDeltas(unittest.TestCase):
     def _archive(self, tmp, delta_text):
@@ -688,9 +710,75 @@ class TestTasks(unittest.TestCase):
         text = "- [x] 1.1 Done.\n- [~] 1.2 Deferred.\n"
         self.assertNotEqual([], co.check_tasks(text))
 
+    def test_multichar_marker_rejected(self):
+        text = "- [x] 1.1 Done.\n- [wip] 1.2 In progress.\n"
+        self.assertNotEqual([], co.check_tasks(text))
+
+    def test_asterisk_bullet_unchecked_rejected(self):
+        self.assertNotEqual([], co.check_tasks("* [ ] 1.1 Do the thing.\n"))
+
+    def test_asterisk_bullet_complete_accepted(self):
+        self.assertEqual([], co.check_tasks("* [x] 1.1 Done.\n"))
+
     def test_markdown_link_item_is_not_a_checkbox(self):
         text = "- [x] 1.1 Done.\n- [Evidence](https://example.invalid/run)\n"
         self.assertEqual([], co.check_tasks(text))
+
+
+class TestArchiveNovelty(unittest.TestCase):
+    def test_new_archive_accepted(self):
+        self.assertEqual(
+            [],
+            co.check_archive_novelty(
+                frozenset({"2026-07-26-new-change"}),
+                frozenset({"2026-01-01-old-change"}),
+            ),
+        )
+
+    def test_inherited_archive_mutation_rejected(self):
+        errors = co.check_archive_novelty(
+            frozenset({"2026-01-01-old-change"}),
+            frozenset({"2026-01-01-old-change"}),
+        )
+        self.assertNotEqual([], errors)
+        self.assertIn("inherited from the comparison base", errors[0])
+
+
+class TestArchiveCompleteness(unittest.TestCase):
+    def _populate(self, directory, names):
+        for name in names:
+            (directory / name).write_text("content\n", encoding="utf-8")
+
+    def test_complete_archive_accepted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            self._populate(directory, (".openspec.yaml", "proposal.md", "tasks.md"))
+            self.assertEqual(
+                [], co.check_archive_completeness(directory, "2026-07-24-x-change")
+            )
+
+    def test_missing_proposal_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            self._populate(directory, (".openspec.yaml", "tasks.md"))
+            errors = co.check_archive_completeness(directory, "2026-07-24-x-change")
+            self.assertNotEqual([], errors)
+            self.assertIn("proposal.md", errors[0])
+
+
+class TestProposalCapabilities(unittest.TestCase):
+    def test_new_and_modified_sections_parsed(self):
+        text = (
+            "### New Capabilities\n\n- `cap-a`: one.\n\n"
+            "### Modified Capabilities\n\n- `cap-b`: two.\n"
+        )
+        self.assertEqual(
+            frozenset({"cap-a", "cap-b"}), co._proposal_capabilities(text)
+        )
+
+    def test_none_placeholder_declares_nothing(self):
+        text = "### Modified Capabilities\n\nNone.\n"
+        self.assertEqual(frozenset(), co._proposal_capabilities(text))
 
 
 class TestArchiveName(unittest.TestCase):
@@ -756,6 +844,10 @@ class TestSelfTest(unittest.TestCase):
         "unguarded-config-mutation",
         "inherited-exemption-mutation",
         "hidden-archive-path",
+        "inherited-archive-mutation",
+        "multichar-task-marker",
+        "renamed-delta-operation",
+        "incomplete-archive",
     }
 
     def test_control_inventory_is_complete(self):
@@ -774,6 +866,13 @@ class TestRepositoryFixtures(unittest.TestCase):
 
     LIFECYCLE = "x-change"
     ARCHIVE = "2026-07-24-x-change"
+    OLD_ARCHIVE = "2026-01-01-old-change"
+    PROPOSAL_TEXT = (
+        "## Why\n\nFixture.\n\n"
+        "## Capabilities\n\n"
+        "### New Capabilities\n\n"
+        "- `cap`: fixture capability.\n"
+    )
     BASELINE = (
         "### Requirement: Example holds\n"
         "The system SHALL hold.\n\n"
@@ -810,14 +909,24 @@ class TestRepositoryFixtures(unittest.TestCase):
         self._git(repo, "add", "-A")
         self._git(repo, "commit", "-q", "-m", message)
 
-    def _init_repo(self, tmp):
+    def _init_repo(self, tmp, seed=None):
         repo = Path(tmp) / "repo"
         repo.mkdir()
         self._git(repo, "init", "-q", "-b", "main")
         self._write(repo, "README.md", "base\n")
+        if seed is not None:
+            seed(repo)
         self._commit(repo, "base")
         self._git(repo, "checkout", "-q", "-b", "feature")
         return repo
+
+    def _seed_inherited_archive(self, repo):
+        prefix = f"openspec/changes/archive/{self.OLD_ARCHIVE}"
+        self._write(repo, f"{prefix}/.openspec.yaml", "schema: spec-driven\n")
+        self._write(repo, f"{prefix}/proposal.md", self.PROPOSAL_TEXT)
+        self._write(repo, f"{prefix}/tasks.md", "- [x] 1.1 Done.\n")
+        self._write(repo, f"{prefix}/specs/cap/spec.md", TestDeltaShape.GOOD)
+        self._write(repo, "openspec/specs/cap/spec.md", self.BASELINE)
 
     def _fake_openspec(self, tmp):
         path = Path(tmp) / "fake_openspec"
@@ -848,19 +957,22 @@ class TestRepositoryFixtures(unittest.TestCase):
             os.chdir(cwd)
         return code, stderr.getvalue()
 
-    def _plan(self, repo, delta_text):
-        prefix = f"openspec/changes/{self.LIFECYCLE}"
+    def _plan(self, repo, delta_text, proposal=None, lifecycle=None):
+        prefix = f"openspec/changes/{lifecycle or self.LIFECYCLE}"
         self._write(repo, f"{prefix}/.openspec.yaml", "schema: spec-driven\n")
-        self._write(repo, f"{prefix}/proposal.md", "## Why\n\nFixture.\n")
+        self._write(repo, f"{prefix}/proposal.md", proposal or self.PROPOSAL_TEXT)
         self._write(repo, f"{prefix}/specs/cap/spec.md", delta_text)
         self._commit(repo, "plan")
 
-    def _archive_lifecycle(self, repo, baseline=None, keep_specs=True):
+    def _archive_lifecycle(self, repo, baseline=None, keep_specs=True, keep_proposal=True):
         prefix = f"openspec/changes/{self.LIFECYCLE}"
         target = f"openspec/changes/archive/{self.ARCHIVE}"
         Path(repo, target).mkdir(parents=True, exist_ok=True)
         self._git(repo, "mv", prefix + "/.openspec.yaml", target)
-        self._git(repo, "mv", prefix + "/proposal.md", target)
+        if keep_proposal:
+            self._git(repo, "mv", prefix + "/proposal.md", target)
+        else:
+            self._git(repo, "rm", "-q", prefix + "/proposal.md")
         if keep_specs:
             self._git(repo, "mv", prefix + "/specs", target + "/specs")
         else:
@@ -977,6 +1089,82 @@ class TestRepositoryFixtures(unittest.TestCase):
             code, stderr = self._merge_bound(tmp, repo)
             self.assertEqual(1, code)
             self.assertIn("inherited from the comparison base", stderr)
+
+    def test_inherited_archive_mutation_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._init_repo(tmp, seed=self._seed_inherited_archive)
+            self._write(
+                repo,
+                f"openspec/changes/archive/{self.OLD_ARCHIVE}/tasks.md",
+                "- [x] 1.1 Rewritten.\n",
+            )
+            self._commit(repo, "tamper archive")
+            code, stderr = self._merge_bound(tmp, repo)
+            self.assertEqual(1, code)
+            self.assertIn(
+                "archived lifecycle inherited from the comparison base", stderr
+            )
+
+    def test_inherited_archive_laundering_rejected(self):
+        # Marker-dance repro: plan a lifecycle named after the inherited
+        # archive, rewrite that archive's delta into a no-op MODIFIED
+        # replay, delete the active lifecycle, and ship production code
+        # under the tampered archive. Exited 0 before check_archive_novelty.
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._init_repo(tmp, seed=self._seed_inherited_archive)
+            self._plan(repo, TestDeltaShape.GOOD, lifecycle="old-change")
+            self._write(
+                repo,
+                f"openspec/changes/archive/{self.OLD_ARCHIVE}/specs/cap/spec.md",
+                "## MODIFIED Requirements\n\n" + self.BASELINE,
+            )
+            self._write(repo, "crates/evil.rs", "fn main() {}\n")
+            self._commit(repo, "tamper and implement")
+            self._git(repo, "rm", "-q", "-r", "openspec/changes/old-change")
+            self._commit(repo, "hide the active lifecycle")
+            code, stderr = self._merge_bound(tmp, repo)
+            self.assertEqual(1, code)
+            self.assertIn(
+                "archived lifecycle inherited from the comparison base", stderr
+            )
+
+    def test_archive_missing_proposal_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._init_repo(tmp)
+            self._plan(repo, TestDeltaShape.GOOD)
+            self._write(repo, "crates/foo.rs", "fn main() {}\n")
+            self._commit(repo, "impl")
+            self._archive_lifecycle(
+                repo, baseline=self.BASELINE, keep_proposal=False
+            )
+            code, stderr = self._merge_bound(tmp, repo)
+            self.assertEqual(1, code)
+            self.assertIn("missing proposal.md", stderr)
+
+    def test_archive_capability_drift_rejected(self):
+        drifted = self.PROPOSAL_TEXT.replace("`cap`", "`other-cap`")
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._init_repo(tmp)
+            self._plan(repo, TestDeltaShape.GOOD, proposal=drifted)
+            self._write(repo, "crates/foo.rs", "fn main() {}\n")
+            self._commit(repo, "impl")
+            self._archive_lifecycle(repo, baseline=self.BASELINE)
+            code, stderr = self._merge_bound(tmp, repo)
+            self.assertEqual(1, code)
+            self.assertIn("disagree", stderr)
+
+    def test_at_prefixed_path_cannot_forge_commit_boundary(self):
+        # The commit log uses a NUL sentinel, so a committed path that
+        # begins with "@" must not desynchronize commit attribution.
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._init_repo(tmp)
+            self._plan(repo, TestDeltaShape.GOOD)
+            self._write(repo, "@sentinel.txt", "decoy\n")
+            self._write(repo, "crates/foo.rs", "fn main() {}\n")
+            self._commit(repo, "impl")
+            self._archive_lifecycle(repo, baseline=self.BASELINE)
+            code, stderr = self._merge_bound(tmp, repo)
+            self.assertEqual(0, code, stderr)
 
     def test_wrong_openspec_version_fails_before_repo_checks(self):
         with tempfile.TemporaryDirectory() as tmp:

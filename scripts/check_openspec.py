@@ -55,12 +55,19 @@ GOVERNANCE_ROOT_FILES = frozenset({"openspec/config.yaml"})
 SPEC_PREFIX = "spec/"
 MARKER_NAME = ".openspec.yaml"
 PLANNING_NEUTRAL = frozenset({".gitignore", ".gitattributes"})
-DELTA_OPERATIONS = ("ADDED", "MODIFIED", "REMOVED", "RENAMED")
+DELTA_OPERATIONS = ("ADDED", "MODIFIED", "REMOVED")
+RENAMED_GUIDANCE = (
+    "RENAMED sections are unsupported; encode renames as REMOVED plus ADDED"
+)
+ARCHIVE_REQUIRED_FILES = (MARKER_NAME, "proposal.md", "tasks.md")
 ARCHIVE_NAME = re.compile(r"^(\d{4})-(\d{2})-(\d{2})-([a-z0-9]+(?:-[a-z0-9]+)*)$")
 EXEMPTION_NAME = re.compile(
     r"^(\d{4})-(\d{2})-(\d{2})-([a-z0-9]+(?:-[a-z0-9]+)*)\.toml$"
 )
-CHECKBOX = re.compile(r"^- \[(.)\] *(.*)$")
+# A checkbox marker is any bracketed text not followed by "(", so a
+# markdown link item like "- [Evidence](url)" is not a task while a
+# nonstandard marker like "- [wip]" is still policed.
+CHECKBOX = re.compile(r"^[-*+] \[([^\]]*)\](?!\() *(.*)$")
 
 SELF_TEST_CONTROLS = (
     "malformed-spec",
@@ -82,6 +89,10 @@ SELF_TEST_CONTROLS = (
     "unguarded-config-mutation",
     "inherited-exemption-mutation",
     "hidden-archive-path",
+    "inherited-archive-mutation",
+    "multichar-task-marker",
+    "renamed-delta-operation",
+    "incomplete-archive",
 )
 
 
@@ -420,6 +431,15 @@ def check_exemption_novelty(exemptions, base_paths) -> list[str]:
     ]
 
 
+def check_archive_novelty(archives, base_archives) -> list[str]:
+    inherited = sorted(frozenset(archives) & frozenset(base_archives))
+    return [
+        "archived lifecycle inherited from the comparison base must not "
+        f"change: {name}"
+        for name in inherited
+    ]
+
+
 def check_planning_order(commits, lifecycle_id: str) -> list[str]:
     marker = f"{CHANGES_PREFIX}{lifecycle_id}/{MARKER_NAME}"
     proposal = f"{CHANGES_PREFIX}{lifecycle_id}/proposal.md"
@@ -477,7 +497,9 @@ def check_commit_coverage(changed, commits) -> list[str]:
 def check_delta_shape(text: str) -> list[str]:
     errors = []
     for match in re.finditer(r"^## (\S+) Requirements *$", text, re.MULTILINE):
-        if match.group(1) not in DELTA_OPERATIONS:
+        if match.group(1) == "RENAMED":
+            errors.append(RENAMED_GUIDANCE)
+        elif match.group(1) not in DELTA_OPERATIONS:
             errors.append(f"unknown delta operation section: {match.group(0)!r}")
     requirements = re.split(r"^### Requirement: *", text, flags=re.MULTILINE)[1:]
     if not requirements:
@@ -508,14 +530,17 @@ def check_tasks(text: str) -> list[str]:
     errors = []
     boxes = 0
     for line in text.splitlines():
-        match = CHECKBOX.match(line.strip()) if line.strip().startswith("- [") else None
+        stripped = line.strip()
+        if not stripped.startswith(("- [", "* [", "+ [")):
+            continue
+        match = CHECKBOX.match(stripped)
         if match is None:
             continue
         boxes += 1
         if match.group(1) != "x":
-            errors.append(f"task is not complete: {line.strip()!r}")
+            errors.append(f"task is not complete: {stripped!r}")
         if not match.group(2).strip():
-            errors.append(f"task has no description: {line.strip()!r}")
+            errors.append(f"task has no description: {stripped!r}")
     if boxes == 0:
         errors.append("task list contains no checkbox tasks")
     return errors
@@ -539,6 +564,14 @@ def check_archive_deltas(
         except CheckError as error:
             errors.append(f"{delta_file}: {error}")
     return errors, deltas
+
+
+def check_archive_completeness(archive_dir: Path, archive: str) -> list[str]:
+    return [
+        f"archived lifecycle is missing {name}: {archive}"
+        for name in ARCHIVE_REQUIRED_FILES
+        if not (archive_dir / name).is_file()
+    ]
 
 
 def check_archive_name(name: str) -> list[str]:
@@ -569,6 +602,8 @@ def parse_delta(text: str) -> dict[str, dict[str, str]]:
     sections = re.split(r"^## (\S+) Requirements *$", text, flags=re.MULTILINE)
     for index in range(1, len(sections), 2):
         operation = sections[index].lower()
+        if sections[index].upper() == "RENAMED":
+            raise CheckError(RENAMED_GUIDANCE)
         if sections[index].upper() not in DELTA_OPERATIONS:
             raise CheckError(f"unknown delta operation: {sections[index]}")
         blocks = parse_requirement_blocks(sections[index + 1])
@@ -716,6 +751,24 @@ def self_test() -> list[str]:
             frozenset(),
             "merge-bound",
         ),
+        "inherited-archive-mutation": _rejects(
+            check_archive_novelty,
+            frozenset({"2026-01-01-old-change"}),
+            frozenset({"2026-01-01-old-change"}),
+        ),
+        "multichar-task-marker": _rejects(
+            check_tasks, "- [x] 1.1 Done.\n- [wip] 1.2 In progress.\n"
+        ),
+        "renamed-delta-operation": _rejects(
+            check_delta_shape,
+            "## RENAMED Requirements\n\n### Requirement: R\nBody.\n\n"
+            "#### Scenario: a\n- x\n\n#### Scenario: b\n- y\n",
+        ),
+        "incomplete-archive": _rejects(
+            check_archive_completeness,
+            Path("nonexistent-archive-fixture"),
+            "2026-07-24-x-change",
+        ),
     }
     with tempfile.TemporaryDirectory() as tmp:
         target = Path(tmp) / "real.json"
@@ -747,7 +800,9 @@ def _branch_commits(git, merge_base: str):
             str(git),
             "log",
             "--reverse",
-            "--format=@%H",
+            # NUL sentinel: no committed path can begin with %x00, so a
+            # crafted filename cannot forge a commit boundary.
+            "--format=%x00%H",
             "--name-only",
             f"{merge_base}..HEAD",
         ],
@@ -761,7 +816,7 @@ def _branch_commits(git, merge_base: str):
     sha = None
     paths: set[str] = set()
     for line in output.stdout.splitlines():
-        if line.startswith("@"):
+        if line.startswith("\0"):
             if sha is not None:
                 commits.append((sha, frozenset(paths)))
             sha = line[1:].strip()
@@ -820,6 +875,17 @@ def _inherited_lifecycles(git, merge_base: str) -> frozenset[str]:
     return frozenset(inherited)
 
 
+def _base_archives(git, merge_base: str) -> frozenset[str]:
+    try:
+        listed = _git_lines(
+            git,
+            ["ls-tree", "--name-only", merge_base, "--", ARCHIVE_PREFIX],
+        )
+    except CheckError:
+        return frozenset()
+    return frozenset(entry.rstrip("/").rsplit("/", 1)[-1] for entry in listed)
+
+
 def _base_exemptions(git, merge_base: str) -> frozenset[str]:
     try:
         listed = _git_lines(
@@ -833,11 +899,12 @@ def _base_exemptions(git, merge_base: str) -> frozenset[str]:
 
 def _proposal_capabilities(text: str) -> frozenset[str]:
     capabilities = set()
-    section = re.split(r"^### New Capabilities *$", text, flags=re.MULTILINE)
-    if len(section) > 1:
-        tail = re.split(r"^#{2,3} ", section[1], flags=re.MULTILINE)[0]
-        for match in re.finditer(r"^- `([a-z0-9-]+)`", tail, re.MULTILINE):
-            capabilities.add(match.group(1))
+    for match in re.finditer(
+        r"^### (?:New|Modified) Capabilities *$", text, re.MULTILINE
+    ):
+        tail = re.split(r"^#{2,3} ", text[match.end() :], flags=re.MULTILINE)[0]
+        for bullet in re.finditer(r"^- `([a-z0-9-]+)`", tail, re.MULTILINE):
+            capabilities.add(bullet.group(1))
     return frozenset(capabilities)
 
 
@@ -856,6 +923,9 @@ def _run_repository_checks(mode: str, base: str, environ) -> list[str]:
     classification = classify_paths(changed)
     inherited = _inherited_lifecycles(git, merge_base)
     errors += check_branch_scope(classification, inherited, mode)
+    errors += check_archive_novelty(
+        classification.archives, _base_archives(git, merge_base)
+    )
     commits = _branch_commits(git, merge_base)
     errors += check_commit_coverage(changed, commits)
     new_lifecycles = classification.active_lifecycles - inherited
@@ -867,13 +937,14 @@ def _run_repository_checks(mode: str, base: str, environ) -> list[str]:
         for delta_file in delta_files:
             errors += check_delta_shape(delta_file.read_text(encoding="utf-8"))
         proposal_file = change_dir / "proposal.md"
+        declared = frozenset()
         if proposal_file.is_file():
             declared = _proposal_capabilities(
                 proposal_file.read_text(encoding="utf-8")
             )
-            present = frozenset(f.parent.name for f in delta_files)
-            if declared:
-                errors += check_artifact_coherence(declared, present)
+        present = frozenset(f.parent.name for f in delta_files)
+        if declared or present:
+            errors += check_artifact_coherence(declared, present)
         errors += _check_citation_from_event(environ, lifecycle)
 
     deltas: dict[str, dict[str, dict[str, str]]] = {}
@@ -886,14 +957,23 @@ def _run_repository_checks(mode: str, base: str, environ) -> list[str]:
             # show whether planning preceded production work.
             errors += check_planning_order(commits, match.group(4))
         archive_dir = root / "openspec" / "changes" / "archive" / archive
+        errors += check_archive_completeness(archive_dir, archive)
         tasks_file = archive_dir / "tasks.md"
         if tasks_file.is_file():
             errors += check_tasks(tasks_file.read_text(encoding="utf-8"))
-        else:
-            errors.append(f"archived lifecycle has no tasks.md: {archive}")
         archive_errors, archive_deltas = check_archive_deltas(archive_dir, archive)
         errors += archive_errors
         deltas.update(archive_deltas)
+        proposal_file = archive_dir / "proposal.md"
+        if proposal_file.is_file():
+            declared = _proposal_capabilities(
+                proposal_file.read_text(encoding="utf-8")
+            )
+            present = frozenset(
+                f.parent.name for f in archive_dir.glob("specs/*/spec.md")
+            )
+            if declared or present:
+                errors += check_artifact_coherence(declared, present)
         if match is not None:
             errors += _check_citation_from_event(environ, match.group(4))
     if classification.archives or classification.baseline_specs:
