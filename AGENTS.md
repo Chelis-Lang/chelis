@@ -104,7 +104,8 @@ workflow on every pull request.
 - Behavior-preserving maintenance outside `spec/**` may instead add one
   exact-path manifest `openspec/exemptions/YYYY-MM-DD-<kebab-id>.toml` with
   `kind = "maintenance"`, a non-empty `reason`, and `paths` equal to the
-  complete changed non-governance set.
+  complete changed non-governance set (root `.gitignore`/`.gitattributes`
+  are planning-neutral and excluded).
 - Merge-bound validation rejects active lifecycles: before merge,
   synchronize delta specs into `openspec/specs/` and move the lifecycle to
   `openspec/changes/archive/YYYY-MM-DD-<change-id>`.

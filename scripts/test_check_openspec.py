@@ -348,6 +348,18 @@ class TestBranchScope(unittest.TestCase):
             co.check_branch_scope(cls, inherited_ids=frozenset(), mode="pre-archive"),
         )
 
+    def test_archived_lifecycle_plus_exemption_rejected_at_merge_bound(self):
+        cls = self._cls(
+            [
+                f"openspec/changes/archive/2026-07-24-{CHANGE_ID}/proposal.md",
+                "openspec/exemptions/2026-07-24-fix-typo.toml",
+            ]
+        )
+        self.assertNotEqual(
+            [],
+            co.check_branch_scope(cls, inherited_ids=frozenset(), mode="merge-bound"),
+        )
+
     def test_inherited_lifecycle_mutation_rejected(self):
         cls = self._cls([f"openspec/changes/{CHANGE_ID}/tasks.md"])
         self.assertNotEqual(
@@ -694,7 +706,9 @@ class TestTasks(unittest.TestCase):
 
     def test_unchecked_task_rejected(self):
         text = "- [x] 1.1 Do the thing.\n- [ ] 1.2 Verify it.\n"
-        self.assertNotEqual([], co.check_tasks(text))
+        errors = co.check_tasks(text)
+        self.assertNotEqual([], errors)
+        self.assertIn("task is not complete", errors[0])
 
     def test_undescribed_task_rejected(self):
         text = "- [x] \n"
@@ -704,7 +718,12 @@ class TestTasks(unittest.TestCase):
         self.assertNotEqual([], co.check_tasks("no checkboxes at all\n"))
 
     def test_capital_marker_rejected(self):
-        self.assertNotEqual([], co.check_tasks("- [X] 1.1 Done.\n"))
+        # A GitHub-checked but noncanonical marker is rejected as a
+        # marker-shape violation, not misreported as incomplete.
+        errors = co.check_tasks("- [X] 1.1 Done.\n")
+        self.assertNotEqual([], errors)
+        self.assertIn("must be exactly '[x]'", errors[0])
+        self.assertNotIn("not complete", errors[0])
 
     def test_nonstandard_marker_rejected(self):
         text = "- [x] 1.1 Done.\n- [~] 1.2 Deferred.\n"
@@ -848,6 +867,7 @@ class TestSelfTest(unittest.TestCase):
         "multichar-task-marker",
         "renamed-delta-operation",
         "incomplete-archive",
+        "archived-exemption-mix",
     }
 
     def test_control_inventory_is_complete(self):
@@ -1052,6 +1072,30 @@ class TestRepositoryFixtures(unittest.TestCase):
             code, stderr = self._merge_bound(tmp, repo)
             self.assertEqual(1, code)
             self.assertIn("unrecognized governance path", stderr)
+
+    def test_archived_lifecycle_plus_exemption_rejected(self):
+        # Review regression (third pass): the isolation requirement says a
+        # branch never combines a lifecycle with an exemption, but the
+        # pre-fix checker only rejected the active-lifecycle case, so an
+        # archived lifecycle plus a valid exemption exited 0.
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._init_repo(tmp)
+            self._plan(repo, TestDeltaShape.GOOD)
+            self._write(repo, "crates/foo.rs", "fn main() {}\n")
+            self._commit(repo, "impl")
+            self._archive_lifecycle(repo, baseline=self.BASELINE)
+            self._write(
+                repo,
+                "openspec/exemptions/2026-07-26-side-cleanup.toml",
+                'kind = "maintenance"\nreason = "side cleanup"\n'
+                'paths = ["crates/foo.rs"]\n',
+            )
+            self._commit(repo, "exempt")
+            code, stderr = self._merge_bound(tmp, repo)
+            self.assertEqual(1, code)
+            self.assertIn(
+                "archived lifecycle with a maintenance exemption", stderr
+            )
 
     def test_new_exemption_accepted_at_merge_bound(self):
         with tempfile.TemporaryDirectory() as tmp:

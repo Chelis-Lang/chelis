@@ -93,6 +93,7 @@ SELF_TEST_CONTROLS = (
     "multichar-task-marker",
     "renamed-delta-operation",
     "incomplete-archive",
+    "archived-exemption-mix",
 )
 
 
@@ -329,6 +330,10 @@ def check_branch_scope(
         )
     if new_lifecycles and classification.exemptions:
         errors.append("branch mixes a lifecycle with a maintenance exemption")
+    if classification.archives and classification.exemptions:
+        errors.append(
+            "branch mixes an archived lifecycle with a maintenance exemption"
+        )
     if len(classification.exemptions) > 1:
         errors.append("branch adds more than one maintenance exemption")
     if len(classification.archives) > 1:
@@ -537,8 +542,13 @@ def check_tasks(text: str) -> list[str]:
         if match is None:
             continue
         boxes += 1
-        if match.group(1) != "x":
+        marker = match.group(1)
+        if not marker.strip():
             errors.append(f"task is not complete: {stripped!r}")
+        elif marker != "x":
+            errors.append(
+                f"task marker must be exactly '[x]' when complete: {stripped!r}"
+            )
         if not match.group(2).strip():
             errors.append(f"task has no description: {stripped!r}")
     if boxes == 0:
@@ -768,6 +778,17 @@ def self_test() -> list[str]:
             check_archive_completeness,
             Path("nonexistent-archive-fixture"),
             "2026-07-24-x-change",
+        ),
+        "archived-exemption-mix": _rejects(
+            check_branch_scope,
+            classify_paths(
+                [
+                    f"{ARCHIVE_PREFIX}2026-07-24-x-change/proposal.md",
+                    "openspec/exemptions/2026-07-24-side-fix.toml",
+                ]
+            ),
+            frozenset(),
+            "merge-bound",
         ),
     }
     with tempfile.TemporaryDirectory() as tmp:

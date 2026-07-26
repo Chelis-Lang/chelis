@@ -12,7 +12,7 @@ Chelis SHALL treat OpenSpec governance as inactive until the repository configur
 - **THEN** merging that branch SHALL activate the OpenSpec planning workflow for subsequent governed changes
 
 ### Requirement: Governed changes are classified before implementation
-Every significant change subject to Phase 0 SHALL use OpenSpec, including every agent-authored feature or behavior change and every change to `spec/**`. Significant scope includes externally observable behavior, language or compiler architecture, public or machine-facing contracts, algorithms or supported domains, dependency strategy, data or interchange formats, assurance or security posture, and operational behavior. A nonnormative documentation, formatting, typo, or behavior-preserving maintenance change outside `spec/**` MAY use the repository-owned maintenance exemption path instead.
+Every significant change subject to Phase 0 SHALL use OpenSpec, including every agent-authored feature or behavior change and every change to `spec/**`. Significant scope includes externally observable behavior, language or compiler architecture, public or machine-facing contracts, algorithms or supported domains, dependency strategy, data or interchange formats, assurance or security posture, and operational behavior. A nonnormative documentation, formatting, typo, or behavior-preserving maintenance change outside `spec/**` MAY use the repository-owned maintenance exemption path instead. The repository-root `.gitignore` and `.gitattributes` files are planning-neutral: they are excluded from governed classification and from exemption path sets, and MAY change without a lifecycle or exemption.
 
 #### Scenario: Significant work is proposed
 - **WHEN** work changes a governed category
