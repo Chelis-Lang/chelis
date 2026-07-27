@@ -222,7 +222,29 @@ None of these is fatal. Together they are a real multiplier on a change whose en
 
 The original justification for the Aeneas work was exhaustive rejection over 2^32 values — "the property enumerated tests cannot establish." That is false, and noticing it is worth more than the proof it undercuts.
 
-`i32` admits 4,294,967,296 values. `decode_id` is a nine-arm match over constants returning a `Result`. At a plausible 1–5 ns per iteration in release, the entire domain runs in roughly 4–20 seconds — Phase 0.10 measures it rather than trusting that estimate. An enumeration of the whole domain is not a sample; it is a complete proof by exhaustion, and it carries exactly the guarantee the Lean theorem carries.
+`i32` admits 4,294,967,296 values. `decode_id` is a nine-arm match over constants returning a `Result`. An enumeration of the whole domain is not a sample; it is a complete proof by exhaustion, and it carries exactly the guarantee the Lean theorem carries.
+
+### Measured, 2026-07-27 (task 0.10, aarch64-apple-darwin, 10 cores)
+
+| configuration | wall-clock |
+| --- | --- |
+| release, single-threaded | **10.4 s** |
+| debug, single-threaded | **128.5 s** |
+| debug, 10 threads (`std::thread::scope`) | **35.1 s** |
+
+All three visited the full domain and reported 9 accepted, 4,294,967,287 rejected. `std::hint::black_box` wraps the argument, so the loop is not elided; without it the measurement would be meaningless.
+
+**The estimate of 4–20 seconds was right for release and wrong for the case that matters.** The gate runs `cargo nextest run --workspace` in **debug**, where the same loop is 128.5 s — more than double the ~60 s budget `AGENTS.md` sets for the whole workspace inner loop.
+
+Threading does not rescue it. The 3.7× speedup (not 10×) reflects this machine's performance/efficiency core split, and 35 s is still over half the entire workspace budget for one test. Worse, the threaded version **saturates all ten cores**, and nextest runs test binaries concurrently — so a test that monopolizes the machine for 35 s effectively serializes the suite around itself. The threaded form is the right shape for a manual gate and the wrong shape for a default one.
+
+### What this changes
+
+**The exhaustive check is a documented manual gate, not an ordinary test.** Per `AGENTS.md`, ignored tests are permitted "only when they clearly mirror a documented manual gate or an environment-dependent prerequisite," so Phase 6 must site it with a concrete command and success condition, and the default test surface keeps a bounded check — every valid tag, the boundary values, and sampled invalid ones.
+
+**The claim "declining the prover lane costs no guarantee" needs qualifying.** The guarantee still exists, but it is enforced by a gate that runs on demand rather than on every change. That is weaker than an ordinary test and stronger than nothing, and the honest statement is the middle one.
+
+**The proof's relative value rises slightly, and only slightly.** Once written, re-checking a small Lean file is milliseconds, where the exhaustive check is 10–128 s. Both sit outside the local inner loop; both are affordable in a per-PR CI job, since CI is not bound by the 60 s local budget. So this is a modest argument for the proof, not a reversal — the cheaper-oracle finding stands, with the cost now measured instead of guessed.
 
 Three consequences, all of which the task ordering now reflects:
 

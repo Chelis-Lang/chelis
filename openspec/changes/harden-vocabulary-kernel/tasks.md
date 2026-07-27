@@ -28,7 +28,7 @@ Three ordering rules, all inherited rather than invented:
 - [ ] **0.7** Confirm cargo-mutants and cargo-llvm-cov both run on `stable` for this crate, adding no pin. Record the pin budget table from the design document with actual findings.
 - [ ] **0.8** Check Aeneas's Lean and Mathlib pin against the locally installed `leanprover/lean4:v4.29.0` that LaCaDiLE builds green on. Record whether `Aeneas.Std` is compatible.
 - [ ] **0.9** Probe whether LaCaDiLE's `scripts/prove.py` loop applies to Aeneas-generated obligations. Record the finding. **It is a development accelerator only** — it depends on an external API key and an org-level Labs toggle, so it SHALL NOT appear in the acceptance oracle.
-- [ ] **0.10** Measure the exhaustive `i32` check: time a release-mode loop over all 2^32 values through `decode_id`. Record the wall-clock. **If it exceeds the default-gate budget**, site it as a documented manual gate rather than dropping it.
+- [x] **0.10** Measure the exhaustive `i32` check. **Done 2026-07-27** (aarch64-apple-darwin, 10 cores): release single-threaded **10.4 s**; debug single-threaded **128.5 s**; debug 10-threaded **35.1 s**. All visited the full domain (9 accepted, 4,294,967,287 rejected) with `black_box` preventing elision. The gate runs debug, so this **exceeds the ~60 s workspace budget** and is sited as a documented manual gate per 6.1. Threading is not a fix: 3.7× only, and it saturates every core, which serializes a concurrently-scheduled nextest run around it.
 - [ ] **0.11** Confirm this obligation's routing against `route-proof-obligations`, including its cheaper-oracle rule. Record that the exhaustive check is the primary oracle and the proof is lane-establishment.
 - [ ] **0.12** Satisfy the lane isolation condition: the repository must build and test on pinned stable with neither Charon, Aeneas, nor Lean installed. **If that cannot be arranged cleanly, decline the lane** and land Phases 1–6 without the proof work. No guarantee is lost by declining.
 
@@ -92,7 +92,9 @@ rejection probe is the crate's strongest rejection evidence.
 
 These carry the guarantees. Everything after this phase is lane-establishment.
 
-- [ ] **6.1** Add the exhaustive check over the entire `i32` domain: every value round-trips or is rejected with the invalid-tag error carrying that value. Site it per the 0.10 measurement — ordinary test if it fits the budget, documented manual gate if not.
+- [ ] **6.1** Add the exhaustive check over the entire `i32` domain: every value round-trips or is rejected with the invalid-tag error carrying that value. Per the 0.10 measurement it is `#[ignore]`d and run in release. Record the concrete command and its success condition in this change and in the current-state docs, per the manual-gate rule.
+- [ ] **6.1a** Add the bounded companion that **does** run by default: every valid tag, the boundary values (`-1`, `9`, `i32::MIN`, `i32::MAX`), and a sample of invalid ones. The manual gate is the complete oracle; this is what guards every ordinary change.
+- [ ] **6.1b** Keep the manual gate single-threaded, or thread it only behind an explicit opt-in. The threaded form monopolizes every core and must not be reachable from a default `cargo nextest run --workspace`.
 - [ ] **6.2** Add the injectivity check over `ALL`, pairwise.
 - [ ] **6.3** Add compile-time layout assertions: the vocabulary's size, and each variant's tag value against the constant emitted for it in generated code.
 - [ ] **6.4** Add the differential test against the compiled generated C decoder. Execute both over every valid tag and a set of invalid ones; require agreement on acceptance, decoded result, byte width, and rejection. **Comparing generated text to a checked-in artifact does not satisfy this** — both decoders must run.
@@ -100,7 +102,7 @@ These carry the guarantees. Everything after this phase is lane-establishment.
 - [ ] **6.6** Negative test: a planted `repr` or discriminant change fails compilation.
 - [ ] **6.7** Negative test: a planted extra `decode_id` arm accepting an unassigned value fails the exhaustive check.
 - [ ] **6.8** Re-run cargo-mutants. The survivor from 5.5 must now be caught. **Attribute the closure to the exhaustive check**, which is what closed it — not to the proof, which has not run yet.
-- [ ] **6.9** Record that at this point every headline guarantee in this change is established, and the remaining phases add no guarantee.
+- [ ] **6.9** Record that at this point every headline guarantee in this change is established, and the remaining phases add no guarantee — **with the qualification** that the exhaustive check is enforced by an on-demand manual gate rather than on every change, which is weaker than an ordinary test and stronger than nothing.
 
 ## Phase 7 — Aeneas extraction (lane establishment)
 
@@ -134,6 +136,7 @@ Reimplemented against this change's surface, with tests per the repository's Pyt
 
 - [ ] **9.1** Document the verified subset and the excluded items with reasons. Confirm no text describes the crate as verified.
 - [ ] **9.2** State that the tag properties are established by the exhaustive check, and that the proof establishes the lane. Do not present the proof as the source of the guarantee.
+- [ ] **9.2a** State the enforcement frequency honestly: the complete oracle is a manual gate (10.4 s release), the default surface carries the bounded companion, and a re-checked proof would be milliseconds. Do not let "established" be read as "checked on every change".
 - [ ] **9.3** Record the residual after the differential test: agreement is checked over every valid tag and sampled invalid ones, which is stronger than the previous text comparison but is not a proof of the C decoder.
 - [ ] **9.4** Confirm every item excluded from the verified subset retains its existing test coverage.
 - [ ] **9.5** Confirm no document reports proof, coverage, and mutation results as a single combined score, and that each is labelled with the question it answers.
