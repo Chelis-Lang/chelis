@@ -1,0 +1,7 @@
+version = 1
+spec = "spec/01-nomenclature.md"
+
+[[exclude]]
+pattern = "tests/corpus/opaque_invariants/programs/"
+class = "generated"
+cross_ref = "§12.2"

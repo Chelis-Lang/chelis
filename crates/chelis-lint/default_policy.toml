@@ -1,0 +1,31 @@
+version = 1
+
+[[exclude]]
+pattern = ".git/"
+class = "infrastructure"
+cross_ref = "§12.2"
+
+[[exclude]]
+pattern = "target/"
+class = "build"
+cross_ref = "§12.2"
+
+[[exclude]]
+pattern = "node_modules/"
+class = "dependency"
+cross_ref = "§12.2"
+
+[[exclude]]
+pattern = "__pycache__/"
+class = "build"
+cross_ref = "§12.2"
+
+[[exclude]]
+pattern = ".venv*/"
+class = "dependency"
+cross_ref = "§12.2"
+
+[[exclude]]
+pattern = "**/.claude/worktrees/"
+class = "infrastructure"
+cross_ref = "§12.2"

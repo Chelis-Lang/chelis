@@ -14,9 +14,11 @@
 //! - Other paths: no rule (out of scope here; caught by sibling rules
 //!   if applicable).
 
-use crate::{Context, Rule, Surface, Violation};
+use crate::policy::TraversalPolicy;
+use crate::{Context, LintError, PreparedRuleState, Rule, Surface, Violation};
 use regex::Regex;
-use std::path::Path;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 static SPEC_TOP_RE: OnceLock<Regex> = OnceLock::new();
@@ -38,6 +40,11 @@ fn kebab_re() -> &'static Regex {
 }
 
 pub struct DocFilenameConvention;
+
+#[derive(Debug, Default)]
+struct DocFilenameState {
+    package_names: HashSet<String>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Slot {
@@ -104,16 +111,17 @@ fn is_inside_mdbook_tree(path: &Path) -> bool {
 }
 
 /// True if the filename stem of `path` (without the `.md` extension)
-/// matches the `name` of a Cargo package somewhere in the workspace
-/// rooted at `root`. This is the "Cargo-package-name exception" carve-out
+/// matches the `name` of a Cargo package somewhere in the workspace selected
+/// by repository policy, falling back to `root` when no policy is present.
+/// This is the "Cargo-package-name exception" carve-out
 /// to §8.3: when a narrative doc is named for a Cargo crate (e.g.,
 /// `docs/shells/c-earchin.md` for the `c-earchin` crate), the kebab-case
 /// filename is intentional and accepted.
 ///
-/// Detection walks ancestor dirs of `path` looking for `Cargo.toml`, plus
-/// — when no ancestor `Cargo.toml` matches — scans the `root` for
-/// `Cargo.toml` files under `crates/`. The scan is bounded so it's safe
-/// to call from a lint check.
+/// Detection scans the policy-root `crates/` directory, then walks ancestor
+/// dirs of `path` looking for an admitted `Cargo.toml`. The scan is bounded so
+/// it is safe to call from a lint check, and policy-root admission prevents
+/// machine-local ancestors from affecting repository lint.
 fn filename_matches_cargo_package(root: &Path, path: &Path) -> bool {
     let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
         return false;
@@ -125,26 +133,32 @@ fn filename_matches_cargo_package(root: &Path, path: &Path) -> bool {
     if !looks_like_cargo_package_name(stem) {
         return false;
     }
-    // Scan workspace crates first — this is the common case. The
-    // `root/crates/` layout is what the chelis ecosystem uses.
-    let crates_dir = root.join("crates");
-    if let Ok(entries) = std::fs::read_dir(&crates_dir) {
-        for entry in entries.flatten() {
-            let manifest = entry.path().join("Cargo.toml");
-            if let Some(name) = read_cargo_package_name(&manifest)
-                && name == stem
-            {
-                return true;
-            }
+    let Ok(policy) = TraversalPolicy::load_for(root) else {
+        return false;
+    };
+    let is_admitted = |manifest: &Path| policy.is_admitted_ancillary(manifest, false);
+    // Scan workspace crates first — this is the common case. Repository
+    // policy defines the workspace boundary even when the lint target is a
+    // subdirectory or one explicit doc. Direct Rule::check callers retain
+    // this bounded compatibility path, but every directory and ancillary
+    // manifest still passes traversal-policy admission through the
+    // centralized non-recursive discovery API.
+    let manifest_root = policy.repository_root().unwrap_or(root);
+    for manifest in policy.admitted_workspace_cargo_manifests(manifest_root) {
+        if let Some(name) = read_cargo_package_name(&manifest)
+            && name == stem
+        {
+            return true;
         }
     }
-    // Fallback: walk ancestors looking for any Cargo.toml whose
+    // Fallback: walk ancestors looking for any admitted Cargo.toml whose
     // package name matches. Useful for layouts where the doc file is
     // colocated with a crate.
     let mut cursor = path.parent();
     while let Some(dir) = cursor {
         let manifest = dir.join("Cargo.toml");
-        if let Some(name) = read_cargo_package_name(&manifest)
+        if is_admitted(&manifest)
+            && let Some(name) = read_cargo_package_name(&manifest)
             && name == stem
         {
             return true;
@@ -159,6 +173,68 @@ fn filename_matches_cargo_package(root: &Path, path: &Path) -> bool {
 fn read_cargo_package_name(manifest: &Path) -> Option<String> {
     let contents = std::fs::read_to_string(manifest).ok()?;
     extract_package_name(&contents)
+}
+
+/// Build the Cargo-package exception catalog from the canonical lint entries.
+///
+/// Ancestor manifests preserve explicit-file and subdirectory lint behavior,
+/// but are admitted only when traversal policy does not exclude them or one of
+/// their parents. No rule-local recursive filesystem discovery is permitted.
+/// `policy` is the invocation's shared traversal policy; this hook must not
+/// reload it.
+fn prepare_doc_filename_state(
+    root: &Path,
+    entries: &[crate::walker::Entry],
+    policy: &TraversalPolicy,
+) -> DocFilenameState {
+    let mut package_names = HashSet::new();
+    let mut visited_manifests = HashSet::<PathBuf>::new();
+
+    for entry in entries {
+        if entry.surface != Some(Surface::ManifestToml)
+            || entry.path.file_name().and_then(|name| name.to_str()) != Some("Cargo.toml")
+        {
+            continue;
+        }
+        visited_manifests.insert(entry.path.clone());
+        if let Some(name) = read_cargo_package_name(&entry.path) {
+            package_names.insert(name);
+        }
+    }
+
+    let manifest_root = policy.repository_root().unwrap_or(root);
+    for manifest in policy.admitted_workspace_cargo_manifests(manifest_root) {
+        if visited_manifests.insert(manifest.clone())
+            && let Some(name) = read_cargo_package_name(&manifest)
+        {
+            package_names.insert(name);
+        }
+    }
+
+    for entry in entries {
+        if entry.surface != Some(Surface::DocFile) {
+            continue;
+        }
+        let mut cursor = entry.path.parent();
+        while let Some(directory) = cursor {
+            let manifest = directory.join("Cargo.toml");
+            if visited_manifests.insert(manifest.clone())
+                && policy.is_admitted_ancillary(&manifest, false)
+                && let Some(name) = read_cargo_package_name(&manifest)
+            {
+                package_names.insert(name);
+            }
+            cursor = directory.parent();
+        }
+    }
+
+    DocFilenameState { package_names }
+}
+
+fn filename_matches_known_cargo_package(path: &Path, package_names: &HashSet<String>) -> bool {
+    path.file_stem()
+        .and_then(|stem| stem.to_str())
+        .is_some_and(|stem| looks_like_cargo_package_name(stem) && package_names.contains(stem))
 }
 
 /// Lightweight `[package].name = "..."` extractor. Avoids pulling in a
@@ -193,24 +269,12 @@ fn numbered_spec_prefix(name: &str) -> bool {
     bytes.len() >= 3 && bytes[0].is_ascii_digit() && bytes[1].is_ascii_digit() && bytes[2] == b'-'
 }
 
-impl Rule for DocFilenameConvention {
-    fn id(&self) -> &str {
-        "doc-filename-convention"
-    }
-
-    fn spec_ref(&self) -> &str {
-        "§8"
-    }
-
-    fn applies_to(&self) -> &[Surface] {
-        &[Surface::DocFile]
-    }
-
-    fn summary(&self) -> &str {
-        "documentation filename conventions per §8 (numeric+kebab spec/, snake spec/design/, snake docs/ with SCREAMING_SNAKE for status reports, kebab mdBook book chapters)"
-    }
-
-    fn check(&self, ctx: &Context<'_>) -> Vec<Violation> {
+impl DocFilenameConvention {
+    fn check_with_package_names(
+        &self,
+        ctx: &Context<'_>,
+        package_names: Option<&HashSet<String>>,
+    ) -> Vec<Violation> {
         let Some(name) = ctx.path.file_name().and_then(|n| n.to_str()) else {
             return Vec::new();
         };
@@ -233,8 +297,11 @@ impl Rule for DocFilenameConvention {
                 // whose stem matches a Cargo package in the workspace
                 // is accepted as documentation for that package.
                 let base = snake_re().is_match(name) || screaming_snake_re().is_match(name);
-                let cargo_exception =
-                    kebab_re().is_match(name) && filename_matches_cargo_package(ctx.root, ctx.path);
+                let cargo_exception = kebab_re().is_match(name)
+                    && package_names.map_or_else(
+                        || filename_matches_cargo_package(ctx.root, ctx.path),
+                        |known| filename_matches_known_cargo_package(ctx.path, known),
+                    );
                 (
                     base || cargo_exception,
                     "snake_case for narrative documents; SCREAMING_SNAKE_CASE for status reports (e.g., `STATUS.md`, `RELEASES.md`); kebab-case is accepted only when the filename stem matches a Cargo package name in the workspace",
@@ -265,6 +332,52 @@ impl Rule for DocFilenameConvention {
                 ),
             }]
         }
+    }
+}
+
+impl Rule for DocFilenameConvention {
+    fn id(&self) -> &str {
+        "doc-filename-convention"
+    }
+
+    fn spec_ref(&self) -> &str {
+        "§8"
+    }
+
+    fn applies_to(&self) -> &[Surface] {
+        &[Surface::DocFile]
+    }
+
+    fn summary(&self) -> &str {
+        "documentation filename conventions per §8 (numeric+kebab spec/, snake spec/design/, snake docs/ with SCREAMING_SNAKE for status reports, kebab mdBook book chapters)"
+    }
+
+    fn prepare_run(
+        &self,
+        root: &Path,
+        entries: &[crate::walker::Entry],
+        policy: &TraversalPolicy,
+    ) -> Result<PreparedRuleState, LintError> {
+        Ok(Box::new(prepare_doc_filename_state(root, entries, policy)))
+    }
+
+    fn check(&self, ctx: &Context<'_>) -> Vec<Violation> {
+        self.check_with_package_names(ctx, None)
+    }
+
+    fn check_prepared(
+        &self,
+        ctx: &Context<'_>,
+        prepared: &(dyn std::any::Any + Send + Sync),
+    ) -> Vec<Violation> {
+        let Some(state) = prepared.downcast_ref::<DocFilenameState>() else {
+            debug_assert!(
+                false,
+                "doc filename rule received another rule's prepared state"
+            );
+            return self.check(ctx);
+        };
+        self.check_with_package_names(ctx, Some(&state.package_names))
     }
 }
 

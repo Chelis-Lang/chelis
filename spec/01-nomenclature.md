@@ -1279,7 +1279,83 @@ Advisory (non-blocking) lint rules support the invariant workflow:
 The authoritative design record is
 `spec/design/opaque_invariants_rfc.md`.
 
-### 12.2 Future rule queue
+### 12.2 Lint traversal exclusions
+
+Whole-tree exclusions are stronger than diagnostic exceptions: a matched
+nested path is pruned before classification, rule preparation, or rule
+checks, so no rule sees it. They are permitted only for infrastructure,
+build output, dependencies, generated artifacts, or immutable inputs that
+should not be part of the editable lint corpus. They must not be added merely
+to hide current violations.
+
+`chelis-lint` composes its shipped baseline policy with the nearest ancestor
+`chelis-lint.toml`. Nearest-ancestor discovery resolves a relative lint
+target against the invocation working directory before walking ancestors, so
+relative and absolute spellings of the same target discover the same policy.
+Repository patterns are gitignore-style and anchored to
+the directory containing that file. The schema is versioned and strict:
+
+```toml
+version = 1
+spec = "spec/01-nomenclature.md"
+
+[[exclude]]
+pattern = "path/to/generated/"
+class = "generated"
+cross_ref = "§12.2"
+```
+
+Every entry requires a pattern, a class from `infrastructure`, `build`,
+`dependency`, `generated`, or `immutable`, and a cross-reference resolving
+in the declared spec. Unknown fields, unsupported versions or classes,
+invalid patterns, missing specs, and unresolved references fail lint before
+traversal. Policy and spec paths are resolved before use: non-file or broken
+policy paths and links escaping the policy root fail closed, while links that
+remain inside the policy root are allowed. Loose targets without repository policy
+receive only the shipped baseline.
+
+The traversal engine must not consult `.gitignore`, `.ignore`, parent or
+global Git configuration, `.git/info/exclude`, or hidden-file defaults. This
+keeps local and CI scope identical and keeps hidden source such as
+`.github/workflows/` visible unless Chelis policy explicitly excludes it.
+An explicitly named file or directory overrides exclusion matching at
+traversal depth zero; it must still be a regular file or directory (or a link
+resolving to one) inside the policy root. An explicitly named root that
+exists but fails that admission — a socket, FIFO, device, or other
+non-regular entry, a link resolving to a different entry kind or outside the
+policy root, or an unresolvable link — fails the lint invocation loudly with
+the root path and rejection reason, matching the nonexistent-root failure; it
+never produces a successful empty result. Only discovered (non-explicit)
+inadmissible entries are silently omitted. Separately excluded descendants under
+an explicit directory remain pruned. Non-explicit discovered entries must be
+directories, regular files, or symlinks that resolve to the same entry kind
+inside the policy root. Sockets, FIFOs, devices, and other special entries or
+targets are omitted before a rule can open or read them. A symlink's target and
+governed parents must remain policy-admitted. Broken links, links escaping the
+policy root, and aliases into excluded content are omitted before any rule can
+read them. Internal links to admitted regular files remain visible and are
+classified by the link path.
+Under an explicitly named excluded directory, that root's exclusion remains
+overridden for an internal symlink target while separately excluded
+descendants remain effective.
+
+Traversal policy does not replace rule-specific `Exception` entries or inline
+`allow` and `keep` directives. Those mechanisms act after a path has entered
+the canonical corpus and retain their existing per-rule diagnostic or autofix
+semantics. Rule-side catalogs and ancillary metadata must derive from the same
+canonical entry set or pass a parent-aware traversal-policy admission check;
+content under an excluded directory must not change an admitted entry's
+verdict indirectly. When repository policy exists, its root bounds ancillary
+workspace discovery: admitted sibling workspace manifests remain visible when
+lint targets a subdirectory or explicit file, while machine-local ancestors
+above the policy root cannot grant lint exceptions. A workspace crate entry's
+kind is determined from its resolved metadata, so an internal symlinked crate
+directory remains visible while a directory link resolving outside the policy
+root is rejected. Governance follows the ancillary link path as well as its
+resolved target: a link above the policy root remains machine-local even when
+it points to an admitted file inside the root.
+
+### 12.3 Future rule queue
 
 The following rules are intentionally queued, not currently part of
 the blocking registry:

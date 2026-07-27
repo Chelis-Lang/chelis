@@ -18,10 +18,12 @@
 //!
 //! Rules are added under [`rules`]; the [`registry`] module wires them up.
 
+use std::any::Any;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
 pub mod exceptions;
+pub mod policy;
 pub mod registry;
 pub mod rules;
 pub mod surface;
@@ -102,6 +104,9 @@ pub struct Context<'a> {
     pub surface: Surface,
 }
 
+/// Immutable state prepared by one rule for one [`lint`] invocation.
+pub type PreparedRuleState = Box<dyn Any + Send + Sync>;
+
 /// The interface every lint rule implements.
 pub trait Rule: Send + Sync {
     /// Stable rule identifier (kebab-case), e.g. `"module-compound-titlecase"`.
@@ -125,8 +130,34 @@ pub trait Rule: Send + Sync {
         Severity::Error
     }
 
-    /// Run the check. Return zero or more violations.
+    /// Prepare immutable state once for a [`lint`] invocation.
+    ///
+    /// The default state is empty. Rules that need corpus-wide context can
+    /// override this hook and consume their state in [`Rule::check_prepared`].
+    /// The shared `policy` is the invocation's single loaded traversal
+    /// policy; rules must not reload it.
+    fn prepare_run(
+        &self,
+        _root: &Path,
+        _entries: &[walker::Entry],
+        _policy: &policy::TraversalPolicy,
+    ) -> Result<PreparedRuleState, LintError> {
+        Ok(Box::new(()))
+    }
+
+    /// Run the check directly, without invocation-prepared state.
     fn check(&self, ctx: &Context<'_>) -> Vec<Violation>;
+
+    /// Run the check with state returned by [`Rule::prepare_run`].
+    ///
+    /// The default preserves existing rules by delegating to [`Rule::check`].
+    fn check_prepared(
+        &self,
+        ctx: &Context<'_>,
+        _prepared: &(dyn Any + Send + Sync),
+    ) -> Vec<Violation> {
+        self.check(ctx)
+    }
 
     /// Return an auto-fix for `violation`, when this occurrence is safely
     /// fixable. The CLI fix driver suppresses fixes when a `keep` annotation
@@ -202,9 +233,17 @@ pub struct Exception {
 /// Walk `root`, classify each entry, dispatch to every matching rule, and
 /// collect violations. Returns violations sorted by path (stable across runs).
 pub fn lint(root: &Path, rules: &[Box<dyn Rule>]) -> Result<Vec<Violation>, LintError> {
+    let policy = std::sync::Arc::new(policy::TraversalPolicy::load_for(root)?);
+    let entries: Vec<walker::Entry> = walker::walk_with_policy(root, &policy)?
+        .into_iter()
+        .collect::<Result<_, _>>()?;
+    let prepared: Vec<PreparedRuleState> = rules
+        .iter()
+        .map(|rule| rule.prepare_run(root, &entries, &policy))
+        .collect::<Result<_, _>>()?;
+
     let mut violations = Vec::new();
-    for entry in walker::walk(root)? {
-        let entry = entry?;
+    for entry in &entries {
         let surface = match entry.surface {
             Some(s) => s,
             None => continue,
@@ -223,12 +262,12 @@ pub fn lint(root: &Path, rules: &[Box<dyn Rule>]) -> Result<Vec<Violation>, Lint
             source: source.as_deref(),
             surface,
         };
-        for rule in rules {
+        for (rule, prepared) in rules.iter().zip(&prepared) {
             if !rule.applies_to().contains(&surface) {
                 continue;
             }
             violations.extend(
-                rule.check(&ctx)
+                rule.check_prepared(&ctx, prepared.as_ref())
                     .into_iter()
                     .filter(|v| !inline_allows(source.as_deref(), surface, v)),
             );
@@ -350,19 +389,29 @@ pub(crate) fn lint_directive(line: &str, surface: Surface) -> Option<&str> {
 #[derive(Debug)]
 pub enum LintError {
     Io(std::io::Error),
-    Walk(walkdir::Error),
+    Policy(policy::TraversalPolicyError),
+    Walk(ignore::Error),
 }
 
 impl fmt::Display for LintError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             LintError::Io(e) => write!(f, "io error: {e}"),
+            LintError::Policy(e) => write!(f, "traversal policy error: {e}"),
             LintError::Walk(e) => write!(f, "walk error: {e}"),
         }
     }
 }
 
-impl std::error::Error for LintError {}
+impl std::error::Error for LintError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(source) => Some(source),
+            Self::Policy(source) => Some(source),
+            Self::Walk(source) => Some(source),
+        }
+    }
+}
 
 impl From<std::io::Error> for LintError {
     fn from(e: std::io::Error) -> Self {
@@ -370,8 +419,286 @@ impl From<std::io::Error> for LintError {
     }
 }
 
-impl From<walkdir::Error> for LintError {
-    fn from(e: walkdir::Error) -> Self {
+impl From<policy::TraversalPolicyError> for LintError {
+    fn from(e: policy::TraversalPolicyError) -> Self {
+        LintError::Policy(e)
+    }
+}
+
+impl From<ignore::Error> for LintError {
+    fn from(e: ignore::Error) -> Self {
         LintError::Walk(e)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+    use tempfile::tempdir;
+
+    struct RunLifecycleRule {
+        prepare_calls: Arc<AtomicUsize>,
+        checked_generations: Arc<Mutex<Vec<usize>>>,
+    }
+
+    impl Rule for RunLifecycleRule {
+        fn id(&self) -> &str {
+            "run-lifecycle-test"
+        }
+
+        fn spec_ref(&self) -> &str {
+            "§12.1"
+        }
+
+        fn applies_to(&self) -> &[Surface] {
+            &[Surface::SurfSource]
+        }
+
+        fn summary(&self) -> &str {
+            "test-only lint-run lifecycle probe"
+        }
+
+        fn prepare_run(
+            &self,
+            _root: &Path,
+            _entries: &[walker::Entry],
+            _policy: &policy::TraversalPolicy,
+        ) -> Result<PreparedRuleState, LintError> {
+            let generation = self.prepare_calls.fetch_add(1, Ordering::SeqCst) + 1;
+            Ok(Box::new(generation))
+        }
+
+        fn check_prepared(
+            &self,
+            _ctx: &Context<'_>,
+            prepared: &(dyn std::any::Any + Send + Sync),
+        ) -> Vec<Violation> {
+            let generation = *prepared
+                .downcast_ref::<usize>()
+                .expect("driver paired prepared state with its owning rule");
+            self.checked_generations
+                .lock()
+                .expect("generation lock")
+                .push(generation);
+            Vec::new()
+        }
+
+        fn check(&self, _ctx: &Context<'_>) -> Vec<Violation> {
+            panic!("lint driver must use the prepared-check path")
+        }
+    }
+
+    #[test]
+    fn prepares_each_rule_once_per_lint_invocation_and_reprepares_next_run() {
+        let temp = tempdir().expect("tempdir");
+        std::fs::write(temp.path().join("first.ch"), "def first() = 1\n")
+            .expect("write first source");
+        std::fs::write(temp.path().join("second.ch"), "def second() = 2\n")
+            .expect("write second source");
+
+        let prepare_calls = Arc::new(AtomicUsize::new(0));
+        let checked_generations = Arc::new(Mutex::new(Vec::new()));
+        let rules: Vec<Box<dyn Rule>> = vec![Box::new(RunLifecycleRule {
+            prepare_calls: Arc::clone(&prepare_calls),
+            checked_generations: Arc::clone(&checked_generations),
+        })];
+
+        lint(temp.path(), &rules).expect("first lint invocation");
+        assert_eq!(prepare_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            *checked_generations.lock().expect("generation lock"),
+            vec![1, 1],
+            "both checked files must share the first invocation's state"
+        );
+
+        lint(temp.path(), &rules).expect("second lint invocation");
+        assert_eq!(
+            prepare_calls.load(Ordering::SeqCst),
+            2,
+            "the same rule objects must prepare fresh state for a later invocation"
+        );
+        assert_eq!(
+            *checked_generations.lock().expect("generation lock"),
+            vec![1, 1, 2, 2],
+            "prepared state must not leak across lint invocations"
+        );
+    }
+
+    struct DefaultLifecycleRule {
+        check_calls: Arc<AtomicUsize>,
+    }
+
+    impl Rule for DefaultLifecycleRule {
+        fn id(&self) -> &str {
+            "default-lifecycle-test"
+        }
+
+        fn spec_ref(&self) -> &str {
+            "§12.1"
+        }
+
+        fn applies_to(&self) -> &[Surface] {
+            &[Surface::SurfSource]
+        }
+
+        fn summary(&self) -> &str {
+            "test-only default lifecycle probe"
+        }
+
+        fn check(&self, _ctx: &Context<'_>) -> Vec<Violation> {
+            self.check_calls.fetch_add(1, Ordering::SeqCst);
+            Vec::new()
+        }
+    }
+
+    struct UsizePreparedRule {
+        check_calls: Arc<AtomicUsize>,
+    }
+
+    impl Rule for UsizePreparedRule {
+        fn id(&self) -> &str {
+            "usize-prepared-test"
+        }
+
+        fn spec_ref(&self) -> &str {
+            "§12.1"
+        }
+
+        fn applies_to(&self) -> &[Surface] {
+            &[Surface::SurfSource]
+        }
+
+        fn summary(&self) -> &str {
+            "test-only usize prepared-state probe"
+        }
+
+        fn prepare_run(
+            &self,
+            _root: &Path,
+            _entries: &[walker::Entry],
+            _policy: &policy::TraversalPolicy,
+        ) -> Result<PreparedRuleState, LintError> {
+            Ok(Box::new(603usize))
+        }
+
+        fn check_prepared(
+            &self,
+            _ctx: &Context<'_>,
+            prepared: &(dyn std::any::Any + Send + Sync),
+        ) -> Vec<Violation> {
+            assert_eq!(prepared.downcast_ref::<usize>(), Some(&603));
+            self.check_calls.fetch_add(1, Ordering::SeqCst);
+            Vec::new()
+        }
+
+        fn check(&self, _ctx: &Context<'_>) -> Vec<Violation> {
+            panic!("lint driver must use the prepared-check path")
+        }
+    }
+
+    struct StringPreparedRule {
+        check_calls: Arc<AtomicUsize>,
+    }
+
+    impl Rule for StringPreparedRule {
+        fn id(&self) -> &str {
+            "string-prepared-test"
+        }
+
+        fn spec_ref(&self) -> &str {
+            "§12.1"
+        }
+
+        fn applies_to(&self) -> &[Surface] {
+            &[Surface::SurfSource]
+        }
+
+        fn summary(&self) -> &str {
+            "test-only string prepared-state probe"
+        }
+
+        fn prepare_run(
+            &self,
+            _root: &Path,
+            _entries: &[walker::Entry],
+            _policy: &policy::TraversalPolicy,
+        ) -> Result<PreparedRuleState, LintError> {
+            Ok(Box::new(String::from("opaque-catalog")))
+        }
+
+        fn check_prepared(
+            &self,
+            _ctx: &Context<'_>,
+            prepared: &(dyn std::any::Any + Send + Sync),
+        ) -> Vec<Violation> {
+            assert_eq!(
+                prepared.downcast_ref::<String>().map(String::as_str),
+                Some("opaque-catalog")
+            );
+            self.check_calls.fetch_add(1, Ordering::SeqCst);
+            Vec::new()
+        }
+
+        fn check(&self, _ctx: &Context<'_>) -> Vec<Violation> {
+            panic!("lint driver must use the prepared-check path")
+        }
+    }
+
+    #[test]
+    fn default_rule_hooks_delegate_and_type_erased_state_stays_with_its_rule() {
+        let temp = tempdir().expect("tempdir");
+        std::fs::write(temp.path().join("first.ch"), "def first() = 1\n")
+            .expect("write first source");
+        std::fs::write(temp.path().join("second.ch"), "def second() = 2\n")
+            .expect("write second source");
+
+        let default_checks = Arc::new(AtomicUsize::new(0));
+        let usize_checks = Arc::new(AtomicUsize::new(0));
+        let string_checks = Arc::new(AtomicUsize::new(0));
+        let rules: Vec<Box<dyn Rule>> = vec![
+            Box::new(DefaultLifecycleRule {
+                check_calls: Arc::clone(&default_checks),
+            }),
+            Box::new(UsizePreparedRule {
+                check_calls: Arc::clone(&usize_checks),
+            }),
+            Box::new(StringPreparedRule {
+                check_calls: Arc::clone(&string_checks),
+            }),
+        ];
+
+        lint(temp.path(), &rules).expect("lint with heterogeneous prepared states");
+        assert_eq!(default_checks.load(Ordering::SeqCst), 2);
+        assert_eq!(usize_checks.load(Ordering::SeqCst), 2);
+        assert_eq!(string_checks.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn lint_invocation_loads_traversal_policy_exactly_once() {
+        let temp = tempdir().expect("tempdir");
+        std::fs::write(temp.path().join("agent.ch"), "def agent() = 1\n").expect("write source");
+        std::fs::create_dir_all(temp.path().join("docs")).expect("create docs");
+        std::fs::write(temp.path().join("docs/overview.md"), "# Overview\n").expect("write doc");
+        let rules: Vec<Box<dyn Rule>> = vec![
+            Box::new(crate::rules::doc_filename_convention::DocFilenameConvention),
+            Box::new(crate::rules::opaque_domain_construction::OpaqueDomainConstruction),
+        ];
+
+        policy::reset_policy_load_count();
+        lint(temp.path(), &rules).expect("first lint invocation");
+        assert_eq!(
+            policy::policy_load_count(),
+            1,
+            "one lint invocation must load the traversal policy exactly once, shared by the walker and every prepare_run hook"
+        );
+
+        lint(temp.path(), &rules).expect("second lint invocation");
+        assert_eq!(
+            policy::policy_load_count(),
+            2,
+            "each invocation loads fresh policy; no cross-invocation caching"
+        );
     }
 }

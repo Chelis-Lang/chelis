@@ -123,6 +123,25 @@ struct ExtraRuntimeArtifacts {
     metal: bool,
 }
 
+fn make_existing_copy_destination_writable(path: &Path) -> std::io::Result<()> {
+    let mut permissions = match fs::metadata(path) {
+        Ok(metadata) => metadata.permissions(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if !permissions.readonly() {
+        return Ok(());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        permissions.set_mode(permissions.mode() | 0o200);
+    }
+    #[cfg(not(unix))]
+    permissions.set_readonly(false);
+    fs::set_permissions(path, permissions)
+}
+
 fn copy_runtime_artifacts(
     runtime_dir: &Path,
     extras: ExtraRuntimeArtifacts,
@@ -140,6 +159,10 @@ fn copy_runtime_artifacts(
     }
     let source = find_runtime_library()?;
     let dest = runtime_dir.join("libchelis_runtime.a");
+    // Rust static-library artifacts are read-only on some hosts, and
+    // `fs::copy` preserves that mode. Restore owner-write before replacing a
+    // previous build's staged archive so rebuilding into one directory works.
+    make_existing_copy_destination_writable(&dest)?;
     fs::copy(&source, &dest)?;
     Ok(dest)
 }
@@ -8457,22 +8480,47 @@ fn cmd_lint(
     // `/spec/design/` in `path.to_string_lossy()`). Without
     // normalization, the same file tree produces different violations
     // depending on whether the user typed `chelis lint --check .` or
-    // `chelis lint --check docs/`: WalkDir prefixes yielded paths with
-    // the literal target argument, so `.` yields `./docs/...` (substring
-    // `/docs/` matches) while `docs/` yields `docs/...` (no leading
-    // slash, no match). Canonicalizing at the CLI boundary unifies the
-    // two walks and forecloses the bug class for any future rule that
-    // does path-segment dispatch.
+    // `chelis lint --check docs/`: the walker prefixes yielded paths
+    // with the literal target argument, so `.` yields `./docs/...`
+    // (substring `/docs/` matches) while `docs/` yields `docs/...` (no
+    // leading slash, no match). Absolutizing at the CLI boundary
+    // unifies the two walks and forecloses the bug class for any future
+    // rule that does path-segment dispatch.
+    //
+    // Non-link targets are then canonicalized so exception matching
+    // strips the same real-path prefix `detect_lint_workspace_root`
+    // reports (macOS tempdirs spell `/var/...` for `/private/var/...`).
+    // A target whose final component is a symlink is deliberately NOT
+    // canonicalized: resolving it would erase the link's identity before
+    // the traversal policy's depth-zero boundary check can see it — an
+    // explicitly named link escaping the repository policy root would
+    // lint its resolved external tree as a loose target instead of
+    // failing loudly (§12.2).
     let targets: Vec<PathBuf> = raw_targets
         .into_iter()
-        .map(|p| match std::fs::canonicalize(&p) {
-            Ok(abs) => abs,
-            Err(err) => {
-                eprintln!(
-                    "warning: failed to canonicalize {}: {err}; using as-is",
-                    p.display()
-                );
-                p
+        .map(|p| {
+            let absolute = match std::path::absolute(&p) {
+                Ok(absolute) => absolute,
+                Err(err) => {
+                    eprintln!(
+                        "warning: failed to absolutize {}: {err}; using as-is",
+                        p.display()
+                    );
+                    p
+                }
+            };
+            // A trailing separator makes POSIX `lstat` dereference a
+            // final-component symlink (the slash asserts "directory",
+            // forcing resolution), so `is_symlink()` would report false
+            // for `link/` and the escaping-link rejection would be
+            // bypassed by a one-character spelling. `components()` drops
+            // the trailing separator; probe and walk the stripped form.
+            let absolute: PathBuf = absolute.components().collect();
+            match std::fs::symlink_metadata(&absolute) {
+                Ok(metadata) if !metadata.file_type().is_symlink() => {
+                    std::fs::canonicalize(&absolute).unwrap_or(absolute)
+                }
+                _ => absolute,
             }
         })
         .collect();
