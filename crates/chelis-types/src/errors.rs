@@ -28,6 +28,31 @@ use crate::unify::{TypeError, TypeErrorKind};
 /// `infer.rs` must therefore route every error through [`report`] /
 /// [`propagate`]; it cannot mint one directly.
 ///
+/// Both halves of that sentence are planted below rather than asserted in
+/// prose. The bare-variant half (chelis#875) had no executable form until
+/// this block existed: it is true by the type system today, but nothing
+/// would have noticed if the variant regained a `Default`, gained a second
+/// zero-argument constructor path, or had its field widened to something
+/// publicly inhabitable. Note the type ascription -- without it,
+/// `Type::Error` names the tuple-variant *constructor function* and compiles
+/// happily; the oracle has to demand a `Type`.
+///
+/// ```compile_fail
+/// use chelis_types::types::Type;
+/// let _silent: Type = Type::Error;
+/// ```
+///
+/// What this witness does NOT cover, stated here because the acceptance
+/// surface should not read stronger than the mechanism (chelis#875): the
+/// guard is specific to `Type::Error`. It says nothing about an ordinary
+/// type standing in as a verdict for "the checker did not recognize this" --
+/// the chelis#873 shape, where `infer_atom` returned `Type::Unit` for a form
+/// it could not type. No constructor gate can close that one: `Type::Unit`
+/// has legitimate uses, so there is nothing to make unconstructible. That
+/// shape is held behaviorally instead, by the score-surface corpus in
+/// `crates/chelis-cli/tests/issue_731_fitness_honesty_corpus.rs`, not by any
+/// oracle in this module.
+///
 /// Serialization note (chelis#731 open question 2, resolved at Phase 2):
 /// `Serialize`/`Deserialize` are derived because `Type` is cached, so serde is
 /// the ONE sanctioned non-constructor mint. Production cache writers receive
