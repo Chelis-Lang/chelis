@@ -23,6 +23,17 @@
 //! migration has made their sites `report(...)` diagnostics -- the property
 //! they assert (score < 1.0) is one the tree now has.
 //!
+//! Membership (chelis#873): bare `Symbol` / `Keyword` atoms in expression
+//! position, in the placements where nothing downstream forces their type to
+//! meet a concrete one. This is chelis#710 form 4, the residue Phase 1 did not
+//! close. `infer_atom` typed them `Type::Unit` from a signature with no
+//! diagnostic sink, so `chelis check` scored these programs 1.0 while
+//! `chelis build` refused to lower them. The constrained placements (a body
+//! under a concrete `defsig`, an argument against a concrete parameter type)
+//! were already caught by unification and are deliberately NOT members; they
+//! appear in the negative-parity test below so the fix cannot be over-applied
+//! into rejecting atoms that legitimately occupy structural positions.
+//!
 //! Membership (chelis#833): declaration-only ill-typed programs
 //! (`total_nodes == 0`, e.g. a duplicate `deftype` / `defsig` / `typealias`).
 //! The Phase 1 corpus asserted every member below 1.0 but every member had a
@@ -255,6 +266,108 @@ fn malformed_dp_forms_score_below_one() {
         ),
     ];
     assert_below_one(&cases);
+}
+
+/// chelis#710 form 4 / chelis#873: a bare `Symbol` or `Keyword` atom in
+/// expression position, in the placements where nothing forces the atom's
+/// type to meet a concrete one.
+///
+/// `infer_atom` typed these `Type::Unit` and had no `DiagnosticSink`
+/// parameter, so it was structurally incapable of reporting. Where the `Unit`
+/// met a concrete declared type, unification caught it; where it did not (a
+/// `def` with no `defsig`, a signature returning `t-unit`, a top-level `def`
+/// bound straight to an atom, an unused `let` binding) `chelis check`
+/// returned `score: 1, errors: [], untyped_nodes: 0` on a program
+/// `chelis build` then refused to lower, citing [05-UNS-1] / chelis#730:
+/// unhandled or malformed forms cannot become Unit or another value. That is
+/// a false 1.0 on the output spec/04-type-system.md §10 designates as the
+/// training signal.
+#[test]
+fn bare_atom_expression_position_scores_below_one() {
+    let wrap_body = |body: &str| {
+        format!(
+            "(module {{}} m.main (def {{}} f (fn {{}} (params {{}} (x {{type: (t-prim {{}} int32)}})) {body})))\n"
+        )
+    };
+    let wrap_unit_sig = |body: &str| {
+        format!(
+            "(module {{}} m.main \
+             (defsig {{}} f (t-fn {{}} (t-prim {{}} int32) (t-unit {{}}))) \
+             (def {{}} f (fn {{}} (params {{}} (x {{type: (t-prim {{}} int32)}})) {body})))\n"
+        )
+    };
+    let cases: Vec<(&str, String, &str)> = vec![
+        ("dp_bare_keyword_body_no_defsig", wrap_body(":oops"), ".dp"),
+        ("dp_bare_symbol_body_no_defsig", wrap_body("oops"), ".dp"),
+        (
+            "dp_bare_keyword_body_unit_defsig",
+            wrap_unit_sig(":oops"),
+            ".dp",
+        ),
+        (
+            "dp_bare_symbol_body_unit_defsig",
+            wrap_unit_sig("oops"),
+            ".dp",
+        ),
+        (
+            "dp_bare_keyword_toplevel_def",
+            "(module {} m.main (def {} out :oops))\n".to_string(),
+            ".dp",
+        ),
+        (
+            "dp_bare_symbol_toplevel_def",
+            "(module {} m.main (def {} out oops))\n".to_string(),
+            ".dp",
+        ),
+        (
+            "dp_bare_keyword_unused_let_binding",
+            wrap_body("(let {} (bind {} unused :oops) (var {} x))"),
+            ".dp",
+        ),
+    ];
+    assert_below_one(&cases);
+}
+
+/// Negative parity for [`bare_atom_expression_position_scores_below_one`]:
+/// the chelis#873 rejection must not over-apply.
+///
+/// `Symbol` atoms are how every Deep form carries its names. A `var`'s name,
+/// a `record`'s constructor head, a `kv` key, an `access` field name, a
+/// `deftype` / `defsig` / `def` / `export` name are all `Atom::Symbol`, and
+/// their owning forms consume them with `symbol_name` rather than routing
+/// them through expression inference. Only an atom that actually reaches
+/// `infer_atom` is in expression position. If a future refactor routes a
+/// structural symbol through the expression path, this test fails rather than
+/// the language quietly losing the ability to name anything.
+#[test]
+fn structural_symbol_positions_still_score_one() {
+    let program = "(module {}\n  \
+         stats.prob\n  \
+         (export {} probability prob_value)\n  \
+         (deftype {opaque: true}\n    \
+         Probability\n    \
+         ()\n    \
+         (variant {} Probability (field {} value (t-prim {} f32))))\n  \
+         (defsig {} probability (t-fn {} (t-prim {} f32) (t-adt {} Probability)))\n  \
+         (def {}\n    \
+         probability\n    \
+         (fn {}\n      \
+         (params {} (x {type: (t-prim {} f32)}))\n      \
+         (record {} Probability (kv {} value (var {} x)))))\n  \
+         (defsig {} prob_value (t-fn {} (t-adt {} Probability) (t-prim {} f32)))\n  \
+         (def {}\n    \
+         prob_value\n    \
+         (fn {}\n      \
+         (params {} (p {type: (t-adt {} Probability)}))\n      \
+         (access {} (var {} p) value))))\n";
+    let score = check_score(program, ".dp");
+    assert!(
+        (score - 1.0).abs() < f64::EPSILON,
+        "chelis#873 over-application: a program whose only `Symbol` atoms sit in \
+         structural positions (var name, record head, kv key, access field, \
+         export / deftype / defsig / def names) must still score exactly 1.0; \
+         got {score}"
+    );
 }
 
 /// chelis#833 regression: declaration-only ill-typed programs

@@ -171,6 +171,28 @@ class ListOutputTests(unittest.TestCase):
             gate.main(["--list"])
         self.assertIn("lint --check .", buf.getvalue())
 
+    def test_list_includes_a_doctest_stage(self):
+        # Regression guard (chelis#875): `cargo nextest` does not execute
+        # doctests, so a gate made entirely of nextest stages runs none of
+        # the `compile_fail` oracles in crates/chelis-types/src/errors.rs.
+        # Those oracles are the chelis#731 Phase 2 acceptance artifact; a
+        # gate that does not drive them lets the plan claim a compile-time
+        # guarantee no continuous job checks. If this stage is ever
+        # removed, the oracles go dark silently -- hence an explicit lock
+        # rather than relying on the union tests.
+        rendered = [gate.render(c) for c in gate.full_command_list()]
+        self.assertTrue(
+            any(r.endswith("--doc") for r in rendered),
+            f"expected a doctest stage in the canonical list, got {rendered}",
+        )
+
+    def test_doctest_stage_is_in_the_local_subset(self):
+        # The doctest stage costs well under a second and catches a broken
+        # oracle before push rather than in CI, so it belongs in `--local`
+        # too (chelis#875).
+        rendered = [gate.render(c) for c in gate.LOCAL_STATIC_COMMANDS]
+        self.assertIn("cargo test -p chelis-types --doc", rendered)
+
     def test_list_uses_nextest_not_cargo_test(self):
         # Regression guard: the historical `AGENTS.md` gate said
         # `cargo test --workspace` where CI runs `cargo nextest run`.

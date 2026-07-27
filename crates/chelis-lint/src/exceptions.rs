@@ -59,7 +59,7 @@ pub fn verify_cross_refs(exceptions: &[Exception], spec_source: &str) -> Result<
 
 /// Extract every `§<number>` section identifier from a markdown spec file
 /// by scanning for `### N.M Title` and `### N.M.K Title` headings.
-fn section_ids_from_spec(spec_source: &str) -> HashSet<String> {
+pub(crate) fn section_ids_from_spec(spec_source: &str) -> HashSet<String> {
     let heading = heading_re();
     let mut out = HashSet::new();
     for caps in heading.captures_iter(spec_source) {

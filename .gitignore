@@ -56,17 +56,3 @@ const_vec.h
 chelis_runtime.h
 chelis_blas.h
 .pi/
-
-# Devenv (local configuration and generated state)
-/.devenv/
-/devenv.nix
-/devenv.yaml
-/devenv.lock
-/devenv.local.nix
-/devenv.local.yaml
-
-# direnv
-.direnv
-
-# pre-commit
-.pre-commit-config.yaml

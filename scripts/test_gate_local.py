@@ -185,7 +185,12 @@ class WorkspaceMemberPackagesTests(unittest.TestCase):
 
 
 class LocalCommandListTests(unittest.TestCase):
-    def test_static_subset_is_exactly_clippy_fmt_lint(self):
+    def test_static_subset_is_exactly_clippy_fmt_lint_doctest(self):
+        # The doctest stage joined the static subset in chelis#875: it is
+        # the only thing that drives the chelis#731 `ErrorWitness`
+        # compile-fail oracles, since `cargo nextest` (every other stage's
+        # runner) does not execute doctests. Asserted by exact list so a
+        # stage cannot be dropped from the pre-push subset silently.
         rendered = [gate.render(c) for c in gate.local_command_list([])]
         self.assertEqual(
             rendered,
@@ -194,6 +199,7 @@ class LocalCommandListTests(unittest.TestCase):
                 "cargo fmt --all -- --check",
                 "cargo run -p chelis-cli --bin chelis --quiet -- "
                 "lint --check .",
+                "cargo test -p chelis-types --doc",
             ],
         )
 

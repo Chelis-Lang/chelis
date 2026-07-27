@@ -20,6 +20,58 @@
 //! branded string is the RENDERING of the contract; machine surfaces carry
 //! the structured kind and payload, and agents match those, never regex
 //! over prose.
+//!
+//! **Status: that structured surface is the TARGET, not what ships today.**
+//! Nothing on this path derives `Serialize`, and the compiler-api flattens
+//! an [`Unsupported`] into a flat `kind: "unsupported_feature"` envelope
+//! plus the rendered message (`unsupported_stage_error`). So today the
+//! branded prefix IS the machine surface, and matching it is legitimate.
+//! Prerequisites, in order: chelis#729 Phase 4's capability Table A (without
+//! it `chelis check` has no target-independent rejections to report, which
+//! is why nothing constructs [`Stage::Checker`]), then a structured payload
+//! slot on `schema::Diagnostic`. Tracked by the section C2 status note in
+//! `spec/design/loud_unsupported.md`.
+//!
+//! **Executable form of that status (chelis#871).** A permission scoped
+//! "until the prerequisites land" needs something that fires when they do,
+//! or it outlives its premise silently. The day any of these four types
+//! gains `Serialize`, its block below starts compiling, the
+//! `cargo test -p chelis-types --doc` gate stage goes red, and whoever
+//! made the structured surface real is told to come back here and to
+//! section C2. Four separate blocks rather than four bounds in one: a
+//! `compile_fail` block passes when ANYTHING in it fails to compile, so a
+//! single combined block would keep passing after three of the four had
+//! gained `Serialize`.
+//!
+//! Positive control first. A `compile_fail` block that fails because the
+//! doctest harness cannot resolve `serde` at all is indistinguishable from
+//! one that fails on the trait bound, so this block proves the bound is
+//! what the four below are actually testing:
+//!
+//! ```
+//! fn require_serialize<T: serde::Serialize>() {}
+//! require_serialize::<i32>();
+//! ```
+//!
+//! ```compile_fail
+//! fn require_serialize<T: serde::Serialize>() {}
+//! require_serialize::<chelis_types::unsupported::Unsupported>();
+//! ```
+//!
+//! ```compile_fail
+//! fn require_serialize<T: serde::Serialize>() {}
+//! require_serialize::<chelis_types::unsupported::UnsupportedKind>();
+//! ```
+//!
+//! ```compile_fail
+//! fn require_serialize<T: serde::Serialize>() {}
+//! require_serialize::<chelis_types::unsupported::Stage>();
+//! ```
+//!
+//! ```compile_fail
+//! fn require_serialize<T: serde::Serialize>() {}
+//! require_serialize::<chelis_types::unsupported::SpanRef>();
+//! ```
 
 use std::fmt;
 

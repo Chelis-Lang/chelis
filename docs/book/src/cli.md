@@ -20,6 +20,56 @@ Chelis ships one CLI with machine-facing and human-facing subcommands.
 - `chelis build` emits C or HIP source plus runtime artifacts and compile flags.
 - `chelis tide` exposes the HTTP/MCP tooling surface.
 
+## Lint Traversal Policy
+
+Directory linting composes Chelis's shipped baseline exclusions with the nearest
+ancestor `chelis-lint.toml`. Discovery resolves relative targets against the
+invocation working directory first, so `chelis lint --check .` from a
+subdirectory applies the same repository policy as the absolute spelling. Repository entries are strict, versioned TOML with
+a gitignore-style pattern, a closed class, and a cross-reference resolving in
+the policy's declared spec:
+
+```toml
+version = 1
+spec = "spec/01-nomenclature.md"
+
+[[exclude]]
+pattern = "path/to/generated/"
+class = "generated"
+cross_ref = "§12.2"
+```
+
+The allowed classes are `infrastructure`, `build`, `dependency`, `generated`,
+and `immutable`. Invalid policy fails lint before the walk. Non-file or broken
+policy paths and policy or spec links resolving outside the policy root also
+fail; internal links remain valid. `.gitignore`, `.ignore`, parent and global Git
+ignores, `.git/info/exclude`, and hidden-file defaults do not affect lint
+scope. A directly named file or directory remains lintable when only its
+exclusion pattern would reject it; it must still be a regular file or directory
+(or a link resolving to one) inside the policy root. A directly named root
+that exists but fails that admission — a socket or FIFO, a link resolving to
+a different entry kind, an escaping link, or a broken link — fails
+`chelis lint` loudly with the root path and rejection reason, exactly like a
+nonexistent root; it never exits 0 as an empty lint. A link-final target is
+not resolved before the walk, so its identity reaches that boundary check.
+Matching nested
+descendants are pruned. Non-explicit discovered entries must be directories,
+regular files, or symlinks resolving to the same entry kind. Special entries
+such as sockets and FIFOs, aliases into an excluded tree, broken links, and
+targets outside the policy root are omitted, while internal links to admitted
+regular files retain their link-path surface. An explicitly named excluded directory
+keeps its depth-zero override for internal link targets, but separately
+excluded descendants still apply. Rules also apply this policy to ancillary
+metadata: an excluded Cargo manifest or machine-local manifest above the
+policy root cannot grant the §8.3 package-name exception to an admitted
+documentation filename. A link path above the policy root remains machine-local
+even when its target resolves to an admitted internal manifest. Admitted sibling
+workspace manifests remain visible when lint targets a documentation
+subdirectory or explicit file, including crates exposed through an internal
+directory symlink. A crate directory link resolving outside the policy root is
+rejected. Use rule-specific exceptions or inline
+`allow`/`keep` when a path must still contribute to other lint rules.
+
 ## Style Gate (Built-In on Every Build)
 
 `chelis build`, `chelis check`, `chelis validate`, and

@@ -10016,7 +10016,7 @@ fn infer_expr_with_type_metadata_ownership(
     product.total_nodes += 1;
 
     let result = match expr {
-        deep::Expr::Atom(atom, _) => infer_atom(atom),
+        deep::Expr::Atom(atom, _) => infer_atom(atom, errors),
         deep::Expr::List(list, _) => {
             let tag = get_tag(list);
             match tag {
@@ -10415,7 +10415,30 @@ fn seed_literal_form(expr: &deep::Expr) -> SeedLiteralForm {
     }
 }
 
-fn infer_atom(atom: &deep::Atom) -> Type {
+/// Type a bare atom in expression position.
+///
+/// `deep::Atom` unions two different kinds of thing: value literals
+/// (`Int`/`Float`/`Bool`/`Str`, which denote runtime values and have types)
+/// and structural tokens (`Symbol`/`Keyword`, which are the names forms are
+/// built out of and never denote a value). Structural positions consume the
+/// latter directly via `symbol_name` (a `var`'s name, a `record`'s
+/// constructor head, a `kv` key) and never route them here, so an atom that
+/// reaches this function as a `Symbol` or `Keyword` is in expression position
+/// and has no type to give.
+///
+/// chelis#710 form 4 / chelis#873: those two variants used to return
+/// `Type::Unit`, which is a verdict with no record. When nothing downstream
+/// forced that `Unit` to meet a concrete type (a `def` with no `defsig`, a
+/// signature returning `t-unit`, an unused `let` binding) `chelis check`
+/// scored the program a perfect 1.0 while `chelis build` refused to lower it,
+/// so the score lied about the one output spec/04-type-system.md §10
+/// designates as the training signal. The rule already existed one lane down
+/// in `chelis_ir::lower::lower_atom`, whose diagnostic states the law this
+/// site was breaking: unhandled or malformed forms cannot become Unit or
+/// another value ([05-UNS-1]; chelis#730). Reporting here says the same thing
+/// at the lane that is the oracle, and re-types the site `Type::Error` so it
+/// sits back under the Phase 2 `ErrorWitness` guard (chelis#731 §C3).
+fn infer_atom(atom: &deep::Atom, errors: &mut DiagnosticSink<'_>) -> Type {
     match atom {
         // D1 (WS-A0 RT-1 fixup): per spec/04-type-system.md §5.3 the
         // lexer parses unsuffixed integer tokens at i64 so that
@@ -10426,17 +10449,38 @@ fn infer_atom(atom: &deep::Atom) -> Type {
         // at `infer_lit` where the type metadata is in scope.
         // Out-of-range here would silently wrap to a negative i32 if
         // we let it default unchecked — exactly what §5.3 forbids.
-        // We can't push errors from this signature; the lit-form path
-        // in `infer_lit` is the user-facing diagnostic site, and
-        // bare-atom Deep code never round-trips through the surf
-        // surface where the diagnostic is mandatory. Pin the decision
-        // here so a future refactor doesn't mistakenly read this as
-        // dead code.
+        // The sink is now threaded (chelis#873), so a future range
+        // check on this path has a failure channel; `infer_lit` remains
+        // the more visible diagnostic site because the type metadata is
+        // in scope there.
         deep::Atom::Int(_) => Type::Prim(Prim::Int32),
         deep::Atom::Float(_) => Type::Prim(Prim::F32),
         deep::Atom::Bool(_) => Type::Prim(Prim::Bool),
         deep::Atom::Str(_) => Type::Prim(Prim::String),
-        deep::Atom::Symbol(_) | deep::Atom::Keyword(_) => Type::Unit,
+        deep::Atom::Symbol(name) => report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::MalformedForm,
+                format!(
+                    "a bare symbol atom `{name}` in expression position cannot be typed or \
+                     lowered to the executable IR (spec/design/loud_unsupported.md section \
+                     C1.4; chelis#710 form 4)"
+                ),
+                vec![format!("to reference a binding, write `(var {{}} {name})`")],
+            ),
+        ),
+        deep::Atom::Keyword(name) => report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::MalformedForm,
+                format!(
+                    "a bare keyword atom `:{name}` in expression position cannot be typed or \
+                     lowered to the executable IR (spec/design/loud_unsupported.md section \
+                     C1.4; chelis#710 form 4)"
+                ),
+                vec!["keywords are metadata and form keys, not runtime expressions".to_string()],
+            ),
+        ),
     }
 }
 
