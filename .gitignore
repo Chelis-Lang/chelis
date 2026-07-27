@@ -1,4 +1,9 @@
 /target
+# devenv's per-machine state and build outputs (profile symlinks, task
+# state, the generated flake). The reproducible inputs are devenv.nix,
+# devenv.yaml, and devenv.lock, which ARE tracked.
+/.devenv
+/.devenv.flake.nix
 # WI-13 Option B: the no-sudo local prefix where the dep-setup script builds
 # Sollya + fplll from source. A build artifact, never committed (the committed
 # proof bundle under crates/chelis-prove/data is the source of truth).

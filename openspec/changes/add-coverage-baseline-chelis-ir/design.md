@@ -78,6 +78,16 @@ It is added to `NON_GATE_WORKFLOWS` in `scripts/test_gate.py` in the same change
 
 The precedent is `smt-full-prove.yml`: nightly and manual dispatch, not on PRs, with the fast smoke kept separate and required.
 
+### D8: `llvm-tools` goes in `rust-toolchain.toml`, and that cost is shared
+
+`cargo-llvm-cov` does not carry its own coverage tools. It shells out to `llvm-cov` and `llvm-profdata` from the `llvm-tools` rustup component, and fails with `failed to find llvm-tools-preview` without them.
+
+The component is declared in `rust-toolchain.toml`, not in `devenv.nix`.
+
+The scoped alternative was tried first and does not work: devenv's `languages.rust.components` is ignored when `languages.rust.toolchainFile` is set, which this project uses. Confirmed empirically — the toolchain built with `components` listed still shipped no `llvm-cov`. The remaining devenv-only route is to bypass `languages.rust` and build the toolchain by hand through the `rust-overlay` input. That decouples the devenv toolchain from the one CI installs and creates a second definition to keep in sync, for a tool whose whole purpose is measuring what CI runs.
+
+**The trade-off is real and is accepted deliberately.** `rust-toolchain.toml` is honored by rustup for every invocation in this repository, so every CI job and every contributor now fetches `llvm-tools` (roughly 25 MB), not only the weekly coverage lane. Against the disk budget this repository actually fights — the 25-30 GB reclaimed per Linux job for chelis#392 — 25 MB is noise. Against the principle that the coverage lane should not tax the gate, it is a genuine, if small, exception. One toolchain definition shared by rustup, devenv, and CI is worth it.
+
 ### D7: Activation ordering
 
 The order is fixed, because each step depends on the previous one.
