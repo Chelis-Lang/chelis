@@ -83,6 +83,30 @@ not drift.
 
 If active docs disagree, fix the disagreement instead of adding a third explanation.
 
+## OpenSpec (initial adoption)
+
+The `openspec/` tree is the canonical OpenSpec planning root (built-in
+spec-driven schema). This is an **initial, non-blocking adoption**: OpenSpec
+is available for planning changes but is **not yet required** and does not
+gate merges. The eventual required-governance regime is described in
+`spec/design/spec_provenance.md` (Phase 0) and is future work — it is not
+activated here.
+
+- CI validates the `openspec/` tree structurally through the
+  `openspec-validate` workflow (`openspec validate --all --strict`) under
+  `contents: read`. It is advisory: not a required status check, and it
+  never governs `spec/**` or blocks a merge.
+- Validate locally the same way (OpenSpec must be exactly 1.6.0):
+
+```sh
+openspec validate --all --strict --no-interactive
+```
+
+- OpenSpec artifacts are planning evidence only. They never become Chelis
+  runtime, spec, coverage, or implementation-correctness authority, and
+  never override `spec/**` or an executable acceptance oracle. When an
+  OpenSpec artifact and `spec/**` disagree, `spec/**` is controlling.
+
 ### Public-Surface Change Rule
 
 When behavior changes, update the owning code, tests, docs, and examples in the same
