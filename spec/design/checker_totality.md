@@ -344,14 +344,21 @@ The exact Deep grammar and binder rules are normative in spec/03 §2.5.1/§2.6.
    and therefore quantify over the checked result, not over the source
    program.** A node with no recognized tag is exempt from the stamp
    requirement (`infer.rs`, `requires_stamp = tag.is_some_and(...)`), from
-   child ownership classification (the `None if tag.is_none()` recursion
-   arm), and from owner registration (`register_annotation_owners`'s
-   `if let Some(tag)`) - so a node the checker never visits satisfies the
-   invariant vacuously. [#858] is the open instance, and [#874] tracks the
-   class. The complementary obligation - every runtime node in the *parsed
-   program* is stamped, dispositioned, or diagnosed - is not part of §C4.1.
-   `DeepTag` exhaustiveness (Phase 3) does not close it either: an untagged
-   list has no tag to be exhaustive over.
+   child ownership classification (the untagged arm of the
+   `child_stamp_role` match, which recurses without registering), and from
+   owner registration (`register_annotation_owners`'s `if let Some(tag)`) -
+   so a node the checker never visits satisfies the invariant vacuously.
+   [#858] is the instance that made this concrete; [#874] tracks the class.
+   Phase 3 closes the known *top-level* path to the exemption - a loud
+   `UnknownForm` where `infer_top_level` used to skip silently, with
+   rejection parity for that input class on both `.dp` validator surfaces -
+   without removing the exemption itself; nested bare lists stay legal by
+   design (empty guards, `loc` metadata values), so the untagged arm
+   remains reachable below the top level. The complementary obligation -
+   every runtime node in the *parsed program* is stamped, dispositioned, or
+   diagnosed - is not part of §C4.1. `DeepTag` exhaustiveness (Phase 3)
+   does not close it either: an untagged list has no tag to be exhaustive
+   over.
 2. **`DeepTag` enum at the chokepoints** (Phase 3): the parser already
    validates strings against the closed vocabulary; it starts producing
    `DeepTag` (string kept alongside for spans/printing). `infer_expr`,
@@ -553,20 +560,25 @@ replaces this oracle.
 **You inherit:** a checker that cannot silently exempt (Phase 2) - this
 phase is about the NEXT tag, not the current ones.
 
-**Why this phase is not only about tag 63.** The parser enforces the closed
-vocabulary (`chelis-deep/src/validate.rs`, promoted to a hard error by
+**Why this phase is not only about tag 63.** Two mechanisms guard two
+populations, at two different times. The parser enforces the closed
+vocabulary at *parse time, over user input*
+(`chelis-deep/src/validate.rs`, promoted to a hard error by
 `parse_str_strict`), so a tag that is *unknown* never reaches a consumer -
-[#710]'s probe confirmed the `infer_expr` catch-all is dead for parsed input.
-What the parser cannot catch is a tag that IS in the vocabulary and has no
-decided disposition at a given consumer. That population is not hypothetical:
-Phase 3 found **31 of the 62 tags with no expression-position case in
-`infer_expr`**, every one of them previously falling through the unknown-tag
-wildcard and being reported with a message claiming it was outside the
-vocabulary it is listed in. `block` is the clearest case - spec/03 §2.3
-presents it as an ordinary expression, and the checker has never had a case
-for it ([#859]). So the phase closes two things: the future supply (tag 63)
-and the present backlog (known tags, no disposition), and the second is what
-the wildcard was actively mis-describing.
+[#710]'s probe confirmed the `infer_expr` catch-all is dead for parsed
+input. `DeepTag` exhaustiveness guards the complement at *compile time,
+over this compiler's own source*: a tag that IS in the vocabulary but has
+no decided disposition at a given consumer. No input check can find that,
+because nothing about the input is wrong - the hole is in our dispatch,
+and a validator cannot validate its own consumers. That population is not
+hypothetical: Phase 3 found **31 of the 62 tags with no expression-position
+case in `infer_expr`**, every one previously falling through the
+unknown-tag wildcard and being reported with a message claiming it was
+outside the vocabulary it is listed in. `block` is the clearest case -
+spec/03 §2.3 presents it as an ordinary expression, and the checker had no
+case for it ([#859]). So the phase closes two things: the future supply
+(tag 63) and the present backlog (known tags, no disposition), and the
+second is what the wildcard was actively mis-describing.
 
 **You deliver:**
 
@@ -584,9 +596,10 @@ the wildcard was actively mis-describing.
 **Frozen at your exit:** the variant set = the vocabulary, changing only
 per B1's one-change-set rule.
 
-**Explicitly not yours:** adding tag 63 or any vocabulary change. (Giving an
-already-in-vocabulary tag a real checker case - as opposed to an explicit
-loud disposition - is also out of scope; `block` is filed as [#859].)
+**Explicitly not yours:** adding tag 63 or any vocabulary change. (Giving
+an already-in-vocabulary tag a real checker case - as opposed to an
+explicit loud disposition - was scoped out here and folded into the phase's
+own change set instead; see [#859].)
 
 **Oracle:** the build itself - the mutation test: adding a scratch
 variant to `DeepTag` must produce compile errors in `infer.rs` AND
