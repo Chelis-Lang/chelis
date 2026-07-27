@@ -3,7 +3,7 @@
 ## ADDED Requirements
 
 ### Requirement: Coverage measurement is scoped to one named package
-The coverage wrapper SHALL measure exactly one workspace package named on its command line. It SHALL drive `cargo llvm-cov nextest` so the measured run matches the runner that `scripts/gate.py` uses for the `integration` stage. It SHALL report LLVM source-region coverage, not line coverage, because region counts distinguish individual `match` arms. After parsing the LCOV output it SHALL discard every source path outside that package's own `src/` directory, so coverage attributed to dependency crates never enters the summary. The wrapper SHALL NOT accept a request to measure the whole workspace.
+The coverage wrapper SHALL measure exactly one workspace package named on its command line. It SHALL drive `cargo llvm-cov nextest` so the measured run matches the runner that `scripts/gate.py` uses for the `integration` stage. It SHALL report LLVM source-region coverage, not line coverage, because region counts distinguish individual `match` arms. It SHALL therefore read llvm-cov's JSON export, which carries region counts, and SHALL NOT read the LCOV output, whose `DA` records are per-line hit counts and cannot express that distinction. After parsing the export it SHALL discard every source path outside that package's own `src/` directory, so coverage attributed to dependency crates never enters the summary. The wrapper SHALL NOT accept a request to measure the whole workspace.
 
 #### Scenario: Named package is measured and summarized per file
 - **WHEN** the wrapper is invoked for `chelis-ir`
@@ -18,11 +18,11 @@ The coverage wrapper SHALL measure exactly one workspace package named on its co
 - **THEN** it exits nonzero and reports that measurement is scoped to a single named package
 
 ### Requirement: An empty measurement is a loud failure, never zero percent
-When the source-path filter matches no file in the parsed LCOV output, the wrapper SHALL exit nonzero and name both the filter it applied and the LCOV path it read. It SHALL NOT report 0.0% coverage in this case. A path-filter defect, a crate rename, or a moved source root is indistinguishable from a total loss of coverage once it is rendered as a percentage, and the two demand opposite responses from the reader.
+When the source-path filter matches no file in the parsed export, the wrapper SHALL exit nonzero and name both the filter it applied and the export path it read. It SHALL NOT report 0.0% coverage in this case. A path-filter defect, a crate rename, or a moved source root is indistinguishable from a total loss of coverage once it is rendered as a percentage, and the two demand opposite responses from the reader.
 
 #### Scenario: Filter matches nothing
-- **WHEN** the parsed LCOV output contains no source path under the measured package's `src/` directory
-- **THEN** the wrapper exits nonzero and reports the applied filter and the LCOV path, and prints no coverage percentage
+- **WHEN** the parsed export contains no source path under the measured package's `src/` directory
+- **THEN** the wrapper exits nonzero and reports the applied filter and the export path, and prints no coverage percentage
 
 #### Scenario: Genuine zero coverage of a file is reported normally
 - **WHEN** the filter matches a source file and that file has zero covered regions

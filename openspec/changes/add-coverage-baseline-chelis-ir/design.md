@@ -40,6 +40,8 @@ That distinction is the reason to measure at all. `lower.rs` is an 11k-line disp
 
 Alternatives rejected: `tarpaulin` is ptrace-based, Linux-only, and less accurate on generic and inlined code, of which a compiler crate has a great deal. `grcov` needs more assembly for the same instrumentation `cargo llvm-cov` already wraps.
 
+**Output format follows from this.** The wrapper reads llvm-cov's own JSON export (`--json --summary-only`), not `--lcov`. LCOV's `DA` records are per-line hit counts and cannot express the arm-level distinction above; region counts appear only in the JSON export's `summary.regions` block. Choosing LCOV would have quietly reduced the whole change to line coverage. `--summary-only` drops the per-line segment arrays, which are large and unused here.
+
 ### D2: Drive it through nextest
 
 The command is `cargo llvm-cov nextest -p chelis-ir`, not `cargo llvm-cov test`.
@@ -48,13 +50,13 @@ The command is `cargo llvm-cov nextest -p chelis-ir`, not `cargo llvm-cov test`.
 
 ### D3: Report only `crates/chelis-ir/src/`
 
-`cargo llvm-cov -p chelis-ir` instruments the dependency graph, so raw output includes `chelis-deep`, `chelis-surf`, `chelis-types`, and more. The wrapper filters the parsed LCOV to source paths under `crates/chelis-ir/src/` before summarizing.
+`cargo llvm-cov -p chelis-ir` instruments the dependency graph, so raw output includes `chelis-deep`, `chelis-surf`, `chelis-types`, and more. The wrapper filters the parsed export to source paths under `crates/chelis-ir/src/` before summarizing.
 
-Filtering happens in the wrapper, on parsed output, rather than through `--ignore-filename-regex`. The wrapper then owns the filter, the filter is unit-testable against a fixture LCOV file without invoking cargo, and D4 becomes enforceable.
+Filtering happens in the wrapper, on parsed output, rather than through `--ignore-filename-regex`. The wrapper then owns the filter, the filter is unit-testable against a fixture export without invoking cargo, and D4 becomes enforceable.
 
 ### D4: An empty result is a failure, not zero percent
 
-If the filter matches no source file, the wrapper exits non-zero and names the filter and the LCOV path.
+If the filter matches no source file, the wrapper exits non-zero and names the filter and the export path.
 
 A path-filter typo, a crate rename, or a moved source root would otherwise render as 0.0% coverage. A future reader comparing against the baseline would see a total collapse and start debugging `chelis-ir` rather than the tool. This mirrors the fail-closed correction made in `harden-lint-traversal-edges`, where an explicit lint root that produced a silent empty entry set and exited 0 green was reclassified as a loud failure.
 
@@ -80,7 +82,7 @@ The precedent is `smt-full-prove.yml`: nightly and manual dispatch, not on PRs, 
 
 The order is fixed, because each step depends on the previous one.
 
-1. `scripts/coverage.py` and `scripts/test_coverage.py`, with LCOV fixtures. The tests run against fixtures, so this step needs no cargo invocation and no `cargo-llvm-cov` install.
+1. `scripts/coverage.py` and `scripts/test_coverage.py`, with export fixtures built in temporary directories. The tests run against fixtures, so this step needs no cargo invocation and no `cargo-llvm-cov` install.
 2. The recorded baseline. This step requires step 1 and a real instrumented run.
 3. `coverage.yml` and the `NON_GATE_WORKFLOWS` entry. This step requires both.
 

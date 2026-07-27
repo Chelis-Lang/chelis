@@ -40,7 +40,7 @@ None. No existing requirement changes.
 - `scripts/coverage_baseline_chelis_ir.json` — new committed baseline.
 - `scripts/test_gate.py` — `NON_GATE_WORKFLOWS` gains `coverage.yml`; without this the existing scope-classification test fails.
 - `.github/workflows/coverage.yml` — new non-required workflow, dispatch plus weekly schedule.
-- `.gitignore` — ignore the raw `cargo llvm-cov` output directory.
+- `devenv.nix` — `cargo-llvm-cov` added to `packages`, with a version check in `enterTest`. No `.gitignore` change is needed: raw export output goes to `target/llvm-cov/`, and `/target` is already ignored.
 - `docs/coverage_setup.md`, `AGENTS.md` — runbook and a pointer to it.
 - `CHANGELOG.md` — contributor-tooling entry.
 - No crate under `crates/` is modified.

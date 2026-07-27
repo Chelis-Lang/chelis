@@ -4,37 +4,38 @@
 
 ## 1. Fixtures and failing tests
 
-- [ ] 1.1 Add LCOV fixtures under `scripts/testdata/coverage/`: one with records for both `crates/chelis-ir/src/` and dependency paths, one with dependency paths only, one truncated mid-record. Fixtures are checked in, so no test in this group invokes cargo.
-- [ ] 1.2 Add baseline JSON fixtures: one well-formed with a full provenance block, one with the provenance block missing, one that is not valid JSON.
-- [ ] 1.3 `scripts/test_coverage.py` — assert the parser keeps only paths under the measured package's `src/` and drops dependency records (spec: dependency sources excluded).
-- [ ] 1.4 Assert an LCOV whose filter matches nothing exits nonzero and names both the filter and the LCOV path, and that no percentage is printed (spec: filter matches nothing).
-- [ ] 1.5 Assert a matched file with zero covered regions reports 0.0% and exits zero, so 1.4 is distinguished from genuine zero coverage (spec: genuine zero coverage reported normally).
-- [ ] 1.6 Assert nonzero exit naming the offending input for: absent `cargo-llvm-cov`, unknown package name, absent baseline, malformed baseline, baseline missing its provenance block.
-- [ ] 1.7 Assert invocation with no package name, and with a workspace-wide request, exits nonzero (spec: workspace-wide measurement refused).
-- [ ] 1.8 Assert comparison against a baseline whose `host_triple` or `rustc_version` differs prints a warning, labels output cross-environment, and exits zero; and that a matching environment produces no warning.
-- [ ] 1.9 Assert a coverage decrease against the baseline exits zero (spec: no percentage is a threshold).
-- [ ] 1.10 Confirm every task in this group fails red before group 2 begins.
+- [x] 1.1 Export fixtures: `_export()` builds an llvm-cov JSON export in a temporary directory, with records for both `crates/chelis-ir/src/` and dependency paths. Built programmatically rather than checked in, matching `scripts/test_test_timing_check.py`. No test in this group invokes cargo.
+- [x] 1.2 Baseline fixtures: `_baseline()` builds one well-formed with a full provenance block, plus variants with the provenance block missing, incomplete, corrupt in its counts, and not valid JSON.
+- [x] 1.3 `scripts/test_coverage.py` — assert the parser keeps only paths under the measured package's `src/` and drops dependency records (spec: dependency sources excluded).
+- [x] 1.4 Assert an export whose filter matches nothing exits nonzero and names both the filter and the export path, and that no percentage is printed (spec: filter matches nothing).
+- [x] 1.5 Assert a matched file with zero covered regions reports 0.0% and exits zero, so 1.4 is distinguished from genuine zero coverage (spec: genuine zero coverage reported normally).
+- [x] 1.6 Assert nonzero exit naming the offending input for: absent `cargo-llvm-cov`, unknown package name, absent baseline, malformed baseline, baseline missing its provenance block.
+- [x] 1.7 Assert invocation with no package name, and with a workspace-wide request, exits nonzero (spec: workspace-wide measurement refused).
+- [x] 1.8 Assert comparison against a baseline whose `host_triple` or `rustc_version` differs prints a warning, labels output cross-environment, and exits zero; and that a matching environment produces no warning.
+- [x] 1.9 Assert a coverage decrease against the baseline exits zero (spec: no percentage is a threshold).
+- [x] 1.10 Confirm every task in this group fails red before group 2 begins.
 
 ## 2. Wrapper implementation
 
-- [ ] 2.1 `scripts/coverage.py` — argument parsing: a required package name, optional `--baseline`, optional `--json-out`. Stdlib only, Python 3.11+.
-- [ ] 2.2 Workspace-membership check via `cargo metadata`; unknown package exits nonzero naming the package.
-- [ ] 2.3 `cargo-llvm-cov` presence check; absence exits nonzero with the install command.
-- [ ] 2.4 Invoke `cargo llvm-cov nextest -p <pkg> --lcov --output-path <tmp>`; write raw output to a gitignored directory.
-- [ ] 2.5 LCOV parser producing per-file covered and total region counts.
-- [ ] 2.6 Source-path filter restricted to `crates/<pkg>/src/`; empty result exits nonzero per D4.
-- [ ] 2.7 Provenance capture: `rustc_version`, `host_triple`, `recorded_at`, and the runner used (`nextest`), recorded in the JSON output.
-- [ ] 2.8 Baseline comparison and the cross-environment warning path; comparison never changes the exit code.
-- [ ] 2.9 Per-file summary renderer, sorted by uncovered region count descending, so the largest gaps read first.
-- [ ] 2.10 Run group 1 green.
+- [x] 2.1 `scripts/coverage.py` — argument parsing: a required package name, optional `--baseline`, `--export`, `--json-out`, `--update-baseline`. Stdlib only, Python 3.11+.
+- [x] 2.2 Workspace-membership check by reading the member manifests with `tomllib`, matching `gate.py`'s `workspace_member_packages`; unknown package exits nonzero naming the package. A member without a `src/` directory also fails loudly, so it cannot reach the filter and imitate lost coverage.
+- [x] 2.3 `cargo-llvm-cov` presence check; absence exits nonzero pointing at the devenv shell.
+- [x] 2.4 Invoke `cargo llvm-cov nextest -p <pkg> --json --summary-only --output-path <target/llvm-cov/...>`. The JSON export, not `--lcov`: region counts exist only in the export, and LCOV would have silently downgraded the change to line coverage.
+- [x] 2.5 Export parser producing per-file covered and total region counts.
+- [x] 2.6 Source-path filter restricted to the package's `src/`; empty result exits nonzero per D4.
+- [x] 2.7 Provenance capture from `rustc -vV`: `rustc_version`, `host_triple`, `llvm_version`, `recorded_at`, and the runner used.
+- [x] 2.8 Baseline comparison and the cross-environment warning path; comparison never changes the exit code.
+- [x] 2.9 Per-file summary renderer, sorted by uncovered region count descending, so the largest gaps read first.
+- [x] 2.10 Run group 1 green — 49 tests, and the full `scripts/` discovery at 406 tests, exit 0.
 
 ## 3. Record the baseline
 
-- [ ] 3.1 Install `cargo-llvm-cov` on an `ubuntu-latest`-equivalent x86_64 host, matching the `integration` job environment named in D5.
-- [ ] 3.2 Run the wrapper for `chelis-ir` on a clean worktree in an isolated `CARGO_TARGET_DIR`; record wall-clock time and peak `target/` size as the disk-budget evidence for D6.
-- [ ] 3.3 Commit `scripts/coverage_baseline_chelis_ir.json` with its provenance block.
-- [ ] 3.4 Record in the validation notes below the region coverage of `lower.rs` and `eval.rs` specifically, and the five files with the most uncovered regions. This is the artifact the change exists to produce.
-- [ ] 3.5 Add the raw `cargo llvm-cov` output directory to `.gitignore`.
+- [x] 3.1 Add `cargo-llvm-cov` to `devenv.nix` packages, with a `cargo llvm-cov --version` check in `enterTest`.
+- [x] 3.2 Confirm `devenv shell` resolves the package — `cargo-llvm-cov 0.8.5` from the Nix store, `enterTest` green.
+- [ ] 3.3 Run the wrapper for `chelis-ir` on an `ubuntu-latest`-equivalent x86_64 host, matching the environment D5 names, on a clean worktree in an isolated `CARGO_TARGET_DIR`; record wall-clock time and peak `target/` size as the disk-budget evidence for D6.
+- [ ] 3.4 Commit `scripts/coverage_baseline_chelis_ir.json` with its provenance block, written by `--update-baseline`.
+- [ ] 3.5 Record in the validation notes below the region coverage of `lower.rs` and `eval.rs` specifically, and the five files with the most uncovered regions. This is the artifact the change exists to produce.
+- [ ] 3.6 Confirm `target/llvm-cov/` needs no `.gitignore` entry, since `target/` is already ignored wholesale.
 
 ## 4. Documentation
 
