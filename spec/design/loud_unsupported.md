@@ -246,6 +246,36 @@ gains a rejected-cells section asserting these strings byte-for-byte per
 lane (a rejection emitted differently per lane is lane skew, [#712]'s
 shape).
 
+**STATUS (2026-07-24): the structured `chelis check` surface above is the
+TARGET, not current behavior.** Today no stage constructs `Stage::Checker`
+(`chelis check` never reaches lowering or codegen, so no `Unsupported` can
+arrive there), no type on the `Unsupported` path derives `Serialize`, and
+the build surface renders the branded string into a flat
+`kind: "unsupported_feature"` envelope
+(`crates/chelis-compiler-api/src/compiler.rs`, `unsupported_stage_error`).
+Consumers - including this plan's own rejected-cells corpus - match prose
+today. Two prerequisites, in order: [#729] Phase 4 supplies capability
+Table A, without which `check` has no target-independent rejections to
+report (`capability_table.md` §Derivations); then the structured payload
+must be plumbed onto `schema::Diagnostic`. Until both land, the
+`unsupported:` brand is the machine surface and tests may match it. The
+byte-for-byte per-lane corpus assertions likewise arrive with [#732]
+Phase 3; today's corpus is deliberately substring-level and says so.
+
+**This is a normative relaxation, recorded as a decision.** Naming it
+rather than leaving a later reader to discover it: the surfacing bullet
+above says machine consumers match the structured kind, *never* prose, and
+for as long as the two prerequisites are outstanding that prohibition is a
+permission - matching the `unsupported:` brand is the sanctioned machine
+surface, and the corpus doing so is correct rather than tolerated. The
+permission is given an expiry that fires on its own: the `compile_fail`
+doctest oracles in `crates/chelis-types/src/unsupported.rs`, one per type
+on the `Unsupported` path, go red the day any of the four gains
+`Serialize`, which is exactly the moment this note stops being true. They
+run in CI through the `cargo test -p chelis-types --doc` gate stage
+([#875]). When both prerequisites land, this STATUS block and those
+oracles come out together and the bullet above stands as written ([#871]).
+
 **Authored versus unimplemented:** a deliberately unsupported case cites the
 spec atom that decides it (the [#733] linkage); a
 not-yet-implemented case cites its issue. The capability table makes
@@ -937,3 +967,5 @@ an unsupported case and a plausible wrong number.
 [#791]: https://github.com/Chelis-Lang/chelis/pull/791
 [#799]: https://github.com/Chelis-Lang/chelis/pull/799
 [#815]: https://github.com/Chelis-Lang/chelis/pull/815
+[#871]: https://github.com/Chelis-Lang/chelis/pull/871
+[#875]: https://github.com/Chelis-Lang/chelis/issues/875
