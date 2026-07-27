@@ -9315,7 +9315,25 @@ fn deep_named_decl_name(expr: &DeepExpr) -> Option<&str> {
 /// supports but the compiled build backends deliberately do not. Kept in
 /// one place so [`reject_eval_only_builtins_host`] and
 /// [`drop_unreachable_eval_only_defs`] stay in agreement.
-const EVAL_ONLY_HOST_BUILTINS: &[&str] = &["process_run"];
+const EVAL_ONLY_HOST_BUILTINS: &[&str] = &[
+    "process_run",
+    // Host-lane JSON I/O (chelis#890): eval-only by scope — the compiled
+    // backends have no Json ADT value representation and emitting the
+    // host_emit catch-all for them would produce a silent wrong value
+    // (the chelis#734 class), so the build gate rejects them loudly.
+    "parse_json",
+    "to_json",
+    "json_f64",
+    "json_str",
+    "json_list",
+    "json_f64s",
+    "jnum",
+    "jstr",
+    "jlist",
+    "jdict",
+    "json_set",
+    "round_to",
+];
 
 /// Drop top-level decls for any function whose body references an eval-only
 /// host builtin ([`EVAL_ONLY_HOST_BUILTINS`]) and is not reachable from the

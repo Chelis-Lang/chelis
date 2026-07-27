@@ -11,6 +11,7 @@ use crate::schema::{DictEntryValue, ExecutionValue, TensorValue};
 mod eval;
 mod host_ops;
 mod invariant;
+mod json;
 mod named_axis;
 #[cfg(test)]
 mod tests;

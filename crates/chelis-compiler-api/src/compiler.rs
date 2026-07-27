@@ -4206,13 +4206,13 @@ def id(let: int64) -> int64 = let
     #[test]
     fn compile_emits_generic_adt_runtime_calls_for_recursive_host_program() {
         let source = r#"
-type Json =
+type Jsonish =
   | JsonNull
   | JsonInt(int64)
   | JsonString(string)
-  | JsonArray(List[Json])
+  | JsonArray(List[Jsonish])
 
-def describe(value: Json) -> string =
+def describe(value: Jsonish) -> string =
   match value with {
     | JsonNull => "null"
     | JsonInt(n) => to_string(n)
@@ -4495,11 +4495,11 @@ year = mk_date.year
             r#"
 module Std.Test
 
-type Json =
+type Jsonish =
   | JsonNull
   | JsonString(string)
-  | JsonArray(List[Json])
-  | JsonObject(Dict[string, Json])
+  | JsonArray(List[Jsonish])
+  | JsonObject(Dict[string, Jsonish])
 
 type Tokenizer =
   | BpeTokenizer(Dict[string, int64], Dict[string, int64], Dict[int64, string], int64)
@@ -4507,7 +4507,7 @@ type Tokenizer =
 def parse_line(line: string) -> Option[List[string]] =
   Some([])
 
-def json_string(value: Option[Json]) -> Option[string] =
+def json_string(value: Option[Jsonish]) -> Option[string] =
   match value with {
     | Some(inner) =>
         match inner with {

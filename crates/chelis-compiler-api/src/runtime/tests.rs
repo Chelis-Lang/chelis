@@ -1929,3 +1929,193 @@ fn rt792_render_value_bool_tag_negative_zero_prints_bits() {
         "tensor(shape=[1], data=[0])"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Host-lane JSON I/O (chelis#890): full-pipeline coverage (surf parse ->
+// desugar -> check -> host eval) for parse_json / accessors / constructors /
+// to_json / round_to. The pure core is unit-tested in `runtime/json.rs`;
+// these tests pin the registry wiring: env schemes, the prelude `Json` ADT,
+// `check_json_builtin_signature`, and the eval dispatch arms.
+// ---------------------------------------------------------------------------
+
+/// End-to-end in-memory pipeline: parse a document, read scalars and a
+/// number list through dot-paths, compute, round, assemble nested output,
+/// and serialize. The final string is asserted byte-exactly (insertion
+/// order, shortest-round-trip numbers).
+#[test]
+fn json_pipeline_parse_access_assemble_serialize() {
+    let checked = checked_surf(
+        r#"
+doc = parse_json("{\"instrument\": \"generic\", \"quotes\": {\"mid\": 101.4568}, \"weights\": [0.25, 0.75]}")
+name = json_str(doc, "instrument")
+mid = json_f64(doc, "quotes.mid")
+weights = json_f64s(doc, "weights")
+out = jdict([("instrument", jstr(name))])
+out2 = json_set(out, "results.mid_rounded", jnum(round_to(mid, 2)))
+out3 = json_set(out2, "results.first_weight", jnum(index(weights, 0)))
+text = to_json(out3)
+"#,
+    );
+    let outcome =
+        evaluate_host_program(&checked, &HashMap::new()).expect("pipeline should evaluate");
+    let text = outcome.host_bindings.get("text").expect("text binding");
+    match text {
+        RuntimeValue::String(s) => assert_eq!(
+            s,
+            r#"{"instrument":"generic","results":{"mid_rounded":101.46,"first_weight":0.25}}"#
+        ),
+        other => panic!("expected string, got {other:?}"),
+    }
+}
+
+/// `round_to` accepts a bare int literal for `places` (an int32 per §5.3;
+/// the signature arm admits any integer precision) and preserves the f64
+/// coming out of `json_f64`. 2.675 parses to 2.67499999999999982..., so
+/// correct decimal rounding gives 2.67 (ties-to-even on the exact value,
+/// matching Python's round), NOT 2.68.
+#[test]
+fn json_round_to_exact_binary_value_with_bare_int_places() {
+    let checked = checked_surf(
+        r#"
+x = json_f64(parse_json("{\"v\": 2.675}"), "v")
+rounded = round_to(x, 2)
+"#,
+    );
+    let outcome = evaluate_host_program(&checked, &HashMap::new()).expect("should evaluate");
+    let rounded = outcome.host_bindings.get("rounded").expect("rounded");
+    assert_eq!(rounded.as_f64(), Some(2.67));
+}
+
+/// Power-user surface: matching on the prelude `Json` ADT constructors.
+#[test]
+fn json_adt_match_extracts_variants() {
+    let checked = checked_surf(
+        r#"
+num_or_zero = match parse_json("2.5") with {
+  | JNum(n) => n
+  | _ => cast(0.0, f64)
+}
+flag = match parse_json("true") with {
+  | JBool(b) => b
+  | _ => false
+}
+"#,
+    );
+    let outcome = evaluate_host_program(&checked, &HashMap::new()).expect("should evaluate");
+    assert_eq!(
+        outcome
+            .host_bindings
+            .get("num_or_zero")
+            .and_then(RuntimeValue::as_f64),
+        Some(2.5)
+    );
+    match outcome.host_bindings.get("flag") {
+        Some(RuntimeValue::Bool(true)) => {}
+        other => panic!("expected true, got {other:?}"),
+    }
+}
+
+/// Loud-failure contract at eval time: a missing key names the builtin,
+/// the path, the segment, and the available keys; a type mismatch names
+/// the actual node kind. No silent defaults.
+#[test]
+fn json_accessor_failures_are_loud() {
+    let missing = checked_surf(
+        r#"
+x = json_f64(parse_json("{\"alpha\": 1.5}"), "beta")
+"#,
+    );
+    let err =
+        evaluate_host_program(&missing, &HashMap::new()).expect_err("missing key must fail eval");
+    assert!(err.contains("json_f64"), "got `{err}`");
+    assert!(err.contains("key `beta` not found"), "got `{err}`");
+    assert!(err.contains("`alpha`"), "available keys listed: `{err}`");
+
+    let mismatch = checked_surf(
+        r#"
+x = json_f64(parse_json("{\"alpha\": \"txt\"}"), "alpha")
+"#,
+    );
+    let err = evaluate_host_program(&mismatch, &HashMap::new())
+        .expect_err("type mismatch must fail eval");
+    assert!(err.contains("expected a number, got string"), "got `{err}`");
+
+    let malformed = checked_surf(
+        r#"
+x = parse_json("{\"alpha\": }")
+"#,
+    );
+    let err = evaluate_host_program(&malformed, &HashMap::new())
+        .expect_err("malformed JSON must fail eval");
+    assert!(err.contains("parse_json"), "got `{err}`");
+}
+
+/// Check-time negative parity: the signature arm rejects non-Json /
+/// non-string / non-numeric slots with named diagnostics.
+#[test]
+fn json_builtin_type_errors_reject_at_check() {
+    for (source, fragment) in [
+        (
+            "x = json_f64(1.5, \"a\")\n",
+            "json_f64 expects a Json first argument",
+        ),
+        (
+            "x = parse_json(1.5)\n",
+            "parse_json expects a string argument",
+        ),
+        ("x = to_json(\"raw\")\n", "to_json expects a Json argument"),
+        (
+            "x = round_to(\"s\", 2)\n",
+            "round_to expects a float first argument",
+        ),
+        (
+            "x = round_to(1.5, 2.0)\n",
+            "round_to expects an integer `places` second argument",
+        ),
+        (
+            "x = jnum(\"not a number\")\n",
+            "jnum expects a float argument",
+        ),
+        (
+            "x = json_set(jdict([(\"a\", jnum(1.0))]), \"a\", 2.0)\n",
+            "json_set expects a Json third argument",
+        ),
+        // Wrong arity is caught by the generic scheme unification before
+        // the signature arm runs; the diagnostic is still loud and typed.
+        ("x = parse_json(\"1\", \"2\")\n", "arity mismatch"),
+    ] {
+        let decls = chelis_surf::parser::parse_str(source).expect("surf parse");
+        let exprs = chelis_surf::desugar::desugar_program(&decls);
+        let err = chelis_types::check_ir_program(&exprs)
+            .expect_err(&format!("{source:?} must be a check error"));
+        assert!(
+            err.errors.iter().any(|e| e.message.contains(fragment)),
+            "{source:?}: expected a diagnostic containing `{fragment}`, got: {:?}",
+            err.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+    }
+}
+
+/// Constructors compose with `json_list` element-relative access, and
+/// serialization is deterministic (two runs, identical bytes).
+#[test]
+fn json_constructors_and_element_relative_access() {
+    let checked = checked_surf(
+        r#"
+doc = parse_json("{\"rows\": [{\"px\": 1.5}, {\"px\": 2.5}]}")
+rows = json_list(doc, "rows")
+second_px = json_f64(index(rows, 1), "px")
+text = to_json(jlist([jnum(second_px), JNull, JBool(true)]))
+"#,
+    );
+    let run = |checked: &chelis_types::CheckedProgram| {
+        let outcome = evaluate_host_program(checked, &HashMap::new()).expect("should evaluate");
+        match outcome.host_bindings.get("text") {
+            Some(RuntimeValue::String(s)) => s.clone(),
+            other => panic!("expected string, got {other:?}"),
+        }
+    };
+    let first = run(&checked);
+    assert_eq!(first, "[2.5,null,true]");
+    assert_eq!(run(&checked), first, "serialization must be deterministic");
+}

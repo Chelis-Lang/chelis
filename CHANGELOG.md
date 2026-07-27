@@ -6,6 +6,35 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **Host-lane JSON I/O + `round_to` decimal rounding (chelis#890).** A `.ch`
+  program can now read JSON inputs and write nested JSON outputs end-to-end
+  in the eval lane, with no host-language glue: a prelude `Json` ADT
+  (`JNull | JBool | JNum f64 | JStr | JList | JDict`, matchable), strict
+  RFC 8259 `parse_json`, dot-path accessors (`json_f64`, `json_str`,
+  `json_list`, `json_f64s`) that fail loudly on missing paths and type
+  mismatches (naming the builtin, path, segment, and available keys),
+  output constructors (`jnum`, `jstr`, `jlist`, `jdict`, `json_set` with
+  auto-created intermediate objects), `to_json` with shortest-round-trip
+  f64 formatting and deterministic insertion-order keys (deliberately not
+  the print channel, chelis#748/#723/#734), and `round_to(x, places)` with
+  ties-to-even decimal rounding on the exact binary value (matching
+  Python's `round`). Eval/test-only: `chelis build` rejects all twelve
+  names whole-program like `process_run`. `Json` becomes a reserved
+  prelude type name. See `docs/CHELIS_SURFACE.md` §3.8.
+
+### Fixed
+
+- **`to_tensor` and `pad_sequences`/`pad_sequences_to` tag float lists and
+  pads at the element's actual dtype (chelis#890).** The runtime previously
+  hardcoded an F32 precision tag for every float list while the checker
+  typed `to_tensor(List[f64])` as `tensor[.., f64]`; consumers re-packing
+  through the tag (`tensor_to_scalar`) silently quantized exact f64 data to
+  f32 — the chelis#723 checker-vs-runtime fidelity class. An f64-sourced
+  list now yields a genuinely f64-tagged tensor (`chelis prove` f64 binders
+  included); mixed float dtypes in one list are a loud error.
+
 ## [0.17.5] — 2026-07-31
 
 ### Added
