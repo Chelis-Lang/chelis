@@ -14789,6 +14789,16 @@ fn infer_app(
                             Type::Prim(Prim::String),
                         ]);
                     }
+                    // Host-lane JSON I/O (chelis#890): parse/serialize,
+                    // dot-path accessors, output constructors over the
+                    // prelude `Json` ADT, and `round_to` decimal rounding.
+                    // Eval-only; the build backends reject them (see
+                    // `reject_eval_only_builtins_host`).
+                    "parse_json" | "to_json" | "json_f64" | "json_str" | "json_list"
+                    | "json_f64s" | "jnum" | "jstr" | "jlist" | "jdict" | "json_set"
+                    | "round_to" => {
+                        return check_json_builtin_signature(fname, list, &arg_tys, subst, errors);
+                    }
                     _ => {}
                 }
             }
@@ -17067,6 +17077,225 @@ fn check_conv2d_signature(
     }
 
     subst.apply(&output_template)
+}
+
+/// Concrete argument/return contracts for the host-lane JSON I/O builtins
+/// (chelis#890): `parse_json`, `to_json`, the dot-path accessors
+/// (`json_f64`/`json_str`/`json_list`/`json_f64s`), the output
+/// constructors (`jnum`/`jstr`/`jlist`/`jdict`/`json_set`), and
+/// `round_to`.
+///
+/// The env schemes (`builtin_env`) only declare arity; this arm pins the
+/// real types. Numeric slots accept ANY float (`jnum`, `round_to` x) or
+/// integer (`round_to` places) precision rather than demanding f64/int64:
+/// unsuffixed literals default to f32/int32 (spec/04-type-system.md §5.3)
+/// and a concrete f64/int64 slot would reject `round_to(x, 2)` outright —
+/// the same flexibility `string_slice` gives its index arguments. The
+/// runtime widens at the boundary; `round_to` preserves the input's float
+/// precision in its return type.
+fn check_json_builtin_signature(
+    fname: &str,
+    list: &deep::List,
+    arg_tys: &[Type],
+    subst: &mut Subst,
+    errors: &mut DiagnosticSink<'_>,
+) -> Type {
+    fn json_ty() -> Type {
+        Type::Adt("Json".to_string(), Vec::new())
+    }
+
+    let expected_arity: usize = match fname {
+        "parse_json" | "to_json" | "jnum" | "jstr" | "jlist" | "jdict" => 1,
+        "json_set" => 3,
+        _ => 2,
+    };
+    if arg_tys.len() != expected_arity {
+        return report_builtin_arity(errors, list, fname, expected_arity, arg_tys.len());
+    }
+
+    let mut reject = |slot_description: String, got: &Type| -> Type {
+        report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::TypeMismatch,
+                with_macro_provenance(
+                    &deep::Expr::List(list.clone(), zero_span()),
+                    format!("{fname} expects {slot_description}, got {got}"),
+                ),
+                vec![],
+            ),
+        )
+    };
+
+    let is_string_like =
+        |ty: &Type| matches!(ty, Type::Prim(Prim::String) | Type::Var(_) | Type::Error(_));
+    let is_json_like = |ty: &Type| {
+        matches!(ty, Type::Adt(name, args) if name == "Json" && args.is_empty())
+            || matches!(ty, Type::Var(_) | Type::Error(_))
+    };
+    let is_float_like = |ty: &Type| {
+        matches!(ty, Type::Prim(p) if p.is_float()) || matches!(ty, Type::Var(_) | Type::Error(_))
+    };
+    let is_int_like = |ty: &Type| {
+        matches!(ty, Type::Prim(p) if p.is_integer()) || matches!(ty, Type::Var(_) | Type::Error(_))
+    };
+
+    let resolved: Vec<Type> = arg_tys
+        .iter()
+        .map(|ty| type_for_readonly_check(ty, subst))
+        .collect();
+
+    // Shared slot checks. Accessors and `json_set` take a Json value first
+    // and a dot-separated string path second.
+    let json_first = |resolved: &[Type], reject: &mut dyn FnMut(String, &Type) -> Type| {
+        if !is_json_like(&resolved[0]) {
+            return Some(reject(
+                "a Json first argument (from `parse_json` or a J* constructor)".to_string(),
+                &resolved[0],
+            ));
+        }
+        None
+    };
+    let path_second = |resolved: &[Type], reject: &mut dyn FnMut(String, &Type) -> Type| {
+        if !is_string_like(&resolved[1]) {
+            return Some(reject(
+                "a dot-separated string path second argument (e.g. \"a.b.c\")".to_string(),
+                &resolved[1],
+            ));
+        }
+        None
+    };
+
+    match fname {
+        "parse_json" => {
+            if !is_string_like(&resolved[0]) {
+                return reject("a string argument".to_string(), &resolved[0]);
+            }
+            json_ty()
+        }
+        "to_json" => {
+            if !is_json_like(&resolved[0]) {
+                return reject(
+                    "a Json argument (from `parse_json` or a J* constructor)".to_string(),
+                    &resolved[0],
+                );
+            }
+            Type::Prim(Prim::String)
+        }
+        "json_f64" | "json_str" | "json_list" | "json_f64s" => {
+            if let Some(err) = json_first(&resolved, &mut reject) {
+                return err;
+            }
+            if let Some(err) = path_second(&resolved, &mut reject) {
+                return err;
+            }
+            match fname {
+                "json_f64" => Type::Prim(Prim::F64),
+                "json_str" => Type::Prim(Prim::String),
+                "json_list" => Type::Adt("List".to_string(), vec![json_ty()]),
+                _ => Type::Adt("List".to_string(), vec![Type::Prim(Prim::F64)]),
+            }
+        }
+        "jnum" => {
+            if !is_float_like(&resolved[0]) {
+                return reject(
+                    "a float argument (any float precision; for an integer value use \
+                     cast(n, f64))"
+                        .to_string(),
+                    &resolved[0],
+                );
+            }
+            json_ty()
+        }
+        "jstr" => {
+            if !is_string_like(&resolved[0]) {
+                return reject("a string argument".to_string(), &resolved[0]);
+            }
+            json_ty()
+        }
+        "jlist" => {
+            match &resolved[0] {
+                Type::Adt(name, args) if name == "List" && args.len() == 1 => {
+                    let element = subst.apply(&args[0]);
+                    if !is_json_like(&element) {
+                        return reject("List[Json] input".to_string(), &element);
+                    }
+                }
+                Type::Var(_) | Type::Error(_) => {}
+                other => return reject("List[Json] input".to_string(), other),
+            }
+            json_ty()
+        }
+        "jdict" => {
+            match &resolved[0] {
+                Type::Adt(name, args) if name == "List" && args.len() == 1 => {
+                    match subst.apply(&args[0]) {
+                        Type::Tuple(items) if items.len() == 2 => {
+                            let key_ty = subst.apply(&items[0]);
+                            let value_ty = subst.apply(&items[1]);
+                            if !is_string_like(&key_ty) {
+                                return reject(
+                                    "(string, Json) entry tuples (string keys)".to_string(),
+                                    &key_ty,
+                                );
+                            }
+                            if !is_json_like(&value_ty) {
+                                return reject(
+                                    "(string, Json) entry tuples (Json values)".to_string(),
+                                    &value_ty,
+                                );
+                            }
+                        }
+                        Type::Var(_) | Type::Error(_) => {}
+                        other => {
+                            return reject("List[(string, Json)] input".to_string(), &other);
+                        }
+                    }
+                }
+                Type::Var(_) | Type::Error(_) => {}
+                other => return reject("List[(string, Json)] input".to_string(), other),
+            }
+            json_ty()
+        }
+        "json_set" => {
+            if let Some(err) = json_first(&resolved, &mut reject) {
+                return err;
+            }
+            if let Some(err) = path_second(&resolved, &mut reject) {
+                return err;
+            }
+            if !is_json_like(&resolved[2]) {
+                return reject(
+                    "a Json third argument (wrap raw values with jnum/jstr/jlist/jdict)"
+                        .to_string(),
+                    &resolved[2],
+                );
+            }
+            json_ty()
+        }
+        "round_to" => {
+            if !is_float_like(&resolved[0]) {
+                return reject(
+                    "a float first argument (any float precision)".to_string(),
+                    &resolved[0],
+                );
+            }
+            if !is_int_like(&resolved[1]) {
+                return reject(
+                    "an integer `places` second argument".to_string(),
+                    &resolved[1],
+                );
+            }
+            // Precision-preserving: `round_to` returns its operand's float
+            // precision; an unresolved operand defaults to the canonical
+            // f64 (the eval lane computes in f64 regardless).
+            match &resolved[0] {
+                Type::Prim(p) if p.is_float() => Type::Prim(*p),
+                _ => Type::Prim(Prim::F64),
+            }
+        }
+        other => unreachable!("check_json_builtin_signature dispatched on `{other}`"),
+    }
 }
 
 fn check_matmul_signature(

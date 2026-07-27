@@ -301,6 +301,35 @@ no AD. Shifts use declared-width two's-complement semantics; counts at or
 above the width fully shift out the value, while negative counts trap
 ([04-NUM-13]).
 
+### 3.8 JSON I/O + decimal rounding — **eval-only** (chelis#890)
+
+Native JSON over the prelude `Json` ADT
+(`Json = JNull | JBool bool | JNum f64 | JStr string | JList List[Json] |
+JDict Dict[string, Json]`). **Eval/test-only**: `chelis build` rejects every
+name below whole-program (`EVAL_ONLY_HOST_BUILTINS`), like `process_run`.
+All failures (malformed JSON, missing path, type mismatch, non-finite
+number) are loud eval errors — no silent defaults.
+
+| Name | Signature | Notes |
+|---|---|---|
+| `parse_json` | `(s: string) -> Json` | strict RFC 8259; numbers are f64 (ints past 2^53 lose precision); duplicate keys: first position, last value; depth cap 512 |
+| `to_json` | `(v: Json) -> string` | compact, **insertion-order keys**, **shortest-round-trip f64** (Rust `{:?}` formatter — deliberately NOT the print channel, chelis#748/#723/#734); NaN/inf fail; non-ASCII emitted as raw UTF-8; byte-stable |
+| `json_f64` | `(j: Json, path: string) -> f64` | dot-path: segment = dict key, or all-digits list index; fails name the missing key and list available keys |
+| `json_str` | `(j: Json, path: string) -> string` | |
+| `json_list` | `(j: Json, path: string) -> List[Json]` | elements re-enter the accessors (element-relative paths) |
+| `json_f64s` | `(j: Json, path: string) -> List[f64]` | list of numbers at path; any non-number element fails with its index |
+| `jnum` | `(x: float) -> Json` | any float precision (literals default f32 per §5.3; use `cast(n, f64)`/`f64` values for full precision) |
+| `jstr` | `(s: string) -> Json` | |
+| `jlist` | `(items: List[Json]) -> Json` | |
+| `jdict` | `(entries: List[(string, Json)]) -> Json` | insertion order; duplicate keys upsert |
+| `json_set` | `(j: Json, path: string, v: Json) -> Json` | returns updated value; missing intermediate dict keys auto-create nested dicts (output assembly); list segments replace existing elements only |
+| `round_to` | `(x: float, places: int) -> float` | decimal rounding, **ties-to-even** on the exact binary value (= Python `round`): `round_to(2.5, 0) = 2.0`, `round_to(2.675, 2) = 2.67`; `places` in 0..=100; non-finite passes through; precision-preserving return |
+
+Composes with §3.5: `read_file |> parse_json`, accessors + tensor builtins
+for compute, `jdict`/`json_set`/`to_json` + `write_file` for nested output.
+Matching on the `Json` constructors is available for power users; the
+accessors are the primary agent surface.
+
 ---
 
 ## 4. Complete closed vocabulary (completeness check)
@@ -338,6 +367,8 @@ Host lane:    cumsum sort einsum diagonal trace where clamp concat split scatter
               to_list
               read_file write_file read_lines read_bytes file_exists list_dir
               mmap_file mmap_read mmap_len process_run
+              parse_json to_json json_f64 json_str json_list json_f64s
+              jnum jstr jlist jdict json_set round_to
               print fail debug test_assert test_assert_eq_f32 test_assert_eq_int
               test_assert_eq_bool test_assert_eq_string test_assert_close_tensor
               test_assert_eq_tensor_int64
@@ -348,7 +379,8 @@ Host lane:    cumsum sort einsum diagonal trace where clamp concat split scatter
 lowering** (`spec/05` §3.4) — treat it as unstable, not a stable builtin (see §2).
 
 Prelude ADTs/constructors (also in scope): `Option`/`Some`/`None`,
-`List`/`Cons`/`Nil`, `MappedFile`.
+`List`/`Cons`/`Nil`, `MappedFile`, and
+`Json`/`JNull`/`JBool`/`JNum`/`JStr`/`JList`/`JDict` (§3.8).
 
 ---
 

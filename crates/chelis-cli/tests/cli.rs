@@ -3764,11 +3764,11 @@ fn build_c_runs_recursive_adt_program_and_matches_eval_output() {
     let out_dir = dir.path().join("jsonish-build-out");
     write_file(
         &path,
-        r#"type Json =
+        r#"type Jsonish =
   | JsonNull
   | JsonInt(int64)
   | JsonString(string)
-  | JsonArray(List[Json])
+  | JsonArray(List[Jsonish])
 
 sample = JsonArray([JsonString("hi"), JsonInt(cast(3, int64))])
 result = match sample with {

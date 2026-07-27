@@ -1536,6 +1536,134 @@ impl<'a> EvalContext<'a> {
                     .map_err(|err| format!("read_file failed for `{path}`: {err}"))?;
                 Ok(RuntimeValue::String(text))
             }
+            // Host-lane JSON I/O (chelis#890). Eval-only; the build backends
+            // reject these via `reject_eval_only_builtins_host`. The core
+            // logic (parser, serializer, path navigation, decimal rounding)
+            // lives in `runtime/json.rs`; every failure is a loud eval error
+            // naming the builtin, the path, and the failing segment — no
+            // silent defaults.
+            "parse_json" => {
+                let text = expect_string_arg(args, 0)?;
+                super::json::parse_json_text(&text)
+            }
+            "to_json" => {
+                let value = args
+                    .first()
+                    .ok_or_else(|| "to_json expects 1 argument".to_string())?;
+                super::json::json_value_to_text(value).map(RuntimeValue::String)
+            }
+            "json_f64" => {
+                let value = args
+                    .first()
+                    .ok_or_else(|| "json_f64 expects 2 arguments".to_string())?;
+                let path = expect_string_arg(args, 1)?;
+                super::json::json_f64_at(value, &path).map(RuntimeValue::float64)
+            }
+            "json_str" => {
+                let value = args
+                    .first()
+                    .ok_or_else(|| "json_str expects 2 arguments".to_string())?;
+                let path = expect_string_arg(args, 1)?;
+                super::json::json_str_at(value, &path).map(RuntimeValue::String)
+            }
+            "json_list" => {
+                let value = args
+                    .first()
+                    .ok_or_else(|| "json_list expects 2 arguments".to_string())?;
+                let path = expect_string_arg(args, 1)?;
+                super::json::json_list_at(value, &path).map(RuntimeValue::List)
+            }
+            "json_f64s" => {
+                let value = args
+                    .first()
+                    .ok_or_else(|| "json_f64s expects 2 arguments".to_string())?;
+                let path = expect_string_arg(args, 1)?;
+                super::json::json_f64s_at(value, &path).map(|values| {
+                    RuntimeValue::List(values.into_iter().map(RuntimeValue::float64).collect())
+                })
+            }
+            "jnum" => {
+                let value = expect_float_arg(args, 0)?;
+                Ok(super::json::jnum(value))
+            }
+            "jstr" => {
+                let value = expect_string_arg(args, 0)?;
+                Ok(super::json::jstr(value))
+            }
+            "jlist" => {
+                let items = expect_list_arg(args, 0)?;
+                for (index, item) in items.iter().enumerate() {
+                    super::json::ensure_json_value(item)
+                        .map_err(|err| format!("jlist: element {index}: {err}"))?;
+                }
+                Ok(super::json::jlist(items))
+            }
+            "jdict" => {
+                let entries = expect_list_arg(args, 0)?;
+                let mut out: Vec<(String, RuntimeValue)> = Vec::with_capacity(entries.len());
+                for (index, entry) in entries.into_iter().enumerate() {
+                    let RuntimeValue::Tuple(items) = entry else {
+                        return Err(format!(
+                            "jdict expects a List of (string, Json) 2-tuples, got \
+                             non-tuple element at index {index}"
+                        ));
+                    };
+                    if items.len() != 2 {
+                        return Err(format!(
+                            "jdict expects (string, Json) 2-tuples, got a {}-tuple \
+                             at index {index}",
+                            items.len()
+                        ));
+                    }
+                    let mut items = items.into_iter();
+                    let key = match items.next() {
+                        Some(RuntimeValue::String(key)) => key,
+                        other => {
+                            return Err(format!(
+                                "jdict keys must be strings, got {other:?} at index {index}"
+                            ));
+                        }
+                    };
+                    let value = items.next().expect("length checked above");
+                    super::json::ensure_json_value(&value)
+                        .map_err(|err| format!("jdict: value for key `{key}`: {err}"))?;
+                    // Duplicate keys: first position, last value — the same
+                    // upsert semantics as `dict_of` and `parse_json`.
+                    if let Some(slot) = out.iter_mut().find(|(existing, _)| *existing == key) {
+                        slot.1 = value;
+                    } else {
+                        out.push((key, value));
+                    }
+                }
+                Ok(super::json::jdict(out))
+            }
+            "json_set" => {
+                let value = args
+                    .first()
+                    .ok_or_else(|| "json_set expects 3 arguments".to_string())?;
+                let path = expect_string_arg(args, 1)?;
+                let new_value = args
+                    .get(2)
+                    .ok_or_else(|| "json_set expects 3 arguments".to_string())?;
+                super::json::ensure_json_value(new_value)
+                    .map_err(|err| format!("json_set: replacement value: {err}"))?;
+                super::json::json_set_at(value, &path, new_value)
+            }
+            "round_to" => {
+                let x = expect_float_arg(args, 0)?;
+                let places = expect_int_arg(args, 1)?;
+                let rounded = super::json::round_to_impl(x, places)?;
+                // Precision-preserving: an f32 input yields an f32 result
+                // (rounded in f64, then re-packed), mirroring how `round`
+                // keeps its operand dtype. The canonical QFBench path is
+                // f64 end-to-end.
+                match args.first() {
+                    Some(RuntimeValue::Scalar(payload)) if payload.dtype().is_float() => {
+                        RuntimeValue::scalar_like_float(payload.dtype(), rounded)
+                    }
+                    _ => Ok(RuntimeValue::float64(rounded)),
+                }
+            }
             // Hull Phase 0a: `process_run(cmd, args) -> (exit_code, stdout, stderr)`.
             //
             // Eval/test-only subprocess exec. Arguments are passed straight to

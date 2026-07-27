@@ -136,6 +136,22 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "to_list",
     "pad_sequences",
     "pad_sequences_to",
+    // Host-lane JSON I/O (chelis#890): parse/serialize + agent-ergonomic
+    // dot-path accessors and output constructors over the prelude `Json`
+    // ADT, plus decimal rounding. Eval-only — the build backends reject
+    // them (`EVAL_ONLY_HOST_BUILTINS`, crates/chelis-cli/src/main.rs).
+    "parse_json",
+    "to_json",
+    "json_f64",
+    "json_str",
+    "json_list",
+    "json_f64s",
+    "jnum",
+    "jstr",
+    "jlist",
+    "jdict",
+    "json_set",
+    "round_to",
     "read_file",
     "write_file",
     "read_lines",
@@ -1074,6 +1090,24 @@ pub fn builtin_env() -> (Env, VarGen) {
     generic_unop_borrow("to_list", &mut env, &mut vg);
     generic_binop("pad_sequences", &mut env, &mut vg);
     generic_triop("pad_sequences_to", &mut env, &mut vg);
+    // Host-lane JSON I/O (chelis#890). The schemes here are the loose
+    // arity-declaring entry points (the same pattern as the string/dict
+    // families); the concrete argument/return contracts — including
+    // accepting any float/integer precision where a bare literal would
+    // otherwise default to f32/int32 (spec/04-type-system.md §5.3) — are
+    // enforced by `check_json_builtin_signature` in `infer.rs`.
+    generic_unop("parse_json", &mut env, &mut vg);
+    generic_unop("to_json", &mut env, &mut vg);
+    generic_binop("json_f64", &mut env, &mut vg);
+    generic_binop("json_str", &mut env, &mut vg);
+    generic_binop("json_list", &mut env, &mut vg);
+    generic_binop("json_f64s", &mut env, &mut vg);
+    generic_unop("jnum", &mut env, &mut vg);
+    generic_unop("jstr", &mut env, &mut vg);
+    generic_unop("jlist", &mut env, &mut vg);
+    generic_unop("jdict", &mut env, &mut vg);
+    generic_triop("json_set", &mut env, &mut vg);
+    generic_binop("round_to", &mut env, &mut vg);
     generic_unop("read_file", &mut env, &mut vg);
     generic_binop("write_file", &mut env, &mut vg);
     generic_unop("read_lines", &mut env, &mut vg);
@@ -1213,6 +1247,68 @@ pub fn register_prelude_adts(env: &mut Env, vg: &mut VarGen, adt_reg: &mut AdtRe
             opaque: false,
             defining_module: None,
             variants: Vec::new(),
+        });
+
+    // Prelude `Json` ADT (chelis#890): the value type behind the host-lane
+    // JSON builtins (`parse_json`/`to_json`/accessors). Non-parameterized
+    // and recursive through `List`/`Dict`, mirroring the document model:
+    //
+    //   Json = JNull | JBool bool | JNum f64 | JStr string
+    //        | JList List[Json] | JDict Dict[string, Json]
+    //
+    // The dot-path accessors (`json_f64` etc.) are the primary surface;
+    // matching on these constructors stays available for power users, so
+    // the variants are registered openly (not opaque).
+    let json_type = Type::Adt("Json".to_string(), Vec::new());
+    let json_variants: Vec<(&str, Vec<Type>)> = vec![
+        ("JNull", vec![]),
+        ("JBool", vec![Type::Prim(Prim::Bool)]),
+        ("JNum", vec![Type::Prim(Prim::F64)]),
+        ("JStr", vec![Type::Prim(Prim::String)]),
+        (
+            "JList",
+            vec![Type::Adt("List".to_string(), vec![json_type.clone()])],
+        ),
+        (
+            "JDict",
+            vec![Type::Adt(
+                "Dict".to_string(),
+                vec![Type::Prim(Prim::String), json_type.clone()],
+            )],
+        ),
+    ];
+    for (ctor, fields) in &json_variants {
+        let body = if fields.is_empty() {
+            json_type.clone()
+        } else {
+            Type::Fn(fields.clone(), Box::new(json_type.clone()))
+        };
+        env.bind(
+            ctor.to_string(),
+            Scheme {
+                tvars: vec![],
+                dvars: vec![],
+                rvars: vec![],
+                body,
+            },
+        );
+    }
+    adt_reg
+        .defs
+        .entry("Json".to_string())
+        .or_insert_with(|| AdtDef {
+            name: "Json".to_string(),
+            type_params: Vec::new(),
+            param_vars: Vec::new(),
+            opaque: false,
+            defining_module: None,
+            variants: json_variants
+                .iter()
+                .map(|(ctor, fields)| VariantInfo {
+                    name: ctor.to_string(),
+                    fields: fields.iter().map(|ty| (None, ty.clone())).collect(),
+                })
+                .collect(),
         });
 }
 
@@ -1486,6 +1582,85 @@ mod tests {
         let (env, _) = builtin_env();
         assert!(env.lookup("process_run_definitely_unregistered").is_none());
         assert!(!BUILTIN_NAMES.contains(&"process_run_definitely_unregistered"));
+    }
+
+    #[test]
+    fn builtin_env_has_json_io_builtins() {
+        // chelis#890 host-lane JSON I/O: every builtin is registered with
+        // the declared arity (the concrete contracts live in
+        // `check_json_builtin_signature`, infer.rs).
+        let (env, _) = builtin_env();
+        for (name, arity) in [
+            ("parse_json", 1),
+            ("to_json", 1),
+            ("json_f64", 2),
+            ("json_str", 2),
+            ("json_list", 2),
+            ("json_f64s", 2),
+            ("jnum", 1),
+            ("jstr", 1),
+            ("jlist", 1),
+            ("jdict", 1),
+            ("json_set", 3),
+            ("round_to", 2),
+        ] {
+            let scheme = env
+                .lookup(name)
+                .unwrap_or_else(|| panic!("`{name}` must be registered"));
+            match &scheme.body {
+                Type::Fn(params, _) => assert_eq!(
+                    params.len(),
+                    arity,
+                    "`{name}` should take {arity} args, got {}",
+                    params.len()
+                ),
+                other => panic!("`{name}` should be a function type, got {other:?}"),
+            }
+            assert!(
+                BUILTIN_NAMES.contains(&name),
+                "`{name}` must be in the closed BUILTIN_NAMES vocabulary"
+            );
+        }
+    }
+
+    #[test]
+    fn register_prelude_adts_adds_json_adt() {
+        let (mut env, mut vg) = builtin_env();
+        let mut adt_reg = AdtRegistry::new();
+        register_prelude_adts(&mut env, &mut vg, &mut adt_reg);
+
+        assert_eq!(
+            adt_reg.variant_names("Json").expect("Json variants"),
+            vec![
+                "JNull".to_string(),
+                "JBool".to_string(),
+                "JNum".to_string(),
+                "JStr".to_string(),
+                "JList".to_string(),
+                "JDict".to_string(),
+            ]
+        );
+        // Constructor value bindings: nullary JNull is a bare Json value;
+        // the payload-carrying constructors are functions into Json.
+        let json_ty = Type::Adt("Json".to_string(), Vec::new());
+        assert_eq!(env.lookup("JNull").expect("JNull").body, json_ty);
+        match &env.lookup("JNum").expect("JNum").body {
+            Type::Fn(params, ret) => {
+                assert_eq!(params.as_slice(), &[Type::Prim(Prim::F64)]);
+                assert_eq!(**ret, json_ty);
+            }
+            other => panic!("JNum should be a function type, got {other:?}"),
+        }
+        // The recursive payloads point back at Json through List/Dict.
+        let def = adt_reg.lookup("Json").expect("Json def");
+        let jdict_fields = &def.variants[5].fields;
+        assert_eq!(
+            jdict_fields[0].1,
+            Type::Adt(
+                "Dict".to_string(),
+                vec![Type::Prim(Prim::String), json_ty.clone()]
+            )
+        );
     }
 
     #[test]

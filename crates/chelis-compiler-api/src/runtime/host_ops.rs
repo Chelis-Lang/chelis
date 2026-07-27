@@ -1382,9 +1382,20 @@ pub(super) fn nested_list_to_tensor_data(
 
 fn list_to_tensor_data(values: &[RuntimeValue]) -> Result<(Prim, Vec<f64>), String> {
     // Element classification: integer scalars → Int64-precision tensor;
-    // float scalars → F32-precision tensor; bools → Bool tensor. The
-    // homogeneity check below pins the precision to whatever the first
-    // typed element advertised.
+    // float scalars → a tensor at the ELEMENT's float dtype; bools → Bool
+    // tensor. The homogeneity check below pins the precision to whatever
+    // the first typed element advertised.
+    //
+    // The float row keys the tag on the element dtype (chelis#890): the
+    // checker types `to_tensor(List[f64])` as `tensor[.., f64]`
+    // (`peel_to_tensor_argument` propagates the element precision), but
+    // this path previously hardcoded `Prim::F32`, so an f64-sourced list
+    // (`json_f64`/`to_float`/`cast(_, f64)` results) produced an
+    // F32-TAGGED tensor whose consumers (`tensor_to_scalar` re-packing at
+    // the tag) silently quantized exact f64 data to f32 — the same
+    // checker-vs-runtime fidelity class as chelis#723. Mixed float dtypes
+    // in one list are an error, matching the checker's homogeneous
+    // `List[T]` element type.
     let mut precision = None;
     let mut data = Vec::with_capacity(values.len());
     for value in values {
@@ -1399,11 +1410,14 @@ fn list_to_tensor_data(values: &[RuntimeValue]) -> Result<(Prim, Vec<f64>), Stri
                 data.push(payload.bits().as_f64());
             }
             RuntimeValue::Scalar(payload) if payload.dtype().is_float() => {
-                precision.get_or_insert(Prim::F32);
-                if precision != Some(Prim::F32) {
-                    return Err(
-                        "to_tensor requires homogeneous numeric or bool list elements".to_string(),
-                    );
+                let dtype = payload.dtype();
+                precision.get_or_insert(dtype);
+                if precision != Some(dtype) {
+                    return Err(format!(
+                        "to_tensor requires homogeneous numeric or bool list elements \
+                         (expected {:?}, got {dtype:?})",
+                        precision.expect("precision set on first element")
+                    ));
                 }
                 data.push(payload.bits().as_f64());
             }
@@ -1460,8 +1474,13 @@ pub(super) fn pad_sequences_value(
         RuntimeValue::Scalar(payload) if payload.dtype().is_integer() => {
             (Prim::Int64, payload.bits().as_f64())
         }
+        // Float pads carry their ACTUAL dtype (chelis#890): the pad
+        // literal is typed at the row element precision by the checker, and
+        // `list_to_tensor_data` now tags rows by element dtype, so an
+        // f64-row/f64-pad pair yields an F64 tensor instead of an F32-tagged
+        // one that downstream `tensor_to_scalar` would quantize through.
         RuntimeValue::Scalar(payload) if payload.dtype().is_float() => {
-            (Prim::F32, payload.bits().as_f64())
+            (payload.dtype(), payload.bits().as_f64())
         }
         other => {
             return Err(format!(
@@ -1510,8 +1529,9 @@ pub(super) fn pad_sequences_to_value(
         RuntimeValue::Scalar(payload) if payload.dtype().is_integer() => {
             (Prim::Int64, payload.bits().as_f64())
         }
+        // Same dtype-keying as `pad_sequences` above (chelis#890).
         RuntimeValue::Scalar(payload) if payload.dtype().is_float() => {
-            (Prim::F32, payload.bits().as_f64())
+            (payload.dtype(), payload.bits().as_f64())
         }
         other => {
             return Err(format!(
