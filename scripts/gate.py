@@ -110,6 +110,25 @@ NEXTEST_WORKSPACE: list[str] = [
 # having no `--lib`/`--test` filter). A `compile_fail` oracle added to any
 # OTHER crate runs nowhere until one of those two is extended.
 DOCTEST_TYPES: list[str] = ["cargo", "test", "-p", "chelis-types", "--doc"]
+# The runtime dtype ABI tag decoder is checked over its ENTIRE i32 domain
+# by enumeration, so round-trip, injectivity, and exhaustive rejection hold
+# by exhaustion rather than by sampling.
+#
+# Measured 2026-07-27 (aarch64-apple-darwin, 10 cores): 10.4s release,
+# 128.5s debug. It therefore runs RELEASE and in its own command rather
+# than inside NEXTEST_WORKSPACE, which is debug. Because chelis-vocab has
+# no dependencies the release build is ~3s, so the whole stage is ~14s --
+# cheaper than the 35s a threaded debug form would add to the workspace
+# run, and it catches a regression on the PR that causes it rather than
+# on the next nightly.
+#
+# The `exhaustive` nextest profile (.config/nextest.toml) selects exactly
+# this binary; `default` and `ci` exclude it so the local inner loop stays
+# inside the ~60s budget AGENTS.md sets for it.
+NEXTEST_EXHAUSTIVE_VOCAB: list[str] = [
+    "cargo", "nextest", "run", "-p", "chelis-vocab", "--release",
+    "--profile", "exhaustive",
+]
 
 STAGES: dict[str, list[list[str]]] = {
     "lint-and-unit": [
@@ -121,6 +140,7 @@ STAGES: dict[str, list[list[str]]] = {
     ],
     "integration": [
         NEXTEST_WORKSPACE,
+        NEXTEST_EXHAUSTIVE_VOCAB,
     ],
 }
 

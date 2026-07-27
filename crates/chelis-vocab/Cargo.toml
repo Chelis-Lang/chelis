@@ -5,3 +5,15 @@ edition.workspace = true
 version.workspace = true
 license.workspace = true
 repository.workspace = true
+
+# Declared rather than inherited. Neither `cargo clippy -- -D warnings` nor any
+# workspace table enables these groups, so without this they are simply off.
+# The crate describes an ABI: a lossy numeric conversion or an overflowing
+# arithmetic op here is a wire-format defect, not a style preference.
+[lints.clippy]
+cast_possible_truncation = "deny"
+cast_possible_wrap = "deny"
+cast_sign_loss = "deny"
+cast_lossless = "deny"
+arithmetic_side_effects = "deny"
+indexing_slicing = "deny"

@@ -13,6 +13,8 @@ use std::fs;
 use std::fs::File;
 use std::ptr;
 
+pub mod dtype_header;
+
 #[cfg(test)]
 mod runtime_dtype_contract_tests;
 
@@ -217,7 +219,9 @@ unsafe fn tensor_dtype(tensor: *const chelis_tensor, context: &str) -> RuntimeDT
 /// rather than per-element typed reads.
 #[inline]
 fn tensor_elem_size(dtype: RuntimeDType) -> usize {
-    dtype.byte_width()
+    // `byte_width` is fixed-width because it describes the ABI; widening to
+    // the host pointer size is the caller's concern.
+    dtype.byte_width() as usize
 }
 
 #[repr(C)]

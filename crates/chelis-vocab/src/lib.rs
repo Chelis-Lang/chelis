@@ -1,13 +1,17 @@
 //! Dependency-bottom closed vocabularies shared across Chelis stages.
 //!
-//! This crate deliberately has no dependencies and no fallback vocabulary
-//! variants.  It is the single authority for identifiers that cross compiler,
-//! runtime, and generated-code boundaries.
+//! This crate has no dependencies, no standard library, no allocation, and no
+//! fallback vocabulary variants.  It is the single authority for identifiers
+//! that cross compiler, runtime, and generated-code boundaries.
+//!
+//! Emitting source text for another language is shell work and lives with the
+//! artifact it produces; see `chelis-runtime`'s `dtype_header` module.
 
+#![no_std]
 #![forbid(unsafe_code)]
 
-use std::error::Error;
-use std::fmt;
+use core::error::Error;
+use core::fmt;
 
 /// The structurally distinct ways a Deep effect-kind annotation can arrive at
 /// the vocabulary decoder.
@@ -35,27 +39,27 @@ impl EffectKind {
         }
     }
 
-    pub fn decode(input: EffectKindInput<'_>) -> Result<Self, EffectKindDecodeError> {
+    pub fn decode<'a>(input: EffectKindInput<'a>) -> Result<Self, EffectKindDecodeError<'a>> {
         match input {
             EffectKindInput::Missing => Err(EffectKindDecodeError::Missing),
             EffectKindInput::Malformed => Err(EffectKindDecodeError::Malformed),
             EffectKindInput::Symbol("random") => Ok(Self::Random),
             EffectKindInput::Symbol("resource") => Ok(Self::Resource),
-            EffectKindInput::Symbol(symbol) => Err(EffectKindDecodeError::Unknown {
-                symbol: symbol.to_owned(),
-            }),
+            EffectKindInput::Symbol(symbol) => Err(EffectKindDecodeError::Unknown { symbol }),
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum EffectKindDecodeError {
+/// Borrows the offending symbol from the decoded input rather than owning a
+/// heap copy, so the decode path performs no allocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EffectKindDecodeError<'a> {
     Missing,
     Malformed,
-    Unknown { symbol: String },
+    Unknown { symbol: &'a str },
 }
 
-impl fmt::Display for EffectKindDecodeError {
+impl fmt::Display for EffectKindDecodeError<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Missing => f.write_str("missing effect kind"),
@@ -65,7 +69,7 @@ impl fmt::Display for EffectKindDecodeError {
     }
 }
 
-impl Error for EffectKindDecodeError {}
+impl Error for EffectKindDecodeError<'_> {}
 
 /// Dtypes that the C-compatible runtime ABI can store.
 #[repr(i32)]
@@ -127,7 +131,9 @@ impl RuntimeDType {
         }
     }
 
-    pub const fn byte_width(self) -> usize {
+    /// Fixed-width because this describes the runtime ABI, which does not vary
+    /// with the host pointer width.
+    pub const fn byte_width(self) -> u32 {
         match self {
             Self::F32 | Self::I32 | Self::Bool => 4,
             Self::F64 | Self::I64 => 8,
@@ -167,29 +173,20 @@ impl fmt::Display for RuntimeDTypeDecodeError {
 
 impl Error for RuntimeDTypeDecodeError {}
 
-/// Render the checked-in C ABI fragment from the Rust vocabulary.
-///
-/// The C decoder terminates on invalid input.  C callers cannot accidentally
-/// reinterpret an unknown ABI tag as `f32`.
-pub fn render_runtime_dtype_c_header() -> String {
-    let mut header = String::from(
-        "#ifndef CHELIS_RUNTIME_DTYPE_H\n#define CHELIS_RUNTIME_DTYPE_H\n\n#include <stddef.h>\n#include <stdio.h>\n#include <stdlib.h>\n\n",
-    );
-    for dtype in RuntimeDType::ALL {
-        header.push_str(&format!("#define {} {}\n", dtype.c_macro(), dtype.id()));
-    }
-    header.push_str(
-        "\nstatic inline size_t chelis_runtime_dtype_size_checked(int dtype) {\n    switch (dtype) {\n",
-    );
-    for dtype in RuntimeDType::ALL {
-        header.push_str(&format!(
-            "        case {}: return {};\n",
-            dtype.c_macro(),
-            dtype.byte_width()
-        ));
-    }
-    header.push_str(
-        "        default:\n            fprintf(stderr, \"invalid Chelis runtime dtype id: %d\\n\", dtype);\n            abort();\n    }\n}\n\n#endif\n",
-    );
-    header
-}
+/// The runtime ABI tag is a fixed-width `i32`; generated C declares it as
+/// `int`.  A representation change must fail the build, not a test.
+const _: () = assert!(core::mem::size_of::<RuntimeDType>() == 4);
+
+/// Each discriminant is a shipped ABI value that generated C and compiled
+/// artifacts already depend on.  Reordering the variants must fail the build.
+const _: () = {
+    assert!(RuntimeDType::F32.id() == 0);
+    assert!(RuntimeDType::F64.id() == 1);
+    assert!(RuntimeDType::I32.id() == 2);
+    assert!(RuntimeDType::Bool.id() == 3);
+    assert!(RuntimeDType::I64.id() == 4);
+    assert!(RuntimeDType::Bf16.id() == 5);
+    assert!(RuntimeDType::F16.id() == 6);
+    assert!(RuntimeDType::I8.id() == 7);
+    assert!(RuntimeDType::I16.id() == 8);
+};

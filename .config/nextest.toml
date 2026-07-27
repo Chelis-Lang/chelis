@@ -1,13 +1,34 @@
 # cargo-nextest configuration.
 #
 # Profiles:
-#   default  - local `cargo nextest run`. Fast suite only; heavy e2e is excluded.
-#   ci       - per-PR `Integration Tests` job, via `scripts/gate.py integration`.
-#              Fast suite only (same default-filter as `default`), plus JUnit
-#              timing XML for `scripts/test_timing_check.py`.
-#   nightly  - the `Heavy E2E` workflow (.github/workflows/heavy-e2e.yml), which
-#              runs on a nightly `schedule:` and on `workflow_dispatch:` ONLY.
-#              Runs exactly the heavy e2e suite the other two profiles exclude.
+#   default    - local `cargo nextest run`. Fast suite only; heavy e2e and the
+#                exhaustive domain sweep are excluded.
+#   ci         - per-PR `Integration Tests` job, via `scripts/gate.py
+#                integration`. Same fast-suite scope as `default`, plus JUnit
+#                timing XML for `scripts/test_timing_check.py`.
+#   nightly    - the `Heavy E2E` workflow (.github/workflows/heavy-e2e.yml),
+#                which runs on a nightly `schedule:` and on
+#                `workflow_dispatch:` ONLY. Runs exactly the heavy e2e suite
+#                `default`/`ci` exclude.
+#   exhaustive - per-PR, but a SEPARATE release-mode command in the same
+#                `integration` job (`scripts/gate.py` NEXTEST_EXHAUSTIVE_VOCAB).
+#
+# THREE categories, not two. Until the `exhaustive` profile landed, a test was
+# on the per-PR gate XOR the nightly gate, and `default`/`ci` shared a filter
+# verbatim. The exhaustive domain sweep is in neither set: it runs per PR (so
+# nightly is wrong) but only in release (so the debug `ci` run is wrong).
+#
+# Why it cannot just join `ci`: measured 2026-07-27 on aarch64-apple-darwin,
+# the sweep over all 2^32 i32 values is 10.4s release and 128.5s debug. `ci`
+# and `default` are debug. Threading is not the fix -- 3.7x only, and it
+# saturates every core, which would need a test group with
+# `threads-required = 'num-cpus'` to schedule without starving the rest of the
+# run. A dedicated release command is ~14s including the 3s build, because
+# chelis-vocab has no dependencies.
+#
+# Why it is not `#[ignore]`d behind a manual gate: the properties it checks are
+# the crate's correctness contract for the C ABI tag, and a manual gate would
+# mean a regression merges and is found later. Per PR is affordable here.
 #
 # Heavy e2e == tests that run a real `chelis build` + gcc + run, or a real
 # `reef build` / `reef install`. Each one rebuilds the whole chelis-std
@@ -33,7 +54,8 @@
 [profile.default]
 default-filter = '''
     not (
-        binary_id(/^chelis-cli::stdlib_typecheck_cache_oracle$/)
+        binary_id(/^chelis-vocab::exhaustive_tag_domain$/)
+        + binary_id(/^chelis-cli::stdlib_typecheck_cache_oracle$/)
         + binary_id(/^chelis-cli::stdlib_typecheck_cache_concurrency$/)
         + binary_id(/^chelis-cli::monomorphization_build$/)
         + (binary_id(/^chelis-cli::cli$/) & test(/^phase3a_reef_std_acceptance_oracle$/))
@@ -46,10 +68,13 @@ default-filter = '''
 
 [profile.ci]
 # Same fast-suite scope as `default`; the only additions are the JUnit
-# timing report and the shared exclusion of the heavy e2e suite.
+# timing report and the shared exclusion of the heavy e2e suite. The
+# exhaustive sweep is excluded here too -- it runs per PR, but through the
+# separate release command, not this debug one.
 default-filter = '''
     not (
-        binary_id(/^chelis-cli::stdlib_typecheck_cache_oracle$/)
+        binary_id(/^chelis-vocab::exhaustive_tag_domain$/)
+        + binary_id(/^chelis-cli::stdlib_typecheck_cache_oracle$/)
         + binary_id(/^chelis-cli::stdlib_typecheck_cache_concurrency$/)
         + binary_id(/^chelis-cli::monomorphization_build$/)
         + (binary_id(/^chelis-cli::cli$/) & test(/^phase3a_reef_std_acceptance_oracle$/))
@@ -83,3 +108,14 @@ default-filter = '''
 # the heavy tests rather than capping their concurrency (which would slow the
 # per-PR gate, the exact regression this change reverses).
 retries = 2
+
+[profile.exhaustive]
+# Selects exactly the domain sweep and nothing else, so the release build this
+# profile runs under stays scoped to one dependency-free crate. Naming the
+# binary explicitly, rather than relying on `-E` interacting with a
+# default-filter, keeps the selection a reviewable diff -- the same discipline
+# the `nightly` set is written with.
+default-filter = 'binary_id(/^chelis-vocab::exhaustive_tag_domain$/)'
+# No retries: an exhaustive enumeration is deterministic. A failure is a real
+# divergence, never a flake, and retrying would only delay finding it.
+retries = 0

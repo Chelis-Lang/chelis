@@ -10,7 +10,7 @@ use crate::{Atom, Expr, List};
 /// Shape errors are deliberately distinct from unknown symbols.  Every
 /// semantic consumer calls this adapter before dispatch, so no stage can
 /// invent a missing or malformed effect kind.
-pub fn decode_effect_kind(list: &List) -> Result<EffectKind, EffectKindDecodeError> {
+pub fn decode_effect_kind(list: &List) -> Result<EffectKind, EffectKindDecodeError<'_>> {
     let Some(Expr::Map(metadata, _)) = list.elements.get(1) else {
         return EffectKind::decode(EffectKindInput::Missing);
     };
@@ -84,9 +84,7 @@ mod tests {
             decode_effect_kind(&list(
                 "(handle-effect {effect: teleport} (lit {} 1) (lit {} 2))"
             )),
-            Err(EffectKindDecodeError::Unknown {
-                symbol: "teleport".to_owned()
-            })
+            Err(EffectKindDecodeError::Unknown { symbol: "teleport" })
         );
     }
 }

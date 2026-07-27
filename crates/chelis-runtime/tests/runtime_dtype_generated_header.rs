@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use chelis_vocab::render_runtime_dtype_c_header;
+use chelis_runtime::dtype_header::render_runtime_dtype_c_header;
 
 #[test]
 fn checked_in_c_dtype_header_is_generated_from_the_rust_vocabulary() {

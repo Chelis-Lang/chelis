@@ -31,9 +31,7 @@ fn effect_kind_missing_malformed_and_unknown_are_distinct_errors() {
     );
     assert_eq!(
         EffectKind::decode(EffectKindInput::Symbol("teleport")),
-        Err(EffectKindDecodeError::Unknown {
-            symbol: "teleport".to_string(),
-        })
+        Err(EffectKindDecodeError::Unknown { symbol: "teleport" })
     );
 }
 
@@ -98,6 +96,23 @@ fn runtime_dtype_invalid_ids_are_errors_not_f32() {
             RuntimeDType::decode_id(id),
             Err(RuntimeDTypeDecodeError::InvalidId { id })
         );
+    }
+}
+
+/// Injectivity. `exhaustive_tag_domain.rs` establishes that nothing outside
+/// this set decodes; this establishes that nothing inside it collides.
+#[test]
+fn runtime_dtype_ids_are_pairwise_distinct() {
+    let all = RuntimeDType::ALL;
+    for (i, left) in all.iter().enumerate() {
+        for right in all.iter().skip(i + 1) {
+            assert_ne!(
+                left.id(),
+                right.id(),
+                "{left:?} and {right:?} share ABI tag {}",
+                left.id()
+            );
+        }
     }
 }
 
