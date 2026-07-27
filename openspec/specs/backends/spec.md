@@ -9,6 +9,8 @@ per-backend dtype gating, backend-boundary effect checks, backend selection and 
 escalation, and the all-backend numerical-correctness and reference-agreement invariants. This
 is the current truth of how Chelis emits target code.
 
+**Source:** captured from [`spec/08-backends.md`](../../../spec/08-backends.md).
+
 ## Requirements
 
 ### Requirement: Backend strategy and separation

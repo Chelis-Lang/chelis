@@ -8,6 +8,8 @@ the `chelis lint` enforcement contract for the Chelis ecosystem. This capability
 current truth of how names and style are constrained and enforced across the monorepo and
 downstream shells.
 
+**Source:** captured from [`spec/01-nomenclature.md`](../../../spec/01-nomenclature.md).
+
 ## Requirements
 
 ### Requirement: Surf identifier case-split

@@ -9,6 +9,8 @@ function application and pipe semantics, canonical form and literal normalizatio
 structural/arity/vocabulary validation. This is the current truth of how Deep is
 constructed, parsed, validated, and printed.
 
+**Source:** captured from [`spec/03-deep-syntax.md`](../../../spec/03-deep-syntax.md).
+
 ## Requirements
 
 ### Requirement: Universal 3-tuple node structure

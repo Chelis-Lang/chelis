@@ -10,6 +10,8 @@ accumulators, runtime shape semantics, fitness scoring, the Phase-2a effect subs
 and the decided numeric-value-semantics and checker-totality atoms. This is the current and
 decided truth of how Chelis programs are type-checked.
 
+**Source:** captured from [`spec/04-type-system.md`](../../../spec/04-type-system.md).
+
 ## Requirements
 
 ### Requirement: Checked Deep contract

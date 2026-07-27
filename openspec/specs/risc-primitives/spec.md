@@ -10,6 +10,8 @@ scatter determinism and AD policy, host-only builtins, the standard ML-op loweri
 completeness and the reference oracle, and the decided unsupported-case and observation
 contracts. This is the current and decided truth of how tensor computation lowers and runs.
 
+**Source:** captured from [`spec/05-risc-primitives.md`](../../../spec/05-risc-primitives.md).
+
 ## Requirements
 
 ### Requirement: RISC philosophy and no broadcasting

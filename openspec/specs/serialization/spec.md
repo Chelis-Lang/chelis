@@ -7,6 +7,8 @@ artifact with its implementation-owned wire layout, the additive compiler-API JS
 wire-compatibility policy, and the normative decode-boundary invariant-revalidation contract for
 invariant-carrying opaque types. This is the current truth of how Chelis serializes and decodes.
 
+**Source:** captured from [`spec/10-serialization.md`](../../../spec/10-serialization.md).
+
 ## Requirements
 
 ### Requirement: Text serialization forms

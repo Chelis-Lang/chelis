@@ -8,6 +8,8 @@ blocks, effect handlers, macros, records, pattern matching, tuples, transforms,
 numeric/string literals, type aliases, and opaque types with declared invariants. This is
 the current truth of how Surf source parses and desugars to Deep.
 
+**Source:** captured from [`spec/02-surf-syntax.md`](../../../spec/02-surf-syntax.md).
+
 ## Requirements
 
 ### Requirement: Reserved keywords

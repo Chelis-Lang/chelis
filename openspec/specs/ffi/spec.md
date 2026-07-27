@@ -7,6 +7,8 @@ direct execution with the NumPy guarantee, JAX), C interop via generated headers
 static runtime and the exported-`main` symbol-rename rule, and compiler-crate embedding. This is
 the current and directional truth of how Chelis interoperates with host languages.
 
+**Source:** captured from [`spec/11-ffi.md`](../../../spec/11-ffi.md).
+
 ## Requirements
 
 ### Requirement: Python interop core (Phase 3b)

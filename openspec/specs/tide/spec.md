@@ -9,6 +9,8 @@ semantics, the HTTP/JSON and MCP agent services with their structured wire and e
 real-arithmetic disclosure, and evaluator-agreement testing. This is the current truth of
 Chelis's interactive and agent tooling.
 
+**Source:** captured from [`spec/09-tide.md`](../../../spec/09-tide.md).
+
 ## Requirements
 
 ### Requirement: Interactive execution strategy

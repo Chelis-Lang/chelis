@@ -10,6 +10,8 @@ just-in-time compilation (`jit`); the semantics-preserving DAG optimization pass
 transformation composition, commutativity, and ordering rules; and the transform error
 contract. This is the current truth of how Chelis transforms and optimizes RISC DAGs.
 
+**Source:** captured from [`spec/06-transformations.md`](../../../spec/06-transformations.md).
+
 ## Requirements
 
 ### Requirement: Transformations are DAG-to-DAG functions

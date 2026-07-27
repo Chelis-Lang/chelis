@@ -7,6 +7,8 @@ the reserved `par` construct for explicit fork/join, the backend concurrency map
 preserves language-level semantics, and the v1 concurrency non-goals. This is the current truth
 of how Chelis expresses and maps parallelism.
 
+**Source:** captured from [`spec/07-concurrency.md`](../../../spec/07-concurrency.md).
+
 ## Requirements
 
 ### Requirement: Implicit DAG parallelism
