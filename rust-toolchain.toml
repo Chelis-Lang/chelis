@@ -1,3 +1,8 @@
 [toolchain]
 channel = "stable"
-components = ["rustfmt", "clippy"]
+# llvm-tools supplies llvm-cov and llvm-profdata, which cargo-llvm-cov
+# shells out to (scripts/coverage.py). It lives here rather than in
+# devenv.nix because `languages.rust.components` is ignored when
+# `toolchainFile` is set, and here rustup, devenv, and CI all agree on
+# one toolchain definition.
+components = ["rustfmt", "clippy", "llvm-tools-preview"]
