@@ -28,7 +28,7 @@ Three ordering rules, all inherited rather than invented:
 - [ ] **0.7** Confirm cargo-mutants and cargo-llvm-cov both run on `stable` for this crate, adding no pin. Record the pin budget table from the design document with actual findings.
 - [ ] **0.8** Check Aeneas's Lean and Mathlib pin against the locally installed `leanprover/lean4:v4.29.0` that LaCaDiLE builds green on. Record whether `Aeneas.Std` is compatible.
 - [ ] **0.9** Probe whether LaCaDiLE's `scripts/prove.py` loop applies to Aeneas-generated obligations. Record the finding. **It is a development accelerator only** — it depends on an external API key and an org-level Labs toggle, so it SHALL NOT appear in the acceptance oracle.
-- [x] **0.10** Measure the exhaustive `i32` check. **Done 2026-07-27** (aarch64-apple-darwin, 10 cores): release single-threaded **10.4 s**; debug single-threaded **128.5 s**; debug 10-threaded **35.1 s**. All visited the full domain (9 accepted, 4,294,967,287 rejected) with `black_box` preventing elision. The gate runs debug, so this **exceeds the ~60 s workspace budget** and is sited as a documented manual gate per 6.1. Threading is not a fix: 3.7× only, and it saturates every core, which serializes a concurrently-scheduled nextest run around it.
+- [x] **0.10** Measure the exhaustive `i32` check. **Done 2026-07-27** (aarch64-apple-darwin, 10 cores): release single-threaded **10.4 s**; debug single-threaded **128.5 s**; debug 10-threaded **35.1 s**. All visited the full domain (9 accepted, 4,294,967,287 rejected) with `black_box` preventing elision. Release compile of the crate is ~3 s. **Conclusion: per-PR CI step, release, single-threaded, ~14 s total** — cheaper than adding the threaded debug form to the existing job, and it catches regressions on the causing PR rather than the next nightly.
 - [ ] **0.11** Confirm this obligation's routing against `route-proof-obligations`, including its cheaper-oracle rule. Record that the exhaustive check is the primary oracle and the proof is lane-establishment.
 - [ ] **0.12** Satisfy the lane isolation condition: the repository must build and test on pinned stable with neither Charon, Aeneas, nor Lean installed. **If that cannot be arranged cleanly, decline the lane** and land Phases 1–6 without the proof work. No guarantee is lost by declining.
 
@@ -92,9 +92,12 @@ rejection probe is the crate's strongest rejection evidence.
 
 These carry the guarantees. Everything after this phase is lane-establishment.
 
-- [ ] **6.1** Add the exhaustive check over the entire `i32` domain: every value round-trips or is rejected with the invalid-tag error carrying that value. Per the 0.10 measurement it is `#[ignore]`d and run in release. Record the concrete command and its success condition in this change and in the current-state docs, per the manual-gate rule.
-- [ ] **6.1a** Add the bounded companion that **does** run by default: every valid tag, the boundary values (`-1`, `9`, `i32::MIN`, `i32::MAX`), and a sample of invalid ones. The manual gate is the complete oracle; this is what guards every ordinary change.
-- [ ] **6.1b** Keep the manual gate single-threaded, or thread it only behind an explicit opt-in. The threaded form monopolizes every core and must not be reachable from a default `cargo nextest run --workspace`.
+- [ ] **6.1** Add the exhaustive check over the entire `i32` domain: every value round-trips or is rejected with the invalid-tag error carrying that value. Single-threaded, in its own test binary so a filterset can name it precisely. Wrap the argument in `black_box` — without it the loop is elided and the test proves nothing.
+- [ ] **6.1a** Add the bounded companion that runs in the **local** `default` profile: every valid tag, the boundary values (`-1`, `9`, `i32::MIN`, `i32::MAX`), and sampled invalid ones. The exhaustive check is the complete oracle; this is what keeps the local inner loop inside its ~60 s budget.
+- [ ] **6.1b** Add a dedicated per-PR CI step: `cargo nextest run -p chelis-vocab --release -E 'binary_id(/^chelis-vocab::<binary>$/)'`. Release, single-threaded, ~14 s including compile. **Do not** add it to the debug workspace job.
+- [ ] **6.1c** Exclude the exhaustive binary from the `default` profile's filter so a local `cargo nextest run` does not pick it up. This makes `ci` a **superset** of `default` for the first time — rewrite the `.config/nextest.toml` header comment, which currently states the two share a filter verbatim and that a test is on the per-PR gate XOR the nightly gate. That invariant gains a third category and the file's own rule requires the selection stay explicit.
+- [ ] **6.1d** Record that `.config/nextest.toml` sets no `slow-timeout`, so nextest warns at 60 s and does not terminate. If a `terminate-after` is ever added there, this test needs an explicit override or it starts being killed.
+- [ ] **6.1e** If the release step is later found awkward, the fallback is the threaded debug form under a nextest test group with `threads-required = 'num-cpus'`, which schedules it exclusively rather than oversubscribing. Recorded so the option is not rediscovered from scratch.
 - [ ] **6.2** Add the injectivity check over `ALL`, pairwise.
 - [ ] **6.3** Add compile-time layout assertions: the vocabulary's size, and each variant's tag value against the constant emitted for it in generated code.
 - [ ] **6.4** Add the differential test against the compiled generated C decoder. Execute both over every valid tag and a set of invalid ones; require agreement on acceptance, decoded result, byte width, and rejection. **Comparing generated text to a checked-in artifact does not satisfy this** — both decoders must run.
@@ -102,7 +105,7 @@ These carry the guarantees. Everything after this phase is lane-establishment.
 - [ ] **6.6** Negative test: a planted `repr` or discriminant change fails compilation.
 - [ ] **6.7** Negative test: a planted extra `decode_id` arm accepting an unassigned value fails the exhaustive check.
 - [ ] **6.8** Re-run cargo-mutants. The survivor from 5.5 must now be caught. **Attribute the closure to the exhaustive check**, which is what closed it — not to the proof, which has not run yet.
-- [ ] **6.9** Record that at this point every headline guarantee in this change is established, and the remaining phases add no guarantee — **with the qualification** that the exhaustive check is enforced by an on-demand manual gate rather than on every change, which is weaker than an ordinary test and stronger than nothing.
+- [ ] **6.9** Record that at this point every headline guarantee in this change is established and enforced on every pull request, and that the remaining phases add no guarantee.
 
 ## Phase 7 — Aeneas extraction (lane establishment)
 
@@ -136,7 +139,7 @@ Reimplemented against this change's surface, with tests per the repository's Pyt
 
 - [ ] **9.1** Document the verified subset and the excluded items with reasons. Confirm no text describes the crate as verified.
 - [ ] **9.2** State that the tag properties are established by the exhaustive check, and that the proof establishes the lane. Do not present the proof as the source of the guarantee.
-- [ ] **9.2a** State the enforcement frequency honestly: the complete oracle is a manual gate (10.4 s release), the default surface carries the bounded companion, and a re-checked proof would be milliseconds. Do not let "established" be read as "checked on every change".
+- [ ] **9.2a** State the enforcement frequency precisely: the complete oracle runs per PR in a dedicated release step, the local profile carries the bounded companion, and neither is a manual gate. Do not describe the local `cargo nextest run` as covering the whole domain.
 - [ ] **9.3** Record the residual after the differential test: agreement is checked over every valid tag and sampled invalid ones, which is stronger than the previous text comparison but is not a proof of the C decoder.
 - [ ] **9.4** Confirm every item excluded from the verified subset retains its existing test coverage.
 - [ ] **9.5** Confirm no document reports proof, coverage, and mutation results as a single combined score, and that each is labelled with the question it answers.

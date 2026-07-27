@@ -236,15 +236,53 @@ All three visited the full domain and reported 9 accepted, 4,294,967,287 rejecte
 
 **The estimate of 4–20 seconds was right for release and wrong for the case that matters.** The gate runs `cargo nextest run --workspace` in **debug**, where the same loop is 128.5 s — more than double the ~60 s budget `AGENTS.md` sets for the whole workspace inner loop.
 
-Threading does not rescue it. The 3.7× speedup (not 10×) reflects this machine's performance/efficiency core split, and 35 s is still over half the entire workspace budget for one test. Worse, the threaded version **saturates all ten cores**, and nextest runs test binaries concurrently — so a test that monopolizes the machine for 35 s effectively serializes the suite around itself. The threaded form is the right shape for a manual gate and the wrong shape for a default one.
+Threading gives 3.7×, not 10×, reflecting this machine's performance/efficiency core split.
+
+### The core-saturation objection was wrong, and nextest is why
+
+An earlier reading of this measurement concluded that the threaded form "saturates all ten cores, and nextest runs test binaries concurrently, so it serializes the suite around itself," and that the check therefore had to be a manual gate.
+
+That is naive-oversubscription reasoning, and nextest does not require it. `threads-required` lets a test declare it needs the whole machine:
+
+```toml
+[test-groups]
+exhaustive = { max-threads = 1 }
+
+[[profile.ci.overrides]]
+filter = 'binary_id(/^chelis-vocab::exhaustive/)'
+test-group = 'exhaustive'
+threads-required = 'num-cpus'
+```
+
+nextest then schedules it exclusively rather than alongside everything else. The 35 s becomes 35 s of dedicated machine, not 35 s of contention inflicted on the rest of the suite. The objection is retracted.
+
+### Placement: a dedicated release step beats widening the debug job
+
+The repository already has the mechanism for this decision. `.config/nextest.toml` runs `default` and `ci` on an identical `default-filter`, with `nightly` running **exactly** the complement — "a test is on the per-PR gate XOR the nightly gate" — and the heavy set named explicitly "so adding or removing a heavy test is a reviewable diff."
+
+Three placements, with measured costs:
+
+| placement | per-PR cost | caught when |
+| --- | --- | --- |
+| add to the heavy set (nightly) | 0 s | next nightly — a bad change merges first |
+| add to the `ci` debug job | +35 s threaded, +128 s not | per PR |
+| **dedicated release step** | **~14 s** (3 s compile + 10.4 s run) | per PR |
+
+The third wins, and it wins because `chelis-vocab` has no dependencies: `cargo nextest run -p chelis-vocab --release -E '...'` compiles one 195-line crate in about three seconds and runs the single-threaded check in 10.4. That is **cheaper than adding the threaded debug form to the existing job**, and it catches a regression on the pull request that causes it rather than the following night.
+
+So the check stays single-threaded, runs in release, and lives in its own step. `threads-required` is then unnecessary — but it is recorded above because it is what makes the threaded debug option viable if the release step proves awkward.
 
 ### What this changes
 
-**The exhaustive check is a documented manual gate, not an ordinary test.** Per `AGENTS.md`, ignored tests are permitted "only when they clearly mirror a documented manual gate or an environment-dependent prerequisite," so Phase 6 must site it with a concrete command and success condition, and the default test surface keeps a bounded check — every valid tag, the boundary values, and sampled invalid ones.
+**The exhaustive check runs per PR, not on demand.** The earlier manual-gate conclusion followed from the retracted objection plus an unexamined assumption that the check had to share the debug workspace job. Neither holds.
 
-**The claim "declining the prover lane costs no guarantee" needs qualifying.** The guarantee still exists, but it is enforced by a gate that runs on demand rather than on every change. That is weaker than an ordinary test and stronger than nothing, and the honest statement is the middle one.
+**The local inner loop is unaffected.** The `default` profile keeps its existing filter, so a local `cargo nextest run` does not pick this up. The ~60 s budget in `AGENTS.md` is a contract about the local loop specifically, and this respects it without weakening the guarantee.
 
-**The proof's relative value rises slightly, and only slightly.** Once written, re-checking a small Lean file is milliseconds, where the exhaustive check is 10–128 s. Both sit outside the local inner loop; both are affordable in a per-PR CI job, since CI is not bound by the 60 s local budget. So this is a modest argument for the proof, not a reversal — the cheaper-oracle finding stands, with the cost now measured instead of guessed.
+**The `ci` profile becomes a superset of `default` for the first time.** Today the two share a filter verbatim and the header comment says so. This introduces a third category — per-PR but not local — which is a deliberate structural change to that file's design, not an incidental edit. The comment must be updated to describe it, in the spirit of the file's own rule that the selection stay explicit and reviewable.
+
+**No slow-timeout override is needed today, and that is worth recording.** `.config/nextest.toml` sets no `slow-timeout`, so nextest's default applies: warn at 60 s, no termination. A 128 s test is flagged and passes. If a `terminate-after` is ever added to that file, this test needs an explicit override or it will start being killed.
+
+**The claim "declining the prover lane costs no guarantee" now holds without qualification**, since the exhaustive check is enforced on every pull request. The proof's relative value is correspondingly unchanged: both it and the check sit in per-PR CI at comparable cost.
 
 Three consequences, all of which the task ordering now reflects:
 
