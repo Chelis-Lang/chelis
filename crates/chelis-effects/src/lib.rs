@@ -1,3 +1,4 @@
+use chelis_deep::DeepTag;
 use std::collections::{HashMap, HashSet};
 
 use chelis_deep::ast::{Atom, Expr, List, MetaMap};
@@ -250,7 +251,7 @@ fn infer_program_effects_with_context(
 fn flattened_top_level(exprs: &[Expr]) -> Vec<&Expr> {
     fn push<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
         if let Expr::List(list, _) = expr
-            && get_tag(list) == Some("module")
+            && get_tag(list) == Some(DeepTag::Module)
         {
             // `(module {} name children...)`: skip tag, meta, name.
             for child in list.elements.iter().skip(3) {
@@ -271,7 +272,7 @@ fn top_level_def_bodies(exprs: &[Expr]) -> HashMap<String, Expr> {
     let mut defs = HashMap::new();
     for expr in flattened_top_level(exprs) {
         if let Expr::List(list, _) = expr
-            && get_tag(list) == Some("def")
+            && get_tag(list) == Some(DeepTag::Def)
         {
             let kids = children(list);
             if kids.len() >= 2
@@ -288,7 +289,7 @@ fn top_level_callable_names(bodies: &HashMap<String, Expr>) -> HashSet<String> {
     bodies
         .iter()
         .filter_map(|(name, body)| match body {
-            Expr::List(list, _) if get_tag(list) == Some("fn") => Some(name.clone()),
+            Expr::List(list, _) if get_tag(list) == Some(DeepTag::Fn) => Some(name.clone()),
             _ => None,
         })
         .collect()
@@ -320,7 +321,7 @@ fn infer_expr_effects(
             };
 
             match tag {
-                "var" => children(list)
+                DeepTag::Var => children(list)
                     .first()
                     .and_then(symbol_name)
                     .and_then(|name| {
@@ -332,8 +333,10 @@ fn infer_expr_effects(
                         })
                     })
                     .unwrap_or_default(),
-                "app" => infer_app_effects(list, top_level_effects, top_level_callables, locals),
-                "fn" => {
+                DeepTag::App => {
+                    infer_app_effects(list, top_level_effects, top_level_callables, locals)
+                }
+                DeepTag::Fn => {
                     let kids = children(list);
                     kids.get(1)
                         .map(|body| {
@@ -341,9 +344,22 @@ fn infer_expr_effects(
                         })
                         .unwrap_or_default()
                 }
-                "let" => infer_let_effects(list, top_level_effects, top_level_callables, locals),
-                "if" | "tuple" | "pipe" | "par" | "record" | "access" | "tuple-get" | "cast"
-                | "copy" | "realize" | "jit" | "match" | "def" => children(list)
+                DeepTag::Let => {
+                    infer_let_effects(list, top_level_effects, top_level_callables, locals)
+                }
+                DeepTag::If
+                | DeepTag::Tuple
+                | DeepTag::Pipe
+                | DeepTag::Par
+                | DeepTag::Record
+                | DeepTag::Access
+                | DeepTag::TupleGet
+                | DeepTag::Cast
+                | DeepTag::Copy
+                | DeepTag::Realize
+                | DeepTag::Jit
+                | DeepTag::Match
+                | DeepTag::Def => children(list)
                     .iter()
                     .map(|kid| {
                         infer_expr_effects(kid, top_level_effects, top_level_callables, locals)
@@ -352,19 +368,19 @@ fn infer_expr_effects(
                         acc.extend(&set);
                         acc
                     }),
-                "grad" => children(list)
+                DeepTag::Grad => children(list)
                     .first()
                     .map(|kid| {
                         infer_expr_effects(kid, top_level_effects, top_level_callables, locals)
                     })
                     .unwrap_or_default(),
-                "vmap" => children(list)
+                DeepTag::Vmap => children(list)
                     .first()
                     .map(|kid| {
                         infer_expr_effects(kid, top_level_effects, top_level_callables, locals)
                     })
                     .unwrap_or_default(),
-                "handle-effect" => {
+                DeepTag::HandleEffect => {
                     infer_handle_effects(list, top_level_effects, top_level_callables, locals)
                 }
                 _ => children(list)
@@ -461,7 +477,9 @@ fn infer_let_effects(
             effects.extend(&value_effects);
             if let Some(name) = symbol_name(&bind_kids[i]) {
                 let binding_effects = match value {
-                    Expr::List(value_list, _) if get_tag(value_list) == Some("fn") => value_effects,
+                    Expr::List(value_list, _) if get_tag(value_list) == Some(DeepTag::Fn) => {
+                        value_effects
+                    }
                     _ => EffectSet::new(),
                 };
                 local_scope.insert(name.to_string(), binding_effects);
@@ -552,7 +570,7 @@ fn annotate_effects(
             let tag = get_tag(list);
             let kids = children(list);
             let annotated_children = match tag {
-                Some("let") if kids.len() >= 2 => {
+                Some(DeepTag::Let) if kids.len() >= 2 => {
                     let bind = if let Expr::List(bind_list, bind_span) = &kids[0] {
                         let bind_kids = children(bind_list);
                         let mut elements =
@@ -575,7 +593,7 @@ fn annotate_effects(
                             if let Some(name) = symbol_name(&bind_kids[i]) {
                                 let binding_effects = match &bind_kids[i + 1] {
                                     Expr::List(value_list, _)
-                                        if get_tag(value_list) == Some("fn") =>
+                                        if get_tag(value_list) == Some(DeepTag::Fn) =>
                                     {
                                         value_effects
                                     }
@@ -660,7 +678,7 @@ fn update_effect_metadata(
     let Expr::Map(meta, _) = meta_expr else {
         return;
     };
-    if let Some("fn") = get_tag(list) {
+    if let Some(DeepTag::Fn) = get_tag(list) {
         let effects = infer_expr_effects(
             &Expr::List(list.clone(), zero_span()),
             top_level_effects,
@@ -682,7 +700,7 @@ fn validate_handlers(exprs: &[Expr], errors: &mut Vec<EffectError>) {
 fn validate_handler_expr(expr: &Expr, errors: &mut Vec<EffectError>) {
     match expr {
         Expr::List(list, _) => {
-            if get_tag(list) == Some("handle-effect") {
+            if get_tag(list) == Some(DeepTag::HandleEffect) {
                 let kids = children(list);
                 match decode_effect_kind(list) {
                     Ok(EffectKind::Random) if kids.first().and_then(int_literal).is_none() => {
@@ -744,7 +762,7 @@ fn validate_unhandled_random_roots(
 ) {
     for expr in flattened_top_level(exprs) {
         if let Expr::List(list, _) = expr
-            && get_tag(list) == Some("def")
+            && get_tag(list) == Some(DeepTag::Def)
         {
             let kids = children(list);
             if kids.len() < 2 {
@@ -753,7 +771,7 @@ fn validate_unhandled_random_roots(
             let Some(name) = symbol_name(&kids[0]) else {
                 continue;
             };
-            if matches!(&kids[1], Expr::List(body, _) if get_tag(body) == Some("fn")) {
+            if matches!(&kids[1], Expr::List(body, _) if get_tag(body) == Some(DeepTag::Fn)) {
                 continue;
             }
             if effects_by_def
@@ -783,7 +801,7 @@ fn declared_effects_from_defsig(list: &List) -> Option<EffectSet> {
     let Expr::List(t_fn_list, _) = t_fn else {
         return None;
     };
-    if get_tag(t_fn_list) != Some("t-fn") {
+    if get_tag(t_fn_list) != Some(DeepTag::TFn) {
         return None;
     }
     // t-fn metadata is element [1] (the meta map).
@@ -795,7 +813,7 @@ fn declared_effects_from_defsig(list: &List) -> Option<EffectSet> {
     let Expr::List(eff_list, _) = eff_expr else {
         return None;
     };
-    if get_tag(eff_list) != Some("effects") {
+    if get_tag(eff_list) != Some(DeepTag::Effects) {
         return None;
     }
     let mut declared = EffectSet::new();
@@ -810,7 +828,7 @@ fn declared_effects_from_defsig(list: &List) -> Option<EffectSet> {
                 _ => {}
             }
         } else if let Expr::List(inner, _) = child
-            && get_tag(inner) == Some("resource")
+            && get_tag(inner) == Some(DeepTag::Resource)
             && let Some(device) = children(inner).first().and_then(|expr| match expr {
                 Expr::Atom(Atom::Str(value), _) => Some(value.clone()),
                 _ => None,
@@ -835,7 +853,7 @@ fn validate_declared_vs_inferred(
     let mut declared_by_name: HashMap<String, EffectSet> = HashMap::new();
     for expr in flattened_top_level(exprs) {
         if let Expr::List(list, _) = expr
-            && get_tag(list) == Some("defsig")
+            && get_tag(list) == Some(DeepTag::Defsig)
         {
             let kids = children(list);
             let Some(name) = kids.first().and_then(symbol_name) else {
@@ -886,7 +904,7 @@ fn validate_declared_vs_inferred(
 fn validate_build_target_expr(expr: &Expr, target: &str, errors: &mut Vec<EffectError>) {
     match expr {
         Expr::List(list, _) => {
-            if get_tag(list) == Some("handle-effect") {
+            if get_tag(list) == Some(DeepTag::HandleEffect) {
                 match decode_effect_kind(list) {
                     Ok(EffectKind::Random) => {}
                     Ok(EffectKind::Resource) => {
@@ -983,17 +1001,14 @@ fn var_name(expr: &Expr) -> Option<&str> {
     let Expr::List(list, _) = expr else {
         return None;
     };
-    if get_tag(list) != Some("var") {
+    if get_tag(list) != Some(DeepTag::Var) {
         return None;
     }
     children(list).first().and_then(symbol_name)
 }
 
-fn get_tag(list: &List) -> Option<&str> {
-    match list.elements.first() {
-        Some(Expr::Atom(Atom::Symbol(tag), _)) => Some(tag.as_str()),
-        _ => None,
-    }
+fn get_tag(list: &List) -> Option<DeepTag> {
+    list.tag()
 }
 
 fn children(list: &List) -> &[Expr] {
@@ -1014,10 +1029,12 @@ fn symbol_name(expr: &Expr) -> Option<&str> {
 fn int_literal(expr: &Expr) -> Option<i64> {
     match expr {
         Expr::Atom(Atom::Int(value), _) => Some(*value),
-        Expr::List(list, _) if get_tag(list) == Some("lit") => match children(list).first() {
-            Some(Expr::Atom(Atom::Int(value), _)) => Some(*value),
-            _ => None,
-        },
+        Expr::List(list, _) if get_tag(list) == Some(DeepTag::Lit) => {
+            match children(list).first() {
+                Some(Expr::Atom(Atom::Int(value), _)) => Some(*value),
+                _ => None,
+            }
+        }
         _ => None,
     }
 }
@@ -1025,10 +1042,12 @@ fn int_literal(expr: &Expr) -> Option<i64> {
 fn string_literal(expr: &Expr) -> Option<&str> {
     match expr {
         Expr::Atom(Atom::Str(value), _) => Some(value.as_str()),
-        Expr::List(list, _) if get_tag(list) == Some("lit") => match children(list).first() {
-            Some(Expr::Atom(Atom::Str(value), _)) => Some(value.as_str()),
-            _ => None,
-        },
+        Expr::List(list, _) if get_tag(list) == Some(DeepTag::Lit) => {
+            match children(list).first() {
+                Some(Expr::Atom(Atom::Str(value), _)) => Some(value.as_str()),
+                _ => None,
+            }
+        }
         _ => None,
     }
 }

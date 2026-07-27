@@ -1,7 +1,12 @@
 # Checker Totality: every construct is checked or loudly rejected
 
-**Status:** Phase 2 implemented; Phase 3 (`DeepTag`) remains open. Tracking
-issue: [#731].
+**Status:** Phases 2 and 3 implemented. Phase 3 first shipped `DeepTag` as
+derive-on-demand dispatch and was red-teamed in that form (round-1
+QUALIFIED PASS with findings folded, round-2 PASS); a maintainer directive
+then superseded that record with the decode-once REWORK now in the tree
+(the parser stamps `Atom::Tag`, the tag string does not exist in memory,
+and the [#858]/[#859] discoveries are fixed rather than deferred). The
+rework's fresh-context red-team round is pending. Tracking issue: [#731].
 **Owning specs:** `spec/03-deep-syntax.md` (the 62-tag closed vocabulary),
 `spec/04-type-system.md` (what "checked" means per construct; its §10
 carries this plan's decided contract as current blockquote authorities
@@ -51,7 +56,18 @@ Whether the parsed node carries the enum alongside its validated string
 implementation choice; the typed-vocabulary pattern from [#730] Phase 2
 (PR #799), a single declaration whose exhaustive typed consumers turn a new
 variant into a compile-time work-list, is the same shape proven for
-`EffectKind`.
+`EffectKind`. Initially executed as derive-on-demand;
+SUPERSEDED at the 2026-07-24 maintainer rework by the stronger decode-once
+representation §C4.2 now mandates: the parser stamps `Atom::Tag(DeepTag)` at
+element 0, the tag string does not exist in the parsed tree, and every
+producer and consumer crosses the typed constructors/accessors. The enum
+lives in `chelis_deep::tag` (every chokepoint crate already depends on
+chelis-deep for the AST, and the parser that enforces the closed vocabulary
+lives there); `chelis_deep::validate::VALID_TAGS` is derived from
+`DeepTag::ALL` and the duplicated `chelis-validate` string copy is retired.
+The serialized `.dp` form is unchanged; the in-memory `Atom` gained the
+`Tag` variant, and the typecheck cache's envelope identity check absorbs the
+representation change by invalidation.
 
 ## Phase 2 architecture
 
@@ -359,14 +375,33 @@ The exact Deep grammar and binder rules are normative in spec/03 §2.5.1/§2.6.
    diagnosed - is not part of §C4.1. `DeepTag` exhaustiveness (Phase 3)
    does not close it either: an untagged list has no tag to be exhaustive
    over.
-2. **`DeepTag` enum at the chokepoints** (Phase 3): the parser already
-   validates strings against the closed vocabulary; it starts producing
-   `DeepTag` (string kept alongside for spans/printing). `infer_expr`,
-   `lower_expr`, and the `.dp` structural validators match the enum
-   **exhaustively - no `_` arm**. Tag 63 then stops the build
-   at every consumer that has not chosen a disposition. Raw-string entry
-   points (anything that never went through the parser) keep the §C1.2
-   loud arm.
+2. **`DeepTag` at the chokepoints is decode-once** (Phase 3, MANDATED at
+   the 2026-07-24 rework per [#730] §C4.2's doctrine: raw strings exist
+   only at serialization boundaries; decode once, then exhaust). The
+   parser stamps every vocabulary tag as `Atom::Tag(DeepTag)` at element
+   0 (including inside metadata map values, where canonical type syntax
+   lives), so after parsing the tag string DOES NOT EXIST in the
+   in-memory tree and no consumer can dispatch on it. Programmatic
+   producers (desugar, macros, the checker's own type-metadata builder,
+   the runtime transform synthesizers) construct `Atom::Tag` through
+   typed constructors. `List::tag()` is the only dispatch accessor;
+   `List::unknown_tag_symbol()` names non-vocabulary heads for
+   diagnostics and returns `None` for stamped nodes by construction.
+   `infer_expr`, `lower_expr`, the `.dp` structural validators, and every
+   migrated consumer match the enum **exhaustively - no `_` arm over the
+   vocabulary**; tag 63 stops the build at every consumer that has not
+   chosen a disposition. Printers and serializers regenerate the string
+   via `as_str()` at the boundary only; the serialized `.dp` form and the
+   wire schemas are unchanged. The permanent decode-once invariant
+   (`chelis_deep::validate::find_raw_vocabulary_tag`: no parsed or
+   desugared tree carries a vocabulary string at element 0) is a standing
+   suite member on both the parser and desugar sides. The recorded
+   raw-string entry points that legitimately keep symbol heads:
+   lenient-parsed unknown tags (spec/03 §8.3 fitness mode), the
+   compiler-internal pre-expansion tags (`defmacro`/`macro-invoke`), the
+   host-lane internal spellings (`vmap-grad`, the list literal, legacy
+   `ascribe`/`:`/`drop`), and the parser's own pre-stamp internals - each
+   guarded by a §C1.2 loud arm or an explicit recorded check.
 3. **The canary stays forever**: the wrapper battery is cheap, runs in the
    default suite, and is the behavioral proof the structural claims cash
    out. Every new wrapper construct SHALL add a positive and negative row in
@@ -610,6 +645,58 @@ second is what the wildcard was actively mis-describing.
    `DeepTag` exhaustiveness is proved by its typed consumers and mutation
    oracle; it does not depend on [#730]'s extracted source lint.
 
+**Delivered (2026-07-23).** `chelis_deep::tag::DeepTag` (62 variants,
+`parse`/`as_str`/`ALL`, unit tests pinning the set to spec/03 §2.10 by an
+independent in-test spelling); `chelis_deep::validate::VALID_TAGS` derived
+from `DeepTag::ALL`; exhaustive no-`_` dispatch at `infer_expr`
+(chelis-types), `lower_list` (chelis-ir, `lower_expr`'s tag dispatch), and
+both `.dp` structural validators (`chelis_deep::validate::validate_tag_shape`
+and `chelis-validate`'s pest-side `validate_tag_shape`, whose duplicated
+`VALID_TAGS` copy and drift test retire). Execution notes:
+
+- The 31 in-vocabulary tags with no expression-position inference case get
+  an explicit loud `UnknownForm` disposition in `infer_expr` whose message
+  names the tag and the real reason: "no expression-position checker
+  disposition (helper/pattern/type syntax outside its owning form, or an
+  expression form with no implemented case; ...)". All but one of the 31
+  are declaration internals, patterns, type/dimension syntax,
+  metaprogramming forms, or structural helpers whose checking belongs to an
+  owning enclosing form; the exception is `block`, a spec/03 §2.3
+  expression form with no implemented checker case (the spec-vs-checker
+  decision is [#859], surfaced by the PR #855 round-1 red team). Before
+  Phase 3 all 31 fell through the unknown-tag wildcard, whose message
+  wrongly claimed they were outside the vocabulary; this message-shape
+  correction is the one §C2 delta of the phase, recorded here per B1 with
+  the exact wording above (kind, severity, and the raw-string arm's
+  message are unchanged).
+  `crates/chelis-types/tests/issue_731_deeptag_dispatch.rs` is the
+  executable record of the 31/31 dispatch split.
+- `lower_list` is behavior-preserving: the formerly-fallthrough tags keep
+  the census-row-16 sequence-lowering disposition ([#730] §C1.4
+  keep-with-comment), now spelled per-tag, and the raw-string `None` arm
+  shares the same helper.
+- The §C1.2 loud arms survive exactly at the two raw-string boundaries:
+  `DeepTag::parse` returning `None` at a chokepoint (programmatic Deep
+  that never crossed the parser) and the validators' unknown-tag paths.
+
+**Reworked (2026-07-24, maintainer directive).** The derive-on-demand
+delivery above is superseded by decode-once (§C4.2's mandated form): the
+parser's `stamp_tags` pass converts every vocabulary tag to `Atom::Tag`
+(metadata map values included), typed constructors cover the desugarer,
+macro expander, checker type-metadata builder, and runtime transform
+synthesizers, and every tag-reading consumer across chelis-deep, -surf,
+-macros, -types, -pred, -ir, -effects, -compiler-api, -prove, -cli,
+-lint, -validate, and -e2e dispatches on the decoded enum (printers and
+the decompiler included; open question 3's deferral is REVERSED). The
+permanent decode-once invariant tests stand on the parser and desugar
+sides. In the same rework, [#858] is fixed (the top-level untagged-list
+silent skip is loud, the fitness clean path reports the checked
+counters, both `.dp` validator surfaces reject the input class, and the
+repro joined the §C4.4 corpus with both polarities) and [#859] is fixed
+(`block` is implemented end-to-end - checker, DAG lowering, host eval,
+dual eval, and C host emission - with both polarities and a
+check/eval/build pipeline test; the expression dispatch split is 32/30).
+
 **Frozen at your exit:** the variant set = the vocabulary, changing only
 per B1's one-change-set rule.
 
@@ -658,7 +745,7 @@ the scratch variant deleted); the canary and full matrix stay green.
 |---|---|---|---|
 | 1 | `handle-effect`'s checked signature details | DECIDED 2026-07-17 (revised same day, explicit over implicit: this code is agent-written, so there is no ergonomic case for contextual binding). Phase 1 checks FORM, [#735] authors meaning. Seed = an EXPLICITLY int64-suffixed integer literal (`42i64`, spec/02 §P10a); an unsuffixed literal is a type error whose diagnostic names the requirement and the suffix spelling; non-literal seed expressions are rejected, diagnostic citing §P5's shipped constraint and [#735]. Device = a string literal; the checker validates literal-ness only, never the device-name vocabulary (target knowledge, [#735]'s territory). No spec/02 §P10 change needed - the width is visible in the source itself. Existing `with seed(n)` fixtures/examples migrate to the suffixed form in P1's change set (Public-Surface Change Rule) | §C1.5 + spec/04 effect section |
 | 2 | typecheck-cache deserialization as a witness mint (accepted, or cache entries re-validated?) | Phase 2 | §C3 note + the cache module doc |
-| 3 | whether printers/desugar also migrate to `DeepTag` (nice-to-have; they are not chokepoints) | Phase 3, may defer | this doc |
+| 3 | whether printers/desugar also migrate to `DeepTag` (nice-to-have; they are not chokepoints) | DECIDED 2026-07-23: deferred; REVERSED 2026-07-24 by the decode-once rework directive - printers, desugar, and every other producer/consumer migrated; no string-keyed tag idiom survives outside the parse/serialize boundary | this doc |
 | 4 | score semantics for `UnknownForm`/`MalformedForm` | DECIDED 2026-07-17: severity parity with `TypeMismatch` (the existing 0.5-class precedent), no new weight class. The invariant that matters - any pushed error forces score < 1.0 - is locked by §C4.4's corpus independently of the weights, so calibration can move later without touching it | scoring code + this doc |
 
 ## Contract summary

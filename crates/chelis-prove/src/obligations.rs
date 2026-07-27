@@ -17,6 +17,7 @@
 //! parameter), is an ERROR naming the producer and channel — never a
 //! silent skip, since one uncovered producer collapses D-SOUND.
 
+use chelis_deep::DeepTag;
 use std::collections::{BTreeMap, BTreeSet};
 
 use chelis_deep::ast::{Atom, Expr};
@@ -107,13 +108,10 @@ pub struct ObligationCollection {
 // Deep helpers (module / export discovery)
 // ===========================================================================
 
-fn tag(expr: &Expr) -> Option<&str> {
-    if let Expr::List(list, _) = expr
-        && let Some(Expr::Atom(Atom::Symbol(s), _)) = list.elements.first()
-    {
-        Some(s.as_str())
-    } else {
-        None
+fn tag(expr: &Expr) -> Option<DeepTag> {
+    match expr {
+        Expr::List(list, _) => list.tag(),
+        _ => None,
     }
 }
 
@@ -147,7 +145,7 @@ pub fn collect_exports(exprs: &[Expr]) -> BTreeSet<String> {
 
 fn collect_exports_in(exprs: &[Expr], out: &mut BTreeSet<String>) {
     for expr in exprs {
-        if tag(expr) == Some("export") {
+        if tag(expr) == Some(DeepTag::Export) {
             for child in children(expr) {
                 if let Some(name) = symbol_text(child) {
                     out.insert(name.to_string());
@@ -164,7 +162,7 @@ fn collect_exports_in(exprs: &[Expr], out: &mut BTreeSet<String>) {
 /// `(def {} name <value>)`), vs sig-only `(defsig {} name <type>)`.
 fn collect_def_bodies(exprs: &[Expr], with_body: &mut BTreeSet<String>) {
     for expr in exprs {
-        if tag(expr) == Some("def")
+        if tag(expr) == Some(DeepTag::Def)
             && let Some(name) = children(expr).first().and_then(symbol_text)
         {
             with_body.insert(name.to_string());
@@ -197,7 +195,7 @@ fn collect_declared_returns_in(
     out: &mut std::collections::BTreeMap<String, Type>,
 ) {
     for expr in exprs {
-        if tag(expr) == Some("defsig")
+        if tag(expr) == Some(DeepTag::Defsig)
             && let Some(name) = children(expr).first().and_then(symbol_text)
             && let Some(ty_node) = children(expr).get(1)
             && let Some(Type::Fn(_, ret)) = type_from_deep(ty_node, aliases)
@@ -240,12 +238,12 @@ fn type_from_deep_depth(ty: &Expr, aliases: &BTreeMap<String, Expr>, depth: usiz
         return Some(Type::Unit);
     }
     match tag(ty)? {
-        "t-prim" => {
+        DeepTag::TPrim => {
             // The producer-set logic only matches ADT names; map prims to
             // a placeholder that never matches an opaque type name.
             Some(Type::Unit)
         }
-        "t-adt" => {
+        DeepTag::TAdt => {
             let kids = children(ty);
             let name = symbol_text(kids.first()?)?.to_string();
             // Resolve a bare (no-arg) alias to its target type. Aliases of
@@ -265,7 +263,7 @@ fn type_from_deep_depth(ty: &Expr, aliases: &BTreeMap<String, Expr>, depth: usiz
                 .collect();
             Some(Type::Adt(name, args))
         }
-        "t-fn" => {
+        DeepTag::TFn => {
             let kids = children(ty);
             if kids.len() < 2 {
                 return None;
@@ -277,14 +275,14 @@ fn type_from_deep_depth(ty: &Expr, aliases: &BTreeMap<String, Expr>, depth: usiz
                 .collect();
             Some(Type::Fn(args, Box::new(ret)))
         }
-        "t-tuple" => {
+        DeepTag::TTuple => {
             let items = children(ty)
                 .iter()
                 .map(|a| type_from_deep_depth(a, aliases, depth + 1).unwrap_or(Type::Unit))
                 .collect();
             Some(Type::Tuple(items))
         }
-        "t-ref" => {
+        DeepTag::TRef => {
             // A borrow `&T`: recurse into the inner type so a borrow of (or
             // containing) the opaque type is reachable by type_contains
             // (CR-14). A record field `inner: &T` was otherwise mapped to
@@ -311,7 +309,7 @@ pub fn collect_type_aliases(exprs: &[Expr]) -> BTreeMap<String, Expr> {
 
 fn collect_type_aliases_in(exprs: &[Expr], out: &mut BTreeMap<String, Expr>) {
     for expr in exprs {
-        if tag(expr) == Some("typealias") {
+        if tag(expr) == Some(DeepTag::Typealias) {
             let kids = children(expr);
             // children: name, (params), target
             if let Some(name) = kids.first().and_then(symbol_text)
@@ -452,7 +450,7 @@ fn collect_record_fields_in(
     out: &mut BTreeMap<String, Vec<Type>>,
 ) {
     for expr in exprs {
-        if tag(expr) == Some("deftype") {
+        if tag(expr) == Some(DeepTag::Deftype) {
             // Skip opaque types: their fields are the sealed representation.
             let opaque = matches!(
                 meta_value(expr, "opaque"),
@@ -465,9 +463,12 @@ fn collect_record_fields_in(
                 // payload is either a named-record `field` node or a
                 // positional type child.
                 let mut field_types = Vec::new();
-                for variant in children(expr).iter().filter(|c| tag(c) == Some("variant")) {
+                for variant in children(expr)
+                    .iter()
+                    .filter(|c| tag(c) == Some(DeepTag::Variant))
+                {
                     for payload in children(variant).iter().skip(1) {
-                        let fty_node = if tag(payload) == Some("field") {
+                        let fty_node = if tag(payload) == Some(DeepTag::Field) {
                             children(payload).get(1)
                         } else {
                             // A positional payload: the child IS the type

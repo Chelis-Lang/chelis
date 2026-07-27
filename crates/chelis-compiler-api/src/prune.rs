@@ -31,6 +31,7 @@
 //! at the type checker. Pruning never hides a real error in the target's own
 //! dependencies; it only removes defs the target does not transitively use.
 
+use chelis_deep::DeepTag;
 use chelis_deep::{Atom as DeepAtom, Expr as DeepExpr};
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -53,7 +54,7 @@ const MODULE_DECL_OFFSET: usize = 3;
 /// path it would without pruning, rather than silently emptying the program).
 pub fn prune_to_entry(exprs: Vec<DeepExpr>, entry: &str) -> Vec<DeepExpr> {
     if let [DeepExpr::List(list, _)] = exprs.as_slice()
-        && list_tag(list) == Some("module")
+        && list_tag(list) == Some(DeepTag::Module)
     {
         // Descend into the single module node: prune its children, keep the
         // wrapper and its non-decl elements (name, import, export).
@@ -144,11 +145,10 @@ pub fn deep_def_name(expr: &DeepExpr) -> Option<&str> {
     let DeepExpr::List(list, _) = expr else {
         return None;
     };
-    match (list.elements.first(), list.elements.get(2)) {
-        (
-            Some(DeepExpr::Atom(DeepAtom::Symbol(tag), _)),
-            Some(DeepExpr::Atom(DeepAtom::Symbol(name), _)),
-        ) if tag == "def" => Some(name.as_str()),
+    match (list.tag(), list.elements.get(2)) {
+        (Some(DeepTag::Def), Some(DeepExpr::Atom(DeepAtom::Symbol(name), _))) => {
+            Some(name.as_str())
+        }
         _ => None,
     }
 }
@@ -160,11 +160,10 @@ pub fn deep_named_decl_name(expr: &DeepExpr) -> Option<&str> {
     let DeepExpr::List(list, _) = expr else {
         return None;
     };
-    match (list.elements.first(), list.elements.get(2)) {
-        (
-            Some(DeepExpr::Atom(DeepAtom::Symbol(tag), _)),
-            Some(DeepExpr::Atom(DeepAtom::Symbol(name), _)),
-        ) if tag == "def" || tag == "defsig" => Some(name.as_str()),
+    match (list.tag(), list.elements.get(2)) {
+        (Some(DeepTag::Def | DeepTag::Defsig), Some(DeepExpr::Atom(DeepAtom::Symbol(name), _))) => {
+            Some(name.as_str())
+        }
         _ => None,
     }
 }
@@ -187,11 +186,8 @@ fn collect_deep_referenced_vars<'a>(expr: &'a DeepExpr, out: &mut Vec<&'a str>) 
             }
         }
         DeepExpr::List(list, _) => {
-            if let (
-                Some(DeepExpr::Atom(DeepAtom::Symbol(tag), _)),
-                Some(DeepExpr::Atom(DeepAtom::Symbol(name), _)),
-            ) = (list.elements.first(), list.elements.get(2))
-                && tag == "var"
+            if let (Some(DeepTag::Var), Some(DeepExpr::Atom(DeepAtom::Symbol(name), _))) =
+                (list.tag(), list.elements.get(2))
             {
                 out.push(name.as_str());
             }
@@ -202,11 +198,8 @@ fn collect_deep_referenced_vars<'a>(expr: &'a DeepExpr, out: &mut Vec<&'a str>) 
     }
 }
 
-fn list_tag(list: &chelis_deep::List) -> Option<&str> {
-    match list.elements.first() {
-        Some(DeepExpr::Atom(DeepAtom::Symbol(tag), _)) => Some(tag.as_str()),
-        _ => None,
-    }
+fn list_tag(list: &chelis_deep::List) -> Option<DeepTag> {
+    list.tag()
 }
 
 #[cfg(test)]

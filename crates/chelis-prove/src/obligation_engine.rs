@@ -11,6 +11,7 @@
 //! through tide is identical to the CLI on the same module (the parity
 //! the cross-surface test locks).
 
+use chelis_deep::DeepTag;
 use std::collections::BTreeMap;
 
 use chelis_compiler_api::schema::{EvalRequest, ExecutionValue, SourceKind};
@@ -1453,11 +1454,11 @@ fn resolve_module_constants(exprs: &[Expr], invariants: &[OpaqueInvariant]) -> C
 fn module_zero_arg_scalar_defs(exprs: &[Expr]) -> Vec<String> {
     fn walk(exprs: &[Expr], out: &mut Vec<String>) {
         for expr in exprs {
-            if list_tag(expr) == Some("def")
+            if list_tag(expr) == Some(DeepTag::Def)
                 && let Some(name) = node_children(expr).first().and_then(sym_text)
                 && let Some(body) = node_children(expr).get(1)
             {
-                let is_zero_arg = if list_tag(body) == Some("fn") {
+                let is_zero_arg = if list_tag(body) == Some(DeepTag::Fn) {
                     // A fn with an empty params node.
                     node_children(body)
                         .first()
@@ -1535,7 +1536,7 @@ fn literal_const_value(exprs: &[Expr], name: &str) -> Option<f64> {
             Expr::Atom(Atom::Float(v), _) => Some(*v),
             Expr::Atom(Atom::Int(v), _) => Some(*v as f64),
             _ => {
-                if list_tag(expr) == Some("lit") {
+                if list_tag(expr) == Some(DeepTag::Lit) {
                     match node_children(expr).first() {
                         Some(Expr::Atom(Atom::Float(v), _)) => Some(*v),
                         Some(Expr::Atom(Atom::Int(v), _)) => Some(*v as f64),
@@ -1549,7 +1550,7 @@ fn literal_const_value(exprs: &[Expr], name: &str) -> Option<f64> {
     }
     fn find(exprs: &[Expr], name: &str) -> Option<f64> {
         for expr in exprs {
-            if list_tag(expr) == Some("def")
+            if list_tag(expr) == Some(DeepTag::Def)
                 && node_children(expr).first().and_then(sym_text) == Some(name)
                 && let Some(body) = node_children(expr).get(1)
             {
@@ -1558,7 +1559,7 @@ fn literal_const_value(exprs: &[Expr], name: &str) -> Option<f64> {
                     return Some(v);
                 }
                 // Zero-arg constant fn: `(fn (params) <lit>)`.
-                if list_tag(body) == Some("fn") {
+                if list_tag(body) == Some(DeepTag::Fn) {
                     let kids = node_children(body);
                     if kids
                         .first()
@@ -1588,7 +1589,7 @@ fn inject_const_probe(exprs: &[Expr], def: Expr) -> Vec<Expr> {
     let mut injected = false;
     for expr in exprs {
         if !injected
-            && list_tag(expr) == Some("module")
+            && list_tag(expr) == Some(DeepTag::Module)
             && let Expr::List(l, span) = expr
         {
             let mut elements = l.elements.clone();
@@ -1633,7 +1634,7 @@ fn eval_constant_obligation(
 /// top level.
 fn inject_into_defining_module(exprs: &[Expr], type_name: &str, new_defs: Vec<Expr>) -> Vec<Expr> {
     fn module_defines(expr: &Expr, type_name: &str) -> bool {
-        if list_tag(expr) == Some("deftype")
+        if list_tag(expr) == Some(DeepTag::Deftype)
             && node_children(expr).first().and_then(sym_text) == Some(type_name)
         {
             return true;
@@ -1647,7 +1648,7 @@ fn inject_into_defining_module(exprs: &[Expr], type_name: &str, new_defs: Vec<Ex
     let mut injected = false;
     for expr in exprs {
         if !injected
-            && list_tag(expr) == Some("module")
+            && list_tag(expr) == Some(DeepTag::Module)
             && module_defines(expr, type_name)
             && let Expr::List(l, span) = expr
         {
@@ -1951,7 +1952,7 @@ fn strip_invariant_meta(expr: &Expr) -> Expr {
     match expr {
         Expr::List(list, span) => {
             let mut elements: Vec<Expr> = list.elements.iter().map(strip_invariant_meta).collect();
-            if list.elements.first().and_then(sym_text) == Some("deftype")
+            if list.tag() == Some(DeepTag::Deftype)
                 && let Some(Expr::Map(map, mspan)) = elements.get(1)
             {
                 let kept: Vec<(String, Expr)> = map
@@ -1987,11 +1988,11 @@ fn scalar_lit(prim: &str, v: f64) -> Expr {
 fn producer_param_names(exprs: &[Expr], producer: &str) -> Vec<String> {
     fn find(exprs: &[Expr], producer: &str) -> Option<Vec<String>> {
         for expr in exprs {
-            if list_tag(expr) == Some("def")
+            if list_tag(expr) == Some(DeepTag::Def)
                 && let Some(name) = node_children(expr).first().and_then(sym_text)
                 && name == producer
                 && let Some(fn_node) = node_children(expr).get(1)
-                && list_tag(fn_node) == Some("fn")
+                && list_tag(fn_node) == Some(DeepTag::Fn)
                 && let Some(params) = node_children(fn_node).first()
             {
                 let mut out = Vec::new();
@@ -2082,9 +2083,9 @@ fn deep_int_lit_for(v: i64, prim: &str) -> Expr {
 fn deep_bool_lit(v: bool) -> Expr {
     deep_typed_lit("bool", Expr::Atom(Atom::Bool(v), Span::new(0, 0)))
 }
-fn list_tag(expr: &Expr) -> Option<&str> {
+fn list_tag(expr: &Expr) -> Option<DeepTag> {
     match expr {
-        Expr::List(l, _) => l.elements.first().and_then(sym_text),
+        Expr::List(list, _) => list.tag(),
         _ => None,
     }
 }

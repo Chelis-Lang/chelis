@@ -12,6 +12,7 @@ pub mod parser;
 pub mod path;
 pub mod printer;
 pub mod span;
+pub mod tag;
 pub mod validate;
 
 pub use ast::{Atom, Expr, List, MetaExpr, MetaMap};
@@ -23,3 +24,4 @@ pub use path::{
     module_has_defsig_for, resolve_function, splice_function_body, spliced_function_def,
 };
 pub use span::Span;
+pub use tag::DeepTag;

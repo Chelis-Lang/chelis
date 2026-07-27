@@ -16,6 +16,7 @@
 //! test locks). This mirrors [`crate::obligation_engine`], which already
 //! shares the derived-obligation run across the two surfaces.
 
+use chelis_deep::DeepTag;
 use std::{cell::RefCell, collections::BTreeMap};
 
 use chelis_compiler_api::schema::{EvalRequest, ExecutionValue, SourceKind, TensorValue};
@@ -2056,7 +2057,7 @@ fn discover_deep_properties_expr(
     let DeepExpr::List(list, _) = expr else {
         return Ok(());
     };
-    if list_tag(expr) == Some("def")
+    if list_tag(expr) == Some(DeepTag::Def)
         && let Some(name) = list.elements.get(2).and_then(symbol_text)
         && let Some(meta) = list.elements.get(1).and_then(meta_map)
     {
@@ -2546,7 +2547,7 @@ fn deep_int_meta(meta: &MetaMap, key: &str) -> Option<usize> {
 fn deep_int_value(expr: &DeepExpr) -> Option<i64> {
     match expr {
         DeepExpr::Atom(DeepAtom::Int(value), _) => Some(*value),
-        DeepExpr::List(list, _) if list_tag_from_list(list) == Some("lit") => {
+        DeepExpr::List(list, _) if list_tag_from_list(list) == Some(DeepTag::Lit) => {
             match list.elements.get(2) {
                 Some(DeepExpr::Atom(DeepAtom::Int(value), _)) => Some(*value),
                 _ => None,
@@ -2560,7 +2561,7 @@ fn deep_property_params(meta: &MetaMap) -> Option<Vec<Param>> {
     let DeepExpr::List(list, _) = deep_meta_value(meta, "property_quantifiers")? else {
         return None;
     };
-    if list_tag_from_list(list) != Some("params") {
+    if list_tag_from_list(list) != Some(DeepTag::Params) {
         return None;
     }
     let mut params = Vec::new();
@@ -2590,7 +2591,7 @@ fn deep_property_preconditions(meta: &MetaMap) -> Option<Vec<DeepExpr>> {
     let DeepExpr::List(list, _) = deep_meta_value(meta, "property_preconditions")? else {
         return None;
     };
-    if list_tag_from_list(list) != Some("tuple") {
+    if list_tag_from_list(list) != Some(DeepTag::Tuple) {
         return None;
     }
     Some(list.elements.iter().skip(2).cloned().collect())
@@ -2601,18 +2602,18 @@ fn type_expr_from_deep(expr: &DeepExpr) -> Option<TypeExpr> {
         return None;
     };
     match list_tag_from_list(list)? {
-        "t-prim" => list
+        DeepTag::TPrim => list
             .elements
             .get(2)
             .and_then(symbol_text)
             .map(|name| TypeExpr::Named(name.to_string(), *span)),
-        "t-tensor" => {
+        DeepTag::TTensor => {
             let children = list.elements.iter().skip(2).collect::<Vec<_>>();
             let precision = children.last().and_then(|expr| {
                 let DeepExpr::List(prim, _) = expr else {
                     return None;
                 };
-                (list_tag_from_list(prim) == Some("t-prim"))
+                (list_tag_from_list(prim) == Some(DeepTag::TPrim))
                     .then(|| prim.elements.get(2).and_then(symbol_text))
                     .flatten()
             })?;
@@ -2621,7 +2622,7 @@ fn type_expr_from_deep(expr: &DeepExpr) -> Option<TypeExpr> {
                 .take(children.len().saturating_sub(1))
                 .map(|dim| match dim {
                     DeepExpr::List(dim_list, dim_span)
-                        if list_tag_from_list(dim_list) == Some("d-lit") =>
+                        if list_tag_from_list(dim_list) == Some(DeepTag::DLit) =>
                     {
                         dim_list.elements.get(2).and_then(|value| match value {
                             DeepExpr::Atom(DeepAtom::Int(value), _) => {
@@ -2631,7 +2632,7 @@ fn type_expr_from_deep(expr: &DeepExpr) -> Option<TypeExpr> {
                         })
                     }
                     DeepExpr::List(dim_list, dim_span)
-                        if list_tag_from_list(dim_list) == Some("d-name") =>
+                        if list_tag_from_list(dim_list) == Some(DeepTag::DName) =>
                     {
                         dim_list
                             .elements
@@ -2652,7 +2653,7 @@ fn deep_fn_body(expr: &DeepExpr) -> Option<&DeepExpr> {
     let DeepExpr::List(list, _) = expr else {
         return None;
     };
-    if list_tag_from_list(list) != Some("fn") {
+    if list_tag_from_list(list) != Some(DeepTag::Fn) {
         return None;
     }
     list.elements.get(3)
@@ -2662,13 +2663,13 @@ fn deep_fn_params(expr: &DeepExpr) -> Option<Vec<Param>> {
     let DeepExpr::List(list, _) = expr else {
         return None;
     };
-    if list_tag_from_list(list) != Some("fn") {
+    if list_tag_from_list(list) != Some(DeepTag::Fn) {
         return None;
     }
     let DeepExpr::List(params, _) = list.elements.get(2)? else {
         return None;
     };
-    if list_tag_from_list(params) != Some("params") {
+    if list_tag_from_list(params) != Some(DeepTag::Params) {
         return None;
     }
     let mut out = Vec::new();
@@ -2779,14 +2780,14 @@ fn deep_lit(value: DeepExpr, ty_name: &str) -> DeepExpr {
     )
 }
 
-fn list_tag(expr: &DeepExpr) -> Option<&str> {
+fn list_tag(expr: &DeepExpr) -> Option<DeepTag> {
     match expr {
         DeepExpr::List(list, _) => list_tag_from_list(list),
         _ => None,
     }
 }
-fn list_tag_from_list(list: &DeepList) -> Option<&str> {
-    list.elements.first().and_then(symbol_text)
+fn list_tag_from_list(list: &DeepList) -> Option<DeepTag> {
+    list.tag()
 }
 fn symbol_text(expr: &DeepExpr) -> Option<&str> {
     match expr {

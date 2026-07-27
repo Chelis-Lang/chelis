@@ -31,6 +31,7 @@
 //! the result through their own borrow-arg classifiers, but the shape
 //! recognition lives here so future sweeps stay aligned.
 
+use chelis_deep::DeepTag;
 use chelis_deep::ast::{Atom, Expr, List};
 
 /// Resolve the effective callee of a pipe stage and the arg position
@@ -67,7 +68,7 @@ fn pipe_lambda_callee_and_pipe_arg_index(stage: &Expr) -> Option<(&Expr, usize)>
     let Expr::List(list, _) = stage else {
         return None;
     };
-    if get_tag(list) != Some("fn") {
+    if get_tag(list) != Some(DeepTag::Fn) {
         return None;
     }
     let kids = children(list);
@@ -77,7 +78,7 @@ fn pipe_lambda_callee_and_pipe_arg_index(stage: &Expr) -> Option<(&Expr, usize)>
     let Expr::List(body_list, _) = body else {
         return None;
     };
-    if get_tag(body_list) != Some("app") {
+    if get_tag(body_list) != Some(DeepTag::App) {
         return None;
     }
     let app_kids = children(body_list);
@@ -98,7 +99,7 @@ fn sole_pipe_param_name(params: &Expr) -> Option<&str> {
     let Expr::List(list, _) = params else {
         return None;
     };
-    if get_tag(list) != Some("params") {
+    if get_tag(list) != Some(DeepTag::Params) {
         return None;
     }
     let kids = children(list);
@@ -113,11 +114,8 @@ fn sole_pipe_param_name(params: &Expr) -> Option<&str> {
     }
 }
 
-fn get_tag(list: &List) -> Option<&str> {
-    match list.elements.first() {
-        Some(Expr::Atom(Atom::Symbol(tag), _)) => Some(tag.as_str()),
-        _ => None,
-    }
+fn get_tag(list: &List) -> Option<DeepTag> {
+    list.tag()
 }
 
 fn children(list: &List) -> &[Expr] {
@@ -139,7 +137,7 @@ fn var_name(expr: &Expr) -> Option<&str> {
     let Expr::List(list, _) = expr else {
         return None;
     };
-    if get_tag(list) != Some("var") {
+    if get_tag(list) != Some(DeepTag::Var) {
         return None;
     }
     children(list).first().and_then(symbol_name)

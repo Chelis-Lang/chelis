@@ -7,6 +7,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::tag::DeepTag;
 use crate::{
     Atom, DeepPath, Expr, List, PathSegment, ResolveError, function_body, printer, resolve_function,
 };
@@ -115,7 +116,7 @@ pub fn outline(module_exprs: &[Expr]) -> Result<ModuleOutline, AuthoringError> {
         .iter()
         .skip(MODULE_DECLS_START)
         .filter_map(|decl| {
-            let def = tagged_list(decl, "def")?;
+            let def = tagged_list(decl, DeepTag::Def)?;
             if !def_is_function(def) {
                 return None;
             }
@@ -149,7 +150,7 @@ pub fn references(module_exprs: &[Expr], symbol: &str) -> Result<References, Aut
     let mut references = Vec::new();
 
     for decl in module.elements.iter().skip(MODULE_DECLS_START) {
-        let Some(def) = tagged_list(decl, "def") else {
+        let Some(def) = tagged_list(decl, DeepTag::Def) else {
             continue;
         };
         if !def_is_function(def) {
@@ -198,7 +199,7 @@ pub fn call_graph(module_exprs: &[Expr]) -> Result<CallGraph, AuthoringError> {
     let mut edges = Vec::new();
 
     for decl in module.elements.iter().skip(MODULE_DECLS_START) {
-        let Some(def) = tagged_list(decl, "def") else {
+        let Some(def) = tagged_list(decl, DeepTag::Def) else {
             continue;
         };
         if !def_is_function(def) {
@@ -259,11 +260,11 @@ pub fn rename_function(
     let module_name = module_name(module).unwrap_or_default().to_string();
 
     for decl in module.elements.iter_mut().skip(MODULE_DECLS_START) {
-        if let Some(list) = tagged_list_mut(decl, "def") {
+        if let Some(list) = tagged_list_mut(decl, DeepTag::Def) {
             if decl_name(list) == Some(old_name.as_str()) {
                 set_decl_name(list, new_name);
             }
-        } else if let Some(list) = tagged_list_mut(decl, "defsig")
+        } else if let Some(list) = tagged_list_mut(decl, DeepTag::Defsig)
             && decl_name(list) == Some(old_name.as_str())
         {
             set_decl_name(list, new_name);
@@ -273,7 +274,7 @@ pub fn rename_function(
 
     let mut renamed_references = 0;
     for decl in module.elements.iter_mut().skip(MODULE_DECLS_START) {
-        let Some(def) = tagged_list_mut(decl, "def") else {
+        let Some(def) = tagged_list_mut(decl, DeepTag::Def) else {
             continue;
         };
         if !def_is_function(def) {
@@ -332,12 +333,12 @@ pub fn replace_function(
     let mut def_index = None;
     let mut defsig_indices = Vec::new();
     for (index, decl) in module.elements.iter().enumerate().skip(decls_start) {
-        if let Some(list) = tagged_list(decl, "def")
+        if let Some(list) = tagged_list(decl, DeepTag::Def)
             && decl_name(list) == Some(old_name.as_str())
         {
             def_index = Some(index);
         }
-        if let Some(list) = tagged_list(decl, "defsig")
+        if let Some(list) = tagged_list(decl, DeepTag::Defsig)
             && decl_name(list) == Some(old_name.as_str())
         {
             defsig_indices.push(index);
@@ -395,7 +396,7 @@ pub fn change_signature(
     let mut rewritten_calls = 0;
 
     for decl in module.elements.iter_mut().skip(MODULE_DECLS_START) {
-        if let Some(list) = tagged_list(decl, "defsig")
+        if let Some(list) = tagged_list(decl, DeepTag::Defsig)
             && decl_name(list) == Some(target_name.as_str())
         {
             *decl = new_defsig.clone();
@@ -403,7 +404,7 @@ pub fn change_signature(
             continue;
         }
 
-        let is_target_def = tagged_list(decl, "def")
+        let is_target_def = tagged_list(decl, DeepTag::Def)
             .and_then(decl_name)
             .is_some_and(|name| name == target_name);
         if is_target_def {
@@ -423,7 +424,7 @@ pub fn change_signature(
     }
 
     for decl in module.elements.iter_mut().skip(MODULE_DECLS_START) {
-        let Some(def) = tagged_list_mut(decl, "def") else {
+        let Some(def) = tagged_list_mut(decl, DeepTag::Def) else {
             continue;
         };
         if !def_is_function(def) {
@@ -492,7 +493,7 @@ pub fn function_params(
     let def = module
         .elements
         .get(MODULE_DECLS_START + resolved.decl_index)
-        .and_then(|expr| tagged_list(expr, "def"))
+        .and_then(|expr| tagged_list(expr, DeepTag::Def))
         .ok_or_else(|| {
             AuthoringError::Resolve(ResolveError::FunctionNotFound {
                 searched: function_name.to_string(),
@@ -763,7 +764,7 @@ fn stale_direct_calls(
     let top_level_names = top_level_function_names(module);
     let mut stale = 0;
     for decl in module.elements.iter().skip(MODULE_DECLS_START) {
-        let Some(def) = tagged_list(decl, "def") else {
+        let Some(def) = tagged_list(decl, DeepTag::Def) else {
             continue;
         };
         if !def_is_function(def) {
@@ -851,7 +852,7 @@ where
     if let Some(meta) = list.elements.get(1) {
         f(meta, scope, format!("{path}.meta"));
     }
-    if tag == Some("fn") {
+    if tag == Some(DeepTag::Fn) {
         let added = list
             .elements
             .get(FN_PARAMS_INDEX)
@@ -864,7 +865,7 @@ where
         });
         return;
     }
-    if tag == Some("let") {
+    if tag == Some(DeepTag::Let) {
         if let Some(bind) = list.elements.get(2) {
             f(bind, scope, format!("{path}.0"));
             let added = bind_names(bind);
@@ -902,11 +903,11 @@ where
         Expr::List(list, _) => list,
         Expr::Atom(..) => return,
     };
-    let tag = list_tag(list).map(str::to_string);
+    let tag = list_tag(list);
     if let Some(meta) = list.elements.get_mut(1) {
         f(meta, scope);
     }
-    if tag.as_deref() == Some("fn") {
+    if tag == Some(DeepTag::Fn) {
         let added = list
             .elements
             .get(FN_PARAMS_INDEX)
@@ -919,7 +920,7 @@ where
         });
         return;
     }
-    if tag.as_deref() == Some("let") {
+    if tag == Some(DeepTag::Let) {
         let added = list.elements.get(2).map(bind_names).unwrap_or_default();
         if let Some(bind) = list.elements.get_mut(2) {
             f(bind, scope);
@@ -973,13 +974,13 @@ fn parse_function_bundle(
     let mut defsig = None;
     for expr in exprs {
         match expr_tag(expr) {
-            Some("def") => {
+            Some(DeepTag::Def) => {
                 if def.is_some() {
                     return Err(AuthoringError::InvalidDecl(
                         "function bundle contains more than one `(def ...)`".to_string(),
                     ));
                 }
-                let list = tagged_list(expr, "def").expect("tag checked");
+                let list = tagged_list(expr, DeepTag::Def).expect("tag checked");
                 let name = decl_name(list).ok_or_else(|| {
                     AuthoringError::InvalidDecl("new `(def ...)` has no name".to_string())
                 })?;
@@ -996,13 +997,13 @@ fn parse_function_bundle(
                 }
                 def = Some(expr.clone());
             }
-            Some("defsig") => {
+            Some(DeepTag::Defsig) => {
                 if defsig.is_some() {
                     return Err(AuthoringError::InvalidDecl(
                         "function bundle contains more than one `(defsig ...)`".to_string(),
                     ));
                 }
-                let list = tagged_list(expr, "defsig").expect("tag checked");
+                let list = tagged_list(expr, DeepTag::Defsig).expect("tag checked");
                 let name = decl_name(list).ok_or_else(|| {
                     AuthoringError::InvalidDecl("new `(defsig ...)` has no name".to_string())
                 })?;
@@ -1016,7 +1017,8 @@ fn parse_function_bundle(
             }
             Some(tag) => {
                 return Err(AuthoringError::InvalidDecl(format!(
-                    "function bundle cannot contain `({tag} ...)`"
+                    "function bundle cannot contain `({} ...)`",
+                    tag.as_str()
                 )));
             }
             None => {
@@ -1039,7 +1041,7 @@ fn parse_function_bundle(
 }
 
 fn validate_new_defsig(expr: &Expr, required_name: &str) -> Result<(), AuthoringError> {
-    let Some(list) = tagged_list(expr, "defsig") else {
+    let Some(list) = tagged_list(expr, DeepTag::Defsig) else {
         return Err(AuthoringError::InvalidDecl(
             "`new_defsig` must be one `(defsig ...)` expression".to_string(),
         ));
@@ -1053,7 +1055,7 @@ fn validate_new_defsig(expr: &Expr, required_name: &str) -> Result<(), Authoring
 }
 
 fn validate_params_node(expr: &Expr) -> Result<(), AuthoringError> {
-    if tagged_list(expr, "params").is_none() {
+    if tagged_list(expr, DeepTag::Params).is_none() {
         return Err(AuthoringError::InvalidDecl(
             "`new_params` must be one `(params ...)` expression".to_string(),
         ));
@@ -1097,7 +1099,7 @@ fn validate_new_symbol(name: &str) -> Result<(), AuthoringError> {
 }
 
 fn replace_def_params(def: &mut Expr, new_params: Expr) -> Result<(), AuthoringError> {
-    let Some(def_list) = tagged_list_mut(def, "def") else {
+    let Some(def_list) = tagged_list_mut(def, DeepTag::Def) else {
         return Err(AuthoringError::InvalidDecl(
             "target declaration is not a `(def ...)`".to_string(),
         ));
@@ -1107,7 +1109,7 @@ fn replace_def_params(def: &mut Expr, new_params: Expr) -> Result<(), AuthoringE
             "target `(def ...)` has no `(fn ...)` child".to_string(),
         ));
     };
-    if list_tag(fn_list) != Some("fn") {
+    if list_tag(fn_list) != Some(DeepTag::Fn) {
         return Err(AuthoringError::InvalidDecl(
             "target `(def ...)` has no `(fn ...)` child".to_string(),
         ));
@@ -1143,7 +1145,7 @@ fn find_function_defsig(module_exprs: &[Expr], function_name: &str) -> Option<Ex
         .iter()
         .skip(MODULE_DECLS_START)
         .find_map(|decl| {
-            let list = tagged_list(decl, "defsig")?;
+            let list = tagged_list(decl, DeepTag::Defsig)?;
             (decl_name(list) == Some(bare)).then(|| decl.clone())
         })
 }
@@ -1154,7 +1156,7 @@ fn top_level_function_names(module: &List) -> BTreeSet<String> {
         .iter()
         .skip(MODULE_DECLS_START)
         .filter_map(|decl| {
-            let def = tagged_list(decl, "def")?;
+            let def = tagged_list(decl, DeepTag::Def)?;
             def_is_function(def).then(|| decl_name(def).map(str::to_string))?
         })
         .collect()
@@ -1166,14 +1168,14 @@ fn defsig_map(module: &List) -> BTreeMap<String, Expr> {
         .iter()
         .skip(MODULE_DECLS_START)
         .filter_map(|decl| {
-            let list = tagged_list(decl, "defsig")?;
+            let list = tagged_list(decl, DeepTag::Defsig)?;
             Some((decl_name(list)?.to_string(), decl.clone()))
         })
         .collect()
 }
 
 fn export_names(expr: &Expr) -> Option<Vec<String>> {
-    let list = tagged_list(expr, "export")?;
+    let list = tagged_list(expr, DeepTag::Export)?;
     Some(
         list.elements
             .iter()
@@ -1185,7 +1187,7 @@ fn export_names(expr: &Expr) -> Option<Vec<String>> {
 }
 
 fn rename_export_symbol(expr: &mut Expr, old_name: &str, new_name: &str) {
-    let Some(list) = tagged_list_mut(expr, "export") else {
+    let Some(list) = tagged_list_mut(expr, DeepTag::Export) else {
         return;
     };
     for element in list.elements.iter_mut().skip(2) {
@@ -1217,7 +1219,7 @@ fn property_quantifier_names_from_def_list(def: &List) -> Vec<String> {
 }
 
 fn tagged_fn_params(expr: &Expr) -> Option<Vec<String>> {
-    let fn_list = tagged_list(expr, "fn")?;
+    let fn_list = tagged_list(expr, DeepTag::Fn)?;
     fn_list
         .elements
         .get(FN_PARAMS_INDEX)
@@ -1225,7 +1227,7 @@ fn tagged_fn_params(expr: &Expr) -> Option<Vec<String>> {
 }
 
 fn params_node_names(expr: &Expr) -> Option<Vec<String>> {
-    let params = tagged_list(expr, "params")?;
+    let params = tagged_list(expr, DeepTag::Params)?;
     Some(
         params
             .elements
@@ -1238,7 +1240,7 @@ fn params_node_names(expr: &Expr) -> Option<Vec<String>> {
 }
 
 fn bind_names(expr: &Expr) -> Vec<String> {
-    let Some(bind) = tagged_list(expr, "bind") else {
+    let Some(bind) = tagged_list(expr, DeepTag::Bind) else {
         return Vec::new();
     };
     bind.elements
@@ -1258,33 +1260,33 @@ fn param_name(expr: &Expr) -> Option<&str> {
 }
 
 fn function_body_mut_expr(def: &mut Expr) -> Option<&mut Expr> {
-    let def_list = tagged_list_mut(def, "def")?;
+    let def_list = tagged_list_mut(def, DeepTag::Def)?;
     let Expr::List(fn_list, _) = def_list.elements.get_mut(DEF_VALUE_INDEX)? else {
         return None;
     };
-    if list_tag(fn_list) != Some("fn") {
+    if list_tag(fn_list) != Some(DeepTag::Fn) {
         return None;
     }
     fn_list.elements.get_mut(3)
 }
 
 fn app_name_and_args(expr: &Expr) -> Option<(&str, &[Expr])> {
-    let list = tagged_list(expr, "app")?;
+    let list = tagged_list(expr, DeepTag::App)?;
     let callee = list.elements.get(2).and_then(var_name)?;
     Some((callee, &list.elements[3..]))
 }
 
 fn app_list_mut(expr: &mut Expr) -> Option<&mut List> {
-    tagged_list_mut(expr, "app")
+    tagged_list_mut(expr, DeepTag::App)
 }
 
 fn var_name(expr: &Expr) -> Option<&str> {
-    let list = tagged_list(expr, "var")?;
+    let list = tagged_list(expr, DeepTag::Var)?;
     list.elements.get(2).and_then(symbol)
 }
 
 fn var_name_mut(expr: &mut Expr) -> Option<&mut String> {
-    let list = tagged_list_mut(expr, "var")?;
+    let list = tagged_list_mut(expr, DeepTag::Var)?;
     match list.elements.get_mut(2)? {
         Expr::Atom(Atom::Symbol(name), _) => Some(name),
         _ => None,
@@ -1294,7 +1296,7 @@ fn var_name_mut(expr: &mut Expr) -> Option<&mut String> {
 fn single_module(exprs: &[Expr]) -> Result<&List, AuthoringError> {
     let modules: Vec<&List> = exprs
         .iter()
-        .filter_map(|expr| tagged_list(expr, "module"))
+        .filter_map(|expr| tagged_list(expr, DeepTag::Module))
         .collect();
     match modules.as_slice() {
         [] => Err(AuthoringError::NoModule),
@@ -1306,7 +1308,7 @@ fn single_module(exprs: &[Expr]) -> Result<&List, AuthoringError> {
 fn single_module_mut(exprs: &mut [Expr]) -> Result<&mut List, AuthoringError> {
     let count = exprs
         .iter()
-        .filter(|expr| tagged_list(expr, "module").is_some())
+        .filter(|expr| tagged_list(expr, DeepTag::Module).is_some())
         .count();
     if count == 0 {
         return Err(AuthoringError::NoModule);
@@ -1316,20 +1318,20 @@ fn single_module_mut(exprs: &mut [Expr]) -> Result<&mut List, AuthoringError> {
     }
     exprs
         .iter_mut()
-        .find_map(|expr| tagged_list_mut(expr, "module"))
+        .find_map(|expr| tagged_list_mut(expr, DeepTag::Module))
         .ok_or(AuthoringError::NoModule)
 }
 
-fn expr_tag(expr: &Expr) -> Option<&str> {
+fn expr_tag(expr: &Expr) -> Option<DeepTag> {
     any_list(expr).and_then(list_tag)
 }
 
-fn tagged_list<'a>(expr: &'a Expr, tag: &str) -> Option<&'a List> {
+fn tagged_list(expr: &Expr, tag: DeepTag) -> Option<&List> {
     let list = any_list(expr)?;
     (list_tag(list) == Some(tag)).then_some(list)
 }
 
-fn tagged_list_mut<'a>(expr: &'a mut Expr, tag: &str) -> Option<&'a mut List> {
+fn tagged_list_mut(expr: &mut Expr, tag: DeepTag) -> Option<&mut List> {
     let list = any_list_mut(expr)?;
     (list_tag(list) == Some(tag)).then_some(list)
 }
@@ -1348,8 +1350,8 @@ fn any_list_mut(expr: &mut Expr) -> Option<&mut List> {
     }
 }
 
-fn list_tag(list: &List) -> Option<&str> {
-    list.elements.first().and_then(symbol)
+fn list_tag(list: &List) -> Option<DeepTag> {
+    list.tag()
 }
 
 fn module_name(list: &List) -> Option<&str> {
@@ -1369,7 +1371,7 @@ fn set_decl_name(list: &mut List, new_name: &str) {
 fn def_is_function(list: &List) -> bool {
     matches!(
         list.elements.get(DEF_VALUE_INDEX),
-        Some(expr) if tagged_list(expr, "fn").is_some()
+        Some(expr) if tagged_list(expr, DeepTag::Fn).is_some()
     )
 }
 

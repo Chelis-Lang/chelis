@@ -11,6 +11,7 @@
 //! It lives in chelis-prove so both the CLI prove path and the tide MCP
 //! tool reach one Surf->SMT lowering through the shared property runner.
 
+use chelis_deep::DeepTag;
 use std::cell::RefCell;
 
 use chelis_deep::ast::{Atom as DeepAtom, Expr as DeepExpr, List as DeepList};
@@ -442,7 +443,7 @@ fn deep_arith(expr: &DeepExpr, ctx: &DeepInlineCtx) -> Option<crate::solver::Smt
         }
         return Some(SmtExpr::Apply(name.to_string(), smt_args));
     }
-    if deep_tag(expr) == Some("if") {
+    if deep_tag(expr) == Some(DeepTag::If) {
         let list = deep_list(expr)?;
         let cond = list.elements.get(2)?;
         let then_expr = list.elements.get(3)?;
@@ -523,7 +524,7 @@ fn deep_arith_subst(
         }
         return Some(SmtExpr::Apply(name.to_string(), smt_args));
     }
-    if deep_tag(expr) == Some("if") {
+    if deep_tag(expr) == Some(DeepTag::If) {
         let list = deep_list(expr)?;
         let cond = list.elements.get(2)?;
         let then_expr = list.elements.get(3)?;
@@ -534,7 +535,7 @@ fn deep_arith_subst(
             Box::new(deep_arith_subst(else_expr, subst, ctx)?),
         ));
     }
-    if deep_tag(expr) == Some("let") {
+    if deep_tag(expr) == Some(DeepTag::Let) {
         let list = deep_list(expr)?;
         let bind = list.elements.get(2)?;
         let body = list.elements.get(3)?;
@@ -613,10 +614,10 @@ fn lookup_deep_fun_body<'a>(
             continue;
         };
         match list_tag_from_list(list) {
-            Some("module") => {
+            Some(DeepTag::Module) => {
                 stack.extend(list.elements.iter().skip(3));
             }
-            Some("def") if list.elements.get(2).and_then(deep_symbol_text) == Some(name) => {
+            Some(DeepTag::Def) if list.elements.get(2).and_then(deep_symbol_text) == Some(name) => {
                 let fn_expr = list.elements.get(3)?;
                 let params = deep_fn_param_names(fn_expr)?;
                 let body = deep_fn_body(fn_expr)?;
@@ -630,11 +631,11 @@ fn lookup_deep_fun_body<'a>(
 
 fn deep_fn_param_names(expr: &DeepExpr) -> Option<Vec<String>> {
     let list = deep_list(expr)?;
-    if list_tag_from_list(list) != Some("fn") {
+    if list_tag_from_list(list) != Some(DeepTag::Fn) {
         return None;
     }
     let params = list.elements.get(2).and_then(deep_list)?;
-    if list_tag_from_list(params) != Some("params") {
+    if list_tag_from_list(params) != Some(DeepTag::Params) {
         return None;
     }
     params
@@ -654,7 +655,7 @@ fn deep_fn_param_names(expr: &DeepExpr) -> Option<Vec<String>> {
 
 fn deep_fn_body(expr: &DeepExpr) -> Option<&DeepExpr> {
     let list = deep_list(expr)?;
-    if list_tag_from_list(list) != Some("fn") {
+    if list_tag_from_list(list) != Some(DeepTag::Fn) {
         return None;
     }
     list.elements.get(3)
@@ -662,7 +663,7 @@ fn deep_fn_body(expr: &DeepExpr) -> Option<&DeepExpr> {
 
 fn deep_bind_pairs(expr: &DeepExpr) -> Option<Vec<(&str, &DeepExpr)>> {
     let list = deep_list(expr)?;
-    if list_tag_from_list(list) != Some("bind") {
+    if list_tag_from_list(list) != Some(DeepTag::Bind) {
         return None;
     }
     let mut pairs = Vec::new();
@@ -681,7 +682,7 @@ fn deep_builtin_cmp<'a>(expr: &'a DeepExpr, name: &str) -> Option<(&'a DeepExpr,
 
 fn deep_app_name_and_args(expr: &DeepExpr) -> Option<(&str, &[DeepExpr])> {
     let list = deep_list(expr)?;
-    if list_tag_from_list(list) != Some("app") {
+    if list_tag_from_list(list) != Some(DeepTag::App) {
         return None;
     }
     let name = list.elements.get(2).and_then(deep_var_name)?;
@@ -690,7 +691,7 @@ fn deep_app_name_and_args(expr: &DeepExpr) -> Option<(&str, &[DeepExpr])> {
 
 fn deep_var_name(expr: &DeepExpr) -> Option<&str> {
     let list = deep_list(expr)?;
-    if list_tag_from_list(list) != Some("var") {
+    if list_tag_from_list(list) != Some(DeepTag::Var) {
         return None;
     }
     list.elements.get(2).and_then(deep_symbol_text)
@@ -698,7 +699,7 @@ fn deep_var_name(expr: &DeepExpr) -> Option<&str> {
 
 fn deep_float_lit(expr: &DeepExpr) -> Option<f64> {
     let list = deep_list(expr)?;
-    if list_tag_from_list(list) != Some("lit") {
+    if list_tag_from_list(list) != Some(DeepTag::Lit) {
         return None;
     }
     match list.elements.get(2)? {
@@ -709,7 +710,7 @@ fn deep_float_lit(expr: &DeepExpr) -> Option<f64> {
 
 fn deep_int_lit(expr: &DeepExpr) -> Option<i64> {
     let list = deep_list(expr)?;
-    if list_tag_from_list(list) != Some("lit") {
+    if list_tag_from_list(list) != Some(DeepTag::Lit) {
         return None;
     }
     match list.elements.get(2)? {
@@ -720,7 +721,7 @@ fn deep_int_lit(expr: &DeepExpr) -> Option<i64> {
 
 fn deep_bool_lit(expr: &DeepExpr) -> Option<bool> {
     let list = deep_list(expr)?;
-    if list_tag_from_list(list) != Some("lit") {
+    if list_tag_from_list(list) != Some(DeepTag::Lit) {
         return None;
     }
     match list.elements.get(2)? {
@@ -729,12 +730,15 @@ fn deep_bool_lit(expr: &DeepExpr) -> Option<bool> {
     }
 }
 
-fn deep_tag(expr: &DeepExpr) -> Option<&str> {
-    deep_list(expr).and_then(list_tag_from_list)
+fn deep_tag(expr: &DeepExpr) -> Option<DeepTag> {
+    match expr {
+        DeepExpr::List(list, _) => list.tag(),
+        _ => None,
+    }
 }
 
-fn list_tag_from_list(list: &DeepList) -> Option<&str> {
-    list.elements.first().and_then(deep_symbol_text)
+fn list_tag_from_list(list: &DeepList) -> Option<DeepTag> {
+    list.tag()
 }
 
 fn deep_list(expr: &DeepExpr) -> Option<&DeepList> {

@@ -5,6 +5,7 @@
 //! postconditions are proved, not write the representation directly.
 
 use crate::{Context, LintError, PreparedRuleState, Rule, Surface, Violation};
+use chelis_deep::DeepTag;
 use chelis_deep::Span;
 use chelis_deep::ast as deep;
 use chelis_surf::ast as surf;
@@ -457,8 +458,10 @@ fn deep_module_less_leaves(exprs: &[deep::Expr]) -> HashSet<String> {
         let Some(list) = as_list(expr) else {
             continue;
         };
-        if matches!(tag(list), Some("deftype") | Some("typealias"))
-            && let Some(name) = children(list).first().and_then(sym_str)
+        if matches!(
+            list.tag(),
+            Some(DeepTag::Deftype) | Some(DeepTag::Typealias)
+        ) && let Some(name) = children(list).first().and_then(sym_str)
         {
             out.insert(type_leaf(name).to_string());
         }
@@ -478,8 +481,8 @@ fn collect_deep_decls_catalog(expr: &deep::Expr, module: Option<String>, out: &m
     let Some(list) = as_list(expr) else {
         return;
     };
-    match tag(list) {
-        Some("module") => {
+    match list.tag() {
+        Some(DeepTag::Module) => {
             let module_name = children(list).first().and_then(sym_str).map(str::to_string);
             for child in children(list).iter().skip(1) {
                 collect_deep_decls_catalog(child, module_name.clone(), out);
@@ -488,7 +491,7 @@ fn collect_deep_decls_catalog(expr: &deep::Expr, module: Option<String>, out: &m
         // Every `deftype`/`typealias` records that its module declares a
         // local type of that leaf (CR-9); opaque deftypes also enter the
         // leaf/module indices.
-        Some("deftype") => {
+        Some(DeepTag::Deftype) => {
             if let Some(name) = children(list).first().and_then(sym_str) {
                 out.declared_leaves
                     .insert((module.clone(), type_leaf(name).to_string()));
@@ -503,7 +506,7 @@ fn collect_deep_decls_catalog(expr: &deep::Expr, module: Option<String>, out: &m
                 }
             }
         }
-        Some("typealias") => {
+        Some(DeepTag::Typealias) => {
             if let Some(name) = children(list).first().and_then(sym_str) {
                 out.declared_leaves
                     .insert((module, type_leaf(name).to_string()));
@@ -528,15 +531,15 @@ fn check_deep_expr(
     let Some(list) = as_list(expr) else {
         return;
     };
-    match tag(list) {
-        Some("module") => {
+    match list.tag() {
+        Some(DeepTag::Module) => {
             let module_name = children(list).first().and_then(sym_str);
             for child in children(list).iter().skip(1) {
                 check_deep_expr(ctx, source, child, catalog, module_name, out);
             }
             return;
         }
-        Some("record") => {
+        Some(DeepTag::Record) => {
             if let Some(name) = children(list).first().and_then(sym_str)
                 && is_outside_opaque_module(name, module, catalog)
             {
@@ -551,7 +554,7 @@ fn check_deep_expr(
                 );
             }
         }
-        Some("cast") => {
+        Some(DeepTag::Cast) => {
             if let Some(target) = children(list).get(1).and_then(type_name_from_type_expr)
                 && is_outside_opaque_module(target, module, catalog)
             {
@@ -566,7 +569,7 @@ fn check_deep_expr(
                 );
             }
         }
-        Some("record-update") => {
+        Some(DeepTag::RecordUpdate) => {
             let typed_target = type_name_from_meta(list)
                 .or_else(|| children(list).first().and_then(type_name_from_meta_expr));
             if let Some(target) = typed_target
@@ -698,13 +701,6 @@ fn as_list(expr: &deep::Expr) -> Option<&deep::List> {
     }
 }
 
-fn tag(list: &deep::List) -> Option<&str> {
-    match list.elements.first()? {
-        deep::Expr::Atom(deep::Atom::Symbol(tag), _) => Some(tag.as_str()),
-        _ => None,
-    }
-}
-
 fn meta(list: &deep::List) -> Option<&deep::MetaMap> {
     match list.elements.get(1)? {
         deep::Expr::Map(map, _) => Some(map),
@@ -757,9 +753,9 @@ fn type_name_from_meta_expr(expr: &deep::Expr) -> Option<&str> {
 
 fn type_name_from_type_expr(expr: &deep::Expr) -> Option<&str> {
     let list = as_list(expr)?;
-    match tag(list) {
-        Some("t-prim") => children(list).first().and_then(sym_str),
-        Some("t-adt") => children(list)
+    match list.tag() {
+        Some(DeepTag::TPrim) => children(list).first().and_then(sym_str),
+        Some(DeepTag::TAdt) => children(list)
             .iter()
             .find_map(sym_str)
             .or_else(|| children(list).first().and_then(sym_str)),

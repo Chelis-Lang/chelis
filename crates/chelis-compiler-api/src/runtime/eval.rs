@@ -1,3 +1,4 @@
+use chelis_deep::DeepTag;
 use std::collections::HashMap;
 use std::fs;
 
@@ -66,18 +67,18 @@ impl<'a> EvalContext<'a> {
 
     fn eval_list(&mut self, list: &List) -> Result<RuntimeValue, String> {
         match tag(list) {
-            Some("lit") => self.eval_lit(list),
-            Some("var") => self.eval_var(list),
-            Some("app") => self.eval_app(list),
-            Some("if") => self.eval_if(list),
-            Some("let") => self.eval_let(list),
-            Some("tuple") => Ok(RuntimeValue::Tuple(
+            Some(DeepTag::Lit) => self.eval_lit(list),
+            Some(DeepTag::Var) => self.eval_var(list),
+            Some(DeepTag::App) => self.eval_app(list),
+            Some(DeepTag::If) => self.eval_if(list),
+            Some(DeepTag::Let) => self.eval_let(list),
+            Some(DeepTag::Tuple) => Ok(RuntimeValue::Tuple(
                 children(list)
                     .iter()
                     .map(|child| self.eval_expr(child))
                     .collect::<Result<Vec<_>, _>>()?,
             )),
-            Some("copy") => {
+            Some(DeepTag::Copy) => {
                 let value = self.eval_expr(
                     children(list)
                         .first()
@@ -88,7 +89,7 @@ impl<'a> EvalContext<'a> {
                     other => Err(format!("copy expects tensor input, got {other:?}")),
                 }
             }
-            Some("borrow") => {
+            Some(DeepTag::Borrow) => {
                 // The IR lower path treats `borrow` as identity
                 // (chelis-ir/src/lower.rs::lower_identity); mirror that
                 // here so `&t` syntax type-checks AND evaluates.
@@ -98,14 +99,27 @@ impl<'a> EvalContext<'a> {
                         .ok_or_else(|| "borrow missing value".to_string())?,
                 )
             }
-            Some("record") => self.eval_record(list),
-            Some("access") => self.eval_access(list),
-            Some("tuple-get") => self.eval_tuple_get(list),
-            Some("match") => self.eval_match(list),
-            Some("fn") => self.eval_fn(list),
-            Some("pipe") => self.eval_pipe(list),
-            Some("cast") => self.eval_cast(list),
-            Some("realize") => {
+            Some(DeepTag::Block) => {
+                // chelis#859: sequenced expressions, value is the last
+                // child's (spec/03 §2.3). Non-last children evaluate for
+                // their effects (e.g. `print` transcript lines).
+                let kids = children(list);
+                let Some((last, init)) = kids.split_last() else {
+                    return Err("a `block` node has no children".to_string());
+                };
+                for child in init {
+                    let _ = self.eval_expr(child)?;
+                }
+                self.eval_expr(last)
+            }
+            Some(DeepTag::Record) => self.eval_record(list),
+            Some(DeepTag::Access) => self.eval_access(list),
+            Some(DeepTag::TupleGet) => self.eval_tuple_get(list),
+            Some(DeepTag::Match) => self.eval_match(list),
+            Some(DeepTag::Fn) => self.eval_fn(list),
+            Some(DeepTag::Pipe) => self.eval_pipe(list),
+            Some(DeepTag::Cast) => self.eval_cast(list),
+            Some(DeepTag::Realize) => {
                 // Bucket 1: `realize` is identity in the host runtime,
                 // matching the C-backend `lower_realize` pass-through
                 // (`crates/chelis-ir/src/host.rs::lower_host_expr`).
@@ -115,7 +129,7 @@ impl<'a> EvalContext<'a> {
                         .ok_or_else(|| "realize missing value".to_string())?,
                 )
             }
-            Some("grad") => {
+            Some(DeepTag::Grad) => {
                 // Bucket 1: capture the `(grad ...)` form so it can be
                 // applied later. The application path
                 // (`apply_resolved_callable` for a `Transform`) routes
@@ -128,7 +142,7 @@ impl<'a> EvalContext<'a> {
                     captured_env: self.bindings.clone(),
                 })
             }
-            Some("vmap") => {
+            Some(DeepTag::Vmap) => {
                 // Bucket 1: same pattern as `grad` above, capture-and-apply.
                 Ok(RuntimeValue::Transform {
                     kind: TransformKind::Vmap,
@@ -136,7 +150,7 @@ impl<'a> EvalContext<'a> {
                     captured_env: self.bindings.clone(),
                 })
             }
-            Some("jit") => {
+            Some(DeepTag::Jit) => {
                 // `spec/03-deep-syntax.md` §2.7: `jit` is a compilation
                 // trigger and a semantic no-op at evaluation. The host
                 // runtime evaluates the inner expression and returns its
@@ -148,7 +162,7 @@ impl<'a> EvalContext<'a> {
                         .ok_or_else(|| "jit missing value".to_string())?,
                 )
             }
-            Some("par") => {
+            Some(DeepTag::Par) => {
                 // `spec/03-deep-syntax.md` §2.3: `par` v1 is sequential
                 // composition; evaluate each child in order and return the
                 // value of the last child. Mirrors `lower_par` in
@@ -167,7 +181,7 @@ impl<'a> EvalContext<'a> {
                 }
                 last.ok_or_else(|| "par has no children to evaluate".to_string())
             }
-            Some("handle-effect") => {
+            Some(DeepTag::HandleEffect) => {
                 let kids = children(list);
                 match decode_effect_kind(list)
                     .map_err(|error| format!("{error} in `handle-effect` evaluation"))?
@@ -231,7 +245,7 @@ impl<'a> EvalContext<'a> {
             }
             other => Err(format!(
                 "host runtime does not support `{}`",
-                other.unwrap_or("?")
+                other.map(DeepTag::as_str).unwrap_or("?")
             )),
         }
     }
@@ -248,7 +262,7 @@ impl<'a> EvalContext<'a> {
             let Some(field_list) = as_list(field) else {
                 continue;
             };
-            if tag(field_list) != Some("kv") {
+            if tag(field_list) != Some(DeepTag::Kv) {
                 continue;
             }
             let field_kids = children(field_list);
@@ -395,7 +409,7 @@ impl<'a> EvalContext<'a> {
             .first()
             .and_then(as_list)
             .ok_or_else(|| "fn missing params".to_string())?;
-        if tag(params_list) != Some("params") {
+        if tag(params_list) != Some(DeepTag::Params) {
             return Err("fn params malformed".to_string());
         }
         let params = children(params_list)
@@ -504,7 +518,7 @@ impl<'a> EvalContext<'a> {
             && !self.bindings.contains_key(callee)
             && !self.tensor_bindings.contains_key(callee)
             && let Some((resolved, def_expr)) = self.lookup_top_level_def(callee)
-            && matches!(&def_expr, Expr::List(def_list, _) if tag(def_list) == Some("fn"))
+            && matches!(&def_expr, Expr::List(def_list, _) if tag(def_list) == Some(DeepTag::Fn))
             && self.def_requires_named_axis_routing(&resolved)
             && let Some(routed) = self.try_named_axis_def_call(&resolved, &def_expr, kids, &args)?
         {
@@ -527,7 +541,7 @@ impl<'a> EvalContext<'a> {
         let callable = if let Some(callee) = var_name(func)
             && !self.bindings.contains_key(callee)
             && let Some((resolved, def_expr)) = self.lookup_top_level_def(callee)
-            && matches!(&def_expr, Expr::List(def_list, _) if tag(def_list) == Some("fn"))
+            && matches!(&def_expr, Expr::List(def_list, _) if tag(def_list) == Some(DeepTag::Fn))
         {
             self.resolve_top_level(&resolved)?
         } else {
@@ -558,7 +572,7 @@ impl<'a> EvalContext<'a> {
             .first()
             .and_then(as_list)
             .ok_or_else(|| "let missing bindings".to_string())?;
-        if tag(bind_list) != Some("bind") {
+        if tag(bind_list) != Some(DeepTag::Bind) {
             return Err("let bindings malformed".to_string());
         }
         let saved = self.bindings.clone();
@@ -627,7 +641,7 @@ impl<'a> EvalContext<'a> {
             let Some(arm_list) = as_list(arm) else {
                 continue;
             };
-            if tag(arm_list) != Some("arm") {
+            if tag(arm_list) != Some(DeepTag::Arm) {
                 continue;
             }
             let arm_kids = children(arm_list);
@@ -700,21 +714,21 @@ impl<'a> EvalContext<'a> {
         let Expr::List(stage_list, _) = stage else {
             return None;
         };
-        if tag(stage_list) != Some("fn") {
+        if tag(stage_list) != Some(DeepTag::Fn) {
             return None;
         }
         let body = children(stage_list).get(1)?;
         // The body's own checker annotation wins when it is concrete
         // (pipe lambdas are typically left as unresolved `t-var`s).
         if let Some(ty) = self.static_type_expr_of(body)
-            && !matches!(&ty, Expr::List(ty_list, _) if tag(ty_list) == Some("t-var"))
+            && !matches!(&ty, Expr::List(ty_list, _) if tag(ty_list) == Some(DeepTag::TVar))
         {
             return Some(ty);
         }
         let Expr::List(body_list, _) = body else {
             return None;
         };
-        if tag(body_list) != Some("app") {
+        if tag(body_list) != Some(DeepTag::App) {
             return None;
         }
         let callee = children(body_list).first().and_then(var_name)?;
@@ -733,7 +747,7 @@ impl<'a> EvalContext<'a> {
         let Expr::List(sig_list, _) = sig else {
             return None;
         };
-        if tag(sig_list) != Some("t-fn") {
+        if tag(sig_list) != Some(DeepTag::TFn) {
             return None;
         }
         children(sig_list).last().cloned()

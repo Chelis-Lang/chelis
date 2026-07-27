@@ -1,3 +1,4 @@
+use chelis_deep::DeepTag;
 use chelis_deep::parser::parse_str;
 use chelis_deep::printer::{print_canonical, print_canonical_flat};
 use chelis_deep::validate::validate;
@@ -54,7 +55,7 @@ fn post_sprint_def_ast_structure() {
         Expr::List(list, _) => {
             // element 0: tag "def"
             match &list.elements[0] {
-                Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "def"),
+                Expr::Atom(Atom::Tag(t), _) => assert_eq!(*t, DeepTag::Def),
                 other => panic!("expected Symbol(def), got {:?}", other),
             }
             // element 1: metadata map {}
@@ -70,7 +71,7 @@ fn post_sprint_def_ast_structure() {
             // element 3: fn node
             match &list.elements[3] {
                 Expr::List(func, _) => match &func.elements[0] {
-                    Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "fn"),
+                    Expr::Atom(Atom::Tag(t), _) => assert_eq!(*t, DeepTag::Fn),
                     other => panic!("expected Symbol(fn), got {:?}", other),
                 },
                 other => panic!("expected fn list, got {:?}", other),
@@ -88,14 +89,14 @@ fn multiple_top_level_exprs() {
     assert_eq!(exprs.len(), 2);
     match &exprs[0] {
         Expr::List(list, _) => match &list.elements[0] {
-            Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "deftype"),
+            Expr::Atom(Atom::Tag(t), _) => assert_eq!(*t, DeepTag::Deftype),
             other => panic!("expected Symbol(deftype), got {:?}", other),
         },
         other => panic!("expected List(deftype), got {:?}", other),
     }
     match &exprs[1] {
         Expr::List(list, _) => match &list.elements[0] {
-            Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "def"),
+            Expr::Atom(Atom::Tag(t), _) => assert_eq!(*t, DeepTag::Def),
             other => panic!("expected Symbol(def), got {:?}", other),
         },
         other => panic!("expected List(def), got {:?}", other),
@@ -213,7 +214,7 @@ fn spec_nested_lists_post_sprint() {
         Expr::List(list, _) => {
             // tag = deftype, meta = {}, name = Option, then type-var and variants
             match &list.elements[0] {
-                Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "deftype"),
+                Expr::Atom(Atom::Tag(t), _) => assert_eq!(*t, DeepTag::Deftype),
                 other => panic!("expected Symbol(deftype), got {:?}", other),
             }
         }

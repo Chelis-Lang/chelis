@@ -8,6 +8,7 @@
 //! invariant against producer-annotated property defs that carry
 //! `chelis_role`.
 
+use chelis_deep::DeepTag;
 use chelis_deep::parser::parse_str;
 use chelis_deep::path::{
     DeepPath, PathSegment, ResolveError, function_body, resolve_function, splice_function_body,
@@ -438,7 +439,7 @@ fn assert_is_def(node: &Expr) {
         panic!("expected def list");
     };
     assert!(
-        matches!(list.elements.first(), Some(Expr::Atom(Atom::Symbol(s), _)) if s == "def"),
+        matches!(list.elements.first(), Some(Expr::Atom(Atom::Tag(t), _)) if *t == DeepTag::Def),
         "expected a def node"
     );
 }

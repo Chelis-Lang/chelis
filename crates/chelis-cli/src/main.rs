@@ -7,6 +7,7 @@ use chelis_compiler_api::schema::{
     EvalRequest, SourceKind, WireInferredDim, WireInferredEffect, WireInferredPrecision,
     WireInferredType,
 };
+use chelis_deep::DeepTag;
 use chelis_deep::ast::{Atom as DeepAtom, Expr as DeepExpr};
 use chelis_surf::ast::Decl;
 use chelis_types::types::{Dim, Effect, EffectSet, TensorPrec, Type};
@@ -8071,8 +8072,8 @@ fn collect_lowered_root_names_from_expr(
     let DeepExpr::List(list, _) = expr else {
         return;
     };
-    match list.elements.first() {
-        Some(DeepExpr::Atom(DeepAtom::Symbol(tag), _)) if tag == "module" => {
+    match list.tag() {
+        Some(DeepTag::Module) => {
             for child in list.elements.iter().skip(3) {
                 collect_lowered_root_names_from_expr(child, program_exprs, type_env, out);
             }
@@ -8104,8 +8105,8 @@ fn collect_root_names_from_expr(
     let DeepExpr::List(list, _) = expr else {
         return;
     };
-    match list.elements.first() {
-        Some(DeepExpr::Atom(DeepAtom::Symbol(tag), _)) if tag == "module" => {
+    match list.tag() {
+        Some(DeepTag::Module) => {
             for child in list.elements.iter().skip(3) {
                 collect_root_names_from_expr(child, type_env, out);
             }
@@ -8126,11 +8127,10 @@ fn deep_top_level_expr_name(expr: &DeepExpr) -> Option<&str> {
     let DeepExpr::List(list, _) = expr else {
         return None;
     };
-    match (list.elements.first(), list.elements.get(2)) {
-        (
-            Some(DeepExpr::Atom(DeepAtom::Symbol(tag), _)),
-            Some(DeepExpr::Atom(DeepAtom::Symbol(name), _)),
-        ) if tag == "def" => Some(name.as_str()),
+    match (list.tag(), list.elements.get(2)) {
+        (Some(DeepTag::Def), Some(DeepExpr::Atom(DeepAtom::Symbol(name), _))) => {
+            Some(name.as_str())
+        }
         _ => None,
     }
 }
@@ -8139,11 +8139,10 @@ fn deep_named_decl_name(expr: &DeepExpr) -> Option<&str> {
     let DeepExpr::List(list, _) = expr else {
         return None;
     };
-    match (list.elements.first(), list.elements.get(2)) {
-        (
-            Some(DeepExpr::Atom(DeepAtom::Symbol(tag), _)),
-            Some(DeepExpr::Atom(DeepAtom::Symbol(name), _)),
-        ) if tag == "def" || tag == "defsig" => Some(name.as_str()),
+    match (list.tag(), list.elements.get(2)) {
+        (Some(DeepTag::Def | DeepTag::Defsig), Some(DeepExpr::Atom(DeepAtom::Symbol(name), _))) => {
+            Some(name.as_str())
+        }
         _ => None,
     }
 }
@@ -8258,12 +8257,9 @@ fn top_level_def_body(expr: &DeepExpr) -> Option<&DeepExpr> {
     let DeepExpr::List(list, _) = expr else {
         return None;
     };
-    matches!(
-        list.elements.first(),
-        Some(DeepExpr::Atom(DeepAtom::Symbol(tag), _)) if tag == "def"
-    )
-    .then(|| list.elements.get(3))
-    .flatten()
+    (list.tag() == Some(DeepTag::Def))
+        .then(|| list.elements.get(3))
+        .flatten()
 }
 
 fn extend_root_names_from_value(
@@ -8273,13 +8269,13 @@ fn extend_root_names_from_value(
     out: &mut Vec<String>,
 ) {
     if let Some(DeepExpr::List(list, _)) = ty
-        && let Some(DeepExpr::Atom(DeepAtom::Symbol(tag), _)) = list.elements.first()
+        && let Some(tag) = list.tag()
     {
-        if tag == "t-fn" {
+        if tag == DeepTag::TFn {
             extend_root_names_from_value(name, list.elements.last(), None, out);
             return;
         }
-        if tag == "t-tuple" {
+        if tag == DeepTag::TTuple {
             for (index, child) in list.elements.iter().skip(2).enumerate() {
                 extend_root_names_from_value(&format!("{name}.{index}"), Some(child), None, out);
             }
@@ -8287,10 +8283,7 @@ fn extend_root_names_from_value(
         }
     }
     if let Some(DeepExpr::List(list, _)) = value
-        && matches!(
-            list.elements.first(),
-            Some(DeepExpr::Atom(DeepAtom::Symbol(tag), _)) if tag == "tuple"
-        )
+        && (list.tag() == Some(DeepTag::Tuple))
     {
         for (index, child) in list.elements.iter().skip(2).enumerate() {
             extend_root_names_from_value(
@@ -8339,7 +8332,7 @@ fn display_root_name(name: &str) -> String {
 }
 
 fn type_expr_is_function(expr: &DeepExpr) -> bool {
-    matches!(expr, DeepExpr::List(list, _) if matches!(list.elements.first(), Some(DeepExpr::Atom(DeepAtom::Symbol(tag), _)) if tag == "t-fn"))
+    matches!(expr, DeepExpr::List(list, _) if (list.tag() == Some(DeepTag::TFn)))
 }
 
 fn collect_symbolic_dims_from_deep(exprs: &[chelis_deep::ast::Expr]) -> Vec<String> {
@@ -8355,9 +8348,7 @@ fn collect_symbolic_dims_from_deep(exprs: &[chelis_deep::ast::Expr]) -> Vec<Stri
 fn collect_symbolic_dims_expr(expr: &chelis_deep::ast::Expr, dims: &mut Vec<String>) {
     match expr {
         chelis_deep::ast::Expr::List(list, _) => {
-            if let Some(chelis_deep::ast::Expr::Atom(chelis_deep::ast::Atom::Symbol(tag), _)) =
-                list.elements.first()
-                && tag == "d-name"
+            if list.tag() == Some(DeepTag::DName)
                 && let Some(chelis_deep::ast::Expr::Atom(chelis_deep::ast::Atom::Symbol(name), _)) =
                     list.elements.get(2)
                 && name != "*"

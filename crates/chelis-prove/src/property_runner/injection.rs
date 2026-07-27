@@ -17,6 +17,7 @@
 //! Gated on the `chelis-prove` optional dependency (the obligation /
 //! generation machinery lives there).
 
+use chelis_deep::DeepTag;
 use chelis_deep::Span;
 use chelis_deep::ast::{Atom, Expr, List, MetaMap};
 use chelis_surf::ast::{Decl, Param, TypeExpr};
@@ -576,12 +577,9 @@ fn bool_lit(v: bool) -> Expr {
     typed_lit("bool", Expr::Atom(Atom::Bool(v), span0()))
 }
 
-fn list_tag(expr: &Expr) -> Option<&str> {
+fn list_tag(expr: &Expr) -> Option<DeepTag> {
     match expr {
-        Expr::List(l, _) => match l.elements.first() {
-            Some(Expr::Atom(Atom::Symbol(s), _)) => Some(s.as_str()),
-            _ => None,
-        },
+        Expr::List(list, _) => list.tag(),
         _ => None,
     }
 }
@@ -597,7 +595,7 @@ fn child0_sym(expr: &Expr) -> Option<&str> {
 }
 
 fn module_defines(expr: &Expr, type_name: &str) -> bool {
-    if list_tag(expr) == Some("deftype") && child0_sym(expr) == Some(type_name) {
+    if list_tag(expr) == Some(DeepTag::Deftype) && child0_sym(expr) == Some(type_name) {
         return true;
     }
     if let Expr::List(l, _) = expr {
@@ -611,7 +609,7 @@ fn inject_into_module(exprs: &[Expr], type_name: &str, def: Expr) -> Vec<Expr> {
     let mut injected = false;
     for expr in exprs {
         if !injected
-            && list_tag(expr) == Some("module")
+            && list_tag(expr) == Some(DeepTag::Module)
             && (type_name.is_empty() || module_defines(expr, type_name))
             && let Expr::List(l, span) = expr
         {
@@ -637,7 +635,7 @@ fn strip_invariant_meta(expr: &Expr) -> Expr {
     match expr {
         Expr::List(list, span) => {
             let mut elements: Vec<Expr> = list.elements.iter().map(strip_invariant_meta).collect();
-            if matches!(list.elements.first(), Some(Expr::Atom(Atom::Symbol(s), _)) if s == "deftype")
+            if (list.tag() == Some(DeepTag::Deftype))
                 && let Some(Expr::Map(map, mspan)) = elements.get(1)
             {
                 let kept: Vec<(String, Expr)> = map

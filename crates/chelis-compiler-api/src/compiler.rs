@@ -1,3 +1,4 @@
+use chelis_deep::DeepTag;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use chelis_backend_c::CodegenResult;
@@ -516,7 +517,7 @@ fn parse_add_function_decls(exprs: Vec<DeepExpr>) -> Result<ParsedAddFunctionDec
             ));
         };
         match tag {
-            "def" => {
+            DeepTag::Def => {
                 if def.is_some() {
                     return Err(add_function_decl_error(
                         "`new_decls` must contain exactly one `(def ...)`",
@@ -533,7 +534,7 @@ fn parse_add_function_decls(exprs: Vec<DeepExpr>) -> Result<ParsedAddFunctionDec
                 def_name = Some(name.to_string());
                 def = Some(expr.clone());
             }
-            "defsig" => {
+            DeepTag::Defsig => {
                 if defsig.is_some() {
                     return Err(add_function_decl_error(
                         "`new_decls` may contain at most one `(defsig ...)`",
@@ -547,7 +548,8 @@ fn parse_add_function_decls(exprs: Vec<DeepExpr>) -> Result<ParsedAddFunctionDec
             }
             other => {
                 return Err(add_function_decl_error(format!(
-                    "`chelis_add_function` accepts only `(def ...)` and optional `(defsig ...)`, got `({other} ...)`"
+                    "`chelis_add_function` accepts only `(def ...)` and optional `(defsig ...)`, got `({} ...)`",
+                    other.as_str()
                 )));
             }
         }
@@ -1833,12 +1835,12 @@ fn collect_checked_decl_names(
         return;
     };
     match tag {
-        "module" => {
+        DeepTag::Module => {
             for child in list.elements.iter().skip(3) {
                 collect_checked_decl_names(child, type_env, lowered_names, out);
             }
         }
-        "def" => {
+        DeepTag::Def => {
             if let Some(name) = list.elements.get(2).and_then(symbol_name) {
                 if lowered_names.is_some_and(|map| !map.get(name).copied().unwrap_or(false)) {
                     return;
@@ -1863,11 +1865,11 @@ fn extend_root_names_from_value(
     if let Some(DeepExpr::List(list, _)) = ty
         && let Some(tag) = list_tag(list)
     {
-        if tag == "t-fn" {
+        if tag == DeepTag::TFn {
             extend_root_names_from_value(name, list.elements.last(), None, out);
             return;
         }
-        if tag == "t-tuple" {
+        if tag == DeepTag::TTuple {
             for (index, child) in list.elements.iter().skip(2).enumerate() {
                 extend_root_names_from_value(&format!("{name}.{index}"), Some(child), None, out);
             }
@@ -1875,7 +1877,7 @@ fn extend_root_names_from_value(
         }
     }
     if let Some(DeepExpr::List(list, _)) = value
-        && list_tag(list) == Some("tuple")
+        && list_tag(list) == Some(DeepTag::Tuple)
     {
         for (index, child) in list.elements.iter().skip(2).enumerate() {
             extend_root_names_from_value(
@@ -1904,11 +1906,11 @@ fn expr_type_metadata(expr: &DeepExpr) -> Option<&DeepExpr> {
     }
 }
 
-fn deep_expr_tag(expr: &DeepExpr) -> Option<&str> {
-    let DeepExpr::List(list, _) = expr else {
-        return None;
-    };
-    list_tag(list)
+fn deep_expr_tag(expr: &DeepExpr) -> Option<DeepTag> {
+    match expr {
+        DeepExpr::List(list, _) => list.tag(),
+        _ => None,
+    }
 }
 
 fn deep_decl_name(expr: &DeepExpr) -> Option<&str> {
@@ -1919,14 +1921,14 @@ fn deep_decl_name(expr: &DeepExpr) -> Option<&str> {
 }
 
 fn deep_def_is_function(expr: &DeepExpr) -> bool {
-    matches!(deep_expr_tag(expr), Some("def")) && chelis_deep::function_body(expr).is_some()
+    matches!(deep_expr_tag(expr), Some(DeepTag::Def)) && chelis_deep::function_body(expr).is_some()
 }
 
 fn deep_def_has_role(expr: &DeepExpr, expected: &str) -> bool {
     let DeepExpr::List(list, _) = expr else {
         return false;
     };
-    if list_tag(list) != Some("def") {
+    if list_tag(list) != Some(DeepTag::Def) {
         return false;
     }
     let Some(DeepExpr::Map(meta, _)) = list.elements.get(1) else {
@@ -1938,8 +1940,8 @@ fn deep_def_has_role(expr: &DeepExpr, expected: &str) -> bool {
     })
 }
 
-fn list_tag(list: &chelis_deep::List) -> Option<&str> {
-    list.elements.first().and_then(symbol_name)
+fn list_tag(list: &chelis_deep::List) -> Option<DeepTag> {
+    list.tag()
 }
 
 fn symbol_name(expr: &DeepExpr) -> Option<&str> {
@@ -3348,6 +3350,12 @@ fn wire_deep_expr(expr: &DeepExpr) -> WireDeepExpr {
                 atom: match atom {
                     chelis_deep::Atom::Symbol(value) => WireDeepAtom::Symbol {
                         value: value.clone(),
+                    },
+                    // Serialization boundary (decode-once, chelis#731 Phase
+                    // 3): a decoded tag crosses the wire as its canonical
+                    // string spelling, keeping the wire schema unchanged.
+                    chelis_deep::Atom::Tag(tag) => WireDeepAtom::Symbol {
+                        value: tag.as_str().to_string(),
                     },
                     chelis_deep::Atom::Int(value) => WireDeepAtom::Int { value: *value },
                     chelis_deep::Atom::Float(value) => WireDeepAtom::Float { value: *value },

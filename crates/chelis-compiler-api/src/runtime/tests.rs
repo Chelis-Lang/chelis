@@ -1,6 +1,7 @@
 use super::host_ops::*;
 use super::transforms::*;
 use super::*;
+use chelis_deep::DeepTag;
 
 /// chelis#399: a reef-linked ADT value carries the internal
 /// `Pkg__..__Ctor` constructor name; eval rendering (the human renderer
@@ -95,7 +96,7 @@ fn literal_seed_read_at_full_i64_width() {
         Expr::List(
             List {
                 elements: vec![
-                    Expr::Atom(Atom::Symbol("lit".to_string()), sp),
+                    Expr::Atom(Atom::Tag(DeepTag::Lit), sp),
                     Expr::Map(
                         MetaMap {
                             entries: vec![("type".to_string(), t_int32)],
