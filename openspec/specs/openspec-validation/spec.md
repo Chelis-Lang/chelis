@@ -7,15 +7,19 @@ Initial, non-blocking adoption of an OpenSpec planning tree for Chelis: structur
 ## Requirements
 
 ### Requirement: Canonical OpenSpec planning tree
-Chelis SHALL maintain a canonical `openspec/` planning tree using the built-in spec-driven schema, and its specifications and changes SHALL pass `openspec validate --all --strict`.
+Chelis SHALL maintain a canonical `openspec/` planning tree using the built-in spec-driven schema, and its specifications and active changes SHALL pass `openspec validate --all --strict`.
 
 #### Scenario: Well-formed tree validates
-- **WHEN** the `openspec/` tree contains only schema-valid specifications and changes
+- **WHEN** the `openspec/` tree contains only schema-valid specifications and active changes
 - **THEN** `openspec validate --all --strict` SHALL succeed
 
-#### Scenario: Malformed artifact is rejected
-- **WHEN** a specification or change under `openspec/` violates the spec-driven schema
+#### Scenario: Malformed active artifact is rejected
+- **WHEN** a specification or an active change under `openspec/` violates the spec-driven schema
 - **THEN** `openspec validate --all --strict` SHALL fail and the CI validation job SHALL report the failure
+
+#### Scenario: Archived changes are outside validation scope
+- **WHEN** `openspec validate --all --strict` runs
+- **THEN** it SHALL enumerate only specifications and active changes, and artifacts under `openspec/changes/archive/` SHALL NOT be validated
 
 ### Requirement: OpenSpec validation is advisory
 Chelis SHALL run OpenSpec structural validation in a dedicated CI workflow with only `contents: read`, triggered by changes under `openspec/`. The workflow SHALL NOT be a required status check, SHALL NOT gate merges, and SHALL NOT govern changes under `spec/**`. The governed-change enforcement described in `spec/design/spec_provenance.md` Phase 0 SHALL remain inactive.
@@ -29,7 +33,7 @@ Chelis SHALL run OpenSpec structural validation in a dedicated CI workflow with 
 - **THEN** OpenSpec validation SHALL NOT fail or block the change on that basis
 
 ### Requirement: OpenSpec stays planning evidence
-OpenSpec artifacts SHALL remain planning and authoring evidence only. They SHALL NOT become Chelis runtime, specification, coverage, or implementation-correctness authority, and SHALL NOT override `spec/**` or an executable acceptance oracle.
+OpenSpec artifacts SHALL remain planning and authoring evidence only, inside the authority boundary defined by `spec/design/spec_provenance.md` § OpenSpec boundary. That section is controlling and owns the enumeration of what OpenSpec is not; this requirement SHALL NOT restate, narrow, or extend it.
 
 #### Scenario: Validation authorizes only structural validity
 - **WHEN** `openspec validate` succeeds for a change

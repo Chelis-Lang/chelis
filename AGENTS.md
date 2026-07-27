@@ -83,6 +83,16 @@ not drift.
 
 If active docs disagree, fix the disagreement instead of adding a third explanation.
 
+### Public-Surface Change Rule
+
+When behavior changes, update the owning code, tests, docs, and examples in the same
+change set:
+
+- parser / type system / IR / backend tests
+- CLI integration tests
+- executable examples in `examples/`
+- active specs and current-state docs
+
 ## OpenSpec (initial adoption)
 
 The `openspec/` tree is the canonical OpenSpec planning root (built-in
@@ -96,26 +106,24 @@ activated here.
   `openspec-validate` workflow (`openspec validate --all --strict`) under
   `contents: read`. It is advisory: not a required status check, and it
   never governs `spec/**` or blocks a merge.
+- `openspec validate` enumerates active changes and specifications only.
+  Artifacts under `openspec/changes/archive/` are outside its scope, so
+  archiving a change ends structural validation of it.
 - Validate locally the same way (OpenSpec must be exactly 1.6.0):
 
 ```sh
 openspec validate --all --strict --no-interactive
 ```
 
-- OpenSpec artifacts are planning evidence only. They never become Chelis
-  runtime, spec, coverage, or implementation-correctness authority, and
-  never override `spec/**` or an executable acceptance oracle. When an
-  OpenSpec artifact and `spec/**` disagree, `spec/**` is controlling.
-
-### Public-Surface Change Rule
-
-When behavior changes, update the owning code, tests, docs, and examples in the same
-change set:
-
-- parser / type system / IR / backend tests
-- CLI integration tests
-- executable examples in `examples/`
-- active specs and current-state docs
+- OpenSpec artifacts are planning evidence only. When an OpenSpec artifact
+  and `spec/**` disagree, `spec/**` is controlling. The authority boundary
+  is owned by `spec/design/spec_provenance.md` § OpenSpec boundary; that
+  section is controlling and is deliberately not restated here.
+- Do not run `openspec init`'s tool generation. `.claude/skills` and
+  `.codex/skills` are symlinks to `agent-skills/`, so `--tools claude,codex`
+  writes generated skill trees into the shared skill library through both
+  paths. OpenSpec is not yet wired into the agent workflow — drive the CLI
+  directly.
 
 ## Contract Invariants
 
