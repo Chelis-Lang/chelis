@@ -1907,6 +1907,40 @@ fn host_program_call_name_sites<T>(
 /// eval/test-only builtins (e.g. `process_run`, Hull Phase 0a) with a
 /// clean diagnostic rather than the silent `/* unsupported builtin */ 0`
 /// fallthrough in C codegen.
+/// Builtins available only under `chelis eval` / `chelis test` (the host
+/// evaluator) and deliberately absent from every compiled backend:
+/// emitting the C codegen catch-all for them would produce a silent wrong
+/// value (the chelis#734 class). Both public build entry points — the CLI
+/// build pipeline and `chelis-compiler-api::compile_for_execution` (the
+/// chelis-python path) — reject them via
+/// [`find_eval_only_host_builtin`], sharing this one list so the two
+/// gates cannot drift (chelis#891 review finding 13).
+pub const EVAL_ONLY_HOST_BUILTINS: &[&str] = &[
+    "process_run",
+    // Host-lane JSON I/O (chelis#890).
+    "parse_json",
+    "to_json",
+    "json_f64",
+    "json_str",
+    "json_list",
+    "json_f64s",
+    "jnum",
+    "jstr",
+    "jlist",
+    "jdict",
+    "json_set",
+    "round_to",
+];
+
+/// First eval/test-only builtin applied anywhere in the lowered host
+/// program, if any (see [`EVAL_ONLY_HOST_BUILTINS`]).
+pub fn find_eval_only_host_builtin<T>(program: &HostProgram<T>) -> Option<&'static str> {
+    EVAL_ONLY_HOST_BUILTINS
+        .iter()
+        .copied()
+        .find(|builtin| host_program_uses_builtin(program, builtin))
+}
+
 pub fn host_program_uses_builtin<T>(program: &HostProgram<T>, builtin: &str) -> bool {
     program
         .globals

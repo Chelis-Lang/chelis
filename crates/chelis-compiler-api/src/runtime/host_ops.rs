@@ -1218,6 +1218,69 @@ pub(super) fn dict_lookup<'a>(
         .map(|(_, value)| value)
 }
 
+/// Past this many entries, [`OrderedStringDictBuilder`] switches from a
+/// linear duplicate scan to a key -> slot hash index.
+const ORDERED_DICT_INDEX_THRESHOLD: usize = 32;
+
+/// Insertion-ordered, string-keyed dict builder with duplicate-key upsert
+/// (first occurrence's position, last occurrence's value — the
+/// [`upsert_dict_entry`] semantics specialized to string keys). Small
+/// objects use a linear scan; past [`ORDERED_DICT_INDEX_THRESHOLD`] a
+/// key -> slot hash index takes over so building an n-key JSON object is
+/// O(n) instead of the O(n²) CPU-DoS a 100k-key document produced
+/// (chelis#891 review findings 11 and 15). Shared by `parse_json`'s
+/// object parser and the `jdict` eval arm.
+pub(super) struct OrderedStringDictBuilder {
+    entries: Vec<(RuntimeValue, RuntimeValue)>,
+    index: Option<std::collections::HashMap<String, usize>>,
+}
+
+impl OrderedStringDictBuilder {
+    pub(super) fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+            index: None,
+        }
+    }
+
+    pub(super) fn upsert(&mut self, key: String, value: RuntimeValue) {
+        if self.index.is_none() && self.entries.len() >= ORDERED_DICT_INDEX_THRESHOLD {
+            self.index = Some(
+                self.entries
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(slot, (existing, _))| match existing {
+                        RuntimeValue::String(existing) => Some((existing.clone(), slot)),
+                        _ => None,
+                    })
+                    .collect(),
+            );
+        }
+        if let Some(index) = self.index.as_mut() {
+            if let Some(&slot) = index.get(&key) {
+                self.entries[slot].1 = value;
+            } else {
+                index.insert(key.clone(), self.entries.len());
+                self.entries.push((RuntimeValue::String(key), value));
+            }
+            return;
+        }
+        if let Some(slot) = self
+            .entries
+            .iter_mut()
+            .find(|(existing, _)| matches!(existing, RuntimeValue::String(k) if *k == key))
+        {
+            slot.1 = value;
+        } else {
+            self.entries.push((RuntimeValue::String(key), value));
+        }
+    }
+
+    pub(super) fn into_entries(self) -> Vec<(RuntimeValue, RuntimeValue)> {
+        self.entries
+    }
+}
+
 /// V2-F2: element-wise precision conversion for `cast(tensor[..], q)` in
 /// the host runtime. Spec §2.7 lists `cast` as a first-class precision
 /// transform; the IR DAG and C backend already handle the tensor form
@@ -1317,20 +1380,39 @@ fn convert_scalar_data(x: f64, src: Prim, dst: Prim) -> f64 {
     }
 }
 
+/// Resolve a list-derived tensor precision: runtime element evidence
+/// first, then the checker-annotated hint threaded from the eval call
+/// site (chelis#891 review finding 3), then the legacy F32 literal
+/// default. The single `unwrap_or` here is the audited
+/// loud-unsupported-baseline site (crates/chelis-cli/tests/
+/// loud_unsupported_tripwire.rs): float literals default to F32 per
+/// spec §5.3, so with no evidence and no hint F32 is the honest default,
+/// not a substitution.
+fn resolve_list_precision(evidence: Option<Prim>, hint: Option<Prim>) -> Prim {
+    evidence.or(hint).unwrap_or(Prim::F32)
+}
+
 /// Bucket 4b: recursively flatten a nested numeric/bool list into a
 /// rank-N tensor. Every nesting level contributes one outer dimension;
 /// the innermost level must be uniformly numeric or bool. All sibling
 /// sub-lists at the same level must have matching length and matching
 /// precision.
 ///
-/// Returns `(precision, shape, flat_data)`. Empty outer lists fall
-/// back to an `[0]` shape with `Prim::F32` (matching the rank-1 path
-/// behaviour for compatibility).
+/// Returns `(precision, shape, flat_data)`. Empty lists carry no runtime
+/// dtype evidence, so `precision_hint` (the checker-annotated element
+/// precision threaded from the eval call site, chelis#891 review
+/// finding 3) breaks the tie; only when no hint exists either does the
+/// legacy `Prim::F32` fallback apply.
 pub(super) fn nested_list_to_tensor_data(
     outer: &[RuntimeValue],
+    precision_hint: Option<Prim>,
 ) -> Result<(Prim, Vec<usize>, Vec<f64>), String> {
     if outer.is_empty() {
-        return Ok((Prim::F32, vec![0], Vec::new()));
+        return Ok((
+            resolve_list_precision(None, precision_hint),
+            vec![0],
+            Vec::new(),
+        ));
     }
 
     // Decide whether this is a leaf level (numeric/bool elements) or a
@@ -1340,7 +1422,7 @@ pub(super) fn nested_list_to_tensor_data(
 
     if !first_is_list {
         // Leaf level — same code path as the original list_to_tensor.
-        let (precision, data) = list_to_tensor_data(outer)?;
+        let (precision, data) = list_to_tensor_data(outer, precision_hint)?;
         return Ok((precision, vec![data.len()], data));
     }
 
@@ -1353,7 +1435,8 @@ pub(super) fn nested_list_to_tensor_data(
                 "to_tensor expects homogeneous nested lists; element {idx} is not a List"
             ));
         };
-        let (sub_precision, sub_shape, sub_data) = nested_list_to_tensor_data(inner)?;
+        let (sub_precision, sub_shape, sub_data) =
+            nested_list_to_tensor_data(inner, precision_hint)?;
         match &precision {
             None => precision = Some(sub_precision),
             Some(p) if *p == sub_precision => {}
@@ -1377,10 +1460,17 @@ pub(super) fn nested_list_to_tensor_data(
 
     let mut shape = vec![outer.len()];
     shape.extend(inner_shape.unwrap_or_default());
-    Ok((precision.unwrap_or(Prim::F32), shape, data))
+    Ok((
+        resolve_list_precision(precision, precision_hint),
+        shape,
+        data,
+    ))
 }
 
-fn list_to_tensor_data(values: &[RuntimeValue]) -> Result<(Prim, Vec<f64>), String> {
+fn list_to_tensor_data(
+    values: &[RuntimeValue],
+    empty_default: Option<Prim>,
+) -> Result<(Prim, Vec<f64>), String> {
     // Element classification: integer scalars → Int64-precision tensor;
     // float scalars → a tensor at the ELEMENT's float dtype; bools → Bool
     // tensor. The homogeneity check below pins the precision to whatever
@@ -1437,7 +1527,10 @@ fn list_to_tensor_data(values: &[RuntimeValue]) -> Result<(Prim, Vec<f64>), Stri
             }
         }
     }
-    Ok((precision.unwrap_or(Prim::F32), data))
+    // An empty list has no element to advertise a dtype; the caller's
+    // default (checker hint or pad precision) wins before the legacy F32
+    // fallback (chelis#891 review finding 3).
+    Ok((resolve_list_precision(precision, empty_default), data))
 }
 
 pub(super) fn tensor_to_list_values(
@@ -1469,6 +1562,7 @@ pub(super) fn tensor_to_list_values(
 pub(super) fn pad_sequences_value(
     sequences: &[RuntimeValue],
     pad: &RuntimeValue,
+    precision_hint: Option<Prim>,
 ) -> Result<(Prim, Vec<f64>, usize, usize), String> {
     let (pad_precision, pad_value) = match pad {
         RuntimeValue::Scalar(payload) if payload.dtype().is_integer() => {
@@ -1496,7 +1590,12 @@ pub(super) fn pad_sequences_value(
                 "pad_sequences expects nested lists, got {sequence:?}"
             ));
         };
-        let (row_precision, row) = list_to_tensor_data(items)?;
+        // Empty rows have no dtype evidence and legitimately pad-fill;
+        // they adopt the pad's precision instead of tripping the
+        // homogeneity check (chelis#891 review finding 3). The
+        // checker-threaded hint covers the remaining empty cases.
+        let (row_precision, row) =
+            list_to_tensor_data(items, Some(precision_hint.unwrap_or(pad_precision)))?;
         if row_precision != pad_precision {
             return Err("pad_sequences requires homogeneous numeric nested lists".to_string());
         }
@@ -1519,6 +1618,7 @@ pub(super) fn pad_sequences_to_value(
     sequences: &[RuntimeValue],
     width: i64,
     pad: &RuntimeValue,
+    precision_hint: Option<Prim>,
 ) -> Result<(Prim, Vec<f64>, usize), String> {
     if width < 0 {
         return Err(format!(
@@ -1547,7 +1647,10 @@ pub(super) fn pad_sequences_to_value(
                 "pad_sequences_to expects nested lists, got {sequence:?}"
             ));
         };
-        let (row_precision, row) = list_to_tensor_data(items)?;
+        // Same empty-row precision adoption as `pad_sequences` above
+        // (chelis#891 review finding 3).
+        let (row_precision, row) =
+            list_to_tensor_data(items, Some(precision_hint.unwrap_or(pad_precision)))?;
         if row_precision != pad_precision {
             return Err("pad_sequences_to requires homogeneous numeric nested lists".to_string());
         }
@@ -3472,5 +3575,55 @@ mod normalize_axis_tests {
             err.contains("gather") && err.contains("out of bounds"),
             "expected an out-of-bounds gather diagnostic, got {err:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod list_tensor_precision_tests {
+    //! chelis#891 review finding 3 (+ the reviewer's dropped mixed-dtype
+    //! item): empty lists carry no dtype evidence, so the caller-supplied
+    //! default (checker hint / pad precision) must win before the legacy
+    //! F32 fallback — and the mixed-float-dtype homogeneity branch must
+    //! stay a loud error.
+    use super::*;
+
+    #[test]
+    fn empty_list_adopts_caller_default_precision() {
+        let (precision, data) = list_to_tensor_data(&[], Some(Prim::F64)).expect("empty list");
+        assert_eq!(precision, Prim::F64);
+        assert!(data.is_empty());
+        // No default: the legacy fallback stays F32.
+        let (precision, _) = list_to_tensor_data(&[], None).expect("empty list");
+        assert_eq!(precision, Prim::F32);
+        // Nested: an empty outer list adopts the hint too.
+        let (precision, shape, _) =
+            nested_list_to_tensor_data(&[], Some(Prim::F64)).expect("empty outer");
+        assert_eq!((precision, shape), (Prim::F64, vec![0]));
+    }
+
+    #[test]
+    fn mixed_float_dtypes_reject_loudly() {
+        let values = vec![RuntimeValue::float64(1.5), RuntimeValue::float_lit(2.5)];
+        let err = list_to_tensor_data(&values, None).expect_err("mixed dtypes must fail");
+        assert!(err.contains("homogeneous"), "got `{err}`");
+        assert!(err.contains("F64"), "names the expected dtype: `{err}`");
+        assert!(err.contains("F32"), "names the offending dtype: `{err}`");
+    }
+
+    #[test]
+    fn pad_rows_empty_row_adopts_pad_precision() {
+        let sequences = vec![
+            RuntimeValue::List(Vec::new()),
+            RuntimeValue::List(vec![RuntimeValue::float64(0.5)]),
+        ];
+        let pad = RuntimeValue::float64(0.25);
+        let (precision, data, batch, width) =
+            pad_sequences_value(&sequences, &pad, None).expect("empty row must not trip");
+        assert_eq!((precision, batch, width), (Prim::F64, 2, 1));
+        assert_eq!(data, vec![0.25, 0.5]);
+        let (precision, data, batch) =
+            pad_sequences_to_value(&sequences, 2, &pad, None).expect("empty row must not trip");
+        assert_eq!((precision, batch), (Prim::F64, 2));
+        assert_eq!(data, vec![0.25, 0.25, 0.5, 0.25]);
     }
 }

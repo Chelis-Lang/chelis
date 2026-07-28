@@ -503,7 +503,25 @@ impl<'a> EvalContext<'a> {
         }
 
         if let Some(name) = builtin_name(func) {
-            return self.eval_builtin(name, &args);
+            // chelis#891 review finding 3: `to_tensor`/`pad_sequences*` on
+            // EMPTY lists have no runtime dtype evidence, so thread the
+            // checker-annotated result precision from the app node's
+            // `{type: (t-tensor .. (t-prim p))}` meta as a hint instead of
+            // silently defaulting the tensor tag to F32.
+            let precision_hint =
+                if matches!(name, "to_tensor" | "pad_sequences" | "pad_sequences_to") {
+                    get_meta(list)
+                        .and_then(|meta| {
+                            meta.entries
+                                .iter()
+                                .find(|(key, _)| key == "type")
+                                .map(|(_, value)| value)
+                        })
+                        .and_then(extract_prim_from_type_expr)
+                } else {
+                    None
+                };
+            return self.eval_builtin(name, &args, precision_hint);
         }
 
         // chelis#338 site B: a call to a top-level def whose body needs
@@ -760,7 +778,7 @@ impl<'a> EvalContext<'a> {
         arg_type_exprs: &[Option<Expr>],
     ) -> Result<RuntimeValue, String> {
         if let Some(name) = builtin_name(stage) {
-            return self.eval_builtin(name, &args);
+            return self.eval_builtin(name, &args, None);
         }
         match self.eval_expr(stage)? {
             value @ (RuntimeValue::Closure { .. } | RuntimeValue::Transform { .. }) => {
@@ -870,7 +888,12 @@ impl<'a> EvalContext<'a> {
         }
     }
 
-    fn eval_builtin(&mut self, name: &str, args: &[RuntimeValue]) -> Result<RuntimeValue, String> {
+    fn eval_builtin(
+        &mut self,
+        name: &str,
+        args: &[RuntimeValue],
+        precision_hint: Option<Prim>,
+    ) -> Result<RuntimeValue, String> {
         match name {
             "add" => numeric_binop(args, |lhs, rhs| lhs + rhs),
             "sub" => numeric_binop(args, |lhs, rhs| lhs - rhs),
@@ -1494,7 +1517,7 @@ impl<'a> EvalContext<'a> {
                 // themselves uniformly-shaped numeric/bool lists, those
                 // contribute additional inner dims (and so on
                 // recursively).
-                let (precision, shape, data) = nested_list_to_tensor_data(&values)?;
+                let (precision, shape, data) = nested_list_to_tensor_data(&values, precision_hint)?;
                 Ok(RuntimeValue::Tensor(RuntimeTensorValue {
                     value: IrTensorValue::from_vec(shape, data),
                     precision,
@@ -1511,7 +1534,8 @@ impl<'a> EvalContext<'a> {
                     .get(1)
                     .cloned()
                     .ok_or_else(|| "pad_sequences expects 2 arguments".to_string())?;
-                let (precision, data, batch, width) = pad_sequences_value(&sequences, &pad)?;
+                let (precision, data, batch, width) =
+                    pad_sequences_value(&sequences, &pad, precision_hint)?;
                 Ok(RuntimeValue::Tensor(RuntimeTensorValue {
                     value: IrTensorValue::from_vec(vec![batch, width], data),
                     precision,
@@ -1524,7 +1548,8 @@ impl<'a> EvalContext<'a> {
                     .get(2)
                     .cloned()
                     .ok_or_else(|| "pad_sequences_to expects 3 arguments".to_string())?;
-                let (precision, data, batch) = pad_sequences_to_value(&sequences, width, &pad)?;
+                let (precision, data, batch) =
+                    pad_sequences_to_value(&sequences, width, &pad, precision_hint)?;
                 Ok(RuntimeValue::Tensor(RuntimeTensorValue {
                     value: IrTensorValue::from_vec(vec![batch, width.max(0) as usize], data),
                     precision,
@@ -1583,7 +1608,27 @@ impl<'a> EvalContext<'a> {
                 })
             }
             "jnum" => {
-                let value = expect_float_arg(args, 0)?;
+                // Exactly f64 (chelis#891 review finding 7): the checker
+                // rejects other precisions; this guard keeps the byte-exact
+                // serialization contract even on dynamically-constructed
+                // calls — an f32 widened here would emit
+                // `0.10000000149011612` for `0.1f32`.
+                let value = match args.first() {
+                    Some(RuntimeValue::Scalar(payload)) if payload.dtype() == Prim::F64 => {
+                        payload.bits().as_f64()
+                    }
+                    Some(RuntimeValue::Scalar(payload)) if payload.dtype().is_float() => {
+                        return Err(format!(
+                            "jnum: expected an f64 value, got {:?} (suffix the literal, \
+                             `0.1f64`, or use cast(n, f64); an f32 value would quantize \
+                             through the byte-exact serializer)",
+                            payload.dtype()
+                        ));
+                    }
+                    other => {
+                        return Err(format!("expected f64 arg at index 0, got {other:?}"));
+                    }
+                };
                 Ok(super::json::jnum(value))
             }
             "jstr" => {
@@ -1600,7 +1645,7 @@ impl<'a> EvalContext<'a> {
             }
             "jdict" => {
                 let entries = expect_list_arg(args, 0)?;
-                let mut out: Vec<(String, RuntimeValue)> = Vec::with_capacity(entries.len());
+                let mut out = OrderedStringDictBuilder::new();
                 for (index, entry) in entries.into_iter().enumerate() {
                     let RuntimeValue::Tuple(items) = entry else {
                         return Err(format!(
@@ -1628,14 +1673,16 @@ impl<'a> EvalContext<'a> {
                     super::json::ensure_json_value(&value)
                         .map_err(|err| format!("jdict: value for key `{key}`: {err}"))?;
                     // Duplicate keys: first position, last value — the same
-                    // upsert semantics as `dict_of` and `parse_json`.
-                    if let Some(slot) = out.iter_mut().find(|(existing, _)| *existing == key) {
-                        slot.1 = value;
-                    } else {
-                        out.push((key, value));
-                    }
+                    // upsert semantics as `dict_of` and `parse_json`, via the
+                    // shared hash-assisted builder (chelis#891 review
+                    // findings 11 and 15).
+                    out.upsert(key, value);
                 }
-                Ok(super::json::jdict(out))
+                Ok(RuntimeValue::Adt {
+                    ctor: "JDict".to_string(),
+                    fields: vec![RuntimeValue::Dict(out.into_entries())],
+                    field_names: None,
+                })
             }
             "json_set" => {
                 let value = args

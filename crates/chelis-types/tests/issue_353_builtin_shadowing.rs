@@ -261,3 +261,51 @@ fn inline_annotated_def_reports_exactly_one_error() {
     );
     assert!(errs[0].0.contains("`def relu`"), "got: {}", errs[0].0);
 }
+
+/// chelis#891 review finding 4: a builtin-named parameter that is CALLED
+/// in its own body is rejected — eval and lowering dispatch builtin-first
+/// by name, so the call could never reach the parameter (verified live:
+/// `def apply(round_to, x) = round_to(x, 0)` invoked the BUILTIN). Value
+/// position stays allowed (`value_params_and_locals_may_reuse_builtin_names`).
+#[test]
+fn builtin_named_param_called_in_body_is_rejected() {
+    let called = surf_to_deep(
+        "module ParamCall\n\
+         def apply(round_to: (f64, int64) -> f64, x: f64) -> f64 = round_to(x, cast(0, int64))\n",
+    );
+    let err =
+        check_ir_program(&called).expect_err("calling a builtin-named param must be rejected");
+    assert!(
+        err.errors.iter().any(|e| e
+            .message
+            .contains("parameter `round_to` shadows the builtin")),
+        "got: {:?}",
+        err.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+
+    // Lambda parameters get the same treatment.
+    let lambda = surf_to_deep(
+        "module LambdaCall\n\
+         g = fn (map: (f64) -> f64) -> map(1.5)\n",
+    );
+    let err = check_ir_program(&lambda).expect_err("lambda param call must be rejected");
+    assert!(
+        err.errors
+            .iter()
+            .any(|e| e.message.contains("parameter `map` shadows the builtin")),
+        "got: {:?}",
+        err.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+
+    // A DIFFERENT (non-shadowed) callee alongside a builtin-named value
+    // parameter stays accepted: only the call-position shape is rejected.
+    let value_only = surf_to_deep(
+        "module ValueOnly\n\
+         def f(sum: &tensor[batch, f32]) -> tensor[batch, f32] = relu(sum)\n\
+         out = f(to_tensor([1.0, -2.0]))\n",
+    );
+    assert!(
+        check_ir_program(&value_only).is_ok(),
+        "value-position builtin-named params must stay accepted"
+    );
+}

@@ -35,6 +35,7 @@
 //!   Python's built-in `round(x, places)`. See [`round_to_impl`].
 
 use super::RuntimeValue;
+use super::host_ops::{OrderedStringDictBuilder, dict_lookup};
 
 /// Nesting depth cap for the recursive-descent parser and serializer.
 /// Deeply nested inputs fail loudly instead of overflowing the stack.
@@ -84,6 +85,10 @@ pub(super) fn jlist(items: Vec<RuntimeValue>) -> RuntimeValue {
     }
 }
 
+// Lib-side callers moved to `OrderedStringDictBuilder` (chelis#891 review
+// finding 11); this constructor remains for the unit tests and for the
+// stacked CSV branch (chelis#903), which builds documents through it.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn jdict(entries: Vec<(String, RuntimeValue)>) -> RuntimeValue {
     RuntimeValue::Adt {
         ctor: "JDict".to_string(),
@@ -175,6 +180,11 @@ struct Parser<'a> {
 /// top-level value, no trailing content, no trailing commas, no comments,
 /// no NaN/Infinity tokens. Loud errors carry the byte offset.
 pub(super) fn parse_json_text(text: &str) -> Result<RuntimeValue, String> {
+    // RFC 8259 §8.1 permits ignoring a leading BOM; strip exactly one so a
+    // Windows-exported file parses instead of dying on mojibake ("`ï`"),
+    // consistent with `parse_csv`'s BOM handling (chelis#891 review
+    // finding 12).
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let mut parser = Parser {
         bytes: text.as_bytes(),
         text,
@@ -235,10 +245,15 @@ impl<'a> Parser<'a> {
             Some(b'f') => self.parse_keyword("false", jbool(false)),
             Some(b'n') => self.parse_keyword("null", jnull()),
             Some(b'-' | b'0'..=b'9') => self.parse_number(),
-            Some(other) => Err(self.err(&format!(
-                "unexpected character `{}` (expected a JSON value)",
-                other as char
-            ))),
+            Some(_) => {
+                // Decode the actual character for the diagnostic — casting a
+                // single UTF-8 byte to `char` renders mojibake for anything
+                // non-ASCII (chelis#891 review finding 12).
+                let ch = self.text[self.pos..].chars().next().unwrap_or('\u{fffd}');
+                Err(self.err(&format!(
+                    "unexpected character `{ch}` (expected a JSON value)"
+                )))
+            }
             None => Err(self.err("unexpected end of input (expected a JSON value)")),
         }
     }
@@ -258,13 +273,13 @@ impl<'a> Parser<'a> {
 
     fn parse_object(&mut self, depth: usize) -> Result<RuntimeValue, String> {
         self.expect_byte(b'{')?;
-        let mut entries: Vec<(RuntimeValue, RuntimeValue)> = Vec::new();
+        let mut entries = OrderedStringDictBuilder::new();
         self.skip_ws();
         if self.peek() == Some(b'}') {
             self.pos += 1;
             return Ok(RuntimeValue::Adt {
                 ctor: "JDict".to_string(),
-                fields: vec![RuntimeValue::Dict(entries)],
+                fields: vec![RuntimeValue::Dict(entries.into_entries())],
                 field_names: None,
             });
         }
@@ -278,16 +293,11 @@ impl<'a> Parser<'a> {
             self.expect_byte(b':')?;
             let value = self.parse_value(depth + 1)?;
             // Duplicate keys: keep the first occurrence's position with the
-            // last occurrence's value (matches `upsert_dict_entry` and
-            // Python's `json.loads`).
-            if let Some(slot) = entries
-                .iter_mut()
-                .find(|(existing, _)| matches!(existing, RuntimeValue::String(k) if *k == key))
-            {
-                slot.1 = value;
-            } else {
-                entries.push((RuntimeValue::String(key), value));
-            }
+            // last occurrence's value (the `upsert_dict_entry` semantics,
+            // matching Python's `json.loads`) — via the shared hash-assisted
+            // builder so a pathological 100k-key object parses in O(n)
+            // (chelis#891 review findings 11 and 15).
+            entries.upsert(key, value);
             self.skip_ws();
             match self.peek() {
                 Some(b',') => {
@@ -297,7 +307,7 @@ impl<'a> Parser<'a> {
                     self.pos += 1;
                     return Ok(RuntimeValue::Adt {
                         ctor: "JDict".to_string(),
-                        fields: vec![RuntimeValue::Dict(entries)],
+                        fields: vec![RuntimeValue::Dict(entries.into_entries())],
                         field_names: None,
                     });
                 }
@@ -388,8 +398,12 @@ impl<'a> Parser<'a> {
                             };
                             out.push(ch);
                         }
-                        other => {
-                            return Err(self.err(&format!("invalid escape `\\{}`", other as char)));
+                        _ => {
+                            // Decode the full character (see the finding-12
+                            // note above): a multibyte char after `\\` must
+                            // render as itself, not as its lead byte.
+                            let ch = self.text[self.pos..].chars().next().unwrap_or('\u{fffd}');
+                            return Err(self.err(&format!("invalid escape `\\{ch}`")));
                         }
                     }
                 }
@@ -415,9 +429,21 @@ impl<'a> Parser<'a> {
         if end > self.bytes.len() {
             return Err(self.err("truncated \\u escape (need 4 hex digits)"));
         }
-        let hex = &self.text[self.pos..end];
-        let value = u32::from_str_radix(hex, 16)
-            .map_err(|_| self.err("invalid \\u escape (need 4 hex digits)"))?;
+        // Byte-wise decoding (chelis#891 review findings 1 and 9): RFC 8259
+        // requires exactly 4 hex DIGITS, so a sign (`+`/`-`), whitespace, or
+        // a multibyte character inside the 4-byte window is a loud parse
+        // error — and slicing `self.text` at an arbitrary `pos + 4` could
+        // split a multibyte character and panic on the char boundary.
+        let mut value: u32 = 0;
+        for &byte in &self.bytes[self.pos..end] {
+            let digit = match byte {
+                b'0'..=b'9' => u32::from(byte - b'0'),
+                b'a'..=b'f' => u32::from(byte - b'a' + 10),
+                b'A'..=b'F' => u32::from(byte - b'A' + 10),
+                _ => return Err(self.err("invalid \\u escape (need 4 hex digits)")),
+            };
+            value = value * 16 + digit;
+        }
         self.pos = end;
         Ok(value)
     }
@@ -603,6 +629,22 @@ fn split_path<'p>(builtin: &str, path: &'p str) -> Result<Vec<&'p str>, String> 
     Ok(segments)
 }
 
+/// Parse a path segment as a list index under the strict "all-digits,
+/// zero-based" contract (chelis#891 review finding 10): ASCII digits
+/// only — no sign, no whitespace — and no leading zeros (`0` itself is
+/// fine), so `+1` and `007` are contract errors instead of silently
+/// resolving to elements 1 and 7.
+fn parse_index_segment(segment: &str) -> Option<usize> {
+    let bytes = segment.as_bytes();
+    if bytes.is_empty() || !bytes.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    if bytes.len() > 1 && bytes[0] == b'0' {
+        return None;
+    }
+    segment.parse::<usize>().ok()
+}
+
 fn dict_available_keys(entries: &[(RuntimeValue, RuntimeValue)]) -> String {
     const MAX_LISTED: usize = 12;
     let mut keys: Vec<String> = entries
@@ -637,10 +679,8 @@ fn get_path<'v>(
         };
         match (ctor.as_str(), fields.as_slice()) {
             ("JDict", [RuntimeValue::Dict(entries)]) => {
-                let found = entries.iter().find_map(|(key, item)| match key {
-                    RuntimeValue::String(k) if k == segment => Some(item),
-                    _ => None,
-                });
+                // Shared lookup helper (chelis#891 review finding 15).
+                let found = dict_lookup(entries, &RuntimeValue::String(segment.to_string()));
                 match found {
                     Some(item) => current = item,
                     None => {
@@ -652,10 +692,11 @@ fn get_path<'v>(
                 }
             }
             ("JList", [RuntimeValue::List(items)]) => {
-                let index: usize = segment.parse().map_err(|_| {
+                let index: usize = parse_index_segment(segment).ok_or_else(|| {
                     format!(
                         "{builtin}: path `{path}`: segment `{segment}` is not a valid \
-                         list index (the node here is a list of {} elements)",
+                         list index (all digits, zero-based, no leading zeros; the \
+                         node here is a list of {} elements)",
                         items.len()
                     )
                 })?;
@@ -794,80 +835,147 @@ pub(super) fn json_set_at(
     new_value: &RuntimeValue,
 ) -> Result<RuntimeValue, String> {
     let segments = split_path("json_set", path)?;
-    set_path_rec(value, path, &segments, new_value)
+    // Cap the recursion up front (chelis#891 review finding 5): the
+    // parser, serializer, and `ensure_json_value` all cap at MAX_DEPTH,
+    // but `set_path_rec` recursed once per segment, so a
+    // tens-of-thousands-segment path overflowed the stack.
+    if segments.len() > MAX_DEPTH {
+        return Err(format!(
+            "json_set: path `{path}` has {} segments, exceeding the maximum depth \
+             {MAX_DEPTH}",
+            segments.len()
+        ));
+    }
+    let result = set_path_iterative(value, path, &segments, new_value)?;
+    // And refuse to BUILD a value deeper than every consumer (to_json,
+    // parse_json, ensure_json_value) will accept: auto-created
+    // intermediates plus a deep replacement value can push the result past
+    // the cap even when each input is individually within it.
+    ensure_json_value(&result).map_err(|err| format!("json_set: result: {err}"))?;
+    Ok(result)
 }
 
-fn set_path_rec(
-    current: &RuntimeValue,
+/// One level of the iterative `json_set` descend/rebuild. The container
+/// contents are cloned on the way down (as the recursive form also did —
+/// inputs are immutable); the rebuild folds the updated child back in on
+/// the way up.
+enum SetPathLevel<'p> {
+    Dict {
+        entries: Vec<(RuntimeValue, RuntimeValue)>,
+        key: &'p str,
+        existing: Option<usize>,
+    },
+    List {
+        items: Vec<RuntimeValue>,
+        index: usize,
+    },
+}
+
+/// Iterative core of [`json_set_at`] (chelis#891 review finding 5): the
+/// former per-segment recursion overflowed the stack on pathological
+/// paths well before any depth check could fire; descending and
+/// rebuilding through an explicit level stack keeps the machine stack
+/// flat regardless of path length.
+fn set_path_iterative(
+    root: &RuntimeValue,
     full_path: &str,
     segments: &[&str],
     new_value: &RuntimeValue,
 ) -> Result<RuntimeValue, String> {
-    let segment = segments[0];
-    let rest = &segments[1..];
-    let RuntimeValue::Adt { ctor, fields, .. } = current else {
-        return Err(format!(
-            "json_set: path `{full_path}`: expected a Json value, got {current:?}"
-        ));
-    };
-    match (ctor.as_str(), fields.as_slice()) {
-        ("JDict", [RuntimeValue::Dict(entries)]) => {
-            let mut entries = entries.clone();
-            let existing = entries.iter_mut().find_map(|(key, item)| match key {
-                RuntimeValue::String(k) if k == segment => Some(item),
-                _ => None,
+    let mut levels: Vec<SetPathLevel<'_>> = Vec::with_capacity(segments.len());
+    // `current` walks the ORIGINAL tree; once a missing intermediate key
+    // sends us into auto-create mode, every remaining level is a fresh
+    // empty dict (the `mkdir -p` output-assembly semantics).
+    let mut current: Option<&RuntimeValue> = Some(root);
+    for (position, segment) in segments.iter().enumerate() {
+        let last = position + 1 == segments.len();
+        let Some(node) = current else {
+            levels.push(SetPathLevel::Dict {
+                entries: Vec::new(),
+                key: segment,
+                existing: None,
             });
-            match (existing, rest.is_empty()) {
-                (Some(slot), true) => {
-                    *slot = new_value.clone();
-                }
-                (Some(slot), false) => {
-                    *slot = set_path_rec(slot, full_path, rest, new_value)?;
-                }
-                (None, true) => {
-                    entries.push((RuntimeValue::String(segment.to_string()), new_value.clone()));
-                }
-                (None, false) => {
-                    // Auto-create the missing intermediate object, then
-                    // recurse into the empty dict to build the rest.
-                    let built = set_path_rec(&jdict(Vec::new()), full_path, rest, new_value)?;
-                    entries.push((RuntimeValue::String(segment.to_string()), built));
-                }
+            continue;
+        };
+        let RuntimeValue::Adt { ctor, fields, .. } = node else {
+            return Err(format!(
+                "json_set: path `{full_path}`: expected a Json value, got {node:?}"
+            ));
+        };
+        match (ctor.as_str(), fields.as_slice()) {
+            ("JDict", [RuntimeValue::Dict(entries)]) => {
+                let existing = entries
+                    .iter()
+                    .position(|(key, _)| matches!(key, RuntimeValue::String(k) if k == *segment));
+                current = match existing {
+                    Some(index) if !last => Some(&entries[index].1),
+                    // Auto-create the missing intermediate object; the
+                    // remaining levels build fresh dicts.
+                    None if !last => None,
+                    _ => Some(node), // unused: the rebuild writes the leaf
+                };
+                levels.push(SetPathLevel::Dict {
+                    entries: entries.clone(),
+                    key: segment,
+                    existing,
+                });
             }
-            Ok(RuntimeValue::Adt {
-                ctor: "JDict".to_string(),
-                fields: vec![RuntimeValue::Dict(entries)],
-                field_names: None,
-            })
-        }
-        ("JList", [RuntimeValue::List(items)]) => {
-            let index: usize = segment.parse().map_err(|_| {
-                format!(
-                    "json_set: path `{full_path}`: segment `{segment}` is not a valid \
-                     list index (the node here is a list of {} elements)",
-                    items.len()
-                )
-            })?;
-            if index >= items.len() {
+            ("JList", [RuntimeValue::List(items)]) => {
+                let index: usize = parse_index_segment(segment).ok_or_else(|| {
+                    format!(
+                        "json_set: path `{full_path}`: segment `{segment}` is not a valid \
+                         list index (all digits, zero-based, no leading zeros; the node \
+                         here is a list of {} elements)",
+                        items.len()
+                    )
+                })?;
+                if index >= items.len() {
+                    return Err(format!(
+                        "json_set: path `{full_path}`: index {index} out of range for list \
+                         of {} elements (json_set replaces existing elements only)",
+                        items.len()
+                    ));
+                }
+                current = Some(&items[index]);
+                levels.push(SetPathLevel::List {
+                    items: items.clone(),
+                    index,
+                });
+            }
+            (other_ctor, _) => {
                 return Err(format!(
-                    "json_set: path `{full_path}`: index {index} out of range for list \
-                     of {} elements (json_set replaces existing elements only)",
-                    items.len()
+                    "json_set: path `{full_path}`: cannot descend into segment `{segment}`: \
+                     the node here is `{other_ctor}`, not an object or list"
                 ));
             }
-            let mut items = items.clone();
-            items[index] = if rest.is_empty() {
-                new_value.clone()
-            } else {
-                set_path_rec(&items[index], full_path, rest, new_value)?
-            };
-            Ok(jlist(items))
         }
-        (other_ctor, _) => Err(format!(
-            "json_set: path `{full_path}`: cannot descend into segment `{segment}`: \
-             the node here is `{other_ctor}`, not an object or list"
-        )),
     }
+    // Rebuild bottom-up.
+    let mut built = new_value.clone();
+    while let Some(level) = levels.pop() {
+        built = match level {
+            SetPathLevel::Dict {
+                mut entries,
+                key,
+                existing,
+            } => {
+                match existing {
+                    Some(index) => entries[index].1 = built,
+                    None => entries.push((RuntimeValue::String(key.to_string()), built)),
+                }
+                RuntimeValue::Adt {
+                    ctor: "JDict".to_string(),
+                    fields: vec![RuntimeValue::Dict(entries)],
+                    field_names: None,
+                }
+            }
+            SetPathLevel::List { mut items, index } => {
+                items[index] = built;
+                jlist(items)
+            }
+        };
+    }
+    Ok(built)
 }
 
 // ---------------------------------------------------------------------------
@@ -1276,5 +1384,110 @@ mod tests {
         };
         let err = ensure_json_value(&malformed).expect_err("malformed JNum");
         assert!(err.contains("malformed Json value"), "got `{err}`");
+    }
+
+    // -- chelis#891 review probes -------------------------------------------
+
+    /// Review findings 1 + 9: the \u escape window is decoded byte-wise —
+    /// a multibyte character inside the 4-byte window is a loud parse
+    /// error (previously a char-boundary PANIC), and a sign or embedded
+    /// whitespace is rejected (previously `from_str_radix` accepted `+`).
+    #[test]
+    fn parse_hex4_is_boundary_safe_and_strict() {
+        let err = parse_json_text("\"\\u00\u{e9}x\"").expect_err("multibyte in window");
+        assert!(err.contains("invalid \\u escape"), "got `{err}`");
+        for input in ["\"\\u+0FF\"", "\"\\u-123\"", "\"\\u 123\"", "\"\\u12 3\""] {
+            let err = parse_json_text(input).expect_err(input);
+            assert!(err.contains("invalid \\u escape"), "{input}: got `{err}`");
+        }
+        // Genuine 4-hex-digit escapes still decode.
+        match parse_json_text("\"\\u00e9\"").expect("valid escape") {
+            RuntimeValue::Adt { fields, .. } => match fields.as_slice() {
+                [RuntimeValue::String(s)] => assert_eq!(s, "\u{e9}"),
+                other => panic!("expected one string field, got {other:?}"),
+            },
+            other => panic!("expected JStr, got {other:?}"),
+        }
+    }
+
+    /// Review finding 12: a leading BOM is skipped (RFC 8259 §8.1,
+    /// consistent with `parse_csv`), and unexpected characters render as
+    /// themselves, not as their UTF-8 lead byte's mojibake.
+    #[test]
+    fn parse_json_strips_leading_bom_and_renders_real_chars() {
+        let value = parse_json_text("\u{feff}{\"a\": 1.5}").expect("BOM-prefixed JSON");
+        assert_eq!(json_f64_at(&value, "a").unwrap(), 1.5);
+        // Exactly one BOM is stripped; a second is a real unexpected
+        // character and renders as itself.
+        let err = parse_json_text("\u{feff}\u{feff}1").expect_err("double BOM");
+        assert!(err.contains('\u{feff}'), "got `{err}`");
+        let err = parse_json_text("\u{e9}").expect_err("stray char");
+        assert!(err.contains("unexpected character `\u{e9}`"), "got `{err}`");
+    }
+
+    /// Review finding 10: list-index path segments are strictly
+    /// all-digits — `+1` and `007` are contract errors, not silent
+    /// element accesses.
+    #[test]
+    fn path_index_segments_are_strictly_all_digits() {
+        let doc = parse_json_text("[10.5, 20.5, 30.5]").unwrap();
+        assert_eq!(json_f64_at(&doc, "0").unwrap(), 10.5);
+        for bad in ["+1", "-1", "007", "1 ", " 1", "0x1"] {
+            let err = json_f64_at(&doc, bad).expect_err(bad);
+            assert!(err.contains("not a valid list index"), "{bad}: got `{err}`");
+            assert!(err.contains("all digits"), "{bad}: got `{err}`");
+        }
+        let err = json_set_at(&doc, "007", &jnum(1.5)).expect_err("leading zeros");
+        assert!(err.contains("no leading zeros"), "got `{err}`");
+    }
+
+    /// Review finding 5: `json_set` caps both the path depth and the
+    /// depth of the value it builds (previously a
+    /// tens-of-thousands-segment path overflowed the stack, and
+    /// composing within-cap inputs could build a value `to_json` then
+    /// refuses).
+    #[test]
+    fn json_set_depth_caps_are_loud_not_crashes() {
+        let deep_path = vec!["a"; 100_000].join(".");
+        let err = json_set_at(&jdict(Vec::new()), &deep_path, &jnum(1.5)).expect_err("deep path");
+        assert!(err.contains("exceeding the maximum depth"), "got `{err}`");
+
+        // Composing within-cap inputs cannot BUILD an over-cap value: a
+        // 450-segment path (within the segment cap) attaching a 100-deep
+        // value pushes the result to depth ~550, which the result check
+        // rejects (previously to_json would refuse a value json_set
+        // happily built).
+        let mut deep = jnum(1.5);
+        for _ in 0..100 {
+            deep = jlist(vec![deep]);
+        }
+        let path_450 = vec!["a"; 450].join(".");
+        let err = json_set_at(&jdict(Vec::new()), &path_450, &deep).expect_err("over-cap result");
+        assert!(err.contains("maximum depth"), "got `{err}`");
+        // The same value attaches fine at a shallow path.
+        json_set_at(&jdict(Vec::new()), "a.b.c", &deep).expect("within cap");
+    }
+
+    /// Review finding 11: duplicate-key upsert stays first-position /
+    /// last-value across the hash-index threshold (large objects switch
+    /// from the linear scan to the key -> slot index).
+    #[test]
+    fn large_object_duplicate_keys_upsert_across_index_threshold() {
+        let mut body = String::from("{");
+        for i in 0..40 {
+            body.push_str(&format!("\"k{i}\": {}.5, ", i));
+        }
+        // Re-set the very first key after the index has kicked in.
+        body.push_str("\"k0\": 99.5}");
+        let value = parse_json_text(&body).expect("large object parses");
+        assert_eq!(json_f64_at(&value, "k0").unwrap(), 99.5, "last value wins");
+        let text = json_value_to_text(&value).unwrap();
+        assert!(
+            text.starts_with("{\"k0\":99.5,\"k1\":1.5"),
+            "first position is kept: {}",
+            &text[..40.min(text.len())]
+        );
+        // 40 distinct keys stay distinct.
+        assert_eq!(json_f64_at(&value, "k39").unwrap(), 39.5);
     }
 }

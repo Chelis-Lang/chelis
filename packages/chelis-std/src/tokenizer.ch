@@ -1,5 +1,5 @@
 module Std.Tokenizer
-import Std.Io.Json (Json, json_array, json_get, json_int, json_object, json_string, try_load_json)
+import Std.Io.Json (JsonValue, json_array, json_get, json_int, json_object, json_string, try_load_json)
 export (load_tokenizer, try_load_tokenizer, encode, decode, batch_encode)
 type Tokenizer =
   | BpeTokenizer(Dict[string, int64], Dict[string, int64], Dict[int64, string], int64)
@@ -80,7 +80,7 @@ def decode(tokenizer: Tokenizer, ids: List[int64]) -> string = {
   }
 }
 def batch_encode(tokenizer: Tokenizer, texts: List[string], max_length: int64, pad_value: int64) -> tensor[batch, seq, int64] = pad_sequences_to(map(fn (text: string) -> encode(tokenizer, text), texts), max_length, pad_value)
-def vocab_from_json(entries: List[(string, Json)], out: List[(string, int64)]) -> Option[List[(string, int64)]] = {
+def vocab_from_json(entries: List[(string, JsonValue)], out: List[(string, int64)]) -> Option[List[(string, int64)]] = {
   if eq(len(entries), cast(0, int64)) then Some(out) else {
     entry = index(entries, cast(0, int64))
     (token, value) = entry
@@ -101,7 +101,7 @@ def invert_vocab_entries(entries: List[(string, int64)], out: List[(int64, strin
     invert_vocab_entries(drop(entries, cast(1, int64)), append(out, pair))
   }
 }
-def merges_from_json(merges: List[Json], index0: int64, out: List[(string, int64)]) -> Option[List[(string, int64)]] = {
+def merges_from_json(merges: List[JsonValue], index0: int64, out: List[(string, int64)]) -> Option[List[(string, int64)]] = {
   if eq(len(merges), cast(0, int64)) then Some(out) else match json_string(Some(index(merges, cast(0, int64)))) with {
     | Some(line) => match merge_key_from_line(line) with {
     | Some(key) => {

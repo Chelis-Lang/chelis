@@ -762,6 +762,7 @@ pub fn compile_for_execution(request: CompileRequest) -> Result<CompiledExecutio
     // §3.6 and spec/design/loud_unsupported.md §C6.3.
     if let Some(host_program) = host_compiled.host.as_ref() {
         reject_host_only_builtins(host_program, request.target)?;
+        reject_eval_only_builtins(host_program)?;
     }
 
     // Two C-build-path guards over `reduce_window_*`, applied before
@@ -2324,6 +2325,27 @@ fn reject_host_only_builtins_before_host_lowering(
 ) -> Result<()> {
     if let Some(name) = chelis_ir::host::find_direct_builtin_call(program, HOST_ONLY_BUILTINS) {
         return Err(host_only_builtin_error(&name, target));
+    }
+    Ok(())
+}
+
+/// Eval/test-only builtins (`process_run`, the chelis#890 JSON family)
+/// are rejected for every compiled target with the same message the CLI
+/// build gate prints, so the public `compile()`/`compile_for_execution()`
+/// APIs (the chelis-python path) fail loudly instead of falling through
+/// to a generic codegen error (chelis#891 review finding 13). The list
+/// lives in `chelis_ir::host` and is shared with the CLI's build gate.
+fn reject_eval_only_builtins(program: &chelis_ir::host::ConcreteHostProgram) -> Result<()> {
+    if let Some(name) = chelis_ir::host::find_eval_only_host_builtin(program) {
+        return Err(stage_error(
+            "compile",
+            format!(
+                "{name} is an eval/test-only builtin; not available in compiled \
+                    targets. Run the program with `chelis eval` or `chelis test` instead, \
+                    or remove the {name} call before building."
+            ),
+            "unsupported_feature",
+        ));
     }
     Ok(())
 }
@@ -4837,5 +4859,34 @@ bad = shape(scalar_to_tensor(cast(3, int64)), axis)
             .dag
             .validate_schema_version()
             .expect("the produced gradient DAG validates");
+    }
+
+    /// chelis#891 review finding 13: the eval-only builtin rejection is
+    /// enforced in the shared compiler layer, so the public
+    /// `compile()`/`compile_for_execution()` APIs (the chelis-python
+    /// path) get the same loud diagnostic as the CLI build gate instead
+    /// of a generic codegen fallthrough.
+    #[test]
+    fn compile_rejects_eval_only_builtins_with_the_build_gate_message() {
+        let source = r#"
+doc = parse_json("{\"a\": 1.5}")
+value = json_f64(doc, "a")
+"#;
+        let err = compile(CompileRequest {
+            source_kind: SourceKind::Surf,
+            source: source.to_string(),
+            target: CompileTarget::C,
+            entry_name: Some("json_reject".to_string()),
+        })
+        .expect_err("compile must reject eval-only builtins");
+        let message = &err.errors[0].message;
+        assert!(
+            message.contains("is an eval/test-only builtin"),
+            "unexpected message: {message}"
+        );
+        assert!(
+            message.contains("chelis eval"),
+            "message should point at the eval lane: {message}"
+        );
     }
 }

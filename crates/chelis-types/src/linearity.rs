@@ -391,7 +391,7 @@ pub fn check_linearity_with_context(
         .iter()
         .filter_map(|expr| {
             if let Expr::List(list, _) = expr
-                && get_tag(list) == Some(DeepTag::Def)
+                && get_tag(&list) == Some(DeepTag::Def)
             {
                 children(list)
                     .first()

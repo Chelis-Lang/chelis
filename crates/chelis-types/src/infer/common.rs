@@ -655,6 +655,7 @@ pub(super) fn collect_all_declarations(
     report_duplicate_defs(&bare_items, errors);
     report_duplicate_defsigs(&bare_items, errors);
     report_builtin_shadowing(&bare_items, errors);
+    report_builtin_param_call_shadowing(&bare_items, errors);
     let resolution_env = precollect_type_resolution_env(items, adt_reg);
     // Install the provisional self/forward header scope explicitly in this
     // per-check registry clone. Declaration bodies resolve against it, while
@@ -995,6 +996,24 @@ pub(super) fn report_builtin_shadowing(items: &[&deep::Expr], errors: &mut Diagn
                  internal-name-rewritten before checking"
             )],
         ));
+    }
+}
+
+/// chelis#891 review finding 4: a function parameter MAY reuse a builtin
+/// name (the deliberate #353 carve-out — it binds a value and shadows
+/// harmlessly in value position), but a CALL through that name never
+/// reaches the parameter: the host evaluator (`runtime/eval.rs::eval_app`)
+/// and IR lowering (`lower.rs`/`host.rs`) both dispatch builtin-first by
+/// name. `def apply(round_to: ..., x) = round_to(x, 0)` therefore
+/// type-checked while silently invoking the BUILTIN. Reject exactly that
+/// shape — a builtin-named parameter applied by name inside its own
+/// scope — and leave value-position reuse intact (pinned by
+/// `value_params_and_locals_may_reuse_builtin_names`).
+fn report_builtin_param_call_shadowing(items: &[&deep::Expr], errors: &mut DiagnosticSink<'_>) {
+    let mut reported: HashSet<String> = HashSet::new();
+    for expr in items {
+        let mut scope: Vec<String> = Vec::new();
+        walk_builtin_param_calls(expr, &mut scope, &mut reported, errors);
     }
 }
 
@@ -1667,3 +1686,99 @@ pub(super) fn infer_top_level(
 }
 
 // ── Core inference ───────────────────────────────────────────────
+
+fn walk_builtin_param_calls(
+    expr: &deep::Expr,
+    scope: &mut Vec<String>,
+    reported: &mut HashSet<String>,
+    errors: &mut DiagnosticSink<'_>,
+) {
+    stack_guard!("walk_builtin_param_calls", expr);
+    match expr {
+        deep::Expr::MetaExpr(meta, _) => {
+            walk_builtin_param_calls(&meta.expr, scope, reported, errors);
+        }
+        deep::Expr::List(list, _) => {
+            let kids = children(list);
+            if get_tag(list) == Some(DeepTag::Fn) {
+                let mut added = 0usize;
+                if let Some(deep::Expr::List(params_list, _)) = kids.first() {
+                    for param in children(params_list) {
+                        if let Some(name) = builtin_shadow_param_name(param)
+                            && builtins::BUILTIN_NAMES.contains(&name)
+                        {
+                            scope.push(name.to_string());
+                            added += 1;
+                        }
+                    }
+                }
+                for kid in kids.iter().skip(1) {
+                    walk_builtin_param_calls(kid, scope, reported, errors);
+                }
+                scope.truncate(scope.len() - added);
+                return;
+            }
+            if get_tag(list) == Some(DeepTag::App)
+                && let Some(callee) = kids.first()
+                && let Some(name) = builtin_shadow_callee_name(callee)
+                && scope.iter().any(|param| param == name)
+                && reported.insert(name.to_string())
+            {
+                errors.push(CheckError::new(
+                    CheckErrorKind::BuiltinShadowing,
+                    format!(
+                        "parameter `{name}` shadows the builtin `{name}` and is called in \
+                         this function body: calls dispatch builtin-first under eval and \
+                         lowering (spec/04-type-system.md \u{00a7}8.6), so `{name}(...)` here \
+                         always invokes the builtin; the parameter can never be reached \
+                         by name."
+                    ),
+                    vec![format!(
+                        "rename the parameter (e.g. `{name}_fn`); builtin-named parameters \
+                         remain allowed in value position"
+                    )],
+                ));
+            }
+            for kid in kids {
+                walk_builtin_param_calls(kid, scope, reported, errors);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Extract a parameter's bound name from its Deep form (bare `Symbol`,
+/// `MetaExpr`-wrapped, or annotated `(name {type: ..})` list) without
+/// self-recursion.
+fn builtin_shadow_param_name(param: &deep::Expr) -> Option<&str> {
+    let mut current = param;
+    loop {
+        match current {
+            deep::Expr::Atom(deep::Atom::Symbol(name), _) => return Some(name.as_str()),
+            deep::Expr::MetaExpr(meta, _) => current = &meta.expr,
+            deep::Expr::List(list, _) => {
+                return list
+                    .elements
+                    .first()
+                    .and_then(symbol_name)
+                    .or_else(|| children(list).first().and_then(symbol_name));
+            }
+            _ => return None,
+        }
+    }
+}
+
+/// Extract the name of a `(var name)` callee, unwrapping `MetaExpr`
+/// annotation layers, without self-recursion.
+fn builtin_shadow_callee_name(callee: &deep::Expr) -> Option<&str> {
+    let mut current = callee;
+    loop {
+        match current {
+            deep::Expr::MetaExpr(meta, _) => current = &meta.expr,
+            deep::Expr::List(list, _) if get_tag(list) == Some(DeepTag::Var) => {
+                return children(list).first().and_then(symbol_name);
+            }
+            _ => return None,
+        }
+    }
+}

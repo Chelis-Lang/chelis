@@ -312,17 +312,17 @@ number) are loud eval errors — no silent defaults.
 
 | Name | Signature | Notes |
 |---|---|---|
-| `parse_json` | `(s: string) -> Json` | strict RFC 8259; numbers are f64 (ints past 2^53 lose precision); duplicate keys: first position, last value; depth cap 512 |
+| `parse_json` | `(s: string) -> Json` | strict RFC 8259; a leading UTF-8 BOM is ignored (§8.1, matching `parse_csv`); numbers are f64 (ints past 2^53 lose precision); duplicate keys: first position, last value; depth cap 512 |
 | `to_json` | `(v: Json) -> string` | compact, **insertion-order keys**, **shortest-round-trip f64** (Rust `{:?}` formatter — deliberately NOT the print channel, chelis#748/#723/#734); NaN/inf fail; non-ASCII emitted as raw UTF-8; byte-stable |
-| `json_f64` | `(j: Json, path: string) -> f64` | dot-path: segment = dict key, or all-digits list index; fails name the missing key and list available keys |
+| `json_f64` | `(j: Json, path: string) -> f64` | dot-path: segment = dict key, or strictly all-digits list index (no sign, no leading zeros); fails name the missing key and list available keys |
 | `json_str` | `(j: Json, path: string) -> string` | |
 | `json_list` | `(j: Json, path: string) -> List[Json]` | elements re-enter the accessors (element-relative paths) |
 | `json_f64s` | `(j: Json, path: string) -> List[f64]` | list of numbers at path; any non-number element fails with its index |
-| `jnum` | `(x: float) -> Json` | any float precision (literals default f32 per §5.3; use `cast(n, f64)`/`f64` values for full precision) |
+| `jnum` | `(x: f64) -> Json` | **exactly f64** (bare literals are f32 per §5.3 and are rejected loudly — suffix them `0.1f64` or use `cast(n, f64)`; an f32 would quantize through the byte-exact serializer) |
 | `jstr` | `(s: string) -> Json` | |
 | `jlist` | `(items: List[Json]) -> Json` | |
 | `jdict` | `(entries: List[(string, Json)]) -> Json` | insertion order; duplicate keys upsert |
-| `json_set` | `(j: Json, path: string, v: Json) -> Json` | returns updated value; missing intermediate dict keys auto-create nested dicts (output assembly); list segments replace existing elements only |
+| `json_set` | `(j: Json, path: string, v: Json) -> Json` | returns updated value; missing intermediate dict keys auto-create nested dicts (output assembly); list segments replace existing elements only; path segments and the built result respect the 512 depth cap |
 | `round_to` | `(x: float, places: int) -> float` | decimal rounding, **ties-to-even** on the exact binary value (= Python `round`): `round_to(2.5, 0) = 2.0`, `round_to(2.675, 2) = 2.67`; `places` in 0..=100; non-finite passes through; precision-preserving return |
 
 Composes with §3.5: `read_file |> parse_json`, accessors + tensor builtins

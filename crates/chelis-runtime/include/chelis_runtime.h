@@ -319,8 +319,8 @@ chelis_tensor *chelis_tensor_from_value_list(const chelis_list *list);
  * (e.g. `let xs: tensor[3, f64] = [1.0, 2.0, 3.0]`). */
 chelis_tensor *chelis_tensor_from_value_list_typed(const chelis_list *list, int dst_dtype);
 chelis_list *chelis_list_from_tensor(const chelis_tensor *tensor);
-chelis_tensor *chelis_pad_sequences(const chelis_list *sequences, chelis_value pad_value);
-chelis_tensor *chelis_pad_sequences_to(const chelis_list *sequences, int64_t width, chelis_value pad_value);
+chelis_tensor *chelis_pad_sequences(const chelis_list *sequences, chelis_value pad_value, int pad_dtype);
+chelis_tensor *chelis_pad_sequences_to(const chelis_list *sequences, int64_t width, chelis_value pad_value, int pad_dtype);
 chelis_tensor *chelis_tensor_concat(const chelis_list *parts, int64_t axis);
 chelis_list *chelis_tensor_split(const chelis_tensor *tensor, int64_t axis, const chelis_list *sizes);
 chelis_tensor *chelis_tensor_gather(const chelis_tensor *tensor, const chelis_tensor *indices, int64_t axis);
