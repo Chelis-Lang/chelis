@@ -73,10 +73,19 @@ call sites.
 
 ## Non-goals
 
-- **The C backend.** It emits text, so `elem_type` returning `"float"` for bool is a data
-  bug rather than a type error — that one line caused six gradient-test failures and no
-  Rust type could have caught it. Phantom-typed `CExpr<T>` is the analogous move for
-  codegen and is a separate, larger argument.
+- **Kernel bodies.** A kernel that writes `1.0f` into a correctly typed one-byte buffer
+  still compiles. The C backend's `cmplt` ternary had to change from `1.0f : 0.0f` to
+  `1 : 0` independently of its pointer type. Phantom-typed `CExpr<T>` is the analogous
+  move and is a separate, larger argument.
+
+  **Correction.** This non-goal originally excluded the backends wholesale, on the
+  grounds that emitted C is text and no Rust type could have caught `elem_type` returning
+  `"float"` for bool. That was too broad, and HIP is the evidence: when
+  `CRuntime-BoolStorage-F1` moved bool to one byte, HIP's device allocation followed
+  automatically while `dtype_c_type` kept its `float` spelling, producing a four-times
+  device-side heap overflow. A Rust type cannot check a kernel's *body*, but it can
+  constrain the *element spelling* — a choice from a fixed set, and the thing that was
+  wrong. That half is [`bind-lane-element-types`](../bind-lane-element-types/proposal.md).
 - **The FFI boundary itself.** `#[repr(C)]` structs crossing a C ABI cannot be typed by
   Rust generics. The goal is to make the untyped region one line per exported function,
   not to eliminate it.
