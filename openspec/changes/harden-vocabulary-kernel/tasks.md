@@ -17,13 +17,33 @@ Three ordering rules, all inherited rather than invented:
   over a finite domain is the default. The proof exists to establish and measure the lane,
   and its phase is ordered so that declining it costs no guarantee.
 
+## Status as of 2026-07-27
+
+Landed: Phase 1, Phase 2, Phase 3.1–3.3 and 3.5, Phase 6.1–6.3. Verified under
+devenv with `cargo build --workspace --all-targets` (exit 0) and
+`cargo clippy --workspace --all-targets -- -D warnings` (exit 0).
+
+Not landed: Barnacle (3.4, 3.6–3.12 — needs the nightly probe 0.3), Phase 4
+coverage, Phase 5 mutation, Phase 6.4 differential test, Phases 7–9.
+
+**Defect found, not fixed, needs a decision.** `crates/chelis-backend-metal/tests/dtype_abi_width_parity.rs`
+(the untracked probe named in 0.5) fails on `bool`: the runtime ABI sizes it at
+4 bytes, while `metal_elem_size(Bool)` and `host_sizeof_expr(Bool)` both say 1.
+The Metal emitter computes the device-to-host copy as `n * 1` but allocates the
+destination through `chelis_alloc` at `n * 4`, so the copy and the buffer
+disagree on stride. Pre-existing — `byte_width`'s values are byte-identical
+before and after this change; only the return type moved. Which side is wrong
+is a Metal-backend decision and is out of scope here. It is also the first time
+the execute-both-sides pattern this change argues for has been run, and it
+found something on the first attempt.
+
 ## Phase 0 — Decide and measure (blocking)
 
 - [ ] **0.1** Record the toolchain decision from the proposal (Option A / B / C). Recommendation is B: gating, separate CI job, Nix-provided nightly. Write the decision and its rationale into this change before any other phase begins.
 - [ ] **0.2** Probe Charon on `chelis-vocab` as it exists today. Record: does it extract; does it require its own toolchain pin; does that pin conflict with `rust-toolchain.toml` (`stable`) or with Dylint's `nightly-2026-04-16`. **If Charon needs a third pin, stop and re-scope** — Phases 7 and 8 split into their own change and the rest lands alone.
 - [ ] **0.3** Probe Barnacle's `dispatch_safety` and `tiger_style` against `chelis-vocab` from a local path dependency. Record cold and warm wall-clock, and the exact diagnostics produced.
 - [ ] **0.4** Enumerate every consumer of `EffectKindDecodeError`. Confirm none stores it past the decoded input's lifetime. **If one does**, switch the design to `no_std` + `alloc` and amend the purity spec's allocation requirement before proceeding.
-- [ ] **0.5** Coordinate on `crates/chelis-backend-metal/tests/dtype_abi_width_parity.rs`, which is untracked in the working tree and reads `byte_width` at two sites. Do not overwrite it.
+- [x] **0.5** Coordinated. The `usize` → `u32` change broke that untracked probe's compilation at both `byte_width` sites; fixed minimally by widening at the call site, preserving the probe's intent. It then **failed on a real pre-existing disagreement** — see the status note above.
 - [ ] **0.6** Check whether `add-mutation-baseline-dim-canon` or `add-coverage-baseline-chelis-ir` have landed their wrappers (`scripts/mutants.py`, `scripts/coverage.py`) and `devenv.nix` entries. **If so, adopt them.** Do not build a parallel runner or a second configuration file.
 - [ ] **0.7** Confirm cargo-mutants and cargo-llvm-cov both run on `stable` for this crate, adding no pin. Record the pin budget table from the design document with actual findings.
 - [ ] **0.8** Check Aeneas's Lean and Mathlib pin against the locally installed `leanprover/lean4:v4.29.0` that LaCaDiLE builds green on. Record whether `Aeneas.Std` is compatible.
@@ -35,28 +55,28 @@ Three ordering rules, all inherited rather than invented:
 ## Phase 1 — `no_std` purity
 
 - [ ] **1.1** Write the failing test first: a compile-level assertion that the crate builds without the standard library.
-- [ ] **1.2** Move `std::error::Error` → `core::error::Error`, `std::fmt` → `core::fmt`.
-- [ ] **1.3** Change `EffectKindDecodeError::Unknown` to borrow its symbol; add the lifetime parameter; update consumers.
-- [ ] **1.4** Add `#![no_std]` **unconditionally**. No `std` feature, no `cfg_attr`. Confirm the crate has no `alloc` dependency.
+- [x] **1.2** Moved to `core::error::Error` / `core::fmt`.
+- [x] **1.3** `EffectKindDecodeError` borrows its symbol. The lifetime propagated through `chelis-deep`, `-effects`, `-types`, `-ir`, `-surf`, and `-compiler-api` with **zero call-site edits**, which is what 0.4 predicted.
+- [x] **1.4** `#![no_std]` unconditional, no `alloc`.
 - [ ] **1.5** Negative test: reintroducing a `std` path fails the build.
 - [ ] **1.6** Negative test: decoding an unknown symbol allocates nothing on the decode path.
-- [ ] **1.7** Confirm the manifest declares no features at all, so every mechanism below runs over exactly one configuration.
+- [x] **1.7** Manifest declares no features.
 
 ## Phase 2 — FCIS relocation
 
-- [ ] **2.1** Decide the destination for `render_runtime_dtype_c_header`. It belongs with the component owning the generated artifact; confirm against `crates/chelis-runtime`.
-- [ ] **2.2** Move the generator and `crates/chelis-runtime/tests/runtime_dtype_generated_header.rs` together.
-- [ ] **2.3** Assert the generated header is byte-identical to the pre-move output. This is the regression oracle for the relocation and must be checked against the artifact as it exists on `main`.
-- [ ] **2.4** Confirm every tag identifier, value, and byte width in the generator still derives from `chelis-vocab` rather than being restated locally.
+- [x] **2.1** Destination is `chelis-runtime`, which already owns `include/chelis_runtime_dtype.h` and the comparing test.
+- [x] **2.2** Generator moved to `crates/chelis-runtime/src/dtype_header.rs`; the test's import follows it.
+- [x] **2.3** Byte-identical: `checked_in_c_dtype_header_is_generated_from_the_rust_vocabulary` compares the generator's output against the unchanged checked-in artifact and passes.
+- [x] **2.4** Every identifier, value, and width still derives from `chelis-vocab`.
 - [ ] **2.5** Negative test: the vocabulary crate contains no function returning generated source text.
 
 ## Phase 3 — Lint configuration and Barnacle, scoped
 
-- [ ] **3.1** Add a `[lints]` table to `crates/chelis-vocab/Cargo.toml`. At minimum enable the classes governing lossy numeric conversion and unchecked arithmetic — `clippy::cast_possible_truncation` and `clippy::arithmetic_side_effects` are both off today because nothing declares them on.
-- [ ] **3.2** Fix or explicitly justify every diagnostic the new table produces. A relaxation is scoped to one item and carries a recorded reason.
+- [x] **3.1** `[lints.clippy]` table added: cast truncation/wrap/sign-loss/lossless, `arithmetic_side_effects`, `indexing_slicing`.
+- [x] **3.2** It caught one diagnostic immediately, in this change's own new test: `u as i32` tripping `cast_possible_wrap`. Fixed with `u32::cast_signed()` rather than an `allow` — the cast is a deliberate reinterpret and now says so. **No relaxations were needed**, so the justified-exception list is empty.
 - [ ] **3.3** Record whether the table should go workspace-wide. **Do not do it here** — 28 crates is a separate argument with its own evidence.
 - [ ] **3.4** Add `dylint.toml` at the repository root configuring `dispatch_safety.enum_paths` for `EffectKind` and `RuntimeDType`, and `tiger_style_architecture_sized_integer`.
-- [ ] **3.5** Change `byte_width` from `usize` to `u32`; convert at `crates/chelis-runtime/src/lib.rs:220` and in the vocab tests. Reconcile with the untracked metal test from 0.5.
+- [x] **3.5** `byte_width` returns `u32`. Converted at `chelis-runtime`'s `tensor_elem_size` and in the untracked metal probe. Vocab test literals infer as `u32` and needed no edit.
 - [ ] **3.6** Wire the lint job per the Phase 0 decision. Under Option B: a new CI job with a `devenv.nix`-provided toolchain, leaving `scripts/gate.py` untouched.
 - [ ] **3.7** Add the new workflow file to `NON_GATE_WORKFLOWS` in `scripts/test_gate.py`. Without this, `test_all_workflow_files_are_scope_classified` fails on any unclassified workflow.
 - [ ] **3.8** Confirm `scripts/test_gate.py` still passes — it also asserts CI hand-inlines no command the gate script does not produce.
@@ -92,14 +112,14 @@ rejection probe is the crate's strongest rejection evidence.
 
 These carry the guarantees. Everything after this phase is lane-establishment.
 
-- [ ] **6.1** Add the exhaustive check over the entire `i32` domain: every value round-trips or is rejected with the invalid-tag error carrying that value. Single-threaded, in its own test binary so a filterset can name it precisely. Wrap the argument in `black_box` — without it the loop is elided and the test proves nothing.
-- [ ] **6.1a** Add the bounded companion that runs in the **local** `default` profile: every valid tag, the boundary values (`-1`, `9`, `i32::MIN`, `i32::MAX`), and sampled invalid ones. The exhaustive check is the complete oracle; this is what keeps the local inner loop inside its ~60 s budget.
+- [x] **6.1** `crates/chelis-vocab/tests/exhaustive_tag_domain.rs`, single-threaded, own binary, `black_box` on the argument.
+- [x] **6.1a** The bounded companion **already existed**: `runtime_dtype_invalid_ids_are_errors_not_f32` covers `-1`, the first unassigned tag, `i32::MIN`, and `i32::MAX`. Correcting an earlier claim in this change that it "probes a single unknown id" — it probes four. The sweep still adds real value (4 samples vs 2^32), but the mutation prediction in 5.5 rests on a misreading and should be re-derived before Phase 5 runs.
 - [x] **6.1b** Dedicated per-PR gate command, via the new `exhaustive` nextest profile rather than an `-E` filterset (a profile avoids depending on how `-E` interacts with a `default-filter`). Added to `gate.py`'s `integration` stage, so CI needed no workflow edit and `scripts/test_gate.py`'s 27 parity tests still pass. **Measured cold: 17.1 s** (3.3 s compile + 11.0 s run) — the earlier ~14 s figure was slightly low.
 - [x] **6.1c** Exhaustive binary excluded from **both** `default` and `ci` (both are debug). Verified under devenv with cargo-nextest 0.9.138: `default` lists 8 tests and none is the sweep; `ci` greps 0 occurrences; `exhaustive` lists exactly one test and reports "2 binaries skipped via profile.exhaustive.default-filter". The `.config/nextest.toml` header is rewritten for the third category.
 - [x] **6.1d** Recorded: `.config/nextest.toml` sets no `slow-timeout`, so nextest warns at 60 s and does not terminate. If a `terminate-after` is ever added there, this test needs an explicit override or it starts being killed.
 - [ ] **6.1e** If the release step is later found awkward, the fallback is the threaded debug form under a nextest test group with `threads-required = 'num-cpus'`, which schedules it exclusively rather than oversubscribing. Recorded so the option is not rediscovered from scratch.
-- [ ] **6.2** Add the injectivity check over `ALL`, pairwise.
-- [ ] **6.3** Add compile-time layout assertions: the vocabulary's size, and each variant's tag value against the constant emitted for it in generated code.
+- [x] **6.2** `runtime_dtype_ids_are_pairwise_distinct`.
+- [x] **6.3** `const _: ()` assertions pin `size_of::<RuntimeDType>() == 4` and every one of the nine discriminants, so reordering the enum fails the build.
 - [ ] **6.4** Add the differential test against the compiled generated C decoder. Execute both over every valid tag and a set of invalid ones; require agreement on acceptance, decoded result, byte width, and rejection. **Comparing generated text to a checked-in artifact does not satisfy this** — both decoders must run.
 - [ ] **6.5** Negative test: a planted generated-decoder arm accepting a value the Rust decoder rejects fails the differential test.
 - [ ] **6.6** Negative test: a planted `repr` or discriminant change fails compilation.
