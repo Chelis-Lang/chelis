@@ -71,6 +71,83 @@ impl fmt::Display for EffectKindDecodeError<'_> {
 
 impl Error for EffectKindDecodeError<'_> {}
 
+/// How a dtype's elements are physically encoded in a buffer.
+///
+/// **This, not the byte width, is the ABI contract.** A width is a projection
+/// of a representation, and that projection is not injective: `TwosComplement32`
+/// and `BoolInBinary32` are both four bytes and are not interchangeable. Two
+/// lanes agree about a dtype iff their `Repr` values are equal; comparing
+/// widths can pass while the encodings differ, which is silent corruption
+/// rather than a stride mismatch.
+///
+/// Naming is by encoding rather than by logical type on purpose. `Bool` does
+/// not appear as a representation because bool is not, today, represented as
+/// itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Repr {
+    Ieee754Binary16,
+    Ieee754Binary32,
+    Ieee754Binary64,
+    Bfloat16,
+    TwosComplement8,
+    TwosComplement16,
+    TwosComplement32,
+    TwosComplement64,
+    /// A boolean carried in an IEEE binary32 payload: `0.0` for false, `1.0`
+    /// for true.
+    ///
+    /// Legacy, and tracked as `CRuntime-BoolStorage-F1` in
+    /// `docs/gap_synthesis.md`. The recorded end state is a native one-byte
+    /// boolean, at which point this variant is replaced by a `Bool8` and
+    /// [`RuntimeDType::byte_width`] follows automatically — which is the
+    /// reason width is derived from this rather than written out per dtype.
+    ///
+    /// It is named here so the deviation is visible in the type system rather
+    /// than only in a document, and so a lane that assumes a native bool is
+    /// wrong in a way a compiler can point at.
+    BoolInBinary32,
+}
+
+impl Repr {
+    pub const ALL: [Self; 9] = [
+        Self::Ieee754Binary16,
+        Self::Ieee754Binary32,
+        Self::Ieee754Binary64,
+        Self::Bfloat16,
+        Self::TwosComplement8,
+        Self::TwosComplement16,
+        Self::TwosComplement32,
+        Self::TwosComplement64,
+        Self::BoolInBinary32,
+    ];
+
+    pub const fn byte_width(self) -> u32 {
+        match self {
+            Self::TwosComplement8 => 1,
+            Self::Ieee754Binary16 | Self::Bfloat16 | Self::TwosComplement16 => 2,
+            Self::Ieee754Binary32 | Self::TwosComplement32 | Self::BoolInBinary32 => 4,
+            Self::Ieee754Binary64 | Self::TwosComplement64 => 8,
+        }
+    }
+
+    /// Whether the encoding carries a logical type other than the one its
+    /// bit pattern denotes. Such a representation cannot be memcpy'd to or
+    /// from a lane holding the type natively; it needs a conversion.
+    pub const fn is_payload_encoded(self) -> bool {
+        match self {
+            Self::BoolInBinary32 => true,
+            Self::Ieee754Binary16
+            | Self::Ieee754Binary32
+            | Self::Ieee754Binary64
+            | Self::Bfloat16
+            | Self::TwosComplement8
+            | Self::TwosComplement16
+            | Self::TwosComplement32
+            | Self::TwosComplement64 => false,
+        }
+    }
+}
+
 /// Dtypes that the C-compatible runtime ABI can store.
 #[repr(i32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -131,15 +208,33 @@ impl RuntimeDType {
         }
     }
 
-    /// Fixed-width because this describes the runtime ABI, which does not vary
-    /// with the host pointer width.
-    pub const fn byte_width(self) -> u32 {
+    /// The physical encoding of one element.
+    ///
+    /// This is the primitive concept; [`Self::byte_width`] is derived from it.
+    /// Prefer comparing representations over comparing widths when checking
+    /// that two lanes agree — see [`Repr`].
+    pub const fn repr(self) -> Repr {
         match self {
-            Self::F32 | Self::I32 | Self::Bool => 4,
-            Self::F64 | Self::I64 => 8,
-            Self::Bf16 | Self::F16 | Self::I16 => 2,
-            Self::I8 => 1,
+            Self::F32 => Repr::Ieee754Binary32,
+            Self::F64 => Repr::Ieee754Binary64,
+            Self::F16 => Repr::Ieee754Binary16,
+            Self::Bf16 => Repr::Bfloat16,
+            Self::I8 => Repr::TwosComplement8,
+            Self::I16 => Repr::TwosComplement16,
+            Self::I32 => Repr::TwosComplement32,
+            Self::I64 => Repr::TwosComplement64,
+            // Not `Bool8`. The runtime stores bool as an f32 payload; see the
+            // variant's documentation.
+            Self::Bool => Repr::BoolInBinary32,
         }
+    }
+
+    /// Derived from [`Self::repr`]. Fixed-width because this describes the
+    /// runtime ABI, which does not vary with the host pointer width.
+    ///
+    /// Equal widths do **not** imply interchangeable buffers.
+    pub const fn byte_width(self) -> u32 {
+        self.repr().byte_width()
     }
 
     pub const fn decode_id(id: i32) -> Result<Self, RuntimeDTypeDecodeError> {

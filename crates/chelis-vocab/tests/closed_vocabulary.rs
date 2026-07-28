@@ -1,5 +1,5 @@
 use chelis_vocab::{
-    EffectKind, EffectKindDecodeError, EffectKindInput, RuntimeDType, RuntimeDTypeDecodeError,
+    EffectKind, EffectKindDecodeError, EffectKindInput, Repr, RuntimeDType, RuntimeDTypeDecodeError,
 };
 
 #[test]
@@ -97,6 +97,58 @@ fn runtime_dtype_invalid_ids_are_errors_not_f32() {
             Err(RuntimeDTypeDecodeError::InvalidId { id })
         );
     }
+}
+
+/// The point of naming representations: width does not determine encoding.
+///
+/// If this ever fails because no two distinct representations share a width,
+/// the projection has become injective and comparing widths would be safe
+/// again. Until then a width comparison can pass while two lanes hold
+/// incompatible bytes, which is the failure mode `Repr` exists to express.
+#[test]
+fn byte_width_is_a_lossy_projection_of_representation() {
+    let collision = Repr::ALL.iter().any(|left| {
+        Repr::ALL
+            .iter()
+            .any(|right| left != right && left.byte_width() == right.byte_width())
+    });
+    assert!(
+        collision,
+        "distinct representations sharing a width is what makes width \
+         comparison unsound; if none remain, revisit the Repr abstraction"
+    );
+
+    // The concrete instance that motivated this: both four bytes, and a
+    // memcpy between them is silent corruption.
+    assert_eq!(
+        Repr::TwosComplement32.byte_width(),
+        Repr::BoolInBinary32.byte_width()
+    );
+    assert_ne!(Repr::TwosComplement32, Repr::BoolInBinary32);
+}
+
+/// Width is derived, so a dtype and its representation cannot disagree.
+#[test]
+fn dtype_byte_width_agrees_with_its_representation() {
+    for dtype in RuntimeDType::ALL {
+        assert_eq!(dtype.byte_width(), dtype.repr().byte_width());
+    }
+}
+
+/// Only bool is payload-encoded today. This is the tracked
+/// `CRuntime-BoolStorage-F1` deviation; when it closes, this is the test that
+/// should change, deliberately.
+#[test]
+fn bool_is_the_only_payload_encoded_dtype() {
+    let payload: Vec<RuntimeDType> = RuntimeDType::ALL
+        .into_iter()
+        .filter(|d| d.repr().is_payload_encoded())
+        .collect();
+    assert_eq!(payload, vec![RuntimeDType::Bool]);
+    assert_eq!(RuntimeDType::Bool.repr(), Repr::BoolInBinary32);
+    // int32 is native two's complement, contradicting a stale comment in
+    // `chelis_tensor_cmplt`. `read_scalar_as_f64` reads it as `*const i32`.
+    assert_eq!(RuntimeDType::I32.repr(), Repr::TwosComplement32);
 }
 
 /// Injectivity. `exhaustive_tag_domain.rs` establishes that nothing outside
