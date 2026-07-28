@@ -283,12 +283,25 @@ impl<'a> EvalContext<'a> {
                 ),
                 TransformKind::Vmap => ("vmap", "vectorize over", "it has no RISC DAG lowering"),
             };
+            // The remediation differs by family: `tensor_scan` has a
+            // tensor-lane rewrite; the chelis#902 special functions have
+            // closed-form derivatives the user can write directly.
+            let advice = if name == "tensor_scan" {
+                format!(
+                    "Build the per-index accumulator with tensor-lane primitives (e.g. \
+                     `range`/`map`/`expand`) before applying `{kind_label}`."
+                )
+            } else {
+                format!(
+                    "Compute the closed-form derivative directly instead (e.g. \
+                     Φ'(x) = φ(x) = exp(-x²/2)/√(2π) composes from `exp`), or keep \
+                     `{name}` out of the `{kind_label}` target."
+                )
+            };
             return Err(format!(
                 "host runtime: `{kind_label}(...)` cannot {verb} host-runtime-only \
                  builtin `{name}`; {reason} (see \
-                 spec/05-risc-primitives.md §3.6 Host-Runtime Builders). Build the per-index \
-                 accumulator with tensor-lane primitives (e.g. `range`/`map`/`expand`) before \
-                 applying `{kind_label}`."
+                 spec/05-risc-primitives.md §3.6 Host-Runtime Builders). {advice}"
             ));
         }
 
@@ -985,7 +998,16 @@ pub(super) fn as_list(expr: &Expr) -> Option<&List> {
 /// `try_lower_subexpr_program` and produce a confusing downstream
 /// error like an out-of-range axis on a phantom rank-0 operand. See
 /// spec/05-risc-primitives.md §3.6.
-const HOST_ONLY_BUILTIN_NAMES: &[&str] = &["tensor_scan"];
+const HOST_ONLY_BUILTIN_NAMES: &[&str] = &[
+    "tensor_scan",
+    // chelis#902 special functions: eval-only host builtins with no RISC
+    // DAG lowering, so grad/vmap must reject them by name here instead of
+    // falling through to the cryptic "lowering produced no roots".
+    "erf",
+    "erfc",
+    "norm_cdf",
+    "norm_ppf",
+];
 
 /// Walk a Deep `Expr` collecting (a) the first directly-applied
 /// host-only builtin (`(app {} (var <name>) ...)`) and (b) the names

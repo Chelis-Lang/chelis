@@ -12,6 +12,7 @@ mod eval;
 mod host_ops;
 mod invariant;
 mod named_axis;
+mod special_fns;
 #[cfg(test)]
 mod tests;
 mod transforms;

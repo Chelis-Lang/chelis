@@ -301,6 +301,28 @@ no AD. Shifts use declared-width two's-complement semantics; counts at or
 above the width fully shift out the value, while negative counts trap
 ([04-NUM-13]).
 
+### 3.8 Special functions (statistics) — **eval-only** (chelis#902)
+
+Error-function pair plus the standard normal CDF and quantile, f64.
+**Eval/test-only**: `chelis build` rejects every name below whole-program
+(`EVAL_ONLY_HOST_BUILTINS`), like `process_run`. Each takes one float
+argument — a scalar of any float precision (return preserves the
+operand's precision, computed in f64; the `round_to` rule) or a
+float-precision tensor (elementwise; an f64 tensor keeps full f64
+results, narrower float tensors round through f32). Algorithms:
+erf/erfc are the SunPro/fdlibm rational approximations (~1 ulp),
+`norm_cdf(x) = ½·erfc(−x/√2)` (tail-accurate, and `Φ(x) + Φ(−x) = 1`
+holds to rounding — parity identities depend on this), `norm_ppf` is
+Wichura's AS 241 (~1e-16 relative). Citations in
+`crates/chelis-compiler-api/src/runtime/special_fns.rs`.
+
+| Name | Signature | Notes |
+|---|---|---|
+| `erf` | `(x: float) -> float` | odd; `erf(±inf) = ±1`; NaN propagates |
+| `erfc` | `(x: float) -> float` | full relative accuracy in the positive tail down to ~1e-307 (underflows to +0 past x ≈ 27.3); `erfc(-inf) = 2` |
+| `norm_cdf` | `(x: float) -> float` | standard normal Φ; lower tail accurate to ~x = −37.5 |
+| `norm_ppf` | `(p: float) -> float` | standard normal quantile Φ⁻¹; `norm_ppf(0) = -inf`, `norm_ppf(1) = +inf`; p outside [0, 1] **fails loudly** (never a silent NaN); NaN propagates |
+
 ---
 
 ## 4. Complete closed vocabulary (completeness check)
@@ -336,6 +358,7 @@ Host lane:    cumsum sort einsum diagonal trace where clamp concat split scatter
               string_starts_with string_ends_with string_trim to_string to_int
               to_float rank shape numel tensor_to_scalar scalar_to_tensor to_tensor
               to_list
+              erf erfc norm_cdf norm_ppf
               read_file write_file read_lines read_bytes file_exists list_dir
               mmap_file mmap_read mmap_len process_run
               print fail debug test_assert test_assert_eq_f32 test_assert_eq_int

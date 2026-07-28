@@ -6,6 +6,21 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **Special-function builtins `erf`, `erfc`, `norm_cdf`, `norm_ppf`
+  (chelis#902).** Eval-lane host builtins, f64: the error-function pair is
+  a cited transcription of the SunPro/fdlibm rational approximations
+  (~1 ulp), the standard normal CDF is the tail-accurate erfc half-form
+  `½·erfc(−x/√2)` (so `Φ(x) + Φ(−x) = 1` holds to rounding), and the
+  quantile is Wichura's Algorithm AS 241 (~1e-16 relative; round-trips
+  the CDF at ≤1e-12 relative on (1e-10, 1−1e-10)). Each takes one float
+  argument — scalar (precision-preserving return, computed in f64) or
+  float tensor (elementwise; f64 tensors keep full f64 accuracy).
+  `norm_ppf` outside [0, 1] fails loudly instead of returning NaN.
+  Eval/test-only: `chelis build` rejects all four whole-program via the
+  `EVAL_ONLY_HOST_BUILTINS` gate, like `process_run`.
+
 ## [0.17.5] — 2026-07-31
 
 ### Added

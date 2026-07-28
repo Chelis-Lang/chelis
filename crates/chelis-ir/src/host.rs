@@ -6263,6 +6263,61 @@ fn dual_eval_app(
                 deriv: scalar_builtin("mul", vec![one_minus, dv(&args[0])]),
             })
         }
+        // chelis#902 special functions. All four have elementary closed-form
+        // derivatives, so forward-mode duals compose from the existing
+        // scalar builtins exactly like `tanh` above. Constants below are the
+        // correctly-rounded f64 values of 2/√π, 1/√(2π), and √(2π).
+        ("erf", 1) => {
+            // (erf u)' = (2/√π) · exp(-u²) · u'
+            let u2 = scalar_builtin("mul", vec![v(&args[0]), v(&args[0])]);
+            let gauss = scalar_builtin("exp", vec![scalar_builtin("neg", vec![u2])]);
+            let scaled = scalar_builtin(
+                "mul",
+                vec![host_float(std::f64::consts::FRAC_2_SQRT_PI), gauss],
+            );
+            Some(Dual {
+                value: scalar_builtin("erf", vec![v(&args[0])]),
+                deriv: scalar_builtin("mul", vec![scaled, dv(&args[0])]),
+            })
+        }
+        ("erfc", 1) => {
+            // (erfc u)' = -(2/√π) · exp(-u²) · u'
+            let u2 = scalar_builtin("mul", vec![v(&args[0]), v(&args[0])]);
+            let gauss = scalar_builtin("exp", vec![scalar_builtin("neg", vec![u2])]);
+            let scaled = scalar_builtin(
+                "mul",
+                vec![host_float(-std::f64::consts::FRAC_2_SQRT_PI), gauss],
+            );
+            Some(Dual {
+                value: scalar_builtin("erfc", vec![v(&args[0])]),
+                deriv: scalar_builtin("mul", vec![scaled, dv(&args[0])]),
+            })
+        }
+        ("norm_cdf", 1) => {
+            // Φ'(u) = φ(u) = (1/√(2π)) · exp(-u²/2) · u'
+            let u2 = scalar_builtin("mul", vec![v(&args[0]), v(&args[0])]);
+            let half_u2 = scalar_builtin("mul", vec![host_float(0.5), u2]);
+            let gauss = scalar_builtin("exp", vec![scalar_builtin("neg", vec![half_u2])]);
+            let pdf = scalar_builtin("mul", vec![host_float(0.398_942_280_401_432_7), gauss]);
+            Some(Dual {
+                value: scalar_builtin("norm_cdf", vec![v(&args[0])]),
+                deriv: scalar_builtin("mul", vec![pdf, dv(&args[0])]),
+            })
+        }
+        ("norm_ppf", 1) => {
+            // (Φ⁻¹)'(p) = 1/φ(Φ⁻¹(p)) = √(2π) · exp(z²/2) with z = Φ⁻¹(p);
+            // the value node is reused so z is computed once (the same
+            // shape as the `tanh` rule above).
+            let z = scalar_builtin("norm_ppf", vec![v(&args[0])]);
+            let z2 = scalar_builtin("mul", vec![z.clone(), z.clone()]);
+            let half_z2 = scalar_builtin("mul", vec![host_float(0.5), z2]);
+            let growth = scalar_builtin("exp", vec![half_z2]);
+            let inv_pdf = scalar_builtin("mul", vec![host_float(2.506_628_274_631_000_2), growth]);
+            Some(Dual {
+                value: z,
+                deriv: scalar_builtin("mul", vec![inv_pdf, dv(&args[0])]),
+            })
+        }
         ("sqrt", 1) => {
             // (sqrt u)' = u' / (2 sqrt(u))
             let s = scalar_builtin("sqrt", vec![v(&args[0])]);
@@ -9929,6 +9984,15 @@ fn infer_builtin_host_type_from_arg_tys_unchecked(
             HostTypeTerm::String,
             HostTypeTerm::String,
         ])),
+        // chelis#902 special functions: float in, float out — the return
+        // mirrors the argument's term (scalar float or float tensor), the
+        // same precision-preserving rule the checker applies. Eval/test-only;
+        // the build backends reject them before codegen (see
+        // `reject_eval_only_builtins_host`).
+        "erf" | "erfc" | "norm_cdf" | "norm_ppf" => match arg_tys.first() {
+            Some(term @ (HostTypeTerm::Scalar(_) | HostTypeTerm::Tensor(_))) => Some(term.clone()),
+            _ => Some(fresh_host_inference()),
+        },
         _ => None,
     }
 }

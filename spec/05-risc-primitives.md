@@ -999,6 +999,49 @@ make the build reject them *whole-program* like `tensor_scan`, not make them
 assertable — a rejection-cleanliness change, not the compiled-lane arm.)
 Until the compiled-lane helpers land, assertions are an eval-lane contract.
 
+### 3.6.2 Special functions (host-only, chelis#902)
+
+Statistics special functions, **eval/test-only** like `process_run`: the
+error-function pair and the standard normal CDF/quantile. All four compute
+in `f64` in the host runtime and take **one float argument** — a scalar of
+any float precision (the return preserves the operand's precision; the
+computation is f64 with one final rounding) or a float-precision tensor
+(elementwise: an `f64`-tagged tensor keeps the full `f64` result; narrower
+float tags round the `f64` result through `f32`). Non-float arguments are a
+type error at check time.
+
+| Name | Signature | Semantics |
+|---|---|---|
+| `erf` | `(x: float) -> float` | Error function. Odd; `erf(±inf) = ±1`; NaN propagates. |
+| `erfc` | `(x: float) -> float` | Complementary error function, computed directly (not `1 - erf`), so the positive tail keeps full relative accuracy down to ~1e-307 (underflow to `+0` past x ≈ 27.3). `erfc(-inf) = 2`. |
+| `norm_cdf` | `(x: float) -> float` | Standard normal CDF `Φ(x) = ½·erfc(−x/√2)`. The single erfc path makes `Φ(x) + Φ(−x) = 1` hold to rounding and keeps the lower tail accurate to ~x = −37.5. |
+| `norm_ppf` | `(p: float) -> float` | Standard normal quantile `Φ⁻¹(p)`. `norm_ppf(0) = -inf`, `norm_ppf(1) = +inf`, NaN propagates; `p` outside `[0, 1]` is a **loud eval error** naming the value (and the element index for tensor args) — never a silent NaN. |
+
+Accuracy contract: `erf`/`erfc` are the SunPro/fdlibm rational
+approximations (~1 ulp; transcribed with citation in
+`crates/chelis-compiler-api/src/runtime/special_fns.rs`, verified against
+mpmath references at ≤1e-15 relative on [−6, 6] and into the tails);
+`norm_ppf` is Wichura's Algorithm AS 241 (~1e-16 relative), and
+`norm_ppf`/`norm_cdf` round-trip at ≤1e-12 relative on (1e-10, 1−1e-10).
+These are *correctly-rounded-class* primitives, not approximations: the
+motivating failure class (chelis#902) is identity checks at 1e-8
+tolerance that no hand-rolled polynomial Φ (A&S 7.1.26, |err| ≤ 1.5e-7)
+can pass.
+
+Build rejection is the whole-program eval-only gate
+(`EVAL_ONLY_HOST_BUILTINS`, the `process_run` mechanism): `chelis build`
+rejects any program that applies one of the four, scalar or tensor use,
+with a clean diagnostic. There is no DAG lowering — a tier-2 composite
+would re-import the polynomial-approximation error these builtins exist to
+remove, and MSL has no `erf` for a Metal kernel — so `grad(...)` /
+`vmap(...)` over a body that reaches one of them is rejected by name at
+the host-runtime transform boundary (the `tensor_scan` gate above), with
+the diagnostic noting the closed-form derivative alternative. The
+host-lane forward-mode dual rules for all four exist (chelis-ir
+`host.rs`), so a `grad`-using host program lowers far enough for the
+eval-only build gate to fire rather than dying with an unnamed lowering
+error.
+
 ---
 
 ## 4. Standard Lowerings (Tier 2 → Tier 1)

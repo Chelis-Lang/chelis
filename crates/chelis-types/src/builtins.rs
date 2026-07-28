@@ -136,6 +136,15 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "to_list",
     "pad_sequences",
     "pad_sequences_to",
+    // Special-function builtins (chelis#902): error function pair plus
+    // the standard normal CDF/quantile, f64, host-lane. Eval-only — the
+    // build backends reject them (`EVAL_ONLY_HOST_BUILTINS`,
+    // crates/chelis-cli/src/main.rs); algorithms and citations live in
+    // chelis-compiler-api's `runtime/special_fns.rs`.
+    "erf",
+    "erfc",
+    "norm_cdf",
+    "norm_ppf",
     "read_file",
     "write_file",
     "read_lines",
@@ -1074,6 +1083,15 @@ pub fn builtin_env() -> (Env, VarGen) {
     generic_unop_borrow("to_list", &mut env, &mut vg);
     generic_binop("pad_sequences", &mut env, &mut vg);
     generic_triop("pad_sequences_to", &mut env, &mut vg);
+    // Special-function builtins (chelis#902). Loose arity-declaring
+    // schemes (the same pattern as the string/dict families); the real
+    // contract — one float argument, scalar or tensor, with a
+    // precision-preserving return — is enforced by
+    // `check_special_fn_builtin_signature` in `infer.rs`.
+    generic_unop("erf", &mut env, &mut vg);
+    generic_unop("erfc", &mut env, &mut vg);
+    generic_unop("norm_cdf", &mut env, &mut vg);
+    generic_unop("norm_ppf", &mut env, &mut vg);
     generic_unop("read_file", &mut env, &mut vg);
     generic_binop("write_file", &mut env, &mut vg);
     generic_unop("read_lines", &mut env, &mut vg);

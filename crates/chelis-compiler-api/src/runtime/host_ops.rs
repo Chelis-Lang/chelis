@@ -864,6 +864,62 @@ pub(super) fn float_unop_with_tensor(
     }
 }
 
+/// Precision-aware fallible float unary for the EVAL-ONLY special
+/// functions (chelis#902: `erf`/`erfc`/`norm_cdf`/`norm_ppf`).
+///
+/// Scalar floats compute in `f64` and re-pack at the operand's dtype
+/// (the `round_to` precision-preserving rule). Tensor args run
+/// elementwise: an `f64`-tagged tensor keeps the full `f64` result,
+/// while narrower float tags round the `f64` result through `f32`
+/// (their stored elements are already `f32`-quantized, so this is the
+/// correctly-rounded value at the tensor's precision). This deliberately
+/// differs from `float_unop_with_tensor`'s all-`f32` tensor rule: that
+/// rule exists to stay byte-identical with the C backend's `expf`-style
+/// tensor emit, and these builtins have no C emit to mirror — the build
+/// lane rejects them (`EVAL_ONLY_HOST_BUILTINS`) and full `f64` tail
+/// accuracy is their entire purpose.
+///
+/// The op is fallible so a per-element domain error (e.g. `norm_ppf`
+/// outside [0, 1]) surfaces loudly with the failing element's index
+/// instead of a silent NaN.
+pub(super) fn special_float_unop(
+    name: &str,
+    args: &[RuntimeValue],
+    op: impl Fn(f64) -> Result<f64, String>,
+) -> Result<RuntimeValue, String> {
+    if args.len() != 1 {
+        return Err(format!("{name} expects 1 argument, got {}", args.len()));
+    }
+    match args.first() {
+        Some(RuntimeValue::Tensor(tensor)) => {
+            if !tensor.precision.is_float() {
+                return Err(format!(
+                    "{name} expects a float tensor, got precision {}",
+                    tensor.precision.name()
+                ));
+            }
+            let keep_f64 = tensor.precision == Prim::F64;
+            let mut data = Vec::with_capacity(tensor.value.data.len());
+            for (index, value) in tensor.value.data.iter().enumerate() {
+                let out =
+                    op(*value).map_err(|err| format!("{name}: tensor element {index}: {err}"))?;
+                data.push(if keep_f64 { out } else { out as f32 as f64 });
+            }
+            Ok(RuntimeValue::Tensor(RuntimeTensorValue {
+                value: IrTensorValue::from_vec(tensor.value.shape.clone(), data),
+                precision: tensor.precision,
+            }))
+        }
+        Some(RuntimeValue::Scalar(payload)) if payload.dtype().is_float() => {
+            let out = op(payload.bits().as_f64())?;
+            RuntimeValue::scalar_like_float(payload.dtype(), out)
+        }
+        other => Err(format!(
+            "{name} expects a float scalar or float tensor argument, got {other:?}"
+        )),
+    }
+}
+
 /// Coerce a scalar `RuntimeValue` to its `f64` representation for
 /// comparison with a tensor element. Returns `None` for non-scalar values.
 fn scalar_as_f64(value: &RuntimeValue) -> Option<f64> {

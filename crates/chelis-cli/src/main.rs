@@ -9315,7 +9315,19 @@ fn deep_named_decl_name(expr: &DeepExpr) -> Option<&str> {
 /// supports but the compiled build backends deliberately do not. Kept in
 /// one place so [`reject_eval_only_builtins_host`] and
 /// [`drop_unreachable_eval_only_defs`] stay in agreement.
-const EVAL_ONLY_HOST_BUILTINS: &[&str] = &["process_run"];
+const EVAL_ONLY_HOST_BUILTINS: &[&str] = &[
+    "process_run",
+    // Special-function builtins (chelis#902): eval-only by scope — the
+    // tensor DAG lane has no erf-family RiscOp (a tier-2 composite would
+    // re-import the polynomial-approximation error the builtins exist to
+    // remove, and MSL has no `erf` for a Metal kernel), and emitting the
+    // host_emit catch-all for them would produce a silent wrong value
+    // (the chelis#734 class), so the build gate rejects them loudly.
+    "erf",
+    "erfc",
+    "norm_cdf",
+    "norm_ppf",
+];
 
 /// Drop top-level decls for any function whose body references an eval-only
 /// host builtin ([`EVAL_ONLY_HOST_BUILTINS`]) and is not reachable from the

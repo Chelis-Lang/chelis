@@ -1642,6 +1642,12 @@ fn builtin_arg_is_borrowed(name: Option<&str>, arg_index: usize) -> bool {
                 | "cos"
                 | "tan"
                 | "atan"
+                // chelis#902 special functions: pure elementwise reads,
+                // same borrow shape as the transcendental siblings above.
+                | "erf"
+                | "erfc"
+                | "norm_cdf"
+                | "norm_ppf"
                 | "abs"
                 | "floor"
                 | "ceil"

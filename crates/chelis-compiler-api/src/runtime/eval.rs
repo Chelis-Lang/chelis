@@ -920,6 +920,21 @@ impl<'a> EvalContext<'a> {
             // evaluator and the C backend's `rintf`. NOT `round`, which
             // is ties-away-from-zero.
             "round" => float_unop_with_tensor(args, f64::round_ties_even, f32::round_ties_even),
+            // Special-function builtins (chelis#902): erf/erfc via the
+            // SunPro/fdlibm rational approximations, norm_cdf via the erfc
+            // half-form, norm_ppf via Wichura AS 241 — see
+            // `runtime/special_fns.rs` for algorithms and citations.
+            // Eval-only (`EVAL_ONLY_HOST_BUILTINS`): scalar floats and f64
+            // tensors compute in f64; narrower float tensors round the f64
+            // result to their precision. `norm_ppf` fails loudly outside
+            // [0, 1] (naming the offending value, and the element index for
+            // tensors) instead of returning a silent NaN.
+            "erf" => special_float_unop("erf", args, |x| Ok(super::special_fns::erf(x))),
+            "erfc" => special_float_unop("erfc", args, |x| Ok(super::special_fns::erfc(x))),
+            "norm_cdf" => {
+                special_float_unop("norm_cdf", args, |x| Ok(super::special_fns::norm_cdf(x)))
+            }
+            "norm_ppf" => special_float_unop("norm_ppf", args, super::special_fns::norm_ppf),
             // `abs` accepts ints and floats and is sign-flipping for both;
             // route through `numeric_unop` so scalar Int64/Int32/F32/F64
             // inputs all keep their dtype.

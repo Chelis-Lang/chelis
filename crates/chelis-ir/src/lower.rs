@@ -2517,6 +2517,14 @@ fn expr_requires_host_runtime_with_ctx(expr: &Expr, exempt_to_tensor_literal: bo
                         | "mmap_read"
                         | "mmap_len"
                         | "process_run"
+                        // chelis#902 special functions: eval-only host
+                        // builtins (like `process_run`) — they have no DAG
+                        // lowering, so they must always route to the host
+                        // runtime, scalar and tensor uses alike.
+                        | "erf"
+                        | "erfc"
+                        | "norm_cdf"
+                        | "norm_ppf"
                         | "to_tensor"
                         | "to_list"
                         | "pad_sequences"
