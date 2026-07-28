@@ -131,6 +131,11 @@ class NixFlakeContractTests(unittest.TestCase):
         self.assertIn('"-DBUILD_SHARED_LIBS=OFF"', cvc5)
         self.assertIn('"-DSTATIC_BINARY=OFF"', cvc5)
 
+    def test_rust_builds_use_store_backed_target_directories(self) -> None:
+        packages = (REPO_ROOT / "nix" / "packages.nix").read_text(encoding="utf-8")
+        self.assertIn('export CARGO_TARGET_DIR="$out/cargo-target"', packages)
+        self.assertEqual(packages.count('rm -rf "$CARGO_TARGET_DIR"'), 3)
+
     def test_contract_stubs_cover_package_shape_and_behavior(self) -> None:
         contracts = nix_json("eval", "--json", "--file", "nix/contracts.nix")
         shapes = contracts["packageShapes"]

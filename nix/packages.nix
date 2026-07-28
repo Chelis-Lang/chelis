@@ -24,6 +24,9 @@ let
     src = source;
     doCheck = false;
     strictDeps = true;
+    preBuild = ''
+      export CARGO_TARGET_DIR="$out/cargo-target"
+    '';
   };
 
   compiler = rustPlatform.buildRustPackage (
@@ -46,9 +49,10 @@ let
       CVC5_DIR = "${cvc5.dir}";
       installPhase = ''
         runHook preInstall
-        artifact="$(find target -type f -path '*/release/chelis' -print -quit)"
+        artifact="$(find "$CARGO_TARGET_DIR" -type f -path '*/release/chelis' -print -quit)"
         test -n "$artifact"
         install -Dm755 "$artifact" "$out/bin/chelis"
+        rm -rf "$CARGO_TARGET_DIR"
         runHook postInstall
       '';
       meta.mainProgram = "chelis";
@@ -66,9 +70,10 @@ let
       ];
       installPhase = ''
         runHook preInstall
-        artifact="$(find target -type f -path '*/release/libchelis_runtime.a' -print -quit)"
+        artifact="$(find "$CARGO_TARGET_DIR" -type f -path '*/release/libchelis_runtime.a' -print -quit)"
         test -n "$artifact"
         install -Dm444 "$artifact" "$out/lib/libchelis_runtime.a"
+        rm -rf "$CARGO_TARGET_DIR"
         mkdir -p "$out/include"
         ${lib.concatMapStringsSep "\n" (header: ''
           install -Dm444 "crates/chelis-runtime/include/${header}" "$out/include/${header}"
@@ -90,9 +95,10 @@ let
       ];
       installPhase = ''
         runHook preInstall
-        artifact="$(find target -type f -path '*/release/chelisup' -print -quit)"
+        artifact="$(find "$CARGO_TARGET_DIR" -type f -path '*/release/chelisup' -print -quit)"
         test -n "$artifact"
         install -Dm755 "$artifact" "$out/bin/chelisup"
+        rm -rf "$CARGO_TARGET_DIR"
         runHook postInstall
       '';
       meta.mainProgram = "chelisup";
