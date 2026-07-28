@@ -14914,6 +14914,15 @@ fn infer_app(
                     | "json_set" | "round_to" => {
                         return check_json_builtin_signature(fname, list, &arg_tys, subst, errors);
                     }
+                    // Host-lane CSV I/O (chelis#903): parse/serialize plus
+                    // column accessors. A Csv document rides the `Json` ADT
+                    // as a fixed shape, so the value type here is `Json`.
+                    // Eval-only; the build backends reject them (see
+                    // `reject_eval_only_builtins_host`).
+                    "parse_csv" | "to_csv" | "csv_f64s" | "csv_strs" | "csv_nrows" | "csv_cols"
+                    | "csv_f64" | "csv_str" => {
+                        return check_csv_builtin_signature(fname, list, &arg_tys, subst, errors);
+                    }
                     _ => {}
                 }
             }
@@ -17450,6 +17459,122 @@ fn check_json_builtin_signature(
             Type::Prim(Prim::F64)
         }
         other => unreachable!("check_json_builtin_signature dispatched on `{other}`"),
+    }
+}
+
+/// Concrete argument/return contracts for the host-lane CSV I/O builtins
+/// (chelis#903): `parse_csv`/`to_csv` plus the column accessors
+/// (`csv_f64s`/`csv_strs`/`csv_nrows`/`csv_cols`/`csv_f64`/`csv_str`).
+///
+/// A Csv document rides the prelude `Json` ADT as the fixed shape
+/// `{"columns": .., "rows": ..}` (see `runtime/csv.rs`), so document slots
+/// type as `Json` — there is deliberately no `Csv` prelude type, and the
+/// `json_*` accessors compose with these documents. Same slot philosophy
+/// as `check_json_builtin_signature`: `csv_f64`/`csv_str` accept ANY
+/// integer precision for the row index so a bare `csv_f64(c, 0, "px")`
+/// literal works (spec/04-type-system.md §5.3); the runtime widens at the
+/// boundary.
+fn check_csv_builtin_signature(
+    fname: &str,
+    list: &deep::List,
+    arg_tys: &[Type],
+    subst: &mut Subst,
+    errors: &mut DiagnosticSink<'_>,
+) -> Type {
+    fn json_ty() -> Type {
+        Type::Adt("Json".to_string(), Vec::new())
+    }
+
+    let expected_arity: usize = match fname {
+        "parse_csv" | "to_csv" | "csv_nrows" | "csv_cols" => 1,
+        "csv_f64" | "csv_str" => 3,
+        _ => 2,
+    };
+    if arg_tys.len() != expected_arity {
+        return report_builtin_arity(errors, list, fname, expected_arity, arg_tys.len());
+    }
+
+    let mut reject = |slot_description: String, got: &Type| -> Type {
+        report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::TypeMismatch,
+                with_macro_provenance(
+                    &deep::Expr::List(list.clone(), zero_span()),
+                    format!("{fname} expects {slot_description}, got {got}"),
+                ),
+                vec![],
+            ),
+        )
+    };
+
+    let is_string_like =
+        |ty: &Type| matches!(ty, Type::Prim(Prim::String) | Type::Var(_) | Type::Error(_));
+    let is_json_like = |ty: &Type| {
+        matches!(ty, Type::Adt(name, args) if name == "Json" && args.is_empty())
+            || matches!(ty, Type::Var(_) | Type::Error(_))
+    };
+    let is_int_like = |ty: &Type| {
+        matches!(ty, Type::Prim(p) if p.is_integer()) || matches!(ty, Type::Var(_) | Type::Error(_))
+    };
+
+    let resolved: Vec<Type> = arg_tys
+        .iter()
+        .map(|ty| type_for_readonly_check(ty, subst))
+        .collect();
+
+    // Every builtin except `parse_csv` takes the Csv document (a Json
+    // value) first; the column name is always the last argument.
+    if fname != "parse_csv" && !is_json_like(&resolved[0]) {
+        return reject(
+            "a Csv document first argument (the Json value `parse_csv` returns)".to_string(),
+            &resolved[0],
+        );
+    }
+
+    match fname {
+        "parse_csv" => {
+            if !is_string_like(&resolved[0]) {
+                return reject("a string argument".to_string(), &resolved[0]);
+            }
+            json_ty()
+        }
+        "to_csv" => Type::Prim(Prim::String),
+        "csv_nrows" => Type::Prim(Prim::Int64),
+        "csv_cols" => Type::Adt("List".to_string(), vec![Type::Prim(Prim::String)]),
+        "csv_f64s" | "csv_strs" => {
+            if !is_string_like(&resolved[1]) {
+                return reject(
+                    "a column-name string second argument".to_string(),
+                    &resolved[1],
+                );
+            }
+            if fname == "csv_f64s" {
+                Type::Adt("List".to_string(), vec![Type::Prim(Prim::F64)])
+            } else {
+                Type::Adt("List".to_string(), vec![Type::Prim(Prim::String)])
+            }
+        }
+        "csv_f64" | "csv_str" => {
+            if !is_int_like(&resolved[1]) {
+                return reject(
+                    "an integer row index second argument (0-based data row)".to_string(),
+                    &resolved[1],
+                );
+            }
+            if !is_string_like(&resolved[2]) {
+                return reject(
+                    "a column-name string third argument".to_string(),
+                    &resolved[2],
+                );
+            }
+            if fname == "csv_f64" {
+                Type::Prim(Prim::F64)
+            } else {
+                Type::Prim(Prim::String)
+            }
+        }
+        other => unreachable!("check_csv_builtin_signature dispatched on `{other}`"),
     }
 }
 

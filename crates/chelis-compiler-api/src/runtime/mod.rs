@@ -8,6 +8,7 @@ use chelis_types::{CheckedProgram, types::Prim};
 
 use crate::schema::{DictEntryValue, ExecutionValue, TensorValue};
 
+mod csv;
 mod eval;
 mod host_ops;
 mod invariant;

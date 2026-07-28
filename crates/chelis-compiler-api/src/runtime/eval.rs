@@ -1740,6 +1740,70 @@ impl<'a> EvalContext<'a> {
                     _ => Ok(RuntimeValue::float64(rounded)),
                 }
             }
+            // Host-lane CSV I/O (chelis#903). Eval-only, like the JSON family
+            // above. A Csv document rides the prelude `Json` ADT as the fixed
+            // shape `{"columns": .., "rows": ..}` (see `runtime/csv.rs`), so
+            // the `json_*` accessors compose with it; the `csv_*` builtins are
+            // the column-oriented surface. Every failure is a loud eval error
+            // naming the builtin, column, and row — no silent NaN/defaults.
+            "parse_csv" => {
+                let text = expect_string_arg(args, 0)?;
+                super::csv::parse_csv_text(&text)
+            }
+            "to_csv" => {
+                let value = args
+                    .first()
+                    .ok_or_else(|| "to_csv expects 1 argument".to_string())?;
+                super::csv::csv_to_text(value).map(RuntimeValue::String)
+            }
+            "csv_f64s" => {
+                let value = args
+                    .first()
+                    .ok_or_else(|| "csv_f64s expects 2 arguments".to_string())?;
+                let column = expect_string_arg(args, 1)?;
+                super::csv::csv_f64s_at(value, &column).map(|values| {
+                    RuntimeValue::List(values.into_iter().map(RuntimeValue::float64).collect())
+                })
+            }
+            "csv_strs" => {
+                let value = args
+                    .first()
+                    .ok_or_else(|| "csv_strs expects 2 arguments".to_string())?;
+                let column = expect_string_arg(args, 1)?;
+                super::csv::csv_strs_at(value, &column).map(|values| {
+                    RuntimeValue::List(values.into_iter().map(RuntimeValue::String).collect())
+                })
+            }
+            "csv_nrows" => {
+                let value = args
+                    .first()
+                    .ok_or_else(|| "csv_nrows expects 1 argument".to_string())?;
+                super::csv::csv_nrows_of(value).map(RuntimeValue::int64)
+            }
+            "csv_cols" => {
+                let value = args
+                    .first()
+                    .ok_or_else(|| "csv_cols expects 1 argument".to_string())?;
+                super::csv::csv_cols_of(value).map(|columns| {
+                    RuntimeValue::List(columns.into_iter().map(RuntimeValue::String).collect())
+                })
+            }
+            "csv_f64" => {
+                let value = args
+                    .first()
+                    .ok_or_else(|| "csv_f64 expects 3 arguments".to_string())?;
+                let row_idx = expect_int_arg(args, 1)?;
+                let column = expect_string_arg(args, 2)?;
+                super::csv::csv_f64_at(value, row_idx, &column).map(RuntimeValue::float64)
+            }
+            "csv_str" => {
+                let value = args
+                    .first()
+                    .ok_or_else(|| "csv_str expects 3 arguments".to_string())?;
+                let row_idx = expect_int_arg(args, 1)?;
+                let column = expect_string_arg(args, 2)?;
+                super::csv::csv_str_at(value, row_idx, &column).map(RuntimeValue::String)
+            }
             // Hull Phase 0a: `process_run(cmd, args) -> (exit_code, stdout, stderr)`.
             //
             // Eval/test-only subprocess exec. Arguments are passed straight to

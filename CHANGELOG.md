@@ -24,6 +24,25 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   names whole-program like `process_run`. `Json` becomes a reserved
   prelude type name. See `docs/CHELIS_SURFACE.md` §3.8.
 
+- **Host-lane CSV I/O (chelis#903).** A `.ch` program can now read CSV
+  inputs and write CSV tables in the eval lane with no host-language glue,
+  completing the chelis#890 loop for CSV-shaped data. `parse_csv` is
+  RFC-4180-ish (first row = header; quoted fields with doubled quotes;
+  embedded commas/newlines; LF/CRLF; BOM stripped) with loud errors naming
+  1-based row/column numbers (unclosed quote, ragged row, duplicate header
+  names, bare CR, interior blank rows). A Csv document rides the `Json`
+  ADT as the fixed shape `{"columns": .., "rows": ..}` — no new prelude
+  type, and the `json_*` accessors compose with it. Column accessors
+  (`csv_f64s`, `csv_strs`, `csv_nrows`, `csv_cols`, per-cell `csv_f64`/
+  `csv_str`) fail loudly: missing columns list the available columns, and
+  numeric reads enforce the strict JSON number grammar per cell (naming
+  the column, 0-based data row, and offending text; empty cells are
+  errors, never silent NaN). `to_csv` serializes the same document shape
+  back (round-trips through `parse_csv`) with shortest-round-trip f64
+  cells and minimal quoting, refusing to silently drop undeclared row
+  keys. Eval/test-only: `chelis build` rejects all eight names
+  whole-program like `process_run`. See `docs/CHELIS_SURFACE.md` §3.9.
+
 ### Changed
 
 - **`jnum` requires exactly f64 (chelis#891 review).** Bare float literals

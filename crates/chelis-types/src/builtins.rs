@@ -154,6 +154,18 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "jdict",
     "json_set",
     "round_to",
+    // Host-lane CSV I/O (chelis#903): RFC-4180-ish parse/serialize plus
+    // column accessors. A Csv document rides the `Json` ADT as the fixed
+    // shape `{"columns": .., "rows": ..}` — no new prelude type. Eval-only
+    // (`EVAL_ONLY_HOST_BUILTINS`, crates/chelis-cli/src/main.rs).
+    "parse_csv",
+    "to_csv",
+    "csv_f64s",
+    "csv_strs",
+    "csv_nrows",
+    "csv_cols",
+    "csv_f64",
+    "csv_str",
     "read_file",
     "write_file",
     "read_lines",
@@ -1112,6 +1124,17 @@ pub fn builtin_env() -> (Env, VarGen) {
     generic_unop("jdict", &mut env, &mut vg);
     generic_triop("json_set", &mut env, &mut vg);
     generic_binop("round_to", &mut env, &mut vg);
+    // Host-lane CSV I/O (chelis#903); same loose-arity pattern as the JSON
+    // family above — the concrete contracts live in
+    // `check_csv_builtin_signature` (infer.rs).
+    generic_unop("parse_csv", &mut env, &mut vg);
+    generic_unop("to_csv", &mut env, &mut vg);
+    generic_binop("csv_f64s", &mut env, &mut vg);
+    generic_binop("csv_strs", &mut env, &mut vg);
+    generic_unop("csv_nrows", &mut env, &mut vg);
+    generic_unop("csv_cols", &mut env, &mut vg);
+    generic_triop("csv_f64", &mut env, &mut vg);
+    generic_triop("csv_str", &mut env, &mut vg);
     generic_unop("read_file", &mut env, &mut vg);
     generic_binop("write_file", &mut env, &mut vg);
     generic_unop("read_lines", &mut env, &mut vg);
@@ -1619,6 +1642,43 @@ mod tests {
             ("jdict", 1),
             ("json_set", 3),
             ("round_to", 2),
+        ] {
+            let scheme = env
+                .lookup(name)
+                .unwrap_or_else(|| panic!("`{name}` must be registered"));
+            match &scheme.body {
+                Type::Fn(params, _) => assert_eq!(
+                    params.len(),
+                    arity,
+                    "`{name}` should take {arity} args, got {}",
+                    params.len()
+                ),
+                other => panic!("`{name}` should be a function type, got {other:?}"),
+            }
+            assert!(
+                BUILTIN_NAMES.contains(&name),
+                "`{name}` must be in the closed BUILTIN_NAMES vocabulary"
+            );
+        }
+    }
+
+    #[test]
+    fn builtin_env_has_csv_io_builtins() {
+        // chelis#903 host-lane CSV I/O: every builtin is registered with
+        // the declared arity (the concrete contracts live in
+        // `check_csv_builtin_signature`, infer.rs). The value type is the
+        // #890 `Json` ADT — a Csv document is a fixed-shape Json value —
+        // so there is deliberately no `Csv` prelude ADT to assert on.
+        let (env, _) = builtin_env();
+        for (name, arity) in [
+            ("parse_csv", 1),
+            ("to_csv", 1),
+            ("csv_f64s", 2),
+            ("csv_strs", 2),
+            ("csv_nrows", 1),
+            ("csv_cols", 1),
+            ("csv_f64", 3),
+            ("csv_str", 3),
         ] {
             let scheme = env
                 .lookup(name)

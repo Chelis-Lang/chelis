@@ -2215,3 +2215,190 @@ padded = pad_sequences([[], [cast(0.5, f64)]], cast(0.25, f64))
         other => panic!("expected tensor, got {other:?}"),
     }
 }
+
+// ---------------------------------------------------------------------------
+// Host-lane CSV I/O (chelis#903): full-pipeline coverage (surf parse ->
+// desugar -> check -> host eval) for parse_csv / csv_* accessors / to_csv.
+// The pure core is unit-tested in `runtime/csv.rs`; these tests pin the
+// registry wiring: env schemes, `check_csv_builtin_signature`, the eval
+// dispatch arms, and the composition with the #890 JSON surface.
+// ---------------------------------------------------------------------------
+
+/// The QFBench-shaped loop in miniature: parse a CSV, pull numeric columns
+/// through `csv_f64s`, compute in the tensor lane, round, and assemble a
+/// nested JSON output. The bare `0`/`2` literals exercise the any-integer
+/// slots. Asserted byte-exactly.
+#[test]
+fn csv_pipeline_parse_access_compute_assemble() {
+    let checked = checked_surf(
+        r#"
+c = parse_csv("id,qty,px\nalpha,2,101.5\nbeta,4,99.25\n")
+qty = csv_f64s(c, "qty")
+px = csv_f64s(c, "px")
+notional = tensor_to_scalar(sum(mul(to_tensor(qty), to_tensor(px)), 0))
+out = jdict([("first_id", jstr(csv_str(c, 0, "id")))])
+out2 = json_set(out, "results.notional", jnum(round_to(notional, 2)))
+out3 = json_set(out2, "results.rows", jnum(cast(csv_nrows(c), f64)))
+text = to_json(out3)
+"#,
+    );
+    let outcome =
+        evaluate_host_program(&checked, &HashMap::new()).expect("pipeline should evaluate");
+    match outcome.host_bindings.get("text") {
+        Some(RuntimeValue::String(s)) => assert_eq!(
+            s,
+            r#"{"first_id":"alpha","results":{"notional":600.0,"rows":2.0}}"#
+        ),
+        other => panic!("expected string, got {other:?}"),
+    }
+}
+
+/// A Csv document is a Json value: the #890 accessors work on it directly
+/// (`json_list` over `rows`, dot-path reads into row cells, `to_json` for
+/// debugging); this is the payoff of riding the Json ADT instead of
+/// adding a `Csv` prelude type.
+#[test]
+fn csv_document_composes_with_json_accessors() {
+    let checked = checked_surf(
+        r#"
+c = parse_csv("id,px\nalpha,1.5\nbeta,2.5\n")
+rows = json_list(c, "rows")
+first_id = json_str(index(rows, 0), "id")
+second_px_text = json_str(c, "rows.1.px")
+doc_text = to_json(c)
+"#,
+    );
+    let outcome = evaluate_host_program(&checked, &HashMap::new()).expect("should evaluate");
+    match outcome.host_bindings.get("first_id") {
+        Some(RuntimeValue::String(s)) => assert_eq!(s, "alpha"),
+        other => panic!("expected string, got {other:?}"),
+    }
+    match outcome.host_bindings.get("second_px_text") {
+        Some(RuntimeValue::String(s)) => assert_eq!(s, "2.5"),
+        other => panic!("expected string, got {other:?}"),
+    }
+    match outcome.host_bindings.get("doc_text") {
+        Some(RuntimeValue::String(s)) => assert_eq!(
+            s,
+            r#"{"columns":["id","px"],"rows":[{"id":"alpha","px":"1.5"},{"id":"beta","px":"2.5"}]}"#
+        ),
+        other => panic!("expected string, got {other:?}"),
+    }
+}
+
+/// CSV output assembly with the #890 constructors (`jdict`/`jlist`/`jnum`/
+/// `jstr`) feeding `to_csv`, deterministic across runs. `csv_f64` reads an
+/// exact f64 out of the input document; `round_to` fixes the decimals.
+#[test]
+fn csv_output_assembly_via_to_csv() {
+    let checked = checked_surf(
+        r#"
+c = parse_csv("id,px\nalpha,1.23456\nbeta,2.5\n")
+row = jdict([("id", jstr(csv_str(c, 0, "id"))), ("pv", jnum(round_to(csv_f64(c, 0, "px"), 2)))])
+out = jdict([("columns", jlist([jstr("id"), jstr("pv")])), ("rows", jlist([row]))])
+text = to_csv(out)
+"#,
+    );
+    let run = |checked: &chelis_types::CheckedProgram| {
+        let outcome = evaluate_host_program(checked, &HashMap::new()).expect("should evaluate");
+        match outcome.host_bindings.get("text") {
+            Some(RuntimeValue::String(s)) => s.clone(),
+            other => panic!("expected string, got {other:?}"),
+        }
+    };
+    let first = run(&checked);
+    assert_eq!(first, "id,pv\nalpha,1.23\n");
+    assert_eq!(run(&checked), first, "to_csv must be deterministic");
+}
+
+/// Loud-failure contract at eval time: a missing column names the builtin,
+/// the column, and the available columns; a non-numeric cell names the
+/// column, the 0-based data row, and the offending text; a malformed file
+/// names the 1-based row/column position. No silent NaN/defaults.
+#[test]
+fn csv_accessor_failures_are_loud() {
+    let missing = checked_surf(
+        r#"
+xs = csv_f64s(parse_csv("date,mid\n2020-01-02,1.5\n"), "px")
+"#,
+    );
+    let err = evaluate_host_program(&missing, &HashMap::new())
+        .expect_err("missing column must fail eval");
+    assert!(err.contains("csv_f64s"), "got `{err}`");
+    assert!(err.contains("column `px` not found"), "got `{err}`");
+    assert!(
+        err.contains("available columns: `date`, `mid`"),
+        "got `{err}`"
+    );
+
+    let non_numeric = checked_surf(
+        r#"
+xs = csv_f64s(parse_csv("id,px\nalpha,n/a\n"), "px")
+"#,
+    );
+    let err = evaluate_host_program(&non_numeric, &HashMap::new())
+        .expect_err("non-numeric cell must fail eval");
+    assert!(err.contains("column `px`"), "got `{err}`");
+    assert!(err.contains("data row 0"), "got `{err}`");
+    assert!(err.contains("cell `n/a` is not a number"), "got `{err}`");
+
+    let malformed = checked_surf(
+        r#"
+c = parse_csv("a,b\n1,\"oops\n")
+"#,
+    );
+    let err = evaluate_host_program(&malformed, &HashMap::new())
+        .expect_err("malformed CSV must fail eval");
+    assert!(err.contains("parse_csv"), "got `{err}`");
+    assert!(err.contains("row 2, column 2"), "got `{err}`");
+    assert!(err.contains("unclosed quoted field"), "got `{err}`");
+}
+
+/// Check-time negative parity: `check_csv_builtin_signature` rejects
+/// non-document / non-string / non-integer slots with named diagnostics.
+#[test]
+fn csv_builtin_type_errors_reject_at_check() {
+    for (source, fragment) in [
+        (
+            "x = parse_csv(1.5)\n",
+            "parse_csv expects a string argument",
+        ),
+        (
+            "x = to_csv(\"raw\")\n",
+            "to_csv expects a Csv document first argument",
+        ),
+        (
+            "x = csv_f64s(1.5, \"a\")\n",
+            "csv_f64s expects a Csv document first argument",
+        ),
+        (
+            "x = csv_nrows(1.5)\n",
+            "csv_nrows expects a Csv document first argument",
+        ),
+        (
+            "x = csv_f64s(parse_csv(\"a\"), 2)\n",
+            "csv_f64s expects a column-name string second argument",
+        ),
+        (
+            "x = csv_f64(parse_csv(\"a\"), \"zero\", \"a\")\n",
+            "csv_f64 expects an integer row index second argument",
+        ),
+        (
+            "x = csv_str(parse_csv(\"a\"), 0, 1.5)\n",
+            "csv_str expects a column-name string third argument",
+        ),
+        // Wrong arity is caught by the generic scheme unification before
+        // the signature arm runs; the diagnostic is still loud and typed.
+        ("x = parse_csv(\"a\", \"b\")\n", "arity mismatch"),
+    ] {
+        let decls = chelis_surf::parser::parse_str(source).expect("surf parse");
+        let exprs = chelis_surf::desugar::desugar_program(&decls);
+        let err = chelis_types::check_ir_program(&exprs)
+            .expect_err(&format!("{source:?} must be a check error"));
+        assert!(
+            err.errors.iter().any(|e| e.message.contains(fragment)),
+            "{source:?}: expected a diagnostic containing `{fragment}`, got: {:?}",
+            err.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+    }
+}

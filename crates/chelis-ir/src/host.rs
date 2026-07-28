@@ -1932,6 +1932,17 @@ pub const EVAL_ONLY_HOST_BUILTINS: &[&str] = &[
     "jdict",
     "json_set",
     "round_to",
+    // Host-lane CSV I/O (chelis#903): same eval-only scope as the JSON
+    // family above — the compiled backends have no Json/Csv document
+    // representation, so the build gates reject these loudly.
+    "parse_csv",
+    "to_csv",
+    "csv_f64s",
+    "csv_strs",
+    "csv_nrows",
+    "csv_cols",
+    "csv_f64",
+    "csv_str",
 ];
 
 /// First eval/test-only builtin applied anywhere in the lowered host

@@ -332,6 +332,33 @@ for compute, `jdict`/`json_set`/`to_json` + `write_file` for nested output.
 Matching on the `Json` constructors is available for power users; the
 accessors are the primary agent surface.
 
+### 3.9 CSV I/O — **eval-only** (chelis#903)
+
+Native CSV, first row = header, riding the `Json` ADT: a **Csv document**
+is the fixed-shape Json value
+`JDict {"columns": JList[JStr], "rows": JList[JDict]}` (cells from
+`parse_csv` are `JStr` — no silent numeric coercion at parse time), so
+every §3.8 accessor works on it (`json_list(c, "rows")`, `json_str(c,
+"rows.0.px")`, `to_json(c)` for debugging) and there is deliberately no
+`Csv` prelude type. **Eval/test-only** like §3.8 (`EVAL_ONLY_HOST_BUILTINS`).
+All failures are loud eval errors — no silent NaN/defaults.
+
+| Name | Signature | Notes |
+|---|---|---|
+| `parse_csv` | `(s: string) -> Json` | RFC-4180-ish: quoted fields, doubled embedded quotes, commas/newlines literal inside quotes; LF or CRLF (mixed ok); leading UTF-8 BOM stripped; blank rows only at EOF. Errors name 1-based row/column: unclosed quote, content after closing quote, bare `"` in an unquoted field, bare CR, ragged row, interior blank row, **duplicate header names** |
+| `to_csv` | `(c: Json) -> string` | serializes the exact document shape `parse_csv` returns (round-trips); cells may be `JStr`/`JNum` (**shortest-round-trip f64**, same contract as `to_json`)/`JBool`/`JNull` (empty cell); minimal quoting, LF rows, trailing newline, byte-stable; loud on non-finite numbers, container cells, a row missing a declared column or carrying an undeclared key |
+| `csv_f64s` | `(c: Json, col: string) -> List[f64]` | whole column as numbers; strict JSON number grammar per cell (surrounding spaces/tabs tolerated, matching Python `float()`); empty or non-numeric cells fail naming the column, 0-based data row, and offending text |
+| `csv_strs` | `(c: Json, col: string) -> List[string]` | whole column verbatim |
+| `csv_nrows` | `(c: Json) -> int64` | data rows (header excluded) |
+| `csv_cols` | `(c: Json) -> List[string]` | header names in file order (preserved even for zero-row files) |
+| `csv_f64` | `(c: Json, row: int, col: string) -> f64` | one cell as a number; `row` is a 0-based data-row index, any integer precision (bare literals work) |
+| `csv_str` | `(c: Json, row: int, col: string) -> string` | one cell verbatim |
+
+Missing columns fail naming the column **and listing the available
+columns**. Composes end-to-end with §3.5/§3.8:
+`read_file |> parse_csv` → `csv_f64s` + tensor builtins → `round_to` →
+`jdict`/`json_set`/`to_json` (or `to_csv`) + `write_file`.
+
 ---
 
 ## 4. Complete closed vocabulary (completeness check)
@@ -371,6 +398,8 @@ Host lane:    cumsum sort einsum diagonal trace where clamp concat split scatter
               mmap_file mmap_read mmap_len process_run
               parse_json to_json json_f64 json_int json_str json_list json_f64s
               jnum jint jstr jlist jdict json_set round_to
+              parse_csv to_csv csv_f64s csv_strs csv_nrows csv_cols
+              csv_f64 csv_str
               print fail debug test_assert test_assert_eq_f32 test_assert_eq_int
               test_assert_eq_bool test_assert_eq_string test_assert_close_tensor
               test_assert_eq_tensor_int64
