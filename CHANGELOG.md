@@ -24,7 +24,41 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   names whole-program like `process_run`. `Json` becomes a reserved
   prelude type name. See `docs/CHELIS_SURFACE.md` §3.8.
 
+### Changed
+
+- **`jnum` requires exactly f64 (chelis#891 review).** Bare float literals
+  (f32 per §5.3) are rejected loudly with suffix/cast guidance instead of
+  silently widening — `jnum(0.1)` previously serialized as
+  `0.10000000149011612` through the byte-exact channel. The JSON builtin
+  contracts are now enforced by unification, so un-annotated parameters
+  flowing into Json/string/number slots are pinned instead of leaving the
+  contract vacuous; calling a builtin-named function parameter is now a
+  check error (calls dispatch builtin-first, so such a call could never
+  reach the parameter). `Std.Io.Json`'s `type Json` and `def parse_json`
+  were renamed to `JsonValue`/`parse_json_value` to clear the now-reserved
+  prelude names.
+
 ### Fixed
+
+- **Host-lane JSON hardening (chelis#891 review).** `parse_json`: \u
+  escapes are decoded byte-wise (a multibyte character inside the 4-digit
+  window was a char-boundary panic; a `+` sign was silently accepted), a
+  leading UTF-8 BOM is skipped (§8.1, matching `parse_csv`), unexpected
+  characters render as themselves instead of mojibake, and large objects
+  parse in O(n) via a hash-assisted duplicate-key upsert. Path list
+  indices are strictly all-digits (`+1`/`007` were silently accepted).
+  `json_set` no longer overflows the stack on pathological paths (the
+  descend/rebuild is iterative, segments are capped at 512) and refuses
+  to build values deeper than every consumer accepts. The eval-only
+  build rejection moved to the shared compiler layer so the public
+  `compile()` API (chelis-python) fails as loudly as `chelis build`.
+- **Compiled C runtime writes f64 pad data at f64 (chelis#891 review).**
+  `chelis_pad_sequences`/`chelis_pad_sequences_to` hardcoded `as f32`
+  stores while the eval lane keys the tensor at the pad's actual dtype;
+  the emitter now threads the static pad dtype and the runtime allocates
+  and writes genuinely f64 tensors. Empty rows/lists no longer mis-tag
+  F32 against the checker's f64 (the checker-known precision is threaded
+  as a hint) and no longer trip the pad homogeneity check.
 
 - **`to_tensor` and `pad_sequences`/`pad_sequences_to` tag float lists and
   pads at the element's actual dtype (chelis#890).** The runtime previously

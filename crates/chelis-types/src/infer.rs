@@ -9161,6 +9161,7 @@ fn collect_all_declarations(
     report_duplicate_defs(&bare_items, errors);
     report_duplicate_defsigs(&bare_items, errors);
     report_builtin_shadowing(&bare_items, errors);
+    report_builtin_param_call_shadowing(&bare_items, errors);
     let resolution_env = precollect_type_resolution_env(items, adt_reg);
     // Install the provisional self/forward header scope explicitly in this
     // per-check registry clone. Declaration bodies resolve against it, while
@@ -9501,6 +9502,120 @@ fn report_builtin_shadowing(items: &[&deep::Expr], errors: &mut DiagnosticSink<'
                  internal-name-rewritten before checking"
             )],
         ));
+    }
+}
+
+/// chelis#891 review finding 4: a function parameter MAY reuse a builtin
+/// name (the deliberate #353 carve-out — it binds a value and shadows
+/// harmlessly in value position), but a CALL through that name never
+/// reaches the parameter: the host evaluator (`runtime/eval.rs::eval_app`)
+/// and IR lowering (`lower.rs`/`host.rs`) both dispatch builtin-first by
+/// name. `def apply(round_to: ..., x) = round_to(x, 0)` therefore
+/// type-checked while silently invoking the BUILTIN. Reject exactly that
+/// shape — a builtin-named parameter applied by name inside its own
+/// scope — and leave value-position reuse intact (pinned by
+/// `value_params_and_locals_may_reuse_builtin_names`).
+fn report_builtin_param_call_shadowing(items: &[&deep::Expr], errors: &mut DiagnosticSink<'_>) {
+    let mut reported: HashSet<String> = HashSet::new();
+    for expr in items {
+        let mut scope: Vec<String> = Vec::new();
+        walk_builtin_param_calls(expr, &mut scope, &mut reported, errors);
+    }
+}
+
+/// Extract a parameter's bound name from its Deep form (bare `Symbol`,
+/// `MetaExpr`-wrapped, or annotated `(name {type: ..})` list) without
+/// self-recursion.
+fn builtin_shadow_param_name(param: &deep::Expr) -> Option<&str> {
+    let mut current = param;
+    loop {
+        match current {
+            deep::Expr::Atom(deep::Atom::Symbol(name), _) => return Some(name.as_str()),
+            deep::Expr::MetaExpr(meta, _) => current = &meta.expr,
+            deep::Expr::List(list, _) => {
+                return list
+                    .elements
+                    .first()
+                    .and_then(symbol_name)
+                    .or_else(|| children(list).first().and_then(symbol_name));
+            }
+            _ => return None,
+        }
+    }
+}
+
+/// Extract the name of a `(var name)` callee, unwrapping `MetaExpr`
+/// annotation layers, without self-recursion.
+fn builtin_shadow_callee_name(callee: &deep::Expr) -> Option<&str> {
+    let mut current = callee;
+    loop {
+        match current {
+            deep::Expr::MetaExpr(meta, _) => current = &meta.expr,
+            deep::Expr::List(list, _) if get_tag(list) == Some("var") => {
+                return children(list).first().and_then(symbol_name);
+            }
+            _ => return None,
+        }
+    }
+}
+
+fn walk_builtin_param_calls(
+    expr: &deep::Expr,
+    scope: &mut Vec<String>,
+    reported: &mut HashSet<String>,
+    errors: &mut DiagnosticSink<'_>,
+) {
+    stack_guard!("walk_builtin_param_calls", expr);
+    match expr {
+        deep::Expr::MetaExpr(meta, _) => {
+            walk_builtin_param_calls(&meta.expr, scope, reported, errors);
+        }
+        deep::Expr::List(list, _) => {
+            let kids = children(list);
+            if get_tag(list) == Some("fn") {
+                let mut added = 0usize;
+                if let Some(deep::Expr::List(params_list, _)) = kids.first() {
+                    for param in children(params_list) {
+                        if let Some(name) = builtin_shadow_param_name(param)
+                            && builtins::BUILTIN_NAMES.contains(&name)
+                        {
+                            scope.push(name.to_string());
+                            added += 1;
+                        }
+                    }
+                }
+                for kid in kids.iter().skip(1) {
+                    walk_builtin_param_calls(kid, scope, reported, errors);
+                }
+                scope.truncate(scope.len() - added);
+                return;
+            }
+            if get_tag(list) == Some("app")
+                && let Some(callee) = kids.first()
+                && let Some(name) = builtin_shadow_callee_name(callee)
+                && scope.iter().any(|param| param == name)
+                && reported.insert(name.to_string())
+            {
+                errors.push(CheckError::new(
+                    CheckErrorKind::BuiltinShadowing,
+                    format!(
+                        "parameter `{name}` shadows the builtin `{name}` and is called in \
+                         this function body: calls dispatch builtin-first under eval and \
+                         lowering (spec/04-type-system.md \u{00a7}8.6), so `{name}(...)` here \
+                         always invokes the builtin; the parameter can never be reached \
+                         by name."
+                    ),
+                    vec![format!(
+                        "rename the parameter (e.g. `{name}_fn`); builtin-named parameters \
+                         remain allowed in value position"
+                    )],
+                ));
+            }
+            for kid in kids {
+                walk_builtin_param_calls(kid, scope, reported, errors);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -17086,13 +17201,22 @@ fn check_conv2d_signature(
 /// `round_to`.
 ///
 /// The env schemes (`builtin_env`) only declare arity; this arm pins the
-/// real types. Numeric slots accept ANY float (`jnum`, `round_to` x) or
-/// integer (`round_to` places) precision rather than demanding f64/int64:
-/// unsuffixed literals default to f32/int32 (spec/04-type-system.md §5.3)
-/// and a concrete f64/int64 slot would reject `round_to(x, 2)` outright —
-/// the same flexibility `string_slice` gives its index arguments. The
-/// runtime widens at the boundary; `round_to` preserves the input's float
-/// precision in its return type.
+/// real types, and — per the chelis#891 review (finding 6) — it pins them
+/// by **unification**, not by permissive matching: an argument whose type
+/// is still a `Type::Var` (an un-annotated parameter, say) is unified
+/// with the slot's expected type instead of waved through, so
+/// `fn (doc) -> json_f64(doc, "a")` genuinely types `Json -> f64` rather
+/// than `forall a. a -> f64`.
+///
+/// Numeric slots: `round_to` accepts ANY float operand / integer `places`
+/// precision (unsuffixed literals default to f32/int32 per
+/// spec/04-type-system.md §5.3, and its return preserves the operand
+/// precision, so accepting f32 stays honest); an unresolved `Var` in
+/// either slot unifies with the canonical f64/int64. `jnum` is stricter —
+/// exactly f64 (chelis#891 review finding 7): its output feeds the
+/// byte-exact `to_json` channel, and silently widening an f32 literal
+/// would serialize `0.1f32` as `0.10000000149011612`. The diagnostic
+/// names the fix (suffix the literal or cast).
 fn check_json_builtin_signature(
     fname: &str,
     list: &deep::List,
@@ -17127,68 +17251,61 @@ fn check_json_builtin_signature(
         )
     };
 
-    let is_string_like =
-        |ty: &Type| matches!(ty, Type::Prim(Prim::String) | Type::Var(_) | Type::Error(_));
-    let is_json_like = |ty: &Type| {
-        matches!(ty, Type::Adt(name, args) if name == "Json" && args.is_empty())
-            || matches!(ty, Type::Var(_) | Type::Error(_))
-    };
-    let is_float_like = |ty: &Type| {
-        matches!(ty, Type::Prim(p) if p.is_float()) || matches!(ty, Type::Var(_) | Type::Error(_))
-    };
-    let is_int_like = |ty: &Type| {
-        matches!(ty, Type::Prim(p) if p.is_integer()) || matches!(ty, Type::Var(_) | Type::Error(_))
-    };
+    // Slot checks: each resolves the argument fresh (earlier unifications
+    // may have refined it), then unifies with the expected type. `unify`
+    // treats `Type::Error` as success, so already-diagnosed slots do not
+    // cascade.
+    macro_rules! require_slot {
+        ($idx:expr, $expected:expr, $desc:expr) => {{
+            let slot = type_for_readonly_check(&arg_tys[$idx], subst);
+            if unify(&slot, &$expected, subst).is_err() {
+                return reject($desc.to_string(), &subst.apply(&slot));
+            }
+        }};
+    }
 
-    let resolved: Vec<Type> = arg_tys
-        .iter()
-        .map(|ty| type_for_readonly_check(ty, subst))
-        .collect();
-
-    // Shared slot checks. Accessors and `json_set` take a Json value first
-    // and a dot-separated string path second.
-    let json_first = |resolved: &[Type], reject: &mut dyn FnMut(String, &Type) -> Type| {
-        if !is_json_like(&resolved[0]) {
-            return Some(reject(
-                "a Json first argument (from `parse_json` or a J* constructor)".to_string(),
-                &resolved[0],
-            ));
-        }
-        None
-    };
-    let path_second = |resolved: &[Type], reject: &mut dyn FnMut(String, &Type) -> Type| {
-        if !is_string_like(&resolved[1]) {
-            return Some(reject(
-                "a dot-separated string path second argument (e.g. \"a.b.c\")".to_string(),
-                &resolved[1],
-            ));
-        }
-        None
-    };
+    // `round_to`'s two slots accept any concrete float/integer precision;
+    // only an unresolved Var is pinned (to the canonical f64/int64) so the
+    // contract is never vacuous through an un-annotated parameter.
+    macro_rules! require_loose_numeric_slot {
+        ($idx:expr, $is_kind:ident, $default:expr, $desc:expr) => {{
+            let slot = type_for_readonly_check(&arg_tys[$idx], subst);
+            let ok = match &slot {
+                Type::Prim(p) if p.$is_kind() => true,
+                Type::Error(_) => true,
+                Type::Var(_) => unify(&slot, &Type::Prim($default), subst).is_ok(),
+                _ => false,
+            };
+            if !ok {
+                return reject($desc.to_string(), &subst.apply(&slot));
+            }
+        }};
+    }
 
     match fname {
         "parse_json" => {
-            if !is_string_like(&resolved[0]) {
-                return reject("a string argument".to_string(), &resolved[0]);
-            }
+            require_slot!(0, Type::Prim(Prim::String), "a string argument");
             json_ty()
         }
         "to_json" => {
-            if !is_json_like(&resolved[0]) {
-                return reject(
-                    "a Json argument (from `parse_json` or a J* constructor)".to_string(),
-                    &resolved[0],
-                );
-            }
+            require_slot!(
+                0,
+                json_ty(),
+                "a Json argument (from `parse_json` or a J* constructor)"
+            );
             Type::Prim(Prim::String)
         }
         "json_f64" | "json_str" | "json_list" | "json_f64s" => {
-            if let Some(err) = json_first(&resolved, &mut reject) {
-                return err;
-            }
-            if let Some(err) = path_second(&resolved, &mut reject) {
-                return err;
-            }
+            require_slot!(
+                0,
+                json_ty(),
+                "a Json first argument (from `parse_json` or a J* constructor)"
+            );
+            require_slot!(
+                1,
+                Type::Prim(Prim::String),
+                "a dot-separated string path second argument (e.g. \"a.b.c\")"
+            );
             match fname {
                 "json_f64" => Type::Prim(Prim::F64),
                 "json_str" => Type::Prim(Prim::String),
@@ -17197,100 +17314,125 @@ fn check_json_builtin_signature(
             }
         }
         "jnum" => {
-            if !is_float_like(&resolved[0]) {
-                return reject(
-                    "a float argument (any float precision; for an integer value use \
-                     cast(n, f64))"
-                        .to_string(),
-                    &resolved[0],
-                );
-            }
+            require_slot!(
+                0,
+                Type::Prim(Prim::F64),
+                "an f64 argument (suffix the literal, `0.1f64`, or use cast(n, f64); \
+                 an f32 value would quantize through the byte-exact serializer)"
+            );
             json_ty()
         }
         "jstr" => {
-            if !is_string_like(&resolved[0]) {
-                return reject("a string argument".to_string(), &resolved[0]);
-            }
+            require_slot!(0, Type::Prim(Prim::String), "a string argument");
             json_ty()
         }
         "jlist" => {
-            match &resolved[0] {
+            let slot = type_for_readonly_check(&arg_tys[0], subst);
+            match &slot {
                 Type::Adt(name, args) if name == "List" && args.len() == 1 => {
                     let element = subst.apply(&args[0]);
-                    if !is_json_like(&element) {
-                        return reject("List[Json] input".to_string(), &element);
+                    if unify(&element, &json_ty(), subst).is_err() {
+                        return reject("List[Json] input".to_string(), &subst.apply(&element));
                     }
                 }
-                Type::Var(_) | Type::Error(_) => {}
+                Type::Error(_) => {}
+                Type::Var(_) => {
+                    let expected = Type::Adt("List".to_string(), vec![json_ty()]);
+                    if unify(&slot, &expected, subst).is_err() {
+                        return reject("List[Json] input".to_string(), &subst.apply(&slot));
+                    }
+                }
                 other => return reject("List[Json] input".to_string(), other),
             }
             json_ty()
         }
         "jdict" => {
-            match &resolved[0] {
+            let entry_ty = || Type::Tuple(vec![Type::Prim(Prim::String), json_ty()]);
+            let slot = type_for_readonly_check(&arg_tys[0], subst);
+            match &slot {
                 Type::Adt(name, args) if name == "List" && args.len() == 1 => {
                     match subst.apply(&args[0]) {
                         Type::Tuple(items) if items.len() == 2 => {
                             let key_ty = subst.apply(&items[0]);
-                            let value_ty = subst.apply(&items[1]);
-                            if !is_string_like(&key_ty) {
+                            if unify(&key_ty, &Type::Prim(Prim::String), subst).is_err() {
                                 return reject(
                                     "(string, Json) entry tuples (string keys)".to_string(),
-                                    &key_ty,
+                                    &subst.apply(&key_ty),
                                 );
                             }
-                            if !is_json_like(&value_ty) {
+                            let value_ty = subst.apply(&items[1]);
+                            if unify(&value_ty, &json_ty(), subst).is_err() {
                                 return reject(
                                     "(string, Json) entry tuples (Json values)".to_string(),
-                                    &value_ty,
+                                    &subst.apply(&value_ty),
                                 );
                             }
                         }
-                        Type::Var(_) | Type::Error(_) => {}
+                        Type::Error(_) => {}
+                        element @ Type::Var(_) => {
+                            if unify(&element, &entry_ty(), subst).is_err() {
+                                return reject(
+                                    "List[(string, Json)] input".to_string(),
+                                    &subst.apply(&element),
+                                );
+                            }
+                        }
                         other => {
                             return reject("List[(string, Json)] input".to_string(), &other);
                         }
                     }
                 }
-                Type::Var(_) | Type::Error(_) => {}
+                Type::Error(_) => {}
+                Type::Var(_) => {
+                    let expected = Type::Adt("List".to_string(), vec![entry_ty()]);
+                    if unify(&slot, &expected, subst).is_err() {
+                        return reject(
+                            "List[(string, Json)] input".to_string(),
+                            &subst.apply(&slot),
+                        );
+                    }
+                }
                 other => return reject("List[(string, Json)] input".to_string(), other),
             }
             json_ty()
         }
         "json_set" => {
-            if let Some(err) = json_first(&resolved, &mut reject) {
-                return err;
-            }
-            if let Some(err) = path_second(&resolved, &mut reject) {
-                return err;
-            }
-            if !is_json_like(&resolved[2]) {
-                return reject(
-                    "a Json third argument (wrap raw values with jnum/jstr/jlist/jdict)"
-                        .to_string(),
-                    &resolved[2],
-                );
-            }
+            require_slot!(
+                0,
+                json_ty(),
+                "a Json first argument (from `parse_json` or a J* constructor)"
+            );
+            require_slot!(
+                1,
+                Type::Prim(Prim::String),
+                "a dot-separated string path second argument (e.g. \"a.b.c\")"
+            );
+            require_slot!(
+                2,
+                json_ty(),
+                "a Json third argument (wrap raw values with jnum/jstr/jlist/jdict)"
+            );
             json_ty()
         }
         "round_to" => {
-            if !is_float_like(&resolved[0]) {
-                return reject(
-                    "a float first argument (any float precision)".to_string(),
-                    &resolved[0],
-                );
-            }
-            if !is_int_like(&resolved[1]) {
-                return reject(
-                    "an integer `places` second argument".to_string(),
-                    &resolved[1],
-                );
-            }
+            require_loose_numeric_slot!(
+                0,
+                is_float,
+                Prim::F64,
+                "a float first argument (any float precision)"
+            );
+            require_loose_numeric_slot!(
+                1,
+                is_integer,
+                Prim::Int64,
+                "an integer `places` second argument"
+            );
             // Precision-preserving: `round_to` returns its operand's float
-            // precision; an unresolved operand defaults to the canonical
-            // f64 (the eval lane computes in f64 regardless).
-            match &resolved[0] {
-                Type::Prim(p) if p.is_float() => Type::Prim(*p),
+            // precision; an unresolved operand was just unified with the
+            // canonical f64, keeping the checker and the eval lane in
+            // agreement on the result dtype (chelis#891 review finding 6).
+            match type_for_readonly_check(&arg_tys[0], subst) {
+                Type::Prim(p) if p.is_float() => Type::Prim(p),
                 _ => Type::Prim(Prim::F64),
             }
         }

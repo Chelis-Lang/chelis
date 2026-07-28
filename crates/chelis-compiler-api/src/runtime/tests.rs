@@ -2074,8 +2074,12 @@ fn json_builtin_type_errors_reject_at_check() {
         ),
         (
             "x = jnum(\"not a number\")\n",
-            "jnum expects a float argument",
+            "jnum expects an f64 argument",
         ),
+        // chelis#891 review finding 7: a bare float literal is f32 (§5.3)
+        // and would quantize through the byte-exact serializer, so jnum
+        // rejects it loudly with the suffix/cast guidance.
+        ("x = jnum(0.1)\n", "jnum expects an f64 argument"),
         (
             "x = json_set(jdict([(\"a\", jnum(1.0))]), \"a\", 2.0)\n",
             "json_set expects a Json third argument",
@@ -2118,4 +2122,87 @@ text = to_json(jlist([jnum(second_px), JNull, JBool(true)]))
     let first = run(&checked);
     assert_eq!(first, "[2.5,null,true]");
     assert_eq!(run(&checked), first, "serialization must be deterministic");
+}
+
+/// chelis#891 review finding 6: the builtin contracts are enforced by
+/// unification, so an un-annotated parameter flowing into a Json/float
+/// slot is pinned to the expected type instead of leaving the contract
+/// vacuous (`forall a. a -> f64`).
+#[test]
+fn json_builtin_slots_unify_unannotated_params() {
+    // The lambda parameter unifies with Json; applying it to a float is
+    // now a check error (previously it checked clean and failed at eval).
+    let source = "f = fn (doc) -> json_f64(doc, \"a\")\nx = f(1.5)\n";
+    let decls = chelis_surf::parser::parse_str(source).expect("surf parse");
+    let exprs = chelis_surf::desugar::desugar_program(&decls);
+    let err = chelis_types::check_ir_program(&exprs).expect_err("non-Json arg must be rejected");
+    assert!(
+        err.errors.iter().any(|e| e.message.contains("mismatch")),
+        "expected a type mismatch, got: {:?}",
+        err.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+
+    // round_to's operand slot pins an unresolved Var to f64, so checker
+    // and eval agree on the result dtype; an f32 application is a check
+    // error rather than a silent f32-in/f64-claimed disagreement.
+    let source = "g = fn (v) -> round_to(v, 2)\nz = g(1.5)\n";
+    let decls = chelis_surf::parser::parse_str(source).expect("surf parse");
+    let exprs = chelis_surf::desugar::desugar_program(&decls);
+    let err = chelis_types::check_ir_program(&exprs).expect_err("f32 arg must be rejected");
+    assert!(
+        err.errors.iter().any(|e| e.message.contains("mismatch")),
+        "expected a precision mismatch, got: {:?}",
+        err.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+
+    // The pinned path works end-to-end with a genuine f64.
+    let checked = checked_surf(
+        r#"
+g = fn (v) -> round_to(v, 2)
+z = g(json_f64(parse_json("{\"v\": 2.675}"), "v"))
+"#,
+    );
+    let outcome = evaluate_host_program(&checked, &HashMap::new()).expect("should evaluate");
+    assert_eq!(
+        outcome
+            .host_bindings
+            .get("z")
+            .and_then(RuntimeValue::as_f64),
+        Some(2.67)
+    );
+}
+
+/// chelis#891 review finding 3: an empty `List[f64]` reaching `to_tensor`
+/// keeps the checker-known f64 precision via the threaded hint (the
+/// runtime value alone carries no dtype evidence), and an empty row in
+/// `pad_sequences` adopts the pad's precision instead of tripping the
+/// homogeneity check.
+#[test]
+fn empty_f64_lists_keep_checker_precision() {
+    let checked = checked_surf(
+        r#"
+xs = json_f64s(parse_json("{\"v\": []}"), "v")
+t = to_tensor(xs)
+padded = pad_sequences([[], [cast(0.5, f64)]], cast(0.25, f64))
+"#,
+    );
+    let outcome = evaluate_host_program(&checked, &HashMap::new()).expect("should evaluate");
+    match outcome.host_bindings.get("t") {
+        Some(RuntimeValue::Tensor(tensor)) => {
+            assert_eq!(
+                tensor.precision,
+                Prim::F64,
+                "checker hint must win over F32"
+            );
+            assert_eq!(tensor.value.shape, vec![0]);
+        }
+        other => panic!("expected tensor, got {other:?}"),
+    }
+    match outcome.host_bindings.get("padded") {
+        Some(RuntimeValue::Tensor(tensor)) => {
+            assert_eq!(tensor.precision, Prim::F64);
+            assert_eq!(tensor.value.data, vec![0.25, 0.5]);
+        }
+        other => panic!("expected tensor, got {other:?}"),
+    }
 }

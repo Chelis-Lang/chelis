@@ -164,12 +164,20 @@ with `date_lt` and friends; `day_of_week`, `day_of_year`, `is_leap_year`; and
 - `read_csv(path)` returns a list of header-keyed dictionaries, `try_read_csv(path)` returns
   the optional form.
 
-`Std.Io.Json` parses JSON into a `Json` value (`JsonNull`, `JsonBool`, `JsonInt`,
+`Std.Io.Json` parses JSON into a `JsonValue` (`JsonNull`, `JsonBool`, `JsonInt`,
 `JsonFloat`, `JsonString`, `JsonArray`, `JsonObject`):
 
-- `load_json(path)`, `parse_json(text)` and their `try_` variants.
+- `load_json(path)`, `parse_json_value(text)` and their `try_` variants
+  (`try_load_json`, `try_parse_json`).
 - `json_get`, and the typed accessors `json_string`, `json_int`, `json_float`, `json_bool`,
   `json_array`, `json_object`, plus `json_is_null`.
+
+Note: the *prelude* now owns the names `Json` and `parse_json` — the eval-lane
+JSON builtins (`parse_json`/`to_json`/`json_f64`/... over the prelude `Json`
+ADT, see `docs/CHELIS_SURFACE.md` §3.8) — so the module's former `type Json`
+and `def parse_json` were renamed to `JsonValue`/`parse_json_value`. The
+module keeps its distinct int/float document model; the builtins are the
+primary agent surface.
 
 These IO modules carry the `IO` effect and run on the evaluator and host paths.
 

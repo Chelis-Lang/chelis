@@ -439,9 +439,11 @@ const BASELINE: &[Entry] = &[
     (
         Pat::UnwrapOrPrim,
         "crates/chelis-compiler-api/src/runtime/host_ops.rs",
-        2,
-        "to_tensor literal-precision defaults: float literals default to F32 \
-         per spec (int/bool elements override); audited, not a substitution",
+        1,
+        "to_tensor literal-precision default, centralized in \
+         resolve_list_precision (chelis#891 review finding 3: runtime \
+         evidence, then the checker-annotated hint, then the F32 literal \
+         default); audited, not a substitution",
     ),
     // -- elemkind-wildcard-arm: ZERO entries left - census row 5's
     // wildcard deleted at Phase 1 (section C4.1); elem_kind is an

@@ -78,16 +78,16 @@ chelis-std = {{ version = "0.4.0" }}
 /// that the regenerated bundle must support.
 const CROSS_MODULE_CTOR_PROGRAM: &str = r#"module Demo.Main
 
-import Std.Io.Json (Json, JsonInt, parse_json)
+import Std.Io.Json (JsonValue, JsonInt, parse_json_value)
 
-def extract_int(value: Json) -> int64 = {
+def extract_int(value: JsonValue) -> int64 = {
   match value with {
     | JsonInt(n) => n
     | _ => cast(0, int64)
   }
 }
 
-answer = extract_int(parse_json("42"))
+answer = extract_int(parse_json_value("42"))
 view = print(answer)
 "#;
 

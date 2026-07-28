@@ -2357,6 +2357,7 @@ pub unsafe extern "C" fn chelis_list_from_tensor(tensor: *const chelis_tensor) -
 pub unsafe extern "C" fn chelis_pad_sequences(
     sequences: *const chelis_list,
     pad_value: chelis_value,
+    pad_dtype: c_int,
 ) -> *mut chelis_tensor {
     let batch = chelis_list_len(sequences) as usize;
     let mut width = 0usize;
@@ -2369,8 +2370,16 @@ pub unsafe extern "C" fn chelis_pad_sequences(
         }
     }
     let shape = [batch as c_int, width as c_int];
+    // Float pads carry their STATIC dtype from the emitter (`pad_dtype`,
+    // chelis#891 review finding 2): the boxed value union has no f32/f64
+    // distinction, and hardcoding F32 silently truncated f64 pad data
+    // while the eval lane (host_ops) keys the tensor at the pad's actual
+    // dtype -- a silent build-vs-eval divergence. Integer pads keep the
+    // historical I32 tag (the chelis#713 class, tracked separately).
     let dtype = if pad_value.tag == chelis_value_tag::CHELIS_VALUE_INT64 {
         RuntimeDType::I32
+    } else if pad_dtype == CHELIS_F64 {
+        RuntimeDType::F64
     } else {
         RuntimeDType::F32
     };
@@ -2405,6 +2414,11 @@ pub unsafe extern "C" fn chelis_pad_sequences(
                 // interpreted as junk integers.
                 if dtype == RuntimeDType::I32 {
                     *((*out).data as *mut i32).add(flat) = value as i32;
+                } else if dtype == RuntimeDType::F64 {
+                    // f64 lane (chelis#891 review finding 2): write the
+                    // full-precision value; `value as f32` here silently
+                    // quantized exact f64 data.
+                    *((*out).data as *mut f64).add(flat) = value;
                 } else {
                     *((*out).data as *mut f32).add(flat) = value as f32;
                 }
@@ -2419,6 +2433,7 @@ pub unsafe extern "C" fn chelis_pad_sequences_to(
     sequences: *const chelis_list,
     width: i64,
     pad_value: chelis_value,
+    pad_dtype: c_int,
 ) -> *mut chelis_tensor {
     if width < 0 {
         runtime_fail!("pad_sequences_to requires non-negative width");
@@ -2426,8 +2441,16 @@ pub unsafe extern "C" fn chelis_pad_sequences_to(
     let batch = chelis_list_len(sequences) as usize;
     let width = width as usize;
     let shape = [batch as c_int, width as c_int];
+    // Float pads carry their STATIC dtype from the emitter (`pad_dtype`,
+    // chelis#891 review finding 2): the boxed value union has no f32/f64
+    // distinction, and hardcoding F32 silently truncated f64 pad data
+    // while the eval lane (host_ops) keys the tensor at the pad's actual
+    // dtype -- a silent build-vs-eval divergence. Integer pads keep the
+    // historical I32 tag (the chelis#713 class, tracked separately).
     let dtype = if pad_value.tag == chelis_value_tag::CHELIS_VALUE_INT64 {
         RuntimeDType::I32
+    } else if pad_dtype == CHELIS_F64 {
+        RuntimeDType::F64
     } else {
         RuntimeDType::F32
     };
@@ -2459,6 +2482,11 @@ pub unsafe extern "C" fn chelis_pad_sequences_to(
                 };
                 if dtype == RuntimeDType::I32 {
                     *((*out).data as *mut i32).add(flat) = value as i32;
+                } else if dtype == RuntimeDType::F64 {
+                    // f64 lane (chelis#891 review finding 2): write the
+                    // full-precision value; `value as f32` here silently
+                    // quantized exact f64 data.
+                    *((*out).data as *mut f64).add(flat) = value;
                 } else {
                     *((*out).data as *mut f32).add(flat) = value as f32;
                 }
@@ -4122,6 +4150,60 @@ mod tests {
             assert_eq!((*tensor).dtype, CHELIS_I32, "from_i64 advertises i32");
             assert_eq!(*((*tensor).data as *const i32), 7);
             chelis_free(tensor);
+        }
+    }
+
+    /// chelis#891 review finding 2: with the emitter-threaded f64 pad
+    /// dtype, `chelis_pad_sequences` allocates a genuinely f64-tagged
+    /// tensor and writes full-precision values -- previously every float
+    /// row/pad went through `value as f32`, silently diverging from the
+    /// eval lane on f64 data.
+    #[test]
+    fn pad_sequences_f64_pad_dtype_preserves_f64_bits() {
+        unsafe {
+            let row_base = chelis_list_empty();
+            let row = chelis_list_append(row_base, chelis_value_from_f64(28125.01875));
+            let empty_row = chelis_list_empty();
+            let base = chelis_list_empty();
+            let with_row = chelis_list_append(base, chelis_value_from_list(row));
+            let sequences = chelis_list_append(with_row, chelis_value_from_list(empty_row));
+
+            let out = chelis_pad_sequences(sequences, chelis_value_from_f64(0.1), CHELIS_F64);
+            assert_eq!(
+                (*out).dtype,
+                CHELIS_F64,
+                "f64 pad dtype must tag the tensor f64"
+            );
+            let stored = *((*out).data as *const f64);
+            assert_eq!(
+                stored.to_bits(),
+                28125.01875_f64.to_bits(),
+                "row data must survive bit-for-bit"
+            );
+            assert_ne!(
+                stored,
+                f64::from(28125.01875_f64 as f32),
+                "f64 store must not collapse to the f32-truncated value"
+            );
+            let padded = *((*out).data as *const f64).add(1);
+            assert_eq!(
+                padded.to_bits(),
+                0.1_f64.to_bits(),
+                "the pad value itself must survive bit-for-bit"
+            );
+            chelis_free(out);
+
+            // The f32 dtype keeps the historical behavior.
+            let out32 = chelis_pad_sequences(sequences, chelis_value_from_f64(0.1), CHELIS_F32);
+            assert_eq!((*out32).dtype, CHELIS_F32);
+            chelis_free(out32);
+
+            chelis_list_release(sequences);
+            chelis_list_release(with_row);
+            chelis_list_release(base);
+            chelis_list_release(empty_row);
+            chelis_list_release(row);
+            chelis_list_release(row_base);
         }
     }
 }

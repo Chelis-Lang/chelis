@@ -2557,20 +2557,22 @@ impl<'a> HostEmitter<'a> {
             }
             "pad_sequences" => {
                 self.lines.push(format!(
-                    "{}{target} = chelis_pad_sequences({}, {});",
+                    "{}{target} = chelis_pad_sequences({}, {}, {});",
                     self.indent,
                     arg_vars[0].0,
-                    self.box_value_expr(&arg_vars[1].0, &arg_vars[1].1)?
+                    self.box_value_expr(&arg_vars[1].0, &arg_vars[1].1)?,
+                    pad_result_dtype_macro(ty)
                 ));
                 return Ok(());
             }
             "pad_sequences_to" => {
                 self.lines.push(format!(
-                    "{}{target} = chelis_pad_sequences_to({}, {}, {});",
+                    "{}{target} = chelis_pad_sequences_to({}, {}, {}, {});",
                     self.indent,
                     arg_vars[0].0,
                     arg_vars[1].0,
-                    self.box_value_expr(&arg_vars[2].0, &arg_vars[2].1)?
+                    self.box_value_expr(&arg_vars[2].0, &arg_vars[2].1)?,
+                    pad_result_dtype_macro(ty)
                 ));
                 return Ok(());
             }
@@ -5908,6 +5910,24 @@ fn sparse_symbol_expr(
                     .then(|| format!("{arg}->shape[{axis}]"))
             })
         })
+}
+
+/// Static dtype macro for a `pad_sequences`/`pad_sequences_to` RESULT
+/// tensor (chelis#891 review finding 2, the RT-4 F1 pattern `to_tensor`
+/// uses above): the boxed `chelis_value` pad carries every float as f64
+/// (and scalar host types normalize floats to `Float64`), so neither the
+/// runtime value nor the pad slot's host type can recover the source
+/// precision -- the checker-typed result tensor precision is the honest
+/// dtype, matching the eval lane's pad-dtype keying. Integer pads keep
+/// the historical tag-keyed I32 selection in the runtime (the chelis#713
+/// class); the macro is passed for uniformity and ignored there.
+fn pad_result_dtype_macro(ty: &HostType) -> &'static str {
+    if let HostType::Tensor(t) = ty
+        && let Ok(dtype) = t.precision.runtime_dtype()
+    {
+        return dtype.c_macro();
+    }
+    chelis_vocab::RuntimeDType::F32.c_macro()
 }
 
 #[cfg(test)]

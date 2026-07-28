@@ -8266,15 +8266,13 @@ fn reject_host_only_builtins_before_host_lowering(
 fn reject_eval_only_builtins_host(
     program: &chelis_ir::host::ConcreteHostProgram,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    for builtin in EVAL_ONLY_HOST_BUILTINS {
-        if chelis_ir::host::host_program_uses_builtin(program, builtin) {
-            return Err(format!(
-                "{builtin} is an eval/test-only builtin; not available in compiled \
-                    targets. Run the program with `chelis eval` or `chelis test` instead, \
-                    or remove the {builtin} call before building."
-            )
-            .into());
-        }
+    if let Some(builtin) = chelis_ir::host::find_eval_only_host_builtin(program) {
+        return Err(format!(
+            "{builtin} is an eval/test-only builtin; not available in compiled \
+                targets. Run the program with `chelis eval` or `chelis test` instead, \
+                or remove the {builtin} call before building."
+        )
+        .into());
     }
     Ok(())
 }
@@ -9315,25 +9313,11 @@ fn deep_named_decl_name(expr: &DeepExpr) -> Option<&str> {
 /// supports but the compiled build backends deliberately do not. Kept in
 /// one place so [`reject_eval_only_builtins_host`] and
 /// [`drop_unreachable_eval_only_defs`] stay in agreement.
-const EVAL_ONLY_HOST_BUILTINS: &[&str] = &[
-    "process_run",
-    // Host-lane JSON I/O (chelis#890): eval-only by scope — the compiled
-    // backends have no Json ADT value representation and emitting the
-    // host_emit catch-all for them would produce a silent wrong value
-    // (the chelis#734 class), so the build gate rejects them loudly.
-    "parse_json",
-    "to_json",
-    "json_f64",
-    "json_str",
-    "json_list",
-    "json_f64s",
-    "jnum",
-    "jstr",
-    "jlist",
-    "jdict",
-    "json_set",
-    "round_to",
-];
+// The list itself lives in `chelis_ir::host` and is shared with the
+// public compiler API's `compile_for_execution` gate, so the CLI build
+// pipeline and the chelis-python path cannot drift (chelis#891 review
+// finding 13).
+const EVAL_ONLY_HOST_BUILTINS: &[&str] = chelis_ir::host::EVAL_ONLY_HOST_BUILTINS;
 
 /// Drop top-level decls for any function whose body references an eval-only
 /// host builtin ([`EVAL_ONLY_HOST_BUILTINS`]) and is not reachable from the

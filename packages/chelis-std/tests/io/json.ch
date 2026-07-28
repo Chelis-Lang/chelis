@@ -1,40 +1,40 @@
 module Std.Tests.Io.Json
-import Std.Io.Json (Json, JsonNull, JsonBool, parse_json, try_parse_json, json_get, json_string, json_int, json_array, json_is_null)
+import Std.Io.Json (JsonValue, JsonNull, JsonBool, parse_json_value, try_parse_json, json_get, json_string, json_int, json_array, json_is_null)
 import Std.Test (assert_eq_int, assert_eq_string, assert_true, assert_false, fail)
 def test_parse_null_returns_json_null() -> unit ! { Test } = {
-  match parse_json("null") with {
-    | JsonNull => assert_true(true, "parse_json(\"null\") matches JsonNull")
-    | _ => fail("parse_json(\"null\") did not match JsonNull")
+  match parse_json_value("null") with {
+    | JsonNull => assert_true(true, "parse_json_value(\"null\") matches JsonNull")
+    | _ => fail("parse_json_value(\"null\") did not match JsonNull")
   }
 }
 def test_parse_true_returns_json_bool_true() -> unit ! { Test } = {
-  match parse_json("true") with {
-    | JsonBool(flag) => assert_true(flag, "parse_json(\"true\") yields JsonBool(true)")
-    | _ => fail("parse_json(\"true\") did not match JsonBool")
+  match parse_json_value("true") with {
+    | JsonBool(flag) => assert_true(flag, "parse_json_value(\"true\") yields JsonBool(true)")
+    | _ => fail("parse_json_value(\"true\") did not match JsonBool")
   }
 }
 def test_parse_false_returns_json_bool_false() -> unit ! { Test } = {
-  match parse_json("false") with {
-    | JsonBool(flag) => assert_false(flag, "parse_json(\"false\") yields JsonBool(false)")
-    | _ => fail("parse_json(\"false\") did not match JsonBool")
+  match parse_json_value("false") with {
+    | JsonBool(flag) => assert_false(flag, "parse_json_value(\"false\") yields JsonBool(false)")
+    | _ => fail("parse_json_value(\"false\") did not match JsonBool")
   }
 }
 def test_parse_int_returns_json_int() -> unit ! { Test } = {
-  parsed = parse_json("42")
+  parsed = parse_json_value("42")
   match json_int(Some(parsed)) with {
-    | Some(n) => assert_eq_int(n, cast(42, int64), "parse_json(\"42\") yields JsonInt(42)")
-    | None => fail("parse_json(\"42\") did not yield JsonInt")
+    | Some(n) => assert_eq_int(n, cast(42, int64), "parse_json_value(\"42\") yields JsonInt(42)")
+    | None => fail("parse_json_value(\"42\") did not yield JsonInt")
   }
 }
 def test_parse_string_returns_json_string() -> unit ! { Test } = {
-  parsed = parse_json("\"hello\"")
+  parsed = parse_json_value("\"hello\"")
   match json_string(Some(parsed)) with {
-    | Some(text) => assert_eq_string(text, "hello", "parse_json(\"\\\"hello\\\"\") yields JsonString(\"hello\")")
-    | None => fail("parse_json(\"\\\"hello\\\"\") did not yield JsonString")
+    | Some(text) => assert_eq_string(text, "hello", "parse_json_value(\"\\\"hello\\\"\") yields JsonString(\"hello\")")
+    | None => fail("parse_json_value(\"\\\"hello\\\"\") did not yield JsonString")
   }
 }
 def test_parse_array_three_ints() -> unit ! { Test } = {
-  parsed = parse_json("[1, 2, 3]")
+  parsed = parse_json_value("[1, 2, 3]")
   match json_array(Some(parsed)) with {
     | Some(items) => {
     _ = assert_eq_int(cast(len(items), int64), cast(3, int64), "[1, 2, 3] has length 3")
@@ -51,18 +51,18 @@ def test_parse_array_three_ints() -> unit ! { Test } = {
       | None => fail("items[2] is not a JsonInt")
     }
   }
-    | None => fail("parse_json(\"[1, 2, 3]\") did not yield JsonArray")
+    | None => fail("parse_json_value(\"[1, 2, 3]\") did not yield JsonArray")
   }
 }
 def test_parse_object_with_int_value() -> unit ! { Test } = {
-  parsed = parse_json("{\"a\": 1}")
+  parsed = parse_json_value("{\"a\": 1}")
   match json_int(json_get(parsed, "a")) with {
     | Some(n) => assert_eq_int(n, cast(1, int64), "{\"a\": 1}.a == JsonInt(1)")
-    | None => fail("json_get(parse_json(\"{\\\"a\\\": 1}\"), \"a\") did not yield JsonInt")
+    | None => fail("json_get(parse_json_value(\"{\\\"a\\\": 1}\"), \"a\") did not yield JsonInt")
   }
 }
 def test_parse_nested_object_null_matches_json_is_null() -> unit ! { Test } = {
-  parsed = parse_json("{\"x\": null}")
+  parsed = parse_json_value("{\"x\": null}")
   assert_true(json_is_null(json_get(parsed, "x")), "{\"x\": null}.x is JsonNull via json_is_null")
 }
 def test_try_parse_json_malformed_returns_none() -> unit ! { Test } = {
