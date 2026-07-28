@@ -101,28 +101,36 @@ drift in code.
 ## C1. Per-dtype value semantics (normative)
 
 The single table both the spec section and the module implement. "Wide
-intermediate" means the f64 (float family) or i64 (integer family) value an
-op kernel produced before finalize.
+intermediate" means the value an op kernel produced at the dtype's
+ARITHMETIC WIDTH (spec/04 [04-NUM-8]) before finalize - NOT an
+unconditional f64/i64. The arithmetic-width column below is reproduced
+from [04-NUM-8] and spec/04 §1.1.3, which are authoritative; all three
+are edited together.
 
-| dtype | value set | finalize(wide) | overflow / out of range | special values |
-|---|---|---|---|---|
-| `f64` | IEEE binary64 | identity | n/a (IEEE handles it) | NaN/±inf/-0.0 preserved |
-| `f32` | IEEE binary32 | round-to-nearest-even to 24-bit mantissa | rounds to ±inf per IEEE | NaN preserved (quiet), ±inf, -0.0 preserved |
-| `f16` | IEEE binary16 | RNE to 11-bit mantissa, incl. subnormals | overflow -> ±inf (locked: `mul(65504f16, 2f16) = inf`) | as f32 |
-| `bf16` | bfloat16 | RNE to 8-bit mantissa | overflow -> ±inf | as f32 |
-| `int64` | integers in [-2^63, 2^63-1] | must be integral and in range, else **trap** | **trap** (`NumericTrap::Overflow`) | none |
-| `int32/16/8` | integers at width | same rule at width | **trap** | none |
-| `bool` | {0, 1} | must be exactly 0 or 1, else **trap** (`NumericTrap::Domain`) | trap | none |
-| `f8e4m3` | rejected by the checker (spec §1.1.1) | unreachable: `finalize` for it is a compile-time-visible `Rejected` row in the capability table, not a runtime arm | - | - |
+| dtype | value set | arithmetic width | finalize(wide) | overflow / out of range | special values |
+|---|---|---|---|---|---|
+| `f64` | IEEE binary64 | f64 | identity | n/a (IEEE handles it) | NaN/±inf/-0.0 preserved |
+| `f32` | IEEE binary32 | f32 | round-to-nearest-even to 24-bit mantissa | rounds to ±inf per IEEE | NaN preserved (quiet), ±inf, -0.0 preserved |
+| `f16` | IEEE binary16 | f32 | RNE to 11-bit mantissa, incl. subnormals | overflow -> ±inf (locked: `mul(65504f16, 2f16) = inf`) | as f32 |
+| `bf16` | bfloat16 | f32 | RNE to 8-bit mantissa | overflow -> ±inf | as f32 |
+| `int64` | integers in [-2^63, 2^63-1] | exact int64 | must be integral and in range, else **trap** | **trap** (`NumericTrap::Overflow`) | none |
+| `int32/16/8` | integers at width | exact at width | same rule at width | **trap** | none |
+| `bool` | {0, 1} | n/a (not arithmetic) | must be exactly 0 or 1, else **trap** (`NumericTrap::Domain`) | trap | none |
+| `f8e4m3` | rejected by the checker (spec §1.1.1) | - | unreachable: `finalize` for it is a compile-time-visible `Rejected` row in the capability table, not a runtime arm | - | - |
 
 Normative notes, each pinned by an existing test:
 
-1. **Single rounding from f64 is correctly rounded** for f32/f16/bf16
-   (f64 carries >= 2p+2 bits for p <= 24). Kernels therefore compute float
-   ops in f64 and finalize ONCE. Chained ops finalize per-op: the eval
-   scalar lane's `add(add(2048f16,1f16),1f16) = 2048` lock
-   (`narrow_dtype_matrix.rs::eval_scalar_f16_rounds_per_op`) is the
-   sequential-rounding contract.
+1. **Kernels compute at the dtype's arithmetic width and finalize ONCE
+   per op** (spec/04 [04-NUM-8]). This note previously read "kernels
+   therefore compute float ops in f64", derived from a permissive clause
+   in [04-NUM-2] that was removed on 2026-07-28; f64 computation of an
+   f32 op is now non-conforming. The narrow-float rows compute at f32,
+   which yields the correctly-rounded narrow result for the basic
+   operations by construction (f32 carries >= 2p+2 bits for p <= 11) and
+   is what every target's hardware does. Chained ops still finalize
+   per-op: the eval scalar lane's `add(add(2048f16,1f16),1f16) = 2048`
+   lock (`narrow_dtype_matrix.rs::eval_scalar_f16_rounds_per_op`) is the
+   sequential-rounding contract and is unaffected.
 2. **The f64 collision stays.** `f64 add(2^53, 1) == 2^53` is CORRECT
    IEEE behavior and must not change
    (`precision_matrix.rs::f64_add_at_mantissa_boundary_is_correctly_lossy`).
@@ -330,6 +338,18 @@ NAMES to these enums stays in the consumers and is [#703]'s territory (its
 fallback must be `Err`, not a value) - this plan only guarantees that once
 dispatched, the semantics are right.
 
+**Signature note (2026-07-28, [04-NUM-8]).** The sketch above takes
+`a: f64, b: f64` and `a: i64` because it was written under the removed
+"compute in f64" clause. Those signatures now encode a non-conforming
+contract: under [04-NUM-8] an f32 op computes at f32 and an int32 op
+computes exactly at int32, so a kernel entry point that can only accept
+f64/i64 cannot express the rule it is meant to enforce. Phase 2 owns the
+replacement and SHALL design it against [04-NUM-8]; this doc deliberately
+does not pre-specify the form (monomorphized per width, a width-parameter,
+or a sealed wide-value enum are all open). What Phase 2 may NOT do is keep
+the f64/i64 signatures and finalize afterwards - that is the current
+behavior and is exactly what the atom forbids.
+
 **Consumer map** - who calls what, and which audit issue each row retires:
 
 | consumer | adopts | retires |
@@ -423,8 +443,9 @@ protocol, not a failure.
 2. **The [#687] exact-integer oracle lanes**: `eval_agreement.rs` gains an
    exact-string lane (or is superseded by the PR [#696] drivers - decision
    recorded in the PR); `parity.rs` loses the silent float-parsing
-   fallback (a mismatch REPORTS, and only ops with a §C4.5 tolerance row
-   may compare tolerantly). Constraint, verified by execution 2026-07-17:
+   fallback (a mismatch REPORTS, and only ops carrying a tolerance row in
+   spec/05 §8, which [05-OBS-3] names as that table's single address, may
+   compare tolerantly). Constraint, verified by execution 2026-07-17:
    the current run-mode parity corpus is byte-identical across lanes
    (123/123 lines) only because it prints dyadic floats exclusively, so
    this lands green - but until [#732] Phase 2 delivers byte-identical
@@ -481,8 +502,13 @@ Part I as the spec of what to build.
 
 **Frozen at your exit:** §C1 table + spec section; §C3 API + storage +
 wire schema; §C4 rules 1-4 as implemented in Rust. **Eval is now the
-reference lane**: Phases 2-3 validate other lanes against eval's output
-strings.
+reference RENDERER**: Phases 2-3 validate other lanes against eval's
+output strings. It is NOT the value authority - `spec/08-backends.md` §2
+names the C backend the reference implementation, and spec/04
+[04-NUM-8] fixes the arithmetic width both lanes owe independently. A
+lane conforms to the spec, not to eval; where eval and the spec disagree
+eval has the bug, and today it has several ([04-NUM-8]'s divergence
+note).
 
 **Explicitly not yours:** the compiled lanes (C still wrong in all its
 audited ways at your exit - expected); trap wiring in `host_ops`' scalar
@@ -534,8 +560,10 @@ own fix, which is [#703]-track).
 
 ## Phase 3 - backends adopt; the observation channel is generated
 
-**You inherit:** frozen everything (§C1-§C5); eval as the reference lane
-whose printed strings are the expected values for yours.
+**You inherit:** frozen everything (§C1-§C5); eval as the reference
+RENDERER whose printed strings are the expected values for yours (the
+rendering contract, not the value contract - values are owed to
+[04-NUM-8] by both lanes independently).
 
 **You deliver:**
 
@@ -559,7 +587,8 @@ whose printed strings are the expected values for yours.
    compiled lane (§C4.4).
 4. The [#687] cross-lane oracle turned fully on: byte-identical expected
    strings for every cell in the matrix files, tolerance only where
-   §C4.5's table says so.
+   §C4.5's table says so (that table is authored into spec/05 §8 per
+   [05-OBS-3]; §C4.5 is this doc's pointer to it, not a second home).
 
 **Frozen at your exit:** §C4 C-side parity - both lanes print identical
 bytes. This is [#728]'s acceptance and the precondition Phase 4's generated
@@ -600,7 +629,8 @@ before this phase; its seed-decision list is this phase's work-list.
    `Supported` cell with no kernel is a compile error in that backend; a
    kernel with no cell is dead code the build flags.
 4. The generated conformance suite: every `Supported` cell executed in
-   every lane asserting exact agreement (or §C4.5 tolerance), every
+   every lane asserting exact agreement (or the spec/05 §8 tolerance row
+   §C4.5 points at), every
    `Rejected` cell asserting the same diagnostic from every lane. This
    suite REPLACES the hand-written matrix files as the standing guard;
    the audit files remain as regression archaeology.

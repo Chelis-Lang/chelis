@@ -219,12 +219,18 @@ operational location of the parameter on the IR node.
 
 In short:
 
-- `bf16` / `f16` operands → `f32` accumulator → `f32` result
+- `bf16` / `f16` operands → `f32` accumulator → `bf16` / `f16` result
 - `f32` operands → `f32` accumulator → `f32` result
 - `f64` operands → `f64` accumulator → `f64` result
 - `int8` / `int16` operands → `int32` accumulator → `int32` result
 - `int32` operands → `int32` accumulator → `int32` result
 - `int64` operands → `int64` accumulator → `int64` result
+
+(The `bf16`/`f16` rows formerly read "→ `f32` result" here, contradicting the
+authoritative table's operand-precision result column; corrected 2026-07-28.
+The `f32` accumulator is consumed inside the op and downcast on output, so the
+caller sees a uniform-precision result tensor. Only the narrow INTEGER rows
+widen their result, and they do so for overflow safety.)
 
 There is no implicit precision promotion: omitting the parameter resolves to
 the documented default before lowering. The IR `RiscOp::ReduceSum` node
@@ -293,16 +299,27 @@ own right. The Surf `reduce_window_*` names are the public surface;
 the IR node and backends share the single `ReduceWindow` lowering
 path.
 
-*Accumulation precision.* The IR evaluator and host runtime accumulate
-each window in `f64` and store at the tensor precision; the C backend
-accumulates `sum` / `mean` in an `f32` lane (`float acc`). For the small
-windows the parity gate exercises (2×2, 3×3) the two agree well inside the
-`1e-5` compile-run tolerance, but a very large window in `f32` can drift
-past it — widen the C accumulator (or the tolerance) before relying on
-big-window `sum` / `mean` parity. `reduce_window_sum` deliberately does
-**not** widen its result precision the way the global `sum` reduction
-does; the output element type matches the operand type (which is also why
-the adjoint needs no `Cast` — see **AD policy**).
+*Accumulation precision.* A windowed reduction accumulates at the
+operand's ARITHMETIC WIDTH (`spec/04-type-system.md` [04-NUM-8]) in every
+lane: `f32` operands accumulate in `f32`, `f64` in `f64`, `f16`/`bf16` at
+`f32`, and integers exactly at their width. `reduce_window_*` takes no
+accumulator parameter, so §5.7's widening does not apply to it and there
+is no other authorized widening.
+
+*(Not honored today: the IR evaluator and host runtime accumulate each
+window in `f64` while the C backend accumulates `sum` / `mean` in an
+`f32` lane (`float acc`) - the two lanes disagree by construction for
+`f32` operands, which is precisely the divergence [04-NUM-8] forbids. The
+C lane is the conforming one. For the small windows the parity gate
+exercises (2×2, 3×3) the two agree inside the `1e-5` compile-run
+tolerance, which is why the divergence went unnoticed; a large `f32`
+window drifts past it. Fixing the eval side rides chelis#729 Phase 2's
+kernel split with the elementwise and global-reduction paths.)*
+
+`reduce_window_sum` deliberately does **not** widen its RESULT precision
+the way the global `sum` reduction does; the output element type matches
+the operand type (which is also why the adjoint needs no `Cast` — see
+**AD policy**).
 
 **AD policy.** `reduce_window_*` is differentiable. `chelis_ir::grad`
 lowers the reverse-mode adjoint to a single `RiscOp::ReduceWindowGrad`
@@ -1159,12 +1176,16 @@ for (int i = 0; i < n; i++) out[i] = a[i] > b[i] ? a[i] : b[i];
 
 // sum: reduce over axis
 // (pseudocode for axis=last, generalized via stride/shape logic)
+// `acc_t` is the accumulator type resolved per §2.3 / spec/04 §5.7.1,
+// NOT unconditionally `float`. The four lanes are the stride-4 ILP
+// cascade §2.3 pins; a single-accumulator left-fold is NOT conforming
+// and produces different f32 bits.
 for (int i = 0; i < outer; i++)
   for (int j = 0; j < inner; j++) {
-    float acc = 0;
+    acc_t acc[4] = {0, 0, 0, 0};
     for (int k = 0; k < axis_size; k++)
-      acc += input[i * axis_size * inner + k * inner + j];
-    output[i * inner + j] = acc;
+      acc[k & 3] += input[i * axis_size * inner + k * inner + j];
+    output[i * inner + j] = (acc[0] + acc[1]) + (acc[2] + acc[3]);
   }
 
 // max_reduce: reduce over axis (same loop structure, max instead of +)
@@ -1180,7 +1201,18 @@ for (int i = 0; i < outer; i++)
 // load: fread or memcpy from source
 ```
 
-These C implementations are the ground truth. The GPU backend (Phase 1) must produce numerically identical results within floating-point tolerance (1e-6 for f32, 1e-12 for f64).
+These C implementations are illustrative reference shapes, not the semantic
+authority. Where one of them and a normative section disagree, the normative
+section wins and the pseudocode has a bug: §2.3 owns reduction order and
+accumulator type, `spec/04-type-system.md` [04-NUM-8] owns the arithmetic
+width every `acc` and every temporary is computed at, and §5.7.1 owns the
+accumulator defaults. (This paragraph formerly read "These C implementations
+are the ground truth", which had already gone stale against §2.3's cascade;
+corrected 2026-07-28.)
+
+The GPU backend must produce numerically identical results within floating-point
+tolerance (1e-6 for f32, 1e-12 for f64) pending the per-op tolerance table of
+[05-OBS-3], which supersedes these two blanket numbers when it is authored.
 
 ---
 
@@ -1357,12 +1389,20 @@ own-width form until the box learns element widths (chelis#865, the
 chelis#729/#686 capacity family).)*
 
 > **[05-OBS-3]** Cross-lane VALUE differences are permitted only for the
-> ops listed in the per-op tolerance table (to be authored into this
-> section by chelis#732 Phase 3), within the listed bound; `sqrt` SHALL
-> be correctly rounded (bound zero, per chelis#719). Formatting
+> ops listed in the per-op tolerance table (to be authored into THIS
+> section, §8, by chelis#732 Phase 3), within the listed bound; `sqrt`
+> SHALL be correctly rounded (bound zero, per chelis#719). Formatting
 > differences are never within tolerance.
 
-*(The table is pending; #719's fix (PR #760) precedes its sqrt row.)*
+*(The table is pending; #719's fix (PR #760) precedes its sqrt row. This
+section, spec/05 §8, is its single authored address: `dtype_semantics.md`
+§C4 item 5 and `faithful_observation.md` Phase 3 point here and do not
+host it. Scope note, 2026-07-28: with arithmetic width fixed per dtype by
+[04-NUM-8], the table covers only genuine implementation variance at a
+single width - one lane's libm or SLEEF or vForce against another's for
+the transcendentals - and never a structural precision mismatch between
+lanes computing at different widths. Rows for add/sub/mul/div and the
+comparisons are bound zero by construction, not by measurement.)*
 
 > **[05-OBS-4]** A scalar-typed value SHALL render as the bare scalar at
 > every exit in both lanes, including as a top-level labeled root

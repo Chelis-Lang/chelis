@@ -977,8 +977,11 @@ TypeName      <- TypeIdent ('.' TypeIdent)*
 PrecType      <- 'f32' / 'f64' / 'bf16' / 'f16'
                / 'int8' / 'int16' / 'int32' / 'int64'
                / 'bool' / 'string'
-               # f8e4m3 is reserved/deferred per spec/04-type-system.md §1.1.1
-               # unsigned types (u8/u16/u32/u64) are out of scope per §1.1.2
+               # The deferred names of spec/04-type-system.md §1.1.1 are
+               # reserved but not active and are rejected at check time:
+               # f8e4m3, f8e5m2, uint8/uint16/uint32/uint64, int4/uint4,
+               # complex64/complex128, decimal128/decimal256. The short
+               # unsigned spellings u8/u16/u32/u64 are not reserved at all.
 
 DimList       <- DimExpr (S ',' S DimExpr)*
 DimExpr       <- IntLit / Ident

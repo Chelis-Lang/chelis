@@ -56,28 +56,115 @@ names (or to a documented deferred name in §1.1.1).
 
 #### 1.1.1 Deferred Numeric Primitives
 
-The following primitive name is reserved in the spec but **not active** in the
-current dtype build-out cycle. It is documented here rather than silently
-dropped so producers do not assume it has gone away.
+The following primitive names are reserved in the spec but **not active** in
+the current dtype build-out cycle. They are documented here rather than
+silently dropped so producers do not assume they have gone away. Every name
+below is rejected by the type checker with a diagnostic pointing at this
+section, and `cast(x, <name>)` is rejected with it.
 
-- `f8e4m3` — 8-bit float (E4M3 format). Deferred. **Rationale:** no current
-  Chelis backend implements f8e4m3; revisit when a concrete backend (HIP, C, or
+Each reserved name declares its ARITHMETIC WIDTH ([04-NUM-8]) at reservation
+time, so the width question is settled before anyone implements the dtype
+rather than being decided per-lane during implementation - the failure mode
+chelis#727 documents. The names and widths track the ecosystem's own
+vocabulary (numpy, PyTorch, JAX, Apache Arrow, and the OCP 8-bit and
+Microscaling specifications); Chelis reserves the standard spelling and the
+standard semantics, never a bespoke variant.
+
+**Reduced-precision floats.**
+
+- `f8e4m3` — 8-bit float (E4M3 per the OCP 8-bit Floating Point
+  Specification). Arithmetic width: **f32**. **Rationale:** no current Chelis
+  backend implements f8e4m3; revisit when a concrete backend (HIP, C, or
   Metal) gains native E4M3 support and a corresponding evaluator round-trip
-  representation. Until then, `(t-prim {} f8e4m3)` is rejected by the type
-  checker with a diagnostic pointing at this section. `cast(x, f8e4m3)` is also
-  rejected.
+  representation. Note OCP E4M3 is not IEEE-shaped: it has no infinities and
+  reuses that encoding to extend range, so its finalize row is not a
+  parameterization of [04-NUM-2] and must be authored when it activates.
+- `f8e5m2` — 8-bit float (E5M2 per the same OCP specification). Arithmetic
+  width: **f32**. **Rationale:** E4M3 and E5M2 are one format pair, not two
+  independent dtypes - FP8 training uses E4M3 for forward values and E5M2 for
+  gradients, and every implementation that ships one ships both. Reserving
+  only E4M3 would reserve half a format.
 
-#### 1.1.2 Out-of-Scope: Unsigned Integer Types
+**Unsigned integers.**
 
-Unsigned integer types (`u8`, `u16`, `u32`, `u64`, or any `uint*` spelling) are
-**out of scope for this cycle** and are not part of the active or deferred
-numeric primitive set. **Rationale:** no current customer use case justifies
-the implementation surface (separate signed/unsigned arithmetic, comparison,
-overflow, AD adjoints, and backend dispatch). The documented workaround is
-to cast to a signed integer type (typically `int32` or `int64`) at the
-boundary where unsigned data enters the program. If a future cycle adds
-unsigned types, this section must be revised at the same time as the active
-list above.
+- `uint8`, `uint16`, `uint32`, `uint64` — unsigned integers at width.
+  Arithmetic width: **exact at their own width**, unsigned. Overflow traps per
+  [04-NUM-3]; the named modular operations of [04-NUM-7] are the wrapping
+  escape hatch and extend to these dtypes when they activate. **Rationale:**
+  universal in the ecosystem (numpy, PyTorch, JAX, and Arrow all carry the
+  full set) and unavoidable at real ingress boundaries - `uint8` is the image
+  dtype, and hashing, checksums, and PRNG state are natively unsigned.
+  Deferred rather than active because the implementation surface is real:
+  separate unsigned comparison and division, unsigned AD adjoints, and
+  per-backend dispatch. Until activation, cast to a signed type (typically
+  `int32` or `int64`) at the boundary where unsigned data enters.
+- `int4`, `uint4` — 4-bit integers. Arithmetic width: **exact at their own
+  width**. **Rationale:** the quantized-inference frontier (JAX carries both).
+  Deferred additionally on a storage question the other widths do not raise:
+  a 4-bit element has no addressable byte, so activation requires a packing
+  decision (two elements per byte, and which nibble is element zero) that
+  belongs with the representation work, not with this list.
+
+**Complex.**
+
+- `complex64`, `complex128` — complex numbers with `f32` and `f64` components
+  respectively. Arithmetic width: **f32 and f64 components**. **Rationale:**
+  present in numpy, PyTorch, and JAX under exactly these spellings; the naming
+  convention is TOTAL bits, so `complex64` is a pair of f32 - Chelis follows
+  the ecosystem spelling rather than inventing `complex32x2`. Deferred because
+  complex multiply and divide have their own accuracy and overflow story
+  (naive division overflows for representable inputs; the ecosystem uses
+  Smith's algorithm or a variant) which must be authored, not inherited.
+
+**Decimal (interchange only).**
+
+- `decimal128`, `decimal256` — exact base-10 values at a declared
+  (precision, scale), per Apache Arrow. Arithmetic width: **exact base-10 at
+  the declared scale**; this is a third arithmetic family alongside float and
+  integer, not a parameterization of either. **Rationale and scope limit:** no
+  array-computation library carries decimal - numpy, PyTorch, and JAX all
+  decline it - because it is a database and dataframe type. Chelis already
+  serves that need twice: `Std.Decimal` is the standard-library scalar type
+  (built on `trunc_div` scale shifts, see `spec/05-risc-primitives.md` §2.1),
+  and `Std.Io.Parquet` is the interop surface. These names are therefore
+  reserved for the **Arrow and parquet interchange boundary only** and are
+  explicitly NOT reserved as tensor element types; activating them does not
+  put decimal into the tensor arithmetic path. They are also the only reserved
+  names that are parameterized, which is itself a reason to keep them off that
+  path: every other `Prim` is a bare name.
+
+**Not reserved, and deliberately so: scaled and block-scaled formats.**
+`qint8`/`quint8` (PyTorch), the MX formats of the OCP Microscaling
+specification (MXFP8, MXFP6, MXFP4), and FP8 training's amax-scaled tensors
+are NOT additional dtypes. Each is a storage dtype PLUS scale metadata - per
+tensor, per channel, or per block of 32. Modelling scale once, as an axis over
+a storage dtype, admits all of them; adding them as primitive names would
+recreate exactly the per-cell scatter chelis#727 exists to end. When scaled
+storage is authored it is authored as that axis, and this paragraph is the
+record of the decision.
+
+**Not reserved: saturating arithmetic.** Image pipelines saturate rather than
+trap or wrap (OpenCV and PIL both, and SIMD provides native saturating adds
+such as `paddusb`). If `uint8` image work activates, `sat_add` and siblings
+are the named ops to author, on the [04-NUM-7] pattern - a named op, never a
+mode. Recorded here so the third behavior is not rediscovered as a surprise.
+
+#### 1.1.2 Unsigned Integer Types: Deferred, Not Out Of Scope
+
+Unsigned integer types are reserved under §1.1.1 as `uint8`, `uint16`,
+`uint32`, and `uint64`, with `int4`/`uint4` alongside them. This section
+formerly declared them "out of scope for this cycle" on the rationale that no
+customer use case justified the implementation surface. That stance was
+revised 2026-07-28: the implementation-surface argument still holds and keeps
+them deferred, but declaring a type the entire ecosystem carries to be out of
+scope left Chelis without a reserved spelling for data it must eventually
+ingest, and the deferral list is the honest home for that. The short
+spellings `u8`/`u16`/`u32`/`u64` are NOT reserved; the `uint*` spellings are
+canonical, matching numpy and Arrow.
+
+The workaround while deferred is unchanged: cast to a signed integer type
+(typically `int32` or `int64`) at the boundary where unsigned data enters the
+program.
 
 #### 1.1.3 Per-Backend Dtype Support Matrix
 
@@ -89,17 +176,23 @@ admits every active dtype. This sub-section is the authoritative per-backend
 matrix. Any "Metal supports X" or "C backend supports Y" claim elsewhere in
 the spec or in user-facing docs must resolve to a cell in this table.
 
-| dtype  | C backend                                                                                                         | HIP backend                                          | Metal backend                                | Evaluator |
-|--------|-------------------------------------------------------------------------------------------------------------------|------------------------------------------------------|----------------------------------------------|-----------|
-| f32    | admitted                                                                                                          | admitted                                             | admitted                                     | admitted  |
-| f64    | admitted                                                                                                          | admitted                                             | **rejected (hardware)**                      | admitted  |
-| bf16   | admitted (storage as `uint16_t`; arithmetic via convert-to-f32; matmul via convert-then-`cblas_sgemm` per §5.7.1) | admitted (matmul + load/store via `hipblasGemmEx`)   | admitted on Apple7+ (M3 or later)            | admitted  |
-| f16    | admitted (storage as `uint16_t`; arithmetic via convert-to-f32; matmul via convert-then-`cblas_sgemm` per §5.7.1) | admitted (matmul + load/store via `hipblasGemmEx`)   | admitted                                     | admitted  |
-| int8   | admitted                                                                                                          | admitted                                             | admitted                                     | admitted  |
-| int16  | admitted                                                                                                          | admitted                                             | admitted                                     | admitted  |
-| int32  | admitted                                                                                                          | admitted                                             | admitted                                     | admitted  |
-| int64  | admitted                                                                                                          | admitted                                             | admitted                                     | admitted  |
-| bool   | admitted                                                                                                          | admitted                                             | admitted                                     | admitted  |
+| dtype  | arithmetic width ([04-NUM-8]) | C backend                                                                                                         | HIP backend                                          | Metal backend                                | Evaluator |
+|--------|-------------------------------|-------------------------------------------------------------------------------------------------------------------|------------------------------------------------------|----------------------------------------------|-----------|
+| f32    | f32                           | admitted                                                                                                          | admitted                                             | admitted                                     | admitted  |
+| f64    | f64                           | admitted                                                                                                          | admitted                                             | **rejected (hardware)**                      | admitted  |
+| bf16   | f32                           | admitted (storage as `uint16_t`; arithmetic via convert-to-f32; matmul via convert-then-`cblas_sgemm` per §5.7.1) | admitted (matmul + load/store via `hipblasGemmEx`)   | admitted on Apple7+ (M3 or later)            | admitted  |
+| f16    | f32                           | admitted (storage as `uint16_t`; arithmetic via convert-to-f32; matmul via convert-then-`cblas_sgemm` per §5.7.1) | admitted (matmul + load/store via `hipblasGemmEx`)   | admitted                                     | admitted  |
+| int8   | exact int8                    | admitted                                                                                                          | admitted                                             | admitted                                     | admitted  |
+| int16  | exact int16                   | admitted                                                                                                          | admitted                                             | admitted                                     | admitted  |
+| int32  | exact int32                   | admitted                                                                                                          | admitted                                             | admitted                                     | admitted  |
+| int64  | exact int64                   | admitted                                                                                                          | admitted                                             | admitted                                     | admitted  |
+| bool   | n/a ([04-NUM-4])              | admitted                                                                                                          | admitted                                             | admitted                                     | admitted  |
+
+The arithmetic-width column is target-independent and normative in every
+cell of its row: a backend that admits a dtype computes it at that width,
+and a backend that cannot is a `rejected` cell, never a silently widened
+one. It is reproduced from [04-NUM-8], which is authoritative; the two
+must be edited together.
 
 Cell semantics:
 
@@ -1573,9 +1666,11 @@ Operations accept same-precision operands only. The table of valid combinations:
 | Logical (and, or, not) | bool only |
 | Transcendental (exp, log, sin, cos, tan, atan, sqrt) | f32, f64, bf16, f16 only (not integer) |
 
-`f8e4m3` is deferred (§1.1.1) and is not a valid arithmetic precision in any
-row. Unsigned integer types are out of scope (§1.1.2) and never appear in any
-row.
+Every deferred name of §1.1.1 - `f8e4m3`, `f8e5m2`, the `uint*` family,
+`int4`/`uint4`, `complex64`/`complex128`, and `decimal128`/`decimal256` - is
+reserved but not active, and is not a valid arithmetic precision in any row.
+Each carries a declared arithmetic width at §1.1.1 so that activating it adds
+rows here without reopening the width question.
 
 ### 5.5 Literal Suffix Grammar
 
@@ -1615,12 +1710,15 @@ on hex literals are a parse error with a diagnostic suggesting an explicit
 `cast`. Decimal float literals carry float suffixes without ambiguity
 (`1.0f32`, `1.0e3f32`).
 
-Deferred / out-of-scope suffixes:
+Deferred suffixes:
 
-- `f8e4m3` is deferred (§1.1.1); the suffix `f8e4m3` is rejected at lex time
-  with a diagnostic pointing at §1.1.1.
-- Unsigned suffixes (`u8`, `u16`, `u32`, `u64`) are out of scope (§1.1.2) and
-  are rejected at lex time with a diagnostic pointing at §1.1.2.
+- No suffix exists for any deferred name of §1.1.1 (`f8e4m3`, `f8e5m2`, the
+  `uint*` family, `int4`/`uint4`, `complex64`/`complex128`,
+  `decimal128`/`decimal256`). Each is rejected at lex time with a diagnostic
+  pointing at §1.1.1. A suffix is authored only when its dtype activates.
+- The short unsigned spellings (`u8`, `u16`, `u32`, `u64`) are not reserved in
+  any form; `uint8`/`uint16`/`uint32`/`uint64` are the canonical names per
+  §1.1.2, matching numpy and Arrow.
 - Any other unrecognized identifier sequence directly adjacent to a numeric
   literal (e.g. `1.0xyz`) is a parse error rather than a silently-split
   literal-then-identifier pair.
@@ -2217,6 +2315,17 @@ blockquote authorities remain normative until selected for fixture-proven
 migration in chelis#733 Phase 1. The pinned Buoy shell-side integration—not a
 `chelis-lint` rule—attaches and checks full semantic revisions.
 
+**Amendment 2026-07-28 - arithmetic width.** [04-NUM-2] formerly closed with
+"Computing a single op in f64 and rounding once is a conforming implementation
+for f32/f16/bf16." That clause was REMOVED and replaced by [04-NUM-8], which
+declares an arithmetic width per dtype. It is recorded here so the deletion is
+not re-derived as an oversight. The clause was permissive and single-op scoped,
+but `spec/design/dtype_semantics.md` cited it to mandate f64 computation for
+all float ops, and the IR evaluator extended that to multi-step float
+reductions and to `argmax`/`argmin` operand comparison - three levels of drift
+from one sentence. [04-NUM-8] states the width positively so there is nothing
+left to widen from.
+
 > **[04-NUM-1]** Every numeric op result SHALL be finalized into its
 > declared dtype - rounding for floats, width and domain checks for
 > integers and bool - before it becomes observable to any subsequent op,
@@ -2226,11 +2335,11 @@ migration in chelis#733 Phase 1. The pinned Buoy shell-side integration—not a
 *(Not honored today: chelis#717, #714, #718, #720, #726.)*
 
 > **[04-NUM-2]** Float finalization SHALL be IEEE-754 round-to-nearest,
-> ties-to-even, at the dtype's own width (f64 identity; f32 24-bit,
-> f16 11-bit including subnormals, bf16 8-bit mantissa), with overflow
-> to the correctly signed infinity, and NaN, signed zero, and infinities
-> preserved. Computing a single op in f64 and rounding once is a
-> conforming implementation for f32/f16/bf16.
+> ties-to-even, at the dtype's own STORAGE width (f64 identity; f32
+> 24-bit, f16 11-bit including subnormals, bf16 8-bit mantissa), with
+> overflow to the correctly signed infinity, and NaN, signed zero, and
+> infinities preserved. The width at which the op is COMPUTED before
+> finalization is fixed by [04-NUM-8], not by this atom.
 
 *(Honored today only by the eval scalar lane; see chelis#717.)*
 
@@ -2284,6 +2393,83 @@ chelis#680/#718.)*
 *(Not expressible today: no `wrap_*` builtins exist; the eval RNG's
 splitmix hash (`dropout_sample`, `chelis-ir/src/eval.rs`) is the
 in-tree witness of the need. Tracked by chelis#753.)*
+
+> **[04-NUM-8]** Every dtype declares an ARITHMETIC WIDTH in addition to
+> its storage width. Every op SHALL be performed at its operands'
+> arithmetic width and finalized to the storage width once per op, in
+> every lane and on every surface. No lane SHALL compute at any other
+> width. The arithmetic widths are:
+>
+> | dtype | storage width | arithmetic width |
+> |---|---|---|
+> | `f64` | 64 | f64 |
+> | `f32` | 32 | f32 |
+> | `f16` | 16 | f32 |
+> | `bf16` | 16 | f32 |
+> | `int64` | 64 | exact int64 |
+> | `int32` | 32 | exact int32 |
+> | `int16` | 16 | exact int16 |
+> | `int8` | 8 | exact int8 |
+> | `bool` | 8 | not an arithmetic dtype ([04-NUM-4]) |
+>
+> The reduction and matmul accumulator parameter of §5.7 is the ONLY
+> user-selectable widening; it is explicit, typed, defaulted per §5.7.1,
+> and it does not license any other widening. An implementation MAY
+> compute an f16 or bf16 op natively where the target provides that
+> instruction, because for the basic operations the f32 intermediate and
+> the native narrow op produce identical bits (f32 carries >= 2p+2 bits
+> for p <= 11); it SHALL NOT compute at any width wider than the one
+> declared above.
+>
+> REDUCED-precision computation - performing an op at an arithmetic width
+> NARROWER than the one declared above, such as a 19-bit tensor-core mode
+> for f32 matmul - SHALL be available only through a named, explicit
+> opt-in at the call site, SHALL never be a default, and SHALL never be
+> selected by a backend, a build flag, or a global mode. No such opt-in is
+> authored yet; until one is, narrower-than-declared computation is
+> non-conforming in every lane.
+
+*(Not honored today: the IR evaluator computes every float op and every
+float reduction in f64 - `binary_elementwise`, `unary_elementwise`, and
+the float `reduce` arm in `chelis-ir/src/eval.rs` all widen through
+`to_f64_lossy_vec()` - and `reduce_argcmp` compares `argmax`/`argmin`
+operands through f64, returning the wrong index for adjacent int64
+values above 2^53. Tracked by chelis#729 Phase 2's kernel split.)*
+
+**Rationale for the f16/bf16 rows.** These are not exclusions carved out
+of a general rule; the arithmetic width is part of what the format is.
+No shipped hardware provides a bf16 arithmetic instruction: AVX512-BF16's
+`vdpbf16ps` and ARM's BFDOT/BFMMLA both accumulate into f32, and there is
+no `vaddbf16` on any target. f16 arithmetic does exist (ARMv8.2-A,
+AVX512-FP16, NVIDIA `__hadd`), which is why the atom permits it, but even
+there the transcendental path converts to f32 because the special-function
+units are f32. The same property holds one rung down and is why §1.1.1
+defers `f8e4m3`: FP8 is a matmul-input format whose tensor-core ops
+accumulate in f32 and which requires an out-of-band scale factor, so it
+has no self-contained arithmetic width to declare yet.
+
+**Why f32 is not widened.** f32 has native arithmetic on every CPU and GPU
+in the supported set, so computing it at f64 invents a width the format
+does not have. For the basic operations that substitution is bit-identical
+and therefore only forfeits the compute (half the SIMD lanes, two
+conversions per op, no tensor-core path); for transcendentals and for
+multi-step reductions it also changes the answer, which is what would
+otherwise force a cross-lane tolerance table between two lanes that
+should agree exactly. The same argument applies to routing exact integer
+arithmetic through f64, which additionally destroys int64 exactness above
+2^53 (chelis#684, chelis#680).
+
+**Why reduced precision is opt-in only.** The prohibition on narrowing is
+not symmetric with the prohibition on widening by accident. Widening is
+invisible in the result for the basic operations and merely wasteful;
+narrowing silently changes results everywhere. The ecosystem's own
+experience is the argument: NVIDIA's 19-bit TF32 mode is enabled by
+default for f32 matmul on Ampere and later, and PyTorch's
+`torch.backends.cuda.matmul.allow_tf32` changing its default silently
+altered users' numerics. A program that asked for f32 got something else
+because a backend decided. Under §5 that is exactly the class of decision
+that must be spelled at the call site, so Chelis admits the capability and
+refuses the default.
 
 ---
 
