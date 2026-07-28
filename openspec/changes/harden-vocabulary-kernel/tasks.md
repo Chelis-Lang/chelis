@@ -46,10 +46,27 @@ green while leaving the copied data wrong, so a third test
 (`bool_device_representation_matches_the_runtime_f32_storage`) was added to
 fail in exactly that case.
 
-Two plausible fixes, both Metal-backend decisions and both out of scope here:
-represent device-side bool as `float` to match the ABI, or convert MSL `bool`
-→ `f32` on copy-back instead of memcpy'ing. The first is consistent with how
-the runtime already treats `Bool` and `F32` identically.
+**The direction is already decided, and it is not the one first proposed here.**
+`docs/gap_synthesis.md:230` tracks this as `CRuntime-BoolStorage-F1`: bool is
+f32-encoded "today, not native 1-byte bool", the TensorElement trait
+deliberately omits a `bool` impl per the PR #79 Phase 0 decision, and the
+recorded closure is to "migrate bool storage to native 1-byte u8 in
+`chelis_alloc`" plus every bool-write site (`chelis_tensor_cmplt`,
+`chelis_pad_sequences`) and read site, bundled with the sibling
+`CRuntime-I32Storage-F1`. Severity is LOW-MEDIUM: it works, but it
+"propagates the f32-coupling pattern this workstream is trying to remove."
+
+So **Metal's 1-byte device bool matches the intended end state, and the
+runtime's 4-byte f32 is the legacy side.** An earlier draft of this note
+suggested widening Metal to `float` to match the ABI; that would have moved
+toward the coupling the roadmap is deleting, and is retracted.
+
+That entry also records "no regression test that exercises native-bool-storage
+today." The probe discussed here is the first artifact that surfaces the gap
+concretely, which is worth noting when `CRuntime-BoolStorage-F1` is scheduled.
+
+Still out of scope for this change: the fix is a runtime storage migration,
+not a vocabulary or Metal edit.
 
 Pre-existing: `byte_width`'s values are byte-identical before and after this
 change; only the return type moved. This is also the first run of the

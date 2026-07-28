@@ -10,6 +10,25 @@
 use chelis_backend_metal::dtype::{host_sizeof_expr, metal_elem_size};
 use chelis_types::types::Prim;
 
+// KNOWN BLIND SPOT: width parity cannot see the Int32 case.
+//
+// `chelis_tensor_cmplt` states the storage convention directly -- "I32 and
+// BOOL storage stays f32-encoded; the f32-strided read is correct for both
+// today" -- and reads both through `data_as_f32_const`. Bool is caught by the
+// tests below only because its widths differ (1 vs 4). Int32 is 4 bytes on
+// both sides, so every assertion here passes while the runtime holds f32 bit
+// patterns and Metal's device side holds native `int32_t`. Reinterpreting one
+// as the other is silent corruption.
+//
+// That is why `docs/gap_synthesis.md` rates `CRuntime-I32Storage-F1` MEDIUM /
+// "silent type-confusion latent" against `CRuntime-BoolStorage-F1`'s
+// LOW-MEDIUM: bool is the loud instance of a quieter class.
+//
+// Deliberately not asserted here. The evidence is mixed --
+// `chelis_scalar_tensor_from_i64` writes a native `i32` while `cmplt` reads
+// f32-encoded -- so pinning Int32 needs the storage question settled first,
+// not a guess encoded as a test.
+
 /// Active Metal dtype matrix per spec/04-type-system.md §1.1.3 (f64 excluded).
 const ACTIVE_METAL: [Prim; 8] = [
     Prim::F32,
