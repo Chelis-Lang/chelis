@@ -433,7 +433,9 @@ unsafe fn read_index_slot(t: *const chelis_tensor, linear: usize, dtype: Runtime
         // Round-to-i64 from the float bytes; matches the previous
         // implicit `as i64` behavior. The `data` field is `*mut u8`
         // post-PR-1, so the cast routes through `*const f32`.
-        RuntimeDType::F32 | RuntimeDType::Bool => *((*t).data as *const f32).add(linear) as i64,
+        // Routed through the checked helper rather than a direct cast so the
+        // bool half is covered by its dtype assert; see `data_as_f32`.
+        RuntimeDType::F32 | RuntimeDType::Bool => *data_as_f32_const(t).add(linear) as i64,
         RuntimeDType::F64 => *((*t).data as *const f64).add(linear) as i64,
         RuntimeDType::Bf16 | RuntimeDType::F16 => {
             runtime_fail!("index tensor cannot use {} storage", dtype.name())
@@ -1163,7 +1165,8 @@ unsafe fn read_scalar_as_f64(t: *const chelis_tensor, dtype: RuntimeDType) -> f6
         RuntimeDType::I32 => *((*t).data as *const i32) as f64,
         RuntimeDType::I16 => *((*t).data as *const i16) as f64,
         RuntimeDType::I8 => *((*t).data as *const i8) as f64,
-        RuntimeDType::F32 | RuntimeDType::Bool => *((*t).data as *const f32) as f64,
+        // Checked helper, not a direct cast, so bool access is gated.
+        RuntimeDType::F32 | RuntimeDType::Bool => *data_as_f32_const(t) as f64,
         RuntimeDType::Bf16 | RuntimeDType::F16 => {
             runtime_fail!(
                 "scalar conversion does not support {} storage",
@@ -2411,9 +2414,11 @@ pub unsafe extern "C" fn chelis_list_from_tensor(tensor: *const chelis_tensor) -
         let stride = (*tensor).strides[0] as usize;
         let value = match dtype {
             RuntimeDType::Bool => {
-                // Bool storage is f32-encoded (4-byte slots) in the
-                // current runtime; route through `*const f32`.
-                let raw = *((*tensor).data as *const f32).add(i * stride);
+                // Bool storage is f32-encoded (4-byte slots) pending
+                // CRuntime-BoolStorage-F1. The checked helper is deliberate:
+                // a direct cast would bypass the dtype assert that is meant
+                // to catch this site when bool moves to native storage.
+                let raw = *data_as_f32_const(tensor).add(i * stride);
                 chelis_value_from_bool(raw != 0.0)
             }
             RuntimeDType::I64 => {
@@ -2502,7 +2507,10 @@ pub unsafe extern "C" fn chelis_pad_sequences(
                 if dtype == RuntimeDType::I32 {
                     *((*out).data as *mut i32).add(flat) = value as i32;
                 } else {
-                    *((*out).data as *mut f32).add(flat) = value as f32;
+                    // Checked helper rather than a direct cast: bool reaches
+                    // this branch, and its assert is what will catch this
+                    // site when bool moves off f32-encoded storage.
+                    *data_as_f32(out).add(flat) = value as f32;
                 }
             }
         }
@@ -2556,7 +2564,10 @@ pub unsafe extern "C" fn chelis_pad_sequences_to(
                 if dtype == RuntimeDType::I32 {
                     *((*out).data as *mut i32).add(flat) = value as i32;
                 } else {
-                    *((*out).data as *mut f32).add(flat) = value as f32;
+                    // Checked helper rather than a direct cast: bool reaches
+                    // this branch, and its assert is what will catch this
+                    // site when bool moves off f32-encoded storage.
+                    *data_as_f32(out).add(flat) = value as f32;
                 }
             }
         }
