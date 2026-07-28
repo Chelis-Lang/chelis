@@ -3299,21 +3299,8 @@ pub unsafe extern "C" fn chelis_tensor_trace(
         RuntimeDType::F32 => trace_cascade::<f32>(diag, out, outer, axis_size, inner),
         RuntimeDType::F64 => trace_cascade::<f64>(diag, out, outer, axis_size, inner),
         RuntimeDType::I64 => trace_loop::<i64>(diag, out, outer, axis_size, inner),
-        RuntimeDType::I32 => {
-            // f32-encoded i32: accumulate as f32 (pre-migration semantics).
-            let dp = data_as_f32(diag);
-            let op = data_as_f32(out);
-            for outer_idx in 0..outer {
-                for inner_idx in 0..inner {
-                    let mut sum = 0.0f32;
-                    for axis_idx in 0..axis_size {
-                        let linear = (outer_idx * axis_size + axis_idx) * inner + inner_idx;
-                        sum += *dp.add(linear);
-                    }
-                    *op.add(outer_idx * inner + inner_idx) = sum;
-                }
-            }
-        }
+        // Native two's complement since RT-4 F1, as at the sibling sites.
+        RuntimeDType::I32 => trace_loop::<i32>(diag, out, outer, axis_size, inner),
         RuntimeDType::Bool => {
             chelis_free(diag);
             runtime_fail!("trace is undefined for bool tensors");
@@ -3386,21 +3373,8 @@ pub unsafe extern "C" fn chelis_tensor_clamp(
         RuntimeDType::F32 => clamp_loop::<f32>(tensor, lo, hi, out, size, lo_scalar, hi_scalar),
         RuntimeDType::F64 => clamp_loop::<f64>(tensor, lo, hi, out, size, lo_scalar, hi_scalar),
         RuntimeDType::I64 => clamp_loop::<i64>(tensor, lo, hi, out, size, lo_scalar, hi_scalar),
-        RuntimeDType::I32 => {
-            // f32-encoded i32: compute clamp as f32 (matches
-            // pre-migration semantics).
-            let tp = data_as_f32_const(tensor);
-            let lp = data_as_f32_const(lo);
-            let hp = data_as_f32_const(hi);
-            let op = data_as_f32(out);
-            for i in 0..size {
-                let low = if lo_scalar { *lp } else { *lp.add(i) };
-                let high = if hi_scalar { *hp } else { *hp.add(i) };
-                let mut value = *tp.add(i);
-                value = value.max(low).min(high);
-                *op.add(i) = value;
-            }
-        }
+        // Native two's complement since RT-4 F1, as at the sibling sites.
+        RuntimeDType::I32 => clamp_loop::<i32>(tensor, lo, hi, out, size, lo_scalar, hi_scalar),
         RuntimeDType::Bool => runtime_fail!("clamp is undefined for bool tensors"),
         RuntimeDType::Bf16 | RuntimeDType::F16 | RuntimeDType::I8 | RuntimeDType::I16 => {
             runtime_fail!("clamp unsupported dtype {}", dtype.name())
@@ -3604,61 +3578,24 @@ pub unsafe extern "C" fn chelis_tensor_einsum(
             reduction_total,
             &mut label_values,
         ),
-        RuntimeDType::I32 => {
-            // f32-encoded i32 storage: multiply-add as f32 (matches
-            // pre-migration semantics for I32 inputs).
-            let lp = data_as_f32_const(lhs);
-            let rp = data_as_f32_const(rhs);
-            let op = data_as_f32(out);
-            let mut out_index = [0; CHELIS_MAX_DIM];
-            let mut reduction_index = [0; CHELIS_MAX_DIM];
-            let mut lhs_index = [0; CHELIS_MAX_DIM];
-            let mut rhs_index = [0; CHELIS_MAX_DIM];
-            for out_linear in 0..out_size {
-                if !out_labels.is_empty() {
-                    chelis_flat_to_indices(
-                        out_linear as c_int,
-                        out_shape.as_ptr(),
-                        out_labels.len() as c_int,
-                        out_index.as_mut_ptr(),
-                    );
-                }
-                for (i, &label) in out_labels.iter().enumerate() {
-                    label_values[label as usize] = out_index[i];
-                }
-                let mut acc = 0.0f32;
-                for reduction_linear in 0..reduction_total {
-                    if !reduction_labels.is_empty() {
-                        chelis_flat_to_indices(
-                            reduction_linear as c_int,
-                            reduction_shape.as_ptr(),
-                            reduction_shape.len() as c_int,
-                            reduction_index.as_mut_ptr(),
-                        );
-                    }
-                    for (i, &label) in reduction_labels.iter().enumerate() {
-                        label_values[label as usize] = reduction_index[i];
-                    }
-                    for (i, &label) in lhs_chars.iter().enumerate() {
-                        lhs_index[i] = label_values[label as usize];
-                    }
-                    for (i, &label) in rhs_chars.iter().enumerate() {
-                        rhs_index[i] = label_values[label as usize];
-                    }
-                    acc += *lp.add(chelis_indices_to_flat(
-                        lhs_index.as_ptr(),
-                        (*lhs).strides.as_ptr(),
-                        lhs_chars.len() as c_int,
-                    ) as usize)
-                        * *rp.add(chelis_indices_to_flat(
-                            rhs_index.as_ptr(),
-                            (*rhs).strides.as_ptr(),
-                            rhs_chars.len() as c_int,
-                        ) as usize);
-                }
-                *op.add(out_linear) = acc;
-            }
-        }
+        // Native two's complement since RT-4 F1, as at the sibling sites. The
+        // hand-rolled f32 multiply-add this replaces both decoded int32 bytes
+        // as floats and accumulated in f32, so it lost integer precision on
+        // top of reading the wrong values.
+        RuntimeDType::I32 => einsum_loop::<i32>(
+            lhs,
+            rhs,
+            out,
+            out_size,
+            &out_labels,
+            &lhs_chars,
+            &rhs_chars,
+            &reduction_labels,
+            &out_shape,
+            &reduction_shape,
+            reduction_total,
+            &mut label_values,
+        ),
         RuntimeDType::Bool => runtime_fail!("einsum is undefined for bool tensors"),
         RuntimeDType::Bf16 | RuntimeDType::F16 | RuntimeDType::I8 | RuntimeDType::I16 => {
             runtime_fail!("einsum unsupported dtype {}", dtype.name())
