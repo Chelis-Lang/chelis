@@ -621,9 +621,65 @@ pub fn lower_program_to_library(program: &CheckedProgram) -> LoweredLibrary {
     try_lower_program_to_library(program).unwrap_or_else(|diagnostic| panic!("{diagnostic}"))
 }
 
+/// Decode-once consumption-boundary check (chelis#731 Phase 3; chelis#887).
+///
+/// The standing `find_raw_vocabulary_tag` invariants cover PARSED trees
+/// (chelis-deep) and DESUGARED trees (chelis-surf). Producers that
+/// SYNTHESIZE Deep after those stages are downstream of both and therefore
+/// unguarded, and three separate instances shipped that way before this
+/// check existed - `ty_expr_to_deep` in this crate and `effect_set_expr` in
+/// chelis-effects among them, each found by a person reading code rather
+/// than by a red test.
+///
+/// Asserting where trees are CONSUMED covers every producer at once instead
+/// of enumerating producers forever, and it inherits its coverage from the
+/// whole suite: any test that lowers anything exercises it.
+///
+/// Two deliberate choices:
+///
+/// * Debug-only. This is an internal representation invariant, not a
+///   user-facing diagnostic, so a release build does not pay for it.
+/// * Called BEFORE `catch_lowering`. A panic raised inside that helper is
+///   converted into a `LowerDiagnostic`, which would let a test that expects
+///   a lowering failure pass for the wrong reason.
+///
+/// Note the detector is vocabulary-complete by construction: it gates on
+/// `DeepTag::parse`, so a tag added later is recognized with no edit here.
+fn assert_decode_once_at_boundary(site: &str, exprs: &[Expr]) {
+    if !cfg!(debug_assertions) {
+        return;
+    }
+    if let Some(tag) = chelis_deep::validate::find_raw_vocabulary_tag(exprs) {
+        panic!(
+            "decode-once violated at the lowering boundary: `{site}` carries the raw \
+             vocabulary tag string `{tag}` at a node head. A programmatic producer built \
+             that node with `Atom::Symbol` instead of a typed constructor (`Expr::node`), \
+             so every typed reader takes its untagged policy for it \
+             (spec/design/checker_totality.md section C4.2; chelis#731, chelis#887)."
+        );
+    }
+}
+
+/// [`assert_decode_once_at_boundary`] over the values of a name-keyed Deep
+/// map (type envs, program defs). Borrows each value rather than collecting.
+fn assert_decode_once_in_env(site: &str, env: &HashMap<String, Expr>) {
+    if !cfg!(debug_assertions) {
+        return;
+    }
+    for value in env.values() {
+        assert_decode_once_at_boundary(site, std::slice::from_ref(value));
+    }
+}
+
 pub fn try_lower_program_to_library(
     program: &CheckedProgram,
 ) -> Result<LoweredLibrary, LowerDiagnostic> {
+    assert_decode_once_at_boundary("lower_program_to_library: exprs", program.exprs());
+    assert_decode_once_at_boundary(
+        "lower_program_to_library: annotated_exprs",
+        program.annotated_exprs(),
+    );
+    assert_decode_once_in_env("lower_program_to_library: type_env", program.type_env());
     catch_lowering(|| lower_program_to_library_inner(program))
 }
 
@@ -930,6 +986,19 @@ pub fn try_lower_program_with_context(
     library: &LoweredLibrary,
     new_program: &CheckedProgram,
 ) -> Result<Dag, LowerDiagnostic> {
+    assert_decode_once_at_boundary("lower_program_with_context: exprs", new_program.exprs());
+    assert_decode_once_at_boundary(
+        "lower_program_with_context: annotated_exprs",
+        new_program.annotated_exprs(),
+    );
+    assert_decode_once_in_env(
+        "lower_program_with_context: type_env",
+        new_program.type_env(),
+    );
+    assert_decode_once_in_env(
+        "lower_program_with_context: library program_defs",
+        &library.program_defs,
+    );
     catch_lowering(|| lower_program_with_context_inner(library, new_program))
 }
 
@@ -1043,6 +1112,9 @@ pub fn try_lower_subexpr_program(
     full_type_env: HashMap<String, Expr>,
     program_defs: HashMap<String, Expr>,
 ) -> Result<Dag, LowerDiagnostic> {
+    assert_decode_once_at_boundary("lower_subexpr_program: expr", std::slice::from_ref(expr));
+    assert_decode_once_in_env("lower_subexpr_program: type_env", &full_type_env);
+    assert_decode_once_in_env("lower_subexpr_program: program_defs", &program_defs);
     catch_lowering(|| {
         lower_subexpr_program_inner(expr, scoped_tensor_types, full_type_env, program_defs)
     })
@@ -11288,6 +11360,59 @@ mod tests {
             .unwrap_or_else(|errors| panic!("effect check failed: {errors:?}"));
         chelis_types::check_linearity(&checked)
             .unwrap_or_else(|errors| panic!("linearity check failed: {errors:?}"))
+    }
+
+    /// chelis#887: the boundary guard must actually FIRE. An assertion with
+    /// no test that it triggers is the "belief without a test" case
+    /// `loud_unsupported.md` section C1 rule 4 rejects, and it is how a
+    /// guard silently rots into a no-op.
+    #[test]
+    #[should_panic(expected = "decode-once violated at the lowering boundary")]
+    fn boundary_guard_fires_on_a_raw_vocabulary_head() {
+        // What a pre-decode-once programmatic producer builds: a vocabulary
+        // tag spelled `Atom::Symbol` at element 0.
+        let raw = Expr::List(
+            chelis_deep::ast::List {
+                elements: vec![
+                    Expr::Atom(Atom::Symbol("t-prim".into()), Span::new(0, 0)),
+                    Expr::Map(chelis_deep::ast::MetaMap::default(), Span::new(0, 0)),
+                ],
+            },
+            Span::new(0, 0),
+        );
+        assert_decode_once_at_boundary("test", std::slice::from_ref(&raw));
+    }
+
+    /// Negative parity: a properly stamped node of the SAME shape passes, so
+    /// the guard is discriminating rather than rejecting all lists.
+    #[test]
+    fn boundary_guard_accepts_a_stamped_head() {
+        let stamped = Expr::node(
+            DeepTag::TPrim,
+            chelis_deep::ast::MetaMap::default(),
+            vec![],
+            Span::new(0, 0),
+        );
+        assert_decode_once_at_boundary("test", std::slice::from_ref(&stamped));
+    }
+
+    /// The env-keyed variant walks map VALUES, which is where library
+    /// `program_defs` and type envs carry Deep.
+    #[test]
+    #[should_panic(expected = "decode-once violated at the lowering boundary")]
+    fn boundary_guard_fires_inside_a_name_keyed_env() {
+        let raw = Expr::List(
+            chelis_deep::ast::List {
+                elements: vec![
+                    Expr::Atom(Atom::Symbol("effects".into()), Span::new(0, 0)),
+                    Expr::Map(chelis_deep::ast::MetaMap::default(), Span::new(0, 0)),
+                ],
+            },
+            Span::new(0, 0),
+        );
+        let mut env: HashMap<String, Expr> = HashMap::new();
+        env.insert("lib_fn".to_string(), raw);
+        assert_decode_once_in_env("test", &env);
     }
 
     fn parse_and_lower(src: &str) -> Dag {
