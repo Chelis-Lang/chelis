@@ -22,6 +22,29 @@ with the runtime's declared width.
 - **WHEN** a pad or const fill materialises a bool scalar
 - **THEN** it emits a byte-valued local rather than reconstructing an f32 bit pattern
 
+### Requirement: An element spelling whose width disagrees with its dtype fails the build
+The HIP element-type table SHALL bind each spelling to a type whose size models it, and
+SHALL assert at compile time that the size equals the dtype's declared width.
+
+#### Scenario: The historical bug does not compile
+- **WHEN** bool is bound to a four-byte spelling
+- **THEN** the build fails naming the spelling, the dtype, and the disagreement
+
+#### Scenario: A width change fails the build rather than corrupting
+- **WHEN** a dtype's declared width changes and its spelling does not
+- **THEN** the build fails, rather than the allocation following the vocabulary while the
+  kernels keep the old width
+
+#### Scenario: The assertion cannot be omitted
+- **WHEN** an element spelling is added
+- **THEN** its width assertion is emitted with it, because there is no hand-written path
+  that produces a spelling without one
+
+#### Scenario: The check holds in release builds
+- **WHEN** the workspace is built in release
+- **THEN** the check still applies, because it is a compile-time assertion rather than a
+  debug assertion
+
 ### Requirement: The HIP lane derives element widths rather than restating them
 HIP SHALL obtain element widths from the vocabulary.
 

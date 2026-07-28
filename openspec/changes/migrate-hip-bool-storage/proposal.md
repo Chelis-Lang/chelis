@@ -28,7 +28,56 @@ when it needed to be scoped to every lane.
 
 ## What changes
 
-Seven sites, together, plus the probe that proves they are all here.
+Seven sites, together — and the spelling becomes a **compile-time** property rather than a
+convention, so this instance is fixed and the class is closed for HIP in the same change.
+
+### The element table is width-checked at compile time
+
+`dtype_c_type` returns a `&'static str` with nothing relating it to the dtype. Replacing
+it with a macro-generated table that also emits a `const` assertion per arm makes the
+mismatch unwriteable:
+
+```rust
+hip_elements! {
+    F32   => (f32, "float",         RuntimeDType::F32),
+    Bool  => (u8,  "unsigned char", RuntimeDType::Bool),
+    Int32 => (i32, "int32_t",       RuntimeDType::I32),
+    // ...
+}
+```
+
+The Rust type is a **width witness** for the C type — `u8` models `unsigned char`, `f32`
+models `float` — and the macro emits
+`assert!(size_of::<witness>() as u32 == dtype.byte_width())` alongside each arm.
+
+**Verified.** Planting the actual bug (`Bool => (f32, "float", RuntimeDType::Bool)`)
+produces:
+
+```
+error[E0080]: evaluation panicked: HIP element type `float` for Bool
+              does not have that dtype's declared width
+```
+
+That is a build failure, not a test failure. `RuntimeDType::byte_width` is already a
+`const fn`, so no vocabulary change is needed. `Prim::runtime_dtype` is **not** const, so
+the table names the `RuntimeDType` directly rather than deriving it.
+
+The macro is the mechanism: because there is no hand-written arm path, a lane cannot add a
+spelling and omit its assertion. Agreement stops being maintained by hand, which is what
+produced this overflow.
+
+### Why this does not need the cross-crate refactor
+
+`bind-lane-element-types` argues the element markers must move to `chelis-vocab`, because
+`Bool8` and friends live in `chelis-runtime` and no backend depends on it.
+
+**That reasoning does not apply here, and the design doc overstated it.** The witness does
+not need to be `Bool8`; it only needs a Rust type whose size models the C type's width, and
+those are primitives. Nothing moves between crates and this stays local to
+`chelis-backend-hip`. `bind-lane-element-types` should be re-derived on this basis — it is
+likely much smaller than its design currently assumes.
+
+### The seven sites
 
 | site | now | becomes |
 | --- | --- | --- |
@@ -68,7 +117,9 @@ the C backend's `cmplt` ternary needed, and one that no pointer-typing would hav
 
 - **Generalising the width derivation.** Two of these tables are HIP's, and they are part
   of this fix. The other four repo-wide belong to `derive-lane-element-widths`.
-- **The compile-time binding.** Making `Prim::Bool => "float"` unwriteable is
-  `bind-lane-element-types`. This change fixes the instance; that one closes the class.
+- **Generalising the binding to the C and Metal lanes.** `bind-lane-element-types` does
+  that, and should be re-derived against the witness pattern proven here rather than the
+  cross-crate marker relocation its design currently assumes. This change closes the class
+  for HIP only.
 - **Probes for the other lanes.** `probe-lane-dtype-abi` generalises the pattern. HIP's
   lands here because a fix without its oracle is how this got here.

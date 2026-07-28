@@ -25,7 +25,33 @@ site list compiled by reading rather than by testing is how the overflow got her
 
 ## Phase 1 — Migrate, in one commit
 
-- [ ] **1.1** `dtype_c_type`: `Prim::Bool => "unsigned char"`.
+### 1.0 — Make the spelling a compile-time property, before fixing the arms
+
+So the fix is *checked* rather than asserted. The pattern is already proven against this
+tree: planting `Bool => (f32, "float", RuntimeDType::Bool)` produced
+``error[E0080]: HIP element type `float` for Bool does not have that dtype's declared width``.
+
+- [ ] **1.0a** Replace `dtype_c_type`'s hand-written match with a macro-generated table:
+      `Prim => (witness_type, c_spelling, RuntimeDType)`. The witness is a Rust primitive
+      whose size models the C type — `u8` for `unsigned char`, `f32` for `float`, `i32`
+      for `int32_t`. It does **not** need to be `Bool8`, so nothing moves between crates.
+- [ ] **1.0b** The macro emits, per arm,
+      `const _: () = assert!(size_of::<witness>() as u32 == dtype.byte_width(), "...")`.
+      `RuntimeDType::byte_width` is already `const fn`. `Prim::runtime_dtype` is **not**
+      const, so name the `RuntimeDType` in the table rather than deriving it.
+- [ ] **1.0c** There must be no hand-written arm path. If a spelling can be added without
+      its assertion, agreement is back in human hands — which is what produced this
+      overflow.
+- [ ] **1.0d** Negative test: a deliberately wrong binding fails the build. A
+      `compile_fail` doctest is the natural form and **runs nowhere today** (`AGENTS.md`:
+      "Doctests only run where something invokes them"). Either wire a doctest stage for
+      this crate in this change set, or record that the oracle is manual and give the exact
+      command that demonstrates it.
+
+### 1.1 onward — the arms
+
+- [ ] **1.1** `dtype_c_type`: bool binds to `(u8, "unsigned char")`. With 1.0 in place this
+      is a table edit the compiler checks, not a claim.
 - [ ] **1.2** `elem_kind`: remove the `Prim::Bool` arm. Bool is not a float family; it
       routes through the typed templates as i8/i16/i32/i64 already do. Confirm every
       caller either handles the absence or is unreachable for bool.
@@ -70,8 +96,10 @@ site list compiled by reading rather than by testing is how the overflow got her
 
 ## Deliberately not in this change
 
-- **The compile-time binding.** `Prim::Bool => "float"` stays writeable after this; making
-  it unwriteable is `bind-lane-element-types`. This fixes the instance.
+- **Generalising the binding to the C and Metal lanes.** `bind-lane-element-types` does
+  that. Note its design assumes the element markers must relocate to `chelis-vocab`; the
+  witness pattern proven here shows that is unnecessary, so that proposal should be
+  re-derived and is likely much smaller than it currently claims.
 - **The other four duplicate width tables.** Repo-wide deletion is
   `derive-lane-element-widths`. The two HIP ones are here because this branch breaks them.
 - **Probes for other lanes.** `probe-lane-dtype-abi`.
