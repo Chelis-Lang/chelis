@@ -427,13 +427,49 @@ may return).
 today - that divergence is [#729]'s subject matter and stays visible
 (faithfully!) in the [#687] corpus until fixed.
 
-**Oracle:** `c_int64_tensor_print_is_exact_above_2p53` ([#723]) and
-`c_print_of_f16_tensor_prints_f16_values` ([#716]) green and un-ignored;
-the round-trip harness green on every exit in both lanes; the
+**Oracle:** one command -
+`.venv/bin/python scripts/faithful_observation_phase2_oracle.py`,
+accepted at exit 0 with the final line `PHASE 2 ORACLE: PASS`. It is the
+executable form of what this phase used to state as prose, plus the leg
+that prose could not carry. Its obligations:
+`c_int64_tensor_print_is_exact_above_2p53` ([#723]) and
+`c_print_of_f16_tensor_prints_f16_values` / `c_to_list_of_f16_tensor_works`
+([#716]) present, un-ignored, and green; the
 `c_dag_kernels_compute_correct_f16_bits_despite_print` byte-decode lock
-retired per its own instructions (replaced by the direct print row).
+retired per its own instructions (replaced by the direct print row); the
+round-trip harness green on every exit in both lanes **except the
+enumerated known-red cells**, which are NOT skipped silently - the
+oracle holds a ledger of every `#[ignore]`d harness cell with its owning
+issue, requires the harness's ignore inventory to EQUAL that ledger (an
+undeclared skip is a narrowed corpus; a stale row overstates what the
+suite covers), runs each
+cell, and fails if one is red for an undeclared reason **or has gone
+green**. A green known-red cell means its upstream [#729]-family repair
+landed: un-ignore the cell on its original assertion and delete the
+ledger row in that change set. The oracle also pins the harness's two
+documented corpus-exclusion lists ([#751] C ingress, [#717] eval
+`to_list`) against silent widening, runs the `chelis_format_shortest`
+byte locks, and requires the §B2.4 format-narrowing tripwire's
+PRODUCTION allowlist to stay empty.
 
-**Delivered** (2026-07-24), with four recorded notes. (1) The
+Scope, stated rather than assumed: the ignore-inventory equality covers
+the observation harness, this plan's own instrument. The sibling matrix
+files carry `#[ignore]`d cells owned by [#682]/[#714]/[#717]/[#724]/[#729];
+for those the oracle asserts only that the three rows named above are
+un-ignored and green.
+
+**Default CI does NOT run this oracle** (same standing as [#730]'s Phase
+2 oracle): it is a manual phase gate, invoked at phase acceptance and at
+any change to the observation surface, and it needs a host C toolchain
+because most obligations build, link, and run generated C. What CI does
+carry continuously is the harness's green set, the matrix oracle rows,
+the `chelis_format_shortest` byte locks, and the §B2.4 tripwire - every
+suite the oracle runs, minus the known-red re-execution and the
+structural ledger scan, which are exactly the legs that need the ledger
+to mean anything. Run it before claiming this phase, not once per PR.
+
+**Delivered** (2026-07-24), with five recorded notes (note 5 added
+2026-07-28, with the oracle it describes). (1) The
 `chelis_format_shortest` routine lives in the Rust runtime library, so
 the wide widths use `{:?}` formatting directly - the normative grammar's
 own definition and the exact code path `format_element` takes - while
@@ -463,6 +499,19 @@ untagged f64 value box renders f32 - not only f16/bf16 - elements at
 f64-image width through `to_list`/boxing; faithful but not own-width
 shortest). Both are [#729]-family value/capacity repairs; rendering is
 not the fix site for either.
+(5) The phase's oracle became a script rather than a prose conjunction,
+after PR #863's exact-head red team (F3) observed that the default
+harness run reported "30 passed, 3 skipped" while nothing asserted what
+the three skips were, that they still failed for their stated reasons,
+or that none had gone green. Three annexed cells is a defensible
+boundary; three cells nobody re-executes is not, and the difference is
+not visible from a green suite. The ledger makes the boundary
+executable, and its unexpectedly-green leg turns each cell into
+[#729]'s exit-criteria instrument: the day the tag repair or the box
+width lands, this oracle fails until the cell is un-ignored. The
+accompanying status texts here and at spec/05 §8 were narrowed in the
+same change set to say "conformant except the enumerated annexed cells"
+rather than leading with an unqualified conformance claim.
 
 ## Phase 3 - the tolerance table and the [#687] handshake
 
@@ -521,6 +570,34 @@ never as tolerance.
   boundary wait for [#729]'s storage decision ([#686]/[#685]); until then the
   wire renders faithfully within f64 capacity and the limitation is
   documented at the schema, not papered over in rendering.
+- **The dtype-carrying payload** (raised as F1/F2 by PR #863's
+  exact-head review, which asked why Phase 2 leaves dtype-unfaithful
+  states *representable* rather than merely unreached): that ask is
+  [#729]'s, and it is the same ownership line this section already
+  draws - a closed `{dtype, bits}` (or per-width) scalar payload
+  carried through the runtime's `chelis_value` box, eval's tensor
+  store, the containers, the roots, and the wire schema is a STORAGE
+  and CAPACITY change, not a rendering one. Three separations remain
+  open on that side and each already has its named cell: the runtime
+  box's single `CHELIS_VALUE_FLOAT64` tag and `f64_` slot ([#865]),
+  eval's separable `Vec<f64>` plus `precision: Prim` fields ([#864],
+  [#717]), and the wire's `Vec<f64>` tensor data plus lone `Float64`
+  scalar variant ([#686]).
+  **What Phase 2 shipped is forward-compatible with that payload, by
+  construction**: every renderer here is ALREADY keyed by dtype -
+  `format_element(prim, ElementRef)` on the Rust side and
+  `chelis_format_shortest(value, width_kind, buf)` on the C side - so
+  the payload's arrival replaces two arguments with one at the CALL
+  sites and changes no rule in §C1, no byte of the grammar, and no
+  rendered output. The renderers are the consumer that makes the
+  payload worth having, not an obstacle to it. `chelis_format_shortest`'s
+  `(double, int)` pair is precisely the seam that payload closes: today
+  the pair is caller-supplied and the routine can only reject an invalid
+  dtype id, not prove the value is the exact widening of one stored at
+  that width. Hardening it (a tagged struct or per-width entry points,
+  plus `(buf, capacity)` and an explicit result) is the natural joint
+  moment with [#729]'s payload work, and is recorded here rather than
+  absorbed - this plan does not own the storage side of it.
 - **With [#730]**: the `<value>` placeholder and the print helper's abort
   default are its census rows; the shared tripwire carries this plan's
   `%.16g`/`%.1f` pattern. No delivery overlap.
@@ -552,6 +629,7 @@ become byte-comparable, and every remaining numeric disagreement is
 guaranteed to be a real value bug wearing its own name.
 
 [#680]: https://github.com/Chelis-Lang/chelis/issues/680
+[#682]: https://github.com/Chelis-Lang/chelis/issues/682
 [#684]: https://github.com/Chelis-Lang/chelis/issues/684
 [#685]: https://github.com/Chelis-Lang/chelis/issues/685
 [#686]: https://github.com/Chelis-Lang/chelis/issues/686
@@ -564,12 +642,17 @@ guaranteed to be a real value bug wearing its own name.
 [#718]: https://github.com/Chelis-Lang/chelis/issues/718
 [#719]: https://github.com/Chelis-Lang/chelis/issues/719
 [#723]: https://github.com/Chelis-Lang/chelis/issues/723
+[#724]: https://github.com/Chelis-Lang/chelis/issues/724
 [#726]: https://github.com/Chelis-Lang/chelis/issues/726
 [#727]: https://github.com/Chelis-Lang/chelis/issues/727
 [#728]: https://github.com/Chelis-Lang/chelis/issues/728
 [#729]: https://github.com/Chelis-Lang/chelis/issues/729
 [#730]: https://github.com/Chelis-Lang/chelis/issues/730
 [#732]: https://github.com/Chelis-Lang/chelis/issues/732
+[#748]: https://github.com/Chelis-Lang/chelis/issues/748
+[#749]: https://github.com/Chelis-Lang/chelis/issues/749
+[#751]: https://github.com/Chelis-Lang/chelis/issues/751
+[#775]: https://github.com/Chelis-Lang/chelis/issues/775
 [#754]: https://github.com/Chelis-Lang/chelis/issues/754
 [#865]: https://github.com/Chelis-Lang/chelis/issues/865
 [#864]: https://github.com/Chelis-Lang/chelis/issues/864

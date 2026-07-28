@@ -47,6 +47,21 @@
 //! cross-lane byte equality is locked below for agreeing bits
 //! (`cross_lane_stdout_is_byte_identical_where_bits_agree`).
 //!
+//! Those three cells are NOT skipped silently. The phase's authoritative
+//! oracle (`.venv/bin/python scripts/faithful_observation_phase2_oracle.py`)
+//! holds the same table as a ledger keyed by issue, requires this file's
+//! `#[ignore]` inventory to EQUAL it (an undeclared ignore is a silently
+//! narrowed corpus; a stale ledger row is a false statement about
+//! coverage), re-runs each cell, and FAILS if one is red for an
+//! undeclared reason OR has gone green. The green case is the [#729]
+//! handoff: when its value/capacity repair lands, the oracle goes red
+//! until the cell is un-ignored on its original assertion and the ledger
+//! row deleted in that change set. The same enforcement covers the two
+//! documented corpus-exclusion lists below (`C_LANE_EXCLUDED`,
+//! `EVAL_F64_LIST_EXCLUDED`), which cannot widen without editing the
+//! ledger, and the §C2.3 cross-lane byte-identity corpus, which may grow
+//! but never shrink.
+//!
 //! Everything else is green by contract; a new red here is a new
 //! faithful-observation bug (file it, per §B2.5).
 //!

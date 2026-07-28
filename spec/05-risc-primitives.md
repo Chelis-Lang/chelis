@@ -1276,7 +1276,7 @@ plan's Phase 3.)*
 
 ---
 
-## 8. Observation And Formatting Contract (Ratified At chelis#732 Phase 1; Both Lanes Conformant Since Phase 2)
+## 8. Observation And Formatting Contract (Ratified At chelis#732 Phase 1; Both Lanes Conformant Since Phase 2 Except The Annexed Cells Listed Below)
 
 **Status banner:** atoms [05-OBS-1..5] were RATIFIED at chelis#732
 Phase 1 (2026-07-20), which landed `format_element` (the single
@@ -1299,7 +1299,14 @@ f64 value box, which renders narrower float elements (f32 as well as
 f16/bf16) at f64-image width through `to_list` and list/tuple boxing -
 faithful parse-back, not the own-width shortest form (chelis#865, the
 chelis#729/#686 capacity family); and unit-valued single-print-root
-LABELING (chelis#862 - a root-naming issue outside these atoms). Atom
+LABELING (chelis#862 - a root-naming issue outside these atoms). Every
+annexed cell carries an `#[ignore]`d red test naming its owning issue,
+and none of them is a silent skip: the phase oracle
+(`.venv/bin/python scripts/faithful_observation_phase2_oracle.py`) holds
+the complete ledger, requires the harness's ignore inventory to equal
+it, re-executes each cell, and FAILS if one is red for an undeclared
+reason or has gone green - so an upstream chelis#729 repair cannot leave
+a permanently skipped test or a stale conformance sentence behind. Atom
 IDs are
 stable, and the current blockquote authorities remain normative until selected
 for chelis#733 Phase 1 migration. Full revisions are attached and checked
@@ -1312,9 +1319,10 @@ elaboration is `spec/design/faithful_observation.md` (meta chelis#728).
 > own dtype width, and all exits within a lane SHALL agree with each
 > other and with the stored bits.
 
-*(Both lanes conformant since chelis#732 Phase 2, with one deliberate
-width note recorded in §8.1 and two annexed value-layer exceptions,
-each an issue-linked ignored red cell in the observation harness: an
+*(Conformant in both lanes since chelis#732 Phase 2 EXCEPT the two
+annexed value-layer cells named here, which remain issue-linked red
+tests re-executed by the phase oracle - one deliberate width note is
+also recorded in §8.1. The exceptions: an
 int64 SCALAR ROOT above 2^53 renders the f64-collapsed stored value at
 the labeled root while `print`/`to_string` of the same def are exact -
 the interpreter's rank-0 realization collapses the value BEFORE the
@@ -1333,7 +1341,9 @@ chelis#729. The C lane's former violations (chelis#716, #723, #748,
 > number grammar (digit selection, exponent form, special-value
 > spellings) SHALL be identical across lanes and is pinned in §8.1.
 
-*(Both lanes conformant since chelis#732 Phase 2: eval adopted the
+*(Conformant in both lanes since chelis#732 Phase 2 EXCEPT the annexed
+own-width cell named at the end of this note, which remains an
+issue-linked red test re-executed by the phase oracle. Eval adopted the
 grammar at Phase 1 (integers lost the `.0`, bool tensors print
 `true`/`false`, scalars render at own width) and Phase 2's generated
 helper brought the compiled lane onto the identical grammar - exact

@@ -89,7 +89,14 @@ finding folded in before merge; the red teams' discoveries are filed as
 **Wave 2 - the independently-landable value work.** [#732] Phase 1
 landed with Wave 1 (above); the remaining Wave 2 set is [#732] Phase 2
 (the generated C side: fixes [#716]/[#723] outright and gives the
-refactor its byte-exact instrument) in parallel with [#731] Phases 2-3 (the
+refactor its byte-exact instrument; its one authoritative completion
+oracle is
+`.venv/bin/python scripts/faithful_observation_phase2_oracle.py`,
+accepted at exit 0 with final line `PHASE 2 ORACLE: PASS` - it carries
+the known-red ledger that keeps every annexed [#729]-family cell
+re-executed rather than silently skipped, and fails when one goes
+green, so the upstream repair's landing forces the un-ignore in the
+same change set) in parallel with [#731] Phases 2-3 (the
 witness token + DeepTag). [#730] Phase 2's final typed implementation is in
 PR [#799] (acceptance validation pending): closed vocabularies, staged
 HostType/ABI separation, and structured emission. Its initial source-lint
