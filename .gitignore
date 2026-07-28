@@ -28,6 +28,7 @@ data/
 !crates/
 !crates/**/*.c
 !crates/**/*.h
+!nix/**/*.c
 # WI-13 committed, certified erf envelope + its Sollya/Gappa proof bundle: all
 # source-of-truth data (the envelope is embedded via include_str!; the .gappa
 # proof + .sollya generator are the committed machine-checkable proof term), so

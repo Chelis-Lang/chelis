@@ -8,6 +8,10 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Locked Nix packages expose the Chelis compiler, C runtime, and `chelisup`.**
+  The root flake supports `x86_64-linux` and `aarch64-darwin` with native checks.
+  It also provides `chelis` and `chelisup` applications for `nix run`.
+  Nix remains an additive source-build channel. `chelisup` still routes release toolchains.
 - **A tracked Devenv shell supplies the contributor toolchain on Linux and macOS.**
   The shell pins Rust, Python 3.11, test tools, and the platform C toolchain.
   Linux uses GCC, OpenBLAS, and Valgrind from Nixpkgs. macOS maps `gcc` and

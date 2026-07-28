@@ -41,6 +41,7 @@ gate = _load_module()
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CI_YML = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 SMT_FULL_PROVE_YML = REPO_ROOT / ".github" / "workflows" / "smt-full-prove.yml"
+NIX_PACKAGES_YML = REPO_ROOT / ".github" / "workflows" / "nix-packages.yml"
 WORKFLOWS_DIR = REPO_ROOT / ".github" / "workflows"
 
 # CI jobs that are deliberately NOT part of the per-PR developer gate.
@@ -101,6 +102,10 @@ NON_GATE_WORKFLOWS = {
     # Release; it runs no cargo/chelis command the per-PR gate owns, only on a
     # cvc5-sys bump / dispatch / weekly schedule. Out of gate.py scope.
     "build-cvc5.yml",
+    # Native Nix package jobs build the complete flake check set on Linux and
+    # macOS. These jobs prove a separate source-build channel and do not run
+    # commands from the canonical Cargo gate.
+    "nix-packages.yml",
     # Scheduled Actions-cache pruner (scripts/ci_cache_prune.py). Deletes stale
     # caches to hold the pool under the 10GB LRU budget; runs no per-PR gate
     # command. Out of gate.py scope by design.
@@ -467,6 +472,35 @@ class CiParityTests(unittest.TestCase):
                     f"scripts/gate.py ...` so the parity parser sees them"
                 ),
             )
+
+
+class NixPackagesWorkflowTests(unittest.TestCase):
+    """Lock the two native Nix package jobs and their complete check command."""
+
+    def test_native_nix_workflow_has_both_authoritative_jobs(self):
+        self.assertTrue(NIX_PACKAGES_YML.is_file(), "missing Nix package workflow")
+        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
+        required = [
+            "name: Nix Packages (x86_64-linux)",
+            "runs-on: ubuntu-latest",
+            "name: Nix Packages (aarch64-darwin)",
+            "runs-on: macos-latest",
+        ]
+        for marker in required:
+            self.assertIn(marker, text)
+
+    def test_each_native_job_runs_the_complete_flake_check_set(self):
+        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
+        self.assertEqual(
+            text.count("run: nix flake check --print-build-logs"),
+            2,
+            "each native Nix job must run the complete flake check set",
+        )
+        self.assertNotIn(
+            "scripts/gate.py",
+            text,
+            "Nix package jobs must stay separate from the canonical Cargo gate",
+        )
 
 
 class SmtCiSplitTests(unittest.TestCase):

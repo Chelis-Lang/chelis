@@ -1,0 +1,221 @@
+{
+  pkgs,
+  lib,
+  root,
+  contracts,
+  cvc5,
+  built,
+  packages,
+  apps,
+}:
+let
+  escape = lib.escapeShellArg;
+  shapeCheck =
+    name: package: shape:
+    let
+      requiredChecks = lib.concatMapStringsSep "\n" (path: ''
+        if [ ! -e "${package}/${path}" ]; then
+          echo "${name} package is missing ${path}" >&2
+          exit 1
+        fi
+      '') shape.required;
+      forbiddenChecks = lib.concatMapStringsSep "\n" (path: ''
+        if [ -e "${package}/${path}" ]; then
+          echo "${name} package contains forbidden path ${path}" >&2
+          exit 1
+        fi
+      '') shape.forbidden;
+      executableCheck =
+        if shape.allowedProductExecutables == [ ] then
+          ''
+            echo "${name} package contains undeclared product executable $relative" >&2
+            exit 1
+          ''
+        else
+          ''
+            case "$relative" in
+              ${lib.concatMapStringsSep "|" (path: escape path) shape.allowedProductExecutables}) ;;
+              *)
+                echo "${name} package contains undeclared product executable $relative" >&2
+                exit 1
+                ;;
+            esac
+          '';
+    in
+    pkgs.runCommand "${name}-package-shape" { nativeBuildInputs = [ pkgs.findutils ]; } ''
+      assert_exact_inventory() {
+        local package="$1"
+        local package_name="$2"
+        shift 2
+        local actual
+        local expected
+        actual="$(find "$package" -mindepth 1 -printf '%P\n' | sort)"
+        expected="$(printf '%s\n' "$@" | sort)"
+        if [ "$actual" != "$expected" ]; then
+          echo "$package_name package inventory differs from its exact contract" >&2
+          printf 'expected:\n%s\nactual:\n%s\n' "$expected" "$actual" >&2
+          return 1
+        fi
+      }
+
+      assert_exact_inventory \
+        ${escape package} \
+        ${escape name} \
+        ${lib.escapeShellArgs shape.inventory}
+      ${requiredChecks}
+      ${forbiddenChecks}
+      if [ -d "${package}/bin" ]; then
+        while IFS= read -r executable; do
+          relative="''${executable#${package}/}"
+          ${executableCheck}
+        done < <(find "${package}/bin" -type f -perm -0100 -print)
+      fi
+      touch "$out"
+    '';
+
+  chelisShape = shapeCheck "chelis" packages.chelis contracts.packageShapes.chelis;
+  runtimeShape =
+    shapeCheck "chelis-runtime" packages.chelis-runtime
+      contracts.packageShapes.chelis-runtime;
+  chelisupShape = shapeCheck "chelisup" packages.chelisup contracts.packageShapes.chelisup;
+
+  cvc5Dir = pkgs.runCommand "cvc5-dir-contract" { } ''
+    test -f ${cvc5.dir}/cmake/version-base.cmake
+    grep -F 'set(CVC5_LAST_RELEASE "${cvc5.version}")' ${cvc5.dir}/cmake/version-base.cmake
+    test -f ${cvc5.dir}/include/cvc5/c/cvc5.h
+    test -d ${cvc5.dir}/build/include
+    test -f ${cvc5.dir}/build/src/libcvc5.a
+    test -d ${cvc5.dir}/build/deps/lib
+    touch "$out"
+  '';
+
+  appContract = pkgs.runCommand "chelis-app-contract" { } ''
+    test ${escape apps.chelis.program} = ${escape "${packages.chelis}/bin/chelis"}
+    test ${escape apps.chelisup.program} = ${escape "${packages.chelisup}/bin/chelisup"}
+    test ${escape apps.default.program} = ${escape apps.chelis.program}
+    touch "$out"
+  '';
+
+  lockParity =
+    pkgs.runCommand "nix-lock-parity"
+      {
+        nativeBuildInputs = [ pkgs.python311 ];
+      }
+      ''
+        python3 ${root}/scripts/check_nix_lock_parity.py \
+          --flake-lock ${root}/flake.lock \
+          --devenv-lock ${root}/devenv.lock
+        touch "$out"
+      '';
+
+  platformBuildInputs = lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.openblas ];
+  compilerBehavior =
+    pkgs.runCommand "chelis-compiler-behavior"
+      {
+        nativeBuildInputs = [
+          pkgs.python311
+          pkgs.stdenv.cc
+        ]
+        ++ platformBuildInputs;
+      }
+      ''
+        export HOME="$TMPDIR/home"
+        export CHELIS_RUNTIME_DIR="${packages.chelis}/lib"
+        mkdir -p "$HOME"
+
+        version_output="$(${packages.chelis}/bin/chelis --version 2>&1)"
+        printf '%s\n' "$version_output" | grep -F ${escape built.version}
+        ${packages.chelis}/bin/chelis --help >/dev/null
+
+        cp -R ${built.source}/crates/chelis-cli/tests/fixtures/release_pipe_stage \
+          "$TMPDIR/release-fixture"
+        chmod -R u+w "$TMPDIR/release-fixture"
+        cd "$TMPDIR/release-fixture"
+        ${packages.chelis}/bin/chelis test tests
+
+        cd "$TMPDIR"
+        python3 ${root}/.github/scripts/verify_release_smt.py ${packages.chelis}/bin/chelis
+        touch "$out"
+      '';
+
+  runtimeConsumer =
+    pkgs.runCommand "chelis-runtime-consumer"
+      {
+        nativeBuildInputs = [ pkgs.stdenv.cc ] ++ platformBuildInputs;
+      }
+      ''
+        cc -std=c11 -Wall -Wextra -Werror \
+          -I${packages.chelis-runtime}/include \
+          ${./tests/runtime-consumer.c} \
+          ${packages.chelis-runtime}/lib/libchelis_runtime.a \
+          ${
+            if pkgs.stdenv.hostPlatform.isDarwin then
+              "-framework Accelerate"
+            else
+              "-lopenblas -lm -lpthread -ldl"
+          } \
+          -o runtime-consumer
+        ./runtime-consumer
+        touch "$out"
+      '';
+
+  chelisupBehavior = pkgs.runCommand "chelisup-behavior" { } ''
+    ${packages.chelisup}/bin/chelisup --help >/dev/null
+    touch "$out"
+  '';
+
+  nixFormat =
+    pkgs.runCommand "nix-format"
+      {
+        nativeBuildInputs = [ pkgs.nixfmt ];
+      }
+      ''
+        nixfmt --check \
+          ${root}/devenv.nix \
+          ${root}/flake.nix \
+          ${./checks.nix} \
+          ${./contracts.nix} \
+          ${./cvc5.nix} \
+          ${./packages.nix} \
+          ${./source.nix}
+        touch "$out"
+      '';
+
+  contractChecks = [
+    appContract
+    chelisShape
+    chelisupBehavior
+    chelisupShape
+    compilerBehavior
+    cvc5Dir
+    lockParity
+    nixFormat
+    runtimeConsumer
+    runtimeShape
+  ];
+  native = pkgs.runCommand "chelis-native-contracts" { } ''
+    ${lib.concatMapStringsSep "\n" (check: "test -e ${check}") contractChecks}
+    test -e ${packages.chelis}
+    test -e ${packages.chelis-runtime}
+    test -e ${packages.chelisup}
+    touch "$out"
+  '';
+in
+{
+  inherit
+    appContract
+    chelisShape
+    chelisupBehavior
+    chelisupShape
+    compilerBehavior
+    cvc5Dir
+    lockParity
+    native
+    nixFormat
+    runtimeConsumer
+    runtimeShape
+    ;
+  chelis = packages.chelis;
+  chelis-runtime = packages.chelis-runtime;
+  chelisup = packages.chelisup;
+}

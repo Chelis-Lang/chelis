@@ -76,6 +76,44 @@ The Linux Devenv check is a manual gate. Default CI does not run this gate.
 
 Devenv is optional and is not a product or CI requirement. If you do not use Devenv, use the manual setup below.
 
+### Nix source packages
+
+The root flake provides locked source packages for these native systems:
+
+- `x86_64-linux`
+- `aarch64-darwin`
+
+Build a package from the repository root:
+
+```sh
+nix build .                 # default package, identical to .#chelis
+nix build .#default         # explicit default alias
+nix build .#chelis          # compiler, runtime library, and five public headers
+nix build .#chelis-runtime  # runtime static library and five public headers
+nix build .#chelisup        # installer executable only
+```
+
+Run an application from the repository root:
+
+```sh
+nix run . -- --version              # default application, identical to .#chelis
+nix run .#default -- --version       # explicit default application alias
+nix run .#chelis -- --version        # packaged compiler
+nix run .#chelisup -- --help         # packaged installer
+```
+
+Run the complete check set for the native system:
+
+```sh
+nix flake check --print-build-logs
+```
+
+Nix is an additive source-build channel. It does not create the version store that release toolchains use.
+
+`chelisup` remains the release installer and version router. Use `chelisup` when a project needs release pins or side-by-side toolchains.
+
+The flake does not export internal crates, the Python extension, `chelis-std`, or documentation as separate packages.
+
 **Rust toolchain.** Install [rustup](https://rustup.rs) (the Rust toolchain
 installer) if you do not already have it:
 
