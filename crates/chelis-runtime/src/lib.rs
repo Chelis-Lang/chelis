@@ -236,26 +236,33 @@ impl From<Bool8> for bool {
     }
 }
 
-/// Typed access to a tensor whose runtime storage is f32-encoded
-/// regardless of the dtype tag.  Returns the buffer typed as
-/// `*mut f32`.
+/// Typed access to a tensor buffer as `*mut f32`, without checking the dtype
+/// tag.
 ///
-/// PR 1 introduced this as a transition shim for the 31 access
-/// sites it did not migrate.  PR 2 migrated those sites to the
-/// `TensorElement` dispatch pattern; the helper survives because
-/// `CHELIS_I32` and `CHELIS_BOOL` tensors still store data as
-/// 4-byte f32 bit patterns.  Migrated dispatch arms for those two
-/// dtype tags route through this helper rather than
-/// `<i32 / bool>::data_ptr_unchecked` (the trait impl for `i32`
-/// exists but reads i32 bytes, which is the wrong decode for the
-/// current f32-encoded storage convention; `bool` has no trait
-/// impl at all).
+/// **The only remaining legitimate non-f32 caller is `CHELIS_BOOL`**, whose
+/// storage really is 4-byte f32 bit patterns (`0.0` / `1.0`) pending
+/// `CRuntime-BoolStorage-F1`. Everything else has a `TensorElement` impl and
+/// should use `data_ptr` / `data_ptr_unchecked`, which check the tag.
 ///
-/// A future §5 follow-on migrates `CHELIS_I32` and `CHELIS_BOOL`
-/// storage to their genuine byte representations and drops this
-/// helper at the same time.  See
-/// `docs/investigations/c_runtime_dtype_accessors_diagnosis.md`
-/// section "I32 storage encoding" for the routing convention.
+/// PR 1 introduced this as a transition shim for the 31 access sites it did
+/// not migrate; PR 2 moved those to `TensorElement` dispatch.
+///
+/// # This doc previously said `CHELIS_I32` was f32-encoded. It is not.
+///
+/// RT-4 F1 changed `chelis_scalar_tensor_from_i64` to write through
+/// `(int32_t*)` "so the slot stores int32 bytes that match the declared
+/// CHELIS_I32 dtype", and `read_scalar_as_f64` decodes it as `*const i32`.
+/// This comment was not updated, and five dispatch arms kept routing int32
+/// through here on its authority — producing wrong comparisons for negative
+/// values, a wrong `where` result at `i32::MIN`, and denormal garbage from the
+/// f64 element reader. Those are fixed; see
+/// `tests/i32_cmplt_native_storage.rs`.
+///
+/// The lesson is worth keeping next to the hazard: a comment asserting that an
+/// unusual decode is correct reads as considered rather than as rot, so a
+/// stale one is more dangerous here than no comment at all. If bool's
+/// migration lands and this helper has no callers, delete it rather than
+/// leaving it available.
 ///
 /// Accepts `*mut chelis_tensor` only; for read-side `*const
 /// chelis_tensor` access, callers cast through `tensor as *mut
@@ -271,6 +278,9 @@ pub unsafe fn data_as_f32(tensor: *mut chelis_tensor) -> *mut f32 {
 
 /// Const-pointer variant of `data_as_f32` for read-side accesses
 /// on `*const chelis_tensor`.
+///
+/// Carries the same constraint: `CHELIS_BOOL` is the only legitimate non-f32
+/// caller. See [`data_as_f32`].
 ///
 /// # Safety
 ///
@@ -3042,21 +3052,11 @@ pub unsafe extern "C" fn chelis_tensor_cumsum(
         RuntimeDType::F32 => cumsum_loop::<f32>(out, outer, axis_size, inner),
         RuntimeDType::F64 => cumsum_loop::<f64>(out, outer, axis_size, inner),
         RuntimeDType::I64 => cumsum_loop::<i64>(out, outer, axis_size, inner),
-        RuntimeDType::I32 => {
-            // f32-encoded i32 storage: accumulate as f32, matching
-            // pre-migration behavior.
-            let p = data_as_f32(out);
-            for outer_idx in 0..outer {
-                for inner_idx in 0..inner {
-                    let mut running = 0.0f32;
-                    for axis_idx in 0..axis_size {
-                        let linear = (outer_idx * axis_size + axis_idx) * inner + inner_idx;
-                        running += *p.add(linear);
-                        *p.add(linear) = running;
-                    }
-                }
-            }
-        }
+        // Native two's complement, as elsewhere since RT-4 F1. Accumulating
+        // through an f32 view summed denormal bit patterns rather than the
+        // integers they encode, and lost the value entirely once a partial
+        // sum left the denormal range.
+        RuntimeDType::I32 => cumsum_loop::<i32>(out, outer, axis_size, inner),
         RuntimeDType::Bool => runtime_fail!("cumsum is undefined for bool tensors"),
         RuntimeDType::Bf16 | RuntimeDType::F16 | RuntimeDType::I8 | RuntimeDType::I16 => {
             runtime_fail!("cumsum unsupported dtype {}", dtype.name())

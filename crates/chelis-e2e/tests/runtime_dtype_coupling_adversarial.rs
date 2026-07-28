@@ -27,9 +27,10 @@ unsafe fn alloc_scalar(dtype: c_int) -> *mut chelis_tensor {
 //
 // PR #84 added four `data_ptr` dtype-mismatch fixtures. We extend with
 // the remaining cross-pairings between the three native-storage
-// precisions (f32, f64, i64) — i32 and bool are f32-encoded today so
-// their cross-dtype assertions are documented as deferred storage
-// changes.
+// precisions (f32, f64, i64). Bool is f32-encoded today, so its
+// cross-dtype assertions are documented as a deferred storage change.
+// i32 is native two's complement since RT-4 F1; the accessor arms that
+// still decoded it as f32 were corrected separately.
 
 #[test]
 fn data_ptr_f32_rejects_f64_tensor() {
@@ -87,7 +88,7 @@ fn data_ptr_i64_rejects_i32_tensor() {
         let res = <i64 as TensorElement>::data_ptr(t);
         assert!(
             res.is_err(),
-            "i64::data_ptr must reject CHELIS_I32 (f32-encoded storage)"
+            "i64::data_ptr must reject CHELIS_I32 (dtype tag mismatch)"
         );
         let err = res.unwrap_err();
         assert_eq!(err.expected, RuntimeDType::I64);

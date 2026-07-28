@@ -5639,10 +5639,16 @@ impl DtypeArm {
 
     fn elem_t(self) -> &'static str {
         match self {
-            // f32 / int32 / bool storage is 4-byte f32-encoded
-            // today.  Reading through `float*` matches the runtime
-            // accessor convention; see the type doc-comment above.
-            DtypeArm::F32 | DtypeArm::I32 | DtypeArm::Bool => "float",
+            // Bool storage really is 4-byte f32-encoded, pending
+            // CRuntime-BoolStorage-F1, so `float*` is the right read.
+            DtypeArm::F32 | DtypeArm::Bool => "float",
+            // int32 storage is native two's complement. RT-4 F1 moved the
+            // write side to `(int32_t*)`; emitting `float*` here made
+            // generated C reinterpret those bytes as floats, the same defect
+            // the Rust accessor arms carried (cmplt, where, scatter, cumsum,
+            // the f64 element reader) on the authority of the same stale
+            // `data_as_f32` rustdoc.
+            DtypeArm::I32 => "int32_t",
             DtypeArm::F64 => "double",
             DtypeArm::I64 => "int64_t",
         }

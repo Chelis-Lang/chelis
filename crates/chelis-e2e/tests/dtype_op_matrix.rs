@@ -209,13 +209,12 @@ fn fill_i64_vector() {
 
 #[test]
 fn fill_i32_vector() {
-    // i32 storage today is 4-byte f32-encoded.  The trait impl for
-    // i32 has `DTYPE = CHELIS_I32`, so `i32::fill` writes i32 bytes
-    // into the buffer.  A round-trip through `i32::data_ptr_unchecked`
-    // reads them back as i32 -- this exercises the trait surface
-    // even though the runtime's other I32 accessors still treat the
-    // storage as f32-encoded.  Filed under the §5 follow-on for i32
-    // storage representation migration.
+    // The trait impl for i32 has `DTYPE = CHELIS_I32` and writes int32
+    // bytes, which is what the runtime's storage actually is: RT-4 F1 moved
+    // CHELIS_I32 to native two's complement, and the accessor arms that
+    // still decoded it as f32 were corrected. This round-trip through
+    // `i32::data_ptr_unchecked` is therefore consistent with the runtime,
+    // not merely an exercise of the trait surface.
     unsafe {
         let t = alloc_vec(8, CHELIS_I32);
         i32::fill(t, 12_345_i32);
@@ -356,12 +355,24 @@ fn data_ptr_match_succeeds() {
 // symbol and assert byte-exact round-trip through the trait's typed
 // pointer.
 //
-// I32 and BOOL fixtures write through `data_as_f32` (the f32-encoded
-// storage convention) and read back the same way, matching the
-// migrated runtime's CHELIS_I32 / CHELIS_BOOL dispatch arms.  The
-// fixtures lock the post-migration behavior; pre-migration the F64
-// and I64 fixtures would have failed because the f32-strided read
+// BOOL fixtures write through `data_as_f32` (its storage really is
+// f32-encoded, pending CRuntime-BoolStorage-F1) and read back the same
+// way.  The F64 and I64 fixtures lock the post-migration behavior;
+// pre-migration they would have failed because the f32-strided read
 // silently truncated 8-byte storage to 4-byte chunks.
+//
+// HAZARD, unresolved: the I32 fixtures also write through `data_as_f32`,
+// and that no longer matches the runtime.  CHELIS_I32 storage is native
+// two's complement -- `chelis_scalar_tensor_from_i64` writes through
+// `(int32_t*)` since RT-4 F1, and the cmplt / where / scatter / cumsum /
+// f64-reader arms were corrected to decode it natively.  These fixtures
+// still pass because they only round-trip through `data_ptr` / `fill`
+// and never reach those arms.
+//
+// So a NEW fixture that builds an I32 tensor with `alloc_vec_with_values`
+// and then calls one of those ops will get wrong answers, and the helper's
+// own doc will have told it that was the convention.  Migrate the I32
+// writer to native int32 before adding such a fixture.
 //
 // PR 3 host_emit code-generation site fixtures live at
 // `crates/chelis-backend-c/tests/host_emit_dtype_dispatch.rs` because
@@ -371,8 +382,12 @@ fn data_ptr_match_succeeds() {
 
 /// Allocate a rank-1 length-`n` tensor and fill it with values from
 /// `vals` interpreted as the tensor's storage convention for `dtype`:
-///   - F32 / I32 / BOOL: writer stores `value as f32` (existing
-///     f32-encoded storage for I32 / BOOL).
+///   - F32 / BOOL: writer stores `value as f32` (bool storage is genuinely
+///     f32-encoded pending `CRuntime-BoolStorage-F1`).
+///   - I32: writer stores `value as f32`, which is **stale** and no longer
+///     matches the runtime's native int32 storage. See the hazard note
+///     above; safe only for the `data_ptr` / `fill` round-trips currently
+///     built on it.
 ///   - F64: writer stores `f64` bytes.
 ///   - I64: writer stores `i64` bytes (treating each `f64` slot as
 ///     `value as i64`).
