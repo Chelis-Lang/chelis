@@ -104,8 +104,10 @@ The single table both the spec section and the module implement. "Wide
 intermediate" means the value an op kernel produced at the dtype's
 ARITHMETIC WIDTH (spec/04 [04-NUM-8]) before finalize - NOT an
 unconditional f64/i64. The arithmetic-width column below is reproduced
-from [04-NUM-8] and spec/04 §1.1.3, which are authoritative; all three
-are edited together.
+from [04-NUM-8], which is authoritative and is the ONLY other copy; the
+two are edited together. Deliberately NOT reproduced into spec/04 §1.1.3:
+arithmetic width is a target-independent Table A fact and §1.1.3 is
+Table B's ancestor, so a copy there would put an A-fact in a B-table.
 
 | dtype | value set | arithmetic width | finalize(wide) | overflow / out of range | special values |
 |---|---|---|---|---|---|

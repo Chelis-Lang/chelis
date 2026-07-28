@@ -176,23 +176,32 @@ admits every active dtype. This sub-section is the authoritative per-backend
 matrix. Any "Metal supports X" or "C backend supports Y" claim elsewhere in
 the spec or in user-facing docs must resolve to a cell in this table.
 
-| dtype  | arithmetic width ([04-NUM-8]) | C backend                                                                                                         | HIP backend                                          | Metal backend                                | Evaluator |
-|--------|-------------------------------|-------------------------------------------------------------------------------------------------------------------|------------------------------------------------------|----------------------------------------------|-----------|
-| f32    | f32                           | admitted                                                                                                          | admitted                                             | admitted                                     | admitted  |
-| f64    | f64                           | admitted                                                                                                          | admitted                                             | **rejected (hardware)**                      | admitted  |
-| bf16   | f32                           | admitted (storage as `uint16_t`; arithmetic via convert-to-f32; matmul via convert-then-`cblas_sgemm` per §5.7.1) | admitted (matmul + load/store via `hipblasGemmEx`)   | admitted on Apple7+ (M3 or later)            | admitted  |
-| f16    | f32                           | admitted (storage as `uint16_t`; arithmetic via convert-to-f32; matmul via convert-then-`cblas_sgemm` per §5.7.1) | admitted (matmul + load/store via `hipblasGemmEx`)   | admitted                                     | admitted  |
-| int8   | exact int8                    | admitted                                                                                                          | admitted                                             | admitted                                     | admitted  |
-| int16  | exact int16                   | admitted                                                                                                          | admitted                                             | admitted                                     | admitted  |
-| int32  | exact int32                   | admitted                                                                                                          | admitted                                             | admitted                                     | admitted  |
-| int64  | exact int64                   | admitted                                                                                                          | admitted                                             | admitted                                     | admitted  |
-| bool   | n/a ([04-NUM-4])              | admitted                                                                                                          | admitted                                             | admitted                                     | admitted  |
+| dtype  | C backend                                                                                                         | HIP backend                                          | Metal backend                                | Evaluator |
+|--------|-------------------------------------------------------------------------------------------------------------------|------------------------------------------------------|----------------------------------------------|-----------|
+| f32    | admitted                                                                                                          | admitted                                             | admitted                                     | admitted  |
+| f64    | admitted                                                                                                          | admitted                                             | **rejected (hardware)**                      | admitted  |
+| bf16   | admitted (storage as `uint16_t`; arithmetic via convert-to-f32; matmul via convert-then-`cblas_sgemm` per §5.7.1) | admitted (matmul + load/store via `hipblasGemmEx`)   | admitted on Apple7+ (M3 or later)            | admitted  |
+| f16    | admitted (storage as `uint16_t`; arithmetic via convert-to-f32; matmul via convert-then-`cblas_sgemm` per §5.7.1) | admitted (matmul + load/store via `hipblasGemmEx`)   | admitted                                     | admitted  |
+| int8   | admitted                                                                                                          | admitted                                             | admitted                                     | admitted  |
+| int16  | admitted                                                                                                          | admitted                                             | admitted                                     | admitted  |
+| int32  | admitted                                                                                                          | admitted                                             | admitted                                     | admitted  |
+| int64  | admitted                                                                                                          | admitted                                             | admitted                                     | admitted  |
+| bool   | admitted                                                                                                          | admitted                                             | admitted                                     | admitted  |
 
-The arithmetic-width column is target-independent and normative in every
-cell of its row: a backend that admits a dtype computes it at that width,
-and a backend that cannot is a `rejected` cell, never a silently widened
-one. It is reproduced from [04-NUM-8], which is authoritative; the two
-must be edited together.
+**Arithmetic width is not a cell of this table.** It is a target-independent
+property of the dtype, declared once by [04-NUM-8] and owned by the semantic
+side of the capability split (`spec/design/capability_table.md`'s Table A,
+whose rejections the CHECKER reports because they hold whatever the target
+is). This table is Table B's ancestor: it records per-backend implementation
+status, which is a different decision reported by build and lowering where
+the target is known. Reproducing the widths here would put an A-fact in a
+B-table and create a second copy to keep in sync by hand.
+
+The constraint this table DOES carry is the consequence: a backend that
+admits a dtype computes it at the width [04-NUM-8] declares, and a backend
+that cannot is a `rejected` cell - never an `admitted` cell that silently
+widens, narrows, or substitutes. The bf16/f16 C-backend notes below are that
+rule already applied, not an exception to it.
 
 Cell semantics:
 
