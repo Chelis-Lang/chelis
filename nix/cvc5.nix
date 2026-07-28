@@ -47,6 +47,7 @@ let
       "-DGMP_LIBRARIES=${gmp}/lib/libgmp.a"
       "-DGMPXX_LIBRARIES=${gmp}/lib/libgmpxx.a"
       "-DSymFPU_INCLUDE_DIR=${symfpu}/include"
+      "-DSTATIC_BINARY=OFF"
       "-DUSE_CLN=OFF"
       "-DUSE_POLY=OFF"
     ];

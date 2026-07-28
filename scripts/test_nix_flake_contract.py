@@ -126,6 +126,11 @@ class NixFlakeContractTests(unittest.TestCase):
         self.assertIn("assert_exact_inventory", checks)
         self.assertIn('find "$package" -mindepth 1 -printf \'%P\\n\' | sort', checks)
 
+    def test_static_cvc5_library_does_not_force_a_static_executable(self) -> None:
+        cvc5 = (REPO_ROOT / "nix" / "cvc5.nix").read_text(encoding="utf-8")
+        self.assertIn('"-DBUILD_SHARED_LIBS=OFF"', cvc5)
+        self.assertIn('"-DSTATIC_BINARY=OFF"', cvc5)
+
     def test_contract_stubs_cover_package_shape_and_behavior(self) -> None:
         contracts = nix_json("eval", "--json", "--file", "nix/contracts.nix")
         shapes = contracts["packageShapes"]
