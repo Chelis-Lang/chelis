@@ -2754,9 +2754,23 @@ pub unsafe extern "C" fn chelis_tensor_cmplt(
         RuntimeDType::F32 => cmp_loop::<f32>(lm, rm, out_buf, size),
         RuntimeDType::F64 => cmp_loop::<f64>(lm, rm, out_buf, size),
         RuntimeDType::I64 => cmp_loop::<i64>(lm, rm, out_buf, size),
-        // I32 and BOOL storage stays f32-encoded; the f32-strided read
-        // is correct for both today.
-        RuntimeDType::I32 | RuntimeDType::Bool => {
+        // CHELIS_I32 storage is native two's complement: RT-4 F1 changed
+        // `chelis_scalar_tensor_from_i64` to write through `(int32_t*)`
+        // precisely because the prior f32 write "left the slot holding float
+        // bit patterns that downstream readers interpreted as junk integers",
+        // and `read_scalar_as_f64` decodes it as `*const i32`.
+        //
+        // The previous arm read it through `data_as_f32_const`, which is
+        // correct only by accident and only for small non-negative values,
+        // where IEEE-754 positive floats happen to order the same way their
+        // bit patterns do. It is wrong for negatives: `-1i32` is `0xFFFFFFFF`,
+        // a NaN as f32, and every comparison against a NaN is false, so
+        // `-1 < 0` reported false. See tests/i32_cmplt_native_storage.rs.
+        RuntimeDType::I32 => cmp_loop::<i32>(lm, rm, out_buf, size),
+        // Bool storage really is f32-encoded (`CRuntime-BoolStorage-F1`), so
+        // this arm stays until that migration flips the width and the typed
+        // access together.
+        RuntimeDType::Bool => {
             let lp = data_as_f32_const(lhs);
             let rp = data_as_f32_const(rhs);
             for i in 0..size {
@@ -2851,8 +2865,8 @@ pub unsafe extern "C" fn chelis_tensor_scatter(
             let src = ((*updates).data as *const u8).add(linear as usize * elem_size);
             ptr::copy_nonoverlapping(src, dst, elem_size);
         } else {
-            // Add mode requires typed addition.  Dispatch on dtype;
-            // I32 / BOOL stay on f32-encoded storage.
+            // Add mode requires typed addition.  Dispatch on dtype; only
+            // BOOL is f32-encoded storage, and it is rejected below.
             match dtype {
                 RuntimeDType::F32 => {
                     let op = f32::data_ptr_unchecked(out);
@@ -2871,11 +2885,16 @@ pub unsafe extern "C" fn chelis_tensor_scatter(
                         (*op.add(out_linear)).wrapping_add(*up.add(linear as usize));
                 }
                 RuntimeDType::I32 => {
-                    // f32-encoded i32: read both as f32, add as f32,
-                    // re-encode.  Matches pre-migration behavior.
-                    let op = data_as_f32(out);
-                    let up = data_as_f32_const(updates);
-                    *op.add(out_linear) += *up.add(linear as usize);
+                    // Native two's complement, matching RT-4 F1's write side.
+                    // The previous arm added through an f32 view, which is a
+                    // wrong decode of native int32 bytes; it survived only
+                    // because small non-negative ints land in the denormal
+                    // range where bit patterns add roughly linearly.
+                    // `wrapping_add` mirrors the I64 arm above.
+                    let op = i32::data_ptr_unchecked(out);
+                    let up = i32::data_ptr_unchecked(updates as *mut chelis_tensor);
+                    *op.add(out_linear) =
+                        (*op.add(out_linear)).wrapping_add(*up.add(linear as usize));
                 }
                 RuntimeDType::Bool => {
                     runtime_fail!("scatter add-mode is undefined for bool tensors");
@@ -2941,10 +2960,24 @@ pub unsafe extern "C" fn chelis_tensor_where(
         }
     }
     match cond_dtype {
-        RuntimeDType::F32 | RuntimeDType::I32 | RuntimeDType::Bool => {
+        // Bool storage is f32-encoded (`CRuntime-BoolStorage-F1`), so it
+        // shares the f32 view with F32 until that migration lands.
+        RuntimeDType::F32 | RuntimeDType::Bool => {
             let p = data_as_f32_const(cond);
             where_copy(out, then_tensor, else_tensor, elem_size, size, |i| {
                 *p.add(i) != 0.0
+            });
+        }
+        // Native two's complement. Reading it through the f32 view gave the
+        // right answer for almost every value, which is what made it hard to
+        // see: a nonzero bit pattern is a nonzero float. The exception is
+        // `i32::MIN`, whose pattern `0x80000000` is `-0.0` as f32, and
+        // `-0.0 != 0.0` is false under IEEE-754 — so a condition of `i32::MIN`
+        // selected the else branch.
+        RuntimeDType::I32 => {
+            let p = i32::data_ptr_unchecked(cond as *mut chelis_tensor);
+            where_copy(out, then_tensor, else_tensor, elem_size, size, |i| {
+                *p.add(i) != 0
             });
         }
         RuntimeDType::F64 => {
@@ -3913,7 +3946,17 @@ unsafe fn tensor_to_string(t: *const chelis_tensor) -> String {
             let p = i64::data_ptr_unchecked(tm);
             Box::new(move |i| *p.add(i) as f64)
         }
-        RuntimeDType::I32 | RuntimeDType::Bool => {
+        // Native two's complement. The previous shared arm read int32 bytes
+        // through an f32 view, so every value came back as a denormal rather
+        // than the integer: `5i32` is `0x00000005`, which as f32 is about
+        // 7e-45, not 5.0. Unlike the sibling sites this was wrong for the
+        // whole domain, not only at an edge case.
+        RuntimeDType::I32 => {
+            let p = i32::data_ptr_unchecked(tm);
+            Box::new(move |i| *p.add(i) as f64)
+        }
+        // Bool storage really is f32-encoded until `CRuntime-BoolStorage-F1`.
+        RuntimeDType::Bool => {
             let p = data_as_f32_const(t);
             Box::new(move |i| *p.add(i) as f64)
         }
