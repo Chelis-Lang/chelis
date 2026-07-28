@@ -2126,7 +2126,7 @@ pub fn top_level_lowering_map_with_context(
 /// `type_is_never_lowerable`, which inspects the t-fn return type.
 fn ty_expr_to_deep(ty: &TensorType) -> Expr {
     use chelis_deep::Span;
-    use chelis_deep::ast::{Atom, List, MetaMap};
+    use chelis_deep::ast::{Atom, MetaMap};
     let span = Span::new(0, 0);
     let prim = match ty.precision {
         chelis_types::types::Prim::F32 => "f32",
@@ -2150,29 +2150,24 @@ fn ty_expr_to_deep(ty: &TensorType) -> Expr {
         chelis_types::types::Prim::Bool => "bool",
         chelis_types::types::Prim::String => "string",
     };
-    let prim_node = Expr::List(
-        List {
-            elements: vec![
-                Expr::Atom(Atom::Symbol("t-prim".into()), span),
-                Expr::Map(MetaMap::default(), span),
-                Expr::Atom(Atom::Symbol(prim.into()), span),
-            ],
-        },
+    // Decode-once (chelis#731 Phase 3): this is a PROGRAMMATIC producer
+    // running in the lowerer, downstream of both `parser::stamp_tags` and
+    // the desugarer, so nothing upstream will stamp element 0 for it. It
+    // must therefore construct through the typed node constructor. Spelling
+    // these heads as `Atom::Symbol("t-prim")` put raw vocabulary strings
+    // into the in-memory tree, and the typed readers below (`list.tag()`)
+    // then took their untagged policy for them instead of the `TPrim` /
+    // `TTensor` arms.
+    let prim_node = Expr::node(
+        DeepTag::TPrim,
+        MetaMap::default(),
+        vec![Expr::Atom(Atom::Symbol(prim.into()), span)],
         span,
     );
     if ty.dims.is_empty() {
         prim_node
     } else {
-        Expr::List(
-            List {
-                elements: vec![
-                    Expr::Atom(Atom::Symbol("t-tensor".into()), span),
-                    Expr::Map(MetaMap::default(), span),
-                    prim_node,
-                ],
-            },
-            span,
-        )
+        Expr::node(DeepTag::TTensor, MetaMap::default(), vec![prim_node], span)
     }
 }
 
@@ -13747,6 +13742,48 @@ mod regression_tests {
             precision: Prim::F8e4m3,
         };
         let _ = ty_expr_to_deep(&ty);
+    }
+
+    /// rt-c2e7c23d F3: `ty_expr_to_deep` is a programmatic producer running
+    /// INSIDE the lowerer, downstream of both `parser::stamp_tags` and the
+    /// desugarer, so nothing upstream will stamp element 0 on its output. It
+    /// spelled `t-prim` / `t-tensor` as `Atom::Symbol`, which put raw
+    /// vocabulary strings back into the in-memory tree and made the typed
+    /// readers below take their untagged policy for these nodes.
+    ///
+    /// The standing decode-once invariant covers PARSED and DESUGARED trees
+    /// (`chelis-deep` and `chelis-surf`); this is the assertion that extends
+    /// it past the synthesis boundary, which is where the escape was.
+    #[test]
+    fn ty_expr_to_deep_carries_no_raw_vocabulary_tag_strings() {
+        for (ty, expected) in [
+            (
+                crate::dag::TensorType {
+                    dims: vec![],
+                    precision: Prim::F32,
+                },
+                DeepTag::TPrim,
+            ),
+            (
+                crate::dag::TensorType {
+                    dims: vec![DimInfo::Lit(4)],
+                    precision: Prim::Int64,
+                },
+                DeepTag::TTensor,
+            ),
+        ] {
+            let expr = ty_expr_to_deep(&ty);
+            assert_eq!(
+                chelis_deep::validate::find_raw_vocabulary_tag(std::slice::from_ref(&expr)),
+                None,
+                "a synthesized type node must not carry a raw vocabulary tag string"
+            );
+            assert_eq!(
+                expr.tag(),
+                Some(expected),
+                "the typed readers must see the decoded tag, not the untagged policy"
+            );
+        }
     }
 
     fn parse_and_lower(src: &str) -> Dag {

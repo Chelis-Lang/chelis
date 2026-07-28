@@ -6972,48 +6972,79 @@ fn annotated_meta_map_with_override(
 }
 
 fn should_attach_type_metadata(tag: DeepTag) -> bool {
-    !matches!(
-        tag,
+    // chelis#731 Phase 3 / rt-c2e7c23d F5: a TOTAL match, not `!matches!(..)`.
+    // As a negated match this policy silently answered `true` for any tag
+    // added later, so the `Scratch63` mutation oracle could not reach it: a
+    // new variant inherited metadata-eligibility instead of forcing a
+    // decision. Exhaustive here means a new tag is a compile error at this
+    // policy too, not only at the dispatch sites.
+    match tag {
+        // Structural, binding, pattern, type and dimension syntax: these
+        // carry no inferred expression type, so no metadata is attached.
         DeepTag::Module
-            | DeepTag::Import
-            | DeepTag::ImportAll
-            | DeepTag::Export
-            | DeepTag::Let
-            | DeepTag::Fn
-            | DeepTag::Var
-            | DeepTag::Tuple
-            | DeepTag::TupleGet
-            | DeepTag::Defsig
-            | DeepTag::Deftype
-            | DeepTag::Typealias
-            | DeepTag::Variant
-            | DeepTag::Field
-            | DeepTag::Defdim
-            | DeepTag::Params
-            | DeepTag::Bind
-            | DeepTag::Kv
-            | DeepTag::Arm
-            | DeepTag::Effects
-            | DeepTag::Resource
-            | DeepTag::PatVar
-            | DeepTag::PatLit
-            | DeepTag::PatCtor
-            | DeepTag::PatTuple
-            | DeepTag::PatRecord
-            | DeepTag::PatWild
-            | DeepTag::PatAs
-            | DeepTag::TPrim
-            | DeepTag::TFn
-            | DeepTag::TTensor
-            | DeepTag::TAdt
-            | DeepTag::TVar
-            | DeepTag::TRef
-            | DeepTag::TUnit
-            | DeepTag::TTuple
-            | DeepTag::DName
-            | DeepTag::DVar
-            | DeepTag::DLit
-    )
+        | DeepTag::Import
+        | DeepTag::ImportAll
+        | DeepTag::Export
+        | DeepTag::Let
+        | DeepTag::Fn
+        | DeepTag::Var
+        | DeepTag::Tuple
+        | DeepTag::TupleGet
+        | DeepTag::Defsig
+        | DeepTag::Deftype
+        | DeepTag::Typealias
+        | DeepTag::Variant
+        | DeepTag::Field
+        | DeepTag::Defdim
+        | DeepTag::Params
+        | DeepTag::Bind
+        | DeepTag::Kv
+        | DeepTag::Arm
+        | DeepTag::Effects
+        | DeepTag::Resource
+        | DeepTag::PatVar
+        | DeepTag::PatLit
+        | DeepTag::PatCtor
+        | DeepTag::PatTuple
+        | DeepTag::PatRecord
+        | DeepTag::PatWild
+        | DeepTag::PatAs
+        | DeepTag::TPrim
+        | DeepTag::TFn
+        | DeepTag::TTensor
+        | DeepTag::TAdt
+        | DeepTag::TVar
+        | DeepTag::TRef
+        | DeepTag::TUnit
+        | DeepTag::TTuple
+        | DeepTag::DName
+        | DeepTag::DVar
+        | DeepTag::DLit => false,
+        // Expression-bearing forms: these own a type and receive the stamp.
+        DeepTag::Def
+        | DeepTag::App
+        | DeepTag::Match
+        | DeepTag::If
+        | DeepTag::Lit
+        | DeepTag::Record
+        | DeepTag::Access
+        | DeepTag::Pipe
+        | DeepTag::Block
+        | DeepTag::RecordUpdate
+        | DeepTag::Par
+        | DeepTag::HandleEffect
+        | DeepTag::Borrow
+        | DeepTag::DRank
+        | DeepTag::Grad
+        | DeepTag::Vmap
+        | DeepTag::Jit
+        | DeepTag::Realize
+        | DeepTag::Cast
+        | DeepTag::Copy
+        | DeepTag::Quote
+        | DeepTag::Unquote
+        | DeepTag::Splice => true,
+    }
 }
 
 fn type_to_deep_expr(ty: &Type) -> deep::Expr {
