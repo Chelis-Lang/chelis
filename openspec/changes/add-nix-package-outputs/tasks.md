@@ -76,7 +76,7 @@ Each job runs the complete flake check set on its named system.
 
 - [x] 7.1 Run Nix formatting checks for every tracked Nix file.
 - [x] 7.2 Run `nix flake show` and verify the exact public output inventory.
-- [ ] 7.3 Run the complete native flake check set on `x86_64-linux`.
+- [x] 7.3 Run the complete native flake check set on `x86_64-linux`.
 - [x] 7.4 Run the complete native flake check set on `aarch64-darwin`.
 - [x] 7.5 Verify that both native builds run without network access in their build sandboxes.
 - [x] 7.6 Compare the toolchain and runtime paths with `.github/workflows/release.yml`.
