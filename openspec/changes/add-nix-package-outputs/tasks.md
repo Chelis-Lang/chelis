@@ -97,7 +97,7 @@ Each job runs the complete flake check set on its named system.
 
 ## 9. Record acceptance evidence
 
-- [ ] 9.1 Record all flake input revisions and package versions.
-- [ ] 9.2 Record the closure paths and package contents for both supported systems.
+- [x] 9.1 Record all flake input revisions and package versions.
+- [x] 9.2 Record the closure paths and package contents for both supported systems.
 - [ ] 9.3 Record both native CI job results and durations.
-- [ ] 9.4 Record the fresh red-team result and each accepted correction.
+- [x] 9.4 Record the fresh red-team result and each accepted correction.
