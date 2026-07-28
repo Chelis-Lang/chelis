@@ -143,6 +143,99 @@ unsafe impl TensorElement for i64 {
     const DTYPE: RuntimeDType = RuntimeDType::I64;
 }
 
+/// One byte of boolean tensor storage: `0` is false, `1` is true.
+///
+/// # Why a newtype rather than `bool`
+///
+/// Rust's `bool` has a validity invariant — only `0x00` and `0x01` are valid
+/// bit patterns, and producing a `bool` from any other byte is undefined
+/// behaviour. [`TensorElement::data_ptr`] hands out a `*mut Self` onto a
+/// buffer this runtime does not always fully initialise, so
+/// `impl TensorElement for bool` would make a single stale byte instant UB.
+/// Every byte value inhabits `Bool8`, so the same access is defined, and the
+/// narrowing to `bool` is explicit and total.
+///
+/// # Why not `u8`
+///
+/// `Bool8` and `i8` share a width and are not interchangeable, exactly as
+/// [`chelis_vocab::Repr::Bool8`] and `Repr::TwosComplement8` are distinct
+/// despite both being one byte. Keeping them distinct at the element type is
+/// what stops bool storage and int8 storage being cross-wired; a bare `u8`
+/// would silently permit it.
+///
+/// # TensorElement impl is deliberately absent
+///
+/// [`TensorElement`]'s safety contract requires that `DTYPE` name the byte
+/// layout `chelis_alloc` actually uses. `chelis_alloc` sizes `CHELIS_BOOL`
+/// from [`chelis_vocab::RuntimeDType::byte_width`], which is 4 today because
+/// bool is still carried as an f32 payload (`CRuntime-BoolStorage-F1`).
+/// Implementing the trait now would assert a layout the allocator does not
+/// provide — an unsound impl, and one whose `data_ptr` would walk a 1-byte
+/// stride over a 4-byte-per-element buffer.
+///
+/// The impl lands in the same change that flips `Repr` for bool, because the
+/// storage width and the typed access have to move together. That the trait's
+/// own contract forbids landing it early is the trait working as designed.
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Bool8(u8);
+
+impl Bool8 {
+    pub const FALSE: Self = Self(0);
+    pub const TRUE: Self = Self(1);
+
+    #[inline]
+    #[must_use]
+    pub const fn new(value: bool) -> Self {
+        if value {
+            Self::TRUE
+        } else {
+            Self::FALSE
+        }
+    }
+
+    /// Total by construction: any non-zero byte reads as true.
+    ///
+    /// The canonical encoding is `{0, 1}` and every producer owes that, but
+    /// defining the read for all 256 values means a producer that breaks the
+    /// invariant yields a wrong answer rather than undefined behaviour. That
+    /// is the whole reason this type exists instead of `bool`.
+    #[inline]
+    #[must_use]
+    pub const fn get(self) -> bool {
+        self.0 != 0
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn to_byte(self) -> u8 {
+        self.0
+    }
+
+    /// Reinterprets a raw storage byte. Non-canonical values are preserved
+    /// rather than normalised, so a caller inspecting storage sees what is
+    /// actually there.
+    #[inline]
+    #[must_use]
+    pub const fn from_byte(byte: u8) -> Self {
+        Self(byte)
+    }
+}
+
+impl From<bool> for Bool8 {
+    #[inline]
+    fn from(value: bool) -> Self {
+        Self::new(value)
+    }
+}
+
+impl From<Bool8> for bool {
+    #[inline]
+    fn from(value: Bool8) -> Self {
+        value.get()
+    }
+}
+
 /// Typed access to a tensor whose runtime storage is f32-encoded
 /// regardless of the dtype tag.  Returns the buffer typed as
 /// `*mut f32`.
