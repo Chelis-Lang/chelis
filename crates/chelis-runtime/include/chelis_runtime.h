@@ -498,7 +498,6 @@ static inline int chelis_is_contiguous(const chelis_tensor *t) {
 }
 
 chelis_tensor *chelis_contiguous(const chelis_tensor *t);
-void chelis_print_f32(const chelis_tensor *t);
 
 /* chelis#732 Phase 2 (faithful_observation.md section C3.3): THE float
  * formatting routine for every compiled-lane exit. `value` is the exact

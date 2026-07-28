@@ -3757,10 +3757,17 @@ pub unsafe extern "C" fn chelis_contiguous(t: *const chelis_tensor) -> *mut chel
     out
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn chelis_print_f32(t: *const chelis_tensor) {
-    write_stdout(&tensor_to_string(t));
-}
+// `chelis_print_f32` was removed at chelis#732 Phase 2: a public
+// `#[no_mangle]` tensor print with ZERO emitters anywhere in
+// `chelis-backend-c` or `chelis-ir`, so no compiled program could reach
+// it. It was neither dead-and-removable nor a supported extern surface
+// owed exit coverage, which is exactly how the int32 misdecode above
+// stayed invisible - an exit the census never had to account for because
+// nothing called it. Removing it shrinks the observation surface to the
+// exits that are actually reachable. C ABI note: the declaration leaves
+// `chelis_runtime.h` in the same release cut as chelis#894's
+// `chelis_fill_bool_bits` -> `chelis_fill_bool` rename, so shells absorb
+// one header delta at 0.18 rather than two.
 
 unsafe fn list_to_string(list: *const chelis_list) -> String {
     let mut out = String::from("[");
@@ -3844,25 +3851,34 @@ unsafe fn tensor_elem_to_string(t: *const chelis_tensor, dtype: RuntimeDType, i:
             format_shortest(v, RuntimeDType::F64)
         }
         RuntimeDType::I64 => (*i64::data_ptr_unchecked(tm).add(i)).to_string(),
-        RuntimeDType::I32 => {
-            // f32-encoded storage at this site. An integral value prints
-            // as the exact integer; a slot whose stored bits fall outside
-            // the tag's value set renders the stored value faithfully
-            // (spec/05 section 8.1: tag-vs-bits disagreements print the
-            // bits, never a truncated lie).
-            let raw = f64::from(*data_as_f32_const(t).add(i));
-            if raw.fract() == 0.0 && raw.is_finite() {
-                (raw as i64).to_string()
-            } else {
-                format_shortest(raw, RuntimeDType::F64)
-            }
-        }
+        // NATIVE two's-complement storage, decoded through the typed
+        // accessor. `to_tensor` and `chelis_scalar_tensor_from_i64` both
+        // write through `(int32_t*)`, and `chelis_list_from_tensor` /
+        // `read_index_slot` both decode that way; reading it through the
+        // f32 view rendered `5i32` as 7.006492321624085e-45, `i32::MAX`
+        // as NaN, and `i32::MIN` as a plausible-looking `0`, while
+        // `to_list` of the SAME tensor returned the right integers - a
+        // section C2.2 intra-lane exit split and a section C2.3 cross-lane
+        // divergence on identical stored bits. No tag-vs-bits branch
+        // belongs here (spec/05 section 8.1): every 32-bit pattern IS a
+        // valid int32, so the "outside the tag's value set" case the old
+        // arm hedged for cannot arise. chelis#894 carries the eight
+        // sibling misdecodes and makes REPRESENTATION (not width) the ABI
+        // primitive; chelis#893 seals the `data` pointer that lets any
+        // site pick its own view.
+        RuntimeDType::I32 => (*i32::data_ptr_unchecked(tm).add(i)).to_string(),
         RuntimeDType::Bool => {
+            // Bool IS f32-encoded today - `read_index_slot` keeps
+            // `F32 | Bool` on the same view, so this half of the old
+            // shared comment was correct. chelis#894 migrates bool to a
+            // native byte (`Repr::Bool8`); this arm moves WITH that
+            // change, never before it, because a 1-byte read against
+            // 4-byte writers is a misdecode in the other direction.
             let raw = *data_as_f32_const(t).add(i);
             if raw != 0.0 { "true" } else { "false" }.to_string()
         }
-        RuntimeDType::I16 => (*((*t).data as *const i16).add(i)).to_string(),
-        RuntimeDType::I8 => (*((*t).data as *const i8).add(i)).to_string(),
+        RuntimeDType::I16 => (*i16::data_ptr_unchecked(tm).add(i)).to_string(),
+        RuntimeDType::I8 => (*i8::data_ptr_unchecked(tm).add(i)).to_string(),
         // chelis#732 Phase 2 (chelis#749's f16-as-f32 shape): read the
         // 2-byte storage and format at the value's own width.
         RuntimeDType::Bf16 => {

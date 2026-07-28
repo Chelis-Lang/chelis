@@ -175,6 +175,59 @@ CROSS_LANE_CORPUS_FLOOR: tuple[str, ...] = (
     "rank0-reduction-root",
 )
 
+RUNTIME_SOURCE = Path("crates/chelis-runtime/src/lib.rs")
+RUNTIME_HEADER = Path("crates/chelis-runtime/include/chelis_runtime.h")
+
+# The observation lane's DECODE table: which pointer view each dtype's
+# element arm in `tensor_elem_to_string` is allowed to read through.
+#
+# chelis#732 Phase 2 made FORMATTING canonical (one `format_element`, the
+# C side generated from it) and left DECODING - `bits <- read(bytes,
+# dtype)` - as hand-written arms. That is how a native two's-complement
+# int32 buffer came to be read through an f32 view at this exit while
+# `to_list` and the generated print helper read it correctly: one
+# formatter, N decoders. `format_element(prim, ElementRef)` and
+# `chelis_format_shortest(value, width_kind, buf)` both receive an
+# ALREADY-DECODED element, so neither can catch it.
+#
+# The durable fix is chelis#893 (seal `chelis_tensor.data` so no site can
+# choose its own view, then type the forced accessor) with chelis#894's
+# `Repr` making representation rather than WIDTH the ABI primitive -
+# width does not determine representation (`Ieee754Binary32` and
+# `TwosComplement32` are both 4 bytes and not interchangeable). Until the
+# pointer is sealed, this table is the observation lane's local guard:
+# every arm's decode is declared, so a view change is a deliberate edit
+# here rather than a silent misread.
+OBSERVATION_DECODE_TABLE: tuple[tuple[str, str, str], ...] = (
+    ("F32", "f32::data_ptr_unchecked", "typed accessor"),
+    ("F64", "f64::data_ptr_unchecked", "typed accessor"),
+    ("I64", "i64::data_ptr_unchecked", "typed accessor"),
+    ("I32", "i32::data_ptr_unchecked", "typed accessor"),
+    ("I16", "i16::data_ptr_unchecked", "typed accessor"),
+    ("I8", "i8::data_ptr_unchecked", "typed accessor"),
+    (
+        "Bool",
+        "data_as_f32_const",
+        "DECLARED EXCEPTION: bool storage IS f32-encoded today "
+        "(`read_index_slot` keeps `F32 | Bool` on the same view). "
+        "chelis#894 migrates it to `Repr::Bool8`; this arm moves WITH "
+        "that change - a 1-byte read against 4-byte writers is a "
+        "misdecode in the other direction",
+    ),
+    (
+        "Bf16",
+        "*const u16",
+        "raw 2-byte bit read: `half::bf16` has no `TensorElement` impl, "
+        "so the bits are decoded explicitly via `from_bits`",
+    ),
+    (
+        "F16",
+        "*const u16",
+        "raw 2-byte bit read: `half::f16` has no `TensorElement` impl, "
+        "so the bits are decoded explicitly via `from_bits`",
+    ),
+)
+
 # Obligation 7: the only permitted c-format-narrowing allowlist row. The
 # two production rows (host_emit.rs = 4, chelis-runtime lib.rs = 1) were
 # deleted at Phase 2 as the Phase 0 handoff promised.
@@ -414,6 +467,86 @@ def cross_lane_corpus_violations(source: str) -> list[str]:
     return []
 
 
+def observation_decode_arms(source: str) -> dict[str, str] | None:
+    """Map each dtype arm of `tensor_elem_to_string` to its arm body."""
+
+    match = re.search(
+        r"unsafe fn tensor_elem_to_string\([^)]*\)[^{]*\{(.*?)\n\}", source, re.S
+    )
+    if match is None:
+        return None
+    body = match.group(1)
+    arms: dict[str, str] = {}
+    starts = [(m.group(1), m.start()) for m in re.finditer(r"RuntimeDType::(\w+) =>", body)]
+    for index, (name, start) in enumerate(starts):
+        end = starts[index + 1][1] if index + 1 < len(starts) else len(body)
+        arms[name] = body[start:end]
+    return arms
+
+
+def observation_decode_violations(source: str) -> list[str]:
+    arms = observation_decode_arms(source)
+    if arms is None:
+        return [
+            "tensor_elem_to_string: not found in the runtime; the observation "
+            "decode table cannot be checked."
+        ]
+    violations: list[str] = []
+    declared = {name for name, _, _ in OBSERVATION_DECODE_TABLE}
+    for name in sorted(set(arms) - declared):
+        violations.append(
+            f"tensor_elem_to_string: dtype arm {name} has no row in "
+            "OBSERVATION_DECODE_TABLE. Every observation decode is declared - "
+            "add the row naming the pointer view and why."
+        )
+    for name, expected, why in OBSERVATION_DECODE_TABLE:
+        arm = arms.get(name)
+        if arm is None:
+            violations.append(
+                f"tensor_elem_to_string: declared dtype arm {name} is missing "
+                "from the match."
+            )
+            continue
+        if expected not in arm:
+            violations.append(
+                f"tensor_elem_to_string: the {name} arm no longer decodes "
+                f"through `{expected}` ({why}). A changed pointer view at an "
+                "observation exit is a misdecode until proven otherwise - this "
+                "is the chelis#894 int32 shape, where native storage was read "
+                "through an f32 view while sibling exits read it correctly."
+            )
+    # The f32 view is the exact mechanism of the int32 defect class; only
+    # the declared exception may reach for it.
+    for name, arm in arms.items():
+        if "data_as_f32_const" in arm and name != "Bool":
+            violations.append(
+                f"tensor_elem_to_string: the {name} arm reaches for the "
+                "untyped f32 view. Only the declared Bool exception may, and "
+                "only until chelis#894's `Repr::Bool8` migration."
+            )
+    return violations
+
+
+def dead_export_violations(source: str, header: str) -> list[str]:
+    """`chelis_print_f32` was a zero-emitter public tensor print (removed)."""
+
+    violations: list[str] = []
+    if "fn chelis_print_f32" in source:
+        violations.append(
+            "chelis-runtime: `chelis_print_f32` is back. It was a public "
+            "`#[no_mangle]` tensor print with zero emitters - an observation "
+            "exit no program could reach, which is how its int32 misdecode "
+            "stayed uncensused. A public exit owes exit coverage or does not "
+            "exist."
+        )
+    if "chelis_print_f32" in header:
+        violations.append(
+            "chelis_runtime.h: the `chelis_print_f32` declaration is back; the "
+            "published C ABI must not re-export it."
+        )
+    return violations
+
+
 def format_narrowing_allowlist(source: str) -> list[tuple[str, int]]:
     rows = re.findall(
         r"Pat::CFormatNarrowing\s*,\s*\"([^\"]+)\"\s*,\s*(\d+)\s*,",
@@ -485,6 +618,8 @@ def read_sources() -> dict[Path, str]:
         NARROW_MATRIX_SOURCE,
         REDUCTION_MATRIX_SOURCE,
         TRIPWIRE_SOURCE,
+        RUNTIME_SOURCE,
+        RUNTIME_HEADER,
     ):
         try:
             sources[relative] = (REPO_ROOT / relative).read_text(encoding="utf-8")
@@ -500,6 +635,10 @@ def run_structural_scan(sources: dict[Path, str]) -> None:
     violations.extend(ledger_violations(sources[HARNESS_SOURCE], KNOWN_RED_CELLS))
     violations.extend(exclusion_violations(sources[HARNESS_SOURCE]))
     violations.extend(cross_lane_corpus_violations(sources[HARNESS_SOURCE]))
+    violations.extend(observation_decode_violations(sources[RUNTIME_SOURCE]))
+    violations.extend(
+        dead_export_violations(sources[RUNTIME_SOURCE], sources[RUNTIME_HEADER])
+    )
     violations.extend(format_narrowing_violations(sources[TRIPWIRE_SOURCE]))
     if violations:
         raise OracleFailure("structural scan failed:\n" + "\n".join(violations))
@@ -507,7 +646,9 @@ def run_structural_scan(sources: dict[Path, str]) -> None:
         "+ structural scan: un-ignored oracle rows present, interim locks "
         f"retired, {len(KNOWN_RED_CELLS)} known-red cells declared and cited, "
         "corpus exclusions unchanged, the §C2.3 cross-lane corpus floor "
-        f"({len(CROSS_LANE_CORPUS_FLOOR)} programs) intact, production "
+        f"({len(CROSS_LANE_CORPUS_FLOOR)} programs) intact, all "
+        f"{len(OBSERVATION_DECODE_TABLE)} observation decode arms on their "
+        "declared pointer views, no zero-emitter public exit, production "
         "format-narrowing allowlist empty",
         flush=True,
     )

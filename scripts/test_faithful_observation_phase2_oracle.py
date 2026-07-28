@@ -257,6 +257,77 @@ class CrossLaneCorpusTests(unittest.TestCase):
         )
 
 
+class ObservationDecodeTableTests(unittest.TestCase):
+    def _runtime(self) -> str:
+        return (oracle.REPO_ROOT / oracle.RUNTIME_SOURCE).read_text(encoding="utf-8")
+
+    def test_the_shipped_arms_match_the_declared_decode_table(self) -> None:
+        self.assertEqual(oracle.observation_decode_violations(self._runtime()), [])
+
+    def test_every_runtime_dtype_arm_is_declared(self) -> None:
+        arms = oracle.observation_decode_arms(self._runtime())
+        self.assertIsNotNone(arms)
+        assert arms is not None
+        declared = {name for name, _, _ in oracle.OBSERVATION_DECODE_TABLE}
+        self.assertEqual(set(arms), declared)
+
+    def test_an_int_arm_on_the_f32_view_is_a_violation(self) -> None:
+        source = self._runtime().replace(
+            "RuntimeDType::I32 => (*i32::data_ptr_unchecked(tm).add(i)).to_string(),",
+            "RuntimeDType::I32 => (*data_as_f32_const(t).add(i) as i64).to_string(),",
+            1,
+        )
+        violations = oracle.observation_decode_violations(source)
+        self.assertTrue(any("I32" in v for v in violations), violations)
+        self.assertTrue(
+            any("untyped f32 view" in v for v in violations),
+            "the f32 view is the defect mechanism and must be named",
+        )
+
+    def test_a_swapped_typed_accessor_is_a_violation(self) -> None:
+        source = self._runtime().replace(
+            "RuntimeDType::I16 => (*i16::data_ptr_unchecked(tm).add(i)).to_string(),",
+            "RuntimeDType::I16 => (*i32::data_ptr_unchecked(tm).add(i)).to_string(),",
+            1,
+        )
+        violations = oracle.observation_decode_violations(source)
+        self.assertTrue(any("I16" in v for v in violations), violations)
+
+    def test_bool_is_the_only_declared_f32_view_exception(self) -> None:
+        exceptions = [
+            name
+            for name, view, _ in oracle.OBSERVATION_DECODE_TABLE
+            if view == "data_as_f32_const"
+        ]
+        self.assertEqual(exceptions, ["Bool"])
+        why = next(
+            why
+            for name, _, why in oracle.OBSERVATION_DECODE_TABLE
+            if name == "Bool"
+        )
+        self.assertIn("chelis#894", why, "the exception must name its retirement")
+
+    def test_a_deleted_decoder_is_a_violation(self) -> None:
+        violations = oracle.observation_decode_violations("fn unrelated() {}\n")
+        self.assertTrue(any("cannot be checked" in v for v in violations), violations)
+
+
+class DeadExportTests(unittest.TestCase):
+    def test_the_shipped_tree_has_no_zero_emitter_print_export(self) -> None:
+        source = (oracle.REPO_ROOT / oracle.RUNTIME_SOURCE).read_text(encoding="utf-8")
+        header = (oracle.REPO_ROOT / oracle.RUNTIME_HEADER).read_text(encoding="utf-8")
+        self.assertEqual(oracle.dead_export_violations(source, header), [])
+
+    def test_a_returning_export_is_a_violation_in_both_surfaces(self) -> None:
+        violations = oracle.dead_export_violations(
+            "pub unsafe extern \"C\" fn chelis_print_f32(t: *const chelis_tensor) {}\n",
+            "void chelis_print_f32(const chelis_tensor *t);\n",
+        )
+        self.assertEqual(len(violations), 2, violations)
+        self.assertTrue(any("zero emitters" in v for v in violations), violations)
+        self.assertTrue(any("published C ABI" in v for v in violations), violations)
+
+
 class FormatNarrowingTests(unittest.TestCase):
     def test_the_shipped_production_allowlist_is_empty(self) -> None:
         source = (oracle.REPO_ROOT / oracle.TRIPWIRE_SOURCE).read_text(encoding="utf-8")

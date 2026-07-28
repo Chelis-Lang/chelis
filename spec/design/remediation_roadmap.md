@@ -363,7 +363,14 @@ Migration-note stubs (the breaking delta per cut):
 - **0.18** (mechanical) - "pin bump only: more previously-silent errors are
   caught (bogus casts, non-record field access, malformed host types) but on
   already-broken code; compiled and eval output now render byte-identically; the
-  runtime tarball gains `chelis_runtime_dtype.h`."
+  runtime tarball gains `chelis_runtime_dtype.h`. The public runtime header
+  also changes shape once: it drops the unused `chelis_print_f32` export
+  ([#732] Phase 2 - a tensor print with no emitter in any backend) and renames
+  `chelis_fill_bool_bits(t, uint32_t)` to `chelis_fill_bool(t, uint8_t)`
+  ([#894]'s native-byte bool storage, where an IEEE binary32 pattern no longer
+  describes anything the buffer holds). Both are C-ABI deltas and ride this one
+  cut deliberately, so a shell linking the runtime directly adapts its header
+  usage once rather than across two bumps."
 - **0.19** (source migration) - "dtype semantics are grounded: integer overflow
   traps instead of wrapping, per-dtype tensor storage (wire-format v2, Python
   payload shape changed), narrow dtypes preserved end-to-end; every op x dtype
@@ -633,3 +640,4 @@ formal target, per its §C1.5) and [#730] makes unknown KINDS loud;
 [#899]: https://github.com/Chelis-Lang/chelis/issues/899
 [#908]: https://github.com/Chelis-Lang/chelis/issues/908
 [#909]: https://github.com/Chelis-Lang/chelis/issues/909
+[#894]: https://github.com/Chelis-Lang/chelis/pull/894

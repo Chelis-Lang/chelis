@@ -2086,6 +2086,77 @@ fn c_nested_tensor_in_list_renders_int64_faithfully() {
     );
 }
 
+/// The int32 face of the same nested-in-list exit (census row C4). The
+/// runtime's element decoder read NATIVE int32 storage through the f32
+/// view, so this exit rendered `5i32` as `7.006492321624085e-45`,
+/// `i32::MAX` (`0x7FFFFFFF`, a NaN pattern) as `NaN`, and `i32::MIN`
+/// (`0x80000000`, `-0.0`) as a plausible-looking `0` - while `to_list`
+/// and the generated print helper, which both decode natively, returned
+/// the right integers from the SAME tensor. That is §C2.2 (intra-lane
+/// exit agreement) and §C2.3 (cross-lane byte identity, since eval was
+/// correct) failing together.
+///
+/// The cell hid because the harness's int32 rows are driven by
+/// `c_int_tensor_exits_round_trip`, which exercises the GENERATED print
+/// helper; `tensor_to_string` is a different exit, reached only through
+/// the nested-value renderer (int64-only coverage until now) and through
+/// the now-removed zero-emitter `chelis_print_f32`. A Phase 0 census gap
+/// against its own deliverable, not a misread oracle - and the shape the
+/// known-red ledger cannot catch, because the ledger polices DECLARED
+/// skips, never exits nobody censused.
+///
+/// `i32::MIN` is the row that matters most: NaN screams, `0` does not.
+#[test]
+fn c_nested_int32_tensor_in_list_decodes_natively() {
+    if !c_toolchain_available() {
+        panic!("needs a host C toolchain");
+    }
+    let program = "module M.Main\n\
+         def mk() -> tensor[3, int32] = to_tensor([cast(5, int32), \
+         cast(2147483647, int32), cast(-2147483648, int32)])\n\
+         nested = print([mk()])\n\
+         listed = print(to_list(mk()))\n";
+    let out = c_stdout(program, "obs_i32_nested").expect("C lane");
+    let nested = out
+        .lines()
+        .find(|l| l.contains("tensor(shape="))
+        .unwrap_or_else(|| panic!("no nested tensor render in:\n{out}"));
+    assert_eq!(
+        tensor_elems(nested),
+        ["5", "2147483647", "-2147483648"],
+        "the nested int32 render must decode native two's-complement \
+         storage ([05-OBS-2]); an f32 view yields 7.006492321624085e-45 / \
+         NaN / 0: {nested}"
+    );
+    // §C2.2: the sibling exit on the same stored bits must agree. Both
+    // renders are list lines, so select the `to_list` one by the absence
+    // of the nested tensor wrapper.
+    let listed = list_lines(&out)
+        .into_iter()
+        .find(|l| !l.contains("tensor(shape="))
+        .unwrap_or_else(|| panic!("no to_list render in:\n{out}"))
+        .to_string();
+    assert_eq!(
+        list_payload_elems(&listed),
+        ["5", "2147483647", "-2147483648"],
+        "to_list must agree with the nested render: {listed}"
+    );
+    // §C2.3: eval holds identical bits and must emit identical bytes.
+    let eval_out = eval_stdout(
+        "module M.Main\n\
+         def mk() -> tensor[3, int32] = to_tensor([cast(5, int32), \
+         cast(2147483647, int32), cast(-2147483648, int32)])\n\
+         nested = print([mk()])\n\
+         listed = print(to_list(mk()))\n",
+    )
+    .expect("eval");
+    assert_eq!(
+        eval_out, out,
+        "§C2.3: the nested int32 exit must be byte-identical across lanes:\n\
+         --- eval ---\n{eval_out}\n--- c ---\n{out}"
+    );
+}
+
 /// chelis#749's truncation half ([05-OBS-5]): a tensor nested inside a
 /// list truncates at 32 elements WITH the `, ...` marker (the pre-fix
 /// runtime renderer cut at 10 with no marker - a 33-element tensor was

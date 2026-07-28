@@ -260,6 +260,32 @@ For every dtype and every storable value:
    int64 path stays exact (it already is - the audit's proof instrument).
    NOTE the boundary: to_list VALUES leaving as list elements is an exit
    (ours); constructing tensors is ingress ([#729]'s).
+5. **The DECODE half of an exit is in scope** (added 2026-07-28, after
+   PR #863's review surfaced a live violation this architecture did not
+   cover). "Print exactly what is stored" is two steps -
+   `bits <- read(bytes, dtype)` then `text <- format(bits)` - and §C1-§C3
+   above govern only the second. `format_element(prim, ElementRef)` and
+   `chelis_format_shortest(value, width_kind, buf)` both receive an
+   ALREADY-DECODED element, so a canonical formatter cannot detect a
+   wrong-width read: the element arrives correct-looking and is rendered
+   faithfully. That is exactly how the compiled lane's nested-value
+   renderer came to decode NATIVE two's-complement int32 through an f32
+   view - rendering `5i32` as `7.006492321624085e-45` and `-2147483648`
+   as a plausible `0` - while `to_list` and the generated print helper,
+   reading the same buffer natively, returned the right integers.
+   Phase 2 made formatting canonical and left decoding as hand-written
+   arms: **one formatter, N decoders.**
+   The rule: an exit's decode must go through the dtype's own typed
+   accessor, never a view chosen at the call site. **Width is not
+   representation** - `Ieee754Binary32` and `TwosComplement32` are both
+   four bytes and are not interchangeable, so a width-keyed check is
+   blind to precisely this defect ([#894] makes `Repr` the ABI primitive
+   with width DERIVED from it). Ownership: the general mechanism is
+   [#893] (seal `chelis_tensor.data`, then type the forced accessor - in
+   that order), not this plan and not [#729], whose §C3 storage decision
+   is the same discipline one layer up. This plan owns the rule AT ITS
+   EXITS and enforces it with the Phase 2 oracle's declared decode
+   table, which fails on any arm whose pointer view drifts.
 
 ## C4. The tolerance table and the oracle handshake
 
@@ -327,6 +353,23 @@ For every dtype and every storable value:
 5. **Discoveries fork** (shared rule): new unfaithful exits found
    mid-phase are filed, added to the census in the tracking issue, and
    scheduled - not silently absorbed.
+6. **No untyped decode at an exit** (§C3.5's operational form). An exit
+   reads its bytes through the dtype's typed accessor; a raw cast that
+   picks a pointer view at the call site is the same review-blocking
+   finding as a third formatter, and for the same reason - it makes the
+   rendered text a faithful report of the wrong bits. A dtype whose
+   storage genuinely has no typed accessor (the halves) decodes its bits
+   explicitly, with the reason stated at the arm. Any exception is
+   DECLARED with the issue that retires it, in the Phase 2 oracle's
+   decode table - bool's f32 encoding is the only one today, and it
+   retires with [#894].
+7. **A public exit owes exit coverage, or does not exist.** A
+   `#[no_mangle]` render entry point with no emitter is not harmless
+   dead code: it is an exit the census never has to account for, so a
+   defect in it is invisible to a harness that drives only reachable
+   programs. `chelis_print_f32` was exactly that, and carried the §C3.5
+   misdecode for as long as it existed. Removed at Phase 2; the oracle
+   fails if it returns in either the Rust source or the published header.
 
 ## B3. How to pick up a phase
 
@@ -583,21 +626,29 @@ never as tolerance.
   eval's separable `Vec<f64>` plus `precision: Prim` fields ([#864],
   [#717]), and the wire's `Vec<f64>` tensor data plus lone `Float64`
   scalar variant ([#686]).
-  **What Phase 2 shipped is forward-compatible with that payload, by
-  construction**: every renderer here is ALREADY keyed by dtype -
-  `format_element(prim, ElementRef)` on the Rust side and
-  `chelis_format_shortest(value, width_kind, buf)` on the C side - so
-  the payload's arrival replaces two arguments with one at the CALL
-  sites and changes no rule in §C1, no byte of the grammar, and no
-  rendered output. The renderers are the consumer that makes the
-  payload worth having, not an obstacle to it. `chelis_format_shortest`'s
-  `(double, int)` pair is precisely the seam that payload closes: today
-  the pair is caller-supplied and the routine can only reject an invalid
-  dtype id, not prove the value is the exact widening of one stored at
-  that width. Hardening it (a tagged struct or per-width entry points,
-  plus `(buf, capacity)` and an explicit result) is the natural joint
-  moment with [#729]'s payload work, and is recorded here rather than
-  absorbed - this plan does not own the storage side of it.
+  **Phase 2's FORMATTING is forward-compatible with that payload by
+  construction; its DECODING was not, and that distinction matters**
+  (this bullet was corrected 2026-07-28 - an earlier revision claimed
+  compatibility for the renderers as a whole, which overstated it).
+  On the format side the claim holds: `format_element(prim, ElementRef)`
+  and `chelis_format_shortest(value, width_kind, buf)` are both already
+  keyed by dtype, so the payload's arrival replaces two arguments with
+  one at the CALL sites and changes no rule in §C1, no byte of the
+  grammar, and no rendered output.
+  But both take an ALREADY-DECODED element, so neither says anything
+  about whether the bytes were read at the right representation - and
+  the int32 misdecode PR #863's review found lived entirely upstream of
+  them (§C3.5). Two consequences worth stating plainly: the parameter
+  spelled `width_kind` carries a `RuntimeDType` id and is therefore
+  correct today, but its NAME encodes the width-thinking [#894]
+  disproves and should not be read as license; and `chelis_format_shortest`'s
+  `(double, int)` pair remains a seam the payload closes - the pair is
+  caller-supplied, and the routine can reject an invalid dtype id but
+  cannot prove the value is the exact widening of one stored at that
+  width. Hardening it (a tagged struct or per-width entry points, plus
+  `(buf, capacity)` and an explicit result) is the natural joint moment
+  with [#729]'s payload work and [#893]'s seal, recorded here rather
+  than absorbed - this plan does not own the storage side of it.
 - **With [#730]**: the `<value>` placeholder and the print helper's abort
   default are its census rows; the shared tripwire carries this plan's
   `%.16g`/`%.1f` pattern. No delivery overlap.
@@ -657,3 +708,5 @@ guaranteed to be a real value bug wearing its own name.
 [#865]: https://github.com/Chelis-Lang/chelis/issues/865
 [#864]: https://github.com/Chelis-Lang/chelis/issues/864
 [#862]: https://github.com/Chelis-Lang/chelis/issues/862
+[#893]: https://github.com/Chelis-Lang/chelis/issues/893
+[#894]: https://github.com/Chelis-Lang/chelis/issues/894
