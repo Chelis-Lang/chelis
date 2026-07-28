@@ -91,9 +91,12 @@ default-filter = '''
 path = "junit.xml"
 
 [profile.nightly]
-# The `Heavy E2E` workflow runs `cargo nextest run --profile nightly`. This
-# default-filter is exactly the set the `default`/`ci` profiles exclude, so
-# the two stay in lockstep: a test is on the per-PR gate XOR the nightly gate.
+# The `Heavy E2E` workflow runs `cargo nextest run --profile nightly`. Together
+# with `exhaustive` below, this covers exactly the set the `default`/`ci`
+# profiles exclude, so the profiles stay in lockstep: every non-ignored test is
+# on exactly one of the per-PR gate, the nightly gate, or the exhaustive gate.
+# `scripts/test_nextest_profile_partition.py` enforces that both as filter text
+# and as `cargo nextest list` set math.
 default-filter = '''
     binary_id(/^chelis-cli::stdlib_typecheck_cache_oracle$/)
     + binary_id(/^chelis-cli::stdlib_typecheck_cache_concurrency$/)

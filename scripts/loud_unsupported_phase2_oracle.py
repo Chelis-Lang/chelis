@@ -175,8 +175,12 @@ def mutate_runtime_dtype(source: str) -> str:
             "}",
         ),
         (
-            "    pub const ALL: [Self; 9] = [\n",
-            "    pub const ALL: [Self; 10] = [\n",
+            # Includes the first element because `Repr::ALL` is also
+            # `[Self; 9]`, so the declaration line alone is not unique to
+            # `RuntimeDType`. The count check below turns that into a loud
+            # failure rather than a mutation applied to the wrong enum.
+            "    pub const ALL: [Self; 9] = [\n        Self::F32,\n",
+            "    pub const ALL: [Self; 10] = [\n        Self::F32,\n",
         ),
         (
             "        Self::I16,\n    ];",
@@ -193,8 +197,12 @@ def mutate_runtime_dtype(source: str) -> str:
             '            Self::Phase2OracleDType => "CHELIS_PHASE2_ORACLE_DTYPE",\n',
         ),
         (
-            "            Self::I8 => 1,\n",
-            "            Self::I8 => 1,\n            Self::Phase2OracleDType => 4,\n",
+            # `byte_width` is derived from `repr()` rather than written per
+            # dtype, so a new dtype owes a representation, not a width. This
+            # anchored on `Self::I8 => 1,` in the old per-dtype width match.
+            "            Self::I8 => Repr::TwosComplement8,\n",
+            "            Self::I8 => Repr::TwosComplement8,\n"
+            "            Self::Phase2OracleDType => Repr::TwosComplement32,\n",
         ),
         (
             "            8 => Ok(Self::I16),\n",

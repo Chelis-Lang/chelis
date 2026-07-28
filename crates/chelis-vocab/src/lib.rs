@@ -238,8 +238,6 @@ impl RuntimeDType {
             Self::I16 => Repr::TwosComplement16,
             Self::I32 => Repr::TwosComplement32,
             Self::I64 => Repr::TwosComplement64,
-            // Not `Bool8`. The runtime stores bool as an f32 payload; see the
-            // variant's documentation.
             Self::Bool => Repr::Bool8,
         }
     }
