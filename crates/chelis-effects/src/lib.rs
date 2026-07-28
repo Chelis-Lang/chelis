@@ -959,30 +959,36 @@ fn validate_build_target_expr(expr: &Expr, target: &str, errors: &mut Vec<Effect
     }
 }
 
+/// Decode-once (chelis#731 Phase 3): both heads here are vocabulary tags
+/// (`DeepTag::Effects`, `DeepTag::Resource`), and this runs AFTER the parser
+/// and the desugarer, so nothing upstream will stamp them. Spelling them
+/// `symbol("effects")` / `symbol("resource")` put raw vocabulary strings back
+/// into the tree, and the typed readers that gate on
+/// `tag(list) == Some(DeepTag::Effects)` reject that form outright
+/// (`declared_effects_from_meta` above; `decompile_effect_suffix_from_type_expr`
+/// and `decompile_effect_set_expr` in chelis-surf).
+///
+/// `chelis_surf::desugar::desugar_effect_set` builds the SAME node shape and
+/// was migrated to the typed constructors; this is its post-check twin and
+/// now matches it exactly. The effect NAMES stay `Atom::Symbol` deliberately:
+/// `random`, `accum`, `io` and `test` are payload, not vocabulary tags.
 fn effect_set_expr(effects: &EffectSet) -> Expr {
-    let mut elements = vec![
-        symbol("effects"),
-        Expr::Map(MetaMap::default(), zero_span()),
-    ];
+    let mut children = Vec::new();
     for effect in effects.iter() {
-        elements.push(match effect {
+        children.push(match effect {
             Effect::Random => symbol("random"),
             Effect::Accum => symbol("accum"),
             Effect::Io => symbol("io"),
             Effect::Test => symbol("test"),
-            Effect::Resource(device) => Expr::List(
-                chelis_deep::ast::List {
-                    elements: vec![
-                        symbol("resource"),
-                        Expr::Map(MetaMap::default(), zero_span()),
-                        Expr::Atom(Atom::Str(device.clone()), zero_span()),
-                    ],
-                },
+            Effect::Resource(device) => Expr::node(
+                DeepTag::Resource,
+                MetaMap::default(),
+                vec![Expr::Atom(Atom::Str(device.clone()), zero_span())],
                 zero_span(),
             ),
         });
     }
-    Expr::List(chelis_deep::ast::List { elements }, zero_span())
+    Expr::node(DeepTag::Effects, MetaMap::default(), children, zero_span())
 }
 
 fn upsert_meta(meta: &mut MetaMap, key: &str, value: Expr) {
@@ -1687,5 +1693,67 @@ def entry(x: tensor[8, f32]) -> tensor[8, f32] =
 "#,
         );
         check_program(&checked).expect("handled-Random module-wrapped program must check clean");
+    }
+}
+
+#[cfg(test)]
+mod decode_once_producer_tests {
+    use super::*;
+
+    /// chelis#731 Phase 3, found by the #887 consumption-boundary probe:
+    /// `effect_set_expr` runs after the parser and the desugarer, so its
+    /// heads are never stamped upstream. It spelled them `symbol("effects")`
+    /// / `symbol("resource")`, which put raw vocabulary strings back into the
+    /// tree - the same class as `ty_expr_to_deep` (chelis-ir), and invisible
+    /// to the standing invariant because that is asserted on parsed and
+    /// desugared trees, not on post-check synthesis.
+    ///
+    /// Both polarities: no raw vocabulary tag anywhere in the produced tree,
+    /// AND the typed readers actually see the decoded tags.
+    #[test]
+    fn effect_set_expr_carries_no_raw_vocabulary_tag_strings() {
+        let mut effects = EffectSet::new();
+        effects.insert(Effect::Random);
+        effects.insert(Effect::Io);
+        effects.insert(Effect::Resource("gpu0".to_string()));
+
+        let expr = effect_set_expr(&effects);
+        assert_eq!(
+            chelis_deep::validate::find_raw_vocabulary_tag(std::slice::from_ref(&expr)),
+            None,
+            "a synthesized effect-set node must not carry a raw vocabulary tag string"
+        );
+        assert_eq!(
+            expr.tag(),
+            Some(DeepTag::Effects),
+            "the typed readers gate on `tag() == Some(DeepTag::Effects)`"
+        );
+
+        let Expr::List(list, _) = &expr else {
+            panic!("effect_set_expr produces a list");
+        };
+        let resource = children(list)
+            .iter()
+            .find(|child| child.tag() == Some(DeepTag::Resource))
+            .expect("the nested resource node must be stamped too");
+        assert_eq!(resource.tag(), Some(DeepTag::Resource));
+    }
+
+    /// Negative parity: the effect NAMES are payload, not vocabulary, and
+    /// must stay bare symbols. If they were ever stamped the readers below
+    /// (`symbol_name`) would stop resolving them.
+    #[test]
+    fn effect_names_stay_bare_symbols() {
+        let mut effects = EffectSet::new();
+        effects.insert(Effect::Random);
+        let expr = effect_set_expr(&effects);
+        let Expr::List(list, _) = &expr else {
+            panic!("effect_set_expr produces a list");
+        };
+        assert_eq!(
+            children(list).first().and_then(symbol_name),
+            Some("random"),
+            "effect names are payload and must remain readable as bare symbols"
+        );
     }
 }
