@@ -90,6 +90,49 @@ If a chapter has no complete transfer record, the numbered chapter remains contr
 
 If active documents disagree, correct the document that controls the subject. Do not add a third explanation.
 
+That ordering is for **project-level** questions: what Chelis is, what it is for, what
+the roadmap says. It is not the ordering for language semantics, and the canonical
+reference says so itself: "Language semantics still belong in the numbered spec
+documents."
+
+### Numbered Specs Decide; Design Docs Implement
+
+- **`spec/00-12*.md` is the authority on WHAT the language does and HOW it must
+  behave.** Any decision about semantics, types, dtypes, syntax, effects, op behavior,
+  diagnostics, or another user-visible contract belongs here. This is the only tier
+  that outlives the work that produced it.
+- **`spec/design/*.md` is the authority on how we IMPLEMENT and SEQUENCE those
+  decisions**: phase plans, oracles, module layout, privacy contracts, migration
+  order, consumer maps, evidence. A design doc may elaborate a numbered-spec rule and
+  should record the reasoning behind it, but it does not get to decide one.
+- **Where the two disagree, the numbered spec wins and the design doc has a bug.** Say
+  so in the doc when you find it rather than reconciling silently in code.
+
+**Why this matters, with a measured instance.** A design doc is a working artifact: it
+is read constantly while its phases are in flight and stops being read the moment they
+ship. A decision parked in one does not survive the work that made it. In 2026-07 that
+produced a three-level drift. `spec/04-type-system.md` [04-NUM-2] PERMITTED one narrow
+thing ("computing a single op in f64 and rounding once is a conforming
+implementation"); `spec/design/dtype_semantics.md` cited that permission to MANDATE
+f64 computation for every float op; the evaluator then extended the mandate to
+multi-step reductions and to comparison operands. Each step was a reasonable reading
+of the one above it, nobody re-checked against the numbered spec, and the result was a
+language that computed f32 programs in f64.
+
+Two rules follow, and both are cheap:
+
+1. **When a design doc states a rule that is really a language decision, lift it into
+   the numbered spec and leave a pointer behind.** `spec/05-risc-primitives.md` §8's
+   [05-OBS-1..5] is the worked example: the observation contract moved out of
+   `faithful_observation.md` and now survives independently of it. `spec/04` §9's
+   [04-NUM-9..11] and §9.1 followed, for the trap contract, the exactness guarantee,
+   and the per-dtype value table.
+2. **Watch for permission-to-mandate escalation.** "X is a conforming implementation"
+   in a spec does not license "therefore we do X" in a design doc, and neither
+   licenses "therefore we do X everywhere" in code. If your implementation needs a
+   stronger rule than the spec states, amend the spec first and say so in the PR;
+   `spec/design/dtype_semantics.md` §B1 calls that "the protocol, not a failure."
+
 ### Public-Surface Change Rule
 
 When behavior changes, update the owning code, tests, docs, and examples in the same

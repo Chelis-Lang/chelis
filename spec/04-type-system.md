@@ -2482,6 +2482,18 @@ should agree exactly. The same argument applies to routing exact integer
 arithmetic through f64, which additionally destroys int64 exactness above
 2^53 (chelis#684, chelis#680).
 
+**Why reduced precision is opt-in only.** The prohibition on narrowing is
+not symmetric with the prohibition on widening by accident. Widening is
+invisible in the result for the basic operations and merely wasteful;
+narrowing silently changes results everywhere. The ecosystem's own
+experience is the argument: NVIDIA's 19-bit TF32 mode is enabled by
+default for f32 matmul on Ampere and later, and PyTorch's
+`torch.backends.cuda.matmul.allow_tf32` changing its default silently
+altered users' numerics. A program that asked for f32 got something else
+because a backend decided. Under §5 that is exactly the class of decision
+that must be spelled at the call site, so Chelis admits the capability and
+refuses the default.
+
 > **[04-NUM-9]** A numeric trap has a CLOSED set of kinds: `Overflow` (an
 > integer result outside the declared dtype's range), `Domain` (a value
 > outside the declared dtype's set - a fractional or non-finite value at an
@@ -2543,19 +2555,45 @@ user-visible statement of what `spec/design/dtype_semantics.md` §C3's
 storage decision delivers: that document owns the mechanism, this atom owns
 the guarantee.)*
 
-**Why reduced precision is opt-in only.** The prohibition on narrowing is
-not symmetric with the prohibition on widening by accident. Widening is
-invisible in the result for the basic operations and merely wasteful;
-narrowing silently changes results everywhere. The ecosystem's own
-experience is the argument: NVIDIA's 19-bit TF32 mode is enabled by
-default for f32 matmul on Ampere and later, and PyTorch's
-`torch.backends.cuda.matmul.allow_tf32` changing its default silently
-altered users' numerics. A program that asked for f32 got something else
-because a backend decided. Under §5 that is exactly the class of decision
-that must be spelled at the call site, so Chelis admits the capability and
-refuses the default.
-
 ---
+
+### 9.1 Per-Dtype Value Semantics (Consolidated Normative Table)
+
+The atoms above decide these cells one rule at a time; this table is the
+consolidated view of the same decisions, per dtype, and is normative. Where a
+cell and an atom disagree the atom wins and this table has a bug. "Wide
+intermediate" below means the value an op kernel produced at the dtype's
+ARITHMETIC WIDTH ([04-NUM-8]) before finalize - NOT an unconditional f64 or
+i64.
+
+| dtype | value set | arithmetic width | finalize(wide) | overflow / out of range | special values |
+|---|---|---|---|---|---|
+| `f64` | IEEE binary64 | f64 | identity | n/a (IEEE handles it) | NaN, ±inf, -0.0 preserved |
+| `f32` | IEEE binary32 | f32 | RNE to 24-bit mantissa | rounds to ±inf per IEEE | NaN preserved (quiet), ±inf, -0.0 preserved |
+| `f16` | IEEE binary16 | f32 | RNE to 11-bit mantissa, incl. subnormals | overflow -> ±inf (`mul(65504f16, 2f16) = inf`) | as f32 |
+| `bf16` | bfloat16 | f32 | RNE to 8-bit mantissa | overflow -> ±inf | as f32 |
+| `int64` | integers in [-2^63, 2^63-1] | exact int64 | must be integral and in range, else trap | trap, kind `Overflow` ([04-NUM-9]) | none |
+| `int32` / `int16` / `int8` | integers at width | exact at width | same rule at width | trap, kind `Overflow` | none |
+| `bool` | {0, 1} | n/a (not an arithmetic dtype) | must be exactly 0 or 1, else trap | trap, kind `Domain` | none |
+| deferred names (§1.1.1) | rejected by the checker | - | unreachable: rejection is compile-time-visible, never a runtime arm | - | - |
+
+Reading notes:
+
+- The **arithmetic width** column is [04-NUM-8]'s table restated per row. It
+  is deliberately NOT reproduced into §1.1.3's per-backend matrix: it is a
+  target-independent fact and §1.1.3 records per-target implementation status.
+- The **f64 row's identity finalize** is why [04-NUM-6] holds:
+  `f64 add(2^53, 1) == 2^53` is the correctly rounded answer and stays. The
+  same two numbers at `int64` are exact or trap, never silently collapsed -
+  same inputs, opposite verdicts, by design.
+- The **bool row has no arithmetic width** because arithmetic on `bool` is
+  rejected rather than performed ([04-NUM-4]). `and` / `or` / `not` are the
+  logical operations; counting is the explicit-cast idiom.
+- The **deferred row** covers every name reserved in §1.1.1. Each has its
+  arithmetic width declared at reservation, so activating one adds a row here
+  without reopening the width question; `f8e4m3` additionally needs its
+  finalize cell authored on activation, since OCP E4M3 has no infinities and
+  is therefore not a parameterization of [04-NUM-2].
 
 ## 10. Checker Totality (Decided 2026-07; Ratified At chelis#731 Phase 1)
 

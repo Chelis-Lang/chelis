@@ -98,16 +98,16 @@ to a frozen contract after its freeze point (§B1) requires editing THIS
 document and the tracking issue in the same change set - never a silent
 drift in code.
 
-## C1. Per-dtype value semantics (normative)
+## C1. Per-dtype value semantics
 
-The single table both the spec section and the module implement. "Wide
-intermediate" means the value an op kernel produced at the dtype's
-ARITHMETIC WIDTH (spec/04 [04-NUM-8]) before finalize - NOT an
-unconditional f64/i64. The arithmetic-width column below is reproduced
-from [04-NUM-8], which is authoritative and is the ONLY other copy; the
-two are edited together. Deliberately NOT reproduced into spec/04 §1.1.3:
-arithmetic width is a target-independent Table A fact and §1.1.3 is
-Table B's ancestor, so a copy there would put an A-fact in a B-table.
+**Normative home: `spec/04-type-system.md` §9.1**, the consolidated
+per-dtype table, backed cell by cell by atoms [04-NUM-1] through
+[04-NUM-11]. That table is what a later reader cites and is the only
+normative copy; this section is the implementation-facing elaboration.
+Where the two disagree the spec wins and this section has a bug.
+
+The rows below are reproduced for convenience while this plan's phases are
+in flight, and are edited in the same change set as §9.1 or not at all:
 
 | dtype | value set | arithmetic width | finalize(wide) | overflow / out of range | special values |
 |---|---|---|---|---|---|
@@ -118,7 +118,7 @@ Table B's ancestor, so a copy there would put an A-fact in a B-table.
 | `int64` | integers in [-2^63, 2^63-1] | exact int64 | must be integral and in range, else **trap** | **trap** (`NumericTrap::Overflow`) | none |
 | `int32/16/8` | integers at width | exact at width | same rule at width | **trap** | none |
 | `bool` | {0, 1} | n/a (not arithmetic) | must be exactly 0 or 1, else **trap** (`NumericTrap::Domain`) | trap | none |
-| `f8e4m3` | rejected by the checker (spec §1.1.1) | - | unreachable: `finalize` for it is a compile-time-visible `Rejected` row in the capability table, not a runtime arm | - | - |
+| deferred names (spec §1.1.1) | rejected by the checker | - | unreachable: `finalize` for them is a compile-time-visible `Rejected` row in the capability table, not a runtime arm | - | - |
 
 Normative notes, each pinned by an existing test:
 
