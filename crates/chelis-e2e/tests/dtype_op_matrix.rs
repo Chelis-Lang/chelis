@@ -355,24 +355,25 @@ fn data_ptr_match_succeeds() {
 // symbol and assert byte-exact round-trip through the trait's typed
 // pointer.
 //
-// BOOL fixtures write through `data_as_f32` (its storage really is
-// f32-encoded, pending CRuntime-BoolStorage-F1) and read back the same
-// way.  The F64 and I64 fixtures lock the post-migration behavior;
-// pre-migration they would have failed because the f32-strided read
-// silently truncated 8-byte storage to 4-byte chunks.
+// Every fixture writes through the element type its dtype actually
+// stores: `TensorElement::data_ptr_unchecked` for F32 / F64 / I32 / I64,
+// and `data_as_f32` for BOOL, whose storage really is f32-encoded pending
+// CRuntime-BoolStorage-F1.  The F64 and I64 fixtures lock the
+// post-migration behavior; pre-migration they would have failed because
+// the f32-strided read silently truncated 8-byte storage to 4-byte chunks.
 //
-// HAZARD, unresolved: the I32 fixtures also write through `data_as_f32`,
-// and that no longer matches the runtime.  CHELIS_I32 storage is native
-// two's complement -- `chelis_scalar_tensor_from_i64` writes through
-// `(int32_t*)` since RT-4 F1, and the cmplt / where / scatter / cumsum /
-// f64-reader arms were corrected to decode it natively.  These fixtures
-// still pass because they only round-trip through `data_ptr` / `fill`
-// and never reach those arms.
+// This block previously said I32 fixtures write through `data_as_f32`.
+// That was already false when written -- `alloc_vec_with_values`'s I32 arm
+// uses `i32::data_ptr_unchecked`, carrying its own RT-4 F1 note twenty
+// lines below.  The stale claim was then read as authoritative and
+// amplified into a hazard warning that described a trap this file did not
+// contain.
 //
-// So a NEW fixture that builds an I32 tensor with `alloc_vec_with_values`
-// and then calls one of those ops will get wrong answers, and the helper's
-// own doc will have told it that was the convention.  Migrate the I32
-// writer to native int32 before adding such a fixture.
+// Recording that because it is the same failure mode as the defect this
+// file exists to guard: a stale comment asserting an unusual convention
+// reads as considered rather than as rot, and gets believed over the code
+// beneath it.  Eight runtime accessors decoded int32 as f32 on exactly
+// that basis.  When these comments and the arms disagree, the arms win.
 //
 // PR 3 host_emit code-generation site fixtures live at
 // `crates/chelis-backend-c/tests/host_emit_dtype_dispatch.rs` because
@@ -382,15 +383,16 @@ fn data_ptr_match_succeeds() {
 
 /// Allocate a rank-1 length-`n` tensor and fill it with values from
 /// `vals` interpreted as the tensor's storage convention for `dtype`:
-///   - F32 / BOOL: writer stores `value as f32` (bool storage is genuinely
-///     f32-encoded pending `CRuntime-BoolStorage-F1`).
-///   - I32: writer stores `value as f32`, which is **stale** and no longer
-///     matches the runtime's native int32 storage. See the hazard note
-///     above; safe only for the `data_ptr` / `fill` round-trips currently
-///     built on it.
+///   - F32: writer stores `f32` bytes.
 ///   - F64: writer stores `f64` bytes.
+///   - I32: writer stores native `i32` bytes, matching the runtime's
+///     two's-complement storage since RT-4 F1.
 ///   - I64: writer stores `i64` bytes (treating each `f64` slot as
 ///     `value as i64`).
+///   - BOOL: writer stores `value as f32`, because bool storage really is
+///     f32-encoded pending `CRuntime-BoolStorage-F1`. This is the only
+///     dtype here whose storage type differs from its logical type, and
+///     the only arm that should change when that migration lands.
 unsafe fn alloc_vec_with_values(dtype: c_int, vals: &[f64]) -> *mut chelis_tensor {
     unsafe {
         let t = alloc_vec(vals.len() as c_int, dtype);
