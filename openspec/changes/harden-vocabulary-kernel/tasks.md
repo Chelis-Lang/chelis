@@ -125,8 +125,8 @@ the first attempt.
 - [x] **1.2** Moved to `core::error::Error` / `core::fmt`.
 - [x] **1.3** `EffectKindDecodeError` borrows its symbol. The lifetime propagated through `chelis-deep`, `-effects`, `-types`, `-ir`, `-surf`, and `-compiler-api` with **zero call-site edits**, which is what 0.4 predicted.
 - [x] **1.4** `#![no_std]` unconditional, no `alloc`.
-- [ ] **1.5** Negative test: reintroducing a `std` path fails the build.
-- [ ] **1.6** Negative test: decoding an unknown symbol allocates nothing on the decode path.
+- [x] **1.5** **Discharged by construction, not by a test.** Under `#![no_std]` a `std::` path does not resolve, so reintroducing one fails the build already. A test asserting this could not be stronger than the compiler. What *is* testable is the escape hatch: `tests/crate_purity.rs` pins that `#![no_std]` is declared and that the crate does not opt back in via `extern crate alloc`.
+- [x] **1.6** **Also discharged by construction.** Without `alloc`, `String` / `Vec` / `Box` / `format!` do not exist, so an allocating decode path does not compile. Pinned indirectly by the same `alloc` ratchet.
 - [x] **1.7** Manifest declares no features.
 
 ## Phase 2 — FCIS relocation
@@ -135,13 +135,26 @@ the first attempt.
 - [x] **2.2** Generator moved to `crates/chelis-runtime/src/dtype_header.rs`; the test's import follows it.
 - [x] **2.3** Byte-identical: `checked_in_c_dtype_header_is_generated_from_the_rust_vocabulary` compares the generator's output against the unchanged checked-in artifact and passes.
 - [x] **2.4** Every identifier, value, and width still derives from `chelis-vocab`.
-- [ ] **2.5** Negative test: the vocabulary crate contains no function returning generated source text.
+- [x] **2.5** **Discharged by construction.** Building source text needs `String` or `format!`, neither of which exists without `alloc`, so a generator cannot be written here at all. This is stronger than the intended test: the relocation is not merely done, it is now irreversible without a visible `extern crate alloc`, which `tests/crate_purity.rs` rejects.
 
 ## Phase 3 — Lint configuration and Barnacle, scoped
 
 - [x] **3.1** `[lints.clippy]` table added: cast truncation/wrap/sign-loss/lossless, `arithmetic_side_effects`, `indexing_slicing`.
 - [x] **3.2** It caught one diagnostic immediately, in this change's own new test: `u as i32` tripping `cast_possible_wrap`. Fixed with `u32::cast_signed()` rather than an `allow` — the cast is a deliberate reinterpret and now says so. **No relaxations were needed**, so the justified-exception list is empty.
-- [ ] **3.3** Record whether the table should go workspace-wide. **Do not do it here** — 28 crates is a separate argument with its own evidence.
+- [ ] **3.3** Record whether the table should go workspace-wide. **Do not do it here** — 28 crates is a separate argument with its own evidence. The table's presence and its two cast lints are pinned by `tests/crate_purity.rs`, so a silent deletion is caught.
+
+### What the purity ratchets actually guard
+
+Worth stating, because it changed what these tasks needed. Most of this crate's
+purity is compiler-enforced and needs no test. The gap is that `#![no_std]`
+does not prevent someone *restoring* the capabilities it removes: one
+`extern crate alloc` line brings back the allocating types, and one manifest
+dependency can pull in `std` transitively. Both compile cleanly and silently
+undo the boundary.
+
+`tests/crate_purity.rs` covers exactly that gap and nothing else. Verified as a
+real ratchet, not a passing test: planting `serde` in `[dependencies]` fails
+`manifest_declares_no_dependencies` with the offending line named.
 - [ ] **3.4** Add `dylint.toml` at the repository root configuring `dispatch_safety.enum_paths` for `EffectKind` and `RuntimeDType`, and `tiger_style_architecture_sized_integer`.
 - [x] **3.5** `byte_width` returns `u32`. Converted at `chelis-runtime`'s `tensor_elem_size` and in the untracked metal probe. Vocab test literals infer as `u32` and needed no edit.
 - [ ] **3.6** Wire the lint job per the Phase 0 decision. Under Option B: a new CI job with a `devenv.nix`-provided toolchain, leaving `scripts/gate.py` untouched.
@@ -184,6 +197,7 @@ These carry the guarantees. Everything after this phase is lane-establishment.
 - [x] **6.1b** Dedicated per-PR gate command, via the new `exhaustive` nextest profile rather than an `-E` filterset (a profile avoids depending on how `-E` interacts with a `default-filter`). Added to `gate.py`'s `integration` stage, so CI needed no workflow edit and `scripts/test_gate.py`'s 27 parity tests still pass. **Measured cold: 17.1 s** (3.3 s compile + 11.0 s run) — the earlier ~14 s figure was slightly low.
 - [x] **6.1c** Exhaustive binary excluded from **both** `default` and `ci` (both are debug). Verified under devenv with cargo-nextest 0.9.138: `default` lists 8 tests and none is the sweep; `ci` greps 0 occurrences; `exhaustive` lists exactly one test and reports "2 binaries skipped via profile.exhaustive.default-filter". The `.config/nextest.toml` header is rewritten for the third category.
 - [x] **6.1d** Recorded: `.config/nextest.toml` sets no `slow-timeout`, so nextest warns at 60 s and does not terminate. If a `terminate-after` is ever added there, this test needs an explicit override or it starts being killed.
+- [ ] **6.1f** **Known wrinkle, observed 2026-07-27.** The `default`/`ci` profile exclusion is a *nextest* mechanism, so a developer running plain `cargo test -p chelis-vocab` still gets the sweep — measured at 215 s in debug under load. The gate uses nextest, so CI and `scripts/gate.py` are unaffected, but the local inner loop is only protected for nextest users. Decide between accepting it (the repo standardises on nextest) and `#[ignore]` plus `--run-ignored` in the `exhaustive` profile, which would cover both runners at the cost of the ignored-test rules in `AGENTS.md`.
 - [ ] **6.1e** If the release step is later found awkward, the fallback is the threaded debug form under a nextest test group with `threads-required = 'num-cpus'`, which schedules it exclusively rather than oversubscribing. Recorded so the option is not rediscovered from scratch.
 - [x] **6.2** `runtime_dtype_ids_are_pairwise_distinct`.
 - [x] **6.3** `const _: ()` assertions pin `size_of::<RuntimeDType>() == 4` and every one of the nine discriminants, so reordering the enum fails the build.
