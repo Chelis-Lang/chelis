@@ -41,8 +41,8 @@
 //!   rounding), applied to the exact binary value of the input — matching
 //!   Python's built-in `round(x, places)`. See [`round_to_impl`].
 
-use super::RuntimeValue;
 use super::host_ops::{OrderedStringDictBuilder, dict_lookup};
+use super::{RuntimeValue, truncate_rendered, truncated_debug};
 
 /// Nesting depth cap for the recursive-descent parser and serializer.
 /// Deeply nested inputs fail loudly instead of overflowing the stack.
@@ -133,7 +133,10 @@ fn json_kind(value: &RuntimeValue) -> Result<&'static str, String> {
                 "expected a Json value (JNull/JBool/JInt/JNum/JStr/JList/JDict), got constructor `{other}`"
             )),
         },
-        other => Err(format!("expected a Json value, got {other:?}")),
+        other => Err(format!(
+            "expected a Json value, got {}",
+            truncated_debug(other)
+        )),
     }
 }
 
@@ -151,7 +154,10 @@ fn ensure_json_value_depth(value: &RuntimeValue, depth: usize) -> Result<(), Str
         return Err(format!("Json value exceeds maximum depth {MAX_DEPTH}"));
     }
     let RuntimeValue::Adt { ctor, fields, .. } = value else {
-        return Err(format!("expected a Json value, got {value:?}"));
+        return Err(format!(
+            "expected a Json value, got {}",
+            truncated_debug(value)
+        ));
     };
     match (ctor.as_str(), fields.as_slice()) {
         ("JNull", []) => Ok(()),
@@ -168,14 +174,18 @@ fn ensure_json_value_depth(value: &RuntimeValue, depth: usize) -> Result<(), Str
         ("JDict", [RuntimeValue::Dict(entries)]) => {
             for (key, item) in entries {
                 let RuntimeValue::String(_) = key else {
-                    return Err(format!("JDict keys must be strings, got {key:?}"));
+                    return Err(format!(
+                        "JDict keys must be strings, got {}",
+                        truncated_debug(key)
+                    ));
                 };
                 ensure_json_value_depth(item, depth + 1)?;
             }
             Ok(())
         }
         ("JNull" | "JBool" | "JInt" | "JNum" | "JStr" | "JList" | "JDict", _) => Err(format!(
-            "malformed Json value: constructor `{ctor}` has unexpected fields {fields:?}"
+            "malformed Json value: constructor `{ctor}` has unexpected fields {}",
+            truncate_rendered(format!("{fields:?}"))
         )),
         (other, _) => Err(format!(
             "expected a Json value (JNull/JBool/JInt/JNum/JStr/JList/JDict), got constructor `{other}`"
@@ -186,6 +196,51 @@ fn ensure_json_value_depth(value: &RuntimeValue, depth: usize) -> Result<(), Str
 // ---------------------------------------------------------------------------
 // Parsing
 // ---------------------------------------------------------------------------
+
+/// Scan one JSON number token
+/// (`-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?`) at the start of
+/// `bytes`. `Ok(len)` is the token length; `Err((offset, reason))`
+/// pinpoints the first offending byte. Shared by [`Parser::parse_number`]
+/// and the CSV numeric accessors (chelis#903), so "CSV cells parse under
+/// the same number grammar as JSON" holds by shared code rather than
+/// parallel maintenance.
+pub(super) fn json_number_token_len(bytes: &[u8]) -> Result<usize, (usize, &'static str)> {
+    let mut i = 0;
+    if bytes.get(i) == Some(&b'-') {
+        i += 1;
+    }
+    match bytes.get(i) {
+        Some(b'0') => i += 1,
+        Some(b'1'..=b'9') => {
+            while matches!(bytes.get(i), Some(b'0'..=b'9')) {
+                i += 1;
+            }
+        }
+        _ => return Err((i, "invalid number (expected a digit)")),
+    }
+    if bytes.get(i) == Some(&b'.') {
+        i += 1;
+        if !matches!(bytes.get(i), Some(b'0'..=b'9')) {
+            return Err((i, "invalid number (expected a digit after `.`)"));
+        }
+        while matches!(bytes.get(i), Some(b'0'..=b'9')) {
+            i += 1;
+        }
+    }
+    if matches!(bytes.get(i), Some(b'e' | b'E')) {
+        i += 1;
+        if matches!(bytes.get(i), Some(b'+' | b'-')) {
+            i += 1;
+        }
+        if !matches!(bytes.get(i), Some(b'0'..=b'9')) {
+            return Err((i, "invalid number (expected a digit in exponent)"));
+        }
+        while matches!(bytes.get(i), Some(b'0'..=b'9')) {
+            i += 1;
+        }
+    }
+    Ok(i)
+}
 
 struct Parser<'a> {
     bytes: &'a [u8],
@@ -467,40 +522,14 @@ impl<'a> Parser<'a> {
 
     fn parse_number(&mut self) -> Result<RuntimeValue, String> {
         let start = self.pos;
-        // Validate against the JSON number grammar
-        // (`-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?`), then hand the
-        // validated token to Rust's correctly-rounded `f64::from_str`.
-        if self.peek() == Some(b'-') {
-            self.pos += 1;
-        }
-        match self.peek() {
-            Some(b'0') => self.pos += 1,
-            Some(b'1'..=b'9') => {
-                while matches!(self.peek(), Some(b'0'..=b'9')) {
-                    self.pos += 1;
-                }
-            }
-            _ => return Err(self.err("invalid number (expected a digit)")),
-        }
-        if self.peek() == Some(b'.') {
-            self.pos += 1;
-            if !matches!(self.peek(), Some(b'0'..=b'9')) {
-                return Err(self.err("invalid number (expected a digit after `.`)"));
-            }
-            while matches!(self.peek(), Some(b'0'..=b'9')) {
-                self.pos += 1;
-            }
-        }
-        if matches!(self.peek(), Some(b'e' | b'E')) {
-            self.pos += 1;
-            if matches!(self.peek(), Some(b'+' | b'-')) {
-                self.pos += 1;
-            }
-            if !matches!(self.peek(), Some(b'0'..=b'9')) {
-                return Err(self.err("invalid number (expected a digit in exponent)"));
-            }
-            while matches!(self.peek(), Some(b'0'..=b'9')) {
-                self.pos += 1;
+        // Validate against the JSON number grammar via the shared scanner
+        // ([`json_number_token_len`], also the CSV cell grammar), then hand
+        // the validated token to Rust's correctly-rounded `f64::from_str`.
+        match json_number_token_len(&self.bytes[start..]) {
+            Ok(len) => self.pos = start + len,
+            Err((offset, reason)) => {
+                self.pos = start + offset;
+                return Err(self.err(reason));
             }
         }
         let token = &self.text[start..self.pos];
@@ -549,8 +578,10 @@ impl<'a> Parser<'a> {
 /// fidelity contract the print channel breaks (chelis#748: the
 /// near-integer arm's near-zero collapse and the fixed-16-significant-
 /// digit starvation) — do not route number
-/// formatting back through `render_value`/`to_string`.
-fn format_f64_json(value: f64) -> Result<String, String> {
+/// formatting back through `render_value`/`to_string`. Shared with
+/// `to_csv` (chelis#903) so both serializers carry the same fidelity
+/// contract by shared code.
+pub(super) fn format_f64_json(value: f64) -> Result<String, String> {
     if !value.is_finite() {
         return Err(format!(
             "to_json: JSON cannot represent non-finite number `{value}`"
@@ -603,7 +634,10 @@ fn write_json_value(out: &mut String, value: &RuntimeValue, depth: usize) -> Res
         return Err(format!("to_json: value exceeds maximum depth {MAX_DEPTH}"));
     }
     let RuntimeValue::Adt { ctor, fields, .. } = value else {
-        return Err(format!("to_json: expected a Json value, got {value:?}"));
+        return Err(format!(
+            "to_json: expected a Json value, got {}",
+            truncated_debug(value)
+        ));
     };
     match (ctor.as_str(), fields.as_slice()) {
         ("JNull", []) => {
@@ -646,7 +680,10 @@ fn write_json_value(out: &mut String, value: &RuntimeValue, depth: usize) -> Res
                     out.push(',');
                 }
                 let RuntimeValue::String(key) = key else {
-                    return Err(format!("to_json: JDict keys must be strings, got {key:?}"));
+                    return Err(format!(
+                        "to_json: JDict keys must be strings, got {}",
+                        truncated_debug(key)
+                    ));
                 };
                 escape_json_string(out, key);
                 out.push(':');
@@ -656,7 +693,8 @@ fn write_json_value(out: &mut String, value: &RuntimeValue, depth: usize) -> Res
             Ok(())
         }
         _ => Err(format!(
-            "to_json: malformed Json value (constructor `{ctor}` with fields {fields:?})"
+            "to_json: malformed Json value (constructor `{ctor}` with fields {})",
+            truncate_rendered(format!("{fields:?}"))
         )),
     }
 }
@@ -723,7 +761,8 @@ fn get_path<'v>(
     for segment in segments {
         let RuntimeValue::Adt { ctor, fields, .. } = current else {
             return Err(format!(
-                "{builtin}: path `{path}`: expected a Json value, got {current:?}"
+                "{builtin}: path `{path}`: expected a Json value, got {}",
+                truncated_debug(current)
             ));
         };
         match (ctor.as_str(), fields.as_slice()) {
@@ -1004,7 +1043,8 @@ fn set_path_iterative(
         };
         let RuntimeValue::Adt { ctor, fields, .. } = node else {
             return Err(format!(
-                "json_set: path `{full_path}`: expected a Json value, got {node:?}"
+                "json_set: path `{full_path}`: expected a Json value, got {}",
+                truncated_debug(node)
             ));
         };
         match (ctor.as_str(), fields.as_slice()) {

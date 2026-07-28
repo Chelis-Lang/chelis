@@ -17203,6 +17203,99 @@ fn check_conv2d_signature(
     subst.apply(&output_template)
 }
 
+/// The prelude `Json` value type used by the host-I/O builtin signatures
+/// (the chelis#890 JSON family and the chelis#903 CSV family, whose Csv
+/// documents ride the same ADT).
+fn host_json_ty() -> Type {
+    Type::Adt("Json".to_string(), Vec::new())
+}
+
+/// Reject one host-I/O builtin slot with a named diagnostic; returns the
+/// propagated error type. Shared by [`check_json_builtin_signature`] and
+/// [`check_csv_builtin_signature`].
+fn reject_host_builtin_slot(
+    errors: &mut DiagnosticSink<'_>,
+    list: &deep::List,
+    fname: &str,
+    slot_description: &str,
+    got: &Type,
+) -> Type {
+    report(
+        errors,
+        CheckError::new(
+            CheckErrorKind::TypeMismatch,
+            with_macro_provenance(
+                &deep::Expr::List(list.clone(), zero_span()),
+                format!("{fname} expects {slot_description}, got {got}"),
+            ),
+            vec![],
+        ),
+    )
+}
+
+/// Unify one resolved slot with its expected type, recording Var bindings
+/// in `subst` (chelis#891 review finding 6: contracts are enforced by
+/// unification, never by waving `Type::Var` through — `unify` treats
+/// `Type::Error` as success, so already-diagnosed slots do not cascade).
+/// On failure emits the standard slot diagnostic; returns the propagated
+/// error type to bubble.
+#[allow(clippy::too_many_arguments)]
+fn unify_host_slot(
+    errors: &mut DiagnosticSink<'_>,
+    list: &deep::List,
+    fname: &str,
+    slot: &Type,
+    expected: &Type,
+    slot_description: &str,
+    subst: &mut Subst,
+) -> Option<Type> {
+    if unify(slot, expected, subst).is_err() {
+        return Some(reject_host_builtin_slot(
+            errors,
+            list,
+            fname,
+            slot_description,
+            &subst.apply(slot),
+        ));
+    }
+    None
+}
+
+/// A loose numeric slot: any concrete float (`want_float`) or integer
+/// precision passes (unsuffixed literals default to f32/int32 per
+/// spec/04-type-system.md §5.3); an unresolved `Var` is pinned to the
+/// canonical `default` so the contract is never vacuous through an
+/// un-annotated parameter (chelis#891 review finding 6).
+#[allow(clippy::too_many_arguments)]
+fn loose_numeric_host_slot(
+    errors: &mut DiagnosticSink<'_>,
+    list: &deep::List,
+    fname: &str,
+    slot: &Type,
+    want_float: bool,
+    default: Prim,
+    slot_description: &str,
+    subst: &mut Subst,
+) -> Option<Type> {
+    let ok = match slot {
+        Type::Prim(p) if want_float => p.is_float(),
+        Type::Prim(p) => p.is_integer(),
+        Type::Error(_) => true,
+        Type::Var(_) => unify(slot, &Type::Prim(default), subst).is_ok(),
+        _ => false,
+    };
+    if !ok {
+        return Some(reject_host_builtin_slot(
+            errors,
+            list,
+            fname,
+            slot_description,
+            &subst.apply(slot),
+        ));
+    }
+    None
+}
+
 /// Concrete argument/return contracts for the host-lane JSON I/O builtins
 /// (chelis#890): `parse_json`, `to_json`, the dot-path accessors
 /// (`json_f64`/`json_str`/`json_list`/`json_f64s`), the output
@@ -17233,10 +17326,6 @@ fn check_json_builtin_signature(
     subst: &mut Subst,
     errors: &mut DiagnosticSink<'_>,
 ) -> Type {
-    fn json_ty() -> Type {
-        Type::Adt("Json".to_string(), Vec::new())
-    }
-
     let expected_arity: usize = match fname {
         "parse_json" | "to_json" | "jnum" | "jstr" | "jlist" | "jdict" => 1,
         "json_set" => 3,
@@ -17246,80 +17335,43 @@ fn check_json_builtin_signature(
         return report_builtin_arity(errors, list, fname, expected_arity, arg_tys.len());
     }
 
-    let mut reject = |slot_description: String, got: &Type| -> Type {
-        report(
-            errors,
-            CheckError::new(
-                CheckErrorKind::TypeMismatch,
-                with_macro_provenance(
-                    &deep::Expr::List(list.clone(), zero_span()),
-                    format!("{fname} expects {slot_description}, got {got}"),
-                ),
-                vec![],
-            ),
-        )
-    };
-
     // Slot checks: each resolves the argument fresh (earlier unifications
-    // may have refined it), then unifies with the expected type. `unify`
-    // treats `Type::Error` as success, so already-diagnosed slots do not
-    // cascade.
+    // may have refined it), then unifies with the expected type.
     macro_rules! require_slot {
         ($idx:expr, $expected:expr, $desc:expr) => {{
             let slot = type_for_readonly_check(&arg_tys[$idx], subst);
-            if unify(&slot, &$expected, subst).is_err() {
-                return reject($desc.to_string(), &subst.apply(&slot));
+            if let Some(error) =
+                unify_host_slot(errors, list, fname, &slot, &$expected, $desc, subst)
+            {
+                return error;
             }
         }};
     }
 
-    // `round_to`'s two slots accept any concrete float/integer precision;
-    // only an unresolved Var is pinned (to the canonical f64/int64) so the
-    // contract is never vacuous through an un-annotated parameter.
-    macro_rules! require_loose_numeric_slot {
-        ($idx:expr, $is_kind:ident, $default:expr, $desc:expr) => {{
-            let slot = type_for_readonly_check(&arg_tys[$idx], subst);
-            let ok = match &slot {
-                Type::Prim(p) if p.$is_kind() => true,
-                Type::Error(_) => true,
-                Type::Var(_) => unify(&slot, &Type::Prim($default), subst).is_ok(),
-                _ => false,
-            };
-            if !ok {
-                return reject($desc.to_string(), &subst.apply(&slot));
-            }
-        }};
-    }
+    const JSON_FIRST: &str = "a Json first argument (from `parse_json` or a J* constructor)";
+    const PATH_SECOND: &str = "a dot-separated string path second argument (e.g. \"a.b.c\")";
 
     match fname {
         "parse_json" => {
             require_slot!(0, Type::Prim(Prim::String), "a string argument");
-            json_ty()
+            host_json_ty()
         }
         "to_json" => {
             require_slot!(
                 0,
-                json_ty(),
+                host_json_ty(),
                 "a Json argument (from `parse_json` or a J* constructor)"
             );
             Type::Prim(Prim::String)
         }
         "json_f64" | "json_int" | "json_str" | "json_list" | "json_f64s" => {
-            require_slot!(
-                0,
-                json_ty(),
-                "a Json first argument (from `parse_json` or a J* constructor)"
-            );
-            require_slot!(
-                1,
-                Type::Prim(Prim::String),
-                "a dot-separated string path second argument (e.g. \"a.b.c\")"
-            );
+            require_slot!(0, host_json_ty(), JSON_FIRST);
+            require_slot!(1, Type::Prim(Prim::String), PATH_SECOND);
             match fname {
                 "json_f64" => Type::Prim(Prim::F64),
                 "json_int" => Type::Prim(Prim::Int64),
                 "json_str" => Type::Prim(Prim::String),
-                "json_list" => Type::Adt("List".to_string(), vec![json_ty()]),
+                "json_list" => Type::Adt("List".to_string(), vec![host_json_ty()]),
                 _ => Type::Adt("List".to_string(), vec![Type::Prim(Prim::F64)]),
             }
         }
@@ -17330,7 +17382,7 @@ fn check_json_builtin_signature(
                 "an f64 argument (suffix the literal, `0.1f64`, or use cast(n, f64); \
                  an f32 value would quantize through the byte-exact serializer)"
             );
-            json_ty()
+            host_json_ty()
         }
         "jint" => {
             require_slot!(
@@ -17338,99 +17390,149 @@ fn check_json_builtin_signature(
                 Type::Prim(Prim::Int64),
                 "an int64 argument (suffix the literal, `1i64`, or use cast(n, int64))"
             );
-            json_ty()
+            host_json_ty()
         }
         "jstr" => {
             require_slot!(0, Type::Prim(Prim::String), "a string argument");
-            json_ty()
+            host_json_ty()
         }
         "jlist" => {
             let slot = type_for_readonly_check(&arg_tys[0], subst);
             match &slot {
                 Type::Adt(name, args) if name == "List" && args.len() == 1 => {
                     let element = subst.apply(&args[0]);
-                    if unify(&element, &json_ty(), subst).is_err() {
-                        return reject("List[Json] input".to_string(), &subst.apply(&element));
+                    if let Some(error) = unify_host_slot(
+                        errors,
+                        list,
+                        fname,
+                        &element,
+                        &host_json_ty(),
+                        "List[Json] input",
+                        subst,
+                    ) {
+                        return error;
                     }
                 }
                 Type::Error(_) => {}
                 Type::Var(_) => {
-                    let expected = Type::Adt("List".to_string(), vec![json_ty()]);
-                    if unify(&slot, &expected, subst).is_err() {
-                        return reject("List[Json] input".to_string(), &subst.apply(&slot));
+                    let expected = Type::Adt("List".to_string(), vec![host_json_ty()]);
+                    if let Some(error) = unify_host_slot(
+                        errors,
+                        list,
+                        fname,
+                        &slot,
+                        &expected,
+                        "List[Json] input",
+                        subst,
+                    ) {
+                        return error;
                     }
                 }
-                other => return reject("List[Json] input".to_string(), other),
+                other => {
+                    return reject_host_builtin_slot(
+                        errors,
+                        list,
+                        fname,
+                        "List[Json] input",
+                        other,
+                    );
+                }
             }
-            json_ty()
+            host_json_ty()
         }
         "jdict" => {
-            let entry_ty = || Type::Tuple(vec![Type::Prim(Prim::String), json_ty()]);
+            let entry_ty = || Type::Tuple(vec![Type::Prim(Prim::String), host_json_ty()]);
             let slot = type_for_readonly_check(&arg_tys[0], subst);
             match &slot {
                 Type::Adt(name, args) if name == "List" && args.len() == 1 => {
                     match subst.apply(&args[0]) {
                         Type::Tuple(items) if items.len() == 2 => {
                             let key_ty = subst.apply(&items[0]);
-                            if unify(&key_ty, &Type::Prim(Prim::String), subst).is_err() {
-                                return reject(
-                                    "(string, Json) entry tuples (string keys)".to_string(),
-                                    &subst.apply(&key_ty),
-                                );
+                            if let Some(error) = unify_host_slot(
+                                errors,
+                                list,
+                                fname,
+                                &key_ty,
+                                &Type::Prim(Prim::String),
+                                "(string, Json) entry tuples (string keys)",
+                                subst,
+                            ) {
+                                return error;
                             }
                             let value_ty = subst.apply(&items[1]);
-                            if unify(&value_ty, &json_ty(), subst).is_err() {
-                                return reject(
-                                    "(string, Json) entry tuples (Json values)".to_string(),
-                                    &subst.apply(&value_ty),
-                                );
+                            if let Some(error) = unify_host_slot(
+                                errors,
+                                list,
+                                fname,
+                                &value_ty,
+                                &host_json_ty(),
+                                "(string, Json) entry tuples (Json values)",
+                                subst,
+                            ) {
+                                return error;
                             }
                         }
                         Type::Error(_) => {}
                         element @ Type::Var(_) => {
-                            if unify(&element, &entry_ty(), subst).is_err() {
-                                return reject(
-                                    "List[(string, Json)] input".to_string(),
-                                    &subst.apply(&element),
-                                );
+                            if let Some(error) = unify_host_slot(
+                                errors,
+                                list,
+                                fname,
+                                &element,
+                                &entry_ty(),
+                                "List[(string, Json)] input",
+                                subst,
+                            ) {
+                                return error;
                             }
                         }
                         other => {
-                            return reject("List[(string, Json)] input".to_string(), &other);
+                            return reject_host_builtin_slot(
+                                errors,
+                                list,
+                                fname,
+                                "List[(string, Json)] input",
+                                &other,
+                            );
                         }
                     }
                 }
                 Type::Error(_) => {}
                 Type::Var(_) => {
                     let expected = Type::Adt("List".to_string(), vec![entry_ty()]);
-                    if unify(&slot, &expected, subst).is_err() {
-                        return reject(
-                            "List[(string, Json)] input".to_string(),
-                            &subst.apply(&slot),
-                        );
+                    if let Some(error) = unify_host_slot(
+                        errors,
+                        list,
+                        fname,
+                        &slot,
+                        &expected,
+                        "List[(string, Json)] input",
+                        subst,
+                    ) {
+                        return error;
                     }
                 }
-                other => return reject("List[(string, Json)] input".to_string(), other),
+                other => {
+                    return reject_host_builtin_slot(
+                        errors,
+                        list,
+                        fname,
+                        "List[(string, Json)] input",
+                        other,
+                    );
+                }
             }
-            json_ty()
+            host_json_ty()
         }
         "json_set" => {
-            require_slot!(
-                0,
-                json_ty(),
-                "a Json first argument (from `parse_json` or a J* constructor)"
-            );
-            require_slot!(
-                1,
-                Type::Prim(Prim::String),
-                "a dot-separated string path second argument (e.g. \"a.b.c\")"
-            );
+            require_slot!(0, host_json_ty(), JSON_FIRST);
+            require_slot!(1, Type::Prim(Prim::String), PATH_SECOND);
             require_slot!(
                 2,
-                json_ty(),
+                host_json_ty(),
                 "a Json third argument (wrap raw values with jnum/jstr/jlist/jdict)"
             );
-            json_ty()
+            host_json_ty()
         }
         "round_to" => {
             // f64-only until `round_to` has an authored [05-OP-N] atom
@@ -17450,12 +17552,19 @@ fn check_json_builtin_signature(
                  per-dtype rounding semantics are authored in spec/05; \
                  suffix the literal `f64` or `cast` the operand)"
             );
-            require_loose_numeric_slot!(
-                1,
-                is_integer,
+            let places_ty = type_for_readonly_check(&arg_tys[1], subst);
+            if let Some(error) = loose_numeric_host_slot(
+                errors,
+                list,
+                fname,
+                &places_ty,
+                false,
                 Prim::Int64,
-                "an integer `places` second argument"
-            );
+                "an integer `places` second argument",
+                subst,
+            ) {
+                return error;
+            }
             Type::Prim(Prim::F64)
         }
         other => unreachable!("check_json_builtin_signature dispatched on `{other}`"),
@@ -17469,11 +17578,12 @@ fn check_json_builtin_signature(
 /// A Csv document rides the prelude `Json` ADT as the fixed shape
 /// `{"columns": .., "rows": ..}` (see `runtime/csv.rs`), so document slots
 /// type as `Json` — there is deliberately no `Csv` prelude type, and the
-/// `json_*` accessors compose with these documents. Same slot philosophy
-/// as `check_json_builtin_signature`: `csv_f64`/`csv_str` accept ANY
-/// integer precision for the row index so a bare `csv_f64(c, 0, "px")`
-/// literal works (spec/04-type-system.md §5.3); the runtime widens at the
-/// boundary.
+/// `json_*` accessors compose with these documents. Contracts are
+/// enforced by unification like the JSON family above (chelis#891 review
+/// finding 6): document and column-name slots pin `Var` arguments, and
+/// `csv_f64`/`csv_str` accept ANY concrete integer precision for the row
+/// index so a bare `csv_f64(c, 0, "px")` literal works
+/// (spec/04-type-system.md §5.3), pinning an unresolved `Var` to int64.
 fn check_csv_builtin_signature(
     fname: &str,
     list: &deep::List,
@@ -17481,10 +17591,6 @@ fn check_csv_builtin_signature(
     subst: &mut Subst,
     errors: &mut DiagnosticSink<'_>,
 ) -> Type {
-    fn json_ty() -> Type {
-        Type::Adt("Json".to_string(), Vec::new())
-    }
-
     let expected_arity: usize = match fname {
         "parse_csv" | "to_csv" | "csv_nrows" | "csv_cols" => 1,
         "csv_f64" | "csv_str" => 3,
@@ -17494,61 +17600,41 @@ fn check_csv_builtin_signature(
         return report_builtin_arity(errors, list, fname, expected_arity, arg_tys.len());
     }
 
-    let mut reject = |slot_description: String, got: &Type| -> Type {
-        report(
-            errors,
-            CheckError::new(
-                CheckErrorKind::TypeMismatch,
-                with_macro_provenance(
-                    &deep::Expr::List(list.clone(), zero_span()),
-                    format!("{fname} expects {slot_description}, got {got}"),
-                ),
-                vec![],
-            ),
-        )
-    };
-
-    let is_string_like =
-        |ty: &Type| matches!(ty, Type::Prim(Prim::String) | Type::Var(_) | Type::Error(_));
-    let is_json_like = |ty: &Type| {
-        matches!(ty, Type::Adt(name, args) if name == "Json" && args.is_empty())
-            || matches!(ty, Type::Var(_) | Type::Error(_))
-    };
-    let is_int_like = |ty: &Type| {
-        matches!(ty, Type::Prim(p) if p.is_integer()) || matches!(ty, Type::Var(_) | Type::Error(_))
-    };
-
-    let resolved: Vec<Type> = arg_tys
-        .iter()
-        .map(|ty| type_for_readonly_check(ty, subst))
-        .collect();
+    macro_rules! require_slot {
+        ($idx:expr, $expected:expr, $desc:expr) => {{
+            let slot = type_for_readonly_check(&arg_tys[$idx], subst);
+            if let Some(error) =
+                unify_host_slot(errors, list, fname, &slot, &$expected, $desc, subst)
+            {
+                return error;
+            }
+        }};
+    }
 
     // Every builtin except `parse_csv` takes the Csv document (a Json
     // value) first; the column name is always the last argument.
-    if fname != "parse_csv" && !is_json_like(&resolved[0]) {
-        return reject(
-            "a Csv document first argument (the Json value `parse_csv` returns)".to_string(),
-            &resolved[0],
+    if fname != "parse_csv" {
+        require_slot!(
+            0,
+            host_json_ty(),
+            "a Csv document first argument (the Json value `parse_csv` returns)"
         );
     }
 
     match fname {
         "parse_csv" => {
-            if !is_string_like(&resolved[0]) {
-                return reject("a string argument".to_string(), &resolved[0]);
-            }
-            json_ty()
+            require_slot!(0, Type::Prim(Prim::String), "a string argument");
+            host_json_ty()
         }
         "to_csv" => Type::Prim(Prim::String),
         "csv_nrows" => Type::Prim(Prim::Int64),
         "csv_cols" => Type::Adt("List".to_string(), vec![Type::Prim(Prim::String)]),
         "csv_f64s" | "csv_strs" => {
-            if !is_string_like(&resolved[1]) {
-                return reject(
-                    "a column-name string second argument".to_string(),
-                    &resolved[1],
-                );
-            }
+            require_slot!(
+                1,
+                Type::Prim(Prim::String),
+                "a column-name string second argument"
+            );
             if fname == "csv_f64s" {
                 Type::Adt("List".to_string(), vec![Type::Prim(Prim::F64)])
             } else {
@@ -17556,18 +17642,24 @@ fn check_csv_builtin_signature(
             }
         }
         "csv_f64" | "csv_str" => {
-            if !is_int_like(&resolved[1]) {
-                return reject(
-                    "an integer row index second argument (0-based data row)".to_string(),
-                    &resolved[1],
-                );
+            let row_ty = type_for_readonly_check(&arg_tys[1], subst);
+            if let Some(error) = loose_numeric_host_slot(
+                errors,
+                list,
+                fname,
+                &row_ty,
+                false,
+                Prim::Int64,
+                "an integer row index second argument (0-based data row)",
+                subst,
+            ) {
+                return error;
             }
-            if !is_string_like(&resolved[2]) {
-                return reject(
-                    "a column-name string third argument".to_string(),
-                    &resolved[2],
-                );
-            }
+            require_slot!(
+                2,
+                Type::Prim(Prim::String),
+                "a column-name string third argument"
+            );
             if fname == "csv_f64" {
                 Type::Prim(Prim::F64)
             } else {

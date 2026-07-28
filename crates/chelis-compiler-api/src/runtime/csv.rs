@@ -26,29 +26,47 @@
 //!   leading UTF-8 BOM is stripped. Everything malformed — unclosed quote,
 //!   content after a closing quote, a bare `"` in an unquoted field, bare
 //!   CR, ragged rows, interior blank rows, duplicate header names — fails
-//!   naming 1-based row (record) and column (field) numbers. Blank rows
-//!   are tolerated only at end of input.
+//!   naming the 1-based row (record) number, plus the 1-based column
+//!   (field) number where one applies (quote and separator errors; ragged
+//!   and blank rows are whole-row errors). Blank rows are tolerated only
+//!   at end of input.
 //! * **Cells are strings at parse time.** No silent numeric coercion (a
 //!   column of zero-padded IDs must not type-flap mid-column). The numeric
 //!   accessors convert at access time under the strict JSON number grammar
-//!   (the same grammar `parse_json` enforces), tolerating surrounding
+//!   (literally `parse_json`'s number scanner), tolerating surrounding
 //!   ASCII spaces/tabs (matching Python `float()`), and fail loudly on
 //!   anything else — naming the column, the row, and the offending text.
 //!   Empty cells in a numeric accessor are errors: **no silent NaN**.
+//! * **Accessors read a cell's own type only — no cross-type coercion.**
+//!   `csv_str` reads `JStr` verbatim; `csv_f64` reads `JStr` (strict
+//!   parse) or a finite `JNum` (hand-assembled documents; non-finite is a
+//!   loud error). `JBool`/`JNull` are to_csv's write-side cell encodings
+//!   and fail loudly in every read accessor, each error naming the actual
+//!   cell type.
+//! * **Document-shape validation is eager and uniform; cell validation is
+//!   lazy.** Every accessor (including `csv_nrows`/`csv_cols`) validates
+//!   the same shape up front — `columns` a JList of unique strings, every
+//!   `rows` element a JDict — so a hand-mangled document fails identically
+//!   everywhere; individual cell types are checked at read.
 //! * **Row indices are 0-based data rows** (`csv_f64(c, 0, "col")` is the
 //!   first row *after* the header); parse errors count 1-based physical
 //!   records (header = row 1). Error messages state which space they use.
-//! * **`to_csv` is the exact inverse shape.** It serializes the same
-//!   document form `parse_csv` returns, so `parse_csv(to_csv(c))`
-//!   round-trips. Cells may be `JStr` (verbatim), `JNum` (shortest-
-//!   round-trip f64 — the same formatter contract as `to_json`, never the
-//!   print channel: chelis#748/#723/#734), `JBool`, or `JNull` (empty
-//!   cell); container cells, non-finite numbers, rows missing a declared
-//!   column, and rows carrying an undeclared key all fail loudly — no
-//!   silent data loss.
+//! * **`to_csv` serializes the exact document shape `parse_csv` returns,
+//!   and the round-trip is values-as-text.** Cells may be `JStr`
+//!   (verbatim), `JNum` (shortest-round-trip f64 via the shared
+//!   `format_f64_json` — the same fidelity contract as `to_json`, never
+//!   the print channel: chelis#748/#723/#734), `JBool` (`true`/`false`),
+//!   or `JNull` (empty cell). `parse_csv(to_csv(c))` reproduces the table
+//!   with every cell normalized to the `JStr` of its serialized field
+//!   text — an all-`JStr` document round-trips identically, and a `JNum`
+//!   cell re-reads bit-exactly through `csv_f64` — but cell TYPES other
+//!   than `JStr` do not survive the trip (CSV is untyped text). Container
+//!   cells, non-finite numbers, unexpected top-level keys, rows missing a
+//!   declared column, and rows carrying an undeclared or duplicate key
+//!   all fail loudly — no silent data loss.
 
-use super::RuntimeValue;
 use super::json::{jdict, jlist, jstr};
+use super::{RuntimeValue, truncate_rendered, truncated_debug};
 
 // ---------------------------------------------------------------------------
 // Parsing
@@ -174,8 +192,8 @@ fn parse_record(
                     break;
                 }
                 return Err(format!(
-                    "parse_csv: row {row}: bare carriage return (CR without LF); only \
-                     LF or CRLF row separators are supported"
+                    "parse_csv: row {row}, column {column}: bare carriage return (CR \
+                     without LF); only LF or CRLF row separators are supported"
                 ));
             }
             None => break,
@@ -257,6 +275,11 @@ struct CsvDoc<'v> {
     rows: &'v [RuntimeValue],
 }
 
+/// The prelude Json ADT's constructor vocabulary, for diagnostics that
+/// must distinguish "a Json value of the wrong kind" from "not a Json
+/// value at all" (chelis#903 review).
+const JSON_CTORS: [&str; 6] = ["JNull", "JBool", "JNum", "JStr", "JList", "JDict"];
+
 fn as_jlist(value: &RuntimeValue) -> Option<&[RuntimeValue]> {
     match value {
         RuntimeValue::Adt { ctor, fields, .. } if ctor == "JList" => match fields.as_slice() {
@@ -287,10 +310,14 @@ fn as_jdict_entries(value: &RuntimeValue) -> Option<&[(RuntimeValue, RuntimeValu
     }
 }
 
-/// Validate the fixed document shape and borrow its parts. Every failure
-/// names the builtin and says what a Csv document is, so a plain
-/// `parse_json` value or a hand-mangled document fails loudly instead of
-/// producing garbage.
+/// Validate the fixed document shape and borrow its parts. Shape
+/// validation is eager and uniform across the whole accessor family
+/// (chelis#903 review): `columns` must be a JList of UNIQUE strings and
+/// every `rows` element a JDict, so a hand-mangled document fails
+/// identically at `csv_nrows` and `csv_f64s` alike; cell-level types stay
+/// lazily checked at read. Every failure names the builtin and says what
+/// a Csv document is, so a plain `parse_json` value fails loudly instead
+/// of producing garbage.
 fn csv_doc<'v>(builtin: &str, value: &'v RuntimeValue) -> Result<CsvDoc<'v>, String> {
     let shape_err = |detail: &str| {
         format!(
@@ -299,12 +326,18 @@ fn csv_doc<'v>(builtin: &str, value: &'v RuntimeValue) -> Result<CsvDoc<'v>, Str
         )
     };
     let Some(entries) = as_jdict_entries(value) else {
-        return match value {
-            RuntimeValue::Adt { ctor, .. } => Err(shape_err(&format!(
-                "got a Json `{ctor}` value, not a JDict"
-            ))),
-            other => Err(shape_err(&format!("got a non-Json value: {other:?}"))),
-        };
+        return Err(match value {
+            RuntimeValue::Adt { ctor, .. } if ctor == "JDict" => {
+                shape_err("this JDict value has a malformed payload")
+            }
+            RuntimeValue::Adt { ctor, .. } if JSON_CTORS.contains(&ctor.as_str()) => {
+                shape_err(&format!("got a Json `{ctor}` value, not a JDict"))
+            }
+            RuntimeValue::Adt { ctor, .. } => {
+                shape_err(&format!("got a non-Json value (constructor `{ctor}`)"))
+            }
+            other => shape_err(&format!("got a non-Json value: {}", truncated_debug(other))),
+        });
     };
     let lookup = |key: &str| {
         entries.iter().find_map(|(k, item)| match k {
@@ -320,7 +353,25 @@ fn csv_doc<'v>(builtin: &str, value: &'v RuntimeValue) -> Result<CsvDoc<'v>, Str
         .iter()
         .map(|item| as_jstr(item).ok_or_else(|| shape_err("`columns` must contain only strings")))
         .collect::<Result<Vec<&str>, String>>()?;
+    for (index, name) in columns.iter().enumerate() {
+        if let Some(first) = columns[..index].iter().position(|other| other == name) {
+            return Err(format!(
+                "{builtin}: duplicate column `{name}` in `columns` (columns {} and {}); \
+                 columns must be addressable by unique names",
+                first + 1,
+                index + 1
+            ));
+        }
+    }
     let rows = as_jlist(rows_value).ok_or_else(|| shape_err("`rows` must be a JList"))?;
+    for (row_idx, row) in rows.iter().enumerate() {
+        if as_jdict_entries(row).is_none() {
+            return Err(format!(
+                "{builtin}: data row {row_idx} (0-based) is not a JDict of \
+                 column -> cell; this is not a Csv document from parse_csv"
+            ));
+        }
+    }
     Ok(CsvDoc { columns, rows })
 }
 
@@ -340,32 +391,60 @@ fn available_columns(columns: &[&str]) -> String {
     names.join(", ")
 }
 
-fn require_column(builtin: &str, doc: &CsvDoc<'_>, column: &str) -> Result<(), String> {
-    if doc.columns.contains(&column) {
-        return Ok(());
-    }
-    Err(format!(
-        "{builtin}: column `{column}` not found; available columns: {}",
-        available_columns(&doc.columns)
-    ))
+/// Resolve a column name to its position in `columns`, or fail listing
+/// the available columns. The returned index feeds [`cell`]'s O(1)
+/// positional probe.
+fn require_column(builtin: &str, doc: &CsvDoc<'_>, column: &str) -> Result<usize, String> {
+    doc.columns
+        .iter()
+        .position(|name| *name == column)
+        .ok_or_else(|| {
+            format!(
+                "{builtin}: column `{column}` not found; available columns: {}",
+                available_columns(&doc.columns)
+            )
+        })
 }
 
-/// Fetch one cell. `row_idx` is a 0-based data-row index (the header is
-/// not a data row). Documents from `parse_csv` hold every cell as `JStr`;
-/// hand-assembled output documents may hold other Json scalars — callers
-/// decide what to accept.
+/// Shared context prefix for cell-level diagnostics. Accessor errors
+/// speak 0-based data-row indices (the `csv_f64`/`csv_str` argument
+/// space); parse errors speak 1-based physical records — the qualifier
+/// keeps the two spaces distinguishable (chelis#903 review).
+fn cell_context(builtin: &str, column: &str, row_idx: usize) -> String {
+    format!("{builtin}: column `{column}`, data row {row_idx} (0-based)")
+}
+
+fn row_entries<'v>(
+    builtin: &str,
+    row: &'v RuntimeValue,
+    row_idx: usize,
+) -> Result<&'v [(RuntimeValue, RuntimeValue)], String> {
+    as_jdict_entries(row).ok_or_else(|| {
+        format!(
+            "{builtin}: data row {row_idx} (0-based) is not a JDict of column -> cell; \
+             this is not a Csv document from parse_csv"
+        )
+    })
+}
+
+/// Fetch one cell. `col_idx` is the column's position in `columns`:
+/// `parse_csv` builds every row positionally aligned with the header, so
+/// the O(1) positional probe hits and a column extraction is linear in
+/// the row count; hand-assembled rows (arbitrary key order) fall back to
+/// a by-name scan (chelis#903 review).
 fn cell<'v>(
     builtin: &str,
     row: &'v RuntimeValue,
     row_idx: usize,
     column: &str,
+    col_idx: usize,
 ) -> Result<&'v RuntimeValue, String> {
-    let entries = as_jdict_entries(row).ok_or_else(|| {
-        format!(
-            "{builtin}: data row {row_idx} is not a JDict; this is not a Csv \
-             document from parse_csv"
-        )
-    })?;
+    let entries = row_entries(builtin, row, row_idx)?;
+    if let Some((key, item)) = entries.get(col_idx)
+        && matches!(key, RuntimeValue::String(k) if k == column)
+    {
+        return Ok(item);
+    }
     entries
         .iter()
         .find_map(|(key, item)| match key {
@@ -374,76 +453,70 @@ fn cell<'v>(
         })
         .ok_or_else(|| {
             format!(
-                "{builtin}: data row {row_idx} has no cell for column `{column}` \
-                 (malformed Csv document)"
+                "{}: row has no cell for this column (malformed Csv document)",
+                cell_context(builtin, column, row_idx)
             )
         })
 }
 
+/// One-phrase description of a cell for diagnostics. Foreign constructors
+/// are labeled as non-Json rather than mislabeled as Json values
+/// (chelis#903 review).
+fn cell_kind(node: &RuntimeValue) -> String {
+    match node {
+        RuntimeValue::Adt { ctor, .. } => match ctor.as_str() {
+            "JNull" => "null".to_string(),
+            "JBool" => "a bool".to_string(),
+            "JNum" => "a number".to_string(),
+            "JStr" => "a string".to_string(),
+            "JList" => "a list".to_string(),
+            "JDict" => "a dict".to_string(),
+            other => format!("not a Json value (constructor `{other}`)"),
+        },
+        other => format!("not a Json value ({})", truncated_debug(other)),
+    }
+}
+
+/// Read a string cell: `JStr` only, verbatim. Every other cell type is a
+/// loud per-type error — no cross-type coercion: `JNum` points at
+/// csv_f64, and `JBool`/`JNull` are to_csv's write-side cell encodings,
+/// not readable text (chelis#903 review).
 fn cell_str<'v>(
     builtin: &str,
     row: &'v RuntimeValue,
     row_idx: usize,
     column: &str,
+    col_idx: usize,
 ) -> Result<&'v str, String> {
-    let node = cell(builtin, row, row_idx, column)?;
-    as_jstr(node).ok_or_else(|| {
-        let kind = match node {
-            RuntimeValue::Adt { ctor, .. } if ctor == "JNum" => {
-                return format!(
-                    "{builtin}: column `{column}`, data row {row_idx}: cell is a number, \
-                     not a string; read it with csv_f64/csv_f64s"
-                );
-            }
-            RuntimeValue::Adt { ctor, .. } => format!("a Json `{ctor}` value"),
-            other => format!("{other:?}"),
-        };
-        format!("{builtin}: column `{column}`, data row {row_idx}: cell is {kind}, not a string")
+    let node = cell(builtin, row, row_idx, column, col_idx)?;
+    if let Some(text) = as_jstr(node) {
+        return Ok(text);
+    }
+    let ctx = cell_context(builtin, column, row_idx);
+    Err(match node.as_adt() {
+        Some(("JNum", _)) => {
+            format!("{ctx}: cell is a number, not a string; read it with csv_f64/csv_f64s")
+        }
+        Some(("JBool", _)) => {
+            format!("{ctx}: cell is a bool, not a string (no silent true/false-to-text coercion)")
+        }
+        Some(("JNull", _)) => {
+            format!("{ctx}: cell is null, not a string (null is to_csv's empty-cell encoding)")
+        }
+        _ => format!("{ctx}: cell is {}, not a string", cell_kind(node)),
     })
 }
 
-/// Strict JSON number grammar
-/// (`-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?`) — the same grammar
-/// `parse_json` enforces. Notably rejects: empty, `inf`/`NaN`, hex,
-/// leading `+`, leading zeros (`007`), bare `.5`/`1.`, and separators
-/// (`1_000`, `1,000`).
+/// Strict JSON number grammar — literally the shared `parse_json` scanner
+/// ([`super::json::json_number_token_len`]) required to consume the whole
+/// cell, so "the same grammar as JSON" holds by shared code. Notably
+/// rejects: empty, `inf`/`NaN`, hex, leading `+`, leading zeros (`007`),
+/// bare `.5`/`1.`, and separators (`1_000`, `1,000`).
 fn is_strict_json_number(text: &str) -> bool {
-    let bytes = text.as_bytes();
-    let mut i = 0;
-    if bytes.get(i) == Some(&b'-') {
-        i += 1;
-    }
-    match bytes.get(i) {
-        Some(b'0') => i += 1,
-        Some(b'1'..=b'9') => {
-            while matches!(bytes.get(i), Some(b'0'..=b'9')) {
-                i += 1;
-            }
-        }
-        _ => return false,
-    }
-    if bytes.get(i) == Some(&b'.') {
-        i += 1;
-        if !matches!(bytes.get(i), Some(b'0'..=b'9')) {
-            return false;
-        }
-        while matches!(bytes.get(i), Some(b'0'..=b'9')) {
-            i += 1;
-        }
-    }
-    if matches!(bytes.get(i), Some(b'e' | b'E')) {
-        i += 1;
-        if matches!(bytes.get(i), Some(b'+' | b'-')) {
-            i += 1;
-        }
-        if !matches!(bytes.get(i), Some(b'0'..=b'9')) {
-            return false;
-        }
-        while matches!(bytes.get(i), Some(b'0'..=b'9')) {
-            i += 1;
-        }
-    }
-    i == bytes.len()
+    matches!(
+        super::json::json_number_token_len(text.as_bytes()),
+        Ok(len) if len == text.len()
+    )
 }
 
 /// Convert one cell's text to f64: strict JSON number grammar after
@@ -457,58 +530,85 @@ fn parse_cell_number(
     row_idx: usize,
     raw: &str,
 ) -> Result<f64, String> {
+    let ctx = || cell_context(builtin, column, row_idx);
     let trimmed = raw.trim_matches(|c| c == ' ' || c == '\t');
     if trimmed.is_empty() {
         return Err(format!(
-            "{builtin}: column `{column}`, data row {row_idx} (0-based): cell is empty \
-             (no silent NaN/defaults; read optional columns with csv_str/csv_strs)"
+            "{}: cell is empty (no silent NaN/defaults; read optional columns with \
+             csv_str/csv_strs)",
+            ctx()
         ));
     }
     if !is_strict_json_number(trimmed) {
         return Err(format!(
-            "{builtin}: column `{column}`, data row {row_idx} (0-based): cell `{raw}` is \
-             not a number (strict JSON number syntax; surrounding spaces/tabs tolerated)"
+            "{}: cell `{raw}` is not a number (strict JSON number syntax; surrounding \
+             spaces/tabs tolerated)",
+            ctx()
         ));
     }
-    let value: f64 = trimmed.parse().map_err(|err| {
-        format!(
-            "{builtin}: column `{column}`, data row {row_idx} (0-based): internal error \
-             parsing `{trimmed}`: {err}"
-        )
-    })?;
+    let value: f64 = trimmed
+        .parse()
+        .map_err(|err| format!("{}: internal error parsing `{trimmed}`: {err}", ctx()))?;
     if !value.is_finite() {
-        return Err(format!(
-            "{builtin}: column `{column}`, data row {row_idx} (0-based): number `{raw}` \
-             overflows f64"
-        ));
+        return Err(format!("{}: number `{raw}` overflows f64", ctx()));
     }
     Ok(value)
 }
 
-/// Read a numeric cell: a `JStr` cell converts under [`parse_cell_number`];
-/// a `JNum` cell (hand-assembled output documents) is read directly.
+/// Read a numeric cell: a `JStr` cell converts under
+/// [`parse_cell_number`]; a finite `JNum` cell (hand-assembled documents)
+/// is read directly — a non-finite `JNum` fails loudly, matching the
+/// to_csv write-side contract (no silent NaN, chelis#903 review).
+/// `JBool`/`JNull` are loud per-type errors, consistent with [`cell_str`].
 fn cell_f64(
     builtin: &str,
     row: &RuntimeValue,
     row_idx: usize,
     column: &str,
+    col_idx: usize,
 ) -> Result<f64, String> {
-    let node = cell(builtin, row, row_idx, column)?;
-    if let RuntimeValue::Adt { ctor, fields, .. } = node
-        && ctor == "JNum"
-    {
-        if let [RuntimeValue::Scalar(payload)] = fields.as_slice()
-            && payload.dtype().is_float()
-        {
-            return Ok(payload.bits().as_f64());
+    let node = cell(builtin, row, row_idx, column, col_idx)?;
+    let ctx = || cell_context(builtin, column, row_idx);
+    match node.as_adt() {
+        Some(("JNum", [RuntimeValue::Scalar(payload)])) if payload.dtype().is_float() => {
+            let value = payload.bits().as_f64();
+            if !value.is_finite() {
+                return Err(format!(
+                    "{}: cell is the non-finite number `{value}` (CSV cannot represent \
+                     non-finite numbers; no silent NaN/defaults)",
+                    ctx()
+                ));
+            }
+            Ok(value)
         }
-        return Err(format!(
-            "{builtin}: column `{column}`, data row {row_idx}: malformed JNum cell \
-             {fields:?}"
-        ));
+        Some(("JNum", fields)) => Err(format!(
+            "{}: malformed JNum cell {}",
+            ctx(),
+            truncate_rendered(format!("{fields:?}"))
+        )),
+        Some(("JStr", [RuntimeValue::String(text)])) => {
+            parse_cell_number(builtin, column, row_idx, text)
+        }
+        Some(("JStr", fields)) => Err(format!(
+            "{}: malformed JStr cell {}",
+            ctx(),
+            truncate_rendered(format!("{fields:?}"))
+        )),
+        Some(("JBool", _)) => Err(format!(
+            "{}: cell is a bool, not a number (no silent true/false-to-number coercion)",
+            ctx()
+        )),
+        Some(("JNull", _)) => Err(format!(
+            "{}: cell is null (no silent NaN/defaults; null is to_csv's empty-cell \
+             encoding)",
+            ctx()
+        )),
+        _ => Err(format!(
+            "{}: cell is {}, not a number",
+            ctx(),
+            cell_kind(node)
+        )),
     }
-    let text = cell_str(builtin, row, row_idx, column)?;
-    parse_cell_number(builtin, column, row_idx, text)
 }
 
 fn require_row_index<'v>(
@@ -544,23 +644,23 @@ pub(super) fn csv_nrows_of(value: &RuntimeValue) -> Result<i64, String> {
 
 pub(super) fn csv_strs_at(value: &RuntimeValue, column: &str) -> Result<Vec<String>, String> {
     let doc = csv_doc("csv_strs", value)?;
-    require_column("csv_strs", &doc, column)?;
+    let col_idx = require_column("csv_strs", &doc, column)?;
     doc.rows
         .iter()
         .enumerate()
         .map(|(row_idx, row)| {
-            cell_str("csv_strs", row, row_idx, column).map(|text| text.to_string())
+            cell_str("csv_strs", row, row_idx, column, col_idx).map(|text| text.to_string())
         })
         .collect()
 }
 
 pub(super) fn csv_f64s_at(value: &RuntimeValue, column: &str) -> Result<Vec<f64>, String> {
     let doc = csv_doc("csv_f64s", value)?;
-    require_column("csv_f64s", &doc, column)?;
+    let col_idx = require_column("csv_f64s", &doc, column)?;
     doc.rows
         .iter()
         .enumerate()
-        .map(|(row_idx, row)| cell_f64("csv_f64s", row, row_idx, column))
+        .map(|(row_idx, row)| cell_f64("csv_f64s", row, row_idx, column, col_idx))
         .collect()
 }
 
@@ -570,16 +670,16 @@ pub(super) fn csv_str_at(
     column: &str,
 ) -> Result<String, String> {
     let doc = csv_doc("csv_str", value)?;
-    require_column("csv_str", &doc, column)?;
+    let col_idx = require_column("csv_str", &doc, column)?;
     let (index, row) = require_row_index("csv_str", &doc, row_idx)?;
-    cell_str("csv_str", row, index, column).map(|text| text.to_string())
+    cell_str("csv_str", row, index, column, col_idx).map(|text| text.to_string())
 }
 
 pub(super) fn csv_f64_at(value: &RuntimeValue, row_idx: i64, column: &str) -> Result<f64, String> {
     let doc = csv_doc("csv_f64", value)?;
-    require_column("csv_f64", &doc, column)?;
+    let col_idx = require_column("csv_f64", &doc, column)?;
     let (index, row) = require_row_index("csv_f64", &doc, row_idx)?;
-    cell_f64("csv_f64", row, index, column)
+    cell_f64("csv_f64", row, index, column, col_idx)
 }
 
 // ---------------------------------------------------------------------------
@@ -588,8 +688,11 @@ pub(super) fn csv_f64_at(value: &RuntimeValue, row_idx: i64, column: &str) -> Re
 
 /// Append one field with minimal RFC 4180 quoting: quoted only when the
 /// text contains a comma, quote, CR, or LF (embedded quotes doubled), or
-/// when `force_quote` demands it (the empty sole field of a single-column
-/// row, which unquoted would read back as a blank line).
+/// when `force_quote` demands it — the empty sole field of a
+/// single-column row (unquoted it would read back as a blank line), and a
+/// first header field starting with U+FEFF (unquoted it would sit at the
+/// start of the output text and parse_csv's BOM strip would silently
+/// rename the column on re-read).
 fn write_csv_field(out: &mut String, text: &str, force_quote: bool) {
     let needs_quote = force_quote
         || text.contains(',')
@@ -610,38 +713,44 @@ fn write_csv_field(out: &mut String, text: &str, force_quote: bool) {
     out.push('"');
 }
 
-/// Render one cell of a hand- or parse-assembled document to field text.
+/// Render one cell of a document to CSV field text. `JStr` is verbatim;
+/// `JNum` uses the shared shortest-round-trip formatter
+/// ([`super::json::format_f64_json`] — the same fidelity contract as
+/// `to_json`, never the print channel: chelis#748/#723/#734); `JBool` is
+/// `true`/`false`; `JNull` is the empty cell. Containers and non-finite
+/// numbers fail loudly.
 fn cell_to_field_text(column: &str, row_idx: usize, node: &RuntimeValue) -> Result<String, String> {
-    let RuntimeValue::Adt { ctor, fields, .. } = node else {
+    let ctx = || cell_context("to_csv", column, row_idx);
+    let Some((ctor, fields)) = node.as_adt() else {
         return Err(format!(
-            "to_csv: column `{column}`, data row {row_idx}: cell is not a Json value \
-             ({node:?})"
+            "{}: cell is not a Json value ({})",
+            ctx(),
+            truncated_debug(node)
         ));
     };
-    match (ctor.as_str(), fields.as_slice()) {
+    match (ctor, fields) {
         ("JStr", [RuntimeValue::String(s)]) => Ok(s.clone()),
         ("JNum", [RuntimeValue::Scalar(payload)]) if payload.dtype().is_float() => {
             let value = payload.bits().as_f64();
             if !value.is_finite() {
                 return Err(format!(
-                    "to_csv: column `{column}`, data row {row_idx}: cannot represent \
-                     non-finite number `{value}` in CSV"
+                    "{}: cannot represent non-finite number `{value}` in CSV",
+                    ctx()
                 ));
             }
-            // Shortest-round-trip f64 — the same fidelity contract as
-            // `to_json` (never the print channel: chelis#748/#723/#734).
-            Ok(format!("{value:?}"))
+            Ok(super::json::format_f64_json(value).expect("finite f64 always formats"))
         }
         ("JBool", [RuntimeValue::Bool(b)]) => Ok(if *b { "true" } else { "false" }.to_string()),
         ("JNull", []) => Ok(String::new()),
         ("JList" | "JDict", _) => Err(format!(
-            "to_csv: column `{column}`, data row {row_idx}: cell is a {}; CSV cells \
-             must be scalars (string, number, bool, or null)",
+            "{}: cell is a {}; CSV cells must be scalars (string, number, bool, or null)",
+            ctx(),
             if ctor == "JList" { "list" } else { "dict" }
         )),
         _ => Err(format!(
-            "to_csv: column `{column}`, data row {row_idx}: malformed Json cell \
-             (constructor `{ctor}` with fields {fields:?})"
+            "{}: malformed Json cell (constructor `{ctor}` with fields {})",
+            ctx(),
+            truncate_rendered(format!("{fields:?}"))
         )),
     }
 }
@@ -649,22 +758,36 @@ fn cell_to_field_text(column: &str, row_idx: usize, node: &RuntimeValue) -> Resu
 /// Serialize a Csv document (the exact shape `parse_csv` returns) to CSV
 /// text: header row from `columns`, one row per `rows` entry, minimal
 /// quoting, LF row separators, trailing final newline. Deterministic and
-/// byte-stable. Loud errors, no silent data loss: rows missing a declared
-/// column or carrying an undeclared key fail by name.
+/// byte-stable. Loud errors, no silent data loss anywhere: unexpected
+/// top-level keys (e.g. a `json_set`-added subtree), rows missing a
+/// declared column, rows carrying an undeclared or duplicate key, and
+/// non-scalar cells all fail by name (chelis#903 review).
 pub(super) fn csv_to_text(value: &RuntimeValue) -> Result<String, String> {
     let doc = csv_doc("to_csv", value)?;
+    // Only `columns` and `rows` serialize; silently ignoring any other
+    // top-level entry (a json_set-added `meta` subtree, say) would be
+    // exactly the silent data loss this surface exists to kill. Read
+    // accessors tolerate extra keys — reads drop nothing — but the write
+    // path must not.
+    for (key, _) in as_jdict_entries(value).expect("csv_doc validated the JDict") {
+        match key {
+            RuntimeValue::String(key) if key == "columns" || key == "rows" => {}
+            RuntimeValue::String(key) => {
+                return Err(format!(
+                    "to_csv: document has unexpected top-level key `{key}` (only \
+                     `columns` and `rows` serialize; refusing to silently drop data)"
+                ));
+            }
+            other => {
+                return Err(format!(
+                    "to_csv: document has a non-string top-level key {}",
+                    truncated_debug(other)
+                ));
+            }
+        }
+    }
     if doc.columns.is_empty() {
         return Err("to_csv: `columns` is empty (a CSV needs at least one column)".to_string());
-    }
-    for (index, name) in doc.columns.iter().enumerate() {
-        if let Some(first) = doc.columns[..index].iter().position(|other| other == name) {
-            return Err(format!(
-                "to_csv: duplicate column `{name}` (columns {} and {}); the result \
-                 could not be re-read by parse_csv",
-                first + 1,
-                index + 1
-            ));
-        }
     }
     let single_column = doc.columns.len() == 1;
     let mut out = String::new();
@@ -672,34 +795,43 @@ pub(super) fn csv_to_text(value: &RuntimeValue) -> Result<String, String> {
         if index > 0 {
             out.push(',');
         }
-        write_csv_field(&mut out, name, single_column && name.is_empty());
+        let force_quote =
+            (single_column && name.is_empty()) || (index == 0 && name.starts_with('\u{feff}'));
+        write_csv_field(&mut out, name, force_quote);
     }
     out.push('\n');
     for (row_idx, row) in doc.rows.iter().enumerate() {
-        let entries = as_jdict_entries(row).ok_or_else(|| {
-            format!("to_csv: data row {row_idx} is not a JDict of column -> cell")
-        })?;
-        // Refuse to silently drop data: every key in the row must be a
-        // declared column (the reverse — a declared column missing from
-        // the row — fails in the emit loop below).
+        let entries = row_entries("to_csv", row, row_idx)?;
+        // Refuse to silently drop or arbitrarily pick data: every key in
+        // the row must be a declared column, at most once (a declared
+        // column missing from the row fails in the emit loop below).
+        let mut seen: Vec<&str> = Vec::with_capacity(entries.len());
         for (key, _) in entries {
             let RuntimeValue::String(key) = key else {
                 return Err(format!(
-                    "to_csv: data row {row_idx} has a non-string key {key:?}"
+                    "to_csv: data row {row_idx} (0-based) has a non-string key {}",
+                    truncated_debug(key)
                 ));
             };
-            if !doc.columns.iter().any(|name| name == key) {
+            if !doc.columns.contains(&key.as_str()) {
                 return Err(format!(
-                    "to_csv: data row {row_idx} has key `{key}` that is not in \
-                     `columns`; refusing to silently drop data"
+                    "to_csv: data row {row_idx} (0-based) has key `{key}` that is not \
+                     in `columns`; refusing to silently drop data"
                 ));
             }
+            if seen.contains(&key.as_str()) {
+                return Err(format!(
+                    "to_csv: data row {row_idx} (0-based) has duplicate key `{key}`; \
+                     refusing to silently pick one of its values"
+                ));
+            }
+            seen.push(key);
         }
         for (index, column) in doc.columns.iter().enumerate() {
             if index > 0 {
                 out.push(',');
             }
-            let node = cell("to_csv", row, row_idx, column)?;
+            let node = cell("to_csv", row, row_idx, column, index)?;
             let text = cell_to_field_text(column, row_idx, node)?;
             write_csv_field(&mut out, &text, single_column && text.is_empty());
         }
@@ -850,8 +982,10 @@ mod tests {
 
     #[test]
     fn parse_bare_carriage_return_fails() {
+        // The CR follows field 2 (`b`), so the error carries both the row
+        // and the column ordinal (chelis#903 review).
         let e = err("a,b\r1,2\r");
-        assert!(e.contains("row 1"), "got `{e}`");
+        assert!(e.contains("row 1, column 2"), "got `{e}`");
         assert!(e.contains("bare carriage return"), "got `{e}`");
     }
 
@@ -1099,7 +1233,8 @@ mod tests {
             ),
         ]);
         let e = csv_to_text(&missing).expect_err("missing column value");
-        assert!(e.contains("no cell for column `b`"), "got `{e}`");
+        assert!(e.contains("column `b`"), "got `{e}`");
+        assert!(e.contains("no cell for this column"), "got `{e}`");
 
         let extra = jdict(vec![
             ("columns".to_string(), jlist(vec![jstr("a".to_string())])),
@@ -1174,5 +1309,306 @@ mod tests {
             json_value_to_text(&c).unwrap(),
             r#"{"columns":["id","px"],"rows":[{"id":"alpha","px":"1.5"}]}"#
         );
+    }
+
+    // -- chelis#903 review probes -------------------------------------------
+
+    fn jbool_cell(value: bool) -> RuntimeValue {
+        RuntimeValue::Adt {
+            ctor: "JBool".to_string(),
+            fields: vec![RuntimeValue::Bool(value)],
+            field_names: None,
+        }
+    }
+
+    fn jnull_cell() -> RuntimeValue {
+        RuntimeValue::Adt {
+            ctor: "JNull".to_string(),
+            fields: vec![],
+            field_names: None,
+        }
+    }
+
+    /// One-column document with one cell per row, for cell-type probes.
+    fn one_col_doc(column: &str, cells: Vec<RuntimeValue>) -> RuntimeValue {
+        jdict(vec![
+            ("columns".to_string(), jlist(vec![jstr(column.to_string())])),
+            (
+                "rows".to_string(),
+                jlist(
+                    cells
+                        .into_iter()
+                        .map(|cell| jdict(vec![(column.to_string(), cell)]))
+                        .collect(),
+                ),
+            ),
+        ])
+    }
+
+    /// Review finding 1: a first header field starting with U+FEFF must be
+    /// quoted, or parse_csv's BOM strip silently renames the column on
+    /// re-read (and a `["\u{feff}a", "a"]` header would collapse into a
+    /// duplicate-header parse error).
+    #[test]
+    fn to_csv_bom_leading_first_column_round_trips() {
+        let c = jdict(vec![
+            (
+                "columns".to_string(),
+                jlist(vec![
+                    jstr("\u{feff}date".to_string()),
+                    jstr("px".to_string()),
+                ]),
+            ),
+            (
+                "rows".to_string(),
+                jlist(vec![jdict(vec![
+                    ("\u{feff}date".to_string(), jstr("d1".to_string())),
+                    ("px".to_string(), jstr("1.5".to_string())),
+                ])]),
+            ),
+        ]);
+        let text = csv_to_text(&c).unwrap();
+        assert!(
+            text.starts_with("\"\u{feff}date\""),
+            "BOM-leading first header field must be quoted, got {text:?}"
+        );
+        assert_eq!(
+            csv_cols_of(&doc(&text)).unwrap(),
+            vec!["\u{feff}date", "px"]
+        );
+
+        // BOM-vs-plain sibling names must survive as two distinct columns.
+        let tricky = jdict(vec![
+            (
+                "columns".to_string(),
+                jlist(vec![jstr("\u{feff}a".to_string()), jstr("a".to_string())]),
+            ),
+            ("rows".to_string(), jlist(vec![])),
+        ]);
+        let text = csv_to_text(&tricky).unwrap();
+        assert_eq!(csv_cols_of(&doc(&text)).unwrap(), vec!["\u{feff}a", "a"]);
+
+        // A double-BOM input: parse strips exactly one; the surviving
+        // BOM-leading column then round-trips through to_csv.
+        let c2 = doc("\u{feff}\u{feff}a\n1\n");
+        assert_eq!(csv_cols_of(&c2).unwrap(), vec!["\u{feff}a"]);
+        let round = doc(&csv_to_text(&c2).unwrap());
+        assert_eq!(csv_cols_of(&round).unwrap(), vec!["\u{feff}a"]);
+    }
+
+    /// Review finding 2: a non-finite `JNum` cell must not leak through the
+    /// numeric accessors as a silent NaN.
+    #[test]
+    fn csv_f64_non_finite_jnum_cell_is_loud() {
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let c = one_col_doc("pv", vec![jnum(bad)]);
+            let e = csv_f64_at(&c, 0, "pv").expect_err("non-finite must fail");
+            assert!(e.contains("non-finite"), "{bad}: got `{e}`");
+            assert!(e.contains("column `pv`"), "{bad}: got `{e}`");
+            let e = csv_f64s_at(&c, "pv").expect_err("non-finite must fail");
+            assert!(e.contains("non-finite"), "{bad}: got `{e}`");
+        }
+    }
+
+    /// Review finding 3: to_csv must not silently drop a top-level subtree
+    /// added via json_set; read accessors still tolerate it (reads drop
+    /// nothing).
+    #[test]
+    fn to_csv_unexpected_top_level_key_is_loud() {
+        let c = doc("id,px\nalpha,1.5\n");
+        let augmented = crate::runtime::json::json_set_at(
+            &c,
+            "meta.note",
+            &jstr("generic annotation".to_string()),
+        )
+        .expect("json_set on a Csv document");
+        let e = csv_to_text(&augmented).expect_err("extra top-level key must fail");
+        assert!(e.contains("unexpected top-level key `meta`"), "got `{e}`");
+        assert!(e.contains("refusing to silently drop data"), "got `{e}`");
+        // Reads keep working on the augmented document.
+        assert_eq!(csv_nrows_of(&augmented).unwrap(), 1);
+        assert_eq!(csv_f64_at(&augmented, 0, "px").unwrap(), 1.5);
+    }
+
+    /// Review finding 4 (decision lock): the to_csv -> parse_csv round trip
+    /// is values-as-text — every cell comes back as the `JStr` of its
+    /// serialized field text; non-`JStr` cell TYPES do not survive. A
+    /// `JBool(true)` cell and a `jstr("true")` cell serialize identically
+    /// by design.
+    #[test]
+    fn round_trip_normalizes_cell_types_to_jstr() {
+        let c = jdict(vec![
+            (
+                "columns".to_string(),
+                jlist(vec![
+                    jstr("num".to_string()),
+                    jstr("flag".to_string()),
+                    jstr("note".to_string()),
+                ]),
+            ),
+            (
+                "rows".to_string(),
+                jlist(vec![jdict(vec![
+                    ("num".to_string(), jnum(2.5)),
+                    ("flag".to_string(), jbool_cell(true)),
+                    ("note".to_string(), jnull_cell()),
+                ])]),
+            ),
+        ]);
+        let reparsed = doc(&csv_to_text(&c).unwrap());
+        assert_eq!(
+            json_value_to_text(&reparsed).unwrap(),
+            r#"{"columns":["num","flag","note"],"rows":[{"num":"2.5","flag":"true","note":""}]}"#,
+            "cells normalize to JStr of their serialized text"
+        );
+        // The JNum path stays bit-exact through the numeric accessor.
+        assert_eq!(csv_f64_at(&reparsed, 0, "num").unwrap(), 2.5);
+        // JBool(true) and jstr("true") are indistinguishable after the
+        // trip — the documented normalization.
+        let as_text = one_col_doc("flag", vec![jstr("true".to_string())]);
+        let as_bool = one_col_doc("flag", vec![jbool_cell(true)]);
+        assert_eq!(
+            csv_to_text(&as_text).unwrap(),
+            csv_to_text(&as_bool).unwrap()
+        );
+    }
+
+    /// Review finding 5: JBool/JNull cells fail the read accessors with
+    /// per-type messages (not a generic "not a string" mislabel), and the
+    /// JNull numeric error explains the empty-cell encoding.
+    #[test]
+    fn csv_accessors_reject_bool_and_null_cells() {
+        let bools = one_col_doc("flag", vec![jbool_cell(true)]);
+        let e = csv_f64_at(&bools, 0, "flag").expect_err("bool as number");
+        assert!(e.contains("cell is a bool, not a number"), "got `{e}`");
+        let e = csv_str_at(&bools, 0, "flag").expect_err("bool as string");
+        assert!(e.contains("cell is a bool, not a string"), "got `{e}`");
+
+        let nulls = one_col_doc("note", vec![jnull_cell()]);
+        let e = csv_f64_at(&nulls, 0, "note").expect_err("null as number");
+        assert!(e.contains("cell is null"), "got `{e}`");
+        assert!(e.contains("no silent NaN"), "got `{e}`");
+        assert!(e.contains("empty-cell encoding"), "got `{e}`");
+        let e = csv_str_at(&nulls, 0, "note").expect_err("null as string");
+        assert!(e.contains("cell is null, not a string"), "got `{e}`");
+    }
+
+    /// Review finding 6: duplicate names in `columns` are rejected by the
+    /// whole accessor family (eager csv_doc validation), not just by
+    /// parse_csv/to_csv.
+    #[test]
+    fn hand_built_duplicate_columns_rejected_by_all_accessors() {
+        let dup = jdict(vec![
+            (
+                "columns".to_string(),
+                jlist(vec![jstr("a".to_string()), jstr("a".to_string())]),
+            ),
+            ("rows".to_string(), jlist(vec![])),
+        ]);
+        for e in [
+            csv_nrows_of(&dup).expect_err("nrows"),
+            csv_cols_of(&dup).expect_err("cols"),
+            csv_f64s_at(&dup, "a").expect_err("f64s"),
+            csv_strs_at(&dup, "a").expect_err("strs"),
+        ] {
+            assert!(e.contains("duplicate column `a` in `columns`"), "got `{e}`");
+            assert!(e.contains("columns 1 and 2"), "got `{e}`");
+        }
+    }
+
+    /// Review finding 7: a foreign ADT constructor is labeled as non-Json,
+    /// not mislabeled "a Json `Some` value".
+    #[test]
+    fn foreign_adt_is_not_labeled_json() {
+        let foreign = RuntimeValue::Adt {
+            ctor: "Some".to_string(),
+            fields: vec![RuntimeValue::float64(1.0)],
+            field_names: None,
+        };
+        let e = csv_nrows_of(&foreign).expect_err("foreign ADT");
+        assert!(
+            e.contains("non-Json value (constructor `Some`)"),
+            "got `{e}`"
+        );
+        assert!(!e.contains("Json `Some`"), "got `{e}`");
+    }
+
+    /// Review finding 8: shape errors truncate huge payloads instead of
+    /// interpolating the entire value.
+    #[test]
+    fn shape_error_truncates_huge_values() {
+        let huge = RuntimeValue::List(vec![RuntimeValue::float64(1.0); 20_000]);
+        let e = csv_nrows_of(&huge).expect_err("non-Json value");
+        assert!(
+            e.len() < 600,
+            "error must stay readable, got {} bytes",
+            e.len()
+        );
+        assert!(e.contains("elided"), "got `{e}`");
+    }
+
+    /// Review finding 11: csv_nrows/csv_cols validate `rows` elements
+    /// eagerly like every other accessor — garbage rows do not pass
+    /// silently anywhere.
+    #[test]
+    fn garbage_rows_rejected_eagerly_by_nrows_and_cols() {
+        let garbage = jdict(vec![
+            ("columns".to_string(), jlist(vec![jstr("a".to_string())])),
+            ("rows".to_string(), jlist(vec![jnum(1.0)])),
+        ]);
+        for e in [
+            csv_nrows_of(&garbage).expect_err("nrows"),
+            csv_cols_of(&garbage).expect_err("cols"),
+            csv_strs_at(&garbage, "a").expect_err("strs"),
+        ] {
+            assert!(
+                e.contains("data row 0 (0-based) is not a JDict"),
+                "got `{e}`"
+            );
+        }
+    }
+
+    /// Review finding 12: a row carrying the same declared key twice is a
+    /// loud to_csv error (unreachable from surf, latent for Rust callers).
+    #[test]
+    fn to_csv_duplicate_row_key_is_loud() {
+        let row = RuntimeValue::Adt {
+            ctor: "JDict".to_string(),
+            fields: vec![RuntimeValue::Dict(vec![
+                (RuntimeValue::String("a".to_string()), jstr("1".to_string())),
+                (RuntimeValue::String("a".to_string()), jstr("2".to_string())),
+            ])],
+            field_names: None,
+        };
+        let c = jdict(vec![
+            ("columns".to_string(), jlist(vec![jstr("a".to_string())])),
+            ("rows".to_string(), jlist(vec![row])),
+        ]);
+        let e = csv_to_text(&c).expect_err("duplicate row key");
+        assert!(e.contains("duplicate key `a`"), "got `{e}`");
+    }
+
+    /// Review finding 15: the positional fast path never changes results —
+    /// hand-assembled rows with reordered keys read correctly through the
+    /// by-name fallback.
+    #[test]
+    fn reordered_row_keys_read_via_fallback() {
+        let c = jdict(vec![
+            (
+                "columns".to_string(),
+                jlist(vec![jstr("a".to_string()), jstr("b".to_string())]),
+            ),
+            (
+                "rows".to_string(),
+                jlist(vec![jdict(vec![
+                    ("b".to_string(), jstr("2".to_string())),
+                    ("a".to_string(), jstr("1".to_string())),
+                ])]),
+            ),
+        ]);
+        assert_eq!(csv_str_at(&c, 0, "a").unwrap(), "1");
+        assert_eq!(csv_str_at(&c, 0, "b").unwrap(), "2");
+        assert_eq!(csv_strs_at(&c, "b").unwrap(), vec!["2"]);
+        assert_eq!(csv_to_text(&c).unwrap(), "a,b\n1,2\n");
     }
 }

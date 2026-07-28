@@ -345,17 +345,30 @@ All failures are loud eval errors — no silent NaN/defaults.
 
 | Name | Signature | Notes |
 |---|---|---|
-| `parse_csv` | `(s: string) -> Json` | RFC-4180-ish: quoted fields, doubled embedded quotes, commas/newlines literal inside quotes; LF or CRLF (mixed ok); leading UTF-8 BOM stripped; blank rows only at EOF. Errors name 1-based row/column: unclosed quote, content after closing quote, bare `"` in an unquoted field, bare CR, ragged row, interior blank row, **duplicate header names** |
-| `to_csv` | `(c: Json) -> string` | serializes the exact document shape `parse_csv` returns (round-trips); cells may be `JStr`/`JNum` (**shortest-round-trip f64**, same contract as `to_json`)/`JBool`/`JNull` (empty cell); minimal quoting, LF rows, trailing newline, byte-stable; loud on non-finite numbers, container cells, a row missing a declared column or carrying an undeclared key |
-| `csv_f64s` | `(c: Json, col: string) -> List[f64]` | whole column as numbers; strict JSON number grammar per cell (surrounding spaces/tabs tolerated, matching Python `float()`); empty or non-numeric cells fail naming the column, 0-based data row, and offending text |
-| `csv_strs` | `(c: Json, col: string) -> List[string]` | whole column verbatim |
+| `parse_csv` | `(s: string) -> Json` | RFC-4180-ish: quoted fields, doubled embedded quotes, commas/newlines literal inside quotes; LF or CRLF (mixed ok); leading UTF-8 BOM stripped; blank rows only at EOF. Errors name the 1-based row, plus the 1-based column where one applies (quote/separator errors): unclosed quote, content after closing quote, bare `"` in an unquoted field, bare CR, ragged row (row-level), interior blank row (row-level), **duplicate header names** |
+| `to_csv` | `(c: Json) -> string` | serializes the exact document shape `parse_csv` returns; the round-trip is **values-as-text**: every cell re-reads as the `JStr` of its serialized field text (all-`JStr` documents round-trip identically; `JNum` re-reads bit-exactly via `csv_f64`; cell *types* other than `JStr` do not survive — CSV is untyped). Cells may be `JStr`/`JNum` (**shortest-round-trip f64**, the same `format_f64_json` as `to_json`)/`JBool`/`JNull` (empty cell); minimal quoting (incl. a BOM-leading first header field), LF rows, trailing newline, byte-stable; loud on non-finite numbers, container cells, unexpected top-level keys, a row missing a declared column or carrying an undeclared/duplicate key |
+| `csv_f64s` | `(c: Json, col: string) -> List[f64]` | whole column as numbers; strict JSON number grammar per cell — literally `parse_json`'s scanner (surrounding spaces/tabs tolerated, matching Python `float()`); empty or non-numeric cells fail naming the column, 0-based data row, and offending text; finite `JNum` cells (assembled docs) read directly, non-finite fail; `JBool`/`JNull` cells fail per-type |
+| `csv_strs` | `(c: Json, col: string) -> List[string]` | whole column verbatim (`JStr` cells only; other cell types fail per-type — no cross-type coercion) |
 | `csv_nrows` | `(c: Json) -> int64` | data rows (header excluded) |
 | `csv_cols` | `(c: Json) -> List[string]` | header names in file order (preserved even for zero-row files) |
 | `csv_f64` | `(c: Json, row: int, col: string) -> f64` | one cell as a number; `row` is a 0-based data-row index, any integer precision (bare literals work) |
 | `csv_str` | `(c: Json, row: int, col: string) -> string` | one cell verbatim |
 
 Missing columns fail naming the column **and listing the available
-columns**. Composes end-to-end with §3.5/§3.8:
+columns**. Document-shape validation is eager and uniform: every accessor
+(including `csv_nrows`/`csv_cols`) checks that `columns` is a list of
+unique strings and every row a JDict; cell types are checked at read.
+
+**Integer precision (chelis#904 review):** `csv_f64`/`csv_f64s` parse
+through the same number grammar into f64, so an integer above 2^53
+**silently loses precision** — `9007199254740993` reads back as
+`9007199254740992.0`, with no diagnostic. CSV columns of int64 IDs are
+the *common* case, more so than in JSON. The exact escape hatch is
+**`csv_str` + `to_int`** (or `csv_strs` + a `map` of `to_int`): cells
+come out of `parse_csv` as `JStr`, so the text is preserved verbatim
+until you choose the numeric read. Same limit and the same reason as
+§3.8's `json_f64`; the exact-int64 story upstream is chelis#729.
+Composes end-to-end with §3.5/§3.8:
 `read_file |> parse_csv` → `csv_f64s` + tensor builtins → `round_to` →
 `jdict`/`json_set`/`to_json` (or `to_csv`) + `write_file`.
 

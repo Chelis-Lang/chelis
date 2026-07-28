@@ -2352,6 +2352,27 @@ c = parse_csv("a,b\n1,\"oops\n")
     assert!(err.contains("parse_csv"), "got `{err}`");
     assert!(err.contains("row 2, column 2"), "got `{err}`");
     assert!(err.contains("unclosed quoted field"), "got `{err}`");
+
+    // The json_set seam (chelis#903 review): augmenting a Csv document
+    // with an extra top-level subtree is fine for reads, but to_csv
+    // refuses to silently drop it.
+    let augmented = checked_surf(
+        r#"
+c2 = json_set(parse_csv("id,px\nalpha,1.5\n"), "meta.note", jstr("x"))
+n = csv_nrows(c2)
+text = to_csv(c2)
+"#,
+    );
+    let err = evaluate_host_program(&augmented, &HashMap::new())
+        .expect_err("extra top-level key must fail to_csv");
+    assert!(
+        err.contains("unexpected top-level key `meta`"),
+        "got `{err}`"
+    );
+    assert!(
+        err.contains("refusing to silently drop data"),
+        "got `{err}`"
+    );
 }
 
 /// Check-time negative parity: `check_csv_builtin_signature` rejects

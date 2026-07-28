@@ -1088,14 +1088,25 @@ pub(super) fn tensor_bool_unop(
     })
 }
 
+/// Render one argument slot for an `expect_*_arg` diagnostic, preserving
+/// the `Some(..)`/`None` wrapper but truncating huge payloads (chelis#903
+/// review; see [`super::truncated_debug`]).
+fn arg_debug(args: &[RuntimeValue], index: usize) -> String {
+    match args.get(index) {
+        Some(value) => format!("Some({})", super::truncated_debug(value)),
+        None => "None".to_string(),
+    }
+}
+
 pub(super) fn expect_tensor_arg(
     args: &[RuntimeValue],
     index: usize,
 ) -> Result<RuntimeTensorValue, String> {
     match args.get(index) {
         Some(RuntimeValue::Tensor(value)) => Ok(value.clone()),
-        other => Err(format!(
-            "expected tensor arg at index {index}, got {other:?}"
+        _ => Err(format!(
+            "expected tensor arg at index {index}, got {}",
+            arg_debug(args, index)
         )),
     }
 }
@@ -1103,8 +1114,9 @@ pub(super) fn expect_tensor_arg(
 pub(super) fn expect_string_arg(args: &[RuntimeValue], index: usize) -> Result<String, String> {
     match args.get(index) {
         Some(RuntimeValue::String(value)) => Ok(value.clone()),
-        other => Err(format!(
-            "expected string arg at index {index}, got {other:?}"
+        _ => Err(format!(
+            "expected string arg at index {index}, got {}",
+            arg_debug(args, index)
         )),
     }
 }
@@ -1115,7 +1127,10 @@ pub(super) fn expect_list_arg(
 ) -> Result<Vec<RuntimeValue>, String> {
     match args.get(index) {
         Some(RuntimeValue::List(items)) => Ok(items.clone()),
-        other => Err(format!("expected list arg at index {index}, got {other:?}")),
+        _ => Err(format!(
+            "expected list arg at index {index}, got {}",
+            arg_debug(args, index)
+        )),
     }
 }
 
@@ -1125,7 +1140,10 @@ pub(super) fn expect_dict_arg(
 ) -> Result<Vec<(RuntimeValue, RuntimeValue)>, String> {
     match args.get(index) {
         Some(RuntimeValue::Dict(entries)) => Ok(entries.clone()),
-        other => Err(format!("expected dict arg at index {index}, got {other:?}")),
+        _ => Err(format!(
+            "expected dict arg at index {index}, got {}",
+            arg_debug(args, index)
+        )),
     }
 }
 
@@ -1134,14 +1152,20 @@ pub(super) fn expect_int_arg(args: &[RuntimeValue], index: usize) -> Result<i64,
         Some(RuntimeValue::Scalar(payload)) if payload.dtype().is_integer() => {
             Ok(payload.bits().as_i64())
         }
-        other => Err(format!("expected int arg at index {index}, got {other:?}")),
+        _ => Err(format!(
+            "expected int arg at index {index}, got {}",
+            arg_debug(args, index)
+        )),
     }
 }
 
 pub(super) fn expect_bool_arg(args: &[RuntimeValue], index: usize) -> Result<bool, String> {
     match args.get(index) {
         Some(RuntimeValue::Bool(value)) => Ok(*value),
-        other => Err(format!("expected bool arg at index {index}, got {other:?}")),
+        _ => Err(format!(
+            "expected bool arg at index {index}, got {}",
+            arg_debug(args, index)
+        )),
     }
 }
 
@@ -1153,8 +1177,9 @@ pub(super) fn expect_float_arg(args: &[RuntimeValue], index: usize) -> Result<f6
         Some(RuntimeValue::Scalar(payload)) if payload.dtype().is_integer() => {
             Ok(payload.bits().as_f64())
         }
-        other => Err(format!(
-            "expected float arg at index {index}, got {other:?}"
+        _ => Err(format!(
+            "expected float arg at index {index}, got {}",
+            arg_debug(args, index)
         )),
     }
 }

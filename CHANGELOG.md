@@ -38,10 +38,15 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   numeric reads enforce the strict JSON number grammar per cell (naming
   the column, 0-based data row, and offending text; empty cells are
   errors, never silent NaN). `to_csv` serializes the same document shape
-  back (round-trips through `parse_csv`) with shortest-round-trip f64
-  cells and minimal quoting, refusing to silently drop undeclared row
-  keys. Eval/test-only: `chelis build` rejects all eight names
-  whole-program like `process_run`. See `docs/CHELIS_SURFACE.md` §3.9.
+  back with shortest-round-trip f64 cells and minimal quoting; the
+  round-trip through `parse_csv` is values-as-text (every cell re-reads
+  as the string of its serialized field text — bit-exact for numbers via
+  `csv_f64`; non-string cell types normalize to strings, as CSV is
+  untyped). No silent data loss anywhere: unexpected top-level keys,
+  undeclared or duplicate row keys, non-finite numbers, and container
+  cells are all loud errors. Eval/test-only: `chelis build` rejects all
+  eight names whole-program like `process_run`. See
+  `docs/CHELIS_SURFACE.md` §3.9.
 
 ### Changed
 
