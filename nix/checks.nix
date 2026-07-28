@@ -124,7 +124,12 @@ let
         mkdir -p "$HOME"
 
         version_output="$(${packages.chelis}/bin/chelis --version 2>&1)"
-        printf '%s\n' "$version_output" | grep -F ${escape built.version}
+        if [ "$version_output" != ${escape "chelis ${built.version}"} ]; then
+          echo "unexpected chelis version output" >&2
+          echo "expected: chelis ${built.version}" >&2
+          echo "actual: $version_output" >&2
+          exit 1
+        fi
         ${packages.chelis}/bin/chelis --help >/dev/null
 
         cp -R ${built.source}/crates/chelis-cli/tests/fixtures/release_pipe_stage \

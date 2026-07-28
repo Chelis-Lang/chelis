@@ -136,6 +136,13 @@ class NixFlakeContractTests(unittest.TestCase):
         self.assertIn('export CARGO_TARGET_DIR="$out/cargo-target"', packages)
         self.assertEqual(packages.count('rm -rf "$CARGO_TARGET_DIR"'), 3)
 
+    def test_version_contract_requires_exact_cli_output(self) -> None:
+        checks = (REPO_ROOT / "nix" / "checks.nix").read_text(encoding="utf-8")
+        self.assertIn(
+            'if [ "$version_output" != ${escape "chelis ${built.version}"} ]; then',
+            checks,
+        )
+
     def test_contract_stubs_cover_package_shape_and_behavior(self) -> None:
         contracts = nix_json("eval", "--json", "--file", "nix/contracts.nix")
         shapes = contracts["packageShapes"]

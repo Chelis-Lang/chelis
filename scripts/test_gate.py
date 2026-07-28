@@ -502,6 +502,12 @@ class NixPackagesWorkflowTests(unittest.TestCase):
             "Nix package jobs must stay separate from the canonical Cargo gate",
         )
 
+    def test_each_native_job_rejects_the_wrong_runner_system(self):
+        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
+        self.assertEqual(text.count("name: Verify the runner system"), 2)
+        self.assertIn('assert system == "x86_64-linux", system', text)
+        self.assertIn('assert system == "aarch64-darwin", system', text)
+
 
 class SmtCiSplitTests(unittest.TestCase):
     """Lock the required-fast / full-prove split for SMT CI."""

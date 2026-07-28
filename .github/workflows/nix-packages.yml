@@ -24,6 +24,8 @@ jobs:
         with:
           extra_nix_config: |
             sandbox = true
+      - name: Verify the runner system
+        run: python3 -c 'import subprocess; system = subprocess.check_output(["nix", "eval", "--impure", "--raw", "--expr", "builtins.currentSystem"], text=True).strip(); assert system == "x86_64-linux", system'
       - name: Verify the Nix sandbox
         run: python3 -c 'import subprocess; value = subprocess.check_output(["nix", "config", "show", "sandbox"], text=True).strip(); assert value == "true", value'
       - name: Run the complete native flake check set
@@ -40,6 +42,8 @@ jobs:
         with:
           extra_nix_config: |
             sandbox = true
+      - name: Verify the runner system
+        run: python3 -c 'import subprocess; system = subprocess.check_output(["nix", "eval", "--impure", "--raw", "--expr", "builtins.currentSystem"], text=True).strip(); assert system == "aarch64-darwin", system'
       - name: Verify the Nix sandbox
         run: python3 -c 'import subprocess; value = subprocess.check_output(["nix", "config", "show", "sandbox"], text=True).strip(); assert value == "true", value'
       - name: Run the complete native flake check set

@@ -86,13 +86,13 @@ Each job runs the complete flake check set on its named system.
 
 ## 8. Run adversarial validation
 
-- [ ] 8.1 Spawn a fresh local red-team agent after all implementation gates pass.
-- [ ] 8.2 Change only one Nixpkgs pin and verify a parity failure.
-- [ ] 8.3 Change only one Rust overlay pin and verify a parity failure.
-- [ ] 8.4 Remove one runtime header and verify a package-shape failure.
-- [ ] 8.5 Add `bin/chelis` to the chelisup output and verify a collision failure.
-- [ ] 8.6 Point one app at a host command and verify an app-contract failure.
-- [ ] 8.7 Disable the SMT feature and verify an SMT-check failure.
+- [x] 8.1 Spawn a fresh local red-team agent after all implementation gates pass.
+- [x] 8.2 Change only one Nixpkgs pin and verify a parity failure.
+- [x] 8.3 Change only one Rust overlay pin and verify a parity failure.
+- [x] 8.4 Remove one runtime header and verify a package-shape failure.
+- [x] 8.5 Add `bin/chelis` to the chelisup output and verify a collision failure.
+- [x] 8.6 Point one app at a host command and verify an app-contract failure.
+- [x] 8.7 Disable the SMT feature and verify an SMT-check failure.
 - [ ] 8.8 Re-run both authoritative native CI jobs after accepted corrections.
 
 ## 9. Record acceptance evidence
