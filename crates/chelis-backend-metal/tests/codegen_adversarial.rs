@@ -325,6 +325,19 @@ fn m7_bool_load_through_where_falls_through_to_stub() {
     let result = codegen_metal(&dag, "boolload");
     let src = &result.mm_source;
     assert_emits_real_kernel(src, "bool Load alone");
+
+    // These two assertions used to stand alone: one that the host side
+    // declares CHELIS_BOOL, one that the device side says `bool`. Both were
+    // individually true and jointly described a corrupt ABI (chelis#892) --
+    // `chelis_alloc(CHELIS_BOOL)` returned a 4-byte f32-encoded buffer while
+    // the transfers moved `n * sizeof(bool)` bytes, so three of every four
+    // bytes were dropped on upload and left zeroed on writeback. The test was
+    // green throughout and held the mismatch in place.
+    //
+    // CRuntime-BoolStorage-F1 closed it by moving the runtime to a native
+    // byte, so the two sides now agree. Keeping only the presence checks
+    // would leave this green again if the runtime ever went back to a payload
+    // encoding, which is the failure this test now exists to prevent.
     assert!(
         src.contains("CHELIS_BOOL"),
         "bool root output must declare CHELIS_BOOL dtype: {src}"
@@ -332,6 +345,25 @@ fn m7_bool_load_through_where_falls_through_to_stub() {
     assert!(
         src.contains("device const bool* a") || src.contains("sizeof(bool)"),
         "bool buffer should reach the .mm via direct emission: {src}"
+    );
+
+    // The agreement check. `sizeof(bool)` is 1 on every ABI this backend
+    // targets; the runtime width has to match it, or every transfer sized by
+    // the device encoding mis-sizes the host buffer.
+    let runtime_width = chelis_vocab::RuntimeDType::Bool.byte_width();
+    assert_eq!(
+        runtime_width, 1,
+        "the .mm sizes bool transfers with `sizeof(bool)` (1 byte) but \
+         chelis_alloc sizes CHELIS_BOOL at {runtime_width}. The two lanes \
+         disagree on bool's physical encoding, so the transfers below \
+         corrupt in both directions (chelis#892). Do not close this by \
+         changing the Metal side: the runtime's native byte is the agreed \
+         encoding and Metal already emits it."
+    );
+    assert!(
+        !src.contains("sizeof(float)"),
+        "a bool-root program must not size any transfer with sizeof(float); \
+         that is the payload encoding this lane was corrupting on: {src}"
     );
 }
 
