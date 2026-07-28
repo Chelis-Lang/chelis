@@ -273,6 +273,18 @@ impl From<Bool8> for bool {
 /// `tensor` must point to a live `chelis_tensor`.
 #[inline]
 pub unsafe fn data_as_f32(tensor: *mut chelis_tensor) -> *mut f32 {
+    debug_assert!(
+        matches!(
+            unsafe { tensor_dtype(tensor, "data_as_f32") },
+            RuntimeDType::F32 | RuntimeDType::Bool
+        ),
+        "data_as_f32 is only valid for f32-encoded storage. F32 is itself; \
+         Bool is f32-encoded pending CRuntime-BoolStorage-F1. Every other \
+         dtype has a TensorElement impl -- use data_ptr / \
+         data_ptr_unchecked, which check the tag. Routing int32 through here \
+         on the authority of this helper's since-corrected rustdoc produced \
+         eight wrong decoders across the runtime and the C backend."
+    );
     unsafe { (*tensor).data as *mut f32 }
 }
 
@@ -287,6 +299,13 @@ pub unsafe fn data_as_f32(tensor: *mut chelis_tensor) -> *mut f32 {
 /// `tensor` must point to a live `chelis_tensor`.
 #[inline]
 pub unsafe fn data_as_f32_const(tensor: *const chelis_tensor) -> *mut f32 {
+    debug_assert!(
+        matches!(
+            unsafe { tensor_dtype(tensor, "data_as_f32_const") },
+            RuntimeDType::F32 | RuntimeDType::Bool
+        ),
+        "data_as_f32_const is only valid for f32-encoded storage; see data_as_f32"
+    );
     unsafe { (*tensor).data as *mut f32 }
 }
 

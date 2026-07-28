@@ -19,12 +19,43 @@ Three ordering rules, all inherited rather than invented:
 
 ## Status as of 2026-07-27
 
-Landed: Phase 1, Phase 2, Phase 3.1–3.3 and 3.5, Phase 6.1–6.3. Verified under
-devenv with `cargo build --workspace --all-targets` (exit 0) and
-`cargo clippy --workspace --all-targets -- -D warnings` (exit 0).
+Landed from this plan: Phase 1, Phase 2, Phase 3.1–3.3 and 3.5, Phase 6.1–6.3.
+Verified under devenv with `cargo build --workspace --all-targets` and
+`cargo clippy --workspace --all-targets -- -D warnings`, both exit 0.
 
 Not landed: Barnacle (3.4, 3.6–3.12 — needs the nightly probe 0.3), Phase 4
 coverage, Phase 5 mutation, Phase 6.4 differential test, Phases 7–9.
+
+### Most of the branch is no longer this plan
+
+Stated plainly because the task counter does not show it. The branch this
+change lives on now carries a correctness fix substantially larger than the
+pilot: **eight runtime accessors plus `host_emit`'s C codegen were decoding
+native int32 storage through an f32 view** — `cmplt`, `where`, scatter
+add-mode, `cumsum`, `trace`, `clamp`, `einsum`, and `tensor_to_string`.
+
+It was reachable only from this change's work: making `Repr` the primitive
+forced the question of what each dtype's encoding actually is, which surfaced
+a `data_as_f32` rustdoc asserting int32 was f32-encoded. RT-4 F1 had already
+moved the write side to native `(int32_t*)`; the comment was never updated,
+and every one of those arms cited it. No single site looked wrong.
+
+Failure modes differed per site, which is why none had been found: wrong only
+for negatives (`cmplt`), only at `i32::MIN` (`where`), only outside the
+denormal range (scatter, cumsum, trace, clamp), and across the whole domain
+(`einsum`, and `tensor_to_string`, so printing an int32 tensor showed
+denormal garbage).
+
+Locked by `tests/i32_cmplt_native_storage.rs` and
+`tests/i32_native_decode_regression.rs`, both verified to fail against the
+pre-fix arms rather than merely passing. `data_as_f32` now debug-asserts its
+dtype is `F32` or `Bool`, which held across the full e2e suite — evidence the
+site enumeration converged, and a tripwire for the bool migration.
+
+`CRuntime-I32Storage-F1` in `docs/gap_synthesis.md` is marked closed.
+
+**For review: this branch should probably be split.** The int32 fix is
+independent of the vocabulary pilot and is the part with user-visible impact.
 
 **Defect found, not fixed, needs a decision.** `crates/chelis-backend-metal/tests/dtype_abi_width_parity.rs`
 (the untracked probe named in 0.5) fails on `bool`, and the cause is a
