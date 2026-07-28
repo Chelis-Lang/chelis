@@ -190,14 +190,32 @@ RUNTIME_HEADER = Path("crates/chelis-runtime/include/chelis_runtime.h")
 # `chelis_format_shortest(value, width_kind, buf)` both receive an
 # ALREADY-DECODED element, so neither can catch it.
 #
-# The durable fix is chelis#893 (seal `chelis_tensor.data` so no site can
-# choose its own view, then type the forced accessor) with chelis#894's
-# `Repr` making representation rather than WIDTH the ABI primitive -
-# width does not determine representation (`Ieee754Binary32` and
-# `TwosComplement32` are both 4 bytes and not interchangeable). Until the
-# pointer is sealed, this table is the observation lane's local guard:
-# every arm's decode is declared, so a view change is a deliberate edit
-# here rather than a silent misread.
+# ENFORCEMENT RUNG (docs/agent_quality_architecture.md, chelis#740): this
+# table is a TRIPWIRE TEST, the third rung, and the standing rule is to
+# push every rule as far up the ladder as it can go. The justification for
+# not taking a higher rung HERE: the compile-error rung for this class is
+# chelis#893's `seal-tensor-data-pointer` then `type-tensor-element-access`
+# (make the untyped `chelis_tensor.data` pointer unreachable, then make the
+# forced accessor impossible to get wrong), which rewrites ~46 call sites
+# across the runtime and belongs in that issue's change set, not in a
+# rendering PR that overlaps chelis#894 in five files. chelis#894 supplies
+# the complement by making REPRESENTATION rather than width the ABI
+# primitive - width does not determine representation (`Ieee754Binary32`
+# and `TwosComplement32` are both 4 bytes and are not interchangeable,
+# which is exactly why a width-based ABI probe caught bool and was blind
+# to int32).
+#
+# So this table is INTERIM and scoped to one function. **Delete it when
+# chelis#893's seal lands** - a tripwire that outlives its compile-time
+# replacement is the "it's documented" floor wearing a test's clothes.
+#
+# Related, and deliberately not duplicated here: chelis#730 §C6.2 names
+# these same decode sites (including "tensor formatting") as a normative
+# consumer row, and chelis#895 is the general mechanism for binding such a
+# row to an executable check or an explicit deferral. This table is the
+# per-arm decode check for chelis#732's exit only; §C6.2's other consumers
+# (cmplt, where, scatter-add, cumsum, trace, clamp, einsum) are chelis#894's
+# and are NOT covered by it.
 OBSERVATION_DECODE_TABLE: tuple[tuple[str, str, str], ...] = (
     ("F32", "f32::data_ptr_unchecked", "typed accessor"),
     ("F64", "f64::data_ptr_unchecked", "typed accessor"),

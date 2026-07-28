@@ -3765,9 +3765,11 @@ pub unsafe extern "C" fn chelis_contiguous(t: *const chelis_tensor) -> *mut chel
 // stayed invisible - an exit the census never had to account for because
 // nothing called it. Removing it shrinks the observation surface to the
 // exits that are actually reachable. C ABI note: the declaration leaves
-// `chelis_runtime.h` in the same release cut as chelis#894's
-// `chelis_fill_bool_bits` -> `chelis_fill_bool` rename, so shells absorb
-// one header delta at 0.18 rather than two.
+// `chelis_runtime.h` at the 0.18 cut, alongside chelis#730 §C6.2's int32
+// decode completion. It does NOT ride with chelis#894's
+// `chelis_fill_bool_bits` -> `chelis_fill_bool` rename, which is a bool
+// STORAGE change and belongs to 0.19 under the roadmap's anti-churn
+// invariant 1 (the storage decision is all-layers-or-nothing).
 
 unsafe fn list_to_string(list: *const chelis_list) -> String {
     let mut out = String::from("[");

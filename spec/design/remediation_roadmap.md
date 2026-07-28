@@ -364,13 +364,18 @@ Migration-note stubs (the breaking delta per cut):
   caught (bogus casts, non-record field access, malformed host types) but on
   already-broken code; compiled and eval output now render byte-identically; the
   runtime tarball gains `chelis_runtime_dtype.h`. The public runtime header
-  also changes shape once: it drops the unused `chelis_print_f32` export
-  ([#732] Phase 2 - a tensor print with no emitter in any backend) and renames
-  `chelis_fill_bool_bits(t, uint32_t)` to `chelis_fill_bool(t, uint8_t)`
-  ([#894]'s native-byte bool storage, where an IEEE binary32 pattern no longer
-  describes anything the buffer holds). Both are C-ABI deltas and ride this one
-  cut deliberately, so a shell linking the runtime directly adapts its header
-  usage once rather than across two bumps."
+  also drops the unused `chelis_print_f32` export ([#732] Phase 2 - a tensor
+  print with no emitter in any backend, so no compiled program could reach
+  it); a shell that declared it directly loses a symbol it could never have
+  usefully called."
+  NOTE, against the natural instinct to bundle: [#894]'s
+  `chelis_fill_bool_bits(t, uint32_t)` -> `chelis_fill_bool(t, uint8_t)` rename
+  does NOT ride this cut. It is a bool STORAGE change (4-byte f32 encoding to
+  one native byte), so anti-churn invariant 1 puts it in **0.19** with the rest
+  of [#729]'s storage break - the int32 decode fixes go the other way, because
+  completing [#730] §C6.2 is 0.18 payload. Two C-ABI deltas in one header do
+  not justify merging two cuts; the storage decision is all-layers-or-nothing
+  and the header is only one of its layers.
 - **0.19** (source migration) - "dtype semantics are grounded: integer overflow
   traps instead of wrapping, per-dtype tensor storage (wire-format v2, Python
   payload shape changed), narrow dtypes preserved end-to-end; every op x dtype
