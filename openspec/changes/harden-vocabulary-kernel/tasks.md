@@ -27,15 +27,34 @@ Not landed: Barnacle (3.4, 3.6–3.12 — needs the nightly probe 0.3), Phase 4
 coverage, Phase 5 mutation, Phase 6.4 differential test, Phases 7–9.
 
 **Defect found, not fixed, needs a decision.** `crates/chelis-backend-metal/tests/dtype_abi_width_parity.rs`
-(the untracked probe named in 0.5) fails on `bool`: the runtime ABI sizes it at
-4 bytes, while `metal_elem_size(Bool)` and `host_sizeof_expr(Bool)` both say 1.
-The Metal emitter computes the device-to-host copy as `n * 1` but allocates the
-destination through `chelis_alloc` at `n * 4`, so the copy and the buffer
-disagree on stride. Pre-existing — `byte_width`'s values are byte-identical
-before and after this change; only the return type moved. Which side is wrong
-is a Metal-backend decision and is out of scope here. It is also the first time
-the execute-both-sides pattern this change argues for has been run, and it
-found something on the first attempt.
+(the untracked probe named in 0.5) fails on `bool`, and the cause is a
+**representation mismatch, not a width typo**:
+
+- The runtime stores `Bool` **as `f32`**. `chelis-runtime/src/lib.rs:314` reads
+  it through `*const f32` in the same match arm as `F32`, and
+  `chelis_fill_bool_bits` writes through `data_as_f32` with `f32::from_bits`.
+  Hence the 4-byte ABI width.
+- Metal's device side uses MSL `bool` — `msl_type(Bool) == "bool"`,
+  `metal_elem_size(Bool) == 1`, `host_sizeof_expr(Bool) == "sizeof(bool)"`, and
+  `host_const_fill_body` emits `p[i] = true`.
+
+The emitter copies `n * 1` bytes into a buffer `chelis_alloc` sized at `n * 4`,
+so the lanes disagree on stride **and** on encoding. Four bytes of packed MSL
+bools reinterpreted as an `f32` is garbage, not merely misaligned. A fix that
+only widens `metal_elem_size(Bool)` to 4 would turn the two original assertions
+green while leaving the copied data wrong, so a third test
+(`bool_device_representation_matches_the_runtime_f32_storage`) was added to
+fail in exactly that case.
+
+Two plausible fixes, both Metal-backend decisions and both out of scope here:
+represent device-side bool as `float` to match the ABI, or convert MSL `bool`
+→ `f32` on copy-back instead of memcpy'ing. The first is consistent with how
+the runtime already treats `Bool` and `F32` identically.
+
+Pre-existing: `byte_width`'s values are byte-identical before and after this
+change; only the return type moved. This is also the first run of the
+execute-both-sides pattern this change argues for, and it found something on
+the first attempt.
 
 ## Phase 0 — Decide and measure (blocking)
 

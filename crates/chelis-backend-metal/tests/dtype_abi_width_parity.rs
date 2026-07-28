@@ -45,6 +45,49 @@ fn metal_elem_size_matches_runtime_abi_width() {
     }
 }
 
+/// Width parity alone is not sufficient, and this pins why.
+///
+/// The runtime does not store `bool` as a 1-byte C `bool`. It stores it as
+/// `f32`: `chelis-runtime/src/lib.rs` reads `RuntimeDType::Bool` through
+/// `*const f32` in the same match arm as `F32`, and `chelis_fill_bool_bits`
+/// writes through `data_as_f32` with `f32::from_bits`. Metal's device side
+/// uses MSL `bool` (`msl_type(Bool) == "bool"`, and `host_const_fill_body`
+/// emits `p[i] = true`).
+///
+/// So the two lanes disagree on *encoding*, not only on width. Four bytes of
+/// packed MSL bools reinterpreted as an `f32` is garbage, not a misaligned
+/// stride. A fix that only makes `metal_elem_size(Bool)` return 4 would turn
+/// the two tests above green while leaving the copied data wrong, so this
+/// test exists to fail in that case.
+#[test]
+fn bool_device_representation_matches_the_runtime_f32_storage() {
+    let runtime_width = Prim::Bool
+        .runtime_dtype()
+        .expect("bool must have a runtime dtype")
+        .byte_width() as usize;
+
+    // The runtime stores bool as f32, so the ABI width is f32's width.
+    assert_eq!(
+        runtime_width,
+        size_of::<f32>(),
+        "the runtime stores bool as f32; if this changed, the reasoning below \
+         and the Metal copy path both need revisiting"
+    );
+
+    // Therefore the device-side element must also be f32-shaped, not a 1-byte
+    // MSL bool, or the copy back needs a real conversion rather than a memcpy.
+    assert_eq!(
+        metal_elem_size(Prim::Bool),
+        runtime_width,
+        "metal_elem_size(bool) = {} but the runtime stores bool as a {}-byte \
+         f32. Matching the width alone is not enough: the device element must \
+         hold the same f32 encoding, or the device-to-host path must convert \
+         MSL bool -> f32 instead of copying bytes",
+        metal_elem_size(Prim::Bool),
+        runtime_width
+    );
+}
+
 /// The emitter computes the device-to-host byte count as
 /// `n * host_sizeof_expr(prec)` but allocates the destination with
 /// `chelis_alloc(..., runtime_dtype_tag(prec))`. If the C expression
