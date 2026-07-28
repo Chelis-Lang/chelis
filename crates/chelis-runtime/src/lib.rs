@@ -139,6 +139,12 @@ unsafe impl TensorElement for i16 {
 unsafe impl TensorElement for i32 {
     const DTYPE: RuntimeDType = RuntimeDType::I32;
 }
+/// Sound only because [`chelis_vocab::Repr::Bool8`] is one byte, which is
+/// what `chelis_alloc` sizes `CHELIS_BOOL` buffers by. Every byte value
+/// inhabits `Bool8`, so a read of an uninitialised slot is defined.
+unsafe impl TensorElement for Bool8 {
+    const DTYPE: RuntimeDType = RuntimeDType::Bool;
+}
 unsafe impl TensorElement for i64 {
     const DTYPE: RuntimeDType = RuntimeDType::I64;
 }
@@ -163,21 +169,23 @@ unsafe impl TensorElement for i64 {
 /// what stops bool storage and int8 storage being cross-wired; a bare `u8`
 /// would silently permit it.
 ///
-/// # TensorElement impl is deliberately absent
+/// # The TensorElement impl and the width move together
 ///
 /// [`TensorElement`]'s safety contract requires that `DTYPE` name the byte
-/// layout `chelis_alloc` actually uses. `chelis_alloc` sizes `CHELIS_BOOL`
-/// from [`chelis_vocab::RuntimeDType::byte_width`], which is 4 today because
-/// bool is still carried as an f32 payload (`CRuntime-BoolStorage-F1`).
-/// Implementing the trait now would assert a layout the allocator does not
-/// provide — an unsound impl, and one whose `data_ptr` would walk a 1-byte
-/// stride over a 4-byte-per-element buffer.
-///
-/// The impl lands in the same change that flips `Repr` for bool, because the
-/// storage width and the typed access have to move together. That the trait's
-/// own contract forbids landing it early is the trait working as designed.
+/// layout `chelis_alloc` actually uses. While bool was an f32 payload,
+/// implementing the trait here would have asserted a layout the allocator did
+/// not provide, and `data_ptr` would have walked a one-byte stride over a
+/// four-byte-per-element buffer. So the impl could not land before
+/// [`chelis_vocab::Repr::Bool8`] flipped the width, and the width could not
+/// flip before the access sites moved. Both are in this change, and the fact
+/// that neither half was shippable alone is the trait's contract doing its
+/// job.
+/// Ordering is by the stored byte, so `false < true` and any non-canonical
+/// byte sorts above both. That is what lets `cmplt` dispatch bool through the
+/// same generic loop as every other dtype instead of a hand-written arm --
+/// which is where all eight int32 decode defects lived.
 #[repr(transparent)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Bool8(u8);
 
 impl Bool8 {
@@ -239,10 +247,16 @@ impl From<Bool8> for bool {
 /// Typed access to a tensor buffer as `*mut f32`, without checking the dtype
 /// tag.
 ///
-/// **The only remaining legitimate non-f32 caller is `CHELIS_BOOL`**, whose
-/// storage really is 4-byte f32 bit patterns (`0.0` / `1.0`) pending
-/// `CRuntime-BoolStorage-F1`. Everything else has a `TensorElement` impl and
-/// should use `data_ptr` / `data_ptr_unchecked`, which check the tag.
+/// **`CHELIS_F32` is now the only legitimate caller.** Every dtype has a
+/// `TensorElement` impl, so every access can go through `data_ptr` /
+/// `data_ptr_unchecked`, which check the tag. This helper exists only for
+/// f32 sites that predate the trait and buys nothing a typed accessor does
+/// not; prefer `f32::data_ptr_unchecked` in new code.
+///
+/// Bool was the last exception. Its storage really was 4-byte f32 bit
+/// patterns, and this assert admitted `RuntimeDType::Bool` for exactly that
+/// reason. `CRuntime-BoolStorage-F1` moved it to a native byte, so the
+/// exception is gone and bool now trips this assert like any other mismatch.
 ///
 /// PR 1 introduced this as a transition shim for the 31 access sites it did
 /// not migrate; PR 2 moved those to `TensorElement` dispatch.
@@ -260,9 +274,7 @@ impl From<Bool8> for bool {
 ///
 /// The lesson is worth keeping next to the hazard: a comment asserting that an
 /// unusual decode is correct reads as considered rather than as rot, so a
-/// stale one is more dangerous here than no comment at all. If bool's
-/// migration lands and this helper has no callers, delete it rather than
-/// leaving it available.
+/// stale one is more dangerous here than no comment at all.
 ///
 /// Accepts `*mut chelis_tensor` only; for read-side `*const
 /// chelis_tensor` access, callers cast through `tensor as *mut
@@ -276,14 +288,16 @@ pub unsafe fn data_as_f32(tensor: *mut chelis_tensor) -> *mut f32 {
     debug_assert!(
         matches!(
             unsafe { tensor_dtype(tensor, "data_as_f32") },
-            RuntimeDType::F32 | RuntimeDType::Bool
+            RuntimeDType::F32
         ),
-        "data_as_f32 is only valid for f32-encoded storage. F32 is itself; \
-         Bool is f32-encoded pending CRuntime-BoolStorage-F1. Every other \
-         dtype has a TensorElement impl -- use data_ptr / \
-         data_ptr_unchecked, which check the tag. Routing int32 through here \
-         on the authority of this helper's since-corrected rustdoc produced \
-         eight wrong decoders across the runtime and the C backend."
+        "data_as_f32 is valid for CHELIS_F32 only. Every dtype now has a \
+         TensorElement impl -- use data_ptr / data_ptr_unchecked, which check \
+         the tag. Bool was the last exception and is now a native byte \
+         (Bool8); reaching here with it means a site was missed by \
+         CRuntime-BoolStorage-F1 and is reading 4 bytes per element out of a \
+         1-byte-per-element buffer. Routing int32 through here on the \
+         authority of this helper's since-corrected rustdoc produced eight \
+         wrong decoders across the runtime and the C backend."
     );
     unsafe { (*tensor).data as *mut f32 }
 }
@@ -291,8 +305,7 @@ pub unsafe fn data_as_f32(tensor: *mut chelis_tensor) -> *mut f32 {
 /// Const-pointer variant of `data_as_f32` for read-side accesses
 /// on `*const chelis_tensor`.
 ///
-/// Carries the same constraint: `CHELIS_BOOL` is the only legitimate non-f32
-/// caller. See [`data_as_f32`].
+/// Carries the same constraint: `CHELIS_F32` only. See [`data_as_f32`].
 ///
 /// # Safety
 ///
@@ -302,9 +315,9 @@ pub unsafe fn data_as_f32_const(tensor: *const chelis_tensor) -> *mut f32 {
     debug_assert!(
         matches!(
             unsafe { tensor_dtype(tensor, "data_as_f32_const") },
-            RuntimeDType::F32 | RuntimeDType::Bool
+            RuntimeDType::F32
         ),
-        "data_as_f32_const is only valid for f32-encoded storage; see data_as_f32"
+        "data_as_f32_const is valid for CHELIS_F32 only; see data_as_f32"
     );
     unsafe { (*tensor).data as *mut f32 }
 }
@@ -433,9 +446,10 @@ unsafe fn read_index_slot(t: *const chelis_tensor, linear: usize, dtype: Runtime
         // Round-to-i64 from the float bytes; matches the previous
         // implicit `as i64` behavior. The `data` field is `*mut u8`
         // post-PR-1, so the cast routes through `*const f32`.
-        // Routed through the checked helper rather than a direct cast so the
-        // bool half is covered by its dtype assert; see `data_as_f32`.
-        RuntimeDType::F32 | RuntimeDType::Bool => *data_as_f32_const(t).add(linear) as i64,
+        RuntimeDType::F32 => *data_as_f32_const(t).add(linear) as i64,
+        RuntimeDType::Bool => {
+            i64::from((*Bool8::data_ptr_unchecked(t as *mut chelis_tensor).add(linear)).get())
+        }
         RuntimeDType::F64 => *((*t).data as *const f64).add(linear) as i64,
         RuntimeDType::Bf16 | RuntimeDType::F16 => {
             runtime_fail!("index tensor cannot use {} storage", dtype.name())
@@ -886,30 +900,32 @@ pub unsafe extern "C" fn chelis_fill_f32_bits(t: *mut chelis_tensor, bits: u32) 
     f32::fill(t, f32::from_bits(bits));
 }
 
-/// Issue #365: bit-pattern fill helper for `Prim::Bool` tensors. A `Bool`
-/// tensor stores its elements in the same 4-byte f32-encoded layout the
-/// comparison ops write (`0.0` / `1.0`), but its dtype tag is
-/// `CHELIS_BOOL`, not `CHELIS_F32`. Filling a `Bool` tensor through
-/// `chelis_fill_f32_bits` trips that helper's debug-build dtype assertion
-/// (`f32::data_ptr_unchecked` asserts the tag is `CHELIS_F32`), aborting a
-/// debug-runtime max-reduce / softmax / cross-entropy backward that
-/// materializes a comparison mask. Fill through the non-asserting
-/// `data_as_f32` view (the same path the comparison kernels use) after
-/// asserting the dtype is `CHELIS_BOOL`, so the storage layout is identical
-/// while the dtype contract is correct.
+/// Issue #365: fill helper for `Prim::Bool` tensors.
+///
+/// A `Bool` tensor cannot be filled through `chelis_fill_f32_bits`: that
+/// helper asserts the tag is `CHELIS_F32`, so it aborted a debug-runtime
+/// max-reduce / softmax / cross-entropy backward that materializes a
+/// comparison mask. This is the dtype-correct entry point.
+///
+/// # This took a byte-valued parameter after CRuntime-BoolStorage-F1
+///
+/// It was `chelis_fill_bool_bits(t, bits: u32)`, where `bits` was an IEEE
+/// binary32 pattern for `0.0` or `1.0`, matching the f32-encoded storage of
+/// the time. Bool is now one native byte, so a 32-bit float pattern no longer
+/// describes anything the buffer holds, and the `_bits` name described an
+/// encoding rather than a value. Callers pass `0` or `1`.
+///
+/// Any non-zero byte fills as true, matching [`Bool8::get`]. The parameter is
+/// `u8` rather than a C `bool` because the C `_Bool` ABI is
+/// implementation-defined in ways this header cannot pin.
 ///
 /// # Safety
 ///
 /// `t` must point to a live `chelis_tensor` whose dtype is `CHELIS_BOOL`.
 #[no_mangle]
-pub unsafe extern "C" fn chelis_fill_bool_bits(t: *mut chelis_tensor, bits: u32) {
+pub unsafe extern "C" fn chelis_fill_bool(t: *mut chelis_tensor, value: u8) {
     debug_assert_eq!(unsafe { tensor_dtype(t, "bool fill") }, RuntimeDType::Bool);
-    let value = f32::from_bits(bits);
-    let buf = unsafe { data_as_f32(t) };
-    let size = unsafe { (*t).size } as isize;
-    for i in 0..size {
-        unsafe { *buf.offset(i) = value };
-    }
+    unsafe { Bool8::fill(t, Bool8::new(value != 0)) };
 }
 
 /// Issue #189: bit-pattern fill helper for `Prim::F64` tensors. Same
@@ -1165,8 +1181,10 @@ unsafe fn read_scalar_as_f64(t: *const chelis_tensor, dtype: RuntimeDType) -> f6
         RuntimeDType::I32 => *((*t).data as *const i32) as f64,
         RuntimeDType::I16 => *((*t).data as *const i16) as f64,
         RuntimeDType::I8 => *((*t).data as *const i8) as f64,
-        // Checked helper, not a direct cast, so bool access is gated.
-        RuntimeDType::F32 | RuntimeDType::Bool => *data_as_f32_const(t) as f64,
+        RuntimeDType::F32 => *data_as_f32_const(t) as f64,
+        RuntimeDType::Bool => {
+            f64::from((*Bool8::data_ptr_unchecked(t as *mut chelis_tensor)).get())
+        }
         RuntimeDType::Bf16 | RuntimeDType::F16 => {
             runtime_fail!(
                 "scalar conversion does not support {} storage",
@@ -2300,28 +2318,17 @@ unsafe fn chelis_flatten_nested_list_typed(
                     *(out_bytes as *mut i8).add(i) = value;
                 }
                 RuntimeDType::Bool => {
-                    // bool tensors store as 4-byte 1.0/0.0 floats per
-                    // chelis_alloc's bool-arm sizing (4 bytes/elem).
-                    let value: f32 = match item.tag {
-                        chelis_value_tag::CHELIS_VALUE_BOOL => {
-                            if item.as_.boolean {
-                                1.0
-                            } else {
-                                0.0
-                            }
-                        }
-                        chelis_value_tag::CHELIS_VALUE_INT64 => {
-                            if item.as_.i64_ != 0 {
-                                1.0
-                            } else {
-                                0.0
-                            }
-                        }
+                    // One native byte since CRuntime-BoolStorage-F1. This
+                    // wrote a 4-byte 1.0f / 0.0f pattern to match the old
+                    // chelis_alloc bool sizing.
+                    let value = match item.tag {
+                        chelis_value_tag::CHELIS_VALUE_BOOL => Bool8::new(item.as_.boolean),
+                        chelis_value_tag::CHELIS_VALUE_INT64 => Bool8::new(item.as_.i64_ != 0),
                         _ => runtime_fail!(
                             "to_tensor leaf element type cannot lower to bool storage"
                         ),
                     };
-                    *(out_bytes as *mut f32).add(i) = value;
+                    *(out_bytes as *mut Bool8).add(i) = value;
                 }
                 // chelis#730 Phase 1 message migration: the section C2
                 // calibration exemplar, rendered in the frozen branded shape.
@@ -2414,12 +2421,8 @@ pub unsafe extern "C" fn chelis_list_from_tensor(tensor: *const chelis_tensor) -
         let stride = (*tensor).strides[0] as usize;
         let value = match dtype {
             RuntimeDType::Bool => {
-                // Bool storage is f32-encoded (4-byte slots) pending
-                // CRuntime-BoolStorage-F1. The checked helper is deliberate:
-                // a direct cast would bypass the dtype assert that is meant
-                // to catch this site when bool moves to native storage.
-                let raw = *data_as_f32_const(tensor).add(i * stride);
-                chelis_value_from_bool(raw != 0.0)
+                let raw = *Bool8::data_ptr_unchecked(tensor as *mut chelis_tensor).add(i * stride);
+                chelis_value_from_bool(raw.get())
             }
             RuntimeDType::I64 => {
                 let v = *((*tensor).data as *const i64).add(i * stride);
@@ -2504,13 +2507,15 @@ pub unsafe extern "C" fn chelis_pad_sequences(
                 // unconditionally, leaving the int32-tagged tensor
                 // holding float bit patterns that downstream readers
                 // interpreted as junk integers.
-                if dtype == RuntimeDType::I32 {
-                    *((*out).data as *mut i32).add(flat) = value as i32;
-                } else {
-                    // Checked helper rather than a direct cast: bool reaches
-                    // this branch, and its assert is what will catch this
-                    // site when bool moves off f32-encoded storage.
-                    *data_as_f32(out).add(flat) = value as f32;
+                match dtype {
+                    RuntimeDType::I32 => *((*out).data as *mut i32).add(flat) = value as i32,
+                    // One native byte since CRuntime-BoolStorage-F1. The
+                    // previous `value as f32` wrote 4 bytes into a 1-byte
+                    // slot once the width flipped.
+                    RuntimeDType::Bool => {
+                        *Bool8::data_ptr_unchecked(out).add(flat) = Bool8::new(value != 0.0);
+                    }
+                    _ => *data_as_f32(out).add(flat) = value as f32,
                 }
             }
         }
@@ -2561,13 +2566,12 @@ pub unsafe extern "C" fn chelis_pad_sequences_to(
                 } else {
                     pad
                 };
-                if dtype == RuntimeDType::I32 {
-                    *((*out).data as *mut i32).add(flat) = value as i32;
-                } else {
-                    // Checked helper rather than a direct cast: bool reaches
-                    // this branch, and its assert is what will catch this
-                    // site when bool moves off f32-encoded storage.
-                    *data_as_f32(out).add(flat) = value as f32;
+                match dtype {
+                    RuntimeDType::I32 => *((*out).data as *mut i32).add(flat) = value as i32,
+                    RuntimeDType::Bool => {
+                        *Bool8::data_ptr_unchecked(out).add(flat) = Bool8::new(value != 0.0);
+                    }
+                    _ => *data_as_f32(out).add(flat) = value as f32,
                 }
             }
         }
@@ -2772,8 +2776,9 @@ pub unsafe extern "C" fn chelis_tensor_cmplt(
     }
     let out = chelis_alloc((*lhs).ndim, (*lhs).shape.as_ptr(), CHELIS_BOOL);
     let size = (*out).size as usize;
-    // Output is CHELIS_BOOL with f32-encoded storage (0.0 / 1.0).
-    let out_buf = data_as_f32(out);
+    // Output is CHELIS_BOOL: one native byte per element since
+    // CRuntime-BoolStorage-F1.
+    let out_buf = Bool8::data_ptr_unchecked(out);
     let lm = lhs as *mut chelis_tensor;
     let rm = rhs as *mut chelis_tensor;
     // Dispatch on input dtype outside the loop.  The previous f32-only
@@ -2781,13 +2786,13 @@ pub unsafe extern "C" fn chelis_tensor_cmplt(
     unsafe fn cmp_loop<T: TensorElement + PartialOrd>(
         lm: *mut chelis_tensor,
         rm: *mut chelis_tensor,
-        out_buf: *mut f32,
+        out_buf: *mut Bool8,
         size: usize,
     ) {
         let lp = T::data_ptr_unchecked(lm);
         let rp = T::data_ptr_unchecked(rm);
         for i in 0..size {
-            *out_buf.add(i) = if *lp.add(i) < *rp.add(i) { 1.0 } else { 0.0 };
+            *out_buf.add(i) = Bool8::new(*lp.add(i) < *rp.add(i));
         }
     }
     match dtype {
@@ -2807,16 +2812,10 @@ pub unsafe extern "C" fn chelis_tensor_cmplt(
         // a NaN as f32, and every comparison against a NaN is false, so
         // `-1 < 0` reported false. See tests/i32_cmplt_native_storage.rs.
         RuntimeDType::I32 => cmp_loop::<i32>(lm, rm, out_buf, size),
-        // Bool storage really is f32-encoded (`CRuntime-BoolStorage-F1`), so
-        // this arm stays until that migration flips the width and the typed
-        // access together.
-        RuntimeDType::Bool => {
-            let lp = data_as_f32_const(lhs);
-            let rp = data_as_f32_const(rhs);
-            for i in 0..size {
-                *out_buf.add(i) = if *lp.add(i) < *rp.add(i) { 1.0 } else { 0.0 };
-            }
-        }
+        // Bool is now a native byte, so it dispatches through the same
+        // generic loop as every other dtype. `Bool8` derives `PartialOrd`
+        // via its byte, which orders false < true.
+        RuntimeDType::Bool => cmp_loop::<Bool8>(lm, rm, out_buf, size),
         RuntimeDType::Bf16 | RuntimeDType::F16 | RuntimeDType::I8 | RuntimeDType::I16 => {
             runtime_fail!("cmplt unsupported dtype {}", dtype.name())
         }
@@ -3000,12 +2999,16 @@ pub unsafe extern "C" fn chelis_tensor_where(
         }
     }
     match cond_dtype {
-        // Bool storage is f32-encoded (`CRuntime-BoolStorage-F1`), so it
-        // shares the f32 view with F32 until that migration lands.
-        RuntimeDType::F32 | RuntimeDType::Bool => {
+        RuntimeDType::F32 => {
             let p = data_as_f32_const(cond);
             where_copy(out, then_tensor, else_tensor, elem_size, size, |i| {
                 *p.add(i) != 0.0
+            });
+        }
+        RuntimeDType::Bool => {
+            let p = Bool8::data_ptr_unchecked(cond as *mut chelis_tensor);
+            where_copy(out, then_tensor, else_tensor, elem_size, size, |i| {
+                (*p.add(i)).get()
             });
         }
         // Native two's complement. Reading it through the f32 view gave the
@@ -3922,10 +3925,9 @@ unsafe fn tensor_to_string(t: *const chelis_tensor) -> String {
             let p = i32::data_ptr_unchecked(tm);
             Box::new(move |i| *p.add(i) as f64)
         }
-        // Bool storage really is f32-encoded until `CRuntime-BoolStorage-F1`.
         RuntimeDType::Bool => {
-            let p = data_as_f32_const(t);
-            Box::new(move |i| *p.add(i) as f64)
+            let p = Bool8::data_ptr_unchecked(tm);
+            Box::new(move |i| f64::from((*p.add(i)).get()))
         }
         RuntimeDType::I16 => {
             let p = (*t).data as *const i16;

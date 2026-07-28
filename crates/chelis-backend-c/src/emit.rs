@@ -1237,7 +1237,13 @@ impl CEmitter {
     /// quiet wrong answer.
     fn elem_type(ty: &TensorType) -> &'static str {
         match ty.precision {
-            Prim::F32 | Prim::Bool => "float",
+            Prim::F32 => "float",
+            // CRuntime-BoolStorage-F1: bool is one native byte. Sharing the
+            // `float` arm here was the single highest-leverage instance of
+            // the defect, because every op that types a pointer through this
+            // helper inherited it -- a 4-byte stride over a
+            // 1-byte-per-element buffer.
+            Prim::Bool => "unsigned char",
             Prim::F64 => "double",
             // WS-A4: i8/i16 element access via reinterpret cast on
             // `t->data`; the runtime allocator now sizes the buffer
@@ -1606,20 +1612,21 @@ impl CEmitter {
                 self.line(&format!("chelis_fill_f32_bits(t{id}, 0x{bits:08x}u);"));
             }
             Prim::Bool => {
-                // Issue #365: a Bool tensor uses the same 4-byte
-                // f32-encoded storage (0.0 / 1.0) as the comparison
-                // kernels write, but its dtype tag is CHELIS_BOOL.
-                // Filling it through `chelis_fill_f32_bits` trips that
-                // helper's debug-build dtype assertion (it asserts
-                // CHELIS_F32), aborting a debug-runtime reduce/softmax/
-                // cross-entropy backward that materializes a comparison
-                // mask. Use the dtype-correct `chelis_fill_bool_bits`,
-                // which asserts CHELIS_BOOL and fills the identical
-                // f32-encoded layout. The emitted bit pattern is the
-                // same `f32::to_bits()` value as the F32 arm.
-                let v32 = Self::f64_to_f32_truncate(value);
-                let bits = v32.to_bits();
-                self.line(&format!("chelis_fill_bool_bits(t{id}, 0x{bits:08x}u);"));
+                // Issue #365: filling a Bool tensor through
+                // `chelis_fill_f32_bits` trips that helper's debug-build
+                // dtype assertion (it asserts CHELIS_F32), aborting a
+                // debug-runtime reduce/softmax/cross-entropy backward that
+                // materializes a comparison mask. `chelis_fill_bool`
+                // asserts CHELIS_BOOL.
+                //
+                // CRuntime-BoolStorage-F1: this emitted an f32 bit pattern
+                // to `chelis_fill_bool_bits` while bool storage was a 4-byte
+                // f32 payload. Bool is one native byte now, so the value is
+                // emitted as 0 or 1.
+                self.line(&format!(
+                    "chelis_fill_bool(t{id}, {}u);",
+                    u8::from(value != 0.0)
+                ));
             }
             // WS-1: bf16 / f16 Const fill. The literal's exact 16-bit
             // pattern is computed at codegen time via the `half` crate
@@ -2152,7 +2159,18 @@ impl CEmitter {
         let et_a = Self::elem_type(&a_ty);
         let et_b = Self::elem_type(&b_ty);
         self.emit_slot_wrapper(id, ty);
-        self.line(&format!("float* restrict __out_{id} = t{id}->data;"));
+        // The output is CHELIS_BOOL (`lower.rs`: "CmpLt always produces Bool
+        // output regardless of input precision"), which is one native byte per
+        // element since CRuntime-BoolStorage-F1. This declared the output
+        // `float*` -- the header's own `data` type -- and wrote 1.0f / 0.0f,
+        // which put 4 bytes into each 1-byte slot once the width flipped.
+        //
+        // Typed through `elem_type` rather than a literal so it tracks the
+        // output's declared precision instead of restating it here.
+        let et_out = Self::elem_type(ty);
+        self.line(&format!(
+            "{et_out}* restrict __out_{id} = ({et_out}*)t{id}->data;"
+        ));
         self.line(&format!(
             "const {et_a}* restrict __in_a_{id} = (const {et_a}*)t{a}->data;"
         ));
@@ -2169,9 +2187,7 @@ impl CEmitter {
         self.line("#pragma omp parallel for simd");
         self.line(&format!("for (int i = 0; i < t{id}->size; i++) {{"));
         self.indent += 1;
-        self.line(&format!(
-            "__out_{id}[i] = ({cmp_a} < {cmp_b}) ? 1.0f : 0.0f;"
-        ));
+        self.line(&format!("__out_{id}[i] = ({cmp_a} < {cmp_b}) ? 1 : 0;"));
         self.indent -= 1;
         self.line("}");
         self.indent -= 1;
@@ -2193,7 +2209,7 @@ impl CEmitter {
         let cmp_a_strided = Self::cmplt_cmp_value(&a_ty, &format!("__in_a_{id}"), "idx_a");
         let cmp_b_strided = Self::cmplt_cmp_value(&b_ty, &format!("__in_b_{id}"), "idx_b");
         self.line(&format!(
-            "__out_{id}[i] = ({cmp_a_strided} < {cmp_b_strided}) ? 1.0f : 0.0f;"
+            "__out_{id}[i] = ({cmp_a_strided} < {cmp_b_strided}) ? 1 : 0;"
         ));
         self.indent -= 1;
         self.line("}");
@@ -4021,7 +4037,9 @@ impl CEmitter {
     /// reduce-sum case where the IR accumulator drives the dispatch.
     fn fill_zero_call(ty: &TensorType, tensor: &str) -> String {
         match ty.precision {
-            Prim::F32 | Prim::Bool => format!("chelis_fill_f32({tensor}, 0.0f);"),
+            Prim::F32 => format!("chelis_fill_f32({tensor}, 0.0f);"),
+            // `chelis_fill_f32` writes 4-byte zeros; bool slots are one byte.
+            Prim::Bool => format!("chelis_fill_bool({tensor}, 0);"),
             Prim::F64 => format!("chelis_fill_f64({tensor}, 0.0);"),
             Prim::Int64 => format!("chelis_fill_i64({tensor}, (int64_t)0);"),
             Prim::Int32 => format!(
@@ -5463,12 +5481,15 @@ impl CEmitter {
                 self.line(&format!("chelis_fill_f32_bits(t{id}, 0x{bits:08x}u);"));
             }
             Prim::Bool => {
-                // Issue #365 sibling sweep: a Bool Pad fill uses the same
-                // f32-encoded storage but its dtype tag is CHELIS_BOOL, so
-                // it must go through the dtype-correct `chelis_fill_bool_bits`
-                // to avoid the debug-runtime dtype assert.
-                let bits = (fill as f32).to_bits();
-                self.line(&format!("chelis_fill_bool_bits(t{id}, 0x{bits:08x}u);"));
+                // Issue #365 sibling sweep: a Bool Pad fill must go through
+                // the dtype-correct `chelis_fill_bool` to avoid the
+                // debug-runtime dtype assert. CRuntime-BoolStorage-F1 made
+                // bool one native byte, so this emits 0 or 1 rather than an
+                // f32 bit pattern.
+                self.line(&format!(
+                    "chelis_fill_bool(t{id}, {}u);",
+                    u8::from(fill != 0.0)
+                ));
             }
             other => panic!(
                 "C backend Pad does not yet support `{}` fill (spec/04-type-system.md §1.1)",
@@ -5810,6 +5831,13 @@ mod tests {
         TensorType::scalar_f32()
     }
 
+    fn scalar_bool() -> TensorType {
+        TensorType {
+            dims: vec![],
+            precision: Prim::Bool,
+        }
+    }
+
     fn vec_f32(n: usize) -> TensorType {
         TensorType {
             dims: vec![DimInfo::Lit(n)],
@@ -5905,14 +5933,29 @@ mod tests {
         assert!(c.contains("sqrtf("));
     }
 
+    /// CmpLt's output is Bool, which `lower.rs` guarantees regardless of input
+    /// precision ("C5: CmpLt always produces Bool output"), so the ternary
+    /// stores a byte rather than an f32.
+    ///
+    /// This test used to give the CmpLt node an f32 output type and assert the
+    /// emitted text was `1.0f : 0.0f`. That DAG is one the lowerer cannot
+    /// produce, and the assertion pinned an emission that was wrong once bool
+    /// storage became a native byte under CRuntime-BoolStorage-F1.
     #[test]
-    fn cmplt_emits_ternary_float() {
+    fn cmplt_emits_byte_valued_ternary_into_bool_storage() {
         let mut dag = Dag::new();
         let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
         let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32(), None);
-        dag.add_node(RiscOp::CmpLt, vec![a, b], scalar_f32(), None);
+        dag.add_node(RiscOp::CmpLt, vec![a, b], scalar_bool(), None);
         let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
-        assert!(c.contains("1.0f : 0.0f"));
+        assert!(
+            c.contains("? 1 : 0;"),
+            "cmplt must store 0/1 bytes into its Bool output:\n{c}"
+        );
+        assert!(
+            !c.contains("1.0f : 0.0f"),
+            "an f32 ternary writes 4 bytes into a 1-byte-per-element buffer:\n{c}"
+        );
     }
 
     #[test]

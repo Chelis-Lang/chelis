@@ -288,18 +288,31 @@ fn scalar_to_tensor_coercion_bool_uses_typed_pointer() {
     let program =
         make_tensor_call_with_scalar_arg(HostType::Bool, HostExpr::new(HostExprKind::Bool(true)));
     let src = emit_host_program(&program, "scalar_bool").unwrap();
-    // The legacy bool arm writes `tensor_name->data[0] = value ? 1.0f
-    // : 0.0f;` against `float *data`.  The migrated code must cast
-    // `->data` through a typed pointer first.
+    // Two separate requirements, and only the first was true originally.
+    //
+    // The legacy arm wrote `tensor_name->data[0] = value ? 1.0f : 0.0f;`
+    // straight through the header's `float *data`, so the fix was to cast to a
+    // typed pointer first. That cast used to be `(float*)`, which was right
+    // while bool storage was a 4-byte f32 payload and wrong after
+    // CRuntime-BoolStorage-F1 made it one native byte -- a 4-byte write into a
+    // 1-byte slot. Asserting on the pointer *type*, not merely on the presence
+    // of a cast, is what makes this test track the storage instead of the
+    // spelling.
     assert!(
-        src.contains("(float*)") && src.contains("->data"),
-        "bool scalar-to-tensor coercion must cast `->data` to typed pointer; got:\n{src}"
+        src.contains("(unsigned char*)") && src.contains("->data"),
+        "bool scalar-to-tensor coercion must cast `->data` to the bool storage \
+         type; got:\n{src}"
     );
     assert!(
-        !src.lines().any(|l| l.contains("->data[0] = ")
-            && l.contains("? 1.0f : 0.0f")
-            && !l.contains("(float*)")),
-        "bool scalar-to-tensor coercion must not emit bare `->data[0] = value ? 1.0f : 0.0f`; got:\n{src}"
+        !src.contains("1.0f : 0.0f"),
+        "bool scalar-to-tensor coercion must store a 0/1 byte, not an f32 bit \
+         pattern; got:\n{src}"
+    );
+    assert!(
+        !src.lines()
+            .any(|l| l.contains("->data[0] = ") && !l.contains("(unsigned char*)")),
+        "bool scalar-to-tensor coercion must not write through the header's \
+         bare `float *data`; got:\n{src}"
     );
 }
 

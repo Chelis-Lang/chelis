@@ -40,15 +40,15 @@ use std::ptr;
 use std::os::raw::c_int;
 
 use chelis_runtime::{
-    CHELIS_BOOL, CHELIS_F32, CHELIS_F64, CHELIS_I32, CHELIS_I64, DtypeMismatch, TensorElement,
-    chelis_alloc, chelis_fill_f32, chelis_fill_f64, chelis_fill_i64, chelis_free,
+    Bool8, CHELIS_BOOL, CHELIS_F32, CHELIS_F64, CHELIS_I32, CHELIS_I64, DtypeMismatch,
+    TensorElement, chelis_alloc, chelis_fill_f32, chelis_fill_f64, chelis_fill_i64, chelis_free,
     chelis_list_append, chelis_list_empty, chelis_list_from_tensor, chelis_list_index,
     chelis_list_len, chelis_string_from_cstr, chelis_tensor, chelis_tensor_clamp,
     chelis_tensor_cmplt, chelis_tensor_concat, chelis_tensor_cumsum, chelis_tensor_diagonal,
     chelis_tensor_einsum, chelis_tensor_gather, chelis_tensor_scatter, chelis_tensor_sort,
     chelis_tensor_split, chelis_tensor_to_f64, chelis_tensor_trace, chelis_tensor_where,
     chelis_tuple_get, chelis_value_as_bool, chelis_value_as_f64, chelis_value_as_int64,
-    chelis_value_as_tensor, chelis_value_from_tensor, data_as_f32,
+    chelis_value_as_tensor, chelis_value_from_tensor,
 };
 
 /// Allocate a rank-0 (scalar) tensor of the given dtype.  Caller frees.
@@ -132,15 +132,12 @@ fn tensor_to_f64_i32() {
 fn tensor_to_f64_bool_true() {
     unsafe {
         let t = alloc_scalar(CHELIS_BOOL);
-        // Bool storage today is 4-byte f32-encoded (1.0f32 /
-        // 0.0f32).  Write through `data_as_f32` to bypass the
-        // trait's dtype assertion.
-        *data_as_f32(t) = 1.0f32;
+        // One native byte since CRuntime-BoolStorage-F1. This wrote an f32
+        // through the untyped view to bypass the trait's dtype assert, back
+        // when bool had no TensorElement impl to assert against.
+        *Bool8::data_ptr_unchecked(t) = Bool8::TRUE;
         let out = chelis_tensor_to_f64(t);
-        assert_eq!(
-            out, 1.0,
-            "bool=true rank-0 tensor (f32-encoded storage) must read back as 1.0"
-        );
+        assert_eq!(out, 1.0, "bool=true rank-0 tensor must read back as 1.0");
         chelis_free(t);
     }
 }
@@ -149,12 +146,9 @@ fn tensor_to_f64_bool_true() {
 fn tensor_to_f64_bool_false() {
     unsafe {
         let t = alloc_scalar(CHELIS_BOOL);
-        *data_as_f32(t) = 0.0f32;
+        *Bool8::data_ptr_unchecked(t) = Bool8::FALSE;
         let out = chelis_tensor_to_f64(t);
-        assert_eq!(
-            out, 0.0,
-            "bool=false rank-0 tensor (f32-encoded storage) must read back as 0.0"
-        );
+        assert_eq!(out, 0.0, "bool=false rank-0 tensor must read back as 0.0");
         chelis_free(t);
     }
 }
@@ -355,11 +349,11 @@ fn data_ptr_match_succeeds() {
 // symbol and assert byte-exact round-trip through the trait's typed
 // pointer.
 //
-// Every fixture writes through the element type its dtype actually
-// stores: `TensorElement::data_ptr_unchecked` for F32 / F64 / I32 / I64,
-// and `data_as_f32` for BOOL, whose storage really is f32-encoded pending
-// CRuntime-BoolStorage-F1.  The F64 and I64 fixtures lock the
-// post-migration behavior; pre-migration they would have failed because
+// Every fixture writes through the element type its dtype actually stores,
+// via `TensorElement::data_ptr_unchecked` -- including BOOL, which is a
+// native `Bool8` byte since CRuntime-BoolStorage-F1 and was the last dtype
+// here needing the untyped `data_as_f32` view.  The F64 and I64 fixtures lock
+// the post-migration behavior; pre-migration they would have failed because
 // the f32-strided read silently truncated 8-byte storage to 4-byte chunks.
 //
 // This block previously said I32 fixtures write through `data_as_f32`.
@@ -389,10 +383,9 @@ fn data_ptr_match_succeeds() {
 ///     two's-complement storage since RT-4 F1.
 ///   - I64: writer stores `i64` bytes (treating each `f64` slot as
 ///     `value as i64`).
-///   - BOOL: writer stores `value as f32`, because bool storage really is
-///     f32-encoded pending `CRuntime-BoolStorage-F1`. This is the only
-///     dtype here whose storage type differs from its logical type, and
-///     the only arm that should change when that migration lands.
+///   - BOOL: writer stores one native `Bool8` byte. This arm wrote
+///     `value as f32` until `CRuntime-BoolStorage-F1`, which was the last
+///     place a storage type differed from its logical type.
 unsafe fn alloc_vec_with_values(dtype: c_int, vals: &[f64]) -> *mut chelis_tensor {
     unsafe {
         let t = alloc_vec(vals.len() as c_int, dtype);
@@ -424,9 +417,9 @@ unsafe fn alloc_vec_with_values(dtype: c_int, vals: &[f64]) -> *mut chelis_tenso
                 }
             }
             CHELIS_BOOL => {
-                let p = data_as_f32(t);
+                let p = Bool8::data_ptr_unchecked(t);
                 for (i, v) in vals.iter().enumerate() {
-                    *p.add(i) = *v as f32;
+                    *p.add(i) = Bool8::new(*v != 0.0);
                 }
             }
             _ => panic!("alloc_vec_with_values: unsupported dtype {dtype}"),
@@ -445,7 +438,7 @@ unsafe fn read_at(t: *mut chelis_tensor, i: usize) -> f64 {
             CHELIS_F64 => *f64::data_ptr_unchecked(t).add(i),
             CHELIS_I64 => *i64::data_ptr_unchecked(t).add(i) as f64,
             CHELIS_I32 => *i32::data_ptr_unchecked(t).add(i) as f64,
-            CHELIS_BOOL => *data_as_f32(t).add(i) as f64,
+            CHELIS_BOOL => f64::from((*Bool8::data_ptr_unchecked(t).add(i)).get()),
             other => panic!("read_at: unsupported dtype {other}"),
         }
     }
@@ -1035,9 +1028,9 @@ unsafe fn alloc_2x2(dtype: c_int, a: f64, b: f64, c: f64, d: f64) -> *mut chelis
                 }
             }
             CHELIS_BOOL => {
-                let p = data_as_f32(t);
+                let p = Bool8::data_ptr_unchecked(t);
                 for (i, v) in vals.iter().enumerate() {
-                    *p.add(i) = *v as f32;
+                    *p.add(i) = Bool8::new(*v != 0.0);
                 }
             }
             _ => panic!("alloc_2x2: unsupported dtype {dtype}"),
@@ -1451,11 +1444,11 @@ fn compose_where_then_trace_f64_accumulates_precision() {
         let shape = [2i32, 2i32];
         let cond = chelis_alloc(2, shape.as_ptr(), CHELIS_BOOL);
         {
-            let p = data_as_f32(cond);
-            *p.add(0) = 1.0;
-            *p.add(1) = 0.0;
-            *p.add(2) = 0.0;
-            *p.add(3) = 1.0;
+            let p = Bool8::data_ptr_unchecked(cond);
+            *p.add(0) = Bool8::TRUE;
+            *p.add(1) = Bool8::FALSE;
+            *p.add(2) = Bool8::FALSE;
+            *p.add(3) = Bool8::TRUE;
         }
         let t = chelis_alloc(2, shape.as_ptr(), CHELIS_F64);
         {
@@ -1494,11 +1487,11 @@ fn compose_where_then_trace_i64_accumulates_precision() {
         let shape = [2i32, 2i32];
         let cond = chelis_alloc(2, shape.as_ptr(), CHELIS_BOOL);
         {
-            let p = data_as_f32(cond);
-            *p.add(0) = 1.0;
-            *p.add(1) = 0.0;
-            *p.add(2) = 0.0;
-            *p.add(3) = 1.0;
+            let p = Bool8::data_ptr_unchecked(cond);
+            *p.add(0) = Bool8::TRUE;
+            *p.add(1) = Bool8::FALSE;
+            *p.add(2) = Bool8::FALSE;
+            *p.add(3) = Bool8::TRUE;
         }
         let t = chelis_alloc(2, shape.as_ptr(), CHELIS_I64);
         {

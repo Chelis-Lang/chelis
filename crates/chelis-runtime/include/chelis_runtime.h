@@ -112,7 +112,10 @@ void chelis_fill_f64_bits(chelis_tensor *t, uint64_t bits);
  * chelis_fill_f32_bits trips the debug-build dtype assertion; this helper
  * asserts CHELIS_BOOL and fills the f32-encoded storage so a debug-runtime
  * reduce/softmax/cross-entropy backward mask fill is dtype-correct. */
-void chelis_fill_bool_bits(chelis_tensor *t, uint32_t bits);
+/* CHELIS_BOOL is one native byte; pass 0 or 1. Any non-zero byte is true.
+   This was chelis_fill_bool_bits(t, uint32_t) taking an IEEE binary32 pattern,
+   back when bool storage was an f32 payload (CRuntime-BoolStorage-F1). */
+void chelis_fill_bool(chelis_tensor *t, uint8_t value);
 /* Issue #248: scalar bit-pattern reconstruction helpers. The C backend
  * emits `chelis_uniform_sample_f32(..., chelis_f32_from_bits(0xXXXXXXXXu),
  * chelis_f32_from_bits(0xYYYYYYYYu))` so the runtime sees the byte-identical

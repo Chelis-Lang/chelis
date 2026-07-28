@@ -65,7 +65,9 @@ fn runtime_dtype_ids_names_c_macros_and_widths_round_trip() {
         (RuntimeDType::F32, 0, "f32", "CHELIS_F32", 4),
         (RuntimeDType::F64, 1, "f64", "CHELIS_F64", 8),
         (RuntimeDType::I32, 2, "int32", "CHELIS_I32", 4),
-        (RuntimeDType::Bool, 3, "bool", "CHELIS_BOOL", 4),
+        // One byte since CRuntime-BoolStorage-F1; was 4 while bool was
+        // carried as an f32 payload.
+        (RuntimeDType::Bool, 3, "bool", "CHELIS_BOOL", 1),
         (RuntimeDType::I64, 4, "int64", "CHELIS_I64", 8),
         (RuntimeDType::Bf16, 5, "bf16", "CHELIS_BF16", 2),
         (RuntimeDType::F16, 6, "f16", "CHELIS_F16", 2),
@@ -119,12 +121,21 @@ fn byte_width_is_a_lossy_projection_of_representation() {
     );
 
     // The concrete instance that motivated this: both four bytes, and a
-    // memcpy between them is silent corruption.
+    // memcpy between them is silent corruption. This pair is not
+    // hypothetical -- eight runtime accessors decoded native int32 through an
+    // f32 view, and a width-based ABI probe could not see it because both
+    // sides reported four bytes.
     assert_eq!(
         Repr::TwosComplement32.byte_width(),
-        Repr::BoolInBinary32.byte_width()
+        Repr::Ieee754Binary32.byte_width()
     );
-    assert_ne!(Repr::TwosComplement32, Repr::BoolInBinary32);
+    assert_ne!(Repr::TwosComplement32, Repr::Ieee754Binary32);
+
+    // Bool used to be the four-byte instance here. It is one byte now, which
+    // moved it into a collision with int8 rather than out of collision
+    // entirely -- the hazard is a property of the projection, not of bool.
+    assert_eq!(Repr::Bool8.byte_width(), Repr::TwosComplement8.byte_width());
+    assert_ne!(Repr::Bool8, Repr::TwosComplement8);
 }
 
 /// Width is derived, so a dtype and its representation cannot disagree.
@@ -135,19 +146,26 @@ fn dtype_byte_width_agrees_with_its_representation() {
     }
 }
 
-/// Only bool is payload-encoded today. This is the tracked
-/// `CRuntime-BoolStorage-F1` deviation; when it closes, this is the test that
-/// should change, deliberately.
+/// No dtype is payload-encoded any more. Bool was the last one, and
+/// `CRuntime-BoolStorage-F1` closed it.
+///
+/// This test previously asserted bool *was* payload-encoded and said that
+/// closing the gap is when it should change, deliberately. This is that
+/// change.
 #[test]
-fn bool_is_the_only_payload_encoded_dtype() {
+fn no_dtype_is_payload_encoded() {
     let payload: Vec<RuntimeDType> = RuntimeDType::ALL
         .into_iter()
         .filter(|d| d.repr().is_payload_encoded())
         .collect();
-    assert_eq!(payload, vec![RuntimeDType::Bool]);
-    assert_eq!(RuntimeDType::Bool.repr(), Repr::BoolInBinary32);
-    // int32 is native two's complement, contradicting a stale comment in
-    // `chelis_tensor_cmplt`. `read_scalar_as_f64` reads it as `*const i32`.
+    assert!(
+        payload.is_empty(),
+        "every dtype's bit pattern should denote the type it claims; \
+         {payload:?} do not. A payload encoding is not forbidden, but it \
+         cannot be silent: declare it in Repr::is_payload_encoded and give \
+         every lane that memcpy's the dtype a conversion."
+    );
+    assert_eq!(RuntimeDType::Bool.repr(), Repr::Bool8);
     assert_eq!(RuntimeDType::I32.repr(), Repr::TwosComplement32);
 }
 

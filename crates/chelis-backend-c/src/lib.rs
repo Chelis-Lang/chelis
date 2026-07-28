@@ -175,6 +175,13 @@ mod tests {
         TensorType::scalar_f32()
     }
 
+    fn scalar_bool() -> TensorType {
+        TensorType {
+            dims: vec![],
+            precision: Prim::Bool,
+        }
+    }
+
     fn vec_f32(n: usize) -> TensorType {
         TensorType {
             dims: vec![DimInfo::Lit(n)],
@@ -1024,7 +1031,16 @@ int main() {{
     {func_name}(NULL, 0, outputs, 1);
     for (int i = 0; i < outputs[0]->size; i++) {{
         if (i > 0) printf(" ");
-        printf("%.6f", outputs[0]->data[i]);
+        /* `data` is declared `float *`, so the bare subscript is an f32 read.
+           CHELIS_BOOL is one native byte since CRuntime-BoolStorage-F1 and
+           needs its own decode. Other dtypes are still read as f32 here; this
+           harness is only used by f32 and bool tests, and widening it is
+           chelis#730's generated-formatter work. */
+        if (outputs[0]->dtype == CHELIS_BOOL) {{
+            printf("%.6f", (double)((const unsigned char*)outputs[0]->data)[i]);
+        }} else {{
+            printf("%.6f", outputs[0]->data[i]);
+        }}
     }}
     printf("\n");
     chelis_free(outputs[0]);
@@ -1437,7 +1453,10 @@ int main(void) {{
         let mut dag = Dag::new();
         let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
         let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32(), None);
-        dag.add_node(RiscOp::CmpLt, vec![a, b], scalar_f32(), None);
+        // Bool, not f32: `lower.rs` guarantees CmpLt produces Bool whatever
+        // the input precision. Declaring f32 here built a DAG the lowerer
+        // cannot emit and hid the storage width from the emitter.
+        dag.add_node(RiscOp::CmpLt, vec![a, b], scalar_bool(), None);
         let out = compile_and_run(&dag, "test_cmplt");
         assert_float_eq(&out, 1.0);
     }
@@ -1450,7 +1469,7 @@ int main(void) {{
         let mut dag = Dag::new();
         let a = dag.add_node(RiscOp::Const { value: 5.0 }, vec![], scalar_f32(), None);
         let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32(), None);
-        dag.add_node(RiscOp::CmpLt, vec![a, b], scalar_f32(), None);
+        dag.add_node(RiscOp::CmpLt, vec![a, b], scalar_bool(), None);
         let out = compile_and_run(&dag, "test_cmplt_f");
         assert_float_eq(&out, 0.0);
     }

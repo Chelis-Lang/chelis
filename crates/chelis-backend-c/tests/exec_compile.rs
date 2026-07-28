@@ -2803,7 +2803,10 @@ int main() {{
     float expected[{n}] = {{{exp_init}}};
     int ok = 1;
     for (int i = 0; i < {n}; i++) {{
-        float got = outputs[0]->data[i];
+        /* cmplt yields CHELIS_BOOL, one native byte per element since
+           CRuntime-BoolStorage-F1. Reading it as `outputs[0]->data[i]`
+           decoded 4 bytes through the header's `float *data`. */
+        float got = (float)((const unsigned char*)outputs[0]->data)[i];
         if (got != expected[i]) {{
             printf("MISMATCH at %d: got %.1f expected %.1f\n", i, got, expected[i]);
             ok = 0;

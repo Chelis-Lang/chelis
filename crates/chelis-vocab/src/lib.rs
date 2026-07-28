@@ -74,15 +74,22 @@ impl Error for EffectKindDecodeError<'_> {}
 /// How a dtype's elements are physically encoded in a buffer.
 ///
 /// **This, not the byte width, is the ABI contract.** A width is a projection
-/// of a representation, and that projection is not injective: `TwosComplement32`
-/// and `BoolInBinary32` are both four bytes and are not interchangeable. Two
+/// of a representation, and that projection is not injective:
+/// `Ieee754Binary32` and `TwosComplement32` are both four bytes and are not
+/// interchangeable, as are `TwosComplement8` and `Bool8` at one byte. Two
 /// lanes agree about a dtype iff their `Repr` values are equal; comparing
 /// widths can pass while the encodings differ, which is silent corruption
 /// rather than a stride mismatch.
 ///
-/// Naming is by encoding rather than by logical type on purpose. `Bool` does
-/// not appear as a representation because bool is not, today, represented as
-/// itself.
+/// That first pair is not hypothetical. Eight runtime accessors decoded native
+/// int32 through an f32 view, and a width-based ABI probe could not see it
+/// because both sides reported four bytes. The same probe did catch bool,
+/// whose widths disagreed. Width found the defect it happened to be sensitive
+/// to and was blind to the one next to it.
+///
+/// Naming is by encoding rather than by logical type on purpose: it is what
+/// makes an encoding that differs from its logical type impossible to write
+/// down without saying so.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Repr {
     Ieee754Binary16,
@@ -93,19 +100,18 @@ pub enum Repr {
     TwosComplement16,
     TwosComplement32,
     TwosComplement64,
-    /// A boolean carried in an IEEE binary32 payload: `0.0` for false, `1.0`
-    /// for true.
+    /// A boolean in one native byte: `0` for false, `1` for true.
     ///
-    /// Legacy, and tracked as `CRuntime-BoolStorage-F1` in
-    /// `docs/gap_synthesis.md`. The recorded end state is a native one-byte
-    /// boolean, at which point this variant is replaced by a `Bool8` and
-    /// [`RuntimeDType::byte_width`] follows automatically — which is the
-    /// reason width is derived from this rather than written out per dtype.
+    /// This replaced a `BoolInBinary32` variant, which carried a boolean in an
+    /// IEEE binary32 payload (`0.0` / `1.0`) and was tracked as
+    /// `CRuntime-BoolStorage-F1`. Naming that deviation as a representation is
+    /// what made the migration mechanical: width is derived from this enum, so
+    /// flipping the variant moved every `chelis_alloc` sizing decision at once.
     ///
-    /// It is named here so the deviation is visible in the type system rather
-    /// than only in a document, and so a lane that assumes a native bool is
-    /// wrong in a way a compiler can point at.
-    BoolInBinary32,
+    /// The same property is why the migration had to be atomic. A one-byte
+    /// width with four-byte writers still live is a heap overflow, not a
+    /// mismatch, so no intermediate state was shippable.
+    Bool8,
 }
 
 impl Repr {
@@ -118,14 +124,14 @@ impl Repr {
         Self::TwosComplement16,
         Self::TwosComplement32,
         Self::TwosComplement64,
-        Self::BoolInBinary32,
+        Self::Bool8,
     ];
 
     pub const fn byte_width(self) -> u32 {
         match self {
-            Self::TwosComplement8 => 1,
+            Self::TwosComplement8 | Self::Bool8 => 1,
             Self::Ieee754Binary16 | Self::Bfloat16 | Self::TwosComplement16 => 2,
-            Self::Ieee754Binary32 | Self::TwosComplement32 | Self::BoolInBinary32 => 4,
+            Self::Ieee754Binary32 | Self::TwosComplement32 => 4,
             Self::Ieee754Binary64 | Self::TwosComplement64 => 8,
         }
     }
@@ -133,9 +139,17 @@ impl Repr {
     /// Whether the encoding carries a logical type other than the one its
     /// bit pattern denotes. Such a representation cannot be memcpy'd to or
     /// from a lane holding the type natively; it needs a conversion.
+    /// No representation is payload-encoded today. `BoolInBinary32` was the
+    /// only one, and it is gone; every remaining variant's bit pattern denotes
+    /// the type it claims.
+    ///
+    /// The method stays because the concept is what the bool defect taught:
+    /// two representations can share a width and still not be interchangeable,
+    /// so a width comparison is not a compatibility check. Keeping it as a
+    /// total function over `Repr` means the next payload encoding declares
+    /// itself here rather than being discovered by a lane that memcpy'd it.
     pub const fn is_payload_encoded(self) -> bool {
         match self {
-            Self::BoolInBinary32 => true,
             Self::Ieee754Binary16
             | Self::Ieee754Binary32
             | Self::Ieee754Binary64
@@ -143,7 +157,8 @@ impl Repr {
             | Self::TwosComplement8
             | Self::TwosComplement16
             | Self::TwosComplement32
-            | Self::TwosComplement64 => false,
+            | Self::TwosComplement64
+            | Self::Bool8 => false,
         }
     }
 }
@@ -225,7 +240,7 @@ impl RuntimeDType {
             Self::I64 => Repr::TwosComplement64,
             // Not `Bool8`. The runtime stores bool as an f32 payload; see the
             // variant's documentation.
-            Self::Bool => Repr::BoolInBinary32,
+            Self::Bool => Repr::Bool8,
         }
     }
 

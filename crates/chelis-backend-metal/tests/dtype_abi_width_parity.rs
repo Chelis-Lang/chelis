@@ -71,18 +71,12 @@ fn metal_device_repr(prec: Prim) -> Repr {
         "short" => Repr::TwosComplement16,
         "int" => Repr::TwosComplement32,
         "long" => Repr::TwosComplement64,
-        // MSL `bool` is a native one-byte boolean. There is no `Repr` variant
-        // for it precisely because nothing in the runtime represents bool as
-        // itself; that absence is the finding, not an oversight.
-        "bool" => panic!(
-            "Metal emits a native MSL `bool`, which has no counterpart in the \
-             runtime representation vocabulary. The runtime carries bool as an \
-             f32 payload (Repr::BoolInBinary32), so the two lanes do not share \
-             an encoding and a memcpy between them is not meaningful. Tracked \
-             as CRuntime-BoolStorage-F1; the recorded closure is native 1-byte \
-             bool in the runtime, at which point add a Repr::Bool8 and map it \
-             here."
-        ),
+        // MSL `bool` is a native one-byte boolean, and so is the runtime's
+        // storage since CRuntime-BoolStorage-F1. This arm used to panic:
+        // there was no `Repr` to map to, because the runtime carried bool as
+        // an f32 payload and the two lanes genuinely did not share an
+        // encoding.
+        "bool" => Repr::Bool8,
         other => panic!("unmapped MSL type: {other}"),
     }
 }
@@ -95,11 +89,6 @@ fn metal_device_repr(prec: Prim) -> Repr {
 #[test]
 fn device_representation_matches_the_runtime_representation() {
     for prec in ACTIVE_METAL {
-        if prec == Prim::Bool {
-            // Covered by the dedicated bool test below, which explains why the
-            // mapping cannot be expressed rather than merely failing.
-            continue;
-        }
         let runtime_repr = prec
             .runtime_dtype()
             .expect("active Metal dtype must have a runtime dtype")
@@ -115,52 +104,42 @@ fn device_representation_matches_the_runtime_representation() {
     }
 }
 
-/// Width parity alone is not sufficient, and this pins why.
+/// Bool was the lane disagreement this file was written to record, and the
+/// runtime was the side that owed the migration.
 ///
-/// The runtime does not store `bool` as a 1-byte C `bool`. It stores it as
-/// `f32`: `chelis-runtime/src/lib.rs` reads `RuntimeDType::Bool` through
-/// `*const f32` in the same match arm as `F32`, and `chelis_fill_bool_bits`
-/// writes through `data_as_f32` with `f32::from_bits`. Metal's device side
-/// uses MSL `bool` (`msl_type(Bool) == "bool"`, and `host_const_fill_body`
-/// emits `p[i] = true`).
+/// The runtime stored bool as an f32 payload while Metal emitted a native MSL
+/// `bool`, so the two lanes disagreed on *encoding*, not merely on width. Four
+/// bytes of packed MSL bools reinterpreted as an `f32` is garbage, not a
+/// misaligned stride. The tempting fix was to widen Metal to four bytes, which
+/// would have turned every test here green while moving toward the f32
+/// coupling that `CRuntime-F32Coupling` set out to remove. `gap_synthesis.md`
+/// recorded the closure as native 1-byte bool in the runtime, and Metal's MSL
+/// bool was already the target shape.
 ///
-/// So the two lanes disagree on *encoding*, not only on width. Four bytes of
-/// packed MSL bools reinterpreted as an `f32` is garbage, not a misaligned
-/// stride. A fix that only makes `metal_elem_size(Bool)` return 4 would turn
-/// the two tests above green while leaving the copied data wrong, so this
-/// test exists to fail in that case.
+/// `CRuntime-BoolStorage-F1` closed it in that direction. Bool now takes part
+/// in `device_representation_matches_the_runtime_representation` like every
+/// other dtype, so this test is no longer about a disagreement -- it pins that
+/// the agreement is on one native byte specifically, and that neither lane
+/// drifts back to four.
 #[test]
-fn bool_device_representation_matches_the_runtime_f32_storage() {
+fn bool_is_one_native_byte_on_both_lanes() {
     let runtime_width = Prim::Bool
         .runtime_dtype()
         .expect("bool must have a runtime dtype")
         .byte_width() as usize;
 
-    // The runtime stores bool as f32, so the ABI width is f32's width.
     assert_eq!(
-        runtime_width,
-        size_of::<f32>(),
-        "the runtime stores bool as f32; if this changed, the reasoning below \
-         and the Metal copy path both need revisiting"
+        runtime_width, 1,
+        "the runtime must store bool as one native byte. Four means a revert \
+         to the f32 payload, which silently un-fixes every access site \
+         CRuntime-BoolStorage-F1 migrated"
     );
-
-    // The two lanes therefore do not share an encoding, and a memcpy between
-    // them is not meaningful.
-    //
-    // Direction matters here. Widening Metal to f32 would match the current
-    // ABI but move toward the f32-coupling that `CRuntime-F32Coupling`'s
-    // closure set out to remove; `docs/gap_synthesis.md` records the intended
-    // fix as native 1-byte bool in the runtime. Metal's 1-byte MSL bool is
-    // already the target shape. So this test failing means the RUNTIME is the
-    // side owing a migration, not Metal.
     assert_eq!(
         metal_elem_size(Prim::Bool),
         runtime_width,
-        "metal_elem_size(bool) = {} but the runtime carries bool as a {}-byte \
-         f32 payload. Until the runtime migrates to native 1-byte bool \
-         (CRuntime-BoolStorage-F1), the device-to-host path must convert \
-         MSL bool <-> f32 rather than copy bytes. Do not close this by \
-         widening Metal to f32",
+        "metal_elem_size(bool) = {} against a runtime width of {}. Do not \
+         close a mismatch here by widening Metal: the runtime's native byte \
+         is the agreed encoding, and Metal already emits it",
         metal_elem_size(Prim::Bool),
         runtime_width
     );

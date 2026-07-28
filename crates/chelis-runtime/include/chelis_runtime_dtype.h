@@ -20,7 +20,7 @@ static inline size_t chelis_runtime_dtype_size_checked(int dtype) {
         case CHELIS_F32: return 4;
         case CHELIS_F64: return 8;
         case CHELIS_I32: return 4;
-        case CHELIS_BOOL: return 4;
+        case CHELIS_BOOL: return 1;
         case CHELIS_I64: return 8;
         case CHELIS_BF16: return 2;
         case CHELIS_F16: return 2;

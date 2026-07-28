@@ -21,10 +21,12 @@
 //! * #379 — top-level bindings spelled like C keywords or the emitted
 //!   helper scheme must produce compilable C (identifier mangling).
 //! * #365 — a `Bool` comparison-mask const (max-reduce / softmax backward)
-//!   must fill through the dtype-correct `chelis_fill_bool_bits`, not
+//!   must fill through the dtype-correct `chelis_fill_bool`, not
 //!   `chelis_fill_f32_bits`, so a debug-runtime build does not abort on the
 //!   dtype assertion. (The test links the debug `libchelis_runtime.a`, whose
-//!   `debug_assert` is active.)
+//!   `debug_assert` is active.) That helper was `chelis_fill_bool_bits` and
+//!   took an f32 bit pattern until `CRuntime-BoolStorage-F1` made bool one
+//!   native byte.
 //!
 //! #378 (route a captured top-level scalar binding into `HostProgram::globals`)
 //! landed in chelis-ir, so the #381 program now compiles on the C backend and
@@ -848,11 +850,15 @@ out = add(w, to_tensor([1.0, 2.0]))\n";
 // -----------------------------------------------------------------------------
 
 /// POSITIVE + emit-shape: a `max_reduce` backward materializes a `Bool`
-/// comparison mask. The mask const must fill through `chelis_fill_bool_bits`
+/// comparison mask. The mask const must fill through `chelis_fill_bool`
 /// (dtype-correct for CHELIS_BOOL), NOT `chelis_fill_f32_bits` (which asserts
 /// CHELIS_F32). The build links the debug `libchelis_runtime.a`, so the
 /// debug-build dtype assertion is active: a regression aborts the run.
 /// Pre-fix the Bool const used `chelis_fill_f32_bits` and aborted here.
+///
+/// The helper was `chelis_fill_bool_bits(t, uint32_t)` taking an IEEE binary32
+/// pattern until `CRuntime-BoolStorage-F1`; a 32-bit float pattern no longer
+/// describes anything a one-byte bool buffer holds.
 #[test]
 fn issue_365_max_reduce_backward_bool_mask_fill_is_dtype_correct() {
     let source = "def f(x: tensor[3, f32]) -> f32 = tensor_to_scalar(max_reduce(x, 0))\n\
@@ -865,8 +871,8 @@ out = df(to_tensor([1.0, 5.0, 3.0]))\n";
     // Emit-shape: the Bool mask const must use the dtype-correct fill.
     let c_source = fs::read_to_string(&kernel_c).expect("read emitted C");
     assert!(
-        c_source.contains("chelis_fill_bool_bits("),
-        "a Bool mask const must fill through chelis_fill_bool_bits (#365); \
+        c_source.contains("chelis_fill_bool("),
+        "a Bool mask const must fill through chelis_fill_bool (#365); \
          emitted C=\n{c_source}",
     );
 

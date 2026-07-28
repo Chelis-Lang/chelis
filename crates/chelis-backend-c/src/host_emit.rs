@@ -736,7 +736,13 @@ fn append_tensor_print_helper(out: &mut Vec<String>) {
         "            case CHELIS_I8:  value = (double)((const int8_t*)t->data)[i]; break;"
             .to_string(),
     );
-    out.push("            case CHELIS_BOOL: value = (double)t->data[i]; break;".to_string());
+    // CRuntime-BoolStorage-F1: bool is one native byte. The bare `t->data[i]`
+    // this used to share with the F32 arm was an f32 read, because the public
+    // C header declares `float *data`.
+    out.push(
+        "            case CHELIS_BOOL: value = (double)((const unsigned char*)t->data)[i]; break;"
+            .to_string(),
+    );
     out.push("            case CHELIS_F32: value = (double)t->data[i]; break;".to_string());
     // chelis#730 Phase 1 (census row 10 interim-hardening): a dtype this
     // helper cannot decode (f16/bf16 2-byte storage) aborts with the
@@ -2877,12 +2883,14 @@ impl<'a> HostEmitter<'a> {
     //
     // Per `docs/design/compiler_cleanup_0_7_8_spec_lock.md` Contract
     // 2 the supported precisions are f32, f64, i32, i64, and bool.
-    // CHELIS_I32 and CHELIS_BOOL storage is 4-byte f32-encoded today
-    // (see `crates/chelis-runtime/src/lib.rs` `chelis_alloc` and the
-    // f32-routed runtime accessors at L2178-L2192 / L2222-L2223);
-    // their arms route through `(float*)t->data` to match the
-    // runtime convention.  CHELIS_F64 uses `(double*)` and
-    // CHELIS_I64 uses `(int64_t*)`.
+    // Every arm reads and writes at its own storage width: CHELIS_F32
+    // `(float*)`, CHELIS_F64 `(double*)`, CHELIS_I32 `(int32_t*)`,
+    // CHELIS_I64 `(int64_t*)`, CHELIS_BOOL `(unsigned char*)`.
+    //
+    // This block used to say I32 and BOOL were "4-byte f32-encoded today"
+    // and route both through `(float*)`. That was already wrong for int32
+    // when written -- RT-4 F1 had moved the write side to `(int32_t*)` --
+    // and became wrong for bool under CRuntime-BoolStorage-F1.
     //
     // The four helpers split into two pairs:
     //
@@ -3235,11 +3243,12 @@ impl<'a> HostEmitter<'a> {
                 // through the public `float *data` declaration in
                 // the C runtime header; mirror the int64 arm's
                 // typed-cast pattern for the bool and f32 cases
-                // so the bug class closes uniformly.  Bool
-                // storage today is 4-byte f32-encoded (per
-                // `docs/investigations/c_runtime_dtype_accessors_diagnosis.md`),
-                // so the bool arm casts to `(float*)` and writes
-                // the 1.0f / 0.0f bit pattern.
+                // so the bug class closes uniformly.
+                //
+                // CRuntime-BoolStorage-F1: the bool arm wrote a 1.0f / 0.0f
+                // f32 pattern through `(float*)` while bool storage was a
+                // 4-byte payload. It is one native byte now, so a 4-byte
+                // write here overran the buffer.
                 let (dtype, store) = match inferred_ty {
                     HostType::Int8 => (
                         "CHELIS_I8",
@@ -3255,7 +3264,7 @@ impl<'a> HostEmitter<'a> {
                     ),
                     HostType::Bool => (
                         "CHELIS_BOOL",
-                        format!("((float*){tensor_name}->data)[0] = {value_name} ? 1.0f : 0.0f;"),
+                        format!("((unsigned char*){tensor_name}->data)[0] = {value_name} ? 1 : 0;"),
                     ),
                     // #381: an f64 captured scalar (e.g. `cast(1.1, f64)`)
                     // fed to a tensor helper via `scalar_to_tensor` must be
@@ -5604,15 +5613,12 @@ fn sparse_dtype_macro(prim: Prim) -> &'static str {
 /// names a `CHELIS_*` constant and the C element type used to read
 /// and write the tensor's `data` buffer through a typed pointer.
 ///
-/// The `Int32` and `Bool` arms reuse `float` as the element type
-/// because CHELIS_I32 and CHELIS_BOOL tensor storage today is
-/// 4-byte f32-encoded (see `crates/chelis-runtime/src/lib.rs`
-/// `chelis_alloc` and the f32-routed runtime accessors at
-/// L2178-L2192 / L2222-L2223 plus
-/// `docs/investigations/c_runtime_dtype_accessors_diagnosis.md`).
-/// `i32::data_ptr_unchecked` exists for future storage migration
-/// but reading the current f32-encoded buffer through it would be
-/// the wrong decode.
+/// Every arm names its own storage type. The `Int32` and `Bool` arms once
+/// reused `float`, on the claim that both were 4-byte f32-encoded; int32 had
+/// already moved to native two's complement under RT-4 F1, and bool moved to
+/// a native byte under CRuntime-BoolStorage-F1. Sharing an element type
+/// across representations is what the `Repr` split in `chelis-vocab` exists
+/// to make impossible to state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DtypeArm {
     F32,
@@ -5639,9 +5645,14 @@ impl DtypeArm {
 
     fn elem_t(self) -> &'static str {
         match self {
-            // Bool storage really is 4-byte f32-encoded, pending
-            // CRuntime-BoolStorage-F1, so `float*` is the right read.
-            DtypeArm::F32 | DtypeArm::Bool => "float",
+            DtypeArm::F32 => "float",
+            // CRuntime-BoolStorage-F1: bool is one native byte. This arm
+            // emitted `float` while storage was a 4-byte f32 payload; leaving
+            // it would have made generated C stride 4 bytes per element over
+            // a 1-byte-per-element buffer, which is the int32 defect's shape
+            // with a worse failure mode -- an out-of-bounds read rather than
+            // a misinterpreted one.
+            DtypeArm::Bool => "unsigned char",
             // int32 storage is native two's complement. RT-4 F1 moved the
             // write side to `(int32_t*)`; emitting `float*` here made
             // generated C reinterpret those bytes as floats, the same defect
