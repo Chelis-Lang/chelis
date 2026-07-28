@@ -153,6 +153,14 @@ Normative notes, each pinned by an existing test:
 
 ## C2. The trap contract
 
+**Normative home: `spec/04-type-system.md` [04-NUM-9] (the closed kind set
+and cross-lane identity), [04-NUM-10] (traps are values until the lane
+boundary, including the device-lane error-flag shape), and [04-NUM-5] (the
+fold-decline rule).** Those atoms outlive this document and are what a
+later reader should cite. This section is the elaboration: the Rust shape,
+the working message strings, and the evidence behind the device-lane
+decision. Where the two disagree the atoms win and this section has a bug.
+
 One error type, one message shape, identical in every lane:
 
 ```rust
@@ -244,6 +252,14 @@ ending the `np.float64` cast of [#685]), and prove's env (§C5-consumer
 table). Partial adoption of the storage decision is forbidden: it is the
 one all-layers-or-nothing element of this plan, because a mixed state
 re-creates the very boundary bugs ([#684]/[#686]) it exists to end.
+
+**Normative home for the GUARANTEE this delivers:**
+`spec/04-type-system.md` [04-NUM-11] - a value survives storage,
+transport, and every boundary crossing at its declared dtype without
+collapse. That atom is what a later reader cites; this section owns the
+mechanism that achieves it (per-dtype buffers, private constructors, the
+sealed types) and is free to change form as long as the atom keeps
+holding.
 
 **Access for consumers.** Reads are free-form (`as_f64_lossy()` explicitly
 named lossy, `as_i64_exact() -> Option<i64>`, typed slices per dtype).

@@ -2324,6 +2324,20 @@ blockquote authorities remain normative until selected for fixture-proven
 migration in chelis#733 Phase 1. The pinned Buoy shell-side integration—not a
 `chelis-lint` rule—attaches and checks full semantic revisions.
 
+**Amendment 2026-07-28 - lifted contracts.** [04-NUM-9], [04-NUM-10], and
+[04-NUM-11] were added on the same date, moving three decisions out of
+`spec/design/dtype_semantics.md` and into this section: the closed trap-kind
+set with cross-lane rendering identity (its §C2), traps-as-values-until-the-
+lane-boundary including the device-lane error-flag shape (also §C2), and the
+guarantee that a value survives storage and transport at its declared dtype
+(the observable half of its §C3 storage decision). None of the three is a new
+decision; each was already decided and each lived only in a design document,
+which is a working artifact that stops being read once its phases ship. The
+numbered spec is where a decision has to live to outlast the work that made
+it - the precedent is [05-OBS-1..5], lifted the same way out of
+`faithful_observation.md`. The design documents keep the elaboration, the
+mechanism, and the evidence, and now point here for the rule.
+
 **Amendment 2026-07-28 - arithmetic width.** [04-NUM-2] formerly closed with
 "Computing a single op in f64 and rounding once is a conforming implementation
 for f32/f16/bf16." That clause was REMOVED and replaced by [04-NUM-8], which
@@ -2467,6 +2481,67 @@ otherwise force a cross-lane tolerance table between two lanes that
 should agree exactly. The same argument applies to routing exact integer
 arithmetic through f64, which additionally destroys int64 exactness above
 2^53 (chelis#684, chelis#680).
+
+> **[04-NUM-9]** A numeric trap has a CLOSED set of kinds: `Overflow` (an
+> integer result outside the declared dtype's range), `Domain` (a value
+> outside the declared dtype's set - a fractional or non-finite value at an
+> integer dtype, a value other than 0 or 1 at `bool`), and `DivZero`
+> (integer division or remainder by a zero divisor). Every trap SHALL name
+> its kind, the operation that raised it, and the dtype it was finalizing
+> to, and SHALL render byte-identically in every lane and on every surface.
+> A lane that raises a numeric failure outside this set, or renders one of
+> these differently from another lane, is a defect.
+
+*(The exact strings are not frozen by this atom.
+`spec/design/dtype_semantics.md` §C2 carries the working shape
+`numeric trap: <kind> in <op> at <prim>`, following the branding precedent
+of `chelis_int_div_guard` / `integer division or remainder by zero`
+(`spec/05-risc-primitives.md` §2.1); the operation-name slot is an open
+decision on chelis#861, and the strings freeze at chelis#729 Phase 2, at
+which point they are recorded here. What this atom fixes now is the closed
+kind set and the cross-lane identity requirement.)*
+
+> **[04-NUM-10]** A numeric trap SHALL be a VALUE inside a lane and SHALL
+> become a process failure only at that lane's boundary: `chelis eval`
+> raises a diagnostic and exits nonzero; a compiled binary writes to stderr
+> and exits nonzero. No lane SHALL panic, abort mid-computation, or
+> terminate the compiler for a trap caused by user input. On a device lane,
+> where a kernel cannot raise mid-flight, the trap is carried as a
+> device-side error flag - at minimum a set/unset flag and the first failing
+> element index - read by the host after dispatch completion, which then
+> raises with the identical branded message. Dispatch completion IS the
+> device lane's boundary, so this rule is satisfied there by construction
+> rather than excepted from.
+
+*(The device-lane shape is evidence-backed and provisional pending the HIP
+half, chelis#736. The Metal spike (chelis#737) measured flag detection as
+effectively free for the memory-bound elementwise shape the backend emits -
+worst case +0.7% median, int64 multiply included - and verified MSL int64
+bit-exactness. Implementation rider from the same spike, recorded here
+because it is a correctness constraint rather than a preference: the clang
+overflow builtins are BANNED in emitted MSL. `__builtin_mul_overflow(long)`
+crashes the backend compiler reproducibly, and at-scale vectorization
+miscompiles the add and sub forms into false positives; the division-based
+form crashes the backend as well. The hand-written checks - widening for
+int32, sign-bit XOR for add and sub, `mulhi` for int64 multiply - are the
+implementation.)*
+
+> **[04-NUM-11]** A value SHALL survive storage, transport, and every
+> boundary crossing at its declared dtype without collapse. An `int64`
+> value above 2^53 that is exact when produced SHALL still be exact after
+> being stored in a tensor, serialized onto the execution wire, returned
+> through a language binding, and read back. A representation that cannot
+> carry a dtype's full value set is not a conforming representation for
+> that dtype, and no stage SHALL substitute a wider or narrower one to
+> compensate.
+
+*(Not honored before chelis#729 Phase 1: tensor storage, the wire schema,
+and the Python binding each flattened numeric payloads to f64, so an int64
+above 2^53 collapsed at every boundary no matter how exactly it had been
+computed - chelis#684, chelis#685, chelis#686. This atom is the
+user-visible statement of what `spec/design/dtype_semantics.md` §C3's
+storage decision delivers: that document owns the mechanism, this atom owns
+the guarantee.)*
 
 **Why reduced precision is opt-in only.** The prohibition on narrowing is
 not symmetric with the prohibition on widening by accident. Widening is
