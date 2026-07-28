@@ -6,6 +6,14 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **A tracked Devenv shell supplies the contributor toolchain on Linux and macOS.**
+  The shell pins Rust, Python 3.11, test tools, and the platform C toolchain.
+  Linux uses GCC, OpenBLAS, and Valgrind from Nixpkgs. macOS maps `gcc` and
+  `g++` to the Nixpkgs clang wrapper from `pkgs.stdenv.cc`.
+  `devenv test` checks the tool versions and compiler warnings.
+
 ### Fixed
 
 - **Compiled list combinators grow accumulators in place (part of chelis#943).**

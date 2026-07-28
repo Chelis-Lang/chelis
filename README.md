@@ -53,6 +53,29 @@ Packages](docs/book/src/reef.md)**.
 
 The rest of this README builds the Chelis compiler from a checkout.
 
+**Optional Devenv shell.** Devenv supplies the pinned Rust, Python, C, and contributor tools from the tracked shell inputs.
+
+On macOS, the `gcc` and `g++` shims invoke the Nixpkgs clang wrapper from `pkgs.stdenv.cc`. They do not invoke host Apple clang.
+
+Run these commands from the repository root:
+
+```sh
+# Enter the interactive development shell.
+devenv shell
+
+# Check the shell tools and compiler contract.
+devenv test
+
+# Run the authoritative C-backend acceptance oracle.
+devenv shell -- cargo nextest run -p chelis-backend-c
+```
+
+`devenv test` exits with status 0 when the shell satisfies its tool and compiler contract.
+
+The Linux Devenv check is a manual gate. Default CI does not run this gate.
+
+Devenv is optional and is not a product or CI requirement. If you do not use Devenv, use the manual setup below.
+
 **Rust toolchain.** Install [rustup](https://rustup.rs) (the Rust toolchain
 installer) if you do not already have it:
 
