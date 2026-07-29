@@ -712,7 +712,7 @@ fn print_helper_elem_case(prim: Prim) -> Option<Vec<String>> {
             dtype,
             vec![
                 format!(
-                    "chelis_format_shortest({image_expr}, {}, fmt_buf);",
+                    "chelis_format_shortest({image_expr}, {}, fmt_buf, sizeof fmt_buf);",
                     dtype.c_macro()
                 ),
                 "fputs(fmt_buf, stdout);".to_string(),
@@ -5034,7 +5034,7 @@ impl<'a> HostEmitter<'a> {
                 let width = scalar_float_width_macro(ty);
                 self.lines.push(format!(
                     "{}{{ char fmt_buf[CHELIS_FORMAT_SHORTEST_BUF]; \
-                     chelis_format_shortest((double)({}), {width}, fmt_buf); \
+                     chelis_format_shortest((double)({}), {width}, fmt_buf, sizeof fmt_buf); \
                      printf(\"%s\\n\", fmt_buf); }}",
                     self.indent, value
                 ));
@@ -5151,7 +5151,7 @@ impl<'a> HostEmitter<'a> {
                 let width = scalar_float_width_macro(ty);
                 self.lines.push(format!(
                     "{}{{ char fmt_buf[CHELIS_FORMAT_SHORTEST_BUF]; \
-                     chelis_format_shortest((double)({}), {width}, fmt_buf); \
+                     chelis_format_shortest((double)({}), {width}, fmt_buf, sizeof fmt_buf); \
                      printf(\"%s\", fmt_buf); }}",
                     self.indent, value
                 ));

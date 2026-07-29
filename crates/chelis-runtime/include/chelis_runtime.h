@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <math.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -508,12 +509,24 @@ chelis_tensor *chelis_contiguous(const chelis_tensor *t);
  * stored bits at that width, in the frozen spec/05 section 8.1 grammar
  * (`inf` / `-inf` / `NaN`, lowercase unpadded `e`, `-0.0` preserved,
  * decimal form on the rendered magnitude in [1e-4, 1e16)). Byte-identical
- * to the eval lane's reference renderer by test. A non-float width_kind or
- * an unknown id aborts with the raw id; integers never route through this
- * (they print exactly at their own width). `buf` must hold at least
- * CHELIS_FORMAT_SHORTEST_BUF bytes. */
+ * to the eval lane's reference renderer by test. Integers never route
+ * through this (they print exactly at their own width).
+ *
+ * `cap` is `buf`'s capacity in bytes; pass `sizeof buf` for an array.
+ * Returns the number of bytes written EXCLUDING the terminating NUL.
+ *
+ * Every contract violation ABORTS rather than truncating or returning a
+ * sentinel - a silent short write is a value substitution at the byte
+ * level: a non-float or unknown width_kind aborts with the raw id, a NULL
+ * buf aborts, and a cap too small for the rendering plus its NUL aborts
+ * naming both numbers. The return value is therefore always a valid
+ * length; it exists so a caller that wants the length need not strlen the
+ * result, not as an error channel.
+ *
+ * CHELIS_FORMAT_SHORTEST_BUF is the documented minimum capacity: no
+ * rendering in the frozen grammar exceeds it. */
 #define CHELIS_FORMAT_SHORTEST_BUF 32
-void chelis_format_shortest(double value, int width_kind, char *buf);
+int chelis_format_shortest(double value, int width_kind, char *buf, size_t cap);
 
 #ifdef __cplusplus
 }

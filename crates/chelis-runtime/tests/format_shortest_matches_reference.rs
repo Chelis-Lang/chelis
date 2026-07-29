@@ -33,11 +33,24 @@ use std::os::raw::c_char;
 fn c_format(value: f64, width: RuntimeDType) -> String {
     let mut buf = [0u8; CHELIS_FORMAT_SHORTEST_BUF];
     unsafe {
-        chelis_format_shortest(value, width.id(), buf.as_mut_ptr() as *mut c_char);
-        CStr::from_ptr(buf.as_ptr() as *const c_char)
+        let written = chelis_format_shortest(
+            value,
+            width.id(),
+            buf.as_mut_ptr() as *mut c_char,
+            buf.len(),
+        );
+        let text = CStr::from_ptr(buf.as_ptr() as *const c_char)
             .to_str()
             .expect("chelis_format_shortest output is ASCII")
-            .to_string()
+            .to_string();
+        // The returned count is the contract's own accounting; every value
+        // in every table below therefore also checks it.
+        assert_eq!(
+            written as usize,
+            text.len(),
+            "the returned byte count must equal the NUL-excluded rendering"
+        );
+        text
     }
 }
 

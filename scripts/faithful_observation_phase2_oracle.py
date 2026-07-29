@@ -162,21 +162,42 @@ DECLARED_EXCLUSIONS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
 # "the two lanes render identically" a fact rather than an assertion, so it
 # must not shrink: growing it is ordinary progress, dropping a row silently
 # re-narrows the very claim Phase 2 freezes. The set is a FLOOR (extra
-# labels are fine); each entry is a program label inside
-# `cross_lane_stdout_is_byte_identical_where_bits_agree`.
-CROSS_LANE_CORPUS_FLOOR: tuple[str, ...] = (
-    "int8-exits",
-    "int64-exits",
-    "bool-exits",
-    "f32-dyadic-exits",
-    "f16-dyadic-print",
-    "f64-scalar-17-digit",
-    "f64-scalar-specials",
-    "rank0-reduction-root",
+# labels are fine).
+#
+# Each row binds its label to TOKENS ITS PROGRAM MUST CONTAIN. A label
+# alone was not enough (PR #863 R2, LOW): a body could be weakened or
+# swapped for a trivial program while the floor still reported intact, so
+# the guard would certify a corpus that no longer covers what its names
+# claim. The tokens are the dtype the row exists for plus the construct
+# that makes it an EXIT, which is the least a replacement would have to
+# preserve to still be the row it is named after.
+CROSS_LANE_CORPUS_FLOOR: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("int8-exits", ("int8",)),
+    ("int64-exits", ("int64",)),
+    ("bool-exits", ("bool", "to_tensor")),
+    ("f32-dyadic-exits", ("f32", "to_tensor")),
+    ("f16-dyadic-print", ("f16", "print", "to_list")),
+    ("f64-scalar-17-digit", ("f64", "print")),
+    ("f64-scalar-specials", ("f64", "div")),
+    ("rank0-reduction-root", ("f32", "sum", "print")),
+)
+
+# The lock's own body must keep comparing FULL stdout across both lanes.
+# A corpus of the right size proves nothing if the assertion under it
+# stops being byte equality.
+CROSS_LANE_REQUIRED_ASSERTIONS: tuple[str, ...] = (
+    "eval_stdout",
+    "c_stdout",
+    "assert_eq!",
 )
 
 RUNTIME_SOURCE = Path("crates/chelis-runtime/src/lib.rs")
 RUNTIME_HEADER = Path("crates/chelis-runtime/include/chelis_runtime.h")
+# The retired-export scan reads the WHOLE crate, not just `lib.rs`: an
+# export re-added in any module is the same public exit returning, and a
+# scan scoped to one file would miss it (`chelis_format_shortest` itself
+# lives in `format_shortest.rs`, which is how this gap surfaced).
+RUNTIME_SRC_DIR = Path("crates/chelis-runtime/src")
 
 # The observation lane's DECODE table: which pointer view each dtype's
 # element arm in `tensor_elem_to_string` is allowed to read through.
@@ -187,7 +208,7 @@ RUNTIME_HEADER = Path("crates/chelis-runtime/include/chelis_runtime.h")
 # int32 buffer came to be read through an f32 view at this exit while
 # `to_list` and the generated print helper read it correctly: one
 # formatter, N decoders. `format_element(prim, ElementRef)` and
-# `chelis_format_shortest(value, width_kind, buf)` both receive an
+# `chelis_format_shortest(value, width_kind, buf, cap)` both receive an
 # ALREADY-DECODED element, so neither can catch it.
 #
 # ENFORCEMENT RUNG (docs/agent_quality_architecture.md, chelis#740): this
@@ -450,39 +471,120 @@ def exclusion_violations(source: str) -> list[str]:
     return violations
 
 
-def cross_lane_corpus_labels(source: str) -> list[str] | None:
-    """The program labels inside the §C2.3 cross-lane byte-identity lock."""
-
+def cross_lane_lock_body(source: str) -> str | None:
     match = re.search(
         r"fn cross_lane_stdout_is_byte_identical_where_bits_agree\(\)(.*?)\n\}",
         source,
         re.S,
     )
-    if match is None:
+    return None if match is None else match.group(1)
+
+
+def cross_lane_corpus_programs(source: str) -> dict[str, str] | None:
+    """Map each program label to its program text inside the §C2.3 lock."""
+
+    body = cross_lane_lock_body(source)
+    if body is None:
         return None
-    body = match.group(1)
     programs = re.search(r"let programs:[^=]*=\s*&\[(.*?)\n    \];", body, re.S)
     if programs is None:
         return None
-    return re.findall(r'\(\s*"([a-z0-9\-]+)"\s*,', programs.group(1))
+    return split_tuple_entries(programs.group(1))
+
+
+def split_tuple_entries(text: str) -> dict[str, str]:
+    """Split a Rust array of `("label", program)` tuples by paren depth.
+
+    A regex split cannot do this: `("int8-exits", int_table_program("int8",
+    ...))` contains an INNER `("int8",` that matches the same shape, so a
+    pattern scan cuts each entry in half and leaves the label sitting alone
+    with no program to check. Depth tracking (with string literals skipped,
+    since the programs are Rust strings full of parentheses) gives the real
+    top-level entries.
+    """
+
+    entries: dict[str, str] = {}
+    depth = 0
+    start: int | None = None
+    in_string = False
+    escaped = False
+    for index, char in enumerate(text):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+            continue
+        if char == "(":
+            if depth == 0:
+                start = index
+            depth += 1
+            continue
+        if char == ")":
+            depth -= 1
+            if depth == 0 and start is not None:
+                entry = text[start : index + 1]
+                label = re.search(r'"([a-z0-9\-]+)"', entry)
+                if label is not None:
+                    entries[label.group(1)] = entry
+                start = None
+    return entries
+
+
+def cross_lane_corpus_labels(source: str) -> list[str] | None:
+    entries = cross_lane_corpus_programs(source)
+    return None if entries is None else list(entries)
 
 
 def cross_lane_corpus_violations(source: str) -> list[str]:
-    labels = cross_lane_corpus_labels(source)
-    if labels is None:
+    entries = cross_lane_corpus_programs(source)
+    if entries is None:
         return [
             "cross_lane_stdout_is_byte_identical_where_bits_agree: the §C2.3 "
             "byte-identity lock or its program list could not be parsed; the "
             "corpus floor cannot be checked."
         ]
-    missing = [label for label in CROSS_LANE_CORPUS_FLOOR if label not in labels]
+    violations: list[str] = []
+    missing = [label for label, _ in CROSS_LANE_CORPUS_FLOOR if label not in entries]
     if missing:
-        return [
+        violations.append(
             "cross_lane_stdout_is_byte_identical_where_bits_agree: the §C2.3 "
             f"corpus lost {missing}. Phase 2 freezes cross-lane byte equality; "
             "the corpus may grow but never shrink."
-        ]
-    return []
+        )
+    # A label that survives while its program is gutted is the same loss
+    # wearing the right name.
+    for label, required in CROSS_LANE_CORPUS_FLOOR:
+        program = entries.get(label)
+        if program is None:
+            continue
+        # Check the PROGRAM, not the label: `bool-exits` contains "bool",
+        # so a token scan over the whole entry is satisfied by the name it
+        # is supposed to be validating.
+        program = program.replace(f'"{label}"', "", 1)
+        absent = [token for token in required if token not in program]
+        if absent:
+            violations.append(
+                f"cross_lane_stdout_is_byte_identical_where_bits_agree: the "
+                f"`{label}` program no longer mentions {absent}. The label is "
+                "intact but the body no longer covers what it is named for - "
+                "a corpus row may be strengthened, never hollowed out."
+            )
+    body = cross_lane_lock_body(source) or ""
+    lacking = [token for token in CROSS_LANE_REQUIRED_ASSERTIONS if token not in body]
+    if lacking:
+        violations.append(
+            "cross_lane_stdout_is_byte_identical_where_bits_agree: the lock no "
+            f"longer references {lacking}. §C2.3 is FULL-stdout byte equality "
+            "across both lanes; a corpus of the right size proves nothing if "
+            "the assertion under it weakens."
+        )
+    return violations
 
 
 _LINE_COMMENT = re.compile(r"//.*?$", re.M)
@@ -594,23 +696,54 @@ def observation_decode_violations(source: str) -> list[str]:
     return violations
 
 
-def dead_export_violations(source: str, header: str) -> list[str]:
-    """`chelis_print_f32` was a zero-emitter public tensor print (removed)."""
+RETIRED_EXPORTS: tuple[str, ...] = ("chelis_print_f32",)
 
+
+def rust_exported_symbols(source: str) -> set[str]:
+    """`#[no_mangle]` `extern "C"` function names, comments excluded."""
+
+    code = strip_comments(source)
+    return set(
+        re.findall(
+            r'#\[no_mangle\]\s*(?:pub\s+)?(?:unsafe\s+)?extern\s+"C"\s+fn\s+([A-Za-z0-9_]+)',
+            code,
+        )
+    )
+
+
+def header_declared_functions(header: str) -> set[str]:
+    """Function names DECLARED in the C header, comments excluded."""
+
+    code = strip_comments(header)
+    return set(re.findall(r"[A-Za-z_][A-Za-z0-9_ \*]*\b([A-Za-z0-9_]+)\s*\([^;{]*\)\s*;", code))
+
+
+def dead_export_violations(source: str, header: str) -> list[str]:
+    """A retired public exit must be gone from the ABI, not just the text.
+
+    Substring presence was the first cut and PR #863 R2 flagged it (LOW):
+    it cannot tell a live declaration from a comment explaining the
+    removal - a false positive on documentation and a false negative on a
+    declaration spelled differently. Both surfaces are parsed instead.
+    """
+
+    exported = rust_exported_symbols(source)
+    declared = header_declared_functions(header)
     violations: list[str] = []
-    if "fn chelis_print_f32" in source:
-        violations.append(
-            "chelis-runtime: `chelis_print_f32` is back. It was a public "
-            "`#[no_mangle]` tensor print with zero emitters - an observation "
-            "exit no program could reach, which is how its int32 misdecode "
-            "stayed uncensused. A public exit owes exit coverage or does not "
-            "exist."
-        )
-    if "chelis_print_f32" in header:
-        violations.append(
-            "chelis_runtime.h: the `chelis_print_f32` declaration is back; the "
-            "published C ABI must not re-export it."
-        )
+    for name in RETIRED_EXPORTS:
+        if name in exported:
+            violations.append(
+                f"chelis-runtime: `{name}` is exported again. It was a public "
+                "`#[no_mangle]` tensor print with zero emitters - an "
+                "observation exit no program could reach, which is how its "
+                "int32 misdecode stayed uncensused. A public exit owes exit "
+                "coverage or does not exist (§B2.7)."
+            )
+        if name in declared:
+            violations.append(
+                f"chelis_runtime.h: `{name}` is declared again; the published "
+                "C ABI must not re-export a retired exit."
+            )
     return violations
 
 
@@ -678,6 +811,15 @@ def command_text(command: Sequence[str]) -> str:
     return " ".join(command)
 
 
+def read_runtime_crate_sources(root: Path) -> str:
+    """Every `.rs` file in the runtime crate, concatenated."""
+
+    files = sorted((root / RUNTIME_SRC_DIR).rglob("*.rs"))
+    if not files:
+        raise OracleFailure(f"no runtime sources under {RUNTIME_SRC_DIR}")
+    return "\n".join(path.read_text(encoding="utf-8") for path in files)
+
+
 def read_sources() -> dict[Path, str]:
     sources: dict[Path, str] = {}
     for relative in (
@@ -692,6 +834,7 @@ def read_sources() -> dict[Path, str]:
             sources[relative] = (REPO_ROOT / relative).read_text(encoding="utf-8")
         except OSError as error:
             raise OracleFailure(f"unreadable oracle source {relative}: {error}") from error
+    sources[RUNTIME_SRC_DIR] = read_runtime_crate_sources(REPO_ROOT)
     return sources
 
 
@@ -704,7 +847,7 @@ def run_structural_scan(sources: dict[Path, str]) -> None:
     violations.extend(cross_lane_corpus_violations(sources[HARNESS_SOURCE]))
     violations.extend(observation_decode_violations(sources[RUNTIME_SOURCE]))
     violations.extend(
-        dead_export_violations(sources[RUNTIME_SOURCE], sources[RUNTIME_HEADER])
+        dead_export_violations(sources[RUNTIME_SRC_DIR], sources[RUNTIME_HEADER])
     )
     violations.extend(format_narrowing_violations(sources[TRIPWIRE_SOURCE]))
     if violations:

@@ -229,9 +229,36 @@ class CrossLaneCorpusTests(unittest.TestCase):
         labels = oracle.cross_lane_corpus_labels(self._harness())
         self.assertIsNotNone(labels)
         assert labels is not None
-        for declared in oracle.CROSS_LANE_CORPUS_FLOOR:
+        for declared, _tokens in oracle.CROSS_LANE_CORPUS_FLOOR:
             self.assertIn(declared, labels)
         self.assertEqual(oracle.cross_lane_corpus_violations(self._harness()), [])
+
+    def test_a_hollowed_out_program_is_a_violation_even_with_its_label(self) -> None:
+        """R2 LOW: a label alone did not bind its body."""
+        entries = oracle.cross_lane_corpus_programs(self._harness())
+        assert entries is not None
+        source = self._harness().replace(
+            entries["bool-exits"],
+            '("bool-exits", exits_program("tensor[1, int8]", "to_tensor([1])")),\n        ',
+            1,
+        )
+        violations = oracle.cross_lane_corpus_violations(source)
+        self.assertTrue(
+            any("bool-exits" in v and "hollowed out" in v for v in violations), violations
+        )
+
+    def test_a_weakened_assertion_in_the_lock_is_a_violation(self) -> None:
+        source = self._harness().replace(
+            "fn cross_lane_stdout_is_byte_identical_where_bits_agree() {",
+            "fn cross_lane_stdout_is_byte_identical_where_bits_agree() {\n    return;",
+            1,
+        )
+        # Drop the comparison entirely from the lock body.
+        body = oracle.cross_lane_lock_body(source)
+        assert body is not None
+        source = source.replace(body, body.replace("assert_eq!", "let _unused ="))
+        violations = oracle.cross_lane_corpus_violations(source)
+        self.assertTrue(any("assert_eq!" in v for v in violations), violations)
 
     def test_a_shrunk_corpus_is_a_violation(self) -> None:
         source = self._harness().replace('("int64-exits"', '("int64-exits-renamed"', 1)
@@ -362,12 +389,56 @@ class DeadExportTests(unittest.TestCase):
 
     def test_a_returning_export_is_a_violation_in_both_surfaces(self) -> None:
         violations = oracle.dead_export_violations(
-            "pub unsafe extern \"C\" fn chelis_print_f32(t: *const chelis_tensor) {}\n",
+            "#[no_mangle]\n"
+            'pub unsafe extern "C" fn chelis_print_f32(t: *const chelis_tensor) {}\n',
             "void chelis_print_f32(const chelis_tensor *t);\n",
         )
         self.assertEqual(len(violations), 2, violations)
         self.assertTrue(any("zero emitters" in v for v in violations), violations)
         self.assertTrue(any("published C ABI" in v for v in violations), violations)
+
+    # R2 LOW: substring presence could not tell a live declaration from a
+    # comment about the removal.
+    def test_a_comment_naming_the_retired_export_is_not_a_violation(self) -> None:
+        violations = oracle.dead_export_violations(
+            "// chelis_print_f32 was removed at Phase 2; see the census.\n",
+            "/* chelis_print_f32 was removed; do not re-declare it. */\n",
+        )
+        self.assertEqual(violations, [])
+
+    def test_the_shipped_lib_mentions_the_retired_name_in_prose_only(self) -> None:
+        source = (oracle.REPO_ROOT / oracle.RUNTIME_SOURCE).read_text(encoding="utf-8")
+        self.assertIn(
+            "chelis_print_f32", source, "the removal note should still be readable"
+        )
+        self.assertNotIn("chelis_print_f32", oracle.rust_exported_symbols(source))
+
+    def test_the_parsed_surfaces_are_non_trivial(self) -> None:
+        """A parser that silently matched nothing would pass every check."""
+        crate = oracle.read_runtime_crate_sources(oracle.REPO_ROOT)
+        header = (oracle.REPO_ROOT / oracle.RUNTIME_HEADER).read_text(encoding="utf-8")
+        exported = oracle.rust_exported_symbols(crate)
+        declared = oracle.header_declared_functions(header)
+        self.assertGreater(len(exported), 50, "no-mangle exports failed to parse")
+        self.assertGreater(len(declared), 50, "header declarations failed to parse")
+        self.assertIn("chelis_format_shortest", exported)
+        self.assertIn("chelis_format_shortest", declared)
+
+    def test_the_scan_covers_the_whole_crate_not_only_lib_rs(self) -> None:
+        """`chelis_format_shortest` lives in a sibling module, not lib.rs.
+
+        A retired export re-added in any module is the same public exit
+        returning; scoping the scan to one file would miss it.
+        """
+        lib_only = (oracle.REPO_ROOT / oracle.RUNTIME_SOURCE).read_text(encoding="utf-8")
+        crate = oracle.read_runtime_crate_sources(oracle.REPO_ROOT)
+        self.assertNotIn("chelis_format_shortest", oracle.rust_exported_symbols(lib_only))
+        self.assertIn("chelis_format_shortest", oracle.rust_exported_symbols(crate))
+
+    def test_the_shipped_crate_and_header_are_clean(self) -> None:
+        crate = oracle.read_runtime_crate_sources(oracle.REPO_ROOT)
+        header = (oracle.REPO_ROOT / oracle.RUNTIME_HEADER).read_text(encoding="utf-8")
+        self.assertEqual(oracle.dead_export_violations(crate, header), [])
 
 
 class FormatNarrowingTests(unittest.TestCase):

@@ -232,11 +232,27 @@ For every dtype and every storable value:
    Phase 2 landing to state the SHIPPED architecture - the B1 row's
    frozen requirement is grammar identity to Rust `{:?}`, and this text
    previously described a pre-implementation sketch): the runtime gains
-   `chelis_format_shortest(double v, int width_kind, char* buf)`,
+   `int chelis_format_shortest(double v, int width_kind, char* buf,
+   size_t cap)`,
    exported from the Rust runtime staticlib every compiled binary links.
    `v` is the exact double image of the stored float (every supported
    width widens losslessly), `width_kind` is the value's `RuntimeDType`
-   id, and an unknown or non-float id aborts loudly with the raw id. The
+   id, `cap` is the caller's buffer capacity, and the return is the byte
+   count written excluding the NUL. **Every contract violation aborts
+   loudly** rather than truncating or returning a sentinel: an unknown or
+   non-float id aborts with the raw id, a null buffer aborts, and a `cap`
+   too small for the rendering plus its NUL aborts naming both numbers. A
+   silent short write would be a [#703]-class substitution at the byte
+   level - a truncated rendering parses back as a DIFFERENT value, which
+   is precisely the unfaithful exit this plan exists to kill, so the
+   return value is a length and never an error channel.
+   (`cap` was added at PR #863's R2 review, which demonstrated that the
+   original `(double, int, char*)` signature could not express - let alone
+   check - the buffer contract its own documentation stated, and wrote
+   past a four-byte logical buffer. Landing it before the 0.18 tag is
+   deliberate: adding a parameter afterwards is a breaking change for
+   every shell that links the runtime, and 0.18 is the mechanical cut.)
+   The
    wide widths (f32/f64) format via `{:?}` itself - the normative
    grammar's own definition and the exact code path `format_element`
    takes, so grammar identity holds by construction and no platform
@@ -265,7 +281,7 @@ For every dtype and every storable value:
    cover). "Print exactly what is stored" is two steps -
    `bits <- read(bytes, dtype)` then `text <- format(bits)` - and §C1-§C3
    above govern only the second. `format_element(prim, ElementRef)` and
-   `chelis_format_shortest(value, width_kind, buf)` both receive an
+   `chelis_format_shortest(value, width_kind, buf, cap)` both receive an
    ALREADY-DECODED element, so a canonical formatter cannot detect a
    wrong-width read: the element arrives correct-looking and is rendered
    faithfully. That is exactly how the compiled lane's nested-value
@@ -326,7 +342,7 @@ For every dtype and every storable value:
 |---|---|---|
 | §C1 rules + number grammar | Phase 1 (FROZEN 2026-07-20; ratified as spec/05 §8/§8.1) | this doc + dtype_semantics.md §C4 + the migration corpus, one change set |
 | §C2 agreement contract | Phase 1 (intra-lane; FROZEN for eval 2026-07-20), Phase 2 (cross-lane byte equality) | same protocol |
-| §C3.3 C formatting routine behavior | Phase 2 | this doc; must stay grammar-identical to Rust `{:?}` (§C1.3 - an earlier revision of this row said `Display`, which §C1.3 explicitly rules out) |
+| §C3.3 C formatting routine behavior AND its C ABI signature | Phase 2 (the signature settled at the R2 review, before the 0.18 tag) | this doc; must stay grammar-identical to Rust `{:?}` (§C1.3 - an earlier revision of this row said `Display`, which §C1.3 explicitly rules out). The signature is frozen for the same reason the render is: after 0.18 ships, changing it breaks every shell that links the runtime |
 | §C4.2 tolerance table | Phase 3 | spec/05 edit + [#687] corpus, one change set |
 
 ## B2. Invariants that hold across every boundary
@@ -631,7 +647,7 @@ never as tolerance.
   (this bullet was corrected 2026-07-28 - an earlier revision claimed
   compatibility for the renderers as a whole, which overstated it).
   On the format side the claim holds: `format_element(prim, ElementRef)`
-  and `chelis_format_shortest(value, width_kind, buf)` are both already
+  and `chelis_format_shortest(value, width_kind, buf, cap)` are both already
   keyed by dtype, so the payload's arrival replaces two arguments with
   one at the CALL sites and changes no rule in §C1, no byte of the
   grammar, and no rendered output.

@@ -237,30 +237,60 @@ fn assemble(neg: bool, digits: &str, sci_exp: i32) -> String {
 }
 
 /// C ABI entry point (section C3.3). `value` is the exact f64 image of the
-/// stored float, `width_kind` its `RuntimeDType` id, and `buf` a caller
-/// buffer of at least `CHELIS_FORMAT_SHORTEST_BUF` bytes that receives the
-/// NUL-terminated rendering. An unknown id or a non-float width aborts
-/// loudly with the raw id (the section C1 response; no default width may
-/// exist).
+/// stored float, `width_kind` its `RuntimeDType` id, `buf` the caller's
+/// output buffer, and `cap` that buffer's capacity in bytes. Returns the
+/// number of bytes written EXCLUDING the terminating NUL.
+///
+/// Every contract violation aborts loudly rather than truncating or
+/// returning a sentinel (the section C1 response; a silent short write is
+/// the chelis#703 substitution shape at a byte level): an unknown id or a
+/// non-float width aborts with the raw id, a null `buf` aborts, and a
+/// `cap` too small for the rendering plus its NUL aborts naming both
+/// numbers. The return is therefore always a valid length and a caller
+/// never has to branch on it - it is there so a caller that wants the
+/// length does not have to `strlen` the result.
+///
+/// `cap` exists because the previous signature could not express, let
+/// alone check, the buffer contract its own docs stated: a red team
+/// passed a four-byte logical buffer and the routine wrote past it
+/// (PR #863 R2). `CHELIS_FORMAT_SHORTEST_BUF` remains the documented
+/// minimum, and `sizeof` at the call site is the intended spelling.
 ///
 /// # Safety
 ///
-/// `buf` must point to at least `CHELIS_FORMAT_SHORTEST_BUF` writable
-/// bytes.
+/// `buf` must point to at least `cap` writable bytes.
 #[no_mangle]
-pub unsafe extern "C" fn chelis_format_shortest(value: f64, width_kind: c_int, buf: *mut c_char) {
+pub unsafe extern "C" fn chelis_format_shortest(
+    value: f64,
+    width_kind: c_int,
+    buf: *mut c_char,
+    cap: usize,
+) -> c_int {
     let width = require_runtime_dtype(width_kind, "chelis_format_shortest width_kind");
+    if buf.is_null() {
+        runtime_fail!("chelis_format_shortest: null output buffer");
+    }
     let text = format_shortest(value, width);
     let bytes = text.as_bytes();
     if bytes.len() >= CHELIS_FORMAT_SHORTEST_BUF {
-        // Unreachable by the grammar's length bound; abort rather than
-        // overrun the caller's buffer if the invariant ever breaks.
+        // OUR contract, not the caller's: the grammar's length bound says
+        // this is unreachable. Abort rather than let a longer rendering
+        // silently demand more room than the documented minimum.
         runtime_fail!(
             "chelis_format_shortest: rendering `{text}` exceeds the {CHELIS_FORMAT_SHORTEST_BUF}-byte contract"
+        );
+    }
+    // The CALLER's contract. Checked separately so the diagnostic names
+    // which side is wrong.
+    let needed = bytes.len() + 1;
+    if cap < needed {
+        runtime_fail!(
+            "chelis_format_shortest: rendering `{text}` needs {needed} bytes including the NUL, caller declared {cap} (minimum {CHELIS_FORMAT_SHORTEST_BUF})"
         );
     }
     unsafe {
         std::ptr::copy_nonoverlapping(bytes.as_ptr(), buf as *mut u8, bytes.len());
         *buf.add(bytes.len()) = 0;
     }
+    bytes.len() as c_int
 }
