@@ -485,6 +485,36 @@ def cross_lane_corpus_violations(source: str) -> list[str]:
     return []
 
 
+_LINE_COMMENT = re.compile(r"//.*?$", re.M)
+_BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.S)
+
+# Every typed accessor a decode arm could reach for. The arm's CODE must
+# contain its own and no other: a decode that reads through a foreign
+# width is the defect, whether it arrives by drift or by a comment that
+# says the right thing while the body does the wrong one.
+_TYPED_ACCESSORS: tuple[str, ...] = (
+    "f32::data_ptr_unchecked",
+    "f64::data_ptr_unchecked",
+    "i8::data_ptr_unchecked",
+    "i16::data_ptr_unchecked",
+    "i32::data_ptr_unchecked",
+    "i64::data_ptr_unchecked",
+)
+
+
+def strip_comments(text: str) -> str:
+    """Rust source with `//` and `/* */` comments removed.
+
+    The decode table is a source-text guard, so it must scan CODE. A
+    red-team probe put `i16::data_ptr_unchecked` in a comment while the
+    body read through `i32::data_ptr_unchecked`, and the substring check
+    that preceded this passed the whole oracle - a wrong reader certified
+    green. Comments are stripped before any arm is inspected.
+    """
+
+    return _LINE_COMMENT.sub("", _BLOCK_COMMENT.sub("", text))
+
+
 def observation_decode_arms(source: str) -> dict[str, str] | None:
     """Map each dtype arm of `tensor_elem_to_string` to its arm body."""
 
@@ -525,7 +555,10 @@ def observation_decode_violations(source: str) -> list[str]:
                 "from the match."
             )
             continue
-        if expected not in arm:
+        # CODE only - a comment naming the right accessor while the body
+        # reads through another is exactly the wrong-reader case.
+        code = strip_comments(arm)
+        if expected not in code:
             violations.append(
                 f"tensor_elem_to_string: the {name} arm no longer decodes "
                 f"through `{expected}` ({why}). A changed pointer view at an "
@@ -533,10 +566,26 @@ def observation_decode_violations(source: str) -> list[str]:
                 "is the chelis#894 int32 shape, where native storage was read "
                 "through an f32 view while sibling exits read it correctly."
             )
+        # Presence is not enough: the arm must use its OWN accessor and no
+        # other. Without this, a body reading a foreign width passes as
+        # long as the declared token appears somewhere.
+        foreign = [
+            accessor
+            for accessor in _TYPED_ACCESSORS
+            if accessor != expected and accessor in code
+        ]
+        if foreign:
+            violations.append(
+                f"tensor_elem_to_string: the {name} arm reads through "
+                f"{foreign} as well as (or instead of) its declared "
+                f"`{expected}`. An arm decodes at its OWN dtype's width and no "
+                "other; a foreign accessor here renders one dtype's bytes as "
+                "another's, which is the whole defect class."
+            )
     # The f32 view is the exact mechanism of the int32 defect class; only
     # the declared exception may reach for it.
     for name, arm in arms.items():
-        if "data_as_f32_const" in arm and name != "Bool":
+        if "data_as_f32_const" in strip_comments(arm) and name != "Bool":
             violations.append(
                 f"tensor_elem_to_string: the {name} arm reaches for the "
                 "untyped f32 view. Only the declared Bool exception may, and "

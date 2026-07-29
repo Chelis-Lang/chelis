@@ -141,9 +141,20 @@ unsafe impl TensorElement for i64 {
     const DTYPE: RuntimeDType = RuntimeDType::I64;
 }
 
-/// Typed access to a tensor whose runtime storage is f32-encoded
-/// regardless of the dtype tag.  Returns the buffer typed as
-/// `*mut f32`.
+/// Typed access to a tensor's buffer as `*mut f32`.
+///
+/// **STALE-DOC WARNING (chelis#694).** The paragraph below is the
+/// historical text and its `CHELIS_I32` half is FALSE. int32 storage is
+/// native two's complement at every writer and every reader; this
+/// helper's claim that `i32::data_ptr_unchecked` "is the wrong decode"
+/// is the enabler chelis#894 identified behind nine sites that decoded
+/// int32 through an f32 view, and every one of those arms cited it. Do
+/// not route an `CHELIS_I32` arm through here. `CHELIS_BOOL` genuinely
+/// is 4-byte f32-encoded today and moves with chelis#894's
+/// `Repr::Bool8`; chelis#893 removes the ability to choose a view at the
+/// call site at all. The historical text is kept rather than deleted so
+/// the citation trail from the wrong arms stays readable, and is
+/// rewritten wholesale when chelis#894 lands.
 ///
 /// PR 1 introduced this as a transition shim for the 31 access
 /// sites it did not migrate.  PR 2 migrated those sites to the
@@ -3835,12 +3846,32 @@ unsafe fn adt_to_string(adt: *const chelis_adt) -> String {
 }
 
 /// One tensor element's text per the frozen observation contract
-/// (chelis#732 Phase 2). The read dispatch keeps each dtype's existing
-/// storage decode (I32/BOOL stay on the f32-encoded convention this site
-/// always used; storage migration is chelis#729's, rendering is ours):
-/// integers print as integers with all digits exact, bool prints
-/// `true`/`false`, and floats print shortest-round-trip at THEIR width
-/// through the same routine the generated C print helper calls.
+/// (chelis#732 Phase 2): integers print as integers with all digits
+/// exact, bool prints `true`/`false`, and floats print
+/// shortest-round-trip at THEIR width through the same routine the
+/// generated C print helper calls.
+///
+/// Each arm decodes at its own dtype's REPRESENTATION, through that
+/// type's `TensorElement` accessor. An earlier revision of THIS comment
+/// said I32 and BOOL both "stay on the f32-encoded convention this site
+/// always used" - false for I32, whose storage is native two's
+/// complement at every writer (`to_tensor`,
+/// `chelis_scalar_tensor_from_i64`) and every sibling reader
+/// (`read_index_slot`, `chelis_list_from_tensor`). Reading it through
+/// the f32 view rendered `5i32` as 7.006492321624085e-45 while
+/// `to_list` returned `5` from the same tensor. BOOL genuinely is
+/// f32-encoded today and moves with chelis#894's `Repr::Bool8`. The two
+/// halves are stated separately because one shared sentence is what
+/// carried the defect - see `data_as_f32`'s own stale rustdoc
+/// (chelis#694), which chelis#894 identified as the enabler every wrong
+/// arm cited.
+///
+/// The arm-to-accessor mapping is declared and enforced in
+/// `scripts/faithful_observation_phase2_oracle.py`
+/// (`OBSERVATION_DECODE_TABLE`), which scans CODE rather than comments:
+/// a comment naming the right accessor beside a body reading the wrong
+/// one is exactly this defect's shape, and was a demonstrated false
+/// green before the guard was hardened.
 unsafe fn tensor_elem_to_string(t: *const chelis_tensor, dtype: RuntimeDType, i: usize) -> String {
     let tm = t as *mut chelis_tensor;
     match dtype {

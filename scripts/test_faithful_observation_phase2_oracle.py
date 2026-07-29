@@ -311,6 +311,48 @@ class ObservationDecodeTableTests(unittest.TestCase):
         violations = oracle.observation_decode_violations("fn unrelated() {}\n")
         self.assertTrue(any("cannot be checked" in v for v in violations), violations)
 
+    # The R2 red team put the expected accessor in a COMMENT while the body
+    # read through a foreign one; the substring check that preceded this
+    # passed the whole oracle. Each variant below must now be caught.
+    def test_line_comment_decoy_is_a_violation(self) -> None:
+        source = self._runtime().replace(
+            "RuntimeDType::I16 => (*i16::data_ptr_unchecked(tm).add(i)).to_string(),",
+            "RuntimeDType::I16 => {\n"
+            "            // decoy: i16::data_ptr_unchecked\n"
+            "            (*i32::data_ptr_unchecked(tm).add(i)).to_string()\n"
+            "        }",
+            1,
+        )
+        violations = oracle.observation_decode_violations(source)
+        self.assertTrue(any("I16" in v for v in violations), violations)
+
+    def test_block_comment_decoy_is_a_violation(self) -> None:
+        source = self._runtime().replace(
+            "RuntimeDType::I16 => (*i16::data_ptr_unchecked(tm).add(i)).to_string(),",
+            "RuntimeDType::I16 => { /* i16::data_ptr_unchecked */ "
+            "(*i64::data_ptr_unchecked(tm).add(i)).to_string() }",
+            1,
+        )
+        violations = oracle.observation_decode_violations(source)
+        self.assertTrue(any("I16" in v for v in violations), violations)
+
+    def test_a_foreign_accessor_beside_the_declared_one_is_a_violation(self) -> None:
+        source = self._runtime().replace(
+            "RuntimeDType::I32 => (*i32::data_ptr_unchecked(tm).add(i)).to_string(),",
+            "RuntimeDType::I32 => { let _ = i32::data_ptr_unchecked(tm); "
+            "(*i64::data_ptr_unchecked(tm).add(i)).to_string() }",
+            1,
+        )
+        violations = oracle.observation_decode_violations(source)
+        self.assertTrue(
+            any("reads through" in v and "I32" in v for v in violations), violations
+        )
+
+    def test_strip_comments_removes_both_comment_forms(self) -> None:
+        self.assertNotIn("hidden", oracle.strip_comments("code // hidden\nmore"))
+        self.assertNotIn("hidden", oracle.strip_comments("code /* hidden */ more"))
+        self.assertIn("code", oracle.strip_comments("code // hidden"))
+
 
 class DeadExportTests(unittest.TestCase):
     def test_the_shipped_tree_has_no_zero_emitter_print_export(self) -> None:
