@@ -74,14 +74,21 @@ not drift.
 
 ## Documentation And Spec Sync
 
-### Documentation Hierarchy
+### Documentation Authority
 
-1. `spec/design/chelis_canonical_reference.md`
-2. `spec/00-12*.md`
-3. `spec/design/chelis_project_plan.md`
-4. `spec/design/archive/`
+Authority is subject-specific during the migration from numbered chapters to OpenSpec capabilities.
 
-If active docs disagree, fix the disagreement instead of adding a third explanation.
+1. `spec/design/chelis_canonical_reference.md` controls cross-subject architecture and project boundaries.
+2. For a transferred chapter, its named `openspec/specs/<capability>/spec.md` controls the subject.
+3. An untransferred `spec/00-12*.md` chapter controls its subject.
+4. `spec/design/chelis_project_plan.md` controls project sequence that a higher authority does not define.
+5. `spec/design/archive/` is historical reference only.
+
+A chapter transfers only through a reviewed change that records the transfer. The chapter must mark itself superseded and link the controlling capability.
+
+If a chapter has no complete transfer record, the numbered chapter remains controlling. `openspec/specs/spec-authority-migration/spec.md` defines the complete transfer contract.
+
+If active documents disagree, correct the document that controls the subject. Do not add a third explanation.
 
 ### Public-Surface Change Rule
 
@@ -93,14 +100,12 @@ change set:
 - executable examples in `examples/`
 - active specs and current-state docs
 
-## OpenSpec (initial adoption)
+## OpenSpec (captured capabilities and advisory validation)
 
-The `openspec/` tree is the canonical OpenSpec planning root (built-in
-spec-driven schema). This is an **initial, non-blocking adoption**: OpenSpec
-is available for planning changes but is **not yet required** and does not
-gate merges. The eventual required-governance regime is described in
-`spec/design/spec_provenance.md` (Phase 0) and is future work — it is not
-activated here.
+The `openspec/` tree is the canonical OpenSpec planning and capability root.
+OpenSpec planning is optional. OpenSpec validation does not gate merges.
+`spec/design/spec_provenance.md` describes the future governance regime.
+This regime is not active.
 
 - The `openspec-validate` workflow uses a pinned `Chelis-Lang/ci` action.
   The action supplies Node 24.18.0 and the locked OpenSpec 1.6.0 package.
@@ -115,10 +120,14 @@ activated here.
 openspec validate --all --strict --no-interactive
 ```
 
-- OpenSpec artifacts are planning evidence only. When an OpenSpec artifact
-  and `spec/**` disagree, `spec/**` is controlling. The authority boundary
-  is owned by `spec/design/spec_provenance.md` § OpenSpec boundary; that
-  section is controlling and is deliberately not restated here.
+- The captured capabilities cite their source chapters. Capture alone does not
+  transfer authority.
+- No numbered chapter is transferred in this pull request. Thus, the numbered
+  chapters remain controlling, and their captured capabilities are reference material.
+- Use the documentation authority rules above for all chapter and capability
+  disagreements.
+- `spec/design/spec_provenance.md` § OpenSpec boundary blocks the first chapter
+  transfer until a separate change amends that boundary.
 - Do not run `openspec init`'s tool generation. `.claude/skills` and
   `.codex/skills` are symlinks to `agent-skills/`, so `--tools claude,codex`
   writes generated skill trees into the shared skill library through both

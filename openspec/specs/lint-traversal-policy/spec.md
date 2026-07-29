@@ -4,6 +4,9 @@
 
 Define the deterministic, structured policy that admits filesystem entries into one canonical `chelis lint` corpus.
 
+**Source:** captured from
+[`spec/01-nomenclature.md` §12.2](../../../spec/01-nomenclature.md#122-lint-traversal-exclusions).
+
 ## Requirements
 
 ### Requirement: Traversal exclusions come from structured policy
