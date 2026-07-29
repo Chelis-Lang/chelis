@@ -57,6 +57,20 @@ design doc §5.5.
 In tests, the single `CHELIS_HOME` seam isolates the toolchain store, the
 shim/default, and the binary-artifact dir at once.
 
+## Nix `chelisup` Closure
+
+The Nix package uses `bin/chelisup` as a wrapper around `libexec/chelisup`.
+Before `install`, the wrapper creates `$CHELIS_HOME/nix-gcroots/chelisup.next`.
+After success, it promotes `$CHELIS_HOME/nix-gcroots/chelisup` and removes the
+staging root. A failed install preserves the prior root. If the install copied
+a new binary, the wrapper promotes `$CHELIS_HOME/nix-gcroots/chelisup.partial`.
+A new attempt recovers a stale staging root before it changes that root.
+`chelisup self uninstall` removes the stable, staging, and partial roots.
+
+The wrapper, package inventory, self-uninstall behavior, Nix contract test,
+and native Nix workflows form one contract. A direct Nix-built executable
+copy is invalid because external copies do not become Nix GC roots.
+
 ## Shim Resolution Order (first match wins)
 
 1. leading `+<ver>` arg (`chelis +0.13.0 build main.ch`)
