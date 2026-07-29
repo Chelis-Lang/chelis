@@ -55,6 +55,8 @@ The rest of this README builds the Chelis compiler from a checkout.
 
 **Optional Devenv shell.** Devenv supplies the pinned Rust, Python, C, and contributor tools from the tracked shell inputs.
 
+The repository pins the Devenv module input to release `v2.2`.
+
 On macOS, the `gcc` and `g++` shims invoke the Nixpkgs clang wrapper from `pkgs.stdenv.cc`. They do not invoke host Apple clang.
 
 Run these commands from the repository root:

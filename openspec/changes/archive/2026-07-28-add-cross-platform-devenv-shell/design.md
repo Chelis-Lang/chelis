@@ -33,6 +33,8 @@ The Nix C wrapper passes linker paths to `-fsyntax-only` commands. Clang reports
 
 The change adds `devenv.nix`, `devenv.yaml`, and `devenv.lock`. The lock file pins the resolved Nix inputs.
 
+The Devenv module input uses release `v2.2` at commit `ffce215a42d09c6375c3d60dd9c4110438fc4d87`. A static test rejects URL and lock drift.
+
 The alternative changes each test to discover a compiler or read `CC` and `CXX`. That work affects a large test surface.
 
 This proposal keeps the test contract unchanged. The development shell provides the command names that the tests already require.

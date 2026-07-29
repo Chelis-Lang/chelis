@@ -9,9 +9,15 @@ Define the reproducible contributor shell, platform compiler commands, Python en
 ### Requirement: The repository provides reproducible Devenv inputs
 The repository MUST track `devenv.nix`, `devenv.yaml`, and `devenv.lock`. The lock file MUST pin all resolved input revisions.
 
+`devenv.yaml` MUST pin the Devenv module input to release `v2.2`. `devenv.lock` MUST resolve that input to commit `ffce215a42d09c6375c3d60dd9c4110438fc4d87`.
+
 The repository MUST ignore `.devenv/` and `.devenv.flake.nix`. These paths contain generated local state, not reproducible inputs.
 
 The repository lint policy MUST exclude both paths from the editable lint corpus. The policy MUST keep the three tracked inputs in the corpus.
+
+#### Scenario: The repository checks the Devenv release pin
+- **WHEN** the configured URL or locked revision differs from Devenv `v2.2`
+- **THEN** the static Devenv version contract test fails
 
 #### Scenario: A clean checkout evaluates the shell
 - **WHEN** a contributor runs `devenv test` from a clean checkout

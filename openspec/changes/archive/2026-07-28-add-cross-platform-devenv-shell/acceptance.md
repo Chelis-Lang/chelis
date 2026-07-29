@@ -115,3 +115,21 @@ The red team found no high-severity or medium-severity error. It found one low-s
 The accepted correction records both the initial diagnostic and the final managed-compiler diagnostic.
 
 The final post-correction oracle passed all 384 tests in 172.932 seconds. One excluded test remained skipped.
+
+## Devenv v2.2 upgrade
+
+The release tag `v2.2` resolves to commit `ffce215a42d09c6375c3d60dd9c4110438fc4d87`.
+
+The local Nix profile reports `devenv 2.2.0+ffce215 (aarch64-darwin)`.
+
+`devenv.yaml` pins `github:cachix/devenv/v2.2?dir=src/modules`. `devenv.lock` records the same tag, module directory, and commit.
+
+The static release contract passed five tests. Its negative tests reject an old revision, a wrong locked directory, and a misplaced input key.
+
+`devenv test --no-tui` passed in 3.16 seconds with Devenv v2.2.
+
+The full Python script suite, strict OpenSpec validation, native flake check, and local repository gate passed.
+
+The independent reviewer service failed three attempts. The user then requested a direct review instead.
+
+The direct review found missing coverage for YAML section boundaries and the locked module directory. Both corrections now have negative tests.

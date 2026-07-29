@@ -21,6 +21,7 @@ Run this oracle on macOS. The Linux manual gate is `devenv test`, and default CI
 - `openspec/changes/add-cross-platform-devenv-shell/proposal.md`
 - `openspec/changes/add-cross-platform-devenv-shell/specs/cross-platform-devenv/spec.md`
 - `openspec/changes/add-cross-platform-devenv-shell/tasks.md`
+- `scripts/test_devenv_version.py`
 
 The later OpenSpec sync and archive workflow can change the corresponding main spec and archive paths.
 
@@ -96,3 +97,12 @@ The later OpenSpec sync and archive workflow can change the corresponding main s
 - [x] 7.2 Record the macOS compiler version output from both shims.
 - [x] 7.3 Record the result and duration of the authoritative completion oracle.
 - [x] 7.4 Record the fresh red-team result and each accepted correction.
+
+## 8. Upgrade Devenv to v2.2
+
+- [x] 8.1 Add positive and negative tests for the exact release pin.
+- [x] 8.2 Pin the Devenv module input to release `v2.2`.
+- [x] 8.3 Update `devenv.lock` to commit `ffce215a42d09c6375c3d60dd9c4110438fc4d87`.
+- [x] 8.4 Upgrade the local Devenv CLI to `2.2.0+ffce215`.
+- [x] 8.5 Run the Devenv smoke check and the repository gates.
+- [x] 8.6 Review the final release pin and parser boundary cases directly.

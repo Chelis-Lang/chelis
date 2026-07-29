@@ -15,7 +15,7 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   The Nix `chelisup` launcher roots its closure before it installs release shims.
   Nix remains an additive source-build channel. `chelisup` still routes release toolchains.
 - **A tracked Devenv shell supplies the contributor toolchain on Linux and macOS.**
-  The shell pins Rust, Python 3.11, test tools, and the platform C toolchain.
+  The shell input pins Devenv modules to `v2.2`. The shell also pins Rust, Python 3.11, test tools, and the platform C toolchain.
   Linux uses GCC, OpenBLAS, and Valgrind from Nixpkgs. macOS maps `gcc` and
   `g++` to the Nixpkgs clang wrapper from `pkgs.stdenv.cc`.
   `devenv test` checks the tool versions and compiler warnings.
