@@ -5,6 +5,7 @@
 //! change in the expanded module shape is caught here.
 
 use super::*;
+use chelis_deep::DeepTag;
 use chelis_macros::ExpansionOptions;
 
 /// Parse + desugar + expand Surf into the Deep program form `prune_to_entry`
@@ -25,7 +26,7 @@ fn def_names(exprs: &[DeepExpr]) -> Vec<String> {
     let mut names = Vec::new();
     for expr in exprs {
         if let DeepExpr::List(list, _) = expr
-            && list_tag(list) == Some("module")
+            && list_tag(list) == Some(DeepTag::Module)
         {
             for child in &list.elements {
                 if let Some(name) = deep_def_name(child) {
@@ -70,7 +71,7 @@ fn prune_descends_module_wrapper_not_just_flat_siblings() {
     let expanded = expand(MULTI_DEF_MODULE);
     assert_eq!(expanded.len(), 1, "expanded Surf is one module node");
     assert!(
-        matches!(&expanded[0], DeepExpr::List(list, _) if list_tag(list) == Some("module")),
+        matches!(&expanded[0], DeepExpr::List(list, _) if list_tag(list) == Some(DeepTag::Module)),
         "the single top-level node is a module"
     );
     let pruned = prune_to_entry(expanded, "scaled");
@@ -88,9 +89,9 @@ fn prune_preserves_module_head_and_import() {
     let DeepExpr::List(list, _) = &pruned[0] else {
         panic!("expected a module list");
     };
-    assert_eq!(list_tag(list), Some("module"));
+    assert_eq!(list_tag(list), Some(DeepTag::Module));
     assert!(
-        matches!(list.elements.first(), Some(DeepExpr::Atom(DeepAtom::Symbol(t), _)) if t == "module"),
+        (list.tag() == Some(DeepTag::Module)),
         "the module tag is first"
     );
     assert!(
@@ -100,7 +101,7 @@ fn prune_preserves_module_head_and_import() {
     let has_import = list
         .elements
         .iter()
-        .any(|e| matches!(e, DeepExpr::List(l, _) if list_tag(l) == Some("import")));
+        .any(|e| matches!(e, DeepExpr::List(l, _) if list_tag(l) == Some(DeepTag::Import)));
     assert!(
         has_import,
         "the import element (a non-decl child) is preserved through pruning"

@@ -167,7 +167,12 @@ pub fn check_ir_program(exprs: &[chelis_deep::Expr]) -> FitnessReport {
     let structure = structure_score(exprs);
     let result = infer_ir_program(exprs);
     if result.errors.is_empty() {
-        let total_nodes = count_nodes(exprs);
+        // chelis#858: report the inference product's own counters instead
+        // of fabricating `typed_nodes = count_nodes(exprs)`. The old
+        // fabrication meant a silently-skipped root could manufacture a
+        // vacuous 1.0 with node counts the checker never visited; a clean
+        // result still scores 1.0, but its counts are now the checked
+        // truth.
         return FitnessReport {
             score: 1.0,
             components: FitnessComponents {
@@ -177,9 +182,9 @@ pub fn check_ir_program(exprs: &[chelis_deep::Expr]) -> FitnessReport {
                 types: 1.0,
             },
             errors: Vec::new(),
-            typed_nodes: total_nodes,
-            untyped_nodes: 0,
-            total_nodes,
+            typed_nodes: result.typed_nodes,
+            untyped_nodes: result.total_nodes.saturating_sub(result.typed_nodes),
+            total_nodes: result.total_nodes,
             unresolved_names: Vec::new(),
         };
     }

@@ -401,3 +401,42 @@ fn declaration_only_known_bad_programs_score_below_one() {
     ];
     assert_below_one(&cases);
 }
+
+/// Membership (chelis#858): a top-level UNTAGGED Deep list. Before the
+/// fix, `infer_top_level` silently skipped any top-level list whose
+/// element 0 is not a decoded tag, and `check_ir_program`'s clean path
+/// fabricated `typed_nodes = count_nodes(exprs)`, so
+/// `((var {} f) (var {} x))` scored a vacuous 1.0 with an empty error
+/// list while `f`/`x` were unbound and nothing was checked. The skip is
+/// now a loud `UnknownForm` and the clean path reports the inference
+/// product's own counters. Both polarities: the negative rows must score
+/// below 1.0, and the positive control must still score exactly 1.0 so
+/// the loud arm cannot creep into well-formed programs.
+#[test]
+fn top_level_untagged_lists_score_below_one() {
+    let cases: Vec<(&str, String, &str)> = vec![
+        (
+            "untagged_top_level_app_shape",
+            "((var {} f) (var {} x))".to_string(),
+            ".dp",
+        ),
+        (
+            "untagged_top_level_beside_valid_def",
+            "(def {} out (lit {type: (t-prim {} f32)} 1.0)) ((var {} f) (var {} x))".to_string(),
+            ".dp",
+        ),
+    ];
+    assert_below_one(&cases);
+}
+
+/// chelis#858 positive control: the sibling well-formed program still
+/// scores a perfect 1.0 after the loud-skip fix and the typed-node
+/// accounting change.
+#[test]
+fn well_formed_control_still_scores_one_after_858() {
+    let score = check_score("(def {} out (lit {type: (t-prim {} f32)} 1.0))", ".dp");
+    assert!(
+        (score - 1.0).abs() < f64::EPSILON,
+        "the well-formed control must still score 1.0, got {score}"
+    );
+}

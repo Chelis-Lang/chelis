@@ -19,15 +19,15 @@ pub(super) fn pattern_matches(
         return Ok(false);
     };
     match tag(list) {
-        Some("pat-var") => {
+        Some(DeepTag::PatVar) => {
             if let Some(name) = children(list).first().and_then(symbol_name) {
                 bindings.insert(name.to_string(), value.clone());
                 return Ok(true);
             }
             Ok(false)
         }
-        Some("pat-wild") => Ok(true),
-        Some("pat-lit") => {
+        Some(DeepTag::PatWild) => Ok(true),
+        Some(DeepTag::PatLit) => {
             let lit = children(list)
                 .first()
                 .ok_or_else(|| "pat-lit missing value".to_string())?;
@@ -47,7 +47,7 @@ pub(super) fn pattern_matches(
                 _ => false,
             })
         }
-        Some("pat-ctor") => {
+        Some(DeepTag::PatCtor) => {
             let kids = children(list);
             let Some(ctor) = kids.first().and_then(symbol_name) else {
                 return Ok(false);
@@ -68,7 +68,7 @@ pub(super) fn pattern_matches(
             }
             Ok(true)
         }
-        Some("pat-record") => {
+        Some(DeepTag::PatRecord) => {
             let kids = children(list);
             let Some(ctor) = kids.first().and_then(symbol_name) else {
                 return Ok(false);
@@ -92,7 +92,7 @@ pub(super) fn pattern_matches(
                 let Some(kv_list) = as_list(kv_expr) else {
                     continue;
                 };
-                if tag(kv_list) != Some("kv") {
+                if tag(kv_list) != Some(DeepTag::Kv) {
                     continue;
                 }
                 let kv_kids = children(kv_list);
@@ -117,7 +117,7 @@ pub(super) fn pattern_matches(
             }
             Ok(true)
         }
-        Some("pat-tuple") => {
+        Some(DeepTag::PatTuple) => {
             let RuntimeValue::Tuple(items) = value else {
                 return Ok(false);
             };
@@ -147,14 +147,14 @@ fn field_type_is_float(ty: &Expr, aliases: &HashMap<String, Expr>, seen: &mut Ve
         return false;
     };
     match tag(list) {
-        Some("t-prim") => matches!(
+        Some(DeepTag::TPrim) => matches!(
             children(list).first().and_then(symbol_name),
             Some("f16" | "bf16" | "f32" | "f64")
         ),
-        Some("t-tensor") => children(list)
+        Some(DeepTag::TTensor) => children(list)
             .last()
             .is_some_and(|elem| field_type_is_float(elem, aliases, seen)),
-        Some("t-adt") => {
+        Some(DeepTag::TAdt) => {
             let kids = children(list);
             let Some(name) = kids.first().and_then(symbol_name) else {
                 return false;
@@ -185,7 +185,7 @@ fn collect_type_aliases(expr_sets: &[&[Expr]]) -> HashMap<String, Expr> {
             let Expr::List(list, _) = expr else {
                 continue;
             };
-            if tag(list) != Some("typealias") {
+            if tag(list) != Some(DeepTag::Typealias) {
                 continue;
             }
             let kids = children(list);
@@ -223,7 +223,7 @@ pub(crate) fn collect_adt_grad_rejections(expr_sets: &[&[Expr]]) -> HashMap<Stri
         let Expr::List(list, _) = expr else {
             continue;
         };
-        if tag(list) != Some("deftype") {
+        if tag(list) != Some(DeepTag::Deftype) {
             continue;
         }
         let kids = children(list);
@@ -237,7 +237,7 @@ pub(crate) fn collect_adt_grad_rejections(expr_sets: &[&[Expr]]) -> HashMap<Stri
             let Some(variant_list) = as_list(variant) else {
                 continue;
             };
-            if tag(variant_list) != Some("variant") {
+            if tag(variant_list) != Some(DeepTag::Variant) {
                 continue;
             }
             let variant_kids = children(variant_list);
@@ -249,7 +249,7 @@ pub(crate) fn collect_adt_grad_rejections(expr_sets: &[&[Expr]]) -> HashMap<Stri
                 let Some(field_list) = as_list(field) else {
                     continue;
                 };
-                if tag(field_list) != Some("field") {
+                if tag(field_list) != Some(DeepTag::Field) {
                     continue;
                 }
                 let field_kids = children(field_list);
@@ -293,7 +293,7 @@ pub(crate) fn collect_adt_ctor_fields(exprs: &[Expr]) -> HashMap<String, Vec<Str
         let Expr::List(list, _) = expr else {
             continue;
         };
-        if tag(list) != Some("deftype") {
+        if tag(list) != Some(DeepTag::Deftype) {
             continue;
         }
         let kids = children(list);
@@ -301,7 +301,7 @@ pub(crate) fn collect_adt_ctor_fields(exprs: &[Expr]) -> HashMap<String, Vec<Str
             let Some(variant_list) = as_list(variant) else {
                 continue;
             };
-            if tag(variant_list) != Some("variant") {
+            if tag(variant_list) != Some(DeepTag::Variant) {
                 continue;
             }
             let variant_kids = children(variant_list);
@@ -313,7 +313,7 @@ pub(crate) fn collect_adt_ctor_fields(exprs: &[Expr]) -> HashMap<String, Vec<Str
                 let Some(field_list) = as_list(field) else {
                     continue;
                 };
-                if tag(field_list) != Some("field") {
+                if tag(field_list) != Some(DeepTag::Field) {
                     continue;
                 }
                 if let Some(name) = children(field_list).first().and_then(symbol_name) {

@@ -1,3 +1,4 @@
+use chelis_deep::DeepTag;
 use std::collections::{HashMap, HashSet};
 
 use chelis_deep::ast::{Atom, Expr, List, MetaMap};
@@ -623,7 +624,7 @@ fn register_top_level_defs(
         let Expr::List(list, _) = expr else {
             continue;
         };
-        if tag(list) != Some("def") {
+        if tag(list) != Some(DeepTag::Def) {
             continue;
         }
         let kids = children(list);
@@ -637,7 +638,7 @@ fn register_top_level_defs(
         if !register_runtime_order {
             continue;
         }
-        let is_fn = matches!(body, Expr::List(body_list, _) if tag(body_list) == Some("fn"));
+        let is_fn = matches!(body, Expr::List(body_list, _) if tag(body_list) == Some(DeepTag::Fn));
         if !is_fn && !lowered_names.get(name).copied().unwrap_or(false) {
             // chelis#614: a tuple- or ADT-valued binding `out = ...` owns
             // FLATTENED root names (`out.0`, `out.1`, ...) in the caller's
@@ -688,7 +689,7 @@ fn collect_top_level_items<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
     let Expr::List(list, _) = expr else {
         return;
     };
-    if tag(list) == Some("module") {
+    if tag(list) == Some(DeepTag::Module) {
         for child in list.elements.iter().skip(3) {
             collect_top_level_items(child, out);
         }
@@ -860,11 +861,8 @@ struct EvalContext<'a> {
     random_counter: u64,
 }
 
-fn tag(list: &List) -> Option<&str> {
-    match list.elements.first() {
-        Some(Expr::Atom(Atom::Symbol(tag), _)) => Some(tag.as_str()),
-        _ => None,
-    }
+fn tag(list: &List) -> Option<DeepTag> {
+    list.tag()
 }
 
 fn get_meta(list: &List) -> Option<&MetaMap> {
@@ -923,7 +921,7 @@ fn int_value(expr: &Expr) -> Option<i64> {
 fn literal_seed_i64(expr: &Expr) -> Option<i64> {
     match expr {
         Expr::Atom(Atom::Int(value), _) => Some(*value),
-        Expr::List(list, _) if tag(list) == Some("lit") => {
+        Expr::List(list, _) if tag(list) == Some(DeepTag::Lit) => {
             children(list).first().and_then(literal_seed_i64)
         }
         _ => None,

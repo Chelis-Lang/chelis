@@ -137,7 +137,10 @@ fn spec_deep_3tuple_format() {
         match expr {
             Expr::List(list, _) => {
                 if list.elements.len() >= 2
-                    && let Some(Expr::Atom(Atom::Symbol(_tag), _)) = list.elements.first()
+                    && matches!(
+                        list.elements.first(),
+                        Some(Expr::Atom(Atom::Symbol(_) | Atom::Tag(_), _))
+                    )
                 {
                     // Second element must be a map (metadata).
                     assert!(

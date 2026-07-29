@@ -2,6 +2,7 @@
 //!
 //! Processes `deftype` Deep nodes to extract constructor type signatures.
 
+use chelis_deep::DeepTag;
 use std::collections::{HashMap, HashSet};
 
 use chelis_deep::ast as deep;
@@ -137,10 +138,8 @@ impl AdtRegistry {
             match &children[1] {
                 deep::Expr::List(list, _) => {
                     // Could be (a b) or (variant ...) -- check if first elem is a variant tag
-                    if let Some(deep::Expr::Atom(deep::Atom::Symbol(tag), _)) =
-                        list.elements.first()
-                    {
-                        if tag == "variant" || tag == "field" {
+                    if let Some(tag) = list.tag() {
+                        if tag == DeepTag::Variant || tag == DeepTag::Field {
                             // No type params, this is already a variant
                             variant_start = 1;
                         } else {
@@ -189,7 +188,7 @@ impl AdtRegistry {
 
         for variant_expr in variant_children {
             if let deep::Expr::List(list, _) = variant_expr
-                && get_tag(list) == Some("variant")
+                && get_tag(list) == Some(DeepTag::Variant)
             {
                 let vchildren = list_children(list);
                 if vchildren.is_empty() {
@@ -211,7 +210,7 @@ impl AdtRegistry {
                 let mut fields: Vec<(Option<String>, Type)> = Vec::new();
                 for field_expr in &vchildren[1..] {
                     match field_expr {
-                        deep::Expr::List(flist, _) if get_tag(flist) == Some("field") => {
+                        deep::Expr::List(flist, _) if get_tag(flist) == Some(DeepTag::Field) => {
                             let fchildren = list_children(flist);
                             if fchildren.len() >= 2 {
                                 let fname = match &fchildren[0] {
@@ -500,12 +499,8 @@ impl AdtRegistry {
 }
 
 /// Helper: get tag string from a Deep List.
-fn get_tag(list: &deep::List) -> Option<&str> {
-    if let Some(deep::Expr::Atom(deep::Atom::Symbol(tag), _)) = list.elements.first() {
-        Some(tag.as_str())
-    } else {
-        None
-    }
+fn get_tag(list: &deep::List) -> Option<DeepTag> {
+    list.tag()
 }
 
 fn terminal_name_matches(full_name: &str, short_name: &str) -> bool {

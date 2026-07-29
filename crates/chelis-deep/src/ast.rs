@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::span::Span;
+use crate::tag::DeepTag;
 
 /// A Deep expression — the core AST node.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -16,6 +17,27 @@ pub enum Expr {
 }
 
 impl Expr {
+    /// Construct a canonical tagged node `(tag {meta} children...)` with a
+    /// decoded tag. This is the typed producer entry point (decode-once,
+    /// chelis#731 Phase 3): programmatic Deep construction goes through
+    /// here (or stamps `Atom::Tag` directly) so the in-memory tree never
+    /// carries a vocabulary tag as a string.
+    pub fn node(tag: DeepTag, meta: MetaMap, children: Vec<Expr>, span: Span) -> Expr {
+        let mut elements = Vec::with_capacity(children.len() + 2);
+        elements.push(Expr::Atom(Atom::Tag(tag), span));
+        elements.push(Expr::Map(meta, span));
+        elements.extend(children);
+        Expr::List(List { elements }, span)
+    }
+
+    /// The decoded tag when this expression is a stamped vocabulary node.
+    pub fn tag(&self) -> Option<DeepTag> {
+        match self {
+            Expr::List(list, _) => list.tag(),
+            _ => None,
+        }
+    }
+
     pub fn span(&self) -> Span {
         match self {
             Expr::Atom(_, s) | Expr::List(_, s) | Expr::Map(_, s) | Expr::MetaExpr(_, s) => *s,
@@ -69,6 +91,13 @@ impl Expr {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Atom {
     Symbol(String),
+    /// A decoded closed-vocabulary Deep tag at a node's tag position
+    /// (element 0). Stamped once by the parser or a typed constructor
+    /// (decode-once, chelis#731 Phase 3): after parsing, the tag string
+    /// does not exist in the in-memory tree, so no consumer can dispatch
+    /// on it; printers and serializers regenerate the string via
+    /// [`DeepTag::as_str`] at the serialization boundary only.
+    Tag(DeepTag),
     Int(i64),
     Float(f64),
     Str(String),
@@ -81,9 +110,35 @@ pub enum Atom {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct List {
     /// All elements of the list. In canonical 3-tuple form:
-    /// elements[0] is the tag, elements[1] is a Map (metadata),
-    /// elements[2..] are children.
+    /// elements[0] is the tag (an `Atom::Tag` after decode-once stamping),
+    /// elements[1] is a Map (metadata), elements[2..] are children.
     pub elements: Vec<Expr>,
+}
+
+impl List {
+    /// The node's decoded closed-vocabulary tag, when element 0 carries
+    /// one. This is the only tag accessor consumers dispatch on
+    /// (decode-once, chelis#731 Phase 3): `None` means the list is not a
+    /// stamped vocabulary node (a bare structural list, a typed-name
+    /// helper, or a lenient-parsed unknown tag), and the caller owns the
+    /// loud raw-string-boundary response per checker_totality.md §C1.2.
+    pub fn tag(&self) -> Option<DeepTag> {
+        match self.elements.first() {
+            Some(Expr::Atom(Atom::Tag(tag), _)) => Some(*tag),
+            _ => None,
+        }
+    }
+
+    /// The element-0 symbol of a list that is NOT a stamped vocabulary
+    /// node, for naming unknown tags in diagnostics. Returns `None`
+    /// whenever the list carries a real decoded tag, so this cannot be
+    /// used to dispatch on the closed vocabulary by string.
+    pub fn unknown_tag_symbol(&self) -> Option<&str> {
+        match self.elements.first() {
+            Some(Expr::Atom(Atom::Symbol(symbol), _)) => Some(symbol.as_str()),
+            _ => None,
+        }
+    }
 }
 
 /// Inline metadata map: `{key: value, ...}` or `{}`.

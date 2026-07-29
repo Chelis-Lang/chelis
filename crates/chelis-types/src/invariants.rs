@@ -28,6 +28,7 @@
 //! VIOLATED by an in-module constructor still type-checks. The invariant
 //! is not refinement typing; the checker records it, never evaluates it.
 
+use chelis_deep::DeepTag;
 use std::collections::{HashMap, HashSet};
 
 use chelis_deep::{Atom, Expr};
@@ -106,7 +107,7 @@ fn validate_type_invariants(exprs: &[Expr], errors: &mut impl DiagnosticOutput) 
                 .or_default()
                 .insert(name.to_string());
         }
-        if tag(item) == Some("deftype")
+        if tag(item) == Some(DeepTag::Deftype)
             && let Some(name) = children(item).first().and_then(sym_str)
         {
             deftypes.insert(name.to_string(), item);
@@ -114,7 +115,7 @@ fn validate_type_invariants(exprs: &[Expr], errors: &mut impl DiagnosticOutput) 
     }
 
     for (module, item) in &items {
-        if tag(item) != Some("deftype") {
+        if tag(item) != Some(DeepTag::Deftype) {
             continue;
         }
         let empty = HashSet::new();
@@ -173,7 +174,7 @@ fn validate_representation(
     let variants: Vec<&Expr> = children(deftype)
         .iter()
         .skip(1) // skip the param-list node
-        .filter(|c| tag(c) == Some("variant"))
+        .filter(|c| tag(c) == Some(DeepTag::Variant))
         .collect();
 
     if variants.len() != 1 {
@@ -189,7 +190,7 @@ fn validate_representation(
         .iter()
         .skip(1) // skip the variant name symbol
         .collect();
-    if fields.is_empty() || !fields.iter().all(|f| tag(f) == Some("field")) {
+    if fields.is_empty() || !fields.iter().all(|f| tag(f) == Some(DeepTag::Field)) {
         errors.push_error(err(format!(
             "opaque type `{type_name}` with an invariant must have a single \
              record-shaped variant (named fields)"
@@ -227,11 +228,11 @@ fn is_value_class_type(
         // Only the numeric/boolean scalar prims an invariant can be verified
         // over (NOT `string`/`f8e4m3`/...) -- shared with the prover's field
         // model so the two agree on the value class.
-        Some("t-prim") => children(ty)
+        Some(DeepTag::TPrim) => children(ty)
             .first()
             .and_then(sym_str)
             .is_some_and(invariant_value_class_prim),
-        Some("t-tensor") => {
+        Some(DeepTag::TTensor) => {
             // All dims must be literal (`d-lit`) and the element an `f32`/`f64`
             // prim: the prover only models `f32`/`f64` tensors, so a tensor of
             // any other element (e.g. an int tensor) is outside the verifiable
@@ -241,14 +242,14 @@ fn is_value_class_type(
                 return false;
             }
             let (dims, element) = kids.split_at(kids.len() - 1);
-            let element_is_float = tag(&element[0]) == Some("t-prim")
+            let element_is_float = tag(&element[0]) == Some(DeepTag::TPrim)
                 && matches!(
                     children(&element[0]).first().and_then(sym_str),
                     Some("f32" | "f64")
                 );
-            dims.iter().all(|d| tag(d) == Some("d-lit")) && element_is_float
+            dims.iter().all(|d| tag(d) == Some(DeepTag::DLit)) && element_is_float
         }
-        Some("t-adt") => {
+        Some(DeepTag::TAdt) => {
             // Resolve the referenced type against the program's deftypes.
             // Builtin / out-of-program ADTs (List, Option, ...) are not in
             // the map, so they reject. A single-variant record whose
@@ -287,13 +288,13 @@ fn is_single_record_of_value_class(
     let variants: Vec<&Expr> = children(deftype)
         .iter()
         .skip(1)
-        .filter(|c| tag(c) == Some("variant"))
+        .filter(|c| tag(c) == Some(DeepTag::Variant))
         .collect();
     if variants.len() != 1 {
         return false;
     }
     let fields: Vec<&Expr> = children(variants[0]).iter().skip(1).collect();
-    if fields.is_empty() || !fields.iter().all(|f| tag(f) == Some("field")) {
+    if fields.is_empty() || !fields.iter().all(|f| tag(f) == Some(DeepTag::Field)) {
         return false;
     }
     fields.iter().all(|field| {
@@ -376,7 +377,7 @@ fn validate_predicate(
 /// Whether the top of a predicate body is boolean-shaped.
 fn is_boolean_shaped(body: &Expr) -> bool {
     match tag(body) {
-        Some("app") => {
+        Some(DeepTag::App) => {
             let kids = children(body);
             let callee = kids.first().and_then(var_name);
             matches!(
@@ -384,7 +385,7 @@ fn is_boolean_shaped(body: &Expr) -> bool {
                 Some("eq" | "neq" | "cmplt" | "lte" | "gte" | "and" | "or" | "not")
             )
         }
-        Some("if") => {
+        Some(DeepTag::If) => {
             // The CONDITION and both branches must be boolean-shaped. Checking
             // only the branches let `if p.value then true else false` (a
             // non-boolean f32 condition) pass D-WF even though the type rule
@@ -395,7 +396,7 @@ fn is_boolean_shaped(body: &Expr) -> bool {
                 && is_boolean_shaped(&kids[1])
                 && is_boolean_shaped(&kids[2])
         }
-        Some("lit") => is_bool_lit(body),
+        Some(DeepTag::Lit) => is_bool_lit(body),
         _ => false,
     }
 }
@@ -425,13 +426,10 @@ fn describe_grammar_error(e: &PredGrammarError) -> String {
 // Deep node helpers (local to this module to stay decoupled from infer.rs)
 // ===========================================================================
 
-fn tag(expr: &Expr) -> Option<&str> {
-    if let Expr::List(list, _) = expr
-        && let Some(Expr::Atom(Atom::Symbol(s), _)) = list.elements.first()
-    {
-        Some(s.as_str())
-    } else {
-        None
+fn tag(expr: &Expr) -> Option<DeepTag> {
+    match expr {
+        Expr::List(list, _) => list.tag(),
+        _ => None,
     }
 }
 
@@ -453,7 +451,7 @@ fn sym_str(expr: &Expr) -> Option<&str> {
 }
 
 fn var_name(expr: &Expr) -> Option<&str> {
-    if tag(expr) == Some("var") {
+    if tag(expr) == Some(DeepTag::Var) {
         children(expr).first().and_then(sym_str)
     } else {
         None
@@ -491,7 +489,7 @@ fn str_value(expr: &Expr) -> Option<&str> {
 
 /// The `(def {} name <body>)` parts, if `expr` is a def.
 fn as_def(expr: &Expr) -> Option<(&str, &Expr)> {
-    if tag(expr) == Some("def") {
+    if tag(expr) == Some(DeepTag::Def) {
         let kids = children(expr);
         if let (Some(name), Some(body)) = (kids.first().and_then(sym_str), kids.get(1)) {
             return Some((name, body));
@@ -503,10 +501,10 @@ fn as_def(expr: &Expr) -> Option<(&str, &Expr)> {
 /// Whether a def body is a zero-argument constant: a bare value, or a
 /// `fn` with an empty params node.
 fn is_zero_arg_constant(body: &Expr) -> bool {
-    if tag(body) == Some("fn") {
+    if tag(body) == Some(DeepTag::Fn) {
         let kids = children(body);
         if let Some(params) = kids.first()
-            && tag(params) == Some("params")
+            && tag(params) == Some(DeepTag::Params)
         {
             return children(params).is_empty();
         }
@@ -518,7 +516,7 @@ fn is_zero_arg_constant(body: &Expr) -> bool {
 
 /// The body (predicate) of a `(fn {} (params {} <binder>) <body>)` node.
 fn fn_body(fn_node: &Expr) -> Option<&Expr> {
-    if tag(fn_node) == Some("fn") {
+    if tag(fn_node) == Some(DeepTag::Fn) {
         children(fn_node).get(1)
     } else {
         None
@@ -530,7 +528,7 @@ fn fn_body(fn_node: &Expr) -> Option<&Expr> {
 /// but is local to this module (chelis-pred + chelis-deep only).
 fn flatten_with_modules(exprs: &[Expr]) -> Vec<(Option<String>, &Expr)> {
     fn push<'a>(expr: &'a Expr, prefix: Option<&str>, out: &mut Vec<(Option<String>, &'a Expr)>) {
-        if tag(expr) == Some("module") {
+        if tag(expr) == Some(DeepTag::Module) {
             let name = children(expr).first().and_then(sym_str);
             let key = match (prefix, name) {
                 (Some(p), Some(n)) => Some(format!("{p}.{n}")),

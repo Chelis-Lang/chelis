@@ -1,3 +1,4 @@
+use chelis_deep::DeepTag;
 use std::collections::{HashMap, HashSet};
 
 use chelis_deep::Span;
@@ -87,7 +88,7 @@ impl<'a> EvalContext<'a> {
                 {
                     return Some(ty.clone());
                 }
-                if tag(list) == Some("var")
+                if tag(list) == Some(DeepTag::Var)
                     && let Some(name) = children(list).first().and_then(symbol_name)
                 {
                     if let Some(declared) = self.binding_types.get(name) {
@@ -157,12 +158,12 @@ impl<'a> EvalContext<'a> {
         let span = Span::new(0, 0);
         let placeholder = "__chelis_named_axis_operand";
         let mut app_elements = vec![
-            Expr::Atom(Atom::Symbol("app".to_string()), span),
+            Expr::Atom(Atom::Tag(DeepTag::App), span),
             Expr::Map(MetaMap::default(), span),
             Expr::List(
                 List {
                     elements: vec![
-                        Expr::Atom(Atom::Symbol("var".to_string()), span),
+                        Expr::Atom(Atom::Tag(DeepTag::Var), span),
                         Expr::Map(MetaMap::default(), span),
                         Expr::Atom(Atom::Symbol(reduce_name.to_string()), span),
                     ],
@@ -207,12 +208,12 @@ impl<'a> EvalContext<'a> {
         let mut scoped: HashMap<String, TensorType> = HashMap::with_capacity(args.len());
         let mut staged: HashMap<String, IrTensorValue> = HashMap::with_capacity(args.len());
         let mut app_elements: Vec<Expr> = Vec::with_capacity(3 + args.len());
-        app_elements.push(Expr::Atom(Atom::Symbol("app".to_string()), span));
+        app_elements.push(Expr::Atom(Atom::Tag(DeepTag::App), span));
         app_elements.push(Expr::Map(MetaMap::default(), span));
         app_elements.push(Expr::List(
             List {
                 elements: vec![
-                    Expr::Atom(Atom::Symbol("var".to_string()), span),
+                    Expr::Atom(Atom::Tag(DeepTag::Var), span),
                     Expr::Map(MetaMap::default(), span),
                     Expr::Atom(Atom::Symbol(resolved_name.to_string()), span),
                 ],
@@ -345,14 +346,14 @@ impl<'a> EvalContext<'a> {
         let Some(Expr::List(sig_list, _)) = self.type_env.get(resolved_name) else {
             return Ok(value);
         };
-        if tag(sig_list) != Some("t-fn") {
+        if tag(sig_list) != Some(DeepTag::TFn) {
             return Ok(value);
         }
         let Some(ret) = children(sig_list).last() else {
             return Ok(value);
         };
         let is_prim_return =
-            matches!(ret, Expr::List(ret_list, _) if tag(ret_list) == Some("t-prim"));
+            matches!(ret, Expr::List(ret_list, _) if tag(ret_list) == Some(DeepTag::TPrim));
         if !is_prim_return {
             return Ok(value);
         }
@@ -391,7 +392,7 @@ impl<'a> EvalContext<'a> {
             if !visited.insert(resolved.clone()) && resolved != name {
                 continue;
             }
-            if matches!(&body, Expr::List(body_list, _) if tag(body_list) == Some("fn")) {
+            if matches!(&body, Expr::List(body_list, _) if tag(body_list) == Some(DeepTag::Fn)) {
                 collect_var_names(&body, &mut vars);
             } else if !self.resolving_top_levels.iter().any(|n| n == &resolved) {
                 // Skip a binding currently being resolved (this walk is
@@ -494,7 +495,7 @@ impl NamedAxisRouteError {
 /// Is this list an `(app <reduce> <operand> <axes...>)` whose callee is
 /// a reduction builtin with at least one bare-var (named) axis?
 fn app_reduces_named_axis(list: &List) -> bool {
-    if tag(list) != Some("app") {
+    if tag(list) != Some(DeepTag::App) {
         return false;
     }
     let kids = children(list);
@@ -513,7 +514,7 @@ fn app_reduces_named_axis(list: &List) -> bool {
 /// possibly carrying a symbolic *size*, is NOT a named-axis app and
 /// keeps the host path.)
 fn app_expands_named_axis(list: &List) -> bool {
-    if tag(list) != Some("app") {
+    if tag(list) != Some(DeepTag::App) {
         return false;
     }
     let kids = children(list);
@@ -537,7 +538,7 @@ fn scan_expr_for_named_axis_reduction(expr: &Expr, hit: &mut bool, vars: &mut Ve
                 *hit = true;
                 return;
             }
-            if tag(list) == Some("var")
+            if tag(list) == Some(DeepTag::Var)
                 && let Some(name) = children(list).first().and_then(symbol_name)
             {
                 vars.push(name.to_string());
@@ -555,7 +556,7 @@ fn collect_var_names(expr: &Expr, vars: &mut Vec<String>) {
     match expr {
         Expr::MetaExpr(meta, _) => collect_var_names(&meta.expr, vars),
         Expr::List(list, _) => {
-            if tag(list) == Some("var")
+            if tag(list) == Some(DeepTag::Var)
                 && let Some(name) = children(list).first().and_then(symbol_name)
             {
                 vars.push(name.to_string());
@@ -571,7 +572,7 @@ fn collect_var_names(expr: &Expr, vars: &mut Vec<String>) {
 /// Strip `t-ref` wrappers (and MetaExpr shells) off a Deep type expr.
 fn strip_type_wrappers(ty_expr: &Expr) -> &Expr {
     match ty_expr {
-        Expr::List(list, _) if tag(list) == Some("t-ref") => children(list)
+        Expr::List(list, _) if tag(list) == Some(DeepTag::TRef) => children(list)
             .first()
             .map(strip_type_wrappers)
             .unwrap_or(ty_expr),
@@ -616,8 +617,8 @@ pub(super) fn declared_tensor_type_for_shape(
         return Err("the static type is not a tensor type".to_string());
     };
     match tag(list) {
-        Some("t-tensor") => {}
-        Some("t-prim") if shape.is_empty() => {
+        Some(DeepTag::TTensor) => {}
+        Some(DeepTag::TPrim) if shape.is_empty() => {
             return Ok(TensorType {
                 dims: vec![],
                 precision: extract_prim_from_type_expr(stripped).unwrap_or(fallback_precision),
@@ -626,7 +627,7 @@ pub(super) fn declared_tensor_type_for_shape(
         other => {
             return Err(format!(
                 "the static type `{}` is not a tensor type",
-                other.unwrap_or("?")
+                other.map(DeepTag::as_str).unwrap_or("?")
             ));
         }
     }
@@ -637,7 +638,7 @@ pub(super) fn declared_tensor_type_for_shape(
     let precision = extract_prim_from_type_expr(prim_expr).unwrap_or(fallback_precision);
     if dim_exprs
         .iter()
-        .any(|d| matches!(d, Expr::List(dim_list, _) if tag(dim_list) == Some("d-rank")))
+        .any(|d| matches!(d, Expr::List(dim_list, _) if tag(dim_list) == Some(DeepTag::DRank)))
     {
         return Err(
             "the operand's declared type is rank-polymorphic (contains a `..spread`), \
@@ -658,14 +659,14 @@ pub(super) fn declared_tensor_type_for_shape(
             return Err("malformed tensor dimension in static type".to_string());
         };
         match tag(dim_list) {
-            Some("d-name") => {
+            Some(DeepTag::DName) => {
                 let name = children(dim_list)
                     .first()
                     .and_then(symbol_name)
                     .ok_or_else(|| "malformed d-name dimension".to_string())?;
                 dims.push(DimInfo::Named(name.to_string(), Some(size)));
             }
-            Some("d-lit") => {
+            Some(DeepTag::DLit) => {
                 let lit = children(dim_list)
                     .first()
                     .and_then(int_value)
@@ -686,18 +687,18 @@ pub(super) fn declared_tensor_type_for_shape(
             // skips the formal/actual remap that would concretize the
             // body's d-var names, so the name must instead bind through
             // the placeholder Load — exactly like a d-name (chelis#351).
-            Some("d-var") if name_dim_vars => {
+            Some(DeepTag::DVar) if name_dim_vars => {
                 let name = children(dim_list)
                     .first()
                     .and_then(symbol_name)
                     .ok_or_else(|| "malformed d-var dimension".to_string())?;
                 dims.push(DimInfo::Named(name.to_string(), Some(size)));
             }
-            Some("d-var") => dims.push(DimInfo::Lit(size)),
+            Some(DeepTag::DVar) => dims.push(DimInfo::Lit(size)),
             other => {
                 return Err(format!(
                     "unsupported dimension form `{}` in static type",
-                    other.unwrap_or("?")
+                    other.map(DeepTag::as_str).unwrap_or("?")
                 ));
             }
         }

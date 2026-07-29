@@ -130,8 +130,8 @@ fn match_static_pattern(
     };
     let pat_kids = children(pat_list);
     match get_tag(pat_list) {
-        Some("pat-wild") => StaticPatternMatch::Match(Vec::new()),
-        Some("pat-var") => match pat_kids.first().and_then(symbol_name) {
+        Some(DeepTag::PatWild) => StaticPatternMatch::Match(Vec::new()),
+        Some(DeepTag::PatVar) => match pat_kids.first().and_then(symbol_name) {
             Some(name) => StaticPatternMatch::Match(vec![(
                 name.to_string(),
                 LoweredValue::Adt {
@@ -142,7 +142,7 @@ fn match_static_pattern(
             )]),
             None => StaticPatternMatch::Unsupported("a nameless `pat-var`".to_string()),
         },
-        Some("pat-as") => {
+        Some(DeepTag::PatAs) => {
             let (Some(name), Some(inner)) =
                 (pat_kids.first().and_then(symbol_name), pat_kids.get(1))
             else {
@@ -163,7 +163,7 @@ fn match_static_pattern(
                 other => other,
             }
         }
-        Some("pat-ctor") => {
+        Some(DeepTag::PatCtor) => {
             let Some(pat_ctor) = pat_kids.first().and_then(symbol_name) else {
                 return StaticPatternMatch::Unsupported("a nameless `pat-ctor`".to_string());
             };
@@ -189,7 +189,7 @@ fn match_static_pattern(
             }
             StaticPatternMatch::Match(binds)
         }
-        Some("pat-record") => {
+        Some(DeepTag::PatRecord) => {
             let Some(pat_ctor) = pat_kids.first().and_then(symbol_name) else {
                 return StaticPatternMatch::Unsupported("a nameless `pat-record`".to_string());
             };
@@ -206,7 +206,7 @@ fn match_static_pattern(
                 let Expr::List(kv_list, _) = kv else {
                     continue;
                 };
-                if get_tag(kv_list) != Some("kv") {
+                if get_tag(kv_list) != Some(DeepTag::Kv) {
                     continue;
                 }
                 let kv_kids = children(kv_list);
@@ -238,7 +238,7 @@ fn match_static_pattern(
         // `pat-lit` against a constructor value cannot match, but a match
         // mixing literal and constructor patterns is outside the checked
         // slice; reject rather than guess.
-        Some(other) => StaticPatternMatch::Unsupported(format!("`{other}` patterns")),
+        Some(other) => StaticPatternMatch::Unsupported(format!("`{}` patterns", other.as_str())),
         None => StaticPatternMatch::Unsupported("an untagged pattern form".to_string()),
     }
 }
@@ -254,14 +254,15 @@ fn bind_leaf_pattern(
         return Err("a non-list sub-pattern form".to_string());
     };
     match get_tag(pat_list) {
-        Some("pat-wild") => Ok(None),
-        Some("pat-var") => match children(pat_list).first().and_then(symbol_name) {
+        Some(DeepTag::PatWild) => Ok(None),
+        Some(DeepTag::PatVar) => match children(pat_list).first().and_then(symbol_name) {
             Some(name) => Ok(Some((name.to_string(), value.clone()))),
             None => Err("a nameless `pat-var` sub-pattern".to_string()),
         },
         Some(other) => Err(format!(
-            "nested `{other}` sub-patterns (only `pat-var`/`pat-wild` field bindings \
-             are in the static slice)"
+            "nested `{}` sub-patterns (only `pat-var`/`pat-wild` field bindings \
+             are in the static slice)",
+            other.as_str()
         )),
         None => Err("an untagged sub-pattern form".to_string()),
     }
@@ -291,11 +292,7 @@ fn bare_var_name(expr: &Expr) -> Option<String> {
     let Expr::List(list, _) = expr else {
         return None;
     };
-    let first = list.elements.first()?;
-    let Expr::Atom(Atom::Symbol(tag), _) = first else {
-        return None;
-    };
-    if tag != "var" {
+    if list.tag() != Some(DeepTag::Var) {
         return None;
     }
     let third = list.elements.get(2)?;
@@ -323,7 +320,7 @@ fn synth_unary_app(fname: &str, acc_name: &str, app_span: Span) -> Expr {
     let callee = Expr::List(
         List {
             elements: vec![
-                Expr::Atom(Atom::Symbol("var".to_string()), zero_span),
+                Expr::Atom(Atom::Tag(DeepTag::Var), zero_span),
                 Expr::Map(MetaMap::default(), zero_span),
                 Expr::Atom(Atom::Symbol(fname.to_string()), zero_span),
             ],
@@ -333,7 +330,7 @@ fn synth_unary_app(fname: &str, acc_name: &str, app_span: Span) -> Expr {
     let arg = Expr::List(
         List {
             elements: vec![
-                Expr::Atom(Atom::Symbol("var".to_string()), zero_span),
+                Expr::Atom(Atom::Tag(DeepTag::Var), zero_span),
                 Expr::Map(MetaMap::default(), zero_span),
                 Expr::Atom(Atom::Symbol(acc_name.to_string()), zero_span),
             ],
@@ -343,7 +340,7 @@ fn synth_unary_app(fname: &str, acc_name: &str, app_span: Span) -> Expr {
     Expr::List(
         List {
             elements: vec![
-                Expr::Atom(Atom::Symbol("app".to_string()), zero_span),
+                Expr::Atom(Atom::Tag(DeepTag::App), zero_span),
                 Expr::Map(MetaMap::default(), zero_span),
                 callee,
                 arg,
@@ -363,7 +360,7 @@ fn synth_reduction_app(fname: &str, operand: Expr, axis: Expr, app_span: Span) -
     let callee = Expr::List(
         List {
             elements: vec![
-                Expr::Atom(Atom::Symbol("var".to_string()), zero_span),
+                Expr::Atom(Atom::Tag(DeepTag::Var), zero_span),
                 Expr::Map(MetaMap::default(), zero_span),
                 Expr::Atom(Atom::Symbol(fname.to_string()), zero_span),
             ],
@@ -373,7 +370,7 @@ fn synth_reduction_app(fname: &str, operand: Expr, axis: Expr, app_span: Span) -
     Expr::List(
         List {
             elements: vec![
-                Expr::Atom(Atom::Symbol("app".to_string()), zero_span),
+                Expr::Atom(Atom::Tag(DeepTag::App), zero_span),
                 Expr::Map(MetaMap::default(), zero_span),
                 callee,
                 operand,
@@ -557,7 +554,7 @@ pub fn install_chelis_panic_hook() {
 }
 
 use chelis_deep::ast::{Atom, Expr, List, MetaMap};
-use chelis_deep::{Span, decode_effect_kind};
+use chelis_deep::{DeepTag, Span, decode_effect_kind};
 use chelis_types::unsupported::{Stage, Unsupported, UnsupportedKind};
 use chelis_types::{BUILTIN_NAMES, CheckedProgram, LinearityInfo, types::Prim};
 use chelis_vocab::EffectKind;
@@ -624,9 +621,65 @@ pub fn lower_program_to_library(program: &CheckedProgram) -> LoweredLibrary {
     try_lower_program_to_library(program).unwrap_or_else(|diagnostic| panic!("{diagnostic}"))
 }
 
+/// Decode-once consumption-boundary check (chelis#731 Phase 3; chelis#887).
+///
+/// The standing `find_raw_vocabulary_tag` invariants cover PARSED trees
+/// (chelis-deep) and DESUGARED trees (chelis-surf). Producers that
+/// SYNTHESIZE Deep after those stages are downstream of both and therefore
+/// unguarded, and three separate instances shipped that way before this
+/// check existed - `ty_expr_to_deep` in this crate and `effect_set_expr` in
+/// chelis-effects among them, each found by a person reading code rather
+/// than by a red test.
+///
+/// Asserting where trees are CONSUMED covers every producer at once instead
+/// of enumerating producers forever, and it inherits its coverage from the
+/// whole suite: any test that lowers anything exercises it.
+///
+/// Two deliberate choices:
+///
+/// * Debug-only. This is an internal representation invariant, not a
+///   user-facing diagnostic, so a release build does not pay for it.
+/// * Called BEFORE `catch_lowering`. A panic raised inside that helper is
+///   converted into a `LowerDiagnostic`, which would let a test that expects
+///   a lowering failure pass for the wrong reason.
+///
+/// Note the detector is vocabulary-complete by construction: it gates on
+/// `DeepTag::parse`, so a tag added later is recognized with no edit here.
+fn assert_decode_once_at_boundary(site: &str, exprs: &[Expr]) {
+    if !cfg!(debug_assertions) {
+        return;
+    }
+    if let Some(tag) = chelis_deep::validate::find_raw_vocabulary_tag(exprs) {
+        panic!(
+            "decode-once violated at the lowering boundary: `{site}` carries the raw \
+             vocabulary tag string `{tag}` at a node head. A programmatic producer built \
+             that node with `Atom::Symbol` instead of a typed constructor (`Expr::node`), \
+             so every typed reader takes its untagged policy for it \
+             (spec/design/checker_totality.md section C4.2; chelis#731, chelis#887)."
+        );
+    }
+}
+
+/// [`assert_decode_once_at_boundary`] over the values of a name-keyed Deep
+/// map (type envs, program defs). Borrows each value rather than collecting.
+fn assert_decode_once_in_env(site: &str, env: &HashMap<String, Expr>) {
+    if !cfg!(debug_assertions) {
+        return;
+    }
+    for value in env.values() {
+        assert_decode_once_at_boundary(site, std::slice::from_ref(value));
+    }
+}
+
 pub fn try_lower_program_to_library(
     program: &CheckedProgram,
 ) -> Result<LoweredLibrary, LowerDiagnostic> {
+    assert_decode_once_at_boundary("lower_program_to_library: exprs", program.exprs());
+    assert_decode_once_at_boundary(
+        "lower_program_to_library: annotated_exprs",
+        program.annotated_exprs(),
+    );
+    assert_decode_once_in_env("lower_program_to_library: type_env", program.type_env());
     catch_lowering(|| lower_program_to_library_inner(program))
 }
 
@@ -933,6 +986,19 @@ pub fn try_lower_program_with_context(
     library: &LoweredLibrary,
     new_program: &CheckedProgram,
 ) -> Result<Dag, LowerDiagnostic> {
+    assert_decode_once_at_boundary("lower_program_with_context: exprs", new_program.exprs());
+    assert_decode_once_at_boundary(
+        "lower_program_with_context: annotated_exprs",
+        new_program.annotated_exprs(),
+    );
+    assert_decode_once_in_env(
+        "lower_program_with_context: type_env",
+        new_program.type_env(),
+    );
+    assert_decode_once_in_env(
+        "lower_program_with_context: library program_defs",
+        &library.program_defs,
+    );
     catch_lowering(|| lower_program_with_context_inner(library, new_program))
 }
 
@@ -1046,6 +1112,9 @@ pub fn try_lower_subexpr_program(
     full_type_env: HashMap<String, Expr>,
     program_defs: HashMap<String, Expr>,
 ) -> Result<Dag, LowerDiagnostic> {
+    assert_decode_once_at_boundary("lower_subexpr_program: expr", std::slice::from_ref(expr));
+    assert_decode_once_in_env("lower_subexpr_program: type_env", &full_type_env);
+    assert_decode_once_in_env("lower_subexpr_program: program_defs", &program_defs);
     catch_lowering(|| {
         lower_subexpr_program_inner(expr, scoped_tensor_types, full_type_env, program_defs)
     })
@@ -1266,8 +1335,7 @@ enum DimSlot {
 fn tensor_formal_dim_slots(expr: &Expr) -> Option<Vec<DimSlot>> {
     let stripped = if let Expr::List(list, _) = expr
         && list.elements.len() >= 3
-        && let Expr::Atom(Atom::Symbol(tag), _) = &list.elements[0]
-        && tag == "t-ref"
+        && list.tag() == Some(DeepTag::TRef)
     {
         list.elements.get(2)?
     } else {
@@ -1276,10 +1344,7 @@ fn tensor_formal_dim_slots(expr: &Expr) -> Option<Vec<DimSlot>> {
     let Expr::List(list, _) = stripped else {
         return None;
     };
-    let Some(Expr::Atom(Atom::Symbol(tag), _)) = list.elements.first() else {
-        return None;
-    };
-    if tag != "t-tensor" || list.elements.len() < 3 {
+    if list.tag() != Some(DeepTag::TTensor) || list.elements.len() < 3 {
         return None;
     }
     // Children after tag+meta are dim nodes followed by the precision node.
@@ -1295,17 +1360,17 @@ fn tensor_formal_dim_slots(expr: &Expr) -> Option<Vec<DimSlot>> {
                 let Expr::List(dl, _) = d else {
                     return DimSlot::Other;
                 };
-                let Some(Expr::Atom(Atom::Symbol(dtag), _)) = dl.elements.first() else {
+                let Some(dtag) = dl.tag() else {
                     return DimSlot::Other;
                 };
                 let payload = match dl.elements.get(2) {
                     Some(Expr::Atom(Atom::Symbol(s), _)) => Some(s.clone()),
                     _ => None,
                 };
-                match (dtag.as_str(), payload) {
-                    ("d-rank", Some(n)) => DimSlot::Spread(n),
-                    ("d-name", Some(n)) => DimSlot::Named(n),
-                    ("d-var", Some(n)) => DimSlot::DimVar(n),
+                match (dtag, payload) {
+                    (DeepTag::DRank, Some(n)) => DimSlot::Spread(n),
+                    (DeepTag::DName, Some(n)) => DimSlot::Named(n),
+                    (DeepTag::DVar, Some(n)) => DimSlot::DimVar(n),
                     _ => DimSlot::Other,
                 }
             })
@@ -1568,8 +1633,7 @@ fn tensor_prec_substitutions(
 fn extract_precision_var_name(expr: &Expr) -> Option<String> {
     let stripped = if let Expr::List(list, _) = expr
         && list.elements.len() >= 3
-        && let Expr::Atom(Atom::Symbol(tag), _) = &list.elements[0]
-        && tag == "t-ref"
+        && list.tag() == Some(DeepTag::TRef)
     {
         list.elements.get(2)?
     } else {
@@ -1581,10 +1645,7 @@ fn extract_precision_var_name(expr: &Expr) -> Option<String> {
     if list.elements.len() < 3 {
         return None;
     }
-    let Expr::Atom(Atom::Symbol(tag), _) = &list.elements[0] else {
-        return None;
-    };
-    if tag != "t-tensor" {
+    if list.tag() != Some(DeepTag::TTensor) {
         return None;
     }
     let last = list.elements.last()?;
@@ -1594,10 +1655,7 @@ fn extract_precision_var_name(expr: &Expr) -> Option<String> {
     if prec_list.elements.len() < 3 {
         return None;
     }
-    let Expr::Atom(Atom::Symbol(prec_tag), _) = &prec_list.elements[0] else {
-        return None;
-    };
-    if prec_tag != "t-var" {
+    if prec_list.tag() != Some(DeepTag::TVar) {
         return None;
     }
     if let Expr::Atom(Atom::Symbol(name), _) = &prec_list.elements[2] {
@@ -1630,8 +1688,7 @@ fn formal_param_type_var_name(expr: &Expr) -> Option<String> {
     // Strip a leading `(t-ref {} ...)` borrow wrapper.
     let stripped = if let Expr::List(list, _) = expr
         && list.elements.len() >= 3
-        && let Expr::Atom(Atom::Symbol(tag), _) = &list.elements[0]
-        && tag == "t-ref"
+        && list.tag() == Some(DeepTag::TRef)
     {
         &list.elements[2]
     } else {
@@ -1640,8 +1697,7 @@ fn formal_param_type_var_name(expr: &Expr) -> Option<String> {
     // Bare `(t-var tN)`: the whole param type is one inference var.
     if let Expr::List(list, _) = stripped
         && list.elements.len() >= 3
-        && let Expr::Atom(Atom::Symbol(tag), _) = &list.elements[0]
-        && tag == "t-var"
+        && list.tag() == Some(DeepTag::TVar)
         && let Expr::Atom(Atom::Symbol(name), _) = &list.elements[2]
     {
         return Some(name.clone());
@@ -1666,7 +1722,7 @@ fn fn_type_arg_exprs(fn_expr: &Expr) -> Option<Vec<&Expr>> {
     let Expr::List(list, _) = fn_expr else {
         return None;
     };
-    if get_tag(list) != Some("fn") {
+    if get_tag(list) != Some(DeepTag::Fn) {
         return None;
     }
     let Expr::Map(meta, _) = list.elements.get(1)? else {
@@ -1676,7 +1732,7 @@ fn fn_type_arg_exprs(fn_expr: &Expr) -> Option<Vec<&Expr>> {
     let Expr::List(fn_ty, _) = ty_expr else {
         return None;
     };
-    if get_tag(fn_ty) != Some("t-fn") {
+    if get_tag(fn_ty) != Some(DeepTag::TFn) {
         return None;
     }
     let args = children(fn_ty);
@@ -2142,7 +2198,7 @@ pub fn top_level_lowering_map_with_context(
 /// `type_is_never_lowerable`, which inspects the t-fn return type.
 fn ty_expr_to_deep(ty: &TensorType) -> Expr {
     use chelis_deep::Span;
-    use chelis_deep::ast::{Atom, List, MetaMap};
+    use chelis_deep::ast::{Atom, MetaMap};
     let span = Span::new(0, 0);
     let prim = match ty.precision {
         chelis_types::types::Prim::F32 => "f32",
@@ -2166,29 +2222,24 @@ fn ty_expr_to_deep(ty: &TensorType) -> Expr {
         chelis_types::types::Prim::Bool => "bool",
         chelis_types::types::Prim::String => "string",
     };
-    let prim_node = Expr::List(
-        List {
-            elements: vec![
-                Expr::Atom(Atom::Symbol("t-prim".into()), span),
-                Expr::Map(MetaMap::default(), span),
-                Expr::Atom(Atom::Symbol(prim.into()), span),
-            ],
-        },
+    // Decode-once (chelis#731 Phase 3): this is a PROGRAMMATIC producer
+    // running in the lowerer, downstream of both `parser::stamp_tags` and
+    // the desugarer, so nothing upstream will stamp element 0 for it. It
+    // must therefore construct through the typed node constructor. Spelling
+    // these heads as `Atom::Symbol("t-prim")` put raw vocabulary strings
+    // into the in-memory tree, and the typed readers below (`list.tag()`)
+    // then took their untagged policy for them instead of the `TPrim` /
+    // `TTensor` arms.
+    let prim_node = Expr::node(
+        DeepTag::TPrim,
+        MetaMap::default(),
+        vec![Expr::Atom(Atom::Symbol(prim.into()), span)],
         span,
     );
     if ty.dims.is_empty() {
         prim_node
     } else {
-        Expr::List(
-            List {
-                elements: vec![
-                    Expr::Atom(Atom::Symbol("t-tensor".into()), span),
-                    Expr::Map(MetaMap::default(), span),
-                    prim_node,
-                ],
-            },
-            span,
-        )
+        Expr::node(DeepTag::TTensor, MetaMap::default(), vec![prim_node], span)
     }
 }
 
@@ -2221,14 +2272,14 @@ fn top_level_expr_is_lowered_with_names(
     let Expr::List(list, _) = expr else {
         return true;
     };
-    if get_tag(list) == Some("module") {
+    if get_tag(list) == Some(DeepTag::Module) {
         return list
             .elements
             .iter()
             .skip(3)
             .all(|child| top_level_expr_is_lowered_with_names(child, type_env, lowered_names));
     }
-    if get_tag(list) != Some("def") {
+    if get_tag(list) != Some(DeepTag::Def) {
         return true;
     }
     let Some(name) = top_level_expr_name(expr) else {
@@ -2254,7 +2305,7 @@ fn type_is_never_lowerable(expr: &Expr) -> bool {
         // call-site inlining (the call site supplies the concrete
         // precision per spec/04-type-system.md §5.8.1); we just must
         // skip the standalone top-level emission.
-        Some("t-fn") => {
+        Some(DeepTag::TFn) => {
             type_expr_has_precision_var(expr)
                 // Tier-2 rank polymorphism (spec/design/rank_polymorphism.md):
                 // a t-fn carrying a `(d-rank ...)` rank variable is
@@ -2265,9 +2316,9 @@ fn type_is_never_lowerable(expr: &Expr) -> bool {
                 || type_expr_has_rank_var(expr)
                 || list.elements.last().is_some_and(type_is_never_lowerable)
         }
-        Some("t-tuple") => children(list).iter().any(type_is_never_lowerable),
-        Some("t-adt") | Some("t-unit") => true,
-        Some("t-prim") => false,
+        Some(DeepTag::TTuple) => children(list).iter().any(type_is_never_lowerable),
+        Some(DeepTag::TAdt) | Some(DeepTag::TUnit) => true,
+        Some(DeepTag::TPrim) => false,
         _ => false,
     }
 }
@@ -2281,10 +2332,10 @@ pub fn type_expr_has_rank_var(expr: &Expr) -> bool {
         return false;
     };
     match get_tag(list) {
-        Some("t-tensor") => children(list)
+        Some(DeepTag::TTensor) => children(list)
             .iter()
-            .any(|c| matches!(c, Expr::List(d, _) if get_tag(d) == Some("d-rank"))),
-        Some("t-ref") | Some("t-fn") | Some("t-tuple") | Some("t-adt") => {
+            .any(|c| matches!(c, Expr::List(d, _) if get_tag(d) == Some(DeepTag::DRank))),
+        Some(DeepTag::TRef) | Some(DeepTag::TFn) | Some(DeepTag::TTuple) | Some(DeepTag::TAdt) => {
             children(list).iter().any(type_expr_has_rank_var)
         }
         _ => false,
@@ -2301,8 +2352,8 @@ pub fn type_expr_has_precision_var(expr: &Expr) -> bool {
         return false;
     };
     match get_tag(list) {
-        Some("t-tensor") => extract_precision_var_name(expr).is_some(),
-        Some("t-ref") | Some("t-fn") | Some("t-tuple") | Some("t-adt") => {
+        Some(DeepTag::TTensor) => extract_precision_var_name(expr).is_some(),
+        Some(DeepTag::TRef) | Some(DeepTag::TFn) | Some(DeepTag::TTuple) | Some(DeepTag::TAdt) => {
             children(list).iter().any(type_expr_has_precision_var)
         }
         _ => false,
@@ -2313,14 +2364,14 @@ fn type_is_scalar_primitive(expr: &Expr) -> bool {
     let Expr::List(list, _) = expr else {
         return false;
     };
-    get_tag(list) == Some("t-prim")
+    get_tag(list) == Some(DeepTag::TPrim)
 }
 
 fn callable_ref_name(expr: &Expr) -> Option<String> {
     let Expr::List(list, _) = expr else {
         return None;
     };
-    if get_tag(list) != Some("var") {
+    if get_tag(list) != Some(DeepTag::Var) {
         return None;
     }
     children(list)
@@ -2340,7 +2391,7 @@ fn top_level_expr_name(expr: &Expr) -> Option<&str> {
     let Expr::List(list, _) = expr else {
         return None;
     };
-    if get_tag(list) != Some("def") {
+    if get_tag(list) != Some(DeepTag::Def) {
         return None;
     }
     children(list).first().and_then(symbol_name)
@@ -2381,25 +2432,25 @@ fn expr_requires_host_runtime_with_ctx(expr: &Expr, exempt_to_tensor_literal: bo
             if exempt_to_tensor_literal && static_to_tensor_literal(expr).is_some() {
                 return false;
             }
-            if get_tag(list) == Some("if") {
+            if get_tag(list) == Some(DeepTag::If) {
                 if !if_expr_is_dag_lowerable(list) {
                     return true;
                 }
             } else if matches!(
                 get_tag(list),
-                Some("match" | "record" | "access" | "tuple-get")
+                Some(DeepTag::Match | DeepTag::Record | DeepTag::Access | DeepTag::TupleGet)
             ) {
                 return true;
             }
-            if get_tag(list) == Some("var")
+            if get_tag(list) == Some(DeepTag::Var)
                 && let Some(name) = children(list).first().and_then(symbol_name)
                 && name.chars().next().is_some_and(|ch| ch.is_uppercase())
             {
                 return true;
             }
-            if get_tag(list) == Some("app")
+            if get_tag(list) == Some(DeepTag::App)
                 && let Some(Expr::List(callee, _)) = children(list).first()
-                && get_tag(callee) == Some("var")
+                && get_tag(callee) == Some(DeepTag::Var)
                 && let Some(name) = children(callee).first().and_then(symbol_name)
                 && name.chars().next().is_some_and(|ch| ch.is_uppercase())
             {
@@ -2591,7 +2642,7 @@ fn fn_body_qualifies_for_to_tensor_exemption(body: &Expr) -> bool {
     let Expr::List(list, _) = body else {
         return false;
     };
-    if get_tag(list) != Some("fn") {
+    if get_tag(list) != Some(DeepTag::Fn) {
         return false;
     }
     // `(fn (params ...) fn_body)` — child index 1 (after the tag +
@@ -2617,7 +2668,9 @@ fn expr_is_multi_root_construct(expr: &Expr) -> bool {
     };
     matches!(
         get_tag(list),
-        Some("tuple" | "match" | "record" | "access" | "tuple-get")
+        Some(
+            DeepTag::Tuple | DeepTag::Match | DeepTag::Record | DeepTag::Access | DeepTag::TupleGet
+        )
     )
 }
 
@@ -2648,7 +2701,7 @@ fn for_each_top_level_item_from_expr(expr: &Expr, f: &mut impl FnMut(&Expr)) {
         return;
     };
     match get_tag(list) {
-        Some("module") => {
+        Some(DeepTag::Module) => {
             for child in list.elements.iter().skip(3) {
                 for_each_top_level_item_from_expr(child, f);
             }
@@ -2662,12 +2715,12 @@ fn collect_top_level_defs_from_expr(expr: &Expr, defs: &mut HashMap<String, Expr
         return;
     };
     match get_tag(list) {
-        Some("module") => {
+        Some(DeepTag::Module) => {
             for child in list.elements.iter().skip(3) {
                 collect_top_level_defs_from_expr(child, defs);
             }
         }
-        Some("def") => {
+        Some(DeepTag::Def) => {
             let kids = children(list);
             if let (Some(name), Some(body)) =
                 (kids.first().and_then(symbol_name), kids.get(1).cloned())
@@ -2684,12 +2737,12 @@ fn collect_top_level_sigs_from_expr(expr: &Expr, sigs: &mut HashMap<String, Expr
         return;
     };
     match get_tag(list) {
-        Some("module") => {
+        Some(DeepTag::Module) => {
             for child in list.elements.iter().skip(3) {
                 collect_top_level_sigs_from_expr(child, sigs);
             }
         }
-        Some("defsig") => {
+        Some(DeepTag::Defsig) => {
             let kids = children(list);
             if let (Some(name), Some(ty)) =
                 (kids.first().and_then(symbol_name), kids.get(1).cloned())
@@ -2823,7 +2876,7 @@ fn expr_depends_on_nonlowerable_name(
             })
         }
         Expr::List(list, _) => {
-            if get_tag(list) == Some("var")
+            if get_tag(list) == Some(DeepTag::Var)
                 && let Some(name) = children(list).first().and_then(symbol_name)
                 && !bound_names.contains(name)
                 && top_level_defs.contains_key(name)
@@ -2837,7 +2890,7 @@ fn expr_depends_on_nonlowerable_name(
                     visiting,
                 );
             }
-            if get_tag(list) == Some("fn") {
+            if get_tag(list) == Some(DeepTag::Fn) {
                 let kids = children(list);
                 let mut scoped = bound_names.clone();
                 if let Some(Expr::List(params, _)) = kids.first() {
@@ -2857,11 +2910,11 @@ fn expr_depends_on_nonlowerable_name(
                     )
                 });
             }
-            if get_tag(list) == Some("let") {
+            if get_tag(list) == Some(DeepTag::Let) {
                 let kids = children(list);
                 let mut scoped = bound_names.clone();
                 if let Some(Expr::List(bindings, _)) = kids.first()
-                    && get_tag(bindings) == Some("bind")
+                    && get_tag(bindings) == Some(DeepTag::Bind)
                 {
                     let binding_children = children(bindings);
                     let mut index = 0;
@@ -2895,7 +2948,7 @@ fn expr_depends_on_nonlowerable_name(
                     )
                 });
             }
-            if get_tag(list) == Some("match") {
+            if get_tag(list) == Some(DeepTag::Match) {
                 let kids = children(list);
                 if kids.first().is_some_and(|scrutinee| {
                     expr_depends_on_nonlowerable_name(
@@ -2914,7 +2967,7 @@ fn expr_depends_on_nonlowerable_name(
                     let Expr::List(arm_list, _) = arm else {
                         continue;
                     };
-                    if get_tag(arm_list) != Some("arm") {
+                    if get_tag(arm_list) != Some(DeepTag::Arm) {
                         continue;
                     }
                     let arm_children = children(arm_list);
@@ -2982,7 +3035,7 @@ fn collect_pattern_bound_names(pattern: &Expr, out: &mut HashSet<String>) {
         Expr::Atom(_, _) | Expr::Map(_, _) => {}
         Expr::MetaExpr(meta, _) => collect_pattern_bound_names(&meta.expr, out),
         Expr::List(list, _) => {
-            if get_tag(list) == Some("pat-var")
+            if get_tag(list) == Some(DeepTag::PatVar)
                 && let Some(name) = children(list).first().and_then(symbol_name)
             {
                 out.insert(name.to_string());
@@ -2996,11 +3049,11 @@ fn collect_pattern_bound_names(pattern: &Expr, out: &mut HashSet<String>) {
 }
 
 fn builtin_name(list: &List) -> Option<&str> {
-    if get_tag(list) != Some("app") {
+    if get_tag(list) != Some(DeepTag::App) {
         return None;
     }
     list.elements.get(2).and_then(|expr| match expr {
-        Expr::List(var_list, _) if get_tag(var_list) == Some("var") => {
+        Expr::List(var_list, _) if get_tag(var_list) == Some(DeepTag::Var) => {
             children(var_list).first().and_then(symbol_name)
         }
         _ => None,
@@ -3022,7 +3075,7 @@ fn expr_type_metadata(expr: &Expr) -> Option<&Expr> {
 }
 
 fn if_expr_is_dag_lowerable(list: &List) -> bool {
-    if get_tag(list) != Some("if") {
+    if get_tag(list) != Some(DeepTag::If) {
         return false;
     }
 
@@ -3053,16 +3106,18 @@ fn assert_ir_lowerable(expr: &Expr) {
             // skip so it never validates declaration metadata as runtime
             // IR. Without this skip, a tensor-field invariant such as
             // `sum(p.weights)` is wrongly audited as a runtime node.
-            if let Some(Expr::Atom(Atom::Symbol(tag), _)) = list.elements.first()
-                && matches!(tag.as_str(), "deftype" | "defsig" | "typealias")
-            {
+            if matches!(
+                list.tag(),
+                Some(DeepTag::Deftype | DeepTag::Defsig | DeepTag::Typealias)
+            ) {
                 return;
             }
-            if let Some(Expr::Atom(Atom::Symbol(tag), _)) = list.elements.first()
-                && ((tag == "if" && !if_expr_is_dag_lowerable(list)) || tag == "match")
+            if let Some(tag) = list.tag()
+                && ((tag == DeepTag::If && !if_expr_is_dag_lowerable(list))
+                    || tag == DeepTag::Match)
             {
                 raise_lowering_diagnostic(lower_diagnostic_for_expr(
-                    unsupported_lowering_message(tag),
+                    unsupported_lowering_message(tag.as_str()),
                     expr,
                 ));
             }
@@ -3096,13 +3151,13 @@ fn assert_ir_typed(expr: &Expr) {
             // for these tags before lowering; the runtime IR audit
             // mirrors that skip so it never validates declaration
             // metadata as runtime IR.
-            if let Some(Expr::Atom(Atom::Symbol(tag), _)) = list.elements.first()
-                && matches!(tag.as_str(), "deftype" | "defsig" | "typealias")
-            {
+            if matches!(
+                list.tag(),
+                Some(DeepTag::Deftype | DeepTag::Defsig | DeepTag::Typealias)
+            ) {
                 return;
             }
-            if let Some(Expr::Atom(Atom::Symbol(tag), _)) = list.elements.first()
-                && tag == "app"
+            if list.tag() == Some(DeepTag::App)
                 && is_shape_sensitive_builtin_app(list)
                 && !has_type_metadata(list)
             {
@@ -3140,15 +3195,10 @@ fn has_type_metadata(list: &List) -> bool {
 
 fn is_shape_sensitive_builtin_app(list: &List) -> bool {
     let func_name = match list.elements.get(2) {
-        Some(Expr::List(func_list, _)) => {
-            match (func_list.elements.first(), func_list.elements.get(2)) {
-                (
-                    Some(Expr::Atom(Atom::Symbol(tag), _)),
-                    Some(Expr::Atom(Atom::Symbol(name), _)),
-                ) if tag == "var" => Some(name.as_str()),
-                _ => None,
-            }
-        }
+        Some(Expr::List(func_list, _)) => match (func_list.tag(), func_list.elements.get(2)) {
+            (Some(DeepTag::Var), Some(Expr::Atom(Atom::Symbol(name), _))) => Some(name.as_str()),
+            _ => None,
+        },
         _ => None,
     };
 
@@ -3180,11 +3230,8 @@ fn is_shape_sensitive_builtin_app(list: &List) -> bool {
     )
 }
 
-fn get_tag(list: &List) -> Option<&str> {
-    match list.elements.first() {
-        Some(Expr::Atom(Atom::Symbol(tag), _)) => Some(tag.as_str()),
-        _ => None,
-    }
+fn get_tag(list: &List) -> Option<DeepTag> {
+    list.tag()
 }
 
 fn children(list: &List) -> &[Expr] {
@@ -3199,7 +3246,7 @@ fn app_var_name_and_args(expr: &Expr) -> Option<(&str, &[Expr])> {
     let Expr::List(list, _) = expr else {
         return None;
     };
-    if get_tag(list) != Some("app") {
+    if get_tag(list) != Some(DeepTag::App) {
         return None;
     }
     let kids = children(list);
@@ -3207,7 +3254,7 @@ fn app_var_name_and_args(expr: &Expr) -> Option<(&str, &[Expr])> {
     let Expr::List(func_list, _) = func else {
         return None;
     };
-    if get_tag(func_list) != Some("var") {
+    if get_tag(func_list) != Some(DeepTag::Var) {
         return None;
     }
     let name = children(func_list).first().and_then(|expr| match expr {
@@ -3237,7 +3284,7 @@ fn is_app_of_builtin(expr: &Expr, expected: &str) -> bool {
     let Expr::List(list, _) = expr else {
         return false;
     };
-    if get_tag(list) != Some("var") {
+    if get_tag(list) != Some(DeepTag::Var) {
         return false;
     }
     matches!(
@@ -3269,7 +3316,7 @@ fn cons_two_int_pair(expr: &Expr) -> Option<(usize, usize)> {
     let Expr::List(outer, _) = expr else {
         return None;
     };
-    if get_tag(outer) != Some("app") {
+    if get_tag(outer) != Some(DeepTag::App) {
         return None;
     }
     let outer_children = children(outer);
@@ -3282,7 +3329,7 @@ fn cons_two_int_pair(expr: &Expr) -> Option<(usize, usize)> {
     let Expr::List(tail_list, _) = tail else {
         return None;
     };
-    if get_tag(tail_list) != Some("app") {
+    if get_tag(tail_list) != Some(DeepTag::App) {
         return None;
     }
     let tail_children = children(tail_list);
@@ -3295,7 +3342,7 @@ fn cons_two_int_pair(expr: &Expr) -> Option<(usize, usize)> {
     let Expr::List(nil_list, _) = nil_expr else {
         return None;
     };
-    if get_tag(nil_list) != Some("var") {
+    if get_tag(nil_list) != Some(DeepTag::Var) {
         return None;
     }
     let nil_name = match children(nil_list).first() {
@@ -3322,7 +3369,7 @@ fn cons_chain_pair_list(expr: &Expr) -> Option<Vec<(usize, usize)>> {
             return None;
         };
         match get_tag(outer)? {
-            "var" => {
+            DeepTag::Var => {
                 let name = match children(outer).first() {
                     Some(Expr::Atom(Atom::Symbol(s), _)) => s.as_str(),
                     _ => return None,
@@ -3332,7 +3379,7 @@ fn cons_chain_pair_list(expr: &Expr) -> Option<Vec<(usize, usize)>> {
                 }
                 return None;
             }
-            "app" => {
+            DeepTag::App => {
                 let app_children = children(outer);
                 let func = app_children.first()?;
                 if !is_app_of_builtin(func, "Cons") {
@@ -3360,7 +3407,7 @@ fn collect_cons_chain(expr: &Expr) -> Option<Vec<&Expr>> {
             return None;
         };
         match get_tag(list)? {
-            "var" => {
+            DeepTag::Var => {
                 let name = match children(list).first() {
                     Some(Expr::Atom(Atom::Symbol(s), _)) => s.as_str(),
                     _ => return None,
@@ -3370,7 +3417,7 @@ fn collect_cons_chain(expr: &Expr) -> Option<Vec<&Expr>> {
                 }
                 return None;
             }
-            "app" => {
+            DeepTag::App => {
                 let app_children = children(list);
                 let func = app_children.first()?;
                 if !is_app_of_builtin(func, "Cons") {
@@ -3445,11 +3492,11 @@ fn extract_int_for_dim(expr: &Expr) -> Option<i64> {
     match expr {
         Expr::Atom(Atom::Int(n), _) => Some(*n),
         Expr::List(list, _) => match get_tag(list)? {
-            "lit" => match list.elements.get(2)? {
+            DeepTag::Lit => match list.elements.get(2)? {
                 Expr::Atom(Atom::Int(n), _) => Some(*n),
                 _ => None,
             },
-            "cast" => extract_int_for_dim(list.elements.get(2)?),
+            DeepTag::Cast => extract_int_for_dim(list.elements.get(2)?),
             _ => None,
         },
         _ => None,
@@ -3473,7 +3520,7 @@ fn extract_int_axis(expr: &Expr) -> Option<i64> {
     }
     // Negative-axis literal: `-k` desugars to `(app (var neg) <inner>)`.
     if let Expr::List(list, _) = expr
-        && get_tag(list) == Some("app")
+        && get_tag(list) == Some(DeepTag::App)
         && let Some(callee) = children(list).first()
         && expr_is_var_named(callee, "neg")
         && let Some(inner) = children(list).get(1)
@@ -3506,7 +3553,7 @@ fn extract_int_axis(expr: &Expr) -> Option<i64> {
 fn strip_cast_wrappers(expr: &Expr) -> &Expr {
     let mut current = expr;
     while let Expr::List(list, _) = current {
-        if get_tag(list) == Some("cast")
+        if get_tag(list) == Some(DeepTag::Cast)
             && let Some(inner) = list.elements.get(2)
         {
             current = inner;
@@ -3522,7 +3569,7 @@ fn shape_app_operand_axis(expr: &Expr) -> Option<(&Expr, usize)> {
         return None;
     };
     // Strip outer `cast(..., int32)` wrappers to reach the `shape` app.
-    if get_tag(list) == Some("cast") {
+    if get_tag(list) == Some(DeepTag::Cast) {
         return list.elements.get(2).and_then(shape_app_operand_axis);
     }
     if builtin_name(list) != Some("shape") {
@@ -3544,7 +3591,7 @@ fn symbolic_dim_var_name(expr: &Expr) -> Option<String> {
     let Expr::List(list, _) = expr else {
         return None;
     };
-    if get_tag(list) != Some("var") {
+    if get_tag(list) != Some(DeepTag::Var) {
         return None;
     }
     children(list)
@@ -3594,7 +3641,7 @@ fn static_to_tensor_literal(expr: &Expr) -> Option<LiteralToTensor> {
     let Expr::List(list, _) = expr else {
         return None;
     };
-    if get_tag(list) != Some("app") {
+    if get_tag(list) != Some(DeepTag::App) {
         return None;
     }
     let app_kids = children(list);
@@ -3612,7 +3659,7 @@ fn expr_is_var_named(expr: &Expr, expected_name: &str) -> bool {
     let Expr::List(list, _) = expr else {
         return false;
     };
-    if get_tag(list) != Some("var") {
+    if get_tag(list) != Some(DeepTag::Var) {
         return false;
     }
     children(list).first().and_then(symbol_name) == Some(expected_name)
@@ -3690,17 +3737,17 @@ fn extract_numeric_leaf(expr: &Expr) -> Option<f64> {
         Expr::Atom(Atom::Float(f), _) => Some(*f),
         Expr::Atom(Atom::Bool(b), _) => Some(if *b { 1.0 } else { 0.0 }),
         Expr::List(list, _) => match get_tag(list)? {
-            "lit" => match list.elements.get(2)? {
+            DeepTag::Lit => match list.elements.get(2)? {
                 Expr::Atom(Atom::Int(n), _) => Some(*n as f64),
                 Expr::Atom(Atom::Float(f), _) => Some(*f),
                 Expr::Atom(Atom::Bool(b), _) => Some(if *b { 1.0 } else { 0.0 }),
                 _ => None,
             },
-            "cast" => {
+            DeepTag::Cast => {
                 let inner = list.elements.get(2)?;
                 extract_numeric_leaf(inner)
             }
-            "app" => {
+            DeepTag::App => {
                 // Negative literal: `-x` desugars to
                 // `(app (var neg) <inner>)`. The recognizer returns
                 // `-extract(inner)` so the literal recognizer sees
@@ -3927,7 +3974,7 @@ fn extract_param_type(expr: &Expr, index: usize) -> Option<&Expr> {
     let Expr::List(list, _) = expr else {
         return None;
     };
-    if get_tag(list) != Some("fn") {
+    if get_tag(list) != Some(DeepTag::Fn) {
         return None;
     }
     let params = children(list).first()?;
@@ -3989,7 +4036,7 @@ fn extract_fn_return_type(expr: &Expr) -> Option<&Expr> {
     let Expr::List(list, _) = expr else {
         return None;
     };
-    if get_tag(list) != Some("fn") {
+    if get_tag(list) != Some(DeepTag::Fn) {
         return None;
     }
     let Expr::Map(meta, _) = list.elements.get(1)? else {
@@ -3999,7 +4046,7 @@ fn extract_fn_return_type(expr: &Expr) -> Option<&Expr> {
     let Expr::List(fn_ty, _) = ty_expr else {
         return None;
     };
-    if get_tag(fn_ty) != Some("t-fn") {
+    if get_tag(fn_ty) != Some(DeepTag::TFn) {
         return None;
     }
     children(fn_ty).last()
@@ -4466,8 +4513,7 @@ impl LowerCtx {
     fn try_extract_ref_type(expr: &Expr) -> Option<&Expr> {
         if let Expr::List(list, _) = expr
             && list.elements.len() >= 3
-            && let Expr::Atom(Atom::Symbol(tag), _) = &list.elements[0]
-            && tag == "t-ref"
+            && list.tag() == Some(DeepTag::TRef)
         {
             return list.elements.get(2);
         }
@@ -4478,8 +4524,7 @@ impl LowerCtx {
         // (t-prim {} f32)
         if let Expr::List(list, _) = expr
             && list.elements.len() >= 3
-            && let Expr::Atom(Atom::Symbol(tag), _) = &list.elements[0]
-            && tag == "t-prim"
+            && list.tag() == Some(DeepTag::TPrim)
             && let Expr::Atom(Atom::Symbol(name), _) = &list.elements[2]
         {
             return Prim::parse_name(name);
@@ -4506,8 +4551,7 @@ impl LowerCtx {
         // Children after tag+meta: dimension nodes followed by a t-prim node as the last child.
         if let Expr::List(list, _) = expr
             && list.elements.len() >= 3
-            && let Expr::Atom(Atom::Symbol(tag), _) = &list.elements[0]
-            && tag == "t-tensor"
+            && list.tag() == Some(DeepTag::TTensor)
         {
             // elements[0] = tag, elements[1] = meta, elements[2..] = children
             let children = &list.elements[2..];
@@ -4530,8 +4574,7 @@ impl LowerCtx {
             let prim = if let Some(last_child) = children.last()
                 && let Expr::List(prec_list, _) = last_child
                 && prec_list.elements.len() >= 3
-                && let Expr::Atom(Atom::Symbol(prec_tag), _) = &prec_list.elements[0]
-                && prec_tag == "t-var"
+                && prec_list.tag() == Some(DeepTag::TVar)
             {
                 let var_name = match &prec_list.elements[2] {
                     Expr::Atom(Atom::Symbol(name), _) => name.clone(),
@@ -4573,8 +4616,7 @@ impl LowerCtx {
                 // the inner comment); it is dropped, never emitted as a rank
                 // dim, because the IR `DimInfo` cannot represent one.
                 if let Expr::List(dl, _) = child
-                    && let Some(Expr::Atom(Atom::Symbol(tag), _)) = dl.elements.first()
-                    && tag == "d-rank"
+                    && dl.tag() == Some(DeepTag::DRank)
                 {
                     let rank_name = match dl.elements.get(2) {
                         Some(Expr::Atom(Atom::Symbol(name), _)) => name.clone(),
@@ -4618,20 +4660,15 @@ impl LowerCtx {
     fn try_extract_dim(expr: &Expr) -> Option<DimInfo> {
         if let Expr::List(list, _) = expr
             && list.elements.len() >= 3
-            && let Expr::Atom(Atom::Symbol(tag), _) = &list.elements[0]
+            && let Some(tag) = list.tag()
         {
-            match tag.as_str() {
-                "d-name" => {
+            match tag {
+                DeepTag::DName | DeepTag::DVar => {
                     if let Expr::Atom(Atom::Symbol(name), _) = &list.elements[2] {
                         return Some(DimInfo::Named(name.clone(), None));
                     }
                 }
-                "d-var" => {
-                    if let Expr::Atom(Atom::Symbol(name), _) = &list.elements[2] {
-                        return Some(DimInfo::Named(name.clone(), None));
-                    }
-                }
-                "d-lit" => {
+                DeepTag::DLit => {
                     if let Expr::Atom(Atom::Int(n), _) = &list.elements[2] {
                         return Some(DimInfo::Lit(*n as usize));
                     }
@@ -4676,11 +4713,11 @@ impl LowerCtx {
 
     fn lower_top_level(&mut self, expr: &Expr) {
         if let Expr::List(list, _) = expr
-            && let Some(Expr::Atom(Atom::Symbol(tag), _)) = list.elements.first()
+            && let Some(tag) = list.tag()
         {
-            match tag.as_str() {
+            match tag {
                 // Skip type-level declarations.
-                "defsig" | "deftype" | "typealias" => return,
+                DeepTag::Defsig | DeepTag::Deftype | DeepTag::Typealias => return,
                 // Skip module-system declarations (issue chelis#232):
                 // `export` / `import` / `import-all` are name-routing
                 // directives — they have no runtime value and must not
@@ -4689,14 +4726,14 @@ impl LowerCtx {
                 // emit a `Load`/`Const` node and `add_root` it, breaking
                 // the `tensor_root_names.len() == dag.roots().len()`
                 // invariant in chelis-compiler-api::compiler::compile_source.
-                "export" | "import" | "import-all" => return,
+                DeepTag::Export | DeepTag::Import | DeepTag::ImportAll => return,
                 _ => {}
             }
         }
 
         let value = self.lower_expr(expr);
         if let Expr::List(list, _) = expr
-            && get_tag(list) == Some("def")
+            && get_tag(list) == Some(DeepTag::Def)
             && let Some(name) = children(list).first().and_then(|expr| match expr {
                 Expr::Atom(Atom::Symbol(name), _) => Some(name.as_str()),
                 _ => None,
@@ -4895,6 +4932,11 @@ impl LowerCtx {
                 None,
                 self.current_span_id.clone(),
             ),
+            Atom::Tag(_) => raise_malformed_deep(
+                "a bare Deep tag atom in expression position",
+                None,
+                self.current_span_id.clone(),
+            ),
         }
     }
 
@@ -4912,77 +4954,173 @@ impl LowerCtx {
             );
         }
 
-        let tag = match &elems[0] {
-            Expr::Atom(Atom::Symbol(s), _) => s.as_str(),
-            _ => raise_malformed_deep(
+        // chelis#731 Phase 3 (checker_totality.md §C4.2, decode-once): the
+        // parser stamped vocabulary tags as `Atom::Tag`; the raw symbol
+        // survives only for non-vocabulary heads. The match is exhaustive
+        // with no `_` arm, so a 63rd `DeepTag` variant fails to compile
+        // until this dispatch chooses its lowering disposition.
+        let deep_tag = list.tag();
+        if deep_tag.is_none() && list.unknown_tag_symbol().is_none() {
+            raise_malformed_deep(
                 "a Deep list node whose tag position is not a symbol",
                 Some(span),
                 self.current_span_id.clone(),
-            ),
-        };
+            );
+        }
 
-        match tag {
-            "def" => self.lower_def(elems),
-            "let" => self.lower_let(elems),
-            "lit" => self.lower_lit(elems),
-            "var" => self.lower_var(elems),
-            "app" => self.lower_app(elems, span),
-            "fn" => self.lower_fn(elems),
-            "pipe" => self.lower_pipe(elems),
-            "cast" => self.lower_cast(elems),
-            "if" => self.lower_if(elems),
-            "tuple" => self.lower_tuple(elems),
-            "par" => self.lower_par(elems),
-            "realize" => self.lower_realize(elems),
-            "copy" => self.lower_copy(elems),
-            "borrow" => self.lower_identity(elems),
-            "tuple-get" => self.lower_tuple_get(elems),
-            "record" => self.lower_record(elems),
-            "access" => self.lower_access(elems),
-            "match" => self.lower_match(elems),
-            "grad" => self.lower_grad(elems),
-            "handle-effect" => self.lower_handle_effect(list),
-            "jit" => self.lower_jit(elems),
-            "vmap" => self.lower_unsupported(tag, elems),
+        match deep_tag {
+            Some(DeepTag::Def) => self.lower_def(elems),
+            Some(DeepTag::Let) => self.lower_let(elems),
+            Some(DeepTag::Lit) => self.lower_lit(elems),
+            Some(DeepTag::Var) => self.lower_var(elems),
+            Some(DeepTag::App) => self.lower_app(elems, span),
+            Some(DeepTag::Fn) => self.lower_fn(elems),
+            Some(DeepTag::Pipe) => self.lower_pipe(elems),
+            Some(DeepTag::Cast) => self.lower_cast(elems),
+            Some(DeepTag::If) => self.lower_if(elems),
+            Some(DeepTag::Tuple) => self.lower_tuple(elems),
+            Some(DeepTag::Par) => self.lower_par(elems),
+            Some(DeepTag::Realize) => self.lower_realize(elems),
+            Some(DeepTag::Copy) => self.lower_copy(elems),
+            Some(DeepTag::Borrow) => self.lower_identity(elems),
+            Some(DeepTag::TupleGet) => self.lower_tuple_get(elems),
+            Some(DeepTag::Record) => self.lower_record(elems),
+            Some(DeepTag::Access) => self.lower_access(elems),
+            Some(DeepTag::Match) => self.lower_match(elems),
+            Some(DeepTag::Grad) => self.lower_grad(elems),
+            Some(DeepTag::HandleEffect) => self.lower_handle_effect(list),
+            Some(DeepTag::Jit) => self.lower_jit(elems),
+            Some(DeepTag::Vmap) => self.lower_unsupported(DeepTag::Vmap.as_str(), elems),
+            Some(DeepTag::Block) => self.lower_block(elems, span),
             // Declarations lowered as an inert zero node: these forms are
             // not value expressions (the checker never lets their "value"
             // flow into a computation), so the node is a structural no-op,
             // not a value substitution. Census row 16 keep-with-comment
             // (chelis#730 section C1.4): a raise here would break every
             // program that declares a signature or type alias.
-            "defsig" | "deftype" | "typealias" => LoweredValue::Node(self.dag.add_node(
-                RiscOp::Const { value: 0.0 },
-                vec![],
-                Self::default_type(),
-                self.current_span_id.clone(),
-            )),
-            _ => {
-                // Unknown-tag fallthrough: children are sequence-lowered
-                // and the last value wins (some wrapper tags rely on
-                // this). A CHILDLESS unknown tag has no value to forward
-                // and previously seeded a silent zero - that childless
-                // case now raises (census row 16, section C1.4; the
-                // parser's closed 62-tag vocabulary keeps this dead, see
-                // canary_unknown_deep_tag_is_rejected).
-                if elems.len() <= 2 {
-                    raise_malformed_deep(
-                        &format!("an unknown childless Deep tag `{tag}`"),
-                        Some(span),
-                        self.current_span_id.clone(),
-                    );
-                }
-                let mut last = LoweredValue::Node(self.dag.add_node(
+            Some(DeepTag::Defsig | DeepTag::Deftype | DeepTag::Typealias) => {
+                LoweredValue::Node(self.dag.add_node(
                     RiscOp::Const { value: 0.0 },
                     vec![],
                     Self::default_type(),
                     self.current_span_id.clone(),
-                ));
-                for elem in &elems[2..] {
-                    last = self.lower_expr(elem);
-                }
-                last
+                ))
+            }
+            // In-vocabulary tags with no dedicated lowering case. Before
+            // chelis#731 Phase 3 these shared the unknown-tag fallthrough;
+            // its behavior (sequence-lower, last child wins; childless
+            // raises) is preserved, now as an explicit per-tag disposition.
+            Some(
+                DeepTag::Module
+                | DeepTag::Import
+                | DeepTag::ImportAll
+                | DeepTag::Export
+                | DeepTag::Defdim
+                | DeepTag::Variant
+                | DeepTag::Field
+                | DeepTag::Arm
+                | DeepTag::RecordUpdate
+                | DeepTag::PatVar
+                | DeepTag::PatLit
+                | DeepTag::PatCtor
+                | DeepTag::PatTuple
+                | DeepTag::PatRecord
+                | DeepTag::PatWild
+                | DeepTag::PatAs
+                | DeepTag::TPrim
+                | DeepTag::TFn
+                | DeepTag::TTensor
+                | DeepTag::TRef
+                | DeepTag::TAdt
+                | DeepTag::TVar
+                | DeepTag::TUnit
+                | DeepTag::TTuple
+                | DeepTag::DName
+                | DeepTag::DVar
+                | DeepTag::DLit
+                | DeepTag::DRank
+                | DeepTag::Quote
+                | DeepTag::Unquote
+                | DeepTag::Splice
+                | DeepTag::Params
+                | DeepTag::Bind
+                | DeepTag::Kv
+                | DeepTag::Effects
+                | DeepTag::Resource,
+            ) => {
+                let tag = deep_tag.expect("arm implies a decoded tag").as_str();
+                self.lower_sequence_fallthrough(tag, elems, span)
+            }
+            // The raw-string boundary (checker_totality.md §C1.2): a tag
+            // string outside the closed vocabulary never came from the
+            // parser. Same fallthrough behavior as before Phase 3; the
+            // parser's vocabulary screen plus the checker's [04-TOT-1]
+            // dispositions keep this arm dead for compiled programs (see
+            // canary_unknown_deep_tag_is_rejected).
+            None => {
+                let tag = list
+                    .unknown_tag_symbol()
+                    .expect("checked above: symbol head")
+                    .to_string();
+                self.lower_sequence_fallthrough(&tag, elems, span)
             }
         }
+    }
+
+    /// chelis#859: `(block {} e1 ... en)` sequences its children and the
+    /// value is the last child's (spec/03 §2.3), matching the checker's
+    /// block case and the host lanes. Discarded non-last values become
+    /// dead DAG nodes and are removed by DCE; a childless block has no
+    /// value and raises.
+    fn lower_block(&mut self, elems: &[Expr], span: Span) -> LoweredValue {
+        if elems.len() <= 2 {
+            raise_malformed_deep(
+                "a childless `block` node (the value is the last child, so at least one \
+                 child expression is required)",
+                Some(span),
+                self.current_span_id.clone(),
+            );
+        }
+        let mut last = LoweredValue::Node(self.dag.add_node(
+            RiscOp::Const { value: 0.0 },
+            vec![],
+            Self::default_type(),
+            self.current_span_id.clone(),
+        ));
+        for elem in &elems[2..] {
+            last = self.lower_expr(elem);
+        }
+        last
+    }
+
+    /// The census-row-16 fallthrough (chelis#730 section C1.4), shared by
+    /// the no-dedicated-case vocabulary tags and the raw-string boundary:
+    /// children are sequence-lowered and the last value wins (some wrapper
+    /// tags rely on this). A CHILDLESS tag has no value to forward and
+    /// previously seeded a silent zero - that childless case raises.
+    fn lower_sequence_fallthrough(
+        &mut self,
+        tag: &str,
+        elems: &[Expr],
+        span: Span,
+    ) -> LoweredValue {
+        if elems.len() <= 2 {
+            raise_malformed_deep(
+                &format!("an unknown childless Deep tag `{tag}`"),
+                Some(span),
+                self.current_span_id.clone(),
+            );
+        }
+        let mut last = LoweredValue::Node(self.dag.add_node(
+            RiscOp::Const { value: 0.0 },
+            vec![],
+            Self::default_type(),
+            self.current_span_id.clone(),
+        ));
+        for elem in &elems[2..] {
+            last = self.lower_expr(elem);
+        }
+        last
     }
 
     /// `(def {meta...} name body)`
@@ -5248,8 +5386,7 @@ impl LowerCtx {
 
         // Check if func is a known built-in: (var {} name).
         if let Expr::List(func_list, _) = &elems[2]
-            && let Some(Expr::Atom(Atom::Symbol(func_tag), _)) = func_list.elements.first()
-            && func_tag == "var"
+            && func_list.tag() == Some(DeepTag::Var)
             && let Some(Expr::Atom(Atom::Symbol(func_name), _)) = func_list.elements.get(2)
             && !self.program_defs.contains_key(func_name)
             && !self.local_callables.contains_key(func_name)
@@ -5369,8 +5506,8 @@ impl LowerCtx {
             return None;
         };
         match get_tag(list) {
-            Some("fn") => Some(CallableExpr::Plain(expr.clone())),
-            Some("var") => {
+            Some(DeepTag::Fn) => Some(CallableExpr::Plain(expr.clone())),
+            Some(DeepTag::Var) => {
                 let name = children(list).first().and_then(|expr| match expr {
                     Expr::Atom(Atom::Symbol(name), _) => Some(name.clone()),
                     _ => None,
@@ -5408,7 +5545,7 @@ impl LowerCtx {
                 }
                 None
             }
-            Some("vmap") => {
+            Some(DeepTag::Vmap) => {
                 let kids = children(list);
                 // chelis#524: distinguish the documented `vmap` contract
                 // (axis argument ABSENT -> map over axis 0) from an axis
@@ -5438,7 +5575,7 @@ impl LowerCtx {
                     },
                 };
                 if let Some(Expr::List(grad_list, _)) = kids.first()
-                    && get_tag(grad_list) == Some("grad")
+                    && get_tag(grad_list) == Some(DeepTag::Grad)
                 {
                     let wrt = self.extract_grad_wrt_indices(grad_list);
                     return self
@@ -5466,7 +5603,7 @@ impl LowerCtx {
                         CallableExpr::Parameter { .. } => None,
                     })
             }
-            Some("grad") => self
+            Some(DeepTag::Grad) => self
                 .resolve_callable_expr_inner(children(list).first()?, visited)
                 .and_then(|inner| match inner {
                     CallableExpr::Plain(fn_expr) => Some(CallableExpr::Grad {
@@ -5487,7 +5624,7 @@ impl LowerCtx {
     fn extract_grad_wrt_indices(&self, list: &List) -> Option<Vec<usize>> {
         let wrt_expr = children(list).get(1)?;
         if let Expr::List(tuple, _) = wrt_expr
-            && get_tag(tuple) == Some("tuple")
+            && get_tag(tuple) == Some(DeepTag::Tuple)
         {
             return Some(
                 children(tuple)
@@ -6787,7 +6924,7 @@ impl LowerCtx {
         let Expr::List(list, _) = expr else {
             return None;
         };
-        if get_tag(list) != Some("fn") {
+        if get_tag(list) != Some(DeepTag::Fn) {
             return None;
         }
         let kids = children(list);
@@ -6796,7 +6933,7 @@ impl LowerCtx {
         let Expr::List(params_list, _) = params else {
             return None;
         };
-        if get_tag(params_list) != Some("params") {
+        if get_tag(params_list) != Some(DeepTag::Params) {
             return None;
         }
         // chelis#620: use the shared three-form walker. A param whose name
@@ -9154,14 +9291,14 @@ impl LowerCtx {
         };
         match get_tag(list) {
             // A bare `var` bound to a static value by a prior `let`.
-            Some("var") => self
+            Some(DeepTag::Var) => self
                 .static_size_bindings
                 .get(&bare_var_name(expr)?)
                 .copied(),
             // `cast(<inner>, ty)` — fold the inner value.
-            Some("cast") => self.fold_static_size(children(list).first()?),
+            Some(DeepTag::Cast) => self.fold_static_size(children(list).first()?),
             // Integer arithmetic over static operands.
-            Some("app") => {
+            Some(DeepTag::App) => {
                 let kids = children(list);
                 let op = bare_var_name(kids.first()?)?;
                 let operands = &kids[1..];
@@ -9342,12 +9479,12 @@ impl LowerCtx {
         match get_tag(list) {
             // A bare `var` bound to a static value by a prior `let`. (A
             // shape-bound var was already handled above.)
-            Some("var") => self
+            Some(DeepTag::Var) => self
                 .static_size_bindings
                 .get(&bare_var_name(expr)?)
                 .copied(),
-            Some("cast") => self.fold_shape_derived_static_size(children(list).first()?),
-            Some("app") => {
+            Some(DeepTag::Cast) => self.fold_shape_derived_static_size(children(list).first()?),
+            Some(DeepTag::App) => {
                 let kids = children(list);
                 let op = bare_var_name(kids.first()?)?;
                 let operands = &kids[1..];
@@ -9416,10 +9553,10 @@ impl LowerCtx {
             return false;
         };
         match get_tag(list) {
-            Some("cast") => children(list)
+            Some(DeepTag::Cast) => children(list)
                 .first()
                 .is_some_and(|inner| self.is_shape_derived_arith_dim(inner)),
-            Some("app") => {
+            Some(DeepTag::App) => {
                 let kids = children(list);
                 let Some(op) = kids.first().and_then(bare_var_name) else {
                     return false;
@@ -9455,12 +9592,12 @@ impl LowerCtx {
             return false;
         };
         match get_tag(list) {
-            Some("var") => bare_var_name(expr)
+            Some(DeepTag::Var) => bare_var_name(expr)
                 .is_some_and(|name| self.static_size_bindings.contains_key(&name)),
-            Some("cast") => children(list)
+            Some(DeepTag::Cast) => children(list)
                 .first()
                 .is_some_and(|inner| self.is_shape_derived_arith_leaf(inner)),
-            Some("app") => self.is_shape_derived_arith_dim(expr),
+            Some(DeepTag::App) => self.is_shape_derived_arith_dim(expr),
             _ => false,
         }
     }
@@ -9472,11 +9609,10 @@ impl LowerCtx {
 
         match expr {
             Expr::Atom(Atom::Symbol(name), _) => Some(self.resolve_dim_expr_symbol(name)),
-            Expr::List(list, _) => match (list.elements.first(), list.elements.get(2)) {
-                (
-                    Some(Expr::Atom(Atom::Symbol(tag), _)),
-                    Some(Expr::Atom(Atom::Symbol(name), _)),
-                ) if tag == "var" => Some(self.resolve_dim_expr_symbol(name)),
+            Expr::List(list, _) => match (list.tag(), list.elements.get(2)) {
+                (Some(DeepTag::Var), Some(Expr::Atom(Atom::Symbol(name), _))) => {
+                    Some(self.resolve_dim_expr_symbol(name))
+                }
                 _ => None,
             },
             _ => None,
@@ -9687,7 +9823,7 @@ impl LowerCtx {
                 // cast(<inner>, <target>): value-preserving only for a float
                 // target; an integer target truncates and is left unresolved
                 // (chelis#776 — go loud, do not guess the cast semantics).
-                Some("cast") => {
+                Some(DeepTag::Cast) => {
                     let inner = list.elements.get(2)?;
                     let target = list.elements.get(3)?;
                     match Self::try_extract_prim(target) {
@@ -9697,7 +9833,7 @@ impl LowerCtx {
                 }
                 // neg(<inner>): unary minus desugars to
                 // `(app {} (var {} neg) <inner>)`.
-                Some("app")
+                Some(DeepTag::App)
                     if children(list)
                         .first()
                         .is_some_and(|callee| expr_is_var_named(callee, "neg")) =>
@@ -9737,7 +9873,7 @@ impl LowerCtx {
     fn resolve_static_f64_arg(&self, expr: &Expr, builtin: &str, arg_desc: &str) -> f64 {
         self.extract_f64_value(expr).unwrap_or_else(|| {
             let found = match expr {
-                Expr::List(list, _) => get_tag(list).unwrap_or("expression"),
+                Expr::List(list, _) => get_tag(list).map(DeepTag::as_str).unwrap_or("expression"),
                 _ => "expression",
             };
             raise_fatal_lowering_error(
@@ -9930,7 +10066,7 @@ impl LowerCtx {
     /// silently empty output.
     fn extract_pair_list(&self, expr: &Expr) -> Option<Vec<(usize, usize)>> {
         if let Expr::List(list, _) = expr
-            && get_tag(list) != Some("app")
+            && get_tag(list) != Some(DeepTag::App)
         {
             // Hand-written `(list ...)` (or similar non-app) form.
             let mut pairs = Vec::new();
@@ -10159,15 +10295,15 @@ impl LowerCtx {
             return false;
         };
         match get_tag(list) {
-            Some("t-fn") => true,
-            Some("t-ref") => Self::type_expr_is_fn(children(list).first()),
+            Some(DeepTag::TFn) => true,
+            Some(DeepTag::TRef) => Self::type_expr_is_fn(children(list).first()),
             _ => false,
         }
     }
 
     fn lower_fn_param_binding(&mut self, name: &str, ty_expr: Option<&Expr>) -> LoweredValue {
         if let Some(Expr::List(list, _)) = ty_expr
-            && get_tag(list) == Some("t-tuple")
+            && get_tag(list) == Some(DeepTag::TTuple)
         {
             let items = children(list)
                 .iter()
@@ -10220,8 +10356,7 @@ impl LowerCtx {
             // (the accumulator was returned unchanged). Top-level
             // bindings then materialised as `()`/Unit in generated C.
             let unary_builtin_name = if let Expr::List(func_list, _) = func_expr
-                && let Some(Expr::Atom(Atom::Symbol(tag), _)) = func_list.elements.first()
-                && tag == "var"
+                && func_list.tag() == Some(DeepTag::Var)
                 && let Some(Expr::Atom(Atom::Symbol(fname), _)) = func_list.elements.get(2)
             {
                 Some(fname.as_str())
@@ -10252,8 +10387,7 @@ impl LowerCtx {
             );
             if is_known_unary_builtin
                 && let Expr::List(func_list, _) = func_expr
-                && let Some(Expr::Atom(Atom::Symbol(tag), _)) = func_list.elements.first()
-                && tag == "var"
+                && func_list.tag() == Some(DeepTag::Var)
                 && let Some(Expr::Atom(Atom::Symbol(fname), _)) = func_list.elements.get(2)
             {
                 let current_node = current.expect_node("pipe stage");
@@ -10513,8 +10647,7 @@ impl LowerCtx {
             }
         } else if let Expr::List(list, _) = &elems[3]
             && list.elements.len() >= 3
-            && let Expr::Atom(Atom::Symbol(tag), _) = &list.elements[0]
-            && tag == "t-prim"
+            && list.tag() == Some(DeepTag::TPrim)
             && let Expr::Atom(Atom::Symbol(pname), _) = &list.elements[2]
         {
             // `(t-prim {} <name>)` whose name is not a recognized
@@ -10882,7 +11015,7 @@ impl LowerCtx {
             let Expr::List(kv_list, _) = kv else {
                 continue;
             };
-            if get_tag(kv_list) != Some("kv") {
+            if get_tag(kv_list) != Some(DeepTag::Kv) {
                 continue;
             }
             let kv_kids = children(kv_list);
@@ -10974,7 +11107,7 @@ impl LowerCtx {
             let Expr::List(arm_list, _) = arm else {
                 continue;
             };
-            if get_tag(arm_list) != Some("arm") {
+            if get_tag(arm_list) != Some(DeepTag::Arm) {
                 continue;
             }
             let arm_kids = children(arm_list);
@@ -11227,6 +11360,59 @@ mod tests {
             .unwrap_or_else(|errors| panic!("effect check failed: {errors:?}"));
         chelis_types::check_linearity(&checked)
             .unwrap_or_else(|errors| panic!("linearity check failed: {errors:?}"))
+    }
+
+    /// chelis#887: the boundary guard must actually FIRE. An assertion with
+    /// no test that it triggers is the "belief without a test" case
+    /// `loud_unsupported.md` section C1 rule 4 rejects, and it is how a
+    /// guard silently rots into a no-op.
+    #[test]
+    #[should_panic(expected = "decode-once violated at the lowering boundary")]
+    fn boundary_guard_fires_on_a_raw_vocabulary_head() {
+        // What a pre-decode-once programmatic producer builds: a vocabulary
+        // tag spelled `Atom::Symbol` at element 0.
+        let raw = Expr::List(
+            chelis_deep::ast::List {
+                elements: vec![
+                    Expr::Atom(Atom::Symbol("t-prim".into()), Span::new(0, 0)),
+                    Expr::Map(chelis_deep::ast::MetaMap::default(), Span::new(0, 0)),
+                ],
+            },
+            Span::new(0, 0),
+        );
+        assert_decode_once_at_boundary("test", std::slice::from_ref(&raw));
+    }
+
+    /// Negative parity: a properly stamped node of the SAME shape passes, so
+    /// the guard is discriminating rather than rejecting all lists.
+    #[test]
+    fn boundary_guard_accepts_a_stamped_head() {
+        let stamped = Expr::node(
+            DeepTag::TPrim,
+            chelis_deep::ast::MetaMap::default(),
+            vec![],
+            Span::new(0, 0),
+        );
+        assert_decode_once_at_boundary("test", std::slice::from_ref(&stamped));
+    }
+
+    /// The env-keyed variant walks map VALUES, which is where library
+    /// `program_defs` and type envs carry Deep.
+    #[test]
+    #[should_panic(expected = "decode-once violated at the lowering boundary")]
+    fn boundary_guard_fires_inside_a_name_keyed_env() {
+        let raw = Expr::List(
+            chelis_deep::ast::List {
+                elements: vec![
+                    Expr::Atom(Atom::Symbol("effects".into()), Span::new(0, 0)),
+                    Expr::Map(chelis_deep::ast::MetaMap::default(), Span::new(0, 0)),
+                ],
+            },
+            Span::new(0, 0),
+        );
+        let mut env: HashMap<String, Expr> = HashMap::new();
+        env.insert("lib_fn".to_string(), raw);
+        assert_decode_once_in_env("test", &env);
     }
 
     fn parse_and_lower(src: &str) -> Dag {
@@ -13681,6 +13867,48 @@ mod regression_tests {
             precision: Prim::F8e4m3,
         };
         let _ = ty_expr_to_deep(&ty);
+    }
+
+    /// rt-c2e7c23d F3: `ty_expr_to_deep` is a programmatic producer running
+    /// INSIDE the lowerer, downstream of both `parser::stamp_tags` and the
+    /// desugarer, so nothing upstream will stamp element 0 on its output. It
+    /// spelled `t-prim` / `t-tensor` as `Atom::Symbol`, which put raw
+    /// vocabulary strings back into the in-memory tree and made the typed
+    /// readers below take their untagged policy for these nodes.
+    ///
+    /// The standing decode-once invariant covers PARSED and DESUGARED trees
+    /// (`chelis-deep` and `chelis-surf`); this is the assertion that extends
+    /// it past the synthesis boundary, which is where the escape was.
+    #[test]
+    fn ty_expr_to_deep_carries_no_raw_vocabulary_tag_strings() {
+        for (ty, expected) in [
+            (
+                crate::dag::TensorType {
+                    dims: vec![],
+                    precision: Prim::F32,
+                },
+                DeepTag::TPrim,
+            ),
+            (
+                crate::dag::TensorType {
+                    dims: vec![DimInfo::Lit(4)],
+                    precision: Prim::Int64,
+                },
+                DeepTag::TTensor,
+            ),
+        ] {
+            let expr = ty_expr_to_deep(&ty);
+            assert_eq!(
+                chelis_deep::validate::find_raw_vocabulary_tag(std::slice::from_ref(&expr)),
+                None,
+                "a synthesized type node must not carry a raw vocabulary tag string"
+            );
+            assert_eq!(
+                expr.tag(),
+                Some(expected),
+                "the typed readers must see the decoded tag, not the untagged policy"
+            );
+        }
     }
 
     fn parse_and_lower(src: &str) -> Dag {

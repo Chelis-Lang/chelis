@@ -561,7 +561,11 @@ m = 3.0
 
     // Value-binding int constant `n = 3`.
     let node = super::const_lit_node(&exprs, "n", 3.0);
-    assert_eq!(super::tag(&node), Some("lit"), "is a lit node");
+    assert_eq!(
+        super::tag(&node),
+        Some(chelis_deep::DeepTag::Lit),
+        "is a lit node"
+    );
     let lit_value = super::children(&node).first().cloned().expect("lit value");
     assert!(
         matches!(lit_value, Expr::Atom(Atom::Int(3), _)),

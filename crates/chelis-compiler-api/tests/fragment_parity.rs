@@ -45,7 +45,7 @@
 //! here. Each case pins both shapes so a regression in the descent is loud.
 
 use chelis_compiler_api::{ReplacementError, ReplacementReport, check_body_replacement};
-use chelis_deep::{Atom, Expr};
+use chelis_deep::Expr;
 
 // ── Surf -> Deep rendering, mirroring `chelis deep` (non-annotated) ──────
 
@@ -89,7 +89,7 @@ fn module_decl(expr: &Expr, decl_index: usize) -> Option<&Expr> {
 }
 
 fn is_tag(list: &chelis_deep::List, tag: &str) -> bool {
-    matches!(list.elements.first(), Some(Expr::Atom(Atom::Symbol(t), _)) if t == tag)
+    matches!(list.tag(), Some(t) if t.as_str() == tag)
 }
 
 /// Flatten `(module ...)` wrappers into a bare decl list, mirroring

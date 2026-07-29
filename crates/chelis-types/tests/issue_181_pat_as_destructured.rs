@@ -30,7 +30,7 @@ fn deep(src: &str) -> Vec<Expr> {
 /// Used to locate the inner pat-var/pat-as we want to inspect.
 fn find_tagged<'a>(expr: &'a Expr, tag: &str) -> Option<&'a Expr> {
     if let Expr::List(list, _) = expr {
-        if let Some(Expr::Atom(chelis_deep::ast::Atom::Symbol(t), _)) = list.elements.first()
+        if let Some(t) = list.tag().map(|t| t.as_str())
             && t == tag
         {
             return Some(expr);

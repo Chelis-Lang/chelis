@@ -6,6 +6,7 @@
 //! closed. A failure reports exactly once and returns an [`ErrorWitness`]
 //! instead of inventing a variable, wildcard, or partial type.
 
+use chelis_deep::DeepTag;
 use std::collections::{HashMap, HashSet};
 
 use chelis_deep::ast as deep;
@@ -251,8 +252,8 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
             });
         }
         if let deep::Expr::List(list, _) = expr {
-            let (tag, children) = self.type_form(list)?;
-            if tag == "t-prim" {
+            let (form_tag, tag, children) = self.type_form(list)?;
+            if form_tag == Some(DeepTag::TPrim) {
                 let name = self.one_symbol(tag, children)?;
                 return Ok(ResolvedCastTarget::PrimitiveSpelling {
                     name: name.to_string(),
@@ -313,9 +314,9 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
                 render_expr(expr)
             )));
         };
-        let (tag, children) = self.type_form(list)?;
-        match tag {
-            "t-prim" => {
+        let (form_tag, tag, children) = self.type_form(list)?;
+        match form_tag {
+            Some(DeepTag::TPrim) => {
                 let name = self.one_symbol(tag, children)?;
                 Prim::parse_name(name).map(Type::Prim).ok_or_else(|| {
                     self.type_error(format!(
@@ -324,11 +325,11 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
                     ))
                 })
             }
-            "t-var" => {
+            Some(DeepTag::TVar) => {
                 let name = self.one_symbol(tag, children)?;
                 self.resolve_type_var(name).map(Type::Var)
             }
-            "t-fn" => {
+            Some(DeepTag::TFn) => {
                 if children.is_empty() {
                     return Err(self.malformed(format!(
                         "malformed `t-fn` in {}: expected at least a return type",
@@ -342,11 +343,11 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
                 let ret = parts.pop().expect("non-empty checked above");
                 Ok(Type::Fn(parts, Box::new(ret)))
             }
-            "t-ref" => {
+            Some(DeepTag::TRef) => {
                 self.exact_arity(tag, children, 1)?;
                 Ok(Type::Ref(Box::new(self.resolve_type(&children[0])?)))
             }
-            "t-tensor" => {
+            Some(DeepTag::TTensor) => {
                 if children.is_empty() {
                     return Err(self.malformed(format!(
                         "malformed `t-tensor` in {}: expected dimensions followed by a precision",
@@ -369,7 +370,7 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
                 };
                 Ok(Type::Tensor(dims, precision))
             }
-            "t-adt" => {
+            Some(DeepTag::TAdt) => {
                 let Some(name) = children.first().and_then(symbol_name) else {
                     return Err(self.malformed(format!(
                         "malformed `t-adt` in {}: expected a nominal type name followed by type arguments",
@@ -395,19 +396,19 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
                 }
                 Ok(Type::Adt(name.to_string(), args))
             }
-            "t-tuple" => {
+            Some(DeepTag::TTuple) => {
                 let mut elements = Vec::with_capacity(children.len());
                 for child in children {
                     elements.push(self.resolve_type(child)?);
                 }
                 Ok(Type::Tuple(elements))
             }
-            "t-unit" => {
+            Some(DeepTag::TUnit) => {
                 self.exact_arity(tag, children, 0)?;
                 Ok(Type::Unit)
             }
-            other => Err(self.malformed(format!(
-                "unknown Deep type tag `{other}` in {}",
+            _ => Err(self.malformed(format!(
+                "unknown Deep type tag `{tag}` in {}",
                 self.use_site.label()
             ))),
         }
@@ -422,9 +423,9 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
                 render_expr(expr)
             )));
         };
-        let (tag, children) = self.type_form(list)?;
-        match tag {
-            "d-name" => {
+        let (form_tag, tag, children) = self.type_form(list)?;
+        match form_tag {
+            Some(DeepTag::DName) => {
                 let name = self.one_symbol(tag, children)?;
                 if name == "*" {
                     Ok(Dim::Wildcard)
@@ -432,15 +433,15 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
                     Ok(Dim::Name(name.to_string()))
                 }
             }
-            "d-var" => {
+            Some(DeepTag::DVar) => {
                 let name = self.one_symbol(tag, children)?;
                 self.resolve_dim_var(name).map(Dim::Var)
             }
-            "d-rank" => {
+            Some(DeepTag::DRank) => {
                 let name = self.one_symbol(tag, children)?;
                 self.resolve_rank_var(name).map(Dim::Rank)
             }
-            "d-lit" => {
+            Some(DeepTag::DLit) => {
                 self.exact_arity(tag, children, 1)?;
                 match &children[0] {
                     deep::Expr::Atom(deep::Atom::Int(value), _) => Ok(Dim::Lit(*value)),
@@ -450,8 +451,8 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
                     ))),
                 }
             }
-            other => Err(self.malformed(format!(
-                "unknown Deep dimension tag `{other}` in {}",
+            _ => Err(self.malformed(format!(
+                "unknown Deep dimension tag `{tag}` in {}",
                 self.use_site.label()
             ))),
         }
@@ -517,23 +518,32 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
         !matches!(self.binder_mode, BinderMode::Explicit(_))
     }
 
+    /// Decode-once (chelis#731 Phase 3): the decoded tag drives dispatch;
+    /// the string is the diagnostic spelling. `None` with a symbol string
+    /// is the raw-string boundary (a lenient-parsed unknown head), which
+    /// the dispatch rejects with the same unknown-tag diagnostic as any
+    /// non-type vocabulary tag.
     fn type_form<'b>(
         &mut self,
         list: &'b deep::List,
-    ) -> Result<(&'b str, &'b [deep::Expr]), ErrorWitness> {
-        let Some(tag) = list.elements.first().and_then(symbol_name) else {
-            return Err(self.malformed(format!(
-                "malformed Deep type form in {}: expected a tag symbol",
-                self.use_site.label()
-            )));
+    ) -> Result<(Option<DeepTag>, &'b str, &'b [deep::Expr]), ErrorWitness> {
+        let (tag, tag_str) = match list.elements.first() {
+            Some(deep::Expr::Atom(deep::Atom::Tag(tag), _)) => (Some(*tag), tag.as_str()),
+            Some(deep::Expr::Atom(deep::Atom::Symbol(name), _)) => (None, name.as_str()),
+            _ => {
+                return Err(self.malformed(format!(
+                    "malformed Deep type form in {}: expected a tag symbol",
+                    self.use_site.label()
+                )));
+            }
         };
         if !matches!(list.elements.get(1), Some(deep::Expr::Map(_, _))) {
             return Err(self.malformed(format!(
-                "malformed `{tag}` in {}: the metadata map must be present at element 1",
+                "malformed `{tag_str}` in {}: the metadata map must be present at element 1",
                 self.use_site.label()
             )));
         }
-        Ok((tag, &list.elements[2..]))
+        Ok((tag, tag_str, &list.elements[2..]))
     }
 
     fn one_symbol<'b>(

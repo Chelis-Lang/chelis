@@ -49,10 +49,9 @@ fn expect_clean(src: &str, what: &str) -> Vec<Expr> {
 }
 
 fn list_tag(list: &List) -> Option<&str> {
-    match list.elements.first() {
-        Some(Expr::Atom(Atom::Symbol(tag), _)) => Some(tag.as_str()),
-        _ => None,
-    }
+    // Decode-once: the spelling comes from the decoded tag, never a raw
+    // element-0 string.
+    list.tag().map(|tag| tag.as_str())
 }
 
 fn var_name(expr: &Expr) -> Option<&str> {

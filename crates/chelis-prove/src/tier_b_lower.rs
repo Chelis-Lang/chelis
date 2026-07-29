@@ -21,6 +21,7 @@
 //! derived obligation proves with `proof_tier:"smt"` for linear-arithmetic
 //! invariants. A residual irreducible `match` falls to Tier C.
 
+use chelis_deep::DeepTag;
 use std::collections::HashMap;
 
 use chelis_deep::ast::{Atom, Expr};
@@ -36,13 +37,10 @@ const MAX_INLINE_DEPTH: usize = 3;
 // Deep helpers
 // ===========================================================================
 
-fn tag(expr: &Expr) -> Option<&str> {
-    if let Expr::List(list, _) = expr
-        && let Some(Expr::Atom(Atom::Symbol(s), _)) = list.elements.first()
-    {
-        Some(s.as_str())
-    } else {
-        None
+fn tag(expr: &Expr) -> Option<DeepTag> {
+    match expr {
+        Expr::List(list, _) => list.tag(),
+        _ => None,
     }
 }
 
@@ -64,13 +62,13 @@ fn symbol_text(expr: &Expr) -> Option<&str> {
 }
 
 fn var_name(expr: &Expr) -> Option<&str> {
-    (tag(expr) == Some("var"))
+    (tag(expr) == Some(DeepTag::Var))
         .then(|| symbol_text(children(expr).first()?))
         .flatten()
 }
 
 fn app_parts(expr: &Expr) -> Option<(&str, &[Expr])> {
-    if tag(expr) == Some("app") {
+    if tag(expr) == Some(DeepTag::App) {
         let kids = children(expr);
         let callee = kids.first()?;
         let name = var_name(callee)?;
@@ -88,11 +86,11 @@ struct ProducerBody<'a> {
 fn lookup_producer<'a>(exprs: &'a [Expr], name: &str) -> Option<ProducerBody<'a>> {
     fn find<'a>(exprs: &'a [Expr], name: &str) -> Option<ProducerBody<'a>> {
         for expr in exprs {
-            if tag(expr) == Some("def")
+            if tag(expr) == Some(DeepTag::Def)
                 && let kids = children(expr)
                 && kids.first().and_then(symbol_text) == Some(name)
                 && let Some(fn_node) = kids.get(1)
-                && tag(fn_node) == Some("fn")
+                && tag(fn_node) == Some(DeepTag::Fn)
             {
                 let fkids = children(fn_node);
                 let params_node = fkids.first()?;
@@ -233,7 +231,7 @@ fn rewrite_opaque_field_access(
     opaque_params: &HashMap<String, OpaqueInvariant>,
 ) -> Expr {
     // `(access (var p) field)` -> `(var "p.field")` when p is opaque.
-    if tag(expr) == Some("access") {
+    if tag(expr) == Some(DeepTag::Access) {
         let kids = children(expr);
         if let (Some(target), Some(field_node)) = (kids.first(), kids.get(1))
             && let Some(pname) = var_name(target)
@@ -275,7 +273,7 @@ fn make_var(name: &str) -> Expr {
     Expr::List(
         List {
             elements: vec![
-                Expr::Atom(Atom::Symbol("var".to_string()), Span::new(0, 0)),
+                Expr::Atom(Atom::Tag(DeepTag::Var), Span::new(0, 0)),
                 Expr::Map(Default::default(), Span::new(0, 0)),
                 Expr::Atom(Atom::Symbol(name.to_string()), Span::new(0, 0)),
             ],
@@ -335,7 +333,7 @@ fn lower_option_obligation(
     depth: usize,
 ) -> Option<SmtExpr> {
     // if g then <then> else <else>: push the case analysis into branches.
-    if tag(result) == Some("if") {
+    if tag(result) == Some(DeepTag::If) {
         let kids = children(result);
         let g = lower_field_bool(kids.first()?)?;
         let then_e = lower_option_obligation(kids.get(1)?, inner, inv, ob, exprs, consts, depth)?;
@@ -405,14 +403,14 @@ fn predicate_body(fn_node: &Expr) -> Option<&Expr> {
 
 /// Extract the `(record C (kv {} field expr) ...)` field map.
 fn record_fields(expr: &Expr) -> Option<HashMap<String, Expr>> {
-    if tag(expr) != Some("record") {
+    if tag(expr) != Some(DeepTag::Record) {
         return None;
     }
     let kids = children(expr);
     // kids[0] is the constructor name; the rest are kv nodes.
     let mut map = HashMap::new();
     for kv in &kids[1..] {
-        if tag(kv) == Some("kv") {
+        if tag(kv) == Some(DeepTag::Kv) {
             let kkids = children(kv);
             let field = symbol_text(kkids.first()?)?.to_string();
             let val = kkids.get(1)?.clone();
@@ -458,7 +456,7 @@ fn reduce(
         return Some(expr.clone());
     }
     // access over a reduced record => record beta.
-    if tag(expr) == Some("access") {
+    if tag(expr) == Some(DeepTag::Access) {
         let kids = children(expr);
         let target = reduce(kids.first()?, subst, consts, exprs, depth)?;
         let field = symbol_text(kids.get(1)?)?;
@@ -492,18 +490,18 @@ fn reduce(
         return Some(rebuild_app(name, reduced_args));
     }
     // record: reduce field exprs.
-    if tag(expr) == Some("record") {
+    if tag(expr) == Some(DeepTag::Record) {
         let kids = children(expr);
         let mut new_children = vec![kids.first()?.clone()];
         for kv in &kids[1..] {
-            if tag(kv) == Some("kv") {
+            if tag(kv) == Some(DeepTag::Kv) {
                 let kkids = children(kv);
                 let field = kkids.first()?.clone();
                 let val = reduce(kkids.get(1)?, subst, consts, exprs, depth)?;
                 new_children.push(Expr::List(
                     List {
                         elements: vec![
-                            Expr::Atom(Atom::Symbol("kv".to_string()), Span::new(0, 0)),
+                            Expr::Atom(Atom::Tag(DeepTag::Kv), Span::new(0, 0)),
                             Expr::Map(Default::default(), Span::new(0, 0)),
                             field,
                             val,
@@ -518,7 +516,7 @@ fn reduce(
         return Some(rebuild(expr, new_children));
     }
     // if: reduce children (keep structure for case analysis).
-    if tag(expr) == Some("if") {
+    if tag(expr) == Some(DeepTag::If) {
         let kids = children(expr);
         let c = reduce(kids.first()?, subst, consts, exprs, depth)?;
         let t = reduce(kids.get(1)?, subst, consts, exprs, depth)?;
@@ -553,7 +551,7 @@ fn int_lit_node(value: i64, int_ty: &str) -> Expr {
     let type_node = Expr::List(
         List {
             elements: vec![
-                Expr::Atom(Atom::Symbol("t-prim".to_string()), Span::new(0, 0)),
+                Expr::Atom(Atom::Tag(DeepTag::TPrim), Span::new(0, 0)),
                 Expr::Map(MetaMap::default(), Span::new(0, 0)),
                 Expr::Atom(Atom::Symbol(int_ty.to_string()), Span::new(0, 0)),
             ],
@@ -565,7 +563,7 @@ fn int_lit_node(value: i64, int_ty: &str) -> Expr {
     Expr::List(
         List {
             elements: vec![
-                Expr::Atom(Atom::Symbol("lit".to_string()), Span::new(0, 0)),
+                Expr::Atom(Atom::Tag(DeepTag::Lit), Span::new(0, 0)),
                 Expr::Map(meta, Span::new(0, 0)),
                 Expr::Atom(Atom::Int(value), Span::new(0, 0)),
             ],
@@ -582,7 +580,7 @@ fn float_lit_node(value: f64) -> Expr {
     let type_node = Expr::List(
         List {
             elements: vec![
-                Expr::Atom(Atom::Symbol("t-prim".to_string()), Span::new(0, 0)),
+                Expr::Atom(Atom::Tag(DeepTag::TPrim), Span::new(0, 0)),
                 Expr::Map(MetaMap::default(), Span::new(0, 0)),
                 Expr::Atom(Atom::Symbol("f32".to_string()), Span::new(0, 0)),
             ],
@@ -594,7 +592,7 @@ fn float_lit_node(value: f64) -> Expr {
     Expr::List(
         List {
             elements: vec![
-                Expr::Atom(Atom::Symbol("lit".to_string()), Span::new(0, 0)),
+                Expr::Atom(Atom::Tag(DeepTag::Lit), Span::new(0, 0)),
                 Expr::Map(meta, Span::new(0, 0)),
                 Expr::Atom(Atom::Float(value), Span::new(0, 0)),
             ],
@@ -620,7 +618,7 @@ fn rebuild_app(callee: &str, args: Vec<Expr>) -> Expr {
     use chelis_deep::Span;
     use chelis_deep::ast::List;
     let mut elements = vec![
-        Expr::Atom(Atom::Symbol("app".to_string()), Span::new(0, 0)),
+        Expr::Atom(Atom::Tag(DeepTag::App), Span::new(0, 0)),
         Expr::Map(Default::default(), Span::new(0, 0)),
         make_var(callee),
     ];
@@ -650,7 +648,7 @@ fn lower_pred_bool(
     if let Expr::Atom(Atom::Bool(b), _) = expr {
         return Some(SmtExpr::BoolLit(*b));
     }
-    if tag(expr) == Some("if") {
+    if tag(expr) == Some(DeepTag::If) {
         let kids = children(expr);
         let c = lower_pred_bool(kids.first()?, binder, fields, consts, exprs, binder_fields)?;
         let t = lower_pred_bool(kids.get(1)?, binder, fields, consts, exprs, binder_fields)?;
@@ -713,12 +711,13 @@ fn pred_arg_is_int_sorted(
     if matches!(arg, Expr::Atom(Atom::Int(_), _)) {
         return true;
     }
-    if tag(arg) == Some("lit") && matches!(children(arg).first(), Some(Expr::Atom(Atom::Int(_), _)))
+    if tag(arg) == Some(DeepTag::Lit)
+        && matches!(children(arg).first(), Some(Expr::Atom(Atom::Int(_), _)))
     {
         return true;
     }
     // A field projection `(access (var binder) field)` onto an int field.
-    if tag(arg) == Some("access") {
+    if tag(arg) == Some(DeepTag::Access) {
         let kids = children(arg);
         if let (Some(target), Some(field_node)) = (kids.first(), kids.get(1))
             && var_name(target) == Some(binder)
@@ -746,7 +745,7 @@ fn lower_pred_arith(
         Expr::Atom(Atom::Int(v), _) => return Some(SmtExpr::IntLit(*v)),
         _ => {}
     }
-    if tag(expr) == Some("lit") {
+    if tag(expr) == Some(DeepTag::Lit) {
         return match children(expr).first() {
             Some(Expr::Atom(Atom::Float(v), _)) => Some(SmtExpr::RealLit(*v)),
             Some(Expr::Atom(Atom::Int(v), _)) => Some(SmtExpr::IntLit(*v)),
@@ -755,7 +754,7 @@ fn lower_pred_arith(
     }
     // Field projection `(access (var binder) field)`: record beta — look
     // up the produced field expr and lower it (params are free vars).
-    if tag(expr) == Some("access") {
+    if tag(expr) == Some(DeepTag::Access) {
         let kids = children(expr);
         let target = kids.first()?;
         let field = symbol_text(kids.get(1)?)?;
@@ -818,7 +817,7 @@ fn lower_field_expr(expr: &Expr) -> Option<SmtExpr> {
         Expr::Atom(Atom::Int(v), _) => return Some(SmtExpr::IntLit(*v)),
         _ => {}
     }
-    if tag(expr) == Some("lit") {
+    if tag(expr) == Some(DeepTag::Lit) {
         return match children(expr).first() {
             Some(Expr::Atom(Atom::Float(v), _)) => Some(SmtExpr::RealLit(*v)),
             Some(Expr::Atom(Atom::Int(v), _)) => Some(SmtExpr::IntLit(*v)),
@@ -829,7 +828,7 @@ fn lower_field_expr(expr: &Expr) -> Option<SmtExpr> {
         return Some(SmtExpr::Var(name.to_string()));
     }
     // A field expr may itself be an `if` (e.g. a clamp): if => ite.
-    if tag(expr) == Some("if") {
+    if tag(expr) == Some(DeepTag::If) {
         let kids = children(expr);
         let c = lower_field_bool(kids.first()?)?;
         let t = lower_field_expr(kids.get(1)?)?;

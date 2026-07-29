@@ -36,10 +36,9 @@ fn list_tag(expr: &Expr) -> Option<&str> {
     let Expr::List(list, _) = expr else {
         return None;
     };
-    match list.elements.first() {
-        Some(Expr::Atom(Atom::Symbol(tag), _)) => Some(tag.as_str()),
-        _ => None,
-    }
+    // Decode-once: the spelling comes from the decoded tag, never a raw
+    // element-0 string.
+    list.tag().map(|tag| tag.as_str())
 }
 
 fn node_type_meta(expr: &Expr) -> Option<&Expr> {

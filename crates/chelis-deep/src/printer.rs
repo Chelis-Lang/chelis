@@ -4,6 +4,7 @@
 //! files and `chelis deep`.
 
 use crate::ast::{Atom, Expr, List, MetaExpr, MetaMap};
+use crate::tag::DeepTag;
 
 const MAX_LINE: usize = 80;
 const INDENT_STEP: usize = 2;
@@ -92,6 +93,7 @@ impl Printer {
     fn fmt_atom(atom: &Atom) -> String {
         match atom {
             Atom::Symbol(s) => s.clone(),
+            Atom::Tag(tag) => tag.as_str().to_string(),
             Atom::Int(n) => n.to_string(),
             Atom::Float(f) => {
                 let s = f.to_string();
@@ -146,6 +148,7 @@ impl Printer {
 
     fn fmt_canonical_node(&self, list: &List, indent: usize) -> Option<String> {
         let (tag, meta, children) = canonical_node_parts(list)?;
+        let tag = tag.as_str();
         let meta_indent = indent + 1 + tag.len() + 1;
         let meta_text = self.fmt_map(meta, meta_indent);
         let header = format!("({tag} {meta_text}");
@@ -294,7 +297,13 @@ impl Printer {
         };
         matches!(
             tag,
-            "var" | "lit" | "d-name" | "d-var" | "d-lit" | "d-rank" | "t-prim"
+            DeepTag::Var
+                | DeepTag::Lit
+                | DeepTag::DName
+                | DeepTag::DVar
+                | DeepTag::DLit
+                | DeepTag::DRank
+                | DeepTag::TPrim
         )
     }
 
@@ -302,17 +311,17 @@ impl Printer {
         let Some((tag, _, _)) = canonical_node_parts(list) else {
             return false;
         };
-        matches!(tag, "fn" | "let" | "bind")
+        matches!(tag, DeepTag::Fn | DeepTag::Let | DeepTag::Bind)
     }
 }
 
-fn canonical_node_parts(list: &List) -> Option<(&str, &MetaMap, &[Expr])> {
+fn canonical_node_parts(list: &List) -> Option<(DeepTag, &MetaMap, &[Expr])> {
     match list.elements.as_slice() {
         [
-            Expr::Atom(Atom::Symbol(tag), _),
+            Expr::Atom(Atom::Tag(tag), _),
             Expr::Map(meta, _),
             children @ ..,
-        ] => Some((tag.as_str(), meta, children)),
+        ] => Some((*tag, meta, children)),
         _ => None,
     }
 }
@@ -350,7 +359,11 @@ mod tests {
     fn node(tag: &str, meta: Vec<(&str, Expr)>, children: Vec<Expr>) -> Expr {
         let mut elements = vec![sym(tag), map_expr(meta)];
         elements.extend(children);
-        Expr::List(List { elements }, sp())
+        let mut expr = Expr::List(List { elements }, sp());
+        // Mirror the parser's decode-once stamping so these hand-built
+        // trees match what every real consumer sees.
+        crate::parser::stamp_tags(std::slice::from_mut(&mut expr));
+        expr
     }
 
     fn generic_list(elements: Vec<Expr>) -> Expr {

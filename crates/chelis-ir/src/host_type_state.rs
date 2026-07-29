@@ -12,6 +12,7 @@
 //! those boundaries distinct prevents a missing or unsupported type from being
 //! converted into a plausible emitted value.
 
+use chelis_deep::DeepTag;
 use std::fmt;
 
 use chelis_deep::ast::{Atom, Expr, List};
@@ -322,7 +323,7 @@ pub fn decode_host_type(expr: &Expr) -> Result<HostTypeTerm, HostTypeDecodeError
     let tag = list_tag(list).ok_or_else(|| malformed("type node has no symbolic tag"))?;
     let children = list_children(list)?;
     match tag {
-        "t-prim" => {
+        DeepTag::TPrim => {
             let name = one_symbol_child(children, "t-prim")?;
             let precision =
                 Prim::parse_name(name).ok_or_else(|| HostTypeDecodeError::UnknownPrimitive {
@@ -330,22 +331,22 @@ pub fn decode_host_type(expr: &Expr) -> Result<HostTypeTerm, HostTypeDecodeError
                 })?;
             Ok(HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(precision)))
         }
-        "t-var" => Ok(HostTypeTerm::TypeVariable(
+        DeepTag::TVar => Ok(HostTypeTerm::TypeVariable(
             one_symbol_child(children, "t-var")?.to_string(),
         )),
-        "t-ref" => {
+        DeepTag::TRef => {
             let inner = one_child(children, "t-ref")?;
             decode_host_type(inner)
         }
-        "t-tensor" => decode_tensor_type(children),
-        "t-adt" => decode_adt_type(children),
-        "t-tuple" => Ok(HostTypeTerm::Tuple(
+        DeepTag::TTensor => decode_tensor_type(children),
+        DeepTag::TAdt => decode_adt_type(children),
+        DeepTag::TTuple => Ok(HostTypeTerm::Tuple(
             children
                 .iter()
                 .map(decode_host_type)
                 .collect::<Result<Vec<_>, _>>()?,
         )),
-        "t-fn" => {
+        DeepTag::TFn => {
             let (ret, params) = children
                 .split_last()
                 .ok_or_else(|| malformed("t-fn has no return type"))?;
@@ -357,9 +358,9 @@ pub fn decode_host_type(expr: &Expr) -> Result<HostTypeTerm, HostTypeDecodeError
                 Box::new(decode_host_type(ret)?),
             ))
         }
-        "t-unit" if children.is_empty() => Ok(HostTypeTerm::Unit),
-        "t-unit" => Err(malformed("t-unit must not have children")),
-        other => Err(malformed(format!("unknown type tag `{other}`"))),
+        DeepTag::TUnit if children.is_empty() => Ok(HostTypeTerm::Unit),
+        DeepTag::TUnit => Err(malformed("t-unit must not have children")),
+        other => Err(malformed(format!("unknown type tag `{}`", other.as_str()))),
     }
 }
 
@@ -446,7 +447,7 @@ fn decode_precision(expr: &Expr) -> Result<HostPrecisionTerm, HostTypeDecodeErro
     let tag = list_tag(list).ok_or_else(|| malformed("precision node has no symbolic tag"))?;
     let children = list_children(list)?;
     match tag {
-        "t-prim" => {
+        DeepTag::TPrim => {
             let name = one_symbol_child(children, "tensor t-prim")?;
             Prim::parse_name(name)
                 .map(HostPrecisionTerm::Concrete)
@@ -454,11 +455,12 @@ fn decode_precision(expr: &Expr) -> Result<HostPrecisionTerm, HostTypeDecodeErro
                     name: name.to_string(),
                 })
         }
-        "t-var" => Ok(HostPrecisionTerm::Variable(
+        DeepTag::TVar => Ok(HostPrecisionTerm::Variable(
             one_symbol_child(children, "tensor t-var")?.to_string(),
         )),
         other => Err(malformed(format!(
-            "tensor precision must be t-prim or t-var, got `{other}`"
+            "tensor precision must be t-prim or t-var, got `{}`",
+            other.as_str()
         ))),
     }
 }
@@ -477,18 +479,21 @@ fn decode_shape_slot(expr: &Expr) -> Result<HostShapeSlot, HostTypeDecodeError> 
     let tag = list_tag(list).ok_or_else(|| malformed("dimension node has no symbolic tag"))?;
     let children = list_children(list)?;
     match tag {
-        "d-name" | "d-var" => Ok(HostShapeSlot::Dim(DimInfo::Named(
-            one_symbol_child(children, tag)?.to_string(),
+        DeepTag::DName | DeepTag::DVar => Ok(HostShapeSlot::Dim(DimInfo::Named(
+            one_symbol_child(children, tag.as_str())?.to_string(),
             None,
         ))),
-        "d-rank" => Ok(HostShapeSlot::RankVariable(
+        DeepTag::DRank => Ok(HostShapeSlot::RankVariable(
             one_symbol_child(children, "d-rank")?.to_string(),
         )),
-        "d-lit" => match one_child(children, "d-lit")? {
+        DeepTag::DLit => match one_child(children, "d-lit")? {
             Expr::Atom(Atom::Int(value), _) => nonnegative_dim(*value),
             _ => Err(malformed("d-lit child is not an integer")),
         },
-        other => Err(malformed(format!("unknown dimension tag `{other}`"))),
+        other => Err(malformed(format!(
+            "unknown dimension tag `{}`",
+            other.as_str()
+        ))),
     }
 }
 
@@ -523,8 +528,8 @@ fn decode_adt_type(children: &[Expr]) -> Result<HostTypeTerm, HostTypeDecodeErro
     }
 }
 
-fn list_tag(list: &List) -> Option<&str> {
-    list.elements.first().and_then(symbol_name)
+fn list_tag(list: &List) -> Option<DeepTag> {
+    list.tag()
 }
 
 fn list_children(list: &List) -> Result<&[Expr], HostTypeDecodeError> {

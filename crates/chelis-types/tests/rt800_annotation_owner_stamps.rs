@@ -23,10 +23,9 @@ fn tag(expr: &Expr) -> Option<&str> {
     let Expr::List(list, _) = expr else {
         return None;
     };
-    match list.elements.first() {
-        Some(Expr::Atom(chelis_deep::Atom::Symbol(tag), _)) => Some(tag),
-        _ => None,
-    }
+    // Decode-once: the spelling comes from the decoded tag, never a raw
+    // element-0 string.
+    list.tag().map(|tag| tag.as_str())
 }
 
 fn carries_type_stamp(expr: &Expr) -> bool {

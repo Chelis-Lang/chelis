@@ -3,11 +3,8 @@ use chelis_ir::eval::{TensorValue, eval_tensor_roots_with_strict};
 use chelis_ir::lower::lower_subexpr_program;
 use std::collections::HashMap;
 
-fn get_tag(list: &List) -> Option<&str> {
-    match list.elements.first() {
-        Some(Expr::Atom(Atom::Symbol(tag), _)) => Some(tag.as_str()),
-        _ => None,
-    }
+fn get_tag(list: &List) -> Option<chelis_deep::DeepTag> {
+    list.tag()
 }
 
 fn children(list: &List) -> &[Expr] {
@@ -44,7 +41,7 @@ fn def_name_and_body(expr: &Expr) -> Option<(String, Expr)> {
     let Expr::List(list, _) = expr else {
         return None;
     };
-    if get_tag(list) != Some("def") {
+    if get_tag(list) != Some(chelis_deep::DeepTag::Def) {
         return None;
     }
     let kids = children(list);

@@ -673,7 +673,53 @@ pub fn parse(tokens: &[Token]) -> Result<Vec<Expr>, ParseError> {
     let mut parser = Parser::new(tokens);
     let mut exprs = parser.parse_exprs()?;
     normalize_typed_literals(&mut exprs)?;
+    stamp_tags(&mut exprs);
     Ok(exprs)
+}
+
+/// Decode-once stamping (chelis#731 Phase 3): convert every list's
+/// element-0 symbol that spells a closed-vocabulary tag into
+/// `Atom::Tag`, recursively, including metadata map values (canonical
+/// type syntax lives there). Positional and shape-blind on purpose:
+/// only element 0 is a tag position, and a vocabulary word appearing as
+/// a child (a parameter or binding name, a bare symbol) is never
+/// converted. After this pass the tag string does not exist in the
+/// in-memory tree; `chelis_deep::printer` regenerates it via
+/// `DeepTag::as_str` at the serialization boundary. Symbols that do not
+/// decode (lenient-parsed unknown tags, spec/03 §8.3) stay `Atom::Symbol`
+/// and flow to consumers' loud raw-string-boundary arms.
+pub fn stamp_tags(exprs: &mut [Expr]) {
+    for expr in exprs.iter_mut() {
+        stamp_tags_expr(expr);
+    }
+}
+
+fn stamp_tags_expr(expr: &mut Expr) {
+    match expr {
+        Expr::List(list, _) => {
+            if let Some(Expr::Atom(atom, _)) = list.elements.first_mut()
+                && let Atom::Symbol(symbol) = &*atom
+                && let Some(tag) = crate::tag::DeepTag::parse(symbol)
+            {
+                *atom = Atom::Tag(tag);
+            }
+            for child in list.elements.iter_mut() {
+                stamp_tags_expr(child);
+            }
+        }
+        Expr::Map(map, _) => {
+            for (_, value) in map.entries.iter_mut() {
+                stamp_tags_expr(value);
+            }
+        }
+        Expr::MetaExpr(meta, _) => {
+            stamp_tags_expr(&mut meta.expr);
+            for (_, value) in meta.entries.iter_mut() {
+                stamp_tags_expr(value);
+            }
+        }
+        Expr::Atom(_, _) => {}
+    }
 }
 
 /// Convenience: lex and parse a source string in one step.
@@ -822,8 +868,10 @@ mod tests {
             Expr::List(list, _) => {
                 assert_eq!(list.elements.len(), 4); // def, {}, f, (fn ...)
                 match &list.elements[0] {
-                    Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "def"),
-                    other => panic!("expected Symbol(def), got {:?}", other),
+                    Expr::Atom(Atom::Tag(t), _) => {
+                        assert_eq!(*t, crate::tag::DeepTag::Def)
+                    }
+                    other => panic!("expected Tag(Def), got {:?}", other),
                 }
                 match &list.elements[1] {
                     Expr::Map(m, _) => assert!(m.entries.is_empty()),
@@ -835,7 +883,7 @@ mod tests {
                 }
                 match &list.elements[3] {
                     Expr::List(func, _) => match &func.elements[0] {
-                        Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "fn"),
+                        Expr::Atom(Atom::Tag(t), _) => assert_eq!(*t, crate::tag::DeepTag::Fn),
                         other => panic!("expected Symbol(fn), got {:?}", other),
                     },
                     other => panic!("expected fn list, got {:?}", other),

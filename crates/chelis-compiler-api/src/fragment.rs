@@ -379,7 +379,7 @@ fn join_messages<'a>(messages: impl Iterator<Item = &'a str>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chelis_deep::Atom;
+    use chelis_deep::DeepTag;
 
     /// Render Surf source to canonical Deep, as `chelis deep` does for `.ch`.
     fn render_deep(surf: &str) -> Vec<Expr> {
@@ -400,10 +400,7 @@ mod tests {
                 let Expr::List(list, _) = expr else {
                     return None;
                 };
-                let is_module = matches!(
-                    list.elements.first(),
-                    Some(Expr::Atom(Atom::Symbol(t), _)) if t == "module"
-                );
+                let is_module = list.tag() == Some(DeepTag::Module);
                 if !is_module {
                     return None;
                 }

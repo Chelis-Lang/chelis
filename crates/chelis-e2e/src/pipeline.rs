@@ -100,13 +100,13 @@ fn collect_decl_root_names(
 
 fn extend_root_names(name: &str, ty: Option<&DeepExpr>, out: &mut Vec<String>) {
     if let Some(DeepExpr::List(list, _)) = ty
-        && let Some(DeepExpr::Atom(chelis_deep::ast::Atom::Symbol(tag), _)) = list.elements.first()
+        && let Some(tag) = list.tag()
     {
-        if tag == "t-fn" {
+        if tag == chelis_deep::DeepTag::TFn {
             extend_root_names(name, list.elements.last(), out);
             return;
         }
-        if tag == "t-tuple" {
+        if tag == chelis_deep::DeepTag::TTuple {
             for (index, child) in list.elements.iter().skip(2).enumerate() {
                 extend_root_names(&format!("{name}.{index}"), Some(child), out);
             }

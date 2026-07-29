@@ -32,6 +32,7 @@
 //! See `/home/jeff/.claude/plans/now-plan-out-the-shimmying-wand.md`
 //! for the full plan.
 
+use chelis_deep::DeepTag;
 use chelis_ir::lower::LoweredLibrary;
 use chelis_reef::{PreparedReefGraph, SourceDigest, prepare_reef_graph};
 use chelis_types::{CheckedProgram, TypeEnv, build_compiled_library_context, check_linearity};
@@ -1136,36 +1137,25 @@ fn library_structural_summary(exprs: &[chelis_deep::ast::Expr]) -> (usize, usize
         };
         // Match the `top_level_decl_items` walk: descend through
         // `(module {} name children...)`.
-        let tag = list
-            .elements
-            .first()
-            .and_then(|e| match e {
-                chelis_deep::ast::Expr::Atom(chelis_deep::ast::Atom::Symbol(s), _) => {
-                    Some(s.as_str())
-                }
-                _ => None,
-            })
-            .unwrap_or("");
-        if tag == "module" {
+        let tag = list.tag();
+        if tag == Some(DeepTag::Module) {
             modules += 1;
             for child in list.elements.iter().skip(3) {
-                if let chelis_deep::ast::Expr::List(child_list, _) = child {
-                    let child_tag = child_list
-                        .elements
-                        .first()
-                        .and_then(|e| match e {
-                            chelis_deep::ast::Expr::Atom(chelis_deep::ast::Atom::Symbol(s), _) => {
-                                Some(s.as_str())
-                            }
-                            _ => None,
-                        })
-                        .unwrap_or("");
-                    if matches!(child_tag, "def" | "defsig" | "deftype" | "typealias") {
-                        decls += 1;
-                    }
+                if let chelis_deep::ast::Expr::List(child_list, _) = child
+                    && matches!(
+                        child_list.tag(),
+                        Some(
+                            DeepTag::Def | DeepTag::Defsig | DeepTag::Deftype | DeepTag::Typealias
+                        )
+                    )
+                {
+                    decls += 1;
                 }
             }
-        } else if matches!(tag, "def" | "defsig" | "deftype" | "typealias") {
+        } else if matches!(
+            tag,
+            Some(DeepTag::Def | DeepTag::Defsig | DeepTag::Deftype | DeepTag::Typealias)
+        ) {
             decls += 1;
         }
     }

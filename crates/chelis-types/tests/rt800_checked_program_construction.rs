@@ -18,7 +18,7 @@ fn find_list_mut<'a>(expr: &'a mut Expr, tag: &str) -> Option<&'a mut List> {
         Expr::List(list, _) => {
             let matches = matches!(
                 list.elements.first(),
-                Some(Expr::Atom(Atom::Symbol(name), _)) if name == tag
+                Some(Expr::Atom(Atom::Tag(found), _)) if found.as_str() == tag
             );
             if matches {
                 return Some(list);

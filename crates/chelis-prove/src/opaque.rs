@@ -14,6 +14,7 @@
 //! `invariant_amenability` recorded on a `.dp` is NOT trusted: it is
 //! recomputed from the predicate via `chelis_pred::classify_predicate`.
 
+use chelis_deep::DeepTag;
 use std::collections::{HashMap, HashSet};
 
 use chelis_deep::ast::{Atom, Expr};
@@ -154,13 +155,10 @@ impl OpaqueInvariant {
 // Deep node helpers (mirrors chelis-pred's structural helpers)
 // ===========================================================================
 
-fn tag(expr: &Expr) -> Option<&str> {
-    if let Expr::List(list, _) = expr
-        && let Some(Expr::Atom(Atom::Symbol(s), _)) = list.elements.first()
-    {
-        Some(s.as_str())
-    } else {
-        None
+fn tag(expr: &Expr) -> Option<DeepTag> {
+    match expr {
+        Expr::List(list, _) => list.tag(),
+        _ => None,
     }
 }
 
@@ -243,7 +241,7 @@ pub fn collect_opaque_invariant_rejections(exprs: &[Expr]) -> Vec<OpaqueInvarian
 /// resolves while the field model is built.
 fn index_deftypes<'a>(exprs: &'a [Expr], out: &mut HashMap<String, &'a Expr>) {
     for expr in exprs {
-        if tag(expr) == Some("deftype")
+        if tag(expr) == Some(DeepTag::Deftype)
             && let Some(name) = children(expr).first().and_then(|n| symbol_text(n))
         {
             out.entry(name.to_string()).or_insert(expr);
@@ -262,7 +260,7 @@ fn collect_in<'a>(
     oks: &mut Vec<OpaqueInvariant>,
     errs: &mut Vec<OpaqueInvariantRejection>,
 ) {
-    if tag(expr) == Some("deftype") {
+    if tag(expr) == Some(DeepTag::Deftype) {
         match opaque_invariant_from_deftype(expr, deftypes) {
             Some(Ok(inv)) => oks.push(inv),
             Some(Err(rej)) => errs.push(rej),
@@ -296,7 +294,7 @@ fn opaque_invariant_from_deftype(
         return None;
     }
     let predicate = meta_value(deftype, "invariant")?.clone();
-    if tag(&predicate) != Some("fn") {
+    if tag(&predicate) != Some(DeepTag::Fn) {
         return None;
     }
 
@@ -320,7 +318,7 @@ fn opaque_invariant_from_deftype(
             "invariant on opaque type `{type_name}` has a malformed binder"
         ));
     };
-    let Some(variant) = kids.iter().find(|c| tag(c) == Some("variant")) else {
+    let Some(variant) = kids.iter().find(|c| tag(c) == Some(DeepTag::Variant)) else {
         return reject(format!(
             "opaque type `{type_name}` carries an invariant but is not a single record variant"
         ));
@@ -337,7 +335,7 @@ fn opaque_invariant_from_deftype(
     };
     let mut fields = Vec::new();
     for field in var_kids.iter().skip(1) {
-        if tag(field) != Some("field") {
+        if tag(field) != Some(DeepTag::Field) {
             return reject(format!(
                 "opaque type `{type_name}` is a positional variant, which cannot carry a \
                  mechanically verifiable invariant"
@@ -385,7 +383,7 @@ fn opaque_invariant_from_deftype(
 fn predicate_binder(fn_node: &Expr) -> Option<String> {
     let kids = children(fn_node);
     let params = kids.first()?;
-    if tag(params) != Some("params") {
+    if tag(params) != Some(DeepTag::Params) {
         return None;
     }
     let pkids = children(params);
@@ -417,17 +415,17 @@ fn field_type_from_deep(
     visiting: &mut HashSet<String>,
 ) -> Option<FieldType> {
     match tag(ty)? {
-        "t-prim" => {
+        DeepTag::TPrim => {
             let name = symbol_text(children(ty).first()?)?;
             chelis_types::invariants::invariant_value_class_prim(name)
                 .then(|| FieldType::Scalar(name.to_string()))
         }
-        "t-tensor" => {
+        DeepTag::TTensor => {
             let kids = children(ty);
             // Last child is the precision t-prim; preceding are dims.
             let precision = {
                 let last = kids.last()?;
-                (tag(last) == Some("t-prim"))
+                (tag(last) == Some(DeepTag::TPrim))
                     .then(|| symbol_text(children(last).first()?))
                     .flatten()?
             };
@@ -437,7 +435,7 @@ fn field_type_from_deep(
             let mut dims = Vec::new();
             for dim in &kids[..kids.len().saturating_sub(1)] {
                 // Literal dims only (`(d-lit {} N)`); symbolic dims reject.
-                if tag(dim) == Some("d-lit")
+                if tag(dim) == Some(DeepTag::DLit)
                     && let Some(Expr::Atom(Atom::Int(n), _)) = children(dim).first()
                     && *n >= 0
                 {
@@ -451,7 +449,7 @@ fn field_type_from_deep(
                 precision: precision.to_string(),
             })
         }
-        "t-adt" => {
+        DeepTag::TAdt => {
             // A nested single-variant record: resolve the referenced deftype
             // and model it as `FieldType::Record` (the V1 nested-record class,
             // spec/04 / RFC D-WF). A generic instantiation (a type argument) or
@@ -484,14 +482,17 @@ fn record_field_type(
     visiting: &mut HashSet<String>,
 ) -> Option<FieldType> {
     let kids = children(deftype);
-    let variants: Vec<_> = kids.iter().filter(|c| tag(c) == Some("variant")).collect();
+    let variants: Vec<_> = kids
+        .iter()
+        .filter(|c| tag(c) == Some(DeepTag::Variant))
+        .collect();
     if variants.len() != 1 {
         return None;
     }
     let var_kids = children(variants[0]);
     let mut fields = Vec::new();
     for field in var_kids.iter().skip(1) {
-        if tag(field) != Some("field") {
+        if tag(field) != Some(DeepTag::Field) {
             return None;
         }
         let fk = children(field);
@@ -578,14 +579,14 @@ pub(crate) fn const_declared_int_type(exprs: &[Expr], name: &str) -> Option<Stri
     fn defsig_prim(exprs: &[Expr], name: &str) -> Option<String> {
         fn prim_of_type(ty: &Expr) -> Option<String> {
             match tag(ty)? {
-                "t-prim" => symbol_text(children(ty).first()?).map(str::to_string),
-                "t-fn" => prim_of_type(children(ty).last()?),
+                DeepTag::TPrim => symbol_text(children(ty).first()?).map(str::to_string),
+                DeepTag::TFn => prim_of_type(children(ty).last()?),
                 _ => None,
             }
         }
         fn scan(exprs: &[Expr], name: &str) -> Option<String> {
             for expr in exprs {
-                if tag(expr) == Some("defsig") {
+                if tag(expr) == Some(DeepTag::Defsig) {
                     let kids = children(expr);
                     if kids.first().and_then(symbol_text) == Some(name)
                         && let Some(ty) = kids.get(1)
@@ -605,14 +606,14 @@ pub(crate) fn const_declared_int_type(exprs: &[Expr], name: &str) -> Option<Stri
         scan(exprs, name)
     }
     fn lit_type_prim(expr: &Expr) -> Option<String> {
-        if tag(expr) != Some("lit") {
+        if tag(expr) != Some(DeepTag::Lit) {
             return None;
         }
         if let Expr::List(list, _) = expr
             && let Some(Expr::Map(meta, _)) = list.elements.get(1)
         {
             for (k, v) in &meta.entries {
-                if k == "type" && tag(v) == Some("t-prim") {
+                if k == "type" && tag(v) == Some(DeepTag::TPrim) {
                     return symbol_text(children(v).first()?).map(str::to_string);
                 }
             }
@@ -622,14 +623,14 @@ pub(crate) fn const_declared_int_type(exprs: &[Expr], name: &str) -> Option<Stri
     /// The constant a body references, if the body is a bare `(var other)`
     /// or a zero-arg `(app (var other))`.
     fn referenced_const(body: &Expr) -> Option<&str> {
-        if tag(body) == Some("var") {
+        if tag(body) == Some(DeepTag::Var) {
             return symbol_text(children(body).first()?);
         }
-        if tag(body) == Some("app") {
+        if tag(body) == Some(DeepTag::App) {
             let kids = children(body);
             if kids.len() == 1 {
                 let callee = kids.first()?;
-                if tag(callee) == Some("var") {
+                if tag(callee) == Some(DeepTag::Var) {
                     return symbol_text(children(callee).first()?);
                 }
             }
@@ -639,12 +640,12 @@ pub(crate) fn const_declared_int_type(exprs: &[Expr], name: &str) -> Option<Stri
     fn const_body<'a>(exprs: &'a [Expr], name: &str) -> Option<&'a Expr> {
         fn scan<'a>(exprs: &'a [Expr], name: &str) -> Option<&'a Expr> {
             for expr in exprs {
-                if tag(expr) == Some("def") {
+                if tag(expr) == Some(DeepTag::Def) {
                     let kids = children(expr);
                     if kids.first().and_then(symbol_text) == Some(name)
                         && let Some(body) = kids.get(1)
                     {
-                        return if tag(body) == Some("fn") {
+                        return if tag(body) == Some(DeepTag::Fn) {
                             children(body).get(1)
                         } else {
                             Some(body)
@@ -734,7 +735,7 @@ fn predicate_body(fn_node: &Expr) -> Option<&Expr> {
 }
 
 fn app_parts(expr: &Expr) -> Option<(&str, &[Expr])> {
-    if tag(expr) == Some("app") {
+    if tag(expr) == Some(DeepTag::App) {
         let kids = children(expr);
         let callee = kids.first()?;
         let name = symbol_text(children(callee).first()?)?;
@@ -748,12 +749,12 @@ fn lower_bool(expr: &Expr, ctx: &LowerCtx) -> Option<SmtExpr> {
     if let Expr::Atom(Atom::Bool(b), _) = expr {
         return Some(SmtExpr::BoolLit(*b));
     }
-    if tag(expr) == Some("lit")
+    if tag(expr) == Some(DeepTag::Lit)
         && let Some(Expr::Atom(Atom::Bool(b), _)) = children(expr).first()
     {
         return Some(SmtExpr::BoolLit(*b));
     }
-    if tag(expr) == Some("if") {
+    if tag(expr) == Some(DeepTag::If) {
         let kids = children(expr);
         let c = lower_bool(kids.first()?, ctx)?;
         let t = lower_bool(kids.get(1)?, ctx)?;
@@ -877,7 +878,7 @@ fn lower_arith(expr: &Expr, ctx: &LowerCtx) -> Option<SmtExpr> {
         Expr::Atom(Atom::Int(v), _) => return Some(SmtExpr::IntLit(*v)),
         _ => {}
     }
-    if tag(expr) == Some("lit") {
+    if tag(expr) == Some(DeepTag::Lit) {
         return match children(expr).first() {
             Some(Expr::Atom(Atom::Float(v), _)) => Some(SmtExpr::RealLit(*v)),
             Some(Expr::Atom(Atom::Int(v), _)) => Some(SmtExpr::IntLit(*v)),
@@ -885,7 +886,7 @@ fn lower_arith(expr: &Expr, ctx: &LowerCtx) -> Option<SmtExpr> {
         };
     }
     // Field projection: `(access (var binder|path) field)` -> dotted var.
-    if tag(expr) == Some("access") {
+    if tag(expr) == Some(DeepTag::Access) {
         return access_path(expr, ctx.binder, ctx.prefix).map(SmtExpr::Var);
     }
     // A bare `(var name)`: an in-module constant reference. Resolve it
@@ -895,7 +896,7 @@ fn lower_arith(expr: &Expr, ctx: &LowerCtx) -> Option<SmtExpr> {
     // mismatch an Int-sorted field var and abort cvc5 in a precondition. An
     // unknown constant means the caller could not resolve it in-grammar, so
     // the predicate is not lowerable here and the property falls to Tier C.
-    if tag(expr) == Some("var") {
+    if tag(expr) == Some(DeepTag::Var) {
         let name = symbol_text(children(expr).first()?)?;
         return ctx
             .consts
@@ -903,7 +904,7 @@ fn lower_arith(expr: &Expr, ctx: &LowerCtx) -> Option<SmtExpr> {
             .copied()
             .map(|value| lower_const_ref(ctx.exprs, name, value));
     }
-    if tag(expr) == Some("if") {
+    if tag(expr) == Some(DeepTag::If) {
         let kids = children(expr);
         let c = lower_bool(kids.first()?, ctx)?;
         let t = lower_arith(kids.get(1)?, ctx)?;
@@ -982,11 +983,11 @@ fn access_path(expr: &Expr, binder: &str, prefix: &str) -> Option<String> {
     let target = kids.first()?;
     let field = symbol_text(kids.get(1)?)?;
     // Base: the binder var.
-    if tag(target) == Some("var") && symbol_text(children(target).first()?) == Some(binder) {
+    if tag(target) == Some(DeepTag::Var) && symbol_text(children(target).first()?) == Some(binder) {
         return Some(format!("{prefix}.{field}"));
     }
     // Nested access: recurse.
-    if tag(target) == Some("access") {
+    if tag(target) == Some(DeepTag::Access) {
         let base = access_path(target, binder, prefix)?;
         return Some(format!("{base}.{field}"));
     }
@@ -1660,14 +1661,14 @@ fn eval_const_arith(expr: &Expr, binder: &str, consts: &ConstEnv) -> Option<f64>
         Expr::Atom(Atom::Float(v), _) => Some(*v),
         Expr::Atom(Atom::Int(v), _) => Some(*v as f64),
         _ => {
-            if tag(expr) == Some("lit") {
+            if tag(expr) == Some(DeepTag::Lit) {
                 return match children(expr).first() {
                     Some(Expr::Atom(Atom::Float(v), _)) => Some(*v),
                     Some(Expr::Atom(Atom::Int(v), _)) => Some(*v as f64),
                     _ => None,
                 };
             }
-            if tag(expr) == Some("var") {
+            if tag(expr) == Some(DeepTag::Var) {
                 let name = symbol_text(children(expr).first()?)?;
                 if name == binder {
                     return None;
@@ -1873,7 +1874,7 @@ fn sentinel_for(fty: &FieldType) -> Expr {
 /// in-module-legal.
 fn inject_into_module_with_source(exprs: &[Expr], type_name: &str, def: Expr) -> Vec<Expr> {
     fn module_defines(expr: &Expr, type_name: &str) -> bool {
-        if tag(expr) == Some("deftype")
+        if tag(expr) == Some(DeepTag::Deftype)
             && children(expr).first().and_then(symbol_text) == Some(type_name)
         {
             return true;
@@ -1888,7 +1889,7 @@ fn inject_into_module_with_source(exprs: &[Expr], type_name: &str, def: Expr) ->
     for expr in exprs {
         let stripped = strip_invariant_metadata(expr);
         if !injected
-            && tag(&stripped) == Some("module")
+            && tag(&stripped) == Some(DeepTag::Module)
             && module_defines(&stripped, type_name)
             && let Expr::List(l, span) = &stripped
         {
@@ -1913,7 +1914,7 @@ fn strip_invariant_metadata(expr: &Expr) -> Expr {
         Expr::List(list, span) => {
             let mut elements: Vec<Expr> =
                 list.elements.iter().map(strip_invariant_metadata).collect();
-            if list.elements.first().and_then(symbol_text) == Some("deftype")
+            if list.tag() == Some(DeepTag::Deftype)
                 && let Some(Expr::Map(map, mspan)) = elements.get(1)
             {
                 let kept: Vec<(String, Expr)> = map

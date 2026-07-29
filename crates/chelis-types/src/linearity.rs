@@ -1,3 +1,4 @@
+use chelis_deep::DeepTag;
 use std::collections::{HashMap, HashSet};
 
 use chelis_deep::Span;
@@ -309,13 +310,13 @@ fn pre_declare_one(expr: &Expr, type_env: &HashMap<String, Expr>, scope: &mut Li
         return;
     };
     match get_tag(list) {
-        Some("module") => {
+        Some(DeepTag::Module) => {
             // `(module {} name children...)` — skip tag, meta, name.
             for child in list.elements.iter().skip(3) {
                 pre_declare_one(child, type_env, scope);
             }
         }
-        Some("def") => {
+        Some(DeepTag::Def) => {
             if let Some(name) = children(list).first().and_then(symbol_name) {
                 scope.declare(name, type_env.get(name).cloned());
             }
@@ -390,7 +391,7 @@ pub fn check_linearity_with_context(
         .iter()
         .filter_map(|expr| {
             if let Expr::List(list, _) = expr
-                && get_tag(list) == Some("def")
+                && get_tag(list) == Some(DeepTag::Def)
             {
                 children(list)
                     .first()
@@ -507,7 +508,7 @@ impl Checker {
         // violations, so all `push_diagnostic` calls route to
         // `Checker::errors`.
         if let Expr::List(list, _) = expr
-            && get_tag(list) == Some("module")
+            && get_tag(list) == Some(DeepTag::Module)
         {
             // Skip tag, meta, name — walk every remaining child as a
             // top-level expression.
@@ -517,13 +518,13 @@ impl Checker {
             return;
         }
         if let Expr::List(list, _) = expr
-            && get_tag(list) == Some("def")
+            && get_tag(list) == Some(DeepTag::Def)
         {
             let kids = children(list);
             if let (Some(name), Some(body)) = (kids.first().and_then(symbol_name), kids.get(1))
                 && !(is_var_expr(body) && var_name(body) == Some(name))
             {
-                if matches!(get_tag_expr(body), Some("borrow")) {
+                if matches!(get_tag_expr(body), Some(DeepTag::Borrow)) {
                     self.invalid_borrow(body, "borrow cannot be returned from a function");
                     return;
                 }
@@ -575,18 +576,18 @@ impl Checker {
             }
             Expr::MetaExpr(meta, _) => self.check_expr(&meta.expr, scope),
             Expr::List(list, _) => match get_tag(list) {
-                Some("var") => self.consume_var_expr(expr, scope, generic_site(expr)),
-                Some("copy") => self.check_copy(list, scope),
-                Some("realize") => self.check_realize(expr, list, scope),
-                Some("borrow") => {
+                Some(DeepTag::Var) => self.consume_var_expr(expr, scope, generic_site(expr)),
+                Some(DeepTag::Copy) => self.check_copy(list, scope),
+                Some(DeepTag::Realize) => self.check_realize(expr, list, scope),
+                Some(DeepTag::Borrow) => {
                     self.invalid_borrow(expr, "borrow is only valid as a direct call argument")
                 }
-                Some("app") => self.check_app(expr, list, scope),
-                Some("pipe") => self.check_pipe(list, scope),
-                Some("let") => self.check_let(list, scope),
-                Some("fn") => self.check_fn(expr, list, scope),
-                Some("if") => self.check_if(list, scope),
-                Some("match") => self.check_match(list, scope),
+                Some(DeepTag::App) => self.check_app(expr, list, scope),
+                Some(DeepTag::Pipe) => self.check_pipe(list, scope),
+                Some(DeepTag::Let) => self.check_let(list, scope),
+                Some(DeepTag::Fn) => self.check_fn(expr, list, scope),
+                Some(DeepTag::If) => self.check_if(list, scope),
+                Some(DeepTag::Match) => self.check_match(list, scope),
                 // `tuple-get(t, i)` is a read of `t`, not a
                 // consume.  The implicit-linearity IR pass inserts a
                 // Copy where needed.  Pre Linearity-F2 the
@@ -597,7 +598,7 @@ impl Checker {
                 // would otherwise consume through `generic_site` and
                 // forward (via the alias chain) to the underlying
                 // tuple source.  Treat the var argument as a borrow.
-                Some("tuple-get") => self.check_tuple_get(list, scope),
+                Some(DeepTag::TupleGet) => self.check_tuple_get(list, scope),
                 _ => {
                     for child in children(list) {
                         self.check_expr(child, scope);
@@ -797,7 +798,7 @@ impl Checker {
                             kind: ConsumeKind::Aliasing,
                         },
                     );
-                } else if matches!(get_tag_expr(value), Some("borrow")) {
+                } else if matches!(get_tag_expr(value), Some(DeepTag::Borrow)) {
                     self.invalid_borrow(value, "borrow cannot be stored in a binding");
                 } else {
                     self.check_expr(value, scope);
@@ -926,7 +927,7 @@ impl Checker {
                 pushed.push(param);
             }
         }
-        if matches!(get_tag_expr(&kids[1]), Some("borrow")) {
+        if matches!(get_tag_expr(&kids[1]), Some(DeepTag::Borrow)) {
             self.invalid_borrow(&kids[1], "borrow cannot be returned from a function");
         } else {
             self.check_expr(&kids[1], &mut inner_scope);
@@ -974,7 +975,7 @@ impl Checker {
             let Expr::List(arm_list, _) = arm else {
                 continue;
             };
-            if get_tag(arm_list) != Some("arm") {
+            if get_tag(arm_list) != Some(DeepTag::Arm) {
                 continue;
             }
             let arm_kids = children(arm_list);
@@ -1317,11 +1318,8 @@ impl Checker {
     }
 }
 
-fn get_tag(list: &List) -> Option<&str> {
-    match list.elements.first() {
-        Some(Expr::Atom(Atom::Symbol(tag), _)) => Some(tag.as_str()),
-        _ => None,
-    }
+fn get_tag(list: &List) -> Option<DeepTag> {
+    list.tag()
 }
 
 fn with_macro_provenance(expr: &Expr, message: String) -> String {
@@ -1347,7 +1345,7 @@ fn macro_source(expr: &Expr) -> Option<String> {
     Some(rendered.replace('\n', " ").trim().to_string())
 }
 
-fn get_tag_expr(expr: &Expr) -> Option<&str> {
+fn get_tag_expr(expr: &Expr) -> Option<DeepTag> {
     match expr {
         Expr::List(list, _) => get_tag(list),
         _ => None,
@@ -1377,14 +1375,14 @@ fn as_list(expr: &Expr) -> Option<&List> {
 }
 
 fn is_var_expr(expr: &Expr) -> bool {
-    matches!(expr, Expr::List(list, _) if get_tag(list) == Some("var"))
+    matches!(expr, Expr::List(list, _) if get_tag(list) == Some(DeepTag::Var))
 }
 
 fn var_name(expr: &Expr) -> Option<&str> {
     let Expr::List(list, _) = expr else {
         return None;
     };
-    if get_tag(list) != Some("var") {
+    if get_tag(list) != Some(DeepTag::Var) {
         return None;
     }
     children(list).first().and_then(symbol_name)
@@ -1394,7 +1392,7 @@ fn borrow_inner(expr: &Expr) -> Option<&Expr> {
     let Expr::List(list, _) = expr else {
         return None;
     };
-    if get_tag(list) != Some("borrow") {
+    if get_tag(list) != Some(DeepTag::Borrow) {
         return None;
     }
     children(list).first()
@@ -1407,14 +1405,14 @@ fn callee_is_observational_higher_order(expr: &Expr) -> bool {
     let Expr::List(list, _) = expr else {
         return false;
     };
-    matches!(get_tag(list), Some("grad") | Some("vmap"))
+    matches!(get_tag(list), Some(DeepTag::Grad) | Some(DeepTag::Vmap))
 }
 
 fn param_names(expr: &Expr) -> Vec<String> {
     let Expr::List(list, _) = expr else {
         return Vec::new();
     };
-    if get_tag(list) != Some("params") {
+    if get_tag(list) != Some(DeepTag::Params) {
         return Vec::new();
     }
     children(list)
@@ -1446,12 +1444,12 @@ fn collect_pattern_names(expr: &Expr, names: &mut Vec<String>) {
         return;
     };
     match get_tag(list) {
-        Some("pat-var") => {
+        Some(DeepTag::PatVar) => {
             if let Some(name) = children(list).first().and_then(symbol_name) {
                 names.push(name.to_string());
             }
         }
-        Some("pat-as") => {
+        Some(DeepTag::PatAs) => {
             let kids = children(list);
             if let Some(name) = kids.first().and_then(symbol_name) {
                 names.push(name.to_string());
@@ -1485,12 +1483,12 @@ fn collect_pattern_named_types(expr: &Expr, bindings: &mut Vec<(String, Option<E
         return;
     };
     match get_tag(list) {
-        Some("pat-var") => {
+        Some(DeepTag::PatVar) => {
             if let Some(name) = children(list).first().and_then(symbol_name) {
                 bindings.push((name.to_string(), type_metadata(expr).cloned()));
             }
         }
-        Some("pat-as") => {
+        Some(DeepTag::PatAs) => {
             let kids = children(list);
             if let Some(name) = kids.first().and_then(symbol_name) {
                 bindings.push((name.to_string(), type_metadata(expr).cloned()));
@@ -1519,14 +1517,14 @@ fn collect_free_vars(expr: &Expr, bound: &mut Vec<HashSet<String>>, free: &mut H
         Expr::Atom(_, _) | Expr::Map(_, _) => {}
         Expr::MetaExpr(meta, _) => collect_free_vars(&meta.expr, bound, free),
         Expr::List(list, _) => match get_tag(list) {
-            Some("var") => {
+            Some(DeepTag::Var) => {
                 if let Some(name) = children(list).first().and_then(symbol_name)
                     && !bound.iter().rev().any(|scope| scope.contains(name))
                 {
                     free.insert(name.to_string());
                 }
             }
-            Some("fn") => {
+            Some(DeepTag::Fn) => {
                 let kids = children(list);
                 if kids.len() >= 2 {
                     bound.push(param_names(&kids[0]).into_iter().collect());
@@ -1534,7 +1532,7 @@ fn collect_free_vars(expr: &Expr, bound: &mut Vec<HashSet<String>>, free: &mut H
                     bound.pop();
                 }
             }
-            Some("let") => {
+            Some(DeepTag::Let) => {
                 let kids = children(list);
                 if kids.len() < 2 {
                     return;
@@ -1555,7 +1553,7 @@ fn collect_free_vars(expr: &Expr, bound: &mut Vec<HashSet<String>>, free: &mut H
                 collect_free_vars(&kids[1], bound, free);
                 bound.pop();
             }
-            Some("match") => {
+            Some(DeepTag::Match) => {
                 let kids = children(list);
                 if kids.is_empty() {
                     return;
@@ -1565,7 +1563,7 @@ fn collect_free_vars(expr: &Expr, bound: &mut Vec<HashSet<String>>, free: &mut H
                     let Expr::List(arm_list, _) = arm else {
                         continue;
                     };
-                    if get_tag(arm_list) != Some("arm") {
+                    if get_tag(arm_list) != Some(DeepTag::Arm) {
                         continue;
                     }
                     let arm_kids = children(arm_list);
@@ -1797,7 +1795,7 @@ fn tuple_get_element_type<'a>(
     let Expr::List(list, _) = expr else {
         return None;
     };
-    if get_tag(list) != Some("tuple-get") {
+    if get_tag(list) != Some(DeepTag::TupleGet) {
         return None;
     }
     let kids = children(list);
@@ -1808,7 +1806,7 @@ fn tuple_get_element_type<'a>(
     })?;
     let index_expr = kids.get(1)?;
     let index = match index_expr {
-        Expr::List(idx_list, _) if get_tag(idx_list) == Some("lit") => {
+        Expr::List(idx_list, _) if get_tag(idx_list) == Some(DeepTag::Lit) => {
             children(idx_list).first().and_then(|child| match child {
                 Expr::Atom(Atom::Int(n), _) => Some(*n as usize),
                 _ => None,
@@ -1820,7 +1818,7 @@ fn tuple_get_element_type<'a>(
     let Expr::List(tuple_ty_list, _) = tuple_ty else {
         return None;
     };
-    if get_tag(tuple_ty_list) != Some("t-tuple") {
+    if get_tag(tuple_ty_list) != Some(DeepTag::TTuple) {
         return None;
     }
     let tys = children(tuple_ty_list);
@@ -1851,14 +1849,14 @@ fn type_expr_contains_tensor(expr: &Expr, tensor_carrying_adts: &HashSet<String>
         return false;
     };
     match get_tag(list) {
-        Some("t-tensor") => true,
-        Some("t-ref") => children(list)
+        Some(DeepTag::TTensor) => true,
+        Some(DeepTag::TRef) => children(list)
             .iter()
             .any(|c| type_expr_contains_tensor(c, tensor_carrying_adts)),
-        Some("t-tuple") => children(list)
+        Some(DeepTag::TTuple) => children(list)
             .iter()
             .any(|c| type_expr_contains_tensor(c, tensor_carrying_adts)),
-        Some("t-adt") => {
+        Some(DeepTag::TAdt) => {
             // An ADT is tensor-carrying if EITHER one of its type
             // arguments is (the original behavior — e.g. `Wrapper[a]`
             // where `a` is `tensor[..]`), OR the ADT's own definition
@@ -1876,13 +1874,13 @@ fn type_expr_contains_tensor(expr: &Expr, tensor_carrying_adts: &HashSet<String>
                     .skip(1) // skip the name; only check type args
                     .any(|c| type_expr_contains_tensor(c, tensor_carrying_adts))
         }
-        Some("t-fn") => false,
+        Some(DeepTag::TFn) => false,
         _ => false,
     }
 }
 
 fn type_expr_is_ref(expr: &Expr) -> bool {
-    matches!(get_tag_expr(expr), Some("t-ref"))
+    matches!(get_tag_expr(expr), Some(DeepTag::TRef))
 }
 
 /// Issue #256: detect a stamped `(t-var ...)` (or `(t-ref (t-var ...))`)
@@ -1906,8 +1904,8 @@ fn type_expr_is_ref(expr: &Expr) -> bool {
 /// `Type::Unit`, `Type::Fn`, etc.), so this leniency cannot leak.
 fn type_expr_is_unresolved_tvar(expr: &Expr) -> bool {
     match get_tag_expr(expr) {
-        Some("t-var") => true,
-        Some("t-ref") => {
+        Some(DeepTag::TVar) => true,
+        Some(DeepTag::TRef) => {
             if let Expr::List(list, _) = expr {
                 children(list)
                     .first()
@@ -1994,7 +1992,7 @@ where
         };
         let tag = get_tag(list);
         match tag {
-            Some("module") => {
+            Some(DeepTag::Module) => {
                 // `(module {} name body...)` — `children()` skips tag
                 // and meta, leaving `[name, body...]`; skip the name
                 // for the same shape the `deftype` branch below uses.
@@ -2002,7 +2000,7 @@ where
                     collect(child, out);
                 }
             }
-            Some("deftype") => {
+            Some(DeepTag::Deftype) => {
                 let kids = children(list);
                 let Some(name) = kids.first().and_then(symbol_name) else {
                     return;
@@ -2012,14 +2010,14 @@ where
                     let Expr::List(inner, _) = child else {
                         continue;
                     };
-                    if get_tag(inner) != Some("variant") {
+                    if get_tag(inner) != Some(DeepTag::Variant) {
                         continue;
                     }
                     // variant children: name, then either `(field name ty)`
                     // entries (record-style) or bare type exprs (positional).
                     for v in children(inner).iter().skip(1) {
                         match v {
-                            Expr::List(vlist, _) if get_tag(vlist) == Some("field") => {
+                            Expr::List(vlist, _) if get_tag(vlist) == Some(DeepTag::Field) => {
                                 if let Some(ty) = children(vlist).get(1) {
                                     field_tys.push(ty.clone());
                                 }
@@ -2069,7 +2067,7 @@ fn type_expr_fn_arg(expr: &Expr, index: usize) -> Option<&Expr> {
     let Expr::List(list, _) = expr else {
         return None;
     };
-    if get_tag(list) != Some("t-fn") {
+    if get_tag(list) != Some(DeepTag::TFn) {
         return None;
     }
     let kids = children(list);
@@ -2162,7 +2160,11 @@ mod tests {
 
     /// Build `(tag {meta} children...)`.
     fn node(tag: &str, meta_entries: Vec<(&str, Expr)>, children: Vec<Expr>) -> Expr {
-        let mut elements = vec![sym(tag), meta(meta_entries)];
+        let head = match DeepTag::parse(tag) {
+            Some(tag) => Expr::Atom(Atom::Tag(tag), span()),
+            None => sym(tag),
+        };
+        let mut elements = vec![head, meta(meta_entries)];
         elements.extend(children);
         Expr::List(List { elements }, span())
     }

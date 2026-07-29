@@ -2305,9 +2305,23 @@ the pinned Buoy shell-side integration and attaches full revisions.
 `handle-effect` case landed - the seed/device handler is checked per
 effect kind and the body's type is returned so the enclosing signature is
 enforced (chelis#709) - and `infer_expr`'s unknown-tag wildcard now pushes
-`UnknownForm` instead of a silent `Type::Error`. Compile-time
-exhaustiveness over the closed vocabulary - the `DeepTag` enum - is
-chelis#731 Phase 3.)*
+`UnknownForm` instead of a silent `Type::Error`.)*
+
+*(Compile-time exhaustiveness landed at chelis#731 Phase 3 and was
+strengthened to decode-once at the 2026-07-24 rework: the closed
+vocabulary is the `chelis_deep::DeepTag` enum, the parser stamps it as
+`Atom::Tag` so the tag string does not exist in the parsed tree, and
+`infer_expr`, `lower_expr`'s tag dispatch, the `.dp` structural
+validators, and every migrated consumer match it exhaustively with no
+wildcard arm, so a new tag fails the build at every chokepoint that has
+not chosen a disposition. In-vocabulary tags with no expression-position
+inference case are an explicit loud `UnknownForm` disposition naming the
+tag (`block` has a real sequencing case per chelis#859), and the
+unknown-string wildcard survives only at raw-string boundaries - input
+that never crossed the parser's vocabulary screen. A top-level list the
+checker cannot decode is a loud diagnostic, never a silent skip
+(chelis#858). Delivery record: `spec/design/checker_totality.md`
+Phase 3.)*
 
 > **[04-TOT-2]** If a check completes with an empty error vector, the
 > typed result SHALL contain no error-typed expression: `Type::Error`

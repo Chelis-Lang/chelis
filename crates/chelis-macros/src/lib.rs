@@ -1,3 +1,4 @@
+use chelis_deep::DeepTag;
 use std::collections::{HashMap, HashSet};
 
 use chelis_deep::Span;
@@ -154,10 +155,10 @@ impl Expander {
                 };
 
                 match tag {
-                    "module" => self.expand_module(list, macros, *span),
-                    "fn" => self.expand_fn(list, macros, scope, *span),
-                    "let" => self.expand_let(list, macros, scope, *span),
-                    "match" => self.expand_match(list, macros, scope, *span),
+                    DeepTag::Module => self.expand_module(list, macros, *span),
+                    DeepTag::Fn => self.expand_fn(list, macros, scope, *span),
+                    DeepTag::Let => self.expand_let(list, macros, scope, *span),
+                    DeepTag::Match => self.expand_match(list, macros, scope, *span),
                     _ => Ok(Expr::List(
                         List {
                             elements: list
@@ -242,7 +243,7 @@ impl Expander {
                 i += 2;
             }
             elements[2] = node_with_meta(
-                "bind",
+                DeepTag::Bind,
                 list.elements[1].clone(),
                 new_bind_children,
                 *bind_span,
@@ -269,7 +270,7 @@ impl Expander {
         elements.push(self.expand_expr(&kids[0], macros, scope)?);
         for arm in &kids[1..] {
             if let Expr::List(arm_list, arm_span) = arm
-                && get_tag(arm_list) == Some("arm")
+                && get_tag(arm_list) == Some(DeepTag::Arm)
             {
                 let arm_kids = children(arm_list);
                 if arm_kids.len() >= 3 {
@@ -300,26 +301,26 @@ impl Expander {
         macros: &HashMap<String, MacroDef>,
         scope: &Scope,
     ) -> Result<Option<Expr>, ExpansionError> {
-        let tag = get_tag(list);
-        let (name, args) = match tag {
-            Some("app") => {
-                let kids = children(list);
-                if kids.is_empty() {
-                    return Ok(None);
+        let (name, args) = if internal_tag(list) == Some("macro-invoke") {
+            let kids = children(list);
+            let Some(name) = kids.first().and_then(symbol_name) else {
+                return Ok(None);
+            };
+            (name.to_string(), kids[1..].to_vec())
+        } else {
+            match get_tag(list) {
+                Some(DeepTag::App) => {
+                    let kids = children(list);
+                    if kids.is_empty() {
+                        return Ok(None);
+                    }
+                    let Some(name) = var_name(&kids[0]) else {
+                        return Ok(None);
+                    };
+                    (name.to_string(), kids[1..].to_vec())
                 }
-                let Some(name) = var_name(&kids[0]) else {
-                    return Ok(None);
-                };
-                (name.to_string(), kids[1..].to_vec())
+                Some(_) | None => return Ok(None),
             }
-            Some("macro-invoke") => {
-                let kids = children(list);
-                let Some(name) = kids.first().and_then(symbol_name) else {
-                    return Ok(None);
-                };
-                (name.to_string(), kids[1..].to_vec())
-            }
-            _ => return Ok(None),
         };
 
         if scope.blocks(&name) {
@@ -398,7 +399,7 @@ fn replace_placeholder_vars(expr: &Expr, replacements: &HashMap<String, Expr>) -
             *span,
         ),
         Expr::List(list, span) => {
-            if get_tag(list) == Some("var")
+            if get_tag(list) == Some(DeepTag::Var)
                 && let Some(name) = children(list).first().and_then(symbol_name)
                 && let Some(replacement) = replacements.get(name)
             {
@@ -465,7 +466,7 @@ fn extract_macro_def(expr: &Expr) -> Result<Option<MacroDef>, ExpansionError> {
     let Expr::List(list, _) = expr else {
         return Ok(None);
     };
-    if get_tag(list) != Some("defmacro") {
+    if internal_tag(list) != Some("defmacro") {
         return Ok(None);
     }
     let kids = children(list);
@@ -484,7 +485,7 @@ fn extract_macro_def(expr: &Expr) -> Result<Option<MacroDef>, ExpansionError> {
             message: format!("defmacro `{name}` must use `(params {{}} ...)`"),
         });
     };
-    if get_tag(params_list) != Some("params") {
+    if get_tag(params_list) != Some(DeepTag::Params) {
         return Err(ExpansionError::MalformedDefinition {
             message: format!("defmacro `{name}` must use `(params {{}} ...)`"),
         });
@@ -521,7 +522,7 @@ fn substitute_expr(
             *span,
         ),
         Expr::List(list, span) => {
-            if get_tag(list) == Some("var")
+            if get_tag(list) == Some(DeepTag::Var)
                 && let Some(name) = children(list).first().and_then(symbol_name)
                 && !shadowed.contains(name)
                 && let Some(replacement) = params.get(name)
@@ -530,9 +531,9 @@ fn substitute_expr(
             }
 
             match get_tag(list) {
-                Some("fn") => substitute_fn(list, params, shadowed, *span),
-                Some("let") => substitute_let(list, params, shadowed, *span),
-                Some("match") => substitute_match(list, params, shadowed, *span),
+                Some(DeepTag::Fn) => substitute_fn(list, params, shadowed, *span),
+                Some(DeepTag::Let) => substitute_let(list, params, shadowed, *span),
+                Some(DeepTag::Match) => substitute_match(list, params, shadowed, *span),
                 _ => Expr::List(
                     List {
                         elements: list
@@ -596,7 +597,7 @@ fn substitute_let(
             i += 2;
         }
         elements[2] = node_with_meta(
-            "bind",
+            DeepTag::Bind,
             list.elements[1].clone(),
             new_bind_children,
             *bind_span,
@@ -622,7 +623,7 @@ fn substitute_match(
     elements.push(substitute_expr(&kids[0], params, shadowed));
     for arm in &kids[1..] {
         if let Expr::List(arm_list, arm_span) = arm
-            && get_tag(arm_list) == Some("arm")
+            && get_tag(arm_list) == Some(DeepTag::Arm)
         {
             let arm_kids = children(arm_list);
             if arm_kids.len() >= 3 {
@@ -658,7 +659,7 @@ fn hygienize_expr(expr: &Expr, counter: &mut usize, env: &HashMap<String, String
             *span,
         ),
         Expr::List(list, span) => {
-            if get_tag(list) == Some("var")
+            if get_tag(list) == Some(DeepTag::Var)
                 && let Some(name) = children(list).first().and_then(symbol_name)
                 && let Some(renamed) = env.get(name)
             {
@@ -667,9 +668,9 @@ fn hygienize_expr(expr: &Expr, counter: &mut usize, env: &HashMap<String, String
                 return Expr::List(List { elements }, *span);
             }
             match get_tag(list) {
-                Some("fn") => hygienize_fn(list, counter, env, *span),
-                Some("let") => hygienize_let(list, counter, env, *span),
-                Some("match") => hygienize_match(list, counter, env, *span),
+                Some(DeepTag::Fn) => hygienize_fn(list, counter, env, *span),
+                Some(DeepTag::Let) => hygienize_let(list, counter, env, *span),
+                Some(DeepTag::Match) => hygienize_match(list, counter, env, *span),
                 _ => Expr::List(
                     List {
                         elements: list
@@ -727,7 +728,7 @@ fn hygienize_let(
             i += 2;
         }
         elements[2] = node_with_meta(
-            "bind",
+            DeepTag::Bind,
             list.elements[1].clone(),
             new_bind_children,
             *bind_span,
@@ -753,7 +754,7 @@ fn hygienize_match(
     elements.push(hygienize_expr(&kids[0], counter, env));
     for arm in &kids[1..] {
         if let Expr::List(arm_list, arm_span) = arm
-            && get_tag(arm_list) == Some("arm")
+            && get_tag(arm_list) == Some(DeepTag::Arm)
         {
             let arm_kids = children(arm_list);
             if arm_kids.len() >= 3 {
@@ -787,7 +788,7 @@ fn hygienize_params_expr(
     let Expr::List(list, span) = expr else {
         return (expr.clone(), next_env);
     };
-    if get_tag(list) != Some("params") {
+    if get_tag(list) != Some(DeepTag::Params) {
         return (expr.clone(), next_env);
     }
     let mut elements = vec![list.elements[0].clone(), list.elements[1].clone()];
@@ -834,7 +835,7 @@ fn hygienize_pattern(
     };
     let mut next_env = env.clone();
     match tag {
-        "pat-var" => {
+        DeepTag::PatVar => {
             let Some(name) = children(list).first().and_then(symbol_name) else {
                 return (expr.clone(), env.clone());
             };
@@ -842,7 +843,7 @@ fn hygienize_pattern(
             next_env.insert(name.to_string(), fresh.clone());
             (
                 node_with_meta(
-                    "pat-var",
+                    DeepTag::PatVar,
                     list.elements[1].clone(),
                     vec![Expr::Atom(Atom::Symbol(fresh), children(list)[0].span())],
                     *span,
@@ -850,7 +851,7 @@ fn hygienize_pattern(
                 next_env,
             )
         }
-        "pat-as" => {
+        DeepTag::PatAs => {
             let kids = children(list);
             if kids.len() < 2 {
                 return (expr.clone(), env.clone());
@@ -863,7 +864,7 @@ fn hygienize_pattern(
             let (inner, inner_env) = hygienize_pattern(&kids[1], counter, &next_env);
             (
                 node_with_meta(
-                    "pat-as",
+                    DeepTag::PatAs,
                     list.elements[1].clone(),
                     vec![Expr::Atom(Atom::Symbol(fresh), kids[0].span()), inner],
                     *span,
@@ -871,11 +872,11 @@ fn hygienize_pattern(
                 inner_env,
             )
         }
-        "pat-tuple" | "pat-ctor" => {
+        DeepTag::PatTuple | DeepTag::PatCtor => {
             let kids = children(list);
             let mut new_children = Vec::new();
             let mut working_env = env.clone();
-            if tag == "pat-ctor" && !kids.is_empty() {
+            if tag == DeepTag::PatCtor && !kids.is_empty() {
                 new_children.push(kids[0].clone());
                 for child in &kids[1..] {
                     let (child_pat, child_env) = hygienize_pattern(child, counter, &working_env);
@@ -894,7 +895,7 @@ fn hygienize_pattern(
                 working_env,
             )
         }
-        "pat-record" => {
+        DeepTag::PatRecord => {
             let mut new_children = Vec::new();
             let kids = children(list);
             if kids.is_empty() {
@@ -904,7 +905,7 @@ fn hygienize_pattern(
             let mut working_env = env.clone();
             for kv in &kids[1..] {
                 if let Expr::List(kv_list, kv_span) = kv
-                    && get_tag(kv_list) == Some("kv")
+                    && get_tag(kv_list) == Some(DeepTag::Kv)
                 {
                     let kv_kids = children(kv_list);
                     if kv_kids.len() == 2 {
@@ -912,7 +913,7 @@ fn hygienize_pattern(
                             hygienize_pattern(&kv_kids[1], counter, &working_env);
                         working_env = child_env;
                         new_children.push(node_with_meta(
-                            "kv",
+                            DeepTag::Kv,
                             kv_list.elements[1].clone(),
                             vec![kv_kids[0].clone(), child_pat],
                             *kv_span,
@@ -923,7 +924,12 @@ fn hygienize_pattern(
                 new_children.push(kv.clone());
             }
             (
-                node_with_meta("pat-record", list.elements[1].clone(), new_children, *span),
+                node_with_meta(
+                    DeepTag::PatRecord,
+                    list.elements[1].clone(),
+                    new_children,
+                    *span,
+                ),
                 working_env,
             )
         }
@@ -960,7 +966,7 @@ fn annotate_source_expr(expr: &Expr, invocation: &Expr) -> Expr {
 
 fn params_blockers(expr: &Expr) -> Vec<String> {
     match expr {
-        Expr::List(list, _) if get_tag(list) == Some("params") => children(list)
+        Expr::List(list, _) if get_tag(list) == Some(DeepTag::Params) => children(list)
             .iter()
             .filter_map(|param| match param {
                 Expr::Atom(Atom::Symbol(name), _) => Some(name.clone()),
@@ -985,12 +991,12 @@ fn collect_pattern_binders(expr: &Expr, out: &mut Vec<String>) {
         return;
     };
     match get_tag(list) {
-        Some("pat-var") => {
+        Some(DeepTag::PatVar) => {
             if let Some(name) = children(list).first().and_then(symbol_name) {
                 out.push(name.to_string());
             }
         }
-        Some("pat-as") => {
+        Some(DeepTag::PatAs) => {
             let kids = children(list);
             if let Some(name) = kids.first().and_then(symbol_name) {
                 out.push(name.to_string());
@@ -999,20 +1005,20 @@ fn collect_pattern_binders(expr: &Expr, out: &mut Vec<String>) {
                 collect_pattern_binders(inner, out);
             }
         }
-        Some("pat-tuple") => {
+        Some(DeepTag::PatTuple) => {
             for child in children(list) {
                 collect_pattern_binders(child, out);
             }
         }
-        Some("pat-ctor") => {
+        Some(DeepTag::PatCtor) => {
             for child in children(list).iter().skip(1) {
                 collect_pattern_binders(child, out);
             }
         }
-        Some("pat-record") => {
+        Some(DeepTag::PatRecord) => {
             for kv in children(list).iter().skip(1) {
                 if let Expr::List(kv_list, _) = kv
-                    && get_tag(kv_list) == Some("kv")
+                    && get_tag(kv_list) == Some(DeepTag::Kv)
                     && let Some(pattern) = children(kv_list).get(1)
                 {
                     collect_pattern_binders(pattern, out);
@@ -1041,11 +1047,17 @@ fn standard_prelude_macros() -> Result<HashMap<String, MacroDef>, ExpansionError
     Ok(defs)
 }
 
-fn get_tag(list: &List) -> Option<&str> {
-    match list.elements.first() {
-        Some(Expr::Atom(Atom::Symbol(tag), _)) => Some(tag.as_str()),
-        _ => None,
-    }
+fn get_tag(list: &List) -> Option<DeepTag> {
+    list.tag()
+}
+
+/// Compiler-internal pre-expansion tags (`defmacro` / `macro-invoke`)
+/// are deliberately outside the public vocabulary (spec/03 macro
+/// boundary rule) and remain symbol-headed; this is the macro layer's
+/// recorded raw-string entry point (checker_totality.md §C1.2). It
+/// returns None for stamped vocabulary nodes by construction.
+fn internal_tag(list: &List) -> Option<&str> {
+    list.unknown_tag_symbol()
 }
 
 fn children(list: &List) -> &[Expr] {
@@ -1067,7 +1079,7 @@ fn var_name(expr: &Expr) -> Option<&str> {
     let Expr::List(list, _) = expr else {
         return None;
     };
-    if get_tag(list) != Some("var") {
+    if get_tag(list) != Some(DeepTag::Var) {
         return None;
     }
     children(list).first().and_then(symbol_name)
@@ -1077,8 +1089,8 @@ fn is_unit_list(expr: &Expr) -> bool {
     matches!(expr, Expr::List(List { elements }, _) if elements.is_empty())
 }
 
-fn node_with_meta(tag: &str, meta: Expr, children: Vec<Expr>, span: Span) -> Expr {
-    let mut elements = vec![Expr::Atom(Atom::Symbol(tag.to_string()), span), meta];
+fn node_with_meta(tag: DeepTag, meta: Expr, children: Vec<Expr>, span: Span) -> Expr {
+    let mut elements = vec![Expr::Atom(Atom::Tag(tag), span), meta];
     elements.extend(children);
     Expr::List(List { elements }, span)
 }
@@ -1154,25 +1166,25 @@ fn app(name: &str, args: Vec<Expr>) -> Expr {
 fn app_expr(func: Expr, args: Vec<Expr>) -> Expr {
     let mut children = vec![func];
     children.extend(args);
-    node("app", children)
+    node(DeepTag::App, children)
 }
 
 fn var(name: &str) -> Expr {
     node(
-        "var",
+        DeepTag::Var,
         vec![Expr::Atom(Atom::Symbol(name.to_string()), zero_span())],
     )
 }
 
 fn int32_lit(value: i64) -> Expr {
     node_with_meta(
-        "lit",
+        DeepTag::Lit,
         Expr::Map(
             MetaMap {
                 entries: vec![(
                     "type".to_string(),
                     node(
-                        "t-prim",
+                        DeepTag::TPrim,
                         vec![Expr::Atom(Atom::Symbol("int32".to_string()), zero_span())],
                     ),
                 )],
@@ -1184,7 +1196,7 @@ fn int32_lit(value: i64) -> Expr {
     )
 }
 
-fn node(tag: &str, children: Vec<Expr>) -> Expr {
+fn node(tag: DeepTag, children: Vec<Expr>) -> Expr {
     node_with_meta(tag, meta_empty(), children, zero_span())
 }
 

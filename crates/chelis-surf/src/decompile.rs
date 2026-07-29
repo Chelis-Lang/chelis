@@ -3,6 +3,7 @@
 //! Walks the Deep AST and produces syntactically valid Surf source
 //! that should re-parse without errors.
 
+use chelis_deep::DeepTag;
 use chelis_deep::ast::{Atom, Expr, List, MetaExpr, MetaMap};
 use chelis_deep::decode_effect_kind;
 use chelis_vocab::EffectKind;
@@ -73,28 +74,31 @@ fn decompile_program_verbose(exprs: &[Expr]) -> String {
 
 fn decompile_toplevel(expr: &Expr) -> String {
     match expr {
+        // `defmacro` is compiler-internal pre-expansion syntax outside the
+        // public vocabulary (symbol-headed by design; spec/03 macro
+        // boundary rule), so it is recognized by its raw symbol before the
+        // typed dispatch.
+        Expr::List(list, _) if list.unknown_tag_symbol() == Some("defmacro") => {
+            decompile_defmacro(list)
+        }
         Expr::List(list, _) => match tag(list) {
-            Some("def") => decompile_def(list),
-            Some("defsig") => decompile_defsig(list),
-            Some("defmacro") => decompile_defmacro(list),
-            Some("deftype") => decompile_deftype(list),
-            Some("typealias") => decompile_typealias(list),
-            Some("module") => decompile_module(list),
-            Some("import") => decompile_import(list),
-            Some("import-all") => decompile_import_all(list),
-            Some("export") => decompile_export(list),
-            Some("defdim") => decompile_defdim(list),
+            Some(DeepTag::Def) => decompile_def(list),
+            Some(DeepTag::Defsig) => decompile_defsig(list),
+            Some(DeepTag::Deftype) => decompile_deftype(list),
+            Some(DeepTag::Typealias) => decompile_typealias(list),
+            Some(DeepTag::Module) => decompile_module(list),
+            Some(DeepTag::Import) => decompile_import(list),
+            Some(DeepTag::ImportAll) => decompile_import_all(list),
+            Some(DeepTag::Export) => decompile_export(list),
+            Some(DeepTag::Defdim) => decompile_defdim(list),
             _ => format!("-- unknown: {}", brief(expr)),
         },
         _ => format!("-- atom: {}", brief(expr)),
     }
 }
 
-fn tag(list: &List) -> Option<&str> {
-    list.elements.first().and_then(|e| match e {
-        Expr::Atom(Atom::Symbol(s), _) => Some(s.as_str()),
-        _ => None,
-    })
+fn tag(list: &List) -> Option<DeepTag> {
+    list.tag()
 }
 
 fn children(list: &List) -> &[Expr] {
@@ -119,7 +123,7 @@ fn extract_grad_wrt_meta(list: &List) -> Option<Vec<String>> {
         .find(|(key, _)| key == "wrt")
         .map(|(_, value)| value)?;
     match wrt_expr {
-        Expr::List(tuple, _) if tag(tuple) == Some("tuple") => {
+        Expr::List(tuple, _) if tag(tuple) == Some(DeepTag::Tuple) => {
             children(tuple).iter().map(extract_grad_wrt_name).collect()
         }
         other => extract_grad_wrt_name(other).map(|name| vec![name]),
@@ -128,7 +132,7 @@ fn extract_grad_wrt_meta(list: &List) -> Option<Vec<String>> {
 
 fn extract_grad_wrt_name(expr: &Expr) -> Option<String> {
     match expr {
-        Expr::List(list, _) if tag(list) == Some("var") => {
+        Expr::List(list, _) if tag(list) == Some(DeepTag::Var) => {
             children(list).first().and_then(sym_str).map(str::to_string)
         }
         Expr::Atom(Atom::Symbol(name), _) => Some(name.clone()),
@@ -157,6 +161,7 @@ fn sym_str(expr: &Expr) -> Option<&str> {
 fn brief(expr: &Expr) -> String {
     match expr {
         Expr::Atom(Atom::Symbol(s), _) => s.clone(),
+        Expr::Atom(Atom::Tag(t), _) => t.as_str().to_string(),
         Expr::Atom(Atom::Int(n), _) => n.to_string(),
         Expr::Atom(Atom::Float(f), _) => format_float(*f),
         Expr::Atom(Atom::Bool(b), _) => b.to_string(),
@@ -216,7 +221,7 @@ impl<'a> IdiomaticDecompiler<'a> {
         while index < exprs.len() {
             if let Some((name, sig_expr)) = match_defsig_name(&exprs[index])
                 && let Some(next) = exprs.get(index + 1)
-                && let Some(def_list) = as_tagged_list(next, "def")
+                && let Some(def_list) = as_tagged_list(next, DeepTag::Def)
                 && def_name(def_list) == Some(name)
             {
                 lines.push(self.render_def(def_list, Some(sig_expr)));
@@ -237,17 +242,19 @@ impl<'a> IdiomaticDecompiler<'a> {
 
     fn render_toplevel(&self, expr: &Expr) -> String {
         match expr {
+            Expr::List(list, _) if list.unknown_tag_symbol() == Some("defmacro") => {
+                decompile_defmacro(list)
+            }
             Expr::List(list, _) => match tag(list) {
-                Some("def") => self.render_def(list, None),
-                Some("defsig") => decompile_defsig(list),
-                Some("defmacro") => decompile_defmacro(list),
-                Some("deftype") => decompile_deftype(list),
-                Some("typealias") => decompile_typealias(list),
-                Some("module") => self.render_module(list),
-                Some("import") => decompile_import(list),
-                Some("import-all") => decompile_import_all(list),
-                Some("export") => decompile_export(list),
-                Some("defdim") => decompile_defdim(list),
+                Some(DeepTag::Def) => self.render_def(list, None),
+                Some(DeepTag::Defsig) => decompile_defsig(list),
+                Some(DeepTag::Deftype) => decompile_deftype(list),
+                Some(DeepTag::Typealias) => decompile_typealias(list),
+                Some(DeepTag::Module) => self.render_module(list),
+                Some(DeepTag::Import) => decompile_import(list),
+                Some(DeepTag::ImportAll) => decompile_import_all(list),
+                Some(DeepTag::Export) => decompile_export(list),
+                Some(DeepTag::Defdim) => decompile_defdim(list),
                 _ => format!("-- unknown: {}", brief(expr)),
             },
             _ => format!("-- atom: {}", brief(expr)),
@@ -287,7 +294,7 @@ impl<'a> IdiomaticDecompiler<'a> {
         }
 
         if let Expr::List(fn_list, _) = body
-            && tag(fn_list) == Some("fn")
+            && tag(fn_list) == Some(DeepTag::Fn)
         {
             if is_property_def(list) {
                 return self.render_property_def(name, list, fn_list, sig_expr);
@@ -355,7 +362,7 @@ impl<'a> IdiomaticDecompiler<'a> {
     }
 
     fn render_params(&self, expr: &Expr, signature: Option<&FnSignature>) -> String {
-        let Some(list) = as_tagged_list(expr, "params") else {
+        let Some(list) = as_tagged_list(expr, DeepTag::Params) else {
             return self.decompile_expr(expr);
         };
         let kids = children(list);
@@ -397,7 +404,7 @@ impl<'a> IdiomaticDecompiler<'a> {
 
         let mut defs = Vec::new();
         for expr in exprs {
-            defs.push(as_tagged_list(expr, "def")?);
+            defs.push(as_tagged_list(expr, DeepTag::Def)?);
         }
 
         let mut load_prefix = Vec::new();
@@ -421,7 +428,7 @@ impl<'a> IdiomaticDecompiler<'a> {
         for def in &defs[index..] {
             let name = def_name(def)?;
             let body = def_body(def)?;
-            if matches!(body, Expr::List(list, _) if tag(list) == Some("fn")) {
+            if matches!(body, Expr::List(list, _) if tag(list) == Some(DeepTag::Fn)) {
                 return None;
             }
             plain_defs.push(PlainDef { name, body });
@@ -588,6 +595,7 @@ impl<'a> IdiomaticDecompiler<'a> {
     fn decompile_expr(&self, expr: &Expr) -> String {
         match expr {
             Expr::Atom(Atom::Symbol(s), _) => s.clone(),
+            Expr::Atom(Atom::Tag(t), _) => t.as_str().to_string(),
             Expr::Atom(Atom::Int(n), _) => n.to_string(),
             Expr::Atom(Atom::Float(f), _) => format_float(*f),
             Expr::Atom(Atom::Bool(b), _) => b.to_string(),
@@ -603,12 +611,12 @@ impl<'a> IdiomaticDecompiler<'a> {
 
     fn decompile_list_expr(&self, list: &List) -> String {
         match tag(list) {
-            Some("var") => children(list)
+            Some(DeepTag::Var) => children(list)
                 .first()
                 .and_then(sym_str)
                 .unwrap_or("_")
                 .to_string(),
-            Some("lit") => {
+            Some(DeepTag::Lit) => {
                 let kids = children(list);
                 if let Some(child) = kids.first() {
                     if let Expr::List(inner, _) = child
@@ -621,7 +629,7 @@ impl<'a> IdiomaticDecompiler<'a> {
                     "()".to_string()
                 }
             }
-            Some("app") => {
+            Some(DeepTag::App) => {
                 let kids = children(list);
                 if kids.is_empty() {
                     return "()".to_string();
@@ -637,7 +645,7 @@ impl<'a> IdiomaticDecompiler<'a> {
                     format!("{func}({})", args.join(", "))
                 }
             }
-            Some("fn") => {
+            Some(DeepTag::Fn) => {
                 let kids = children(list);
                 if kids.len() < 2 {
                     return "fn () -> ()".to_string();
@@ -646,8 +654,8 @@ impl<'a> IdiomaticDecompiler<'a> {
                 let body = self.decompile_expr(&kids[1]);
                 format!("fn ({params}) -> {body}")
             }
-            Some("let") => self.decompile_let_expr(list),
-            Some("if") => {
+            Some(DeepTag::Let) => self.decompile_let_expr(list),
+            Some(DeepTag::If) => {
                 let kids = children(list);
                 if kids.len() < 3 {
                     return "()".to_string();
@@ -659,14 +667,14 @@ impl<'a> IdiomaticDecompiler<'a> {
                     self.decompile_expr(&kids[2])
                 )
             }
-            Some("tuple") => {
+            Some(DeepTag::Tuple) => {
                 let elems = children(list)
                     .iter()
                     .map(|expr| self.decompile_expr(expr))
                     .collect::<Vec<_>>();
                 format!("({})", elems.join(", "))
             }
-            Some("tuple-get") => {
+            Some(DeepTag::TupleGet) => {
                 let kids = children(list);
                 if kids.len() < 2 {
                     return "()".to_string();
@@ -677,13 +685,13 @@ impl<'a> IdiomaticDecompiler<'a> {
                     self.decompile_expr(&kids[1])
                 )
             }
-            Some("pipe") => format_pipe_expr_lines(
+            Some(DeepTag::Pipe) => format_pipe_expr_lines(
                 &children(list)
                     .iter()
                     .map(|expr| self.decompile_expr(expr))
                     .collect::<Vec<_>>(),
             ),
-            Some("match") => {
+            Some(DeepTag::Match) => {
                 let kids = children(list);
                 if kids.is_empty() {
                     return "match () with {}".to_string();
@@ -699,7 +707,7 @@ impl<'a> IdiomaticDecompiler<'a> {
                     arms
                 )
             }
-            Some("cast") => {
+            Some(DeepTag::Cast) => {
                 let kids = children(list);
                 if kids.len() < 2 {
                     return "()".to_string();
@@ -710,11 +718,11 @@ impl<'a> IdiomaticDecompiler<'a> {
                     decompile_type_expr(&kids[1])
                 )
             }
-            Some("grad") => format_grad_expr(
+            Some(DeepTag::Grad) => format_grad_expr(
                 children(list).first().map(|expr| self.decompile_expr(expr)),
                 extract_grad_wrt_meta(list),
             ),
-            Some("vmap") => {
+            Some(DeepTag::Vmap) => {
                 let kids = children(list);
                 if kids.len() >= 2 {
                     if let Some(axis) = extract_int_literal(&kids[1]) {
@@ -732,24 +740,24 @@ impl<'a> IdiomaticDecompiler<'a> {
                     "vmap()".to_string()
                 }
             }
-            Some("jit") => children(list)
+            Some(DeepTag::Jit) => children(list)
                 .first()
                 .map(|expr| format!("jit({})", self.decompile_expr(expr)))
                 .unwrap_or_else(|| "jit()".to_string()),
-            Some("realize") => children(list)
+            Some(DeepTag::Realize) => children(list)
                 .first()
                 .map(|expr| format!("realize({})", self.decompile_expr(expr)))
                 .unwrap_or_else(|| "realize()".to_string()),
-            Some("copy") => children(list)
+            Some(DeepTag::Copy) => children(list)
                 .first()
                 .map(|expr| format!("copy({})", self.decompile_expr(expr)))
                 .unwrap_or_else(|| "copy()".to_string()),
-            Some("borrow") => children(list)
+            Some(DeepTag::Borrow) => children(list)
                 .first()
                 .map(|expr| format!("&{}", self.decompile_expr(expr)))
                 .unwrap_or_else(|| "&()".to_string()),
-            Some("handle-effect") => self.decompile_handle_effect(list),
-            Some("par") => format!(
+            Some(DeepTag::HandleEffect) => self.decompile_handle_effect(list),
+            Some(DeepTag::Par) => format!(
                 "par({})",
                 children(list)
                     .iter()
@@ -757,7 +765,7 @@ impl<'a> IdiomaticDecompiler<'a> {
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
-            Some("record") => {
+            Some(DeepTag::Record) => {
                 let kids = children(list);
                 if kids.is_empty() {
                     return "()".to_string();
@@ -766,7 +774,7 @@ impl<'a> IdiomaticDecompiler<'a> {
                 let fields = kids[1..]
                     .iter()
                     .filter_map(|kv| {
-                        let kv_list = as_tagged_list(kv, "kv")?;
+                        let kv_list = as_tagged_list(kv, DeepTag::Kv)?;
                         let kv_kids = children(kv_list);
                         if kv_kids.len() < 2 {
                             return None;
@@ -781,7 +789,7 @@ impl<'a> IdiomaticDecompiler<'a> {
                     .collect::<Vec<_>>();
                 format!("{name} {{ {} }}", fields.join(", "))
             }
-            Some("access") => {
+            Some(DeepTag::Access) => {
                 let kids = children(list);
                 if kids.len() >= 2 {
                     let field = sym_str(&kids[1]).unwrap_or("_");
@@ -796,9 +804,9 @@ impl<'a> IdiomaticDecompiler<'a> {
                     .map(|expr| self.decompile_expr(expr))
                     .collect::<Vec<_>>();
                 if args.is_empty() {
-                    t.to_string()
+                    t.as_str().to_string()
                 } else {
-                    format!("{t}({})", args.join(", "))
+                    format!("{}({})", t.as_str(), args.join(", "))
                 }
             }
             None => {
@@ -821,7 +829,7 @@ impl<'a> IdiomaticDecompiler<'a> {
         if kids.len() < 2 {
             return "()".to_string();
         }
-        let Some(bind_list) = as_tagged_list(&kids[0], "bind") else {
+        let Some(bind_list) = as_tagged_list(&kids[0], DeepTag::Bind) else {
             return "()".to_string();
         };
         let bind_kids = children(bind_list);
@@ -859,7 +867,7 @@ impl<'a> IdiomaticDecompiler<'a> {
     }
 }
 
-fn as_tagged_list<'a>(expr: &'a Expr, expected_tag: &str) -> Option<&'a List> {
+fn as_tagged_list(expr: &Expr, expected_tag: DeepTag) -> Option<&List> {
     let Expr::List(list, _) = expr else {
         return None;
     };
@@ -875,7 +883,7 @@ fn def_body(list: &List) -> Option<&Expr> {
 }
 
 fn match_defsig_name(expr: &Expr) -> Option<(&str, &Expr)> {
-    let list = as_tagged_list(expr, "defsig")?;
+    let list = as_tagged_list(expr, DeepTag::Defsig)?;
     let kids = children(list);
     if kids.len() < 2 {
         return None;
@@ -884,7 +892,7 @@ fn match_defsig_name(expr: &Expr) -> Option<(&str, &Expr)> {
 }
 
 fn extract_fn_signature(expr: &Expr) -> Option<FnSignature> {
-    let list = as_tagged_list(expr, "t-fn")?;
+    let list = as_tagged_list(expr, DeepTag::TFn)?;
     let kids = children(list);
     let ret_type = kids.last()?.clone();
     let arg_types = kids[..kids.len().saturating_sub(1)].to_vec();
@@ -897,7 +905,7 @@ fn extract_fn_signature(expr: &Expr) -> Option<FnSignature> {
 
 fn match_load_binding(expected_name: &str, expr: &Expr) -> Option<LoadBinding> {
     let ty = extract_expr_type(expr)?;
-    let list = as_tagged_list(strip_meta(expr), "var")?;
+    let list = as_tagged_list(strip_meta(expr), DeepTag::Var)?;
     let actual_name = children(list).first().and_then(sym_str)?;
     (actual_name == expected_name).then(|| LoadBinding {
         name: expected_name.to_string(),
@@ -922,7 +930,7 @@ fn property_preconditions(list: &List) -> Option<Vec<&Expr>> {
     let Expr::List(tuple, _) = value else {
         return None;
     };
-    (tag(tuple) == Some("tuple")).then(|| children(tuple).iter().collect())
+    (tag(tuple) == Some(DeepTag::Tuple)).then(|| children(tuple).iter().collect())
 }
 
 fn property_options(list: &List) -> Vec<(&'static str, &Expr)> {
@@ -966,7 +974,7 @@ fn extract_expr_type(expr: &Expr) -> Option<Expr> {
 fn collect_var_refs(expr: &Expr, refs: &mut Vec<String>) {
     match expr {
         Expr::List(list, _) => {
-            if tag(list) == Some("var")
+            if tag(list) == Some(DeepTag::Var)
                 && let Some(name) = children(list).first().and_then(sym_str)
             {
                 refs.push(name.to_string());
@@ -1008,11 +1016,11 @@ fn collect_use_counts(
 
 fn collect_let_bindings<'a>(expr: &'a Expr, bindings: &mut Vec<(String, &'a Expr)>) -> &'a Expr {
     if let Expr::List(list, _) = expr
-        && tag(list) == Some("let")
+        && tag(list) == Some(DeepTag::Let)
     {
         let kids = children(list);
         if kids.len() >= 2
-            && let Some(bind_list) = as_tagged_list(&kids[0], "bind")
+            && let Some(bind_list) = as_tagged_list(&kids[0], DeepTag::Bind)
         {
             let bind_kids = children(bind_list);
             let mut index = 0;
@@ -1036,7 +1044,7 @@ where
     let Expr::List(list, _) = expr else {
         return None;
     };
-    if tag(list) != Some("pipe") {
+    if tag(list) != Some(DeepTag::Pipe) {
         return None;
     }
     let kids = children(list);
@@ -1047,7 +1055,7 @@ where
 }
 
 fn expr_starts_pipe_chain(expr: &Expr) -> bool {
-    matches!(expr, Expr::List(list, _) if matches!(tag(list), Some("app" | "pipe")))
+    matches!(expr, Expr::List(list, _) if matches!(tag(list), Some(DeepTag::App | DeepTag::Pipe)))
 }
 
 fn call_stage_using_first_arg<F>(expr: &Expr, name: &str, render: F) -> Option<String>
@@ -1062,7 +1070,7 @@ where
     // may compact a lambda stage back to call-stage sugar when the carried
     // value is the first argument.
     match tag(list) {
-        Some("app") => {
+        Some(DeepTag::App) => {
             let kids = children(list);
             if kids.len() < 2 {
                 return None;
@@ -1070,7 +1078,7 @@ where
             let Expr::List(first_arg, _) = &kids[1] else {
                 return None;
             };
-            if tag(first_arg) != Some("var")
+            if tag(first_arg) != Some(DeepTag::Var)
                 || children(first_arg).first().and_then(sym_str) != Some(name)
             {
                 return None;
@@ -1086,7 +1094,7 @@ where
         // Unary-builtin bodies produced by parser-side synthesis for bare
         // keyword pipe stages — `(realize (var ... name))` ≡ `realize`,
         // `(copy (var ... name))` ≡ `copy`. Item 2b round-trip support.
-        Some(tag_name @ ("realize" | "copy")) => {
+        Some(tag_name @ (DeepTag::Realize | DeepTag::Copy)) => {
             let kids = children(list);
             let [only] = kids else {
                 return None;
@@ -1094,11 +1102,12 @@ where
             let Expr::List(inner, _) = only else {
                 return None;
             };
-            if tag(inner) != Some("var") || children(inner).first().and_then(sym_str) != Some(name)
+            if tag(inner) != Some(DeepTag::Var)
+                || children(inner).first().and_then(sym_str) != Some(name)
             {
                 return None;
             }
-            Some(tag_name.to_string())
+            Some(tag_name.as_str().to_string())
         }
         _ => None,
     }
@@ -1118,7 +1127,7 @@ where
     let Expr::List(list, _) = expr else {
         return None;
     };
-    if tag(list) == Some("fn") {
+    if tag(list) == Some(DeepTag::Fn) {
         let kids = children(list);
         let params = kids.first()?;
         let body = kids.get(1)?;
@@ -1132,7 +1141,7 @@ fn extract_single_param_name(expr: &Expr) -> Option<&str> {
     let Expr::List(list, _) = expr else {
         return None;
     };
-    if tag(list) != Some("params") {
+    if tag(list) != Some(DeepTag::Params) {
         return None;
     }
     let [only] = children(list) else {
@@ -1301,7 +1310,7 @@ fn decompile_def(list: &List) -> String {
     let body = &kids[1];
 
     if let Expr::List(fn_list, _) = body
-        && tag(fn_list) == Some("fn")
+        && tag(fn_list) == Some(DeepTag::Fn)
     {
         let fn_kids = children(fn_list);
         if fn_kids.len() >= 2 {
@@ -1393,7 +1402,7 @@ fn decompile_invariant_meta(list: &List) -> Option<String> {
     let Expr::List(fn_list, _) = inv else {
         return None;
     };
-    if tag(fn_list) != Some("fn") {
+    if tag(fn_list) != Some(DeepTag::Fn) {
         return None;
     }
     let fn_kids = children(fn_list);
@@ -1402,7 +1411,7 @@ fn decompile_invariant_meta(list: &List) -> Option<String> {
     }
     // params node: (params {} <binder>), binder is a bare symbol.
     let binder = match &fn_kids[0] {
-        Expr::List(params, _) if tag(params) == Some("params") => {
+        Expr::List(params, _) if tag(params) == Some(DeepTag::Params) => {
             children(params).first().and_then(sym_str)?
         }
         _ => return None,
@@ -1421,7 +1430,7 @@ fn has_true_meta(list: &List, key: &str) -> bool {
 
 fn decompile_variant(expr: &Expr) -> String {
     if let Expr::List(list, _) = expr
-        && tag(list) == Some("variant")
+        && tag(list) == Some(DeepTag::Variant)
     {
         let kids = children(list);
         if kids.is_empty() {
@@ -1438,12 +1447,12 @@ fn decompile_variant(expr: &Expr) -> String {
         // bare type exprs is positional. (Surf does not allow mixing.)
         let is_record = kids[1..]
             .iter()
-            .all(|f| matches!(f, Expr::List(fl, _) if tag(fl) == Some("field")));
+            .all(|f| matches!(f, Expr::List(fl, _) if tag(fl) == Some(DeepTag::Field)));
         let fields: Vec<String> = kids[1..]
             .iter()
             .map(|f| {
                 if let Expr::List(fl, _) = f
-                    && tag(fl) == Some("field")
+                    && tag(fl) == Some(DeepTag::Field)
                 {
                     let fk = children(fl);
                     if fk.len() >= 2 {
@@ -1539,6 +1548,7 @@ fn decompile_defdim(list: &List) -> String {
 fn decompile_expr(expr: &Expr) -> String {
     match expr {
         Expr::Atom(Atom::Symbol(s), _) => s.clone(),
+        Expr::Atom(Atom::Tag(t), _) => t.as_str().to_string(),
         Expr::Atom(Atom::Int(n), _) => n.to_string(),
         Expr::Atom(Atom::Float(f), _) => format_float(*f),
         Expr::Atom(Atom::Bool(b), _) => b.to_string(),
@@ -1569,16 +1579,16 @@ fn decompile_expr(expr: &Expr) -> String {
 }
 
 fn should_render_type_annotation(list: &List) -> bool {
-    !matches!(tag(list), Some("cast"))
+    !matches!(tag(list), Some(DeepTag::Cast))
 }
 
 fn decompile_list_expr(list: &List) -> String {
     match tag(list) {
-        Some("var") => {
+        Some(DeepTag::Var) => {
             let kids = children(list);
             kids.first().and_then(sym_str).unwrap_or("_").to_string()
         }
-        Some("lit") => {
+        Some(DeepTag::Lit) => {
             let kids = children(list);
             if let Some(child) = kids.first() {
                 if let Expr::List(inner, _) = child
@@ -1591,7 +1601,7 @@ fn decompile_list_expr(list: &List) -> String {
                 "()".to_string()
             }
         }
-        Some("app") => {
+        Some(DeepTag::App) => {
             let kids = children(list);
             if kids.is_empty() {
                 return "()".to_string();
@@ -1604,7 +1614,7 @@ fn decompile_list_expr(list: &List) -> String {
                 format!("{func}({})", args.join(", "))
             }
         }
-        Some("fn") => {
+        Some(DeepTag::Fn) => {
             let kids = children(list);
             if kids.len() < 2 {
                 return "fn () -> ()".to_string();
@@ -1613,8 +1623,8 @@ fn decompile_list_expr(list: &List) -> String {
             let body = decompile_expr(&kids[1]);
             format!("fn ({params}) -> {body}")
         }
-        Some("let") => decompile_let_list_as_block(list),
-        Some("if") => {
+        Some(DeepTag::Let) => decompile_let_list_as_block(list),
+        Some(DeepTag::If) => {
             let kids = children(list);
             if kids.len() < 3 {
                 return "()".to_string();
@@ -1624,12 +1634,12 @@ fn decompile_list_expr(list: &List) -> String {
             let else_e = decompile_expr(&kids[2]);
             format!("if {cond} then {then_e} else {else_e}")
         }
-        Some("tuple") => {
+        Some(DeepTag::Tuple) => {
             let kids = children(list);
             let elems: Vec<String> = kids.iter().map(decompile_expr).collect();
             format!("({})", elems.join(", "))
         }
-        Some("tuple-get") => {
+        Some(DeepTag::TupleGet) => {
             let kids = children(list);
             if kids.len() < 2 {
                 return "()".to_string();
@@ -1638,12 +1648,12 @@ fn decompile_list_expr(list: &List) -> String {
             let index = decompile_expr(&kids[1]);
             format!("{target}.{index}")
         }
-        Some("pipe") => {
+        Some(DeepTag::Pipe) => {
             let kids = children(list);
             let parts: Vec<String> = kids.iter().map(decompile_expr).collect();
             parts.join(" |> ")
         }
-        Some("match") => {
+        Some(DeepTag::Match) => {
             let kids = children(list);
             if kids.is_empty() {
                 return "match () with {{}}".to_string();
@@ -1652,7 +1662,7 @@ fn decompile_list_expr(list: &List) -> String {
             let arms: Vec<String> = kids[1..].iter().map(decompile_arm).collect();
             format!("match {scrutinee} with {{\n  {}\n}}", arms.join("\n  "))
         }
-        Some("cast") => {
+        Some(DeepTag::Cast) => {
             let kids = children(list);
             if kids.len() < 2 {
                 return "()".to_string();
@@ -1661,11 +1671,11 @@ fn decompile_list_expr(list: &List) -> String {
             let ty = decompile_type_expr(&kids[1]);
             format!("({e} as {ty})")
         }
-        Some("grad") => format_grad_expr(
+        Some(DeepTag::Grad) => format_grad_expr(
             children(list).first().map(decompile_expr),
             extract_grad_wrt_meta(list),
         ),
-        Some("vmap") => {
+        Some(DeepTag::Vmap) => {
             let kids = children(list);
             if kids.len() >= 2 {
                 if let Some(axis) = extract_int_literal(&kids[1]) {
@@ -1683,7 +1693,7 @@ fn decompile_list_expr(list: &List) -> String {
                 "vmap()".to_string()
             }
         }
-        Some("jit") => {
+        Some(DeepTag::Jit) => {
             let kids = children(list);
             if let Some(child) = kids.first() {
                 format!("jit({})", decompile_expr(child))
@@ -1691,7 +1701,7 @@ fn decompile_list_expr(list: &List) -> String {
                 "jit()".to_string()
             }
         }
-        Some("realize") => {
+        Some(DeepTag::Realize) => {
             let kids = children(list);
             if let Some(child) = kids.first() {
                 format!("realize({})", decompile_expr(child))
@@ -1699,7 +1709,7 @@ fn decompile_list_expr(list: &List) -> String {
                 "realize()".to_string()
             }
         }
-        Some("copy") => {
+        Some(DeepTag::Copy) => {
             let kids = children(list);
             if let Some(child) = kids.first() {
                 format!("copy({})", decompile_expr(child))
@@ -1707,7 +1717,7 @@ fn decompile_list_expr(list: &List) -> String {
                 "copy()".to_string()
             }
         }
-        Some("borrow") => {
+        Some(DeepTag::Borrow) => {
             let kids = children(list);
             if let Some(child) = kids.first() {
                 format!("&{}", decompile_expr(child))
@@ -1715,13 +1725,13 @@ fn decompile_list_expr(list: &List) -> String {
                 "&()".to_string()
             }
         }
-        Some("handle-effect") => decompile_handle_effect(list),
-        Some("par") => {
+        Some(DeepTag::HandleEffect) => decompile_handle_effect(list),
+        Some(DeepTag::Par) => {
             let kids = children(list);
             let parts: Vec<String> = kids.iter().map(decompile_expr).collect();
             format!("par({})", parts.join(", "))
         }
-        Some("record") => {
+        Some(DeepTag::Record) => {
             let kids = children(list);
             if kids.is_empty() {
                 return "()".to_string();
@@ -1731,7 +1741,7 @@ fn decompile_list_expr(list: &List) -> String {
                 .iter()
                 .filter_map(|kv| {
                     if let Expr::List(kv_list, _) = kv
-                        && tag(kv_list) == Some("kv")
+                        && tag(kv_list) == Some(DeepTag::Kv)
                     {
                         let kv_kids = children(kv_list);
                         if kv_kids.len() >= 2 {
@@ -1745,7 +1755,7 @@ fn decompile_list_expr(list: &List) -> String {
                 .collect();
             format!("{name} {{ {} }}", fields.join(", "))
         }
-        Some("access") => {
+        Some(DeepTag::Access) => {
             let kids = children(list);
             if kids.len() >= 2 {
                 let target = decompile_expr(&kids[0]);
@@ -1759,9 +1769,9 @@ fn decompile_list_expr(list: &List) -> String {
             let kids = children(list);
             let args: Vec<String> = kids.iter().map(decompile_expr).collect();
             if args.is_empty() {
-                t.to_string()
+                t.as_str().to_string()
             } else {
-                format!("{t}({})", args.join(", "))
+                format!("{}({})", t.as_str(), args.join(", "))
             }
         }
         None => {
@@ -1773,7 +1783,7 @@ fn decompile_list_expr(list: &List) -> String {
 
 fn decompile_arm(expr: &Expr) -> String {
     if let Expr::List(list, _) = expr
-        && tag(list) == Some("arm")
+        && tag(list) == Some(DeepTag::Arm)
     {
         let kids = children(list);
         if kids.len() >= 3 {
@@ -1788,7 +1798,7 @@ fn decompile_arm(expr: &Expr) -> String {
 
 fn decompile_bind(expr: &Expr) -> String {
     if let Expr::List(list, _) = expr
-        && tag(list) == Some("bind")
+        && tag(list) == Some(DeepTag::Bind)
     {
         let kids = children(list);
         if kids.len() >= 2 {
@@ -1802,7 +1812,7 @@ fn decompile_bind(expr: &Expr) -> String {
 
 fn decompile_params(expr: &Expr) -> String {
     if let Expr::List(list, _) = expr
-        && tag(list) == Some("params")
+        && tag(list) == Some(DeepTag::Params)
     {
         let kids = children(list);
         let params: Vec<String> = kids
@@ -1854,16 +1864,16 @@ fn decompile_bare_names(expr: &Expr) -> String {
 fn decompile_pattern(expr: &Expr) -> String {
     if let Expr::List(list, _) = expr {
         match tag(list) {
-            Some("pat-wild") => return "_".to_string(),
-            Some("pat-var") => {
+            Some(DeepTag::PatWild) => return "_".to_string(),
+            Some(DeepTag::PatVar) => {
                 let kids = children(list);
                 return kids.first().and_then(sym_str).unwrap_or("_").to_string();
             }
-            Some("pat-lit") => {
+            Some(DeepTag::PatLit) => {
                 let kids = children(list);
                 return kids.first().map(brief).unwrap_or_else(|| "_".to_string());
             }
-            Some("pat-ctor") => {
+            Some(DeepTag::PatCtor) => {
                 let kids = children(list);
                 if kids.is_empty() {
                     return "_".to_string();
@@ -1875,12 +1885,12 @@ fn decompile_pattern(expr: &Expr) -> String {
                 let sub: Vec<String> = kids[1..].iter().map(decompile_pattern).collect();
                 return format!("{name}({})", sub.join(", "));
             }
-            Some("pat-tuple") => {
+            Some(DeepTag::PatTuple) => {
                 let kids = children(list);
                 let parts: Vec<String> = kids.iter().map(decompile_pattern).collect();
                 return format!("({})", parts.join(", "));
             }
-            Some("pat-record") => {
+            Some(DeepTag::PatRecord) => {
                 let kids = children(list);
                 if kids.is_empty() {
                     return "_".to_string();
@@ -1890,7 +1900,7 @@ fn decompile_pattern(expr: &Expr) -> String {
                     .iter()
                     .filter_map(|kv| {
                         if let Expr::List(kv_list, _) = kv
-                            && tag(kv_list) == Some("kv")
+                            && tag(kv_list) == Some(DeepTag::Kv)
                         {
                             let kv_kids = children(kv_list);
                             if kv_kids.len() >= 2 {
@@ -1904,7 +1914,7 @@ fn decompile_pattern(expr: &Expr) -> String {
                     .collect();
                 return format!("{name} {{ {} }}", fields.join(", "));
             }
-            Some("pat-as") => {
+            Some(DeepTag::PatAs) => {
                 let kids = children(list);
                 if kids.len() >= 2 {
                     let name = sym_str(&kids[0]).unwrap_or("_");
@@ -1925,21 +1935,21 @@ fn decompile_pattern(expr: &Expr) -> String {
 /// True when `expr` is a `t-fn` Deep node (a function type). Used to decide
 /// whether an arrow type in argument position needs grouping parens (#290).
 fn is_t_fn(expr: &Expr) -> bool {
-    matches!(expr, Expr::List(list, _) if tag(list) == Some("t-fn"))
+    matches!(expr, Expr::List(list, _) if tag(list) == Some(DeepTag::TFn))
 }
 
 fn decompile_type_expr(expr: &Expr) -> String {
     if let Expr::List(list, _) = expr {
         match tag(list) {
-            Some("t-prim") => {
+            Some(DeepTag::TPrim) => {
                 let kids = children(list);
                 return kids.first().and_then(sym_str).unwrap_or("_").to_string();
             }
-            Some("t-var") => {
+            Some(DeepTag::TVar) => {
                 let kids = children(list);
                 return kids.first().and_then(sym_str).unwrap_or("_").to_string();
             }
-            Some("t-fn") => {
+            Some(DeepTag::TFn) => {
                 let kids = children(list);
                 if kids.is_empty() {
                     return "() -> ()".to_string();
@@ -1964,7 +1974,7 @@ fn decompile_type_expr(expr: &Expr) -> String {
                     .collect();
                 return parts.join(" -> ");
             }
-            Some("t-ref") => {
+            Some(DeepTag::TRef) => {
                 let kids = children(list);
                 // `&` binds tighter than `->`, so a reference to a function
                 // type must group the arrow: `&(a -> b)` differs from
@@ -1977,7 +1987,7 @@ fn decompile_type_expr(expr: &Expr) -> String {
                     None => "&_".to_string(),
                 };
             }
-            Some("t-tensor") => {
+            Some(DeepTag::TTensor) => {
                 let kids = children(list);
                 if kids.is_empty() {
                     return "tensor[f32]".to_string();
@@ -1985,7 +1995,7 @@ fn decompile_type_expr(expr: &Expr) -> String {
                 let parts: Vec<String> = kids.iter().map(decompile_dim_or_prim).collect();
                 return format!("tensor[{}]", parts.join(", "));
             }
-            Some("t-adt") => {
+            Some(DeepTag::TAdt) => {
                 let kids = children(list);
                 if kids.is_empty() {
                     return "_".to_string();
@@ -1997,7 +2007,7 @@ fn decompile_type_expr(expr: &Expr) -> String {
                 let args: Vec<String> = kids[1..].iter().map(decompile_type_expr).collect();
                 return format!("{name}[{}]", args.join(", "));
             }
-            Some("t-tuple") => {
+            Some(DeepTag::TTuple) => {
                 let kids = children(list);
                 if kids.is_empty() {
                     return "()".to_string();
@@ -2005,7 +2015,7 @@ fn decompile_type_expr(expr: &Expr) -> String {
                 let parts: Vec<String> = kids.iter().map(decompile_type_expr).collect();
                 return format!("({})", parts.join(", "));
             }
-            Some("t-unit") => return "()".to_string(),
+            Some(DeepTag::TUnit) => return "()".to_string(),
             _ => {}
         }
     }
@@ -2015,20 +2025,20 @@ fn decompile_type_expr(expr: &Expr) -> String {
 fn decompile_dim_or_prim(expr: &Expr) -> String {
     if let Expr::List(list, _) = expr {
         match tag(list) {
-            Some("d-lit" | "d-var" | "d-name") => {
+            Some(DeepTag::DLit | DeepTag::DVar | DeepTag::DName) => {
                 let kids = children(list);
                 if let Some(child) = kids.first() {
                     return brief(child);
                 }
             }
             // Rank variable `(d-rank {} r)` decompiles to the `..r` spread form.
-            Some("d-rank") => {
+            Some(DeepTag::DRank) => {
                 let kids = children(list);
                 if let Some(child) = kids.first() {
                     return format!("..{}", brief(child));
                 }
             }
-            Some("t-prim") => {
+            Some(DeepTag::TPrim) => {
                 return decompile_type_expr(expr);
             }
             _ => {}
@@ -2076,7 +2086,7 @@ fn decompile_block_contents(expr: &Expr) -> String {
 
 fn collect_block_bindings<'a>(expr: &'a Expr, bindings: &mut Vec<String>) -> &'a Expr {
     if let Expr::List(list, _) = expr
-        && tag(list) == Some("let")
+        && tag(list) == Some(DeepTag::Let)
     {
         let kids = children(list);
         if kids.len() >= 2 {
@@ -2108,7 +2118,7 @@ fn collect_block_bindings_from_let_list<'a>(
     }
     bindings.push(decompile_bind(&kids[0]));
     if let Expr::List(next, _) = &kids[1]
-        && tag(next) == Some("let")
+        && tag(next) == Some(DeepTag::Let)
     {
         return collect_block_bindings_from_let_list(next, bindings);
     }
@@ -2119,7 +2129,7 @@ fn decompile_effect_suffix_from_type_expr(expr: &Expr) -> String {
     let Expr::List(list, _) = expr else {
         return String::new();
     };
-    if tag(list) != Some("t-fn") {
+    if tag(list) != Some(DeepTag::TFn) {
         return String::new();
     }
     let Some(effect_expr) = meta(list).and_then(|meta| {
@@ -2134,7 +2144,7 @@ fn decompile_effect_suffix_from_type_expr(expr: &Expr) -> String {
     let Expr::List(eff_list, _) = effect_expr else {
         return String::new();
     };
-    if tag(eff_list) != Some("effects") {
+    if tag(eff_list) != Some(DeepTag::Effects) {
         return String::new();
     }
     let rendered = decompile_effect_set_expr(effect_expr);
@@ -2145,7 +2155,7 @@ fn decompile_effect_set_expr(expr: &Expr) -> String {
     let Expr::List(list, _) = expr else {
         return String::new();
     };
-    if tag(list) != Some("effects") {
+    if tag(list) != Some(DeepTag::Effects) {
         return String::new();
     }
     let rendered: Vec<String> = children(list)
@@ -2165,7 +2175,7 @@ fn decompile_effect_expr(expr: &Expr) -> Option<String> {
             "test" => "Test".to_string(),
             _ => return None,
         }),
-        Expr::List(list, _) if tag(list) == Some("resource") => {
+        Expr::List(list, _) if tag(list) == Some(DeepTag::Resource) => {
             let device = children(list).first().and_then(|child| match child {
                 Expr::Atom(Atom::Str(device), _) => Some(device.as_str()),
                 _ => None,
@@ -2207,7 +2217,7 @@ fn extract_int_literal(expr: &Expr) -> Option<i64> {
     match expr {
         Expr::Atom(Atom::Int(value), _) => Some(*value),
         Expr::MetaExpr(meta, _) => extract_int_literal(&meta.expr),
-        Expr::List(list, _) if tag(list) == Some("lit") => {
+        Expr::List(list, _) if tag(list) == Some(DeepTag::Lit) => {
             children(list).first().and_then(|child| {
                 if let Expr::Atom(Atom::Int(value), _) = child {
                     Some(*value)

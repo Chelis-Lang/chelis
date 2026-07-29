@@ -4,7 +4,7 @@ use chelis_compiler_api::schema::{
     CheckRequest, DeepCallGraphRequest, DeepOutlineRequest, RenameRequest, ReplaceFunctionRequest,
     SourceKind, WireDeepExpr,
 };
-use chelis_deep::{Atom, Expr};
+use chelis_deep::Expr;
 use schemars::schema_for;
 use serde_json::Value;
 
@@ -166,7 +166,7 @@ fn module_decl_exprs(exprs: &[Expr]) -> Vec<Expr> {
 }
 
 fn is_tag(list: &chelis_deep::List, tag: &str) -> bool {
-    matches!(list.elements.first(), Some(Expr::Atom(Atom::Symbol(found), _)) if found == tag)
+    matches!(list.tag(), Some(found) if found.as_str() == tag)
 }
 
 fn assert_insertion_faithful(original: &str, rewritten: &str, inserted: &str, index: usize) {

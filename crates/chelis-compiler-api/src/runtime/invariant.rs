@@ -187,7 +187,7 @@ pub(crate) fn collect_type_invariants(exprs: &[Expr]) -> HashMap<String, Invaria
         let Expr::List(list, _) = expr else {
             continue;
         };
-        if tag(list) != Some("deftype") {
+        if tag(list) != Some(DeepTag::Deftype) {
             continue;
         }
         let Some(meta) = get_meta(list) else {
@@ -212,7 +212,7 @@ pub(crate) fn collect_type_invariants(exprs: &[Expr]) -> HashMap<String, Invaria
             let Some(variant_list) = as_list(variant) else {
                 continue;
             };
-            if tag(variant_list) != Some("variant") {
+            if tag(variant_list) != Some(DeepTag::Variant) {
                 continue;
             }
             let Some(ctor) = children(variant_list).first().and_then(symbol_name) else {
@@ -280,7 +280,7 @@ pub(crate) fn collect_zero_arg_constants(exprs: &[Expr]) -> HashMap<String, Expr
         let Expr::List(list, _) = expr else {
             continue;
         };
-        if tag(list) != Some("def") {
+        if tag(list) != Some(DeepTag::Def) {
             continue;
         }
         let kids = children(list);
@@ -293,12 +293,12 @@ pub(crate) fn collect_zero_arg_constants(exprs: &[Expr]) -> HashMap<String, Expr
         let candidate_body = match as_list(body) {
             // Fn-wrapped form: keep only the empty-params (zero-arg) case,
             // and take the unwrapped inner value body.
-            Some(fn_list) if tag(fn_list) == Some("fn") => {
+            Some(fn_list) if tag(fn_list) == Some(DeepTag::Fn) => {
                 let fn_kids = children(fn_list);
                 let Some(params_list) = fn_kids.first().and_then(as_list) else {
                     continue;
                 };
-                if tag(params_list) != Some("params") || !children(params_list).is_empty() {
+                if tag(params_list) != Some(DeepTag::Params) || !children(params_list).is_empty() {
                     // Non-empty params => a parameterized function, not a
                     // constant. Not in the predicate grammar as a value.
                     continue;
@@ -346,9 +346,9 @@ fn is_constant_foldable(
     };
     match tag(list) {
         // A literal value is the base constant.
-        Some("lit") => true,
+        Some(DeepTag::Lit) => true,
         // A reference folds only to another genuine constant; chase it.
-        Some("var") => {
+        Some(DeepTag::Var) => {
             let Some(name) = children(list).first().and_then(symbol_name) else {
                 return false;
             };
@@ -367,7 +367,7 @@ fn is_constant_foldable(
         }
         // An application folds when the callee is an admitted predicate-
         // grammar op and every argument is itself constant foldable.
-        Some("app") => {
+        Some(DeepTag::App) => {
             let kids = children(list);
             let Some(callee) = kids.first() else {
                 return false;
@@ -441,7 +441,7 @@ pub(crate) fn collect_ctor_field_types(exprs: &[Expr]) -> HashMap<String, Vec<De
         let Expr::List(list, _) = expr else {
             continue;
         };
-        if tag(list) != Some("deftype") {
+        if tag(list) != Some(DeepTag::Deftype) {
             continue;
         }
         let kids = children(list);
@@ -449,7 +449,7 @@ pub(crate) fn collect_ctor_field_types(exprs: &[Expr]) -> HashMap<String, Vec<De
             let Some(variant_list) = as_list(variant) else {
                 continue;
             };
-            if tag(variant_list) != Some("variant") {
+            if tag(variant_list) != Some(DeepTag::Variant) {
                 continue;
             }
             let variant_kids = children(variant_list);
@@ -461,7 +461,7 @@ pub(crate) fn collect_ctor_field_types(exprs: &[Expr]) -> HashMap<String, Vec<De
                 let Some(field_list) = as_list(field) else {
                     continue;
                 };
-                if tag(field_list) != Some("field") {
+                if tag(field_list) != Some(DeepTag::Field) {
                     continue;
                 }
                 let field_kids = children(field_list);
@@ -494,16 +494,16 @@ pub(crate) fn collect_ctor_field_types(exprs: &[Expr]) -> HashMap<String, Vec<De
 fn decode_field_type(expr: &Expr) -> Option<DecodeFieldType> {
     let list = as_list(expr)?;
     match tag(list) {
-        Some("t-prim") => children(list)
+        Some(DeepTag::TPrim) => children(list)
             .first()
             .and_then(symbol_name)
             .and_then(prim_from_name)
             .map(DecodeFieldType::Prim),
-        Some("t-tensor") => children(list)
+        Some(DeepTag::TTensor) => children(list)
             .last()
             .and_then(extract_prim_from_type_expr)
             .map(DecodeFieldType::Tensor),
-        Some("t-adt") => children(list)
+        Some(DeepTag::TAdt) => children(list)
             .first()
             .and_then(symbol_name)
             .map(|name| DecodeFieldType::Adt(name.to_string())),
@@ -514,12 +514,12 @@ fn decode_field_type(expr: &Expr) -> Option<DecodeFieldType> {
 /// Parse `(fn {} (params {} <binder>) <body>)` into `(binder, body)`.
 fn parse_invariant_fn(expr: &Expr) -> Option<(String, Expr)> {
     let list = as_list(expr)?;
-    if tag(list) != Some("fn") {
+    if tag(list) != Some(DeepTag::Fn) {
         return None;
     }
     let kids = children(list);
     let params = as_list(kids.first()?)?;
-    if tag(params) != Some("params") {
+    if tag(params) != Some(DeepTag::Params) {
         return None;
     }
     let binder = children(params).first().and_then(symbol_name)?;
