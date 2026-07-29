@@ -5031,10 +5031,10 @@ impl<'a> HostEmitter<'a> {
             // (the f32 C value widens to its exact double image), never
             // through a fixed-precision printf (chelis#748).
             HostType::Float64 | HostType::Float32 => {
-                let width = scalar_float_width_macro(ty);
+                let dtype = scalar_float_dtype_macro(ty);
                 self.lines.push(format!(
                     "{}{{ char fmt_buf[CHELIS_FORMAT_SHORTEST_BUF]; \
-                     chelis_format_shortest((double)({}), {width}, fmt_buf, sizeof fmt_buf); \
+                     chelis_format_shortest((double)({}), {dtype}, fmt_buf, sizeof fmt_buf); \
                      printf(\"%s\\n\", fmt_buf); }}",
                     self.indent, value
                 ));
@@ -5148,10 +5148,10 @@ impl<'a> HostEmitter<'a> {
             // chelis#732 Phase 2: same own-width routine as
             // `emit_print_value` (intra-lane exit agreement, [05-OBS-1]).
             HostType::Float64 | HostType::Float32 => {
-                let width = scalar_float_width_macro(ty);
+                let dtype = scalar_float_dtype_macro(ty);
                 self.lines.push(format!(
                     "{}{{ char fmt_buf[CHELIS_FORMAT_SHORTEST_BUF]; \
-                     chelis_format_shortest((double)({}), {width}, fmt_buf, sizeof fmt_buf); \
+                     chelis_format_shortest((double)({}), {dtype}, fmt_buf, sizeof fmt_buf); \
                      printf(\"%s\", fmt_buf); }}",
                     self.indent, value
                 ));
@@ -5707,7 +5707,12 @@ fn sparse_elem_type(prim: Prim) -> &'static str {
 /// `chelis_format_shortest` (chelis#732 Phase 2). Reduced-float scalars
 /// have no C-host ABI cell (rejected pre-codegen, loud_unsupported.md
 /// section C6.3), so the print sites only ever see these two widths.
-fn scalar_float_width_macro(ty: &HostType) -> &'static str {
+/// `CHELIS_<DTYPE>` macro selector for a scalar float print, matching
+/// the sibling `sparse_dtype_macro` naming. It selects a DTYPE, not a
+/// width: spec/04 [04-NUM-8] gives storage and arithmetic width separate
+/// meanings, so a name spelled after "width" would be ambiguous at the
+/// one call site that feeds `chelis_format_shortest`.
+fn scalar_float_dtype_macro(ty: &HostType) -> &'static str {
     match ty {
         HostType::Float32 => chelis_vocab::RuntimeDType::F32.c_macro(),
         HostType::Float64 => chelis_vocab::RuntimeDType::F64.c_macro(),

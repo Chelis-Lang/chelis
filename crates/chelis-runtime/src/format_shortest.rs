@@ -1,7 +1,7 @@
 //! The compiled lane's shortest-round-trip float formatter
 //! (chelis#732 Phase 2, `spec/design/faithful_observation.md` section C3.3).
 //!
-//! `chelis_format_shortest(double v, int width_kind, char *buf)` is the one
+//! `chelis_format_shortest(double v, int dtype, char *buf, size_t cap)` is the one
 //! float exit routine for everything the compiled lane renders: the
 //! generated C print helper, the emitted scalar/labeled-root prints, and
 //! the runtime's own nested-value renderer all call it (directly or through
@@ -9,10 +9,14 @@
 //! spec/05 section 8.1 contract, byte-identical to the reference renderer
 //! `chelis_types::observation::format_element`:
 //!
-//! * shortest round-trip digits AT THE VALUE'S OWN WIDTH (`width_kind` is
-//!   the `RuntimeDType` id of a float dtype; `v` carries the exact f64
+//! * shortest round-trip digits AT THE VALUE'S OWN STORAGE WIDTH (`dtype`
+//!   is the `RuntimeDType` id of a float dtype; `v` carries the exact f64
 //!   image of the stored value, which every float width widens to
-//!   losslessly);
+//!   losslessly). STORAGE width, not arithmetic width: spec/04
+//!   [04-NUM-8] gives f16 and bf16 an arithmetic width of f32 while their
+//!   storage width stays 16, and [05-OBS-2] renders at storage. The
+//!   parameter is spelled `dtype` for exactly that reason - it names a
+//!   dtype, and "width" now denotes two different properties of one;
 //! * decimal form exactly when the RENDERED magnitude is zero or inside
 //!   `[1e-4, 1e16)`, e-notation otherwise, decided on the digits actually
 //!   printed (the rendered-magnitude rule, PR #792 red-team F2);
@@ -75,7 +79,7 @@ pub(crate) fn format_shortest(image: f64, width: RuntimeDType) -> String {
             "bf16",
         ),
         other => runtime_fail!(
-            "chelis_format_shortest: width_kind {} ({}) is not a float dtype",
+            "chelis_format_shortest: dtype {} ({}) is not a float dtype",
             other.id(),
             other.name()
         ),
@@ -237,7 +241,7 @@ fn assemble(neg: bool, digits: &str, sci_exp: i32) -> String {
 }
 
 /// C ABI entry point (section C3.3). `value` is the exact f64 image of the
-/// stored float, `width_kind` its `RuntimeDType` id, `buf` the caller's
+/// stored float, `dtype` its `RuntimeDType` id, `buf` the caller's
 /// output buffer, and `cap` that buffer's capacity in bytes. Returns the
 /// number of bytes written EXCLUDING the terminating NUL.
 ///
@@ -262,11 +266,11 @@ fn assemble(neg: bool, digits: &str, sci_exp: i32) -> String {
 #[no_mangle]
 pub unsafe extern "C" fn chelis_format_shortest(
     value: f64,
-    width_kind: c_int,
+    dtype: c_int,
     buf: *mut c_char,
     cap: usize,
 ) -> c_int {
-    let width = require_runtime_dtype(width_kind, "chelis_format_shortest width_kind");
+    let width = require_runtime_dtype(dtype, "chelis_format_shortest dtype");
     if buf.is_null() {
         runtime_fail!("chelis_format_shortest: null output buffer");
     }

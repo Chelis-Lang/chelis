@@ -208,7 +208,7 @@ RUNTIME_SRC_DIR = Path("crates/chelis-runtime/src")
 # int32 buffer came to be read through an f32 view at this exit while
 # `to_list` and the generated print helper read it correctly: one
 # formatter, N decoders. `format_element(prim, ElementRef)` and
-# `chelis_format_shortest(value, width_kind, buf, cap)` both receive an
+# `chelis_format_shortest(value, dtype, buf, cap)` both receive an
 # ALREADY-DECODED element, so neither can catch it.
 #
 # ENFORCEMENT RUNG (docs/agent_quality_architecture.md, chelis#740): this

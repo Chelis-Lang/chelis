@@ -503,21 +503,29 @@ chelis_tensor *chelis_contiguous(const chelis_tensor *t);
 /* chelis#732 Phase 2 (faithful_observation.md section C3.3): THE float
  * formatting routine for every compiled-lane exit. `value` is the exact
  * double image of the stored float (every supported float width widens to
- * double losslessly), `width_kind` is the value's CHELIS_* dtype id
+ * double losslessly), `dtype` is the value's CHELIS_* dtype id
  * (CHELIS_F64 / CHELIS_F32 / CHELIS_F16 / CHELIS_BF16), and `buf` receives
  * the NUL-terminated shortest string that parses back to exactly the
- * stored bits at that width, in the frozen spec/05 section 8.1 grammar
+ * stored bits at that dtype's STORAGE width, in the frozen spec/05
+ * section 8.1 grammar
  * (`inf` / `-inf` / `NaN`, lowercase unpadded `e`, `-0.0` preserved,
  * decimal form on the rendered magnitude in [1e-4, 1e16)). Byte-identical
  * to the eval lane's reference renderer by test. Integers never route
  * through this (they print exactly at their own width).
+ *
+ * Storage width, NOT arithmetic width. spec/04 [04-NUM-8] declares those
+ * separately and they differ for the narrow floats: f16 and bf16 store at
+ * 16 bits and compute at f32, and [05-OBS-2] renders at storage - an f16
+ * value prints its shortest f16 round-trip, never its f32 intermediate.
+ * The parameter is spelled `dtype` rather than a width because it names a
+ * dtype, and "width" denotes two different properties of one.
  *
  * `cap` is `buf`'s capacity in bytes; pass `sizeof buf` for an array.
  * Returns the number of bytes written EXCLUDING the terminating NUL.
  *
  * Every contract violation ABORTS rather than truncating or returning a
  * sentinel - a silent short write is a value substitution at the byte
- * level: a non-float or unknown width_kind aborts with the raw id, a NULL
+ * level: a non-float or unknown dtype aborts with the raw id, a NULL
  * buf aborts, and a cap too small for the rendering plus its NUL aborts
  * naming both numbers. The return value is therefore always a valid
  * length; it exists so a caller that wants the length need not strlen the
@@ -526,7 +534,7 @@ chelis_tensor *chelis_contiguous(const chelis_tensor *t);
  * CHELIS_FORMAT_SHORTEST_BUF is the documented minimum capacity: no
  * rendering in the frozen grammar exceeds it. */
 #define CHELIS_FORMAT_SHORTEST_BUF 32
-int chelis_format_shortest(double value, int width_kind, char *buf, size_t cap);
+int chelis_format_shortest(double value, int dtype, char *buf, size_t cap);
 
 #ifdef __cplusplus
 }

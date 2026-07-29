@@ -6,7 +6,7 @@
 //! Two contracts, checked separately because the diagnostics must name
 //! which side is wrong:
 //!
-//! * **the width**: a non-float width_kind (integer/bool ids) or an
+//! * **the dtype**: a non-float dtype id (integer/bool ids) or an
 //!   unknown raw id. No default width may exist - a formatter that
 //!   "helpfully" picked f64 for an integer id would recreate the census's
 //!   everything-through-double funnel.
@@ -32,12 +32,12 @@ fn invalid_width_child() {
     let Ok(case) = std::env::var(CHILD_CASE_ENV) else {
         return;
     };
-    let width_kind: i32 = case.parse().unwrap_or_else(|_| panic!("bad case {case}"));
+    let dtype: i32 = case.parse().unwrap_or_else(|_| panic!("bad case {case}"));
     let mut buf = [0u8; CHELIS_FORMAT_SHORTEST_BUF];
     unsafe {
-        chelis_format_shortest(1.5, width_kind, buf.as_mut_ptr() as *mut c_char, buf.len());
+        chelis_format_shortest(1.5, dtype, buf.as_mut_ptr() as *mut c_char, buf.len());
     }
-    panic!("width_kind {width_kind} returned a rendering instead of terminating");
+    panic!("dtype {dtype} returned a rendering instead of terminating");
 }
 
 #[test]
@@ -95,10 +95,10 @@ fn run_child(env_key: &str, case: &str, child_test: &str) -> (bool, String) {
 }
 
 #[test]
-fn non_float_and_unknown_width_kinds_abort_before_formatting() {
+fn non_float_and_unknown_dtype_ids_abort_before_formatting() {
     // Integer and bool ids (real dtypes that must not funnel through the
     // float formatter), the first unused id, and the extrema.
-    for (width_kind, expected) in [
+    for (dtype, expected) in [
         (
             chelis_vocab::RuntimeDType::I64.id(),
             "is not a float dtype".to_string(),
@@ -114,15 +114,12 @@ fn non_float_and_unknown_width_kinds_abort_before_formatting() {
             format!("invalid Chelis runtime dtype id: {}", i32::MAX),
         ),
     ] {
-        let (success, stderr) = run_child(
-            CHILD_CASE_ENV,
-            &width_kind.to_string(),
-            "invalid_width_child",
-        );
-        assert!(!success, "width_kind {width_kind} returned success");
+        let (success, stderr) =
+            run_child(CHILD_CASE_ENV, &dtype.to_string(), "invalid_width_child");
+        assert!(!success, "dtype {dtype} returned success");
         assert!(
             stderr.contains(&expected),
-            "width_kind {width_kind} lost its diagnostic (wanted `{expected}`):\n{stderr}"
+            "dtype {dtype} lost its diagnostic (wanted `{expected}`):\n{stderr}"
         );
     }
 }

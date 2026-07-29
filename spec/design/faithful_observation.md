@@ -232,12 +232,15 @@ For every dtype and every storable value:
    Phase 2 landing to state the SHIPPED architecture - the B1 row's
    frozen requirement is grammar identity to Rust `{:?}`, and this text
    previously described a pre-implementation sketch): the runtime gains
-   `int chelis_format_shortest(double v, int width_kind, char* buf,
+   `int chelis_format_shortest(double v, int dtype, char* buf,
    size_t cap)`,
    exported from the Rust runtime staticlib every compiled binary links.
    `v` is the exact double image of the stored float (every supported
-   width widens losslessly), `width_kind` is the value's `RuntimeDType`
-   id, `cap` is the caller's buffer capacity, and the return is the byte
+   width widens losslessly), `dtype` is the value's `RuntimeDType` id
+   (its STORAGE width is what the rendering round-trips at - spec/04
+   [04-NUM-8] declares storage and arithmetic width separately and they
+   differ for f16/bf16, which compute at f32; the parameter names a dtype
+   rather than a width because "width" denotes two properties of one), `cap` is the caller's buffer capacity, and the return is the byte
    count written excluding the NUL. **Every contract violation aborts
    loudly** rather than truncating or returning a sentinel: an unknown or
    non-float id aborts with the raw id, a null buffer aborts, and a `cap`
@@ -281,7 +284,7 @@ For every dtype and every storable value:
    cover). "Print exactly what is stored" is two steps -
    `bits <- read(bytes, dtype)` then `text <- format(bits)` - and §C1-§C3
    above govern only the second. `format_element(prim, ElementRef)` and
-   `chelis_format_shortest(value, width_kind, buf, cap)` both receive an
+   `chelis_format_shortest(value, dtype, buf, cap)` both receive an
    ALREADY-DECODED element, so a canonical formatter cannot detect a
    wrong-width read: the element arrives correct-looking and is rendered
    faithfully. That is exactly how the compiled lane's nested-value
@@ -647,17 +650,21 @@ never as tolerance.
   (this bullet was corrected 2026-07-28 - an earlier revision claimed
   compatibility for the renderers as a whole, which overstated it).
   On the format side the claim holds: `format_element(prim, ElementRef)`
-  and `chelis_format_shortest(value, width_kind, buf, cap)` are both already
+  and `chelis_format_shortest(value, dtype, buf, cap)` are both already
   keyed by dtype, so the payload's arrival replaces two arguments with
   one at the CALL sites and changes no rule in §C1, no byte of the
   grammar, and no rendered output.
   But both take an ALREADY-DECODED element, so neither says anything
   about whether the bytes were read at the right representation - and
   the int32 misdecode PR #863's review found lived entirely upstream of
-  them (§C3.5). Two consequences worth stating plainly: the parameter
-  spelled `width_kind` carries a `RuntimeDType` id and is therefore
-  correct today, but its NAME encodes the width-thinking [#894]
-  disproves and should not be read as license; and `chelis_format_shortest`'s
+  them (§C3.5). Two consequences worth stating plainly: the C entry
+  point's dtype parameter was originally spelled `width_kind`, which
+  encoded exactly the width-thinking [#894] disproves - and spec/04
+  [04-NUM-8] then gave "width" a SECOND meaning (storage vs arithmetic,
+  which differ for f16/bf16), so one parameter name denoted two
+  properties of a thing it was not even naming. Renamed to `dtype`
+  before the 0.18 tag, matching every other dtype-id parameter in the
+  runtime and header; and `chelis_format_shortest`'s
   `(double, int)` pair remains a seam the payload closes - the pair is
   caller-supplied, and the routine can reject an invalid dtype id but
   cannot prove the value is the exact widening of one stored at that
