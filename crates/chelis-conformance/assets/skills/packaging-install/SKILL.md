@@ -65,7 +65,10 @@ After success, it promotes `$CHELIS_HOME/nix-gcroots/chelisup` and removes the
 staging root. A failed install preserves the prior root. If the install copied
 a new binary, the wrapper promotes `$CHELIS_HOME/nix-gcroots/chelisup.partial`.
 A new attempt recovers a stale staging root before it changes that root.
-`chelisup self uninstall` removes the stable, staging, and partial roots.
+After success, the Nix wrapper restores itself at `$CHELIS_HOME/bin/chelisup`.
+The generic Rust installer contains no Nix root path or cleanup logic. The
+installed Nix wrapper removes all three roots after the real `self uninstall`
+command succeeds.
 
 The wrapper, package inventory, self-uninstall behavior, Nix contract test,
 and native Nix workflows form one contract. A direct Nix-built executable

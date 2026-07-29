@@ -554,7 +554,7 @@ pub(crate) fn uninstall(store: &Store, version: &str) -> Result<bool, String> {
     Ok(was_default)
 }
 
-/// Removes the shim, installer copy, Nix GC roots, and recorded default.
+/// Removes the shim, installer copy, and recorded default.
 /// Installed toolchains and the reef/src stores remain intact. The function
 /// returns the list of paths removed.
 ///
@@ -565,9 +565,6 @@ pub(crate) fn self_uninstall(store: &Store) -> Result<Vec<PathBuf>, String> {
     for path in [
         store.shim_path(),
         store.chelisup_path(),
-        store.nix_gc_root(),
-        store.nix_gc_staging_root(),
-        store.nix_gc_partial_root(),
         store.default_file(),
     ] {
         if path.exists() || path.is_symlink() {

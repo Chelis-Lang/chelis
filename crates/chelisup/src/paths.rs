@@ -84,21 +84,6 @@ impl Store {
         self.bin_dir().join("chelisup")
     }
 
-    /// `<home>/nix-gcroots/chelisup`, the GC root for a Nix-packaged installer.
-    pub fn nix_gc_root(&self) -> PathBuf {
-        self.home.join("nix-gcroots").join("chelisup")
-    }
-
-    /// The temporary GC root that protects a new Nix installer during install.
-    pub fn nix_gc_staging_root(&self) -> PathBuf {
-        self.home.join("nix-gcroots").join("chelisup.next")
-    }
-
-    /// The GC root that protects a binary from an incomplete Nix install.
-    pub fn nix_gc_partial_root(&self) -> PathBuf {
-        self.home.join("nix-gcroots").join("chelisup.partial")
-    }
-
     /// `<home>/default`, the recorded default-version file.
     pub fn default_file(&self) -> PathBuf {
         self.home.join("default")
@@ -193,15 +178,6 @@ mod tests {
         );
         assert_eq!(s.shim_path(), PathBuf::from("/r/bin/chelis"));
         assert_eq!(s.chelisup_path(), PathBuf::from("/r/bin/chelisup"));
-        assert_eq!(s.nix_gc_root(), PathBuf::from("/r/nix-gcroots/chelisup"));
-        assert_eq!(
-            s.nix_gc_staging_root(),
-            PathBuf::from("/r/nix-gcroots/chelisup.next")
-        );
-        assert_eq!(
-            s.nix_gc_partial_root(),
-            PathBuf::from("/r/nix-gcroots/chelisup.partial")
-        );
         assert_eq!(s.default_file(), PathBuf::from("/r/default"));
     }
 

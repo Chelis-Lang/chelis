@@ -204,7 +204,7 @@ fn default_to_uninstalled_version_is_rejected() {
 }
 
 #[test]
-fn self_uninstall_removes_shims_but_keeps_toolchains() {
+fn self_uninstall_ignores_packaging_roots_and_keeps_toolchains() {
     let home = tempfile::tempdir().unwrap();
     let release = tempfile::tempdir().unwrap();
     build_fixture_tarball(release.path(), "0.1.0", slug());
@@ -225,13 +225,10 @@ fn self_uninstall_removes_shims_but_keeps_toolchains() {
     assert!(out.status.success(), "stderr: {}", stderr(&out));
     assert!(!home.path().join("bin/chelis").exists());
     assert!(!home.path().join("bin/chelisup").exists());
-    assert!(!gc_root.exists());
-    assert!(!gc_root.is_symlink());
-    assert!(!staging_root.exists());
-    assert!(!staging_root.is_symlink());
-    assert!(!partial_root.exists());
-    assert!(!partial_root.is_symlink());
-    // The toolchain bytes remain.
+    assert!(gc_root.is_symlink());
+    assert!(staging_root.is_symlink());
+    assert!(partial_root.is_symlink());
+    // Packaging roots and the toolchain bytes remain.
     assert!(home.path().join("toolchains/0.1.0/bin/chelis").is_file());
 }
 

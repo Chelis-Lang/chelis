@@ -264,15 +264,19 @@ If an interrupted install left a staging root, the next attempt compares its
 package with both installed copies. It promotes the partial root only for a
 matching copy. Then it removes the stale staging root.
 
-The stable GC root points to the complete Nix package output. It preserves all
-store dependencies after `current_exe()` copies the real binary into
-`$CHELIS_HOME/bin/{chelis,chelisup}`.
+The real installer copies itself into both executable paths. After each
+successful copy, the Nix launcher replaces `$CHELIS_HOME/bin/chelisup` with
+itself. `$CHELIS_HOME/bin/chelis` remains the real shim.
 
-A direct copy without this root is invalid. Nix does not scan files outside the
-store, so garbage collection can remove the copied binary dependencies.
+The stable GC root points to the complete Nix package output. It preserves the
+shim dependencies and every store reference in the installed launcher.
 
-`chelisup self uninstall` removes the stable, staging, and partial GC roots
-with the copied executables. Other Nix `chelisup` commands do not create a root.
+The real installer contains no Nix root path or cleanup logic. The installed
+Nix launcher intercepts `self uninstall`. It delegates executable cleanup to
+the real installer and then removes the stable, staging, and partial roots.
+
+A direct real-binary copy has no Nix root management. Nix does not scan files
+outside the store, so garbage collection can remove its store dependencies.
 
 ## 6. Layer 1 — binary distribution (chelis#468)
 

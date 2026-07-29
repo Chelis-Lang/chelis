@@ -13,6 +13,7 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   Pinned `crate2nix` crate derivations share dependency outputs across the product packages.
   It also provides `chelis` and `chelisup` applications for `nix run`.
   The Nix `chelisup` launcher roots its closure before it installs release shims.
+  The launcher remains installed and owns Nix root cleanup. The generic installer remains independent of Nix.
   Nix remains an additive source-build channel. `chelisup` still routes release toolchains.
 - **A tracked Devenv shell supplies the contributor toolchain on Linux and macOS.**
   The shell input pins Devenv modules to `v2.2`. The shell also pins Rust, Python 3.11, test tools, and the platform C toolchain.

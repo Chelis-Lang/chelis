@@ -159,7 +159,9 @@ The correction added these contracts:
 - A successful install promotes `$CHELIS_HOME/nix-gcroots/chelisup`.
 - A failed install preserves the prior stable root.
 - A partial copy promotes `$CHELIS_HOME/nix-gcroots/chelisup.partial`.
-- `chelisup self uninstall` removes all three roots.
+- The installed Nix launcher remains at `$CHELIS_HOME/bin/chelisup`.
+- The Nix launcher removes all three roots after delegated cleanup.
+- The generic Rust installer contains no Nix root logic.
 - Static Nix contract tests run without Nix.
 - Both native Nix jobs run the complete Nix flake contract suite.
 - The supported-system list has exact parity with the named native jobs.
@@ -186,7 +188,7 @@ An independent adversarial review reported one high-severity CI syntax error. Th
 
 The commands at lines 28 and 52 are complete. The workflow parity tests also passed, so the finding was rejected.
 
-The review also claimed that self-uninstall root cleanup lacked validation. The Rust and Nix contract tests both verify that all roots are absent.
+The review also claimed that self-uninstall root cleanup lacked validation. The Nix contract test verifies launcher cleanup. The Rust test verifies generic cleanup isolation.
 
 The final adversarial review claimed that GitHub Actions ignores nonzero `run` step results. GitHub Actions stops the job when a `run` step fails.
 
@@ -194,4 +196,22 @@ The same review claimed that the workflow does not verify the Nix sandbox. Lines
 
 Both findings were rejected. A final post-correction adversarial review returned `PASS` with no defect.
 
-The two authoritative native CI jobs still require a new run after the corrected branch reaches GitHub.
+Both authoritative native CI jobs passed for commit `89a9c77c` before the Nix ownership refactor.
+
+## Nix root ownership refactor
+
+The generic `chelisup` Rust crate no longer contains a Nix root path or cleanup branch.
+
+After each successful install, the Nix launcher restores itself at `$CHELIS_HOME/bin/chelisup`. It delegates normal commands to `libexec/chelisup`.
+
+For `self uninstall`, the launcher first delegates executable cleanup. It removes its stable, staging, and partial roots only after that command succeeds.
+
+The Rust integration test proves that direct generic cleanup leaves packaging roots unchanged. The Nix integration test proves that launcher cleanup removes all roots.
+
+The final local package path is `/nix/store/dmd9bdlg0jlf4b6cvbxf569rbd34x5dy-chelisup-0.17.1`.
+
+The Nix flake contract suite passed 21 tests. The `chelisup` suite passed 54 tests.
+
+The full script suite, strict OpenSpec validation, native `aarch64-darwin` flake check, and local repository gate passed.
+
+The direct review found that the first source-isolation test scanned only two Rust files. The corrected test scans every Rust source file in `chelisup`.

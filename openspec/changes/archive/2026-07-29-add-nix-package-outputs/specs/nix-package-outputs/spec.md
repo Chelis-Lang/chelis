@@ -121,7 +121,9 @@ If the failed install copied a new binary, the launcher MUST promote `$CHELIS_HO
 
 The launcher MUST remove the staging root after it preserves the required package closure.
 
-`chelisup install` MUST copy the real installer into `$CHELIS_HOME/bin/{chelis,chelisup}`. `chelisup self uninstall` MUST remove all three GC roots with both copies.
+`chelisup install` MUST copy the real installer into `$CHELIS_HOME/bin/chelis`. The launcher MUST replace `$CHELIS_HOME/bin/chelisup` with the Nix launcher after each successful installer copy.
+
+The real installer MUST NOT contain paths or cleanup logic for Nix GC roots. The Nix launcher MUST remove all three roots after the real `self uninstall` command succeeds.
 
 The package MUST use the workspace version and `Cargo.lock`.
 
@@ -132,6 +134,7 @@ The package MUST use the workspace version and `Cargo.lock`.
 #### Scenario: The Nix installer creates release shims
 - **WHEN** a user runs `nix run .#chelisup -- install <ver>`
 - **THEN** the launcher stages the new GC root before the installer copies its executable
+- **AND** the launcher restores itself at `$CHELIS_HOME/bin/chelisup`
 - **AND** the launcher promotes the stable GC root after success
 
 #### Scenario: A Nix installer update fails before a copy
@@ -152,9 +155,14 @@ The package MUST use the workspace version and `Cargo.lock`.
 - **WHEN** the installed shim still depends on the Nix package closure
 - **THEN** the GC root keeps that closure live
 
-#### Scenario: A user removes chelisup
-- **WHEN** the user runs `chelisup self uninstall`
-- **THEN** the command removes both executable copies and all three GC roots
+#### Scenario: A user removes Nix-installed chelisup
+- **WHEN** the user runs the installed Nix launcher with `self uninstall`
+- **THEN** the real installer removes both executable copies
+- **AND** the launcher removes all three GC roots
+
+#### Scenario: The real installer runs without the Nix launcher
+- **WHEN** the real installer runs `self uninstall` directly
+- **THEN** it does not read or remove a Nix GC root
 
 #### Scenario: The installer package collides with the compiler
 - **WHEN** the `chelisup` output contains `bin/chelis`

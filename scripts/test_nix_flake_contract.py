@@ -188,6 +188,12 @@ class NixFlakeContractTests(unittest.TestCase):
         self.assertIn("pkgs.pkg-config", packages)
         self.assertIn("LIBCLANG_PATH", packages)
 
+    def test_chelisup_rust_sources_do_not_own_nix_gc_roots(self) -> None:
+        source_dir = REPO_ROOT / "crates" / "chelisup" / "src"
+        for path in source_dir.rglob("*.rs"):
+            source = path.read_text(encoding="utf-8")
+            self.assertNotRegex(source, r"\b[Nn]ix\b|nix-gcroots|nix_gc", str(path))
+
     def test_workspace_source_overrides_preserve_external_compile_assets(self) -> None:
         packages = (REPO_ROOT / "nix" / "packages.nix").read_text(encoding="utf-8")
         expected_roots = {
@@ -313,8 +319,22 @@ class NixFlakeContractTests(unittest.TestCase):
             real_binary = package / "libexec" / "chelisup"
             installed_binary = home / "bin" / "chelisup"
             installed_shim = home / "bin" / "chelis"
-            self.assertEqual(installed_binary.read_bytes(), real_binary.read_bytes())
+            package_wrapper = package / "bin" / "chelisup"
+            self.assertEqual(installed_binary.read_bytes(), package_wrapper.read_bytes())
+            self.assertNotEqual(installed_binary.read_bytes(), real_binary.read_bytes())
             self.assertEqual(installed_shim.read_bytes(), real_binary.read_bytes())
+
+            reinstalled = subprocess.run(
+                [installed_binary, "install", version],
+                cwd=REPO_ROOT,
+                env=environment,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            self.assertEqual(reinstalled.returncode, 0, reinstalled.stderr)
+            self.assertEqual(installed_binary.read_bytes(), package_wrapper.read_bytes())
 
             copied_help = subprocess.run(
                 [installed_binary, "--help"],
@@ -326,6 +346,8 @@ class NixFlakeContractTests(unittest.TestCase):
             )
             self.assertEqual(copied_help.returncode, 0, copied_help.stderr.decode())
 
+            staging_root.symlink_to(package)
+            partial_root.symlink_to(package)
             removed = subprocess.run(
                 [installed_binary, "self", "uninstall"],
                 cwd=REPO_ROOT,
@@ -336,8 +358,45 @@ class NixFlakeContractTests(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(removed.returncode, 0, removed.stderr)
-            self.assertFalse(gc_root.exists())
-            self.assertFalse(gc_root.is_symlink())
+            for root in (gc_root, staging_root, partial_root):
+                self.assertFalse(root.exists())
+                self.assertFalse(root.is_symlink())
+
+    @REQUIRES_NIX
+    def test_failed_self_uninstall_preserves_all_gc_roots(self) -> None:
+        package = Path(
+            nix_raw("build", "--no-link", "--print-out-paths", ".#chelisup")
+        )
+
+        with tempfile.TemporaryDirectory() as raw_home:
+            home = Path(raw_home)
+            bin_dir = home / "bin"
+            bin_dir.mkdir()
+            (bin_dir / "chelis").mkdir()
+            roots = tuple(
+                home / "nix-gcroots" / name
+                for name in ("chelisup", "chelisup.next", "chelisup.partial")
+            )
+            roots[0].parent.mkdir()
+            for root in roots:
+                root.symlink_to(package)
+
+            environment = os.environ.copy()
+            environment["CHELIS_HOME"] = str(home)
+            environment["PATH"] = ""
+            failed = subprocess.run(
+                [package / "bin" / "chelisup", "self", "uninstall"],
+                cwd=REPO_ROOT,
+                env=environment,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            self.assertNotEqual(failed.returncode, 0)
+            for root in roots:
+                self.assertTrue(root.is_symlink())
+                self.assertEqual(root.resolve(), package.resolve())
 
     @REQUIRES_NIX
     def test_partial_chelisup_copy_keeps_the_partial_gc_root(self) -> None:

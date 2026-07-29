@@ -76,6 +76,10 @@ The launcher removes the staging root after it preserves the required closure. T
 
 After an interrupted install, the next attempt compares the staged package with both installed copies. It promotes only a matching partial package.
 
+After a successful installer copy, the launcher restores itself at `$CHELIS_HOME/bin/chelisup`. The real Rust installer contains no Nix root logic.
+
+The installed launcher delegates `self uninstall` and removes all three roots only after the real command succeeds.
+
 The `chelisup` package will not install a `bin/chelis` shim. This rule prevents a path collision with the real compiler package.
 
 An alternative exposed all workspace crates. Most crates are implementation libraries, not stable product artifacts. That option creates an unsupported public package inventory.
@@ -143,7 +147,9 @@ Each supported system will define checks for these contracts:
 - Nix `chelisup install` stages and promotes a GC root around the internal installer copy
 - a failed Nix install preserves the prior stable GC root
 - a partial copy promotes the partial GC root
-- `chelisup self uninstall` removes all three GC roots
+- the installed Nix launcher remains at `$CHELIS_HOME/bin/chelisup`
+- the real Rust installer contains no Nix root logic
+- the Nix launcher removes all three roots after `self uninstall` succeeds
 - each app points at the executable in its corresponding package
 - the lock parity checker succeeds
 
@@ -159,9 +165,9 @@ The Nix `chelisup` launcher stages a GC root before an install. It promotes the 
 
 A failed install preserves the prior stable root. A partial copy promotes the partial root.
 
-`chelisup self uninstall` removes the stable, staging, and partial roots.
+The installed Nix launcher remains at `$CHELIS_HOME/bin/chelisup`. It removes the stable, staging, and partial roots after delegated cleanup succeeds.
 
-`chelisup` remains the installer and router for downloaded release toolchains. The Nix documentation must state this boundary.
+The real `chelisup` installer has no Nix root logic. It remains the installer and router for downloaded release toolchains. The Nix documentation must state this boundary.
 
 ## Risks / Trade-offs
 

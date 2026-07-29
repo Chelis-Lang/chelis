@@ -651,8 +651,10 @@ and [`docs/book/src/reef.md`](docs/book/src/reef.md).
   `$CHELIS_HOME/nix-gcroots/chelisup`. A failed install preserves the prior root.
   If the install copied a new binary, the wrapper promotes
   `$CHELIS_HOME/nix-gcroots/chelisup.partial`. A new attempt recovers a stale
-  staging root before it changes that root. `chelisup self uninstall` removes
-  the stable, staging, and partial roots.
+  staging root before it changes that root. After success, the Nix wrapper
+  restores itself at `$CHELIS_HOME/bin/chelisup`. The generic Rust installer
+  contains no Nix root path or cleanup logic. The installed Nix wrapper removes
+  all three roots after the real `self uninstall` command succeeds.
 - **Shim resolution order** (first match wins): `+<ver>` arg → `CHELIS_TOOLCHAIN`
   → nearest `chelis-toolchain` file → nearest `reef.toml` `compiler =` pin →
   recorded default. A resolved-but-not-installed version is a loud error naming

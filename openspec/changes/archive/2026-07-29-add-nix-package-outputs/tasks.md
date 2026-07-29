@@ -138,4 +138,15 @@ Each job runs the complete flake check set on its named system.
 - [x] 11.11 Run the complete native flake check on `aarch64-darwin`.
 - [x] 11.12 Run the local repository gate inside Devenv.
 - [x] 11.13 Run a fresh adversarial review and record its result.
-- [ ] 11.14 Re-run both authoritative native CI jobs.
+- [x] 11.14 Re-run both authoritative native CI jobs.
+
+## 12. Keep Nix root ownership out of the Rust installer
+
+- [x] 12.1 Add failing tests for generic cleanup and the installed Nix launcher.
+- [x] 12.2 Remove Nix root paths and cleanup from the `chelisup` Rust crate.
+- [x] 12.3 Restore the Nix launcher after install and let it remove its roots.
+- [x] 12.4 Synchronize the package contracts and installation documentation.
+- [x] 12.5 Run the focused Rust, Python, Nix, and OpenSpec checks.
+- [x] 12.6 Run the local gate and the local native flake check.
+- [x] 12.7 Perform a direct final review.
+- [ ] 12.8 Re-run both authoritative native CI jobs.

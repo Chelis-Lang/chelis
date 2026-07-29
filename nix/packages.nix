@@ -90,34 +90,79 @@ let
     #!${pkgs.runtimeShell}
     set -eu
 
-    if [ "\''${1:-}" = "install" ]; then
+    resolve_chelis_home() {
       if [ -n "\''${CHELIS_HOME:-}" ]; then
         chelis_home="\$CHELIS_HOME"
       elif [ -n "\''${HOME:-}" ]; then
         chelis_home="\$HOME/.chelis"
       else
         printf '%s\n' 'chelisup: neither CHELIS_HOME nor HOME is set' >&2
-        exit 1
+        return 1
       fi
+    }
+
+    set_gc_root_paths() {
       gc_root_dir="\$chelis_home/nix-gcroots"
       gc_root="\$gc_root_dir/chelisup"
       staging_root="\$gc_root_dir/chelisup.next"
       partial_root="\$gc_root_dir/chelisup.partial"
-      ${pkgs.coreutils}/bin/mkdir -p "\$gc_root_dir"
+    }
 
-      copy_matches_package() {
-        candidate_root="\$1"
-        for installed_copy in \
-          "\$chelis_home/bin/chelis" \
-          "\$chelis_home/bin/chelisup"; do
-          if [ -f "\$installed_copy" ] \
-            && ${pkgs.diffutils}/bin/cmp -s \
-              "\$candidate_root/libexec/chelisup" "\$installed_copy"; then
-            return 0
-          fi
-        done
-        return 1
-      }
+    copy_matches_package() {
+      candidate_root="\$1"
+      for installed_copy in \
+        "\$chelis_home/bin/chelis" \
+        "\$chelis_home/bin/chelisup"; do
+        if [ -f "\$installed_copy" ] \
+          && ${pkgs.diffutils}/bin/cmp -s \
+            "\$candidate_root/libexec/chelisup" "\$installed_copy"; then
+          return 0
+        fi
+      done
+      return 1
+    }
+
+    installer_matches_package() {
+      [ -f "\$chelis_home/bin/chelisup" ] \
+        && ${pkgs.diffutils}/bin/cmp -s \
+          "$out/libexec/chelisup" "\$chelis_home/bin/chelisup"
+    }
+
+    restore_nix_wrapper() {
+      wrapper_tmp="\$chelis_home/bin/.chelisup-nix-wrapper.\$\$"
+      ${pkgs.coreutils}/bin/rm -f "\$wrapper_tmp"
+      ${pkgs.coreutils}/bin/install -m755 "$out/bin/chelisup" "\$wrapper_tmp" \
+        || { ${pkgs.coreutils}/bin/rm -f "\$wrapper_tmp"; return 1; }
+      ${pkgs.coreutils}/bin/mv -f "\$wrapper_tmp" "\$chelis_home/bin/chelisup" \
+        || { ${pkgs.coreutils}/bin/rm -f "\$wrapper_tmp"; return 1; }
+    }
+
+    remove_gc_roots() {
+      for root in "\$gc_root" "\$staging_root" "\$partial_root"; do
+        if [ -e "\$root" ] || [ -L "\$root" ]; then
+          ${pkgs.coreutils}/bin/rm -f "\$root"
+          printf 'removed %s\n' "\$root"
+        fi
+      done
+      ${pkgs.coreutils}/bin/rmdir "\$gc_root_dir" 2>/dev/null || true
+    }
+
+    if [ "\''${1:-}" = "self" ] && [ "\''${2:-}" = "uninstall" ]; then
+      resolve_chelis_home
+      set_gc_root_paths
+      uninstall_status=0
+      "$out/libexec/chelisup" "\$@" || uninstall_status=\$?
+      if [ "\$uninstall_status" -ne 0 ]; then
+        exit "\$uninstall_status"
+      fi
+      remove_gc_roots
+      exit 0
+    fi
+
+    if [ "\''${1:-}" = "install" ]; then
+      resolve_chelis_home
+      set_gc_root_paths
+      ${pkgs.coreutils}/bin/mkdir -p "\$gc_root_dir"
 
       if [ -L "\$staging_root" ]; then
         staged_package="$(${pkgs.coreutils}/bin/readlink "\$staging_root")"
@@ -142,10 +187,14 @@ let
             --add-root "\$partial_root" \
             --realise "$out" >/dev/null
         fi
+        if installer_matches_package; then
+          restore_nix_wrapper
+        fi
         ${pkgs.coreutils}/bin/rm -f "\$staging_root"
         exit "\$install_status"
       fi
 
+      restore_nix_wrapper
       if ! ${pkgs.nix}/bin/nix-store --add-root "\$gc_root" --realise "$out" >/dev/null; then
         printf '%s\n' 'chelisup: failed to promote the Nix GC root' >&2
         exit 1

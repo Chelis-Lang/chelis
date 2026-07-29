@@ -166,7 +166,9 @@ The stable root preserves the copied installer dependencies. A failed install pr
 
 If a failed install copied a new binary, `$CHELIS_HOME/nix-gcroots/chelisup.partial` protects that binary.
 
-`chelisup self uninstall` removes the stable, staging, and partial roots with both executable copies.
+After each successful install, the Nix wrapper restores itself at `$CHELIS_HOME/bin/chelisup`. The generic installer contains no Nix root logic.
+
+Through the installed Nix wrapper, `chelisup self uninstall` removes all three roots after executable cleanup.
 
 The `chelisup` release workflow owns release pins and side-by-side toolchains.
 
