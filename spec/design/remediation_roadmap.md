@@ -26,6 +26,27 @@ The plan set: [`dtype_semantics.md`](dtype_semantics.md) ([#729]), [`loud_unsupp
 | [#728] the observation channel is not dtype-faithful | [`faithful_observation.md`](faithful_observation.md) - one Rust formatter, generated C print helper, round-trip invariant, tolerance table; landable before [#729]; unblocks [#687] | [#732] |
 | spec silence + stale claims ([#694]; the unauthored cells) | [`spec_provenance.md`](spec_provenance.md) - OpenSpec plans changes after Phase 0 activation, while a pinned Buoy shell and one-way Chelis adapter provide repository-independent authority, freshness, coverage, and impact enforcement; design/fixtures may proceed now, advisory execution waits for Buoy's final oracle, and blocking waits for the adapter and Chelis configuration oracles | [#733] |
 
+This map is scoped to the 2026-07 numeric audit's plan set and stays that way.
+The `meta (the class)` column names a META issue per row; that pairing is
+historical and is NOT the pattern for a new class - `AGENTS.md` section Issue
+Tracking Conventions owns the one-tracker-per-class rule now.
+
+**Sibling classes, tracked on their own issues, not here.** Listed only so a
+reader of the five plans above does not go looking inside them for work they
+structurally cannot deliver. Each row is a limit of one of the five and the
+issue that took it:
+
+| what one of the five cannot deliver | handled at |
+|---|---|
+| [#731] makes a silent `Type::Error` unconstructible by gating its constructor. The same move is unavailable for `Type::Unit`, which is an ordinary type with no constructor to gate (its own section C3 says so), and `DeepTag` exhaustiveness forces *a* disposition, not a correct one. Neither reaches the `Atom` / list-head domain | [#908] ([#885], [#887] Tier 2). [#887] Tier 1 stays with [#731], which does deliver *diagnosed* |
+| [#730] makes callable rejections loud and explicitly non-goals making them WORK ("that is [#729]'s or an op-owner's work"), so a C-host function-value ABI has no owner anywhere in the five | [#909] ([#866], [#867], [#879]). [#868] keeps its [#730] parent - span threading IS section C2's contract |
+| [#729] seals numeric construction behind private Rust constructors. It has no reach into the C runtime, where `chelis_tensor.data` is a `pub` untyped `*mut u8`; Phases 0-4 never touch it | [#893] ([#899], [#889]). [#892]'s bool storage still rides [#729]'s v0.19 cut |
+| [#730] section C2 declares the diagnostic span normative and [#731] owns checker diagnostics, but neither has a phase that threads one: `Unsupported::with_span` and `CheckError::with_span_id` both have zero call sites | [#883] ([#868], [#886] keep their [#730] parent) |
+| [05-OBS-1..5] are each conditioned on a stored numeric value reaching an exit, so three of the four questions about what a top-level ROOT is - does it exist, is it named, must `build` emit a `main` - are outside every observation atom ([#732]) and outside any authored text ([#733]) | [#912] ([#820], [#862]). [#775]'s shape half IS authored ([05-OBS-4]); only its C residue remains under [#732] |
+| no numeric plan touches `chelis reef conform`'s audit surface, which the four bump waves below keep regenerating gaps in | [#788] ([#814], [#825], [#845]) |
+
+None carries a wave assignment; they are not sequenced against the waves.
+
 Supporting: [`capability_table.md`](capability_table.md) (schema; rides [#729] Phase 4),
 [`docs/agent_quality_architecture.md`](../../docs/agent_quality_architecture.md) ([#740]), the seeded atoms
 (spec/04 §9-§10, spec/05 §7-§8), and [PR #696](https://github.com/Chelis-Lang/chelis/pull/696) (the acceptance surface).
@@ -587,3 +608,21 @@ formal target, per its §C1.5) and [#730] makes unknown KINDS loud;
 [#889]: https://github.com/Chelis-Lang/chelis/issues/889
 [#893]: https://github.com/Chelis-Lang/chelis/issues/893
 [#912]: https://github.com/Chelis-Lang/chelis/issues/912
+[#788]: https://github.com/Chelis-Lang/chelis/issues/788
+[#814]: https://github.com/Chelis-Lang/chelis/issues/814
+[#820]: https://github.com/Chelis-Lang/chelis/issues/820
+[#825]: https://github.com/Chelis-Lang/chelis/issues/825
+[#845]: https://github.com/Chelis-Lang/chelis/issues/845
+[#862]: https://github.com/Chelis-Lang/chelis/issues/862
+[#866]: https://github.com/Chelis-Lang/chelis/issues/866
+[#867]: https://github.com/Chelis-Lang/chelis/issues/867
+[#868]: https://github.com/Chelis-Lang/chelis/issues/868
+[#879]: https://github.com/Chelis-Lang/chelis/issues/879
+[#883]: https://github.com/Chelis-Lang/chelis/issues/883
+[#885]: https://github.com/Chelis-Lang/chelis/issues/885
+[#886]: https://github.com/Chelis-Lang/chelis/issues/886
+[#887]: https://github.com/Chelis-Lang/chelis/issues/887
+[#892]: https://github.com/Chelis-Lang/chelis/issues/892
+[#899]: https://github.com/Chelis-Lang/chelis/issues/899
+[#908]: https://github.com/Chelis-Lang/chelis/issues/908
+[#909]: https://github.com/Chelis-Lang/chelis/issues/909
