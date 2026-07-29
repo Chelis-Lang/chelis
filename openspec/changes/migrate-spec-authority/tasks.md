@@ -6,8 +6,8 @@
 ## 2. Unblock transfer
 
 - [ ] 2.1 Amend `spec/design/spec_provenance.md` § OpenSpec boundary, which currently denies OpenSpec authority outright and blocks every transfer under requirement 5.
-- [ ] 2.2 Amend the AGENTS.md documentation hierarchy so it describes authority per subject rather than ranking `spec/00-12*.md` above `openspec/` unconditionally.
-- [ ] 2.3 Reconcile the AGENTS.md OpenSpec section, which states `spec/**` is controlling without qualification.
+- [x] 2.2 Amend the AGENTS.md documentation hierarchy so it describes authority per subject rather than ranking `spec/00-12*.md` above `openspec/` unconditionally.
+- [x] 2.3 Reconcile the AGENTS.md OpenSpec section, which states `spec/**` is controlling without qualification.
 
 ## 3. Pilot transfer
 
