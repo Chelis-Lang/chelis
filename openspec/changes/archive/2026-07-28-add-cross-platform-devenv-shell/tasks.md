@@ -114,4 +114,4 @@ The later OpenSpec sync and archive workflow can change the corresponding main s
 - [x] 9.3 Keep services and long-running processes out of the smoke-check graph.
 - [x] 9.4 Run the Devenv smoke check and repository validation.
 - [x] 9.5 Review the final task graph directly.
-- [ ] 9.6 Re-run pull request CI.
+- [x] 9.6 Re-run pull request CI.
