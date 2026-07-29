@@ -188,9 +188,11 @@ class NixFlakeContractTests(unittest.TestCase):
         self.assertIn("pkgs.pkg-config", packages)
         self.assertIn("LIBCLANG_PATH", packages)
 
-    def test_chelisup_rust_sources_do_not_own_nix_gc_roots(self) -> None:
-        source_dir = REPO_ROOT / "crates" / "chelisup" / "src"
-        for path in source_dir.rglob("*.rs"):
+    def test_chelisup_rust_crate_does_not_own_nix_gc_roots(self) -> None:
+        crate_dir = REPO_ROOT / "crates" / "chelisup"
+        rust_sources = sorted(crate_dir.rglob("*.rs"))
+        self.assertTrue(rust_sources)
+        for path in rust_sources:
             source = path.read_text(encoding="utf-8")
             self.assertNotRegex(source, r"\b[Nn]ix\b|nix-gcroots|nix_gc", str(path))
 

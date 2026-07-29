@@ -188,7 +188,7 @@ An independent adversarial review reported one high-severity CI syntax error. Th
 
 The commands at lines 28 and 52 are complete. The workflow parity tests also passed, so the finding was rejected.
 
-The review also claimed that self-uninstall root cleanup lacked validation. The Nix contract test verifies launcher cleanup. The Rust test verifies generic cleanup isolation.
+The review also claimed that self-uninstall root cleanup lacked validation. The Nix contract test verifies launcher cleanup. The source-isolation test verifies the crate boundary.
 
 The final adversarial review claimed that GitHub Actions ignores nonzero `run` step results. GitHub Actions stops the job when a `run` step fails.
 
@@ -206,7 +206,7 @@ After each successful install, the Nix launcher restores itself at `$CHELIS_HOME
 
 For `self uninstall`, the launcher first delegates executable cleanup. It removes its stable, staging, and partial roots only after that command succeeds.
 
-The Rust integration test proves that direct generic cleanup leaves packaging roots unchanged. The Nix integration test proves that launcher cleanup removes all roots.
+The source-isolation test proves that the complete Rust crate contains no Nix root ownership. The Nix integration test proves that launcher cleanup removes all roots.
 
 The final local package path is `/nix/store/dmd9bdlg0jlf4b6cvbxf569rbd34x5dy-chelisup-0.17.1`.
 
@@ -214,4 +214,4 @@ The Nix flake contract suite passed 21 tests. The `chelisup` suite passed 54 tes
 
 The full script suite, strict OpenSpec validation, native `aarch64-darwin` flake check, and local repository gate passed.
 
-The direct review found that the first source-isolation test scanned only two Rust files. The corrected test scans every Rust source file in `chelisup`.
+The direct review found that the first source-isolation test scanned only two Rust files. The corrected test scans every Rust file in the `chelisup` crate.
