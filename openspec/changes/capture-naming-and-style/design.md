@@ -2,9 +2,9 @@
 
 `spec/01-nomenclature.md` is the canonical source of truth for identifier and filename
 conventions across the chelis monorepo and downstream shells. It splits its content into
-hard language constraints (§1, parser/resolver/backend enforced), settled conventions
-(§§2–10, `chelis lint` enforced), and resolved decisions (§11). This change records that
-content as a `naming-and-style` capability spec without altering any behavior.
+hard language constraints (§1), settled conventions, and lint enforcement rules (§§2–12).
+The existing `lint-traversal-policy` capability owns the traversal contract in §12.2. This
+change records the remaining content as a `naming-and-style` capability spec.
 
 ## Goals / Non-Goals
 
@@ -19,13 +19,15 @@ content as a `naming-and-style` capability spec without altering any behavior.
   captures the rule and one representative pair, not the full lookup tables.
 - Restating the historical resolved-decision rationale (§11) except where it changes a
   current, testable rule.
+- The change does not duplicate the lint traversal requirements from §12.2. The existing
+  `lint-traversal-policy` capability owns those requirements.
 
 ## Decisions
 
-- Group the 40+ sub-sections of the source into ~17 coherent requirements rather than one
-  requirement per sub-section, so each requirement is independently testable and carries its
-  own negative-parity scenario. Rationale: OpenSpec requirements are test units; over-fine
-  granularity would duplicate the lexer/lint boundary in noise.
+- Group the source sections into 17 coherent requirements instead of one requirement per
+  subsection. Each requirement is testable and has a negative scenario.
+- The capture links the existing `lint-traversal-policy` capability for §12.2. It does not
+  add weaker duplicate requirements to `naming-and-style`.
 - Treat the closed Deep tag vocabulary (§1.4) and its hyphen exception as one requirement
   plus a separate user-symbol-charset requirement (§1.5), because the two invariants have
   distinct enforcement points (validator vs lint).
@@ -36,6 +38,8 @@ content as a `naming-and-style` capability spec without altering any behavior.
   `MODEL_NAMESPACE_PREFIXES` / `MATH_ML_WELL_KNOWN_PREFIXES` tables live in the lint source;
   the spec captures the rule and defers the exact table to the lint, matching the source's
   own "adding a prefix requires updating that table" framing.
+- [§12.2 has a separate capability] → `naming-and-style` links
+  `lint-traversal-policy`. That capability cites §12.2 as its source.
 
 ## Open Questions
 

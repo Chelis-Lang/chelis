@@ -14,19 +14,24 @@ against explicit normative statements with positive and negative parity.
   tag vocabulary, module-path lowering, and backend/formatter identifier fidelity.
 - Capture the lint severity model (blocking vs advisory), the `--allow-style-violations`
   and `CHELIS_STYLE_GATE_DISABLE` escape hatches, and the opaque-domain-construction rule.
+- Link the existing `lint-traversal-policy` capability for the §12.2 traversal contract.
 
 ## Capabilities
 
 ### New Capabilities
 - `naming-and-style`: identifier grammar, filesystem/manifest naming, Surf/Rust/Python
   identifier conventions, module ladders, function-naming patterns, documentation naming,
-  test naming, and the `chelis lint` enforcement contract.
+  test naming, and the `chelis lint` enforcement contract. The existing
+  `lint-traversal-policy` capability owns traversal.
 
 ### Modified Capabilities
+
+- `lint-traversal-policy`: Adds a source citation for §12.2. Requirements do not change.
 
 ## Impact
 
 - Source: `spec/01-nomenclature.md` (read-only) is the authority for this capability.
+- Existing capability: `lint-traversal-policy` owns §12.2 and gains a source citation.
 - Enforcement surface: `crates/chelis-lint`, `crates/chelis-surf` (lexer/formatter),
   `crates/chelis-deep` (validate/printer), C/HIP backend symbol emission.
 - No code changes; this change only records current behavior as an OpenSpec capability spec.

@@ -4,6 +4,7 @@
 - [ ] 1.2 Record filesystem/manifest and Surf/Rust/Python identifier conventions
 - [ ] 1.3 Record module ladder, function prefix/suffix, documentation, and test naming conventions
 - [ ] 1.4 Record the `chelis lint` severity model, style-gate contract, and opaque-domain-construction discipline
+- [ ] 1.5 Link §12.2 to the existing `lint-traversal-policy` capability without duplicate requirements
 
 ## 2. Validate and sync
 

@@ -10,6 +10,9 @@ downstream shells.
 
 **Source:** captured from [`spec/01-nomenclature.md`](../../../spec/01-nomenclature.md).
 
+**Related capability:** [`lint-traversal-policy`](../lint-traversal-policy/spec.md) owns the
+traversal contract in §12.2.
+
 ## Requirements
 
 ### Requirement: Surf identifier case-split
