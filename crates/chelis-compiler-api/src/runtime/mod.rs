@@ -611,6 +611,7 @@ pub(crate) fn evaluate_host_program_with_library_and_types(
         resolving_top_levels: Vec::new(),
         random_seed: None,
         random_counter: 0,
+        cancel: chelis_types::current_cancel_token(),
     };
 
     for name in top_level_order {
@@ -970,6 +971,12 @@ struct EvalContext<'a> {
     resolving_top_levels: Vec<String>,
     random_seed: Option<u64>,
     random_counter: u64,
+    /// Cooperative cancellation flag (chelis#914), captured ONCE from the
+    /// thread-local install point at construction so the per-node-visit
+    /// check in [`Self::eval_expr`] is a relaxed atomic load rather than a
+    /// TLS lookup. `None` — the default when no caller installed a token —
+    /// makes the check a single `Option` discriminant test.
+    cancel: Option<chelis_types::CancelToken>,
 }
 
 fn tag(list: &List) -> Option<DeepTag> {

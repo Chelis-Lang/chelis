@@ -9,6 +9,14 @@ pub(crate) mod runtime;
 pub mod schema;
 pub mod stdlib_cache;
 
+/// Cooperative cancellation for long-running evaluation (chelis#914).
+/// Install a token on the thread that will run the eval, hand a clone to
+/// whoever may want to stop it, and the eval unwinds with
+/// [`EVAL_CANCELLED_MSG`] within one node visit of the request.
+pub use chelis_types::{
+    CancelToken, CancelTokenGuard, EVAL_CANCELLED_MSG, current_cancel_token, install_cancel_token,
+    is_cancellation,
+};
 pub use chelis_types::{LinkedProgramGuard, install_linked_program_guard};
 pub use compiler::{
     PreparedEvalInContext, check_in_context, eval_in_context, eval_many_in_context,

@@ -152,6 +152,37 @@ When `chelis eval --file` runs from inside a Reef package root, ad hoc
 snippet files can import package modules even if the snippet file
 itself lives outside `src/` and does not declare a top-level `module`.
 
+### Bounding a slow evaluation
+
+Interactively, Ctrl-C stops a running `chelis eval` immediately. For
+unattended and scripted runs — CI, agent harnesses, batch jobs — use
+`--timeout`:
+
+```sh
+chelis eval --timeout 30 --file slow.ch
+```
+
+On trip the command prints
+
+```text
+error: evaluation timed out after 30s (--timeout)
+```
+
+to stderr and exits non-zero, so a mis-sized or accidentally quadratic
+program fails loudly instead of being indistinguishable from one that is
+still making progress. Without the flag there is no timeout; evaluation
+runs to completion.
+
+The timeout is cooperative: the evaluator checks for it at every node
+visit, so it unwinds cleanly rather than being killed mid-write. A
+program wedged in parsing, type-checking, or lowering never reaches a
+node visit, so a backstop terminates the process a few seconds after the
+deadline — the flag's loud-failure guarantee holds either way.
+
+The same cancellation mechanism is what makes `KeyboardInterrupt` work
+promptly in the Python bindings (chelis#914); see
+`bindings/python/README.md`.
+
 ## Native Test Loop
 
 `chelis test` runs `def test_*()` functions in `tests/**/*.ch` files:

@@ -1552,7 +1552,19 @@ where
     let op_declared_axes = crate::dag::op_declared_axes_by_node(&bound_dag);
     let mut runtime_dims = prebound_dims;
 
+    // chelis#914: cooperative cancellation. `eval_compiled` runs two lanes —
+    // this tensor-DAG lane and the host runtime's `EvalContext::eval_expr` —
+    // so guarding only the host lane would leave a tensor-heavy program
+    // uninterruptible. Captured once here; the per-node cost is one relaxed
+    // load behind an `Option` test.
+    let cancel = chelis_types::current_cancel_token();
+
     for node in bound_dag.nodes() {
+        if let Some(cancel) = &cancel
+            && cancel.is_cancelled()
+        {
+            return Err(chelis_types::EVAL_CANCELLED_MSG.to_string());
+        }
         if let Some(mask) = live
             && !mask[node.id.0]
         {

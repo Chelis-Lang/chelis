@@ -17,6 +17,20 @@ Current guarantees:
 - `ChelisError` reports compiler/build/runtime failures; `ValueError` reports bad Python
   arguments such as wrong dtype, wrong shape, or unsupported device placement
 - native compile/build and compiled host/device execution release the Python GIL
+- the JSON entry points (`check`, `desugar`, `decompile`, `compile`, `eval`,
+  `validate`) run on a worker thread and stay responsive to Ctrl-C: SIGINT
+  raises `KeyboardInterrupt` promptly instead of waiting for the call to
+  finish (chelis#914). The worker is always joined, never detached, so a
+  cancelled call leaves no evaluation running behind it.
+
+  Interrupt latency is bounded by the longest single uninterruptible step,
+  not by how much work remains — in practice tens of milliseconds. The
+  exception is a program holding one very large intermediate value, where
+  allocating or freeing it is itself one such step: interrupting a fold over
+  a 40M-element list takes a few seconds, because that is how long the list
+  takes to tear down.
+
+  Acceptance probe: `bindings/python/tests/manual_eval_interrupt.py`.
 
 Compiler selection:
 

@@ -1,6 +1,7 @@
 //! Type checker for the Chelis language.
 
 pub mod adt;
+pub mod cancel;
 pub mod context;
 pub(crate) mod deep_type;
 pub mod env;
@@ -24,6 +25,10 @@ mod builtins;
 mod source_arch;
 
 pub use builtins::{BUILTIN_NAMES, ShapeClass, builtin_env, shape_class};
+pub use cancel::{
+    CancelToken, CancelTokenGuard, EVAL_CANCELLED_MSG, current_cancel_token, install_cancel_token,
+    is_cancellation,
+};
 pub use chelis_vocab::EffectKind;
 pub use context::TypeEnv;
 pub use fitness::{

@@ -225,6 +225,15 @@ enum Command {
         /// Emergency use only; CI must not pass this flag.
         #[arg(long, action = ArgAction::SetTrue)]
         allow_style_violations: bool,
+        /// Abandon the evaluation after this many seconds and exit
+        /// non-zero with `error: evaluation timed out after <N>s`.
+        ///
+        /// For unattended and scripted use: without it, a mis-sized or
+        /// accidentally quadratic program is indistinguishable from one
+        /// that is still making progress (chelis#914). Interactive Ctrl-C
+        /// already works and needs no flag.
+        #[arg(long, value_name = "SECS")]
+        timeout: Option<u64>,
     },
     /// Run front-end checks and report fitness-oriented diagnostics
     ///
@@ -825,11 +834,13 @@ fn main() {
             expr,
             json,
             allow_style_violations,
+            timeout,
         }) => cmd_eval(
             file.as_deref(),
             expr.as_deref(),
             json,
             allow_style_violations,
+            timeout,
         ),
         Some(Command::Check {
             file,
@@ -1091,7 +1102,65 @@ fn cmd_fmt(file: &Path, inplace: bool, check: bool) -> Result<(), Box<dyn std::e
     Ok(())
 }
 
+/// chelis#914: `--timeout` wrapper around [`cmd_eval_inner`].
+///
+/// The token is installed on THIS thread because the eval runs inline in the
+/// CLI; a watchdog thread trips it after `secs`. The guard is held across the
+/// whole inner call so every dispatch arm is covered, and the cancellation
+/// sentinel is translated here into the user-facing timeout message — the
+/// inner path stays unaware that a timeout exists.
 fn cmd_eval(
+    file: Option<&std::path::Path>,
+    expr: Option<&str>,
+    json: bool,
+    allow_style_violations: bool,
+    timeout: Option<u64>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let _cancel_guard = timeout.map(install_eval_timeout);
+    let outcome = cmd_eval_inner(file, expr, json, allow_style_violations);
+    match (outcome, timeout) {
+        (Err(err), Some(secs)) if chelis_compiler_api::is_cancellation(&err.to_string()) => {
+            Err(format!("evaluation timed out after {secs}s (--timeout)").into())
+        }
+        (outcome, _) => outcome,
+    }
+}
+
+/// Arm the `--timeout` watchdog and install its token for the current thread.
+///
+/// Two-stage on purpose. The token is the clean path: the eval lanes notice it
+/// at the next node visit and unwind normally, so destructors run and the
+/// error surfaces through the ordinary error channel. But the token is only
+/// observed *during evaluation* — a program wedged in parse, type-check, or
+/// lowering never reaches a node visit and would sail past its own timeout.
+/// Since the entire point of `--timeout` is an unconditional loud failure for
+/// unattended runs, a grace period after the deadline the watchdog gives up on
+/// cooperation and exits the process. Front-end cancellation would remove the
+/// need for the backstop; until then, silently not timing out is the worse
+/// failure.
+fn install_eval_timeout(secs: u64) -> chelis_compiler_api::CancelTokenGuard {
+    let token = chelis_compiler_api::CancelToken::new();
+    let watchdog = token.clone();
+    // Detached by design: this thread only sleeps and sets a flag, holds no
+    // resources, and must outlive nothing. The process exits when `cmd_eval`
+    // returns, whichever stage got there first.
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(secs));
+        watchdog.cancel();
+        std::thread::sleep(TIMEOUT_HARD_EXIT_GRACE);
+        // Still alive: the cooperative path did not reach a node visit.
+        eprintln!("error: evaluation timed out after {secs}s (--timeout)");
+        std::process::exit(1);
+    });
+    chelis_compiler_api::install_cancel_token(token)
+}
+
+/// How long the `--timeout` watchdog waits for cooperative cancellation to
+/// unwind before hard-exiting. Generous relative to the per-node check so a
+/// single long-running tensor op is not cut short spuriously.
+const TIMEOUT_HARD_EXIT_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+
+fn cmd_eval_inner(
     file: Option<&std::path::Path>,
     expr: Option<&str>,
     json: bool,

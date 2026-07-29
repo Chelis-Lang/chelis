@@ -57,6 +57,18 @@ impl<'a> EvalContext<'a> {
     }
 
     pub(super) fn eval_expr(&mut self, expr: &Expr) -> Result<RuntimeValue, String> {
+        // chelis#914: cooperative cancellation. Every node visit passes
+        // through here — including each element of a fold/map, which reach
+        // `eval_expr` via `apply_resolved_callable_with_arg_types` — so this
+        // is the single point that bounds how long a cancelled evaluation
+        // keeps running. `self.cancel` was captured once at context
+        // construction, so the common (no token) case is an `Option`
+        // discriminant test and the cancellable case adds one relaxed load.
+        if let Some(cancel) = &self.cancel
+            && cancel.is_cancelled()
+        {
+            return Err(chelis_types::EVAL_CANCELLED_MSG.to_string());
+        }
         match expr {
             Expr::Atom(_, _) => Err("bare atom is not a runtime expression".to_string()),
             Expr::Map(_, _) => Ok(RuntimeValue::Unit),
