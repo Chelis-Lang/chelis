@@ -105,9 +105,9 @@ NON_GATE_WORKFLOWS = {
     # caches to hold the pool under the 10GB LRU budget; runs no per-PR gate
     # command. Out of gate.py scope by design.
     "cache-prune.yml",
-    # OpenSpec validation (advisory). Runs `openspec validate` on the
-    # openspec/ tree; not a required status check and runs no cargo/chelis
-    # command the per-PR developer gate owns. Out of gate.py scope by design.
+    # OpenSpec validation uses the pinned central action in advisory mode.
+    # It runs no cargo or Chelis command that the developer gate owns.
+    # It stays outside gate.py by design.
     "openspec-validate.yml",
 }
 
@@ -170,6 +170,28 @@ class ListOutputTests(unittest.TestCase):
         with redirect_stdout(buf):
             gate.main(["--list"])
         self.assertIn("lint --check .", buf.getvalue())
+
+    def test_list_includes_a_doctest_stage(self):
+        # Regression guard (chelis#875): `cargo nextest` does not execute
+        # doctests, so a gate made entirely of nextest stages runs none of
+        # the `compile_fail` oracles in crates/chelis-types/src/errors.rs.
+        # Those oracles are the chelis#731 Phase 2 acceptance artifact; a
+        # gate that does not drive them lets the plan claim a compile-time
+        # guarantee no continuous job checks. If this stage is ever
+        # removed, the oracles go dark silently -- hence an explicit lock
+        # rather than relying on the union tests.
+        rendered = [gate.render(c) for c in gate.full_command_list()]
+        self.assertTrue(
+            any(r.endswith("--doc") for r in rendered),
+            f"expected a doctest stage in the canonical list, got {rendered}",
+        )
+
+    def test_doctest_stage_is_in_the_local_subset(self):
+        # The doctest stage costs well under a second and catches a broken
+        # oracle before push rather than in CI, so it belongs in `--local`
+        # too (chelis#875).
+        rendered = [gate.render(c) for c in gate.LOCAL_STATIC_COMMANDS]
+        self.assertIn("cargo test -p chelis-types --doc", rendered)
 
     def test_list_uses_nextest_not_cargo_test(self):
         # Regression guard: the historical `AGENTS.md` gate said

@@ -13,8 +13,10 @@ path = "src/lib.rs"
 [dependencies]
 chelis-deep.workspace = true
 chelis-surf.workspace = true
+ignore = "0.4"
 regex = "1"
-walkdir = "2"
+serde.workspace = true
+toml = "0.8"
 
 [dev-dependencies]
 chelis-deep.workspace = true

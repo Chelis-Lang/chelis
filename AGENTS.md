@@ -83,30 +83,6 @@ not drift.
 
 If active docs disagree, fix the disagreement instead of adding a third explanation.
 
-## OpenSpec (initial adoption)
-
-The `openspec/` tree is the canonical OpenSpec planning root (built-in
-spec-driven schema). This is an **initial, non-blocking adoption**: OpenSpec
-is available for planning changes but is **not yet required** and does not
-gate merges. The eventual required-governance regime is described in
-`spec/design/spec_provenance.md` (Phase 0) and is future work — it is not
-activated here.
-
-- CI validates the `openspec/` tree structurally through the
-  `openspec-validate` workflow (`openspec validate --all --strict`) under
-  `contents: read`. It is advisory: not a required status check, and it
-  never governs `spec/**` or blocks a merge.
-- Validate locally the same way (OpenSpec must be exactly 1.6.0):
-
-```sh
-openspec validate --all --strict --no-interactive
-```
-
-- OpenSpec artifacts are planning evidence only. They never become Chelis
-  runtime, spec, coverage, or implementation-correctness authority, and
-  never override `spec/**` or an executable acceptance oracle. When an
-  OpenSpec artifact and `spec/**` disagree, `spec/**` is controlling.
-
 ### Public-Surface Change Rule
 
 When behavior changes, update the owning code, tests, docs, and examples in the same
@@ -116,6 +92,38 @@ change set:
 - CLI integration tests
 - executable examples in `examples/`
 - active specs and current-state docs
+
+## OpenSpec (initial adoption)
+
+The `openspec/` tree is the canonical OpenSpec planning root (built-in
+spec-driven schema). This is an **initial, non-blocking adoption**: OpenSpec
+is available for planning changes but is **not yet required** and does not
+gate merges. The eventual required-governance regime is described in
+`spec/design/spec_provenance.md` (Phase 0) and is future work — it is not
+activated here.
+
+- The `openspec-validate` workflow uses a pinned `Chelis-Lang/ci` action.
+  The action supplies Node 24.18.0 and the locked OpenSpec 1.6.0 package.
+  `scripts/check_openspec.py` runs structural validation only.
+  Schema findings produce warnings because the action uses advisory mode.
+  Operational failures stay nonzero. The workflow uses only `contents: read`.
+- `openspec validate` enumerates active changes and specifications only.
+  It does not enumerate artifacts under `openspec/changes/archive/`.
+- Local validation requires OpenSpec 1.6.0:
+
+```sh
+openspec validate --all --strict --no-interactive
+```
+
+- OpenSpec artifacts are planning evidence only. When an OpenSpec artifact
+  and `spec/**` disagree, `spec/**` is controlling. The authority boundary
+  is owned by `spec/design/spec_provenance.md` § OpenSpec boundary; that
+  section is controlling and is deliberately not restated here.
+- Do not run `openspec init`'s tool generation. `.claude/skills` and
+  `.codex/skills` are symlinks to `agent-skills/`, so `--tools claude,codex`
+  writes generated skill trees into the shared skill library through both
+  paths. OpenSpec is not yet wired into the agent workflow — drive the CLI
+  directly.
 
 ## Contract Invariants
 
@@ -191,6 +199,7 @@ python3 scripts/gate.py --list
 # cargo clippy --workspace --all-targets -- -D warnings  # local + ci
 # cargo fmt --all -- --check  # local + ci
 # cargo run -p chelis-cli --bin chelis --quiet -- lint --check .  # local + ci
+# cargo test -p chelis-types --doc  # local + ci
 # cargo nextest run --workspace --profile ci  # ci-owned
 # # --local also runs: cargo nextest run -p <crate> for each crate changed vs origin/main
 ```
@@ -200,6 +209,21 @@ The gate runs `cargo nextest run` (CI's actual runner), not `cargo test
 naming gate). The sanitizer, macOS-smoke, LOC-report, no-AI-authorship,
 docs, and smt-build CI jobs are out of scope for this script by design.
 
+The `cargo test -p chelis-types --doc` stage exists because `cargo
+nextest` does not execute doctests and every other gate stage runs
+under nextest (chelis#875). Without it the chelis#731 Phase 2
+`ErrorWitness` compile-fail oracles ran in no continuous job. It is
+deliberately scoped to one crate rather than `--workspace --doc`: a
+workspace-wide doctest stage makes every crate's doc examples gating
+and should be argued on its own merits, not inherited from this one.
+
+**Doctests only run where something invokes them.** Today that is two
+places: this stage (`chelis-types`) and the C-backend job's
+`cargo test -p chelis-backend-c`, which is unfiltered and so picks up
+that crate's privacy compile-fail doctests. A `compile_fail` oracle
+added to any other crate runs nowhere until this stage is widened or
+that crate gains an equivalent invocation, in the same change set.
+
 Local pre-push gate (chelis#360):
 
 ```sh
@@ -208,7 +232,8 @@ python3 scripts/gate.py --local
 
 `--local` runs the developer pre-push subset: workspace clippy
 (`-D warnings`, compile-only), `cargo fmt --check`,
-`chelis lint --check .`, and `cargo nextest run -p <crate>` for each
+`chelis lint --check .`, `cargo test -p chelis-types --doc`, and
+`cargo nextest run -p <crate>` for each
 crate changed vs `origin/main` (committed diff plus uncommitted work;
 owning packages are resolved from each member's `Cargo.toml`, not the
 directory name). The derived crate list is always printed; "no crate

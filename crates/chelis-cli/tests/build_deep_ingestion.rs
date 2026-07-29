@@ -138,6 +138,39 @@ fn build_dp_with_deep_flag_is_a_noop_relative_to_auto_detect() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn build_replaces_a_read_only_stale_runtime_archive() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempdir().expect("tempdir");
+    let out = dir.path().join("model.c");
+    let runtime = dir.path().join("libchelis_runtime.a");
+    fs::write(&runtime, b"stale runtime").expect("write stale runtime");
+    fs::set_permissions(&runtime, fs::Permissions::from_mode(0o444))
+        .expect("make stale runtime read-only");
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "build",
+            wrapped_dp().to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    assert_ne!(
+        fs::read(&runtime).expect("read replaced runtime"),
+        b"stale runtime",
+        "a successful build must replace stale runtime bytes, not silently reuse them"
+    );
+}
+
 // ── Row 3: `chelis build foo.ch --deep` (override) ─────────────────────
 
 #[test]

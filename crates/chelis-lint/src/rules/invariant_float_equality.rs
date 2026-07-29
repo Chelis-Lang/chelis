@@ -55,22 +55,20 @@ fn collect(decls: &[Decl], source: &str, ctx: &Context<'_>, out: &mut Vec<Violat
                 name,
                 invariant: Some(inv),
                 ..
-            } => {
-                if expr_has_field_equality(&inv.body) {
-                    let (line, col) = line_col(source, inv.span.offset);
-                    out.push(Violation {
-                        rule_id: "invariant-float-equality".to_string(),
-                        spec_ref: "§12.1".to_string(),
-                        path: ctx.path.to_path_buf(),
-                        line: Some(line),
-                        col: Some(col),
-                        message: format!(
-                            "invariant on `{name}` uses exact `==` over a representation field; \
-                             exact float equality starves generation by design \
-                             (use a tolerance band over a module constant)"
-                        ),
-                    });
-                }
+            } if expr_has_field_equality(&inv.body) => {
+                let (line, col) = line_col(source, inv.span.offset);
+                out.push(Violation {
+                    rule_id: "invariant-float-equality".to_string(),
+                    spec_ref: "§12.1".to_string(),
+                    path: ctx.path.to_path_buf(),
+                    line: Some(line),
+                    col: Some(col),
+                    message: format!(
+                        "invariant on `{name}` uses exact `==` over a representation field; \
+                         exact float equality starves generation by design \
+                         (use a tolerance band over a module constant)"
+                    ),
+                });
             }
             Decl::Module { decls, .. } => collect(decls, source, ctx, out),
             _ => {}

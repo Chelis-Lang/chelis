@@ -4,6 +4,71 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- **Lint traversal exclusions are structured and configurable (chelis#740).**
+  `walker.rs` no longer hard-codes generated, dependency, build, or
+  infrastructure directory names. `chelis-lint` now composes a shipped
+  baseline with the nearest strict `chelis-lint.toml`; every repository entry
+  has a typed class and resolvable spec cross-reference. BurntSushi's `ignore`
+  engine performs matching and pruning with ambient `.gitignore`, `.ignore`,
+  parent/global Git, Git-exclude, and hidden-file filters disabled, so local
+  and CI scope is identical. Policy and spec links are resolved inside the
+  policy root; non-file paths and broken or escaping links fail closed instead
+  of importing machine-local policy. Explicit targets remain lintable, and all
+  rules plus prepared catalogs consume one policy-admitted corpus. Ancillary
+  Cargo manifests used by `doc-filename-convention` now come from admitted
+  entries or pass a parent-aware policy check. Admitted sibling workspace
+  manifests remain visible to subdirectory and explicit-file lint targets,
+  including crates exposed through internal directory symlinks, while external
+  directory links, excluded crates, and machine-local ancestors above the
+  policy root cannot suppress an admitted documentation violation. Discovered symlink
+  targets are resolved through the same policy: internal admitted regular-file
+  links remain usable, while special files and aliases into excluded or
+  machine-local content cannot affect prepared catalogs or ancillary metadata.
+  Depth-zero targets override exclusion matching only; special-file roots and
+  symlinked directory roots escaping the policy boundary are rejected before
+  traversal. Ancillary governance follows the lexical path, so an above-root
+  link cannot gain authority by pointing inward. Rule modules are tripwired
+  against independent walker and directory-discovery primitives. A crate-local
+  canonical `AGENTS.md` plus `CLAUDE.md` symlink locks the rule-registration and
+  canonical-traversal protocol for both agent entry points at edit time.
+- **Repeated CLI builds can replace staged runtime archives on read-only-artifact
+  hosts.** `chelis build` now restores owner-write permission on an existing
+  staged `libchelis_runtime.a` before copying the current Cargo artifact. This
+  preserves stale-runtime replacement and lets repeated builds target the same
+  output directory on macOS, where Rust static libraries are emitted read-only.
+- **`opaque-domain-construction` repository linting is linear and honors
+  canonical skip filters (chelis#603).** The rule now prepares its Surf
+  declaration catalog once per `chelis_lint::lint` invocation from the main
+  walker's admitted entries, then reuses that immutable catalog for every
+  checked Surf file. It no longer starts an unfiltered `WalkDir` per file or
+  descends into `target/`, `.git/`, `.venv*`, dependency trees, agent
+  worktrees, and generated opaque-invariant programs. Opaque definitions are
+  indexed by type leaf and defining module, so each construction, cast, or
+  update lookup is independent of unrelated declarations instead of rescanning
+  the catalog. Prepared state remains invocation-local so repeated `--fix`
+  passes and reused rule objects observe source edits without stale-cache
+  behavior.
+- **Rejected explicit lint roots fail loudly.** An explicitly named lint root
+  that exists but fails depth-zero admission — a socket or FIFO, a link
+  resolving to a different entry kind, an escaping link, or a broken link —
+  now fails `chelis lint` and the built-in style gate with the root path and
+  rejection reason instead of exiting 0 with no entries, matching the
+  nonexistent-root failure. Discovered inadmissible entries below an admitted
+  root remain silently omitted. The standalone CLI absolutizes targets without
+  resolving symlinks so a link's identity reaches the traversal-policy
+  boundary check. BREAKING for callers that relied on a silent empty walk of
+  a rejected explicit root.
+- **Repository lint policy discovery is cwd-insensitive.** `chelis-lint`
+  resolves relative lint targets against the invocation working directory
+  before searching ancestors for `chelis-lint.toml`, so
+  `cd sub && chelis lint --check .` applies the same repository exclusions as
+  the absolute spelling. One traversal policy load is now shared per lint
+  invocation across the walker and every rule's `prepare_run` hook.
+
 ## [0.17.1] — 2026-07-23
 
 The first cut of the numeric-remediation "loud checking" work: cases that
