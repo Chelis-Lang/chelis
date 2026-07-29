@@ -74,7 +74,7 @@ Each job runs the complete flake check set on its named system.
 
 ## 7. Run platform and repository gates
 
-- [x] 7.1 Run Nix formatting checks for every tracked Nix file.
+- [x] 7.1 Run Nix formatting checks for every tracked handwritten Nix file.
 - [x] 7.2 Run `nix flake show` and verify the exact public output inventory.
 - [x] 7.3 Run the complete native flake check set on `x86_64-linux`.
 - [x] 7.4 Run the complete native flake check set on `aarch64-darwin`.
@@ -101,3 +101,24 @@ Each job runs the complete flake check set on its named system.
 - [x] 9.2 Record the closure paths and package contents for both supported systems.
 - [ ] 9.3 Record both native CI job results and durations.
 - [x] 9.4 Record the fresh red-team result and each accepted correction.
+
+## 10. Replace the Cargo-wide builds with crate2nix
+
+- [x] 10.1 Add positive contract tests for the pinned crate2nix input and selected workspace members.
+- [x] 10.2 Add negative tests for a stale generated graph, a missing digest, and an unsafe workspace member path.
+- [x] 10.3 Pin crate2nix 0.15.0 as a non-flake source input.
+- [x] 10.4 Generate and track `Cargo.nix` with the `chelis-cli/smt` feature.
+- [x] 10.5 Add digest and exact regeneration checks for the checked-in crate2nix graph.
+- [x] 10.6 Import the generated graph with the Rust overlay toolchain and without import from derivation.
+- [x] 10.7 Build `chelis-cli`, `chelis-runtime`, and `chelisup` from crate2nix workspace-member derivations.
+- [x] 10.8 Override native inputs and external compile assets for the affected crate derivations.
+- [x] 10.9 Preserve the exact package layouts, applications, and native contract checks.
+- [x] 10.10 Document the graph regeneration command and crate2nix version.
+- [x] 10.11 Run the Python contract and graph synchronization suites.
+- [x] 10.12 Run Nix formatting and exact flake-output checks.
+- [x] 10.13 Run the complete native flake check on `aarch64-darwin`.
+- [x] 10.14 Run the complete native flake check on `x86_64-linux`.
+- [x] 10.15 Run the local repository gate inside Devenv.
+- [x] 10.16 Run strict OpenSpec validation.
+- [x] 10.17 Run a fresh red-team pass against the crate2nix graph and native overrides.
+- [ ] 10.18 Record replacement acceptance evidence and re-run both native CI jobs.

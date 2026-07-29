@@ -114,6 +114,19 @@ Nix is an additive source-build channel. It does not create the version store th
 
 The flake does not export internal crates, the Python extension, `chelis-std`, or documentation as separate packages.
 
+The Rust packages use a checked-in graph from `crate2nix` 0.15.0. The graph gives each Rust crate a separate Nix derivation.
+
+If `Cargo.lock` or a workspace manifest changes, regenerate the graph:
+
+```sh
+nix run github:nix-community/crate2nix/0.15.0 -- \
+  generate --no-default-features --features chelis-cli/smt --output Cargo.nix
+.venv/bin/python scripts/check_crate2nix_sync.py --write
+.venv/bin/python scripts/check_crate2nix_sync.py
+```
+
+The repository check rejects `Cargo.nix` when its recorded input digest is stale.
+
 **Rust toolchain.** Install [rustup](https://rustup.rs) (the Rust toolchain
 installer) if you do not already have it:
 

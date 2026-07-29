@@ -8,6 +8,7 @@ Date: 2026-07-28
 | --- | --- |
 | Nixpkgs | `f205b5574fd0cb7da5b702a2da51507b7f4fdd1b` |
 | Rust overlay | `19a19f3921ae195f2fbd85f5dc57e6d1df63aa0b` |
+| crate2nix | `0.15.0` (`7c33e664668faecf7655fa53861d7a80c9e464a2`) |
 | `chelis` | `0.17.1` |
 | `chelis-runtime` | `0.17.1` |
 | `chelisup` | `0.17.1` |
@@ -20,12 +21,12 @@ The lock parity check confirmed that the Nixpkgs and Rust overlay revisions matc
 
 | System | Package | Output path |
 | --- | --- | --- |
-| `x86_64-linux` | `chelis` | `/nix/store/h9x9gj2jkghg13hy63hglys06n380rnb-chelis-0.17.1` |
-| `x86_64-linux` | `chelis-runtime` | `/nix/store/5hmwf0i2cd29rw4c08hkih3zn4rzvrld-chelis-runtime-0.17.1` |
-| `x86_64-linux` | `chelisup` | `/nix/store/71r9rmc525yygw6901qbz4x7f6v6qpdg-chelisup-0.17.1` |
-| `aarch64-darwin` | `chelis` | `/nix/store/33baipsydiral8xdhhbiz07dp8hplmpc-chelis-0.17.1` |
-| `aarch64-darwin` | `chelis-runtime` | `/nix/store/9madhn0ain26ib1kcg13nxzy17lkv0db-chelis-runtime-0.17.1` |
-| `aarch64-darwin` | `chelisup` | `/nix/store/dyk7hxrx7v7w4ga8ygq840yxr7j3pyb7-chelisup-0.17.1` |
+| `x86_64-linux` | `chelis` | `/nix/store/2qgcbip5s8x2j173ln5xzpr83hr1x94x-chelis-0.17.1` |
+| `x86_64-linux` | `chelis-runtime` | `/nix/store/m5vpj20w19hcq0cqk0hkvr4dmd7vms04-chelis-runtime-0.17.1` |
+| `x86_64-linux` | `chelisup` | `/nix/store/9r154b9g6nap5x17mcic00f1769qk3wr-chelisup-0.17.1` |
+| `aarch64-darwin` | `chelis` | `/nix/store/3q322qf962g1np1r98vf841s0bf2fjya-chelis-0.17.1` |
+| `aarch64-darwin` | `chelis-runtime` | `/nix/store/2dxnpzc5g7v2mvlc1gqcvcmv5b99pmcx-chelis-runtime-0.17.1` |
+| `aarch64-darwin` | `chelisup` | `/nix/store/svazbsn2m8yjn6iga5bmk25c3249vjfa-chelisup-0.17.1` |
 
 ## Exact package contents
 
@@ -102,3 +103,40 @@ The adversarial reviews produced three accepted corrections:
 3. Each native CI job now verifies its exact Nix runner system.
 
 The final native checks passed on both supported systems after these corrections.
+
+## crate2nix replacement
+
+The Rust package layer now uses the checked-in graph from crate2nix 0.15.0. The graph input digest is `c9d143cb620dc6e8ba6128e641f02a2e5d614bcecee31de7a8e5f41abfbe7214`.
+
+The complete `aarch64-darwin` flake check passed after the replacement. The check proved the exact package inventories, runtime consumer, applications, and active cvc5 discharge.
+
+The graph regeneration check reproduced the complete `Cargo.nix` file with crate2nix 0.15.0 in offline Cargo mode.
+
+The final replacement checks passed on both supported systems:
+
+| System | Command | Result | Duration |
+| --- | --- | --- | --- |
+| `x86_64-linux` | `nix build --print-build-logs .#checks.x86_64-linux.native` | Pass | 1 minute 3 seconds |
+| `aarch64-darwin` | `nix flake check --print-build-logs` | Pass | 9 seconds |
+
+Both final checks reused crate outputs from the first replacement builds. The local repository gate passed inside Devenv.
+
+## crate2nix replacement red-team result
+
+A fresh local Pi subagent tested the staged replacement in an isolated worktree.
+
+All five required mutations failed for the required reason:
+
+- A changed `Cargo.lock` failed the graph digest check.
+- A changed `Cargo.nix` body failed the exact regeneration check.
+- An import-from-derivation marker failed the native crate2nix contract.
+- A missing `CVC5_DIR` override failed the fixed cvc5 input contract.
+- A missing workspace source override failed the compile asset contract.
+
+The subagent restored all mutations. The focused suites and the exact regeneration check then passed.
+
+The review found one medium test harness defect. The lock parity tests used a `.venv` path in the active worktree.
+
+The test runner now uses `sys.executable`. A detached worktree without `.venv` passed all four lock parity tests.
+
+No product defect remained after the correction. The CI jobs remain pending.

@@ -39,8 +39,53 @@ The package MUST preserve the artifact boundaries of the release toolchain. It M
 - **THEN** the package check fails
 
 #### Scenario: A build attempts network access
-- **WHEN** Cargo or the cvc5 build requests an undeclared network source
+- **WHEN** a Rust crate or the cvc5 build requests an undeclared network source
 - **THEN** the sandboxed Nix build fails instead of fetching the source
+
+### Requirement: Rust packages use a pinned crate2nix graph
+The flake MUST pin `crate2nix` 0.15.0. The package build MUST use a checked-in `Cargo.nix` graph without import from derivation.
+
+The graph MUST contain the `chelis-cli`, `chelis-runtime`, and `chelisup` workspace members. The compiler member MUST enable the `smt` feature.
+
+The `cvc5-sys` crate derivation MUST receive the fixed cvc5 tree and libclang. It MUST NOT fetch cvc5 during the build.
+
+`chelis-cli`, `chelis-compiler-api`, `chelis-cove`, and `tree-sitter-chelis` MUST receive a workspace source view for external compile-time assets.
+
+Other crates MUST keep crate-local sources.
+
+The repository MUST track a digest of `Cargo.lock`, the root manifest, and every workspace manifest. The native check set and Python suite MUST reject a stale digest.
+
+The native check set MUST regenerate `Cargo.nix` with crate2nix 0.15.0 and compare the complete generated file. Any difference MUST fail.
+
+The lint policy MUST classify `Cargo.nix` as generated. The graph synchronization check MUST remain active for this file.
+
+#### Scenario: Separate product members share crate outputs
+- **WHEN** Nix builds the compiler, runtime, and installer packages
+- **THEN** crate2nix builds their common dependencies as shared crate derivations
+
+#### Scenario: The generated graph is stale
+- **WHEN** a Cargo graph input changes without a new `Cargo.nix` digest
+- **THEN** the graph synchronization check fails and names `Cargo.nix`
+
+#### Scenario: The generated graph changes without an input change
+- **WHEN** `Cargo.nix` differs from fresh crate2nix 0.15.0 output
+- **THEN** the native regeneration check fails
+
+#### Scenario: The cvc5 override is absent
+- **WHEN** the `cvc5-sys` crate does not receive the fixed cvc5 tree
+- **THEN** the SMT compiler build fails without a network fallback
+
+#### Scenario: A crate loses an external compile-time asset
+- **WHEN** one listed crate receives only its crate directory
+- **THEN** the crate build fails because a required header or grammar file is absent
+
+#### Scenario: Import from derivation is introduced
+- **WHEN** package evaluation attempts to generate `Cargo.nix` through a derivation
+- **THEN** the flake contract check fails
+
+#### Scenario: Repository lint reads the generated graph
+- **WHEN** a contributor runs the repository lint gate
+- **THEN** lint skips `Cargo.nix` and the graph synchronization check still reads it
 
 ### Requirement: The runtime package exposes the C runtime contract
 `packages.chelis-runtime` MUST contain `lib/libchelis_runtime.a` and these headers under `include/`:

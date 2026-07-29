@@ -8,6 +8,7 @@ The Devenv shell supplies build tools, but the repository does not expose Chelis
 - Export a default `chelis` toolchain package for supported Linux and macOS systems.
 - Export separate `chelis-runtime` and `chelisup` packages.
 - Export `chelis` and `chelisup` app outputs for `nix run`.
+- Build Rust workspace members through pinned `crate2nix` crate derivations.
 - Build the `chelis` binary with the shipped SMT feature and without network access in the build sandbox.
 - Install the runtime library and public headers with the same layout as the release toolchain.
 - Add Nix checks for package contents, executable behavior, SMT activation, and lock parity with Devenv.
@@ -26,7 +27,8 @@ None.
 
 ## Impact
 
-- Add `flake.nix`, `flake.lock`, and Nix package definitions.
+- Add `flake.nix`, `flake.lock`, a generated `Cargo.nix`, and Nix package definitions.
+- Add tests that detect drift between `Cargo.nix` and the Cargo workspace inputs.
 - Add tests that compare shared Nixpkgs and Rust overlay pins with `devenv.lock`.
 - Extend contributor documentation and the changelog with Nix build commands.
 - Add optional Nix checks to CI without replacing the existing Cargo and release gates.

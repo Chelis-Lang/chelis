@@ -12,6 +12,11 @@ class = "generated"
 cross_ref = "§12.2"
 
 [[exclude]]
+pattern = "Cargo.nix"
+class = "generated"
+cross_ref = "§12.2"
+
+[[exclude]]
 pattern = "tests/corpus/opaque_invariants/programs/"
 class = "generated"
 cross_ref = "§12.2"

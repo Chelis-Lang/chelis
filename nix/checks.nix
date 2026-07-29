@@ -10,6 +10,12 @@
 }:
 let
   escape = lib.escapeShellArg;
+  cargoDeps = pkgs.rustPlatform.importCargoLock {
+    lockFile = root + "/Cargo.lock";
+    outputHashes = {
+      "carcara-1.1.0" = "sha256-MiGxAA7LcagOohofUrt0FMURqsn85lq0d4Prz4SsfI8=";
+    };
+  };
   shapeCheck =
     name: package: shape:
     let
@@ -107,6 +113,56 @@ let
           --devenv-lock ${root}/devenv.lock
         touch "$out"
       '';
+  crate2nixGraphSync =
+    pkgs.runCommand "crate2nix-graph-sync"
+      {
+        nativeBuildInputs = [ pkgs.python311 ];
+      }
+      ''
+        python3 ${root}/scripts/check_crate2nix_sync.py --root ${root}
+        touch "$out"
+      '';
+  crate2nixRegeneration =
+    pkgs.runCommand "crate2nix-regeneration"
+      {
+        inherit cargoDeps;
+        nativeBuildInputs = [
+          built.toolchain
+          pkgs.crate2nix
+          pkgs.nix
+          pkgs.python311
+          pkgs.rustPlatform.cargoSetupHook
+        ];
+      }
+      ''
+        export CARGO_NET_OFFLINE=true
+        export HOME="$TMPDIR/home"
+        mkdir -p "$HOME"
+        test "$(crate2nix --version)" = "crate2nix 0.15.0"
+        if grep -E \
+          'generated[C]argoNix|applied[C]argoNix|allow-import-from-derivatio[n]' \
+          ${root}/flake.nix ${./checks.nix} ${./contracts.nix} \
+          ${./cvc5.nix} ${./packages.nix} ${./source.nix}; then
+          echo "handwritten Nix must not use import from derivation" >&2
+          exit 1
+        fi
+        if grep -F 'buildRustPackage' ${./packages.nix}; then
+          echo "Rust product packages must use crate2nix" >&2
+          exit 1
+        fi
+        cp -R ${root} workspace
+        chmod -R u+w workspace
+        cd workspace
+        cargoSetupPostUnpackHook
+        rm Cargo.nix
+        crate2nix generate \
+          --no-default-features \
+          --features chelis-cli/smt \
+          --output Cargo.nix
+        python3 scripts/check_crate2nix_sync.py --write
+        cmp Cargo.nix ${root}/Cargo.nix
+        touch "$out"
+      '';
 
   platformBuildInputs = lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.openblas ];
   compilerBehavior =
@@ -192,6 +248,8 @@ let
     chelisupBehavior
     chelisupShape
     compilerBehavior
+    crate2nixGraphSync
+    crate2nixRegeneration
     cvc5Dir
     lockParity
     nixFormat
@@ -213,6 +271,8 @@ in
     chelisupBehavior
     chelisupShape
     compilerBehavior
+    crate2nixGraphSync
+    crate2nixRegeneration
     cvc5Dir
     lockParity
     native

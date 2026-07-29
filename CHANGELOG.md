@@ -10,6 +10,7 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 - **Locked Nix packages expose the Chelis compiler, C runtime, and `chelisup`.**
   The root flake supports `x86_64-linux` and `aarch64-darwin` with native checks.
+  Pinned `crate2nix` crate derivations share dependency outputs across the product packages.
   It also provides `chelis` and `chelisup` applications for `nix run`.
   Nix remains an additive source-build channel. `chelisup` still routes release toolchains.
 - **A tracked Devenv shell supplies the contributor toolchain on Linux and macOS.**

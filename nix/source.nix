@@ -1,7 +1,11 @@
-{ lib, root }:
+{
+  lib,
+  root,
+  includeRoots ? null,
+}:
 let
   rootString = toString root;
-  allowedRoots = [
+  defaultRoots = [
     ".cargo"
     "Cargo.lock"
     "Cargo.toml"
@@ -17,6 +21,7 @@ let
     "spec"
     "tree-sitter-chelis"
   ];
+  allowedRoots = if includeRoots == null then defaultRoots else includeRoots;
   rejectedNames = [
     ".devenv"
     ".git"

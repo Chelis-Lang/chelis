@@ -6,6 +6,7 @@ Run with `.venv/bin/python scripts/test_check_nix_lock_parity.py`.
 from __future__ import annotations
 
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -20,7 +21,7 @@ MATCHING_DEVENV = FIXTURES / "matching-devenv.lock"
 def run_checker(flake_lock: Path, devenv_lock: Path = MATCHING_DEVENV) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [
-            str(REPO_ROOT / ".venv" / "bin" / "python"),
+            sys.executable,
             str(CHECKER),
             "--flake-lock",
             str(flake_lock),

@@ -17,6 +17,7 @@ The first supported systems are `x86_64-linux` and `aarch64-darwin`. These syste
 - Provide locked `nix build` outputs for each product artifact class.
 - Make the default package contain the complete Chelis toolchain layout.
 - Keep the Nix artifact layout consistent with the release archive.
+- Build workspace members as separate Nix crate derivations with shared dependency outputs.
 - Build an SMT-enabled compiler without network access in the build sandbox.
 - Provide `nix run` apps for `chelis` and `chelisup`.
 - Check each output on a native builder for every supported system.
@@ -69,11 +70,32 @@ The `chelisup` package will not install a `bin/chelis` shim. This rule prevents 
 
 An alternative exposed all workspace crates. Most crates are implementation libraries, not stable product artifacts. That option creates an unsupported public package inventory.
 
-### 3. Use the repository toolchain and Cargo lock
+### 3. Use pinned crate2nix crate derivations
 
-Use the Rust overlay compiler selected by `rust-toolchain.toml`. Use `Cargo.lock` as the complete Cargo dependency lock.
+Pin `crate2nix` 0.15.0 as a non-flake source input. Use its generated `Cargo.nix` graph without import from derivation.
 
-Use the Nixpkgs Rust package builder to vendor Cargo dependencies before the sandboxed build. Filter generated state and local build products from the source input.
+Generate the graph with the `chelis-cli/smt` feature. Import the graph with the Rust overlay compiler from `rust-toolchain.toml`.
+
+Select the `chelis-cli`, `chelis-runtime`, and `chelisup` workspace members. Keep their crate derivations private behind the three product outputs.
+
+Override `cvc5-sys` with the fixed cvc5 tree, libclang, and the required environment. The override must prevent a network request.
+
+Give four crates a filtered workspace source view:
+
+- `chelis-cli`
+- `chelis-compiler-api`
+- `chelis-cove`
+- `tree-sitter-chelis`
+
+Their compile steps read headers or grammar files outside their crate directories.
+
+Track a digest of `Cargo.lock`, the root manifest, and every workspace manifest in `Cargo.nix`. A repository check must reject a stale digest.
+
+A native check must regenerate the complete graph with crate2nix 0.15.0. It must compare the new file with the checked-in file.
+
+The checked-in graph avoids import from derivation and preserves parallel crate builds. Dependency changes require graph regeneration and a new digest.
+
+Classify `Cargo.nix` as generated in the lint policy. The separate graph synchronization check remains mandatory.
 
 Read the package version from the workspace manifest. Do not duplicate the Chelis version in Nix source.
 
@@ -122,6 +144,9 @@ Nix is an additive source-build channel. `nix profile install` can install one N
 ## Risks / Trade-offs
 
 - **[Cold cvc5 builds are expensive]** → Build cvc5 once as a separate derivation and reuse it across compiler checks.
+- **[The generated crate graph can drift]** → Check the input digest and compare the complete regenerated file.
+- **[A native crate can lose required inputs]** → Override `cvc5-sys` and run the SMT activation check against the final compiler.
+- **[Crate-local sources can omit compile assets]** → Give only the four affected crates a filtered workspace source view.
 - **[Two lock files can drift]** → Run the lock parity checker in Nix checks and the Python script suite.
 - **[Source filtering can omit compile-time assets]** → Build from a clean Git source and run the compiler fixture inside the Nix check.
 - **[Nix package contents can drift from releases]** → Check the release artifact paths and reuse the same runtime header list.
@@ -130,14 +155,14 @@ Nix is an additive source-build channel. `nix profile install` can install one N
 
 ## Migration Plan
 
-1. Add the flake inputs and package definitions.
-2. Generate and review `flake.lock`.
-3. Add the lock parity checker and its tests.
+1. Add the flake inputs and crate2nix contract tests.
+2. Generate and review `flake.lock` and `Cargo.nix`.
+3. Add the graph digest check and the lock parity check.
 4. Build each package on `x86_64-linux`.
 5. Build each package on `aarch64-darwin`.
 6. Add the native CI checks.
 7. Document the Nix commands and installation boundary.
-8. Remove the flake and CI checks to roll back this additive surface.
+8. Remove the flake, generated graph, and CI checks to roll back this additive surface.
 
 ## Open Questions
 
