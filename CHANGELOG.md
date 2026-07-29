@@ -19,7 +19,7 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   The shell input pins Devenv modules to `v2.2`. The shell also pins Rust, Python 3.11, test tools, and the platform C toolchain.
   Linux uses GCC, OpenBLAS, and Valgrind from Nixpkgs. macOS maps `gcc` and
   `g++` to the Nixpkgs clang wrapper from `pkgs.stdenv.cc`.
-  `devenv test` checks the tool versions and compiler warnings.
+  `devenv test` runs separate toolchain, Python, C, and C++ tasks.
 
 ### Fixed
 

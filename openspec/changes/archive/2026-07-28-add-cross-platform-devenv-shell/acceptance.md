@@ -133,3 +133,24 @@ The full Python script suite, strict OpenSpec validation, native flake check, an
 The independent reviewer service failed three attempts. The user then requested a direct review instead.
 
 The direct review found missing coverage for YAML section boundaries and the locked module directory. Both corrections now have negative tests.
+
+## Named Devenv test tasks
+
+The shell smoke check now runs four tasks before `devenv:enterTest`:
+
+- `chelis:toolchain-test`
+- `chelis:python-test`
+- `chelis:c-compiler-test`
+- `chelis:cpp-compiler-test`
+
+`devenv test --no-tui` passed all four tasks in 2.05 seconds. The empty `devenv:enterTest` lifecycle step then completed.
+
+The task graph defines no Devenv service or long-running process.
+
+The Devenv static contract passed seven positive and negative tests. The full Python script suite also passed.
+
+Strict OpenSpec validation, the Nix format check, and the local repository gate passed.
+
+The C-backend acceptance oracle passed all 384 tests. One test remained skipped by its existing configuration.
+
+The independent final review returned `PASS`.

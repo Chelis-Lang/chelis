@@ -79,7 +79,11 @@ The shell creates `.venv` only when `.venv/bin/python` does not exist. It does n
 
 `devenv test` checks tool availability, Python 3.11, and C and C++ compilation under `-Werror`.
 
+Four independent tasks run before `devenv:enterTest`. This structure gives each contract a separate result and permits parallel execution.
+
 The negative compiler check uses a deliberate source warning. The compile must fail, which proves that the shim does not hide code warnings.
+
+The smoke check uses no Devenv service or process. Chelis has no long-running dependency for this check.
 
 The authoritative acceptance oracle is:
 

@@ -6,6 +6,7 @@ Run with `.venv/bin/python scripts/test_devenv_version.py`.
 from __future__ import annotations
 
 import json
+import re
 import unittest
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,6 +17,12 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 EXPECTED_URL = "github:cachix/devenv/v2.2?dir=src/modules"
 EXPECTED_REF = "v2.2"
 EXPECTED_REVISION = "ffce215a42d09c6375c3d60dd9c4110438fc4d87"
+EXPECTED_TEST_TASKS = (
+    "chelis:toolchain-test",
+    "chelis:python-test",
+    "chelis:c-compiler-test",
+    "chelis:cpp-compiler-test",
+)
 
 
 @dataclass(frozen=True)
@@ -25,6 +32,27 @@ class DevenvPin:
     directory: str
     locked_directory: str
     revision: str
+
+
+@dataclass(frozen=True)
+class DevenvTestTasks:
+    names: frozenset[str]
+
+
+def parse_devenv_test_tasks(text: str) -> DevenvTestTasks:
+    raw_names = re.findall(r'(?m)^\s{2}tasks\."([^"]+)" = \{$', text)
+    names = frozenset(raw_names)
+    if len(raw_names) != len(names):
+        raise ValueError("devenv.nix must not define a duplicate test task")
+    if names != frozenset(EXPECTED_TEST_TASKS):
+        raise ValueError(f"devenv.nix must define the named test tasks: {names!r}")
+    if text.count('before = [ "devenv:enterTest" ];') != len(names):
+        raise ValueError("each named test task must run before devenv:enterTest")
+    if re.search(r"(?m)^\s*enterTest\s*=", text):
+        raise ValueError("devenv.nix must not define a monolithic enterTest script")
+    if "processes." in text or "services." in text:
+        raise ValueError("the Devenv smoke check must not define a service or process")
+    return DevenvTestTasks(names=names)
 
 
 def parse_devenv_url(text: str) -> str:
@@ -94,6 +122,22 @@ class DevenvVersionTests(unittest.TestCase):
         yaml_text = (REPO_ROOT / "devenv.yaml").read_text(encoding="utf-8")
         lock_data = json.loads((REPO_ROOT / "devenv.lock").read_text(encoding="utf-8"))
         require_v22(parse_devenv_pin(yaml_text, lock_data))
+
+    def test_repository_uses_named_tasks_for_the_devenv_test_contract(self) -> None:
+        config = (REPO_ROOT / "devenv.nix").read_text(encoding="utf-8")
+        self.assertEqual(
+            parse_devenv_test_tasks(config).names,
+            frozenset(EXPECTED_TEST_TASKS),
+        )
+
+    def test_missing_named_test_task_fails_at_the_parse_boundary(self) -> None:
+        config = (REPO_ROOT / "devenv.nix").read_text(encoding="utf-8")
+        mutated = config.replace(
+            'tasks."chelis:python-test" = {',
+            'tasks."chelis:python-missing" = {',
+        )
+        with self.assertRaisesRegex(ValueError, "must define the named test tasks"):
+            parse_devenv_test_tasks(mutated)
 
     def test_missing_devenv_input_fails_at_the_parse_boundary(self) -> None:
         with self.assertRaisesRegex(ValueError, "does not define the devenv input"):

@@ -106,3 +106,12 @@ The later OpenSpec sync and archive workflow can change the corresponding main s
 - [x] 8.4 Upgrade the local Devenv CLI to `2.2.0+ffce215`.
 - [x] 8.5 Run the Devenv smoke check and the repository gates.
 - [x] 8.6 Review the final release pin and parser boundary cases directly.
+
+## 9. Split the smoke check into Devenv tasks
+
+- [x] 9.1 Add a failing static contract for the four named test tasks.
+- [x] 9.2 Replace the monolithic `enterTest` script with four independent tasks.
+- [x] 9.3 Keep services and long-running processes out of the smoke-check graph.
+- [x] 9.4 Run the Devenv smoke check and repository validation.
+- [x] 9.5 Review the final task graph directly.
+- [ ] 9.6 Re-run pull request CI.

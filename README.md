@@ -72,7 +72,7 @@ devenv test
 devenv shell -- cargo nextest run -p chelis-backend-c
 ```
 
-`devenv test` exits with status 0 when the shell satisfies its tool and compiler contract.
+`devenv test` runs separate toolchain, Python, C, and C++ tasks. It exits with status 0 when all four tasks pass.
 
 The Linux Devenv check is a manual gate. Default CI does not run this gate.
 

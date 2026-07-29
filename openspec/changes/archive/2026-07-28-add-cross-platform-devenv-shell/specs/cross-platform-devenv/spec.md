@@ -89,9 +89,20 @@ If `.venv/bin/python` exists, the shell MUST preserve the existing environment. 
 
 It MUST compile valid C and C++ translation units under `-Werror`. It MUST also prove that a deliberate code warning still fails.
 
+The smoke checks MUST run as these independent Devenv tasks before `devenv:enterTest`:
+
+- `chelis:toolchain-test`
+- `chelis:python-test`
+- `chelis:c-compiler-test`
+- `chelis:cpp-compiler-test`
+
+The smoke-check graph MUST NOT start a Devenv service or long-running process.
+
 #### Scenario: The shell smoke check passes
 - **WHEN** all required tools and compiler commands satisfy the contract
-- **THEN** `devenv test` exits with status 0
+- **THEN** `devenv test` runs all four named tasks
+- **AND** each task reports success
+- **AND** `devenv test` exits with status 0
 
 #### Scenario: A managed compiler command is missing
 - **WHEN** either `gcc` or `g++` does not resolve to a Nix store package
