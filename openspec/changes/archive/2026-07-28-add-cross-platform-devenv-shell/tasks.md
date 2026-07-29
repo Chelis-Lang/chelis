@@ -123,4 +123,5 @@ The later OpenSpec sync and archive workflow can change the corresponding main s
 - [x] 10.3 Install the pinned Devenv CLI and run all four smoke tasks.
 - [x] 10.4 Document the cache boundary for the custom cvc5 derivation.
 - [x] 10.5 Run local validation and review the workflow.
-- [ ] 10.6 Re-run pull request CI.
+- [x] 10.6 Merge the current base branch and regenerate `Cargo.nix`.
+- [ ] 10.7 Re-run pull request CI.

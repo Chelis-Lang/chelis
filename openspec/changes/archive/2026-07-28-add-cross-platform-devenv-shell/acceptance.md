@@ -174,3 +174,11 @@ The public Devenv cache does not contain the custom non-GPL cvc5 derivation. Nat
 The reviewer requested a cache cleanup input. The v16 action defines no cleanup input, and GitHub-hosted runners discard job state.
 
 The workflow instead sets the supported `skipPush` input to `true`. This value makes the public cache explicitly read-only.
+
+Both native CI jobs installed Devenv and passed all four smoke tasks for commit `41df9256`.
+
+The later flake checks exposed drift from main commit `76c32ff0`. That commit added the `half` dependency to `chelis-runtime` after this branch diverged.
+
+The branch now includes current main. `Cargo.nix` was regenerated with crate2nix 0.15.0 and records digest `22da918d08a37ec74d128983320e90784336eb7f4e446301a6593242ea7a7e4f`.
+
+The complete native flake check passed locally on `aarch64-darwin`. The full Python script suite and local repository gate also passed.
