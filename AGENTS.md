@@ -93,6 +93,38 @@ change set:
 - executable examples in `examples/`
 - active specs and current-state docs
 
+## OpenSpec (initial adoption)
+
+The `openspec/` tree is the canonical OpenSpec planning root (built-in
+spec-driven schema). This is an **initial, non-blocking adoption**: OpenSpec
+is available for planning changes but is **not yet required** and does not
+gate merges. The eventual required-governance regime is described in
+`spec/design/spec_provenance.md` (Phase 0) and is future work — it is not
+activated here.
+
+- The `openspec-validate` workflow uses a pinned `Chelis-Lang/ci` action.
+  The action supplies Node 24.18.0 and the locked OpenSpec 1.6.0 package.
+  `scripts/check_openspec.py` runs structural validation only.
+  Schema findings produce warnings because the action uses advisory mode.
+  Operational failures stay nonzero. The workflow uses only `contents: read`.
+- `openspec validate` enumerates active changes and specifications only.
+  It does not enumerate artifacts under `openspec/changes/archive/`.
+- Local validation requires OpenSpec 1.6.0:
+
+```sh
+openspec validate --all --strict --no-interactive
+```
+
+- OpenSpec artifacts are planning evidence only. When an OpenSpec artifact
+  and `spec/**` disagree, `spec/**` is controlling. The authority boundary
+  is owned by `spec/design/spec_provenance.md` § OpenSpec boundary; that
+  section is controlling and is deliberately not restated here.
+- Do not run `openspec init`'s tool generation. `.claude/skills` and
+  `.codex/skills` are symlinks to `agent-skills/`, so `--tools claude,codex`
+  writes generated skill trees into the shared skill library through both
+  paths. OpenSpec is not yet wired into the agent workflow — drive the CLI
+  directly.
+
 ## Contract Invariants
 
 Machine-facing contracts should be expressed as invariants and locked with tests.

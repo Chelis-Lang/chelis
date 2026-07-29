@@ -55,9 +55,13 @@ DOC_EXACT_NAMES: frozenset[str] = frozenset(
 # mdBook source and investigations; an mdBook-only change still has its
 # own Docs job (mdbook build + the skill_suite validator), which is one
 # of the always-run jobs, so skipping the heavy jobs for a docs/-only
-# change keeps coverage. Trailing slash is required so a sibling file
+# change keeps coverage. `openspec/changes/` is planning prose, but every
+# change carries a non-Markdown `.openspec.yaml`, which alone would force
+# the full matrix; the openspec-validate workflow keys on `openspec/**`
+# and still runs. `openspec/config.yaml` stays code -- it configures the
+# tool, not one change. Trailing slash is required so a sibling file
 # like `docsignore` does not match.
-DOC_DIR_PREFIXES: tuple[str, ...] = ("docs/",)
+DOC_DIR_PREFIXES: tuple[str, ...] = ("docs/", "openspec/changes/")
 
 
 def is_doc_path(path: str) -> bool:

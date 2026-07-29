@@ -1,0 +1,45 @@
+name: OpenSpec validation
+
+# This advisory workflow validates the openspec/ planning tree.
+# It does not enforce lifecycle, citation, or ordering rules.
+# The central action supplies the locked OpenSpec CLI and Node runtime.
+# Validation findings produce warnings. Operational failures stay nonzero.
+# The Phase 0 regime in spec/design/spec_provenance.md stays inactive.
+
+on:
+  pull_request:
+    paths:
+      - "openspec/**"
+      - ".github/workflows/openspec-validate.yml"
+      - "scripts/check_openspec.py"
+  push:
+    branches: [main]
+    paths:
+      - "openspec/**"
+      - ".github/workflows/openspec-validate.yml"
+      - "scripts/check_openspec.py"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: openspec-validate-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  openspec-validate:
+    name: openspec-validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate OpenSpec tree
+        uses: Chelis-Lang/ci/actions/openspec-governance@74f11c693992cfa9278b93b0117778f6b38bfe16 # ci#32 with ci#30 advisory mode
+        with:
+          mode: advisory
