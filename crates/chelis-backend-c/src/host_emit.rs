@@ -688,77 +688,161 @@ fn append_tensor_math_helpers(out: &mut Vec<String>) {
     out.push("}".to_string());
 }
 
+/// One emitted `case` of the per-dtype element printer, or `None` for a
+/// `Prim` that has no runtime tensor storage (`f8e4m3` is rejected at
+/// check time per spec/04 section 1.1.1; `string` payloads are never
+/// tensor elements). Exhaustive over `Prim` with no `_` arm
+/// (`loud_unsupported.md` section C4): adding a primitive is a
+/// compile-error work-list here, never a silent fall-through to the
+/// aborting `default:`. The `CHELIS_*` case labels and format widths come
+/// from the `RuntimeDType` vocabulary declaration, not a local table.
+fn print_helper_elem_case(prim: Prim) -> Option<Vec<String>> {
+    use chelis_vocab::RuntimeDType;
+    let case = |dtype: RuntimeDType, body: Vec<String>| -> Vec<String> {
+        let mut lines = vec![format!("        case {}:", dtype.c_macro())];
+        lines.extend(body.into_iter().map(|line| format!("            {line}")));
+        lines.push("            break;".to_string());
+        lines
+    };
+    // Floats: read at storage width, widen to the exact double image
+    // (lossless for every supported float), format at the value's OWN
+    // width through the runtime's shortest-round-trip routine.
+    let float_case = |dtype: RuntimeDType, image_expr: &str| -> Vec<String> {
+        case(
+            dtype,
+            vec![
+                format!(
+                    "chelis_format_shortest({image_expr}, {}, fmt_buf, sizeof fmt_buf);",
+                    dtype.c_macro()
+                ),
+                "fputs(fmt_buf, stdout);".to_string(),
+            ],
+        )
+    };
+    // Integers: printf at width, all digits exact. int64 goes through
+    // `long long` (>= 64 bits everywhere), NEVER through double
+    // (chelis#723's lie was exactly that funnel).
+    let int_case =
+        |dtype: RuntimeDType, print_expr: String| -> Vec<String> { case(dtype, vec![print_expr]) };
+    match prim {
+        Prim::F64 => Some(float_case(RuntimeDType::F64, "((const double*)t->data)[i]")),
+        Prim::F32 => Some(float_case(
+            RuntimeDType::F32,
+            "(double)((const float*)t->data)[i]",
+        )),
+        // f16/bf16 decode through the same WS-1 conversion helpers the
+        // kernels use; f16 -> f32 -> double widening is exact, so the
+        // routine sees the stored value's true image (chelis#716's fix).
+        Prim::F16 => Some(float_case(
+            RuntimeDType::F16,
+            "(double)chelis_f16_to_f32(((const uint16_t*)t->data)[i])",
+        )),
+        Prim::Bf16 => Some(float_case(
+            RuntimeDType::Bf16,
+            "(double)chelis_bf16_to_f32(((const uint16_t*)t->data)[i])",
+        )),
+        Prim::Int64 => Some(int_case(
+            RuntimeDType::I64,
+            "printf(\"%lld\", (long long)((const int64_t*)t->data)[i]);".to_string(),
+        )),
+        Prim::Int32 => Some(int_case(
+            RuntimeDType::I32,
+            "printf(\"%d\", (int)((const int32_t*)t->data)[i]);".to_string(),
+        )),
+        Prim::Int16 => Some(int_case(
+            RuntimeDType::I16,
+            "printf(\"%d\", (int)((const int16_t*)t->data)[i]);".to_string(),
+        )),
+        Prim::Int8 => Some(int_case(
+            RuntimeDType::I8,
+            "printf(\"%d\", (int)((const int8_t*)t->data)[i]);".to_string(),
+        )),
+        // Bool tensor storage is f32-encoded today (the runtime's
+        // convention); the ELEMENT prints `true`/`false` at every exit
+        // (chelis#726's C half, [05-OBS-2]).
+        Prim::Bool => Some(case(
+            RuntimeDType::Bool,
+            vec![
+                "fputs(((const float*)t->data)[i] != 0.0f ? \"true\" : \"false\", stdout);"
+                    .to_string(),
+            ],
+        )),
+        // Not in the active dtype set (spec/04 section 1.1.1); rejected at
+        // check time, so no tensor can carry one. No runtime dtype id
+        // exists to case on.
+        Prim::F8e4m3 => None,
+        // String values render as themselves at their exits and are never
+        // numeric tensor element payloads.
+        Prim::String => None,
+    }
+}
+
+/// chelis#732 Phase 2 (faithful_observation.md section C3.2): the emitted
+/// print helper is GENERATED from [`print_helper_elem_case`]'s exhaustive
+/// `Prim` match. The hand-written `(double)` funnel this replaces rendered
+/// int64 through double (chelis#723), read f16/bf16 buffers as f32 before
+/// the chelis#730 interim abort (chelis#716), printed bool as `1.0`/`0.0`
+/// against to_list's `true`/`false` (chelis#726), and lost whole value
+/// classes to its near-integer/`%g` format split (chelis#748). No
+/// hand-written dtype switch may return (frozen at Phase 2 exit); the
+/// `default:` arm aborts with the raw dtype id so an unknown runtime
+/// dtype stays loud (loud_unsupported.md section C1).
 fn append_tensor_print_helper(out: &mut Vec<String>) {
+    out.push(
+        "static void chelis_print_tensor_elem_stdout(const chelis_tensor* t, int64_t i) {"
+            .to_string(),
+    );
+    out.push("    char fmt_buf[CHELIS_FORMAT_SHORTEST_BUF];".to_string());
+    out.push("    (void)fmt_buf;".to_string());
+    out.push("    switch (t->dtype) {".to_string());
+    for prim in [
+        Prim::F32,
+        Prim::F64,
+        Prim::F16,
+        Prim::Bf16,
+        Prim::F8e4m3,
+        Prim::Int8,
+        Prim::Int16,
+        Prim::Int32,
+        Prim::Int64,
+        Prim::Bool,
+        Prim::String,
+    ] {
+        if let Some(case_lines) = print_helper_elem_case(prim) {
+            out.extend(case_lines);
+        }
+    }
+    out.push("        default:".to_string());
+    out.push(
+        "            fprintf(stderr, \"unsupported: tensor print of dtype id %d on the \
+         emitted C print helper (runtime); the RuntimeDType vocabulary defines no such \
+         id\\n\", (int)t->dtype);"
+            .to_string(),
+    );
+    out.push("            exit(1);".to_string());
+    out.push("    }".to_string());
+    out.push("}".to_string());
+    out.push(String::new());
     out.push("static void chelis_print_tensor_stdout(const chelis_tensor* t) {".to_string());
+    // [05-OBS-4]: a rank-0 tensor renders as its single element, bare -
+    // the `tensor(shape=[], data=[..])` wrapper is not an exit form.
+    out.push("    if (t->ndim == 0) {".to_string());
+    out.push("        chelis_print_tensor_elem_stdout(t, 0);".to_string());
+    out.push("        return;".to_string());
+    out.push("    }".to_string());
     out.push("    printf(\"tensor(shape=[\");".to_string());
     out.push("    for (int64_t d = 0; d < t->ndim; ++d) {".to_string());
     out.push("        if (d > 0) { printf(\", \"); }".to_string());
     out.push("        printf(\"%lld\", (long long)t->shape[d]);".to_string());
     out.push("    }".to_string());
     out.push("    printf(\"], data=[\");".to_string());
-    // Limit raised from 10 to 32 (a 4x4 tensor previously rendered only 10
-    // of 16 elements with no marker, indistinguishable from a true 10-element
-    // tensor; red-team v0.2.6 MEDIUM). Also append "..." when truncated so
-    // the trailing-data case is visually unambiguous; downstream parsers
-    // must tolerate the `...` token.
+    // [05-OBS-5]: every exit truncates tensor element rendering after 32
+    // elements with the `, ...` marker; full-element fidelity is
+    // to_list's and the wire's job, never print's.
     out.push("    int64_t limit = t->size < 32 ? t->size : 32;".to_string());
     out.push("    for (int64_t i = 0; i < limit; ++i) {".to_string());
-    // RT-4 F1: read each slot at the correct dtype. The previous code
-    // assumed `t->data` was always `float*` and silently read f64/i64
-    // tensors as 4-byte slots, producing garbage when the runtime
-    // (correctly) sized the buffer at 8 bytes/elem. The display
-    // format stays float-style for parity with the evaluator's tensor
-    // renderer (every tensor prints as `1.0, 2.0, ...`); int dtypes
-    // are widened to double for the format step but stored at the
-    // correct width.
-    //
-    // Mirrors PR #67's runtime-dtype dispatch (host reshape memcpy)
-    // and PR #64's typed-cast pattern (DAG emit_cast). See
-    // `docs/investigations/cbackend_print_tensor_f64_diagnosis.md`.
-    out.push("        double value;".to_string());
-    out.push("        switch (t->dtype) {".to_string());
-    out.push(
-        "            case CHELIS_F64: value = ((const double*)t->data)[i]; break;".to_string(),
-    );
-    out.push(
-        "            case CHELIS_I64: value = (double)((const int64_t*)t->data)[i]; break;"
-            .to_string(),
-    );
-    out.push(
-        "            case CHELIS_I32: value = (double)((const int32_t*)t->data)[i]; break;"
-            .to_string(),
-    );
-    out.push(
-        "            case CHELIS_I16: value = (double)((const int16_t*)t->data)[i]; break;"
-            .to_string(),
-    );
-    out.push(
-        "            case CHELIS_I8:  value = (double)((const int8_t*)t->data)[i]; break;"
-            .to_string(),
-    );
-    out.push("            case CHELIS_BOOL: value = (double)t->data[i]; break;".to_string());
-    out.push("            case CHELIS_F32: value = (double)t->data[i]; break;".to_string());
-    // chelis#730 Phase 1 (census row 10 interim-hardening): a dtype this
-    // helper cannot decode (f16/bf16 2-byte storage) aborts with the
-    // dtype id instead of misreading the buffer as f32. The faithful
-    // rendering is chelis#728/#732's work (their generated formatter
-    // replaces this helper); until then the abort is the section C1
-    // rule-4 response, mirroring the runtime `to_tensor` abort shape.
-    out.push("            default:".to_string());
-    out.push(
-        "                fprintf(stderr, \"unsupported: tensor print of dtype id %d on \
-         the emitted C print helper (runtime); f16/bf16 tensor rendering is tracked by \
-         chelis#728\\n\", (int)t->dtype);"
-            .to_string(),
-    );
-    out.push("                exit(1);".to_string());
-    out.push("        }".to_string());
     out.push("        if (i > 0) { printf(\", \"); }".to_string());
-    out.push("        if (fabs(value - round(value)) < 1e-9) {".to_string());
-    out.push("            printf(\"%.1f\", value);".to_string());
-    out.push("        } else {".to_string());
-    out.push("            printf(\"%.16g\", value);".to_string());
-    out.push("        }".to_string());
+    out.push("        chelis_print_tensor_elem_stdout(t, i);".to_string());
     out.push("    }".to_string());
     out.push("    if (t->size > limit) { printf(\", ...\"); }".to_string());
     out.push("    printf(\"])\");".to_string());
@@ -2742,11 +2826,14 @@ impl<'a> HostEmitter<'a> {
                     HostType::Int8 | HostType::Int16 | HostType::Int32 | HostType::Int64 => {
                         EmittedExpr::call("chelis_string_from_int64", [arg(0)])
                     }
-                    // f32 promotes to double for formatting (lossless); there is
-                    // no separate f32 formatter in the runtime.
-                    HostType::Float64 | HostType::Float32 => {
-                        EmittedExpr::call("chelis_string_from_f64", [arg(0)])
-                    }
+                    HostType::Float64 => EmittedExpr::call("chelis_string_from_f64", [arg(0)]),
+                    // to_string is an observation exit: the f32 scalar
+                    // renders at ITS width through the runtime's own-width
+                    // formatter ([05-OBS-2]; the former promote-to-double
+                    // funnel carried f64-image digits and split this exit
+                    // from `print` of the same stored value - PR #863
+                    // round-1 F1).
+                    HostType::Float32 => EmittedExpr::call("chelis_string_from_f32", [arg(0)]),
                     HostType::Bool => EmittedExpr::call("chelis_string_from_bool", [arg(0)]),
                     HostType::String => arg(0),
                     // chelis#730 Phase 1 (census row 3, chelis#734): to_string
@@ -4873,7 +4960,11 @@ impl<'a> HostEmitter<'a> {
             HostType::List(_) => format!("chelis_value_from_list({value})"),
             HostType::Tuple(_) => format!("chelis_value_from_tuple({value})"),
             HostType::Dict(_, _) => format!("chelis_value_from_dict({value})"),
-            HostType::Callback(_, _)
+            // A boxed-only reduced-float list element never exists as a C
+            // scalar to box FROM: the scalar expression that would
+            // produce one is rejected at its own site (chelis#714).
+            HostType::ReducedFloatBoxed(_)
+            | HostType::Callback(_, _)
             | HostType::Option(_)
             | HostType::MappedFile
             | HostType::Unit => {
@@ -4904,7 +4995,11 @@ impl<'a> HostEmitter<'a> {
             HostType::List(_) => format!("chelis_value_as_list({value_expr})"),
             HostType::Tuple(_) => format!("chelis_value_as_tuple({value_expr})"),
             HostType::Dict(_, _) => format!("chelis_value_as_dict({value_expr})"),
-            HostType::Callback(_, _)
+            // Unboxing a reduced-float element into a C scalar is exactly
+            // the missing chelis#714 ABI cell; reject loudly rather than
+            // widening through double behind the user's back.
+            HostType::ReducedFloatBoxed(_)
+            | HostType::Callback(_, _)
             | HostType::Option(_)
             | HostType::MappedFile
             | HostType::Unit => {
@@ -4931,9 +5026,19 @@ impl<'a> HostEmitter<'a> {
                     self.indent, value
                 ))
             }
-            HostType::Float64 | HostType::Float32 => self
-                .lines
-                .push(format!("{}printf(\"%.16g\\n\", {});", self.indent, value)),
+            // chelis#732 Phase 2: scalar floats render through the
+            // runtime's shortest-round-trip routine at their OWN width
+            // (the f32 C value widens to its exact double image), never
+            // through a fixed-precision printf (chelis#748).
+            HostType::Float64 | HostType::Float32 => {
+                let dtype = scalar_float_dtype_macro(ty);
+                self.lines.push(format!(
+                    "{}{{ char fmt_buf[CHELIS_FORMAT_SHORTEST_BUF]; \
+                     chelis_format_shortest((double)({}), {dtype}, fmt_buf, sizeof fmt_buf); \
+                     printf(\"%s\\n\", fmt_buf); }}",
+                    self.indent, value
+                ));
+            }
             HostType::Bool => self.lines.push(format!(
                 "{}printf(\"%s\\n\", {} ? \"true\" : \"false\");",
                 self.indent, value
@@ -5040,9 +5145,17 @@ impl<'a> HostEmitter<'a> {
                     self.indent, value
                 ))
             }
-            HostType::Float64 | HostType::Float32 => self
-                .lines
-                .push(format!("{}printf(\"%.16g\", {});", self.indent, value)),
+            // chelis#732 Phase 2: same own-width routine as
+            // `emit_print_value` (intra-lane exit agreement, [05-OBS-1]).
+            HostType::Float64 | HostType::Float32 => {
+                let dtype = scalar_float_dtype_macro(ty);
+                self.lines.push(format!(
+                    "{}{{ char fmt_buf[CHELIS_FORMAT_SHORTEST_BUF]; \
+                     chelis_format_shortest((double)({}), {dtype}, fmt_buf, sizeof fmt_buf); \
+                     printf(\"%s\", fmt_buf); }}",
+                    self.indent, value
+                ));
+            }
             HostType::Bool => self.lines.push(format!(
                 "{}printf(\"%s\", {} ? \"true\" : \"false\");",
                 self.indent, value
@@ -5587,6 +5700,23 @@ fn sparse_elem_type(prim: Prim) -> &'static str {
             "C backend sparse path has no element type for `{}` (spec/04-type-system.md §1.1)",
             other.name()
         ),
+    }
+}
+
+/// Width id macro for a scalar float `HostType` handed to
+/// `chelis_format_shortest` (chelis#732 Phase 2). Reduced-float scalars
+/// have no C-host ABI cell (rejected pre-codegen, loud_unsupported.md
+/// section C6.3), so the print sites only ever see these two widths.
+/// `CHELIS_<DTYPE>` macro selector for a scalar float print, matching
+/// the sibling `sparse_dtype_macro` naming. It selects a DTYPE, not a
+/// width: spec/04 [04-NUM-8] gives storage and arithmetic width separate
+/// meanings, so a name spelled after "width" would be ambiguous at the
+/// one call site that feeds `chelis_format_shortest`.
+fn scalar_float_dtype_macro(ty: &HostType) -> &'static str {
+    match ty {
+        HostType::Float32 => chelis_vocab::RuntimeDType::F32.c_macro(),
+        HostType::Float64 => chelis_vocab::RuntimeDType::F64.c_macro(),
+        other => unreachable!("scalar float print of non-float host type {other:?}"),
     }
 }
 

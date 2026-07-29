@@ -1,6 +1,6 @@
 # Faithful Observation: one dtype-true formatter for every exit, both lanes
 
-**Status:** Phases 0-1 LANDED. Phase 0 (the round-trip harness and the
+**Status:** Phases 0-2 LANDED. Phase 0 (the round-trip harness and the
 exit census) landed 2026-07-17 (PR #752, tightened by PR #774). Phase 1
 (the formatter, eval adoption, and the eval-side §B2.1 migration) landed
 2026-07-20: `format_element` lives at `chelis-types::observation`, every
@@ -11,7 +11,25 @@ annexed value-layer exception, surfaced by PR #792's red team: int64
 scalar roots above 2^53 render the f64-collapsed stored value at the
 labeled root ([#684]'s rank-0 realization, repaired by [#729]; the
 exception and its ignored red cell are recorded at spec/05 §8).
-Phases 2-3 remain. Tracking issue: [#732].
+Phase 2 (the generated C side and the C-side §B2.1 migration) landed
+2026-07-24: `chelis_format_shortest` in the runtime, the print helper
+generated from an exhaustive `Prim` match, `to_list`'s F16/BF16 arms,
+and §C2.3 cross-lane byte equality locked for identical stored bits -
+[#716]/[#723]/[#726]-C/[#748]/[#749] fixed by un-ignoring their red
+cells (close the issues on the PR #863 merge). Four recorded
+boundaries, each issue-linked ([#864] and [#865] with ignored red
+cells in the harness): eval TENSOR float elements still render at the stored
+f64 width (the deliberate §8.1 width note, [#729]'s metadata repair),
+so non-dyadic narrow-float tensor cells stay width-divergent across
+lanes until then; eval's LABELED ROOT of a cast-constructed f64 tensor
+narrows through the stale F32 tag ([#864], the [#717] family - an
+[05-OBS-1] violation inside eval, surfaced by PR #863's red team); the
+compiled lane's untagged f64 value box renders narrower float elements
+(f32 as well as f16/bf16) at f64-image width through `to_list` and
+list/tuple boxing - faithful parse-back, not own-width shortest
+([#865], the [#729]/[#686] capacity family); and unit-valued
+single-print-root labeling diverges ([#862], a root-labeling discovery
+outside the [05-OBS] atoms). Phase 3 remains. Tracking issue: [#732].
 **Owning specs:** `spec/05-risc-primitives.md` (its §8 carries this
 plan's ratified contract as current blockquote authorities [05-OBS-1..5]; the
 per-op tolerance table lands into the same section at Phase 3, while
@@ -210,21 +228,83 @@ For every dtype and every storable value:
    shortest-round-trip routine (next item); f16/bf16 decoded via the
    same conversion helpers the WS-1 kernels already use, then formatted
    at THEIR width.
-3. **Shortest-round-trip in C** without vendoring a big formatter: the
-   runtime gains `chelis_format_shortest(double v, int width_kind, char*
-   buf)` implemented as the precision-escalation loop - try
-   `%.{p}g` for p = 1..17 (f64) / 1..9 (f32) / 1..5 (f16/bf16 via their
-   exact double value), `strtod` back, stop at the first exact
-   round-trip - then normalize specials and exponent digits to §C1.3's
-   grammar. Simple, portable, provably shortest-in-digits; printing is
-   not a hot path. (Vendoring Ryū is the recorded alternative if the
-   loop's cost ever matters - open question 2.)
+3. **The compiled lane's formatting routine** (§C3.3; rewritten at
+   Phase 2 landing to state the SHIPPED architecture - the B1 row's
+   frozen requirement is grammar identity to Rust `{:?}`, and this text
+   previously described a pre-implementation sketch): the runtime gains
+   `int chelis_format_shortest(double v, int dtype, char* buf,
+   size_t cap)`,
+   exported from the Rust runtime staticlib every compiled binary links.
+   `v` is the exact double image of the stored float (every supported
+   width widens losslessly), `dtype` is the value's `RuntimeDType` id
+   (its STORAGE width is what the rendering round-trips at - spec/04
+   [04-NUM-8] declares storage and arithmetic width separately and they
+   differ for f16/bf16, which compute at f32; the parameter names a dtype
+   rather than a width because "width" denotes two properties of one), `cap` is the caller's buffer capacity, and the return is the byte
+   count written excluding the NUL. **Every contract violation aborts
+   loudly** rather than truncating or returning a sentinel: an unknown or
+   non-float id aborts with the raw id, a null buffer aborts, and a `cap`
+   too small for the rendering plus its NUL aborts naming both numbers. A
+   silent short write would be a [#703]-class substitution at the byte
+   level - a truncated rendering parses back as a DIFFERENT value, which
+   is precisely the unfaithful exit this plan exists to kill, so the
+   return value is a length and never an error channel.
+   (`cap` was added at PR #863's R2 review, which demonstrated that the
+   original `(double, int, char*)` signature could not express - let alone
+   check - the buffer contract its own documentation stated, and wrote
+   past a four-byte logical buffer. Landing it before the 0.18 tag is
+   deliberate: adding a parameter afterwards is a breaking change for
+   every shell that links the runtime, and 0.18 is the mechanical cut.)
+   The
+   wide widths (f32/f64) format via `{:?}` itself - the normative
+   grammar's own definition and the exact code path `format_element`
+   takes, so grammar identity holds by construction and no platform
+   printf variance exists to normalize. The half widths (f16/bf16, which
+   Rust cannot format natively) use the ratified §8.1 escalation: digit
+   counts 1..=5, the correctly rounded scientific form plus its two
+   decimal-grid neighbors at each count, first round-tripping count
+   wins, same-length ties break to the numerically closest then the
+   even mantissa. Byte equality against `format_element` is locked by
+   test - exhaustively over all 65536 bit patterns per half format,
+   table- and sweep-driven for f32/f64. (The originally sketched
+   `%.{p}g`/`strtod` escalation-plus-normalization existed to
+   approximate exactly this from C; implemented faithfully it can still
+   diverge from `{:?}` at same-length ties - the executed example is
+   f32 1916442.25, where `{:?}` renders `1916442.3` and the loop's
+   nearest-candidate rule renders `1916442.2` - so the loop would
+   VIOLATE the frozen grammar and is not an admissible implementation.)
 4. **`to_list` completes its per-dtype reads**: the runtime's `to_list`
    gains F16/BF16 arms (reading the 2-byte buffers via the existing
    conversion helpers) instead of the current `runtime_fail!`, and its
    int64 path stays exact (it already is - the audit's proof instrument).
    NOTE the boundary: to_list VALUES leaving as list elements is an exit
    (ours); constructing tensors is ingress ([#729]'s).
+5. **The DECODE half of an exit is in scope** (added 2026-07-28, after
+   PR #863's review surfaced a live violation this architecture did not
+   cover). "Print exactly what is stored" is two steps -
+   `bits <- read(bytes, dtype)` then `text <- format(bits)` - and §C1-§C3
+   above govern only the second. `format_element(prim, ElementRef)` and
+   `chelis_format_shortest(value, dtype, buf, cap)` both receive an
+   ALREADY-DECODED element, so a canonical formatter cannot detect a
+   wrong-width read: the element arrives correct-looking and is rendered
+   faithfully. That is exactly how the compiled lane's nested-value
+   renderer came to decode NATIVE two's-complement int32 through an f32
+   view - rendering `5i32` as `7.006492321624085e-45` and `-2147483648`
+   as a plausible `0` - while `to_list` and the generated print helper,
+   reading the same buffer natively, returned the right integers.
+   Phase 2 made formatting canonical and left decoding as hand-written
+   arms: **one formatter, N decoders.**
+   The rule: an exit's decode must go through the dtype's own typed
+   accessor, never a view chosen at the call site. **Width is not
+   representation** - `Ieee754Binary32` and `TwosComplement32` are both
+   four bytes and are not interchangeable, so a width-keyed check is
+   blind to precisely this defect ([#894] makes `Repr` the ABI primitive
+   with width DERIVED from it). Ownership: the general mechanism is
+   [#893] (seal `chelis_tensor.data`, then type the forced accessor - in
+   that order), not this plan and not [#729], whose §C3 storage decision
+   is the same discipline one layer up. This plan owns the rule AT ITS
+   EXITS and enforces it with the Phase 2 oracle's declared decode
+   table, which fails on any arm whose pointer view drifts.
 
 ## C4. The tolerance table and the oracle handshake
 
@@ -265,7 +345,7 @@ For every dtype and every storable value:
 |---|---|---|
 | §C1 rules + number grammar | Phase 1 (FROZEN 2026-07-20; ratified as spec/05 §8/§8.1) | this doc + dtype_semantics.md §C4 + the migration corpus, one change set |
 | §C2 agreement contract | Phase 1 (intra-lane; FROZEN for eval 2026-07-20), Phase 2 (cross-lane byte equality) | same protocol |
-| §C3.3 C formatting routine behavior | Phase 2 | this doc; must stay grammar-identical to Rust `{:?}` (§C1.3 - an earlier revision of this row said `Display`, which §C1.3 explicitly rules out) |
+| §C3.3 C formatting routine behavior AND its C ABI signature | Phase 2 (the signature settled at the R2 review, before the 0.18 tag) | this doc; must stay grammar-identical to Rust `{:?}` (§C1.3 - an earlier revision of this row said `Display`, which §C1.3 explicitly rules out). The signature is frozen for the same reason the render is: after 0.18 ships, changing it breaks every shell that links the runtime |
 | §C4.2 tolerance table | Phase 3 | spec/05 edit + [#687] corpus, one change set |
 
 ## B2. Invariants that hold across every boundary
@@ -292,6 +372,23 @@ For every dtype and every storable value:
 5. **Discoveries fork** (shared rule): new unfaithful exits found
    mid-phase are filed, added to the census in the tracking issue, and
    scheduled - not silently absorbed.
+6. **No untyped decode at an exit** (§C3.5's operational form). An exit
+   reads its bytes through the dtype's typed accessor; a raw cast that
+   picks a pointer view at the call site is the same review-blocking
+   finding as a third formatter, and for the same reason - it makes the
+   rendered text a faithful report of the wrong bits. A dtype whose
+   storage genuinely has no typed accessor (the halves) decodes its bits
+   explicitly, with the reason stated at the arm. Any exception is
+   DECLARED with the issue that retires it, in the Phase 2 oracle's
+   decode table - bool's f32 encoding is the only one today, and it
+   retires with [#894].
+7. **A public exit owes exit coverage, or does not exist.** A
+   `#[no_mangle]` render entry point with no emitter is not harmless
+   dead code: it is an exit the census never has to account for, so a
+   defect in it is invisible to a harness that drives only reachable
+   programs. `chelis_print_f32` was exactly that, and carried the §C3.5
+   misdecode for as long as it existed. Removed at Phase 2; the oracle
+   fails if it returns in either the Rust source or the published header.
 
 ## B3. How to pick up a phase
 
@@ -392,11 +489,91 @@ may return).
 today - that divergence is [#729]'s subject matter and stays visible
 (faithfully!) in the [#687] corpus until fixed.
 
-**Oracle:** `c_int64_tensor_print_is_exact_above_2p53` ([#723]) and
-`c_print_of_f16_tensor_prints_f16_values` ([#716]) green and un-ignored;
-the round-trip harness green on every exit in both lanes; the
+**Oracle:** one command -
+`.venv/bin/python scripts/faithful_observation_phase2_oracle.py`,
+accepted at exit 0 with the final line `PHASE 2 ORACLE: PASS`. It is the
+executable form of what this phase used to state as prose, plus the leg
+that prose could not carry. Its obligations:
+`c_int64_tensor_print_is_exact_above_2p53` ([#723]) and
+`c_print_of_f16_tensor_prints_f16_values` / `c_to_list_of_f16_tensor_works`
+([#716]) present, un-ignored, and green; the
 `c_dag_kernels_compute_correct_f16_bits_despite_print` byte-decode lock
-retired per its own instructions (replaced by the direct print row).
+retired per its own instructions (replaced by the direct print row); the
+round-trip harness green on every exit in both lanes **except the
+enumerated known-red cells**, which are NOT skipped silently - the
+oracle holds a ledger of every `#[ignore]`d harness cell with its owning
+issue, requires the harness's ignore inventory to EQUAL that ledger (an
+undeclared skip is a narrowed corpus; a stale row overstates what the
+suite covers), runs each
+cell, and fails if one is red for an undeclared reason **or has gone
+green**. A green known-red cell means its upstream [#729]-family repair
+landed: un-ignore the cell on its original assertion and delete the
+ledger row in that change set. The oracle also pins the harness's two
+documented corpus-exclusion lists ([#751] C ingress, [#717] eval
+`to_list`) against silent widening, runs the `chelis_format_shortest`
+byte locks, and requires the §B2.4 format-narrowing tripwire's
+PRODUCTION allowlist to stay empty.
+
+Scope, stated rather than assumed: the ignore-inventory equality covers
+the observation harness, this plan's own instrument. The sibling matrix
+files carry `#[ignore]`d cells owned by [#682]/[#714]/[#717]/[#724]/[#729];
+for those the oracle asserts only that the three rows named above are
+un-ignored and green.
+
+**Default CI does NOT run this oracle** (same standing as [#730]'s Phase
+2 oracle): it is a manual phase gate, invoked at phase acceptance and at
+any change to the observation surface, and it needs a host C toolchain
+because most obligations build, link, and run generated C. What CI does
+carry continuously is the harness's green set, the matrix oracle rows,
+the `chelis_format_shortest` byte locks, and the §B2.4 tripwire - every
+suite the oracle runs, minus the known-red re-execution and the
+structural ledger scan, which are exactly the legs that need the ledger
+to mean anything. Run it before claiming this phase, not once per PR.
+
+**Delivered** (2026-07-24), with five recorded notes (note 5 added
+2026-07-28, with the oracle it describes). (1) The
+`chelis_format_shortest` routine lives in the Rust runtime library, so
+the wide widths use `{:?}` formatting directly - the normative grammar's
+own definition and the exact code path `format_element` takes - while
+f16/bf16 use the ratified escalation search; the C-side sketch's
+printf/strtod loop and normalization pass exist to approximate exactly
+this from C, and byte equality is still locked by test (exhaustive per
+half format). (2) `to_list` completion required naming a boxed-only
+list-element ABI state (`ReducedFloatBoxed`) in the C backend: PR #799's
+typed boundary had begun rejecting `list[f16]` wholesale at build (the
+census recorded the older runtime abort); the named state keeps every
+scalar-materialization path loudly rejected per [#714] while letting the
+heap list print. The state is recorded in `loud_unsupported.md` §C6.3
+(the boundary's owning doc; their interlock-edits-are-bidirectional
+rule) and its Phase 2 oracle gained an added-variant `HostAbiType`
+mutation leg, so a new ABI variant is a compile-error work-list at
+every exhaustive consumer. (3) §C2.3's byte-identity lock runs where stored bits
+AND rendered widths agree; the eval tensor width note (spec/05 §8.1)
+keeps non-dyadic narrow-float tensor cells width-divergent until [#729],
+and the [#862] unit-root labeling discovery is filed, not absorbed.
+(4) PR #863's fresh-context red team (round 1) surfaced two further
+width-annex gaps, filed per §B2.5 and annexed at spec/05 §8 with
+ignored red cells: [#864] (eval's labeled-root render of
+`cast(<tensor>, f64)` results narrows through the stale F32 tag - an
+eval-lane [05-OBS-1] violation the harness's `via_cast=false` F64 table
+structurally never constructed) and [#865] (the compiled lane's
+untagged f64 value box renders f32 - not only f16/bf16 - elements at
+f64-image width through `to_list`/boxing; faithful but not own-width
+shortest). Both are [#729]-family value/capacity repairs; rendering is
+not the fix site for either.
+(5) The phase's oracle became a script rather than a prose conjunction,
+after PR #863's exact-head red team (F3) observed that the default
+harness run reported "30 passed, 3 skipped" while nothing asserted what
+the three skips were, that they still failed for their stated reasons,
+or that none had gone green. Three annexed cells is a defensible
+boundary; three cells nobody re-executes is not, and the difference is
+not visible from a green suite. The ledger makes the boundary
+executable, and its unexpectedly-green leg turns each cell into
+[#729]'s exit-criteria instrument: the day the tag repair or the box
+width lands, this oracle fails until the cell is un-ignored. The
+accompanying status texts here and at spec/05 §8 were narrowed in the
+same change set to say "conformant except the enumerated annexed cells"
+rather than leading with an unqualified conformance claim.
 
 ## Phase 3 - the tolerance table and the [#687] handshake
 
@@ -455,6 +632,46 @@ never as tolerance.
   boundary wait for [#729]'s storage decision ([#686]/[#685]); until then the
   wire renders faithfully within f64 capacity and the limitation is
   documented at the schema, not papered over in rendering.
+- **The dtype-carrying payload** (raised as F1/F2 by PR #863's
+  exact-head review, which asked why Phase 2 leaves dtype-unfaithful
+  states *representable* rather than merely unreached): that ask is
+  [#729]'s, and it is the same ownership line this section already
+  draws - a closed `{dtype, bits}` (or per-width) scalar payload
+  carried through the runtime's `chelis_value` box, eval's tensor
+  store, the containers, the roots, and the wire schema is a STORAGE
+  and CAPACITY change, not a rendering one. Three separations remain
+  open on that side and each already has its named cell: the runtime
+  box's single `CHELIS_VALUE_FLOAT64` tag and `f64_` slot ([#865]),
+  eval's separable `Vec<f64>` plus `precision: Prim` fields ([#864],
+  [#717]), and the wire's `Vec<f64>` tensor data plus lone `Float64`
+  scalar variant ([#686]).
+  **Phase 2's FORMATTING is forward-compatible with that payload by
+  construction; its DECODING was not, and that distinction matters**
+  (this bullet was corrected 2026-07-28 - an earlier revision claimed
+  compatibility for the renderers as a whole, which overstated it).
+  On the format side the claim holds: `format_element(prim, ElementRef)`
+  and `chelis_format_shortest(value, dtype, buf, cap)` are both already
+  keyed by dtype, so the payload's arrival replaces two arguments with
+  one at the CALL sites and changes no rule in §C1, no byte of the
+  grammar, and no rendered output.
+  But both take an ALREADY-DECODED element, so neither says anything
+  about whether the bytes were read at the right representation - and
+  the int32 misdecode PR #863's review found lived entirely upstream of
+  them (§C3.5). Two consequences worth stating plainly: the C entry
+  point's dtype parameter was originally spelled `width_kind`, which
+  encoded exactly the width-thinking [#894] disproves - and spec/04
+  [04-NUM-8] then gave "width" a SECOND meaning (storage vs arithmetic,
+  which differ for f16/bf16), so one parameter name denoted two
+  properties of a thing it was not even naming. Renamed to `dtype`
+  before the 0.18 tag, matching every other dtype-id parameter in the
+  runtime and header; and `chelis_format_shortest`'s
+  `(double, int)` pair remains a seam the payload closes - the pair is
+  caller-supplied, and the routine can reject an invalid dtype id but
+  cannot prove the value is the exact widening of one stored at that
+  width. Hardening it (a tagged struct or per-width entry points, plus
+  `(buf, capacity)` and an explicit result) is the natural joint moment
+  with [#729]'s payload work and [#893]'s seal, recorded here rather
+  than absorbed - this plan does not own the storage side of it.
 - **With [#730]**: the `<value>` placeholder and the print helper's abort
   default are its census rows; the shared tripwire carries this plan's
   `%.16g`/`%.1f` pattern. No delivery overlap.
@@ -473,7 +690,7 @@ never as tolerance.
 | # | question | decided in | recorded where |
 |---|---|---|---|
 | 1 | exact number grammar edge set | DECIDED 2026-07-17 (mechanics; exact constants pinned by P1's tests): `{:?}`'s e-notation thresholds are captured empirically and recorded as NORMATIVE CONSTANTS in §C1.3, so a rustc formatting change breaks our tests loudly instead of silently shifting the grammar the generated C must match. f16/bf16 shortest-digit = the shortest string whose parse-back (strtod to f64, then round to the half width - safe by the same excess-precision argument as [04-NUM-1]'s single-rounding rule) yields the stored bits, verified EXHAUSTIVELY over all 65536 bit patterns per format (a required P1 deliverable - the narrow widths are fully enumerable, so no boundary-case debate survives). DELIVERED at P1 (2026-07-20): constants pinned and rustc-locked, both exhaustive half-format tests landed in `chelis-types::observation` | §C1.3 + spec/05 §8.1 + the formatter's unit tests |
-| 2 | precision-escalation loop vs vendored Ryū for the C routine | Phase 2 (loop is the default; revisit only on measured cost) | §C3.3 |
+| 2 | precision-escalation loop vs vendored Ryū for the C routine | DECIDED at Phase 2: neither - the routine lives in the Rust runtime staticlib, so f32/f64 use `{:?}` directly (grammar identity by construction) and f16/bf16 use the ratified §8.1 escalation; a faithful printf-loop emulation diverges from `{:?}` at same-length ties (f32 1916442.25 -> loop `1916442.2` vs `{:?}` `1916442.3`), so the loop was never grammar-admissible for the wide widths | §C3.3 |
 | 3 | whether the wire schema renders numbers as JSON numbers or strings for int64 once [#729]'s storage lands | with [#729] Phase 1 | schema.rs + both docs' §I1 |
 | 4 | truncation story | DECIDED 2026-07-17: ONE rule at every exit in both lanes - truncate tensor element rendering at 32 with the marker `, ...` (C's existing form). P0's census proved "keep as-is" was incoherent (three stories: eval transcript unlimited, eval root `+ ...`@32, C `, ...`@32). Eval-transcript's unlimited printing is REMOVED in the migration (the one place §B2.1's carve-out changes how MUCH is printed, flagged with §B2.2 bit-level companions); print-based cross-lane comparison beyond 32 never worked (the C lane already capped), and full-element fidelity is `to_list`'s and the wire's job, never print's. The threshold is one documented constant; configurability deferred until a real need | §C1.5 |
 
@@ -486,6 +703,7 @@ become byte-comparable, and every remaining numeric disagreement is
 guaranteed to be a real value bug wearing its own name.
 
 [#680]: https://github.com/Chelis-Lang/chelis/issues/680
+[#682]: https://github.com/Chelis-Lang/chelis/issues/682
 [#684]: https://github.com/Chelis-Lang/chelis/issues/684
 [#685]: https://github.com/Chelis-Lang/chelis/issues/685
 [#686]: https://github.com/Chelis-Lang/chelis/issues/686
@@ -498,10 +716,20 @@ guaranteed to be a real value bug wearing its own name.
 [#718]: https://github.com/Chelis-Lang/chelis/issues/718
 [#719]: https://github.com/Chelis-Lang/chelis/issues/719
 [#723]: https://github.com/Chelis-Lang/chelis/issues/723
+[#724]: https://github.com/Chelis-Lang/chelis/issues/724
 [#726]: https://github.com/Chelis-Lang/chelis/issues/726
 [#727]: https://github.com/Chelis-Lang/chelis/issues/727
 [#728]: https://github.com/Chelis-Lang/chelis/issues/728
 [#729]: https://github.com/Chelis-Lang/chelis/issues/729
 [#730]: https://github.com/Chelis-Lang/chelis/issues/730
 [#732]: https://github.com/Chelis-Lang/chelis/issues/732
+[#748]: https://github.com/Chelis-Lang/chelis/issues/748
+[#749]: https://github.com/Chelis-Lang/chelis/issues/749
+[#751]: https://github.com/Chelis-Lang/chelis/issues/751
+[#775]: https://github.com/Chelis-Lang/chelis/issues/775
 [#754]: https://github.com/Chelis-Lang/chelis/issues/754
+[#865]: https://github.com/Chelis-Lang/chelis/issues/865
+[#864]: https://github.com/Chelis-Lang/chelis/issues/864
+[#862]: https://github.com/Chelis-Lang/chelis/issues/862
+[#893]: https://github.com/Chelis-Lang/chelis/issues/893
+[#894]: https://github.com/Chelis-Lang/chelis/issues/894

@@ -89,7 +89,14 @@ finding folded in before merge; the red teams' discoveries are filed as
 **Wave 2 - the independently-landable value work.** [#732] Phase 1
 landed with Wave 1 (above); the remaining Wave 2 set is [#732] Phase 2
 (the generated C side: fixes [#716]/[#723] outright and gives the
-refactor its byte-exact instrument) in parallel with [#731] Phases 2-3 (the
+refactor its byte-exact instrument; its one authoritative completion
+oracle is
+`.venv/bin/python scripts/faithful_observation_phase2_oracle.py`,
+accepted at exit 0 with final line `PHASE 2 ORACLE: PASS` - it carries
+the known-red ledger that keeps every annexed [#729]-family cell
+re-executed rather than silently skipped, and fails when one goes
+green, so the upstream repair's landing forces the un-ignore in the
+same change set) in parallel with [#731] Phases 2-3 (the
 witness token + DeepTag). [#730] Phase 2's final typed implementation is in
 PR [#799] (acceptance validation pending): closed vocabularies, staged
 HostType/ABI separation, and structured emission. Its initial source-lint
@@ -356,7 +363,19 @@ Migration-note stubs (the breaking delta per cut):
 - **0.18** (mechanical) - "pin bump only: more previously-silent errors are
   caught (bogus casts, non-record field access, malformed host types) but on
   already-broken code; compiled and eval output now render byte-identically; the
-  runtime tarball gains `chelis_runtime_dtype.h`."
+  runtime tarball gains `chelis_runtime_dtype.h`. The public runtime header
+  also drops the unused `chelis_print_f32` export ([#732] Phase 2 - a tensor
+  print with no emitter in any backend, so no compiled program could reach
+  it); a shell that declared it directly loses a symbol it could never have
+  usefully called."
+  NOTE, against the natural instinct to bundle: [#894]'s
+  `chelis_fill_bool_bits(t, uint32_t)` -> `chelis_fill_bool(t, uint8_t)` rename
+  does NOT ride this cut. It is a bool STORAGE change (4-byte f32 encoding to
+  one native byte), so anti-churn invariant 1 puts it in **0.19** with the rest
+  of [#729]'s storage break - the int32 decode fixes go the other way, because
+  completing [#730] §C6.2 is 0.18 payload. Two C-ABI deltas in one header do
+  not justify merging two cuts; the storage decision is all-layers-or-nothing
+  and the header is only one of its layers.
 - **0.19** (source migration) - "dtype semantics are grounded: integer overflow
   traps instead of wrapping, per-dtype tensor storage (wire-format v2, Python
   payload shape changed), narrow dtypes preserved end-to-end; every op x dtype
@@ -626,3 +645,4 @@ formal target, per its §C1.5) and [#730] makes unknown KINDS loud;
 [#899]: https://github.com/Chelis-Lang/chelis/issues/899
 [#908]: https://github.com/Chelis-Lang/chelis/issues/908
 [#909]: https://github.com/Chelis-Lang/chelis/issues/909
+[#894]: https://github.com/Chelis-Lang/chelis/pull/894

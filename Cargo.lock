@@ -767,7 +767,9 @@ dependencies = [
 name = "chelis-runtime"
 version = "0.17.1"
 dependencies = [
+ "chelis-types",
  "chelis-vocab",
+ "half",
  "libc",
  "memmap2",
 ]

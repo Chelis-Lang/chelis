@@ -358,23 +358,14 @@ const BASELINE: &[Entry] = &[
         "proven-structural: absent symbolic-dim label defaults to extent 1 \
          per the summary contract",
     ),
-    // -- c-format-narrowing (hosted for the chelis#732 plan's Phase 0; its
-    // production allowlist only ever shrinks - deleted by #732 Phase 2) ----
-    (
-        Pat::CFormatNarrowing,
-        "crates/chelis-backend-c/src/host_emit.rs",
-        4,
-        "chelis#732 production allowlist: the emitted tensor print helper's \
-         %.1f/%.16g split and the two scalar %.16g print sites \
-         (chelis#716/#723); deleted by #732 Phase 2's generated helper",
-    ),
-    (
-        Pat::CFormatNarrowing,
-        "crates/chelis-runtime/src/lib.rs",
-        1,
-        "chelis#732 production allowlist: tensor_to_string's {value:.1} \
-         near-integer arm; deleted by #732 Phase 2",
-    ),
+    // -- c-format-narrowing (hosted for the chelis#732 plan's Phase 0) ----
+    // The production allowlist rows (host_emit.rs = 4, chelis-runtime
+    // lib.rs = 1) were DELETED by chelis#732 Phase 2 as the Phase 0
+    // handoff promised: every compiled-lane float exit now routes through
+    // `chelis_format_shortest` / the generated print helper, so the
+    // format-narrowing token count in product code is zero and any new
+    // occurrence is a third formatter (faithful_observation.md section
+    // B2.4, a review-blocking finding).
     (
         Pat::CFormatNarrowing,
         "crates/chelis-backend-c/src/lib.rs",

@@ -18,8 +18,9 @@
 //! * the **eval scalar lane** rounds f16/bf16 per-op correctly (IEEE
 //!   sequential rounding, locked below);
 //! * the **C DAG kernels** compute correctly-rounded f16/bf16 values (WS-1) -
-//!   proven here by decoding the misprinted bytes, so the lock survives the
-//!   broken print path;
+//!   originally proven here by decoding the misprinted bytes; since
+//!   chelis#732 Phase 2 the faithful print renders them directly
+//!   (`c_print_of_f16_tensor_prints_f16_values`, un-ignored);
 //! * **HIP rejects** f16/bf16 compute ops with a clean diagnostic and
 //!   **Metal emits properly typed** `half`/`bfloat` kernels - the two
 //!   backends that get it right;
@@ -94,46 +95,6 @@ fn build_and_run_c(program: &str, name: &str) -> Result<(String, String), String
         ));
     }
     Ok((emitted, String::from_utf8_lossy(&run.stdout).into_owned()))
-}
-
-/// Build + link + run, keeping the run OUTCOME: `Ok((run_ok, stdout,
-/// stderr))`, or `Err(build/link stderr)`. For rows whose contract is a
-/// runtime ABORT (census row 10 interim-hardening), where
-/// `build_and_run_c`'s nonzero-exit-is-Err folding would hide the
-/// distinction between a build failure and the asserted abort.
-fn c_run_outcome_full(program: &str, name: &str) -> Result<(bool, String, String), String> {
-    let dir = tempdir().expect("tempdir");
-    let path = dir.path().join(format!("{name}.ch"));
-    let out_dir = dir.path().join(format!("{name}-out"));
-    write_file(&path, program);
-    let built = Command::cargo_bin("chelis")
-        .expect("binary")
-        .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .args([
-            "build",
-            path.to_str().unwrap(),
-            "--target",
-            "c",
-            "--output",
-            out_dir.to_str().unwrap(),
-        ])
-        .output()
-        .expect("chelis build should run");
-    if !built.status.success() {
-        return Err(String::from_utf8_lossy(&built.stderr).into_owned());
-    }
-    let status = common::link_generated(&out_dir, &format!("{name}.c"), name);
-    if !status.success() {
-        return Err(format!("link failed: {status}"));
-    }
-    let run = std::process::Command::new(out_dir.join(name))
-        .output()
-        .expect("compiled binary should run");
-    Ok((
-        run.status.success(),
-        String::from_utf8_lossy(&run.stdout).into_owned(),
-        String::from_utf8_lossy(&run.stderr).into_owned(),
-    ))
 }
 
 /// `chelis eval` a full program; first printed line or stderr.
@@ -396,44 +357,18 @@ fn f8e4m3_is_rejected_in_both_lanes() {
     );
 }
 
-/// **The C DAG kernels compute correct f16 bits** - locked by decoding the
-/// bytes the broken print helper emits (chelis#716). The printed garbage
-/// `0.0004898309707641602` IS the proof the kernels are right: its f32 bit
-/// pattern is 0x3A006800, which is the two correct f16 results 0x6800
-/// (= 2048.0, the correctly rounded f16 sum of 2048 + 1) and 0x3A00 (= 0.75)
-/// concatenated little-endian.
-///
-/// Re-authored by chelis#730 Phase 1 (census row 10 interim-hardening):
-/// the emitted print helper no longer misreads an f16 buffer as f32 - it
-/// ABORTS with the branded dtype-id message. The f16 kernel-bits VALUE
-/// evidence this lock used to decode from the misprint has no observation
-/// route until chelis#728/#716 land the faithful print (the value
-/// assertion lives in the ignored `c_print_of_f16_tensor_prints_f16_values`).
-/// This lock now pins the interim contract: the program still BUILDS (f16
-/// tensor kernels are supported storage), and the binary aborts loudly at
-/// the print instead of rendering garbage.
-#[test]
-fn c_f16_tensor_print_aborts_with_dtype_id_instead_of_misreading() {
-    if !c_toolchain_available() {
-        eprintln!("skipping: no host C toolchain");
-        return;
-    }
-    let (ran_ok, _stdout, stderr) = c_run_outcome_full(
-        "def f(x: tensor[2, f32], y: tensor[2, f32]) -> tensor[2, f16] = add(cast(x, f16), cast(y, f16))\n\
-         out = print(f(to_tensor([2048.0, 0.5]), to_tensor([1.0, 0.25])))\n",
-        "f16_kernel_bits",
-    )
-    .expect("the f16 tensor program must still BUILD (storage is supported)");
-    assert!(
-        !ran_ok,
-        "the compiled binary must abort at the f16 print, not render garbage"
-    );
-    assert!(
-        stderr.contains("unsupported: tensor print of dtype id"),
-        "the abort must carry the branded dtype-id message (census row 10 \
-         interim contract, chelis#728 owns the faithful rendering); got: {stderr}"
-    );
-}
+// The interim lock formerly here
+// (`c_f16_tensor_print_aborts_with_dtype_id_instead_of_misreading`, itself
+// the chelis#730 re-authoring of the
+// `c_dag_kernels_compute_correct_f16_bits_despite_print` byte-decode lock)
+// is RETIRED per its own instructions at chelis#732 Phase 2: the generated
+// print helper renders f16/bf16 tensors faithfully, so the
+// abort-at-the-print contract it pinned no longer exists, and the f16
+// kernel-bits VALUE evidence flows through the direct print row
+// (`c_print_of_f16_tensor_prints_f16_values`, un-ignored below). The
+// helper's `default:` arm still aborts with the raw dtype id, but only for
+// ids the RuntimeDType vocabulary does not define, which no buildable
+// program can produce.
 
 // ===========================================================================
 // chelis#714 - f16/bf16 scalars in the compiled C lane
@@ -561,13 +496,11 @@ fn f16_scalar_abs_compiles_and_runs() {
 // chelis#716 - the C host boundaries around correct f16/bf16 kernels
 // ===========================================================================
 
-/// Observed today: prints `data=[0.0004898309707641602, 0.0]` - the correct
-/// f16 buffer read as f32 by the print helper's `default:` arm
-/// (host_emit.rs:512).
+/// Green since chelis#732 Phase 2 (un-ignored per the plan's B2.3): the
+/// generated print helper decodes f16 storage and formats at f16 width.
+/// (The pre-fix helper printed `data=[0.0004898309707641602, 0.0]` - the
+/// correct f16 buffer read as f32; the chelis#730 interim aborted.)
 #[test]
-#[ignore = "chelis#716: the emitted print helper reads f16 buffers as f32 and prints \
-            0.0004898309707641602 instead of 2048.0, 0.75. Run with \
-            `cargo test -p chelis-cli --test narrow_dtype_matrix -- --ignored`."]
 fn c_print_of_f16_tensor_prints_f16_values() {
     if !c_toolchain_available() {
         panic!("needs a host C toolchain");
@@ -589,12 +522,12 @@ fn c_print_of_f16_tensor_prints_f16_values() {
     );
 }
 
-/// Observed today: runtime abort `to_list expects numeric or bool tensor
-/// input` (chelis-runtime lib.rs:2296). Loud, but from a build that succeeded.
+/// Green since chelis#732 Phase 2 (un-ignored per the plan's B2.3):
+/// `chelis_list_from_tensor` reads the 2-byte f16 storage exactly and the
+/// host ABI carries `list[f16]` as the boxed-element state. (The pre-fix
+/// runtime aborted `to_list expects a supported numeric or bool tensor
+/// input` from a build that succeeded.)
 #[test]
-#[ignore = "chelis#716: to_list of an f16 tensor aborts at runtime in the compiled lane; \
-            eval prints [2048, 0.75]. Run with \
-            `cargo test -p chelis-cli --test narrow_dtype_matrix -- --ignored`."]
 fn c_to_list_of_f16_tensor_works() {
     if !c_toolchain_available() {
         panic!("needs a host C toolchain");
@@ -616,13 +549,20 @@ fn c_to_list_of_f16_tensor_works() {
     );
 }
 
-/// Observed today: the branded runtime abort `unsupported: destination dtype`
-/// (chelis-runtime lib.rs:2182). The build gate admits the program
-/// (cli_admits_bf16_f16_target_c.rs locks that), then the runtime cannot
-/// construct the value the program starts from.
+/// Observed today (re-verified at chelis#732 Phase 2 round 1): the BUILD
+/// rejects the typed literal with `unsupported: dtype \`f16\` on C host
+/// ABI selection (codegen:c) ... chelis#714` - the post-PR-#799 typed
+/// host boundary refuses before the former runtime `to_tensor` abort
+/// (chelis-runtime's destination-dtype arm) can be reached. Either way
+/// the failure is loud and the case is INGRESS: `to_tensor` literal
+/// construction is chelis#714/[#729] territory per faithful_observation
+/// section I1, which is why chelis#732 Phase 2's to_list/print exit work
+/// left this cell ignored.
 #[test]
-#[ignore = "chelis#716: an f16 to_tensor literal aborts at runtime in the compiled lane; \
-            eval evaluates it fine. Run with \
+#[ignore = "chelis#714/[#729] ingress (formerly filed under the chelis#716 umbrella): a \
+            typed f16 to_tensor literal is rejected at build by the C host ABI boundary; \
+            eval evaluates it fine. Un-ignore when narrow-float literal construction \
+            lands. Run with \
             `cargo test -p chelis-cli --test narrow_dtype_matrix -- --ignored`."]
 fn c_f16_tensor_literal_constructs() {
     if !c_toolchain_available() {
@@ -633,7 +573,7 @@ fn c_f16_tensor_literal_constructs() {
          out = print(f())\n",
         "f16_literal",
     )
-    .expect("chelis#716: an f16 tensor literal must be constructible at runtime");
+    .expect("chelis#714/[#729] ingress: a typed f16 to_tensor literal must construct");
     common::assert_elements_in_domain(
         "f16",
         stdout.lines().next().unwrap_or("").trim(),

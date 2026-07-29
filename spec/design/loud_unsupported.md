@@ -554,6 +554,7 @@ typed boundary that prevents unresolved state from entering codegen.
 | known logical type without target representation | exact `Prim` in `ConcreteHostType`; target selection returns `Unsupported` from the capability decision |
 | emitter expectation/refinement | resolution before emission; helpers receive concrete element/parameter ABI types |
 | declaration, boxing, unboxing, call, and callback representation | exhaustive `HostAbiType`; no `void *`, numeric zero, or other default for an unsupported state |
+| reduced-float element inside a heap LIST (the `to_list` exit, chelis#732 Phase 2) | the NAMED boxed-only state `HostAbiType::ReducedFloatBoxed(prim)`, constructed in list-element position ONLY: the list is an ordinary `chelis_list *` whose elements live behind `chelis_value` boxes as exact f64 images; the state has no standalone C spelling (`c_type_name` is `None`, like the callback declarator) and every declaration/boxing/unboxing path that would materialize an f16/bf16 C scalar rejects with the chelis#714 diagnostic; scalar, tuple, dict, and function positions keep the wholesale rejection. Not an erasure: the anti-erasure lock asserts the two-outcome contract. Owned jointly with `faithful_observation.md` (its Phase 2 Delivered note records the same state; interlock edits are bidirectional per B2.6) |
 
 The staged source contract is:
 
@@ -818,6 +819,13 @@ one fully-decodable variant to each closed vocabulary (`EffectKind` and
 `RuntimeDType`) in a single workspace check. The mutation must produce
 non-exhaustive-match errors in each vocabulary's independent semantic
 consumers and the runner must restore the owner source byte-for-byte.
+Since chelis#732 Phase 2 the runner carries a third controlled-mutation
+leg for the backend's crate-private `HostAbiType` (the section C6.3
+typed-state boundary, which gained `ReducedFloatBoxed`): an added ABI
+variant with no consumer arms must produce non-exhaustive-match errors at
+the ABI owner's matches (`host_abi.rs`) and the emitter's
+boxing/unboxing/print consumers (`host_emit.rs`), with the same
+clean-owner refusal and byte-for-byte restore.
 The tripwire remains supporting evidence executed by the normal gate; it is
 not a second completion oracle.
 

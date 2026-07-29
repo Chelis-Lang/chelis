@@ -186,13 +186,15 @@ fn c_f32_tensor_add_rounds_to_f32() {
         "c_f32_add",
     )
     .expect("C lane should run");
-    // chelis#729 Phase 0: this control also pins the domain checker's
-    // print-truncation slack: the C lane's %.16g rendering of the exact
-    // f32 sum ("0.300000011920929") must be accepted as an f32 member.
     common::assert_elements_in_domain("f32", &line, "c_f32_add");
+    // chelis#732 Phase 2: the C lane renders at f32 width, and the
+    // shortest string parsing back to the exact f32 sum
+    // (0.30000001192092896) is "0.3" - same stored bits, own-width
+    // digits ([05-OBS-2]; the pre-contract %.16g printed
+    // "0.300000011920929").
     assert!(
-        line.contains("0.300000011920929"),
-        "C f32 add(0.1, 0.2) must be the f32 sum; got: {line}"
+        line.contains("data=[0.3, 3.0]"),
+        "C f32 add(0.1, 0.2) must render the f32 sum at f32 width; got: {line}"
     );
 }
 

@@ -141,9 +141,20 @@ unsafe impl TensorElement for i64 {
     const DTYPE: RuntimeDType = RuntimeDType::I64;
 }
 
-/// Typed access to a tensor whose runtime storage is f32-encoded
-/// regardless of the dtype tag.  Returns the buffer typed as
-/// `*mut f32`.
+/// Typed access to a tensor's buffer as `*mut f32`.
+///
+/// **STALE-DOC WARNING (chelis#694).** The paragraph below is the
+/// historical text and its `CHELIS_I32` half is FALSE. int32 storage is
+/// native two's complement at every writer and every reader; this
+/// helper's claim that `i32::data_ptr_unchecked` "is the wrong decode"
+/// is the enabler chelis#894 identified behind nine sites that decoded
+/// int32 through an f32 view, and every one of those arms cited it. Do
+/// not route an `CHELIS_I32` arm through here. `CHELIS_BOOL` genuinely
+/// is 4-byte f32-encoded today and moves with chelis#894's
+/// `Repr::Bool8`; chelis#893 removes the ability to choose a view at the
+/// call site at all. The historical text is kept rather than deleted so
+/// the citation trail from the wrong arms stays readable, and is
+/// rewritten wholesale when chelis#894 lands.
 ///
 /// PR 1 introduced this as a transition shim for the 31 access
 /// sites it did not migrate.  PR 2 migrated those sites to the
@@ -191,6 +202,13 @@ macro_rules! runtime_fail {
         std::process::exit(1);
     }};
 }
+
+// chelis#732 Phase 2: the compiled lane's shortest-round-trip float
+// formatter (declared after `runtime_fail!` so the macro is in scope).
+mod format_shortest;
+
+use format_shortest::format_shortest;
+pub use format_shortest::{chelis_format_shortest, CHELIS_FORMAT_SHORTEST_BUF};
 
 /// Decode an ABI dtype tag at the Rust FFI boundary.
 #[inline]
@@ -1173,7 +1191,20 @@ pub unsafe extern "C" fn chelis_string_from_int64(value: i64) -> chelis_string {
 
 #[no_mangle]
 pub unsafe extern "C" fn chelis_string_from_f64(value: f64) -> chelis_string {
-    new_runtime_string(format!("{}", value))
+    // chelis#732 Phase 2: `to_string` is an observation exit; the frozen
+    // section C1.3 grammar replaces the Display form (which never emitted
+    // e-notation and dropped the `.0` on integral values, so the compiled
+    // lane's `to_string` disagreed with eval's byte-for-byte).
+    new_runtime_string(format_shortest(value, RuntimeDType::F64))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_string_from_f32(value: f32) -> chelis_string {
+    // chelis#732 Phase 2 (PR #863 round-1 F1): an f32 scalar's `to_string`
+    // renders at ITS width ([05-OBS-2]); the pre-fix emission promoted
+    // through `chelis_string_from_f64` and carried the f64-image digits,
+    // splitting the exit from `print` of the same stored value.
+    new_runtime_string(format_shortest(f64::from(value), RuntimeDType::F32))
 }
 
 #[no_mangle]
@@ -2314,8 +2345,19 @@ pub unsafe extern "C" fn chelis_list_from_tensor(tensor: *const chelis_tensor) -
                 let raw = *((*tensor).data as *const f32).add(i * stride);
                 chelis_value_from_f64(raw as f64)
             }
-            RuntimeDType::Bf16 | RuntimeDType::F16 => {
-                runtime_fail!("to_list expects a supported numeric or bool tensor input")
+            // chelis#732 Phase 2 (section C3.4, chelis#716's abort half):
+            // read the 2-byte storage and widen exactly. The list box is
+            // f64-valued, so the element leaves as the exact image of the
+            // stored half value (widening is lossless); the box renders at
+            // f64 width until the value box learns narrow-float widths
+            // (chelis#729's capacity side).
+            RuntimeDType::Bf16 => {
+                let bits = *((*tensor).data as *const u16).add(i * stride);
+                chelis_value_from_f64(f64::from(half::bf16::from_bits(bits)))
+            }
+            RuntimeDType::F16 => {
+                let bits = *((*tensor).data as *const u16).add(i * stride);
+                chelis_value_from_f64(f64::from(half::f16::from_bits(bits)))
             }
         };
         items.push(value);
@@ -3545,7 +3587,13 @@ unsafe fn write_stdout(text: &str) {
 unsafe fn value_to_string_inline(value: chelis_value) -> String {
     match value.tag {
         chelis_value_tag::CHELIS_VALUE_INT64 => value.as_.i64_.to_string(),
-        chelis_value_tag::CHELIS_VALUE_FLOAT64 => value.as_.f64_.to_string(),
+        // chelis#732 Phase 2: the boxed float renders in the frozen
+        // section C1.3 grammar at the box's f64 width (the pre-contract
+        // Display form had no e-notation and dropped the `.0` on integral
+        // values, diverging from the reference renderer).
+        chelis_value_tag::CHELIS_VALUE_FLOAT64 => {
+            format_shortest(value.as_.f64_, RuntimeDType::F64)
+        }
         chelis_value_tag::CHELIS_VALUE_BOOL => {
             if value.as_.boolean { "true" } else { "false" }.to_string()
         }
@@ -3720,10 +3768,19 @@ pub unsafe extern "C" fn chelis_contiguous(t: *const chelis_tensor) -> *mut chel
     out
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn chelis_print_f32(t: *const chelis_tensor) {
-    write_stdout(&tensor_to_string(t));
-}
+// `chelis_print_f32` was removed at chelis#732 Phase 2: a public
+// `#[no_mangle]` tensor print with ZERO emitters anywhere in
+// `chelis-backend-c` or `chelis-ir`, so no compiled program could reach
+// it. It was neither dead-and-removable nor a supported extern surface
+// owed exit coverage, which is exactly how the int32 misdecode above
+// stayed invisible - an exit the census never had to account for because
+// nothing called it. Removing it shrinks the observation surface to the
+// exits that are actually reachable. C ABI note: the declaration leaves
+// `chelis_runtime.h` at the 0.18 cut, alongside chelis#730 §C6.2's int32
+// decode completion. It does NOT ride with chelis#894's
+// `chelis_fill_bool_bits` -> `chelis_fill_bool` rename, which is a bool
+// STORAGE change and belongs to 0.19 under the roadmap's anti-churn
+// invariant 1 (the storage decision is all-layers-or-nothing).
 
 unsafe fn list_to_string(list: *const chelis_list) -> String {
     let mut out = String::from("[");
@@ -3788,8 +3845,97 @@ unsafe fn adt_to_string(adt: *const chelis_adt) -> String {
     out
 }
 
+/// One tensor element's text per the frozen observation contract
+/// (chelis#732 Phase 2): integers print as integers with all digits
+/// exact, bool prints `true`/`false`, and floats print
+/// shortest-round-trip at THEIR width through the same routine the
+/// generated C print helper calls.
+///
+/// Each arm decodes at its own dtype's REPRESENTATION, through that
+/// type's `TensorElement` accessor. An earlier revision of THIS comment
+/// said I32 and BOOL both "stay on the f32-encoded convention this site
+/// always used" - false for I32, whose storage is native two's
+/// complement at every writer (`to_tensor`,
+/// `chelis_scalar_tensor_from_i64`) and every sibling reader
+/// (`read_index_slot`, `chelis_list_from_tensor`). Reading it through
+/// the f32 view rendered `5i32` as 7.006492321624085e-45 while
+/// `to_list` returned `5` from the same tensor. BOOL genuinely is
+/// f32-encoded today and moves with chelis#894's `Repr::Bool8`. The two
+/// halves are stated separately because one shared sentence is what
+/// carried the defect - see `data_as_f32`'s own stale rustdoc
+/// (chelis#694), which chelis#894 identified as the enabler every wrong
+/// arm cited.
+///
+/// The arm-to-accessor mapping is declared and enforced in
+/// `scripts/faithful_observation_phase2_oracle.py`
+/// (`OBSERVATION_DECODE_TABLE`), which scans CODE rather than comments:
+/// a comment naming the right accessor beside a body reading the wrong
+/// one is exactly this defect's shape, and was a demonstrated false
+/// green before the guard was hardened.
+unsafe fn tensor_elem_to_string(t: *const chelis_tensor, dtype: RuntimeDType, i: usize) -> String {
+    let tm = t as *mut chelis_tensor;
+    match dtype {
+        RuntimeDType::F32 => {
+            let v = *f32::data_ptr_unchecked(tm).add(i);
+            format_shortest(f64::from(v), RuntimeDType::F32)
+        }
+        RuntimeDType::F64 => {
+            let v = *f64::data_ptr_unchecked(tm).add(i);
+            format_shortest(v, RuntimeDType::F64)
+        }
+        RuntimeDType::I64 => (*i64::data_ptr_unchecked(tm).add(i)).to_string(),
+        // NATIVE two's-complement storage, decoded through the typed
+        // accessor. `to_tensor` and `chelis_scalar_tensor_from_i64` both
+        // write through `(int32_t*)`, and `chelis_list_from_tensor` /
+        // `read_index_slot` both decode that way; reading it through the
+        // f32 view rendered `5i32` as 7.006492321624085e-45, `i32::MAX`
+        // as NaN, and `i32::MIN` as a plausible-looking `0`, while
+        // `to_list` of the SAME tensor returned the right integers - a
+        // section C2.2 intra-lane exit split and a section C2.3 cross-lane
+        // divergence on identical stored bits. No tag-vs-bits branch
+        // belongs here (spec/05 section 8.1): every 32-bit pattern IS a
+        // valid int32, so the "outside the tag's value set" case the old
+        // arm hedged for cannot arise. chelis#894 carries the eight
+        // sibling misdecodes and makes REPRESENTATION (not width) the ABI
+        // primitive; chelis#893 seals the `data` pointer that lets any
+        // site pick its own view.
+        RuntimeDType::I32 => (*i32::data_ptr_unchecked(tm).add(i)).to_string(),
+        RuntimeDType::Bool => {
+            // Bool IS f32-encoded today - `read_index_slot` keeps
+            // `F32 | Bool` on the same view, so this half of the old
+            // shared comment was correct. chelis#894 migrates bool to a
+            // native byte (`Repr::Bool8`); this arm moves WITH that
+            // change, never before it, because a 1-byte read against
+            // 4-byte writers is a misdecode in the other direction.
+            let raw = *data_as_f32_const(t).add(i);
+            if raw != 0.0 { "true" } else { "false" }.to_string()
+        }
+        RuntimeDType::I16 => (*i16::data_ptr_unchecked(tm).add(i)).to_string(),
+        RuntimeDType::I8 => (*i8::data_ptr_unchecked(tm).add(i)).to_string(),
+        // chelis#732 Phase 2 (chelis#749's f16-as-f32 shape): read the
+        // 2-byte storage and format at the value's own width.
+        RuntimeDType::Bf16 => {
+            let bits = *((*t).data as *const u16).add(i);
+            format_shortest(f64::from(half::bf16::from_bits(bits)), RuntimeDType::Bf16)
+        }
+        RuntimeDType::F16 => {
+            let bits = *((*t).data as *const u16).add(i);
+            format_shortest(f64::from(half::f16::from_bits(bits)), RuntimeDType::F16)
+        }
+    }
+}
+
+/// Elements rendered at every tensor exit before truncation applies
+/// ([05-OBS-5]); one documented constant, both lanes, marker `, ...`.
+const TENSOR_RENDER_LIMIT: usize = 32;
+
 unsafe fn tensor_to_string(t: *const chelis_tensor) -> String {
     let dtype = tensor_dtype(t, "tensor formatting");
+    // [05-OBS-4]: a rank-0 tensor renders as its single element, bare -
+    // the `tensor(shape=[], data=[..])` wrapper is not an exit form.
+    if (*t).ndim == 0 {
+        return tensor_elem_to_string(t, dtype, 0);
+    }
     let mut out = String::from("tensor(shape=[");
     for d in 0..(*t).ndim as usize {
         if d > 0 {
@@ -3798,50 +3944,17 @@ unsafe fn tensor_to_string(t: *const chelis_tensor) -> String {
         out.push_str(&(*t).shape[d].to_string());
     }
     out.push_str("], data=[");
-    let n = ((*t).size as usize).min(10);
-    // Dispatch on dtype outside the read loop so F64 / I64 produce
-    // their full-precision value rather than the previous
-    // f32-truncated read.  I32 and BOOL stay on f32-encoded storage.
-    let tm = t as *mut chelis_tensor;
-    let read: Box<dyn Fn(usize) -> f64> = match dtype {
-        RuntimeDType::F32 => {
-            let p = f32::data_ptr_unchecked(tm);
-            Box::new(move |i| *p.add(i) as f64)
-        }
-        RuntimeDType::F64 => {
-            let p = f64::data_ptr_unchecked(tm);
-            Box::new(move |i| *p.add(i))
-        }
-        RuntimeDType::I64 => {
-            let p = i64::data_ptr_unchecked(tm);
-            Box::new(move |i| *p.add(i) as f64)
-        }
-        RuntimeDType::I32 | RuntimeDType::Bool => {
-            let p = data_as_f32_const(t);
-            Box::new(move |i| *p.add(i) as f64)
-        }
-        RuntimeDType::I16 => {
-            let p = (*t).data as *const i16;
-            Box::new(move |i| *p.add(i) as f64)
-        }
-        RuntimeDType::I8 => {
-            let p = (*t).data as *const i8;
-            Box::new(move |i| *p.add(i) as f64)
-        }
-        RuntimeDType::Bf16 | RuntimeDType::F16 => {
-            runtime_fail!("tensor formatting unsupported dtype {}", dtype.name())
-        }
-    };
+    // [05-OBS-5]: truncate at 32 elements with the `, ...` marker (the
+    // pre-contract form here cut at 10 with NO marker, chelis#749).
+    let n = ((*t).size as usize).min(TENSOR_RENDER_LIMIT);
     for i in 0..n {
-        let value = read(i);
         if i > 0 {
             out.push_str(", ");
         }
-        if (value - value.round()).abs() < 1e-9 {
-            out.push_str(&format!("{value:.1}"));
-        } else {
-            out.push_str(&value.to_string());
-        }
+        out.push_str(&tensor_elem_to_string(t, dtype, i));
+    }
+    if (*t).size as usize > n {
+        out.push_str(", ...");
     }
     out.push_str("])");
     out

@@ -58,12 +58,53 @@ fn unsupported_scalar_abis_return_the_shared_typed_diagnostic() {
     }
 }
 
+/// A pointer container must not ERASE an unsupported element ABI. Two
+/// conformant outcomes exist since chelis#732 Phase 2:
+///
+/// * the LIST element position carries the NAMED boxed-only state
+///   `ReducedFloatBoxed` (the `to_list` exit: elements live behind
+///   `chelis_value` boxes as exact f64 images, the list is an ordinary
+///   `chelis_list *`, and the element has no standalone C spelling - so a
+///   scalar materialization still rejects, which
+///   `reduced_float_boxed_element_has_no_scalar_c_spelling` locks);
+/// * every other container position keeps the wholesale chelis#714
+///   rejection.
 #[test]
 fn nested_values_cannot_hide_an_unsupported_scalar_abi() {
     let list = ConcreteHostType::List(Box::new(ConcreteHostType::Scalar(Prim::F16)));
-    let err = HostAbiType::try_from_concrete(&list)
-        .expect_err("a pointer container must not erase an unsupported element ABI");
+    let abi = HostAbiType::try_from_concrete(&list)
+        .expect("to_list of an f16 tensor is printable (chelis#732 Phase 2)");
+    assert_eq!(
+        abi,
+        HostAbiType::List(Box::new(HostAbiType::ReducedFloatBoxed(Prim::F16))),
+        "the element state must stay NAMED, never erased to f32/f64/void*"
+    );
+
+    let tuple = ConcreteHostType::Tuple(vec![ConcreteHostType::Scalar(Prim::Bf16)]);
+    let err = HostAbiType::try_from_concrete(&tuple)
+        .expect_err("non-list containers keep the wholesale rejection");
+    assert_eq!(err.what, UnsupportedKind::Dtype("bf16".into()));
+
+    let dict = ConcreteHostType::Dict(
+        Box::new(ConcreteHostType::Scalar(Prim::Int64)),
+        Box::new(ConcreteHostType::Scalar(Prim::F16)),
+    );
+    let err = HostAbiType::try_from_concrete(&dict)
+        .expect_err("non-list containers keep the wholesale rejection");
     assert_eq!(err.what, UnsupportedKind::Dtype("f16".into()));
+}
+
+/// The chelis#732 Phase 2 half of the anti-erasure control: the boxed-only
+/// element state has no standalone C spelling, so no declaration, boxing,
+/// or unboxing path can materialize an f16/bf16 C scalar out of a list.
+#[test]
+fn reduced_float_boxed_element_has_no_scalar_c_spelling() {
+    for precision in [Prim::F16, Prim::Bf16] {
+        assert_eq!(
+            HostAbiType::ReducedFloatBoxed(precision).c_type_name(),
+            None
+        );
+    }
 }
 
 #[test]
