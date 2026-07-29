@@ -93,13 +93,13 @@ Each job runs the complete flake check set on its named system.
 - [x] 8.5 Add `bin/chelis` to the chelisup output and verify a collision failure.
 - [x] 8.6 Point one app at a host command and verify an app-contract failure.
 - [x] 8.7 Disable the SMT feature and verify an SMT-check failure.
-- [ ] 8.8 Re-run both authoritative native CI jobs after accepted corrections.
+- [x] 8.8 Re-run both authoritative native CI jobs after accepted corrections.
 
 ## 9. Record acceptance evidence
 
 - [x] 9.1 Record all flake input revisions and package versions.
 - [x] 9.2 Record the closure paths and package contents for both supported systems.
-- [ ] 9.3 Record both native CI job results and durations.
+- [x] 9.3 Record both native CI job results and durations.
 - [x] 9.4 Record the fresh red-team result and each accepted correction.
 
 ## 10. Replace the Cargo-wide builds with crate2nix
@@ -121,4 +121,4 @@ Each job runs the complete flake check set on its named system.
 - [x] 10.15 Run the local repository gate inside Devenv.
 - [x] 10.16 Run strict OpenSpec validation.
 - [x] 10.17 Run a fresh red-team pass against the crate2nix graph and native overrides.
-- [ ] 10.18 Record replacement acceptance evidence and re-run both native CI jobs.
+- [x] 10.18 Record replacement acceptance evidence and re-run both native CI jobs.

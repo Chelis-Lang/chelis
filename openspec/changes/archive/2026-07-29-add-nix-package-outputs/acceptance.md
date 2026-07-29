@@ -74,10 +74,10 @@ The final correction checks used cached package outputs. They passed in 22 secon
 
 | Job | Result | Duration |
 | --- | --- | --- |
-| `Nix Packages (x86_64-linux)` | Pending | Pending |
-| `Nix Packages (aarch64-darwin)` | Pending | Pending |
+| `Nix Packages (x86_64-linux)` | Pass | 42 minutes 26 seconds |
+| `Nix Packages (aarch64-darwin)` | Pass | 23 minutes 25 seconds |
 
-This section remains pending until both GitHub Actions jobs run after the accepted corrections.
+Both jobs passed against commit `d9e067cb` after the crate2nix replacement.
 
 ## Fresh red-team result
 
@@ -139,4 +139,4 @@ The review found one medium test harness defect. The lock parity tests used a `.
 
 The test runner now uses `sys.executable`. A detached worktree without `.venv` passed all four lock parity tests.
 
-No product defect remained after the correction. The CI jobs remain pending.
+No product defect remained after the correction. Both native CI jobs passed after the replacement.
