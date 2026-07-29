@@ -105,9 +105,9 @@ NON_GATE_WORKFLOWS = {
     # caches to hold the pool under the 10GB LRU budget; runs no per-PR gate
     # command. Out of gate.py scope by design.
     "cache-prune.yml",
-    # OpenSpec validation (advisory). Runs `openspec validate` on the
-    # openspec/ tree; not a required status check and runs no cargo/chelis
-    # command the per-PR developer gate owns. Out of gate.py scope by design.
+    # OpenSpec validation uses the pinned central action in advisory mode.
+    # It runs no cargo or Chelis command that the developer gate owns.
+    # It stays outside gate.py by design.
     "openspec-validate.yml",
 }
 

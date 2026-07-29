@@ -1,39 +1,56 @@
 ## Context
 
-`spec/design/spec_provenance.md` describes a future required-governance phase (Phase 0) for OpenSpec, but Chelis has no OpenSpec planning tree yet and is not ready to require lifecycles for every governed change or every `spec/**` edit. This change adopts OpenSpec in the smallest useful form: a valid planning tree plus advisory structural validation.
+Main already contains the stock OpenSpec tree from #839. That tree has template configuration and no hosted structural validation.
+
+`spec/design/spec_provenance.md` describes a future required OpenSpec phase. Chelis is not ready to require a lifecycle for each governed change or `spec/**` edit.
+
+This change adds authored configuration and advisory structural validation. It does not activate Phase 0.
 
 ## Goals / Non-Goals
 
 **Goals:**
 
-- Establish the canonical `openspec/` root with the built-in spec-driven schema.
-- Validate the tree structurally in CI and locally, non-blocking.
+- Add authored project context and artifact rules to the canonical `openspec/` root.
+- Run structural validation in CI and locally.
+- Keep schema findings advisory and keep operational failures nonzero.
 
 **Non-Goals:**
 
-- Require OpenSpec lifecycles, citations, planning-before-code ordering, or branch-scope rules.
+- Require OpenSpec lifecycles, citations, planning order, or branch-scope rules.
 - Govern `spec/**` or make OpenSpec a documentation-only gate.
-- Make OpenSpec or provider metadata canonical Chelis product, atom, coverage, or implementation-correctness authority.
+- Make OpenSpec or provider metadata a Chelis product authority.
 - Activate `spec/design/spec_provenance.md` Phase 0.
 
 ## Decisions
 
-### 1. Advisory validation, not governance
+### 1. Advisory structural validation, not Phase 0 governance
 
-CI runs `openspec validate --all --strict` on `openspec/` changes with `contents: read`. It is not a required status check and does not gate merges. A malformed OpenSpec artifact is caught early; nothing else is enforced.
+CI calls `Chelis-Lang/ci/actions/openspec-governance` at an exact SHA in advisory mode. The consumer checker runs `openspec validate --all --strict --no-interactive` over the complete active tree.
 
-**Alternative rejected:** A merge-bound governance checker enforcing lifecycle ordering, PR citations, branch scope, and `spec/**` coupling. That is the future Phase 0 regime, deferred until the repository is ready to require it.
+The fixed action interface supplies a comparison base. The checker parses that base but applies no diff policy.
 
-### 2. OpenSpec installed from npm at an exact version
+The checker reserves exit `1` for schema findings. The central action emits a warning and returns zero for this result.
 
-The workflow installs `@fission-ai/openspec@1.6.0` and runs `openspec validate`. No private shared action, no full-history diffing, and no secrets are required.
+Exit `2` identifies an operational failure. The central action keeps this result nonzero in both modes.
 
-**Alternative rejected:** A pinned private composite action. It is only needed for merge-bound governance, which this change does not perform.
+The checker applies no lifecycle, citation, planning-order, branch-scope, or `spec/**` policy.
+
+**Alternative rejected:** Restore the Phase 0 merge-bound checker. That checker enforces policy that this initial adoption does not activate.
+
+### 2. Use the locked central toolchain
+
+The central action supplies Node 24.18.0 and installs its locked OpenSpec 1.6.0 dependency graph. It also validates the OpenSpec version before it calls the consumer checker.
+
+The workflow uses a full-history checkout because the central action requires a comparison base. The exact central SHA permits source review and rollback.
+
+**Alternative rejected:** Install OpenSpec globally in the workflow. That command resolves transitive dependencies again during each run.
 
 ## Risks / Trade-offs
 
-- **[Validation is advisory, so a malformed tree could merge]** → Acceptable for an initial adoption; the check still surfaces the failure on the pull request, and a future change can make it required.
-- **[The OpenSpec tree could drift from `spec/design/spec_provenance.md`]** → The `openspec-validation` capability states explicitly that it does not activate Phase 0 and that `spec/**` remains controlling.
+- **[A malformed tree can merge]** → Advisory mode emits a warning and returns zero for schema findings.
+- **[The central action name implies broader governance]** → The consumer checker defines the policy and runs structural validation only.
+- **[An operational failure creates a failed job]** → This result identifies a broken validation path instead of a schema finding.
+- **[The OpenSpec tree can conflict with `spec/**`]** → The authority boundary in `spec/design/spec_provenance.md` remains controlling.
 
 ## Open Questions
 

@@ -1,22 +1,23 @@
 name: OpenSpec validation
 
-# Advisory, non-blocking structural validation of the openspec/ planning
-# tree. This is NOT a required status check: it does not gate merges, does
-# not govern spec/**, and enforces no lifecycle/citation/ordering rules. It
-# only runs `openspec validate` so a malformed OpenSpec artifact is caught
-# early. The eventual required-governance regime lives in
-# spec/design/spec_provenance.md (Phase 0) and is not activated here.
+# This advisory workflow validates the openspec/ planning tree.
+# It does not enforce lifecycle, citation, or ordering rules.
+# The central action supplies the locked OpenSpec CLI and Node runtime.
+# Validation findings produce warnings. Operational failures stay nonzero.
+# The Phase 0 regime in spec/design/spec_provenance.md stays inactive.
 
 on:
   pull_request:
     paths:
       - "openspec/**"
       - ".github/workflows/openspec-validate.yml"
+      - "scripts/check_openspec.py"
   push:
     branches: [main]
     paths:
       - "openspec/**"
       - ".github/workflows/openspec-validate.yml"
+      - "scripts/check_openspec.py"
   workflow_dispatch:
 
 permissions:
@@ -32,13 +33,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Checkout
+      - name: Checkout full history
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0
           persist-credentials: false
 
-      - name: Install OpenSpec 1.6.0
-        run: npm install -g @fission-ai/openspec@1.6.0
-
       - name: Validate OpenSpec tree
-        run: openspec validate --all --strict --no-interactive
+        uses: Chelis-Lang/ci/actions/openspec-governance@74f11c693992cfa9278b93b0117778f6b38bfe16 # ci#32 with ci#30 advisory mode
+        with:
+          mode: advisory

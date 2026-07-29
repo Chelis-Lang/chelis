@@ -102,14 +102,14 @@ gate merges. The eventual required-governance regime is described in
 `spec/design/spec_provenance.md` (Phase 0) and is future work — it is not
 activated here.
 
-- CI validates the `openspec/` tree structurally through the
-  `openspec-validate` workflow (`openspec validate --all --strict`) under
-  `contents: read`. It is advisory: not a required status check, and it
-  never governs `spec/**` or blocks a merge.
+- The `openspec-validate` workflow uses a pinned `Chelis-Lang/ci` action.
+  The action supplies Node 24.18.0 and the locked OpenSpec 1.6.0 package.
+  `scripts/check_openspec.py` runs structural validation only.
+  Schema findings produce warnings because the action uses advisory mode.
+  Operational failures stay nonzero. The workflow uses only `contents: read`.
 - `openspec validate` enumerates active changes and specifications only.
-  Artifacts under `openspec/changes/archive/` are outside its scope, so
-  archiving a change ends structural validation of it.
-- Validate locally the same way (OpenSpec must be exactly 1.6.0):
+  It does not enumerate artifacts under `openspec/changes/archive/`.
+- Local validation requires OpenSpec 1.6.0:
 
 ```sh
 openspec validate --all --strict --no-interactive
