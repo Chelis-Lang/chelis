@@ -312,6 +312,42 @@ pub(super) fn infer_permute_app(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Check a `reshape` shape argument against `List[Int64]`, reporting the
+/// int64-suffix remediation instead of the raw unification error.
+///
+/// The raw error reads `precision mismatch: expected int32, got int64`
+/// (chelis#916), which is backwards: `unify` labels its *first* argument
+/// "expected" (`unify.rs:449-456`) and this slot passes the actual type first,
+/// so a user who wrote `[2, 2]` is told to write the int32 they already wrote.
+///
+/// Swapping the argument order here would fix the direction but not the
+/// usefulness, and the order is inconsistent across `infer.rs` as a whole —
+/// settling that convention is a separate change with a much wider
+/// message-text blast radius. So this follows `infer_shrink_app` below:
+/// discard the unification error and substitute a message that names the fix.
+fn reshape_shape_arg_error(
+    list: &deep::List,
+    shape_ty: &Type,
+    subst: &mut Subst,
+) -> Option<CheckError> {
+    let expected_shape_ty = Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int64)]);
+    unify(shape_ty, &expected_shape_ty, subst).err().map(|_te| {
+        CheckError::new(
+            CheckErrorKind::TypeMismatch,
+            with_macro_provenance(
+                &deep::Expr::List(list.clone(), zero_span()),
+                format!(
+                    "reshape expects an int64 shape list, got {}; unsuffixed integer \
+                     literals default to int32, so write `[2i64, 2i64]` or \
+                     `[cast(2, int64), cast(2, int64)]`",
+                    subst.apply(shape_ty)
+                ),
+            ),
+            vec![],
+        )
+    })
+}
+
 pub(super) fn infer_reshape_app(
     list: &deep::List,
     env: &mut Env,
@@ -340,10 +376,8 @@ pub(super) fn infer_reshape_app(
         Type::Prim(precision) => {
             if let Some(shape_expr) = kids.get(2) {
                 let shape_ty = infer_expr(shape_expr, env, vg, subst, adt_reg, errors, product);
-                let expected_shape_ty =
-                    Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int64)]);
-                if let Err(te) = unify(&shape_ty, &expected_shape_ty, subst) {
-                    return report(errors, te.into());
+                if let Some(err) = reshape_shape_arg_error(list, &shape_ty, subst) {
+                    return report(errors, err);
                 }
                 let dims = reshape_output_dims(shape_expr, input_var_name.as_deref(), &[], subst);
                 return Type::Tensor(dims, TensorPrec::Concrete(precision));
@@ -354,10 +388,8 @@ pub(super) fn infer_reshape_app(
         Type::Tensor(input_dims, precision) => {
             if let Some(shape_expr) = kids.get(2) {
                 let shape_ty = infer_expr(shape_expr, env, vg, subst, adt_reg, errors, product);
-                let expected_shape_ty =
-                    Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int64)]);
-                if let Err(te) = unify(&shape_ty, &expected_shape_ty, subst) {
-                    return report(errors, te.into());
+                if let Some(err) = reshape_shape_arg_error(list, &shape_ty, subst) {
+                    return report(errors, err);
                 }
                 let dims =
                     reshape_output_dims(shape_expr, input_var_name.as_deref(), &input_dims, subst);
@@ -369,10 +401,8 @@ pub(super) fn infer_reshape_app(
         Type::Var(_) | Type::Error(_) => {
             if let Some(shape_expr) = kids.get(2) {
                 let shape_ty = infer_expr(shape_expr, env, vg, subst, adt_reg, errors, product);
-                let expected_shape_ty =
-                    Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int64)]);
-                if let Err(te) = unify(&shape_ty, &expected_shape_ty, subst) {
-                    return report(errors, te.into());
+                if let Some(err) = reshape_shape_arg_error(list, &shape_ty, subst) {
+                    return report(errors, err);
                 }
             }
             input_ty
