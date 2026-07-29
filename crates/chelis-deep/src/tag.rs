@@ -1,25 +1,39 @@
 //! The closed Deep tag vocabulary as a typed enum (chelis#731 Phase 3).
 //!
 //! `DeepTag` is the in-memory, typed form of the 62-tag closed vocabulary
-//! normatively owned by `spec/03-deep-syntax.md` §2. The serialized Deep
-//! form stays frozen: nodes keep carrying their tag as the leading symbol
-//! string, and the dispatch chokepoints (`infer_expr`, `lower_expr`, the
-//! `.dp` structural validators) derive the enum on demand through
-//! [`DeepTag::parse`] rather than the AST carrying it.
+//! normatively owned by `spec/03-deep-syntax.md` §2.
+//!
+//! The SERIALIZED Deep form stays frozen: a node's tag is still written as
+//! its leading symbol string. The IN-MEMORY form is decode-once
+//! (`spec/design/checker_totality.md` §C4 item 2, executing [#730]'s
+//! §C4.2 doctrine that raw strings exist only at serialization
+//! boundaries). The parser stamps the tag as `Atom::Tag(DeepTag)` at
+//! element 0, so after parsing the tag string does not exist in the tree
+//! and a consumer cannot dispatch on it. [`List::tag`] is the only
+//! dispatch accessor; printers and serializers regenerate the string
+//! through [`DeepTag::as_str`] at the boundary only.
+//!
+//! [#730]: https://github.com/Chelis-Lang/chelis/issues/730
 //!
 //! The point of the enum is compile-time totality
-//! (`spec/design/checker_totality.md` §C4.2): each chokepoint matches it
+//! (`spec/design/checker_totality.md` §C4): each chokepoint matches it
 //! exhaustively with no `_` arm, so adding a 63rd variant turns every
 //! consumer that has not chosen a disposition into a compile error. The
 //! variant set is frozen to the vocabulary and may change only together
 //! with a `spec/03-deep-syntax.md` revision and every consumer, in one
 //! change set (checker_totality.md B1).
 //!
-//! [`DeepTag::parse`] returning `None` is the raw-string entry verdict:
-//! the string is outside the closed vocabulary, and the caller owns the
-//! loud rejection (§C1.2). Compiler-internal pre-expansion tags such as
-//! `defmacro` and `macro-invoke` are deliberately outside this vocabulary
-//! (spec/03 §1.1.2 macro boundary rule) and do not parse.
+//! [`DeepTag::parse`] is the decode side of that boundary: the parser's
+//! stamping pass and the `find_raw_vocabulary_tag` invariant use it, and
+//! raw-string entry points call it directly. It is NOT the dispatch path -
+//! decode-once means dispatch reads the already-stamped [`List::tag`].
+//! `parse` returning `None` is the raw-string entry verdict: the string is
+//! outside the closed vocabulary and the caller owns the loud rejection
+//! (§C1.2). Compiler-internal pre-expansion tags such as `defmacro` and
+//! `macro-invoke` are deliberately outside this vocabulary (spec/03
+//! §1.1.2 macro boundary rule) and do not parse.
+//!
+//! [`List::tag`]: crate::ast::List::tag
 
 /// One tag of the closed Deep vocabulary (`spec/03-deep-syntax.md` §2.10).
 ///
