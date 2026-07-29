@@ -4,7 +4,7 @@
 devenv shell -- cargo nextest run -p chelis-backend-c
 ```
 
-Run this oracle on macOS. The Linux manual gate is `devenv test`, and default CI does not run it.
+The authoritative oracle runs on macOS. The initial Linux evidence used the manual `devenv test` gate. Section 10 later adds this gate to CI.
 
 **Allowed implementation file list:**
 
@@ -73,7 +73,7 @@ The later OpenSpec sync and archive workflow can change the corresponding main s
 
 - [x] 5.1 Run `devenv test` on macOS and record exit status 0.
 - [x] 5.2 Run `devenv test` on Linux and record exit status 0.
-- [x] 5.3 State that the Linux command is a manual gate and is absent from default CI.
+- [x] 5.3 Record that the initial default CI omitted the Linux command.
 - [x] 5.4 Run the authoritative completion oracle on macOS and record exit status 0.
 - [x] 5.5 Verify that no compiler-dependent `chelis-backend-c` test reports a missing compiler.
 - [x] 5.6 Run `python3 scripts/gate.py --local` and record exit status 0.
@@ -115,3 +115,12 @@ The later OpenSpec sync and archive workflow can change the corresponding main s
 - [x] 9.4 Run the Devenv smoke check and repository validation.
 - [x] 9.5 Review the final task graph directly.
 - [x] 9.6 Re-run pull request CI.
+
+## 10. Add the official Devenv GitHub Actions integration
+
+- [x] 10.1 Add positive and negative tests for the native CI recipe.
+- [x] 10.2 Configure the Devenv Cachix cache in both native Nix jobs.
+- [x] 10.3 Install the pinned Devenv CLI and run all four smoke tasks.
+- [x] 10.4 Document the cache boundary for the custom cvc5 derivation.
+- [x] 10.5 Run local validation and review the workflow.
+- [ ] 10.6 Re-run pull request CI.

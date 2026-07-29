@@ -46,6 +46,8 @@ def parse_devenv_test_tasks(text: str) -> DevenvTestTasks:
         raise ValueError("devenv.nix must not define a duplicate test task")
     if names != frozenset(EXPECTED_TEST_TASKS):
         raise ValueError(f"devenv.nix must define the named test tasks: {names!r}")
+    if text.count('after = [ "devenv:enterShell" ];') != len(names):
+        raise ValueError("each named test task must run after devenv:enterShell")
     if text.count('before = [ "devenv:enterTest" ];') != len(names):
         raise ValueError("each named test task must run before devenv:enterTest")
     if re.search(r"(?m)^\s*enterTest\s*=", text):
@@ -137,6 +139,16 @@ class DevenvVersionTests(unittest.TestCase):
             'tasks."chelis:python-missing" = {',
         )
         with self.assertRaisesRegex(ValueError, "must define the named test tasks"):
+            parse_devenv_test_tasks(mutated)
+
+    def test_missing_enter_shell_dependency_fails_at_the_parse_boundary(self) -> None:
+        config = (REPO_ROOT / "devenv.nix").read_text(encoding="utf-8")
+        mutated = config.replace(
+            'after = [ "devenv:enterShell" ];\n',
+            "",
+            1,
+        )
+        with self.assertRaisesRegex(ValueError, "must run after devenv:enterShell"):
             parse_devenv_test_tasks(mutated)
 
     def test_missing_devenv_input_fails_at_the_parse_boundary(self) -> None:

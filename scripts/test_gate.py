@@ -42,6 +42,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 CI_YML = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 SMT_FULL_PROVE_YML = REPO_ROOT / ".github" / "workflows" / "smt-full-prove.yml"
 NIX_PACKAGES_YML = REPO_ROOT / ".github" / "workflows" / "nix-packages.yml"
+DEVENV_REVISION = "ffce215a42d09c6375c3d60dd9c4110438fc4d87"
 WORKFLOWS_DIR = REPO_ROOT / ".github" / "workflows"
 
 
@@ -70,6 +71,23 @@ def _assert_nix_system_job_parity(contracts: str, workflow: str) -> None:
             "Nix supported systems and native CI jobs differ: "
             f"missing jobs={missing_jobs}, extra jobs={extra_jobs}"
         )
+
+
+def _assert_native_devenv_recipe(workflow: str) -> None:
+    required_counts = {
+        "uses: cachix/cachix-action@v16": 2,
+        "name: devenv": 2,
+        "skipPush: true": 2,
+        f"run: nix profile add github:cachix/devenv/{DEVENV_REVISION}": 2,
+        "run: devenv test --no-tui": 2,
+    }
+    for marker, expected_count in required_counts.items():
+        actual_count = workflow.count(marker)
+        if actual_count != expected_count:
+            raise AssertionError(
+                f"native Devenv recipe marker {marker!r}: "
+                f"expected {expected_count}, found {actual_count}"
+            )
 
 
 # CI jobs that are deliberately NOT part of the per-PR developer gate.
@@ -555,6 +573,16 @@ class NixPackagesWorkflowTests(unittest.TestCase):
             text.count("run: .venv/bin/python scripts/test_nix_flake_contract.py"),
             2,
         )
+
+    def test_each_native_job_uses_the_official_devenv_actions_recipe(self):
+        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
+        _assert_native_devenv_recipe(text)
+
+    def test_missing_devenv_cache_action_fails_the_native_recipe(self):
+        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
+        mutated = text.replace("uses: cachix/cachix-action@v16", "uses: omitted", 1)
+        with self.assertRaisesRegex(AssertionError, "cachix-action"):
+            _assert_native_devenv_recipe(mutated)
 
 
 class SmtCiSplitTests(unittest.TestCase):

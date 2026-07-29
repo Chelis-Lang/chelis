@@ -52,6 +52,7 @@ in
 
   tasks."chelis:toolchain-test" = {
     description = "Check the common development tools";
+    after = [ "devenv:enterShell" ];
     before = [ "devenv:enterTest" ];
     exec = ''
       set -eu
@@ -80,6 +81,7 @@ in
 
   tasks."chelis:python-test" = {
     description = "Check the project Python interpreter";
+    after = [ "devenv:enterShell" ];
     before = [ "devenv:enterTest" ];
     exec = ''
       set -eu
@@ -93,6 +95,7 @@ in
 
   tasks."chelis:c-compiler-test" = {
     description = "Check the managed C compiler";
+    after = [ "devenv:enterShell" ];
     before = [ "devenv:enterTest" ];
     exec = ''
       set -eu
@@ -137,6 +140,7 @@ in
 
   tasks."chelis:cpp-compiler-test" = {
     description = "Check the managed C++ compiler";
+    after = [ "devenv:enterShell" ];
     before = [ "devenv:enterTest" ];
     exec = ''
       set -eu

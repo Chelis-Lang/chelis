@@ -74,9 +74,11 @@ devenv shell -- cargo nextest run -p chelis-backend-c
 
 `devenv test` runs separate toolchain, Python, C, and C++ tasks. It exits with status 0 when all four tasks pass.
 
-The Linux Devenv check is a manual gate. Default CI does not run this gate.
+Both native Nix package jobs use the official Devenv GitHub Actions recipe. They install the pinned Devenv CLI and run these tasks.
 
-Devenv is optional and is not a product or CI requirement. If you do not use Devenv, use the manual setup below.
+The recipe uses the public Devenv Cachix cache in read-only mode. This cache does not contain the custom non-GPL cvc5 derivation.
+
+Devenv is optional for local work and is not a product requirement. If you do not use Devenv locally, use the manual setup below.
 
 ### Nix source packages
 

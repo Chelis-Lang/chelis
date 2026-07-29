@@ -95,7 +95,7 @@ If `.venv/bin/python` exists, the shell MUST preserve the existing environment. 
 
 It MUST compile valid C and C++ translation units under `-Werror`. It MUST also prove that a deliberate code warning still fails.
 
-The smoke checks MUST run as these independent Devenv tasks before `devenv:enterTest`:
+The smoke checks MUST run after `devenv:enterShell` and before `devenv:enterTest` as these independent tasks:
 
 - `chelis:toolchain-test`
 - `chelis:python-test`
@@ -118,6 +118,23 @@ The smoke-check graph MUST NOT start a Devenv service or long-running process.
 - **WHEN** the deliberate warning compiles successfully under `-Werror`
 - **THEN** `devenv test` exits with a nonzero status
 
+### Requirement: Native package CI uses the official Devenv integration
+Each native Nix package job MUST configure the public Devenv Cachix cache with `cachix/cachix-action@v16` in read-only mode.
+
+Each job MUST install the Devenv CLI from revision `ffce215a42d09c6375c3d60dd9c4110438fc4d87` and run `devenv test --no-tui`.
+
+The Devenv cache MUST NOT replace the complete native flake check. It does not cache the custom Chelis cvc5 derivation.
+
+#### Scenario: Native CI checks the development shell
+- **WHEN** either native Nix package job runs
+- **THEN** the job configures the Devenv binary cache
+- **AND** the job runs all four named Devenv tasks
+- **AND** the job runs the complete native flake check
+
+#### Scenario: The custom cvc5 output is absent from public caches
+- **WHEN** the native flake check requires the custom non-GPL cvc5 derivation
+- **THEN** Nix builds that derivation from source
+
 ### Requirement: The shell runs the C backend test tier on macOS
 The macOS shell MUST run the existing `chelis-backend-c` tests that invoke `gcc` and `g++`.
 
@@ -136,7 +153,9 @@ The contributor documentation MUST show the Devenv activation and smoke-check co
 
 It MUST state that the macOS command shims invoke the Nixpkgs clang wrapper from `pkgs.stdenv.cc`, not host Apple clang.
 
-The documentation MUST keep the manual setup path. It MUST NOT describe Devenv as a product or CI requirement.
+The documentation MUST keep the manual setup path. It MUST describe Devenv as optional for local work and required by native Nix CI only.
+
+It MUST NOT describe Devenv as a product requirement.
 
 #### Scenario: A contributor selects Devenv
 - **WHEN** a contributor reads the source-build prerequisites

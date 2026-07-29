@@ -79,7 +79,7 @@ The shell creates `.venv` only when `.venv/bin/python` does not exist. It does n
 
 `devenv test` checks tool availability, Python 3.11, and C and C++ compilation under `-Werror`.
 
-Four independent tasks run before `devenv:enterTest`. This structure gives each contract a separate result and permits parallel execution.
+Four independent tasks run after `devenv:enterShell` and before `devenv:enterTest`. This order prevents a race with project environment creation.
 
 The negative compiler check uses a deliberate source warning. The compile must fail, which proves that the shim does not hide code warnings.
 
@@ -101,6 +101,14 @@ The repository lint policy excludes both generated paths under §12.2. The polic
 
 The generated files remain local machine state. A contributor can remove them without loss of a reproducible input.
 
+### D7: Use the official Devenv integration in native CI
+
+Each native Nix package job configures `devenv.cachix.org` through `cachix/cachix-action@v16`. The `skipPush` option keeps this cache read-only.
+
+Each job installs the Devenv CLI from the locked v2.2 revision. It then runs `devenv test --no-tui` before the native flake check.
+
+This cache supplies public Devenv artifacts. It does not supply the custom non-GPL cvc5 derivation.
+
 ## Risks / Trade-offs
 
 **[The macOS command is named `gcc` but runs Nixpkgs clang]** → The documentation states this fact. Linux and CI retain real GCC coverage.
@@ -121,6 +129,7 @@ The generated files remain local machine state. A contributor can remove them wi
 4. Add the contributor documentation.
 5. Run the shell checks on macOS and Linux.
 6. Run the authoritative acceptance oracle on macOS.
+7. Add the official Devenv integration to both native Nix CI jobs.
 
 To remove this change, delete the Devenv files and their ignore rules. Then remove the Devenv documentation.
 

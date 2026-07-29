@@ -90,7 +90,7 @@ The generated test completed every tool check, Python 3.11 assertion, positive c
 
 The Linux derivation exited with status 0. Its result file contains `linux devenv test passed`.
 
-Default CI does not run this Linux manual gate.
+Default CI did not run this Linux gate during the initial acceptance. The later GitHub Actions integration now runs it.
 
 ## Fresh local red-team result
 
@@ -136,18 +136,18 @@ The direct review found missing coverage for YAML section boundaries and the loc
 
 ## Named Devenv test tasks
 
-The shell smoke check now runs four tasks before `devenv:enterTest`:
+The shell smoke check now runs four tasks after `devenv:enterShell` and before `devenv:enterTest`:
 
 - `chelis:toolchain-test`
 - `chelis:python-test`
 - `chelis:c-compiler-test`
 - `chelis:cpp-compiler-test`
 
-`devenv test --no-tui` passed all four tasks in 2.05 seconds. The empty `devenv:enterTest` lifecycle step then completed.
+`devenv test --no-tui` passed all four tasks. The empty `devenv:enterTest` lifecycle step then completed.
 
 The task graph defines no Devenv service or long-running process.
 
-The Devenv static contract passed seven positive and negative tests. The full Python script suite also passed.
+The Devenv static contract passed eight positive and negative tests. The full Python script suite also passed.
 
 Strict OpenSpec validation, the Nix format check, and the local repository gate passed.
 
@@ -156,3 +156,21 @@ The C-backend acceptance oracle passed all 384 tests. One test remained skipped 
 The independent final review returned `PASS`.
 
 All 15 pull request checks passed for commit `33c2899a`. This result includes both native Nix package jobs.
+
+## Official Devenv GitHub Actions integration
+
+Both native Nix package jobs now configure `devenv.cachix.org` through `cachix/cachix-action@v16`. The `skipPush` option prevents uploads.
+
+Each job installs the CLI from revision `ffce215a42d09c6375c3d60dd9c4110438fc4d87`. A temporary profile reported `devenv 2.2.0+ffce215`.
+
+Each job runs `devenv test --no-tui` before the complete native flake check.
+
+A clean temporary configuration passed all four tasks. The explicit lifecycle edges prevented a race with `.venv` creation.
+
+The eight native workflow tests, `actionlint`, the full Python script suite, strict OpenSpec validation, and the local repository gate passed.
+
+The public Devenv cache does not contain the custom non-GPL cvc5 derivation. Native package jobs can still build cvc5 from source.
+
+The reviewer requested a cache cleanup input. The v16 action defines no cleanup input, and GitHub-hosted runners discard job state.
+
+The workflow instead sets the supported `skipPush` input to `true`. This value makes the public cache explicitly read-only.

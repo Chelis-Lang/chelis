@@ -20,6 +20,7 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   Linux uses GCC, OpenBLAS, and Valgrind from Nixpkgs. macOS maps `gcc` and
   `g++` to the Nixpkgs clang wrapper from `pkgs.stdenv.cc`.
   `devenv test` runs separate toolchain, Python, C, and C++ tasks.
+  Native Nix CI uses the public Devenv Cachix cache and runs these tasks on Linux and macOS.
 
 ### Fixed
 
