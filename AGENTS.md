@@ -645,6 +645,14 @@ and [`docs/book/src/reef.md`](docs/book/src/reef.md).
   `install` / `default` / `list-installed` / `which` / `show` / `uninstall` /
   `self uninstall`. The store is `$CHELIS_HOME` (default `~/.chelis`):
   `toolchains/<ver>`, `bin/{chelis,chelisup}`, `reef/`, `src/`.
+- **Nix `chelisup` closure:** the Nix package uses `bin/chelisup` as a wrapper
+  around `libexec/chelisup`. Before `install`, the wrapper creates the staging
+  root `$CHELIS_HOME/nix-gcroots/chelisup.next`. After success, it promotes
+  `$CHELIS_HOME/nix-gcroots/chelisup`. A failed install preserves the prior root.
+  If the install copied a new binary, the wrapper promotes
+  `$CHELIS_HOME/nix-gcroots/chelisup.partial`. A new attempt recovers a stale
+  staging root before it changes that root. `chelisup self uninstall` removes
+  the stable, staging, and partial roots.
 - **Shim resolution order** (first match wins): `+<ver>` arg → `CHELIS_TOOLCHAIN`
   → nearest `chelis-toolchain` file → nearest `reef.toml` `compiler =` pin →
   recorded default. A resolved-but-not-installed version is a loud error naming

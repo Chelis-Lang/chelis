@@ -44,6 +44,34 @@ SMT_FULL_PROVE_YML = REPO_ROOT / ".github" / "workflows" / "smt-full-prove.yml"
 NIX_PACKAGES_YML = REPO_ROOT / ".github" / "workflows" / "nix-packages.yml"
 WORKFLOWS_DIR = REPO_ROOT / ".github" / "workflows"
 
+
+def _nix_supported_systems(contracts: str) -> set[str]:
+    supported_block = re.search(
+        r"supportedSystems\s*=\s*\[(?P<body>.*?)\];",
+        contracts,
+        re.DOTALL,
+    )
+    if supported_block is None:
+        raise AssertionError("missing supportedSystems contract")
+    return set(re.findall(r'"([^"]+)"', supported_block.group("body")))
+
+
+def _nix_native_job_systems(workflow: str) -> set[str]:
+    return set(re.findall(r"name: Nix Packages \(([^)]+)\)", workflow))
+
+
+def _assert_nix_system_job_parity(contracts: str, workflow: str) -> None:
+    supported = _nix_supported_systems(contracts)
+    native_jobs = _nix_native_job_systems(workflow)
+    if supported != native_jobs:
+        missing_jobs = sorted(supported - native_jobs)
+        extra_jobs = sorted(native_jobs - supported)
+        raise AssertionError(
+            "Nix supported systems and native CI jobs differ: "
+            f"missing jobs={missing_jobs}, extra jobs={extra_jobs}"
+        )
+
+
 # CI jobs that are deliberately NOT part of the per-PR developer gate.
 # `gate.py` only owns the `lint-and-unit` and `integration` jobs; these
 # are listed by name so the parity test's exclusion is visible.
@@ -507,6 +535,26 @@ class NixPackagesWorkflowTests(unittest.TestCase):
         self.assertEqual(text.count("name: Verify the runner system"), 2)
         self.assertIn('assert system == "x86_64-linux", system', text)
         self.assertIn('assert system == "aarch64-darwin", system', text)
+
+    def test_supported_systems_have_exact_native_job_parity(self):
+        contracts = (REPO_ROOT / "nix" / "contracts.nix").read_text(encoding="utf-8")
+        workflow = NIX_PACKAGES_YML.read_text(encoding="utf-8")
+        _assert_nix_system_job_parity(contracts, workflow)
+
+    def test_supported_system_without_native_job_fails_parity(self):
+        contracts = 'supportedSystems = [ "x86_64-linux" "aarch64-linux" ];'
+        workflow = "name: Nix Packages (x86_64-linux)"
+        with self.assertRaisesRegex(AssertionError, "aarch64-linux"):
+            _assert_nix_system_job_parity(contracts, workflow)
+
+    def test_each_native_job_runs_the_nix_contract_suite_with_project_python(self):
+        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
+        self.assertEqual(text.count("uses: astral-sh/setup-uv@v8.1.0"), 2)
+        self.assertEqual(text.count("run: uv venv --python 3.11 .venv"), 2)
+        self.assertEqual(
+            text.count("run: .venv/bin/python scripts/test_nix_flake_contract.py"),
+            2,
+        )
 
 
 class SmtCiSplitTests(unittest.TestCase):

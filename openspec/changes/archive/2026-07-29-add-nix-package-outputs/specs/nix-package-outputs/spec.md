@@ -110,14 +110,51 @@ The package MUST NOT contain the `chelis` or `chelisup` executable.
 - **WHEN** `packages.chelis-runtime` contains `bin/chelis` or `bin/chelisup`
 - **THEN** the runtime package check fails
 
-### Requirement: The chelisup package exposes only the installer
-`packages.chelisup` MUST contain `bin/chelisup`. It MUST NOT install a `bin/chelis` shim.
+### Requirement: The chelisup package exposes a closure-safe installer
+`packages.chelisup` MUST contain a launcher at `bin/chelisup` and the real installer at `libexec/chelisup`. It MUST NOT install a `bin/chelis` shim in the package output.
+
+The launcher MUST create `$CHELIS_HOME/nix-gcroots/chelisup.next` before it delegates an `install` command. This staging root MUST point to the complete Nix package output.
+
+After a successful install, the launcher MUST promote `$CHELIS_HOME/nix-gcroots/chelisup` and remove the staging root. After a failed install, it MUST preserve the prior stable root.
+
+If the failed install copied a new binary, the launcher MUST promote `$CHELIS_HOME/nix-gcroots/chelisup.partial`. This partial root MUST protect that binary.
+
+The launcher MUST remove the staging root after it preserves the required package closure.
+
+`chelisup install` MUST copy the real installer into `$CHELIS_HOME/bin/{chelis,chelisup}`. `chelisup self uninstall` MUST remove all three GC roots with both copies.
 
 The package MUST use the workspace version and `Cargo.lock`.
 
 #### Scenario: A user builds chelisup
 - **WHEN** a user runs `nix build .#chelisup`
-- **THEN** the result contains a runnable `bin/chelisup`
+- **THEN** the result contains a runnable launcher and the internal installer payload
+
+#### Scenario: The Nix installer creates release shims
+- **WHEN** a user runs `nix run .#chelisup -- install <ver>`
+- **THEN** the launcher stages the new GC root before the installer copies its executable
+- **AND** the launcher promotes the stable GC root after success
+
+#### Scenario: A Nix installer update fails before a copy
+- **WHEN** an install fails before it copies the new installer
+- **THEN** the launcher removes the staging root and preserves the prior stable root
+
+#### Scenario: A Nix installer update fails after a partial copy
+- **WHEN** an install fails after it copies either new executable
+- **THEN** the launcher promotes the partial root and preserves the prior stable root
+- **AND** the launcher removes the staging root
+
+#### Scenario: A prior install left a staging root
+- **WHEN** the next install finds `$CHELIS_HOME/nix-gcroots/chelisup.next`
+- **THEN** the launcher preserves every closure that matches an installed executable
+- **AND** the launcher removes the stale staging root before the new attempt
+
+#### Scenario: Nix garbage collection runs after installation
+- **WHEN** the installed shim still depends on the Nix package closure
+- **THEN** the GC root keeps that closure live
+
+#### Scenario: A user removes chelisup
+- **WHEN** the user runs `chelisup self uninstall`
+- **THEN** the command removes both executable copies and all three GC roots
 
 #### Scenario: The installer package collides with the compiler
 - **WHEN** the `chelisup` output contains `bin/chelis`
@@ -160,7 +197,9 @@ The repository MUST provide a parity checker with positive and negative tests. A
 ### Requirement: Native Nix checks protect every supported system
 Each supported system MUST define checks for package construction, package contents, executable behavior, app paths, SMT activation, and lock parity.
 
-CI MUST run the complete check set on native `x86_64-linux` and `aarch64-darwin` builders. A system MUST NOT count as supported from evaluation-only evidence.
+CI MUST run the complete check set and the Nix flake contract suite on native `x86_64-linux` and `aarch64-darwin` builders. A system MUST NOT count as supported from evaluation-only evidence.
+
+The supported-system list and the named native CI jobs MUST have exact parity. The repository script suite MUST fail when either list contains an unmatched system.
 
 The authoritative completion oracle MUST be the two successful native CI check jobs.
 
@@ -175,6 +214,10 @@ The authoritative completion oracle MUST be the two successful native CI check j
 #### Scenario: One package check fails
 - **WHEN** any required package or contract check fails on a supported system
 - **THEN** the native system job fails and the change does not satisfy the completion oracle
+
+#### Scenario: A supported system has no native job
+- **WHEN** the supported-system list contains a system without a named native CI job
+- **THEN** the repository script suite fails before the system can count as supported
 
 ### Requirement: Documentation explains the Nix channel boundary
 Contributor documentation MUST show the package names and commands for `nix build`, `nix run`, and flake checks.

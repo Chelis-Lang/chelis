@@ -122,3 +122,20 @@ Each job runs the complete flake check set on its named system.
 - [x] 10.16 Run strict OpenSpec validation.
 - [x] 10.17 Run a fresh red-team pass against the crate2nix graph and native overrides.
 - [x] 10.18 Record replacement acceptance evidence and re-run both native CI jobs.
+
+## 11. Close PR review findings
+
+- [x] 11.1 Add a failing test for the Nix `chelisup` GC-root contract.
+- [x] 11.2 Add a failing test for exact parity between supported systems and native CI jobs.
+- [x] 11.3 Make the Nix package separate the launcher from the real installer.
+- [x] 11.4 Stage the new GC root before install and promote it after success.
+- [x] 11.5 Preserve the stable root and promote a partial root after a partial copy.
+- [x] 11.6 Remove all three GC roots during `chelisup self uninstall`.
+- [x] 11.7 Run the complete Nix flake contract suite in both native jobs.
+- [x] 11.8 Keep non-Nix static contract tests active in the standard script job.
+- [x] 11.9 Synchronize the package contracts and installation documentation.
+- [x] 11.10 Run the focused Python, Rust, Nix, and OpenSpec checks.
+- [x] 11.11 Run the complete native flake check on `aarch64-darwin`.
+- [x] 11.12 Run the local repository gate inside Devenv.
+- [x] 11.13 Run a fresh adversarial review and record its result.
+- [ ] 11.14 Re-run both authoritative native CI jobs.

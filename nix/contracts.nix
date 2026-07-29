@@ -79,12 +79,20 @@
     };
 
     chelisup = {
-      required = [ "bin/chelisup" ];
+      required = [
+        "bin/chelisup"
+        "libexec/chelisup"
+      ];
       forbidden = [ "bin/chelis" ];
-      allowedProductExecutables = [ "bin/chelisup" ];
+      allowedProductExecutables = [
+        "bin/chelisup"
+        "libexec/chelisup"
+      ];
       inventory = [
         "bin"
+        "libexec"
         "bin/chelisup"
+        "libexec/chelisup"
       ];
     };
   };

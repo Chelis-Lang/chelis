@@ -12,6 +12,7 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   The root flake supports `x86_64-linux` and `aarch64-darwin` with native checks.
   Pinned `crate2nix` crate derivations share dependency outputs across the product packages.
   It also provides `chelis` and `chelisup` applications for `nix run`.
+  The Nix `chelisup` launcher roots its closure before it installs release shims.
   Nix remains an additive source-build channel. `chelisup` still routes release toolchains.
 - **A tracked Devenv shell supplies the contributor toolchain on Linux and macOS.**
   The shell pins Rust, Python 3.11, test tools, and the platform C toolchain.

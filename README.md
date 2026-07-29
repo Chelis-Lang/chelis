@@ -90,7 +90,7 @@ nix build .                 # default package, identical to .#chelis
 nix build .#default         # explicit default alias
 nix build .#chelis          # compiler, runtime library, and five public headers
 nix build .#chelis-runtime  # runtime static library and five public headers
-nix build .#chelisup        # installer executable only
+nix build .#chelisup        # installer command and its internal Nix payload
 ```
 
 Run an application from the repository root:
@@ -100,11 +100,21 @@ nix run . -- --version              # default application, identical to .#chelis
 nix run .#default -- --version       # explicit default application alias
 nix run .#chelis -- --version        # packaged compiler
 nix run .#chelisup -- --help         # packaged installer
+nix run .#chelisup -- install 0.17.1 # install one release toolchain
 ```
+
+Before an install, the Nix `chelisup` wrapper creates `$CHELIS_HOME/nix-gcroots/chelisup.next`. After success, it promotes `$CHELIS_HOME/nix-gcroots/chelisup`.
+
+The stable root keeps the copied installer dependencies available after Nix garbage collection. A failed install preserves the prior stable root.
+
+If a failed install copied a new binary, `$CHELIS_HOME/nix-gcroots/chelisup.partial` protects that binary.
+
+`chelisup self uninstall` removes the stable, staging, and partial roots with both executable copies.
 
 Run the complete check set for the native system:
 
 ```sh
+.venv/bin/python scripts/test_nix_flake_contract.py
 nix flake check --print-build-logs
 ```
 

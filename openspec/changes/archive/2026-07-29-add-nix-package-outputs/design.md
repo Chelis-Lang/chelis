@@ -64,7 +64,17 @@ Compose `packages.chelis` from the compiler and runtime outputs. Its layout will
 - `lib/libchelis_runtime.a`
 - the five public runtime headers under `include/`
 
-`packages.chelis-runtime` will contain only the runtime library and public headers. `packages.chelisup` will contain `bin/chelisup`.
+`packages.chelis-runtime` will contain only the runtime library and public headers. `packages.chelisup` will contain `bin/chelisup` and `libexec/chelisup`.
+
+The public command is a Nix launcher. The internal path contains the real installer that `current_exe()` copies into the Chelis home.
+
+Before an install, the launcher creates `$CHELIS_HOME/nix-gcroots/chelisup.next`. After success, it promotes the stable root and removes the staging root.
+
+After failure, the launcher preserves the prior stable root. If the install copied a new binary, it promotes the partial root.
+
+The launcher removes the staging root after it preserves the required closure. This sequence protects both the old and new binaries.
+
+After an interrupted install, the next attempt compares the staged package with both installed copies. It promotes only a matching partial package.
 
 The `chelisup` package will not install a `bin/chelis` shim. This rule prevents a path collision with the real compiler package.
 
@@ -130,14 +140,26 @@ Each supported system will define checks for these contracts:
 - the release pipe-stage fixture succeeds with the Nix compiler
 - the SMT verifier confirms active cvc5 discharge
 - `chelisup --help` succeeds
+- Nix `chelisup install` stages and promotes a GC root around the internal installer copy
+- a failed Nix install preserves the prior stable GC root
+- a partial copy promotes the partial GC root
+- `chelisup self uninstall` removes all three GC roots
 - each app points at the executable in its corresponding package
 - the lock parity checker succeeds
 
-CI will run the native check set on `x86_64-linux` and `aarch64-darwin`. The two native jobs form the authoritative completion oracle.
+CI will run the native check set and the Nix flake contract suite on `x86_64-linux` and `aarch64-darwin`. The two native jobs form the authoritative completion oracle.
+
+The repository script suite will compare the supported-system list with the named native jobs. Any unmatched system will fail.
 
 ### 7. Keep installation ownership explicit
 
 Nix is an additive source-build channel. `nix profile install` can install one Nix package, but it does not create a Chelis version store.
+
+The Nix `chelisup` launcher stages a GC root before an install. It promotes the stable root only after success.
+
+A failed install preserves the prior stable root. A partial copy promotes the partial root.
+
+`chelisup self uninstall` removes the stable, staging, and partial roots.
 
 `chelisup` remains the installer and router for downloaded release toolchains. The Nix documentation must state this boundary.
 
@@ -152,6 +174,8 @@ Nix is an additive source-build channel. `nix profile install` can install one N
 - **[Nix package contents can drift from releases]** → Check the release artifact paths and reuse the same runtime header list.
 - **[One supported system can hide platform errors]** → Require native Linux and macOS check jobs before completion.
 - **[The Nix compiler can lose SMT support]** → Run the existing SMT verifier against the final package binary.
+- **[A copied Nix installer can lose store dependencies]** → Root the package closure before `chelisup install` copies the real binary.
+- **[An untested system can appear supported]** → Compare the supported-system list with the named native CI jobs.
 
 ## Migration Plan
 

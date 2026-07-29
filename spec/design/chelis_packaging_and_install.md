@@ -246,6 +246,34 @@ The toolchain may additionally be *described* as a `[artifacts]` entry for
 reproducibility, but its installer of record is chelisup, not `reef install`.
 This keeps two installers from fighting over the toolchain.
 
+### 5.7 Nix source package
+
+The Nix `chelisup` package has a launcher at `bin/chelisup` and the real binary
+at `libexec/chelisup`. Before an install, the launcher creates the staging root
+`$CHELIS_HOME/nix-gcroots/chelisup.next`.
+
+After a successful install, the launcher promotes
+`$CHELIS_HOME/nix-gcroots/chelisup` and removes the staging root. A failed
+install always preserves the prior stable root.
+
+If the failed install copied a new binary, the launcher promotes
+`$CHELIS_HOME/nix-gcroots/chelisup.partial`. This partial root protects that
+binary. The launcher then removes the staging root.
+
+If an interrupted install left a staging root, the next attempt compares its
+package with both installed copies. It promotes the partial root only for a
+matching copy. Then it removes the stale staging root.
+
+The stable GC root points to the complete Nix package output. It preserves all
+store dependencies after `current_exe()` copies the real binary into
+`$CHELIS_HOME/bin/{chelis,chelisup}`.
+
+A direct copy without this root is invalid. Nix does not scan files outside the
+store, so garbage collection can remove the copied binary dependencies.
+
+`chelisup self uninstall` removes the stable, staging, and partial GC roots
+with the copied executables. Other Nix `chelisup` commands do not create a root.
+
 ## 6. Layer 1 — binary distribution (chelis#468)
 
 Specified in full as Item 11 of [`reef_distribution.md`](reef_distribution.md).

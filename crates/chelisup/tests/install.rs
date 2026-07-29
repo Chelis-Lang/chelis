@@ -213,11 +213,24 @@ fn self_uninstall_removes_shims_but_keeps_toolchains() {
             .status
             .success()
     );
+    let gc_root = home.path().join("nix-gcroots/chelisup");
+    let staging_root = home.path().join("nix-gcroots/chelisup.next");
+    let partial_root = home.path().join("nix-gcroots/chelisup.partial");
+    std::fs::create_dir_all(gc_root.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(release.path(), &gc_root).unwrap();
+    std::os::unix::fs::symlink(release.path(), &staging_root).unwrap();
+    std::os::unix::fs::symlink(release.path(), &partial_root).unwrap();
 
     let out = run_cli(home.path(), home.path(), &["self", "uninstall"], &[]);
     assert!(out.status.success(), "stderr: {}", stderr(&out));
     assert!(!home.path().join("bin/chelis").exists());
     assert!(!home.path().join("bin/chelisup").exists());
+    assert!(!gc_root.exists());
+    assert!(!gc_root.is_symlink());
+    assert!(!staging_root.exists());
+    assert!(!staging_root.is_symlink());
+    assert!(!partial_root.exists());
+    assert!(!partial_root.is_symlink());
     // The toolchain bytes remain.
     assert!(home.path().join("toolchains/0.1.0/bin/chelis").is_file());
 }

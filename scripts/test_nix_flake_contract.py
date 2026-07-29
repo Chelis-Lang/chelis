@@ -3,15 +3,19 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
+import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 NIX = shutil.which("nix")
+REQUIRES_NIX = unittest.skipUnless(NIX, "Nix is not installed")
 EXPECTED_SYSTEMS = ["aarch64-darwin", "x86_64-linux"]
 EXPECTED_PACKAGES = ["chelis", "chelis-runtime", "chelisup", "default"]
 EXPECTED_APPS = ["chelis", "chelisup", "default"]
@@ -52,8 +56,8 @@ def nix_raw(*args: str) -> str:
     return completed.stdout.strip()
 
 
-@unittest.skipUnless(NIX, "Nix is not installed")
 class NixFlakeContractTests(unittest.TestCase):
+    @REQUIRES_NIX
     def test_contract_records_exact_release_header_manifest(self) -> None:
         contracts = nix_json("eval", "--json", "--file", "nix/contracts.nix")
         self.assertEqual(contracts["publicRuntimeHeaders"], EXPECTED_HEADERS)
@@ -82,10 +86,12 @@ class NixFlakeContractTests(unittest.TestCase):
             ["version", "help", "release-fixture", "smt"],
         )
 
+    @REQUIRES_NIX
     def test_supported_systems_are_exact(self) -> None:
         systems = nix_json("eval", "--json", ".#packages", "--apply", "builtins.attrNames")
         self.assertEqual(systems, EXPECTED_SYSTEMS)
 
+    @REQUIRES_NIX
     def test_package_names_are_exact_on_each_system(self) -> None:
         for system in EXPECTED_SYSTEMS:
             with self.subTest(system=system):
@@ -98,6 +104,7 @@ class NixFlakeContractTests(unittest.TestCase):
                 )
                 self.assertEqual(names, EXPECTED_PACKAGES)
 
+    @REQUIRES_NIX
     def test_application_names_are_exact_on_each_system(self) -> None:
         for system in EXPECTED_SYSTEMS:
             with self.subTest(system=system):
@@ -110,6 +117,7 @@ class NixFlakeContractTests(unittest.TestCase):
                 )
                 self.assertEqual(names, EXPECTED_APPS)
 
+    @REQUIRES_NIX
     def test_default_package_and_application_are_exact_aliases(self) -> None:
         for system in EXPECTED_SYSTEMS:
             with self.subTest(system=system):
@@ -216,6 +224,7 @@ class NixFlakeContractTests(unittest.TestCase):
             checks,
         )
 
+    @REQUIRES_NIX
     def test_contract_stubs_cover_package_shape_and_behavior(self) -> None:
         contracts = nix_json("eval", "--json", "--file", "nix/contracts.nix")
         shapes = contracts["packageShapes"]
@@ -247,17 +256,212 @@ class NixFlakeContractTests(unittest.TestCase):
             ],
         )
         self.assertEqual(
+            shapes["chelisup"]["required"],
+            ["bin/chelisup", "libexec/chelisup"],
+        )
+        self.assertEqual(
             shapes["chelisup"]["allowedProductExecutables"],
-            ["bin/chelisup"],
+            ["bin/chelisup", "libexec/chelisup"],
         )
         self.assertEqual(shapes["chelisup"]["forbidden"], ["bin/chelis"])
         self.assertEqual(
             shapes["chelisup"]["inventory"],
-            ["bin", "bin/chelisup"],
+            ["bin", "libexec", "bin/chelisup", "libexec/chelisup"],
         )
         for header in EXPECTED_HEADERS:
             self.assertIn(f"include/{header}", shapes["chelis"]["required"])
             self.assertIn(f"include/{header}", shapes["chelis-runtime"]["required"])
+
+    @REQUIRES_NIX
+    def test_chelisup_install_roots_the_nix_closure_and_self_uninstall_removes_it(self) -> None:
+        package = Path(
+            nix_raw("build", "--no-link", "--print-out-paths", ".#chelisup")
+        )
+        manifest = tomllib.loads((REPO_ROOT / "Cargo.toml").read_text(encoding="utf-8"))
+        version = manifest["workspace"]["package"]["version"]
+
+        with tempfile.TemporaryDirectory() as raw_home:
+            home = Path(raw_home)
+            toolchain = home / "toolchains" / version / "bin" / "chelis"
+            toolchain.parent.mkdir(parents=True)
+            toolchain.write_text("placeholder toolchain\n", encoding="utf-8")
+
+            environment = os.environ.copy()
+            environment["CHELIS_HOME"] = str(home)
+            environment["PATH"] = ""
+            installed = subprocess.run(
+                [package / "bin" / "chelisup", "install", version],
+                cwd=REPO_ROOT,
+                env=environment,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            self.assertEqual(installed.returncode, 0, installed.stderr)
+
+            gc_root = home / "nix-gcroots" / "chelisup"
+            self.assertTrue(gc_root.is_symlink(), f"missing Nix GC root: {gc_root}")
+            self.assertEqual(gc_root.resolve(), package.resolve())
+            staging_root = home / "nix-gcroots" / "chelisup.next"
+            partial_root = home / "nix-gcroots" / "chelisup.partial"
+            self.assertFalse(staging_root.exists())
+            self.assertFalse(staging_root.is_symlink())
+            self.assertFalse(partial_root.exists())
+            self.assertFalse(partial_root.is_symlink())
+
+            real_binary = package / "libexec" / "chelisup"
+            installed_binary = home / "bin" / "chelisup"
+            installed_shim = home / "bin" / "chelis"
+            self.assertEqual(installed_binary.read_bytes(), real_binary.read_bytes())
+            self.assertEqual(installed_shim.read_bytes(), real_binary.read_bytes())
+
+            copied_help = subprocess.run(
+                [installed_binary, "--help"],
+                cwd=REPO_ROOT,
+                env=environment,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            self.assertEqual(copied_help.returncode, 0, copied_help.stderr.decode())
+
+            removed = subprocess.run(
+                [installed_binary, "self", "uninstall"],
+                cwd=REPO_ROOT,
+                env=environment,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            self.assertEqual(removed.returncode, 0, removed.stderr)
+            self.assertFalse(gc_root.exists())
+            self.assertFalse(gc_root.is_symlink())
+
+    @REQUIRES_NIX
+    def test_partial_chelisup_copy_keeps_the_partial_gc_root(self) -> None:
+        package = Path(
+            nix_raw("build", "--no-link", "--print-out-paths", ".#chelisup")
+        )
+        manifest = tomllib.loads((REPO_ROOT / "Cargo.toml").read_text(encoding="utf-8"))
+        version = manifest["workspace"]["package"]["version"]
+
+        with tempfile.TemporaryDirectory() as raw_home:
+            home = Path(raw_home)
+            toolchain = home / "toolchains" / version / "bin" / "chelis"
+            toolchain.parent.mkdir(parents=True)
+            toolchain.write_text("placeholder toolchain\n", encoding="utf-8")
+
+            bin_dir = home / "bin"
+            bin_dir.mkdir()
+            (bin_dir / "chelisup").mkdir()
+            gc_root = home / "nix-gcroots" / "chelisup"
+            gc_root.parent.mkdir(parents=True)
+            prior_target = package / "bin" / "chelisup"
+            gc_root.symlink_to(prior_target)
+
+            environment = os.environ.copy()
+            environment["CHELIS_HOME"] = str(home)
+            environment["PATH"] = ""
+            failed = subprocess.run(
+                [package / "bin" / "chelisup", "install", version],
+                cwd=REPO_ROOT,
+                env=environment,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            self.assertNotEqual(failed.returncode, 0)
+            self.assertEqual(gc_root.resolve(), prior_target.resolve())
+            real_binary = package / "libexec" / "chelisup"
+            self.assertEqual((bin_dir / "chelis").read_bytes(), real_binary.read_bytes())
+            staging_root = home / "nix-gcroots" / "chelisup.next"
+            partial_root = home / "nix-gcroots" / "chelisup.partial"
+            self.assertFalse(staging_root.exists())
+            self.assertFalse(staging_root.is_symlink())
+            self.assertTrue(partial_root.is_symlink())
+            self.assertEqual(partial_root.resolve(), package.resolve())
+
+    @REQUIRES_NIX
+    def test_stale_staging_root_recovery_preserves_required_closures(self) -> None:
+        package = Path(
+            nix_raw("build", "--no-link", "--print-out-paths", ".#chelisup")
+        )
+        real_binary = package / "libexec" / "chelisup"
+
+        for has_partial_copy in (False, True):
+            with self.subTest(has_partial_copy=has_partial_copy):
+                with tempfile.TemporaryDirectory() as raw_home:
+                    home = Path(raw_home)
+                    roots = home / "nix-gcroots"
+                    roots.mkdir()
+                    stable_root = roots / "chelisup"
+                    partial_root = roots / "chelisup.partial"
+                    staging_root = roots / "chelisup.next"
+                    stable_root.symlink_to(real_binary)
+                    prior_partial_target = package / "bin" / "chelisup"
+                    partial_root.symlink_to(prior_partial_target)
+                    staging_root.symlink_to(package)
+
+                    if has_partial_copy:
+                        bin_dir = home / "bin"
+                        bin_dir.mkdir()
+                        (bin_dir / "chelis").write_bytes(real_binary.read_bytes())
+
+                    environment = os.environ.copy()
+                    environment["CHELIS_HOME"] = str(home)
+                    environment["PATH"] = ""
+                    failed = subprocess.run(
+                        [package / "bin" / "chelisup", "install", "invalid-version"],
+                        cwd=REPO_ROOT,
+                        env=environment,
+                        text=True,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        check=False,
+                    )
+                    self.assertNotEqual(failed.returncode, 0)
+                    self.assertEqual(stable_root.resolve(), real_binary.resolve())
+                    expected_partial = package if has_partial_copy else prior_partial_target
+                    self.assertEqual(partial_root.resolve(), expected_partial.resolve())
+                    self.assertFalse(staging_root.exists())
+                    self.assertFalse(staging_root.is_symlink())
+
+    @REQUIRES_NIX
+    def test_failed_chelisup_install_preserves_the_existing_gc_root(self) -> None:
+        package = Path(
+            nix_raw("build", "--no-link", "--print-out-paths", ".#chelisup")
+        )
+        with tempfile.TemporaryDirectory() as raw_home:
+            home = Path(raw_home)
+            gc_root = home / "nix-gcroots" / "chelisup"
+            partial_root = home / "nix-gcroots" / "chelisup.partial"
+            gc_root.parent.mkdir(parents=True)
+            prior_target = package / "libexec" / "chelisup"
+            prior_partial_target = package / "bin" / "chelisup"
+            gc_root.symlink_to(prior_target)
+            partial_root.symlink_to(prior_partial_target)
+
+            environment = os.environ.copy()
+            environment["CHELIS_HOME"] = str(home)
+            environment["PATH"] = ""
+            failed = subprocess.run(
+                [package / "bin" / "chelisup", "install", "invalid-version"],
+                cwd=REPO_ROOT,
+                env=environment,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            self.assertNotEqual(failed.returncode, 0)
+            self.assertEqual(gc_root.resolve(), prior_target.resolve())
+            self.assertEqual(partial_root.resolve(), prior_partial_target.resolve())
+            staging_root = home / "nix-gcroots" / "chelisup.next"
+            self.assertFalse(staging_root.exists())
+            self.assertFalse(staging_root.is_symlink())
 
 
 if __name__ == "__main__":

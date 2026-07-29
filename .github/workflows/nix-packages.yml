@@ -28,6 +28,12 @@ jobs:
         run: python3 -c 'import subprocess; system = subprocess.check_output(["nix", "eval", "--impure", "--raw", "--expr", "builtins.currentSystem"], text=True).strip(); assert system == "x86_64-linux", system'
       - name: Verify the Nix sandbox
         run: python3 -c 'import subprocess; value = subprocess.check_output(["nix", "config", "show", "sandbox"], text=True).strip(); assert value == "true", value'
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+      - name: Create the project Python environment
+        run: uv venv --python 3.11 .venv
+      - name: Run the Nix flake contract suite
+        run: .venv/bin/python scripts/test_nix_flake_contract.py
       - name: Run the complete native flake check set
         run: nix flake check --print-build-logs
 
@@ -46,5 +52,11 @@ jobs:
         run: python3 -c 'import subprocess; system = subprocess.check_output(["nix", "eval", "--impure", "--raw", "--expr", "builtins.currentSystem"], text=True).strip(); assert system == "aarch64-darwin", system'
       - name: Verify the Nix sandbox
         run: python3 -c 'import subprocess; value = subprocess.check_output(["nix", "config", "show", "sandbox"], text=True).strip(); assert value == "true", value'
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+      - name: Create the project Python environment
+        run: uv venv --python 3.11 .venv
+      - name: Run the Nix flake contract suite
+        run: .venv/bin/python scripts/test_nix_flake_contract.py
       - name: Run the complete native flake check set
         run: nix flake check --print-build-logs

@@ -17,7 +17,7 @@ Date: 2026-07-28
 
 The lock parity check confirmed that the Nixpkgs and Rust overlay revisions match `devenv.lock`.
 
-## Package output paths
+## Package output paths before PR review corrections
 
 | System | Package | Output path |
 | --- | --- | --- |
@@ -28,7 +28,7 @@ The lock parity check confirmed that the Nixpkgs and Rust overlay revisions matc
 | `aarch64-darwin` | `chelis-runtime` | `/nix/store/2dxnpzc5g7v2mvlc1gqcvcmv5b99pmcx-chelis-runtime-0.17.1` |
 | `aarch64-darwin` | `chelisup` | `/nix/store/svazbsn2m8yjn6iga5bmk25c3249vjfa-chelisup-0.17.1` |
 
-## Exact package contents
+## Exact package contents before PR review corrections
 
 Both systems produced the same relative package contents.
 
@@ -140,3 +140,58 @@ The review found one medium test harness defect. The lock parity tests used a `.
 The test runner now uses `sys.executable`. A detached worktree without `.venv` passed all four lock parity tests.
 
 No product defect remained after the correction. Both native CI jobs passed after the replacement.
+
+## PR review corrections
+
+Date: 2026-07-29
+
+The PR review found two release blockers after the first acceptance pass.
+
+The Nix `chelisup` binary copied itself outside the Nix store without a GC root. A later Nix garbage collection can remove its dynamic dependencies.
+
+The Nix flake contract suite used a class-level skip when Nix was absent. The standard script job therefore skipped all 15 tests.
+
+The correction added these contracts:
+
+- `bin/chelisup` is a Nix launcher.
+- `libexec/chelisup` is the real installer.
+- The launcher creates `$CHELIS_HOME/nix-gcroots/chelisup.next` before an install.
+- A successful install promotes `$CHELIS_HOME/nix-gcroots/chelisup`.
+- A failed install preserves the prior stable root.
+- A partial copy promotes `$CHELIS_HOME/nix-gcroots/chelisup.partial`.
+- `chelisup self uninstall` removes all three roots.
+- Static Nix contract tests run without Nix.
+- Both native Nix jobs run the complete Nix flake contract suite.
+- The supported-system list has exact parity with the named native jobs.
+
+The corrected local `aarch64-darwin` package path is `/nix/store/ilkpmqca4adm42jncgv6vanlmbsyrnag-chelisup-0.17.1`.
+
+The corrected package contains these paths:
+
+```text
+bin/chelisup
+libexec/chelisup
+```
+
+The following local checks passed:
+
+- The Nix flake contract suite passed 19 tests.
+- The standard script suite passed.
+- The `chelisup` suite passed 54 tests.
+- Strict OpenSpec validation passed 7 items.
+- The complete `aarch64-darwin` flake check passed.
+- The local repository gate passed.
+
+An independent adversarial review reported one high-severity CI syntax error. The report cited nonexistent line 85 in a 62-line file.
+
+The commands at lines 28 and 52 are complete. The workflow parity tests also passed, so the finding was rejected.
+
+The review also claimed that self-uninstall root cleanup lacked validation. The Rust and Nix contract tests both verify that all roots are absent.
+
+The final adversarial review claimed that GitHub Actions ignores nonzero `run` step results. GitHub Actions stops the job when a `run` step fails.
+
+The same review claimed that the workflow does not verify the Nix sandbox. Lines 29 and 53 explicitly compare the value with `true`.
+
+Both findings were rejected. A final post-correction adversarial review returned `PASS` with no defect.
+
+The two authoritative native CI jobs still require a new run after the corrected branch reaches GitHub.
