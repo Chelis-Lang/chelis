@@ -125,6 +125,67 @@ openspec validate --all --strict --no-interactive
   paths. OpenSpec is not yet wired into the agent workflow — drive the CLI
   directly.
 
+## Issue Tracking Conventions
+
+### One Tracking Issue Per Class
+
+A recurring defect class gets **one tracking issue**, which is also the GitHub
+**sub-issue parent** for every instance. Its body carries the plan (phases,
+oracles, freeze points, the class statement); its evidence lives in the owning
+design doc under `spec/design/` or in `docs/investigations/`.
+
+**Do not create a separate META issue alongside it.** The existing META/tracker
+pairs ([#727]/[#729], [#703]/[#730], and siblings) are historical, not a pattern
+to copy: the METAs were filed during the 2026-07 numeric audit as evidence
+records, and the trackers were filed later, when the design docs were written,
+as delivery contracts. Three reasons the split has stopped paying for itself:
+
+1. **It has already broken down.** Two of the five "METAs" are closed (#709,
+   #710) while their class continues under an open #731, and neither was written
+   as a META - both are instance reports the class map promoted after the fact.
+2. **Sub-issues do the job the pairing was improvising.** When the tracker is
+   the parent, "what belongs to this class" is a structural fact. A second issue
+   whose content is a list of instances duplicates the child list and drifts
+   from it.
+3. **Two bodies means two things to keep honest**, and the evidence half has a
+   better home: `docs/investigations/` already holds the probe corpus and the
+   audit record.
+
+Rules:
+
+- An issue has **one** parent. When a defect splits across classes (the #689
+  shape: a silent half and a support half), parent it to whichever class's
+  **oracle turns green when it is fixed**, and add an explicit `Also part of #N`
+  line or comment for the other. Do not leave the second half implicit; that is
+  how a half gets dropped when the first parent closes.
+- A tracking issue carries the `tracking` label so it can be excluded from the
+  work queue. **`-label:tracking` is the work queue.**
+- A class without a design doc is legitimate. Say so in the tracker ("no design
+  doc is planned; this is a parent, not a plan") rather than leaving a reader to
+  wonder which doc they failed to find.
+
+### Labels
+
+`tracking` and the `area:*` family carry navigation; `bug` and `soundness`
+carry severity. Prefer the specific one - an issue labelled only `soundness`
+is not findable by anyone who does not already know it exists.
+
+| label | means |
+|---|---|
+| `tracking` | a hub: a class or a plan, not a work item |
+| `spec-gap` | normative text was never authored. Distinct from `design-discussion`, which means the decision exists and is contested |
+| `soundness` | semantics divergence, type-safety, or a wrong answer. **Not** CI tooling |
+| `area:eval` | the `chelis eval` interpreter lane |
+| `area:runtime` | `chelis-runtime` and the C ABI surface |
+| `area:backend` | backend codegen: C, HIP, Metal, and IR lowering |
+| `area:prove` | `chelis-prove`, SMT, contract discharge |
+| `area:bindings` | Python bindings and the compiler-api embedding surface |
+| `area:ecosystem` | shell repos, `reef conform`, ecosystem drift |
+| `area:perf` | performance and benchmarking |
+| `area:ci` | CI workflows, coverage, mutation testing, dev infrastructure |
+
+`type-system` and `cli` predate this table and keep their existing meanings.
+
 ## Contract Invariants
 
 Machine-facing contracts should be expressed as invariants and locked with tests.
