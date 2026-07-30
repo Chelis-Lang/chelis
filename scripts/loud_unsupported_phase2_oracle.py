@@ -179,8 +179,8 @@ def mutate_runtime_dtype(source: str) -> str:
             "}",
         ),
         (
-            "    pub const ALL: [Self; 9] = [\n",
-            "    pub const ALL: [Self; 10] = [\n",
+            "    pub const ALL: [Self; 9] = [\n        Self::F32,\n",
+            "    pub const ALL: [Self; 10] = [\n        Self::F32,\n",
         ),
         (
             "        Self::I16,\n    ];",
@@ -197,8 +197,9 @@ def mutate_runtime_dtype(source: str) -> str:
             '            Self::Phase2OracleDType => "CHELIS_PHASE2_ORACLE_DTYPE",\n',
         ),
         (
-            "            Self::I8 => 1,\n",
-            "            Self::I8 => 1,\n            Self::Phase2OracleDType => 4,\n",
+            "            Self::I16 => Repr::TwosComplement16,\n",
+            "            Self::I16 => Repr::TwosComplement16,\n"
+            "            Self::Phase2OracleDType => Repr::Ieee754Binary32,\n",
         ),
         (
             "            8 => Ok(Self::I16),\n",
