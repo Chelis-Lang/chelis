@@ -449,6 +449,21 @@ hand-maintained list (hand lists are how `HOST_ONLY_BUILTINS` rotted,
    row or a recorded non-numeric classification. An op nobody
    registered is then a build failure, not a doc comment
    (`capability_table.md` §New numeric ops carries the interim rule).
+   Numeric-ness is STRUCTURAL, never declared: any callable whose
+   signature mentions a numeric dtype requires a row, and the
+   non-numeric classification exists only for genuinely dtype-free
+   surface - so the cheapest evasion (an op classifying itself
+   non-numeric) is not representable. Wherever a consumer can be
+   DERIVED from the table rather than compared against it, derive:
+   Phase 4 already plans checker acceptance as a generated table view,
+   which makes an unregistered op `UnknownForm` by construction.
+   Comparison-based totality has an enumeration boundary (the
+   `.dp`-reachable internals of [#730] census row 13 / chelis#794);
+   derivation does not. Dependency, recorded: this chokepoint is only
+   as total as the chelis#850-class closure (a `sig` with no `def`
+   reaching an undeclared C call) in the [#730]/[#731] tracks - the
+   FFI seam is a numeric-surface entry the table cannot see until it
+   is closed.
 
 Deliverables, with phase homes:
 
@@ -462,6 +477,29 @@ Deliverables, with phase homes:
    in-diff citation: the payload work (chelis#893/chelis#894) or a
    recorded §C3 census entry. This guard would have caught the sweep's
    three surface instances mechanically at PR time.
+   Acceptance requirements, from the 2026-07-30 adversarial pass -
+   each closes a measured or predicted evasion, and together they
+   implement the design criterion stated under Scope honesty below:
+   - **Enumerate compiled artifacts, never source text**: the
+     preprocessed header (transitive `#include`s included), the
+     desugared prelude AST, cargo metadata. A macro-generated export,
+     a typedef-hidden `int`, or an expansion-built ADT must be
+     visible; text-level scanning is evadable by construction.
+   - **A new row cannot self-bless**: the generator emits
+     `citation: TODO` for any addition and CI fails on TODO, so
+     regenerating the baseline alone can never pass. A valid citation
+     names an OPEN issue or the payload work.
+   - **Rows carry the known-red liveness leg** (the [#732] Phase 2
+     oracle's pattern): a row citing a closed issue FAILS, forcing
+     re-adjudication instead of permanent grandfathering - a wrongly
+     admitted row does not become blessed by surviving.
+   - **Failure messages teach**: the rule, the sanctioned actions, and
+     the §C6 pointer. For a context-poor agent the error text is the
+     only documentation that provably gets read; the cheapest passing
+     action must be visible IN the message and must be the wanted one.
+   - **The census and tripwire files are review-routed** (the
+     CODEOWNERS move [#733] makes for `spec/**`): an agent editing the
+     guard to pass it is flagged structurally, not by vigilance.
 2. **Phase 1**: the census re-derivation defines §C3's atomic set (the
    §C3 amendment above); the tripwire baseline regenerates in the same
    change set.
@@ -483,10 +521,41 @@ Deliverables, with phase homes:
    escape in the sweep is the motivating instance ([#730] §C6 owns the
    oracle; this row records the derivation rule).
 
-Scope honesty: this ratchet makes SILENT or UNDECIDED additions
-unwritable; it does not make bad decisions unwritable. A new channel or
-op can still land - visibly, cited, with its row and its atom, through
-review. That is the same claim §C3 makes for values, extended to the
+Scope honesty, sharpened by the 2026-07-30 adversarial pass. The END
+STATE's guarantees are types and build failures and survive adversarial
+review on their own; the INTERIM census is a visibility mechanism whose
+strength is review attention. Its design criterion is therefore
+CHEAPEST-PASSING-ACTION: agents do not evade guards, they satisfy them
+literally, so an agent blocked by the tripwire must find that the
+sanctioned action (cite the open issue, extend the enumerator, author
+the spec entry) is cheaper than any evasion - that is what the
+TODO-citation, liveness, message-pedagogy, and review-routing
+requirements above exist to arrange. The doctrine also lives where
+context-poor agents actually read: `AGENTS.md` §Numeric Surface
+Discipline carries the binding rules, and this section is its
+elaboration.
+
+Named non-goals, each with its owner, so coverage is never inferred:
+
+- **Ingress dtype SELECTION.** Parsing int64 IDs into an f32 tensor
+  launders capacity through a blessed carrier; every chokepoint here
+  governs carrier SHAPE, not conversion choices. The cast ladder's
+  named-lossy discipline ([#759]) owns it, and `AGENTS.md` §Numeric
+  Surface Discipline states the never-silently-narrow rule.
+- **Shell-side surface.** A shell wrapping the runtime with its own
+  `(double, int)` helper is invisible to chelis CI; the mirror is a
+  conform-contract row (chelis#738's lane), not this plan.
+- **Raw FFI buffer writes** until chelis#893's seal lands; the C
+  runtime's `pub` untyped data pointer is that issue's subject.
+- **A genuinely new surface KIND** (a new serialization format, IPC
+  channel, or export mechanism) is unguarded until the enumerators are
+  taught it. Introducing one without extending them in the same change
+  set is a review-blocking finding; the rule lives in `AGENTS.md`
+  because the enumerators cannot see what they were never pointed at.
+
+Within those bounds: silent or undecided additions are unwritable; bad
+decisions are not - they are forced to a visible, cited, reviewed
+point. That is the same claim §C3 makes for values, extended to the
 surface.
 
 ---

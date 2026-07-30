@@ -144,7 +144,10 @@ Phase 4 the requirement becomes structural: the conformance suite's
 totality leg (`dtype_semantics.md` §C6 chokepoint 3) enumerates the
 reachable numeric surface and fails the build for any op without a
 Table A row, and the row's mandatory atom citation forces the spec
-entry.
+entry. Numeric-ness is signature-derived: a callable whose signature
+mentions a numeric dtype requires a row, and the non-numeric
+classification is available only for dtype-free surface, so an op
+cannot classify itself out of the requirement.
 
 `round_to` specifically: widening an f32 operand to f64, rounding
 decimally, and re-narrowing is computing at other than the declared

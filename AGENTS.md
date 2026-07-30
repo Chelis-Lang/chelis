@@ -136,6 +136,32 @@ Two rules follow, and both are cheap:
    stronger rule than the spec states, amend the spec first and say so in the PR;
    `spec/design/dtype_semantics.md` §B1 calls that "the protocol, not a failure."
 
+### Numeric Surface Discipline
+
+The numeric remediation's surface ratchet (`spec/design/dtype_semantics.md` §C6)
+binds every change that touches numeric data, whether or not you have read that
+document:
+
+- **No new numeric channel outside the tagged carrier.** A public ADT variant, wire
+  field, exported C signature, or binding parameter that carries numeric values as
+  bare `f64`/`double`, or that takes a raw integer dtype id, is a review-blocking
+  finding. The capacity census is the allowlist; an addition cites an OPEN issue or
+  the payload work (chelis#893/chelis#894) - never a citation invented to pass the
+  tripwire.
+- **A new numeric op requires its `spec/05-risc-primitives.md` entry in the same
+  change set** (signature, per-dtype semantics at [04-NUM-8]'s declared widths,
+  adjoint or non-differentiability statement, accumulator rule where applicable). A
+  Rust doc comment is not an authority.
+- **Never silently narrow at ingress.** Choosing a lossy dtype for ingested data
+  (int64 IDs into an f32 tensor) is a decision: use the named lossy form (the
+  chelis#759 pattern) or the exact dtype, never a quiet convenience cast.
+- **A new surface KIND** (a new serialization format, IPC channel, or export
+  mechanism that can carry numbers) extends the §C6 enumerators in the same change
+  set, or does not land.
+- The census, tripwire, and oracle files are guard artifacts: editing one to make
+  your change pass is never the fix. The failure message names the sanctioned
+  actions; take one of those.
+
 ### Public-Surface Change Rule
 
 When behavior changes, update the owning code, tests, docs, and examples in the same
