@@ -137,6 +137,8 @@ pub fn cmd_prove(options: ProveOptions<'_>) -> Result<i32, String> {
     let mut totals = Summary::default();
     let mut worst = Status::Passed;
     let mut all_dependency_edges: Vec<serde_json::Value> = Vec::new();
+    let mut dependency_graphs = Vec::new();
+    let mut dependency_graph_unavailable = Vec::new();
     for input in &inputs {
         let status = match input.extension().and_then(|ext| ext.to_str()) {
             Some("ch") => prove_surf_file(input, &options, &mut totals)?,
@@ -155,9 +157,33 @@ pub fn cmd_prove(options: ProveOptions<'_>) -> Result<i32, String> {
                 }));
             }
         }
+        if options.json {
+            match compute_compiler_dependency_graph(input) {
+                Ok(Some(graph)) => dependency_graphs.push(graph),
+                Ok(None) => dependency_graph_unavailable.push(match input
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                {
+                    Some("dp") => format!(
+                        "{}: Deep input has no compiler-owned source-file declaration ownership",
+                        input.display()
+                    ),
+                    _ => format!(
+                        "{}: input is not a Reef package module, so stable linker ownership is unavailable",
+                        input.display()
+                    ),
+                }),
+                Err(reason) => dependency_graph_unavailable.push(format!(
+                    "{}: dependency analysis failed: {reason}",
+                    input.display()
+                )),
+            }
+        }
     }
 
     if options.json {
+        let dependency_graph =
+            merge_compiler_dependency_graphs(dependency_graphs, dependency_graph_unavailable);
         println!(
             "{}",
             json!({
@@ -169,6 +195,7 @@ pub fn cmd_prove(options: ProveOptions<'_>) -> Result<i32, String> {
                 "errors": totals.errors,
                 "obligations": totals.obligations,
                 "dependency_edges": all_dependency_edges,
+                "dependency_graph": dependency_graph,
             })
         );
     } else {
@@ -178,6 +205,41 @@ pub fn cmd_prove(options: ProveOptions<'_>) -> Result<i32, String> {
         );
     }
     Ok(worst.exit_code())
+}
+
+fn compute_compiler_dependency_graph(
+    path: &Path,
+) -> Result<Option<chelis_reef::CompilerDependencyGraph>, String> {
+    match path.extension().and_then(|extension| extension.to_str()) {
+        Some("ch") => chelis_reef::dependency_graph_for_file(path),
+        Some("dp") => Ok(None),
+        _ => Ok(None),
+    }
+}
+
+fn merge_compiler_dependency_graphs(
+    graphs: Vec<chelis_reef::CompilerDependencyGraph>,
+    unavailable: Vec<String>,
+) -> serde_json::Value {
+    if !unavailable.is_empty() {
+        return json!({
+            "status": "unavailable",
+            "reason": unavailable.join("; "),
+        });
+    }
+    let mut declarations = BTreeMap::<String, chelis_reef::DependencyDeclaration>::new();
+    let mut edges = std::collections::BTreeSet::new();
+    for graph in graphs {
+        for declaration in graph.declarations {
+            declarations.insert(declaration.id.clone(), declaration);
+        }
+        edges.extend(graph.edges);
+    }
+    json!({
+        "status": "complete",
+        "declarations": declarations.into_values().collect::<Vec<_>>(),
+        "edges": edges.into_iter().collect::<Vec<_>>(),
+    })
 }
 
 /// Compute property dependency edges for a single input file (chelis#490).
@@ -480,17 +542,65 @@ fn prove_surf_file(
         let prop_status = match &linked_program {
             Ok(Some(prepared)) => {
                 let display_names = linked_property_display_names(&flat, &prepared.entry_decls);
-                property_run::run_surf_linked_properties_shared(
-                    path,
-                    &prepared.decls,
-                    &prepared.entry_decls,
-                    &prepared.stdlib_decls,
-                    &display_names,
-                    options,
-                    totals,
-                )
+                match prepared.reachable_decls() {
+                    Ok(reachable_decls) => {
+                        // Check the exact linked declaration closure before
+                        // emitting any property verdict. A later compiler
+                        // rejection must never coexist with an earlier green
+                        // proof record for the same ill-typed program.
+                        let (reachable_stdlib, reachable_non_stdlib): (Vec<_>, Vec<_>) =
+                            reachable_decls
+                                .iter()
+                                .cloned()
+                                .partition(|decl| prepared.stdlib_decls.contains(decl));
+                        let check_status = obligation_run::check_linked_decls(
+                            &reachable_stdlib,
+                            &reachable_non_stdlib,
+                            options,
+                            totals,
+                        );
+                        if check_status != Status::Passed {
+                            return Ok(check_status);
+                        }
+                        property_run::run_surf_linked_properties_shared(
+                            path,
+                            &reachable_decls,
+                            &prepared.entry_decls,
+                            &prepared.stdlib_decls,
+                            &display_names,
+                            options,
+                            totals,
+                        )
+                    }
+                    Err(message) => {
+                        totals.errors += 1;
+                        if options.json {
+                            println!(
+                                "{}",
+                                json!({
+                                    "kind": "error",
+                                    "stage": "property-discovery",
+                                    "reason": format!("reachable linked-program selection failed; properties not verified: {message}"),
+                                    "source": json!({ "kind": "surf", "file": path.display().to_string() }),
+                                })
+                            );
+                        } else {
+                            eprintln!(
+                                "prove error: reachable linked-program selection failed in {}: {message}",
+                                path.display()
+                            );
+                        }
+                        Status::Error
+                    }
+                }
             }
-            Ok(None) => property_run::run_surf_properties_shared(path, &source, options, totals),
+            Ok(None) => {
+                let check_status = obligation_run::check_unlinked_decls(&parsed, options, totals);
+                if check_status != Status::Passed {
+                    return Ok(check_status);
+                }
+                property_run::run_surf_properties_shared(path, &source, options, totals)
+            }
             Err(message) => {
                 totals.errors += 1;
                 if options.json {
@@ -516,10 +626,9 @@ fn prove_surf_file(
 
         let obligation_count = count_invariant_opaque_surf(&flat);
         let ob_status = match (&linked_program, obligation_count) {
-            (Ok(Some(prepared)), 0) => {
-                obligation_run::check_linked_decls(&prepared.decls, options, totals)
-            }
-            (Ok(None), 0) => obligation_run::run_obligations(&parsed, options, totals),
+            // The property path above has already checked these exact
+            // declarations before producing any verdict.
+            (Ok(_), 0) => Status::Passed,
             (Err(_), 0) => Status::Passed,
             (Ok(_), _) => obligation_run::run_obligations(&parsed, options, totals),
             (Err(_), _) => Status::Passed,

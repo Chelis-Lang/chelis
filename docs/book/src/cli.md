@@ -194,10 +194,30 @@ imports are for name resolution, not discovery. Explicit `.dp` inputs are
 validated first, then scanned for canonical `chelis_role: "property"`
 metadata. SMT-amenable scalar Deep properties lower directly to Tier B;
 unsupported Deep property shapes follow the normal requested-tier policy.
+Surf properties may also prove an applied single-target scalar gradient such
+as `grad(price, wrt=rate)(args...)` when the differentiated lambda or pure
+top-level function has `f32`/`f64` parameters, produces an `f32`/`f64` result,
+and uses scalar arithmetic, blocks, and inlineable scalar helpers. These proofs
+are still over the reals and carry the `real_arithmetic` qualifier. Tensor or
+multi-target gradients, non-floating results, conditionals, casts in
+differentiated bodies, effects, recursion, nested transforms, helper-depth
+overflow, and unsupported differentiated operations return a specific
+unsupported reason under `--tier smt-only`; `auto` may fuzz-validate them
+instead. Conditional scalar gradients and differentiated casts remain outside
+the prover subset until the compiler can build them.
 
 Exit codes are stable for CI: `0` pass, `1` counterexample, `2` selected
 property unsupported by the v1 generator, and `3` setup/input/config error.
 `--json` emits NDJSON property records followed by one summary record.
+For Reef-package Surf modules, that summary includes
+`dependency_graph:{status:"complete",declarations:[...],edges:[...]}`. Nodes
+carry stable compiler declaration IDs plus package/module and package-relative
+source-span ownership; edges use those IDs and come from linker-resolved AST,
+not downstream source parsing. A complete graph may be explicitly empty.
+Bare Surf, Deep, a failed attribution pass, or any incomplete member of a
+multi-input selection instead emits
+`dependency_graph:{status:"unavailable",reason:"..."}`. The deprecated,
+name-only `dependency_edges` field remains for one compatibility release.
 
 ## Output Contract
 

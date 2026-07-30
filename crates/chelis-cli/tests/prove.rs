@@ -3,6 +3,9 @@ use predicates::prelude::*;
 use serde_json::Value;
 use tempfile::tempdir;
 
+#[path = "common/mod.rs"]
+mod common;
+
 fn write_prop(source: &str) -> tempfile::TempDir {
     let dir = tempdir().expect("tempdir");
     std::fs::write(dir.path().join("prop.ch"), source).expect("write property");
@@ -172,7 +175,7 @@ fn prove_json_schema_has_property_and_summary_records() {
     assert_eq!(records[1]["passed"], 1);
 }
 
-#[cfg(feature = "smt")]
+#[cfg(feature = "chelis-prove")]
 #[test]
 fn prove_surf_reef_input_lowers_against_linked_declarations() {
     let dir = tempdir().expect("tempdir");
@@ -206,15 +209,25 @@ module_prefix = "Mylib"
     );
     write_file(
         &root.join("mylib/src/math.ch"),
-        "module Mylib.Math\nexport (double)\ndef double(x: f32) -> f32 = x + x\n",
+        "module Mylib.Math\n\
+         export (double, quotient)\n\
+         def double(x: f32) -> f32 = x + x\n\
+         def quotient(d: f32, r: f32, g: f32) -> f32 = {\n\
+         \x20 denominator = r - g\n\
+         \x20 d / denominator\n\
+         }\n",
     );
     let entry = root.join("src/proofs.ch");
     write_file(
         &entry,
         r#"module App.Proofs
-import Mylib.Math (double)
+import Mylib.Math (double, quotient)
 @property double_identity forall(x: f32):
   double(x) == x + x
+@property imported_grad_formula forall(d: f32, r: f32, g: f32)
+where (r > g):
+  (grad(quotient, wrt=r)(d, r, g)
+    == (0.0 - d) / ((r - g) * (r - g)))
 "#,
     );
 
@@ -236,11 +249,171 @@ import Mylib.Math (double)
         String::from_utf8_lossy(&output.stderr)
     );
     let props = property_records(&output.stdout);
-    assert_eq!(props.len(), 1, "records: {props:?}");
-    assert_eq!(props[0]["name"], "double_identity");
-    assert_eq!(props[0]["status"], "passed");
-    assert_eq!(props[0]["proof_tier"], "smt");
-    assert_eq!(props[0]["arith_model"], "real");
+    assert_eq!(props.len(), 2, "records: {props:?}");
+    for name in ["double_identity", "imported_grad_formula"] {
+        let prop = props
+            .iter()
+            .find(|prop| prop["name"] == name)
+            .unwrap_or_else(|| panic!("missing {name}: {props:?}"));
+        assert_eq!(prop["status"], "passed", "{prop}");
+        assert_eq!(prop["proof_tier"], "smt", "{prop}");
+        assert_eq!(prop["arith_model"], "real", "{prop}");
+    }
+    let summary = property_summary(&output.stdout);
+    let graph = &summary["dependency_graph"];
+    assert_eq!(graph["status"], "complete");
+    let declarations = graph["declarations"].as_array().expect("declarations");
+    let property = declarations
+        .iter()
+        .find(|node| node["module"] == "App.Proofs" && node["name"] == "double_identity")
+        .expect("root property node");
+    let dependency = declarations
+        .iter()
+        .find(|node| node["module"] == "Mylib.Math" && node["name"] == "double")
+        .expect("path-dependency function node");
+    assert_eq!(dependency["source"]["file"], "src/math.ch");
+    assert!(
+        graph["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|edge| edge["from"] == property["id"] && edge["to"] == dependency["id"]),
+        "linker graph must cross a path-package import: {graph}"
+    );
+}
+
+#[cfg(feature = "chelis-prove")]
+#[test]
+fn prove_does_not_recheck_unreachable_dependency_declarations_after_verdict() {
+    let dir = tempdir().expect("tempdir");
+    let root = dir.path().join("myapp");
+    write_file(
+        &root.join("reef.toml"),
+        &format!(
+            r#"[package]
+name = "myapp"
+version = "0.1.0"
+compiler = "={}"
+module_prefix = "App"
+
+[dependencies]
+mylib = {{ path = "./mylib" }}
+"#,
+            env!("CARGO_PKG_VERSION")
+        ),
+    );
+    write_file(
+        &root.join("mylib/reef.toml"),
+        &format!(
+            r#"[package]
+name = "mylib"
+version = "0.1.0"
+compiler = "={}"
+module_prefix = "Mylib"
+"#,
+            env!("CARGO_PKG_VERSION")
+        ),
+    );
+    write_file(
+        &root.join("mylib/src/math.ch"),
+        "module Mylib.Math\n\
+         export (double)\n\
+         def double(x: f32) -> f32 = x + x\n\
+         def unrelated_broken(x: f32) -> f32 = to_tensor([x])\n",
+    );
+    let entry = root.join("src/proofs.ch");
+    write_file(
+        &entry,
+        "module App.Proofs\n\
+         import Mylib.Math (double)\n\
+         @property double_identity forall(x: f32): double(x) == x + x\n",
+    );
+
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "prove",
+            entry.to_str().unwrap(),
+            "--json",
+            "--tier",
+            "fuzz-only",
+        ])
+        .output()
+        .expect("run prove");
+    assert!(
+        output.status.success(),
+        "an unreachable broken dependency declaration is outside the selected \
+         module's fail-closed check\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[cfg(feature = "chelis-prove")]
+#[test]
+fn prove_rejects_a_broken_dependency_declaration_reachable_from_entry() {
+    let dir = tempdir().expect("tempdir");
+    let root = dir.path().join("myapp");
+    write_file(
+        &root.join("reef.toml"),
+        &format!(
+            r#"[package]
+name = "myapp"
+version = "0.1.0"
+compiler = "={}"
+module_prefix = "App"
+
+[dependencies]
+mylib = {{ path = "./mylib" }}
+"#,
+            env!("CARGO_PKG_VERSION")
+        ),
+    );
+    write_file(
+        &root.join("mylib/reef.toml"),
+        &format!(
+            r#"[package]
+name = "mylib"
+version = "0.1.0"
+compiler = "={}"
+module_prefix = "Mylib"
+"#,
+            env!("CARGO_PKG_VERSION")
+        ),
+    );
+    write_file(
+        &root.join("mylib/src/math.ch"),
+        "module Mylib.Math\n\
+         export (broken)\n\
+         def broken(x: f32) -> f32 = to_tensor([x])\n",
+    );
+    let entry = root.join("src/proofs.ch");
+    write_file(
+        &entry,
+        "module App.Proofs\n\
+         import Mylib.Math (broken)\n\
+         def selected(x: f32) -> f32 = broken(x)\n\
+         @property reflexive forall(x: f32): x == x\n",
+    );
+
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "prove",
+            entry.to_str().unwrap(),
+            "--json",
+            "--tier",
+            "fuzz-only",
+        ])
+        .output()
+        .expect("run prove");
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "a reachable broken dependency must fail closed\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 // chelis#580: proving a reef PACKAGE that carries a `@property` must not
@@ -2532,6 +2705,509 @@ fn issue_417_mixed_call_form_arith_false_goal_disproves_at_smt() {
     );
 }
 
+// chelis#923: an applied scalar single-wrt gradient is a Tier-B arithmetic
+// term. The public CLI must prove the true sensitivity claim, disprove its
+// reversed corrupt twin, and preserve the real-arithmetic qualification.
+#[cfg(feature = "smt")]
+#[test]
+fn issue_923_scalar_grad_and_corrupt_twin_receive_smt_verdicts() {
+    let source = r#"module Audit.Main
+
+@property inline_grad_negative forall(d: f32, r: f32, g: f32)
+where (d > 0.5), (r > g), (r < 9.5):
+  (grad(fn (dd: f32, rr: f32, gg: f32) ->
+    (dd / (rr - gg)), wrt=rr)(d, r, g) < 0.0)
+"#;
+    for (source, expected_code, expected_status) in [
+        (source.to_string(), 0, "passed"),
+        (source.replace("< 0.0)", "> 0.0)"), 1, "failed"),
+    ] {
+        let dir = write_prop(&source);
+        let output = Command::cargo_bin("chelis")
+            .expect("binary")
+            .args([
+                "prove",
+                dir.path().join("prop.ch").to_str().unwrap(),
+                "--tier",
+                "smt-only",
+                "--json",
+            ])
+            .output()
+            .expect("run prove");
+        assert_eq!(
+            output.status.code(),
+            Some(expected_code),
+            "stdout={}\nstderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let props = property_records(&output.stdout);
+        assert_eq!(props.len(), 1, "records: {props:?}");
+        assert_eq!(props[0]["status"], expected_status, "{}", props[0]);
+        assert_eq!(props[0]["proof_tier"], "smt", "{}", props[0]);
+        assert_eq!(props[0]["samples"], 0, "{}", props[0]);
+        if expected_status == "passed" {
+            assert_eq!(
+                props[0]["composite_verdict"], "proven_modulo_real_arithmetic",
+                "{}",
+                props[0]
+            );
+        } else {
+            assert!(
+                props[0].get("counterexample").is_some(),
+                "SMT disproof must carry a model: {}",
+                props[0]
+            );
+        }
+    }
+}
+
+#[cfg(feature = "smt")]
+#[test]
+fn issue_923_f64_and_inferred_float_results_receive_smt_verdicts() {
+    let fixtures = [
+        (
+            "f64",
+            r#"def square64(x: f64) -> f64 = x * x
+@property named64 forall(x: f64):
+  grad(square64, wrt=x)(x) == (2.0f64 * x)
+@property inline64 forall(x: f64):
+  grad(fn (xx: f64) -> xx * xx, wrt=xx)(x) == (x + x)
+"#,
+            2,
+        ),
+        (
+            "inferred-f32",
+            r#"def square(x: f32) = x * x
+@property inferred_result forall(x: f32):
+  grad(square, wrt=x)(x) == (x + x)
+"#,
+            1,
+        ),
+    ];
+    for (name, source, expected_properties) in fixtures {
+        let dir = write_prop(source);
+        let output = Command::cargo_bin("chelis")
+            .expect("binary")
+            .args([
+                "prove",
+                dir.path().join("prop.ch").to_str().unwrap(),
+                "--tier",
+                "smt-only",
+                "--json",
+            ])
+            .output()
+            .expect("run prove");
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{name} stdout={}\nstderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let props = property_records(&output.stdout);
+        assert_eq!(props.len(), expected_properties, "{name}: {props:?}");
+        for prop in props {
+            assert_eq!(prop["status"], "passed", "{name}: {prop}");
+            assert_eq!(prop["proof_tier"], "smt", "{name}: {prop}");
+            assert_eq!(
+                prop["composite_verdict"], "proven_modulo_real_arithmetic",
+                "{name}: {prop}"
+            );
+        }
+    }
+}
+
+#[cfg(feature = "smt")]
+#[test]
+fn issue_923_type_errors_are_reported_before_any_property_verdict() {
+    let dir = write_prop(
+        r#"def square64(x: f64) -> f64 = x * x
+@property ill_typed forall(x: f64):
+  grad(square64, wrt=x)(x) == (2.0 * x)
+"#,
+    );
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "prove",
+            dir.path().join("prop.ch").to_str().unwrap(),
+            "--tier",
+            "smt-only",
+            "--json",
+        ])
+        .output()
+        .expect("run prove");
+    assert_eq!(output.status.code(), Some(3));
+    assert!(
+        property_records(&output.stdout).is_empty(),
+        "an ill-typed module must emit no property verdicts: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let records: Vec<serde_json::Value> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("NDJSON"))
+        .collect();
+    assert!(
+        records
+            .iter()
+            .any(|record| record["kind"] == "error" && record["stage"] == "check"),
+        "missing pre-proof checker error: {records:?}"
+    );
+}
+
+#[cfg(feature = "smt")]
+#[test]
+fn issue_923_unsupported_grad_intrinsic_is_prompt_and_specific() {
+    let dir = write_prop(
+        r#"module Audit.Main
+
+@property exp_grad_positive forall(x: f32)
+where (x > 0.5), (x < 9.5):
+  (grad(fn (xx: f32) -> exp(xx), wrt=xx)(x) > 0.0)
+"#,
+    );
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "prove",
+            dir.path().join("prop.ch").to_str().unwrap(),
+            "--tier",
+            "smt-only",
+            "--json",
+        ])
+        .output()
+        .expect("run prove");
+    assert_eq!(output.status.code(), Some(2));
+    let props = property_records(&output.stdout);
+    assert_eq!(props.len(), 1, "records: {props:?}");
+    assert_eq!(props[0]["status"], "unsupported", "{}", props[0]);
+    assert_eq!(props[0]["proof_tier"], "smt", "{}", props[0]);
+    assert_eq!(
+        props[0]["reason"], "scalar grad SMT lowering does not support call `exp`",
+        "{}",
+        props[0]
+    );
+}
+
+// chelis#923 result boundary: an integer-valued function has no scalar
+// floating derivative in Chelis. The prover must not emit a green SMT record
+// before the compiler rejects the same source.
+#[cfg(feature = "smt")]
+#[test]
+fn issue_923_non_float_results_are_never_proven_and_do_not_build() {
+    let fixtures = [
+        (
+            "named",
+            r#"def integer_value(x: f32) -> int32 = 1
+@property integer_grad_zero forall(x: f32):
+  grad(integer_value, wrt=x)(x) == 0.0
+"#,
+        ),
+        (
+            "inline",
+            r#"@property inline_integer_grad_zero forall(x: f32):
+  grad(fn (xx: f32) -> 1, wrt=xx)(x) == 0.0
+"#,
+        ),
+    ];
+
+    for (name, source) in fixtures {
+        let dir = write_prop(source);
+        let path = dir.path().join("prop.ch");
+        let prove = Command::cargo_bin("chelis")
+            .expect("binary")
+            .args([
+                "prove",
+                path.to_str().unwrap(),
+                "--tier",
+                "smt-only",
+                "--json",
+            ])
+            .output()
+            .expect("run prove");
+        assert!(
+            !prove.status.success(),
+            "{name} non-float gradient unexpectedly proved"
+        );
+        let props = property_records(&prove.stdout);
+        assert!(
+            props.is_empty(),
+            "{name}: an invalid gradient must emit no property verdict: {props:?}"
+        );
+        let records: Vec<serde_json::Value> = String::from_utf8_lossy(&prove.stdout)
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("NDJSON"))
+            .collect();
+        assert!(
+            records
+                .iter()
+                .any(|record| record["kind"] == "error" && record["stage"] == "check"),
+            "{name}: missing pre-proof checker error: {records:?}"
+        );
+
+        let build = Command::cargo_bin("chelis")
+            .expect("binary")
+            .env("CHELIS_STYLE_GATE_DISABLE", "1")
+            .args([
+                "build",
+                path.to_str().unwrap(),
+                "--target",
+                "c",
+                "--output",
+                dir.path().join(format!("{name}-build")).to_str().unwrap(),
+            ])
+            .output()
+            .expect("run build");
+        assert!(
+            !build.status.success(),
+            "{name} non-float gradient unexpectedly built\nstdout={}\nstderr={}",
+            String::from_utf8_lossy(&build.stdout),
+            String::from_utf8_lossy(&build.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&build.stderr)
+                .contains("grad requires a scalar floating output"),
+            "{name} build did not reject the non-floating result specifically:\n{}",
+            String::from_utf8_lossy(&build.stderr)
+        );
+    }
+}
+
+// chelis#923 negative parity: the prover-owned symbolic transform must not
+// certify a conditional gradient while the compiler's scalar-AD transform
+// cannot build the same program.
+#[cfg(feature = "smt")]
+#[test]
+fn issue_923_conditional_grad_is_unsupported_by_prove_and_build() {
+    let source = r#"module Audit.Main
+
+def conditional_value(x: f32) -> f32 =
+  if x > 0.0 then x * x else 0.0 - x
+
+def conditional_derivative(x: f32) -> f32 =
+  grad(conditional_value, wrt=x)(x)
+
+out = conditional_derivative(2.0)
+
+@property conditional_grad_nonnegative forall(x: f32):
+  (grad(conditional_value, wrt=x)(x) >= 0.0)
+"#;
+    let dir = write_prop(source);
+    let path = dir.path().join("prop.ch");
+    let prove = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "prove",
+            path.to_str().unwrap(),
+            "--tier",
+            "smt-only",
+            "--json",
+        ])
+        .output()
+        .expect("run prove");
+    assert_eq!(prove.status.code(), Some(2));
+    let props = property_records(&prove.stdout);
+    assert_eq!(props.len(), 1, "records: {props:?}");
+    assert_eq!(props[0]["status"], "unsupported", "{}", props[0]);
+    assert_eq!(
+        props[0]["reason"], "scalar grad SMT lowering does not support conditionals",
+        "{}",
+        props[0]
+    );
+
+    let build = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            dir.path().join("build").to_str().unwrap(),
+        ])
+        .output()
+        .expect("run build");
+    assert!(
+        !build.status.success(),
+        "conditional scalar grad unexpectedly built; the prover subset may \
+         only widen after compiler support lands\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&build.stdout),
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&build.stderr);
+    assert!(
+        stderr.contains("can't lower these defs"),
+        "build must fail at the compiler scalar-AD boundary, got:\n{stderr}"
+    );
+}
+
+// The executable-parity oracle also found that the compiler scalar-AD path
+// rejects casts in differentiated bodies. Keep Tier B fail-closed until that
+// compiler boundary widens.
+#[cfg(feature = "smt")]
+#[test]
+fn issue_923_cast_grad_is_unsupported_by_prove_and_build() {
+    let source = r#"def cast_value(x: f32) -> f32 = cast(x * x, f32)
+def cast_derivative(x: f32) -> f32 = grad(cast_value, wrt=x)(x)
+out = cast_derivative(2.0)
+@property cast_grad_nonnegative forall(x: f32):
+  (grad(cast_value, wrt=x)(x) >= 0.0)
+"#;
+    let dir = write_prop(source);
+    let path = dir.path().join("prop.ch");
+    let prove = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "prove",
+            path.to_str().unwrap(),
+            "--tier",
+            "smt-only",
+            "--json",
+        ])
+        .output()
+        .expect("run prove");
+    assert_eq!(prove.status.code(), Some(2));
+    let props = property_records(&prove.stdout);
+    assert_eq!(props.len(), 1, "records: {props:?}");
+    assert_eq!(props[0]["status"], "unsupported", "{}", props[0]);
+    assert_eq!(
+        props[0]["reason"],
+        "scalar grad SMT lowering does not support casts in differentiated bodies",
+        "{}",
+        props[0]
+    );
+
+    let build = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            dir.path().join("cast-build").to_str().unwrap(),
+        ])
+        .output()
+        .expect("run build");
+    assert!(
+        !build.status.success(),
+        "cast-bearing scalar grad unexpectedly built\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&build.stdout),
+        String::from_utf8_lossy(&build.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&build.stderr).contains("can't lower these defs"),
+        "build must fail at the compiler scalar-AD boundary:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+}
+
+// Independent three-way parity oracle for the supported intersection:
+//  1. the compiler evaluator executes scalar AD,
+//  2. generated C executes the compiler's backend transform, and
+//  3. Tier B proves the same derivative's closed form symbolically.
+// A finite-difference reference guards against evaluator/backend agreement on
+// the same wrong transform.
+#[cfg(feature = "smt")]
+#[test]
+fn issue_923_symbolic_grad_matches_evaluator_backend_and_finite_difference() {
+    if !common::gcc_available() {
+        eprintln!("skipping: no host C compiler available");
+        return;
+    }
+    let runtime_source = r#"def square(x: f32) -> f32 = x * x
+def quadratic(x: f32) -> f32 = {
+  squared = square(x)
+  squared + x
+}
+def quadratic_grad(x: f32) -> f32 =
+  grad(quadratic, wrt=x)(x)
+
+out = quadratic_grad(3.0)
+"#;
+    let proof_source = format!(
+        r#"{runtime_source}
+
+@property quadratic_grad_formula forall(x: f32):
+  (grad(quadratic, wrt=x)(x) == 2.0 * x + 1.0)
+"#
+    );
+    let dir = write_prop(&proof_source);
+    let path = dir.path().join("prop.ch");
+    let runtime_dir = write_prop(runtime_source);
+    let runtime_path = runtime_dir.path().join("prop.ch");
+
+    let eval = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["eval", "--file", runtime_path.to_str().unwrap()])
+        .output()
+        .expect("run evaluator");
+    assert!(
+        eval.status.success(),
+        "evaluator failed:\n{}",
+        String::from_utf8_lossy(&eval.stderr)
+    );
+    let eval_stdout = String::from_utf8(eval.stdout).expect("utf-8 evaluator output");
+    let eval_value = parse_scalar_out(&eval_stdout);
+
+    let backend_stdout = common::build_and_run(runtime_source, "issue_923_grad_parity");
+    let backend_value = parse_scalar_out(&backend_stdout);
+
+    let prove = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "prove",
+            path.to_str().unwrap(),
+            "--tier",
+            "smt-only",
+            "--json",
+        ])
+        .output()
+        .expect("run prover");
+    assert!(
+        prove.status.success(),
+        "symbolic formula did not prove:\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&prove.stdout),
+        String::from_utf8_lossy(&prove.stderr)
+    );
+    let props = property_records(&prove.stdout);
+    assert_eq!(props.len(), 1, "records: {props:?}");
+    assert_eq!(props[0]["status"], "passed", "{}", props[0]);
+    assert_eq!(props[0]["proof_tier"], "smt", "{}", props[0]);
+
+    let quadratic = |x: f64| x * x + x;
+    let h = 1e-4;
+    let finite_difference = (quadratic(3.0 + h) - quadratic(3.0 - h)) / (2.0 * h);
+    for (surface, value) in [("evaluator", eval_value), ("generated C", backend_value)] {
+        assert!(
+            (value - finite_difference).abs() < 1e-5,
+            "{surface} derivative {value} disagrees with finite difference {finite_difference}"
+        );
+        assert!(
+            (value - 7.0).abs() < 1e-6,
+            "{surface} derivative must equal the proved closed form 7.0, got {value}"
+        );
+    }
+    assert!(
+        (eval_value - backend_value).abs() < 1e-7,
+        "evaluator/backend mismatch: {eval_value} vs {backend_value}"
+    );
+}
+
+#[cfg(feature = "smt")]
+fn parse_scalar_out(stdout: &str) -> f64 {
+    stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("out = "))
+        .and_then(|value| value.trim().parse().ok())
+        .or_else(|| stdout.trim().parse().ok())
+        .unwrap_or_else(|| panic!("missing scalar `out` in:\n{stdout}"))
+}
+
 // chelis#425 regression lock (stale-fixed by chelis#426): a NESTED helper call
 // written DIRECTLY at the property goal site -- not pushed into a def body --
 // must lower to the SMT tier and prove a TRUE goal. The bug was that nested
@@ -2800,4 +3476,265 @@ def my_add(x: f32, y: f32) -> f32 = x + y
         refs.contains(&Value::String("my_add".to_string())),
         "references must contain 'my_add': {refs:?}"
     );
+    assert_eq!(
+        summary["dependency_graph"]["status"], "unavailable",
+        "a bare Surf file has no linker-owned package/module identity"
+    );
+}
+
+#[cfg(feature = "chelis-prove")]
+#[test]
+fn prove_json_dependency_graph_uses_linker_owned_ids_and_source_ownership() {
+    let dir = tempdir().expect("tempdir");
+    let root = dir.path().join("graphapp");
+    write_file(
+        &root.join("reef.toml"),
+        &format!(
+            r#"[package]
+name = "graphapp"
+version = "0.1.0"
+compiler = "={}"
+module_prefix = "Graph"
+"#,
+            env!("CARGO_PKG_VERSION")
+        ),
+    );
+    write_file(
+        &root.join("src/a.ch"),
+        "module Graph.A\n\
+         import Graph.B (same, from_b, b_cycle)\n\
+         def same(x: f32) -> f32 = x\n\
+         def unused(x: f32) -> f32 = x\n\
+         def through_b(x: f32) -> f32 = from_b(x)\n\
+         def a_cycle(x: f32) -> f32 = if (x <= 0.0) then 0.0 else b_cycle(x - 1.0)\n\
+         @property selected forall(same: f32): through_b(same) == same\n",
+    );
+    write_file(
+        &root.join("src/b.ch"),
+        "module Graph.B\n\
+         import Graph.A (a_cycle, through_b)\n\
+         export (same, from_b)\n\
+         dim rows\n\
+         type Wrapped =\n\
+           | Wrapped { value: f32 }\n\
+         type WrappedAlias = Wrapped\n\
+         def same(x: f32) -> f32 = x + 0.0\n\
+         def from_b(x: f32) -> f32 = same(x)\n\
+         macro via_macro(x) = same(x)\n\
+         def shaped(x: tensor[rows, f32]) -> tensor[rows, f32] = x\n\
+         def make(x: f32) -> Wrapped = Wrapped { value: x }\n\
+         def nonnegative(x: f32) -> bool = x >= 0.0\n\
+         @opaque\n\
+         @invariant(guard) nonnegative(guard.value)\n\
+         type Guard =\n\
+           | Guard { value: f32 }\n\
+         def b_cycle(x: f32) -> f32 = if (x <= 0.0) then 0.0 else a_cycle(x - 1.0)\n",
+    );
+    let entry = root.join("src/a.ch");
+
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "prove",
+            entry.to_str().unwrap(),
+            "--json",
+            "--tier",
+            "fuzz-only",
+        ])
+        .output()
+        .expect("run prove");
+    assert!(
+        output.status.success(),
+        "stdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let summary = property_summary(&output.stdout);
+    let graph = &summary["dependency_graph"];
+    assert_eq!(graph["status"], "complete", "{graph}");
+    let declarations = graph["declarations"].as_array().expect("declarations");
+    let edges = graph["edges"].as_array().expect("edges");
+
+    let find = |module: &str, name: &str| {
+        declarations
+            .iter()
+            .find(|node| node["module"] == module && node["name"] == name)
+            .unwrap_or_else(|| panic!("missing {module}.{name}: {declarations:?}"))
+    };
+    let a_same = find("Graph.A", "same");
+    let b_same = find("Graph.B", "same");
+    let selected = find("Graph.A", "selected");
+    let through_b = find("Graph.A", "through_b");
+    let a_cycle = find("Graph.A", "a_cycle");
+    let b_cycle = find("Graph.B", "b_cycle");
+    let from_b = find("Graph.B", "from_b");
+    let unused = find("Graph.A", "unused");
+    let rows = find("Graph.B", "rows");
+    let wrapped = find("Graph.B", "Wrapped");
+    let wrapped_constructor = declarations
+        .iter()
+        .find(|node| {
+            node["module"] == "Graph.B"
+                && node["name"] == "Wrapped"
+                && node["kind"] == "constructor"
+        })
+        .expect("constructor node");
+    let wrapped_alias = find("Graph.B", "WrappedAlias");
+    let via_macro = find("Graph.B", "via_macro");
+    let shaped = find("Graph.B", "shaped");
+    let make = find("Graph.B", "make");
+    let guard = find("Graph.B", "Guard");
+    let nonnegative = find("Graph.B", "nonnegative");
+    assert_ne!(
+        a_same["id"], b_same["id"],
+        "module collisions need distinct ids"
+    );
+    assert_eq!(unused["source"]["file"], "src/a.ch");
+    assert!(unused["source"]["span"]["len"].as_u64().unwrap() > 0);
+    assert!(
+        edges
+            .iter()
+            .any(|edge| edge["from"] == selected["id"] && edge["to"] == through_b["id"]),
+        "property parameter shadowing must not create an edge to Graph.A.same: {edges:?}"
+    );
+    assert!(
+        !edges
+            .iter()
+            .any(|edge| edge["from"] == selected["id"] && edge["to"] == a_same["id"]),
+        "the parameter named same shadows the declaration: {edges:?}"
+    );
+    assert!(
+        edges
+            .iter()
+            .any(|edge| edge["from"] == through_b["id"] && edge["to"] == from_b["id"]),
+        "import must resolve across the module boundary: {edges:?}"
+    );
+    assert!(
+        edges
+            .iter()
+            .any(|edge| edge["from"] == a_cycle["id"] && edge["to"] == b_cycle["id"])
+            && edges
+                .iter()
+                .any(|edge| edge["from"] == b_cycle["id"] && edge["to"] == a_cycle["id"]),
+        "cross-module cycles must retain both linker-owned edges: {edges:?}"
+    );
+    assert!(
+        edges
+            .iter()
+            .any(|edge| edge["from"] == from_b["id"] && edge["to"] == b_same["id"]),
+        "same-name imported/local declarations must resolve by linker identity: {edges:?}"
+    );
+    assert_eq!(rows["kind"], "dimension");
+    assert!(
+        edges
+            .iter()
+            .any(|edge| edge["from"] == shaped["id"] && edge["to"] == rows["id"]),
+        "dimension declarations are graph definitions: {edges:?}"
+    );
+    assert_eq!(wrapped["kind"], "type");
+    assert_ne!(wrapped["id"], wrapped_constructor["id"]);
+    assert!(
+        edges
+            .iter()
+            .any(|edge| edge["from"] == wrapped_alias["id"] && edge["to"] == wrapped["id"]),
+        "type-alias references must target the type node: {edges:?}"
+    );
+    assert!(
+        edges
+            .iter()
+            .any(|edge| edge["from"] == make["id"] && edge["to"] == wrapped_constructor["id"]),
+        "constructor references must not collapse into the same-named type: {edges:?}"
+    );
+    assert!(
+        edges
+            .iter()
+            .any(|edge| edge["from"] == via_macro["id"] && edge["to"] == b_same["id"]),
+        "macro bodies participate in the resolved graph: {edges:?}"
+    );
+    assert!(
+        edges
+            .iter()
+            .any(|edge| edge["from"] == guard["id"] && edge["to"] == nonnegative["id"]),
+        "invariant-only references participate in the graph: {edges:?}"
+    );
+
+    let second = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "prove",
+            entry.to_str().unwrap(),
+            "--json",
+            "--tier",
+            "fuzz-only",
+        ])
+        .output()
+        .expect("repeat prove");
+    assert!(second.status.success());
+    assert_eq!(
+        property_summary(&second.stdout)["dependency_graph"],
+        *graph,
+        "stable ids and deterministic ordering must survive a repeat run"
+    );
+}
+
+#[test]
+fn prove_json_dependency_graph_marks_deep_analysis_unavailable() {
+    let dir = tempdir().expect("tempdir");
+    let input = dir.path().join("empty.dp");
+    std::fs::write(&input, "(module {})\n").expect("write Deep");
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["prove", input.to_str().unwrap(), "--json"])
+        .output()
+        .expect("run prove");
+    let summary = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|row| row["kind"] == "summary")
+        .expect("summary");
+    assert_eq!(summary["dependency_graph"]["status"], "unavailable");
+    assert!(
+        summary["dependency_graph"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("Deep"),
+        "{summary}"
+    );
+}
+
+#[cfg(feature = "chelis-prove")]
+#[test]
+fn prove_json_dependency_graph_distinguishes_complete_empty_from_unavailable() {
+    let dir = tempdir().expect("tempdir");
+    let root = dir.path().join("emptygraph");
+    write_file(
+        &root.join("reef.toml"),
+        &format!(
+            r#"[package]
+name = "emptygraph"
+version = "0.1.0"
+compiler = "={}"
+module_prefix = "Empty"
+"#,
+            env!("CARGO_PKG_VERSION")
+        ),
+    );
+    let entry = root.join("src/main.ch");
+    write_file(&entry, "module Empty.Main\n");
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["prove", entry.to_str().unwrap(), "--json"])
+        .output()
+        .expect("run prove");
+    assert!(
+        output.status.success(),
+        "stdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let graph = &property_summary(&output.stdout)["dependency_graph"];
+    assert_eq!(graph["status"], "complete");
+    assert_eq!(graph["declarations"], serde_json::json!([]));
+    assert_eq!(graph["edges"], serde_json::json!([]));
+    assert!(graph.get("reason").is_none(), "{graph}");
 }

@@ -257,6 +257,20 @@ binary at `~/.chelis/bin/<name>`, and records it in `reef.lock` via a new
 reuses `install_validated_artifact_pair`, the shipped SHA-256 helpers,
 `install_from_github`, and `try_github_token` (added in chelis#571).
 
+Installed source packages also feed the cross-process prepared-graph and
+compiled-context caches (chelis#924). A registry package retains its extracted
+source root and its archive/shell identities in `PreparedReefGraph`; cache
+determinants additionally cover compiler version, canonical project root,
+manifests, `reef.lock`, and the relative path plus exact bytes of every `.ch`
+file in every declared source root. Add/delete/rename operations are therefore
+cache-invalidating events. Prepared graphs are built between equal pre/post
+live-inventory snapshots, and loads independently recompute that inventory;
+concurrent mutation retries rather than pairing v1 declarations with a v2
+hash. Source-root symlinks escaping the canonical package root fail closed.
+Both caches use versioned, integrity-checked envelopes and rebuild on
+corruption or staleness. A changed published or editable dependency therefore
+cannot reuse compiled state from the previous graph.
+
 ## 7. Layer 2 — orchestration: `chelis reef setup`
 
 **Implemented (WS-C).** `chelis reef setup [--path <PATH>]` brings a

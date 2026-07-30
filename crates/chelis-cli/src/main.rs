@@ -1132,19 +1132,6 @@ fn cmd_eval(
                 let source = fs::read_to_string(path)?;
                 match run_eval_in_context(package_root, &source, json) {
                     Ok(()) => return Ok(()),
-                    Err(EvalInContextError::HashUnsupported) => {
-                        // The Phase G hash step does not yet cover
-                        // `LocalRegistry` packages (chelis-std published
-                        // via `chelis reef publish`). Phase I will
-                        // extend `LoadedPackage` to retain the
-                        // extracted cache root so `source_digests` can
-                        // hash them. Until then, fall through to the
-                        // legacy `prepare_eval` path so users on a
-                        // local-registry-backed chelis-std setup keep
-                        // the same eval behavior they had before the
-                        // Phase H refactor — byte-identical output to
-                        // pre-refactor on the same input.
-                    }
                     Err(EvalInContextError::Compile(msg)) => return Err(msg.into()),
                 }
             }
@@ -1209,16 +1196,9 @@ fn detect_eval_package_root(file: &Path) -> Result<Option<PathBuf>, Box<dyn std:
     }
 }
 
-/// Outcomes from the Phase H new path. Distinct from a generic boxed
-/// error so the caller can fall back to the legacy `prepare_eval` path
-/// on a Phase-I-shaped hash gap (`LocalRegistry` packages aren't yet
-/// hashable) without swallowing real compile / eval failures.
+/// Outcome from the Phase H context path. Kept distinct from a generic boxed
+/// error so compile/eval diagnostics retain their established rendering.
 enum EvalInContextError {
-    /// `compile_reef_context` couldn't hash the package graph because
-    /// `source_digests` doesn't yet cover `LocalRegistry`. The CLI can
-    /// fall back to the legacy path here without losing correctness —
-    /// the legacy path doesn't compute that hash.
-    HashUnsupported,
     /// Any other failure: type error, effect error, eval error, etc.
     /// Propagate to the user with the same format the legacy path used.
     Compile(String),
@@ -1248,18 +1228,6 @@ fn run_eval_in_context(
         match chelis_compiler_api::load_or_compile_for_package(&reef_home, package_root, true) {
             Ok(ctx) => ctx,
             Err(err) => {
-                // The hash step is the one place `compile_reef_context`
-                // can fail today on a graph the legacy path handles fine
-                // (LocalRegistry source_digests TODO). Detect that
-                // specifically — anything else is a real error and must
-                // not be silently swallowed.
-                let is_hash_unsupported = err
-                    .errors
-                    .iter()
-                    .any(|d| d.kind == "hash_error" && d.message.contains("LocalRegistry"));
-                if is_hash_unsupported {
-                    return Err(EvalInContextError::HashUnsupported);
-                }
                 let msg = err
                     .errors
                     .iter()
@@ -6330,8 +6298,7 @@ fn compile_check_in_exec_context(
 /// `prepare_eval_in_context(ctx, source)`. Per-file work drops from
 /// "full pipeline on ~50 modules" to "parse + check + lower the test
 /// file's ~10 lines." The `ReefGraph` arm stays on the legacy path
-/// for `LocalRegistry` packages whose graph the new context-builder
-/// can't yet hash.
+/// for direct workers that were not handed a compiled context.
 #[derive(Clone)]
 enum PreparedTestEval {
     Legacy(chelis_compiler_api::compiler::PreparedEval),
@@ -6390,10 +6357,8 @@ fn prepare_eval_in_exec_context(
                 chelis_reef::compile_with_reef_graph(exec_context.reef_graph(), synth_decls)
                     .map_err(|e| e.to_string())?;
             let source_text = chelis_surf::format::format_program(&prepared.decls);
-            // Phase K: `prepare_eval` is deprecated externally but retained
-            // as the LocalRegistry fallback path until source_digests grows
-            // LocalRegistry support. Silence the deprecation here — this
-            // is the canonical fallback.
+            // `prepare_eval` is deprecated externally but retained for a
+            // directly-invoked worker that was not handed a compiled context.
             #[allow(deprecated)]
             let prepared_eval = chelis_compiler_api::compiler::prepare_eval(EvalRequest {
                 source_kind: SourceKind::Surf,

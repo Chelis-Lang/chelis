@@ -46,6 +46,31 @@ record before applying the abstraction. For `std.normal_cdf.reflection`, the
 lowering recognizes syntactic `normal_cdf(x)` / `normal_cdf(-x)` pairs and
 asserts the reflection coupling between their fresh symbols.
 
+### Scalar gradient goals in Tier B
+
+Tier B lowers an applied scalar gradient into the same real-arithmetic
+obligation language as an ordinary scalar property. The supported v1 shape is
+`grad(f, wrt=x)(args...)`, with exactly one explicit `wrt`, where `f` is an
+inline lambda or pure top-level function whose parameters and result are
+`f32`/`f64`. The differentiated body may contain scalar literals and variables,
+negation, `+`, `-`, `*`, `/`, named scalar block bindings, and recursively
+inlined pure scalar helpers with `f32`/`f64` results within the normal Tier B
+inlining-depth bound. Argument substitutions are resolved in the caller's
+scope before differentiation.
+
+This is a prover-owned symbolic dual lowering; it must agree with Chelis scalar
+AD semantics but does not replace the compiler's `grad` transform. Its SMT
+verdict retains the `real_arithmetic` qualifier. Multi-target or implicit
+`wrt`, tensor/ADT gradients, non-floating results, conditionals, casts in
+differentiated bodies, effects, recursion, nested transforms, helper-inlining
+depth overflow, unsupported intrinsics, and malformed calls do not silently sample under
+`smt-only`: they return
+`status:"unsupported"` with a reason naming the scalar-gradient capability
+boundary. Under `auto`, the same boundary may continue to Tier C fuzz
+validation. In particular, conditionals remain outside this prover-owned
+subset until the compiler's scalar AD transform can build the same programs.
+Float casts in differentiated bodies follow the same executable-parity rule.
+
 ## Deep Representation
 
 Desugaring emits a `defsig` plus an ordinary property-tagged `def`:
@@ -171,8 +196,37 @@ summary record.
 {"kind":"property","name":"call_price_non_negative","status":"passed","composite_verdict":"fuzz_validated","qualifiers":["fuzz_base"],"assumptions":[],"samples":100,"seed":0}
 {"kind":"property","name":"req_PRC_001","status":"failed","composite_verdict":"failed","assumptions":[],"samples":1,"seed":0,"source":{"kind":"bridge:c-earchin","spans":"references/pricing_rules.spans.json"}}
 {"kind":"property","name":"tensor_symbolic_shape","status":"unsupported","composite_verdict":"unsupported","assumptions":[],"reason":"symbolic tensor dimensions are not supported in L2 v1"}
-{"kind":"summary","total":3,"passed":1,"failed":1,"unsupported":1,"errors":0}
+{"kind":"summary","total":3,"passed":1,"failed":1,"unsupported":1,"errors":0,"dependency_graph":{"status":"complete","declarations":[{"id":"decl:…","name":"call_price","kind":"function","package":"pricing","module":"Pricing.BlackScholes","source":{"file":"src/black_scholes.ch","span":{"offset":42,"len":180}}}],"edges":[{"from":"decl:…property","to":"decl:…"}]}}
 ```
+
+The summary's `dependency_graph` is the compiler-owned declaration ownership
+wire (chelis#922):
+
+- `status:"complete"` means linker analysis ran. Empty `declarations` and
+  `edges` arrays are a complete empty result, not missing analysis.
+- `status:"unavailable"` carries a `reason` and never carries a guessed partial
+  graph. Bare Surf files have no stable Reef package/module identity, and Deep
+  inputs do not carry compiler-owned source-file ownership, so both are
+  unavailable.
+- A declaration `id` is the deterministic
+  `(package,module,kind,author-facing-name)` identity. Body and span edits keep
+  the ID stable; a rename changes it. Every node also carries the package,
+  module, declaration kind, and package-relative source file plus byte span.
+- Edges are stable-ID `from`/`to` pairs derived from Reef's linker-resolved Surf
+  AST. Consumers must not reconstruct ownership by parsing source. The graph
+  covers functions, values, properties, types, constructors, aliases, macros,
+  and each module-level dimension declaration; type/invariant/macro references
+  participate alongside value references.
+- Every root-package declaration is present, including unused declarations.
+  Referenced dependency-package declarations are included transitively. Linker
+  identity preserves same-name declarations, lexical shadowing, imports, and
+  cycles without name guessing.
+- A multi-input summary is `unavailable` if any selected input lacks complete
+  attribution; Chelis does not present a partial union as complete.
+
+The legacy name-only `dependency_edges` array remains additive and deprecated
+for at least one published release after `dependency_graph` is introduced.
+New consumers use only `dependency_graph`.
 
 Every `{kind:"property"}` and `{kind:"obligation"}` result record carries:
 

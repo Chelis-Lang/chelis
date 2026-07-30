@@ -34,7 +34,7 @@
 
 use chelis_deep::DeepTag;
 use chelis_ir::lower::LoweredLibrary;
-use chelis_reef::{PreparedReefGraph, SourceDigest, prepare_reef_graph};
+use chelis_reef::{PreparedReefGraph, SourceDigest, prepare_reef_graph_cached};
 use chelis_types::{CheckedProgram, TypeEnv, build_compiled_library_context, check_linearity};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -407,7 +407,7 @@ impl CompiledContext {
         // Recompute the source hash from the live package_dir. If the file
         // was named with a hash prefix that collides with a different
         // package, the recomputed hash will not match → cache miss.
-        let live_graph = prepare_reef_graph(package_dir).map_err(CacheError::Reef)?;
+        let live_graph = prepare_reef_graph_cached(package_dir).map_err(CacheError::Reef)?;
         let live_digests = live_graph.source_digests().map_err(CacheError::Reef)?;
         let live_hash = ContextHash::from_digests(&live_digests);
         if envelope.source_hash != live_hash {
@@ -582,7 +582,7 @@ pub fn load_or_compile_for_package(
     // mandatory pre-work for both the cache probe AND a full compile, so
     // we always pay it. On Coral-shape packages this is ~5s; the savings
     // come from skipping the rest of `compile_reef_context` on a hit.
-    let live_graph = match prepare_reef_graph(package_dir) {
+    let live_graph = match prepare_reef_graph_cached(package_dir) {
         Ok(g) => g,
         Err(e) => return Err(reef_error(&e)),
     };
@@ -851,26 +851,13 @@ pub fn compile_reef_context(
         }
     };
 
-    let reef_state = prepare_reef_graph(package_dir).map_err(|e| reef_error(&e))?;
+    let reef_state = prepare_reef_graph_cached(package_dir).map_err(|e| reef_error(&e))?;
     log_phase("prepare_reef_graph", &mut t);
-    let digests = match reef_state.source_digests() {
-        Ok(digests) => Some(digests),
-        Err(e) if e.contains("LocalRegistry") => {
-            // LocalRegistry-backed dependency sources cannot be hashed yet
-            // because the loaded package does not retain its registry cache
-            // root. Disk-cache lookup still errors before this point in
-            // `load_or_compile_for_package`, but an uncached in-memory
-            // context build is still valid and is needed by `chelis test`
-            // to share one compiled dependency graph across workers.
-            None
-        }
-        Err(e) => return Err(hash_error(&e)),
-    };
+    let digests = reef_state
+        .source_digests()
+        .map_err(|error| hash_error(&error))?;
     log_phase("source_digests", &mut t);
-    let source_hash = digests
-        .as_deref()
-        .map(ContextHash::from_digests)
-        .unwrap_or(ContextHash([0u8; 32]));
+    let source_hash = ContextHash::from_digests(&digests);
     log_phase("hash_digests", &mut t);
 
     // Phase C+0e / chelis#451: build the `(TypeEnv, library CheckedProgram,

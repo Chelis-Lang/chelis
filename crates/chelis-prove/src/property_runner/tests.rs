@@ -94,6 +94,244 @@ fn fuzz_counterexample_records_accepted_shrink_steps() {
     );
 }
 
+#[cfg(feature = "smt")]
+const INLINE_SCALAR_GRAD_PROPERTY: &str = "module M
+@property inline_grad_negative forall(d: f32, r: f32, g: f32)
+where (d > 0.5), (r > g), (r < 9.5):
+  (grad(fn (dd: f32, rr: f32, gg: f32) ->
+    (dd / (rr - gg)), wrt=rr)(d, r, g) < 0.0)
+";
+
+#[cfg(feature = "smt")]
+#[test]
+fn scalar_grad_inline_lambda_reaches_smt() {
+    let outcomes = run_surf(INLINE_SCALAR_GRAD_PROPERTY, "smt-only");
+    assert_eq!(outcomes.len(), 1);
+    let outcome = &outcomes[0];
+    assert_eq!(outcome.status, PropertyStatus::Passed, "{outcome:?}");
+    assert_eq!(outcome.proof_tier, PropertyTier::Smt, "{outcome:?}");
+    assert_eq!(
+        outcome.composite_verdict,
+        CompositeVerdict::ProvenModuloRealArithmetic,
+        "{outcome:?}"
+    );
+    assert_eq!(outcome.samples, 0, "{outcome:?}");
+    assert!(
+        !outcome.assumptions.is_empty()
+            && outcome.assumptions.iter().all(|assumption| {
+                assumption
+                    .non_vacuity
+                    .as_ref()
+                    .is_some_and(|record| record.status == NonVacuityStatus::Established)
+            }),
+        "the gradient proof must retain established non-vacuity: {outcome:?}"
+    );
+}
+
+#[cfg(feature = "smt")]
+#[test]
+fn scalar_grad_matches_closed_form_derivative() {
+    let outcomes = run_surf(
+        "module M
+@property quotient_grad_formula forall(d: f32, r: f32, g: f32)
+where (r > g):
+  (grad(fn (dd: f32, rr: f32, gg: f32) ->
+    (dd / (rr - gg)), wrt=rr)(d, r, g)
+    == (0.0 - d) / ((r - g) * (r - g)))
+",
+        "smt-only",
+    );
+    assert_eq!(outcomes.len(), 1);
+    let outcome = &outcomes[0];
+    assert_eq!(outcome.status, PropertyStatus::Passed, "{outcome:?}");
+    assert_eq!(outcome.proof_tier, PropertyTier::Smt, "{outcome:?}");
+    assert_eq!(
+        outcome.composite_verdict,
+        CompositeVerdict::ProvenModuloRealArithmetic,
+        "{outcome:?}"
+    );
+}
+
+#[cfg(feature = "smt")]
+#[test]
+fn scalar_grad_reversed_claim_is_disproved_by_smt() {
+    let source = INLINE_SCALAR_GRAD_PROPERTY.replace("< 0.0)", "> 0.0)");
+    let outcomes = run_surf(&source, "smt-only");
+    assert_eq!(outcomes.len(), 1);
+    let outcome = &outcomes[0];
+    assert_eq!(outcome.status, PropertyStatus::Failed, "{outcome:?}");
+    assert_eq!(outcome.proof_tier, PropertyTier::Smt, "{outcome:?}");
+    assert_eq!(outcome.samples, 0, "{outcome:?}");
+    assert!(outcome.counterexample.is_some(), "{outcome:?}");
+}
+
+#[cfg(feature = "smt")]
+const NAMED_SCALAR_GRAD_PROPERTY: &str = "module M
+def gap(rr: f32, gg: f32) -> f32 = rr - gg
+def quotient_value(dd: f32, rr: f32, gg: f32) -> f32 = {
+  denominator = gap(rr, gg)
+  dd / denominator
+}
+@property named_grad_negative forall(d: f32, r: f32, g: f32)
+where (d > 0.5), (r > g), (r < 9.5):
+  (grad(quotient_value, wrt=rr)(d, r, g) < 0.0)
+";
+
+#[cfg(feature = "smt")]
+#[test]
+fn scalar_grad_named_function_handles_helpers_and_blocks() {
+    let outcomes = run_surf(NAMED_SCALAR_GRAD_PROPERTY, "smt-only");
+    assert_eq!(outcomes.len(), 1);
+    let outcome = &outcomes[0];
+    assert_eq!(outcome.status, PropertyStatus::Passed, "{outcome:?}");
+    assert_eq!(outcome.proof_tier, PropertyTier::Smt, "{outcome:?}");
+    assert_eq!(
+        outcome.composite_verdict,
+        CompositeVerdict::ProvenModuloRealArithmetic,
+        "{outcome:?}"
+    );
+}
+
+#[cfg(feature = "smt")]
+#[test]
+fn scalar_grad_cast_fails_closed_with_specific_reason() {
+    let outcomes = run_surf(
+        "module M
+def cast_value(x: f32) -> f32 = cast(x * x, f32)
+@property cast_grad forall(x: f32):
+  (grad(cast_value, wrt=x)(x) >= 0.0)
+",
+        "smt-only",
+    );
+    assert_eq!(outcomes.len(), 1);
+    let outcome = &outcomes[0];
+    assert_eq!(outcome.status, PropertyStatus::Unsupported, "{outcome:?}");
+    assert_eq!(
+        outcome.reason.as_deref(),
+        Some("scalar grad SMT lowering does not support casts in differentiated bodies"),
+        "{outcome:?}"
+    );
+}
+
+#[cfg(feature = "smt")]
+#[test]
+fn scalar_grad_conditional_fails_closed_with_specific_reason() {
+    let outcomes = run_surf(
+        "module M
+def conditional_value(x: f32) -> f32 =
+  if x > 0.0 then x * x else 0.0 - x
+@property conditional_grad forall(x: f32):
+  (grad(conditional_value, wrt=x)(x) >= 0.0)
+",
+        "smt-only",
+    );
+    assert_eq!(outcomes.len(), 1);
+    let outcome = &outcomes[0];
+    assert_eq!(outcome.status, PropertyStatus::Unsupported, "{outcome:?}");
+    assert_eq!(outcome.proof_tier, PropertyTier::Smt, "{outcome:?}");
+    assert_eq!(
+        outcome.reason.as_deref(),
+        Some("scalar grad SMT lowering does not support conditionals"),
+        "{outcome:?}"
+    );
+}
+
+#[cfg(feature = "smt")]
+#[test]
+fn scalar_grad_implicit_wrt_fails_closed_with_specific_reason() {
+    let outcomes = run_surf(
+        "module M
+@property implicit_grad forall(x: f32):
+  (grad(fn (xx: f32) -> xx * xx)(x) >= 0.0)
+",
+        "smt-only",
+    );
+    assert_eq!(outcomes.len(), 1);
+    assert_eq!(outcomes[0].status, PropertyStatus::Unsupported);
+    assert_eq!(
+        outcomes[0].reason.as_deref(),
+        Some("scalar grad SMT lowering requires exactly one explicit `wrt` parameter")
+    );
+}
+
+#[cfg(feature = "smt")]
+#[test]
+fn scalar_grad_nested_transform_fails_closed_with_specific_reason() {
+    let outcomes = run_surf(
+        "module M
+@property nested_grad forall(x: f32):
+  (grad(grad(fn (xx: f32) -> xx * xx, wrt=xx), wrt=xx)(x) >= 0.0)
+",
+        "smt-only",
+    );
+    assert_eq!(outcomes.len(), 1);
+    assert_eq!(outcomes[0].status, PropertyStatus::Unsupported);
+    assert_eq!(
+        outcomes[0].reason.as_deref(),
+        Some("scalar grad SMT lowering does not support nested gradients")
+    );
+}
+
+#[cfg(feature = "smt")]
+#[test]
+fn scalar_grad_helper_depth_overflow_fails_closed_with_specific_reason() {
+    let outcomes = run_surf(
+        "module M
+def h4(x: f32) -> f32 = x * x
+def h3(x: f32) -> f32 = h4(x)
+def h2(x: f32) -> f32 = h3(x)
+def h1(x: f32) -> f32 = h2(x)
+@property deep_grad forall(x: f32):
+  (grad(h1, wrt=x)(x) >= 0.0)
+",
+        "smt-only",
+    );
+    assert_eq!(outcomes.len(), 1);
+    assert_eq!(outcomes[0].status, PropertyStatus::Unsupported);
+    assert_eq!(
+        outcomes[0].reason.as_deref(),
+        Some("scalar grad SMT lowering exceeded the helper inlining depth")
+    );
+}
+
+#[cfg(feature = "smt")]
+const UNSUPPORTED_SCALAR_GRAD_PROPERTY: &str = "module M
+@property exp_grad_positive forall(x: f32)
+where (x > 0.5), (x < 9.5):
+  (grad(fn (xx: f32) -> exp(xx), wrt=xx)(x) > 0.0)
+";
+
+#[cfg(feature = "smt")]
+#[test]
+fn unsupported_scalar_grad_operation_has_specific_prompt_reason() {
+    let outcomes = run_surf(UNSUPPORTED_SCALAR_GRAD_PROPERTY, "smt-only");
+    assert_eq!(outcomes.len(), 1);
+    let outcome = &outcomes[0];
+    assert_eq!(outcome.status, PropertyStatus::Unsupported, "{outcome:?}");
+    assert_eq!(outcome.proof_tier, PropertyTier::Smt, "{outcome:?}");
+    assert_eq!(outcome.samples, 0, "{outcome:?}");
+    assert_eq!(
+        outcome.reason.as_deref(),
+        Some("scalar grad SMT lowering does not support call `exp`"),
+        "{outcome:?}"
+    );
+}
+
+#[cfg(feature = "smt")]
+#[test]
+fn unsupported_scalar_grad_operation_still_falls_to_fuzz_under_auto() {
+    let outcomes = run_surf(UNSUPPORTED_SCALAR_GRAD_PROPERTY, "auto");
+    assert_eq!(outcomes.len(), 1);
+    let outcome = &outcomes[0];
+    assert_eq!(outcome.status, PropertyStatus::Passed, "{outcome:?}");
+    assert_eq!(outcome.proof_tier, PropertyTier::Fuzz, "{outcome:?}");
+    assert_eq!(
+        outcome.composite_verdict,
+        CompositeVerdict::FuzzValidatedEmpirical,
+        "{outcome:?}"
+    );
+}
+
 const UNKNOWN_CONTRACT_PROPERTY: &str = r#"module M
 @property unknown_contract forall(x: f32):
   x == x

@@ -46,12 +46,11 @@ looks like an evaluation produced no rows.
 
 1. `crates/chelis-cli/src/main.rs` `run_eval_emit` (L890): legacy
    eval path. Reached when `chelis eval --file <foo.ch>` runs outside
-   a reef package, or inside a reef package that the Phase H context
-   builder can't yet hash (`HashUnsupported` fallback).
+   a reef package.
 2. `crates/chelis-cli/src/main.rs` `run_eval_in_context` (L837):
    Phase H eval-in-context path. Reached when `chelis eval --file
-   <foo.ch>` runs inside a reef package whose graph the context
-   builder can hash.
+   <foo.ch>` runs inside a reef package. LocalRegistry graphs became
+   hashable in chelis#924.
 
 Both call `format_eval_result` and both short-circuit on an empty
 formatted string. The fix needs to land on both arms or the bug

@@ -55,9 +55,10 @@
 //! a hash + index.
 
 use chelis_compiler_api::compiler;
+#[cfg(debug_assertions)]
+use chelis_compiler_api::schema::WIRE_DAG_SCHEMA_VERSION;
 use chelis_compiler_api::schema::{
-    LowerRequest, LowerResult, SourceKind, WIRE_DAG_SCHEMA_VERSION, WireDag, WireDagSchemaError,
-    WireRiscOp,
+    LowerRequest, LowerResult, SourceKind, WireDag, WireDagSchemaError, WireRiscOp,
 };
 use sha2::{Digest, Sha256};
 
