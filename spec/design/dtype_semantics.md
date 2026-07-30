@@ -614,11 +614,31 @@ elaboration.
 
 Named non-goals, each with its owner, so coverage is never inferred:
 
-- **Ingress dtype SELECTION.** Parsing int64 IDs into an f32 tensor
-  launders capacity through a blessed carrier; every chokepoint here
-  governs carrier SHAPE, not conversion choices. The cast ladder's
-  named-lossy discipline ([#759]) owns it, and `AGENTS.md` §Numeric
-  Surface Discipline states the never-silently-narrow rule.
+- **Ingress dtype SELECTION - restated 2026-07-30; the first version
+  of this bullet overclaimed the non-goal.** Where BOTH ends of a
+  conversion are typed, dtype selection IS the type checker's job, and
+  the language already does it structurally: no implicit precision
+  promotion exists, every conversion is a spelled `cast`, and the
+  [#759] ladder makes the CHECKED cast the default (it traps when the
+  value does not survive the target) with lossiness only as a named
+  spelling. §C6's chokepoints add nothing there and disclaim nothing
+  there. The genuine non-goal is one step earlier, where the source
+  side has no type yet: host-lane ingestion that parses external
+  text or bytes and CHOOSES the first dtype (a CSV column read as
+  f64; a JSON number funneled to float). `csv_f64(...) ->
+  tensor[n, f64]` is a well-typed program - the defect is that the
+  source's integer-ness never existed as a type for the checker to
+  defend, and no checker can govern a conversion whose source type is
+  not in the program. The fix is still type-system-shaped: TYPE THE
+  BOUNDARY - source-faithful ingestion ADTs, the in-tree `io/json`
+  precedent (`JsonInt(int64)` beside `JsonFloat(f64)`; JSON syntax
+  distinguishes the two, so a parse that erases it discards
+  information the source format carried) - after which the checker
+  governs everything downstream and the [#759] discipline covers the
+  now-visible casts. [04-NUM-11] owns that obligation, the census's
+  std-ADT leg keeps every ingestion ADT's numeric variants visible,
+  and `AGENTS.md` §Numeric Surface Discipline states the
+  never-silently-narrow rule for boundary authors.
 - **Shell-side surface.** A shell wrapping the runtime with its own
   `(double, int)` helper is invisible to chelis CI; the mirror is a
   conform-contract row (chelis#738's lane), not this plan.

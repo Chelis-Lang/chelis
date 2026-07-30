@@ -155,7 +155,11 @@ document:
   Rust doc comment is not an authority.
 - **Never silently narrow at ingress.** Choosing a lossy dtype for ingested data
   (int64 IDs into an f32 tensor) is a decision: use the named lossy form (the
-  chelis#759 pattern) or the exact dtype, never a quiet convenience cast.
+  chelis#759 pattern) or the exact dtype, never a quiet convenience cast. Better
+  still, type the boundary so the checker can defend it: ingestion APIs preserve
+  the source format's numeric distinctions as ADT variants (`io/json`'s
+  `JsonInt(int64)` beside `JsonFloat(f64)` is the precedent), never one float
+  funnel.
 - **A new surface KIND** (a new serialization format, IPC channel, or export
   mechanism that can carry numbers) extends the §C6 enumerators in the same change
   set, or does not land.
