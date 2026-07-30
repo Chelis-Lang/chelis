@@ -243,7 +243,7 @@ fn frontend_cancellation_latency_sweep_at_repro_scale() {
         assert!(
             latency * 4 < remaining,
             "latency {latency:?} is not a small fraction of the {remaining:?} \
-             of compile still ahead — that is the pre-fix signature"
+             of compile still ahead: that is the pre-fix signature"
         );
         worst = worst.max(latency);
     }

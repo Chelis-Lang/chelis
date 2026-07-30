@@ -14,10 +14,16 @@
 //! **Expected success condition:** the probe prints `ALL PASS: 4/4`. The key
 //! lines are SIGINT-to-`KeyboardInterrupt` under the 250 ms budget during
 //! evaluation (chelis#914) and under 1 s during a front-end-dominated compile
-//! (chelis#930). Measured 50.5 ms and 22.4 ms respectively on an M-series
-//! workstation, debug build. The pre-fix baselines are "never, until the
-//! evaluation completes" and "the remaining compile time" — 17.3 s on the
-//! chelis#930 repro.
+//! (chelis#930). Measured on an M-series workstation: 49.1 ms and 62.1 ms
+//! respectively, the latter abandoning 2.9 s of a 3.9 s compile. The pre-fix
+//! baselines are "never, until the evaluation completes" and "the remaining
+//! compile time" — 17.3 s on the chelis#930 repro.
+//!
+//! Note the absolute compile time depends on how the extension was built:
+//! `uv pip install` produces a release build, so the same 1500-declaration
+//! source compiles in seconds here and in ~20 s under a debug build. The
+//! probe derives its interrupt point from a measured baseline for exactly
+//! that reason, and asserts a ratio as well as a budget.
 //!
 //! **Prerequisite:** a repo-root `.venv` (`uv venv --python 3.11`) — the same
 //! one `.cargo/config.toml` points `PYO3_PYTHON` at. The test skips with a
