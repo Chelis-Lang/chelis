@@ -491,6 +491,64 @@ class NixFlakeContractTests(unittest.TestCase):
                     self.assertFalse(staging_root.is_symlink())
 
     @REQUIRES_NIX
+    def test_stale_staging_recovery_promotes_the_staged_package(self) -> None:
+        # The staged package must differ from the invoking wrapper's package:
+        # a same-package staging root lets the later failure-path promotion
+        # mask a broken recovery branch.
+        package = Path(
+            nix_raw("build", "--no-link", "--print-out-paths", ".#chelisup")
+        )
+        with tempfile.TemporaryDirectory() as raw_fixture:
+            fixture = Path(raw_fixture) / "staged-package"
+            (fixture / "libexec").mkdir(parents=True)
+            (fixture / "libexec" / "chelisup").write_bytes(
+                b"synthetic staged chelisup binary\n"
+            )
+            staged_package = Path(
+                nix_raw(
+                    "store",
+                    "add",
+                    "--name",
+                    "chelisup-staged-fixture",
+                    str(fixture),
+                )
+            )
+
+        with tempfile.TemporaryDirectory() as raw_home:
+            home = Path(raw_home)
+            bin_dir = home / "bin"
+            bin_dir.mkdir()
+            (bin_dir / "chelis").write_bytes(
+                (staged_package / "libexec" / "chelisup").read_bytes()
+            )
+            roots = home / "nix-gcroots"
+            roots.mkdir()
+            staging_root = roots / "chelisup.next"
+            staging_root.symlink_to(staged_package)
+
+            environment = os.environ.copy()
+            environment["CHELIS_HOME"] = str(home)
+            environment["PATH"] = ""
+            failed = subprocess.run(
+                [package / "bin" / "chelisup", "install", "invalid-version"],
+                cwd=REPO_ROOT,
+                env=environment,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            self.assertNotEqual(failed.returncode, 0)
+            partial_root = roots / "chelisup.partial"
+            self.assertTrue(
+                partial_root.is_symlink(),
+                "recovery must promote the partial root for the staged package",
+            )
+            self.assertEqual(partial_root.resolve(), staged_package.resolve())
+            self.assertFalse(staging_root.exists())
+            self.assertFalse(staging_root.is_symlink())
+
+    @REQUIRES_NIX
     def test_failed_chelisup_install_preserves_the_existing_gc_root(self) -> None:
         package = Path(
             nix_raw("build", "--no-link", "--print-out-paths", ".#chelisup")

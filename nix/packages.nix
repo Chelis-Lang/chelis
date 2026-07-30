@@ -165,7 +165,7 @@ let
       ${pkgs.coreutils}/bin/mkdir -p "\$gc_root_dir"
 
       if [ -L "\$staging_root" ]; then
-        staged_package="$(${pkgs.coreutils}/bin/readlink "\$staging_root")"
+        staged_package="\$(${pkgs.coreutils}/bin/readlink "\$staging_root")"
         if copy_matches_package "\$staged_package"; then
           ${pkgs.nix}/bin/nix-store \
             --add-root "\$partial_root" \
