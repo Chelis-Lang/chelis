@@ -299,34 +299,53 @@ hints, [#959]) - the accidental-unsupported shape [05-UNS-5] forbids,
 with nothing enforcing it.
 
 The amended Phase 3 replaces the bare `hint` field on `Unsupported`
-with an OPAQUE `RejectionAuthority` type. Required fields are not the
-mechanism - required fields still admit
-`Deliberate { atom: "", hint: "" }` and `Unimplemented { issue: 0 }`.
-The mechanism is validated construction:
+with an OPAQUE `RejectionAuthority` type. Two things are NOT the
+mechanism, named so nobody re-derives them: required fields still
+admit `Deliberate { atom: "", hint: "" }`, and a grammar check still
+admits `[05-ZZZ-999]` - a well-shaped citation of an atom that exists
+nowhere, or of chelis#1 (a merged, unrelated PR), is arbitrary prose
+wearing a token. The mechanism is validated construction against
+REGISTRIES of what actually exists:
 
 - Fields are private. The only constructors are
   `RejectionAuthority::deliberate(atom: SpecAtomRef, hint)` and
   `RejectionAuthority::unimplemented(issue: IssueRef, hint)`.
-- `SpecAtomRef` and `IssueRef` are validating newtypes with private
-  fields: `SpecAtomRef::new` is a `const fn` that rejects an empty or
-  non-atom-shaped string (the `[NN-AAA-N]` grammar), and `IssueRef`
-  wraps `NonZeroU32` - issue zero is unrepresentable, and `const`
-  construction of an invalid atom is a compile-time error at the site.
-  Hints are validated non-empty the same way.
-- Direct struct-literal construction from outside the owning module is
-  a privacy error, locked by `compile_fail` doctests (the
-  `host_abi.rs` pattern).
+- `SpecAtomRef` validates in two gates: the `[NN-AAA-N]` grammar,
+  then MEMBERSHIP in the derived atom registry - a generated artifact
+  parsed from the numbered specs' blockquote atoms and locked by a
+  byte-agreement test (the §C4.3 generated-header pattern), so the
+  registry cannot drift from `spec/` silently. Citing an atom that no
+  numbered spec declares is a construction error.
+- `IssueRef` wraps `NonZeroU32` AND validates membership in a
+  checked-in issue manifest recording, per number: it is an ISSUE
+  (not a PR), and it is OPEN. The §C7.5 scheduled job re-verifies the
+  manifest against the live tracker, so a cited issue closing makes
+  the stale citation red - the same ratchet as the shell contract's
+  "probe flips green, remove the citation" rule, pointed inward.
+- Hints are validated non-empty; direct struct-literal construction
+  from outside the owning module is a privacy error, locked by
+  `compile_fail` doctests (the `host_abi.rs` pattern).
+- **These registries are the named pre-table authority source.**
+  Phase 3 does not wait for [#729]'s capability table; when Table A/B
+  lands, its `Rejected(atom)` / `Unimplemented { issue }` cells
+  populate this type through the same validation, and the registries
+  become derivation inputs rather than the standalone source.
 
-A rejection without a real citation is then unwritable, not
-unreviewed. The frozen four-clause message format does not change: the
-authority renders into the existing `; <hint>` clause. Negative
-controls land with the change: the empty atom, the malformed atom,
-issue zero, and the out-of-module struct literal each fail to compile
-or construct, and the [#687] corpus update rides the same PR per B1.
-Which cells are `Deliberate` versus `Unimplemented` remains [#729]
-Table A/B's decision; when Table B lands, its `Rejected(atom)` /
-`Unimplemented { issue }` cells populate this type - the plan never
-authors a capability decision (§I1).
+**Calibrated claim:** construction proves the citation names a real,
+currently-valid authority - an existing atom, an open tracked issue.
+Whether that atom semantically DECIDES this particular rejection is
+not mechanizable and remains review's job; the fixed text says so
+rather than implying otherwise. The frozen four-clause message format
+does not change: the authority renders into the existing `; <hint>`
+clause. Negative controls land with the change, one per admission
+route: the empty atom, the malformed atom, the WELL-SHAPED
+NONEXISTENT atom, issue zero, a real-but-closed issue, a real number
+that is a PR rather than an issue, a nonexistent nonzero issue, and
+the out-of-module struct literal each fail to compile, construct, or
+validate; the [#687] corpus update rides the same PR per B1. Which
+cells are `Deliberate` versus `Unimplemented` remains [#729]
+Table A/B's decision - the plan never authors a capability decision
+(§I1).
 
 ### C2.2 The closed kind vocabulary (added 2026-07-30; lands at Phase 3)
 
@@ -361,20 +380,34 @@ remains directly constructible:
   `DiagnosticKind::UnsupportedFeature` to any general envelope API is
   therefore a type error, not a reviewed convention. The chokepoint's
   privacy is locked by `compile_fail` doctests.
-- **The literal routes close too**: `schema::Diagnostic` becomes
-  `#[non_exhaustive]`, so an out-of-crate `Diagnostic { .. }` literal
-  no longer compiles (wire `Deserialize` is unaffected); the existing
-  in-crate hand-rolled `Diagnostic` literals (the `reef_error`
-  substring-dispatch family and kin) converge onto the chokepoint, and
-  an architecture scan forbids new in-crate literals outside the
-  chokepoint module - stated plainly as the supporting rung for the
-  one route privacy cannot reach.
+- **The literal and mutation routes close by privacy, not by scan**:
+  `Diagnostic.kind` becomes a PRIVATE field (serde derives work on
+  private fields, so wire `Serialize`/`Deserialize` are unaffected),
+  with construction and the read accessor living in the sealed schema
+  module. `#[non_exhaustive]` alone is NOT the seal - it binds only
+  other crates, and any module inside compiler-api could still write
+  `Diagnostic { kind: "unsupported_feature".to_owned(), .. }` or
+  mutate a public field after construction. With the field private,
+  the in-crate literal and the post-construction mutation are ordinary
+  privacy errors everywhere outside the sealed module - which is the
+  chokepoint itself. The existing hand-rolled `Diagnostic` literals
+  (the `reef_error` substring-dispatch family and kin) converge onto
+  the constructors as part of this change; no architecture scan
+  carries the seal.
 
 Negative controls land with the change, one per bypass route, not only
 the old free-string route: a free string literal, a direct
 `DiagnosticKind::UnsupportedFeature` argument to a general envelope
-API, and an out-of-crate `Diagnostic` literal each fail to compile;
-the `format!("{:?}")` and message-substring dispatch sites are gone.
+API, and an out-of-crate `Diagnostic` literal each fail to compile
+(`compile_fail` doctests); an IN-CRATE literal outside the sealed
+module and a post-construction `kind` mutation are proven unwritable
+by planted-mutation controls in the Phase 3 oracle - a temporary
+planted bypass in a non-chokepoint compiler-api module must fail the
+workspace check, byte-restored after (the Phase 2 oracle's planted
+style, which is how a same-crate privacy violation can be
+continuously proven at all - a `compile_fail` doctest compiles as a
+foreign crate and cannot see in-crate privacy); the
+`format!("{:?}")` and message-substring dispatch sites are gone.
 The wire field itself remains a `String` - the enum governs producers,
 the string is the rendering - and nothing here adds `Serialize` or
 otherwise lifts the §C2 STATUS relaxation above; the [#871] expiry
@@ -905,12 +938,17 @@ layers are the authority for the routes they cover:
    is the only blessed spelling for a §C1.3-legitimate panic. Its
    signature REQUIRES the named guarantee and the upstream guard
    citation (`compiler_invariant!(guarantee: "...", guard: "<canary/
-   test or spec cite>", ...)`), and the macro validates both at
-   COMPILE TIME (const assertions reject an empty guarantee or guard,
-   so `guarantee: ""` fails to build - required arguments alone would
-   accept them). "The guarantee is named" stops being prose and
-   becomes an argument that cannot be empty, greppable as a single
-   token.
+   test or spec cite>", ...)`), validated in two tiers because
+   non-emptiness alone accepts `"TODO"`: the macro const-asserts SHAPE
+   at compile time (non-empty guarantee; guard non-empty and either a
+   test/canary identifier or a `[NN-AAA-N]` atom token), and the
+   Phase 4 oracle verifies the REFERENT - a guard naming a test or
+   canary must resolve in the §C7.4 nextest-selected set, and a guard
+   citing an atom must be a member of the §C2.1 atom registry.
+   `guard: "TODO"` and `guard: "not-a-canary-or-spec-citation"` pass
+   neither tier. "The guarantee is named" stops being prose and
+   becomes an argument that cannot be empty or fabricated quietly,
+   greppable as a single token.
 3. **Spelling ratchets, explicitly the supporting rung.** Raw
    `panic!` / `unreachable!` / `todo!` / `unimplemented!` and the
    assertion macros (`assert!` / `assert_eq!` / `assert_ne!` /
@@ -930,11 +968,20 @@ layers are the authority for the routes they cover:
 Negative controls, one per route: a planted raw `panic!`, a planted
 `.unwrap()`, and a planted bare `assert!` in a derived-universe member
 each go red; a `compiler_invariant!` with empty metadata fails to
-compile; the sealed adapters' privacy is `compile_fail`-locked; and
-the Phase 4 oracle plants an internal panic behind a `Result` entry
-point in a scratch member and asserts the BEHAVIOR instruments (not
-the token classes) are what catch it - documenting the limit
-executably rather than in prose.
+compile and one with a fabricated non-empty guard (`"TODO"`) fails
+the oracle's referent tier; the sealed adapters' privacy is
+`compile_fail`-locked. For the non-enumerable routes, the control is a
+TEST SEAM, not a scratch member - a disconnected planted function
+proves only that an explicitly invoked panic panics, which proves
+nothing about coverage. The seam: an env-gated hook
+(`CHELIS_TEST_INTERNAL_PANIC=<site>`, test builds only) makes a REAL
+lowering/emission site panic behind its `Result` signature, and a
+named `.ch` probe drives that site through the CLI, asserting the
+surfacing contract (nonzero exit; an internal-error rendering that
+names the invariant, never a silent artifact). Stated plainly: this
+validates the panic-SURFACING path. DISCOVERY of an unknown internal
+panic is what the probe corpus and fuzzing are for; no planted
+control can certify it, and this plan does not claim one does.
 
 The ~44 rejection-shaped panics are census work, not annotation work:
 they convert through the existing `Unsupported` channel in Phase 4's
@@ -973,16 +1020,20 @@ discovery mechanism cannot silently agree on a shrunken universe.
 Adversarial controls land with the change: an aliased import, a
 `dtype: i32` field in a new file, a scratch crate with a vocab edge
 and no inventory row, and an unregistered non-Cargo root must each go
-red.
+red. **Discovery is never path-filtered**: both derivations and the
+manifest-totality guard run as ordinary workspace tests on every PR
+(exactly as today's architecture test does). §C7.5's filter question
+applies only to the expensive mutation legs; the cheap detection of a
+new consumer or root must not depend on anyone predicting its path.
 
-### C7.4 The census is doc-bound and its backings are executed
+### C7.4 The census is doc-bound and its backings are selected
 
 A test parses the §C5 tables out of this document (`include_str!`; the
 `traversal_policy.rs` / `builtins.rs` precedent), extracts the
 `test <name>` / `canary <name>` / `[#NNN]` tokens, and binds each row
-to the EXECUTABLE record, not to token presence - a function that
-exists but is `#[ignore]`d, filtered out of every invoked suite, or a
-stub proves nothing:
+to the SELECTED executable record, not to token presence - a function
+that exists but is `#[ignore]`d or filtered out of every invoked
+suite proves nothing:
 
 - every named function must exist AND appear in the selected set of
   an invoked suite (verified against `cargo nextest list` output);
@@ -990,18 +1041,32 @@ stub proves nothing:
   the owning issue - the [#732] Phase 2 ignore-ledger pattern: the
   declared set and the actual ignore inventory must be EQUAL, so an
   undeclared skip and a stale declaration are both red;
-- every row carries an issue link.
+- every row carries an issue link;
+- a row whose status cell claims LIVE-by-execution names its
+  probe-corpus record (`docs/investigations/probes/`), and the binder
+  checks the named record exists - per B3.2 the corpus, not this
+  table, is already the substantive-truth instrument.
 
 Negative controls: a planted row naming a nonexistent function, a
 planted backing that exists but is ignored without a row declaration,
-and a planted backing filtered out of the invoked suites each go red.
+a planted backing filtered out of the invoked suites, and a planted
+live-row probe reference naming a nonexistent record each go red.
 
-**Calibrated claim:** the binder keeps CENSUSED rows honest - no stale
-references, no dead backings, no undeclared skips. It cannot discover
-an UNCENSUSED site: an omitted row has no token to parse. Discovery of
-the [#919] shape (sites that "survived the Phase 1 sweep uncensused")
-belongs to the §C7.1/§C7.2 derived classes - which would have counted
-those panics - and to the probe corpus, not to this binder.
+**Calibrated claim, stated at the binder's actual strength:** the
+binder proves SELECTED, NON-IGNORED REGISTRATION plus record
+presence - no stale references, no unselected or silently ignored
+backings, no phantom probe citations. Selection cannot prove
+SUBSTANCE: a no-op body with the right name is listed, selected, and
+green, and `nextest list` cannot see inside it. Substantive liveness
+and status truth remain the probe corpus's job (B3.2: "believe
+execution, not this table"), and any future claim stronger than this
+paragraph requires per-row expected-outcome records plus a
+replace-with-no-op mutation control - deliberately not specified
+here. The binder also cannot discover an UNCENSUSED site: an omitted
+row has no token to parse. Discovery of the [#919] shape (sites that
+"survived the Phase 1 sweep uncensused") belongs to the §C7.1/§C7.2
+derived classes - which would have counted those panics - and to the
+probe corpus, not to this binder.
 
 ### C7.5 Change-gated and scheduled authority
 
@@ -1015,16 +1080,32 @@ alone would be honest as a canary but is NOT recurrence prevention: it
 detects a hole only after main has moved. Phase 4 therefore delivers
 both halves:
 
-1. **Change-gated, pre-merge, blocking.** A `ci.yml` job runs the
-   mutation legs whenever a PR touches their inputs - the vocabulary
-   owner sources, `host_abi.rs`, the §C6 consumer files, the oracle
-   scripts, or the nightly workflow itself (the path filter derives
-   from the §C6 inventory, per §C7.3). The crate-scoped `HostAbiType`
-   leg is cheap enough to run on every match; the workspace vocabulary
-   leg runs when the vocab owner or a §C6 consumer changes. The job is
-   classified in `scripts/test_gate.py`'s job tables in the same
-   change. A PR that breaks the mutation proof cannot merge - that is
-   the recurrence-prevention half.
+1. **Change-gated, pre-merge, blocking - with the trigger loop
+   closed.** A filter derived only from the already-ratified §C6
+   inventory has a hole exactly where it matters: a NEW consumer is by
+   definition not in the inventory yet, so its path would never fire
+   the filter, and the nightly would find it only after merge. The
+   loop closes in two moves. First, per §C7.3, discovery and the
+   manifest-totality guard are unconditional per-PR workspace tests -
+   a PR adding a consumer, member, or root goes red pre-merge with no
+   filter involved, and can only go green by editing the ratified
+   inventory or the registry. Second, the mutation job's path filter
+   covers the files that edit therefore touches: the vocabulary owner
+   sources, `host_abi.rs`, the RATIFIED INVENTORY FILE itself, the
+   root `Cargo.toml`, the non-Cargo product-root registry, the oracle
+   scripts, and the workflows. A new consumer thus cannot reach main
+   without the discovery test forcing an inventory edit, and the
+   inventory edit cannot merge without the mutation legs running. The
+   crate-scoped `HostAbiType` leg runs on every filter match; the
+   workspace vocabulary leg runs when the vocab owner, the inventory,
+   the root manifest, or the registry changes. The job is classified
+   in `scripts/test_gate.py`'s job tables in the same change.
+   Trigger controls land with the workflow: a planted new workspace
+   member, a planted vocab dependency edge, a planted file in a
+   previously uninventoried consumer, and a planted non-Cargo root
+   must each (a) fail the per-PR discovery tests and (b) have their
+   forced inventory/registry edit matched by the filter - asserted
+   against the workflow's path list, not assumed.
 2. **Scheduled full matrix, the drift canary.**
    `loud-unsupported-nightly.yml`: a cron workflow running
    `scripts/loud_unsupported_phase2_oracle.py` in full,
@@ -1315,7 +1396,11 @@ mislabel).
 4. **The typed rejection authority** (§C2.1): the 33-site `hint ->
    RejectionAuthority` migration, with the [#687] rejected-cells corpus
    updated in the same PR per B1 (31 sites are mechanical; the two
-   uncited `reduce_window` hints gain their [#959] citation first).
+   uncited `reduce_window` hints gain their [#959] citation first) -
+   plus the two validation registries the constructors consume: the
+   derived atom registry (generated from the numbered specs,
+   byte-agreement-tested) and the checked-in issue manifest (whose
+   liveness re-verification is §C7.5 scheduled-job work).
 5. Deletion of gates that now only duplicate emitter rejections, with the
    cross-lane rejected-cells corpus proving the diagnostic surface
    unchanged or improved (earlier stage, same `unsupported:` content).
@@ -1338,11 +1423,18 @@ census-named test was renamed after the census froze - the Phase 4
 census binding re-links it; use the current suite name); zero gates
 existing in two copies (a new tripwire assertion, mirroring the
 conformance MANIFEST pattern); the wire-spelling lock test green; and
-the full §C2.1-C2.2 negative-control set - a planted free-literal kind
-string, a direct `DiagnosticKind::UnsupportedFeature` argument to a
-general envelope API, an out-of-crate `Diagnostic` literal, an empty
-or malformed spec atom, and issue zero - each failing to compile or
-construct, one control per bypass route.
+the full §C2.1-C2.2 negative-control set, one control per bypass or
+admission route: a planted free-literal kind string, a direct
+`DiagnosticKind::UnsupportedFeature` argument to a general envelope
+API, and an out-of-crate `Diagnostic` literal failing to compile; an
+in-crate `Diagnostic` literal outside the sealed module and a
+post-construction `kind` mutation proven unwritable by
+planted-mutation controls (planted bypass in a non-chokepoint
+compiler-api module fails the workspace check, byte-restored after);
+and the authority admission set - empty atom, malformed atom,
+well-shaped nonexistent atom, issue zero, closed issue, PR-number
+citation, nonexistent nonzero issue - each rejected at construction
+or validation.
 
 ## Phase 4 - ratchet totality (added 2026-07-30)
 
@@ -1365,8 +1457,9 @@ tripwire, §C7, and census rows 24-25 and 27.
    hit carries an issue or a conversion. This produces the honest
    backlog and is the first PR.
 2. **The census binding** (§C7.4): the `include_str!` parse of §C5,
-   binding every row to an executed backing (nextest-selected or
-   row-declared ignored per the ignore-ledger rule) and an issue link.
+   binding every row to a selected backing (nextest-selected or
+   row-declared ignored per the ignore-ledger rule), an issue link,
+   and - for live-by-execution rows - an existing probe-corpus record.
 3. **Consumer discovery** (§C7.3): `closed_vocabulary_architecture.rs`
    inverted from a fixed file list to the dual-source derivation
    (dependency graph + token scan), with the mutation oracle's
@@ -1409,20 +1502,29 @@ provably computed from the product-source manifest - Cargo members
 plus the non-Cargo-root registry under its top-level totality guard -
 not from a literal list); the lints-adoption check over the derived
 members; the §C7.4 census binding against the nextest-selected set
-with the ignore-ledger equality; the §C7.3 dual-source discovery scan;
-the execution-wiring assertions (the change-gated `ci.yml` job exists
-and is classified in `scripts/test_gate.py`; the nightly file exists,
-names both oracle runners, and appears in `NON_GATE_WORKFLOWS` - and
-the mutation legs themselves are executed by those jobs, not by this
-assertion); and negative controls in the Phase 2 oracle's planted
-style - a planted production `panic!`, a planted `.unwrap()`, and a
-planted bare `assert!` in a derived-universe member each go red; a
-planted census row naming a nonexistent test, an ignored-undeclared
-backing, and an unregistered non-Cargo product root each go red; a
-planted internal panic behind a `Result` entry point is caught by the
-behavior instruments, executably documenting §C7.2's stated limit -
-with byte-for-byte restore of every planted file. Its self-tests ride
-the existing per-PR `unittest discover` CI step automatically, which
+with the ignore-ledger equality and the live-row probe-record
+existence check; the §C7.3 dual-source discovery scan; the
+`compiler_invariant!` guard-referent tier (every guard resolves in the
+selected test set or the atom registry); the execution-wiring
+assertions (the change-gated `ci.yml` job exists, is classified in
+`scripts/test_gate.py`, and its path filter covers the ratified
+inventory file, the root `Cargo.toml`, and the non-Cargo registry -
+the §C7.5 trigger-loop closure, asserted against the workflow's
+actual path list; the nightly file exists, names both oracle runners,
+and appears in `NON_GATE_WORKFLOWS`; the mutation legs themselves are
+executed by those jobs, not by this assertion); and negative controls
+in the Phase 2 oracle's planted style - a planted production
+`panic!`, a planted `.unwrap()`, and a planted bare `assert!` in a
+derived-universe member each go red; a planted census row naming a
+nonexistent test, an ignored-undeclared backing, a phantom
+probe-record citation, and an unregistered non-Cargo product root
+each go red; a planted new consumer (vocab dependency edge) and a
+planted uninventoried consumer file each fail the discovery tests;
+the §C7.2 test seam drives a real lowering/emission site's internal
+panic through a named `.ch` probe and asserts the surfacing contract
+(nonzero exit, invariant-naming rendering, no artifact) - with
+byte-for-byte restore of every planted file. Its self-tests ride the
+existing per-PR `unittest discover` CI step automatically, which
 keeps the oracle's anchors continuously verified between scheduled
 runs.
 
@@ -1537,11 +1639,14 @@ types at every semantic consumer, build C expressions structurally, and keep
 gates/lexical scans as UX and evidence rather than the thing standing between
 an unsupported case and a plausible wrong number. Then take the pen away from
 the ratchets themselves (§C7): derive every guard's universe from the
-product-source manifest instead of enumerating it, seal the kind and the
-citation behind validated constructors so a mislabeled or uncited rejection
-cannot be built, sanction exactly one invariant terminal whose metadata
-cannot be empty, and execute the structural authority pre-merge when its
-inputs change and nightly otherwise so its proof never goes stale.
+product-source manifest instead of enumerating it, seal the kind behind a
+private producer field and the citation behind registry-validated
+constructors so a mislabeled, uncited, or fabricated-citation rejection
+cannot be built, sanction exactly one invariant terminal whose metadata is
+shape-checked at compile time and referent-checked by the oracle, and run
+discovery unconditionally on every PR with the mutation authority
+change-gated pre-merge and nightly otherwise, so the proof never goes stale
+and never depends on predicting a path.
 
 [#387]: https://github.com/Chelis-Lang/chelis/issues/387
 [#680]: https://github.com/Chelis-Lang/chelis/issues/680
