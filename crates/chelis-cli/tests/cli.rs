@@ -8818,11 +8818,30 @@ fn build_c_grad_program_has_zero_definitely_lost_under_valgrind() {
 // subject.
 //
 // Same toolchain gating and no-suppression contract as the #406 oracle
-// above. Manual gate:
+// above. Registered in `docs/manual_gates.md`; manual gate:
 //   cargo test -p chelis-cli --test cli \
 //     build_c_list_combinator_program_has_zero_definitely_lost_under_valgrind \
-//     -- --nocapture
+//     -- --ignored --nocapture
+//
+// `#[ignore]` rather than the #406 sibling's bare self-skip: valgrind is
+// installed in no CI job (`grep -rniE valgrind .github/workflows/` is
+// empty) and is unavailable on macOS arm64, so on every machine that
+// currently runs the suite the tool-availability `return` below made
+// nextest report **PASS in ~0.008s** for a leak oracle that never ran.
+// A green result for an unexecuted check is worse than an honest skip,
+// especially for the standing guard on this change set's central claim.
+// `docs/manual_gates.md` states the contract this now satisfies: "If a
+// test is `#[ignore]`'d, it must appear here with its full command and
+// prerequisite."
+//
+// The tool-availability check is kept as a second line of defence so the
+// documented `--ignored` command still explains itself on a box without
+// valgrind rather than failing obscurely. The #406 sibling
+// (`cli.rs`, `build_c_leak_program_has_zero_definitely_lost_under_valgrind`)
+// and the other five #406-era oracles still self-skip and report a false
+// PASS; converting them is out of scope here and tracked separately.
 #[test]
+#[ignore = "requires valgrind + gcc; registered in docs/manual_gates.md (chelis#943)"]
 #[cfg(unix)]
 fn build_c_list_combinator_program_has_zero_definitely_lost_under_valgrind() {
     fn tool_available(tool: &str) -> bool {
