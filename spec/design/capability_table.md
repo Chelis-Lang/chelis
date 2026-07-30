@@ -128,6 +128,31 @@ authored:
 | `wrap_add`/`wrap_sub`/`wrap_mul` x (both surfaces) x int widths (spec/04 [04-NUM-7], [#753]) | A `Supported` on int8/16/32/64, `Rejected` on bool/float ("no modular arithmetic on non-integer dtypes; see [04-NUM-7]"); B-cells `Unimplemented { issue: #753 }` until kernels land ([#729] Phase 2's natural moment; SMT lowers to `bvadd`/`bvsub`/`bvmul` exactly, no tolerance row) |
 | named lossy cast x directions x dtypes ([#759]) | the explicit truncating/narrowing rung over the checked-cast default (same discipline as [#753]): per-direction rules authored as atoms - proposals: float->float RNE at target width; float->int truncate-toward-zero with an authored out-of-range rule; int->narrower-int ONE authored rule; never the default; bool out of scope per [04-NUM-4]; B-cells land with [#729] Phase 2's kernel work |
 
+## New numeric ops before the table lands (added 2026-07-30)
+
+Recorded after the 2026-07-30 PR sweep found a new numeric op
+(`round_to`, PR #891, unmerged) at review with per-dtype semantics
+stated only in a Rust doc comment. Between now and [#729] Phase 4, a
+NEW numeric op entering the public surface (builtin, prelude, stdlib,
+or runtime export) requires a `spec/05-risc-primitives.md` entry in the
+same change set: signature, per-dtype semantics at [04-NUM-8]'s
+declared arithmetic widths, adjoint or a non-differentiability
+statement, and an accumulator rule where applicable. A doc comment is
+not an authority (`AGENTS.md` §Numbered Specs Decide; the ops of
+chelis#898 are the standing backlog of exactly this omission). At
+Phase 4 the requirement becomes structural: the conformance suite's
+totality leg (`dtype_semantics.md` §C6 chokepoint 3) enumerates the
+reachable numeric surface and fails the build for any op without a
+Table A row, and the row's mandatory atom citation forces the spec
+entry.
+
+`round_to` specifically: widening an f32 operand to f64, rounding
+decimally, and re-narrowing is computing at other than the declared
+arithmetic width - non-conforming under [04-NUM-8] as of its 2026-07-28
+amendment, which provides no exception vocabulary. Its semantics must
+be authored at declared widths, or its dtype set restricted to f64,
+before it lands.
+
 ## Open questions (decided at [#729] Phase 4 entry, recorded here)
 
 1. Machine form: `const` Rust table vs a checked-in data file with a
