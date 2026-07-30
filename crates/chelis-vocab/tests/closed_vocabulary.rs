@@ -1,5 +1,5 @@
 use chelis_vocab::{
-    EffectKind, EffectKindDecodeError, EffectKindInput, RuntimeDType, RuntimeDTypeDecodeError,
+    EffectKind, EffectKindDecodeError, EffectKindInput, Repr, RuntimeDType, RuntimeDTypeDecodeError,
 };
 
 #[test]
@@ -29,17 +29,23 @@ fn effect_kind_missing_malformed_and_unknown_are_distinct_errors() {
         EffectKind::decode(EffectKindInput::Malformed),
         Err(EffectKindDecodeError::Malformed)
     );
+
+    let input = String::from("teleport");
+    let error = EffectKind::decode(EffectKindInput::Symbol(&input)).expect_err("unknown effect");
+    let EffectKindDecodeError::Unknown { symbol } = error else {
+        panic!("expected an unknown-symbol error")
+    };
+    assert_eq!(symbol, input);
     assert_eq!(
-        EffectKind::decode(EffectKindInput::Symbol("teleport")),
-        Err(EffectKindDecodeError::Unknown {
-            symbol: "teleport".to_string(),
-        })
+        symbol.as_ptr(),
+        input.as_ptr(),
+        "the error must borrow the input"
     );
 }
 
 #[test]
 fn effect_kind_decoder_never_returns_option_or_a_default_kind() {
-    let decoded: Result<EffectKind, EffectKindDecodeError> =
+    let decoded: Result<EffectKind, EffectKindDecodeError<'_>> =
         EffectKind::decode(EffectKindInput::Symbol("not-a-kind"));
     assert!(matches!(
         decoded,
@@ -62,25 +68,143 @@ fn effect_kind_consumer_match_is_a_compile_time_ratchet() {
 }
 
 #[test]
-fn runtime_dtype_ids_names_c_macros_and_widths_round_trip() {
+fn representation_variants_have_current_widths_and_payload_status() {
     let expected = [
-        (RuntimeDType::F32, 0, "f32", "CHELIS_F32", 4),
-        (RuntimeDType::F64, 1, "f64", "CHELIS_F64", 8),
-        (RuntimeDType::I32, 2, "int32", "CHELIS_I32", 4),
-        (RuntimeDType::Bool, 3, "bool", "CHELIS_BOOL", 4),
-        (RuntimeDType::I64, 4, "int64", "CHELIS_I64", 8),
-        (RuntimeDType::Bf16, 5, "bf16", "CHELIS_BF16", 2),
-        (RuntimeDType::F16, 6, "f16", "CHELIS_F16", 2),
-        (RuntimeDType::I8, 7, "int8", "CHELIS_I8", 1),
-        (RuntimeDType::I16, 8, "int16", "CHELIS_I16", 2),
+        (Repr::Ieee754Binary16, 2, false),
+        (Repr::Ieee754Binary32, 4, false),
+        (Repr::Ieee754Binary64, 8, false),
+        (Repr::Bfloat16, 2, false),
+        (Repr::TwosComplement8, 1, false),
+        (Repr::TwosComplement16, 2, false),
+        (Repr::TwosComplement32, 4, false),
+        (Repr::TwosComplement64, 8, false),
+        (Repr::BoolInBinary32, 4, true),
+    ];
+    assert_eq!(Repr::ALL, expected.map(|(repr, ..)| repr));
+
+    for (repr, byte_width, payload_encoded) in expected {
+        assert_eq!(repr.byte_width(), byte_width);
+        assert_eq!(repr.is_payload_encoded(), payload_encoded);
+    }
+}
+
+#[test]
+fn equal_width_representations_keep_distinct_identities() {
+    assert_eq!(
+        Repr::Ieee754Binary32.byte_width(),
+        Repr::TwosComplement32.byte_width()
+    );
+    assert_ne!(Repr::Ieee754Binary32, Repr::TwosComplement32);
+    assert_ne!(Repr::BoolInBinary32, Repr::Ieee754Binary32);
+    assert_ne!(Repr::BoolInBinary32, Repr::TwosComplement32);
+}
+
+#[test]
+fn representation_consumer_match_is_a_compile_time_ratchet() {
+    fn encoding_name(repr: Repr) -> &'static str {
+        match repr {
+            Repr::Ieee754Binary16 => "ieee754-binary16",
+            Repr::Ieee754Binary32 => "ieee754-binary32",
+            Repr::Ieee754Binary64 => "ieee754-binary64",
+            Repr::Bfloat16 => "bfloat16",
+            Repr::TwosComplement8 => "twos-complement-8",
+            Repr::TwosComplement16 => "twos-complement-16",
+            Repr::TwosComplement32 => "twos-complement-32",
+            Repr::TwosComplement64 => "twos-complement-64",
+            Repr::BoolInBinary32 => "bool-in-binary32",
+        }
+    }
+
+    for repr in Repr::ALL {
+        assert!(!encoding_name(repr).is_empty());
+    }
+}
+
+#[test]
+fn runtime_dtype_ids_names_macros_representations_and_widths_round_trip() {
+    let expected = [
+        (
+            RuntimeDType::F32,
+            0,
+            "f32",
+            "CHELIS_F32",
+            Repr::Ieee754Binary32,
+            4,
+        ),
+        (
+            RuntimeDType::F64,
+            1,
+            "f64",
+            "CHELIS_F64",
+            Repr::Ieee754Binary64,
+            8,
+        ),
+        (
+            RuntimeDType::I32,
+            2,
+            "int32",
+            "CHELIS_I32",
+            Repr::TwosComplement32,
+            4,
+        ),
+        (
+            RuntimeDType::Bool,
+            3,
+            "bool",
+            "CHELIS_BOOL",
+            Repr::BoolInBinary32,
+            4,
+        ),
+        (
+            RuntimeDType::I64,
+            4,
+            "int64",
+            "CHELIS_I64",
+            Repr::TwosComplement64,
+            8,
+        ),
+        (
+            RuntimeDType::Bf16,
+            5,
+            "bf16",
+            "CHELIS_BF16",
+            Repr::Bfloat16,
+            2,
+        ),
+        (
+            RuntimeDType::F16,
+            6,
+            "f16",
+            "CHELIS_F16",
+            Repr::Ieee754Binary16,
+            2,
+        ),
+        (
+            RuntimeDType::I8,
+            7,
+            "int8",
+            "CHELIS_I8",
+            Repr::TwosComplement8,
+            1,
+        ),
+        (
+            RuntimeDType::I16,
+            8,
+            "int16",
+            "CHELIS_I16",
+            Repr::TwosComplement16,
+            2,
+        ),
     ];
     assert_eq!(RuntimeDType::ALL, expected.map(|(dtype, ..)| dtype));
 
-    for (dtype, id, name, c_macro, byte_width) in expected {
+    for (dtype, id, name, c_macro, repr, byte_width) in expected {
         assert_eq!(dtype.id(), id);
         assert_eq!(dtype.name(), name);
         assert_eq!(dtype.c_macro(), c_macro);
+        assert_eq!(dtype.repr(), repr);
         assert_eq!(dtype.byte_width(), byte_width);
+        assert_eq!(dtype.byte_width(), dtype.repr().byte_width());
         assert_eq!(RuntimeDType::decode_id(id), Ok(dtype));
     }
 }
@@ -98,6 +222,21 @@ fn runtime_dtype_invalid_ids_are_errors_not_f32() {
             RuntimeDType::decode_id(id),
             Err(RuntimeDTypeDecodeError::InvalidId { id })
         );
+    }
+}
+
+#[test]
+fn runtime_dtype_ids_are_pairwise_distinct() {
+    let all = RuntimeDType::ALL;
+    for (index, left) in all.iter().enumerate() {
+        for right in all.iter().skip(index.saturating_add(1)) {
+            assert_ne!(
+                left.id(),
+                right.id(),
+                "{left:?} and {right:?} share ABI tag {}",
+                left.id()
+            );
+        }
     }
 }
 

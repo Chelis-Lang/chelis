@@ -5,3 +5,13 @@ edition.workspace = true
 version.workspace = true
 license.workspace = true
 repository.workspace = true
+
+# These lints protect the ABI vocabulary from lossy numeric operations.
+# The workspace does not enable these lint classes.
+[lints.clippy]
+cast_possible_truncation = "deny"
+cast_possible_wrap = "deny"
+cast_sign_loss = "deny"
+cast_lossless = "deny"
+arithmetic_side_effects = "deny"
+indexing_slicing = "deny"

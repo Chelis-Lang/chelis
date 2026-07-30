@@ -13,6 +13,8 @@ use std::fs;
 use std::fs::File;
 use std::ptr;
 
+pub mod dtype_header;
+
 #[cfg(test)]
 mod runtime_dtype_contract_tests;
 
