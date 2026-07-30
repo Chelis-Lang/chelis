@@ -2775,6 +2775,88 @@ where (x > 0.5), (x < 9.5):
     );
 }
 
+// chelis#923 result boundary: an integer-valued function has no scalar
+// floating derivative in Chelis. The prover must not emit a green SMT record
+// before the compiler rejects the same source.
+#[cfg(feature = "smt")]
+#[test]
+fn issue_923_non_float_results_are_never_proven_and_do_not_build() {
+    let fixtures = [
+        (
+            "named",
+            r#"def integer_value(x: f32) -> int32 = 1
+@property integer_grad_zero forall(x: f32):
+  grad(integer_value, wrt=x)(x) == 0.0
+"#,
+        ),
+        (
+            "inline",
+            r#"@property inline_integer_grad_zero forall(x: f32):
+  grad(fn (xx: f32) -> 1, wrt=xx)(x) == 0.0
+"#,
+        ),
+    ];
+
+    for (name, source) in fixtures {
+        let dir = write_prop(source);
+        let path = dir.path().join("prop.ch");
+        let prove = Command::cargo_bin("chelis")
+            .expect("binary")
+            .args([
+                "prove",
+                path.to_str().unwrap(),
+                "--tier",
+                "smt-only",
+                "--json",
+            ])
+            .output()
+            .expect("run prove");
+        assert!(
+            !prove.status.success(),
+            "{name} non-float gradient unexpectedly proved"
+        );
+        let props = property_records(&prove.stdout);
+        assert_eq!(props.len(), 1, "{name}: {props:?}");
+        assert_eq!(props[0]["status"], "unsupported", "{name}: {}", props[0]);
+        assert_eq!(
+            props[0]["reason"], "scalar grad SMT lowering requires an f32/f64 result",
+            "{name}: {}",
+            props[0]
+        );
+        assert_ne!(
+            props[0]["composite_verdict"], "proven_modulo_real_arithmetic",
+            "{name}: {}",
+            props[0]
+        );
+
+        let build = Command::cargo_bin("chelis")
+            .expect("binary")
+            .env("CHELIS_STYLE_GATE_DISABLE", "1")
+            .args([
+                "build",
+                path.to_str().unwrap(),
+                "--target",
+                "c",
+                "--output",
+                dir.path().join(format!("{name}-build")).to_str().unwrap(),
+            ])
+            .output()
+            .expect("run build");
+        assert!(
+            !build.status.success(),
+            "{name} non-float gradient unexpectedly built\nstdout={}\nstderr={}",
+            String::from_utf8_lossy(&build.stdout),
+            String::from_utf8_lossy(&build.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&build.stderr)
+                .contains("grad requires a scalar floating output"),
+            "{name} build did not reject the non-floating result specifically:\n{}",
+            String::from_utf8_lossy(&build.stderr)
+        );
+    }
+}
+
 // chelis#923 negative parity: the prover-owned symbolic transform must not
 // certify a conditional gradient while the compiler's scalar-AD transform
 // cannot build the same program.

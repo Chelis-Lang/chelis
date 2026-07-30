@@ -51,18 +51,19 @@ asserts the reflection coupling between their fresh symbols.
 Tier B lowers an applied scalar gradient into the same real-arithmetic
 obligation language as an ordinary scalar property. The supported v1 shape is
 `grad(f, wrt=x)(args...)`, with exactly one explicit `wrt`, where `f` is an
-inline lambda or pure top-level function whose parameters are `f32`/`f64`.
-The differentiated body may contain scalar literals and variables, negation,
-`+`, `-`, `*`, `/`, named scalar block bindings, and recursively inlined pure
-scalar helpers within the normal Tier B inlining-depth bound. Argument
-substitutions are resolved in the caller's scope before differentiation.
+inline lambda or pure top-level function whose parameters and result are
+`f32`/`f64`. The differentiated body may contain scalar literals and variables,
+negation, `+`, `-`, `*`, `/`, named scalar block bindings, and recursively
+inlined pure scalar helpers with `f32`/`f64` results within the normal Tier B
+inlining-depth bound. Argument substitutions are resolved in the caller's
+scope before differentiation.
 
 This is a prover-owned symbolic dual lowering; it must agree with Chelis scalar
 AD semantics but does not replace the compiler's `grad` transform. Its SMT
 verdict retains the `real_arithmetic` qualifier. Multi-target or implicit
-`wrt`, tensor/ADT gradients, conditionals, casts in differentiated bodies,
-effects, recursion, nested transforms, helper-inlining depth overflow,
-unsupported intrinsics, and malformed calls do not silently sample under
+`wrt`, tensor/ADT gradients, non-floating results, conditionals, casts in
+differentiated bodies, effects, recursion, nested transforms, helper-inlining
+depth overflow, unsupported intrinsics, and malformed calls do not silently sample under
 `smt-only`: they return
 `status:"unsupported"` with a reason naming the scalar-gradient capability
 boundary. Under `auto`, the same boundary may continue to Tier C fuzz

@@ -12,7 +12,10 @@
 //! tool reach one Surf->SMT lowering through the shared property runner.
 
 use chelis_deep::DeepTag;
-use std::{cell::RefCell, collections::HashMap};
+use std::{
+    cell::RefCell,
+    collections::{HashMap, HashSet},
+};
 
 use chelis_deep::ast::{Atom as DeepAtom, Expr as DeepExpr, List as DeepList};
 use chelis_surf::ast::{BinOp, Decl, Expr, LetPattern, Literal, Param, TypeExpr, UnaryOp};
@@ -807,6 +810,80 @@ fn scalar_param(param: &Param) -> bool {
     )
 }
 
+fn scalar_float_type(ty: Option<&TypeExpr>) -> bool {
+    matches!(
+        ty,
+        Some(TypeExpr::Named(name, _)) if matches!(name.as_str(), "f32" | "f64")
+    )
+}
+
+/// Fail-closed result-kind check for an inline gradient target.
+///
+/// Surf lambdas do not carry an explicit result annotation in the AST, so the
+/// prover cannot read their checker-inferred result directly. This deliberately
+/// recognizes only the same small floating arithmetic subset the symbolic-dual
+/// lowering accepts. In particular, a bare/typed integer result is never
+/// promoted to a Real merely because its derivative is zero.
+fn inline_scalar_float_result(expr: &Expr, float_names: &HashSet<String>, decls: &[Decl]) -> bool {
+    match expr {
+        Expr::Var(name, _) => float_names.contains(name),
+        Expr::Lit(Literal::Float(_) | Literal::TypedFloat(_, _), _) => true,
+        Expr::Unary(UnaryOp::Neg, inner, _) => {
+            inline_scalar_float_result(inner, float_names, decls)
+        }
+        Expr::Binary(BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div, left, right, _) => {
+            inline_scalar_float_result(left, float_names, decls)
+                && inline_scalar_float_result(right, float_names, decls)
+        }
+        Expr::Apply(func, args, _) => {
+            let Expr::Var(name, _) = func.as_ref() else {
+                return false;
+            };
+            let declared_result = decls.iter().find_map(|decl| match decl {
+                Decl::FunDef {
+                    name: candidate,
+                    ret_ty,
+                    ..
+                } if candidate == name => Some(ret_ty.as_ref()),
+                _ => None,
+            });
+            // Unknown calls remain eligible here so `scalar_dual` can report
+            // its more specific unsupported-intrinsic reason. They cannot
+            // become green: that lowering rejects every unknown call.
+            let known_float_callable = call_form_arith_op(name).is_some()
+                || name == "neg"
+                || declared_result.is_none()
+                || declared_result.is_some_and(scalar_float_type);
+            known_float_callable
+                && args
+                    .iter()
+                    .all(|arg| inline_scalar_float_result(arg, float_names, decls))
+        }
+        Expr::Block(bindings, body, _) => {
+            let mut names = float_names.clone();
+            for binding in bindings {
+                let LetPattern::Var(name, _) = &binding.pattern else {
+                    return false;
+                };
+                if !inline_scalar_float_result(&binding.value, &names, decls)
+                    || binding
+                        .ty
+                        .as_ref()
+                        .is_some_and(|ty| !scalar_float_type(Some(ty)))
+                {
+                    return false;
+                }
+                names.insert(name.clone());
+            }
+            inline_scalar_float_result(body, &names, decls)
+        }
+        Expr::Annotate(inner, ty, _) => {
+            scalar_float_type(Some(ty)) && inline_scalar_float_result(inner, float_names, decls)
+        }
+        _ => false,
+    }
+}
+
 fn scalar_grad_application(
     target: &Expr,
     wrt: Option<&[String]>,
@@ -814,19 +891,24 @@ fn scalar_grad_application(
     ctx: &InlineCtx,
     lower_arg: impl Fn(&Expr) -> Option<crate::solver::SmtExpr>,
 ) -> Result<crate::solver::SmtExpr, String> {
-    let (params, body, target_name) = match target {
-        Expr::Lambda(params, body, _) => (params.as_slice(), body.as_ref(), None),
+    let (params, body, target_name, declared_result) = match target {
+        Expr::Lambda(params, body, _) => (params.as_slice(), body.as_ref(), None, None),
         Expr::Var(name, _) => {
-            let Some((params, body, effects)) = ctx.decls.iter().find_map(|decl| match decl {
-                Decl::FunDef {
-                    name: candidate,
-                    params,
-                    body,
-                    effects,
-                    ..
-                } if candidate == name => Some((params.as_slice(), body, effects.as_ref())),
-                _ => None,
-            }) else {
+            let Some((params, body, effects, ret_ty)) =
+                ctx.decls.iter().find_map(|decl| match decl {
+                    Decl::FunDef {
+                        name: candidate,
+                        params,
+                        body,
+                        effects,
+                        ret_ty,
+                        ..
+                    } if candidate == name => {
+                        Some((params.as_slice(), body, effects.as_ref(), ret_ty.as_ref()))
+                    }
+                    _ => None,
+                })
+            else {
                 return Err(format!(
                     "scalar grad SMT lowering cannot resolve function `{name}`"
                 ));
@@ -836,7 +918,7 @@ fn scalar_grad_application(
                     "scalar grad SMT lowering does not support effectful function `{name}`"
                 ));
             }
-            (params, body, Some(name.as_str()))
+            (params, body, Some(name.as_str()), ret_ty)
         }
         Expr::Grad(_, _, _) => {
             return Err("scalar grad SMT lowering does not support nested gradients".to_string());
@@ -863,6 +945,20 @@ fn scalar_grad_application(
     }
     if !params.iter().all(scalar_param) {
         return Err("scalar grad SMT lowering supports only f32/f64 parameters".to_string());
+    }
+    let has_float_result = match declared_result {
+        Some(ty) => scalar_float_type(Some(ty)),
+        None if target_name.is_none() => {
+            let float_names = params
+                .iter()
+                .map(|param| param.name.clone())
+                .collect::<HashSet<_>>();
+            inline_scalar_float_result(body, &float_names, ctx.decls)
+        }
+        None => false,
+    };
+    if !has_float_result {
+        return Err("scalar grad SMT lowering requires an f32/f64 result".to_string());
     }
     let [wrt_name] = wrt.unwrap_or_default() else {
         return Err(
@@ -1022,16 +1118,21 @@ fn scalar_dual(
                     tangent: arith(ArithOp::Neg, inner.tangent.clone(), SmtExpr::IntLit(0)),
                 });
             }
-            let Some((params, body, effects)) = ctx.decls.iter().find_map(|decl| match decl {
-                Decl::FunDef {
-                    name: candidate,
-                    params,
-                    body,
-                    effects,
-                    ..
-                } if candidate == name => Some((params, body, effects.as_ref())),
-                _ => None,
-            }) else {
+            let Some((params, body, effects, ret_ty)) =
+                ctx.decls.iter().find_map(|decl| match decl {
+                    Decl::FunDef {
+                        name: candidate,
+                        params,
+                        body,
+                        effects,
+                        ret_ty,
+                        ..
+                    } if candidate == name => {
+                        Some((params, body, effects.as_ref(), ret_ty.as_ref()))
+                    }
+                    _ => None,
+                })
+            else {
                 return Err(format!(
                     "scalar grad SMT lowering does not support call `{name}`"
                 ));
@@ -1051,7 +1152,10 @@ fn scalar_dual(
                     "scalar grad SMT lowering does not support recursion through `{name}`"
                 ));
             }
-            if params.len() != dual_args.len() || !params.iter().all(scalar_param) {
+            if params.len() != dual_args.len()
+                || !params.iter().all(scalar_param)
+                || !scalar_float_type(ret_ty)
+            {
                 return Err(format!(
                     "scalar grad SMT lowering requires scalar f32/f64 helper `{name}`"
                 ));
@@ -1803,5 +1907,40 @@ mod tests {
             ),
             "scalar grad SMT lowering does not support recursion through `recursive_loss`"
         );
+    }
+
+    #[test]
+    fn scalar_grad_named_non_float_result_fails_closed() {
+        assert_eq!(
+            parsed_grad_error(
+                "def integer_value(x: f32) -> int32 = 1\n",
+                "integer_value",
+                &["x"],
+            ),
+            "scalar grad SMT lowering requires an f32/f64 result"
+        );
+    }
+
+    #[test]
+    fn scalar_grad_inline_non_float_result_fails_closed() {
+        let parameter = Param {
+            name: "x".to_string(),
+            ty: Some(TypeExpr::Named("f32".to_string(), sp())),
+            span: sp(),
+        };
+        let target = Expr::Lambda(
+            vec![parameter],
+            Box::new(Expr::Lit(Literal::Int(1), sp())),
+            sp(),
+        );
+        let error = scalar_grad_application(
+            &target,
+            Some(&["x".to_string()]),
+            &[var("argument")],
+            &ctx(&[]),
+            |_| Some(SmtExpr::Var("argument".into())),
+        )
+        .expect_err("integer-result lambda must fail closed");
+        assert_eq!(error, "scalar grad SMT lowering requires an f32/f64 result");
     }
 }
