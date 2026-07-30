@@ -3502,16 +3502,17 @@ module_prefix = "Graph"
     write_file(
         &root.join("src/a.ch"),
         "module Graph.A\n\
-         import Graph.B (same, from_b)\n\
+         import Graph.B (same, from_b, b_cycle)\n\
          def same(x: f32) -> f32 = x\n\
          def unused(x: f32) -> f32 = x\n\
          def through_b(x: f32) -> f32 = from_b(x)\n\
+         def a_cycle(x: f32) -> f32 = if (x <= 0.0) then 0.0 else b_cycle(x - 1.0)\n\
          @property selected forall(same: f32): through_b(same) == same\n",
     );
     write_file(
         &root.join("src/b.ch"),
         "module Graph.B\n\
-         import Graph.A (through_b)\n\
+         import Graph.A (a_cycle, through_b)\n\
          export (same, from_b)\n\
          dim rows\n\
          type Wrapped =\n\
@@ -3527,7 +3528,7 @@ module_prefix = "Graph"
          @invariant(guard) nonnegative(guard.value)\n\
          type Guard =\n\
            | Guard { value: f32 }\n\
-         def cycle(x: f32) -> f32 = through_b(x)\n",
+         def b_cycle(x: f32) -> f32 = if (x <= 0.0) then 0.0 else a_cycle(x - 1.0)\n",
     );
     let entry = root.join("src/a.ch");
 
@@ -3564,6 +3565,8 @@ module_prefix = "Graph"
     let b_same = find("Graph.B", "same");
     let selected = find("Graph.A", "selected");
     let through_b = find("Graph.A", "through_b");
+    let a_cycle = find("Graph.A", "a_cycle");
+    let b_cycle = find("Graph.B", "b_cycle");
     let from_b = find("Graph.B", "from_b");
     let unused = find("Graph.A", "unused");
     let rows = find("Graph.B", "rows");
@@ -3605,6 +3608,15 @@ module_prefix = "Graph"
             .iter()
             .any(|edge| edge["from"] == through_b["id"] && edge["to"] == from_b["id"]),
         "import must resolve across the module boundary: {edges:?}"
+    );
+    assert!(
+        edges
+            .iter()
+            .any(|edge| edge["from"] == a_cycle["id"] && edge["to"] == b_cycle["id"])
+            && edges
+                .iter()
+                .any(|edge| edge["from"] == b_cycle["id"] && edge["to"] == a_cycle["id"]),
+        "cross-module cycles must retain both linker-owned edges: {edges:?}"
     );
     assert!(
         edges

@@ -548,8 +548,17 @@ fn prove_surf_file(
                         // emitting any property verdict. A later compiler
                         // rejection must never coexist with an earlier green
                         // proof record for the same ill-typed program.
-                        let check_status =
-                            obligation_run::check_linked_decls(&reachable_decls, options, totals);
+                        let (reachable_stdlib, reachable_non_stdlib): (Vec<_>, Vec<_>) =
+                            reachable_decls
+                                .iter()
+                                .cloned()
+                                .partition(|decl| prepared.stdlib_decls.contains(decl));
+                        let check_status = obligation_run::check_linked_decls(
+                            &reachable_stdlib,
+                            &reachable_non_stdlib,
+                            options,
+                            totals,
+                        );
                         if check_status != Status::Passed {
                             return Ok(check_status);
                         }
@@ -586,7 +595,7 @@ fn prove_surf_file(
                 }
             }
             Ok(None) => {
-                let check_status = obligation_run::check_linked_decls(&parsed, options, totals);
+                let check_status = obligation_run::check_unlinked_decls(&parsed, options, totals);
                 if check_status != Status::Passed {
                     return Ok(check_status);
                 }
