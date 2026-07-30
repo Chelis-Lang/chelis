@@ -1,5 +1,6 @@
 module Std.Io.Csv
-export (read_csv, try_read_csv)
+export (read_csv, try_read_csv, to_csv, try_to_csv, write_csv, try_write_csv)
+import Std.Text (join)
 def read_csv(path: string) -> List[Dict[string, string]] = {
   match try_read_csv(path) with {
     | Some(rows) => rows
@@ -13,6 +14,61 @@ def try_read_csv(path: string) -> Option[List[Dict[string, string]]] = {
     if eq(len(lines), cast(0, int64)) then Some([]) else match parse_line(index(lines, cast(0, int64))) with {
       | Some(headers) => parse_rows(headers, drop(lines, cast(1, int64)), [])
       | None => None
+    }
+  }
+}
+def to_csv(rows: List[Dict[string, string]]) -> string = {
+  match try_to_csv(rows) with {
+    | Some(text) => text
+    | None => fail(string_concat("to_csv failed at row ", string_concat(to_string(first_invalid_row(rows)), ": every row must have exactly the header row's keys, and no field or header may contain CR or LF")))
+  }
+}
+def try_to_csv(rows: List[Dict[string, string]]) -> Option[string] = {
+  if eq(len(rows), cast(0, int64)) then Some("") else {
+    headers = dict_keys(index(rows, cast(0, int64)))
+    if and(fields_ok(headers), rows_ok(headers, rows)) then Some(render_all(headers, rows)) else None
+  }
+}
+def write_csv(path: string, rows: List[Dict[string, string]]) -> unit = {
+  match try_to_csv(rows) with {
+    | Some(text) => write_file(path, text)
+    | None => fail(string_concat("write_csv failed for ", string_concat(path, string_concat(" at row ", string_concat(to_string(first_invalid_row(rows)), ": every row must have exactly the header row's keys, and no field or header may contain CR or LF")))))
+  }
+}
+def try_write_csv(path: string, rows: List[Dict[string, string]]) -> Option[unit] = {
+  match try_to_csv(rows) with {
+    | Some(text) => Some(write_file(path, text))
+    | None => None
+  }
+}
+def rows_ok(headers: List[string], rows: List[Dict[string, string]]) -> bool = fold(fn (acc: bool, row: Dict[string, string]) -> and(acc, row_ok(headers, row)), true, rows)
+def row_ok(headers: List[string], row: Dict[string, string]) -> bool = {
+  if neq(len(row), len(headers)) then false else fold(fn (acc: bool, h: string) -> and(acc, match dict_get(row, h) with {
+    | Some(v) => field_ok(v)
+    | None => false
+  }), true, headers)
+}
+def field_ok(text: string) -> bool = not(or(string_contains(text, "\n"), string_contains(text, "\r")))
+def fields_ok(values: List[string]) -> bool = fold(fn (acc: bool, v: string) -> and(acc, field_ok(v)), true, values)
+def render_all(headers: List[string], rows: List[Dict[string, string]]) -> string = string_concat(render_line(map(fn (h: string) -> render_field(h), headers)), string_concat("\n", string_concat(join(map(fn (row: Dict[string, string]) -> render_row(headers, row), rows), "\n"), "\n")))
+def render_row(headers: List[string], row: Dict[string, string]) -> string = {
+  render_line(map(fn (h: string) -> render_field(match dict_get(row, h) with {
+    | Some(v) => v
+    | None => ""
+  }), headers))
+}
+def render_line(fields: List[string]) -> string = {
+  line = join(fields, ",")
+  if eq(string_len(line), cast(0, int64)) then "\"\"" else line
+}
+def render_field(text: string) -> string = { if or(string_contains(text, ","), string_contains(text, "\"")) then string_concat("\"", string_concat(double_quotes(text), "\"")) else text }
+def double_quotes(text: string) -> string = { if not(string_contains(text, "\"")) then text else fold(fn (acc: string, idx: int64) -> string_concat(acc, if eq(string_slice(text, idx, cast(1, int64)), "\"") then "\"\"" else string_slice(text, idx, cast(1, int64))), "", range(cast(0, int64), string_len(text))) }
+def first_invalid_row(rows: List[Dict[string, string]]) -> int64 = {
+  if eq(len(rows), cast(0, int64)) then cast(-1, int64) else {
+    headers = dict_keys(index(rows, cast(0, int64)))
+    if not(fields_ok(headers)) then cast(0, int64) else {
+      scan = fold(fn (acc: (int64, int64), row: Dict[string, string]) -> if gte(acc.1, cast(0, int64)) then (add(acc.0, cast(1, int64)), acc.1) else if row_ok(headers, row) then (add(acc.0, cast(1, int64)), cast(-1, int64)) else (add(acc.0, cast(1, int64)), acc.0), (cast(0, int64), cast(-1, int64)), rows)
+      scan.1
     }
   }
 }

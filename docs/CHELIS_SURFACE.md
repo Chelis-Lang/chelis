@@ -581,7 +581,8 @@ chelis-std 0.4.0 — there is no upstream NN fallback. Use these; do not reimple
 | `Std.Sort` | `sort_1d`, `sort_2d` |
 | `Std.Scan` | `scan_list` (list lane; tensor lane is the `tensor_scan` builtin) |
 | `Std.Index` | `list_index`, `take_list`, `drop_list` |
-| `Std.Io.{Csv,Json,Parquet,Safetensors}` | `read_csv`, `save_tensors`/`load_tensors`, … |
+| `Std.Io.{Csv,Json,Parquet,Safetensors}` | `read_csv`/`to_csv`/`write_csv`, `load_json`/`to_json`/`write_json` (+ exported `Json` constructors, `try_write_*` twins). Caveats: `to_csv` rejects CR/LF in fields (line-based reader cannot round-trip them, chelis#954); `to_json` passes control chars other than `\n \t \r` through unescaped (no `char_code` primitive, chelis#953). `save_tensors`/`load_tensors`, … |
+| `Std.Text` | `join(parts, sep)` |
 | `Std.Test` | `assert_*`, `assert_close*`, `assert_shape`, `fail` |
 | `Std.Time`, `Std.Decimal`, `Std.Tokenizer`, `Std.Process`, `Std.Contracts` | dates, fixed-point, tokenization, `run`/`run_chelis`, contract predicates |
 

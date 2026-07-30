@@ -1,5 +1,5 @@
 module Std.Tests.Io.Csv
-import Std.Io.Csv (read_csv, try_read_csv)
+import Std.Io.Csv (read_csv, try_read_csv, to_csv, try_to_csv, write_csv, try_write_csv)
 import Std.Test (assert_eq_int, assert_eq_string, assert_true, fail)
 def check_field(rows: List[Dict[string, string]], i: int64, k: string, expected: string, label: string) -> unit ! { Test } = {
   match dict_get(index(rows, i), k) with {
@@ -75,4 +75,81 @@ def test_unterminated_quote_returns_none() -> unit ! { Test, IO } = {
     | Some(_) => fail("unterminated quote must yield None, got Some")
     | None => assert_true(true, "unterminated quote -> None")
   }
+}
+def test_to_csv_renders_header_and_rows() -> unit ! { Test } = {
+  rows = [dict_of([("name", "Alice"), ("age", "30")]), dict_of([("name", "Bob"), ("age", "25")])]
+  assert_eq_string(to_csv(rows), "name,age\nAlice,30\nBob,25\n", "two rows render with header, LF endings, trailing newline")
+}
+def test_to_csv_quotes_comma_and_doubles_quotes() -> unit ! { Test } = {
+  rows = [dict_of([("k", "a,b"), ("v", "he said \"hi\"")])]
+  assert_eq_string(to_csv(rows), "k,v\n\"a,b\",\"he said \"\"hi\"\"\"\n", "comma field is quoted and embedded quotes are doubled")
+}
+def test_to_csv_empty_rows_renders_empty_string() -> unit ! { Test } = { assert_eq_string(to_csv([]), "", "no rows -> empty output, mirroring try_read_csv on an empty file") }
+def test_try_to_csv_mismatched_key_sets_returns_none() -> unit ! { Test } = {
+  rows = [dict_of([("a", "1")]), dict_of([("b", "2")])]
+  match try_to_csv(rows) with {
+    | Some(_) => fail("row with a different key set must yield None")
+    | None => assert_true(true, "mismatched key set -> None")
+  }
+}
+def test_try_to_csv_extra_key_returns_none() -> unit ! { Test } = {
+  rows = [dict_of([("a", "1")]), dict_of([("a", "1"), ("b", "2")])]
+  match try_to_csv(rows) with {
+    | Some(_) => fail("row with an extra key must yield None")
+    | None => assert_true(true, "extra key -> None")
+  }
+}
+def test_try_to_csv_newline_field_returns_none() -> unit ! { Test } = {
+  rows = [dict_of([("k", "line one\nline two")])]
+  match try_to_csv(rows) with {
+    | Some(_) => fail("a field containing LF must yield None: the line-based reader cannot round-trip it")
+    | None => assert_true(true, "LF field -> None")
+  }
+}
+def test_try_to_csv_cr_header_returns_none() -> unit ! { Test } = {
+  rows = [dict_of([("bad\rheader", "x")])]
+  match try_to_csv(rows) with {
+    | Some(_) => fail("a header containing CR must yield None")
+    | None => assert_true(true, "CR header -> None")
+  }
+}
+def test_empty_single_column_value_round_trips() -> unit ! { Test, IO } = {
+  path = "/tmp/chelis_std_test_csv_empty_value.csv"
+  rows = [dict_of([("a", "x")]), dict_of([("a", "")])]
+  _ = write_csv(path, rows)
+  back = read_csv(path)
+  _ = assert_eq_int(len(back), cast(2, int64), "empty single-column value survives round-trip as a quoted empty field, not a dropped blank line")
+  check_field(back, cast(1, int64), "a", "", "row1.a reads back as the empty string")
+}
+def test_empty_header_round_trips() -> unit ! { Test, IO } = {
+  path = "/tmp/chelis_std_test_csv_empty_header.csv"
+  rows = [dict_of([("", "x")])]
+  _ = write_csv(path, rows)
+  back = read_csv(path)
+  _ = assert_eq_int(len(back), cast(1, int64), "empty header renders quoted and is not promoted over by the data row")
+  check_field(back, cast(0, int64), "", "x", "value keyed by the empty header reads back")
+}
+def test_to_csv_handles_multi_kilobyte_fields() -> unit ! { Test } = {
+  tail = fold(fn (acc: string, i: int64) -> string_concat(acc, "ab"), "", range(cast(0, int64), cast(2048, int64)))
+  field = string_concat("a\"b,", tail)
+  rows = [dict_of([("k", field), ("v", "plain")])]
+  expected = string_concat("k,v\n\"a\"\"b,", string_concat(tail, "\",plain\n"))
+  assert_eq_string(to_csv(rows), expected, "4 KiB quoted field renders byte-exactly (read-back of multi-kilobyte lines is capped by the reader's recursion, chelis#954)")
+}
+def test_try_write_csv_mismatched_rows_returns_none() -> unit ! { Test, IO } = {
+  rows = [dict_of([("a", "1")]), dict_of([("b", "2")])]
+  match try_write_csv("/tmp/chelis_std_test_csv_try_write.csv", rows) with {
+    | Some(_) => fail("try_write_csv on mismatched key sets must return None")
+    | None => assert_true(true, "mismatched key set -> None through the write facade")
+  }
+}
+def test_write_csv_round_trips_through_read_csv() -> unit ! { Test, IO } = {
+  path = "/tmp/chelis_std_test_csv_write_round_trip.csv"
+  rows = [dict_of([("k", "a,b"), ("v", "x")]), dict_of([("k", "plain"), ("v", "he said \"hi\"")])]
+  _ = write_csv(path, rows)
+  back = read_csv(path)
+  _ = assert_eq_int(len(back), cast(2, int64), "written CSV reads back with 2 rows")
+  _ = check_field(back, cast(0, int64), "k", "a,b", "quoted comma field round-trips")
+  _ = check_field(back, cast(0, int64), "v", "x", "plain field round-trips")
+  check_field(back, cast(1, int64), "v", "he said \"hi\"", "doubled quotes round-trip")
 }
