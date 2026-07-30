@@ -318,10 +318,20 @@ REGISTRIES of what actually exists:
   numbered spec declares is a construction error.
 - `IssueRef` wraps `NonZeroU32` AND validates membership in a
   checked-in issue manifest recording, per number: it is an ISSUE
-  (not a PR), and it is OPEN. The §C7.5 scheduled job re-verifies the
-  manifest against the live tracker, so a cited issue closing makes
-  the stale citation red - the same ratchet as the shell contract's
+  (not a PR), and it is OPEN. **A checked-in manifest is
+  self-authorizing unless its edits are gated** - the same PR that
+  cites a bogus number can add the manifest row that blesses it (the
+  2026-07-30 addendum's countermodel: after a same-PR edit, a closed
+  issue, a PR number, and a 404 all "validate"). So manifest
+  ADDITIONS receive blocking LIVE validation: the manifest file is in
+  the §C7.5 change-gated job's path filter, and that job verifies
+  every added or modified row against the live tracker (exists, is an
+  issue, is open) before the PR can merge. The scheduled job
+  re-verifies the STANDING manifest for drift, so a cited issue
+  closing later makes the stale citation red - the shell contract's
   "probe flips green, remove the citation" rule, pointed inward.
+  Membership answers the compile-time question; the two jobs answer
+  the truth question, at the two times it can change.
 - Hints are validated non-empty; direct struct-literal construction
   from outside the owning module is a privacy error, locked by
   `compile_fail` doctests (the `host_abi.rs` pattern).
@@ -342,7 +352,9 @@ route: the empty atom, the malformed atom, the WELL-SHAPED
 NONEXISTENT atom, issue zero, a real-but-closed issue, a real number
 that is a PR rather than an issue, a nonexistent nonzero issue, and
 the out-of-module struct literal each fail to compile, construct, or
-validate; the [#687] corpus update rides the same PR per B1. Which
+validate; a same-PR manifest addition of a closed issue, a PR number,
+or a nonexistent number fails the change-gated live validation; the
+[#687] corpus update rides the same PR per B1. Which
 cells are `Deliberate` versus `Unimplemented` remains [#729]
 Table A/B's decision - the plan never authors a capability decision
 (§I1).
@@ -381,10 +393,9 @@ remains directly constructible:
   therefore a type error, not a reviewed convention. The chokepoint's
   privacy is locked by `compile_fail` doctests.
 - **The literal and mutation routes close by privacy, not by scan**:
-  `Diagnostic.kind` becomes a PRIVATE field (serde derives work on
-  private fields, so wire `Serialize`/`Deserialize` are unaffected),
-  with construction and the read accessor living in the sealed schema
-  module. `#[non_exhaustive]` alone is NOT the seal - it binds only
+  `Diagnostic.kind` becomes a PRIVATE field, with construction and the
+  read accessor living in the sealed schema module.
+  `#[non_exhaustive]` alone is NOT the seal - it binds only
   other crates, and any module inside compiler-api could still write
   `Diagnostic { kind: "unsupported_feature".to_owned(), .. }` or
   mutate a public field after construction. With the field private,
@@ -394,20 +405,43 @@ remains directly constructible:
   (the `reef_error` substring-dispatch family and kin) converge onto
   the constructors as part of this change; no architecture scan
   carries the seal.
+- **Deserialization is not allowed to be a back door.** A private
+  field does not seal a type that derives `Deserialize`: serde IS a
+  public constructor, and
+  `serde_json::from_str(r#"{"kind":"unsupported_feature",..}"#)`
+  builds the forged value without touching the chokepoint (executed in
+  the 2026-07-30 addendum). The producer type therefore derives
+  `Serialize` ONLY. Wire READING moves to a separate consumer-side
+  type (`WireDiagnostic`, the `deep_path` module's side of the
+  schema) that derives `Deserialize` for tests, tooling, and shells -
+  and the envelope-assembly APIs (`ApiSuccess`/`ApiFailure`
+  construction) accept only the producer type, so a deserialized
+  value cannot re-enter the production pipeline: there is no
+  `WireDiagnostic -> Diagnostic` conversion. **Threat-model
+  calibration, stated:** no type system stops a process from printing
+  arbitrary bytes to stdout; what this seals is the PRODUCTION
+  pipeline - every diagnostic that reaches the wire through the
+  envelope APIs was built at the chokepoint. Forgery outside that
+  pipeline is out of scope here and is what [#733]'s provenance layer
+  exists for.
 
 Negative controls land with the change, one per bypass route, not only
 the old free-string route: a free string literal, a direct
 `DiagnosticKind::UnsupportedFeature` argument to a general envelope
 API, and an out-of-crate `Diagnostic` literal each fail to compile
-(`compile_fail` doctests); an IN-CRATE literal outside the sealed
-module and a post-construction `kind` mutation are proven unwritable
-by planted-mutation controls in the Phase 3 oracle - a temporary
-planted bypass in a non-chokepoint compiler-api module must fail the
-workspace check, byte-restored after (the Phase 2 oracle's planted
-style, which is how a same-crate privacy violation can be
-continuously proven at all - a `compile_fail` doctest compiles as a
-foreign crate and cannot see in-crate privacy); the
-`format!("{:?}")` and message-substring dispatch sites are gone.
+(`compile_fail` doctests); a serde-deserialized `WireDiagnostic`
+handed to any envelope-assembly API fails to compile (the
+no-conversion rule above); the producer type gaining `Deserialize` is
+expiry-locked with a `compile_fail` doctest in the [#871] style; an
+IN-CRATE literal outside the sealed module and a post-construction
+`kind` mutation are proven unwritable by planted-mutation controls in
+the Phase 3 oracle - a temporary planted bypass in a non-chokepoint
+compiler-api module must fail the workspace check, byte-restored
+after (the Phase 2 oracle's planted style, which is how a same-crate
+privacy violation can be continuously proven at all - a
+`compile_fail` doctest compiles as a foreign crate and cannot see
+in-crate privacy); the `format!("{:?}")` and message-substring
+dispatch sites are gone.
 The wire field itself remains a `String` - the enum governs producers,
 the string is the rendering - and nothing here adds `Serialize` or
 otherwise lifts the §C2 STATUS relaxation above; the [#871] expiry
@@ -948,7 +982,13 @@ layers are the authority for the routes they cover:
    `guard: "TODO"` and `guard: "not-a-canary-or-spec-citation"` pass
    neither tier. "The guarantee is named" stops being prose and
    becomes an argument that cannot be empty or fabricated quietly,
-   greppable as a single token.
+   greppable as a single token. **Calibration, same as §C2.1's:**
+   referent resolution proves the guard names a real, currently
+   selected instrument or existing atom; whether that instrument
+   actually GUARDS this site (a resolvable but unrelated test name
+   passes both tiers) is not mechanizable and remains review's job -
+   the tiers exist to make the fabricated and the stale citation
+   unwritable, not to certify relevance.
 3. **Spelling ratchets, explicitly the supporting rung.** Raw
    `panic!` / `unreachable!` / `todo!` / `unimplemented!` and the
    assertion macros (`assert!` / `assert_eq!` / `assert_ne!` /
@@ -973,15 +1013,24 @@ the oracle's referent tier; the sealed adapters' privacy is
 `compile_fail`-locked. For the non-enumerable routes, the control is a
 TEST SEAM, not a scratch member - a disconnected planted function
 proves only that an explicitly invoked panic panics, which proves
-nothing about coverage. The seam: an env-gated hook
-(`CHELIS_TEST_INTERNAL_PANIC=<site>`, test builds only) makes a REAL
-lowering/emission site panic behind its `Result` signature, and a
-named `.ch` probe drives that site through the CLI, asserting the
-surfacing contract (nonzero exit; an internal-error rendering that
-names the invariant, never a silent artifact). Stated plainly: this
-validates the panic-SURFACING path. DISCOVERY of an unknown internal
-panic is what the probe corpus and fuzzing are for; no planted
-control can certify it, and this plan does not claim one does.
+nothing about coverage. The seam is FEATURE-gated, never
+`cfg(test)`-gated: `cfg(test)` does not propagate into the dependency
+crates of a CLI binary, so a test-cfg hook in an emitter crate is
+compiled OUT of exactly the binary the probe drives (executed in the
+2026-07-30 addendum: `cli_dependency_cfg_test=false`). Instead, a
+dedicated cargo feature (`internal-panic-seam`) on the emitter crate
+compiles the hook in; the env selector
+(`CHELIS_TEST_INTERNAL_PANIC=<site>`) picks the site at run time; and
+only the oracle's dedicated `--features` build carries it. The seam
+makes a REAL lowering/emission site panic behind its `Result`
+signature, and a named `.ch` probe drives that site through the
+seam-built CLI, asserting the surfacing contract (nonzero exit; an
+internal-error rendering that names the invariant, never a silent
+artifact). A control asserts the default and release builds do not
+contain the feature. Stated plainly: this validates the
+panic-SURFACING path. DISCOVERY of an unknown internal panic is what
+the probe corpus and fuzzing are for; no planted control can certify
+it, and this plan does not claim one does.
 
 The ~44 rejection-shaped panics are census work, not annotation work:
 they convert through the existing `Unsupported` channel in Phase 4's
@@ -1025,6 +1074,16 @@ manifest-totality guard run as ordinary workspace tests on every PR
 (exactly as today's architecture test does). §C7.5's filter question
 applies only to the expensive mutation legs; the cheap detection of a
 new consumer or root must not depend on anyone predicting its path.
+**Exclusion is the third authorization route and is gated like the
+other two** (the 2026-07-30 addendum's countermodel: a candidate can
+be silenced by an annotated exclusion without the mutation job ever
+running). Two closures: the exclusion lists are in the §C7.5 mutation
+filter, so an exclusion edit runs the legs pre-merge; and the
+discovery tests validate exclusion annotations - a dependency-edge
+consumer candidate may be excluded only with an issue citation, and
+an uncited production-code exclusion is red. Control: a planted
+exclusion for a vocab-edge candidate must trigger the mutation job
+and fail annotation validation until it cites an issue.
 
 ### C7.4 The census is doc-bound and its backings are selected
 
@@ -1092,14 +1151,19 @@ both halves:
    inventory or the registry. Second, the mutation job's path filter
    covers the files that edit therefore touches: the vocabulary owner
    sources, `host_abi.rs`, the RATIFIED INVENTORY FILE itself, the
-   root `Cargo.toml`, the non-Cargo product-root registry, the oracle
-   scripts, and the workflows. A new consumer thus cannot reach main
-   without the discovery test forcing an inventory edit, and the
-   inventory edit cannot merge without the mutation legs running. The
-   crate-scoped `HostAbiType` leg runs on every filter match; the
-   workspace vocabulary leg runs when the vocab owner, the inventory,
-   the root manifest, or the registry changes. The job is classified
-   in `scripts/test_gate.py`'s job tables in the same change.
+   EXCLUSION LISTS (the third authorization route, per §C7.3), the
+   §C2.1 issue manifest, the root `Cargo.toml`, the non-Cargo
+   product-root registry, the oracle scripts, and the workflows. A new
+   consumer thus cannot reach main without the discovery test forcing
+   an inventory, exclusion, or registry edit, and none of those edits
+   can merge without the mutation legs running. The same job carries
+   the §C2.1 manifest live validation: added or modified manifest rows
+   are verified against the tracker (exists, is an issue, is open)
+   before merge. The crate-scoped `HostAbiType` leg runs on every
+   filter match; the workspace vocabulary leg runs when the vocab
+   owner, the inventory, the exclusions, the root manifest, or the
+   registry changes. The job is classified in `scripts/test_gate.py`'s
+   job tables in the same change.
    Trigger controls land with the workflow: a planted new workspace
    member, a planted vocab dependency edge, a planted file in a
    previously uninventoried consumer, and a planted non-Cargo root
@@ -1391,8 +1455,10 @@ mislabel).
 3. **The closed kind vocabulary** (§C2.2): `DiagnosticKind` in
    `chelis-vocab`, the `stage_error` signature change, the
    `unsupported_feature`-only-via-`unsupported_stage_error` rule, the
-   wire-spelling lock test, and removal of the `format!("{:?}")` and
-   message-substring kind paths.
+   producer/wire type split (`Serialize`-only producer with the
+   private `kind`; `Deserialize`-only `WireDiagnostic` that no
+   envelope-assembly API accepts), the wire-spelling lock test, and
+   removal of the `format!("{:?}")` and message-substring kind paths.
 4. **The typed rejection authority** (§C2.1): the 33-site `hint ->
    RejectionAuthority` migration, with the [#687] rejected-cells corpus
    updated in the same PR per B1 (31 sites are mechanical; the two
@@ -1426,15 +1492,18 @@ conformance MANIFEST pattern); the wire-spelling lock test green; and
 the full §C2.1-C2.2 negative-control set, one control per bypass or
 admission route: a planted free-literal kind string, a direct
 `DiagnosticKind::UnsupportedFeature` argument to a general envelope
-API, and an out-of-crate `Diagnostic` literal failing to compile; an
-in-crate `Diagnostic` literal outside the sealed module and a
-post-construction `kind` mutation proven unwritable by
+API, an out-of-crate `Diagnostic` literal, and a serde-deserialized
+`WireDiagnostic` handed to an envelope-assembly API each failing to
+compile, with the producer type's `Deserialize` absence
+expiry-locked; an in-crate `Diagnostic` literal outside the sealed
+module and a post-construction `kind` mutation proven unwritable by
 planted-mutation controls (planted bypass in a non-chokepoint
 compiler-api module fails the workspace check, byte-restored after);
 and the authority admission set - empty atom, malformed atom,
 well-shaped nonexistent atom, issue zero, closed issue, PR-number
-citation, nonexistent nonzero issue - each rejected at construction
-or validation.
+citation, nonexistent nonzero issue, and the same-PR manifest
+addition of any such number - each rejected at construction,
+validation, or the change-gated live check.
 
 ## Phase 4 - ratchet totality (added 2026-07-30)
 
@@ -1474,8 +1543,11 @@ tripwire, §C7, and census rows 24-25 and 27.
 5. **Census row 25's conversion** ([#958], the einsum default), the
    row shrinking with the fix per B1.
 6. **Both §C7.5 execution halves**: the change-gated blocking `ci.yml`
-   job for the mutation legs (path filter derived from the §C6
-   inventory; classified in `scripts/test_gate.py`), and
+   job for the mutation legs and the manifest live validation (path
+   filter per §C7.5: the vocab owners, `host_abi.rs`, the ratified
+   inventory, the exclusion lists, the issue manifest, the root
+   `Cargo.toml`, the non-Cargo registry, the oracle scripts, the
+   workflows; classified in `scripts/test_gate.py`), and
    `loud-unsupported-nightly.yml` + the `NON_GATE_WORKFLOWS` entry +
    the open/close report job, running both plans' Phase 2 oracle
    runners and this phase's oracle as the full-matrix drift canary.
@@ -1508,21 +1580,27 @@ existence check; the §C7.3 dual-source discovery scan; the
 selected test set or the atom registry); the execution-wiring
 assertions (the change-gated `ci.yml` job exists, is classified in
 `scripts/test_gate.py`, and its path filter covers the ratified
-inventory file, the root `Cargo.toml`, and the non-Cargo registry -
+inventory file, the exclusion lists, the §C2.1 issue manifest, the
+root `Cargo.toml`, and the non-Cargo registry -
 the §C7.5 trigger-loop closure, asserted against the workflow's
 actual path list; the nightly file exists, names both oracle runners,
-and appears in `NON_GATE_WORKFLOWS`; the mutation legs themselves are
-executed by those jobs, not by this assertion); and negative controls
+and appears in `NON_GATE_WORKFLOWS`; the mutation legs and the
+manifest live validation are executed by those jobs, not by this
+assertion); and negative controls
 in the Phase 2 oracle's planted style - a planted production
 `panic!`, a planted `.unwrap()`, and a planted bare `assert!` in a
 derived-universe member each go red; a planted census row naming a
 nonexistent test, an ignored-undeclared backing, a phantom
 probe-record citation, and an unregistered non-Cargo product root
-each go red; a planted new consumer (vocab dependency edge) and a
-planted uninventoried consumer file each fail the discovery tests;
-the §C7.2 test seam drives a real lowering/emission site's internal
-panic through a named `.ch` probe and asserts the surfacing contract
-(nonzero exit, invariant-naming rendering, no artifact) - with
+each go red; a planted new consumer (vocab dependency edge), a
+planted uninventoried consumer file, and a planted uncited exclusion
+for a vocab-edge candidate each fail the discovery tests;
+the §C7.2 test seam - under its dedicated feature build, since
+`cfg(test)` does not reach a CLI binary's dependency crates - drives
+a real lowering/emission site's internal panic through a named `.ch`
+probe and asserts the surfacing contract (nonzero exit,
+invariant-naming rendering, no artifact), with a companion control
+asserting the default and release builds carry no seam - with
 byte-for-byte restore of every planted file. Its self-tests ride the
 existing per-PR `unittest discover` CI step automatically, which
 keeps the oracle's anchors continuously verified between scheduled
