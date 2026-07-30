@@ -622,9 +622,10 @@ never as tolerance.
   `dtype_semantics.md` §C4 and this §C1 are the same rules by
   construction; edits go to both in one change set.
 - **Landing order - this plan first (expected)**: [#729] Phases 1-3 then
-  inherit the formatter and validate against it; their "eval is the
-  reference lane" claim strengthens to "reference bits AND reference
-  bytes". [#723]/[#716] are fixed without waiting.
+  inherit the formatter and validate against it; eval serves them as the
+  reference RENDERER (its Phase 1 exit note - the value authority is
+  spec/04 §9, not a lane), so lane validation covers reference bits AND
+  reference bytes. [#723]/[#716] are fixed without waiting.
 - **Landing order - [#729] first**: its Phase 1 delivers `format_element`'s
   Rust side per its §C4 and THIS doc's Phase 1 collapses into an
   adoption/migration pass; its Phase 3 delivers §C3.2's generation and

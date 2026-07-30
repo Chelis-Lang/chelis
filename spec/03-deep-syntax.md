@@ -661,6 +661,10 @@ lex time with a diagnostic citing §1.1.1, and a suffix is authored only
 when its dtype activates. The short unsigned spellings (`u8`, `u16`,
 `u32`, `u64`) are not reserved in any form - `uint8`/`uint16`/`uint32`/
 `uint64` are canonical per §1.1.2 - and are likewise rejected at lex time.
+*(Diagnostic status: today only `f8e4m3`'s message cites §1.1.1; the
+`u*`/`uint*` suffixes cite §1.1.2's superseded stance and the remaining
+reserved names fall to the generic unknown-suffix rejection - chelis#944
+re-points them at §1.1.1.)*
 Hex integer literals interact with float-typed suffixes per the
 hex-suffix rule in `spec/02-surf-syntax.md` §P10a; the same rule applies
 to Deep.
@@ -698,7 +702,8 @@ IntSuffix   ← 'i8' / 'i16' / 'i32' / 'i64'
 # No suffix exists for any deferred name of spec/04-type-system.md §1.1.1
 # (`f8e4m3`, `f8e5m2`, `uint*`, `int4`/`uint4`, `complex*`, `decimal*`); the
 # short unsigned spellings `u8`/`u16`/`u32`/`u64` are not reserved at all.
-# Every such sequence is rejected at lex time with a diagnostic citing §1.1.1.
+# Every such sequence is rejected at lex time with a diagnostic citing §1.1.1
+# (re-pointing tracked at chelis#944; today only f8e4m3's message cites it).
 BoolLit     ← 'true' / 'false'
 StringLit   ← '"' (!'"' .)* '"'
 Spacing     ← ([ \t\n\r] / Comment)*

@@ -100,7 +100,10 @@ documents."
 - **`spec/00-12*.md` is the authority on WHAT the language does and HOW it must
   behave.** Any decision about semantics, types, dtypes, syntax, effects, op behavior,
   diagnostics, or another user-visible contract belongs here. This is the only tier
-  that outlives the work that produced it.
+  that outlives the work that produced it. (For a chapter with a recorded transfer,
+  the Documentation Authority rules above hand that chapter's subject to its
+  controlling `openspec/` capability spec - the tier boundary is unchanged: the
+  normative tier decides, design docs implement.)
 - **`spec/design/*.md` is the authority on how we IMPLEMENT and SEQUENCE those
   decisions**: phase plans, oracles, module layout, privacy contracts, migration
   order, consumer maps, evidence. A design doc may elaborate a numbered-spec rule and

@@ -62,6 +62,15 @@ silently dropped so producers do not assume they have gone away. Every name
 below is rejected by the type checker with a diagnostic pointing at this
 section, and `cast(x, <name>)` is rejected with it.
 
+*(Diagnostic status, 2026-07-30: every name below IS rejected today, but only
+`f8e4m3`'s diagnostics cite this section. The `u*`/`uint*` family is rejected
+with messages that still cite §1.1.2's superseded "out of scope" stance
+(`chelis-surf`/`chelis-deep` lexers, the checker's unsigned-family
+diagnostic, and their locking tests), and the names newly reserved by this
+amendment fall to the generic unknown-suffix / unknown-primitive rejections
+with no citation. Re-pointing them all at this section is chelis#944; delete
+this note in that change set.)*
+
 Each reserved name declares its ARITHMETIC WIDTH ([04-NUM-8]) at reservation
 time, so the width question is settled before anyone implements the dtype
 rather than being decided per-lane during implementation - the failure mode
@@ -148,6 +157,10 @@ trap or wrap (OpenCV and PIL both, and SIMD provides native saturating adds
 such as `paddusb`). If `uint8` image work activates, `sat_add` and siblings
 are the named ops to author, on the [04-NUM-7] pattern - a named op, never a
 mode. Recorded here so the third behavior is not rediscovered as a surprise.
+The pressure will arrive as "wrapping is wrong AND trapping is tiresome" the
+day `uint8` image work is real; the answer that preserves [04-NUM-3]'s
+doctrine is the named op, authored then - not a mode, and not a silent
+default.
 
 #### 1.1.2 Unsigned Integer Types: Deferred, Not Out Of Scope
 
@@ -1725,6 +1738,9 @@ Deferred suffixes:
   `uint*` family, `int4`/`uint4`, `complex64`/`complex128`,
   `decimal128`/`decimal256`). Each is rejected at lex time with a diagnostic
   pointing at §1.1.1. A suffix is authored only when its dtype activates.
+  *(Today only `f8e4m3`'s lex diagnostic cites §1.1.1; the `u*`/`uint*`
+  suffixes cite §1.1.2's superseded stance and the rest fall to the generic
+  unknown-suffix rejection - chelis#944 re-points them.)*
 - The short unsigned spellings (`u8`, `u16`, `u32`, `u64`) are not reserved in
   any form; `uint8`/`uint16`/`uint32`/`uint64` are the canonical names per
   §1.1.2, matching numpy and Arrow.
@@ -1825,8 +1841,14 @@ same wider-accumulator default for bf16/f16 matmul.
 
 Rationale for the i8/i16 → i32 default: overflow safety. Summing 200
 non-trivial `int8` values overflows `int8` but fits comfortably in `int32`.
-This matches PyTorch's `torch.sum` accumulator-promotion rule for narrow
-integer inputs.
+The same instinct exists ecosystem-wide, but the details differ: PyTorch's
+`torch.sum` promotes ALL integral inputs to `int64`, and NumPy accumulates at
+the platform default integer. Chelis deliberately widens one step instead of
+jumping to `int64`; the §5.7 accumulator parameter is the authored route to a
+wider accumulator when a reduction genuinely needs one. (Corrected
+2026-07-30: this paragraph formerly claimed the `int32` default "matches
+PyTorch's `torch.sum` accumulator-promotion rule"; PyTorch's rule is
+`int64`.)
 
 The accumulator parameter is permitted only when it is at least as wide as
 the operand precision and is not narrower than the documented default. A
@@ -2349,6 +2371,21 @@ reductions and to `argmax`/`argmin` operand comparison - three levels of drift
 from one sentence. [04-NUM-8] states the width positively so there is nothing
 left to widen from.
 
+**Amendment 2026-07-30 - trap occurrence, and the record carries its
+cost.** A review pass on the same change set added [04-NUM-12]: trap
+OCCURRENCE for multi-step operations is defined relative to each lane's
+documented accumulation order, and trap-versus-exact divergence at
+accumulator range edges is the one permitted cross-lane trap divergence.
+[04-NUM-9] required identical RENDERING but was silent on occurrence,
+which order-dependence makes a real question for int64 reductions - and
+it had to be answered before chelis#729 Phase 2 freezes the trap
+contract. The same pass stated the availability trade in the rationale
+(trapping converts silent corruption into loud termination,
+deliberately), scoped [04-NUM-8]'s native-narrow permission to the basic
+operations so it no longer conflicts with the reduced-precision opt-in
+rule, and annotated §1.1.1's and §5.5's diagnostic claims with shipped
+reality (chelis#944).
+
 > **[04-NUM-1]** Every numeric op result SHALL be finalized into its
 > declared dtype - rounding for floats, width and domain checks for
 > integers and bool - before it becomes observable to any subsequent op,
@@ -2438,26 +2475,37 @@ in-tree witness of the need. Tracked by chelis#753.)*
 > The reduction and matmul accumulator parameter of §5.7 is the ONLY
 > user-selectable widening; it is explicit, typed, defaulted per §5.7.1,
 > and it does not license any other widening. An implementation MAY
-> compute an f16 or bf16 op natively where the target provides that
-> instruction, because for the basic operations the f32 intermediate and
-> the native narrow op produce identical bits (f32 carries >= 2p+2 bits
-> for p <= 11); it SHALL NOT compute at any width wider than the one
-> declared above.
+> compute a BASIC f16 or bf16 operation (add, sub, mul, div, sqrt)
+> natively where the target provides that instruction: for exactly those
+> operations the f32 intermediate and the native narrow op produce
+> identical bits (f32 carries >= 2p+2 bits for p <= 11), so the native
+> form is an implementation of the declared width, not a departure from
+> it. The permission does not extend to transcendentals or any other op
+> where the bits could differ - those compute at f32 per the table. No
+> lane SHALL compute at any width wider than the one declared above.
 >
 > REDUCED-precision computation - performing an op at an arithmetic width
-> NARROWER than the one declared above, such as a 19-bit tensor-core mode
-> for f32 matmul - SHALL be available only through a named, explicit
+> narrower than the one declared above SUCH THAT THE RESULT BITS CAN
+> DIFFER, such as a 19-bit tensor-core mode for f32 matmul (the
+> bit-identical native-narrow case above is not reduced precision) -
+> SHALL be available only through a named, explicit
 > opt-in at the call site, SHALL never be a default, and SHALL never be
 > selected by a backend, a build flag, or a global mode. No such opt-in is
 > authored yet; until one is, narrower-than-declared computation is
 > non-conforming in every lane.
 
 *(Not honored today: the IR evaluator computes every float op and every
-float reduction in f64 - `binary_elementwise`, `unary_elementwise`, and
-the float `reduce` arm in `chelis-ir/src/eval.rs` all widen through
-`to_f64_lossy_vec()` - and `reduce_argcmp` compares `argmax`/`argmin`
-operands through f64, returning the wrong index for adjacent int64
-values above 2^53. Tracked by chelis#729 Phase 2's kernel split.)*
+float reduction in f64 because its tensor store itself is f64-backed -
+`TensorValue { data: Vec<f64> }` in `chelis-ir/src/eval.rs` - so
+`binary_map`/`unary_map`'s closures and the `reduce` fold (`init: f64`)
+run at f64 whatever the dtype, and `reduce_argcmp` compares
+`argmax`/`argmin` operands as f64, returning the wrong index for
+adjacent int64 values above 2^53. The storage-width column's `bool` row
+is also ahead of the shipped ABI: the C runtime still stores bool at 4
+bytes through the f32 encoding (`RuntimeDType::byte_width`), and the
+native byte lands with the §C3 storage decision at 0.19 (chelis#892,
+chelis#894). Tracked by chelis#729 Phase 2's kernel split and Phase 1's
+storage decision.)*
 
 **Rationale for the f16/bf16 rows.** These are not exclusions carved out
 of a general rule; the arithmetic width is part of what the format is.
@@ -2538,6 +2586,19 @@ form crashes the backend as well. The hand-written checks - widening for
 int32, sign-bit XOR for add and sub, `mulhi` for int64 multiply - are the
 implementation.)*
 
+**The availability trade, stated.** Trapping converts silent data
+corruption into loud termination, by design: a long-running job that
+overflows an `int64` counter DIES where wrapping arithmetic would have
+carried a silently wrong value to completion. That operational cost is
+deliberate, and this record carries it alongside the benefit: the
+alternative outcome is not a successful run but a plausible wrong result,
+which the 2026-07 audit measured as the strictly worse failure mode
+(chelis#703). Code that WANTS mod-2^width semantics states it with
+[04-NUM-7]'s named `wrap_*` operations; saturation - the third behavior,
+which image pipelines want - is authored as named `sat_*` ops if `uint8`
+activates (§1.1.1's non-reservation note). Behaviors are named ops, never
+modes.
+
 > **[04-NUM-11]** A value SHALL survive storage, transport, and every
 > boundary crossing at its declared dtype without collapse. An `int64`
 > value above 2^53 that is exact when produced SHALL still be exact after
@@ -2554,6 +2615,44 @@ computed - chelis#684, chelis#685, chelis#686. This atom is the
 user-visible statement of what `spec/design/dtype_semantics.md` §C3's
 storage decision delivers: that document owns the mechanism, this atom owns
 the guarantee.)*
+
+> **[04-NUM-12]** A numeric trap's OCCURRENCE is deterministic within a
+> lane and is defined by that lane's documented evaluation order. For a
+> multi-step operation (a reduction or scan), whether an intermediate
+> result leaves the accumulator dtype's range - and therefore whether
+> the operation traps - is evaluated against the lane's documented
+> accumulation order: the host lanes' stride-4 cascade
+> (`spec/05-risc-primitives.md` §2.3) or a device lane's documented tree
+> reduction. Same program, same inputs, same lane SHALL always produce
+> the same trap or the same completion. Where two lanes document
+> different accumulation orders, an integer accumulation whose
+> intermediate sums approach the accumulator's range MAY trap in one
+> lane and complete in another; a lane that completes SHALL produce the
+> exact result. Trap-versus-exact at accumulator range edges is the ONLY
+> permitted cross-lane divergence in trap behavior: trap versus a wrong
+> value is never permitted, the tolerance table never applies to traps,
+> and when two lanes both trap, [04-NUM-9]'s rendering identity applies
+> in full.
+
+*(Authored 2026-07-30, before chelis#729 Phase 2 freezes the trap
+strings, because [04-NUM-9]'s identity requirement was silent on exactly
+this interaction: trapping addition is associative in VALUE but not in
+trap occurrence, so pinned-order host lanes and tree-order device lanes
+can legitimately differ at range edges. The alternative - pinning one
+accumulation order across every lane - was considered and rejected: §2.3
+already documents per-lane order divergence for float values, and
+serializing device reductions to the host cascade would forfeit the
+parallel reduction for a case reachable only at the extreme edge of the
+range. Practical reach: §5.7.1's widened default accumulators make
+occurrence order-independent for the narrow integer dtypes whenever
+n·max|element| fits the accumulator - no ordering of partial sums each
+bounded by n·max|element| can overflow int32 before roughly 2^24 int8
+elements - so the divergence window is real only for int64 (and
+extreme-length int32) accumulations near the range edge. No lane traps
+integer overflow today ([04-NUM-3]'s divergence note), so this atom
+rides chelis#729 Phase 2 with the trap contract itself; the chelis#687
+and chelis#754 cross-lane oracles treat a trap-versus-complete
+divergence as conforming only under this atom's conditions.)*
 
 ---
 
@@ -2572,8 +2671,8 @@ i64.
 | `f32` | IEEE binary32 | f32 | RNE to 24-bit mantissa | rounds to ±inf per IEEE | NaN preserved (quiet), ±inf, -0.0 preserved |
 | `f16` | IEEE binary16 | f32 | RNE to 11-bit mantissa, incl. subnormals | overflow -> ±inf (`mul(65504f16, 2f16) = inf`) | as f32 |
 | `bf16` | bfloat16 | f32 | RNE to 8-bit mantissa | overflow -> ±inf | as f32 |
-| `int64` | integers in [-2^63, 2^63-1] | exact int64 | must be integral and in range, else trap | trap, kind `Overflow` ([04-NUM-9]) | none |
-| `int32` / `int16` / `int8` | integers at width | exact at width | same rule at width | trap, kind `Overflow` | none |
+| `int64` | integers in [-2^63, 2^63-1] | exact int64 | must be integral and in range, else trap | trap: `Overflow` out of range, `Domain` non-integral ([04-NUM-9]) | none |
+| `int32` / `int16` / `int8` | integers at width | exact at width | same rule at width | trap: `Overflow` / `Domain` at width | none |
 | `bool` | {0, 1} | n/a (not an arithmetic dtype) | must be exactly 0 or 1, else trap | trap, kind `Domain` | none |
 | deferred names (§1.1.1) | rejected by the checker | - | unreachable: rejection is compile-time-visible, never a runtime arm | - | - |
 
@@ -2582,6 +2681,9 @@ Reading notes:
 - The **arithmetic width** column is [04-NUM-8]'s table restated per row. It
   is deliberately NOT reproduced into §1.1.3's per-backend matrix: it is a
   target-independent fact and §1.1.3 records per-target implementation status.
+- The **trap cells** name [04-NUM-9]'s kinds; for multi-step operations,
+  trap OCCURRENCE is governed by [04-NUM-12] (each lane's documented
+  accumulation order).
 - The **f64 row's identity finalize** is why [04-NUM-6] holds:
   `f64 add(2^53, 1) == 2^53` is the correctly rounded answer and stays. The
   same two numbers at `int64` are exact or trap, never silently collapsed -

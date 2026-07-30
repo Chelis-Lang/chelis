@@ -102,7 +102,7 @@ drift in code.
 
 **Normative home: `spec/04-type-system.md` §9.1**, the consolidated
 per-dtype table, backed cell by cell by atoms [04-NUM-1] through
-[04-NUM-11]. That table is what a later reader cites and is the only
+[04-NUM-12]. That table is what a later reader cites and is the only
 normative copy; this section is the implementation-facing elaboration.
 Where the two disagree the spec wins and this section has a bug.
 
@@ -115,8 +115,8 @@ in flight, and are edited in the same change set as §9.1 or not at all:
 | `f32` | IEEE binary32 | f32 | round-to-nearest-even to 24-bit mantissa | rounds to ±inf per IEEE | NaN preserved (quiet), ±inf, -0.0 preserved |
 | `f16` | IEEE binary16 | f32 | RNE to 11-bit mantissa, incl. subnormals | overflow -> ±inf (locked: `mul(65504f16, 2f16) = inf`) | as f32 |
 | `bf16` | bfloat16 | f32 | RNE to 8-bit mantissa | overflow -> ±inf | as f32 |
-| `int64` | integers in [-2^63, 2^63-1] | exact int64 | must be integral and in range, else **trap** | **trap** (`NumericTrap::Overflow`) | none |
-| `int32/16/8` | integers at width | exact at width | same rule at width | **trap** | none |
+| `int64` | integers in [-2^63, 2^63-1] | exact int64 | must be integral and in range, else **trap** | **trap** (`Overflow` out of range, `Domain` non-integral, [04-NUM-9]) | none |
+| `int32/16/8` | integers at width | exact at width | same rule at width | **trap** (`Overflow` / `Domain` at width) | none |
 | `bool` | {0, 1} | n/a (not arithmetic) | must be exactly 0 or 1, else **trap** (`NumericTrap::Domain`) | trap | none |
 | deferred names (spec §1.1.1) | rejected by the checker | - | unreachable: `finalize` for them is a compile-time-visible `Rejected` row in the capability table, not a runtime arm | - | - |
 
@@ -155,11 +155,18 @@ Normative notes, each pinned by an existing test:
 
 **Normative home: `spec/04-type-system.md` [04-NUM-9] (the closed kind set
 and cross-lane identity), [04-NUM-10] (traps are values until the lane
-boundary, including the device-lane error-flag shape), and [04-NUM-5] (the
+boundary, including the device-lane error-flag shape), [04-NUM-12] (trap
+OCCURRENCE for multi-step ops is defined by each lane's documented
+accumulation order; trap-versus-exact at accumulator range edges is the
+one permitted cross-lane trap divergence), and [04-NUM-5] (the
 fold-decline rule).** Those atoms outlive this document and are what a
 later reader should cite. This section is the elaboration: the Rust shape,
 the working message strings, and the evidence behind the device-lane
 decision. Where the two disagree the atoms win and this section has a bug.
+Phase 2's trap-string freeze inherits [04-NUM-12] as a standing
+constraint: the strings it freezes render a trap whose occurrence is
+per-lane-order-defined, and the [#687] corpus may not paper over a
+trap-versus-complete divergence that the atom's conditions permit.
 
 One error type, one message shape, identical in every lane:
 

@@ -306,6 +306,18 @@ lane: `f32` operands accumulate in `f32`, `f64` in `f64`, `f16`/`bf16` at
 accumulator parameter, so §5.7's widening does not apply to it and there
 is no other authorized widening.
 
+For integer operands that is a decided consequence, not an oversight
+(recorded 2026-07-30): a window sum that leaves the operand dtype's
+range traps per [04-NUM-3] - with occurrence governed by [04-NUM-12] -
+where the GLOBAL reduction's §5.7.1 default would have widened, because
+there is no parameter to request a wider window accumulator. If windowed
+reductions over narrow integers become a real need, the resolution is
+authoring an accumulator parameter for `reduce_window_*` on §5.7's
+pattern, never silent widening. No shipped behavior turns on this yet:
+the compiled lane's precision gate
+(`reject_unsupported_reduce_window_precision`) restricts
+`reduce_window_*` to `f32` before codegen today.
+
 *(Not honored today: the IR evaluator and host runtime accumulate each
 window in `f64` while the C backend accumulates `sum` / `mean` in an
 `f32` lane (`float acc`) - the two lanes disagree by construction for
@@ -441,8 +453,12 @@ never the inner reduction.
 This change is observable for floating-point operands — the prior
 strict left-fold could diverge from torch by ~1 ULP at unfavorable
 seeds and forced parity-oracle carve-outs in downstream harnesses
-(issue Chelis-Lang/chelis#163). Integer reductions are unchanged
-(integer addition is associative). The accumulator-precision rule
+(issue Chelis-Lang/chelis#163). Integer reductions are unchanged in
+VALUE (integer addition is associative), but under [04-NUM-3]'s traps,
+whether an intermediate leaves the accumulator's range is
+order-dependent at range edges - `spec/04-type-system.md` [04-NUM-12]
+defines trap occurrence relative to each lane's documented order,
+including this cascade. The accumulator-precision rule
 above is orthogonal to the reduction order: the lane type is the
 accumulator type, and the final combine happens in the same
 precision.
