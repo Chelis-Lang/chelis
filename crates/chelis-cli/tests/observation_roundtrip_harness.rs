@@ -935,6 +935,7 @@ fn eval_f64_list_excluded_rows_still_narrow_through_the_f32_tag() {
     let out = eval_stdout(&float_table_program("f64", F64_ROWS, false)).expect("eval");
     let llines = list_lines(&out);
     assert_eq!(llines.len(), 2, "expected both to_list renders:\n{out}");
+    let mut visited = std::collections::BTreeSet::new();
     for line in llines {
         let elems = list_payload_elems(line);
         assert_eq!(elems.len(), F64_ROWS.len(), "element count: {line}");
@@ -972,28 +973,71 @@ fn eval_f64_list_excluded_rows_still_narrow_through_the_f32_tag() {
                  change set, so the main assertions cover it (B2.3: \
                  red-to-green only by un-ignoring)."
             );
+            visited.insert(*label);
         }
     }
+    // The execution receipt the oracle compares against the declared
+    // labels (PR #962 red-team F2: a probe that stops iterating the
+    // ledger must not still count as re-execution).
+    println!(
+        "exclusion probe EVAL_F64_LIST_EXCLUDED visited: {}",
+        visited.into_iter().collect::<Vec<_>>().join(" ")
+    );
 }
 
-/// §B2.9 leg 2+3 for `C_LANE_EXCLUDED`'s uncompilable trio: each excluded
-/// constant still emits the chelis#751 integer-literal shape and still
-/// fails at the native stage. `chelis build` succeeding while its output
-/// cannot compile is the defect (exit 0, uncompilable C).
+/// Run a linked exit binary and decode every rendered element at `w`.
+fn run_and_decode_elements(bin: &std::path::Path, w: Width) -> Result<Vec<u64>, String> {
+    let run = std::process::Command::new(bin)
+        .output()
+        .map_err(|e| format!("spawn: {e}"))?;
+    if !run.status.success() {
+        return Err(format!("binary exited {}", run.status));
+    }
+    let stdout = String::from_utf8_lossy(&run.stdout).into_owned();
+    let mut bits = Vec::new();
+    for line in tensor_lines(&stdout) {
+        for text in tensor_elems(line) {
+            bits.push(text_bits_at(&text, w)?);
+        }
+    }
+    for line in list_lines(&stdout) {
+        for text in list_payload_elems(line) {
+            bits.push(text_bits_at(&text, w)?);
+        }
+    }
+    if bits.is_empty() {
+        return Err(format!("no rendered elements in:\n{stdout}"));
+    }
+    Ok(bits)
+}
+
+/// §B2.9 leg 2+3 for `C_LANE_EXCLUDED`'s giant-constant trio. The defect
+/// (chelis#751) is an EMISSION defect - the generated C carries a bare
+/// integer literal too wide for any C integer constant - so the lexical
+/// fingerprint is the toolchain-independent defect check. The NATIVE
+/// outcome is a per-toolchain SYMPTOM, corroborated but never load
+/// bearing for the verdict (PR #962 red-team F1: Clang rejects the
+/// literal outright, while GCC diagnoses it as a warning and produces a
+/// binary - and for the 20-digit e19 constant a 128-bit-constant
+/// toolchain can even reproduce the exact value, so neither "it linked"
+/// nor "it ran correctly" implies the repair landed). GOOD NEWS - the
+/// shrink protocol - fires only when the fingerprint is GONE and the
+/// program builds, links, runs, and renders the exact bits end to end.
 #[test]
 fn c_lane_excluded_labels_still_fail_at_ingress() {
     if !c_toolchain_available() {
         eprintln!("skipping: no C toolchain");
         return;
     }
+    let mut visited: Vec<&str> = Vec::new();
     for label in C_LANE_EXCLUDED {
         if *label == "f64-neg-zero" {
             continue; // its failure mode is a wrong RENDER, probed below
         }
-        let (dt, rows): (&str, &[FRow]) = if label.starts_with("f64") {
-            ("f64", F64_ROWS)
+        let (dt, w, rows): (&str, Width, &[FRow]) = if label.starts_with("f64") {
+            ("f64", Width::F64, F64_ROWS)
         } else {
-            ("f32", F32_ROWS)
+            ("f32", Width::F32, F32_ROWS)
         };
         let row = rows
             .iter()
@@ -1031,25 +1075,73 @@ fn c_lane_excluded_labels_still_fail_at_ingress() {
         );
         let c_source =
             std::fs::read_to_string(out_dir.join(format!("{name}.c"))).expect("generated C source");
-        assert!(
-            has_bare_giant_integer_literal(&c_source),
-            "[probe/{label}] the generated C no longer carries the \
-             chelis#751 bare-integer-literal fingerprint. If the constant \
-             now emits correctly, GOOD NEWS: remove `{label}` from \
-             C_LANE_EXCLUDED and from DECLARED_EXCLUSIONS in \
-             scripts/faithful_observation_phase2_oracle.py in this change \
-             set, and let the main compiled-lane tests cover the row."
-        );
-        let status = common::link_generated(&out_dir, &format!("{name}.c"), &name);
-        assert!(
-            !status.success(),
-            "[probe/{label}] GOOD NEWS: the emitted C now compiles - the \
-             chelis#751 ingress repair landed for this constant. Remove \
-             `{label}` from C_LANE_EXCLUDED and from DECLARED_EXCLUSIONS in \
-             scripts/faithful_observation_phase2_oracle.py in this change \
-             set, so the row rejoins the compiled-lane corpus."
-        );
+        let fingerprint = has_bare_giant_integer_literal(&c_source);
+        let link_ok = common::link_generated(&out_dir, &format!("{name}.c"), &name).success();
+
+        if !fingerprint {
+            // The emission changed. Only a clean end-to-end run is the
+            // repair; anything else is a new, different defect.
+            let end_to_end = if link_ok {
+                run_and_decode_elements(&out_dir.join(&name), w)
+            } else {
+                Err("native stage failed".into())
+            };
+            match end_to_end {
+                Ok(bits) if bits.iter().all(|b| *b == value_bits_at(row.value, w)) => {
+                    panic!(
+                        "[probe/{label}] GOOD NEWS: the chelis#751 \
+                         bare-integer-literal fingerprint is gone and the \
+                         program builds, links, runs, and renders the exact \
+                         bits - the ingress repair landed for this constant. \
+                         Remove `{label}` from C_LANE_EXCLUDED and from \
+                         DECLARED_EXCLUSIONS in \
+                         scripts/faithful_observation_phase2_oracle.py in \
+                         this change set, so the row rejoins the \
+                         compiled-lane corpus."
+                    );
+                }
+                other => {
+                    panic!(
+                        "[probe/{label}] the generated C no longer carries \
+                         the chelis#751 fingerprint, but the native outcome \
+                         is still broken ({other:?}). That is a DIFFERENT \
+                         defect: file it per faithful_observation.md B2.5 \
+                         before touching the exclusion."
+                    );
+                }
+            }
+        }
+
+        // Fingerprint present: the chelis#751 emission defect stands and
+        // the exclusion is earned. Corroborate the per-toolchain symptom
+        // without letting it decide the verdict.
+        if link_ok {
+            match run_and_decode_elements(&out_dir.join(&name), w) {
+                Ok(bits) if bits.iter().all(|b| *b == value_bits_at(row.value, w)) => {
+                    eprintln!(
+                        "[probe/{label}] note: this toolchain accepts the \
+                         giant literal and reproduces the exact value (a \
+                         128-bit-constant extension); the exclusion stands \
+                         on the non-portable chelis#751 emission, which is \
+                         still present."
+                    );
+                }
+                Ok(_) => {
+                    // The GCC-family symptom: accepted with a warning,
+                    // value corrupted by truncation/pinning.
+                }
+                Err(_) => {
+                    // Accepted but the binary fails to run or render - a
+                    // harsher spelling of the same corruption symptom.
+                }
+            }
+        }
+        visited.push(label);
     }
+    println!(
+        "exclusion probe C_LANE_EXCLUDED visited: {}",
+        visited.join(" ")
+    );
 }
 
 /// §B2.9 leg 2+3 for `C_LANE_EXCLUDED`'s `f64-neg-zero`: the constant
@@ -1113,6 +1205,7 @@ fn c_lane_excluded_neg_zero_still_drops_the_sign() {
         }
     }
     assert_eq!(renders, 4, "expected all four exit renders:\n{out}");
+    println!("exclusion probe C_LANE_EXCLUDED visited: f64-neg-zero");
 }
 
 fn float_table_program(dt: &str, rows: &[FRow], via_cast: bool) -> String {

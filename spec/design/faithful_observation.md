@@ -370,13 +370,18 @@ For every dtype and every storable value:
    `printf`/`format!` of a tensor element in the numeric crates is a
    review-blocking finding. The rule spans BOTH lanes and every Rust
    exit surface, and its instruments (stated per §B2.8) are the three
-   hosted token classes in `loud_unsupported_tripwire.rs`, each a
-   two-sided exact-count ratchet: `c-format-narrowing` (C printf tokens
+   hosted classes in `loud_unsupported_tripwire.rs`, each a two-sided
+   exact-count ratchet: `c-format-narrowing` (C printf tokens
    `%.16g`/`%.1f`, all crate src; production allowlist empty since
-   Phase 2), `rust-format-narrowing` (Rust precision-spec forms
-   `{x:.N}`, all crate src, comment lines excluded), and
-   `rust-debug-numeric-format` (`:?}`/`:#?}` tokens over the declared
-   `OBSERVATION_EXIT_SURFACES` - directory prefixes deliberately, so a
+   Phase 2), `rust-format-narrowing` (interpolations whose format spec
+   pins a decimal precision - `.N`, argument-supplied `.*`, named
+   `.prec$`, in any combination with fill/alignment/sign/width, so
+   `{value:8.2}` and `{v:0>8.2}` count alongside `{x:.N}`; all crate
+   src, comment lines excluded - widened from the bare token per PR
+   #962 red-team F3), and `rust-debug-numeric-format` (interpolations
+   whose spec selects the Debug trait, i.e. ends in `?` - `{v:?}`,
+   `{x:#?}`, `{value:8?}`, `{v:x?}` - over the declared
+   `OBSERVATION_EXIT_SURFACES`: directory prefixes deliberately, so a
    NEW file inside a declared surface is covered from its first line at
    baseline zero; creating an exit surface anywhere else obliges adding
    its prefix in the same change set). The sanctioned implementations -
@@ -422,17 +427,22 @@ For every dtype and every storable value:
    between what a rule claims and what its detector covers is itself a
    violation of this item - that gap is how `format_f64_json` shipped
    with no mechanical signal while §B2.4 said "either lane".
-   Enforcement is structural, not aspirational: the Phase 2 oracle
-   carries `B2_RULE_INSTRUMENTS`, one row per item of this section,
-   checked two ways - the doc's §B2 item list must equal the manifest
-   (a new rule lands only with a deliberate instrument decision, which
-   may be the literal review-rule entry with its justification), and
-   every named instrument must exist in the sources the oracle reads.
-   The oracle further requires every tripwire pattern whose `doc()`
-   cites this document to carry an oracle coverage row (its per-class
-   permitted baseline paths), so a hosted detector the oracle cannot
-   see - the 2026-07-30 review's second finding, one layer up - is
-   structurally impossible to add.
+   Enforcement, with its own limits stated (PR #962 red-team F5): the
+   Phase 2 oracle carries `B2_RULE_INSTRUMENTS`, one row per item of
+   this section, checked three ways - the doc's §B2 item list must
+   equal the manifest (a new rule lands only with a deliberate
+   instrument decision, which may be the literal review-rule entry with
+   a substantive justification), every named instrument must exist, and
+   every callable instrument must be INVOKED by one of the oracle's
+   run_* legs (callable-but-never-run is manifest theater). The oracle
+   further requires every tripwire pattern whose `doc()` cites this
+   document to carry an oracle coverage row (its per-class permitted
+   baseline paths), closing the review's second finding one layer up.
+   What the manifest deliberately does NOT prove: that an instrument's
+   checks are non-vacuous. That burden sits with the mutation tests in
+   `test_faithful_observation_phase2_oracle.py` - one shipped-clean
+   test plus one mutation test per failure mode per instrument - and a
+   new instrument owes its mutation tests in the same change set.
 9. **Three-legged boundaries** (added 2026-07-30). Every artifact that
    DECLARES current breakage - the `#[ignore]` ledger, the
    corpus-exclusion lists, the tripwire baselines - carries three legs,
@@ -445,25 +455,40 @@ For every dtype and every storable value:
    overstating breakage stayed green forever. Standing conformance:
    `KNOWN_RED_CELLS` has all three legs from the oracle's authoring
    (ledger equality, per-cell re-runs, the gone-green failure with its
-   `fragment` discriminator); the tripwire baseline has all three (the
-   row list, the every-CI scan, and its DECREASE branch is precisely
-   the gone-green leg); the exclusion lists gained legs 2-3 via the
-   harness's non-ignored exclusion probes
+   `fragment` discriminator); the tripwire baseline carries the three
+   legs at NET-COUNT granularity - the row list, the every-CI scan, and
+   the DECREASE branch as its gone-green leg - which is honestly weaker
+   than per-occurrence identity: a same-file edit that removes one
+   benign token and adds one violating token preserves the count and
+   fires neither branch (PR #962 red-team F4; `loud_unsupported.md`
+   §C4.5 has always named count relocation among the inventory's
+   evasions, and the review rule owns the swap case); the exclusion
+   lists gained legs 2-3 via the harness's exclusion probes
    (`eval_f64_list_excluded_rows_still_narrow_through_the_f32_tag`,
    `c_lane_excluded_labels_still_fail_at_ingress`,
-   `c_lane_excluded_neg_zero_still_drops_the_sign`), which iterate the
-   exclusion consts themselves so inventory parity holds by
-   construction, run in the DEFAULT suite so CI re-executes them
-   continuously, assert each exclusion's declared fingerprint (the
-   chelis#717 F32-tag narrowing; the chelis#751 bare-integer-literal
-   emission and its native-stage failure; the dropped -0.0 sign), and
-   fail with a shrink-the-list message naming `DECLARED_EXCLUSIONS`
-   the moment the upstream repair lands. Scope notes: corpus FLOORS
-   (the §C2.3 byte-identity floor) assert coverage, not breakage - they
-   owe legs 1 and 2 only, since unexpected green is meaningless for a
-   floor; a declared boundary whose behavior cannot be driven is
-   converted into a probe of the rejection (the C-lane link-fail probes
-   are the worked example) or deleted.
+   `c_lane_excluded_neg_zero_still_drops_the_sign`). Probe discipline,
+   hardened per PR #962's red team (F1/F2): each probe carries exactly
+   the unconditional `#[test]` attribute (checked structurally;
+   cfg-gated or cfg_attr-ignored probes fail the scan, unrecognized
+   attribute shapes fail closed), iterates the exclusion const itself
+   and prints a visited-labels receipt that the oracle - running each
+   probe individually - compares against the declared labels (a decoy
+   that stops iterating fails the receipt union), runs in the DEFAULT
+   suite so CI re-executes it continuously, and asserts each
+   exclusion's declared fingerprint: the chelis#717 F32-tag narrowing;
+   the chelis#751 bare-integer-literal EMISSION (the native-stage
+   outcome is a per-toolchain SYMPTOM only - Clang rejects the literal,
+   GCC warns and may corrupt the value or, for 128-bit-constant
+   toolchains on the 20-digit constant, even reproduce it exactly - so
+   the lexical fingerprint decides, and the shrink protocol fires only
+   when the fingerprint is gone AND the program renders exact bits end
+   to end); the dropped -0.0 sign. Every gone-green failure names
+   `DECLARED_EXCLUSIONS` and the shrink protocol. Scope notes: corpus
+   FLOORS (the §C2.3 byte-identity floor) assert coverage, not
+   breakage - they owe legs 1 and 2 only, since unexpected green is
+   meaningless for a floor; a declared boundary whose behavior cannot
+   be driven is converted into a probe of the rejection (the C-lane
+   probes are the worked example) or deleted.
 
 ## B3. How to pick up a phase
 

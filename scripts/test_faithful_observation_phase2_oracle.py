@@ -618,6 +618,115 @@ class ExclusionProbeTests(unittest.TestCase):
         )
 
 
+class ProbeAttributeTests(unittest.TestCase):
+    def _harness(self) -> str:
+        return (oracle.REPO_ROOT / oracle.HARNESS_SOURCE).read_text(encoding="utf-8")
+
+    def test_the_shipped_probes_are_unconditional_tests(self) -> None:
+        self.assertEqual(oracle.probe_attribute_violations(self._harness()), [])
+        for _const, _owner, probes, _labels in oracle.DECLARED_EXCLUSIONS:
+            for probe in probes:
+                self.assertEqual(
+                    oracle.probe_attributes(self._harness(), probe), ["#[test]"]
+                )
+
+    def test_a_cfg_attr_ignore_is_a_violation(self) -> None:
+        source = self._harness().replace(
+            "#[test]\nfn c_lane_excluded_neg_zero_still_drops_the_sign() {",
+            "#[test]\n#[cfg_attr(all(), ignore)]\n"
+            "fn c_lane_excluded_neg_zero_still_drops_the_sign() {",
+            1,
+        )
+        violations = oracle.probe_attribute_violations(source)
+        self.assertTrue(
+            any("cfg_attr" in v or "exactly the" in v for v in violations), violations
+        )
+
+    def test_a_missing_test_attribute_is_a_violation(self) -> None:
+        source = self._harness().replace(
+            "#[test]\nfn eval_f64_list_excluded_rows_still_narrow_through_the_f32_tag() {",
+            "fn eval_f64_list_excluded_rows_still_narrow_through_the_f32_tag() {",
+            1,
+        )
+        violations = oracle.probe_attribute_violations(source)
+        self.assertTrue(
+            any(
+                "eval_f64_list_excluded_rows_still_narrow_through_the_f32_tag" in v
+                for v in violations
+            ),
+            violations,
+        )
+
+    def test_a_multi_line_attribute_fails_closed(self) -> None:
+        source = self._harness().replace(
+            "#[test]\nfn c_lane_excluded_labels_still_fail_at_ingress() {",
+            "#[test]\n#[cfg_attr(\n    all(),\n    ignore\n)]\n"
+            "fn c_lane_excluded_labels_still_fail_at_ingress() {",
+            1,
+        )
+        violations = oracle.probe_attribute_violations(source)
+        self.assertTrue(
+            any("c_lane_excluded_labels_still_fail_at_ingress" in v for v in violations),
+            "an attribute shape the parser cannot vouch for must be a "
+            f"violation, never a pass; got {violations}",
+        )
+
+
+class ProbeReceiptTests(unittest.TestCase):
+    def test_receipt_lines_parse_into_label_sets(self) -> None:
+        output = (
+            "running 1 test\n"
+            "exclusion probe C_LANE_EXCLUDED visited: f64-max f32-max\n"
+            "exclusion probe C_LANE_EXCLUDED visited: f64-neg-zero\n"
+            "ok\n"
+        )
+        self.assertEqual(
+            oracle.probe_receipts(output),
+            {"C_LANE_EXCLUDED": {"f64-max", "f32-max", "f64-neg-zero"}},
+        )
+
+    def test_a_full_receipt_union_across_probes_passes(self) -> None:
+        outputs = [
+            ("trio", 0, "running 1 test\nexclusion probe C visited: a b\nok"),
+            ("solo", 0, "running 1 test\nexclusion probe C visited: c\nok"),
+        ]
+        self.assertEqual(
+            oracle.classify_probe_outputs("C", ("a", "b", "c"), outputs), []
+        )
+
+    def test_a_shrunken_receipt_is_a_violation(self) -> None:
+        outputs = [
+            ("trio", 0, "running 1 test\nexclusion probe C visited: a\nok"),
+        ]
+        violations = oracle.classify_probe_outputs("C", ("a", "b"), outputs)
+        self.assertTrue(
+            any("missing ['b']" in v for v in violations),
+            "a probe that stops iterating the ledger must fail the receipt "
+            f"comparison; got {violations}",
+        )
+
+    def test_a_failing_probe_is_reported_with_its_output(self) -> None:
+        outputs = [("trio", 101, "running 1 test\nGOOD NEWS: ...\nFAILED")]
+        violations = oracle.classify_probe_outputs("C", ("a",), outputs)
+        self.assertTrue(any("FAILED (exit 101)" in v for v in violations), violations)
+
+    def test_a_zero_test_run_is_a_violation(self) -> None:
+        outputs = [("trio", 0, "running 0 tests\nok")]
+        violations = oracle.classify_probe_outputs("C", ("a",), outputs)
+        self.assertTrue(
+            any("did not execute exactly one test" in v for v in violations), violations
+        )
+
+    def test_an_undeclared_visited_label_is_a_violation(self) -> None:
+        outputs = [
+            ("trio", 0, "running 1 test\nexclusion probe C visited: a rogue\nok"),
+        ]
+        violations = oracle.classify_probe_outputs("C", ("a",), outputs)
+        self.assertTrue(
+            any("undeclared ['rogue']" in v for v in violations), violations
+        )
+
+
 class RuleManifestTests(unittest.TestCase):
     def _doc(self) -> str:
         return (oracle.REPO_ROOT / oracle.DESIGN_DOC).read_text(encoding="utf-8")
@@ -664,6 +773,36 @@ class RuleManifestTests(unittest.TestCase):
         self.assertTrue(
             any("nonexistent_check" in v and "cannot run" in v for v in violations),
             violations,
+        )
+
+    def test_a_callable_but_never_invoked_instrument_is_a_violation(self) -> None:
+        """PR #962 red-team F5.2: callable is not invoked. `probe_receipts`
+        is a real oracle function, but no run_* leg calls it by name (a
+        helper does), so naming it as an instrument must fail."""
+        original = oracle.B2_RULE_INSTRUMENTS
+        oracle.B2_RULE_INSTRUMENTS = original + (
+            (9, "Three-legged boundaries", ("probe_receipts",)),
+        )
+        try:
+            violations = oracle.b2_manifest_violations(self._doc())
+        finally:
+            oracle.B2_RULE_INSTRUMENTS = original
+        self.assertTrue(
+            any("probe_receipts" in v and "never" in v.lower() for v in violations),
+            violations,
+        )
+
+    def test_a_bare_review_rule_tag_is_a_violation(self) -> None:
+        original = oracle.B2_RULE_INSTRUMENTS
+        oracle.B2_RULE_INSTRUMENTS = original + (
+            (9, "Three-legged boundaries", ("review-rule: trust me",)),
+        )
+        try:
+            violations = oracle.b2_manifest_violations(self._doc())
+        finally:
+            oracle.B2_RULE_INSTRUMENTS = original
+        self.assertTrue(
+            any("justification" in v for v in violations), violations
         )
 
     def test_an_unlocatable_b2_section_is_reported_not_vacuous(self) -> None:

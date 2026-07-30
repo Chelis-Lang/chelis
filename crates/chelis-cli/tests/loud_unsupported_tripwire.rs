@@ -57,9 +57,16 @@
 //!   piece with an owner): derived-Debug containers embedding floats
 //!   (`{other:?}` on a `#[derive(Debug)]` value - chelis#729's payload
 //!   work plus the review rule), bare `{}` Display / `.to_string()` of a
-//!   numeric payload (review rule), and exits created outside
+//!   numeric payload (review rule), exits created outside
 //!   `OBSERVATION_EXIT_SURFACES` (review rule; a new exit surface adds
-//!   its prefix in the same change set). The typed boundaries and their
+//!   its prefix in the same change set), and COUNT-PRESERVING RELOCATION
+//!   (PR #962 red-team F4: a same-file edit that removes one benign
+//!   token and adds one violating token keeps the per-file exact count
+//!   unchanged, so neither ratchet branch fires - the per-file count is
+//!   a net-growth/net-shrink guard, not a per-occurrence identity; the
+//!   review rule owns the swap case, and loud_unsupported.md C4.5
+//!   already names count relocation among this inventory's known
+//!   evasions). The typed boundaries and their
 //!   mutation oracles close the semantic class; do not treat this inventory as
 //!   airtight.
 
@@ -69,10 +76,28 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// The recidivist token classes from section C4.3 of the plan, plus the
-/// hosted chelis#732 format row.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
-enum Pat {
+/// Declare the pattern enum AND its scan list from ONE variant list, so a
+/// variant cannot exist without being scanned. The previous shape - a
+/// hand list plus a hand index map plus a hand count - was satisfiable
+/// while omitting a variant (PR #962 red-team F5.1: a new variant could
+/// reuse an existing index and never join `ALL_PATS`); generation from a
+/// single source is the fix that needs no guard test.
+macro_rules! declare_pats {
+    ($($(#[$meta:meta])* $name:ident,)+) => {
+        /// The recidivist token classes from section C4.3 of the plan,
+        /// plus the hosted chelis#732 format classes.
+        #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+        enum Pat {
+            $($(#[$meta])* $name,)+
+        }
+
+        /// Every pattern, generated from the same list that declares the
+        /// enum.
+        const ALL_PATS: &[Pat] = &[$(Pat::$name,)+];
+    };
+}
+
+declare_pats! {
     /// `*/ 0"` - a `/* unsupported ... */ 0` stub inside an emitted-string
     /// builder (census rows 2 and 19).
     StubZero,
@@ -127,39 +152,6 @@ enum Pat {
     /// inside a declared exit surface starts at baseline zero.
     RustDebugNumericFormat,
 }
-
-const ALL_PATS: &[Pat] = &[
-    Pat::StubZero,
-    Pat::ValuePlaceholder,
-    Pat::UnwrapOrDefault,
-    Pat::UnwrapOrPrim,
-    Pat::ElemKindWildcardArm,
-    Pat::UnwrapOrNumericLiteral,
-    Pat::CFormatNarrowing,
-    Pat::RustFormatNarrowing,
-    Pat::RustDebugNumericFormat,
-];
-
-/// Every `Pat` has a stable index, and the `match` forces this function to
-/// grow with the enum: a variant added without updating it is a compile
-/// error, and `all_pats_lists_every_variant_exactly_once` then forces the
-/// hand-maintained `ALL_PATS` list to carry it - a detector that exists
-/// but never scans is unrepresentable (faithful_observation.md B2.8).
-fn variant_index(pat: Pat) -> usize {
-    match pat {
-        Pat::StubZero => 0,
-        Pat::ValuePlaceholder => 1,
-        Pat::UnwrapOrDefault => 2,
-        Pat::UnwrapOrPrim => 3,
-        Pat::ElemKindWildcardArm => 4,
-        Pat::UnwrapOrNumericLiteral => 5,
-        Pat::CFormatNarrowing => 6,
-        Pat::RustFormatNarrowing => 7,
-        Pat::RustDebugNumericFormat => 8,
-    }
-}
-
-const PAT_VARIANT_COUNT: usize = 9;
 
 impl Pat {
     fn id(self) -> &'static str {
@@ -563,6 +555,54 @@ const BASELINE: &[Entry] = &[
         "fuzz-acceptance-rate diagnostic ({:.4} ratios) - prover \
          diagnostics, not a stored-value exit",
     ),
+    // The six rows below joined when the scanner widened from the bare
+    // `:.N` token to the full spec grammar (PR #962 red-team F3), which
+    // newly sees width/fill/dynamic combinations.
+    (
+        Pat::RustFormatNarrowing,
+        "crates/chelis-compiler-api/src/context.rs",
+        2,
+        "compile-timing eprintln ({:>8.3}s elapsed seconds) - a duration \
+         display, not a stored-value exit",
+    ),
+    (
+        Pat::RustFormatNarrowing,
+        "crates/chelis-deep/src/ast.rs",
+        2,
+        "Deep-syntax span metadata in a fixture string: `{span: \
+         \"surf:0..3\"}`'s range dots parse as a precision spec under the \
+         scanner's brace-group conservatism; not formatting at all",
+    ),
+    (
+        Pat::RustFormatNarrowing,
+        "crates/chelis-ir/src/lower.rs",
+        2,
+        "lowering-phase timing eprintln ({:>8.4}s) - duration displays, \
+         not stored-value exits",
+    ),
+    (
+        Pat::RustFormatNarrowing,
+        "crates/chelis-runtime/src/format_shortest.rs",
+        1,
+        "the sanctioned compiled-lane routine's own spec/05 8.1 \
+         escalation candidate ({:.*e} at digit count p) - the normative \
+         grammar's implementation, not a third formatter",
+    ),
+    (
+        Pat::RustFormatNarrowing,
+        "crates/chelis-types/src/infer.rs",
+        3,
+        "checker timing eprintln ({:>8.4}s) - duration displays, not \
+         stored-value exits",
+    ),
+    (
+        Pat::RustFormatNarrowing,
+        "crates/chelis-types/src/observation.rs",
+        2,
+        "format_element's own spec/05 8.1 escalation candidates ({:.*e}) \
+         - the sanctioned formatter's implementation of the grammar it \
+         defines",
+    ),
     // -- rust-debug-numeric-format (hosted for chelis#732 B2.4's Rust
     // lane; scoped to OBSERVATION_EXIT_SURFACES). The first two rows ARE
     // the sanctioned formatters - `{:?}` is the normative grammar's own
@@ -671,49 +711,93 @@ fn count_numeric_defaults(line: &str) -> usize {
         + count(line, ".map_or(", numeric_after_ws)
 }
 
-/// Count Rust precision-format specs on one source line: `{v:.17}`,
-/// `{:.8}`, `{rel_err:.2e}`, `{dur:.3?}` - an interpolation whose format
-/// spec pins a decimal precision. The shape matched is `{`, an optional
-/// `[A-Za-z0-9_]*` argument, `:.`, one or more ASCII digits, optionally
-/// ONE trailing format-type character (a letter such as `e`, or `?`),
-/// then `}`. Escaped `{{:.8}}` doc-quotes in assertion messages match too
-/// (the walk-back sees the inner brace); that is deliberate conservatism,
-/// absorbed by an annotated baseline row rather than a scanner exception.
-fn count_precision_format_specs(line: &str) -> usize {
+/// The format specs of every `{arg:spec}`-shaped interpolation on one
+/// source line. An interpolation is `{`, an optional `[A-Za-z0-9_]*`
+/// argument (named or positional), `:`, then spec characters up to the
+/// closing `}` on the same line (real format strings do not wrap a spec
+/// across lines). PR #962 red-team F3: the original scanners matched only
+/// the bare `:.N`/`:?}` token shapes, so valid combined forms -
+/// `{value:8.2}`, `{value:8?}`, fill/align like `{v:0>8.2}`, dynamic
+/// precision `{v:.prec$}`/`{:.*}` - were invisible. Parsing the
+/// interpolation and classifying its whole spec closes that family.
+/// Escaped `{{:.8}}` doc-quotes still count (the parser lands on the
+/// inner brace) - deliberate conservatism, absorbed by annotated
+/// baseline rows rather than a scanner exception.
+fn format_specs(line: &str) -> Vec<&str> {
     let bytes = line.as_bytes();
-    let mut hits = 0usize;
-    let mut from = 0usize;
-    while let Some(pos) = line[from..].find(":.") {
-        let colon = from + pos;
-        let mut j = colon + 2;
-        let digits_start = j;
-        while j < bytes.len() && bytes[j].is_ascii_digit() {
+    let mut specs = Vec::new();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] != b'{' {
+            i += 1;
+            continue;
+        }
+        let mut j = i + 1;
+        while j < bytes.len() && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_') {
             j += 1;
         }
-        let mut shape_ok = j > digits_start;
-        if shape_ok && j < bytes.len() && (bytes[j].is_ascii_alphabetic() || bytes[j] == b'?') {
-            j += 1;
+        if j >= bytes.len() || bytes[j] != b':' {
+            i += 1;
+            continue;
         }
-        shape_ok = shape_ok && j < bytes.len() && bytes[j] == b'}';
-        if shape_ok {
-            let mut k = colon;
-            while k > 0 && (bytes[k - 1].is_ascii_alphanumeric() || bytes[k - 1] == b'_') {
-                k -= 1;
-            }
-            if k > 0 && bytes[k - 1] == b'{' {
-                hits += 1;
-            }
+        let spec_start = j + 1;
+        let mut k = spec_start;
+        while k < bytes.len() && bytes[k] != b'}' && bytes[k] != b'{' {
+            k += 1;
         }
-        from = colon + 2;
+        if k >= bytes.len() || bytes[k] != b'}' {
+            i += 1;
+            continue;
+        }
+        specs.push(&line[spec_start..k]);
+        i = k + 1;
     }
-    hits
+    specs
 }
 
-/// Count Debug-format tokens on one source line: the plain `:?}` and the
-/// pretty `:#?}` (whose bytes do not contain the plain token, so the two
-/// counts never overlap).
+/// Whether a format spec pins a decimal precision: a `.` followed by
+/// digits (`.2`), by `*` (argument-supplied), or by an identifier ending
+/// in `$` (named dynamic precision) - in any combination with fill,
+/// alignment, sign, or width.
+fn spec_has_precision(spec: &str) -> bool {
+    let bytes = spec.as_bytes();
+    for (idx, &byte) in bytes.iter().enumerate() {
+        if byte != b'.' {
+            continue;
+        }
+        let rest = &spec[idx + 1..];
+        if rest.starts_with(|c: char| c.is_ascii_digit()) || rest.starts_with('*') {
+            return true;
+        }
+        let ident_len = rest
+            .bytes()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == b'_')
+            .count();
+        if ident_len > 0 && rest.as_bytes().get(ident_len) == Some(&b'$') {
+            return true;
+        }
+    }
+    false
+}
+
+/// Count interpolations whose spec pins a decimal precision (`{v:.17}`,
+/// `{:.8}`, `{rel_err:.2e}`, `{value:8.2}`, `{v:0>8.2}`, `{v:.prec$}`).
+fn count_precision_format_specs(line: &str) -> usize {
+    format_specs(line)
+        .into_iter()
+        .filter(|spec| spec_has_precision(spec))
+        .count()
+}
+
+/// Count interpolations whose spec selects the Debug trait: the spec's
+/// final character is `?` (`{v:?}`, `{x:#?}`, `{v:8?}`, `{v:x?}`,
+/// `{dur:.3?}` - the last counts for BOTH classes, which is correct: it
+/// is a precision-narrowed Debug render).
 fn count_debug_format_tokens(line: &str) -> usize {
-    line.matches(":?}").count() + line.matches(":#?}").count()
+    format_specs(line)
+        .into_iter()
+        .filter(|spec| spec.ends_with('?'))
+        .count()
 }
 
 /// Recursively collect `.rs` files under `dir`.
@@ -958,22 +1042,11 @@ fn tripwire_goes_red_on_every_planted_token_class() {
     );
 }
 
-/// The B2.8 exhaustiveness guard's executable half: `variant_index`'s
-/// `match` forces itself to grow with the enum at compile time, and this
-/// test forces `ALL_PATS` to carry every variant exactly once - so a
-/// detector that exists but never scans cannot be written.
-#[test]
-fn all_pats_lists_every_variant_exactly_once() {
-    let mut seen = [0usize; PAT_VARIANT_COUNT];
-    for &pat in ALL_PATS {
-        seen[variant_index(pat)] += 1;
-    }
-    assert!(
-        seen.iter().all(|&n| n == 1),
-        "ALL_PATS must list every Pat variant exactly once; \
-         occurrence vector by variant_index: {seen:?}"
-    );
-}
+// The B2.8 scan-completeness property needs no guard test: `declare_pats!`
+// generates `ALL_PATS` from the same variant list that declares the enum,
+// so a variant that exists but never scans is not writable. (PR #962
+// red-team F5.1 showed the previous guard - a hand list, a hand index map,
+// and a hand count - could be satisfied while omitting a variant.)
 
 /// The precision-spec scanner: every narrowing spelling counts, on any
 /// argument form, and the format-type suffix is covered.
@@ -994,6 +1067,19 @@ fn count_precision_format_specs_counts_narrowing_spellings() {
     // The escaped doc-quote form counts too (deliberate conservatism,
     // absorbed by an annotated baseline row).
     assert_eq!(count_precision_format_specs("\"quotes {{:.8}} form\""), 1);
+    // PR #962 red-team F3: the combined forms the token scan missed -
+    // width+precision, fill/align+precision, dynamic precision (both the
+    // argument-supplied and named-parameter spellings), sign+precision.
+    assert_eq!(count_precision_format_specs("format!(\"{value:8.2}\")"), 1);
+    assert_eq!(count_precision_format_specs("format!(\"{v:>8.3}\")"), 1);
+    assert_eq!(count_precision_format_specs("format!(\"{v:0>8.2}\")"), 1);
+    assert_eq!(count_precision_format_specs("format!(\"{v:+.3e}\")"), 1);
+    assert_eq!(
+        count_precision_format_specs("format!(\"{:.*}\", prec, v)"),
+        1
+    );
+    assert_eq!(count_precision_format_specs("format!(\"{v:.prec$}\")"), 1);
+    assert_eq!(count_precision_format_specs("format!(\"{v:08.2}\")"), 1);
 }
 
 /// Negative parity for the precision scanner: non-precision format specs
@@ -1011,8 +1097,13 @@ fn count_precision_format_specs_ignores_non_precision_forms() {
         0
     );
     assert_eq!(count_precision_format_specs("format!(\"{v:.}\")"), 0);
-    // Outside an interpolation entirely (no opening brace on walk-back).
+    // Outside an interpolation entirely (no `{arg:`-shaped opener).
     assert_eq!(count_precision_format_specs("path :.4} nonsense"), 0);
+    // Width-only combined forms are not precision.
+    assert_eq!(count_precision_format_specs("format!(\"{v:>8}\")"), 0);
+    assert_eq!(count_precision_format_specs("format!(\"{v:0>8}\")"), 0);
+    // A member access after a spec-less interpolation is not precision.
+    assert_eq!(count_precision_format_specs("format!(\"{a}\", x.2)"), 0);
 }
 
 /// The Debug-token scanner: plain and pretty forms count, positional and
@@ -1025,6 +1116,13 @@ fn count_debug_format_tokens_counts_debug_forms() {
     assert_eq!(count_debug_format_tokens("\"{a:?} then {b:#?}\""), 2);
     assert_eq!(count_debug_format_tokens("format!(\"{name}\")"), 0);
     assert_eq!(count_debug_format_tokens("format!(\"{v:.2}\")"), 0);
+    // PR #962 red-team F3: width/fill/hex-selector Debug forms the token
+    // scan missed, and the precision'd Debug that counts for BOTH classes.
+    assert_eq!(count_debug_format_tokens("format!(\"{value:8?}\")"), 1);
+    assert_eq!(count_debug_format_tokens("format!(\"{v:>8?}\")"), 1);
+    assert_eq!(count_debug_format_tokens("format!(\"{v:x?}\")"), 1);
+    assert_eq!(count_debug_format_tokens("format!(\"{dur:.3?}\")"), 1);
+    assert_eq!(count_precision_format_specs("format!(\"{dur:.3?}\")"), 1);
 }
 
 /// The chelis#732 B2.4 new-file guarantee (the PR #891 shape, executed):
