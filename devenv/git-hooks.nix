@@ -1,5 +1,8 @@
-{ ... }:
+{ config, ... }:
 
+let
+  commitMessageChecker = ../scripts/check_commit_message.py;
+in
 {
   # Keep this catalog inactive until a separate policy change enables hooks.
   git-hooks.hooks = {
@@ -37,6 +40,16 @@
     trim-trailing-whitespace = {
       enable = false;
       args = [ "--markdown-linebreak-ext=md" ];
+    };
+
+    no-ai-authorship = {
+      enable = true;
+      name = "Reject AI authorship markers";
+      entry = "${config.languages.python.package}/bin/python ${commitMessageChecker}";
+      language = "system";
+      package = config.languages.python.package;
+      pass_filenames = true;
+      stages = [ "commit-msg" ];
     };
   };
 }

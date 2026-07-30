@@ -90,6 +90,10 @@ The shell also provides these platform commands:
 
 Each command forwards its arguments to the tested Python file under `scripts/`.
 
+Devenv installs the `no-ai-authorship` hook at the `commit-msg` stage. The hook runs `scripts/check_commit_message.py`.
+
+The hook rejects AI tool authorship markers before Git creates a commit. All listed formatting and lint hooks remain disabled.
+
 Both native Nix package jobs use the reviewed portable Devenv action from `Chelis-Lang/ci`. They run these tasks through its portable shell.
 
 The action uses exact Nix and Devenv inputs. Its public Devenv cache is read-only and does not contain the custom cvc5 derivation.

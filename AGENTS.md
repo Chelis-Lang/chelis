@@ -387,6 +387,13 @@ A managed Python is a hard prerequisite on every platform. Outside Devenv,
 Apple's bundled Python reports a stale `sysconfig.LIBDIR` path. A managed
 interpreter avoids that path. Run `uv venv --python 3.11` before a manual build.
 
+## Local Git Hook
+
+Devenv installs the `no-ai-authorship` hook at the `commit-msg` stage. The hook
+runs `scripts/check_commit_message.py`. All formatting and lint hooks remain
+disabled. Do not restore the cargo-husky installer. Devenv owns local hook
+installation, and CI remains the remote enforcement boundary.
+
 ## Build And Gate Commands
 
 Minimum repo gate:

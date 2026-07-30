@@ -169,6 +169,8 @@ def parse_contributor_docs(text: str) -> None:
         "chelis-exec-preflight",
         "chelis-z3-test",
         "chelis-hip-test",
+        "no-ai-authorship",
+        "scripts/check_commit_message.py",
         ".devenv/state/venv",
         "PYO3_PYTHON",
     )

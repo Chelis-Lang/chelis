@@ -78,22 +78,39 @@ The repository MUST declare this Git hook catalog in `devenv/git-hooks.nix`:
 - `shellcheck`
 - `trim-trailing-whitespace`
 
-Each catalog entry MUST set `enable = false`. Devenv MUST NOT install or run a hook from this catalog by default.
+Each listed catalog entry MUST set `enable = false`. Devenv MUST NOT install or run a listed catalog hook by default.
 
 The `nixfmt` entry MUST exclude generated `Cargo.nix`. The `rustfmt` entry MUST use check mode.
 
 The `shellcheck` entry MUST select only `crates/chelisup/bootstrap/chelisup.sh`. The whitespace entry MUST preserve Markdown line breaks.
 
-The repository MUST ignore `.pre-commit-config.yaml`. Devenv can generate this local file after a future hook activation.
+Devenv MUST define one enabled custom hook named `no-ai-authorship`. This hook MUST use the `commit-msg` stage.
 
-#### Scenario: A contributor enters the shell with the inactive catalog
+The custom hook MUST invoke `scripts/check_commit_message.py` with the configured Python package. It MUST reject prohibited AI authorship markers.
+
+The custom hook MUST accept ordinary commit messages. It MUST report the matched marker when it rejects a message.
+
+Devenv MUST be the only local hook installer. The repository MUST NOT retain the cargo-husky hook or dependency.
+
+The repository MUST ignore `.pre-commit-config.yaml`. Devenv generates this local file when a contributor enters the shell.
+
+#### Scenario: A contributor enters the shell with the hook catalog
 - **WHEN** a contributor runs `devenv shell`
-- **THEN** no catalog hook is active
-- **AND** Devenv does not install an active pre-commit hook
+- **THEN** no listed catalog hook is active
+- **AND** Devenv installs the custom `commit-msg` hook
 
-#### Scenario: A catalog entry becomes active without a policy change
-- **WHEN** any catalog entry sets `enable = true`
+#### Scenario: A listed catalog entry becomes active without a policy change
+- **WHEN** any listed catalog entry sets `enable = true`
 - **THEN** the static Devenv contract test fails
+
+#### Scenario: A commit message contains an AI authorship marker
+- **WHEN** the custom hook receives that commit message
+- **THEN** the hook exits with a nonzero status
+- **AND** the diagnostic identifies the matched marker
+
+#### Scenario: A commit message contains no AI authorship marker
+- **WHEN** the custom hook receives that commit message
+- **THEN** the hook exits with status 0
 
 ### Requirement: The shell provides platform-correct compiler commands
 On macOS, the shell MUST provide `gcc` and `g++` commands that invoke the Nixpkgs Darwin compiler wrappers from `pkgs.stdenv.cc`.

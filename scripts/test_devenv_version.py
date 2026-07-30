@@ -26,6 +26,7 @@ EXPECTED_TEST_TASKS = (
     "chelis:cpp-compiler-test",
 )
 EXPECTED_GIT_HOOKS_URL = "github:cachix/git-hooks.nix"
+EXPECTED_ACTIVE_GIT_HOOKS = frozenset({"no-ai-authorship"})
 EXPECTED_DISABLED_GIT_HOOKS = frozenset(
     {
         "actionlint",
@@ -67,8 +68,9 @@ class DevenvTestTasks:
 
 
 @dataclass(frozen=True)
-class DisabledGitHookCatalog:
-    names: frozenset[str]
+class GitHookCatalog:
+    disabled_names: frozenset[str]
+    active_names: frozenset[str]
 
 
 @dataclass(frozen=True)
@@ -95,7 +97,7 @@ def parse_devenv_test_tasks(text: str) -> DevenvTestTasks:
     return DevenvTestTasks(names=names)
 
 
-def parse_disabled_git_hook_catalog(text: str) -> DisabledGitHookCatalog:
+def parse_git_hook_catalog(text: str) -> GitHookCatalog:
     marker = "  git-hooks.hooks = {\n"
     try:
         start = text.index(marker) + len(marker)
@@ -124,11 +126,20 @@ def parse_disabled_git_hook_catalog(text: str) -> DisabledGitHookCatalog:
     names = [name for name, _ in entries]
     if len(names) != len(set(names)):
         raise ValueError("the Git hook module must not define a duplicate hook")
-    if frozenset(names) != EXPECTED_DISABLED_GIT_HOOKS:
-        raise ValueError(f"the Git hook module must define inactive hooks: {names!r}")
-    active = [name for name, value in entries if value != "false"]
-    if active:
-        raise ValueError(f"Git hooks must remain inactive: {active!r}")
+    expected_names = EXPECTED_DISABLED_GIT_HOOKS | EXPECTED_ACTIVE_GIT_HOOKS
+    if frozenset(names) != expected_names:
+        raise ValueError(f"the Git hook module must define the hook catalog: {names!r}")
+    values = dict(entries)
+    active_listed = [
+        name for name in EXPECTED_DISABLED_GIT_HOOKS if values[name] != "false"
+    ]
+    if active_listed:
+        raise ValueError(f"listed Git hooks must remain inactive: {active_listed!r}")
+    inactive_custom = [
+        name for name in EXPECTED_ACTIVE_GIT_HOOKS if values[name] != "true"
+    ]
+    if inactive_custom:
+        raise ValueError(f"custom Git hooks must remain active: {inactive_custom!r}")
 
     nixfmt = re.search(
         (
@@ -163,7 +174,25 @@ def parse_disabled_git_hook_catalog(text: str) -> DisabledGitHookCatalog:
     )
     if whitespace is None:
         raise ValueError("the whitespace hook must preserve Markdown line breaks")
-    return DisabledGitHookCatalog(names=frozenset(names))
+    custom = re.search(
+        (
+            r"(?ms)^    no-ai-authorship = \{\n"
+            r".*?^      enable = true;$"
+            r".*?^      entry = \"\$\{config\.languages\.python\.package\}"
+            r"/bin/python \$\{commitMessageChecker\}\";$"
+            r".*?^      language = \"system\";$"
+            r".*?^      pass_filenames = true;$"
+            r".*?^      stages = \[ \"commit-msg\" \];$"
+            r".*?^    \};$"
+        ),
+        body,
+    )
+    if custom is None:
+        raise ValueError("the active authorship hook must use the commit-msg stage")
+    return GitHookCatalog(
+        disabled_names=EXPECTED_DISABLED_GIT_HOOKS,
+        active_names=EXPECTED_ACTIVE_GIT_HOOKS,
+    )
 
 
 def parse_input_url(text: str, input_name: str) -> str:
@@ -313,12 +342,11 @@ class DevenvVersionTests(unittest.TestCase):
             frozenset(EXPECTED_TEST_TASKS),
         )
 
-    def test_repository_declares_only_inactive_git_hooks(self) -> None:
+    def test_repository_declares_the_git_hook_policy(self) -> None:
         config = GIT_HOOKS_MODULE.read_text(encoding="utf-8")
-        self.assertEqual(
-            parse_disabled_git_hook_catalog(config).names,
-            EXPECTED_DISABLED_GIT_HOOKS,
-        )
+        catalog = parse_git_hook_catalog(config)
+        self.assertEqual(catalog.disabled_names, EXPECTED_DISABLED_GIT_HOOKS)
+        self.assertEqual(catalog.active_names, EXPECTED_ACTIVE_GIT_HOOKS)
 
     def test_repository_pins_the_git_hooks_input(self) -> None:
         yaml_text = (REPO_ROOT / "devenv.yaml").read_text(encoding="utf-8")
@@ -340,13 +368,22 @@ class DevenvVersionTests(unittest.TestCase):
             "    actionlint.enable = true;",
         )
         with self.assertRaisesRegex(ValueError, "must remain inactive"):
-            parse_disabled_git_hook_catalog(mutated)
+            parse_git_hook_catalog(mutated)
 
     def test_missing_git_hook_fails_at_the_parse_boundary(self) -> None:
         config = GIT_HOOKS_MODULE.read_text(encoding="utf-8")
         mutated = config.replace("    actionlint.enable = false;\n", "")
-        with self.assertRaisesRegex(ValueError, "must define inactive hooks"):
-            parse_disabled_git_hook_catalog(mutated)
+        with self.assertRaisesRegex(ValueError, "must define the hook catalog"):
+            parse_git_hook_catalog(mutated)
+
+    def test_inactive_custom_hook_fails_at_the_parse_boundary(self) -> None:
+        config = GIT_HOOKS_MODULE.read_text(encoding="utf-8")
+        mutated = config.replace(
+            "      enable = true;\n      name = \"Reject AI authorship markers\";",
+            "      enable = false;\n      name = \"Reject AI authorship markers\";",
+        )
+        with self.assertRaisesRegex(ValueError, "must remain active"):
+            parse_git_hook_catalog(mutated)
 
     def test_git_hooks_input_without_nixpkgs_follow_fails_at_parse_boundary(
         self,
