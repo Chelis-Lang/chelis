@@ -225,17 +225,38 @@ fn cancellation_interrupts_the_front_end_of_a_trivial_evaluation() {
 /// **Expected success condition:** every sweep point unwinds in a small
 /// fraction of the remaining compile, and the printed table shows no point
 /// where latency tracks "time left" (which is the pre-fix signature).
+///
+/// The two early sample points are deliberate. Declaration collection and the
+/// inference schedule's component search run *before* body inference and both
+/// scale with declaration count (measured 1.3 s and 0.9 s over 1500
+/// declarations), so a sweep that starts a ninth of the way in would step over
+/// them entirely — and they were the window that made a loaded machine fall
+/// through to `--timeout`'s hard-exit backstop.
 #[test]
-#[ignore = "manual chelis#930 sweep: ~1500-declaration compile, run nine times"]
+#[ignore = "manual chelis#930 sweep: ~1500-declaration compile, run eleven times"]
 fn frontend_cancellation_latency_sweep_at_repro_scale() {
     const REPRO_DEFS: usize = 1500;
+    /// Sample points as (numerator, denominator) fractions of the baseline.
+    const SAMPLES: [(u32, u32); 10] = [
+        (1, 100),
+        (1, 20),
+        (1, 9),
+        (2, 9),
+        (3, 9),
+        (4, 9),
+        (5, 9),
+        (6, 9),
+        (7, 9),
+        (8, 9),
+    ];
+
     let source = front_end_heavy_source(REPRO_DEFS);
     let baseline = uncancelled_duration(&source);
     println!("issue#930 sweep: {REPRO_DEFS} defs, uncancelled compile {baseline:?}");
 
     let mut worst = Duration::ZERO;
-    for step in 1..=8 {
-        let cancel_after = baseline * step / 9;
+    for (numerator, denominator) in SAMPLES {
+        let cancel_after = baseline * numerator / denominator;
         let (latency, err) = cancel_mid_compile(source.clone(), cancel_after);
         assert!(is_cancellation(&err), "expected cancellation, got: {err}");
         let remaining = baseline.saturating_sub(cancel_after);

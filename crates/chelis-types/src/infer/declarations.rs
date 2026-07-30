@@ -393,7 +393,17 @@ pub(super) fn function_inference_sccs(exprs: &[deep::Expr]) -> Vec<FunctionInfer
 
     let mut assigned = HashSet::new();
     let mut unordered = Vec::<FunctionInferenceComponent<'_>>::new();
+    // chelis#930: per-declaration cancellation. The component search below is
+    // quadratic in declaration count (each unassigned name is tested for
+    // mutual reachability against every other), measured at ~0.9 s over 1500
+    // declarations, and it also runs before body inference. A short component
+    // list means later declarations are never inferred; the check entry's
+    // `cancellation_gate` rejects the unit.
+    let cancel = crate::cancel::current_cancel_token();
     for (name, _) in &def_items {
+        if cancel.as_ref().is_some_and(CancelToken::is_cancelled) {
+            break;
+        }
         if assigned.contains(name) {
             continue;
         }

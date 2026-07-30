@@ -1,4 +1,8 @@
 /target
+# `uv pip install bindings/python` (the chelis#914/#930 manual interrupt gate)
+# runs cargo from `bindings/python`, so a relative CARGO_TARGET_DIR resolves
+# there and drops a full build tree the anchored `/target` above does not cover.
+bindings/python/target/
 # WI-13 Option B: the no-sudo local prefix where the dep-setup script builds
 # Sollya + fplll from source. A build artifact, never committed (the committed
 # proof bundle under crates/chelis-prove/data is the source of truth).

@@ -14,7 +14,7 @@
 //! **Expected success condition:** the probe prints `ALL PASS: 4/4`. The key
 //! lines are SIGINT-to-`KeyboardInterrupt` under the 250 ms budget during
 //! evaluation (chelis#914) and under 1 s during a front-end-dominated compile
-//! (chelis#930). Measured on an M-series workstation: 49.1 ms and 62.1 ms
+//! (chelis#930). Measured on an M-series workstation: 11.5 ms and 9.8 ms
 //! respectively, the latter abandoning 2.9 s of a 3.9 s compile. The pre-fix
 //! baselines are "never, until the evaluation completes" and "the remaining
 //! compile time" — 17.3 s on the chelis#930 repro.

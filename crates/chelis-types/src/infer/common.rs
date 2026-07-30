@@ -660,7 +660,17 @@ pub(super) fn collect_all_declarations(
     // per-check registry clone. Declaration bodies resolve against it, while
     // only successful bodies enter the validated maps that survive serde.
     adt_reg.install_resolution_env(resolution_env.clone());
+    // chelis#930: per-declaration cancellation. This runs BEFORE body
+    // inference, so without it the first ~1.3 s of a 1500-declaration check
+    // (measured, debug build) is uninterruptible and a cancellation arriving
+    // in that window waits it out. An abandoned collection leaves later
+    // declarations unbound; the check entry's `cancellation_gate` rejects the
+    // unit before anything reads it.
+    let cancel = crate::cancel::current_cancel_token();
     for (module, expr) in items {
+        if cancel.as_ref().is_some_and(CancelToken::is_cancelled) {
+            return;
+        }
         collect_declarations(
             expr,
             module.as_deref(),
@@ -674,6 +684,9 @@ pub(super) fn collect_all_declarations(
         );
     }
     for (module, expr) in items {
+        if cancel.as_ref().is_some_and(CancelToken::is_cancelled) {
+            return;
+        }
         collect_declarations(
             expr,
             module.as_deref(),
