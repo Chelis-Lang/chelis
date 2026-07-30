@@ -531,6 +531,17 @@ suite the oracle runs, minus the known-red re-execution and the
 structural ledger scan, which are exactly the legs that need the ledger
 to mean anything. Run it before claiming this phase, not once per PR.
 
+**Scheduled execution (interlock added 2026-07-30, bidirectional with
+`loud_unsupported.md` §C7.5/§I2/B2.7):** the manual-gate standing above
+is being upgraded, not by this plan. [#730] Phase 4 delivers a nightly
+workflow (`loud-unsupported-nightly.yml`, with the repo's open/close
+tracking-issue report pattern) that runs this oracle on a schedule
+alongside [#730]'s own - their B2.7 rule is that a named structural
+authority with no scheduled execution is itself a defect of their
+class. This oracle's contents, stages, ledger semantics, and pass
+criteria remain this plan's alone; [#730] owns only the scheduling.
+Until that workflow lands, the paragraph above stands as written.
+
 **Delivered** (2026-07-24), with five recorded notes (note 5 added
 2026-07-28, with the oracle it describes). (1) The
 `chelis_format_shortest` routine lives in the Rust runtime library, so

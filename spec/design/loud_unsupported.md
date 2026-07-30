@@ -1,15 +1,16 @@
 # Loud Unsupported: the failure-channel contract
 
-**Status:** Phases 0-1 are complete (Phase 0: PR [#746]; Phase 1: PR
-[#791]). Phase 2's implementation is complete in PR [#799]: the
-`EffectKind`/`RuntimeDType` identities and consumers, generated Rust/C dtype
-agreement, staged `HostTypeTerm -> ConcreteHostType -> HostAbiType` boundary,
-and closed structured C-expression AST are implemented. Phase acceptance
-still requires the authoritative oracle
-(`.venv/bin/python scripts/loud_unsupported_phase2_oracle.py`) and a fresh
-adversarial review; this status does not claim that validation early. Count
-baselines and the token tripwire are supporting checks, not completion
-evidence. Phase 3 is pending.
+**Status:** Phases 0-2 are complete and accepted (Phase 0: PR [#746];
+Phase 1: PR [#791]; Phase 2: PR [#799], merged 2026-07-24 with the
+authoritative oracle green - `PHASE 2 ORACLE: PASS` - and a fresh-context
+execution red team, PASS WITH FINDINGS, every finding dispositioned:
+`docs/investigations/pr799_returned_function_values_redteam.md`). Count
+baselines and the token tripwire remain supporting checks, not completion
+evidence. Phase 3 is pending, amended 2026-07-30 to absorb the typed
+diagnostic-kind and rejection-authority work (§C2.1-C2.2). Phase 4
+(ratchet totality, §C7) was added 2026-07-30 after the nine-PR
+class-coverage review recorded on [#730] found four holes in this plan's
+own detection mechanisms; §C7's opening paragraph states the finding.
 Tracking issue: [#730].
 
 **Implementation record (re-planned 2026-07-22).** The initial Phase 2 draft
@@ -155,7 +156,7 @@ second checker or dtype-semantics layer.
 
 ---
 
-# Part I - the normative contracts (§C1-§C6)
+# Part I - the normative contracts (§C1-§C7)
 
 ## C1. The response contract
 
@@ -287,6 +288,65 @@ the distinction structural - `Rejected(atom)` vs `Unimplemented
 the diagnostic surface, so "unsupported by decision" and "unsupported
 because nobody built it yet" are never conflated again.
 
+### C2.1 Typed rejection authority (added 2026-07-30; lands at Phase 3)
+
+The paragraph above is convention today: `hint` is a bare
+`&'static str`, 31 of 33 production sites cite an atom or issue by
+discipline, and two do not (the `reduce_window` "f32-only today" hints,
+[#959]) - the accidental-unsupported shape this section forbids, with
+nothing enforcing it. The amended Phase 3 makes the distinction
+structural at the diagnostic layer:
+
+```rust
+pub enum RejectionAuthority {
+    /// Unsupported by decision: cites the spec atom that decides it.
+    Deliberate { atom: &'static str, hint: &'static str },
+    /// Unsupported because nobody built it yet: cites the issue.
+    Unimplemented { issue: u32, hint: &'static str },
+}
+```
+
+replaces the bare `hint` field on `Unsupported`. A rejection without a
+citation is unwritable, not unreviewed. The frozen four-clause message
+format does not change: the authority renders into the existing
+`; <hint>` clause (the citation text most sites already carry moves
+from prose convention into the type). This is a §C2 shape change and
+follows the B1 path exactly: this doc (this amendment) plus the [#687]
+rejected-cells corpus update in the same implementation PR. Which cells
+are `Deliberate` versus `Unimplemented` remains [#729] Table A/B's
+decision; when Table B lands, its `Rejected(atom)` /
+`Unimplemented { issue }` cells populate this enum - the plan never
+authors a capability decision (§I1).
+
+### C2.2 The closed kind vocabulary (added 2026-07-30; lands at Phase 3)
+
+The machine-facing diagnostic `kind` is today a bare `String` chosen
+three unpoliced ways: hand-typed literals (~23 sites spell
+`"unsupported_feature"` themselves; `unsupported_stage_error`, the only
+typed `Unsupported -> Diagnostic` path, has 4 call sites), a
+`format!("{:?}", error.kind)` of a foreign enum (an enum rename
+silently rewrites the wire), and message-substring dispatch. A
+capability rejection can be mislabeled `"compile_error"` and every test
+stays green. Inventory and instances: [#959].
+
+The amended Phase 3 closes this with the plan's own §C4.1 move:
+`DiagnosticKind` joins `chelis-vocab` as a closed vocabulary (stable
+wire spellings via `as_str()`, `Result`-only `decode`, no serde
+dependency - kind identity is exactly the crate's charter, like
+`EffectKind` and `RuntimeDType`). `stage_error` takes the enum, never
+`&str`; the `unsupported_feature` kind is constructible only from a
+typed `Unsupported` through `unsupported_stage_error`, so brand and
+kind cannot disagree and a hand-typed or mislabeled kind is a compile
+error. A wire-spelling lock test freezes `as_str()` output (the
+generated-header agreement pattern, §C4.3). The wire field itself
+remains a `String` - the enum governs producers, the string is the
+rendering - and nothing here adds `Serialize` or otherwise lifts the
+§C2 STATUS relaxation above; the [#871] expiry doctests stay untouched.
+The wire spellings deserve an eventual numbered-spec atom via [#733].
+Boundary: this plan owns the kind vocabulary and the
+`unsupported_feature`-only-from-`Unsupported` rule; span threading and
+the check-JSON serialization mechanics stay with [#883]/[#886] (§I2).
+
 ## C3. The failure channel
 
 Per stage, what exists and what this plan builds:
@@ -413,6 +473,25 @@ is the un-ignored acceptance tests named in PR [#791] plus
 | 22 | `lower.rs` `tuple-get` index `unwrap_or(0)` | field 0 | flagged by [#782] | CONVERTED: raise (section C1.4; compile-time index by construction) |
 | 23 | `lower.rs` conv2d present-but-non-literal stride/padding `unwrap_or(1)`/`unwrap_or(0)` | stride 1 / padding 0 | P1 discovery (the [#776] shape); TO FILE | flagged and left per B2.5 (absent-arg defaults are the documented optional-arg semantics; the present-but-non-literal case needs its own probe + issue); baselined in the tripwire's numeric-unwrap class |
 
+**2026-07-30 ratchet-review appends (rows 24-27).** Filed per B2.5 from
+the nine-PR class-coverage review recorded on [#730]. Each row lands
+censused-not-fixed; rows 24-25 are Phase 4 work, rows 26-27 split
+between the amended Phase 3 (row 26) and Phase 4 scope entry plus
+[#909] (row 27):
+
+| # | site | substitutes | issue | status |
+|---|---|---|---|---|
+| 24 | the lowering/emission panic family: `emit_fused_elem`/`emit_fused_reduce` f32-hardcoded panics in `chelis-backend-c/src/emit.rs` plus ~150 production `panic!`/`unreachable!`/`todo!` across `chelis-ir` and the three backends, ~44 of them §C2 rejections wearing panics (row-two: panic, not substitution - the rows 11/12 class, uncensused growth) | - | [#919] (the fused pair) + [#957] (the family) | live (population measured 2026-07-30; the fused pair execution-confirmed per [#919]); backing tests land with the Phase 4 §C7.2 sweep |
+| 25 | `chelis-ir/src/host.rs:8207` einsum output precision `.unwrap_or(chelis_types::types::Prim::F32)` - path-qualified, so the `unwrap_or(Prim::` token misses it; in-scope for the class and absent from BASELINE | F32 precision | [#958] | live-suspect (liveness not execution-confirmed - the empty-operand path may be checker-guarded); §C1.4 raise-or-prove applies regardless; converted at Phase 4 |
+| 26 | the unbranded/mislabeled rejection inventory: kindless CLI `reject_*` gates (`main.rs:8137-8420`, incl. the `process_run` eval-only gate PR [#891] widens 1 -> 21), hand-typed `"unsupported: "` literals at `main.rs:7963/:7978/:8055`, ~23 free-literal `"unsupported_feature"` sites and the `format!("{:?}")` / substring-dispatch kind paths in compiler-api, and the two uncited `reduce_window` hints (gate row, the 17/18 precedent) | (gate/kind skew, not a value) | [#959] | live (read-confirmed 2026-07-30, instances executed in the PR sweep); resolved by the amended Phase 3 |
+| 27 | `chelis-python` raw-i32 dtype surface: `dtype: i32` struct fields, no decode-on-entry anywhere, string-gated dtype checks, hardcoded DLPack `code: 2, bits: 32`, 4 production `unwrap_or_default()` - the crate is outside every `UnwrapOr*` tripwire scope and the Phase 2 oracle's evidence set | dtype identity by convention | [#960] (requirement half; ABI fix shape is [#909]'s) | live ([#900] is the executed value-corrupting instance); scope entry + §C6.2 row at Phase 4; ABI redesign at [#909] |
+
+`chelis-runtime` is deliberately not a row: it is the reference
+implementation of the §C6.2 decode-on-entry contract
+(`require_runtime_dtype`, `tensor_elem_size(RuntimeDType)`, zero
+fallbacks) and enters the derived scan scope at Phase 4 as a clean
+baseline, not a finding.
+
 | # | site | substitutes | issue | status |
 |---|---|---|---|---|
 | 1 | `lower.rs` `lower_transcendental` non-float arm | `Const 0.0`, operand dropped | [#699] (+[#722] via grad) | live (test `cos_on_integer_tensor_is_not_silently_zeroed`) |
@@ -454,7 +533,11 @@ Phase 0 item 3 and the roadmap's Wave 0 handshake; that row's new-site
 message points at `faithful_observation.md` §B2.4).
 
 Phase 0 freezes this table into the tripwire; additions after that are
-either new work (filed + censused) or regressions (red gate).
+either new work (filed + censused) or regressions (red gate). Once
+Phase 4's §C7.4 census binding lands, the backing convention above is
+machine-checked: every `test <name>` / `canary <name>` token in a
+status cell must name an existing test function and every row must
+carry an issue link, or the binding test is red.
 
 ## C6. Phase 2 ownership and consumer contract
 
@@ -666,6 +749,150 @@ classes the target cannot represent (function values) carry the distinct
 `UnsupportedKind::HostAbi`; the unresolved-term `UnsupportedKind::HostType`
 state is never used for a type that did resolve.
 
+## C7. Ratchet totality (the coverage contract; added 2026-07-30)
+
+**Why this section exists.** The 2026-07-30 nine-PR class-coverage
+review (recorded on [#730]) found four holes in this plan's own
+ratchets: the tripwire has no panic class and no early-return-default
+class, its scope map is a hand-maintained default-allow crate list that
+excludes the two user-closest crates (`chelis-python`, `chelis-runtime`),
+unbranded and mislabeled rejections are unpoliced, and the §C6 consumer
+inventory is append-by-hand. Every instance walked through those holes
+was found by a person reading code, not by CI. That is this plan's own
+disease one level up: §"Why not a pile of patches" diagnoses the class
+as "optionality is the root cause" - each site chose independently - and
+each RATCHET here had likewise chosen its own universe independently,
+so each drifted independently. This section removes the option once.
+
+**The contract, normative:** a ratchet's universe is DERIVED, never
+enumerated. Every mechanism claiming recurrence prevention declares
+where its universe comes from - the root `Cargo.toml`
+`[workspace] members` list, a token-derived consumer scan, or the §C5
+table itself. A hand-maintained crate or file list is mis-rung on the
+enforcement ladder (compile-error > lint > tripwire > gate > prose) for
+the same reason a gate must not carry correctness: it rots invisibly.
+Scope narrowing is an annotated `(class, path, reason[, issue])`
+exclusion; an absent entry is never an exclusion; exclusion lists only
+shrink, or grow with a filed issue. A new workspace member is born
+inside every ratchet.
+
+### C7.1 Derived scopes
+
+The tripwire's per-class scope lists are replaced by
+universe-minus-exclusions: the member set is parsed from the root
+`Cargo.toml` at test time and each member is walked recursively
+(`src/**`, `build.rs`, `include/**` - not only `src/*.rs`, which is how
+the generated dtype headers escaped scanning). Each token class
+declares an explicit `TestsPolicy` (production-only via `#[cfg(test)]`
+region splitting, or tests-included) so that decision is per-class and
+reviewed rather than an accident of the walker; the substitution-token
+classes are expected to go production-only, which also removes the
+in-test noise the current baseline carries. Class additions and
+widenings landing with this contract:
+
+- line-conjunction matching for `.unwrap_or(` / `.unwrap_or_else(` /
+  `.map_or(` x `Prim::` on the same line, closing the path-qualified
+  spelling evasion ([#958] is the live instance);
+- an `.expect(` count class over the lowering/emission scope;
+- an early-return-default class: `else`-branch and `return`-position
+  selection of `F32` (`Prim::F32`, `RuntimeDType::F32`,
+  `ElemKind::F32`, `.c_macro()` on a default) outside a match arm -
+  §C4.3 already says "no default may select f32" with nothing detecting
+  the non-match spellings;
+- the §C7.2 panic-token class.
+
+`tree-sitter-chelis` is the worked exclusion example: generated parser
+C, upstream-owned grammar - excluded per class with that reason, not by
+sitting outside a walked directory.
+
+### C7.2 Panic-freedom is structural; the lint is evidence
+
+§C1.3 says panics are for broken compiler invariants with the
+guarantee named in the message. Nothing enforces either half, and the
+measured population (~150 production panic-family sites across
+`chelis-ir` and the three backends, ~44 of them §C2 rejections wearing
+panics, ~65 naming neither an invariant nor a citation) says the prose
+rule does not hold ([#957], census row 24). Three layers, strongest
+first; per §C4.5's own rule the lexical layers are evidence and the
+structural layers are the authority:
+
+1. **No infallible production entry point into lowering or emission.**
+   §C6.3's "no public infallible host-lowering wrapper and no
+   production caller may turn one of those failures into a panic"
+   extends to every lowering and emission stage. The existing
+   Result-to-panic adapters (the `unwrap_or_else(|d| panic!(..))`
+   wrappers in `lower.rs`, the boundary unwraps in `host.rs` and Metal
+   `dtype.rs`) become test-only - `pub(crate)` plus test-gating - and
+   the privatization is locked by `compile_fail` doctests exactly as
+   `host_abi.rs` locks its crate privacy. A production caller reaching
+   for a panicking adapter is a compile error, not a review comment.
+2. **One sanctioned invariant terminal.** A `compiler_invariant!`
+   macro (beside `Unsupported` in `chelis-types`) is the only blessed
+   spelling for a §C1.3-legitimate panic. Its signature REQUIRES the
+   named guarantee and the upstream guard citation
+   (`compiler_invariant!(guarantee: "...", guard: "<canary/test or
+   spec cite>", ...)`); "the guarantee is named in the panic message"
+   stops being prose and becomes a required argument, unwritable
+   without it, and greppable as a single token.
+3. **Defense-in-depth, explicitly the supporting rung.** Raw
+   `panic!` / `unreachable!` / `todo!` / `unimplemented!` in the
+   derived production universe become a tripwire token class with a
+   frozen, shrink-only baseline; `[workspace.lints]` denies
+   `clippy::todo` / `clippy::unimplemented` workspace-wide and
+   `clippy::panic` / `clippy::unreachable` per emission crate as that
+   crate's triage completes, with lint adoption itself checked against
+   the derived member list. These detect the spelling; layers 1-2 are
+   the structure.
+
+The ~44 rejection-shaped panics are census work, not annotation work:
+they convert through the existing `Unsupported` channel in Phase 4's
+sweep (triage buckets: convert-to-`Unsupported`,
+migrate-to-`compiler_invariant!`, delete-dead).
+
+### C7.3 Derived consumer discovery
+
+The §C6 consumer inventories remain the normative content, but
+membership stops being a fixed file list: the architecture test scans
+the §C7.1 universe for consumption tokens (`EffectKind`,
+`RuntimeDType`, the decoder names, `dtype: c_int` signatures, effect
+symbol literals) and every hit must appear in the inventory or in an
+annotated exclusion. A new file that decodes a closed vocabulary is a
+red test until inventoried - today it is invisible, sitting outside the
+mutation oracle undetected. The mutation oracle's required-evidence set
+derives from the same scan, so the compile-failure proof and the
+inventory cannot cover different universes.
+
+### C7.4 The census is doc-bound
+
+A test parses the §C5 tables out of this document (`include_str!`; the
+`traversal_policy.rs` / `builtins.rs` precedent), extracts the
+`test <name>` / `canary <name>` / `[#NNN]` tokens, and asserts every
+named function exists in the test corpus and every row carries an
+issue link. A census row can no longer be added, or its backing
+skipped, independently of the executable record - the [#919] shape
+(sites that "survived the Phase 1 sweep uncensused" and were found by
+reading) becomes structurally impossible to repeat quietly for
+anything the census claims to cover.
+
+### C7.5 Continuous authority
+
+A named structural authority runs on a schedule; a point-in-time run
+is phase-completion evidence, never class-maintenance evidence. The
+Phase 2 oracle's two controlled-mutation legs - the plan's own named
+authority - currently run in no CI job; only their self-tests are
+continuous. Phase 4 delivers `loud-unsupported-nightly.yml`: a cron
+workflow running `scripts/loud_unsupported_phase2_oracle.py`,
+`scripts/faithful_observation_phase2_oracle.py` (the sibling authority
+in the identical position; contents remain [#732]'s, per §I2), and the
+Phase 4 oracle once it exists, with the open/close tracking-issue
+report pattern the repo's other nightlies use (the `heavy-e2e`
+precedent - "scheduled-run failures do not show a red status on main"
+is exactly the failure mode to avoid for a structural authority). The
+workflow file is added to `NON_GATE_WORKFLOWS` in
+`scripts/test_gate.py` in the same change; cadence is nightly-only, no
+per-PR mutation job (revisit only if the tracking-issue loop proves
+too slow a feedback cycle).
+
 ---
 
 # Part II - process rules at every boundary
@@ -677,9 +904,13 @@ state is never used for a type that did resolve.
 | §C2 `Unsupported` shape + message format | Phase 1 | this doc + [#687] rejected-corpus update, same PR |
 | §C3 channel signatures (`Result` plumbing shape) | Phase 1 | this doc |
 | §C5 census (as tripwire baseline) | Phase 0 | append-only via filed issue; removals only with the site's fix |
-| §C4 vocabulary declarations and typed consumer inventory | Phase 2 | this doc + owning active spec, with an added-variant mutation oracle in the same change |
+| §C4 vocabulary declarations and typed consumer inventory | Phase 2 | this doc + owning active spec, with an added-variant mutation oracle and the §C7.3 discovery scan updated in the same change |
 | §C4.5 source-inventory tripwire | temporary during Phase 2 | this doc + the tripwire test; never a completion oracle |
 | gate inventory (§C5 rows 17-18 resolution) | Phase 3 | this doc |
+| §C2.2 `DiagnosticKind` vocabulary + wire spellings | Phase 3 | this doc + the wire-spelling lock test, same PR (eventual [#733] atom noted in §C2.2) |
+| §C2.1 `RejectionAuthority` shape | Phase 3 | this doc + [#687] corpus, same PR (the existing §C2 path) |
+| §C7 universe derivations + exclusion lists | Phase 4 | exclusions shrink-only; additions via filed issue + annotation |
+| continuous-authority job (workflow + `NON_GATE_WORKFLOWS` entry) | Phase 4 | this doc + `scripts/test_gate.py`, same PR |
 
 ## B2. Invariants that hold across every boundary
 
@@ -700,7 +931,17 @@ state is never used for a type that did resolve.
    censused (append), tripwired, and scheduled - not silently fixed
    in-passing (unreviewed conversions are how gates drifted, [#698]).
 6. **Interlock edits are bidirectional.** Any change to §I1's boundary
-   with [#729] updates both documents in the same change set.
+   with [#729] updates both documents in the same change set. The same
+   rule governs the §I2 interlocks.
+7. **A named structural authority runs on a schedule** (§C7.5). A
+   point-in-time oracle run is phase-completion evidence only; class
+   maintenance requires the scheduled job with its open/close
+   tracking-issue report. An authority with no scheduled execution is
+   itself a hole of this class and gets censused.
+8. **Ratchet universes are derived, never enumerated** (§C7). A
+   recurrence mechanism whose scope is a hand-maintained list is
+   mis-rung; scope narrowing is an annotated, issue-backed exclusion.
+   Coverage drift is a red test, not a reading exercise.
 
 ## B3. How to pick up a phase
 
@@ -877,38 +1118,140 @@ clean-owner refusal and byte-for-byte restore.
 The tripwire remains supporting evidence executed by the normal gate; it is
 not a second completion oracle.
 
-## Phase 3 - gates become UX, not safety
+## Phase 3 - gates become UX, and rejections become typed
 
-**You inherit:** emitters that cannot silently substitute (so gates are
-no longer load-carrying for correctness) and the census rows 17-18.
+**Amended 2026-07-30**: this phase absorbs §C2.1-C2.2 because gate
+dedup and the typed constructors are the same code motion - the two
+`reject_*` families cannot be deduplicated without deciding what the
+shared constructors return, and that decision IS the typed kind
+channel. Not gated on [#729] Phase 4: deliverable 1 below stands on
+"let the emitter's channel speak" whether or not the capability table
+has landed (the roadmap's Wave 4 placement is advice; where the two
+disagreed, this plan wins and the roadmap was corrected 2026-07-30).
+
+**You inherit:** emitters that cannot silently substitute (so gates no
+longer carry correctness), the census rows 17-18 and 26, and two live
+demonstrations that the unpoliced shape is actively widening (PR
+[#891]'s 1 -> 21 eval-only gate names; PR [#822]'s `"compile_error"`
+mislabel).
 
 **You deliver:**
 
 1. **Gate inventory resolution**: the duplicated `reject_*` gates ([#698]'s
    drifted pair, [#705]'s missing CLI twin) are deduplicated to single
-   definitions consumed by both the CLI and compiler-api paths;
-   `HOST_ONLY_BUILTINS` and kin either derive from the [#729] Phase 4
-   capability table (if landed) or are replaced by "let the emitter's
-   channel speak, gate only to move the diagnostic earlier and add span
-   context".
+   typed definitions consumed by both the CLI and compiler-api paths -
+   the `Unsupported::compiled_host_only_builtin` shared-constructor
+   precedent, extended across the inventory in census row 26, including
+   the `process_run` / eval-only family; `HOST_ONLY_BUILTINS` and kin
+   either derive from the [#729] Phase 4 capability table (if landed)
+   or are replaced by "let the emitter's channel speak, gate only to
+   move the diagnostic earlier and add span context".
 2. **The gate contract**, recorded in this doc: a gate may only ever make
    a diagnostic EARLIER or MORE SPECIFIC; it may never be the sole
    defense, and a gate/emitter disagreement is a bug in the gate. The
    enforcement ladder: compile-error > lint > tripwire
-   > gate > prose - a gate that is load-bearing for correctness is on
+   > gate > prose - a gate that carries correctness is on
    the wrong rung.
-3. Deletion of gates that now only duplicate emitter rejections, with the
+3. **The closed kind vocabulary** (§C2.2): `DiagnosticKind` in
+   `chelis-vocab`, the `stage_error` signature change, the
+   `unsupported_feature`-only-via-`unsupported_stage_error` rule, the
+   wire-spelling lock test, and removal of the `format!("{:?}")` and
+   message-substring kind paths.
+4. **The typed rejection authority** (§C2.1): the 33-site `hint ->
+   RejectionAuthority` migration, with the [#687] rejected-cells corpus
+   updated in the same PR per B1 (31 sites are mechanical; the two
+   uncited `reduce_window` hints gain their [#959] citation first).
+5. Deletion of gates that now only duplicate emitter rejections, with the
    cross-lane rejected-cells corpus proving the diagnostic surface
    unchanged or improved (earlier stage, same `unsupported:` content).
 
-**Frozen at your exit:** the gate inventory and contract.
+**Frozen at your exit:** the gate inventory and contract; the
+`DiagnosticKind` vocabulary and wire spellings; the
+`RejectionAuthority` shape.
 
-**Explicitly not yours:** the capability table itself ([#729] Phase 4).
+**Explicitly not yours:** the capability table itself ([#729] Phase 4);
+span threading and the check-JSON serialization mechanics
+([#883]/[#886], §I2); lifting the §C2 STATUS relaxation (nothing gains
+`Serialize`).
 
-**Oracle:** the rejected-cells corpus byte-stable (or improved-with-
-updated-expectations in the same PR); [#697]/[#698]'s tests green and
-un-ignored; zero gates existing in two copies (a new tripwire assertion,
-mirroring the conformance MANIFEST pattern).
+**Oracle:** the rejected-cells corpus stable (or improved-with-updated-
+expectations in the same PR) - substring-level today by design, with
+byte-exact per-lane assertions arriving via the [#732] Phase 3
+handshake, a named cross-plan residual this phase does not wait for;
+[#697]/[#698]'s tests green and un-ignored (note: [#698]'s
+census-named test was renamed after the census froze - the Phase 4
+census binding re-links it; use the current suite name); zero gates
+existing in two copies (a new tripwire assertion, mirroring the
+conformance MANIFEST pattern); the wire-spelling lock test green; and
+a planted free-literal kind string failing to compile (the §C2.2
+negative control).
+
+## Phase 4 - ratchet totality (added 2026-07-30)
+
+Independently landable in any interleaving with Phase 3 (one ordering
+note: deliverable 2's census binding lands before either phase edits
+further §C5 rows, so row edits are machine-checked from the start).
+
+**You inherit:** the frozen Phase 2 vocabularies and oracle, the
+tripwire, §C7, and census rows 24-25 and 27.
+
+**You deliver:**
+
+1. **The derived-universe tripwire** (§C7.1): scopes parsed from the
+   root `Cargo.toml` member list, recursive per-member walk, per-class
+   `TestsPolicy`, the new and widened token classes (line-conjunction
+   `unwrap_or` x `Prim::`, `.expect(`, early-return defaults, the
+   panic class), annotated exclusions, and a regenerated baseline in
+   which every production hit carries an issue or a conversion. This
+   produces the honest backlog and is the first PR.
+2. **The census binding** (§C7.4): the `include_str!` parse of §C5,
+   asserting every named backing exists and every row carries an issue.
+3. **Consumer discovery** (§C7.3): `closed_vocabulary_architecture.rs`
+   inverted from a fixed file list to a universe scan; the mutation
+   oracle's evidence set derived from the same scan.
+4. **The structural panic work** (§C7.2): adapter privatization with
+   `compile_fail` locks; `compiler_invariant!`; then the [#957] triage
+   sweep in crate-scoped PRs (metal -> hip -> backend-c -> ir), each
+   crate's `clippy::panic`/`clippy::unreachable` deny flipping as its
+   triage completes, `clippy::todo`/`clippy::unimplemented` denied
+   workspace-wide up front, lint adoption checked against the derived
+   member list.
+5. **Census row 25's conversion** ([#958], the einsum default), the
+   row shrinking with the fix per B1.
+6. **The nightly authority workflow** (§C7.5):
+   `loud-unsupported-nightly.yml` + the `NON_GATE_WORKFLOWS` entry +
+   the open/close report job, running both plans' Phase 2 oracle
+   runners and this phase's oracle.
+
+**Frozen at your exit:** the §C7 universe derivations and exclusion
+lists (shrink-only thereafter); the workspace lints table; the nightly
+authority job.
+
+**Explicitly not yours:** making any rejected cell supported ([#729]);
+`chelis-python`'s FFI/ABI redesign ([#909] - this phase only brings its
+dtype boundary into scan scope and requires §C6.2 decode-on-entry);
+[#732]'s oracle contents (this phase schedules it; they own it);
+checker-side panics ([#731]'s organ).
+
+**Authoritative oracle (owner: Phase 4):**
+
+```sh
+.venv/bin/python scripts/loud_unsupported_phase4_oracle.py
+```
+
+Success means exit 0 with the final line `PHASE 4 ORACLE: PASS`. The
+runner executes: the derivation checks (the tripwire's scope set is
+provably computed from the `Cargo.toml` member list, not a literal
+list); the lints-adoption check over the derived members; the §C7.4
+census binding; the §C7.3 discovery scan; the workflow-existence
+assertion (the nightly file exists, names both oracle runners, and
+appears in `NON_GATE_WORKFLOWS`); and negative controls in the Phase 2
+oracle's planted style - a planted production `panic!` in a
+derived-universe member goes red, a planted census row naming a
+nonexistent test goes red - with byte-for-byte restore of every
+planted file. Its self-tests ride the existing per-PR
+`unittest discover` CI step automatically, which keeps the oracle's
+anchors continuously verified between scheduled runs.
 
 ---
 
@@ -956,6 +1299,32 @@ boundary, pinned:
   plan's Phase 3 gate contract governs by hand; at that point rejected
   cells' diagnostics come from the table's `Rejected(reason)` and this
   plan's §C2 format governs the rendering.
+- **`RejectionAuthority` (§C2.1) types the citation channel; the table
+  owns the citations.** Which cells are `Deliberate` versus
+  `Unimplemented` is Table A/B's decision; when Table B lands, its
+  cells populate the enum through the same boundary the pre-table
+  adapter uses today. This plan never authors a capability decision.
+
+## I2. Interlocks added 2026-07-30
+
+Same discipline as §I1; edits are bidirectional per B2.6.
+
+- **[#883]/[#886] (the diagnostic surface).** This plan owns the closed
+  `DiagnosticKind` vocabulary, the frozen wire spellings, and the rule
+  that an `unsupported_feature` envelope is constructible only from a
+  typed `Unsupported`. [#883]/[#886] own span threading and the
+  check-JSON serialization mechanics that carry the payload. A new kind
+  changes this doc; a new wire field or serializer changes theirs.
+- **[#732] (faithful observation).** B2.7 is stated here and
+  generalizes: the §C7.5 nightly workflow executes both plans' Phase 2
+  oracle runners. `faithful_observation.md` carries the reciprocal
+  continuity note; its oracle's contents, stages, and pass criteria
+  remain [#732]'s alone.
+- **[#909] (host function values).** `chelis-python`'s FFI/ABI shape is
+  [#909]'s to redesign. This plan requires only that its dtype boundary
+  decodes through `chelis-vocab` on entry and that its rejections carry
+  the §C2 brand; census row 27 records the current state ([#960]) and
+  points at [#909] for the fix.
 
 ## Issue map
 
@@ -964,16 +1333,18 @@ boundary, pinned:
 | 0 | census verified; tripwire live; regressions detectable |
 | 1 | [#699] (+[#722]'s eval half via the raise), [#682], [#704], [#705], [#715] (stub half), [#689], [#692], [#725], [#734], the [#709]-adjacent effect catch-all; [#714]/[#718] downgraded from silent-wrong to cleanly-rejected |
 | 2 | the future supply of the class (bottom vocabularies + Result decoding + exhaustive consumers + structured emission) |
-| 3 | [#697], [#698], [#705]'s gate half; gate rot as a class |
+| 3 | [#697], [#698], [#705]'s gate half, [#959] (kind/brand skew); gate rot and kind mislabeling as classes |
+| 4 | [#957] (the panic family, incl. [#919]'s pair), [#958], [#960]'s decode-on-entry half; ratchet-coverage drift as a class - a new crate, consumer, census row, or panic outside the derived universe is a red test, not a reading exercise |
 
 ## Settled ownership and remaining phase decisions
 
 | # | question | decided in | recorded where |
 |---|---|---|---|
-| 1 | shared error/vocabulary ownership | `Unsupported` remains in `chelis-types`; closed cross-layer identity lives in dependency-free `chelis-vocab`; per-crate mirrors are forbidden | §C2, §C4.1, §C6 |
+| 1 | shared error/vocabulary ownership | `Unsupported` remains in `chelis-types`; closed cross-layer identity - including `DiagnosticKind` (2026-07-30) - lives in dependency-free `chelis-vocab`; per-crate mirrors are forbidden | §C2, §C2.2, §C4.1, §C6 |
 | 2 | whether `check` reports target-independent unsupported constructs | yes: Table A rejections are type-level facts; Table B rejections surface at build where the target is known | `capability_table.md` §Derivations |
 | 3 | source-inventory mechanics | the token/count baseline remains blocking only while typed boundaries are incomplete and is never a completion oracle | tripwire test + §C4.5 |
 | 4 | which gates survive Phase 3 as early-UX vs die | Phase 3 | §C5 rows 17-18 + gate contract |
+| 5 | first-error-only vs accumulating `Unsupported` reporting (the checker accumulates ~30 independent errors per pass; the §C3 channel short-circuits at one - the asymmetry named in the 2026-07-24 post-merge review, item 5) | Phase 3, before the gate contract freezes; §C3 specified first-error deliberately, so this is affirm-or-re-open, not drift | §C3 + this row |
 
 ## Contract summary
 
@@ -982,7 +1353,12 @@ live yes-anyway sites to §C2 diagnostics, then take the pen away: decode raw
 symbols and dtype IDs once into dependency-bottom closed types, exhaust those
 types at every semantic consumer, build C expressions structurally, and keep
 gates/lexical scans as UX and evidence rather than the thing standing between
-an unsupported case and a plausible wrong number.
+an unsupported case and a plausible wrong number. Then take the pen away from
+the ratchets themselves (§C7): derive every guard's universe instead of
+enumerating it, type the kind and the citation so a mislabeled or uncited
+rejection is a compile error, sanction exactly one invariant terminal so a
+panic without a named guarantee is unwritable, and run the structural
+authority on a schedule so its proof never goes stale.
 
 [#387]: https://github.com/Chelis-Lang/chelis/issues/387
 [#680]: https://github.com/Chelis-Lang/chelis/issues/680
@@ -1025,5 +1401,16 @@ an unsupported case and a plausible wrong number.
 [#791]: https://github.com/Chelis-Lang/chelis/pull/791
 [#799]: https://github.com/Chelis-Lang/chelis/pull/799
 [#815]: https://github.com/Chelis-Lang/chelis/pull/815
+[#822]: https://github.com/Chelis-Lang/chelis/pull/822
 [#871]: https://github.com/Chelis-Lang/chelis/pull/871
 [#875]: https://github.com/Chelis-Lang/chelis/issues/875
+[#883]: https://github.com/Chelis-Lang/chelis/issues/883
+[#886]: https://github.com/Chelis-Lang/chelis/issues/886
+[#891]: https://github.com/Chelis-Lang/chelis/pull/891
+[#900]: https://github.com/Chelis-Lang/chelis/issues/900
+[#909]: https://github.com/Chelis-Lang/chelis/issues/909
+[#919]: https://github.com/Chelis-Lang/chelis/issues/919
+[#957]: https://github.com/Chelis-Lang/chelis/issues/957
+[#958]: https://github.com/Chelis-Lang/chelis/issues/958
+[#959]: https://github.com/Chelis-Lang/chelis/issues/959
+[#960]: https://github.com/Chelis-Lang/chelis/issues/960
