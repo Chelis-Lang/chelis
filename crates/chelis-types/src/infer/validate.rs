@@ -18,7 +18,16 @@ pub(super) fn validate_ir_program(
     // shape-sensitive calls that consume such a name emit a redundant
     // cascade diagnostic; suppress it. See RT-205 round-2 F3.
     let mut failed_let_names: HashSet<String> = HashSet::new();
+    // chelis#930: per-top-level-declaration cancellation, same grain as
+    // inference. Without it this validator is one uninterruptible step whose
+    // cost grows with the program, and interrupt latency is bounded by the
+    // longest such step. The caller's `cancellation_gate` rejects the
+    // truncated walk.
+    let cancel = crate::cancel::current_cancel_token();
     for expr in top_level_decl_items(exprs) {
+        if cancel.as_ref().is_some_and(CancelToken::is_cancelled) {
+            break;
+        }
         validate_ir_expr(
             expr,
             type_env,
@@ -598,7 +607,14 @@ pub(super) fn validate_polymorphic_op_constraints(
     // references inside the body without requiring the bodies to have
     // been annotated. Bodies of polymorphic defs intentionally have
     // their inner exprs untouched by the annotator at this stage.
+    // chelis#930: per-top-level-declaration cancellation; see
+    // `validate_ir_program`. Measured at ~0.85s over 1500 declarations, this
+    // was the largest remaining uninterruptible step in the check phase.
+    let cancel = crate::cancel::current_cancel_token();
     for expr in top_level_decl_items(exprs) {
+        if cancel.as_ref().is_some_and(CancelToken::is_cancelled) {
+            break;
+        }
         let scope = build_def_param_scope(expr, &combined_env);
         walk_for_poly_op_constraint_violations(
             expr,

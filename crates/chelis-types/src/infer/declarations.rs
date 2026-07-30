@@ -228,10 +228,20 @@ pub(super) fn infer_signature_metadata_with_context_and_headers(
         .map(|(name, inference)| (name.clone(), inference.display_signature.clone()))
         .collect::<HashMap<_, _>>();
 
-    for _ in 0..passes {
+    // chelis#930: cooperative cancellation at declaration granularity. This
+    // fixed point runs one full sweep of every def per def (`passes` is the
+    // def count), which makes it the front end's other declaration-count-
+    // scaling pass — and on a large program the single most expensive one.
+    // Polling the inner loop rather than the outer sweep keeps the bound
+    // independent of program size: one declaration, not one O(n) sweep.
+    let cancel = crate::cancel::current_cancel_token();
+    'fixed_point: for _ in 0..passes {
         functions.clear();
         let mut available_signatures = imported_signatures.clone();
         for expr in &ordered_defs {
+            if cancel.as_ref().is_some_and(CancelToken::is_cancelled) {
+                break 'fixed_point;
+            }
             let deep::Expr::List(list, _) = expr else {
                 continue;
             };

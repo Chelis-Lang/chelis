@@ -12,6 +12,12 @@
 //! evaluation entry points do not need a new parameter, and nested or
 //! re-entrant evals cannot leak a token into an outer scope.
 //!
+//! chelis#930 extended the same token to the **front end**. Parse, desugar,
+//! type-check and lowering have no node visit to poll at, so they poll at
+//! phase boundaries and at top-level-declaration boundaries inside the passes
+//! that scale with declaration count. Nothing new was introduced for that: the
+//! token, the guard, and the error kind are the ones below.
+//!
 //! Cost discipline: consumers are expected to call [`current_cancel_token`] **once**
 //! at context construction and cache the `Arc` for the duration of the
 //! evaluation, so the hot path is one relaxed atomic load behind an `Option`
@@ -19,10 +25,14 @@
 //! uses `Ordering::Relaxed` deliberately: the flag is a single-writer,
 //! many-reader hint whose only requirement is eventual visibility, and losing
 //! a race by one node visit is immaterial when the alternative is minutes.
+//! [`cancellation_requested`] is the uncached convenience form, for the
+//! handful-of-calls-per-compile phase boundaries only.
 
 use std::cell::RefCell;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+
+use crate::errors::{CheckError, CheckErrorKind};
 
 /// Stable sentinel for the error a cancelled evaluation returns.
 ///
@@ -102,6 +112,45 @@ pub fn current_cancel_token() -> Option<CancelToken> {
     CANCEL_TOKEN.with(|cell| cell.borrow().clone())
 }
 
+/// Whether the current thread has an installed token that has been cancelled.
+///
+/// One TLS borrow plus one relaxed load, with no `Arc` clone. That budget is
+/// right for the *coarse* polling sites added by chelis#930 — front-end phase
+/// boundaries, where the check runs a handful of times per compile — and wrong
+/// for anything iterating. A loop over declarations should hoist
+/// [`current_cancel_token`] above the loop and poll
+/// [`CancelToken::is_cancelled`] on the cached handle instead, the same
+/// discipline `EvalContext` follows for node visits.
+pub fn cancellation_requested() -> bool {
+    CANCEL_TOKEN.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .is_some_and(CancelToken::is_cancelled)
+    })
+}
+
+/// The hard failure a front-end pass reports when it abandons its walk
+/// because cancellation was requested (chelis#930).
+///
+/// A pass that stopped early has proved nothing about the program, so it must
+/// fail rather than return a partial `Ok` — the same covered-or-rejected rule
+/// the type checker's stack-exhaustion bail follows. [`CheckErrorKind::Other`]
+/// is deliberate: cancellation is not a property of the source, so it does not
+/// earn a diagnostic classification of its own, and callers holding structured
+/// errors should test `CompilerError::is_cancellation` (which reads
+/// `Diagnostic::kind`) rather than this variant.
+///
+/// The message is the [`EVAL_CANCELLED_MSG`] sentinel so the one caller that
+/// only ever sees flattened error text — the CLI's `--timeout` boundary, where
+/// the typed error is already gone — still classifies it correctly.
+pub fn cancellation_check_error() -> CheckError {
+    CheckError::new(
+        CheckErrorKind::Other,
+        EVAL_CANCELLED_MSG.to_string(),
+        vec![],
+    )
+}
+
 /// Restores the previously installed token when dropped.
 pub struct CancelTokenGuard {
     previous: Option<CancelToken>,
@@ -146,6 +195,51 @@ mod tests {
             current_cancel_token().is_none(),
             "guard must restore the previous (absent) token"
         );
+    }
+
+    /// chelis#930's polling form. The three states have to be distinguished:
+    /// no token at all, an installed-but-untripped token, and a tripped one.
+    /// Collapsing the middle case into `true` would cancel every compile on a
+    /// thread that merely *armed* a timeout.
+    #[test]
+    fn cancellation_requested_distinguishes_absent_armed_and_tripped() {
+        assert!(
+            !cancellation_requested(),
+            "no token installed must never read as cancelled"
+        );
+        let token = CancelToken::new();
+        let _guard = install_cancel_token(token.clone());
+        assert!(
+            !cancellation_requested(),
+            "an armed but untripped token must not read as cancelled"
+        );
+        token.cancel();
+        assert!(cancellation_requested());
+    }
+
+    #[test]
+    fn cancellation_requested_is_restored_by_the_guard() {
+        {
+            let token = CancelToken::new();
+            token.cancel();
+            let _guard = install_cancel_token(token);
+            assert!(cancellation_requested());
+        }
+        assert!(
+            !cancellation_requested(),
+            "a cancelled token must not leak past its guard into the next compile"
+        );
+    }
+
+    /// The front-end passes report cancellation through the check-error
+    /// channel so an abandoned walk is a hard failure, never a partial `Ok`.
+    /// The CLI's `--timeout` boundary only ever sees flattened text, so the
+    /// sentinel has to survive that flattening.
+    #[test]
+    fn cancellation_check_error_is_recognised_as_cancellation() {
+        let error = cancellation_check_error();
+        assert!(is_cancellation(&error.message));
+        assert!(is_cancellation(&format!("check: {}", error.message)));
     }
 
     #[test]

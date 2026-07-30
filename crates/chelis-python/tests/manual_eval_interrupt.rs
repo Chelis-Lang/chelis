@@ -1,8 +1,9 @@
-//! Manual acceptance gate for chelis#914: bindings interrupt latency.
+//! Manual acceptance gate for chelis#914 + chelis#930: bindings interrupt
+//! latency, in both the evaluation phase and the front end.
 //!
 //! `#[ignore]` because it installs the bindings into the repo's `.venv` (a
-//! maturin build of `chelis-python`) and then spends ~10 s measuring a real
-//! SIGINT against a running evaluation. Neither belongs in the inner loop.
+//! maturin build of `chelis-python`) and then spends minutes measuring real
+//! SIGINTs against running work. Neither belongs in the inner loop.
 //!
 //! **Manual command:**
 //!
@@ -10,10 +11,13 @@
 //! cargo nextest run -p chelis-python --test manual_eval_interrupt -- --ignored
 //! ```
 //!
-//! **Expected success condition:** the probe prints `ALL PASS: 3/3`, the key
-//! line being SIGINT-to-`KeyboardInterrupt` under the 250 ms budget. Measured
-//! 50.5 ms on an M-series workstation, debug build; the pre-fix baseline is
-//! "never, until the evaluation completes on its own".
+//! **Expected success condition:** the probe prints `ALL PASS: 4/4`. The key
+//! lines are SIGINT-to-`KeyboardInterrupt` under the 250 ms budget during
+//! evaluation (chelis#914) and under 1 s during a front-end-dominated compile
+//! (chelis#930). Measured 50.5 ms and 22.4 ms respectively on an M-series
+//! workstation, debug build. The pre-fix baselines are "never, until the
+//! evaluation completes" and "the remaining compile time" — 17.3 s on the
+//! chelis#930 repro.
 //!
 //! **Prerequisite:** a repo-root `.venv` (`uv venv --python 3.11`) — the same
 //! one `.cargo/config.toml` points `PYO3_PYTHON` at. The test skips with a
@@ -28,7 +32,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 #[test]
-#[ignore = "manual chelis#914 acceptance gate: installs bindings into .venv and measures real SIGINT latency"]
+#[ignore = "manual chelis#914 / chelis#930 acceptance gate: installs bindings into .venv and measures real SIGINT latency"]
 fn eval_interrupt_latency_manual_acceptance_oracle() {
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let python = repo_root.join(".venv/bin/python");

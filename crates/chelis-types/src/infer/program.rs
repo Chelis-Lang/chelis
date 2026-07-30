@@ -5,6 +5,27 @@
 
 use super::*;
 
+/// Front-end cancellation gate for a check unit (chelis#930).
+///
+/// Placed between the passes of every public check entry. When the thread's
+/// cancellation token has been tripped it records the hard failure and reports
+/// `true`, and the caller returns immediately: the passes below it would
+/// otherwise spend the rest of the front end's budget walking declarations the
+/// abandoned inference never bound, and report their absence as if the program
+/// were wrong.
+///
+/// Same covered-or-rejected discipline as `StackExhaustionScope::drain_into` —
+/// a check unit that stopped early must fail, never return a partial `Ok`.
+#[must_use = "a tripped cancellation gate must end the check unit"]
+fn cancellation_gate(errors: &mut DiagnosticSink<'_>) -> bool {
+    if crate::cancel::cancellation_requested() {
+        errors.push(crate::cancel::cancellation_check_error());
+        true
+    } else {
+        false
+    }
+}
+
 /// Run type inference on a list of top-level Deep expressions.
 pub fn infer_program(exprs: &[deep::Expr]) -> InferResult {
     // WI-1 follow-up: run the whole pipeline on a grown stack so a deeply
@@ -205,6 +226,12 @@ pub(crate) fn build_type_env_from_library_in_session(
     );
     let stats = product.stats();
     log_sub("infer_ir_program_with_state", &mut sub_t);
+    // chelis#930: inference may have abandoned its schedule. Stop before the
+    // validators, which would otherwise report the un-inferred tail as program
+    // errors and spend the rest of the phase doing it.
+    if cancellation_gate(errors) {
+        return Err(stats);
+    }
     validate_ir_program(library_exprs, &library_ir, errors);
     log_sub("validate_ir_program", &mut sub_t);
     validate_tensor_precisions_in_program(library_exprs, errors);
@@ -248,11 +275,12 @@ pub(crate) fn build_type_env_from_library_in_session(
     // different sequential, nested, or parallel check.
     let declared_signatures = collect_declared_sig_metadata(library_exprs);
     let annotation_context = AnnotationResolutionContext::root(&declared_signatures);
-    let library_annotated: Vec<deep::Expr> = library_exprs
-        .iter()
-        .map(|e| annotate_expr_with_scope(e, &product, annotation_context, errors))
-        .collect();
+    let library_annotated =
+        annotate_top_levels(library_exprs, &product, annotation_context, errors);
     log_sub("annotate_library_exprs_outer_loop", &mut sub_t);
+    if cancellation_gate(errors) {
+        return Err(stats);
+    }
     let library_ir_annotated = build_ir_type_env(&library_annotated);
     log_sub("build_ir_type_env_from_annotated", &mut sub_t);
 
@@ -340,6 +368,11 @@ pub(crate) fn build_compiled_library_context_in_session(
         errors,
     );
     let stats = product.stats();
+    // chelis#930: see `build_type_env_from_library_in_session` — stop before
+    // the validators if inference abandoned its schedule.
+    if cancellation_gate(errors) {
+        return Err(stats);
+    }
     validate_ir_program(library_exprs, &library_ir, errors);
     validate_tensor_precisions_in_program(library_exprs, errors);
     crate::invariants::validate_type_invariants_in_program_with_sink(library_exprs, errors);
@@ -372,14 +405,15 @@ pub(crate) fn build_compiled_library_context_in_session(
     // parameter metadata and per-def binder scope to the recursive pass.
     let declared_signatures = collect_declared_sig_metadata(library_exprs);
     let annotation_context = AnnotationResolutionContext::root(&declared_signatures);
-    let library_annotated: Vec<deep::Expr> = library_exprs
-        .iter()
-        .map(|e| annotate_expr_with_scope(e, &product, annotation_context, errors))
-        .collect();
+    let library_annotated =
+        annotate_top_levels(library_exprs, &product, annotation_context, errors);
     // Annotation also recurses (annotate_expr_with_scope); if it bailed on
     // low stack, reject rather than return a partially-annotated program.
     stack_scope.drain_into(errors);
     if !errors.is_empty() {
+        return Err(stats);
+    }
+    if cancellation_gate(errors) {
         return Err(stats);
     }
     let library_ir_annotated = build_ir_type_env(&library_annotated);
@@ -409,6 +443,10 @@ pub(crate) fn build_compiled_library_context_in_session(
         errors,
     );
     if !errors.is_empty() {
+        return Err(stats);
+    }
+    // chelis#930: see `check_ir_with_signature_context_in_session`.
+    if cancellation_gate(errors) {
         return Err(stats);
     }
 
@@ -489,6 +527,11 @@ pub(crate) fn build_compiled_library_context_with_base_in_session(
         errors,
     );
     let stats = product.stats();
+    // chelis#930: see `build_type_env_from_library_in_session` — stop before
+    // the validators if inference abandoned its schedule.
+    if cancellation_gate(errors) {
+        return Err(stats);
+    }
     validate_ir_program(library_exprs, &combined_ir, errors);
     validate_tensor_precisions_in_program(library_exprs, errors);
     crate::invariants::validate_type_invariants_in_program_with_sink(library_exprs, errors);
@@ -520,14 +563,15 @@ pub(crate) fn build_compiled_library_context_with_base_in_session(
     // inheriting binders from the base context.
     let declared_signatures = collect_declared_sig_metadata(library_exprs);
     let annotation_context = AnnotationResolutionContext::root(&declared_signatures);
-    let library_annotated: Vec<deep::Expr> = library_exprs
-        .iter()
-        .map(|e| annotate_expr_with_scope(e, &product, annotation_context, errors))
-        .collect();
+    let library_annotated =
+        annotate_top_levels(library_exprs, &product, annotation_context, errors);
     // Annotation also recurses (annotate_expr_with_scope); if it bailed on
     // low stack, reject rather than return a partially-annotated program.
     stack_scope.drain_into(errors);
     if !errors.is_empty() {
+        return Err(stats);
+    }
+    if cancellation_gate(errors) {
         return Err(stats);
     }
     let new_ir_annotated = build_ir_type_env(&library_annotated);
@@ -571,6 +615,10 @@ pub(crate) fn build_compiled_library_context_with_base_in_session(
         errors,
     );
     if !errors.is_empty() {
+        return Err(stats);
+    }
+    // chelis#930: see `check_ir_with_signature_context_in_session`.
+    if cancellation_gate(errors) {
         return Err(stats);
     }
 
@@ -663,6 +711,11 @@ pub(crate) fn check_ir_with_signature_context_in_session(
     );
     let stats = product.stats();
     log_sub("infer_ir_program_with_state", &mut sub_t);
+    // chelis#930: see `build_type_env_from_library_in_session` — stop before
+    // the validators if inference abandoned its schedule.
+    if cancellation_gate(errors) {
+        return Err(stats);
+    }
     // Run cycle / shape / precision validators on new_exprs only. The
     // combined IR env is supplied so `(var libfoo)` references
     // resolve to the library's declared type during shape validation.
@@ -690,6 +743,9 @@ pub(crate) fn check_ir_with_signature_context_in_session(
     if !errors.is_empty() {
         return Err(stats);
     }
+    if cancellation_gate(errors) {
+        return Err(stats);
+    }
     // Surface library declared types in the returned type_env so downstream
     // passes (lower, effects, linearity) can resolve `(var libname)` calls
     // from new-code without a separate library lookup. New-code types take
@@ -711,6 +767,12 @@ pub(crate) fn check_ir_with_signature_context_in_session(
         errors,
     );
     if !errors.is_empty() {
+        return Err(stats);
+    }
+    // chelis#930: signature inference (inside `finalize_checked_program`) can
+    // abandon its fixed point, which leaves the metadata short rather than
+    // wrong-looking, so nothing above would have failed.
+    if cancellation_gate(errors) {
         return Err(stats);
     }
     Ok(checked)
@@ -738,6 +800,11 @@ pub(crate) fn check_typed_program_in_session(
         if !errors.is_empty() {
             return Err(stats);
         }
+        // chelis#930: annotation and the signature fixed point below both
+        // abandon their walks on cancellation.
+        if cancellation_gate(errors) {
+            return Err(stats);
+        }
         let checked = finalize_checked_program(
             annotated_exprs,
             annotated_type_env,
@@ -748,6 +815,9 @@ pub(crate) fn check_typed_program_in_session(
             errors,
         );
         if !errors.is_empty() {
+            return Err(stats);
+        }
+        if cancellation_gate(errors) {
             return Err(stats);
         }
         Ok(checked)
@@ -887,7 +957,16 @@ pub(super) fn infer_ir_program_with_state(
         .cloned()
         .collect::<HashSet<_>>();
     let inference_groups = primary_inference_groups(exprs, &items);
-    for group in inference_groups {
+    // chelis#930: cooperative cancellation at top-level-declaration
+    // granularity. Body inference is one of the two front-end passes whose
+    // cost scales with declaration count, so an abandoned compile has to be
+    // able to stop inside it rather than only at the end of the phase. The
+    // token is read ONCE (a TLS lookup) and polled per declaration as a
+    // relaxed load, leaving the type checker's own recursive walk — which runs
+    // many orders of magnitude more often — untouched.
+    let cancel = crate::cancel::current_cancel_token();
+    let cancelled = || cancel.as_ref().is_some_and(CancelToken::is_cancelled);
+    'schedule: for group in inference_groups {
         let provisional_types = if group.recursive {
             prebind_recursive_function_schemes(
                 &group.indices,
@@ -902,6 +981,9 @@ pub(super) fn infer_ir_program_with_state(
         };
         let mut deferred_bindings = Vec::new();
         for declaration_index in group.indices {
+            if cancelled() {
+                break 'schedule;
+            }
             let (module, expr) = &items[declaration_index];
             product.begin_root(expr);
             let t0 = if detail_profile {
@@ -962,6 +1044,14 @@ pub(super) fn infer_ir_program_with_state(
         }
     }
     crate::opacity::set_current_item(None, None);
+
+    if cancelled() {
+        // Abandoned mid-schedule. The remaining declarations were never
+        // inferred, so the walks below would attribute their absence to the
+        // program and spend the phase's remaining budget doing it. The caller's
+        // `cancellation_gate` turns this early return into a hard failure.
+        return product;
+    }
 
     for warning in chelis_deep::validate::validate(exprs) {
         errors.push(

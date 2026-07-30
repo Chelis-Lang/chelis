@@ -43,7 +43,9 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-use crate::compiler::{CompilerError, check_error_diagnostic, stage_error};
+use crate::compiler::{
+    CompilerError, bail_if_cancelled, cancelled_or, check_error_diagnostic, stage_error,
+};
 use crate::schema::{Diagnostic, Span};
 
 /// 32-byte content hash of every source file that contributed to a
@@ -851,8 +853,16 @@ pub fn compile_reef_context(
         }
     };
 
+    // chelis#930: the library-context build is the dominant per-call front-end
+    // cost for a reef package (chelis#828 measures ~4.5 minutes with a real
+    // library context), so it polls the cancellation token at every phase
+    // boundary. The per-declaration polling that makes those bounds useful
+    // lives in `chelis-types`; `prepare_reef_graph_cached` itself is
+    // filesystem work and is not covered.
+    bail_if_cancelled("reef")?;
     let reef_state = prepare_reef_graph_cached(package_dir).map_err(|e| reef_error(&e))?;
     log_phase("prepare_reef_graph", &mut t);
+    bail_if_cancelled("check")?;
     let digests = reef_state
         .source_digests()
         .map_err(|error| hash_error(&error))?;
@@ -876,6 +886,12 @@ pub fn compile_reef_context(
         Some(Ok(triple)) => triple,
         Some(Err(err)) => return Err(err),
         None => {
+            // chelis#930: the layered path folds ANY failure into `None` so
+            // the monolithic path can produce the byte-identical diagnostic.
+            // An abandoned compile must not take that route: it would rerun
+            // the entire library check it just abandoned, so a cancelled
+            // library-context build would cost MORE than an uncancelled one.
+            bail_if_cancelled("check")?;
             // Surf → Deep desugar + macro expand of the WHOLE library.
             // `linked_library_decls` is already linked + internal-name-
             // rewritten by `prepare_reef_graph`.
@@ -903,16 +919,16 @@ pub fn compile_reef_context(
             // inference + per-decl annotation ONCE and returns both the
             // [`TypeEnv`] (for downstream `_with_context` calls) and the
             // [`CheckedProgram`] (for effects + linearity + lowering).
-            let (type_env, checked) =
-                build_compiled_library_context(&deep_library_decls).map_err(|report| {
-                    CompilerError {
-                        stage: "check".to_string(),
-                        errors: report.errors.iter().map(check_error_diagnostic).collect(),
-                    }
-                })?;
+            let (type_env, checked) = build_compiled_library_context(&deep_library_decls)
+                .map_err(|report| CompilerError {
+                    stage: "check".to_string(),
+                    errors: report.errors.iter().map(check_error_diagnostic).collect(),
+                })
+                .map_err(|error| cancelled_or("check", error))?;
             log_phase("build_compiled_library_context", &mut t);
-            let checked =
-                chelis_effects::check_program(&checked).map_err(|errors| CompilerError {
+            bail_if_cancelled("effects")?;
+            let checked = chelis_effects::check_program(&checked)
+                .map_err(|errors| CompilerError {
                     stage: "effects".to_string(),
                     errors: errors
                         .iter()
@@ -927,12 +943,16 @@ pub fn compile_reef_context(
                             deep_path: None,
                         })
                         .collect(),
-                })?;
+                })
+                .map_err(|error| cancelled_or("effects", error))?;
             log_phase("check_effects", &mut t);
-            let library_checked = check_linearity(&checked).map_err(|errors| CompilerError {
-                stage: "linearity".to_string(),
-                errors: errors.iter().map(check_error_diagnostic).collect(),
-            })?;
+            bail_if_cancelled("linearity")?;
+            let library_checked = check_linearity(&checked)
+                .map_err(|errors| CompilerError {
+                    stage: "linearity".to_string(),
+                    errors: errors.iter().map(check_error_diagnostic).collect(),
+                })
+                .map_err(|error| cancelled_or("linearity", error))?;
             log_phase("check_linearity", &mut t);
             (type_env, library_checked)
         }
@@ -944,6 +964,7 @@ pub fn compile_reef_context(
     // lowering the monolithic one (the composed program carries the same
     // chelis-std ++ package annotated bodies), so the layered path does not
     // need to reuse the cached chelis-std `library_dag` here.
+    bail_if_cancelled("lower")?;
     let library_dag =
         chelis_ir::lower::try_lower_program_to_library(&library_checked).map_err(|diagnostic| {
             CompilerError {

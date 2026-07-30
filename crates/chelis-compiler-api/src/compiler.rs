@@ -122,6 +122,48 @@ fn eval_stage_error(message: String) -> CompilerError {
     stage_error("eval", message, kind)
 }
 
+/// The error a front-end phase returns when the compile was abandoned
+/// (chelis#930).
+///
+/// `stage` is the phase that was running or about to run, which is what the
+/// operator wants to know ("it was still type-checking"). Classification is
+/// structural — [`EVAL_CANCELLED_KIND`] — exactly as for the eval lanes; the
+/// message carries the sentinel only for the CLI's `--timeout` boundary, which
+/// sees flattened text rather than the typed error.
+pub(crate) fn cancelled_stage_error(stage: &str) -> CompilerError {
+    stage_error(stage, chelis_types::EVAL_CANCELLED_MSG, EVAL_CANCELLED_KIND)
+}
+
+/// Front-end phase boundary (chelis#930): abandon the compile if cancellation
+/// has been requested.
+///
+/// Phase boundaries alone bound interrupt latency to one phase; the passes
+/// that dominate a large front end also poll per top-level declaration
+/// (`chelis-types`), which is what makes the bound useful rather than nominal.
+pub(crate) fn bail_if_cancelled(stage: &str) -> Result<()> {
+    if chelis_types::cancellation_requested() {
+        return Err(cancelled_stage_error(stage));
+    }
+    Ok(())
+}
+
+/// Replace a phase's error with the cancellation error when the compile was
+/// abandoned mid-phase (chelis#930).
+///
+/// A pass that stopped early reports whatever its truncated view implied —
+/// unbound tail declarations, missing signatures. Those are artefacts of the
+/// abandonment, not findings about the program, and reporting them would be
+/// actively misleading (the user asked to stop; the program may be fine).
+/// Cancellation is one-way, so this decision is deterministic: once the token
+/// is tripped it stays tripped for the rest of the compile.
+pub(crate) fn cancelled_or(stage: &str, error: CompilerError) -> CompilerError {
+    if chelis_types::cancellation_requested() {
+        cancelled_stage_error(stage)
+    } else {
+        error
+    }
+}
+
 type Result<T> = std::result::Result<T, CompilerError>;
 
 pub fn parse(request: ParseRequest) -> Result<ParseResult> {
@@ -1069,6 +1111,11 @@ fn compile_new_source_in_context(
     // resolved the package's library decls; the new source is whatever
     // the user typed into a `chelis eval --file` / `chelis test` worker /
     // `chelis check` call.
+    // chelis#930: same phase-boundary polling as `compile_source_scoped`. This
+    // is the primary route for reef packages (`chelis eval --file` inside a
+    // package, `chelis test` workers), so it is the path that matters most for
+    // the library-heavy workloads in chelis#828.
+    bail_if_cancelled("parse")?;
     let raw_new_decls = parse_surf(new_source)?;
     // Strip module wrappers and route through the reef name resolver so
     // bare references like `add` get rewritten to their internal-name
@@ -1080,6 +1127,7 @@ fn compile_new_source_in_context(
     let rewritten =
         chelis_reef::rewrite_entry_decls_with_reef_graph(&context.reef_state, &flat_decls)
             .map_err(|err| stage_error("reef", err, "reef_error"))?;
+    bail_if_cancelled("desugar")?;
     let new_deep = chelis_macros::expand_program(
         &chelis_surf::desugar::desugar_program(&rewritten),
         &chelis_macros::ExpansionOptions::default(),
@@ -1088,6 +1136,7 @@ fn compile_new_source_in_context(
     .into_exprs();
 
     // Phase C: type-check new code against the library type env.
+    bail_if_cancelled("check")?;
     let new_checked = chelis_types::check_ir_with_signature_context(
         &context.type_env,
         context.library_checked.signature_inference(),
@@ -1096,9 +1145,11 @@ fn compile_new_source_in_context(
     .map_err(|report| CompilerError {
         stage: "check".to_string(),
         errors: report.errors.iter().map(check_error_diagnostic).collect(),
-    })?;
+    })
+    .map_err(|error| cancelled_or("check", error))?;
 
     // Phase D: effects checker, library + new.
+    bail_if_cancelled("effects")?;
     let new_checked =
         chelis_effects::check_effects_with_context(&context.library_checked, &new_checked)
             .map_err(|errors| CompilerError {
@@ -1116,15 +1167,19 @@ fn compile_new_source_in_context(
                         deep_path: None,
                     })
                     .collect(),
-            })?;
+            })
+            .map_err(|error| cancelled_or("effects", error))?;
 
     // Phase E: linearity checker, library + new.
+    bail_if_cancelled("linearity")?;
     let new_checked =
         chelis_types::check_linearity_with_context(&context.library_checked, &new_checked)
             .map_err(|errors| CompilerError {
                 stage: "linearity".to_string(),
                 errors: errors.iter().map(check_error_diagnostic).collect(),
-            })?;
+            })
+            .map_err(|error| cancelled_or("linearity", error))?;
+    bail_if_cancelled("lower")?;
 
     // Build the same CompiledSource shape `compile_source` produces, but
     // for the new code only — the library state lives in the composed
@@ -1677,9 +1732,16 @@ fn compile_source_scoped(
     source: &str,
     entry: Option<&str>,
 ) -> Result<CompiledSource> {
+    // chelis#930: the front end polls the cancellation token at every phase
+    // boundary, and the check phase additionally polls per top-level
+    // declaration inside `chelis-types`. Before this, a SIGINT arriving during
+    // compilation was not observed until evaluation started, so interrupt
+    // latency equalled the remaining compile time.
+    bail_if_cancelled("parse")?;
     let deep_exprs: Vec<DeepExpr> = match source_kind {
         SourceKind::Surf => {
             let decls = parse_surf(source)?;
+            bail_if_cancelled("desugar")?;
             chelis_macros::expand_program(
                 &chelis_surf::desugar::desugar_program(&decls),
                 &chelis_macros::ExpansionOptions::default(),
@@ -1695,30 +1757,40 @@ fn compile_source_scoped(
         None => deep_exprs,
     };
 
-    let checked = chelis_types::check_ir_program(&deep_exprs).map_err(|report| CompilerError {
-        stage: "check".to_string(),
-        errors: report.errors.iter().map(check_error_diagnostic).collect(),
-    })?;
-    let checked = chelis_effects::check_program(&checked).map_err(|errors| CompilerError {
-        stage: "effects".to_string(),
-        errors: errors
-            .iter()
-            .map(|error| Diagnostic {
-                kind: "effect_error".to_string(),
-                message: error.message.clone(),
-                severity: 0.8,
-                expected: None,
-                got: None,
-                suggestions: vec![],
-                span: None,
-                deep_path: None,
-            })
-            .collect(),
-    })?;
-    let checked = chelis_types::check_linearity(&checked).map_err(|errors| CompilerError {
-        stage: "linearity".to_string(),
-        errors: errors.iter().map(check_error_diagnostic).collect(),
-    })?;
+    bail_if_cancelled("check")?;
+    let checked = chelis_types::check_ir_program(&deep_exprs)
+        .map_err(|report| CompilerError {
+            stage: "check".to_string(),
+            errors: report.errors.iter().map(check_error_diagnostic).collect(),
+        })
+        .map_err(|error| cancelled_or("check", error))?;
+    bail_if_cancelled("effects")?;
+    let checked = chelis_effects::check_program(&checked)
+        .map_err(|errors| CompilerError {
+            stage: "effects".to_string(),
+            errors: errors
+                .iter()
+                .map(|error| Diagnostic {
+                    kind: "effect_error".to_string(),
+                    message: error.message.clone(),
+                    severity: 0.8,
+                    expected: None,
+                    got: None,
+                    suggestions: vec![],
+                    span: None,
+                    deep_path: None,
+                })
+                .collect(),
+        })
+        .map_err(|error| cancelled_or("effects", error))?;
+    bail_if_cancelled("linearity")?;
+    let checked = chelis_types::check_linearity(&checked)
+        .map_err(|errors| CompilerError {
+            stage: "linearity".to_string(),
+            errors: errors.iter().map(check_error_diagnostic).collect(),
+        })
+        .map_err(|error| cancelled_or("linearity", error))?;
+    bail_if_cancelled("lower")?;
     let all_root_names = root_names_from_checked_exprs(checked.exprs(), checked.type_env(), false);
     let tensor_root_names =
         root_names_from_checked_exprs(checked.exprs(), checked.type_env(), true);
