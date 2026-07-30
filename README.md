@@ -96,7 +96,11 @@ The hook rejects AI tool authorship markers before Git creates a commit. All lis
 
 Both native Nix package jobs use the reviewed portable Devenv action from `Chelis-Lang/ci`. They run these tasks through its portable shell.
 
-The action uses exact Nix and Devenv inputs. Its public Devenv cache is read-only and does not contain the custom cvc5 derivation.
+The action uses exact Nix and Devenv inputs. Its public Devenv cache is read-only and does not contain the custom cvc5 derivation. Each job therefore stores the prebuilt cvc5 toolchain closure in the GitHub Actions cache, keyed by its derivation name.
+
+The Linux job runs on every pull request and push to `main`. It reclaims unused preinstalled toolchain disk space first and bounds Nix to two concurrent builds.
+
+The macOS job is a manual gate, and default CI does not run it. Dispatch it with `gh workflow run "Nix Packages" --ref <branch>`. The gate passes when the dispatched `Nix Packages (aarch64-darwin)` job completes with every check green.
 
 Devenv is optional for local work and is not a product requirement. If you do not use Devenv locally, use the manual setup below.
 

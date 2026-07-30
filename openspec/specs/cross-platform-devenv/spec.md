@@ -248,20 +248,20 @@ The smoke-check graph MUST NOT start a Devenv service or long-running process.
 - **THEN** `devenv test` exits with a nonzero status
 
 ### Requirement: Native package CI uses the reviewed portable Devenv base
-Each native Nix package job MUST invoke `Chelis-Lang/ci/actions/setup-devenv@73f017c4d3179dc313844e9d5f08d17a7879c824` once before its first `run` step.
+Each native Nix package job MUST invoke `Chelis-Lang/ci/actions/setup-devenv@73f017c4d3179dc313844e9d5f08d17a7879c824` once before its runner verification step.
 
-Each job MUST use `devenv-ci bash --noprofile --norc -e -o pipefail {0}` as its default shell for `run` steps.
+Each job MUST use `devenv-ci bash --noprofile --norc -e -o pipefail {0}` as its default shell for `run` steps. A host maintenance step, such as runner disk reclamation, MAY precede the reviewed action with an explicit host shell.
 
 The workflow MUST NOT duplicate the direct Nix, Cachix, or Devenv bootstrap. The reviewed action supplies Nix 2.34.4 and Devenv v2.2.
 
 Each job MUST run `devenv test --no-tui`. The Devenv cache MUST NOT replace the complete native flake check.
 
-The public Devenv cache does not contain the custom Chelis cvc5 derivation.
+The public Devenv cache does not contain the custom Chelis cvc5 derivation. Each job MAY reuse the prebuilt cvc5 toolchain closure from the repository Actions cache, keyed by the closure derivation name.
 
 #### Scenario: Native CI checks the development shell
 - **WHEN** either native Nix package job runs
 - **THEN** the job invokes the reviewed portable Devenv action
-- **AND** each `run` step uses the portable shell
+- **AND** each Nix and Devenv `run` step uses the portable shell
 - **AND** the job runs all four named Devenv tasks
 - **AND** the job runs the complete native flake check
 
@@ -270,7 +270,7 @@ The public Devenv cache does not contain the custom Chelis cvc5 derivation.
 - **THEN** the native workflow contract fails
 
 #### Scenario: The custom cvc5 output is absent from public caches
-- **WHEN** the native flake check requires the custom non-GPL cvc5 derivation
+- **WHEN** the native flake check requires the custom non-GPL cvc5 derivation and the repository closure cache has no entry
 - **THEN** Nix builds that derivation from source
 
 ### Requirement: The shell runs the C backend test tier on macOS

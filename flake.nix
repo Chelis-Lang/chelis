@@ -75,6 +75,11 @@
         in
         {
           inherit apps checks packages;
+          # CI caches this pinned toolchain closure between runs; exposing it
+          # here keeps the locked package contract unchanged.
+          legacy = {
+            cvc5-dir = cvc5.dir;
+          };
         }
       );
     in
@@ -82,5 +87,6 @@
       packages = lib.mapAttrs (_system: outputs: outputs.packages) perSystem;
       apps = lib.mapAttrs (_system: outputs: outputs.apps) perSystem;
       checks = lib.mapAttrs (_system: outputs: outputs.checks) perSystem;
+      legacyPackages = lib.mapAttrs (_system: outputs: outputs.legacy) perSystem;
     };
 }

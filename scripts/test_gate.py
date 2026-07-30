@@ -105,10 +105,10 @@ def _assert_native_devenv_recipe(workflow: str) -> None:
                     f"expected 1, found {actual_count}"
                 )
         setup_index = block.index(f"uses: {DEVENV_SETUP_ACTION}")
-        first_run_index = block.find("\n        run:")
-        if first_run_index < 0 or setup_index > first_run_index:
+        verify_index = block.find("name: Verify the runner system")
+        if verify_index < 0 or setup_index > verify_index:
             raise AssertionError(
-                f"native Devenv setup in {job!r} must precede the first run step"
+                f"native Devenv setup in {job!r} must precede the runner verification"
             )
 
     forbidden_markers = (
@@ -120,6 +120,70 @@ def _assert_native_devenv_recipe(workflow: str) -> None:
         if marker in workflow:
             raise AssertionError(
                 f"native Devenv recipe duplicates central setup marker {marker!r}"
+            )
+
+
+def _assert_darwin_manual_dispatch(workflow: str) -> None:
+    trigger_section = workflow.split("jobs:", 1)[0]
+    if "workflow_dispatch:" not in trigger_section:
+        raise AssertionError("the Nix workflow must expose a workflow_dispatch trigger")
+    blocks = _workflow_job_blocks(workflow)
+    darwin = blocks.get("nix-darwin-arm64", "")
+    if "if: github.event_name == 'workflow_dispatch'" not in darwin:
+        raise AssertionError("the darwin Nix job must run on manual dispatch only")
+    linux = blocks.get("nix-linux-x86-64", "")
+    if "github.event_name" in linux:
+        raise AssertionError("the Linux Nix job must keep pull request coverage")
+
+
+def _assert_runner_resource_bounds(workflow: str) -> None:
+    blocks = _workflow_job_blocks(workflow)
+    max_jobs = {
+        "nix-linux-x86-64": "max-jobs = 2",
+        "nix-darwin-arm64": "max-jobs = 1",
+    }
+    for job, bound in max_jobs.items():
+        block = blocks.get(job, "")
+        for required in ("sandbox = true", bound, "cores = 0"):
+            if required not in block:
+                raise AssertionError(f"{job!r} must set {required!r} in NIX_CONFIG")
+    linux = blocks.get("nix-linux-x86-64", "")
+    reclaim_index = linux.find("name: Reclaim runner disk space")
+    setup_index = linux.find(f"uses: {DEVENV_SETUP_ACTION}")
+    if reclaim_index < 0 or setup_index < 0 or reclaim_index > setup_index:
+        raise AssertionError(
+            "the Linux Nix job must reclaim runner disk before Devenv setup"
+        )
+
+
+def _assert_cvc5_closure_cache(workflow: str) -> None:
+    blocks = _workflow_job_blocks(workflow)
+    jobs = (
+        ("nix-linux-x86-64", "x86_64-linux"),
+        ("nix-darwin-arm64", "aarch64-darwin"),
+    )
+    for job, system in jobs:
+        block = blocks.get(job, "")
+        markers = (
+            "uses: actions/cache/restore@v4",
+            "uses: actions/cache/save@v4",
+            f".#legacyPackages.{system}.cvc5-dir.drvPath",
+            f".#legacyPackages.{system}.cvc5-dir.outPath",
+            "--no-check-sigs",
+        )
+        for marker in markers:
+            if marker not in block:
+                raise AssertionError(
+                    f"{job!r} must cache the cvc5 closure: missing {marker!r}"
+                )
+        check_index = block.index("run: nix flake check")
+        if block.index("uses: actions/cache/restore@v4") > check_index:
+            raise AssertionError(
+                f"{job!r} must restore the cvc5 closure before the flake check"
+            )
+        if block.index("uses: actions/cache/save@v4") < check_index:
+            raise AssertionError(
+                f"{job!r} must save the cvc5 closure after the flake check"
             )
 
 
@@ -631,8 +695,46 @@ class NixPackagesWorkflowTests(unittest.TestCase):
             f"run: devenv test --no-tui\n      - {setup}",
             1,
         )
-        with self.assertRaisesRegex(AssertionError, "precede the first run"):
+        with self.assertRaisesRegex(AssertionError, "precede the runner verification"):
             _assert_native_devenv_recipe(mutated)
+
+    def test_darwin_job_runs_on_manual_dispatch_only(self):
+        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
+        _assert_darwin_manual_dispatch(text)
+
+    def test_darwin_pull_request_trigger_fails_the_manual_lock(self):
+        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
+        mutated = text.replace(
+            "    if: github.event_name == 'workflow_dispatch'\n", "", 1
+        )
+        with self.assertRaisesRegex(AssertionError, "manual dispatch"):
+            _assert_darwin_manual_dispatch(mutated)
+
+    def test_each_job_bounds_runner_resources(self):
+        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
+        _assert_runner_resource_bounds(text)
+
+    def test_unbounded_build_parallelism_fails_the_resource_lock(self):
+        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
+        mutated = text.replace("        max-jobs = 2\n", "", 1)
+        with self.assertRaisesRegex(AssertionError, "max-jobs = 2"):
+            _assert_runner_resource_bounds(mutated)
+
+    def test_missing_disk_reclaim_fails_the_resource_lock(self):
+        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
+        mutated = text.replace("name: Reclaim runner disk space", "name: omitted", 1)
+        with self.assertRaisesRegex(AssertionError, "reclaim runner disk"):
+            _assert_runner_resource_bounds(mutated)
+
+    def test_each_job_caches_the_cvc5_toolchain_closure(self):
+        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
+        _assert_cvc5_closure_cache(text)
+
+    def test_missing_cvc5_restore_fails_the_cache_lock(self):
+        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
+        mutated = text.replace("uses: actions/cache/restore@v4", "uses: omitted", 1)
+        with self.assertRaisesRegex(AssertionError, "cvc5 closure"):
+            _assert_cvc5_closure_cache(mutated)
 
     def test_direct_devenv_bootstrap_fails_the_native_recipe(self):
         text = NIX_PACKAGES_YML.read_text(encoding="utf-8")

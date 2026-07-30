@@ -211,18 +211,18 @@ The repository MUST provide a parity checker with positive and negative tests. A
 ### Requirement: Native Nix checks protect every supported system
 Each supported system MUST define checks for package construction, package contents, executable behavior, app paths, SMT activation, and lock parity.
 
-CI MUST run the complete check set and the Nix flake contract suite on native `x86_64-linux` and `aarch64-darwin` builders. A system MUST NOT count as supported from evaluation-only evidence.
+CI MUST run the complete check set and the Nix flake contract suite on native `x86_64-linux` and `aarch64-darwin` builders. The `x86_64-linux` job MUST run on every pull request and push to `main`. The `aarch64-darwin` job MUST run the identical steps and MUST be a documented manual dispatch gate; default CI does not run it. A system MUST NOT count as supported from evaluation-only evidence.
 
 The supported-system list and the named native CI jobs MUST have exact parity. The repository script suite MUST fail when either list contains an unmatched system.
 
-The authoritative completion oracle MUST be the two successful native CI check jobs.
+The authoritative completion oracle MUST be the two successful native CI check jobs: the pull-request `x86_64-linux` job and the dispatched `aarch64-darwin` job.
 
 #### Scenario: Linux checks pass
 - **WHEN** CI runs the complete flake check set on `x86_64-linux`
 - **THEN** every package and contract check exits with status 0
 
 #### Scenario: macOS checks pass
-- **WHEN** CI runs the complete flake check set on `aarch64-darwin`
+- **WHEN** a manually dispatched CI run executes the complete flake check set on `aarch64-darwin`
 - **THEN** every package and contract check exits with status 0
 
 #### Scenario: One package check fails
