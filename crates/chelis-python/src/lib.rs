@@ -47,6 +47,7 @@ const MATH_H: &str = include_str!(concat!(
 ));
 
 const CHELIS_F32: i32 = RuntimeDType::F32.id();
+const CHELIS_F64: i32 = RuntimeDType::F64.id();
 const CHELIS_MAX_DIM: usize = 8;
 const DLPACK_CPU_DEVICE_TYPE: i32 = 1;
 const DLPACK_ROCM_DEVICE_TYPE: i32 = 10;
@@ -272,9 +273,15 @@ impl NativeTensor {
         self.owner.shape()
     }
 
+    // chelis#920: report the dtype the runtime tensor actually carries
+    // instead of asserting float32. With the f32-only gate in place the
+    // two were always equal, so the hardcode was invisible; once f64
+    // artifacts load, a stale "float32" here makes consumers
+    // reinterpret a double buffer at a 4-byte stride and read garbage
+    // with no error and an unchanged shape.
     #[getter]
-    fn dtype(&self) -> &str {
-        "float32"
+    fn dtype(&self) -> PyResult<&'static str> {
+        numpy_dtype_name(self.owner.runtime_dtype())
     }
 
     fn __dlpack_device__(&self) -> (i32, i32) {
@@ -295,14 +302,20 @@ impl NativeTensor {
     }
 }
 
+/// Lowercase name of a compile target, as the `target` getter and the
+/// marshalling diagnostics spell it.
+fn target_label(target: CompileTarget) -> &'static str {
+    match target {
+        CompileTarget::C => "c",
+        CompileTarget::Hip => "hip",
+    }
+}
+
 #[pymethods]
 impl NativeCompiledModel {
     #[getter]
     fn target(&self) -> String {
-        match self.loaded.manifest.target {
-            CompileTarget::C => "c".to_string(),
-            CompileTarget::Hip => "hip".to_string(),
-        }
+        target_label(self.loaded.manifest.target).to_string()
     }
 
     #[getter]
@@ -704,14 +717,46 @@ fn run_compile_and_load_job(
     Ok(CompileAndLoadOutput { lib_path, tempdir })
 }
 
+/// The tensor dtypes `compile_and_load` can marshal, per target.
+///
+/// chelis#920: this list is the contract every other dtype-dependent
+/// site in this file is derived from. `cpu_input_tensor` reads it to
+/// pick the expected NumPy dtype and the `CHELIS_*` runtime tag;
+/// `NativeTensor::dtype` and the DLPack capsule read the tag back off
+/// the tensor the kernel wrote. Adding a dtype here without teaching
+/// `spec_dtype_mapping` / `numpy_dtype_name` / `dlpack_bits` about it
+/// is a loud error at the marshalling boundary, not a silent
+/// reinterpretation — which is the defect #920 reported.
+///
+/// The C target admits f32 and f64: the C backend has been f64-capable
+/// (`elem_type` → `double`, `cblas_dgemm`, `double_math_fn`) and
+/// chelis#919 widened the last f32-hardcoded elementwise path.
+///
+/// The HIP target stays f32-only and rejects explicitly. Its kernels
+/// are still f32-hardcoded in the places the C backend is not (sparse
+/// scatter, the fused launch path), so admitting f64 there would move
+/// the failure from an honest message to a backend panic.
+fn supported_execution_dtypes(target: CompileTarget) -> &'static [&'static str] {
+    match target {
+        CompileTarget::C => &["f32", "f64"],
+        CompileTarget::Hip => &["f32"],
+    }
+}
+
 fn ensure_supported_execution_artifact_inner(
     artifact: &CompiledExecutionArtifact,
 ) -> Result<(), String> {
+    let target = artifact.compile_result.target;
+    let supported = supported_execution_dtypes(target);
     for spec in artifact.inputs.iter().chain(artifact.outputs.iter()) {
-        if spec.dtype != "f32" {
+        if !supported.contains(&spec.dtype.as_str()) {
             return Err(format!(
-                "compiled execution currently supports only f32 tensors; `{}` uses `{}`",
-                spec.name, spec.dtype
+                "compiled execution on the {} target currently supports only {} tensors; \
+                 `{}` uses `{}`",
+                target_label(target),
+                supported.join(" / "),
+                spec.name,
+                spec.dtype
             ));
         }
         if spec.dims.len() > CHELIS_MAX_DIM {
@@ -1115,10 +1160,16 @@ fn cpu_input_tensor(
         ));
     };
 
+    // chelis#920: dispatch the expected NumPy dtype and the runtime
+    // dtype tag off the artifact's `spec.dtype` instead of hard-coding
+    // float32 / CHELIS_F32. A `_ =>` catch-all here would re-create the
+    // silent-default arm this issue is about, so an unmapped dtype is a
+    // loud error even though the gate above already rejected it.
+    let (expected_numpy_dtype, runtime_dtype) = spec_dtype_mapping(&spec.dtype)?;
     let dtype = array.getattr("dtype")?.str()?.extract::<String>()?;
-    if dtype != "float32" {
+    if dtype != expected_numpy_dtype {
         return Err(PyValueError::new_err(format!(
-            "input `{}` expected dtype float32, got {dtype}",
+            "input `{}` expected dtype {expected_numpy_dtype}, got {dtype}",
             spec.name
         )));
     }
@@ -1131,7 +1182,7 @@ fn cpu_input_tensor(
         shape: dims_array(&shape)?,
         strides: dims_array(&strides)?,
         ndim: shape.len() as i32,
-        dtype: CHELIS_F32,
+        dtype: runtime_dtype,
         size: element_count(&shape)? as i32,
         owns_data: 0,
     };
@@ -1167,6 +1218,18 @@ fn gpu_input_tensor(
         return Err(PyValueError::new_err(
             "GPU compiled execution requires GPU tensor inputs",
         ));
+    }
+    // chelis#920: the device lane stays f32-only. `supported_execution_dtypes`
+    // admits only f32 for the HIP target, so `spec.dtype` is already f32 here;
+    // re-check it rather than silently tagging whatever arrives as CHELIS_F32,
+    // so widening the HIP gate without widening this marshalling path is a
+    // loud error instead of a reinterpreted buffer.
+    if spec.dtype != "f32" {
+        return Err(PyValueError::new_err(format!(
+            "device compiled execution supports only f32 tensors; `{}` uses `{}`. \
+             The torch/GPU marshalling path is f32-hardcoded (chelis#920)",
+            spec.name, spec.dtype
+        )));
     }
     let dtype = tensor.getattr("dtype")?.str()?.extract::<String>()?;
     if !dtype.ends_with("float32") {
@@ -1345,9 +1408,82 @@ impl TensorOwner {
             Self::Gpu(handle) => (DLPACK_ROCM_DEVICE_TYPE, handle.device_id),
         }
     }
+
+    /// chelis#920: the `CHELIS_*` dtype tag the compiled kernel wrote
+    /// into the output tensor. `ChelisTensor` and `ChelisGpuTensor`
+    /// both already carry it, so this is the authoritative source for
+    /// the Python `dtype` attribute and the DLPack `bits` field —
+    /// nothing new has to be threaded through from the artifact.
+    fn runtime_dtype(&self) -> i32 {
+        match self {
+            Self::Cpu(handle) => unsafe { handle.ptr.as_ref().dtype },
+            Self::Gpu(handle) => unsafe { handle.ptr.as_ref().dtype },
+        }
+    }
+}
+
+/// chelis#920: the expected NumPy dtype string and the `CHELIS_*`
+/// runtime tag for an artifact spec dtype.
+///
+/// The mapping is exhaustive over what `supported_execution_dtypes`
+/// admits and errors on anything else. It deliberately has no
+/// default arm: the pre-#920 code defaulted unknown dtypes to f32,
+/// which is precisely how a correct f64 buffer came back to NumPy
+/// described as float32. Same reasoning as the WS-A0 fix that removed
+/// the silent `"float"` default from `elem_type` in `chelis-backend-c`.
+fn spec_dtype_mapping(dtype: &str) -> PyResult<(&'static str, i32)> {
+    match dtype {
+        "f32" => Ok(("float32", CHELIS_F32)),
+        "f64" => Ok(("float64", CHELIS_F64)),
+        other => Err(PyValueError::new_err(format!(
+            "compiled execution has no NumPy marshalling for dtype `{other}`; \
+             this is a chelis-python bug: `supported_execution_dtypes` admitted \
+             a dtype the marshalling layer does not map"
+        ))),
+    }
+}
+
+/// chelis#920: NumPy dtype name for a `CHELIS_*` runtime dtype tag.
+///
+/// No default arm, for the same reason as `spec_dtype_mapping`: an
+/// unmapped tag must be a loud error rather than a float32 answer that
+/// makes a wider buffer read as garbage.
+fn numpy_dtype_name(dtype: i32) -> PyResult<&'static str> {
+    if dtype == CHELIS_F32 {
+        Ok("float32")
+    } else if dtype == CHELIS_F64 {
+        Ok("float64")
+    } else {
+        Err(PyValueError::new_err(format!(
+            "compiled output tensor carries runtime dtype tag {dtype}, which \
+             chelis-python cannot describe to NumPy (known tags: \
+             {CHELIS_F32} = float32, {CHELIS_F64} = float64)"
+        )))
+    }
+}
+
+/// chelis#920: DLPack element width in bits for a `CHELIS_*` runtime
+/// dtype tag. Paired with `numpy_dtype_name`, which rejects the tags
+/// this function has no width for.
+fn dlpack_bits(dtype: i32) -> PyResult<u8> {
+    if dtype == CHELIS_F32 {
+        Ok(32)
+    } else if dtype == CHELIS_F64 {
+        Ok(64)
+    } else {
+        Err(PyValueError::new_err(format!(
+            "compiled output tensor carries runtime dtype tag {dtype}, which has \
+             no DLPack width in chelis-python (known tags: {CHELIS_F32} = 32-bit \
+             float, {CHELIS_F64} = 64-bit float)"
+        )))
+    }
 }
 
 fn create_dlpack_capsule(py: Python<'_>, owner: TensorOwner) -> PyResult<PyObject> {
+    // chelis#920: resolve the width before building the capsule so an
+    // unknown dtype tag surfaces as a Python exception rather than a
+    // capsule that misdescribes its own buffer.
+    let bits = dlpack_bits(owner.runtime_dtype())?;
     let mut context = Box::new(DlpackContext {
         shape: owner.shape().into_iter().map(|dim| dim as i64).collect(),
         strides: owner
@@ -1368,9 +1504,12 @@ fn create_dlpack_capsule(py: Python<'_>, owner: TensorOwner) -> PyResult<PyObjec
                 }
             },
             ndim: context.shape.len() as i32,
+            // chelis#920: the width follows the runtime tensor's dtype
+            // tag rather than a hardcoded 32. `code: 2` (kDLFloat) is
+            // correct for both f32 and f64, so only `bits` varies.
             dtype: DLDataType {
                 code: 2,
-                bits: 32,
+                bits,
                 lanes: 1,
             },
             shape: context.shape.as_mut_ptr(),
@@ -1621,6 +1760,385 @@ loss = (mean(x, 0) : tensor[f32])
         let library = unsafe { Library::new(&output.lib_path) }
             .expect("shared library should load without unresolved runtime symbols");
         drop(library);
+    }
+
+    // ---------------------------------------------------------------
+    // chelis#919 / chelis#920: f64 through `compile_and_load`.
+    //
+    // Before these two fixes, widening the artifact gate alone gave
+    // silently wrong numbers (#920: the f64 buffer described to NumPy
+    // as float32 and read at a 4-byte stride) and every f64 activation
+    // reached Python as a `PanicException` (#919: `emit_fused_elem`
+    // panicked on any non-f32 dtype). The tests below are the
+    // executable form of both claims.
+    // ---------------------------------------------------------------
+
+    /// Compile `source` for the C target, load the shared library, and
+    /// run its host entry over a single f64 input tensor.
+    ///
+    /// Returns the runtime dtype tag the compiled kernel wrote into the
+    /// output tensor together with its elements. Reading the output as
+    /// f64 is only sound because the tag is asserted first: at f32 the
+    /// same bytes are four different numbers, which is exactly the
+    /// failure #920 describes.
+    fn run_f64_kernel(source: &str, input: &[f64]) -> (i32, Vec<f64>) {
+        run_f64_kernel_strided(source, input, 1)
+    }
+
+    /// As `run_f64_kernel`, but stores the logical elements
+    /// `element_stride` apart in an interleaved buffer.
+    ///
+    /// A stride above 1 makes the input non-contiguous, so the fused
+    /// kernel takes its strided slow path rather than the contiguous
+    /// fast path. Those are two different pointer forms in the emitted
+    /// C: the slow path indexes `t{n}->data` directly, and because that
+    /// field is declared `float *`, an f64 chain that indexed before
+    /// reinterpreting would advance four bytes per element and read
+    /// half of each double. The interleaved slots hold a poison value
+    /// so a kernel that ignored the stride reads it and fails loudly.
+    fn run_f64_kernel_strided(
+        source: &str,
+        input: &[f64],
+        element_stride: usize,
+    ) -> (i32, Vec<f64>) {
+        let dir = tempdir().expect("tempdir");
+        let source_path = dir.path().join("model.ch");
+        fs::write(&source_path, source).expect("write source");
+
+        let output = run_compile_and_load_job(CompileAndLoadJob {
+            source_path: source_path.clone(),
+            source_kind: SourceKind::Surf,
+            target: CompileTarget::C,
+            entry_name: None,
+            artifact_dir: Some(PathBuf::from(dir.path())),
+        })
+        .expect("compile and load job");
+
+        let manifest_path = output.lib_path.with_extension("json");
+        let manifest: ArtifactManifest =
+            serde_json::from_str(&fs::read_to_string(&manifest_path).expect("read manifest"))
+                .expect("parse manifest");
+
+        let library = unsafe { Library::new(&output.lib_path) }.expect("load shared library");
+        let symbol_name = nul_terminated(&manifest.host_entry_name);
+        let entry = unsafe {
+            library
+                .get::<HostEntry>(symbol_name.as_bytes())
+                .expect("resolve host entry")
+        };
+
+        assert!(element_stride >= 1, "element stride must be positive");
+        const POISON: f64 = -12345.5;
+        let mut data: Vec<f64> = vec![POISON; input.len() * element_stride];
+        for (index, value) in input.iter().enumerate() {
+            data[index * element_stride] = *value;
+        }
+        let mut shape = [0i32; CHELIS_MAX_DIM];
+        shape[0] = input.len() as i32;
+        let mut strides = [0i32; CHELIS_MAX_DIM];
+        strides[0] = element_stride as i32;
+        let mut tensor = ChelisTensor {
+            // `ChelisTensor::data` is `*mut f32` for C-ABI compatibility
+            // with `chelis_runtime.h`'s `float *data`; the dtype tag is
+            // what says how wide the elements really are.
+            data: data.as_mut_ptr().cast::<f32>(),
+            shape,
+            strides,
+            ndim: 1,
+            dtype: CHELIS_F64,
+            size: input.len() as i32,
+            owns_data: 0,
+        };
+        let mut input_ptrs: Vec<*mut ChelisTensor> = vec![&mut tensor as *mut ChelisTensor];
+        let mut output_ptrs: Vec<*mut ChelisTensor> = vec![std::ptr::null_mut()];
+        unsafe {
+            (*entry)(
+                input_ptrs.as_mut_ptr(),
+                input_ptrs.len() as c_int,
+                output_ptrs.as_mut_ptr(),
+                output_ptrs.len() as c_int,
+            );
+        }
+
+        let out = output_ptrs[0];
+        assert!(!out.is_null(), "compiled execution returned a NULL output");
+        let (out_dtype, values) = unsafe {
+            let t = &*out;
+            let values = std::slice::from_raw_parts(t.data.cast::<f64>(), t.size as usize).to_vec();
+            (t.dtype, values)
+        };
+        drop(library);
+        (out_dtype, values)
+    }
+
+    /// The single-precision value the same expression would produce, as
+    /// an f64. Every f64 assertion below is paired with this so a
+    /// regression that silently narrows through `expf` fails loudly
+    /// rather than passing an `approx_eq` with a loose tolerance.
+    fn f32_lane_value(compute: impl Fn(f32) -> f32, x: f64) -> f64 {
+        f64::from(compute(x as f32))
+    }
+
+    #[test]
+    fn f64_exp_returns_full_double_precision() {
+        // `exp` is the unfused `emit_unary_func` path, which was
+        // already f64-correct before chelis#919. It is the control:
+        // if this regresses, the problem is not in the fused path.
+        let (dtype, values) = run_f64_kernel(
+            "def exp4(x: tensor[4, f64]) -> tensor[4, f64] = exp(x)\n",
+            &[1.0, 0.0, 2.0, -1.0],
+        );
+        assert_eq!(dtype, CHELIS_F64, "output tensor must be tagged f64");
+        assert_eq!(
+            values[0],
+            1.0f64.exp(),
+            "exp(1.0) must be the full-precision double {:?}, got {:?} \
+             (the f32 lane would give {:?})",
+            1.0f64.exp(),
+            values[0],
+            f32_lane_value(f32::exp, 1.0),
+        );
+        assert_eq!(values[1], 1.0);
+        assert_eq!(values[2], 2.0f64.exp());
+    }
+
+    #[test]
+    fn f64_activations_compute_in_double_not_float() {
+        // chelis#919: each of these lowers to a fused elementwise
+        // chain, so each one panicked in `emit_fused_elem` before the
+        // fix — `sigmoid` on the very first call.
+        //
+        // The tolerance is the point of the test. A `double` chain
+        // agrees with the f64 reference to a few ULP (~1e-16); a chain
+        // that narrowed through `expf` would be off by ~1e-8, which is
+        // eight orders of magnitude outside this bound.
+        const TOL: f64 = 1e-14;
+        let x = 0.7_f64;
+
+        let sigmoid_ref = 1.0 / (1.0 + (-x).exp());
+        let (dtype, values) = run_f64_kernel(
+            "def sg(x: tensor[1, f64]) -> tensor[1, f64] = sigmoid(x)\n",
+            &[x],
+        );
+        assert_eq!(dtype, CHELIS_F64, "sigmoid output must be tagged f64");
+        assert!(
+            (values[0] - sigmoid_ref).abs() < TOL,
+            "f64 sigmoid({x}) = {:?}, expected within {TOL} of {sigmoid_ref:?}; \
+             the f32 lane would give about {:?}",
+            values[0],
+            f32_lane_value(|v| 1.0 / (1.0 + (-v).exp()), x),
+        );
+
+        let tanh_ref = x.tanh();
+        let (dtype, values) = run_f64_kernel(
+            "def th(x: tensor[1, f64]) -> tensor[1, f64] = tanh(x)\n",
+            &[x],
+        );
+        assert_eq!(dtype, CHELIS_F64, "tanh output must be tagged f64");
+        assert!(
+            (values[0] - tanh_ref).abs() < TOL,
+            "f64 tanh({x}) = {:?}, expected within {TOL} of {tanh_ref:?}; \
+             the f32 lane would give about {:?}",
+            values[0],
+            f32_lane_value(f32::tanh, x),
+        );
+
+        // `gelu` lowers through the tanh approximation in
+        // `chelis_ir::tier2::lower_gelu`; mirror that exact formula so
+        // the assertion tests precision, not a different definition of
+        // gelu. Its `Const` operands (sqrt(2/pi), 0.044715) also
+        // exercise the f64 const-fill path.
+        let gelu_ref = {
+            let c = 0.7978845608028654_f64;
+            let k = 0.044715_f64;
+            0.5 * x * (1.0 + (c * (x + k * x * x * x)).tanh())
+        };
+        let (dtype, values) = run_f64_kernel(
+            "def g(x: tensor[1, f64]) -> tensor[1, f64] = gelu(x)\n",
+            &[x],
+        );
+        assert_eq!(dtype, CHELIS_F64, "gelu output must be tagged f64");
+        assert!(
+            (values[0] - gelu_ref).abs() < TOL,
+            "f64 gelu({x}) = {:?}, expected within {TOL} of {gelu_ref:?}",
+            values[0],
+        );
+    }
+
+    #[test]
+    fn f64_fused_chain_computes_in_double_not_float() {
+        // chelis#919's minimal repro: `exp(x)` alone and `x * y` alone
+        // both compiled at f64 before the fix, but composing them fuses
+        // the two into one chain and that chain panicked.
+        let x = 1.0_f64;
+        let expected = x.exp() * x;
+        let (dtype, values) = run_f64_kernel(
+            "def fc(x: tensor[1, f64]) -> tensor[1, f64] = exp(x) * x\n",
+            &[x],
+        );
+        assert_eq!(dtype, CHELIS_F64, "fused chain output must be tagged f64");
+        assert_eq!(
+            values[0],
+            expected,
+            "f64 exp({x}) * {x} must be {expected:?}, got {:?} \
+             (the f32 lane would give {:?})",
+            values[0],
+            f32_lane_value(|v| v.exp() * v, x),
+        );
+    }
+
+    #[test]
+    fn f64_fused_chain_is_correct_on_the_strided_slow_path() {
+        // The contiguous fast path and the strided slow path emit
+        // different pointer forms, and only the slow path indexes
+        // `t{n}->data` (declared `float *`) directly. A NumPy view such
+        // as `base[::2]` reaches this path through `cpu_input_tensor`,
+        // which normalizes byte strides by itemsize and hands the
+        // buffer over unchanged.
+        let x = [1.0_f64, 0.5, 2.0, 0.25];
+        let (dtype, values) = run_f64_kernel_strided(
+            "def fc(x: tensor[4, f64]) -> tensor[4, f64] = exp(x) * x\n",
+            &x,
+            2,
+        );
+        assert_eq!(dtype, CHELIS_F64, "strided f64 output must be tagged f64");
+        for (index, input) in x.iter().enumerate() {
+            let expected = input.exp() * input;
+            assert_eq!(
+                values[index], expected,
+                "strided f64 exp({input}) * {input} must be {expected:?}, got {:?}",
+                values[index]
+            );
+        }
+    }
+
+    #[test]
+    fn f32_fused_chain_is_unregressed_by_the_f64_widening() {
+        // Negative parity for the tests above: the f32 lane must still
+        // produce f32 results through the same fused path. If the
+        // widening had accidentally promoted f32 chains to double, this
+        // would return the f64 value and fail.
+        let dir = tempdir().expect("tempdir");
+        let source_path = dir.path().join("model.ch");
+        fs::write(
+            &source_path,
+            "def fc(x: tensor[1, f32]) -> tensor[1, f32] = exp(x) * x\n",
+        )
+        .expect("write source");
+
+        let output = run_compile_and_load_job(CompileAndLoadJob {
+            source_path: source_path.clone(),
+            source_kind: SourceKind::Surf,
+            target: CompileTarget::C,
+            entry_name: None,
+            artifact_dir: Some(PathBuf::from(dir.path())),
+        })
+        .expect("compile and load job");
+
+        let manifest_path = output.lib_path.with_extension("json");
+        let manifest: ArtifactManifest =
+            serde_json::from_str(&fs::read_to_string(&manifest_path).expect("read manifest"))
+                .expect("parse manifest");
+        let library = unsafe { Library::new(&output.lib_path) }.expect("load shared library");
+        let symbol_name = nul_terminated(&manifest.host_entry_name);
+        let entry = unsafe {
+            library
+                .get::<HostEntry>(symbol_name.as_bytes())
+                .expect("resolve host entry")
+        };
+
+        let mut data: Vec<f32> = vec![1.0];
+        let mut shape = [0i32; CHELIS_MAX_DIM];
+        shape[0] = 1;
+        let mut strides = [0i32; CHELIS_MAX_DIM];
+        strides[0] = 1;
+        let mut tensor = ChelisTensor {
+            data: data.as_mut_ptr(),
+            shape,
+            strides,
+            ndim: 1,
+            dtype: CHELIS_F32,
+            size: 1,
+            owns_data: 0,
+        };
+        let mut input_ptrs: Vec<*mut ChelisTensor> = vec![&mut tensor as *mut ChelisTensor];
+        let mut output_ptrs: Vec<*mut ChelisTensor> = vec![std::ptr::null_mut()];
+        unsafe {
+            (*entry)(
+                input_ptrs.as_mut_ptr(),
+                input_ptrs.len() as c_int,
+                output_ptrs.as_mut_ptr(),
+                output_ptrs.len() as c_int,
+            );
+        }
+        let out = output_ptrs[0];
+        assert!(!out.is_null(), "compiled execution returned a NULL output");
+        let (out_dtype, value) = unsafe {
+            let t = &*out;
+            (t.dtype, *t.data)
+        };
+        drop(library);
+
+        assert_eq!(out_dtype, CHELIS_F32, "f32 output must stay tagged f32");
+        assert_eq!(
+            value,
+            1.0f32.exp() * 1.0f32,
+            "the f32 fused chain must keep single-precision results"
+        );
+    }
+
+    // chelis#920: the dtype mappings must have no default arm. A
+    // catch-all that answered "float32" is what turned a correct f64
+    // buffer into `[-2.8569523e-32, 2.0897851, 0.0, 1.875]` with no
+    // error and an unchanged shape.
+    #[test]
+    fn dtype_mappings_are_exhaustive_and_reject_unknown_tags() {
+        Python::with_gil(|_py| {
+            assert_eq!(numpy_dtype_name(CHELIS_F32).expect("f32"), "float32");
+            assert_eq!(numpy_dtype_name(CHELIS_F64).expect("f64"), "float64");
+            assert_eq!(dlpack_bits(CHELIS_F32).expect("f32"), 32);
+            assert_eq!(dlpack_bits(CHELIS_F64).expect("f64"), 64);
+            assert_eq!(
+                spec_dtype_mapping("f32").expect("f32"),
+                ("float32", CHELIS_F32)
+            );
+            assert_eq!(
+                spec_dtype_mapping("f64").expect("f64"),
+                ("float64", CHELIS_F64)
+            );
+
+            // An unmapped runtime tag must be an error, not float32.
+            let unknown_tag = RuntimeDType::I64.id();
+            assert_ne!(unknown_tag, CHELIS_F32);
+            assert_ne!(unknown_tag, CHELIS_F64);
+            let err = numpy_dtype_name(unknown_tag).expect_err("unknown tag must not map");
+            assert!(
+                err.to_string().contains("cannot describe to NumPy"),
+                "expected a loud unknown-dtype error, got: {err}"
+            );
+            let err = dlpack_bits(unknown_tag).expect_err("unknown tag must have no width");
+            assert!(
+                err.to_string().contains("no DLPack width"),
+                "expected a loud unknown-dtype error, got: {err}"
+            );
+            let err = spec_dtype_mapping("i64").expect_err("unmapped spec dtype must not map");
+            assert!(
+                err.to_string().contains("no NumPy marshalling"),
+                "expected a loud unmapped-spec-dtype error, got: {err}"
+            );
+        });
+    }
+
+    // chelis#920: the artifact gate is target-aware. Widening the C
+    // lane to f64 must not widen the device lane, whose torch
+    // marshalling and HIP kernels are still f32-hardcoded.
+    #[test]
+    fn execution_dtype_gate_is_target_aware() {
+        assert_eq!(
+            supported_execution_dtypes(CompileTarget::C),
+            &["f32", "f64"]
+        );
+        assert_eq!(supported_execution_dtypes(CompileTarget::Hip), &["f32"]);
     }
 
     // chelis#747 red-team: `CHELIS_RUNTIME_DIR` is the first-priority override in
