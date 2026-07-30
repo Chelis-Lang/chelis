@@ -4890,17 +4890,27 @@ fn walk_for_tensor_precision(
                     && let Some(name) = children(prec_list).first().and_then(symbol_name)
                 {
                     let active_set = "f32, f64, bf16, f16, bool, int8, int16, int32, int64";
-                    // A1 (WS-A0 RT-1 fixup): unsigned dtype names per
-                    // spec/04-type-system.md §1.1.2. Mirror the f8e4m3
+                    // A1 (WS-A0 RT-1 fixup): unsigned dtype names, plus
+                    // the other reserved-but-deferred names of
+                    // spec/04-type-system.md §1.1.1. Mirror the f8e4m3
                     // §1.1.1 rejection contract — these names never
                     // resolve through `Prim::parse_name`, so without
-                    // this guard `tensor[..., u8]` would silently fall
-                    // through with no diagnostic.
+                    // this guard `tensor[..., u8]` (or `tensor[...,
+                    // complex64]`) would silently fall through with no
+                    // §1.1.1-citing diagnostic.
                     if is_unsigned_dtype_name(name)
                         && seen.insert((def_context.to_string(), name.to_string()))
                     {
                         if let Some(diag) =
                             unsigned_family_diagnostic(name, /* tensor = */ true)
+                        {
+                            errors.push(diag);
+                        }
+                    } else if is_deferred_dtype_name(name)
+                        && seen.insert((def_context.to_string(), name.to_string()))
+                    {
+                        if let Some(diag) =
+                            deferred_family_diagnostic(name, /* tensor = */ true)
                         {
                             errors.push(diag);
                         }
@@ -4937,11 +4947,13 @@ fn walk_for_tensor_precision(
                         }
                     } else if Prim::parse_name(name).is_none()
                         && !is_unsigned_dtype_name(name)
+                        && !is_deferred_dtype_name(name)
                         && seen.insert((def_context.to_string(), name.to_string()))
                     {
                         // WS-A5 RT-3a F3: an identifier in a `t-prim`
                         // precision slot that is neither a known active
-                        // primitive nor a §1.1.2 unsigned alias is an
+                        // primitive nor a §1.1.1 deferred dtype name
+                        // (unsigned alias or reserved name) is an
                         // unbound name. Inside a sig the desugarer emits
                         // such an identifier as `t-var`, so reaching this
                         // arm with `t-prim` proves the name appears in a
@@ -20447,10 +20459,13 @@ fn infer_cast(
     };
     let target_ty = match resolved_target {
         ResolvedCastTarget::PrimitiveSpelling { name, canonical } => {
-            // A1 (WS-A0 RT-1 fixup): per spec/04-type-system.md §1.1.2,
-            // unsigned integer types remain explicitly out of scope. Keep the
-            // owning precision diagnostic after syntax has validated.
-            if let Some(diag) = unsigned_family_diagnostic(&name, /* tensor = */ false) {
+            // A1 (WS-A0 RT-1 fixup): per spec/04-type-system.md §1.1.1,
+            // the unsigned family and the other reserved-but-deferred
+            // dtype names are rejected with the owning precision
+            // diagnostic after syntax has validated.
+            if let Some(diag) = unsigned_family_diagnostic(&name, /* tensor = */ false)
+                .or_else(|| deferred_family_diagnostic(&name, /* tensor = */ false))
+            {
                 let diag = target_location
                     .as_ref()
                     .map_or(diag.clone(), |location| location.attach(diag));
@@ -20585,10 +20600,12 @@ fn report_unknown_cast_target(
     report(errors, error)
 }
 
-/// True if `name` is one of the unsigned integer dtype names that
-/// `spec/04-type-system.md` §1.1.2 declares out of scope. Covers both
-/// the short form (`u8`/`u16`/`u32`/`u64`) and the explicit `uint*`
-/// alias family that LLMs and cross-language users tend to write.
+/// True if `name` is one of the unsigned integer dtype names reserved
+/// as deferred by `spec/04-type-system.md` §1.1.1 (§1.1.2 names the
+/// `uint*` spellings canonical; the short `u*` spellings are not
+/// reserved). Covers both the short form (`u8`/`u16`/`u32`/`u64`) and
+/// the canonical `uint*` family that LLMs and cross-language users
+/// tend to write.
 fn is_unsigned_dtype_name(name: &str) -> bool {
     matches!(
         name,
@@ -20596,7 +20613,7 @@ fn is_unsigned_dtype_name(name: &str) -> bool {
     )
 }
 
-/// Build a §1.1.2 diagnostic for an unsigned dtype name appearing as a
+/// Build a §1.1.1 diagnostic for an unsigned dtype name appearing as a
 /// cast target or a tensor element type. Returns `None` for non-unsigned
 /// names so call sites can short-circuit with `&&`.
 fn unsigned_family_diagnostic(name: &str, tensor: bool) -> Option<CheckError> {
@@ -20609,13 +20626,52 @@ fn unsigned_family_diagnostic(name: &str, tensor: bool) -> Option<CheckError> {
         CheckErrorKind::UnsupportedTensorPrecision,
         format!(
             "cannot use `{name}` as a {surface} dtype: unsigned integer types \
-             are out of scope per spec/04-type-system.md §1.1.2 (active set: \
+             are deferred per spec/04-type-system.md §1.1.1 (canonical \
+             spelling uint8/uint16/uint32/uint64 per §1.1.2; active set: \
              {active_set})"
         ),
         vec![format!(
             "spec/04-type-system.md §1.1.2 documents the workaround: cast to \
              int32 or int64 and reason at the wider signed precision; or use \
              a tensor of int8 / int16 / int32 / int64 if the bit-width matters"
+        )],
+    ))
+}
+
+/// True if `name` is one of the remaining reserved-but-deferred dtype
+/// names of `spec/04-type-system.md` §1.1.1 (`f8e4m3` is absent because
+/// it is a real `Prim` variant and takes the `Prim::parse_name` path;
+/// the unsigned family has its own predicate above). These spellings
+/// never resolve through `Prim::parse_name`, so without a dedicated arm
+/// they would fall to the generic unknown-name rejections with no
+/// §1.1.1 citation.
+fn is_deferred_dtype_name(name: &str) -> bool {
+    matches!(
+        name,
+        "f8e5m2" | "int4" | "uint4" | "complex64" | "complex128" | "decimal128" | "decimal256"
+    )
+}
+
+/// Build a §1.1.1 diagnostic for a reserved-but-deferred dtype name
+/// appearing as a cast target or a tensor element type. Returns `None`
+/// for other names so call sites can short-circuit.
+fn deferred_family_diagnostic(name: &str, tensor: bool) -> Option<CheckError> {
+    if !is_deferred_dtype_name(name) {
+        return None;
+    }
+    let surface = if tensor { "tensor element" } else { "scalar" };
+    let active_set = "f32, f64, bf16, f16, bool, int8, int16, int32, int64";
+    Some(CheckError::new(
+        CheckErrorKind::UnsupportedTensorPrecision,
+        format!(
+            "cannot use `{name}` as a {surface} dtype: {name} is reserved \
+             but deferred per spec/04-type-system.md §1.1.1 (active set: \
+             {active_set})"
+        ),
+        vec![format!(
+            "spec/04-type-system.md §1.1.1 records the deferral rationale \
+             and {name}'s declared arithmetic width; pick one of \
+             {active_set} until it activates"
         )],
     ))
 }

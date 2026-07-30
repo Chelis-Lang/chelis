@@ -26,13 +26,14 @@ fn surf_to_deep(source: &str) -> Vec<chelis_deep::Expr> {
 // A. Dtype-set boundary
 // ---------------------------------------------------------------
 
-/// §1.1 + §1.1.2: `u8` should never resolve to a Prim variant.
+/// §1.1 + §1.1.1/§1.1.2: `u8` should never resolve to a Prim variant.
 #[test]
 fn parse_name_rejects_unsigned_u8() {
     assert_eq!(
         Prim::parse_name("u8"),
         None,
-        "spec §1.1.2: `u8` is out of scope; parse_name must not resolve it"
+        "spec §1.1.1: unsigned types are deferred (and `u8` is not even the \
+         reserved spelling); parse_name must not resolve it"
     );
 }
 
@@ -54,9 +55,9 @@ fn parse_name_rejects_fp32_misspelling() {
     assert_eq!(Prim::parse_name("fp32"), None);
 }
 
-// `cast(1, u8)` rejection at check time is pinned with the exact §1.1.2
+// `cast(1, u8)` rejection at check time is pinned with the exact §1.1.1
 // diagnostic by `unsigned_dtype_rejection.rs::
-// cast_scalar_to_u8_rejected_with_spec_1_1_2_diagnostic`, which asserts
+// cast_scalar_to_u8_rejected_with_spec_1_1_1_diagnostic`, which asserts
 // a strict superset of the looser rejection-only check that previously
 // lived here.
 

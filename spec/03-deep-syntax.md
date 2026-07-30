@@ -350,7 +350,7 @@ An opaque `deftype` may additionally carry a **declared invariant**
 
 | Tag | Form | Semantics |
 |---|---|---|
-| `t-prim` | `(t-prim {} f32)` | Primitive type (active set: f32, f64, bf16, f16, int8, int16, int32, int64, bool, string — see `spec/04-type-system.md` §1.1; `f8e4m3` is reserved/deferred per §1.1.1; unsigned types are out of scope per §1.1.2) |
+| `t-prim` | `(t-prim {} f32)` | Primitive type (active set: f32, f64, bf16, f16, int8, int16, int32, int64, bool, string — see `spec/04-type-system.md` §1.1; the deferred names of §1.1.1 — `f8e4m3`, `f8e5m2`, `uint8`/`uint16`/`uint32`/`uint64`, `int4`/`uint4`, `complex64`/`complex128`, `decimal128`/`decimal256` — are reserved and rejected at check time) |
 | `t-fn` | `(t-fn {} arg₁ arg₂ ... ret)` | Function type; last child is return |
 | `t-tensor` | `(t-tensor {} dim₁ dim₂ ... precision)` | Tensor type; last child is precision |
 | `t-ref` | `(t-ref {} type)` | Read-only borrow type |
@@ -654,9 +654,13 @@ Float-typed suffixes (`f32`, `f64`, `bf16`, `f16`) attach to either an
 integer or float literal token. Integer-typed suffixes (`i8`, `i16`,
 `i32`, `i64`) attach to integer literal tokens only.
 
-The suffix `f8e4m3` is reserved/deferred per `spec/04-type-system.md`
-§1.1.1 and is rejected at lex time. Unsigned suffixes (`u8`, `u16`,
-`u32`, `u64`) are out of scope per §1.1.2 and are rejected at lex time.
+No suffix exists for any deferred name of `spec/04-type-system.md` §1.1.1
+(`f8e4m3`, `f8e5m2`, the `uint*` family, `int4`/`uint4`,
+`complex64`/`complex128`, `decimal128`/`decimal256`); each is rejected at
+lex time with a diagnostic citing §1.1.1, and a suffix is authored only
+when its dtype activates. The short unsigned spellings (`u8`, `u16`,
+`u32`, `u64`) are not reserved in any form - `uint8`/`uint16`/`uint32`/
+`uint64` are canonical per §1.1.2 - and are likewise rejected at lex time.
 Hex integer literals interact with float-typed suffixes per the
 hex-suffix rule in `spec/02-surf-syntax.md` §P10a; the same rule applies
 to Deep.
@@ -691,8 +695,10 @@ IntLit      ← '-'? [0-9]+ (FloatSuffix / IntSuffix)?
 FloatSuffix ← 'f32' / 'f64' / 'bf16' / 'f16'
 IntSuffix   ← 'i8' / 'i16' / 'i32' / 'i64'
 # Suffix must immediately follow the digit sequence (no whitespace, no comment).
-# `f8e4m3`, `u8`, `u16`, `u32`, `u64` are reserved/deferred or out-of-scope per
-# spec/04-type-system.md §1.1.1 / §1.1.2 and are rejected at lex time.
+# No suffix exists for any deferred name of spec/04-type-system.md §1.1.1
+# (`f8e4m3`, `f8e5m2`, `uint*`, `int4`/`uint4`, `complex*`, `decimal*`); the
+# short unsigned spellings `u8`/`u16`/`u32`/`u64` are not reserved at all.
+# Every such sequence is rejected at lex time with a diagnostic citing §1.1.1.
 BoolLit     ← 'true' / 'false'
 StringLit   ← '"' (!'"' .)* '"'
 Spacing     ← ([ \t\n\r] / Comment)*

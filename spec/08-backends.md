@@ -24,6 +24,14 @@ The C backend is the reference implementation.
 Its job is to turn the DAG into portable host code that can be compiled with the system
 toolchain.
 
+"Reference implementation" here means the first and most complete backend, and the
+practical numeric oracle the later backends are checked against. It does not mean the C
+backend DEFINES the values: every lane, the evaluator included, owes its results to
+`spec/04-type-system.md` §9 - [04-NUM-8]'s arithmetic width, [04-NUM-1..7]'s finalize and
+trap rules, and [04-NUM-11]'s exactness guarantee - and where a lane and those atoms
+disagree, the lane has the bug. The C backend is the oracle because it is the most
+complete conforming lane, not because conformance is defined as agreeing with it.
+
 Current design points:
 
 - emit loops for elementwise, reduction, and movement operations
@@ -464,6 +472,12 @@ Additional targets may be added later as StableHLO, FX, and Triton land.
 
 All backends must preserve:
 
-- numerical correctness within documented tolerances
+- the numeric semantics of `spec/04-type-system.md` §9: finalize at the declared dtype,
+  compute at the arithmetic width [04-NUM-8] declares, trap per [04-NUM-9]/[04-NUM-10],
+  and carry values without collapse per [04-NUM-11]
+- numerical correctness within documented tolerances, which under [04-NUM-8] cover
+  implementation variance at a single width (libm against SLEEF against vForce) and never
+  a structural width mismatch between lanes
 - named-dimension and precision semantics established before lowering
-- agreement with the reference C backend on the shared test suite
+- agreement with the reference C backend on the shared test suite - a practical oracle
+  for the invariants above, not a substitute for them

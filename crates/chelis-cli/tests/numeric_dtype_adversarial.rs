@@ -531,7 +531,8 @@ fn rt4_invariant_f8e4m3_suffix_lex_rejected() {
     );
 }
 
-/// Working: u32 / unsigned suffix lex-rejected per spec §1.1.2.
+/// Working: u32 / unsigned suffix lex-rejected, deferred per spec
+/// §1.1.1 (§1.1.2 names the `uint*` spellings canonical).
 #[test]
 fn rt4_invariant_unsigned_suffix_lex_rejected() {
     let dir = tempdir().expect("tempdir");
@@ -544,8 +545,8 @@ fn rt4_invariant_unsigned_suffix_lex_rejected() {
         "RT-4 invariant: u32 suffix must be a lex error"
     );
     assert!(
-        stderr.contains("§1.1.2") || stderr.contains("1.1.2"),
-        "RT-4 invariant: u32 lex-error must cite §1.1.2. stderr={stderr}"
+        stderr.contains("§1.1.1") || stderr.contains("1.1.1"),
+        "RT-4 invariant: u32 lex-error must cite §1.1.1. stderr={stderr}"
     );
 }
 

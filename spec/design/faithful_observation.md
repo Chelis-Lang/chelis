@@ -346,7 +346,7 @@ For every dtype and every storable value:
 | §C1 rules + number grammar | Phase 1 (FROZEN 2026-07-20; ratified as spec/05 §8/§8.1) | this doc + dtype_semantics.md §C4 + the migration corpus, one change set |
 | §C2 agreement contract | Phase 1 (intra-lane; FROZEN for eval 2026-07-20), Phase 2 (cross-lane byte equality) | same protocol |
 | §C3.3 C formatting routine behavior AND its C ABI signature | Phase 2 (the signature settled at the R2 review, before the 0.18 tag) | this doc; must stay grammar-identical to Rust `{:?}` (§C1.3 - an earlier revision of this row said `Display`, which §C1.3 explicitly rules out). The signature is frozen for the same reason the render is: after 0.18 ships, changing it breaks every shell that links the runtime |
-| §C4.2 tolerance table | Phase 3 | spec/05 edit + [#687] corpus, one change set |
+| §C4 tolerance table (authored into spec/05 §8 per [05-OBS-3]) | Phase 3 | spec/05 edit + [#687] corpus, one change set |
 
 ## B2. Invariants that hold across every boundary
 
@@ -582,7 +582,9 @@ visible as exactly themselves.
 
 **You deliver:**
 
-1. The per-op tolerance table in `spec/05-risc-primitives.md` (§C4.2),
+1. The per-op tolerance table authored into `spec/05-risc-primitives.md`
+   §8, which [05-OBS-3] names as its single address (this doc's §C4 and
+   `dtype_semantics.md` §C4.5 are pointers to it, not alternate homes),
    authored from the audit's measurements (the vvsqrtf/SLEEF rows). The
    fix-precedes-the-row gate on `sqrt = 0` is SATISFIED: [#719] was
    fixed by PR #760 (merged 2026-07-17; contiguous f32 sqrt now takes
@@ -620,9 +622,10 @@ never as tolerance.
   `dtype_semantics.md` §C4 and this §C1 are the same rules by
   construction; edits go to both in one change set.
 - **Landing order - this plan first (expected)**: [#729] Phases 1-3 then
-  inherit the formatter and validate against it; their "eval is the
-  reference lane" claim strengthens to "reference bits AND reference
-  bytes". [#723]/[#716] are fixed without waiting.
+  inherit the formatter and validate against it; eval serves them as the
+  reference RENDERER (its Phase 1 exit note - the value authority is
+  spec/04 §9, not a lane), so lane validation covers reference bits AND
+  reference bytes. [#723]/[#716] are fixed without waiting.
 - **Landing order - [#729] first**: its Phase 1 delivers `format_element`'s
   Rust side per its §C4 and THIS doc's Phase 1 collapses into an
   adoption/migration pass; its Phase 3 delivers §C3.2's generation and
