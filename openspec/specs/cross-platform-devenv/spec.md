@@ -118,18 +118,27 @@ The smoke-check graph MUST NOT start a Devenv service or long-running process.
 - **WHEN** the deliberate warning compiles successfully under `-Werror`
 - **THEN** `devenv test` exits with a nonzero status
 
-### Requirement: Native package CI uses the official Devenv integration
-Each native Nix package job MUST configure the public Devenv Cachix cache with `cachix/cachix-action@v16` in read-only mode.
+### Requirement: Native package CI uses the reviewed portable Devenv base
+Each native Nix package job MUST invoke `Chelis-Lang/ci/actions/setup-devenv@73f017c4d3179dc313844e9d5f08d17a7879c824` once before its first `run` step.
 
-Each job MUST install the Devenv CLI from revision `ffce215a42d09c6375c3d60dd9c4110438fc4d87` and run `devenv test --no-tui`.
+Each job MUST use `devenv-ci bash --noprofile --norc -e -o pipefail {0}` as its default shell for `run` steps.
 
-The Devenv cache MUST NOT replace the complete native flake check. It does not cache the custom Chelis cvc5 derivation.
+The workflow MUST NOT duplicate the direct Nix, Cachix, or Devenv bootstrap. The reviewed action supplies Nix 2.34.4 and Devenv v2.2.
+
+Each job MUST run `devenv test --no-tui`. The Devenv cache MUST NOT replace the complete native flake check.
+
+The public Devenv cache does not contain the custom Chelis cvc5 derivation.
 
 #### Scenario: Native CI checks the development shell
 - **WHEN** either native Nix package job runs
-- **THEN** the job configures the Devenv binary cache
+- **THEN** the job invokes the reviewed portable Devenv action
+- **AND** each `run` step uses the portable shell
 - **AND** the job runs all four named Devenv tasks
 - **AND** the job runs the complete native flake check
+
+#### Scenario: Native CI bypasses the portable base
+- **WHEN** a job omits the reviewed action, omits the portable shell, or adds a direct bootstrap
+- **THEN** the native workflow contract fails
 
 #### Scenario: The custom cvc5 output is absent from public caches
 - **WHEN** the native flake check requires the custom non-GPL cvc5 derivation

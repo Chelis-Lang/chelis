@@ -159,9 +159,9 @@ All 15 pull request checks passed for commit `33c2899a`. This result includes bo
 
 ## Official Devenv GitHub Actions integration
 
-Both native Nix package jobs now configure `devenv.cachix.org` through `cachix/cachix-action@v16`. The `skipPush` option prevents uploads.
+The initial native workflow configured `devenv.cachix.org` through `cachix/cachix-action@v16`. The `skipPush` option prevented uploads.
 
-Each job installs the CLI from revision `ffce215a42d09c6375c3d60dd9c4110438fc4d87`. A temporary profile reported `devenv 2.2.0+ffce215`.
+Each job installed the CLI from revision `ffce215a42d09c6375c3d60dd9c4110438fc4d87`. A temporary profile reported `devenv 2.2.0+ffce215`.
 
 Each job runs `devenv test --no-tui` before the complete native flake check.
 
@@ -182,3 +182,19 @@ The later flake checks exposed drift from main commit `76c32ff0`. That commit ad
 The branch now includes current main. `Cargo.nix` was regenerated with crate2nix 0.15.0 and records digest `22da918d08a37ec74d128983320e90784336eb7f4e446301a6593242ea7a7e4f`.
 
 The complete native flake check passed locally on `aarch64-darwin`. The full Python script suite and local repository gate also passed.
+
+All 15 pull request checks passed for commit `7504a0c3`. The Linux native job took 43 minutes, and the Darwin native job took 31 minutes.
+
+## Reviewed portable Devenv base
+
+The native workflow now invokes `Chelis-Lang/ci/actions/setup-devenv@73f017c4d3179dc313844e9d5f08d17a7879c824` in both jobs.
+
+The action supplies Nix 2.34.4, Cachix v17 in read-only mode, Devenv v2.2, and an isolated portable environment.
+
+Each workflow `run` step uses the `devenv-ci` shell. The workflow no longer duplicates the direct Nix, Cachix, or Devenv bootstrap.
+
+The portable shell ran all four project tasks locally. The focused workflow tests and `actionlint` also passed.
+
+The full Python script suite, strict OpenSpec validation, and the local repository gate passed.
+
+Hosted Linux and Darwin evidence remains pending for this workflow revision.

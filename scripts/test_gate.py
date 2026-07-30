@@ -42,7 +42,11 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 CI_YML = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 SMT_FULL_PROVE_YML = REPO_ROOT / ".github" / "workflows" / "smt-full-prove.yml"
 NIX_PACKAGES_YML = REPO_ROOT / ".github" / "workflows" / "nix-packages.yml"
-DEVENV_REVISION = "ffce215a42d09c6375c3d60dd9c4110438fc4d87"
+DEVENV_SETUP_ACTION = (
+    "Chelis-Lang/ci/actions/setup-devenv@"
+    "73f017c4d3179dc313844e9d5f08d17a7879c824"
+)
+PORTABLE_DEVENV_SHELL = "devenv-ci bash --noprofile --norc -e -o pipefail {0}"
 WORKFLOWS_DIR = REPO_ROOT / ".github" / "workflows"
 
 
@@ -73,20 +77,49 @@ def _assert_nix_system_job_parity(contracts: str, workflow: str) -> None:
         )
 
 
+def _workflow_job_blocks(workflow: str) -> dict[str, str]:
+    headers = list(re.finditer(r"(?m)^  (?P<name>[a-z0-9-]+):\s*$", workflow))
+    blocks: dict[str, str] = {}
+    for index, header in enumerate(headers):
+        end = headers[index + 1].start() if index + 1 < len(headers) else len(workflow)
+        blocks[header.group("name")] = workflow[header.start() : end]
+    return blocks
+
+
 def _assert_native_devenv_recipe(workflow: str) -> None:
-    required_counts = {
-        "uses: cachix/cachix-action@v16": 2,
-        "name: devenv": 2,
-        "skipPush: true": 2,
-        f"run: nix profile add github:cachix/devenv/{DEVENV_REVISION}": 2,
-        "run: devenv test --no-tui": 2,
-    }
-    for marker, expected_count in required_counts.items():
-        actual_count = workflow.count(marker)
-        if actual_count != expected_count:
+    blocks = _workflow_job_blocks(workflow)
+    for job in ("nix-linux-x86-64", "nix-darwin-arm64"):
+        if job not in blocks:
+            raise AssertionError(f"missing native Nix job {job!r}")
+        block = blocks[job]
+        required_markers = (
+            f"uses: {DEVENV_SETUP_ACTION}",
+            f"shell: {PORTABLE_DEVENV_SHELL}",
+            "run: devenv test --no-tui",
+        )
+        for marker in required_markers:
+            actual_count = block.count(marker)
+            if actual_count != 1:
+                raise AssertionError(
+                    f"native Devenv recipe marker {marker!r} in {job!r}: "
+                    f"expected 1, found {actual_count}"
+                )
+        setup_index = block.index(f"uses: {DEVENV_SETUP_ACTION}")
+        first_run_index = block.find("\n        run:")
+        if first_run_index < 0 or setup_index > first_run_index:
             raise AssertionError(
-                f"native Devenv recipe marker {marker!r}: "
-                f"expected {expected_count}, found {actual_count}"
+                f"native Devenv setup in {job!r} must precede the first run step"
+            )
+
+    forbidden_markers = (
+        "uses: cachix/install-nix-action@",
+        "uses: cachix/cachix-action@",
+        "nix profile add github:cachix/devenv/",
+    )
+    for marker in forbidden_markers:
+        if marker in workflow:
+            raise AssertionError(
+                f"native Devenv recipe duplicates central setup marker {marker!r}"
             )
 
 
@@ -574,14 +607,45 @@ class NixPackagesWorkflowTests(unittest.TestCase):
             2,
         )
 
-    def test_each_native_job_uses_the_official_devenv_actions_recipe(self):
+    def test_each_native_job_uses_the_reviewed_portable_devenv_base(self):
         text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
         _assert_native_devenv_recipe(text)
 
-    def test_missing_devenv_cache_action_fails_the_native_recipe(self):
+    def test_missing_central_devenv_action_fails_the_native_recipe(self):
         text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
-        mutated = text.replace("uses: cachix/cachix-action@v16", "uses: omitted", 1)
-        with self.assertRaisesRegex(AssertionError, "cachix-action"):
+        mutated = text.replace(f"uses: {DEVENV_SETUP_ACTION}", "uses: omitted", 1)
+        with self.assertRaisesRegex(AssertionError, "setup-devenv"):
+            _assert_native_devenv_recipe(mutated)
+
+    def test_missing_portable_shell_fails_the_native_recipe(self):
+        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
+        mutated = text.replace(f"shell: {PORTABLE_DEVENV_SHELL}", "shell: bash", 1)
+        with self.assertRaisesRegex(AssertionError, "devenv-ci"):
+            _assert_native_devenv_recipe(mutated)
+
+    def test_late_central_devenv_action_fails_the_native_recipe(self):
+        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
+        setup = f"uses: {DEVENV_SETUP_ACTION}"
+        mutated = text.replace(setup, "uses: omitted", 1).replace(
+            "run: devenv test --no-tui",
+            f"run: devenv test --no-tui\n      - {setup}",
+            1,
+        )
+        with self.assertRaisesRegex(AssertionError, "precede the first run"):
+            _assert_native_devenv_recipe(mutated)
+
+    def test_direct_devenv_bootstrap_fails_the_native_recipe(self):
+        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
+        setup = f"uses: {DEVENV_SETUP_ACTION}"
+        duplicated = (
+            f"{setup}\n"
+            "      - uses: cachix/cachix-action@v17\n"
+            "        with:\n"
+            "          name: devenv\n"
+            "          skipPush: true"
+        )
+        mutated = text.replace(setup, duplicated, 1)
+        with self.assertRaisesRegex(AssertionError, "duplicates central setup"):
             _assert_native_devenv_recipe(mutated)
 
 

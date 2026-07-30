@@ -124,4 +124,12 @@ The later OpenSpec sync and archive workflow can change the corresponding main s
 - [x] 10.4 Document the cache boundary for the custom cvc5 derivation.
 - [x] 10.5 Run local validation and review the workflow.
 - [x] 10.6 Merge the current base branch and regenerate `Cargo.nix`.
-- [ ] 10.7 Re-run pull request CI.
+- [x] 10.7 Re-run pull request CI.
+
+## 11. Adopt the reviewed portable Devenv base
+
+- [x] 11.1 Add positive and negative tests for the central action and portable shell.
+- [x] 11.2 Replace the duplicated native bootstrap with the reviewed central action.
+- [x] 11.3 Update the active specification, design, acceptance record, and user documentation.
+- [x] 11.4 Run local validation and review the final workflow.
+- [ ] 11.5 Re-run pull request CI.

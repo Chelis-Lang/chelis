@@ -101,13 +101,17 @@ The repository lint policy excludes both generated paths under §12.2. The polic
 
 The generated files remain local machine state. A contributor can remove them without loss of a reproducible input.
 
-### D7: Use the official Devenv integration in native CI
+### D7: Use the reviewed portable Devenv base in native CI
 
-Each native Nix package job configures `devenv.cachix.org` through `cachix/cachix-action@v16`. The `skipPush` option keeps this cache read-only.
+Each native Nix package job invokes `Chelis-Lang/ci/actions/setup-devenv@73f017c4d3179dc313844e9d5f08d17a7879c824`.
 
-Each job installs the Devenv CLI from the locked v2.2 revision. It then runs `devenv test --no-tui` before the native flake check.
+The action supplies exact Nix, Cachix, Devenv, and package inputs. Cachix uses the public Devenv cache in read-only mode.
 
-This cache supplies public Devenv artifacts. It does not supply the custom non-GPL cvc5 derivation.
+Each job uses the `devenv-ci` default shell. The workflow does not duplicate the direct Nix, Cachix, or Devenv bootstrap.
+
+Each job runs `devenv test --no-tui` before the native flake check.
+
+The public cache supplies Devenv artifacts. It does not supply the custom non-GPL cvc5 derivation.
 
 ## Risks / Trade-offs
 
