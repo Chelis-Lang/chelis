@@ -145,9 +145,10 @@ document:
 - **No new numeric channel outside the tagged carrier.** A public ADT variant, wire
   field, exported C signature, or binding parameter that carries numeric values as
   bare `f64`/`double`, or that takes a raw integer dtype id, is a review-blocking
-  finding. The capacity census is the allowlist; an addition cites an OPEN issue or
-  the payload work (chelis#893/chelis#894) - never a citation invented to pass the
-  tripwire.
+  finding. The capacity census is the inventory: an UNFLAGGED addition cites an OPEN
+  issue; a FLAGGED capacity seam has NO citation path at all - redesign onto the
+  tagged carrier, remove it, or obtain a maintainer override in review. Opening a
+  fresh issue to cite is not authorization; new capacity debt does not land.
 - **A new numeric op requires its `spec/05-risc-primitives.md` entry in the same
   change set** (signature, per-dtype semantics at [04-NUM-8]'s declared widths,
   adjoint or non-differentiability statement, accumulator rule where applicable). A

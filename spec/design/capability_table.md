@@ -141,13 +141,29 @@ statement, and an accumulator rule where applicable. A doc comment is
 not an authority (`AGENTS.md` §Numbered Specs Decide; the ops of
 chelis#898 are the standing backlog of exactly this omission). At
 Phase 4 the requirement becomes structural: the conformance suite's
-totality leg (`dtype_semantics.md` §C6 chokepoint 3) enumerates the
-reachable numeric surface and fails the build for any op without a
-Table A row, and the row's mandatory atom citation forces the spec
-entry. Numeric-ness is signature-derived: a callable whose signature
-mentions a numeric dtype requires a row, and the non-numeric
-classification is available only for dtype-free surface, so an op
-cannot classify itself out of the requirement.
+totality leg (`dtype_semantics.md` §C6 chokepoint 3) fails the build
+for any op absent from its FAMILY's registry - Table A for language
+builtins (whose checker acceptance is derived from it), the capacity
+census for runtime exports, the desugared-AST leg for stdlib defs, the
+rustdoc-JSON leg for bindings. Table A's (builtin, surface, dtype) key
+deliberately does NOT stretch to the other families: runtime exports
+and PyO3 functions have no `BuiltinId`, and container/boundary
+callables have no `Scalar|Tensor` surface - the `to_string` x
+Tensor/List seed row above already strains that axis (PR #950 red team
+P1-2; open question 5). Numeric-ness is signature-derived: a callable
+whose signature mentions a numeric dtype requires a row in its
+family's registry, and the non-numeric classification is available
+only for dtype-free surface, so an op cannot classify itself out of
+the requirement.
+
+Registration decides LANGUAGE legality only - what is legal in Surf,
+Deep, and the RISC DAG, target-independently, reported by the checker.
+Per-backend executability is Table B's separate decision, reported at
+build through [#730]'s `Unsupported` channel where the target is
+known: a language-legal op a backend cannot run is a CAPABILITY
+rejection, never a checker type error (§Derivations owns this split;
+restated here because a new-op author is the person most tempted to
+collapse it).
 
 `round_to` specifically: widening an f32 operand to f64, rounding
 decimally, and re-narrowing is computing at other than the declared
@@ -169,6 +185,11 @@ before it lands.
    expressible; where [#725]'s "window must be literal" rule sits).
 4. Row count management (builtins x 2 surfaces x 10 dtypes is a few
    thousand cells; the dtype-class authoring macro's ergonomics).
+5. Surface axis for container/boundary callables: the `to_string` x
+   Tensor/List seed row already names a `List` surface the
+   `Scalar|Tensor` axis forbids (PR #950 red team P1-2). Decide before
+   Phase 4 entry: extend the axis, or move container ops to a sibling
+   registry per `dtype_semantics.md` §C6's registries-per-family rule.
 
 [#682]: https://github.com/Chelis-Lang/chelis/issues/682
 [#690]: https://github.com/Chelis-Lang/chelis/issues/690

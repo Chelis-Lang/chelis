@@ -119,7 +119,10 @@ at) is hard-gated on byte-identical rendering.
 
 **Wave 3 - the semantics refactor.** [#729] Phases 1-3 in order (the
 module + storage decision; the kernel split + prove; backend adoption),
-validated by everything Waves 0-2 built.
+validated by everything Waves 0-2 built. Entry gate: the [#729] §C6
+capacity census/tripwire (PR #956) lands BEFORE Phase 1 entry, and
+Phase 1 re-derives its §C3 layer set from the census baseline - a hard
+edge recorded here (PR #950 red team P2-4) in lieu of a DAG node.
 
 **Wave 4 - the permanent guards.** [#729] Phase 4 delivers the capability
 table per [`capability_table.md`](capability_table.md); [#730] Phase 3 (gates become UX) and [#733]
@@ -293,7 +296,7 @@ decisions 0.19 already made, so it is behavior-preserving by construction.
 |---|---|---|---|
 | **v0.17.0 - loud checking + canonical eval rendering** (ship now) | [#730] P1 + [#731] P1 + [#732] P1, and everything else merged since 0.16.1 | **source migration** (wave 1) | breaking deltas only: loud rejections (incl. the new loud compiled-lane `test_*` assert, [#796] - the old inert-`0` stub is gone, so anything leaning on it fails heavily in E2E), `with seed(n)` -> `42i64` ([#731] P1 - the Shoals / Whale / hello-chelis HEAD canaries fail on unsuffixed seeds), and dtype-faithful eval rendering. Seed form frozen ([#735] changes only meaning); eval render frozen (C matches it at 0.18) |
 | **v0.18.0 - checker totality, DeepTag, host-type/ABI boundary, compiled rendering** | [#731] P2 (PR #800) + [#731] P3 (DeepTag) + [#730] P2 (PR #799 vocab + host-type/ABI state) + [#732] P2 (compiled render) | **mechanical** for shells | no wire break ([#730] P2 preserves the `CHELIS_*` ids); the added loudness lands on already-broken code, so no *expected* source migration. Completes byte-identical rendering. Release-hygiene gate: the tarball must now ship `chelis_runtime_dtype.h` - PR 799's public `chelis_runtime.h` `#include`s it, but the release workflow currently copies only `chelis_runtime.h` |
-| **v0.19.0 - grounded dtype storage/wire break + every behavior-changing capability decision** | [#729] P1-P3 landed atomic per §C3, **plus every capability decision that changes behavior** - integer-overflow traps and each supported-vs-`Unimplemented` disposition (int `mean` [#724], bool arithmetic [#726], the [#715] rows, the HIP/Metal/C reject cells) - plus the prelude JSON/CSV integer-capacity decision (a `JInt`-shaped variant and integer accessors) if PR #891's f64-only channel lands before the break ([#729] §C3's amended census), and any published-ABI signature change deferred here by anti-churn invariant 7 | **source migration** (wave 2) | the one wire break, isolated from the checker-loudness cuts; class E resolves here, not at the 0.20 table. Bindings adapt to the per-dtype payload once; capability behavior is final |
+| **v0.19.0 - grounded dtype storage/wire break + every behavior-changing capability decision** | [#729] P1-P3 landed atomic per §C3, **plus every capability decision that changes behavior** - integer-overflow traps and each supported-vs-`Unimplemented` disposition (int `mean` [#724], bool arithmetic [#726], the [#715] rows, the HIP/Metal/C reject cells) - plus the prelude JSON/CSV integer-capacity decision (a `JInt`-shaped variant and integer accessors) for any prelude numeric channel this cut admits - invariant 7 HOLDS such channels out of every earlier release unless they land integer-capable from the start ([#729] §C3's amended census) - and any published-ABI signature change deferred here by anti-churn invariant 7 | **source migration** (wave 2) | the one wire break, isolated from the checker-loudness cuts; class E resolves here, not at the 0.20 table. Bindings adapt to the per-dtype payload once; capability behavior is final |
 | **v0.20.0 - behavior-preserving permanent guards** | [#729] P4 (the capability *table*, mechanizing 0.19's decisions) + [#730] P3 (gates -> UX) + [#732] P3 (tolerance / cross-lane oracle) + [#733] P3 (first blocking provenance ratchet) | **mechanical** for shells | guaranteed behavior-preserving: no decision, rejection, or rendered byte changes here - 0.19 shipped them all. [#733] P0 lands independently before this cut, while its P1-P2 advisory integration is a prerequisite rather than v0.20 release payload. `tests_blocked/` probes are re-adjudicated against the now-standing table |
 
 Net downstream shape: there are **four mechanical `conform` bump waves** - one
@@ -340,7 +343,13 @@ needs it now; otherwise it rides 0.18.
    the mechanism once it lands. Motivating instance: PR #891's
    `chelis_pad_sequences` gaining an `int pad_dtype` parameter (flagged in the
    2026-07-30 sweep, unmerged) inside the window the 0.18 note promises "no
-   wire break".
+   wire break". The same freeze governs prelude numeric channels: a PR adding
+   one (the #891 `Json` shape) ships in NO release before 0.19 unless it lands
+   with its final integer-capable form from the start - "if it lands before
+   the break" is a fact pattern, not a hold; THIS sentence is the hold (PR
+   #950 red team P2-5). The in-tree precedent is already final-from-the-start:
+   `packages/chelis-std/src/io/json.ch` carries `JsonInt(int64)` beside
+   `JsonFloat(f64)`.
 
 ### Per-cut conform checklist
 
