@@ -24,13 +24,23 @@ use std::cell::RefCell;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-/// Stable sentinel prefix for the error a cancelled evaluation returns.
+/// Stable sentinel for the error a cancelled evaluation returns.
 ///
 /// The eval lanes propagate failures as `Result<_, String>`, so callers
 /// distinguish "the user asked us to stop" from "the program is wrong" by
-/// testing for this prefix. Keep it stable: the Python bindings and the CLI
-/// `--timeout` path both match on it to pick their user-facing message.
-pub const EVAL_CANCELLED_MSG: &str = "evaluation cancelled";
+/// testing for this marker via [`is_cancellation`].
+///
+/// It is deliberately namespaced rather than plain prose. Detection is a
+/// substring test (stage wrapping prepends context), so a bare phrase like
+/// "evaluation cancelled" could in principle appear inside a genuine
+/// evaluation error and be misreported to the user as a timeout. Nothing a
+/// user program can produce contains this token.
+///
+/// Internal by construction: the CLI translates it to the `--timeout`
+/// message, and the bindings never surface it (a cancelled call raises the
+/// pending Python exception instead). Keep it stable regardless — both
+/// callers match on it.
+pub const EVAL_CANCELLED_MSG: &str = "chelis::eval::cancelled";
 
 /// Shared cancellation flag handed to an evaluation.
 ///
@@ -174,5 +184,25 @@ mod tests {
         assert!(is_cancellation(EVAL_CANCELLED_MSG));
         assert!(is_cancellation(&format!("eval: {EVAL_CANCELLED_MSG}")));
         assert!(!is_cancellation("unknown runtime name foo"));
+    }
+
+    /// The sentinel must not collide with prose a real program could emit.
+    /// Detection is a substring test, so a bare phrase like "evaluation
+    /// cancelled" in a genuine error would be misreported to the user as a
+    /// timeout.
+    #[test]
+    fn sentinel_does_not_collide_with_ordinary_error_prose() {
+        for message in [
+            "evaluation cancelled",
+            "the evaluation was cancelled by the user",
+            "cancelled",
+            "error: order cancelled before settlement",
+            "eval error: cancellation policy violated",
+        ] {
+            assert!(
+                !is_cancellation(message),
+                "{message:?} must not be mistaken for the cancellation sentinel"
+            );
+        }
     }
 }
