@@ -11,15 +11,18 @@
 //! Sanctioned actions when this test fails (also printed in the failure
 //! message, which is the contract - a context-poor agent reads only that):
 //!
-//! 1. Intended surface addition: regenerate the baseline with
+//! 1. UNFLAGGED surface addition: regenerate the baseline with
 //!    `CHELIS_CAPACITY_CENSUS_WRITE=1 cargo test -p chelis-cli --test
 //!    capacity_census_tripwire`, then replace the generated
-//!    `"citation": "TODO"` with an OPEN chelis issue reference or the
-//!    payload-work citation (chelis#893/chelis#894). The test fails while
-//!    any TODO remains, so regeneration alone can never self-bless.
-//! 2. Unintended: remove the new public numeric surface. Numeric values
-//!    cross public boundaries inside the tagged carrier only
-//!    (`AGENTS.md` §Numeric Surface Discipline).
+//!    `"citation": "TODO"` with an OPEN chelis issue reference. The test
+//!    fails while any TODO remains, so regeneration alone can never
+//!    self-bless.
+//! 2. FLAGGED capacity seam: NO citation path exists (PR #950 red team
+//!    P1-1) - the grandfathered 2026-07-30 seam set is frozen by exact
+//!    citation string and count. Redesign onto the tagged carrier, remove
+//!    the surface, or obtain a `maintainer-override(...)` citation, which
+//!    only a human reviewer adds (`AGENTS.md` §Numeric Surface
+//!    Discipline).
 //! 3. A removed row is an ABI removal and is 0.19 payload by default
 //!    (`spec/design/remediation_roadmap.md` anti-churn invariant 7).
 //!
@@ -47,6 +50,20 @@ const STD_SRC_REL: &str = "packages/chelis-std/src";
 const NUMERIC_PRIMS: &[&str] = &[
     "f64", "f32", "f16", "bf16", "int8", "int16", "int32", "int64",
 ];
+
+/// The exact citation carried by the grandfathered 2026-07-30 capacity
+/// seams. A FLAGGED row (float-carrier / raw-dtype-int) has NO
+/// issue-citation path (PR #950 red team P1-1: an open-issue path would
+/// make the known-red set monotonically growable): its citation must be
+/// this string (the frozen pre-ratchet set) or a
+/// `maintainer-override(...)` marker, which only a human reviewer adds -
+/// the baseline file is review-routed.
+const GRANDFATHER_SEAM_CITATION: &str = "baseline-2026-07-30 pre-ratchet seam; \
+unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break";
+
+/// The frozen seam set may only SHRINK. Copying the grandfather citation
+/// onto a new flagged row trips this count lock.
+const GRANDFATHER_SEAM_COUNT: usize = 21;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 struct Row {
@@ -401,13 +418,16 @@ fn teaching_header() -> String {
 
 fn teaching_footer() -> String {
     "\nSanctioned actions:\n\
-     1. Intended addition: regenerate with CHELIS_CAPACITY_CENSUS_WRITE=1 \
-     cargo test -p chelis-cli --test capacity_census_tripwire, then replace \
-     the generated citation TODO with an OPEN chelis issue reference or the \
-     payload-work citation (chelis#893/chelis#894). A citation invented to \
-     pass this gate is the defect, not a fix.\n\
-     2. Unintended: remove the new public numeric surface; numeric values \
-     cross public boundaries inside the tagged carrier only.\n\
+     1. UNFLAGGED addition (no capacity shape): regenerate with \
+     CHELIS_CAPACITY_CENSUS_WRITE=1 cargo test -p chelis-cli --test \
+     capacity_census_tripwire, then replace the generated citation TODO with \
+     an OPEN chelis issue reference. A citation invented to pass this gate \
+     is the defect, not a fix.\n\
+     2. FLAGGED capacity seam (float-carrier / raw-dtype-int): there is NO \
+     citation path - opening a fresh issue is not authorization. Redesign \
+     onto the tagged carrier, remove the surface, or obtain a \
+     maintainer-override(<reason>, chelis#N) citation, which only a human \
+     reviewer adds (the baseline file is review-routed).\n\
      3. A removed row is an ABI removal: 0.19 payload by default per \
      remediation_roadmap.md anti-churn invariant 7.\n\
      This test and spec/design/capacity_census.json are guard artifacts; \
@@ -447,7 +467,28 @@ fn check_against_baseline(current: &[Row], baseline: &Baseline) -> Result<(), St
                 "UNCITED census row (citation is TODO/empty): [{}] {}",
                 row.kind, row.id
             ));
+        } else if !row.flags.is_empty()
+            && row.citation != GRANDFATHER_SEAM_CITATION
+            && !row.citation.starts_with("maintainer-override(")
+        {
+            problems.push(format!(
+                "NEW capacity seam without a sanctioned disposition (an issue \
+                 citation is NOT a path for flagged rows): [{}] {}",
+                row.kind, row.id
+            ));
         }
+    }
+    let grandfathered = baseline
+        .rows
+        .iter()
+        .filter(|r| !r.flags.is_empty() && r.citation == GRANDFATHER_SEAM_CITATION)
+        .count();
+    if grandfathered > GRANDFATHER_SEAM_COUNT {
+        problems.push(format!(
+            "grandfathered seam citation appears on {grandfathered} rows; the \
+             frozen 2026-07-30 set is {GRANDFATHER_SEAM_COUNT} and may only \
+             shrink"
+        ));
     }
     if problems.is_empty() {
         Ok(())
@@ -673,4 +714,95 @@ fn new_and_removed_rows_fail() {
     assert!(err.contains("NEW surface"), "{err}");
     assert!(err.contains("REMOVED surface"), "{err}");
     assert!(err.contains("anti-churn invariant 7"), "{err}");
+}
+
+fn flagged_row(id: &str, citation: &str) -> Row {
+    Row {
+        kind: "header-export".to_string(),
+        id: id.to_string(),
+        flags: vec!["raw-dtype-int".to_string()],
+        citation: citation.to_string(),
+    }
+}
+
+/// PR #950 red team P1-1: opening a fresh issue and citing it must NOT
+/// bless a new capacity seam - flagged rows have no issue-citation path.
+#[test]
+fn new_flagged_seam_cannot_be_cited_with_an_issue() {
+    let row = flagged_row(
+        "planted.h: void f(chelis_value v, int pad_dtype);",
+        "chelis#123456",
+    );
+    let baseline = Baseline {
+        version: 1,
+        legs: serde_json::json!({}),
+        rows: vec![row.clone()],
+    };
+    let err = check_against_baseline(&[row], &baseline).unwrap_err();
+    assert!(
+        err.contains("NEW capacity seam") && err.contains("NOT a path for flagged rows"),
+        "an issue citation must not bless a flagged row: {err}"
+    );
+    assert!(
+        err.contains("opening a fresh issue is not authorization"),
+        "the teaching message must state the P1-1 rule: {err}"
+    );
+}
+
+/// Copying the grandfather citation string onto an extra flagged row
+/// trips the count lock: the frozen seam set may only shrink.
+#[test]
+fn grandfather_citation_cannot_be_copied_onto_new_rows() {
+    let rows: Vec<Row> = (0..=GRANDFATHER_SEAM_COUNT)
+        .map(|i| {
+            flagged_row(
+                &format!("planted.h: void f{i}(int x_dtype);"),
+                GRANDFATHER_SEAM_CITATION,
+            )
+        })
+        .collect();
+    let baseline = Baseline {
+        version: 1,
+        legs: serde_json::json!({}),
+        rows: rows.clone(),
+    };
+    let err = check_against_baseline(&rows, &baseline).unwrap_err();
+    assert!(
+        err.contains("may only shrink"),
+        "the grandfather count lock must trip: {err}"
+    );
+}
+
+/// The one human exception: a maintainer-override citation passes, and
+/// its issue references stay under the liveness gate.
+#[test]
+fn maintainer_override_is_the_human_exception() {
+    let row = flagged_row(
+        "planted.h: void staged(int out_dtype);",
+        "maintainer-override(FFI staging for chelis#893, chelis#893)",
+    );
+    let baseline = Baseline {
+        version: 1,
+        legs: serde_json::json!({}),
+        rows: vec![row.clone()],
+    };
+    assert!(check_against_baseline(&[row], &baseline).is_ok());
+}
+
+/// Unflagged rows keep the open-issue path (invariant 7's release
+/// policy governs those additions, not the seam freeze).
+#[test]
+fn unflagged_row_with_issue_citation_passes() {
+    let row = Row {
+        kind: "header-export".to_string(),
+        id: "planted.h: void plain(chelis_string s);".to_string(),
+        flags: vec![],
+        citation: "chelis#123456".to_string(),
+    };
+    let baseline = Baseline {
+        version: 1,
+        legs: serde_json::json!({}),
+        rows: vec![row.clone()],
+    };
+    assert!(check_against_baseline(&[row], &baseline).is_ok());
 }

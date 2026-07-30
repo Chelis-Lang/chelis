@@ -9,11 +9,11 @@
     "deferred": [
       {
         "leg": "wire-schema-numeric-fields",
-        "owner": "chelis#729 Phase 1 census re-derivation (dtype_semantics.md \u00a7C3)"
+        "owner": "chelis#729 Phase 1 census re-derivation (dtype_semantics.md C3)"
       },
       {
         "leg": "binding-raw-dtype-params",
-        "owner": "chelis#730 \u00a7C6 mutation-oracle build-set derivation"
+        "owner": "rustdoc-JSON enumeration (cargo metadata carries no item signatures, PR #950 red team P1-2; cargo metadata serves only the chelis#730 C6 mutation-oracle build-set derivation)"
       }
     ]
   },
