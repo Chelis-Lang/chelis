@@ -28,11 +28,36 @@ import json
 import re
 import subprocess
 import sys
+from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
+from typing import Any, Callable
 
 REPO = "Chelis-Lang/chelis"
 CENSUS_REL = Path("spec/design/capacity_census.json")
 ISSUE_REF = re.compile(r"chelis#(\d+)")
+
+
+class IssueKind(Enum):
+    """GitHub object kind returned by the REST issues endpoint."""
+
+    ISSUE = "ISSUE"
+    PULL_REQUEST = "PULL REQUEST"
+
+
+class IssueState(Enum):
+    """Only states relevant to the liveness contract."""
+
+    OPEN = "OPEN"
+    CLOSED = "CLOSED"
+
+
+@dataclass(frozen=True)
+class IssueRecord:
+    """Typed liveness input: an OPEN pull request is not an OPEN issue."""
+
+    kind: IssueKind
+    state: IssueState
 
 
 def extract_issue_refs(citation: str) -> list[int]:
@@ -45,10 +70,12 @@ def extract_issue_refs(citation: str) -> list[int]:
     return seen
 
 
-def adjudicate(rows: list[dict], issue_states: dict[int, str]) -> list[str]:
+def adjudicate(rows: list[dict], issues: dict[int, IssueRecord]) -> list[str]:
     """Pure verdict logic: return the list of problems (empty means pass).
 
-    `issue_states` maps issue number -> "OPEN" | "CLOSED".
+    `issues` maps a cited GitHub number to its typed REST record. GitHub's
+    issues endpoint also returns pull requests, identified by the
+    `pull_request` field, so kind is part of the verdict rather than discarded.
     """
     problems: list[str] = []
     for row in rows:
@@ -58,22 +85,36 @@ def adjudicate(rows: list[dict], issue_states: dict[int, str]) -> list[str]:
             problems.append(f"UNCITED row (CI tripwire should have caught this): {row_id}")
             continue
         for number in extract_issue_refs(citation):
-            state = issue_states.get(number)
-            if state is None:
+            issue = issues.get(number)
+            if issue is None:
                 problems.append(f"UNRESOLVABLE citation chelis#{number}: {row_id}")
-            elif state != "OPEN":
+            elif issue.kind is not IssueKind.ISSUE:
                 problems.append(
-                    f"STALE citation: chelis#{number} is {state}, so this row's "
+                    f"WRONG OBJECT KIND: chelis#{number} is a "
+                    f"{issue.kind.value}, not an OPEN issue: {row_id}"
+                )
+            elif issue.state is not IssueState.OPEN:
+                problems.append(
+                    f"STALE citation: chelis#{number} is {issue.state.value}, "
+                    f"so this row's "
                     f"justification no longer stands and it must be re-adjudicated "
                     f"(un-census the surface, or re-cite live work): {row_id}"
                 )
     return problems
 
 
-def fetch_issue_state(number: int) -> str | None:
-    """Query GitHub for an issue's state; None when the lookup fails."""
-    result = subprocess.run(
-        ["gh", "issue", "view", str(number), "--repo", REPO, "--json", "state"],
+def fetch_issue(
+    number: int,
+    *,
+    run: Callable[..., Any] = subprocess.run,
+) -> IssueRecord | None:
+    """Query GitHub's REST issues endpoint; return None on any invalid lookup.
+
+    The injectable `run` seam is the unit-test oracle. `gh issue view` is not
+    used because it accepts pull-request numbers while hiding object kind.
+    """
+    result = run(
+        ["gh", "api", f"repos/{REPO}/issues/{number}"],
         capture_output=True,
         text=True,
         check=False,
@@ -81,8 +122,15 @@ def fetch_issue_state(number: int) -> str | None:
     if result.returncode != 0:
         return None
     try:
-        return json.loads(result.stdout)["state"]
-    except (json.JSONDecodeError, KeyError):
+        payload = json.loads(result.stdout)
+        state = IssueState(str(payload["state"]).upper())
+        kind = (
+            IssueKind.PULL_REQUEST
+            if "pull_request" in payload
+            else IssueKind.ISSUE
+        )
+        return IssueRecord(kind=kind, state=state)
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError):
         return None
 
 
@@ -92,8 +140,9 @@ def main() -> int:
     rows = json.loads(census_path.read_text())["rows"]
 
     numbers = sorted({n for row in rows for n in extract_issue_refs(str(row.get("citation", "")))})
-    issue_states = {n: fetch_issue_state(n) for n in numbers}
-    problems = adjudicate(rows, {n: s for n, s in issue_states.items() if s is not None})
+    resolved = {n: fetch_issue(n) for n in numbers}
+    issues = {n: issue for n, issue in resolved.items() if issue is not None}
+    problems = adjudicate(rows, issues)
 
     if problems:
         print(

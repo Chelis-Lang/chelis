@@ -23,13 +23,16 @@
 //!    the surface, or obtain a `maintainer-override(...)` citation, which
 //!    only a human reviewer adds (`AGENTS.md` §Numeric Surface
 //!    Discipline).
-//! 3. A removed row is an ABI removal and is 0.19 payload by default
+//! 3. NEW numeric callable: add its exact `SemanticRegistration` to a newly
+//!    authored normative `[05-OP-N]` atom; a maintainer capacity override
+//!    does not waive this independent semantics obligation.
+//! 4. A removed row is an ABI removal and is 0.19 payload by default
 //!    (`spec/design/remediation_roadmap.md` anti-churn invariant 7).
 //!
 //! This file and the baseline are guard artifacts: editing either to make a
 //! change pass is never the fix. Deferred legs (wire-schema numeric fields,
-//! binding-side raw-dtype parameters) are recorded in the baseline's
-//! `legs.deferred` so the census never silently overstates its coverage.
+//! binding-side raw-dtype parameters) remain typed, fixed manifest entries;
+//! relabeling JSON cannot claim an enumerator or mutation oracle exists.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -47,6 +50,7 @@ const INCLUDE_DIR_REL: &str = "crates/chelis-runtime/include";
 /// against them too.
 const HEADER_ROOTS: &[&str] = &["chelis_runtime.h", "chelis_blas.h", "chelis_math.h"];
 const STD_SRC_REL: &str = "packages/chelis-std/src";
+const CONTROLLING_SPEC_REL: &str = "spec/05-risc-primitives.md";
 const NUMERIC_PRIMS: &[&str] = &[
     "f64", "f32", "f16", "bf16", "int8", "int16", "int32", "int64",
 ];
@@ -108,14 +112,134 @@ struct Row {
     citation: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct CoveredLeg {
+    leg: String,
+    artifact: String,
+    enumerator: String,
+    command: String,
+    expected_success: String,
+    mutations: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct DeferredLeg {
+    leg: String,
+    owner: String,
+    artifact: String,
+    enumerator: String,
+    command: String,
+    expected_success: String,
+    mutations: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct CoverageManifest {
+    covered: Vec<CoveredLeg>,
+    deferred: Vec<DeferredLeg>,
+}
+
+fn coverage_manifest() -> CoverageManifest {
+    CoverageManifest {
+        covered: vec![
+            CoveredLeg {
+                leg: "header-export".to_string(),
+                artifact: "crates/chelis-runtime/include/*.h published closure".to_string(),
+                enumerator: "preprocessed_headers -> header_rows".to_string(),
+                command: "cargo nextest run -p chelis-cli --test capacity_census_tripwire"
+                    .to_string(),
+                expected_success: "capacity_census_matches_public_surface passes".to_string(),
+                mutations: vec![
+                    "reviewer_preprocessor_capacity_seam_is_visible".to_string(),
+                    "c_identity_is_token_canonical_across_preprocessor_whitespace".to_string(),
+                ],
+            },
+            CoveredLeg {
+                leg: "header-struct".to_string(),
+                artifact: "crates/chelis-runtime/include/*.h published closure".to_string(),
+                enumerator: "preprocessed_headers -> header_rows".to_string(),
+                command: "cargo nextest run -p chelis-cli --test capacity_census_tripwire"
+                    .to_string(),
+                expected_success: "capacity_census_matches_public_surface passes".to_string(),
+                mutations: vec!["planted_struct_layout_is_inventoried".to_string()],
+            },
+            CoveredLeg {
+                leg: "std-adt-numeric".to_string(),
+                artifact: "packages/chelis-std/src/**/*.ch desugared Deep AST".to_string(),
+                enumerator: "stdlib_rows -> scan_deftypes + scan_exported_numeric_defs".to_string(),
+                command: "cargo nextest run -p chelis-cli --test capacity_census_tripwire"
+                    .to_string(),
+                expected_success: "capacity_census_matches_public_surface passes".to_string(),
+                mutations: vec![
+                    "std_adt_identity_changes_when_same_dtype_variant_changes".to_string(),
+                ],
+            },
+            CoveredLeg {
+                leg: "std-def-numeric".to_string(),
+                artifact: "packages/chelis-std/src/**/*.ch desugared Deep AST".to_string(),
+                enumerator: "stdlib_rows -> scan_deftypes + scan_exported_numeric_defs".to_string(),
+                command: "cargo nextest run -p chelis-cli --test capacity_census_tripwire"
+                    .to_string(),
+                expected_success: "capacity_census_matches_public_surface passes".to_string(),
+                mutations: vec!["exported_public_numeric_stdlib_def_is_enumerated".to_string()],
+            },
+        ],
+        deferred: vec![
+            DeferredLeg {
+                leg: "wire-schema-numeric-fields".to_string(),
+                owner: "chelis#729 Phase 1 entry hard edge".to_string(),
+                artifact: "crates/chelis-compiler-api/src/schema.rs public serde/JsonSchema graph"
+                    .to_string(),
+                enumerator: "PLANNED: typed public wire-schema numeric-field enumerator"
+                    .to_string(),
+                command:
+                    "PLANNED: cargo nextest run -p chelis-compiler-api --test capacity_census_wire"
+                        .to_string(),
+                expected_success: "PLANNED: exact schema rows match a reviewed baseline"
+                    .to_string(),
+                mutations: vec![
+                    "PLANNED: add/remove public f64 serde/JsonSchema field".to_string(),
+                    "CURRENT DEFERRED PROBE: ReviewerWireNumericProbe leaves this census unchanged"
+                        .to_string(),
+                ],
+            },
+            DeferredLeg {
+                leg: "binding-raw-dtype-params".to_string(),
+                owner: "chelis#729 Phase 1 entry hard edge".to_string(),
+                artifact: "crates/chelis-python/src/lib.rs registered PyO3 callables".to_string(),
+                enumerator: "PLANNED: rustdoc-JSON PyO3 callable-signature enumerator".to_string(),
+                command:
+                    "PLANNED: cargo nextest run -p chelis-python --test capacity_census_bindings"
+                        .to_string(),
+                expected_success: "PLANNED: exact binding rows match a reviewed baseline"
+                    .to_string(),
+                mutations: vec![
+                    "PLANNED: add/remove registered #[pyfunction] dtype: i32 parameter".to_string(),
+                    "CURRENT DEFERRED PROBE: reviewer_raw_dtype_probe leaves this census unchanged"
+                        .to_string(),
+                ],
+            },
+        ],
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct Baseline {
     version: u32,
-    /// Doc metadata (covered/deferred legs); carried through regeneration
-    /// verbatim so coverage claims stay in the artifact, not in prose.
-    legs: serde_json::Value,
+    legs: CoverageManifest,
     rows: Vec<Row>,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SemanticRegistration {
+    callable: &'static str,
+    atom: &'static str,
+}
+
+/// Empty until spec/05 acquires its first `[05-OP-N]` atom. Existing
+/// numeric rows are the frozen pre-ratchet baseline; every future callable
+/// requires an exact entry here and the controlling atom in the same change.
+const SEMANTIC_REGISTRATIONS: &[SemanticRegistration] = &[];
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -132,13 +256,189 @@ fn repo_root() -> PathBuf {
 /// closure is followed by the real preprocessor, so an export added to a
 /// transitively-included header - or hidden behind a macro - is visible.
 fn preprocessed_headers(include_dir: &Path, roots: &[&str]) -> BTreeMap<String, String> {
+    assert_context_invariant_headers(include_dir, roots);
     let mut per_file: BTreeMap<String, String> = BTreeMap::new();
     for root in roots {
         for (name, text) in preprocess_root(include_dir, root) {
-            per_file.entry(name).or_insert(text);
+            if let Some(previous) = per_file.get(&name) {
+                let previous_rows = header_rows_local(&name, previous);
+                let current_rows = header_rows_local(&name, &text);
+                assert_eq!(
+                    previous_rows,
+                    current_rows,
+                    "{}CONTEXT-VARYING PUBLIC ABI in `{name}`: two published \
+                     roots preprocess it to different exported declarations. \
+                     Published ABI must be context-invariant; move the \
+                     conditional behind a static implementation detail.{}",
+                    teaching_header(),
+                    teaching_footer()
+                );
+            } else {
+                per_file.insert(name, text);
+            }
         }
     }
     per_file
+}
+
+fn quoted_include(line: &str) -> Option<&str> {
+    let rest = line.trim_start().strip_prefix("#include")?.trim_start();
+    let rest = rest.strip_prefix('"')?;
+    rest.split('"').next()
+}
+
+fn header_source_closure(include_dir: &Path, roots: &[&str]) -> BTreeMap<String, String> {
+    let mut pending: Vec<String> = roots.iter().map(|root| (*root).to_string()).collect();
+    let mut sources = BTreeMap::new();
+    while let Some(name) = pending.pop() {
+        if sources.contains_key(&name) {
+            continue;
+        }
+        let path = include_dir.join(&name);
+        let source =
+            fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        for line in source.lines() {
+            if let Some(included) = quoted_include(line)
+                && include_dir.join(included).is_file()
+            {
+                pending.push(included.to_string());
+            }
+        }
+        sources.insert(name, source);
+    }
+    sources
+}
+
+fn include_guard_name(source: &str) -> Option<String> {
+    let directives: Vec<&str> = source
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with('#'))
+        .take(2)
+        .collect();
+    let guard = directives.first()?.strip_prefix("#ifndef")?.trim();
+    let defined = directives.get(1)?.strip_prefix("#define")?.trim();
+    (guard == defined).then(|| guard.to_string())
+}
+
+/// The supported preprocessing policy is total by construction: public ABI
+/// declarations in the published local-header closure may not be conditional.
+/// Platform and feature branches remain permitted inside `static` function
+/// bodies and for include/macro selection that does not declare ABI.
+fn assert_context_invariant_headers(include_dir: &Path, roots: &[&str]) {
+    let sources = header_source_closure(include_dir, roots);
+    for (name, source) in &sources {
+        let guard = include_guard_name(source);
+        let mut conditional_stack: Vec<bool> = Vec::new();
+        let mut brace_depth = 0usize;
+        let mut conditional_top_level = String::new();
+        let mut conditional_macros = BTreeSet::new();
+        let mut conditional_includes = BTreeSet::new();
+
+        for line in strip_c_comments(source).lines() {
+            let trimmed = line.trim();
+            if let Some(rest) = trimmed
+                .strip_prefix("#ifdef")
+                .or_else(|| trimmed.strip_prefix("#ifndef"))
+                .or_else(|| trimmed.strip_prefix("#if"))
+            {
+                let is_guard = conditional_stack.is_empty()
+                    && guard.as_deref().is_some_and(|g| rest.trim() == g);
+                conditional_stack.push(!is_guard);
+                continue;
+            }
+            if trimmed.starts_with("#elif") || trimmed == "#else" {
+                continue;
+            }
+            if trimmed.starts_with("#endif") {
+                conditional_stack.pop();
+                continue;
+            }
+
+            let varying = conditional_stack.iter().any(|frame| *frame);
+            if varying {
+                if let Some(rest) = trimmed.strip_prefix("#define")
+                    && let Some(macro_name) = rest.split_whitespace().next()
+                {
+                    conditional_macros.insert(
+                        macro_name
+                            .split('(')
+                            .next()
+                            .expect("split always has first")
+                            .to_string(),
+                    );
+                }
+                if let Some(included) = quoted_include(trimmed) {
+                    conditional_includes.insert(included.to_string());
+                }
+            }
+            let extern_wrapper = trimmed == "extern \"C\" {" || trimmed == "}";
+            if varying && brace_depth == 0 && !trimmed.starts_with('#') {
+                conditional_top_level.push_str(line);
+                conditional_top_level.push('\n');
+            }
+            if !extern_wrapper {
+                for c in line.chars() {
+                    if c == '{' {
+                        brace_depth += 1;
+                    } else if c == '}' {
+                        brace_depth = brace_depth.saturating_sub(1);
+                    }
+                }
+            }
+        }
+
+        let conditional_rows = header_rows_local(name, &conditional_top_level);
+        let conditional_typedef = conditional_top_level
+            .split(';')
+            .any(|statement| normalize_ws(statement).starts_with("typedef "));
+        let raw_rows = header_rows_local(name, source);
+        let macro_dependent_rows: Vec<&Row> = raw_rows
+            .iter()
+            .filter(|row| {
+                let tokens: BTreeSet<&str> = row
+                    .id
+                    .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                    .filter(|token| !token.is_empty())
+                    .collect();
+                conditional_macros
+                    .iter()
+                    .any(|macro_name| tokens.contains(macro_name.as_str()))
+            })
+            .collect();
+        let conditional_include_rows: Vec<Row> = conditional_includes
+            .iter()
+            .filter_map(|included| sources.get(included).map(|source| (included, source)))
+            .flat_map(|(included, source)| header_rows_local(included, source))
+            .collect();
+        assert!(
+            conditional_rows.is_empty()
+                && !conditional_typedef
+                && macro_dependent_rows.is_empty()
+                && conditional_include_rows.is_empty(),
+            "{}CONTEXT-VARYING PUBLIC ABI in `{name}`: conditional branches \
+             contain exported declarations {:?}, a top-level typedef is \
+             conditional ({conditional_typedef}), conditional macros reach \
+             declarations {:?}, or conditional local includes expose {:?}. \
+             Published ABI declarations and their type spellings must be \
+             unconditional in the local header closure; conditional code is \
+             permitted only behind static implementation details.{}",
+            teaching_header(),
+            conditional_rows
+                .iter()
+                .map(|row| row.id.as_str())
+                .collect::<Vec<_>>(),
+            macro_dependent_rows
+                .iter()
+                .map(|row| row.id.as_str())
+                .collect::<Vec<_>>(),
+            conditional_include_rows
+                .iter()
+                .map(|row| row.id.as_str())
+                .collect::<Vec<_>>(),
+            teaching_footer()
+        );
+    }
 }
 
 fn strip_c_comments(text: &str) -> String {
@@ -167,6 +467,79 @@ fn strip_c_comments(text: &str) -> String {
 
 fn normalize_ws(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Tokenize the declaration subset of C used by published headers. Identity
+/// is the token sequence, never a preprocessor's incidental whitespace.
+fn canonical_c_tokens(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let mut tokens = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c.is_whitespace() {
+            i += 1;
+            continue;
+        }
+        if c == '"' || c == '\'' {
+            let quote = c;
+            let mut token = String::new();
+            token.push(c);
+            i += 1;
+            while i < chars.len() {
+                let next = chars[i];
+                token.push(next);
+                i += 1;
+                if next == '\\' && i < chars.len() {
+                    token.push(chars[i]);
+                    i += 1;
+                } else if next == quote {
+                    break;
+                }
+            }
+            tokens.push(token);
+            continue;
+        }
+        if c.is_ascii_alphanumeric() || c == '_' || c == '.' {
+            let mut token = String::new();
+            while i < chars.len()
+                && (chars[i].is_ascii_alphanumeric() || chars[i] == '_' || chars[i] == '.')
+            {
+                token.push(chars[i]);
+                i += 1;
+            }
+            tokens.push(token);
+            continue;
+        }
+        if i + 2 < chars.len() && chars[i..i + 3] == ['.', '.', '.'] {
+            tokens.push("...".to_string());
+            i += 3;
+            continue;
+        }
+        if i + 1 < chars.len() {
+            let pair = [c, chars[i + 1]].iter().collect::<String>();
+            if matches!(
+                pair.as_str(),
+                "->" | "++" | "--" | "<<" | ">>" | "<=" | ">=" | "==" | "!=" | "&&" | "||"
+            ) {
+                tokens.push(pair);
+                i += 2;
+                continue;
+            }
+        }
+        tokens.push(c.to_string());
+        i += 1;
+    }
+    tokens.join(" ")
+}
+
+fn canonical_inventory_id(id: &str) -> String {
+    if let Some((header, declaration)) = id.split_once(": ")
+        && header.ends_with(".h")
+    {
+        return format!("{header}: {}", canonical_c_tokens(declaration));
+    }
+    id.to_string()
 }
 
 /// True when the citation names at least one chelis issue (`chelis#N`), so
@@ -383,16 +756,16 @@ fn header_rows(header_name: &str, raw: &str, typedefs: &BTreeMap<String, Vec<Str
                         }
                         tail.push(c2);
                     }
-                    let id = format!(
+                    let declaration = format!(
                         "{} {{ {} }} {}",
                         head,
                         normalize_ws(&body),
                         normalize_ws(&tail)
                     );
-                    let flags = classify(&id, typedefs);
+                    let flags = classify(&declaration, typedefs);
                     rows.push(Row {
                         kind: "header-struct".to_string(),
-                        id: format!("{header_name}: {id}"),
+                        id: format!("{header_name}: {}", canonical_c_tokens(&declaration)),
                         flags,
                         citation: String::new(),
                     });
@@ -429,7 +802,7 @@ fn header_rows(header_name: &str, raw: &str, typedefs: &BTreeMap<String, Vec<Str
                     let flags = classify(&stmt, typedefs);
                     rows.push(Row {
                         kind: "header-export".to_string(),
-                        id: format!("{header_name}: {stmt};"),
+                        id: format!("{header_name}: {}", canonical_c_tokens(&format!("{stmt};"))),
                         flags,
                         citation: String::new(),
                     });
@@ -489,21 +862,87 @@ fn deftype_name(list: &List) -> String {
     "<unnamed>".to_string()
 }
 
+fn symbol(expr: &Expr) -> Option<&str> {
+    if let Expr::Atom(Atom::Symbol(name), _) = expr {
+        Some(name)
+    } else {
+        None
+    }
+}
+
+fn scan_exported_numeric_defs(list: &List, file_label: &str, rows: &mut Vec<Row>) {
+    if list.tag() != Some(DeepTag::Module) {
+        return;
+    }
+    let declarations = list.elements.iter().skip(3);
+    let mut exports = BTreeSet::new();
+    let mut signatures: BTreeMap<String, &Expr> = BTreeMap::new();
+    for declaration in declarations.clone() {
+        let Expr::List(declaration, _) = declaration else {
+            continue;
+        };
+        match declaration.tag() {
+            Some(DeepTag::Export) => {
+                exports.extend(
+                    declaration
+                        .elements
+                        .iter()
+                        .skip(2)
+                        .filter_map(symbol)
+                        .map(str::to_string),
+                );
+            }
+            Some(DeepTag::Defsig) => {
+                if let (Some(name), Some(signature)) = (
+                    declaration.elements.get(2).and_then(symbol),
+                    declaration.elements.get(3),
+                ) {
+                    signatures.insert(name.to_string(), signature);
+                }
+            }
+            _ => {}
+        }
+    }
+    for name in exports {
+        let Some(signature) = signatures.get(&name) else {
+            continue;
+        };
+        let mut prims = BTreeSet::new();
+        collect_numeric_tprims(signature, &mut prims);
+        if prims.is_empty() {
+            continue;
+        }
+        rows.push(Row {
+            kind: "std-def-numeric".to_string(),
+            id: format!(
+                "{file_label}::{name}: {}",
+                chelis_deep::printer::print_expr_flat(signature)
+            ),
+            flags: vec!["numeric-op".to_string()],
+            citation: String::new(),
+        });
+    }
+}
+
 fn scan_deftypes(exprs: &[Expr], file_label: &str, rows: &mut Vec<Row>) {
     fn walk(expr: &Expr, file_label: &str, rows: &mut Vec<Row>) {
         match expr {
             Expr::List(list, _) => {
+                scan_exported_numeric_defs(list, file_label, rows);
                 if list.tag() == Some(DeepTag::Deftype) {
                     let mut prims = BTreeSet::new();
                     for e in list.elements.iter().skip(2) {
                         collect_numeric_tprims(e, &mut prims);
                     }
                     if !prims.is_empty() {
-                        let id = format!(
-                            "{file_label}::{}: {}",
-                            deftype_name(list),
-                            prims.into_iter().collect::<Vec<_>>().join(",")
-                        );
+                        let shape = list
+                            .elements
+                            .iter()
+                            .skip(3)
+                            .map(chelis_deep::printer::print_expr_flat)
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        let id = format!("{file_label}::{}: {shape}", deftype_name(list),);
                         rows.push(Row {
                             kind: "std-adt-numeric".to_string(),
                             id,
@@ -530,7 +969,7 @@ fn scan_deftypes(exprs: &[Expr], file_label: &str, rows: &mut Vec<Row>) {
     }
 }
 
-fn std_adt_rows(root: &Path) -> Vec<Row> {
+fn stdlib_rows(root: &Path) -> Vec<Row> {
     let src_dir = root.join(STD_SRC_REL);
     let mut files = Vec::new();
     walk_ch_files(&src_dir, &mut files);
@@ -572,7 +1011,7 @@ fn current_inventory(root: &Path) -> Vec<Row> {
     for (name, text) in &per_file {
         rows.extend(header_rows(name, text, &typedefs));
     }
-    rows.extend(std_adt_rows(root));
+    rows.extend(stdlib_rows(root));
     rows.sort_by(|a, b| (a.kind.as_str(), a.id.as_str()).cmp(&(b.kind.as_str(), b.id.as_str())));
     rows.dedup_by(|a, b| a.kind == b.kind && a.id == b.id);
     rows
@@ -597,9 +1036,9 @@ fn teaching_footer() -> String {
      onto the tagged carrier, remove the surface, or obtain a \
      maintainer-override(<reason>, chelis#N) citation, which only a human \
      reviewer adds (the baseline file is review-routed).\n\
-     3. NEW numeric-op export: cite BOTH its chelis#N issue AND its \
-     spec/05 entry (authored in the same change set; a doc comment is not \
-     an authority).\n\
+     3. NEW numeric-op callable: cite its chelis#N issue, author one exact \
+     [05-OP-N] atom in spec/05, and add its exact `SemanticRegistration` \
+     mapping in this file. An unrelated or nonexistent atom is not authority.\n\
      4. A removed row is an ABI removal: 0.19 payload by default per \
      remediation_roadmap.md anti-churn invariant 7.\n\
      This test and spec/design/capacity_census.json are guard artifacts; \
@@ -608,6 +1047,58 @@ fn teaching_footer() -> String {
 }
 
 fn check_against_baseline(current: &[Row], baseline: &Baseline) -> Result<(), String> {
+    let spec = fs::read_to_string(repo_root().join(CONTROLLING_SPEC_REL))
+        .expect("controlling spec/05 must be readable");
+    check_against_baseline_with(current, baseline, SEMANTIC_REGISTRATIONS, &spec)
+}
+
+fn callable_identity(row: &Row) -> String {
+    format!("[{}] {}", row.kind, row.id)
+}
+
+fn registration_problem(registration: SemanticRegistration, spec: &str) -> Option<String> {
+    let Some(atom) = registration
+        .atom
+        .strip_prefix('[')
+        .and_then(|atom| atom.strip_suffix(']'))
+    else {
+        return Some(format!(
+            "malformed atom `{}` (expected `[05-OP-N]`)",
+            registration.atom
+        ));
+    };
+    let parts: Vec<&str> = atom.split('-').collect();
+    if parts.len() != 3
+        || parts[0] != "05"
+        || parts[1] != "OP"
+        || parts[2].is_empty()
+        || !parts[2].chars().all(|c| c.is_ascii_digit())
+    {
+        return Some(format!(
+            "wrong atom grammar/group `{}` (expected `[05-OP-N]`)",
+            registration.atom
+        ));
+    }
+    let definition_prefix = format!("> **{}**", registration.atom);
+    if !spec
+        .lines()
+        .any(|line| line.trim_start().starts_with(&definition_prefix))
+    {
+        return Some(format!(
+            "atom `{}` does not exist as a normative `> **[05-OP-N]**` \
+             definition in {}",
+            registration.atom, CONTROLLING_SPEC_REL
+        ));
+    }
+    None
+}
+
+fn check_against_baseline_with(
+    current: &[Row],
+    baseline: &Baseline,
+    registrations: &[SemanticRegistration],
+    spec: &str,
+) -> Result<(), String> {
     let base_map: BTreeMap<(String, String), &Row> = baseline
         .rows
         .iter()
@@ -619,8 +1110,48 @@ fn check_against_baseline(current: &[Row], baseline: &Baseline) -> Result<(), St
         .collect();
 
     let mut problems = Vec::new();
+    let expected_manifest = coverage_manifest();
+    if baseline.version != 2 || baseline.legs != expected_manifest {
+        problems.push(format!(
+            "INVALID COVERAGE MANIFEST: baseline version/legs do not equal \
+             the fixed executable `coverage_manifest`; deferred \
+             wire-schema-numeric-fields and binding-raw-dtype-params cannot \
+             become covered without a live enumerator, command, expected \
+             success, and mutation_oracle. expected={expected_manifest:?}, \
+             actual(version={}, legs={:?})",
+            baseline.version, baseline.legs
+        ));
+    }
+
+    let mut registration_map = BTreeMap::new();
+    for registration in registrations {
+        if registration_map
+            .insert(registration.callable, *registration)
+            .is_some()
+        {
+            problems.push(format!(
+                "DUPLICATE SEMANTIC REGISTRATION for `{}`",
+                registration.callable
+            ));
+        }
+        if let Some(problem) = registration_problem(*registration, spec) {
+            problems.push(format!(
+                "INVALID SEMANTIC REGISTRATION for `{}`: {problem}",
+                registration.callable
+            ));
+        }
+    }
+
     for row in current {
-        if !base_map.contains_key(&(row.kind.clone(), row.id.clone())) {
+        if let Some(baseline_row) = base_map.get(&(row.kind.clone(), row.id.clone())) {
+            if row.flags != baseline_row.flags {
+                problems.push(format!(
+                    "ENFORCEMENT METADATA CHANGED for matched row [{}] {}: \
+                     baseline flags {:?}, current flags {:?}",
+                    row.kind, row.id, baseline_row.flags, row.flags
+                ));
+            }
+        } else {
             problems.push(format!(
                 "NEW surface not in the census: [{}] {} (flags: {:?})",
                 row.kind, row.id, row.flags
@@ -639,7 +1170,9 @@ fn check_against_baseline(current: &[Row], baseline: &Baseline) -> Result<(), St
                 "UNCITED census row (citation is TODO/empty): [{}] {}",
                 row.kind, row.id
             ));
-        } else if is_seam(&row.flags)
+            continue;
+        }
+        if is_seam(&row.flags)
             && row.citation != GRANDFATHER_SEAM_CITATION
             && !row.citation.starts_with("maintainer-override(")
         {
@@ -648,8 +1181,11 @@ fn check_against_baseline(current: &[Row], baseline: &Baseline) -> Result<(), St
                  citation is NOT a path for flagged rows): [{}] {}",
                 row.kind, row.id
             ));
-        } else if row.citation == GRANDFATHER_SEAM_CITATION
-            && !GRANDFATHER_SEAM_IDS.contains(&row.id.as_str())
+        }
+        if row.citation == GRANDFATHER_SEAM_CITATION
+            && !GRANDFATHER_SEAM_IDS
+                .iter()
+                .any(|id| canonical_inventory_id(id) == row.id)
         {
             problems.push(format!(
                 "GRANDFATHER citation on an identity outside the frozen \
@@ -657,20 +1193,31 @@ fn check_against_baseline(current: &[Row], baseline: &Baseline) -> Result<(), St
                  shrink): [{}] {}",
                 row.kind, row.id
             ));
-        } else if row.flags.iter().any(|f| f == "numeric-op")
+        }
+        if (row.flags.iter().any(|f| f == "numeric-op") || row.kind == "std-def-numeric")
             && row.citation != GRANDFATHER_PLAIN_CITATION
             && row.citation != GRANDFATHER_SEAM_CITATION
-            && !row.citation.starts_with("maintainer-override(")
-            && !(row.citation.contains("spec/05") || row.citation.contains("[05-"))
         {
-            problems.push(format!(
-                "NUMERIC OP WITHOUT SEMANTIC REGISTRATION (a new numeric \
-                 runtime export cites its spec/05 entry, authored in the same \
-                 change set, alongside its chelis#N issue; capability Table B \
-                 mechanizes this at chelis#729 Phase 4): [{}] {}",
-                row.kind, row.id
-            ));
-        } else if !cites_a_chelis_issue(&row.citation) {
+            let callable = callable_identity(row);
+            match registration_map.get(callable.as_str()) {
+                None => problems.push(format!(
+                    "NUMERIC OP WITHOUT EXACT SEMANTIC REGISTRATION: \
+                     `{callable}` has no `SemanticRegistration`; citation \
+                     `{}` is not a callable-to-authority mapping",
+                    row.citation
+                )),
+                Some(registration) => {
+                    if let Some(problem) = registration_problem(*registration, spec) {
+                        problems.push(format!(
+                            "NUMERIC OP WITHOUT EXACT SEMANTIC REGISTRATION: \
+                             `{callable}` maps to `{}` but {problem}",
+                            registration.atom
+                        ));
+                    }
+                }
+            }
+        }
+        if !cites_a_chelis_issue(&row.citation) {
             problems.push(format!(
                 "CITATION NAMES NO ISSUE (every sanctioned citation carries a \
                  chelis#N reference so the liveness gate has purchase; prose \
@@ -708,7 +1255,12 @@ fn regenerate(baseline_path: &Path, current: &[Row], old: Option<&Baseline>) {
         .map(|b| {
             b.rows
                 .iter()
-                .map(|r| ((r.kind.clone(), r.id.clone()), r.citation.clone()))
+                .map(|r| {
+                    (
+                        (r.kind.clone(), canonical_inventory_id(&r.id)),
+                        r.citation.clone(),
+                    )
+                })
                 .collect()
         })
         .unwrap_or_default();
@@ -724,24 +1276,9 @@ fn regenerate(baseline_path: &Path, current: &[Row], old: Option<&Baseline>) {
                 .unwrap_or_else(|| "TODO".to_string()),
         })
         .collect();
-    let legs = old.map(|b| b.legs.clone()).unwrap_or_else(|| {
-        serde_json::json!({
-            "covered": ["header-export", "header-struct", "std-adt-numeric"],
-            "deferred": [
-                {
-                    "leg": "wire-schema-numeric-fields",
-                    "owner": "chelis#729 Phase 1 census re-derivation (dtype_semantics.md §C3)"
-                },
-                {
-                    "leg": "binding-raw-dtype-params",
-                    "owner": "chelis#730 §C6 mutation-oracle build-set derivation"
-                }
-            ]
-        })
-    });
     let out = Baseline {
-        version: 1,
-        legs,
+        version: 2,
+        legs: coverage_manifest(),
         rows,
     };
     let json = serde_json::to_string_pretty(&out).expect("serialize census");
@@ -766,7 +1303,7 @@ fn capacity_census_matches_public_surface() {
 
     let old: Option<Baseline> = fs::read_to_string(&baseline_path)
         .ok()
-        .map(|t| serde_json::from_str(&t).expect("parse capacity_census.json"));
+        .map(|text| serde_json::from_str(&text).expect("parse capacity_census.json"));
 
     if std::env::var("CHELIS_CAPACITY_CENSUS_WRITE").as_deref() == Ok("1") {
         regenerate(&baseline_path, &current, old.as_ref());
@@ -833,7 +1370,7 @@ fn planted_static_inline_carries_no_abi_row() {
     let ids: Vec<&str> = rows.iter().map(|r| r.id.as_str()).collect();
     assert_eq!(
         ids,
-        ["planted.h: void chelis_real_export(int x);"],
+        ["planted.h: void chelis_real_export ( int x ) ;"],
         "static inline must be skipped, the real export kept"
     );
 }
@@ -870,7 +1407,7 @@ fn planted_deftype_with_f64_variant_is_detected() {
     let mut rows = Vec::new();
     scan_deftypes(&[deftype], "planted", &mut rows);
     assert_eq!(rows.len(), 1, "{rows:?}");
-    assert_eq!(rows[0].id, "planted::Json: f64");
+    assert_eq!(rows[0].id, "planted::Json: (t-prim {} f64)");
 }
 
 #[test]
@@ -882,8 +1419,8 @@ fn todo_citation_fails_with_teaching_message() {
         citation: "TODO".to_string(),
     };
     let baseline = Baseline {
-        version: 1,
-        legs: serde_json::json!({}),
+        version: 2,
+        legs: coverage_manifest(),
         rows: vec![row.clone()],
     };
     let current = vec![row];
@@ -906,8 +1443,8 @@ fn new_and_removed_rows_fail() {
         citation: "baseline-2026-07-30".to_string(),
     };
     let baseline = Baseline {
-        version: 1,
-        legs: serde_json::json!({}),
+        version: 2,
+        legs: coverage_manifest(),
         rows: vec![cited("a.h: void old(void);")],
     };
     let current = vec![cited("a.h: void brand_new(void);")];
@@ -935,8 +1472,8 @@ fn new_flagged_seam_cannot_be_cited_with_an_issue() {
         "chelis#123456",
     );
     let baseline = Baseline {
-        version: 1,
-        legs: serde_json::json!({}),
+        version: 2,
+        legs: coverage_manifest(),
         rows: vec![row.clone()],
     };
     let err = check_against_baseline(&[row], &baseline).unwrap_err();
@@ -963,8 +1500,8 @@ fn grandfather_citation_cannot_be_copied_onto_new_rows() {
         })
         .collect();
     let baseline = Baseline {
-        version: 1,
-        legs: serde_json::json!({}),
+        version: 2,
+        legs: coverage_manifest(),
         rows: rows.clone(),
     };
     let err = check_against_baseline(&rows, &baseline).unwrap_err();
@@ -983,11 +1520,28 @@ fn maintainer_override_is_the_human_exception() {
         "maintainer-override(FFI staging for chelis#893, chelis#893)",
     );
     let baseline = Baseline {
-        version: 1,
-        legs: serde_json::json!({}),
+        version: 2,
+        legs: coverage_manifest(),
         rows: vec![row.clone()],
     };
     assert!(check_against_baseline(&[row], &baseline).is_ok());
+}
+
+#[test]
+fn maintainer_override_does_not_waive_numeric_semantic_registration() {
+    let mut row =
+        header_rows_local("planted.h", "double staged(double value, int out_dtype);").remove(0);
+    row.citation = "maintainer-override(FFI staging, chelis#893)".to_string();
+    let baseline = Baseline {
+        version: 2,
+        legs: coverage_manifest(),
+        rows: vec![row.clone()],
+    };
+    let err = check_against_baseline(&[row], &baseline).unwrap_err();
+    assert!(
+        err.contains("NUMERIC OP WITHOUT EXACT SEMANTIC REGISTRATION"),
+        "capacity disposition and callable semantics are independent: {err}"
+    );
 }
 
 /// Prose is not a citation: every sanctioned citation names a chelis
@@ -1002,8 +1556,8 @@ fn prose_citation_without_issue_ref_fails() {
         citation: "reviewed and fine".to_string(),
     };
     let baseline = Baseline {
-        version: 1,
-        legs: serde_json::json!({}),
+        version: 2,
+        legs: coverage_manifest(),
         rows: vec![row.clone()],
     };
     let err = check_against_baseline(&[row], &baseline).unwrap_err();
@@ -1019,8 +1573,8 @@ fn maintainer_override_without_issue_ref_fails() {
         "maintainer-override(because I said so)",
     );
     let baseline = Baseline {
-        version: 1,
-        legs: serde_json::json!({}),
+        version: 2,
+        legs: coverage_manifest(),
         rows: vec![row.clone()],
     };
     let err = check_against_baseline(&[row], &baseline).unwrap_err();
@@ -1038,8 +1592,8 @@ fn unflagged_row_with_issue_citation_passes() {
         citation: "chelis#123456".to_string(),
     };
     let baseline = Baseline {
-        version: 1,
-        legs: serde_json::json!({}),
+        version: 2,
+        legs: coverage_manifest(),
         rows: vec![row.clone()],
     };
     assert!(check_against_baseline(&[row], &baseline).is_ok());
@@ -1110,8 +1664,8 @@ fn reviewer_grandfathered_identity_relocation_must_fail() {
         GRANDFATHER_SEAM_CITATION,
     ));
     let regenerated = Baseline {
-        version: 1,
-        legs: serde_json::json!({}),
+        version: 2,
+        legs: coverage_manifest(),
         rows: rows.clone(),
     };
     let err = check_against_baseline(&rows, &regenerated).unwrap_err();
@@ -1137,23 +1691,391 @@ fn reviewer_runtime_numeric_op_requires_semantic_registration() {
     rows[0].citation = "chelis#729".to_string();
     let row = rows.remove(0);
     let regenerated = Baseline {
-        version: 1,
-        legs: serde_json::json!({}),
+        version: 2,
+        legs: coverage_manifest(),
         rows: vec![row.clone()],
     };
     let err = check_against_baseline(std::slice::from_ref(&row), &regenerated).unwrap_err();
     assert!(
-        err.contains("NUMERIC OP WITHOUT SEMANTIC REGISTRATION"),
+        err.contains("NUMERIC OP WITHOUT EXACT SEMANTIC REGISTRATION"),
         "a tracker citation is not a semantic decision: {err}"
     );
     let mut registered = row;
-    registered.citation =
-        "chelis#123456; spec/05-risc-primitives.md abs entry authored in this change set"
-            .to_string();
+    registered.citation = "chelis#123456".to_string();
     let ok_baseline = Baseline {
-        version: 1,
-        legs: serde_json::json!({}),
+        version: 2,
+        legs: coverage_manifest(),
         rows: vec![registered.clone()],
     };
-    assert!(check_against_baseline(&[registered], &ok_baseline).is_ok());
+    let registration = SemanticRegistration {
+        callable: "[header-export] planted.h: int64_t chelis_abs_i64 ( int64_t value ) ;",
+        atom: "[05-OP-1]",
+    };
+    assert!(
+        check_against_baseline_with(
+            &[registered],
+            &ok_baseline,
+            &[registration],
+            "Synthetic controlling fixture:\n> **[05-OP-1]** Integer abs.",
+        )
+        .is_ok()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// PR #956 correction tests (2026-07-30): these lock the exact omissions found
+// by the exact-head review and the failed Linux Integration run.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn c_identity_is_token_canonical_across_preprocessor_whitespace() {
+    let apple = header_rows_local(
+        "planted.h",
+        "chelis_string chelis_string_from_bool(_Bool value);\n",
+    );
+    let linux = header_rows_local(
+        "planted.h",
+        "chelis_string chelis_string_from_bool( _Bool value);\n",
+    );
+    assert_eq!(
+        apple, linux,
+        "C token identity must not depend on a preprocessor's whitespace rendering"
+    );
+}
+
+#[test]
+fn matched_row_float_carrier_metadata_change_fails() {
+    let baseline_row = Row {
+        kind: "header-export".to_string(),
+        id: "planted.h: int64_t f(int64_t value);".to_string(),
+        flags: vec!["numeric-op".to_string()],
+        citation: GRANDFATHER_PLAIN_CITATION.to_string(),
+    };
+    let mut current_row = baseline_row.clone();
+    current_row.flags = vec!["float-carrier".to_string(), "numeric-op".to_string()];
+    let baseline = Baseline {
+        version: 2,
+        legs: coverage_manifest(),
+        rows: vec![baseline_row],
+    };
+    let err = check_against_baseline(&[current_row], &baseline).unwrap_err();
+    assert!(
+        err.contains("ENFORCEMENT METADATA CHANGED")
+            && err.contains("float-carrier")
+            && err.contains("numeric-op"),
+        "matched identities must freeze their derived flags exactly: {err}"
+    );
+}
+
+#[test]
+fn matched_row_typedef_int64_to_double_metadata_change_fails() {
+    let before = header_rows_local(
+        "planted.h",
+        "typedef int64_t planted_num;\nplanted_num f(planted_num value);\n",
+    );
+    let after = header_rows_local(
+        "planted.h",
+        "typedef double planted_num;\nplanted_num f(planted_num value);\n",
+    );
+    assert_eq!(before.len(), 1);
+    assert_eq!(after.len(), 1);
+    assert_eq!(before[0].id, after[0].id, "typedef spelling stays stable");
+    let mut baseline_row = before[0].clone();
+    baseline_row.citation = GRANDFATHER_PLAIN_CITATION.to_string();
+    let mut current_row = after[0].clone();
+    current_row.citation = GRANDFATHER_PLAIN_CITATION.to_string();
+    let baseline = Baseline {
+        version: 2,
+        legs: coverage_manifest(),
+        rows: vec![baseline_row],
+    };
+    let err = check_against_baseline(&[current_row], &baseline).unwrap_err();
+    assert!(
+        err.contains("ENFORCEMENT METADATA CHANGED")
+            && err.contains("float-carrier")
+            && err.contains("numeric-op"),
+        "typedef target changes must not evade the flag freeze: {err}"
+    );
+}
+
+#[test]
+fn matched_row_raw_dtype_metadata_change_fails() {
+    let baseline_row = Row {
+        kind: "header-export".to_string(),
+        id: "planted.h: void f ( int dtype ) ;".to_string(),
+        flags: vec![],
+        citation: GRANDFATHER_PLAIN_CITATION.to_string(),
+    };
+    let mut current_row = baseline_row.clone();
+    current_row.flags = vec!["raw-dtype-int".to_string()];
+    let baseline = Baseline {
+        version: 2,
+        legs: coverage_manifest(),
+        rows: vec![baseline_row],
+    };
+    let err = check_against_baseline(&[current_row], &baseline).unwrap_err();
+    assert!(
+        err.contains("ENFORCEMENT METADATA CHANGED") && err.contains("raw-dtype-int"),
+        "raw-dtype classification is enforcement metadata: {err}"
+    );
+}
+
+#[test]
+fn unrelated_observation_atom_is_not_a_numeric_registration() {
+    let mut rows = header_rows_local("planted.h", "int64_t chelis_abs_i64(int64_t value);");
+    let mut row = rows.remove(0);
+    row.citation = "chelis#729; spec/05-risc-primitives.md [05-OBS-1]".to_string();
+    let baseline = Baseline {
+        version: 2,
+        legs: coverage_manifest(),
+        rows: vec![row.clone()],
+    };
+    let registration = SemanticRegistration {
+        callable: "[header-export] planted.h: int64_t chelis_abs_i64 ( int64_t value ) ;",
+        atom: "[05-OBS-1]",
+    };
+    let spec = fs::read_to_string(repo_root().join(CONTROLLING_SPEC_REL)).unwrap();
+    let err = check_against_baseline_with(&[row], &baseline, &[registration], &spec).unwrap_err();
+    assert!(
+        err.contains("NUMERIC OP WITHOUT EXACT SEMANTIC REGISTRATION")
+            && err.contains("wrong atom grammar/group")
+            && err.contains("05-OBS-1"),
+        "an unrelated existing atom must not bless a callable: {err}"
+    );
+}
+
+#[test]
+fn nonexistent_operation_atom_is_not_a_numeric_registration() {
+    let mut row =
+        header_rows_local("planted.h", "int64_t chelis_abs_i64(int64_t value);").remove(0);
+    row.citation = "chelis#729".to_string();
+    let baseline = Baseline {
+        version: 2,
+        legs: coverage_manifest(),
+        rows: vec![row.clone()],
+    };
+    let registration = SemanticRegistration {
+        callable: "[header-export] planted.h: int64_t chelis_abs_i64 ( int64_t value ) ;",
+        atom: "[05-OP-999]",
+    };
+    let err =
+        check_against_baseline_with(&[row], &baseline, &[registration], "no op atoms").unwrap_err();
+    assert!(
+        err.contains("does not exist as a normative") && err.contains("[05-OP-999]"),
+        "a syntactically valid but absent atom must fail: {err}"
+    );
+}
+
+#[test]
+fn operation_atom_cross_reference_is_not_a_normative_definition() {
+    let mut row =
+        header_rows_local("planted.h", "int64_t chelis_abs_i64(int64_t value);").remove(0);
+    row.citation = "chelis#729".to_string();
+    let baseline = Baseline {
+        version: 2,
+        legs: coverage_manifest(),
+        rows: vec![row.clone()],
+    };
+    let registration = SemanticRegistration {
+        callable: "[header-export] planted.h: int64_t chelis_abs_i64 ( int64_t value ) ;",
+        atom: "[05-OP-1]",
+    };
+    let err = check_against_baseline_with(
+        &[row],
+        &baseline,
+        &[registration],
+        "A cross-reference to [05-OP-1] is not its definition.",
+    )
+    .unwrap_err();
+    assert!(
+        err.contains("does not exist as a normative"),
+        "a textual mention must not satisfy atom existence: {err}"
+    );
+}
+
+#[test]
+fn registered_numeric_callable_still_requires_issue_reference() {
+    let mut row =
+        header_rows_local("planted.h", "int64_t chelis_abs_i64(int64_t value);").remove(0);
+    row.citation = "reviewed semantic registration".to_string();
+    let baseline = Baseline {
+        version: 2,
+        legs: coverage_manifest(),
+        rows: vec![row.clone()],
+    };
+    let registration = SemanticRegistration {
+        callable: "[header-export] planted.h: int64_t chelis_abs_i64 ( int64_t value ) ;",
+        atom: "[05-OP-1]",
+    };
+    let err = check_against_baseline_with(
+        &[row],
+        &baseline,
+        &[registration],
+        "> **[05-OP-1]** Synthetic exact callable semantics.",
+    )
+    .unwrap_err();
+    assert!(
+        err.contains("CITATION NAMES NO ISSUE")
+            && !err.contains("NUMERIC OP WITHOUT EXACT SEMANTIC REGISTRATION"),
+        "registration and live-issue citation are independent obligations: {err}"
+    );
+}
+
+fn planted_numeric_adt(variant_name: &str) -> Expr {
+    let span = chelis_deep::Span::new(0, 0);
+    let tprim = Expr::node(
+        DeepTag::TPrim,
+        Default::default(),
+        vec![Expr::Atom(Atom::Symbol("f64".to_string()), span)],
+        span,
+    );
+    let variant = Expr::node(
+        DeepTag::Variant,
+        Default::default(),
+        vec![
+            Expr::Atom(Atom::Symbol(variant_name.to_string()), span),
+            tprim,
+        ],
+        span,
+    );
+    Expr::node(
+        DeepTag::Deftype,
+        Default::default(),
+        vec![
+            Expr::Atom(Atom::Symbol("Json".to_string()), span),
+            Expr::List(List { elements: vec![] }, span),
+            variant,
+        ],
+        span,
+    )
+}
+
+#[test]
+fn std_adt_identity_changes_when_same_dtype_variant_changes() {
+    let mut before = Vec::new();
+    let mut after = Vec::new();
+    scan_deftypes(&[planted_numeric_adt("JNum")], "planted", &mut before);
+    scan_deftypes(&[planted_numeric_adt("JNumber")], "planted", &mut after);
+    assert_eq!(before.len(), 1);
+    assert_eq!(after.len(), 1);
+    assert_ne!(
+        before[0].id, after[0].id,
+        "variant and field shape, not only the dtype set, controls ADT identity"
+    );
+}
+
+#[test]
+fn exported_public_numeric_stdlib_def_is_enumerated() {
+    let decls = chelis_surf::parser::parse_str(
+        "module Planted\n\
+         export (public_numeric)\n\
+         def public_numeric(x: int64) -> int64 = x\n",
+    )
+    .expect("planted stdlib source parses");
+    let exprs = chelis_surf::desugar::desugar_program(&decls);
+    let mut rows = Vec::new();
+    scan_deftypes(&exprs, "planted", &mut rows);
+    assert!(
+        rows.iter()
+            .any(|row| { row.kind == "std-def-numeric" && row.id.contains("public_numeric") }),
+        "every exported numeric stdlib def must have a semantic-registration row: {rows:?}"
+    );
+}
+
+#[test]
+fn conditional_public_abi_is_mechanically_rejected() {
+    let dir = std::env::temp_dir().join(format!("census-context-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("temp include dir");
+    fs::write(
+        dir.join("planted.h"),
+        "#ifdef PLANTED_WIDE\n\
+         double chelis_contextual(double x);\n\
+         #else\n\
+         int64_t chelis_contextual(int64_t x);\n\
+         #endif\n",
+    )
+    .expect("write planted header");
+    let result = std::panic::catch_unwind(|| preprocessed_headers(&dir, &["planted.h"]));
+    fs::remove_dir_all(&dir).ok();
+    let panic = result.expect_err("context-varying public ABI must be rejected");
+    let message = if let Some(s) = panic.downcast_ref::<String>() {
+        s.as_str()
+    } else if let Some(s) = panic.downcast_ref::<&str>() {
+        s
+    } else {
+        ""
+    };
+    assert!(
+        message.contains("CONTEXT-VARYING PUBLIC ABI"),
+        "the rejection must teach the totality rule: {message}"
+    );
+}
+
+#[test]
+fn shared_header_cannot_have_multiple_public_macro_contexts() {
+    let dir = std::env::temp_dir().join(format!("census-root-context-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("temp include dir");
+    fs::write(
+        dir.join("shared.h"),
+        "CHELIS_NUM chelis_context_result(CHELIS_NUM value);\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("a.h"),
+        "#define CHELIS_NUM double\n#include \"shared.h\"\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("b.h"),
+        "#define CHELIS_NUM float\n#include \"shared.h\"\n",
+    )
+    .unwrap();
+    let result = std::panic::catch_unwind(|| preprocessed_headers(&dir, &["a.h", "b.h"]));
+    fs::remove_dir_all(&dir).ok();
+    let panic = result.expect_err("multiple public macro contexts must be rejected");
+    let message = if let Some(s) = panic.downcast_ref::<String>() {
+        s.as_str()
+    } else if let Some(s) = panic.downcast_ref::<&str>() {
+        s
+    } else {
+        ""
+    };
+    assert!(
+        message.contains("CONTEXT-VARYING PUBLIC ABI"),
+        "the rejection must name the context-invariance policy: {message}"
+    );
+}
+
+#[test]
+fn coverage_legs_cannot_claim_covered_without_live_oracles() {
+    let row = Row {
+        kind: "header-export".to_string(),
+        id: "planted.h: void plain(chelis_string s);".to_string(),
+        flags: vec![],
+        citation: GRANDFATHER_PLAIN_CITATION.to_string(),
+    };
+    let mut legs = coverage_manifest();
+    legs.deferred
+        .retain(|leg| leg.leg != "wire-schema-numeric-fields");
+    legs.covered.push(CoveredLeg {
+        leg: "wire-schema-numeric-fields".to_string(),
+        artifact: "invented".to_string(),
+        enumerator: "invented".to_string(),
+        command: "invented".to_string(),
+        expected_success: "invented".to_string(),
+        mutations: vec!["invented".to_string()],
+    });
+    let baseline = Baseline {
+        version: 2,
+        legs,
+        rows: vec![row.clone()],
+    };
+    let err = check_against_baseline(&[row], &baseline).unwrap_err();
+    assert!(
+        err.contains("INVALID COVERAGE MANIFEST")
+            && err.contains("wire-schema-numeric-fields")
+            && err.contains("enumerator")
+            && err.contains("mutation_oracle"),
+        "a prose relabel must not turn a deferred leg into covered: {err}"
+    );
 }
