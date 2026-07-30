@@ -66,7 +66,11 @@
 //!   a net-growth/net-shrink guard, not a per-occurrence identity; the
 //!   review rule owns the swap case, and loud_unsupported.md C4.5
 //!   already names count relocation among this inventory's known
-//!   evasions). The typed boundaries and their
+//!   evasions), and MACRO-COMPOSED format strings (a spec assembled by
+//!   `concat!`/`format_args!` indirection never appears as one
+//!   `{arg:spec}` in source; review rule - the scanner joins
+//!   string-continuation lines but does not expand macros). The typed
+//!   boundaries and their
 //!   mutation oracles close the semantic class; do not treat this inventory as
 //!   airtight.
 
@@ -77,11 +81,14 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 /// Declare the pattern enum AND its scan list from ONE variant list, so a
-/// variant cannot exist without being scanned. The previous shape - a
-/// hand list plus a hand index map plus a hand count - was satisfiable
-/// while omitting a variant (PR #962 red-team F5.1: a new variant could
-/// reuse an existing index and never join `ALL_PATS`); generation from a
-/// single source is the fix that needs no guard test.
+/// variant cannot exist without being ENUMERATED for scanning. The
+/// previous shape - a hand list plus a hand index map plus a hand count -
+/// was satisfiable while omitting a variant (PR #962 red-team F5.1).
+/// Enumeration alone does not prove a variant ever APPLIES (round-2 F4:
+/// a variant with empty scopes scans nothing while every suite stays
+/// green), so `sample()` forces a planted counterexample per variant at
+/// compile time and `every_pattern_trips_on_its_own_sample` executes
+/// each one.
 macro_rules! declare_pats {
     ($($(#[$meta:meta])* $name:ident,)+) => {
         /// The recidivist token classes from section C4.3 of the plan,
@@ -249,6 +256,54 @@ impl Pat {
         }
     }
 
+    /// A planted counterexample for THIS pattern: a scope-valid repo
+    /// path plus file content that must produce at least one count. The
+    /// `match` makes the compiler demand a sample from every new
+    /// variant, and `every_pattern_trips_on_its_own_sample` executes
+    /// each one - so a generated variant cannot be enumeration-complete
+    /// yet vacuous (PR #962 round-2 F4: a `NeverApplicable` variant with
+    /// empty scopes and an unreachable counter passed every suite).
+    fn sample(self) -> (&'static str, &'static str) {
+        match self {
+            Pat::StubZero => (
+                "crates/planted-crate/src/emit.rs",
+                "fn f(x: &str) -> String {\n    format!(\"/* unsupported {x} */ 0\")\n}\n",
+            ),
+            Pat::ValuePlaceholder => (
+                "crates/planted-crate/src/emit.rs",
+                "const PLACEHOLDER: &str = \"<value>\";\n",
+            ),
+            Pat::UnwrapOrDefault => (
+                "crates/chelis-ir/src/planted.rs",
+                "fn f(w: Option<Vec<u8>>) -> Vec<u8> {\n    w.unwrap_or_default()\n}\n",
+            ),
+            Pat::UnwrapOrPrim => (
+                "crates/chelis-ir/src/planted.rs",
+                "fn f(p: Option<Prim>) -> Prim {\n    p.unwrap_or(Prim::F32)\n}\n",
+            ),
+            Pat::ElemKindWildcardArm => (
+                "crates/chelis-backend-hip/src/planted.rs",
+                "fn k(p: Prim) -> ElemKind {\n    match p {\n        _ => kernels::ElemKind::F32,\n    }\n}\n",
+            ),
+            Pat::UnwrapOrNumericLiteral => (
+                "crates/chelis-ir/src/planted.rs",
+                "fn f(b: Option<f64>) -> f64 {\n    b.unwrap_or(0.0)\n}\n",
+            ),
+            Pat::CFormatNarrowing => (
+                "crates/planted-crate/src/emit.rs",
+                "const FMT: &str = \"%.16g\";\n",
+            ),
+            Pat::RustFormatNarrowing => (
+                "crates/planted-crate/src/emit.rs",
+                "fn f(v: f64) -> String {\n    format!(\"{v:.17}\")\n}\n",
+            ),
+            Pat::RustDebugNumericFormat => (
+                "crates/chelis-runtime/src/planted.rs",
+                "fn f(v: f64) -> String {\n    format!(\"{v:?}\")\n}\n",
+            ),
+        }
+    }
+
     fn count(self, content: &str) -> usize {
         fn occurrences(content: &str, token: &str) -> usize {
             content.matches(token).count()
@@ -283,16 +338,20 @@ impl Pat {
             // Comment lines are skipped for both Rust-lane classes so
             // prose ABOUT the grammar (observation.rs's doc comments
             // quote `{:?}` as the normative spelling) does not count as a
-            // live formatting site.
-            Pat::RustFormatNarrowing => content
-                .lines()
+            // live formatting site. LOGICAL lines, not physical ones:
+            // a Rust string continuation (`\` at end of line) joins
+            // before scanning, so a format spec split across physical
+            // lines is seen as the single spec the compiler sees (PR
+            // #962 round-2 F3).
+            Pat::RustFormatNarrowing => logical_lines(content)
+                .iter()
                 .filter(|line| !line.trim_start().starts_with("//"))
-                .map(count_precision_format_specs)
+                .map(|line| count_precision_format_specs(line))
                 .sum(),
-            Pat::RustDebugNumericFormat => content
-                .lines()
+            Pat::RustDebugNumericFormat => logical_lines(content)
+                .iter()
                 .filter(|line| !line.trim_start().starts_with("//"))
-                .map(count_debug_format_tokens)
+                .map(|line| count_debug_format_tokens(line))
                 .sum(),
         }
     }
@@ -711,6 +770,35 @@ fn count_numeric_defaults(line: &str) -> usize {
         + count(line, ".map_or(", numeric_after_ws)
 }
 
+/// Rust string continuations joined into logical lines: a line whose
+/// trailing backslash count is ODD ends in the escape `\<newline>`,
+/// which the compiler replaces (with the next line's leading
+/// whitespace) by nothing - so `format!("{value:\` on one physical line
+/// and `8.2}")` on the next is ONE format spec (PR #962 round-2 F3, an
+/// executed evasion of the per-physical-line scan). An EVEN trailing
+/// count is escaped literal backslashes, not a continuation.
+fn logical_lines(content: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut continuing = false;
+    for line in content.lines() {
+        let piece = if continuing { line.trim_start() } else { line };
+        let trailing = piece.chars().rev().take_while(|c| *c == '\\').count();
+        if trailing % 2 == 1 {
+            current.push_str(&piece[..piece.len() - 1]);
+            continuing = true;
+        } else {
+            current.push_str(piece);
+            out.push(std::mem::take(&mut current));
+            continuing = false;
+        }
+    }
+    if !current.is_empty() {
+        out.push(current);
+    }
+    out
+}
+
 /// The format specs of every `{arg:spec}`-shaped interpolation on one
 /// source line. An interpolation is `{`, an optional `[A-Za-z0-9_]*`
 /// argument (named or positional), `:`, then spec characters up to the
@@ -1042,11 +1130,59 @@ fn tripwire_goes_red_on_every_planted_token_class() {
     );
 }
 
-// The B2.8 scan-completeness property needs no guard test: `declare_pats!`
-// generates `ALL_PATS` from the same variant list that declares the enum,
-// so a variant that exists but never scans is not writable. (PR #962
-// red-team F5.1 showed the previous guard - a hand list, a hand index map,
-// and a hand count - could be satisfied while omitting a variant.)
+/// B2.8 applicability, executable: every pattern has a non-empty scope
+/// and trips on its own compiler-forced `sample()` counterexample. The
+/// `declare_pats!` macro guarantees ENUMERATION (a variant cannot miss
+/// `ALL_PATS`); this test guarantees APPLICABILITY (PR #962 round-2 F4:
+/// a macro-generated variant with empty scopes and an unreachable
+/// counter passed every suite, because nothing demanded that each
+/// variant can actually fire).
+#[test]
+fn every_pattern_trips_on_its_own_sample() {
+    for &pat in ALL_PATS {
+        assert!(
+            !pat.scopes().is_empty(),
+            "pattern `{}` has no scope; it can never scan anything",
+            pat.id()
+        );
+        let (rel, content) = pat.sample();
+        assert!(
+            pat.scopes().iter().any(|scope| rel.starts_with(scope)),
+            "pattern `{}`'s sample path {rel} sits outside its own scopes",
+            pat.id()
+        );
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(rel);
+        fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+        fs::write(&path, content).expect("write sample");
+        let got = violations(dir.path(), &[]);
+        assert!(
+            got.iter().any(|v| v.contains(pat.id())),
+            "pattern `{}` did not trip on its own sample; got: {got:?}",
+            pat.id()
+        );
+    }
+}
+
+/// PR #962 round-2 F3: a format spec split across physical lines by a
+/// Rust string continuation is the same spec after the compiler joins
+/// it, and must count. An even trailing-backslash run is a literal `\`,
+/// not a continuation, and must not join.
+#[test]
+fn scanners_count_string_continuation_split_specs() {
+    let precision = "fn f(value: f64) -> String {\n    format!(\"{value:\\\n8.2}\")\n}\n";
+    assert_eq!(Pat::RustFormatNarrowing.count(precision), 1);
+    let debug = "fn f(value: f64) -> String {\n    format!(\"{value:\\\n?}\")\n}\n";
+    assert_eq!(Pat::RustDebugNumericFormat.count(debug), 1);
+    // Even trailing backslashes are literal, not continuations: the
+    // interpolation never closes on its own line and must not count.
+    let literal = "let a = \"{v:\\\\\n.2}\";\n";
+    assert_eq!(Pat::RustFormatNarrowing.count(literal), 0);
+    // A continuation that lands inside a comment line still respects
+    // the comment filter on the joined line's start.
+    let commented = "// quotes the banned form {v:\\\n//   .2}\n";
+    assert_eq!(Pat::RustFormatNarrowing.count(commented), 0);
+}
 
 /// The precision-spec scanner: every narrowing spelling counts, on any
 /// argument form, and the format-type suffix is covered.

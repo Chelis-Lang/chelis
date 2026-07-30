@@ -384,7 +384,11 @@ For every dtype and every storable value:
    `OBSERVATION_EXIT_SURFACES`: directory prefixes deliberately, so a
    NEW file inside a declared surface is covered from its first line at
    baseline zero; creating an exit surface anywhere else obliges adding
-   its prefix in the same change set). The sanctioned implementations -
+   its prefix in the same change set). Both Rust classes scan LOGICAL
+   lines - string continuations (`\` at end of line) are joined first,
+   so a format spec split across physical lines is the single spec the
+   compiler sees (round-2 F3's executed evasion, closed). The
+   sanctioned implementations -
    the only sites where the grammar may be spelled directly - are
    `chelis-types/src/observation.rs` (`format_element`) and
    `chelis-runtime/src/format_shortest.rs` (`chelis_format_shortest`);
@@ -394,11 +398,14 @@ For every dtype and every storable value:
    value; today's diagnostic carriers are annotated in the tripwire
    baseline, retired by [#729]'s dtype-carrying payload plus the review
    rule), bare `{}` Display / `.to_string()` of a numeric payload (the
-   review rule; too common to token-scan), and exits born outside the
-   declared surfaces (the review rule). The Rust lane was added by the
-   2026-07-30 detector-scope review, after the rule's only instrument -
-   C tokens - let PR #891's Rust-side `format_f64_json` reach review
-   with no mechanical signal.
+   review rule; too common to token-scan), exits born outside the
+   declared surfaces (the review rule), and MACRO-COMPOSED format
+   strings (`concat!`/`format_args!` indirection assembles a spec that
+   never appears whole in source; the scanner joins string
+   continuations but does not expand macros - the review rule). The
+   Rust lane was added by the 2026-07-30 detector-scope review, after
+   the rule's only instrument - C tokens - let PR #891's Rust-side
+   `format_f64_json` reach review with no mechanical signal.
 5. **Discoveries fork** (shared rule): new unfaithful exits found
    mid-phase are filed, added to the census in the tracking issue, and
    scheduled - not silently absorbed.
@@ -427,14 +434,18 @@ For every dtype and every storable value:
    between what a rule claims and what its detector covers is itself a
    violation of this item - that gap is how `format_f64_json` shipped
    with no mechanical signal while §B2.4 said "either lane".
-   Enforcement, with its own limits stated (PR #962 red-team F5): the
-   Phase 2 oracle carries `B2_RULE_INSTRUMENTS`, one row per item of
-   this section, checked three ways - the doc's §B2 item list must
-   equal the manifest (a new rule lands only with a deliberate
-   instrument decision, which may be the literal review-rule entry with
-   a substantive justification), every named instrument must exist, and
-   every callable instrument must be INVOKED by one of the oracle's
-   run_* legs (callable-but-never-run is manifest theater). The oracle
+   Enforcement, with its own limits stated (PR #962 red-team F5, then
+   round-2 M2): the Phase 2 oracle carries `B2_RULE_INSTRUMENTS`, one
+   row per item of this section, checked three ways - the doc's §B2
+   item list must equal the manifest (a new rule lands only with a
+   deliberate instrument decision, which may be the literal review-rule
+   entry with a substantive justification), every named instrument must
+   exist, and every callable or suite instrument must have produced a
+   RUNTIME invocation receipt by the end of the run (the `@instrument`
+   decorator records execution; suites record on success). The first
+   cut checked invocation by scanning the oracle's own source, which
+   round-2 M2 refuted with an `if False:` branch - only a receipt
+   written by the running code counts. The oracle
    further requires every tripwire pattern whose `doc()` cites this
    document to carry an oracle coverage row (its per-class permitted
    baseline paths), closing the review's second finding one layer up.
@@ -463,19 +474,24 @@ For every dtype and every storable value:
    fires neither branch (PR #962 red-team F4; `loud_unsupported.md`
    §C4.5 has always named count relocation among the inventory's
    evasions, and the review rule owns the swap case); the exclusion
-   lists gained legs 2-3 via the harness's exclusion probes
+   lists gained legs 2-3 via TWO mechanisms with different trust
+   models (PR #962 round-2 M1 forced the split): the harness's
+   exclusion probes
    (`eval_f64_list_excluded_rows_still_narrow_through_the_f32_tag`,
    `c_lane_excluded_labels_still_fail_at_ingress`,
-   `c_lane_excluded_neg_zero_still_drops_the_sign`). Probe discipline,
-   hardened per PR #962's red team (F1/F2): each probe carries exactly
-   the unconditional `#[test]` attribute (checked structurally;
-   cfg-gated or cfg_attr-ignored probes fail the scan, unrecognized
-   attribute shapes fail closed), iterates the exclusion const itself
-   and prints a visited-labels receipt that the oracle - running each
-   probe individually - compares against the declared labels (a decoy
-   that stops iterating fails the receipt union), runs in the DEFAULT
-   suite so CI re-executes it continuously, and asserts each
-   exclusion's declared fingerprint: the chelis#717 F32-tag narrowing;
+   `c_lane_excluded_neg_zero_still_drops_the_sign`) are the CONTINUOUS
+   CI leg - each carries exactly the unconditional `#[test]` attribute
+   (checked structurally; cfg-gated or cfg_attr-ignored probes fail
+   the scan, unrecognized attribute shapes fail closed), iterates the
+   exclusion const itself, and prints an ORDERED visited receipt the
+   oracle compares against the probe's declared sequence with
+   multiplicity (shrunken, duplicated, or reordered receipts fail).
+   Receipts are probe-authored text, so a probe could forge them -
+   which is why the INDEPENDENT leg is
+   `run_exclusion_ground_truth`: the oracle itself writes the
+   per-label programs, runs eval and the C emitter, and re-derives
+   each exclusion's fingerprint from its own observations, trusting no
+   probe output. The fingerprints: the chelis#717 F32-tag narrowing;
    the chelis#751 bare-integer-literal EMISSION (the native-stage
    outcome is a per-toolchain SYMPTOM only - Clang rejects the literal,
    GCC warns and may corrupt the value or, for 128-bit-constant
@@ -614,22 +630,30 @@ documented corpus-exclusion lists ([#751] C ingress, [#717] eval
 earlier check pinned the lists against silent widening only, so a stale
 list overstating breakage stayed green): leg 1 is inventory equality
 against its `DECLARED_EXCLUSIONS` table, in both directions; legs 2-3
-are the harness's NON-ignored exclusion probes, whose existence,
-non-ignored status, and list-constant-driven bodies the oracle requires
-structurally while the probes themselves run as ordinary suite members
-(in CI continuously, and inside this oracle's harness leg). The probes'
-first execution shrank `EVAL_F64_LIST_EXCLUDED` by one row (`f64-tenth`
-rendered text-coincident since Phase 1's own-width renderer - a stale
-over-claim, caught exactly as designed). The oracle further runs the
+are carried twice, at different trust levels (round-2 M1): the
+harness's NON-ignored exclusion probes (existence, exactly-`#[test]`
+attributes, list-constant-driven bodies, and per-probe ORDERED
+receipts compared with multiplicity, all oracle-checked while the
+probes run as ordinary suite members in CI), and - independently -
+`run_exclusion_ground_truth`, where the oracle writes each excluded
+label's program itself, runs eval and the C emitter, and re-derives
+every exclusion fingerprint from its own observations, so no
+probe-authored output is trusted for the re-execution claim. The
+probes' first execution shrank `EVAL_F64_LIST_EXCLUDED` by one row
+(`f64-tenth` rendered text-coincident since Phase 1's own-width
+renderer - a stale over-claim, caught exactly as designed). The oracle
+further runs the
 `chelis_format_shortest` byte locks, requires every no-third-formatter
 tripwire class's baseline paths to stay inside its per-class permitted
 set (`FORMAT_CLASS_TABLE`: the C class's PRODUCTION allowlist stays
 empty; the Rust classes' sets are the frozen annotated non-exit
 carriers), requires every tripwire pattern whose `doc()` cites this
 document to be a `FORMAT_CLASS_TABLE` key (§B2.8's doc-citation
-parity), and checks this document's §B2 item list against its
+parity), checks this document's §B2 item list against its
 `B2_RULE_INSTRUMENTS` manifest (§B2.8: a rule lands only with a
-deliberate instrument decision).
+deliberate instrument decision), and finishes by verifying every
+manifest instrument's RUNTIME invocation receipt (round-2 M2: an
+instrument that never executed fails the run's final check).
 
 Scope, stated rather than assumed: the ignore-inventory equality covers
 the observation harness, this plan's own instrument. The sibling matrix

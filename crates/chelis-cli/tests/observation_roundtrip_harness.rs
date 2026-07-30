@@ -935,16 +935,18 @@ fn eval_f64_list_excluded_rows_still_narrow_through_the_f32_tag() {
     let out = eval_stdout(&float_table_program("f64", F64_ROWS, false)).expect("eval");
     let llines = list_lines(&out);
     assert_eq!(llines.len(), 2, "expected both to_list renders:\n{out}");
-    let mut visited = std::collections::BTreeSet::new();
-    for line in llines {
-        let elems = list_payload_elems(line);
-        assert_eq!(elems.len(), F64_ROWS.len(), "element count: {line}");
-        for label in EVAL_F64_LIST_EXCLUDED {
-            let (idx, row) = F64_ROWS
-                .iter()
-                .enumerate()
-                .find(|(_, r)| r.label == *label)
-                .unwrap_or_else(|| panic!("excluded label `{label}` is not an F64_ROWS row"));
+    let elems_per_line: Vec<Vec<String>> = llines.iter().map(|l| list_payload_elems(l)).collect();
+    for elems in &elems_per_line {
+        assert_eq!(elems.len(), F64_ROWS.len(), "element count:\n{out}");
+    }
+    let mut visited: Vec<&str> = Vec::new();
+    for label in EVAL_F64_LIST_EXCLUDED {
+        let (idx, row) = F64_ROWS
+            .iter()
+            .enumerate()
+            .find(|(_, r)| r.label == *label)
+            .unwrap_or_else(|| panic!("excluded label `{label}` is not an F64_ROWS row"));
+        for elems in &elems_per_line {
             let text = &elems[idx];
             let f32_bits = text_bits_at(text, Width::F32)
                 .unwrap_or_else(|e| panic!("[probe/{label}] to_list exit: {e}"));
@@ -973,15 +975,18 @@ fn eval_f64_list_excluded_rows_still_narrow_through_the_f32_tag() {
                  change set, so the main assertions cover it (B2.3: \
                  red-to-green only by un-ignoring)."
             );
-            visited.insert(*label);
         }
+        visited.push(label);
     }
-    // The execution receipt the oracle compares against the declared
-    // labels (PR #962 red-team F2: a probe that stops iterating the
-    // ledger must not still count as re-execution).
+    // The ordered execution receipt (PR #962 round-1 F2 and round-2 M1):
+    // exact sequence, compared by the oracle against the declared order
+    // with multiplicity. The receipt is still probe-authored text - the
+    // INDEPENDENT re-execution evidence is the oracle's own per-label
+    // ground-truth driver, which re-derives these facts without trusting
+    // this line.
     println!(
         "exclusion probe EVAL_F64_LIST_EXCLUDED visited: {}",
-        visited.into_iter().collect::<Vec<_>>().join(" ")
+        visited.join(" ")
     );
 }
 
