@@ -448,6 +448,56 @@ pub struct PreparedProgram {
     pub non_stdlib_decls: Vec<Decl>,
 }
 
+/// Linker-owned declaration graph emitted for machine consumers such as
+/// notebook shells (chelis#922). `complete` is load-bearing: an empty
+/// `declarations`/`edges` pair means analysis ran and found an empty graph.
+/// Callers must use an explicit unavailable record instead of constructing
+/// this type when no package/linker ownership context exists.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompilerDependencyGraph {
+    pub status: DependencyGraphStatus,
+    pub declarations: Vec<DependencyDeclaration>,
+    pub edges: Vec<DependencyReferenceEdge>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DependencyGraphStatus {
+    Complete,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DependencyDeclaration {
+    /// Deterministic declaration identity. It is independent of source bytes
+    /// and spans, so edits to a declaration body do not change its identity.
+    pub id: String,
+    /// Author-facing (pre-linker) declaration name.
+    pub name: String,
+    pub kind: String,
+    pub package: String,
+    pub module: String,
+    pub source: DependencySource,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DependencySource {
+    /// Package-relative source path, using `/` separators on every platform.
+    pub file: String,
+    pub span: DependencySpan,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DependencySpan {
+    pub offset: usize,
+    pub len: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct DependencyReferenceEdge {
+    pub from: String,
+    pub to: String,
+}
+
 impl PreparedProgram {
     /// Return the fail-closed declaration slice for checking a selected entry
     /// module after a prove verdict (chelis#924).
@@ -502,6 +552,594 @@ impl PreparedProgram {
             .filter(|(_, keep)| *keep)
             .map(|(decl, _)| decl.clone())
             .collect())
+    }
+}
+
+/// Return the complete linker-owned declaration graph for the Reef package
+/// containing `file`. `None` means that `file` is not a Reef package module;
+/// consumers must report that state as unavailable, not as a complete empty
+/// graph.
+pub fn dependency_graph_for_file(file: &Path) -> Result<Option<CompilerDependencyGraph>, String> {
+    let Some(root) = find_package_root_for_input(file)? else {
+        return Ok(None);
+    };
+    let graph = prepare_reef_graph_cached(&root)?;
+    Ok(Some(graph.compiler_dependency_graph()?))
+}
+
+impl PreparedReefGraph {
+    fn compiler_dependency_graph(&self) -> Result<CompilerDependencyGraph, String> {
+        #[derive(Clone)]
+        struct OwnedDecl {
+            node: DependencyDeclaration,
+            linked_names: Vec<String>,
+            linked_decl: Option<Decl>,
+        }
+
+        let mut owned = Vec::<OwnedDecl>::new();
+        for (package_name, package) in &self.graph.packages {
+            for module in package.modules.values() {
+                let rewritten = rewrite_module_decls(
+                    module,
+                    &self.graph,
+                    &self.internal_maps,
+                    &self.dep_shells,
+                )?;
+                let originals = module
+                    .decls
+                    .iter()
+                    .filter(|decl| !matches!(decl, Decl::Import { .. }))
+                    .collect::<Vec<_>>();
+                if originals.len() != rewritten.len() {
+                    return Err(format!(
+                        "dependency graph declaration alignment failed for module `{}`",
+                        module.module_name
+                    ));
+                }
+                let relative_file = Path::new(&module.source_root).join(module.file_rel.as_path());
+                let relative_file = relative_file.to_string_lossy().replace('\\', "/");
+                for (original, linked) in originals.into_iter().zip(rewritten) {
+                    let mut push_node =
+                        |kind: &str,
+                         name: &str,
+                         span: chelis_deep::Span,
+                         linked_names: Vec<String>,
+                         linked_decl: Option<Decl>| {
+                            owned.push(OwnedDecl {
+                                node: DependencyDeclaration {
+                                    id: stable_dependency_id(
+                                        package_name,
+                                        &module.module_name,
+                                        kind,
+                                        name,
+                                    ),
+                                    name: name.to_string(),
+                                    kind: kind.to_string(),
+                                    package: package_name.clone(),
+                                    module: module.module_name.clone(),
+                                    source: DependencySource {
+                                        file: relative_file.clone(),
+                                        span: DependencySpan {
+                                            offset: span.offset,
+                                            len: span.len,
+                                        },
+                                    },
+                                },
+                                linked_names,
+                                linked_decl,
+                            });
+                        };
+                    match (original, &linked) {
+                        (
+                            Decl::FunDef { name, span, .. },
+                            Decl::FunDef {
+                                name: linked_name, ..
+                            },
+                        ) => {
+                            push_node(
+                                "function",
+                                name,
+                                *span,
+                                vec![linked_name.clone()],
+                                Some(linked.clone()),
+                            );
+                        }
+                        (
+                            Decl::LetDef { name, span, .. },
+                            Decl::LetDef {
+                                name: linked_name, ..
+                            },
+                        ) => {
+                            push_node(
+                                "value",
+                                name,
+                                *span,
+                                vec![linked_name.clone()],
+                                Some(linked.clone()),
+                            );
+                        }
+                        (
+                            Decl::Property { name, span, .. },
+                            Decl::Property {
+                                name: linked_name, ..
+                            },
+                        ) => push_node(
+                            "property",
+                            name,
+                            *span,
+                            vec![linked_name.clone()],
+                            Some(linked.clone()),
+                        ),
+                        (
+                            Decl::TypeAlias { name, span, .. },
+                            Decl::TypeAlias {
+                                name: linked_name, ..
+                            },
+                        ) => push_node(
+                            "type_alias",
+                            name,
+                            *span,
+                            vec![linked_name.clone()],
+                            Some(linked.clone()),
+                        ),
+                        (
+                            Decl::MacroDef { name, span, .. },
+                            Decl::MacroDef {
+                                name: linked_name, ..
+                            },
+                        ) => push_node(
+                            "macro",
+                            name,
+                            *span,
+                            vec![linked_name.clone()],
+                            Some(linked.clone()),
+                        ),
+                        (
+                            Decl::TypeDef {
+                                name,
+                                variants,
+                                span,
+                                ..
+                            },
+                            Decl::TypeDef {
+                                name: linked_name,
+                                variants: linked_variants,
+                                ..
+                            },
+                        ) => {
+                            push_node(
+                                "type",
+                                name,
+                                *span,
+                                vec![linked_name.clone()],
+                                Some(linked.clone()),
+                            );
+                            for (variant, linked_variant) in
+                                variants.iter().zip(linked_variants.iter())
+                            {
+                                push_node(
+                                    "constructor",
+                                    &variant.name,
+                                    variant.span,
+                                    vec![linked_variant.name.clone()],
+                                    None,
+                                );
+                            }
+                        }
+                        (Decl::Dim { names, span }, Decl::Dim { .. }) => {
+                            let internals = self
+                                .internal_maps
+                                .get(&(package_name.clone(), module.module_name.clone()));
+                            for name in names {
+                                push_node(
+                                    "dimension",
+                                    name,
+                                    *span,
+                                    internals
+                                        .and_then(|names| names.get(name))
+                                        .cloned()
+                                        .into_iter()
+                                        .collect(),
+                                    None,
+                                );
+                            }
+                        }
+                        (
+                            Decl::Sig { .. } | Decl::Export { .. },
+                            Decl::Sig { .. } | Decl::Export { .. },
+                        ) => {}
+                        _ => {
+                            return Err(format!(
+                                "dependency graph declaration alignment drifted in module `{}`",
+                                module.module_name
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
+        // The Reef linker has already resolved every top-level reference to
+        // its collision-proof internal binding. Mapping those names to stable
+        // declaration IDs is therefore attribution from the compiler record,
+        // not a second source-language resolver.
+        let mut binding_to_ids = BTreeMap::<String, Vec<(String, String)>>::new();
+        for decl in &owned {
+            for linked_name in &decl.linked_names {
+                binding_to_ids
+                    .entry(linked_name.clone())
+                    .or_default()
+                    .push((decl.node.kind.clone(), decl.node.id.clone()));
+            }
+        }
+        let mut all_edges = BTreeSet::<DependencyReferenceEdge>::new();
+        for decl in &owned {
+            let Some(linked_decl) = &decl.linked_decl else {
+                continue;
+            };
+            let mut references = BTreeSet::new();
+            collect_decl_references(linked_decl, &mut references);
+            let mut type_references = BTreeSet::new();
+            collect_decl_type_references(linked_decl, &mut type_references);
+            let mut constructor_references = BTreeSet::new();
+            collect_decl_constructor_references(linked_decl, &mut constructor_references);
+            for reference in references {
+                if let Some(targets) = binding_to_ids.get(&reference) {
+                    for (kind, target) in targets {
+                        let namespace_matches = match kind.as_str() {
+                            "constructor" => constructor_references.contains(&reference),
+                            "type" | "type_alias" | "dimension" => {
+                                type_references.contains(&reference)
+                            }
+                            _ => true,
+                        };
+                        if namespace_matches && target != &decl.node.id {
+                            all_edges.insert(DependencyReferenceEdge {
+                                from: decl.node.id.clone(),
+                                to: target.clone(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        // A root-package report owns every root declaration, including unused
+        // notebook cells. Dependency-package declarations enter only when a
+        // root declaration references them transitively; this preserves import
+        // attribution without dumping the entire bundled stdlib into every
+        // prove summary.
+        let mut selected = owned
+            .iter()
+            .filter(|decl| decl.node.package == self.graph.root_package)
+            .map(|decl| decl.node.id.clone())
+            .collect::<BTreeSet<_>>();
+        loop {
+            let before = selected.len();
+            for edge in &all_edges {
+                if selected.contains(&edge.from) {
+                    selected.insert(edge.to.clone());
+                }
+            }
+            if selected.len() == before {
+                break;
+            }
+        }
+
+        let mut declarations = owned
+            .into_iter()
+            .map(|decl| decl.node)
+            .filter(|node| selected.contains(&node.id))
+            .collect::<Vec<_>>();
+        declarations.sort_by(|left, right| left.id.cmp(&right.id));
+        let edges = all_edges
+            .into_iter()
+            .filter(|edge| selected.contains(&edge.from) && selected.contains(&edge.to))
+            .collect();
+        Ok(CompilerDependencyGraph {
+            status: DependencyGraphStatus::Complete,
+            declarations,
+            edges,
+        })
+    }
+}
+
+fn stable_dependency_id(package: &str, module: &str, kind: &str, name: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"chelis-declaration-v1\0");
+    for component in [package, module, kind, name] {
+        hasher.update(component.as_bytes());
+        hasher.update(b"\0");
+    }
+    let digest = hasher.finalize();
+    let hex = digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("decl:{hex}")
+}
+
+fn collect_decl_type_references(decl: &Decl, out: &mut BTreeSet<String>) {
+    match decl {
+        Decl::Module { decls, .. } => {
+            for decl in decls {
+                collect_decl_type_references(decl, out);
+            }
+        }
+        Decl::Sig { ty, .. } | Decl::TypeAlias { ty, .. } => collect_type_references(ty, out),
+        Decl::TypeDef {
+            variants,
+            invariant,
+            ..
+        } => {
+            for variant in variants {
+                match &variant.fields {
+                    VariantFields::Positional(types) => {
+                        for ty in types {
+                            collect_type_references(ty, out);
+                        }
+                    }
+                    VariantFields::Record(fields) => {
+                        for (_, ty) in fields {
+                            collect_type_references(ty, out);
+                        }
+                    }
+                }
+            }
+            if let Some(invariant) = invariant {
+                collect_expr_type_references(&invariant.body, out);
+            }
+        }
+        Decl::FunDef {
+            params,
+            ret_ty,
+            body,
+            ..
+        } => {
+            for param in params {
+                if let Some(ty) = &param.ty {
+                    collect_type_references(ty, out);
+                }
+            }
+            if let Some(ty) = ret_ty {
+                collect_type_references(ty, out);
+            }
+            collect_expr_type_references(body, out);
+        }
+        Decl::Property {
+            params,
+            preconditions,
+            body,
+            options,
+            ..
+        } => {
+            for param in params {
+                if let Some(ty) = &param.ty {
+                    collect_type_references(ty, out);
+                }
+            }
+            for expression in preconditions {
+                collect_expr_type_references(expression, out);
+            }
+            collect_expr_type_references(body, out);
+            for option in options {
+                match option {
+                    PropertyOption::Tolerance(expression, _)
+                    | PropertyOption::Seed(expression, _)
+                    | PropertyOption::Samples(expression, _) => {
+                        collect_expr_type_references(expression, out);
+                    }
+                    PropertyOption::Contract(_, _) => {}
+                }
+            }
+        }
+        Decl::LetDef { ty, value, .. } => {
+            if let Some(ty) = ty {
+                collect_type_references(ty, out);
+            }
+            collect_expr_type_references(value, out);
+        }
+        Decl::MacroDef { body, .. } => collect_expr_type_references(body, out),
+        Decl::Dim { .. } | Decl::Import { .. } | Decl::Export { .. } => {}
+    }
+}
+
+fn collect_expr_type_references(expr: &Expr, out: &mut BTreeSet<String>) {
+    match expr {
+        Expr::Lit(_, _) | Expr::Var(_, _) | Expr::Constructor(_, _) => {}
+        Expr::Apply(callee, arguments, _) => {
+            collect_expr_type_references(callee, out);
+            for argument in arguments {
+                collect_expr_type_references(argument, out);
+            }
+        }
+        Expr::List(items, _) | Expr::Tuple(items, _) | Expr::Par(items, _) => {
+            for item in items {
+                collect_expr_type_references(item, out);
+            }
+        }
+        Expr::Record(_, fields, _) => {
+            for (_, value) in fields {
+                collect_expr_type_references(value, out);
+            }
+        }
+        Expr::Access(inner, _, _)
+        | Expr::TupleGet(inner, _, _)
+        | Expr::Unary(_, inner, _)
+        | Expr::Grad(inner, _, _)
+        | Expr::Vmap(inner, _, _)
+        | Expr::Jit(inner, _)
+        | Expr::Realize(inner, _)
+        | Expr::Copy(inner, _)
+        | Expr::Borrow(inner, _) => collect_expr_type_references(inner, out),
+        Expr::Binary(_, left, right, _)
+        | Expr::WithSeed(left, right, _)
+        | Expr::WithDevice(left, right, _) => {
+            collect_expr_type_references(left, out);
+            collect_expr_type_references(right, out);
+        }
+        Expr::Pipe(value, stages, _) => {
+            collect_expr_type_references(value, out);
+            for stage in stages {
+                collect_expr_type_references(stage, out);
+            }
+        }
+        Expr::If(condition, then_expression, else_expression, _) => {
+            collect_expr_type_references(condition, out);
+            collect_expr_type_references(then_expression, out);
+            collect_expr_type_references(else_expression, out);
+        }
+        Expr::Match(value, arms, _) => {
+            collect_expr_type_references(value, out);
+            for arm in arms {
+                if let Some(guard) = &arm.guard {
+                    collect_expr_type_references(guard, out);
+                }
+                collect_expr_type_references(&arm.body, out);
+            }
+        }
+        Expr::Lambda(params, body, _) => {
+            for param in params {
+                if let Some(ty) = &param.ty {
+                    collect_type_references(ty, out);
+                }
+            }
+            collect_expr_type_references(body, out);
+        }
+        Expr::Cast(inner, name, _) => {
+            collect_expr_type_references(inner, out);
+            out.insert(name.clone());
+        }
+        Expr::Annotate(inner, ty, _) => {
+            collect_expr_type_references(inner, out);
+            collect_type_references(ty, out);
+        }
+        Expr::Block(bindings, body, _) => {
+            for binding in bindings {
+                if let Some(ty) = &binding.ty {
+                    collect_type_references(ty, out);
+                }
+                collect_expr_type_references(&binding.value, out);
+            }
+            collect_expr_type_references(body, out);
+        }
+    }
+}
+
+fn collect_decl_constructor_references(decl: &Decl, out: &mut BTreeSet<String>) {
+    match decl {
+        Decl::Module { decls, .. } => {
+            for decl in decls {
+                collect_decl_constructor_references(decl, out);
+            }
+        }
+        Decl::TypeDef {
+            invariant: Some(invariant),
+            ..
+        } => collect_expr_constructor_references(&invariant.body, out),
+        Decl::FunDef { body, .. }
+        | Decl::LetDef { value: body, .. }
+        | Decl::MacroDef { body, .. } => collect_expr_constructor_references(body, out),
+        Decl::Property {
+            preconditions,
+            body,
+            options,
+            ..
+        } => {
+            for expression in preconditions {
+                collect_expr_constructor_references(expression, out);
+            }
+            collect_expr_constructor_references(body, out);
+            for option in options {
+                match option {
+                    PropertyOption::Tolerance(expression, _)
+                    | PropertyOption::Seed(expression, _)
+                    | PropertyOption::Samples(expression, _) => {
+                        collect_expr_constructor_references(expression, out);
+                    }
+                    PropertyOption::Contract(_, _) => {}
+                }
+            }
+        }
+        Decl::Sig { .. }
+        | Decl::Dim { .. }
+        | Decl::TypeDef {
+            invariant: None, ..
+        }
+        | Decl::TypeAlias { .. }
+        | Decl::Import { .. }
+        | Decl::Export { .. } => {}
+    }
+}
+
+fn collect_expr_constructor_references(expr: &Expr, out: &mut BTreeSet<String>) {
+    match expr {
+        Expr::Constructor(name, _) => {
+            out.insert(name.clone());
+        }
+        Expr::Record(name, fields, _) => {
+            out.insert(name.clone());
+            for (_, value) in fields {
+                collect_expr_constructor_references(value, out);
+            }
+        }
+        Expr::Lit(_, _) | Expr::Var(_, _) => {}
+        Expr::Apply(callee, arguments, _) => {
+            collect_expr_constructor_references(callee, out);
+            for argument in arguments {
+                collect_expr_constructor_references(argument, out);
+            }
+        }
+        Expr::List(items, _) | Expr::Tuple(items, _) | Expr::Par(items, _) => {
+            for item in items {
+                collect_expr_constructor_references(item, out);
+            }
+        }
+        Expr::Access(inner, _, _)
+        | Expr::TupleGet(inner, _, _)
+        | Expr::Unary(_, inner, _)
+        | Expr::Grad(inner, _, _)
+        | Expr::Vmap(inner, _, _)
+        | Expr::Jit(inner, _)
+        | Expr::Realize(inner, _)
+        | Expr::Copy(inner, _)
+        | Expr::Borrow(inner, _)
+        | Expr::Cast(inner, _, _)
+        | Expr::Annotate(inner, _, _) => collect_expr_constructor_references(inner, out),
+        Expr::Binary(_, left, right, _)
+        | Expr::WithSeed(left, right, _)
+        | Expr::WithDevice(left, right, _) => {
+            collect_expr_constructor_references(left, out);
+            collect_expr_constructor_references(right, out);
+        }
+        Expr::Pipe(value, stages, _) => {
+            collect_expr_constructor_references(value, out);
+            for stage in stages {
+                collect_expr_constructor_references(stage, out);
+            }
+        }
+        Expr::If(condition, then_expression, else_expression, _) => {
+            collect_expr_constructor_references(condition, out);
+            collect_expr_constructor_references(then_expression, out);
+            collect_expr_constructor_references(else_expression, out);
+        }
+        Expr::Match(value, arms, _) => {
+            collect_expr_constructor_references(value, out);
+            for arm in arms {
+                collect_pattern_references(&arm.pattern, out);
+                if let Some(guard) = &arm.guard {
+                    collect_expr_constructor_references(guard, out);
+                }
+                collect_expr_constructor_references(&arm.body, out);
+            }
+        }
+        Expr::Lambda(_, body, _) => collect_expr_constructor_references(body, out),
+        Expr::Block(bindings, body, _) => {
+            for binding in bindings {
+                collect_expr_constructor_references(&binding.value, out);
+            }
+            collect_expr_constructor_references(body, out);
+        }
     }
 }
 

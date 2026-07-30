@@ -137,6 +137,8 @@ pub fn cmd_prove(options: ProveOptions<'_>) -> Result<i32, String> {
     let mut totals = Summary::default();
     let mut worst = Status::Passed;
     let mut all_dependency_edges: Vec<serde_json::Value> = Vec::new();
+    let mut dependency_graphs = Vec::new();
+    let mut dependency_graph_unavailable = Vec::new();
     for input in &inputs {
         let status = match input.extension().and_then(|ext| ext.to_str()) {
             Some("ch") => prove_surf_file(input, &options, &mut totals)?,
@@ -155,9 +157,33 @@ pub fn cmd_prove(options: ProveOptions<'_>) -> Result<i32, String> {
                 }));
             }
         }
+        if options.json {
+            match compute_compiler_dependency_graph(input) {
+                Ok(Some(graph)) => dependency_graphs.push(graph),
+                Ok(None) => dependency_graph_unavailable.push(match input
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                {
+                    Some("dp") => format!(
+                        "{}: Deep input has no compiler-owned source-file declaration ownership",
+                        input.display()
+                    ),
+                    _ => format!(
+                        "{}: input is not a Reef package module, so stable linker ownership is unavailable",
+                        input.display()
+                    ),
+                }),
+                Err(reason) => dependency_graph_unavailable.push(format!(
+                    "{}: dependency analysis failed: {reason}",
+                    input.display()
+                )),
+            }
+        }
     }
 
     if options.json {
+        let dependency_graph =
+            merge_compiler_dependency_graphs(dependency_graphs, dependency_graph_unavailable);
         println!(
             "{}",
             json!({
@@ -169,6 +195,7 @@ pub fn cmd_prove(options: ProveOptions<'_>) -> Result<i32, String> {
                 "errors": totals.errors,
                 "obligations": totals.obligations,
                 "dependency_edges": all_dependency_edges,
+                "dependency_graph": dependency_graph,
             })
         );
     } else {
@@ -178,6 +205,41 @@ pub fn cmd_prove(options: ProveOptions<'_>) -> Result<i32, String> {
         );
     }
     Ok(worst.exit_code())
+}
+
+fn compute_compiler_dependency_graph(
+    path: &Path,
+) -> Result<Option<chelis_reef::CompilerDependencyGraph>, String> {
+    match path.extension().and_then(|extension| extension.to_str()) {
+        Some("ch") => chelis_reef::dependency_graph_for_file(path),
+        Some("dp") => Ok(None),
+        _ => Ok(None),
+    }
+}
+
+fn merge_compiler_dependency_graphs(
+    graphs: Vec<chelis_reef::CompilerDependencyGraph>,
+    unavailable: Vec<String>,
+) -> serde_json::Value {
+    if !unavailable.is_empty() {
+        return json!({
+            "status": "unavailable",
+            "reason": unavailable.join("; "),
+        });
+    }
+    let mut declarations = BTreeMap::<String, chelis_reef::DependencyDeclaration>::new();
+    let mut edges = std::collections::BTreeSet::new();
+    for graph in graphs {
+        for declaration in graph.declarations {
+            declarations.insert(declaration.id.clone(), declaration);
+        }
+        edges.extend(graph.edges);
+    }
+    json!({
+        "status": "complete",
+        "declarations": declarations.into_values().collect::<Vec<_>>(),
+        "edges": edges.into_iter().collect::<Vec<_>>(),
+    })
 }
 
 /// Compute property dependency edges for a single input file (chelis#490).

@@ -196,8 +196,37 @@ summary record.
 {"kind":"property","name":"call_price_non_negative","status":"passed","composite_verdict":"fuzz_validated","qualifiers":["fuzz_base"],"assumptions":[],"samples":100,"seed":0}
 {"kind":"property","name":"req_PRC_001","status":"failed","composite_verdict":"failed","assumptions":[],"samples":1,"seed":0,"source":{"kind":"bridge:c-earchin","spans":"references/pricing_rules.spans.json"}}
 {"kind":"property","name":"tensor_symbolic_shape","status":"unsupported","composite_verdict":"unsupported","assumptions":[],"reason":"symbolic tensor dimensions are not supported in L2 v1"}
-{"kind":"summary","total":3,"passed":1,"failed":1,"unsupported":1,"errors":0}
+{"kind":"summary","total":3,"passed":1,"failed":1,"unsupported":1,"errors":0,"dependency_graph":{"status":"complete","declarations":[{"id":"decl:…","name":"call_price","kind":"function","package":"pricing","module":"Pricing.BlackScholes","source":{"file":"src/black_scholes.ch","span":{"offset":42,"len":180}}}],"edges":[{"from":"decl:…property","to":"decl:…"}]}}
 ```
+
+The summary's `dependency_graph` is the compiler-owned declaration ownership
+wire (chelis#922):
+
+- `status:"complete"` means linker analysis ran. Empty `declarations` and
+  `edges` arrays are a complete empty result, not missing analysis.
+- `status:"unavailable"` carries a `reason` and never carries a guessed partial
+  graph. Bare Surf files have no stable Reef package/module identity, and Deep
+  inputs do not carry compiler-owned source-file ownership, so both are
+  unavailable.
+- A declaration `id` is the deterministic
+  `(package,module,kind,author-facing-name)` identity. Body and span edits keep
+  the ID stable; a rename changes it. Every node also carries the package,
+  module, declaration kind, and package-relative source file plus byte span.
+- Edges are stable-ID `from`/`to` pairs derived from Reef's linker-resolved Surf
+  AST. Consumers must not reconstruct ownership by parsing source. The graph
+  covers functions, values, properties, types, constructors, aliases, macros,
+  and each module-level dimension declaration; type/invariant/macro references
+  participate alongside value references.
+- Every root-package declaration is present, including unused declarations.
+  Referenced dependency-package declarations are included transitively. Linker
+  identity preserves same-name declarations, lexical shadowing, imports, and
+  cycles without name guessing.
+- A multi-input summary is `unavailable` if any selected input lacks complete
+  attribution; Chelis does not present a partial union as complete.
+
+The legacy name-only `dependency_edges` array remains additive and deprecated
+for at least one published release after `dependency_graph` is introduced.
+New consumers use only `dependency_graph`.
 
 Every `{kind:"property"}` and `{kind:"obligation"}` result record carries:
 

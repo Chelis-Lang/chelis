@@ -6,6 +6,18 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **`chelis prove --json` reports compiler-owned declaration dependencies
+  (chelis#922).** Reef-package summaries now carry a structured
+  `dependency_graph` with stable declaration IDs, package/module/source-span
+  ownership, and stable-ID edges derived from linker-resolved Surf AST.
+  Complete empty analysis is distinct from explicit `unavailable` analysis;
+  collisions, shadowing, imports, cycles, unused declarations, dimensions,
+  types, constructors, aliases, macros, and invariant references retain their
+  compiler identity. The legacy name-only `dependency_edges` field remains
+  for one compatibility release.
+
 ### Fixed
 
 - **Lint traversal exclusions are structured and configurable (chelis#740).**

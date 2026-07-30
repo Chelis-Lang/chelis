@@ -259,6 +259,27 @@ where (r > g):
         assert_eq!(prop["proof_tier"], "smt", "{prop}");
         assert_eq!(prop["arith_model"], "real", "{prop}");
     }
+    let summary = property_summary(&output.stdout);
+    let graph = &summary["dependency_graph"];
+    assert_eq!(graph["status"], "complete");
+    let declarations = graph["declarations"].as_array().expect("declarations");
+    let property = declarations
+        .iter()
+        .find(|node| node["module"] == "App.Proofs" && node["name"] == "double_identity")
+        .expect("root property node");
+    let dependency = declarations
+        .iter()
+        .find(|node| node["module"] == "Mylib.Math" && node["name"] == "double")
+        .expect("path-dependency function node");
+    assert_eq!(dependency["source"]["file"], "src/math.ch");
+    assert!(
+        graph["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|edge| edge["from"] == property["id"] && edge["to"] == dependency["id"]),
+        "linker graph must cross a path-package import: {graph}"
+    );
 }
 
 #[cfg(feature = "chelis-prove")]
@@ -3359,4 +3380,253 @@ def my_add(x: f32, y: f32) -> f32 = x + y
         refs.contains(&Value::String("my_add".to_string())),
         "references must contain 'my_add': {refs:?}"
     );
+    assert_eq!(
+        summary["dependency_graph"]["status"], "unavailable",
+        "a bare Surf file has no linker-owned package/module identity"
+    );
+}
+
+#[cfg(feature = "chelis-prove")]
+#[test]
+fn prove_json_dependency_graph_uses_linker_owned_ids_and_source_ownership() {
+    let dir = tempdir().expect("tempdir");
+    let root = dir.path().join("graphapp");
+    write_file(
+        &root.join("reef.toml"),
+        &format!(
+            r#"[package]
+name = "graphapp"
+version = "0.1.0"
+compiler = "={}"
+module_prefix = "Graph"
+"#,
+            env!("CARGO_PKG_VERSION")
+        ),
+    );
+    write_file(
+        &root.join("src/a.ch"),
+        "module Graph.A\n\
+         import Graph.B (same, from_b)\n\
+         def same(x: f32) -> f32 = x\n\
+         def unused(x: f32) -> f32 = x\n\
+         def through_b(x: f32) -> f32 = from_b(x)\n\
+         @property selected forall(same: f32): through_b(same) == same\n",
+    );
+    write_file(
+        &root.join("src/b.ch"),
+        "module Graph.B\n\
+         import Graph.A (through_b)\n\
+         export (same, from_b)\n\
+         dim rows\n\
+         type Wrapped =\n\
+           | Wrapped { value: f32 }\n\
+         type WrappedAlias = Wrapped\n\
+         def same(x: f32) -> f32 = x + 0.0\n\
+         def from_b(x: f32) -> f32 = same(x)\n\
+         macro via_macro(x) = same(x)\n\
+         def shaped(x: tensor[rows, f32]) -> tensor[rows, f32] = x\n\
+         def make(x: f32) -> Wrapped = Wrapped { value: x }\n\
+         def nonnegative(x: f32) -> bool = x >= 0.0\n\
+         @opaque\n\
+         @invariant(guard) nonnegative(guard.value)\n\
+         type Guard =\n\
+           | Guard { value: f32 }\n\
+         def cycle(x: f32) -> f32 = through_b(x)\n",
+    );
+    let entry = root.join("src/a.ch");
+
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "prove",
+            entry.to_str().unwrap(),
+            "--json",
+            "--tier",
+            "fuzz-only",
+        ])
+        .output()
+        .expect("run prove");
+    assert!(
+        output.status.success(),
+        "stdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let summary = property_summary(&output.stdout);
+    let graph = &summary["dependency_graph"];
+    assert_eq!(graph["status"], "complete", "{graph}");
+    let declarations = graph["declarations"].as_array().expect("declarations");
+    let edges = graph["edges"].as_array().expect("edges");
+
+    let find = |module: &str, name: &str| {
+        declarations
+            .iter()
+            .find(|node| node["module"] == module && node["name"] == name)
+            .unwrap_or_else(|| panic!("missing {module}.{name}: {declarations:?}"))
+    };
+    let a_same = find("Graph.A", "same");
+    let b_same = find("Graph.B", "same");
+    let selected = find("Graph.A", "selected");
+    let through_b = find("Graph.A", "through_b");
+    let from_b = find("Graph.B", "from_b");
+    let unused = find("Graph.A", "unused");
+    let rows = find("Graph.B", "rows");
+    let wrapped = find("Graph.B", "Wrapped");
+    let wrapped_constructor = declarations
+        .iter()
+        .find(|node| {
+            node["module"] == "Graph.B"
+                && node["name"] == "Wrapped"
+                && node["kind"] == "constructor"
+        })
+        .expect("constructor node");
+    let wrapped_alias = find("Graph.B", "WrappedAlias");
+    let via_macro = find("Graph.B", "via_macro");
+    let shaped = find("Graph.B", "shaped");
+    let make = find("Graph.B", "make");
+    let guard = find("Graph.B", "Guard");
+    let nonnegative = find("Graph.B", "nonnegative");
+    assert_ne!(
+        a_same["id"], b_same["id"],
+        "module collisions need distinct ids"
+    );
+    assert_eq!(unused["source"]["file"], "src/a.ch");
+    assert!(unused["source"]["span"]["len"].as_u64().unwrap() > 0);
+    assert!(
+        edges
+            .iter()
+            .any(|edge| edge["from"] == selected["id"] && edge["to"] == through_b["id"]),
+        "property parameter shadowing must not create an edge to Graph.A.same: {edges:?}"
+    );
+    assert!(
+        !edges
+            .iter()
+            .any(|edge| edge["from"] == selected["id"] && edge["to"] == a_same["id"]),
+        "the parameter named same shadows the declaration: {edges:?}"
+    );
+    assert!(
+        edges
+            .iter()
+            .any(|edge| edge["from"] == through_b["id"] && edge["to"] == from_b["id"]),
+        "import must resolve across the module boundary: {edges:?}"
+    );
+    assert!(
+        edges
+            .iter()
+            .any(|edge| edge["from"] == from_b["id"] && edge["to"] == b_same["id"]),
+        "same-name imported/local declarations must resolve by linker identity: {edges:?}"
+    );
+    assert_eq!(rows["kind"], "dimension");
+    assert!(
+        edges
+            .iter()
+            .any(|edge| edge["from"] == shaped["id"] && edge["to"] == rows["id"]),
+        "dimension declarations are graph definitions: {edges:?}"
+    );
+    assert_eq!(wrapped["kind"], "type");
+    assert_ne!(wrapped["id"], wrapped_constructor["id"]);
+    assert!(
+        edges
+            .iter()
+            .any(|edge| edge["from"] == wrapped_alias["id"] && edge["to"] == wrapped["id"]),
+        "type-alias references must target the type node: {edges:?}"
+    );
+    assert!(
+        edges
+            .iter()
+            .any(|edge| edge["from"] == make["id"] && edge["to"] == wrapped_constructor["id"]),
+        "constructor references must not collapse into the same-named type: {edges:?}"
+    );
+    assert!(
+        edges
+            .iter()
+            .any(|edge| edge["from"] == via_macro["id"] && edge["to"] == b_same["id"]),
+        "macro bodies participate in the resolved graph: {edges:?}"
+    );
+    assert!(
+        edges
+            .iter()
+            .any(|edge| edge["from"] == guard["id"] && edge["to"] == nonnegative["id"]),
+        "invariant-only references participate in the graph: {edges:?}"
+    );
+
+    let second = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "prove",
+            entry.to_str().unwrap(),
+            "--json",
+            "--tier",
+            "fuzz-only",
+        ])
+        .output()
+        .expect("repeat prove");
+    assert!(second.status.success());
+    assert_eq!(
+        property_summary(&second.stdout)["dependency_graph"],
+        *graph,
+        "stable ids and deterministic ordering must survive a repeat run"
+    );
+}
+
+#[test]
+fn prove_json_dependency_graph_marks_deep_analysis_unavailable() {
+    let dir = tempdir().expect("tempdir");
+    let input = dir.path().join("empty.dp");
+    std::fs::write(&input, "(module {})\n").expect("write Deep");
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["prove", input.to_str().unwrap(), "--json"])
+        .output()
+        .expect("run prove");
+    let summary = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|row| row["kind"] == "summary")
+        .expect("summary");
+    assert_eq!(summary["dependency_graph"]["status"], "unavailable");
+    assert!(
+        summary["dependency_graph"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("Deep"),
+        "{summary}"
+    );
+}
+
+#[cfg(feature = "chelis-prove")]
+#[test]
+fn prove_json_dependency_graph_distinguishes_complete_empty_from_unavailable() {
+    let dir = tempdir().expect("tempdir");
+    let root = dir.path().join("emptygraph");
+    write_file(
+        &root.join("reef.toml"),
+        &format!(
+            r#"[package]
+name = "emptygraph"
+version = "0.1.0"
+compiler = "={}"
+module_prefix = "Empty"
+"#,
+            env!("CARGO_PKG_VERSION")
+        ),
+    );
+    let entry = root.join("src/main.ch");
+    write_file(&entry, "module Empty.Main\n");
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["prove", entry.to_str().unwrap(), "--json"])
+        .output()
+        .expect("run prove");
+    assert!(
+        output.status.success(),
+        "stdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let graph = &property_summary(&output.stdout)["dependency_graph"];
+    assert_eq!(graph["status"], "complete");
+    assert_eq!(graph["declarations"], serde_json::json!([]));
+    assert_eq!(graph["edges"], serde_json::json!([]));
+    assert!(graph.get("reason").is_none(), "{graph}");
 }

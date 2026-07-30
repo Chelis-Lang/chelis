@@ -209,6 +209,15 @@ the prover subset until the compiler can build them.
 Exit codes are stable for CI: `0` pass, `1` counterexample, `2` selected
 property unsupported by the v1 generator, and `3` setup/input/config error.
 `--json` emits NDJSON property records followed by one summary record.
+For Reef-package Surf modules, that summary includes
+`dependency_graph:{status:"complete",declarations:[...],edges:[...]}`. Nodes
+carry stable compiler declaration IDs plus package/module and package-relative
+source-span ownership; edges use those IDs and come from linker-resolved AST,
+not downstream source parsing. A complete graph may be explicitly empty.
+Bare Surf, Deep, a failed attribution pass, or any incomplete member of a
+multi-input selection instead emits
+`dependency_graph:{status:"unavailable",reason:"..."}`. The deprecated,
+name-only `dependency_edges` field remains for one compatibility release.
 
 ## Output Contract
 
