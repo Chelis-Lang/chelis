@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::env;
 use std::fs;
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, Read, Write};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -328,6 +328,9 @@ enum Command {
         /// Per-test wall-clock timeout (seconds)
         #[clap(long, default_value = "30")]
         timeout: u64,
+        /// Whole-suite wall-clock timeout, including setup and finalization (seconds)
+        #[clap(long, default_value = "600")]
+        suite_timeout: u64,
         /// Test-file workers to run concurrently (`auto` uses available CPUs)
         #[clap(long, default_value = "auto", value_name = "N|auto")]
         jobs: TestJobs,
@@ -873,14 +876,16 @@ fn main() {
             filter,
             json,
             timeout,
+            suite_timeout,
             jobs,
             batch_mode,
             expect,
-        }) => match cmd_test(
+        }) => match cmd_test_supervised(
             path.as_deref(),
             filter.as_deref(),
             json,
             timeout,
+            suite_timeout,
             jobs,
             batch_mode,
             expect,
@@ -4279,6 +4284,597 @@ impl ExpectArg {
             ExpectArg::Blocked => chelis_conformance::expect::ExpectMode::Blocked,
         }
     }
+
+    fn cli_value(self) -> &'static str {
+        match self {
+            ExpectArg::Neg => "neg",
+            ExpectArg::Blocked => "blocked",
+        }
+    }
+}
+
+fn testing_hook_enabled(name: &str) -> bool {
+    env::var("CHELIS_TEST_INTERNAL_TESTING").as_deref() == Ok("1")
+        && env::var(name).as_deref() == Ok("1")
+}
+
+fn hang_test_suite_if_requested(name: &str) {
+    if testing_hook_enabled(name) {
+        loop {
+            thread::park();
+        }
+    }
+}
+
+fn write_test_progress_rows_if_requested(path: &Path) {
+    if env::var("CHELIS_TEST_INTERNAL_TESTING").as_deref() != Ok("1") {
+        return;
+    }
+    let Ok(count) = env::var("CHELIS_TEST_PROGRESS_ROWS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .ok_or(())
+    else {
+        return;
+    };
+    let Ok(file) = fs::OpenOptions::new().append(true).open(path) else {
+        return;
+    };
+    let mut out = io::BufWriter::new(file);
+    for index in 0..count {
+        if writeln!(
+            out,
+            "{{\"file\":\"tests/backpressure.ch\",\"test\":\"test_{index}\",\"status\":\"pass\"}}"
+        )
+        .is_err()
+        {
+            return;
+        }
+    }
+    let _ = out.flush();
+}
+
+#[cfg(unix)]
+fn create_cloexec_pipe() -> Result<(std::os::fd::OwnedFd, std::os::fd::OwnedFd), String> {
+    use std::os::fd::FromRawFd;
+
+    let mut fds = [-1; 2];
+    if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+        return Err(format!(
+            "create test supervisor pipe: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    for fd in fds {
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0 {
+            unsafe {
+                libc::close(fds[0]);
+                libc::close(fds[1]);
+            }
+            return Err(format!(
+                "protect test supervisor pipe: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+    }
+    Ok(unsafe {
+        (
+            std::os::fd::OwnedFd::from_raw_fd(fds[0]),
+            std::os::fd::OwnedFd::from_raw_fd(fds[1]),
+        )
+    })
+}
+
+#[cfg(unix)]
+fn start_forked_suite_parent_watchdog(pipe: std::os::fd::OwnedFd, progress_path: PathBuf) {
+    let mut pipe = std::fs::File::from(pipe);
+    thread::spawn(move || {
+        let mut byte = [0u8; 1];
+        loop {
+            match pipe.read(&mut byte) {
+                Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+                _ => {
+                    let _ = fs::remove_file(&progress_path);
+                    unsafe {
+                        libc::kill(0, libc::SIGKILL);
+                    }
+                    break;
+                }
+            }
+        }
+    });
+}
+
+#[cfg(unix)]
+fn ignore_test_suite_sigterm_if_requested() {
+    if testing_hook_enabled("CHELIS_TEST_IGNORE_SIGTERM") {
+        unsafe {
+            libc::signal(libc::SIGTERM, libc::SIG_IGN);
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn ignore_test_suite_sigterm_if_requested() {}
+
+#[allow(clippy::too_many_arguments)]
+fn cmd_test_supervised(
+    path: Option<&Path>,
+    filter: Option<&str>,
+    json: bool,
+    timeout_secs: u64,
+    suite_timeout_secs: u64,
+    jobs: TestJobs,
+    batch_mode: TestBatchMode,
+    expect: Option<ExpectArg>,
+) -> Result<i32, String> {
+    ensure_test_suite_supervision_supported()?;
+    if suite_timeout_secs == 0 {
+        return Err("`--suite-timeout` must be at least 1 second".to_string());
+    }
+    let progress_file = tempfile::Builder::new()
+        .prefix("chelis-test-progress-")
+        .suffix(".ndjson")
+        .tempfile()
+        .map_err(|e| format!("could not create suite progress file: {e}"))?;
+    let timeout = Duration::from_secs(suite_timeout_secs);
+    let suite_deadline = Instant::now().checked_add(timeout);
+    let output = run_forked_test_suite(
+        path,
+        filter,
+        json,
+        timeout_secs,
+        jobs,
+        batch_mode,
+        expect,
+        progress_file.path(),
+        timeout,
+    )
+    .map_err(|e| format!("could not supervise test suite: {e}"))?;
+    let batch_progress = read_test_batch_progress(progress_file.path());
+    if output.timed_out || output.leader_signaled {
+        let reason = if output.timed_out {
+            SuiteIncompleteReason::Timeout(suite_timeout_secs)
+        } else {
+            SuiteIncompleteReason::AbnormalLeaderExit
+        };
+        return render_incomplete_test_suite(&output.output, reason, json, expect, batch_progress);
+    }
+
+    let exit_code = output.output.status.code().unwrap_or(2);
+    let output_forwarded = match suite_deadline {
+        Some(deadline) => {
+            let stderr_forwarded = write_stream_bounded(
+                OutputStream::Stderr,
+                output.output.stderr,
+                deadline.saturating_duration_since(Instant::now()),
+            );
+            if !stderr_forwarded {
+                let _ = write_stream_bounded(
+                    OutputStream::Stdout,
+                    output_forwarding_failure_report(json, expect, suite_timeout_secs),
+                    Duration::from_secs(1),
+                );
+                return Ok(1);
+            }
+            write_stream_bounded(
+                OutputStream::Stdout,
+                output.output.stdout,
+                deadline.saturating_duration_since(Instant::now()),
+            )
+        }
+        None => {
+            io::stderr()
+                .write_all(&output.output.stderr)
+                .map_err(|e| e.to_string())?;
+            io::stdout()
+                .write_all(&output.output.stdout)
+                .map_err(|e| e.to_string())?;
+            true
+        }
+    };
+    if !output_forwarded {
+        let _ = write_stream_bounded(
+            OutputStream::Stderr,
+            output_forwarding_failure_diagnostic(suite_timeout_secs),
+            Duration::from_secs(1),
+        );
+        return Ok(1);
+    }
+    Ok(exit_code)
+}
+
+#[cfg(unix)]
+fn ensure_test_suite_supervision_supported() -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn ensure_test_suite_supervision_supported() -> Result<(), String> {
+    Err(
+        "`chelis test` whole-suite supervision requires Unix process-group semantics; \
+         this target is unsupported and the command is refusing to start without \
+         descendant-cleanup guarantees"
+            .to_string(),
+    )
+}
+
+fn read_test_batch_progress(path: &Path) -> Vec<serde_json::Value> {
+    let mut rows = Vec::new();
+    let Ok(bytes) = fs::read(path) else {
+        return rows;
+    };
+    for line in bytes.split(|byte| *byte == b'\n') {
+        if let Ok(value) = serde_json::from_slice::<serde_json::Value>(line)
+            && test_row_from_json(&value).is_some()
+        {
+            rows.push(value);
+        }
+    }
+    rows
+}
+
+#[derive(Clone, Copy)]
+enum SuiteIncompleteReason {
+    Timeout(u64),
+    AbnormalLeaderExit,
+}
+
+impl SuiteIncompleteReason {
+    fn message(self) -> String {
+        match self {
+            Self::Timeout(seconds) => {
+                format!("suite timeout after {seconds}s; terminated suite process group")
+            }
+            Self::AbnormalLeaderExit => {
+                "suite process exited abnormally; terminated remaining process group".to_string()
+            }
+        }
+    }
+
+    fn status(self) -> &'static str {
+        match self {
+            Self::Timeout(_) => "timeout",
+            Self::AbnormalLeaderExit => "abnormal-exit",
+        }
+    }
+}
+
+fn render_incomplete_test_suite(
+    output: &std::process::Output,
+    reason: SuiteIncompleteReason,
+    json: bool,
+    expect: Option<ExpectArg>,
+    batch_progress: Vec<serde_json::Value>,
+) -> Result<i32, String> {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut out = Vec::new();
+    let mut passed = 0usize;
+    let mut failed = 0usize;
+    let mut expect_ok = 0usize;
+    let mut expect_failed = 0usize;
+    let mut child_test_summary = None::<(usize, usize)>;
+    let mut child_expect_summary = None::<(usize, usize)>;
+
+    if json {
+        let mut seen = HashSet::<String>::new();
+        let records = batch_progress.into_iter().chain(
+            stdout
+                .lines()
+                .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok()),
+        );
+        for value in records {
+            let is_test_row = value.get("file").is_some()
+                && value.get("test").is_some()
+                && matches!(
+                    value.get("status").and_then(|status| status.as_str()),
+                    Some("pass" | "fail")
+                );
+            let is_expect_row = value.get("file").is_some()
+                && value.get("expect").is_some()
+                && value
+                    .get("verdict")
+                    .and_then(|verdict| verdict.as_str())
+                    .is_some();
+            if !is_test_row && !is_expect_row {
+                continue;
+            }
+            let key = serde_json::to_string(&value).map_err(|e| e.to_string())?;
+            if !seen.insert(key) {
+                continue;
+            }
+            if is_test_row {
+                match value.get("status").and_then(|status| status.as_str()) {
+                    Some("pass") => passed += 1,
+                    Some("fail") => failed += 1,
+                    _ => unreachable!("test-row shape checked above"),
+                }
+            } else if value.get("verdict").and_then(|verdict| verdict.as_str()) == Some("ok") {
+                expect_ok += 1;
+            } else {
+                expect_failed += 1;
+            }
+            writeln!(out, "{value}").map_err(|e| e.to_string())?;
+        }
+        let mut suite = serde_json::json!({
+            "status": reason.status(),
+            "incomplete": true,
+            "message": reason.message(),
+        });
+        if let SuiteIncompleteReason::Timeout(seconds) = reason {
+            suite["timeout_seconds"] = serde_json::json!(seconds);
+        }
+        writeln!(out, "{}", serde_json::json!({ "suite": suite })).map_err(|e| e.to_string())?;
+        if let Some(expect) = expect {
+            writeln!(
+                out,
+                "{}",
+                serde_json::json!({
+                    "summary": {
+                        "ok": expect_ok,
+                        "failed": expect_failed + 1,
+                        "mode": expect.cli_value(),
+                        "incomplete": true,
+                    }
+                })
+            )
+            .map_err(|e| e.to_string())?;
+        } else {
+            writeln!(
+                out,
+                "{}",
+                serde_json::json!({
+                    "summary": {
+                        "passed": passed,
+                        "failed": failed + 1,
+                        "incomplete": true,
+                    }
+                })
+            )
+            .map_err(|e| e.to_string())?;
+        }
+    } else {
+        if stdout.trim().is_empty() {
+            let mut last_file = None::<String>;
+            for value in batch_progress {
+                let Some(row) = test_row_from_json(&value) else {
+                    continue;
+                };
+                if last_file.as_deref() != Some(row.file.as_str()) {
+                    writeln!(out, "{}", row.file).map_err(|e| e.to_string())?;
+                    last_file = Some(row.file.clone());
+                }
+                writeln!(out, "  {}", row.render_plain()).map_err(|e| e.to_string())?;
+                match row.status {
+                    TestStatus::Pass => passed += 1,
+                    TestStatus::Fail => failed += 1,
+                }
+            }
+        }
+        for line in stdout.lines() {
+            if let Some(counts) = parse_plain_test_summary(line) {
+                child_test_summary = Some(counts);
+                continue;
+            }
+            if let Some(counts) = parse_plain_expect_summary(line, expect) {
+                child_expect_summary = Some(counts);
+                continue;
+            }
+            if expect.is_some() && line.starts_with("OK") {
+                expect_ok += 1;
+            } else if expect.is_some()
+                && [
+                    "SHOULD-HAVE-FAILED",
+                    "WRONG-DIAGNOSTIC",
+                    "FIX-DETECTED",
+                    "DRIFTED",
+                    "CONFIG-ERROR",
+                ]
+                .iter()
+                .any(|label| line.starts_with(label))
+            {
+                expect_failed += 1;
+            } else if expect.is_none()
+                && let Some(status) = plain_test_row_status(line)
+            {
+                match status {
+                    TestStatus::Pass => passed += 1,
+                    TestStatus::Fail => failed += 1,
+                }
+            }
+            writeln!(out, "{line}").map_err(|e| e.to_string())?;
+        }
+        if let Some((summary_passed, summary_failed)) = child_test_summary {
+            passed = summary_passed;
+            failed = summary_failed;
+        }
+        if let Some((summary_ok, summary_failed)) = child_expect_summary {
+            expect_ok = summary_ok;
+            expect_failed = summary_failed;
+        }
+        writeln!(out, "test-suite").map_err(|e| e.to_string())?;
+        writeln!(
+            out,
+            "  <suite> ....................... FAIL ({})",
+            reason.message()
+        )
+        .map_err(|e| e.to_string())?;
+        if let Some(expect) = expect {
+            writeln!(
+                out,
+                "\n{expect_ok} ok, {} failing ({} mode, suite incomplete)",
+                expect_failed + 1,
+                expect.cli_value()
+            )
+            .map_err(|e| e.to_string())?;
+        } else {
+            writeln!(
+                out,
+                "\n{passed} passed, {} failed (suite incomplete)",
+                failed + 1
+            )
+            .map_err(|e| e.to_string())?;
+        }
+    }
+    write_timeout_report_bounded(out, output.stderr.clone());
+    Ok(1)
+}
+
+fn write_timeout_report_bounded(stdout: Vec<u8>, stderr: Vec<u8>) {
+    const REPORT_GRACE: Duration = Duration::from_secs(1);
+    const STDOUT_SHARE: Duration = Duration::from_millis(800);
+    let deadline = Instant::now()
+        .checked_add(REPORT_GRACE)
+        .unwrap_or_else(Instant::now);
+    // Reserve part of the reporting grace for stderr. If stdout's consumer
+    // has stopped reading, consuming the entire grace there would suppress
+    // the only remaining channel for an honest incomplete-suite diagnostic.
+    let stdout_written = write_stream_bounded(OutputStream::Stdout, stdout, STDOUT_SHARE);
+    let mut stderr = stderr;
+    if !stdout_written {
+        stderr.extend_from_slice(
+            b"error: suite timeout report could not be written to stdout; suite incomplete\n",
+        );
+    }
+    let _ = write_stream_bounded(
+        OutputStream::Stderr,
+        stderr,
+        deadline.saturating_duration_since(Instant::now()),
+    );
+}
+
+#[derive(Clone, Copy)]
+enum OutputStream {
+    Stdout,
+    Stderr,
+}
+
+fn write_stream_bounded(stream: OutputStream, bytes: Vec<u8>, budget: Duration) -> bool {
+    if bytes.is_empty() {
+        return true;
+    }
+    let (done_tx, done_rx) = std::sync::mpsc::channel::<bool>();
+    thread::spawn(move || {
+        let written = match stream {
+            OutputStream::Stdout => {
+                let mut out = io::stdout().lock();
+                out.write_all(&bytes).and_then(|_| out.flush()).is_ok()
+            }
+            OutputStream::Stderr => {
+                let mut err = io::stderr().lock();
+                err.write_all(&bytes).and_then(|_| err.flush()).is_ok()
+            }
+        };
+        let _ = done_tx.send(written);
+    });
+    // The command dispatcher calls process::exit immediately after a failure
+    // return, terminating a writer blocked by consumer backpressure.
+    done_rx.recv_timeout(budget).unwrap_or(false)
+}
+
+fn output_forwarding_failure_diagnostic(timeout_secs: u64) -> Vec<u8> {
+    format!(
+        "error: suite output forwarding exceeded the {timeout_secs}s \
+         whole-command deadline; suite incomplete\n"
+    )
+    .into_bytes()
+}
+
+fn output_forwarding_failure_report(
+    json: bool,
+    expect: Option<ExpectArg>,
+    timeout_secs: u64,
+) -> Vec<u8> {
+    if json {
+        let summary = if let Some(expect) = expect {
+            serde_json::json!({
+                "summary": {
+                    "ok": 0,
+                    "failed": 1,
+                    "mode": expect.cli_value(),
+                    "incomplete": true,
+                }
+            })
+        } else {
+            serde_json::json!({
+                "summary": {
+                    "passed": 0,
+                    "failed": 1,
+                    "incomplete": true,
+                }
+            })
+        };
+        return format!(
+            "{}\n{summary}\n",
+            serde_json::json!({
+                "suite": {
+                    "status": "timeout",
+                    "incomplete": true,
+                    "message": format!(
+                        "suite output forwarding exceeded the {timeout_secs}s whole-command deadline"
+                    ),
+                }
+            })
+        )
+        .into_bytes();
+    }
+    let summary = if let Some(expect) = expect {
+        format!(
+            "0 ok, 1 failing ({} mode, suite incomplete)",
+            expect.cli_value()
+        )
+    } else {
+        "0 passed, 1 failed (suite incomplete)".to_string()
+    };
+    format!(
+        "test-suite\n  <suite> ....................... FAIL \
+         (output forwarding exceeded the {timeout_secs}s whole-command deadline)\n\
+         \n{summary}\n"
+    )
+    .into_bytes()
+}
+
+fn parse_plain_test_summary(line: &str) -> Option<(usize, usize)> {
+    let (passed, failed) = line.split_once(" passed, ")?;
+    let failed = failed.strip_suffix(" failed")?;
+    Some((passed.parse().ok()?, failed.parse().ok()?))
+}
+
+fn parse_plain_expect_summary(line: &str, expect: Option<ExpectArg>) -> Option<(usize, usize)> {
+    let expect = expect?;
+    let (ok, failed) = line.split_once(" ok, ")?;
+    let failed = failed.strip_suffix(&format!(" failing ({} mode)", expect.cli_value()))?;
+    Some((ok.parse().ok()?, failed.parse().ok()?))
+}
+
+fn plain_test_row_status(line: &str) -> Option<TestStatus> {
+    let row = line.strip_prefix("  ")?;
+    if row.ends_with(" PASS") {
+        return Some(TestStatus::Pass);
+    }
+    let (_, suffix) = row.rsplit_once(" FAIL")?;
+    if suffix.is_empty() || (suffix.starts_with(" (") && suffix.ends_with(')')) {
+        return Some(TestStatus::Fail);
+    }
+    None
+}
+
+fn test_row_from_json(value: &serde_json::Value) -> Option<TestRow> {
+    let status = match value.get("status")?.as_str()? {
+        "pass" => TestStatus::Pass,
+        "fail" => TestStatus::Fail,
+        _ => return None,
+    };
+    Some(TestRow {
+        file: value.get("file")?.as_str()?.to_string(),
+        test: value.get("test")?.as_str()?.to_string(),
+        status,
+        message: value
+            .get("message")
+            .and_then(|message| message.as_str())
+            .map(str::to_string),
+    })
 }
 
 #[derive(Clone)]
@@ -4303,6 +4899,7 @@ struct TestFileResult {
 /// * `0` — every selected test passed.
 /// * `1` — at least one test failed.
 /// * `2` — runner error (missing dir, missing reef package, or no test files parsed).
+#[allow(clippy::too_many_arguments)]
 fn cmd_test(
     path: Option<&Path>,
     filter: Option<&str>,
@@ -4311,6 +4908,7 @@ fn cmd_test(
     jobs: TestJobs,
     batch_mode: TestBatchMode,
     expect: Option<ExpectArg>,
+    progress_file: Option<&Path>,
 ) -> Result<i32, String> {
     // `--expect` runs an expected-failure suite over every probe; a name filter
     // is both ignored by `run_expect` and a false-green risk (a no-match filter
@@ -4549,6 +5147,7 @@ fn cmd_test(
                 &mut out,
                 &mut passed,
                 &mut failed,
+                progress_file,
             )?;
         }
     }
@@ -4793,6 +5392,7 @@ fn run_test_jobs_auto(
     out: &mut impl Write,
     passed: &mut usize,
     failed: &mut usize,
+    progress_file: Option<&Path>,
 ) -> Result<(), String> {
     let classified = classify_test_jobs_for_batch(test_jobs, filter);
     let mut rows_by_index = BTreeMap::<usize, Vec<TestRow>>::new();
@@ -4805,6 +5405,7 @@ fn run_test_jobs_auto(
             &classified.batch_jobs,
             timeout_secs,
             compiled_context_path,
+            progress_file,
         )? {
             BatchSubprocessOutcome::Rows(rows) => {
                 if !group_batch_rows_by_file(&classified.batch_jobs, rows, &mut rows_by_index) {
@@ -4951,6 +5552,7 @@ fn run_test_batch_subprocess(
     batch_jobs: &[TestBatchManifestFile],
     timeout_secs: u64,
     compiled_context_path: &Path,
+    progress_file: Option<&Path>,
 ) -> Result<BatchSubprocessOutcome, String> {
     let manifest = TestBatchManifest {
         files: batch_jobs.to_vec(),
@@ -4966,9 +5568,32 @@ fn run_test_batch_subprocess(
         .current_dir(cwd)
         .env("CHELIS_TEST_COMPILED_CONTEXT", compiled_context_path);
 
-    let output = match run_worker_command_with_timeout(
+    let mut progress = progress_file
+        .map(|path| {
+            fs::OpenOptions::new()
+                .append(true)
+                .open(path)
+                .map_err(|e| format!("open suite progress file `{}`: {e}", path.display()))
+        })
+        .transpose()?;
+    let output = match run_batch_worker_command_with_timeout(
         cmd,
         batch_worker_timeout(batch_jobs, timeout_secs),
+        |line| {
+            let line = line.strip_suffix(b"\n").unwrap_or(line);
+            let line = line.strip_suffix(b"\r").unwrap_or(line);
+            let Ok(value) = serde_json::from_slice::<serde_json::Value>(line) else {
+                return;
+            };
+            if test_row_from_json(&value).is_none() {
+                return;
+            }
+            if let Some(progress) = progress.as_mut() {
+                let _ = progress.write_all(line);
+                let _ = progress.write_all(b"\n");
+                let _ = progress.flush();
+            }
+        },
     ) {
         Ok(output) => output,
         Err(_) => return Ok(BatchSubprocessOutcome::Fallback),
@@ -5459,30 +6084,354 @@ fn tag_filter_inactive(row: &mut TestRow) {
 struct TestWorkerOutput {
     output: std::process::Output,
     timed_out: bool,
+    leader_signaled: bool,
 }
 
-fn run_worker_command_with_timeout(
+fn run_batch_worker_command_with_timeout<F>(
     mut cmd: std::process::Command,
     timeout: Duration,
-) -> Result<TestWorkerOutput, std::io::Error> {
+    mut on_stdout_line: F,
+) -> Result<TestWorkerOutput, std::io::Error>
+where
+    F: FnMut(&[u8]),
+{
     cmd.stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
+        // Batch stderr is operator output, not protocol. Inherit the suite
+        // worker's stderr so bytes flow directly to the public supervisor
+        // without buffering, UTF-8 conversion, or progress multiplexing.
+        .stderr(std::process::Stdio::inherit());
     let mut child = cmd.spawn()?;
-    let deadline = Instant::now() + timeout;
+    let child_stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| std::io::Error::other("batch stdout pipe missing"))?;
+    let (line_tx, line_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+    let stdout_reader = thread::spawn(move || {
+        let mut reader = io::BufReader::new(child_stdout);
+        let mut all = Vec::new();
+        loop {
+            let mut line = Vec::new();
+            let read = reader.read_until(b'\n', &mut line)?;
+            if read == 0 {
+                break;
+            }
+            all.extend_from_slice(&line);
+            if line_tx.send(line).is_err() {
+                break;
+            }
+        }
+        Ok::<_, std::io::Error>(all)
+    });
+    let deadline = Instant::now().checked_add(timeout);
     let mut timed_out = false;
     loop {
+        while let Ok(line) = line_rx.try_recv() {
+            on_stdout_line(&line);
+        }
         if child.try_wait()?.is_some() {
             break;
         }
-        if Instant::now() >= deadline {
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             timed_out = true;
             terminate_worker_process(&mut child)?;
             break;
         }
         thread::sleep(Duration::from_millis(20));
     }
-    let output = child.wait_with_output()?;
-    Ok(TestWorkerOutput { output, timed_out })
+    let status = child.wait()?;
+    let stdout = stdout_reader
+        .join()
+        .map_err(|_| std::io::Error::other("batch stdout reader panicked"))??;
+    while let Ok(line) = line_rx.try_recv() {
+        on_stdout_line(&line);
+    }
+    Ok(TestWorkerOutput {
+        output: std::process::Output {
+            status,
+            stdout,
+            stderr: Vec::new(),
+        },
+        timed_out,
+        leader_signaled: false,
+    })
+}
+
+fn run_worker_command_with_timeout(
+    cmd: std::process::Command,
+    timeout: Duration,
+) -> Result<TestWorkerOutput, std::io::Error> {
+    run_command_with_timeout(cmd, timeout)
+}
+
+#[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
+fn run_forked_test_suite(
+    path: Option<&Path>,
+    filter: Option<&str>,
+    json: bool,
+    timeout_secs: u64,
+    jobs: TestJobs,
+    batch_mode: TestBatchMode,
+    expect: Option<ExpectArg>,
+    progress_path: &Path,
+    timeout: Duration,
+) -> Result<TestWorkerOutput, std::io::Error> {
+    use std::os::fd::AsRawFd;
+
+    if testing_hook_enabled("CHELIS_TEST_FORCE_SUITE_FORK_FAILURE") {
+        return Err(std::io::Error::other("forced suite fork failure"));
+    }
+    let (stdout_read, stdout_write) = create_cloexec_pipe().map_err(std::io::Error::other)?;
+    let (stderr_read, stderr_write) = create_cloexec_pipe().map_err(std::io::Error::other)?;
+    let (supervisor_read, supervisor_write) =
+        create_cloexec_pipe().map_err(std::io::Error::other)?;
+    let progress_path = progress_path.to_path_buf();
+
+    // This is deliberately the first process-lifecycle operation: no reader
+    // or watchdog threads exist until after fork, so the child does not inherit
+    // a multithreaded runtime and never needs an externally addressable worker
+    // subcommand.
+    let pid = unsafe { libc::fork() };
+    if pid < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if pid == 0 {
+        drop(stdout_read);
+        drop(stderr_read);
+        drop(supervisor_write);
+        let stdout_fd = stdout_write.as_raw_fd();
+        let stderr_fd = stderr_write.as_raw_fd();
+        let setup_ok = unsafe {
+            libc::setpgid(0, 0) == 0
+                && libc::dup2(stdout_fd, libc::STDOUT_FILENO) >= 0
+                && libc::dup2(stderr_fd, libc::STDERR_FILENO) >= 0
+        };
+        drop(stdout_write);
+        drop(stderr_write);
+        if !setup_ok {
+            let _ = fs::remove_file(&progress_path);
+            unsafe {
+                libc::_exit(2);
+            }
+        }
+
+        start_forked_suite_parent_watchdog(supervisor_read, progress_path.clone());
+        ignore_test_suite_sigterm_if_requested();
+        write_test_progress_rows_if_requested(&progress_path);
+        hang_test_suite_if_requested("CHELIS_TEST_HANG_BEFORE_SUITE");
+        let code = match cmd_test(
+            path,
+            filter,
+            json,
+            timeout_secs,
+            jobs,
+            batch_mode,
+            expect,
+            Some(&progress_path),
+        ) {
+            Ok(code) => code,
+            Err(err) => {
+                eprintln!("error: {err}");
+                2
+            }
+        };
+        hang_test_suite_if_requested("CHELIS_TEST_HANG_AFTER_SUITE");
+        let _ = io::stdout().flush();
+        let _ = io::stderr().flush();
+        unsafe {
+            libc::_exit(code);
+        }
+    }
+
+    drop(stdout_write);
+    drop(stderr_write);
+    drop(supervisor_read);
+    let output = run_forked_suite_pid_with_timeout(pid, stdout_read, stderr_read, timeout);
+    // Keep this write end live until the child has been reaped and its output
+    // collected. If this public supervisor is killed, kernel closure wakes the
+    // child watchdog, which unlinks progress before killing the process group.
+    drop(supervisor_write);
+    output
+}
+
+#[cfg(not(unix))]
+#[allow(clippy::too_many_arguments)]
+fn run_forked_test_suite(
+    _path: Option<&Path>,
+    _filter: Option<&str>,
+    _json: bool,
+    _timeout_secs: u64,
+    _jobs: TestJobs,
+    _batch_mode: TestBatchMode,
+    _expect: Option<ExpectArg>,
+    _progress_path: &Path,
+    _timeout: Duration,
+) -> Result<TestWorkerOutput, std::io::Error> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "whole-suite descendant cleanup requires Unix process-group semantics",
+    ))
+}
+
+#[cfg(unix)]
+fn run_forked_suite_pid_with_timeout(
+    pid: libc::pid_t,
+    stdout_read: std::os::fd::OwnedFd,
+    stderr_read: std::os::fd::OwnedFd,
+    timeout: Duration,
+) -> Result<TestWorkerOutput, std::io::Error> {
+    use std::os::unix::process::ExitStatusExt;
+
+    let mut child_stdout = std::fs::File::from(stdout_read);
+    let mut child_stderr = std::fs::File::from(stderr_read);
+    let stdout_reader = thread::spawn(move || {
+        let mut bytes = Vec::new();
+        child_stdout.read_to_end(&mut bytes).map(|_| bytes)
+    });
+    let stderr_reader = thread::spawn(move || {
+        let mut bytes = Vec::new();
+        child_stderr.read_to_end(&mut bytes).map(|_| bytes)
+    });
+    let started = Instant::now();
+    let deadline = started.checked_add(timeout);
+    let suite_term_at = deadline.map(|deadline| {
+        deadline
+            .checked_sub(Duration::from_millis(200))
+            .unwrap_or(started)
+    });
+    let mut timed_out = false;
+    let mut suite_term_sent = false;
+    let wait_status = loop {
+        if let Some(status) = waitpid_nonblocking(pid)? {
+            // A leader may die while a worker still owns the captured pipes.
+            // Always quiesce its process group before joining reader threads;
+            // a legitimate leader has already reaped its workers, making this
+            // an ESRCH no-op.
+            send_suite_pid_signal(pid, libc::SIGKILL)?;
+            break status;
+        }
+        let now = Instant::now();
+        if !suite_term_sent && suite_term_at.is_some_and(|term_at| now >= term_at) {
+            timed_out = true;
+            suite_term_sent = true;
+            send_suite_pid_signal(pid, libc::SIGTERM)?;
+        }
+        if deadline.is_some_and(|deadline| now >= deadline) {
+            timed_out = true;
+            send_suite_pid_signal(pid, libc::SIGKILL)?;
+            break waitpid_blocking(pid)?;
+        }
+        thread::sleep(Duration::from_millis(20));
+    };
+    let stdout = stdout_reader
+        .join()
+        .map_err(|_| std::io::Error::other("child stdout reader panicked"))??;
+    let stderr = stderr_reader
+        .join()
+        .map_err(|_| std::io::Error::other("child stderr reader panicked"))??;
+    Ok(TestWorkerOutput {
+        output: std::process::Output {
+            status: std::process::ExitStatus::from_raw(wait_status),
+            stdout,
+            stderr,
+        },
+        timed_out,
+        leader_signaled: libc::WIFSIGNALED(wait_status),
+    })
+}
+
+#[cfg(unix)]
+fn waitpid_nonblocking(pid: libc::pid_t) -> Result<Option<libc::c_int>, std::io::Error> {
+    loop {
+        let mut status = 0;
+        match unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) } {
+            0 => return Ok(None),
+            value if value == pid => return Ok(Some(status)),
+            -1 if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted => {
+                continue;
+            }
+            -1 => return Err(std::io::Error::last_os_error()),
+            _ => {
+                return Err(std::io::Error::other(
+                    "waitpid returned an unexpected child",
+                ));
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+fn waitpid_blocking(pid: libc::pid_t) -> Result<libc::c_int, std::io::Error> {
+    loop {
+        let mut status = 0;
+        match unsafe { libc::waitpid(pid, &mut status, 0) } {
+            value if value == pid => return Ok(status),
+            -1 if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted => {
+                continue;
+            }
+            -1 => return Err(std::io::Error::last_os_error()),
+            _ => {
+                return Err(std::io::Error::other(
+                    "waitpid returned an unexpected child",
+                ));
+            }
+        }
+    }
+}
+
+fn run_command_with_timeout(
+    mut cmd: std::process::Command,
+    timeout: Duration,
+) -> Result<TestWorkerOutput, std::io::Error> {
+    cmd.stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut child = cmd.spawn()?;
+    let mut child_stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| std::io::Error::other("child stdout pipe missing"))?;
+    let mut child_stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| std::io::Error::other("child stderr pipe missing"))?;
+    let stdout_reader = thread::spawn(move || {
+        let mut bytes = Vec::new();
+        child_stdout.read_to_end(&mut bytes).map(|_| bytes)
+    });
+    let stderr_reader = thread::spawn(move || {
+        let mut bytes = Vec::new();
+        child_stderr.read_to_end(&mut bytes).map(|_| bytes)
+    });
+    let deadline = Instant::now().checked_add(timeout);
+    let mut timed_out = false;
+    loop {
+        if child.try_wait()?.is_some() {
+            break;
+        }
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            timed_out = true;
+            terminate_worker_process(&mut child)?;
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    let status = child.wait()?;
+    let stdout = stdout_reader
+        .join()
+        .map_err(|_| std::io::Error::other("child stdout reader panicked"))??;
+    let stderr = stderr_reader
+        .join()
+        .map_err(|_| std::io::Error::other("child stderr reader panicked"))??;
+    let output = std::process::Output {
+        status,
+        stdout,
+        stderr,
+    };
+    Ok(TestWorkerOutput {
+        output,
+        timed_out,
+        leader_signaled: false,
+    })
 }
 
 fn terminate_worker_process(child: &mut std::process::Child) -> Result<(), std::io::Error> {
@@ -5498,6 +6447,18 @@ fn terminate_worker_process(child: &mut std::process::Child) -> Result<(), std::
         thread::sleep(Duration::from_millis(20));
     }
     child.kill()
+}
+
+#[cfg(unix)]
+fn send_suite_pid_signal(pid: libc::pid_t, signal: libc::c_int) -> Result<(), std::io::Error> {
+    let rc = unsafe { libc::kill(-pid, signal) };
+    if rc != 0 {
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() != Some(libc::ESRCH) {
+            return Err(err);
+        }
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -5831,6 +6792,23 @@ fn load_test_execution_context() -> Result<TestExecutionContext, String> {
 }
 
 fn cmd_internal_test_batch(manifest_path: &Path, timeout: Duration) -> Result<i32, String> {
+    if env::var("CHELIS_TEST_INTERNAL_TESTING").as_deref() == Ok("1") {
+        let stderr = io::stderr();
+        let mut err = stderr.lock();
+        if let Ok(message) = env::var("CHELIS_TEST_BATCH_STDERR") {
+            err.write_all(message.as_bytes())
+                .and_then(|_| err.write_all(b"\n"))
+                .and_then(|_| err.flush())
+                .map_err(|e| format!("write batch stderr test hook: {e}"))?;
+        }
+        if let Ok(path) = env::var("CHELIS_TEST_BATCH_STDERR_FILE") {
+            let bytes = fs::read(&path)
+                .map_err(|e| format!("read batch stderr test hook file `{path}`: {e}"))?;
+            err.write_all(&bytes)
+                .and_then(|_| err.flush())
+                .map_err(|e| format!("write batch stderr test hook file: {e}"))?;
+        }
+    }
     if env::var("CHELIS_TEST_INTERNAL_TESTING").as_deref() == Ok("1")
         && env::var("CHELIS_TEST_FORCE_BATCH_ABORT").as_deref() == Ok("1")
     {
@@ -5895,6 +6873,15 @@ fn cmd_internal_test_batch(manifest_path: &Path, timeout: Duration) -> Result<i3
     })?;
     if let Some(e) = io_err {
         return Err(e);
+    }
+    if testing_hook_enabled("CHELIS_TEST_HANG_AFTER_BATCH") {
+        if let Ok(path) = env::var("CHELIS_TEST_HANG_PID_FILE") {
+            fs::write(path, std::process::id().to_string())
+                .map_err(|e| format!("write hung-batch pid file: {e}"))?;
+        }
+        loop {
+            thread::park();
+        }
     }
     Ok(if failed == 0 { 0 } else { 1 })
 }

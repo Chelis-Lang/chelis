@@ -463,6 +463,56 @@ $ chelis test tests/ --timeout 5
 
 A test that exceeds the budget fails with a timeout message and the run exits `1`.
 
+`--suite-timeout <seconds>` independently caps the complete public command,
+including Reef/context preparation, batch or file-worker execution, output
+collection, and finalization. The default is 600 seconds. When this deadline
+expires, the supervisor terminates the suite worker and every descendant,
+exits `1`, and reports an explicit incomplete-suite failure. It must not retry
+the same work through another execution mode after the suite deadline. Zero is
+not a valid suite timeout. Any cooperative termination grace is part of, rather
+than additional to, the advertised wall-clock deadline.
+
+In `--json` mode, every stdout line remains valid JSON. Completed test rows and
+completed `--expect` verdict records are retained, any child-produced summary
+is replaced, and the stream ends with an explicit timeout record plus a
+mode-correct summary whose `incomplete` field is `true` and whose failure count
+includes the suite timeout. A timed-out or killed suite must never emit a
+perfect-success summary. Batch workers must forward each flushed row to the
+suite supervisor before worker exit; collecting batch stdout only after exit
+does not satisfy this retention requirement.
+
+The public `test` subcommand always enters the supervisor. On Unix it forks the
+suite directly before creating reader threads; there is no externally
+addressable suite-worker subcommand and no environment variable may turn a
+public invocation into an unsupervised worker. A private inherited lifecycle
+pipe makes the child remove the exact progress file and kill its process group
+if the public supervisor disappears. Conversely, the public supervisor must
+kill the remaining process group on any suite-leader exit before joining
+captured-output readers. A signaled leader produces an explicit incomplete
+JSON or plain result, even if it died before emitting a row. Flushed
+batch rows travel through a supervisor-owned temporary NDJSON progress file,
+not stdout or stderr. Batch stderr remains a separate byte stream and is
+forwarded unchanged on success, fallback, and timeout. Plain-mode counts are
+derived from rendered result-row structure, never from `PASS`/`FAIL`
+substrings in filenames or diagnostic text.
+
+Captured-output forwarding is part of the whole-command deadline. If a
+consumer stops draining stdout or stderr, the public process exits `1` instead
+of waiting forever and reports the incomplete forwarding failure on any
+stream that remains writable. Timeout-report emission itself has a bounded
+one-second best-effort grace so backpressure cannot recreate the hang it is
+reporting. Normal captured stderr is delivered before normal stdout, so a
+blocked diagnostic stream can never leave a perfect-success summary on the
+machine stream; recovery is written only through the opposite stream.
+Deadline arithmetic uses checked `Instant` operations; every syntactically
+accepted `u64` timeout is non-panicking.
+
+Whole-suite deadline supervision currently requires Unix process-group
+semantics (the supported Linux and macOS release targets). On non-Unix targets,
+the public `chelis test` command fails closed before starting a suite rather
+than claiming descendant cleanup that the platform implementation cannot
+provide.
+
 ### Reef layout rule (hard)
 
 - `tests/` — Chelis-native test files. Run with `chelis test`. No C compiler, no
