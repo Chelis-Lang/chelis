@@ -323,8 +323,17 @@ pub(super) fn infer_permute_app(
 /// Swapping the argument order here would fix the direction but not the
 /// usefulness, and the order is inconsistent across `infer.rs` as a whole —
 /// settling that convention is a separate change with a much wider
-/// message-text blast radius. So this follows `infer_shrink_app` below:
-/// discard the unification error and substitute a message that names the fix.
+/// message-text blast radius (tracked on chelis#883). So this follows
+/// `infer_shrink_app` below and `infer_permute_app` above: discard the
+/// unification error and substitute a message that names the fix.
+///
+/// The structured `suggestions` are deliberately preserved. The old path
+/// reached `CheckError` through `From<TypeError>`, which attaches
+/// `["Insert explicit cast"]` for `PrecisionMismatch` (`errors.rs:379`);
+/// `suggestions` is a typed field on the compiler-api wire
+/// (`schema.rs:70-71`), so dropping it would migrate remediation out of a
+/// structured field and into prose — the direction chelis#886 exists to
+/// reverse. The suffix form leads because it is the shorter fix.
 fn reshape_shape_arg_error(
     list: &deep::List,
     shape_ty: &Type,
@@ -343,7 +352,10 @@ fn reshape_shape_arg_error(
                     subst.apply(shape_ty)
                 ),
             ),
-            vec![],
+            vec![
+                "Suffix each shape element with i64".to_string(),
+                "Insert explicit cast".to_string(),
+            ],
         )
     })
 }

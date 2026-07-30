@@ -50,6 +50,24 @@ would require a `chelis-types` edit outside the named file set).
 
 ## L1 — #208 §4.7.5: error message direction is inverted from spec
 
+> **Superseded by chelis#916 / PR #918 (2026-07-30).** The mechanism
+> described below — "the checker unifies the first element of the list
+> with each subsequent element, so the 'expected' side is whichever
+> element the unifier saw first" — is **wrong**, and the recommendation
+> it produced ("rewriting the spec narrative to match") was carried into
+> `spec/04-type-system.md` §4.7.5 and had to be reverted.
+>
+> There is no element-to-element unification. The shape argument is
+> unified with `List<Int64>` as a whole, so `[2, 2]` — which has no
+> intra-list disagreement at all — fails exactly as `[shape(x, 0), 4]`
+> does. The right conclusion was the one this entry talked itself out
+> of: the diagnostic was wrong and the spec was right to imply
+> "expected int64". §4.7.5 now carries the corrected mechanism and the
+> shipped message.
+>
+> Retained as the provenance record for how the inverted claim reached
+> the spec. Do not re-promote it.
+
 The spec narrative at `spec/04-type-system.md:706-715` describes
 `reshape`'s shape list as `List<Int64>` and says the bare
 `shape(x, k)` returns `int32`, "so a runtime axis size MUST be cast

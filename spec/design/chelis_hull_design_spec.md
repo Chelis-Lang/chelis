@@ -284,7 +284,8 @@ def type_check(ctx: Ctx, e: Expr) -> Option[(Type, EffectRow)] =
     -- (`crates/chelis-types/src/infer.rs`, dispatched from the `reshape` builtin).
     -- reshape(e, new_dims): e must be a tensor; new_dims is a value-level shape list.
     -- The shape list elements are int64 (the shipped path unifies the list against
-    -- List[Int64]; an int32 shape element is a PrecisionMismatch there). The output
+    -- List[Int64]; an int32 shape element is a TypeMismatch there, naming the i64
+    -- suffix / explicit-cast remediation -- chelis#916). The output
     -- element type is INVARIANT (precision is copied unchanged from the input). The
     -- output dims are rebuilt element-by-element from new_dims (lit/cast -> DLit, a
     -- shape(input, k) reference -> the input's dim at axis k, otherwise DVar/wildcard).

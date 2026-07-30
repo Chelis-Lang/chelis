@@ -71,6 +71,73 @@ fn unsuffixed_reshape_shape_list_names_the_int64_remediation() {
     );
 }
 
+/// The spec's own example (`spec/04-type-system.md` §4.7.5) — a mixed list
+/// whose first element is a bare `shape(x, 0)`.
+///
+/// This is the case that proves §4.7.5's stated *mechanism* wrong, not just
+/// its transcribed message. The spec says "the first list element fixes the
+/// 'expected' precision, and later entries that disagree trip the mismatch",
+/// which would make this a same-precision list (`shape(x, 0)` is int32, the
+/// literal `4` is int32) and therefore clean. It is not: the error comes from
+/// the *outer* `unify(&shape_ty, &List[Int64])`, so an internally consistent
+/// int32 list still fails — exactly as `[2, 2]` does.
+///
+/// Without this test only `[2, 2]` is covered, and a fix that moved just the
+/// homogeneous-literal case would look complete while leaving the spec's own
+/// example on the old message.
+#[test]
+fn spec_example_mixed_shape_list_names_the_int64_remediation() {
+    let src = "def rows(x) -> tensor[2, 4, f32] = reshape(x, [shape(x, 0), 4])\n";
+    let deep = surf_to_deep(src);
+    let rep = check_ir_program(&deep).expect_err("a bare shape(x, 0) list must be rejected");
+    let msgs = messages(&rep);
+
+    assert!(
+        msgs.iter()
+            .any(|m| m.contains("reshape expects an int64 shape list")),
+        "the spec's own §4.7.5 example must reach the new diagnostic, got {msgs:?}"
+    );
+    assert!(
+        !msgs
+            .iter()
+            .any(|m| m.contains("precision mismatch: expected int32, got int64")),
+        "the inverted precision-mismatch message must not survive here either; got {msgs:?}"
+    );
+}
+
+/// The remediation stays in the structured `suggestions` field rather than
+/// migrating into prose (chelis#886's direction). The pre-fix path attached
+/// `["Insert explicit cast"]` via `From<TypeError>`; emptying it would be a
+/// silent wire regression that no message assertion catches.
+#[test]
+fn the_remediation_stays_in_the_structured_suggestions_field() {
+    let src = "def fixed_dims(x) -> tensor[2, 2, f32] = reshape(x, [2, 2])\n";
+    let deep = surf_to_deep(src);
+    let rep = check_ir_program(&deep).expect_err("an int32 shape list must be rejected");
+
+    let err = rep
+        .errors
+        .iter()
+        .find(|e| e.message.contains("reshape expects an int64 shape list"))
+        .expect("the reshape shape-list diagnostic");
+
+    assert!(
+        !err.suggestions.is_empty(),
+        "suggestions must not be empty: it is a typed field on the compiler-api \
+         wire and the pre-fix path populated it"
+    );
+    assert!(
+        err.suggestions.iter().any(|s| s.contains("i64")),
+        "the suffix fix must be offered structurally; got {:?}",
+        err.suggestions
+    );
+    assert!(
+        err.suggestions.iter().any(|s| s.contains("cast")),
+        "the cast fix must survive from the pre-fix path; got {:?}",
+        err.suggestions
+    );
+}
+
 // ── Controls: the forms that already worked must keep working ───────
 
 /// An `i64`-suffixed shape list is the documented fix and must check clean.

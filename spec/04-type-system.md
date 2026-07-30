@@ -1610,19 +1610,33 @@ returns `int32` and integer literals default to `int32`, but
 element must be cast to `int64` before it can appear in the list:
 
 ```text
-reshape(x, [shape(x, 0), 4])                          ;; TYPE ERROR: precision mismatch: expected int32, got int64
+reshape(x, [shape(x, 0), 4])                          ;; TYPE ERROR: reshape expects an int64 shape list, got List int32; unsuffixed integer literals default to int32, so write `[2i64, 2i64]` or `[cast(2, int64), cast(2, int64)]`
 reshape(x, [cast(shape(x, 0), int64), cast(4, int64)]) ;; OK
+reshape(x, [2i64, 2i64])                               ;; OK
 ```
 
-The diagnostic direction reflects the unification order in the
-type-checker: the first list element fixes the "expected"
-precision, and later entries that disagree trip the mismatch on the
-"got" side. The bare `shape(x, 0)` pins `int32` as the expected
-precision; the integer literal `4` (also `int32`) is fine, but the
-moment any `int64` enters the list the mismatch fires. In practice
-the fix is the same in both directions — cast every element to
-`int64` — so the unification-order artifact does not affect
-remediation guidance.
+The check is against the **list as a whole**, not between its
+elements: the shape argument is unified with `List<Int64>`, so any
+list whose element precision is not `int64` is rejected, however
+internally consistent it is. `[shape(x, 0), 4]` above and `[2, 2]`
+both fail for the same reason and produce the same message — neither
+has an intra-list disagreement.
+
+The diagnostic names the remediation directly (an `i64` literal
+suffix, or an explicit `cast` per element) and carries both forms in
+its structured `suggestions` field. Its kind is `TypeMismatch`.
+
+> **Amended (chelis#916).** Earlier revisions of this section stated
+> that "the first list element fixes the 'expected' precision, and
+> later entries that disagree trip the mismatch on the 'got' side."
+> That mechanism is wrong: it predicts that `[shape(x, 0), 4]` — an
+> all-`int32` list — checks clean, and it does not. The claim was
+> promoted into this spec from
+> `docs/investigations/wave1_red_team_followups_diagnosis.md:57-70`,
+> and the transcribed message it explained
+> (`precision mismatch: expected int32, got int64`) was itself
+> inverted, naming the type the user had already written as the one
+> they should have used.
 
 #### 4.7.6 Out-of-scope: arbitrary runtime shape expressions
 
