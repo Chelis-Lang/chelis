@@ -540,7 +540,12 @@ be represented.
    site identity nor an exhaustiveness proof: aliases, bindings, indirection,
    equivalent numeric-default spellings, count relocation, and in-crate raw
    emission can evade it. The corresponding typed mutation oracle is the
-   authority.
+   authority. For the hosted [#732] no-third-formatter classes the same
+   textual limits apply and the residue is DECLARED at the owning rule
+   (`faithful_observation.md` §B2.4, each piece with its owner):
+   derived-Debug containers embedding floats, bare `{}` Display /
+   `.to_string()` of numeric payloads, and exits born outside the
+   declared `OBSERVATION_EXIT_SURFACES`.
 6. **Host types are a staged typed pipeline.** The host-type layer consumes
    checked type metadata; it does not re-infer source types. `HostTypeTerm`
    preserves exact
@@ -640,9 +645,15 @@ converts both arms at Phase 1 regardless. New named executables live in
 `crates/chelis-cli/tests/loud_unsupported_census_canaries.rs`; the token
 baseline is frozen in
 `crates/chelis-cli/tests/loud_unsupported_tripwire.rs` (which also hosts
-the [#732] plan's `%.16g`/`%.1f`/`{value:.1}` format-token row per its
-Phase 0 item 3 and the roadmap's Wave 0 handshake; that row's new-site
-message points at `faithful_observation.md` §B2.4).
+the [#732] plan's three no-third-formatter classes per its Phase 0 item
+3, the roadmap's Wave 0 handshake, and its §B2.4/§B2.8 instrument list:
+`c-format-narrowing` (the original `%.16g`/`%.1f` row),
+`rust-format-narrowing` (Rust precision-spec forms, subsuming the old
+`{value:.1}` token), and `rust-debug-numeric-format` (Debug tokens at
+the declared observation exit surfaces) - every hosted class's new-site
+message points at `faithful_observation.md` §B2.4, and that plan's
+Phase 2 oracle cross-checks each class's baseline paths against its own
+permitted sets).
 
 Phase 0 freezes this table into the tripwire; additions after that are
 either new work (filed + censused) or regressions (red gate). Once

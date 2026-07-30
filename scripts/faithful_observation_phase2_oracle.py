@@ -35,15 +35,39 @@ The obligations, in execution order:
      leaves a permanently-skipped test behind and nobody learns.
 5. **The formatter byte locks** (`chelis_format_shortest` == the Rust
    `format_element`, exhaustive over both half formats) must pass.
-6. **The corpus-exclusion lists** must match their declared contents. The
-   harness excludes rows for chelis#751 (C ingress) and chelis#717 (the
-   eval f64 to_list tag); both are documented at their definitions, both
-   are legitimate, and both are also exactly how a corpus gets narrowed
-   until "green" means nothing. Widening either list is a deliberate act
-   that must edit this ledger too.
-7. **The §B2.4 no-third-formatter tripwire** must run green with a
-   PRODUCTION allowlist of zero: the only permitted `c-format-narrowing`
-   row is the cfg(test) fixture-string one.
+6. **The corpus-exclusion lists** carry the full §B2.9 three-legged
+   treatment. The harness excludes rows for chelis#751 (C ingress) and
+   chelis#717 (the eval f64 to_list tag); both are documented at their
+   definitions, both are legitimate, and both are also exactly how a
+   corpus gets narrowed until "green" means nothing. Leg 1: each list
+   must EQUAL its `DECLARED_EXCLUSIONS` row - changing a list in either
+   direction edits this ledger too (the pre-2026-07-30 check stopped
+   here, so a stale list overstating breakage stayed green). Legs 2-3:
+   each list's declared, NON-ignored exclusion probe must exist in the
+   harness, iterate the list constant itself, and carry the
+   shrink-protocol message - the probes run in the default suite (and in
+   obligation 3's harness leg), re-executing every excluded behavior and
+   failing the moment an upstream repair lands. Their first execution
+   shrank `EVAL_F64_LIST_EXCLUDED` by the text-coincident `f64-tenth`.
+7. **The §B2.4 no-third-formatter tripwire** must run green, and every
+   hosted class's baseline paths must stay inside its per-class
+   permitted set (`FORMAT_CLASS_TABLE`): `c-format-narrowing`'s
+   PRODUCTION allowlist is zero (the only permitted row is the
+   cfg(test) fixture-string one), and the Rust classes'
+   (`rust-format-narrowing`, `rust-debug-numeric-format`) permitted
+   sets are the frozen annotated non-exit carriers. A new baseline path
+   requires editing BOTH the tripwire and this oracle - the
+   two-instrument interlock.
+8. **Doc-citation parity** (§B2.8). Every tripwire `Pat` whose `doc()`
+   cites `faithful_observation.md` must be a `FORMAT_CLASS_TABLE` key,
+   and vice versa: a hosted detector this oracle cannot see, or a
+   coverage row for a detector that no longer exists, is structural
+   failure - the 2026-07-30 review's finding one layer up.
+9. **The §B2 rule-instrument manifest** (§B2.8). The design doc's §B2
+   item list must equal `B2_RULE_INSTRUMENTS` (numbers and titles), and
+   every named instrument must exist (an oracle function here, a green
+   suite label, or an explicit justified review-rule entry). A §B2 rule
+   cannot land without a deliberate instrument decision.
 
 Scope, stated rather than assumed (the harness's own no-silent-caps rule):
 the set-equality obligation in (4) covers the OBSERVATION HARNESS only -
@@ -78,6 +102,7 @@ HARNESS_SOURCE = Path("crates/chelis-cli/tests/observation_roundtrip_harness.rs"
 NARROW_MATRIX_SOURCE = Path("crates/chelis-cli/tests/narrow_dtype_matrix.rs")
 REDUCTION_MATRIX_SOURCE = Path("crates/chelis-cli/tests/reduction_and_bitwise_matrix.rs")
 TRIPWIRE_SOURCE = Path("crates/chelis-cli/tests/loud_unsupported_tripwire.rs")
+DESIGN_DOC = Path("spec/design/faithful_observation.md")
 
 
 class RedCell:
@@ -133,23 +158,38 @@ RETIRED_LOCKS: tuple[str, ...] = (
     "c_f16_tensor_print_aborts_with_dtype_id_instead_of_misreading",
 )
 
-# Declared corpus exclusions (obligation 6). Both are documented at their
-# definitions with the owning issue; this table is the mechanical guard
-# against either growing silently.
-DECLARED_EXCLUSIONS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+# Declared corpus exclusions (obligation 6, §B2.9 three-legged). Both are
+# documented at their definitions with the owning issue. Leg 1 is the
+# equality check against `labels` (either direction). Legs 2-3 are the
+# named `probes`: NON-ignored harness tests that iterate the list constant
+# itself, re-execute each excluded behavior on its declared fingerprint,
+# and fail with the shrink-protocol message when a repair lands. A list
+# may not exist here without at least one probe (§B2.9: a boundary that
+# cannot be re-executed may not exist).
+#
+# 2026-07-30: `f64-tenth` left EVAL_F64_LIST_EXCLUDED on the probes' first
+# execution - its F32-narrowed image renders `0.1`, text-coincident with
+# the original f64, so the text assertion the list guards passes for it.
+# The stale row is precisely what the pre-probe equality-only check could
+# never catch.
+DECLARED_EXCLUSIONS: tuple[tuple[str, str, tuple[str, ...], tuple[str, ...]], ...] = (
     (
         "C_LANE_EXCLUDED",
         "chelis#751 (C constant-emission ingress; rows are unconstructible, not red)",
+        (
+            "c_lane_excluded_labels_still_fail_at_ingress",
+            "c_lane_excluded_neg_zero_still_drops_the_sign",
+        ),
         ("f64-neg-zero", "f64-max", "f64-audit-e19", "f32-max"),
     ),
     (
         "EVAL_F64_LIST_EXCLUDED",
         "chelis#717 (eval's to_list narrows through the stale F32 tag)",
+        ("eval_f64_list_excluded_rows_still_narrow_through_the_f32_tag",),
         (
             "f64-max",
             "f64-min-subnormal",
             "f64-min-normal",
-            "f64-tenth",
             "f64-17-digit",
             "f64-2p53",
             "f64-2p53-plus-2",
@@ -272,6 +312,61 @@ OBSERVATION_DECODE_TABLE: tuple[tuple[str, str, str], ...] = (
 # deleted at Phase 2 as the Phase 0 handoff promised.
 PERMITTED_FORMAT_NARROWING_PATHS: frozenset[str] = frozenset(
     {"crates/chelis-backend-c/src/lib.rs"}
+)
+
+# Obligation 7, the Rust precision class (2026-07-30): every permitted row
+# is an annotated NON-EXIT carrier (test assertion messages, tooling
+# eprintln reports, UX displays). A new PATH here means a precision spec
+# appeared in a file that never had one - review it as a possible third
+# formatter before extending either side.
+PERMITTED_RUST_FORMAT_NARROWING_PATHS: frozenset[str] = frozenset(
+    {
+        "crates/chelis-backend-c/src/lib.rs",
+        "crates/chelis-backend-hip/src/emit.rs",
+        "crates/chelis-cli/src/main.rs",
+        "crates/chelis-cove/src/live.rs",
+        "crates/chelis-e2e/src/bench.rs",
+        "crates/chelis-e2e/src/bin/train_mnist.rs",
+        "crates/chelis-ir/src/grad.rs",
+        "crates/chelis-prove/src/bin/certify_erf_envelope.rs",
+        "crates/chelis-prove/src/bin/certify_special_fn_envelope.rs",
+        "crates/chelis-prove/src/opaque.rs",
+    }
+)
+
+# Obligation 7, the Rust Debug class (2026-07-30): the first two rows ARE
+# the sanctioned formatters (`{:?}` is the normative grammar's definition
+# there); the compiler-api rows are the declared derived-Debug residue
+# carriers per faithful_observation.md §B2.4.
+PERMITTED_RUST_DEBUG_FORMAT_PATHS: frozenset[str] = frozenset(
+    {
+        "crates/chelis-types/src/observation.rs",
+        "crates/chelis-runtime/src/format_shortest.rs",
+        "crates/chelis-compiler-api/src/runtime/host_ops.rs",
+        "crates/chelis-compiler-api/src/runtime/eval.rs",
+        "crates/chelis-compiler-api/src/runtime/invariant.rs",
+        "crates/chelis-compiler-api/src/runtime/named_axis.rs",
+        "crates/chelis-compiler-api/src/runtime/tests.rs",
+        "crates/chelis-compiler-api/src/runtime/transforms.rs",
+    }
+)
+
+# The no-third-formatter classes and their permitted baseline path sets.
+# §B2.8's doc-citation parity leg requires this table to equal the set of
+# tripwire patterns whose `doc()` cites faithful_observation.md, so a
+# hosted detector this oracle cannot see is unrepresentable.
+FORMAT_CLASS_TABLE: tuple[tuple[str, str, frozenset[str]], ...] = (
+    ("CFormatNarrowing", "c-format-narrowing", PERMITTED_FORMAT_NARROWING_PATHS),
+    (
+        "RustFormatNarrowing",
+        "rust-format-narrowing",
+        PERMITTED_RUST_FORMAT_NARROWING_PATHS,
+    ),
+    (
+        "RustDebugNumericFormat",
+        "rust-debug-numeric-format",
+        PERMITTED_RUST_DEBUG_FORMAT_PATHS,
+    ),
 )
 
 GREEN_SUITES: tuple[tuple[str, tuple[str, ...]], ...] = (
@@ -453,7 +548,7 @@ def exclusion_list(source: str, const_name: str) -> list[str] | None:
 
 def exclusion_violations(source: str) -> list[str]:
     violations: list[str] = []
-    for const_name, owner, declared in DECLARED_EXCLUSIONS:
+    for const_name, owner, _probes, declared in DECLARED_EXCLUSIONS:
         found = exclusion_list(source, const_name)
         if found is None:
             violations.append(
@@ -468,6 +563,69 @@ def exclusion_violations(source: str) -> list[str]:
                 "corpus entirely - update this ledger deliberately, with the "
                 "issue that owns the exclusion."
             )
+    return violations
+
+
+def test_fn_body(source: str, name: str) -> str | None:
+    """The body of a top-level `fn name()` (through its closing `\\n}`)."""
+
+    match = re.search(r"fn " + re.escape(name) + r"\(\)(.*?)\n\}", source, re.S)
+    return None if match is None else match.group(1)
+
+
+def exclusion_probe_violations(source: str) -> list[str]:
+    """§B2.9 legs 2-3, structurally: each exclusion's probes exist, are
+    NOT `#[ignore]`d (an ignored probe is a disabled re-execution leg),
+    iterate the list constant itself (a probe rewritten over hard-coded
+    labels loses inventory parity silently), and carry the
+    shrink-protocol message naming this ledger."""
+
+    ignored = ignored_cells(source)
+    violations: list[str] = []
+    for const_name, owner, probes, _declared in DECLARED_EXCLUSIONS:
+        if not probes:
+            violations.append(
+                f"{const_name}: no exclusion probe declared. §B2.9: a declared "
+                "boundary that is not re-executed may not exist."
+            )
+            continue
+        for probe in probes:
+            if not defines_test(source, probe):
+                violations.append(
+                    f"{const_name} [{owner}]: exclusion probe {probe} is not "
+                    "defined in the harness. The re-execution leg is gone; "
+                    "restore the probe or delete the exclusion with its rows."
+                )
+                continue
+            if probe in ignored:
+                violations.append(
+                    f"{const_name}: exclusion probe {probe} is `#[ignore]`d - "
+                    "a disabled re-execution leg. Probes run in the DEFAULT "
+                    "suite; if the probe is failing, that is the §B2.9 signal "
+                    "working (shrink the list or file the new defect), not a "
+                    "flake to silence."
+                )
+                continue
+            body = test_fn_body(source, probe)
+            if body is None:
+                violations.append(
+                    f"{const_name}: exclusion probe {probe}'s body could not "
+                    "be extracted; the probe-shape checks cannot run."
+                )
+                continue
+            if const_name not in body:
+                violations.append(
+                    f"{const_name}: probe {probe} no longer references the "
+                    "list constant. Probes iterate the exclusion const itself "
+                    "so shrinking the list shrinks the probe in the same edit "
+                    "- hard-coded labels drift."
+                )
+            if "DECLARED_EXCLUSIONS" not in body:
+                violations.append(
+                    f"{const_name}: probe {probe} no longer carries the "
+                    "shrink-protocol message naming DECLARED_EXCLUSIONS; the "
+                    "gone-green failure must say what to do."
+                )
     return violations
 
 
@@ -747,9 +905,11 @@ def dead_export_violations(source: str, header: str) -> list[str]:
     return violations
 
 
-def format_narrowing_allowlist(source: str) -> list[tuple[str, int]]:
+def format_narrowing_allowlist(
+    source: str, variant: str = "CFormatNarrowing"
+) -> list[tuple[str, int]]:
     rows = re.findall(
-        r"Pat::CFormatNarrowing\s*,\s*\"([^\"]+)\"\s*,\s*(\d+)\s*,",
+        r"Pat::" + re.escape(variant) + r"\s*,\s*\"([^\"]+)\"\s*,\s*(\d+)\s*,",
         source,
     )
     return [(path, int(count)) for path, count in rows]
@@ -757,14 +917,226 @@ def format_narrowing_allowlist(source: str) -> list[tuple[str, int]]:
 
 def format_narrowing_violations(source: str) -> list[str]:
     violations: list[str] = []
-    for path, count in format_narrowing_allowlist(source):
-        if path not in PERMITTED_FORMAT_NARROWING_PATHS:
+    for variant, class_id, permitted in FORMAT_CLASS_TABLE:
+        for path, count in format_narrowing_allowlist(source, variant):
+            if path not in permitted:
+                violations.append(
+                    f"{path}: a {class_id} allowlist row of {count} outside "
+                    "the permitted set. A new baseline path is a possible "
+                    "third formatter (§B2.4, a review-blocking finding); if "
+                    "review clears it as a non-exit carrier, extend the "
+                    "permitted set here in the same change set - the "
+                    "two-instrument interlock is deliberate."
+                )
+    return violations
+
+
+_DOC_ARM = re.compile(
+    r"((?:Pat::\w+\s*\|\s*)*Pat::\w+|_)\s*=>\s*\{?\s*\"([^\"]+)\"",
+)
+
+
+def tripwire_doc_arms(source: str) -> list[tuple[tuple[str, ...], str]] | None:
+    """Parse `fn doc()`'s match arms into (variant names, citation) pairs.
+
+    Returns None when the function cannot be located; a located-but-empty
+    parse is reported by the caller as non-triviality failure (a silently
+    empty parse would otherwise pass every check).
+    """
+
+    match = re.search(r"fn doc\(self\) -> &'static str \{(.*?)\n    \}", source, re.S)
+    if match is None:
+        return None
+    arms: list[tuple[tuple[str, ...], str]] = []
+    for patterns, citation in _DOC_ARM.findall(match.group(1)):
+        names = tuple(re.findall(r"Pat::(\w+)", patterns))
+        arms.append((names, citation))
+    return arms
+
+
+def doc_citation_violations(source: str) -> list[str]:
+    """§B2.8's doc-citation parity: tripwire patterns citing this plan's
+    doc and FORMAT_CLASS_TABLE must be the same set, both ways."""
+
+    arms = tripwire_doc_arms(source)
+    if arms is None:
+        return [
+            "loud_unsupported_tripwire.rs: fn doc() could not be located; the "
+            "doc-citation parity check cannot run."
+        ]
+    if not arms or not any("loud_unsupported.md" in cite for _, cite in arms):
+        return [
+            "loud_unsupported_tripwire.rs: fn doc() parsed to nothing "
+            "recognizable (no loud_unsupported.md arm). The parser has gone "
+            "non-trivial-blind; fix it before trusting parity."
+        ]
+    cited = {
+        name
+        for names, citation in arms
+        if "faithful_observation.md" in citation
+        for name in names
+    }
+    covered = {variant for variant, _, _ in FORMAT_CLASS_TABLE}
+    violations: list[str] = []
+    for name in sorted(cited - covered):
+        violations.append(
+            f"Pat::{name} cites faithful_observation.md in doc() but has no "
+            "FORMAT_CLASS_TABLE row - a hosted detector this oracle cannot "
+            "see. Add its permitted-path row here in the same change set "
+            "(§B2.8)."
+        )
+    for name in sorted(covered - cited):
+        violations.append(
+            f"FORMAT_CLASS_TABLE covers Pat::{name} but the tripwire's doc() "
+            "no longer cites faithful_observation.md for it - a stale "
+            "coverage row or a detector that changed owner. Reconcile both "
+            "sides deliberately."
+        )
+    return violations
+
+
+# §B2.8's rule-instrument manifest: one row per §B2 item of the design
+# doc - (item number, a fragment of the item's bold title, instruments).
+# An instrument is an oracle function name (checked against this module),
+# `suite:<label>` naming a GREEN_SUITES entry, or `review-rule: <why>` -
+# an explicit, justified decision that the rule's enforcement is human
+# review. The point is not that every rule gets a mechanical check; it is
+# that NO rule gets to exist without the decision being recorded and
+# tripwired against the doc drifting away from it.
+B2_RULE_INSTRUMENTS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
+    (
+        1,
+        "one-time migration carve-out",
+        (
+            "review-rule: the migration completed at Phases 1-2; its proof "
+            "was the round-trip harness surviving both §B2.1 PRs unchanged",
+        ),
+    ),
+    (
+        2,
+        "Bits before text",
+        (
+            "review-rule: bit-level companions are corpus content, checked "
+            "where the migration touched expectations",
+        ),
+    ),
+    (
+        3,
+        "Red-to-green only by un-ignoring",
+        ("ledger_violations", "classify_red_run"),
+    ),
+    (
+        4,
+        "No third formatter",
+        (
+            "format_narrowing_violations",
+            "doc_citation_violations",
+            "suite:the §B2.4 no-third-formatter tripwire",
+        ),
+    ),
+    (
+        5,
+        "Discoveries fork",
+        (
+            "review-rule: filing and censusing are process acts; the "
+            "append-only census lives on the tracking issue",
+        ),
+    ),
+    (
+        6,
+        "No untyped decode at an exit",
+        ("observation_decode_violations",),
+    ),
+    (
+        7,
+        "A public exit owes exit coverage",
+        ("dead_export_violations",),
+    ),
+    (
+        8,
+        "Detector-scope parity",
+        ("b2_manifest_violations", "doc_citation_violations"),
+    ),
+    (
+        9,
+        "Three-legged boundaries",
+        ("exclusion_violations", "exclusion_probe_violations"),
+    ),
+)
+
+
+def b2_rule_items(doc: str) -> list[tuple[int, str]] | None:
+    """The §B2 section's numbered items as (number, bold title) pairs."""
+
+    match = re.search(r"^## B2\..*?$(.*?)^## ", doc, re.S | re.M)
+    if match is None:
+        return None
+    return [
+        (int(number), title)
+        for number, title in re.findall(r"^(\d+)\. \*\*(.+?)\*\*", match.group(1), re.M)
+    ]
+
+
+def b2_manifest_violations(doc: str) -> list[str]:
+    items = b2_rule_items(doc)
+    if items is None:
+        return [
+            "spec/design/faithful_observation.md: the §B2 section could not "
+            "be located; the rule-instrument manifest cannot run."
+        ]
+    if len(items) < 7:
+        return [
+            f"spec/design/faithful_observation.md: the §B2 parse found only "
+            f"{len(items)} items where at least 7 are known to exist - the "
+            "parser has gone non-trivial-blind; fix it before trusting the "
+            "manifest."
+        ]
+    violations: list[str] = []
+    titles = dict(items)
+    manifest_numbers = {number for number, _, _ in B2_RULE_INSTRUMENTS}
+    for number in sorted(set(titles) - manifest_numbers):
+        violations.append(
+            f"§B2.{number} ({titles[number]!r}) has no B2_RULE_INSTRUMENTS "
+            "row. A §B2 rule lands only with a deliberate instrument decision "
+            "(§B2.8) - name its check, its suite, or an explicit justified "
+            "review-rule entry, in this same change set."
+        )
+    for number in sorted(manifest_numbers - set(titles)):
+        violations.append(
+            f"B2_RULE_INSTRUMENTS declares §B2.{number}, which the doc no "
+            "longer has. Delete the manifest row with the rule, never before."
+        )
+    suite_labels = {label for label, _ in GREEN_SUITES}
+    for number, fragment, instruments in B2_RULE_INSTRUMENTS:
+        title = titles.get(number)
+        if title is not None and fragment not in title:
             violations.append(
-                f"{path}: a c-format-narrowing allowlist row of {count} outside "
-                "the permitted cfg(test) fixture row. Phase 2 deleted every "
-                "PRODUCTION row; a new one is a third formatter (§B2.4, a "
-                "review-blocking finding)."
+                f"§B2.{number}'s title {title!r} no longer contains its "
+                f"manifest fragment {fragment!r} - the rule moved or was "
+                "rewritten; re-bind the manifest deliberately."
             )
+        for instrument in instruments:
+            if instrument.startswith("review-rule"):
+                if len(instrument.removeprefix("review-rule:").strip()) < 10:
+                    violations.append(
+                        f"§B2.{number}: a review-rule instrument needs its "
+                        "justification spelled out, not a bare tag."
+                    )
+                continue
+            if instrument.startswith("suite:"):
+                label = instrument.removeprefix("suite:")
+                if label not in suite_labels:
+                    violations.append(
+                        f"§B2.{number}: instrument {instrument!r} names no "
+                        "GREEN_SUITES entry."
+                    )
+                continue
+            if not callable(globals().get(instrument)):
+                violations.append(
+                    f"§B2.{number}: instrument `{instrument}` is not a "
+                    "function in this oracle - the manifest names something "
+                    "that cannot run."
+                )
     return violations
 
 
@@ -829,6 +1201,7 @@ def read_sources() -> dict[Path, str]:
         TRIPWIRE_SOURCE,
         RUNTIME_SOURCE,
         RUNTIME_HEADER,
+        DESIGN_DOC,
     ):
         try:
             sources[relative] = (REPO_ROOT / relative).read_text(encoding="utf-8")
@@ -844,22 +1217,29 @@ def run_structural_scan(sources: dict[Path, str]) -> None:
     violations.extend(retired_lock_violations(sources))
     violations.extend(ledger_violations(sources[HARNESS_SOURCE], KNOWN_RED_CELLS))
     violations.extend(exclusion_violations(sources[HARNESS_SOURCE]))
+    violations.extend(exclusion_probe_violations(sources[HARNESS_SOURCE]))
     violations.extend(cross_lane_corpus_violations(sources[HARNESS_SOURCE]))
     violations.extend(observation_decode_violations(sources[RUNTIME_SOURCE]))
     violations.extend(
         dead_export_violations(sources[RUNTIME_SRC_DIR], sources[RUNTIME_HEADER])
     )
     violations.extend(format_narrowing_violations(sources[TRIPWIRE_SOURCE]))
+    violations.extend(doc_citation_violations(sources[TRIPWIRE_SOURCE]))
+    violations.extend(b2_manifest_violations(sources[DESIGN_DOC]))
     if violations:
         raise OracleFailure("structural scan failed:\n" + "\n".join(violations))
+    probe_count = sum(len(probes) for _, _, probes, _ in DECLARED_EXCLUSIONS)
     print(
         "+ structural scan: un-ignored oracle rows present, interim locks "
         f"retired, {len(KNOWN_RED_CELLS)} known-red cells declared and cited, "
-        "corpus exclusions unchanged, the §C2.3 cross-lane corpus floor "
+        f"corpus exclusions unchanged with {probe_count} non-ignored "
+        "re-execution probes bound, the §C2.3 cross-lane corpus floor "
         f"({len(CROSS_LANE_CORPUS_FLOOR)} programs) intact, all "
         f"{len(OBSERVATION_DECODE_TABLE)} observation decode arms on their "
-        "declared pointer views, no zero-emitter public exit, production "
-        "format-narrowing allowlist empty",
+        f"declared pointer views, no zero-emitter public exit, all "
+        f"{len(FORMAT_CLASS_TABLE)} no-third-formatter classes inside their "
+        "permitted sets with doc-citation parity, and the §B2 "
+        f"rule-instrument manifest bound ({len(B2_RULE_INSTRUMENTS)} rules)",
         flush=True,
     )
 

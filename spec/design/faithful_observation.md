@@ -368,8 +368,32 @@ For every dtype and every storable value:
 4. **No third formatter.** Any new exit added to either lane must route
    through `format_element` / the generated helper; a hand-rolled
    `printf`/`format!` of a tensor element in the numeric crates is a
-   review-blocking finding (and the tripwire greps for the old
-   `%.16g`/`%.1f` pair).
+   review-blocking finding. The rule spans BOTH lanes and every Rust
+   exit surface, and its instruments (stated per §B2.8) are the three
+   hosted token classes in `loud_unsupported_tripwire.rs`, each a
+   two-sided exact-count ratchet: `c-format-narrowing` (C printf tokens
+   `%.16g`/`%.1f`, all crate src; production allowlist empty since
+   Phase 2), `rust-format-narrowing` (Rust precision-spec forms
+   `{x:.N}`, all crate src, comment lines excluded), and
+   `rust-debug-numeric-format` (`:?}`/`:#?}` tokens over the declared
+   `OBSERVATION_EXIT_SURFACES` - directory prefixes deliberately, so a
+   NEW file inside a declared surface is covered from its first line at
+   baseline zero; creating an exit surface anywhere else obliges adding
+   its prefix in the same change set). The sanctioned implementations -
+   the only sites where the grammar may be spelled directly - are
+   `chelis-types/src/observation.rs` (`format_element`) and
+   `chelis-runtime/src/format_shortest.rs` (`chelis_format_shortest`);
+   their baseline rows say so. Declared residue the token instruments
+   cannot see, each with its owner per §B2.8: derived-`Debug`
+   containers embedding floats (`{other:?}` on a `#[derive(Debug)]`
+   value; today's diagnostic carriers are annotated in the tripwire
+   baseline, retired by [#729]'s dtype-carrying payload plus the review
+   rule), bare `{}` Display / `.to_string()` of a numeric payload (the
+   review rule; too common to token-scan), and exits born outside the
+   declared surfaces (the review rule). The Rust lane was added by the
+   2026-07-30 detector-scope review, after the rule's only instrument -
+   C tokens - let PR #891's Rust-side `format_f64_json` reach review
+   with no mechanical signal.
 5. **Discoveries fork** (shared rule): new unfaithful exits found
    mid-phase are filed, added to the census in the tracking issue, and
    scheduled - not silently absorbed.
@@ -390,6 +414,56 @@ For every dtype and every storable value:
    programs. `chelis_print_f32` was exactly that, and carried the §C3.5
    misdecode for as long as it existed. Removed at Phase 2; the oracle
    fails if it returns in either the Rust source or the published header.
+8. **Detector-scope parity** (added 2026-07-30). A §B2 prohibition
+   exists only with a named instrument, and the instrument's covered
+   scope is stated at the rule beside the rule's own scope; whatever
+   the instrument cannot see is declared residue with a named owner (an
+   issue that retires it, or the review rule). An undeclared gap
+   between what a rule claims and what its detector covers is itself a
+   violation of this item - that gap is how `format_f64_json` shipped
+   with no mechanical signal while §B2.4 said "either lane".
+   Enforcement is structural, not aspirational: the Phase 2 oracle
+   carries `B2_RULE_INSTRUMENTS`, one row per item of this section,
+   checked two ways - the doc's §B2 item list must equal the manifest
+   (a new rule lands only with a deliberate instrument decision, which
+   may be the literal review-rule entry with its justification), and
+   every named instrument must exist in the sources the oracle reads.
+   The oracle further requires every tripwire pattern whose `doc()`
+   cites this document to carry an oracle coverage row (its per-class
+   permitted baseline paths), so a hosted detector the oracle cannot
+   see - the 2026-07-30 review's second finding, one layer up - is
+   structurally impossible to add.
+9. **Three-legged boundaries** (added 2026-07-30). Every artifact that
+   DECLARES current breakage - the `#[ignore]` ledger, the
+   corpus-exclusion lists, the tripwire baselines - carries three legs,
+   or may not exist: (1) inventory equality between the artifact and
+   its declared ledger; (2) continuous re-execution of the declared
+   behavior; (3) fail-on-unexpected-green, with a wrong-reason
+   discriminator wherever the declared failure has a fingerprint. A
+   boundary with fewer legs decays silently: the pre-2026-07-30
+   exclusion check compared lists for equality only, so a stale list
+   overstating breakage stayed green forever. Standing conformance:
+   `KNOWN_RED_CELLS` has all three legs from the oracle's authoring
+   (ledger equality, per-cell re-runs, the gone-green failure with its
+   `fragment` discriminator); the tripwire baseline has all three (the
+   row list, the every-CI scan, and its DECREASE branch is precisely
+   the gone-green leg); the exclusion lists gained legs 2-3 via the
+   harness's non-ignored exclusion probes
+   (`eval_f64_list_excluded_rows_still_narrow_through_the_f32_tag`,
+   `c_lane_excluded_labels_still_fail_at_ingress`,
+   `c_lane_excluded_neg_zero_still_drops_the_sign`), which iterate the
+   exclusion consts themselves so inventory parity holds by
+   construction, run in the DEFAULT suite so CI re-executes them
+   continuously, assert each exclusion's declared fingerprint (the
+   chelis#717 F32-tag narrowing; the chelis#751 bare-integer-literal
+   emission and its native-stage failure; the dropped -0.0 sign), and
+   fail with a shrink-the-list message naming `DECLARED_EXCLUSIONS`
+   the moment the upstream repair lands. Scope notes: corpus FLOORS
+   (the §C2.3 byte-identity floor) assert coverage, not breakage - they
+   owe legs 1 and 2 only, since unexpected green is meaningless for a
+   floor; a declared boundary whose behavior cannot be driven is
+   converted into a probe of the rejection (the C-lane link-fail probes
+   are the worked example) or deleted.
 
 ## B3. How to pick up a phase
 
@@ -509,11 +583,28 @@ suite covers), runs each
 cell, and fails if one is red for an undeclared reason **or has gone
 green**. A green known-red cell means its upstream [#729]-family repair
 landed: un-ignore the cell on its original assertion and delete the
-ledger row in that change set. The oracle also pins the harness's two
+ledger row in that change set. The oracle also holds the harness's two
 documented corpus-exclusion lists ([#751] C ingress, [#717] eval
-`to_list`) against silent widening, runs the `chelis_format_shortest`
-byte locks, and requires the §B2.4 format-narrowing tripwire's
-PRODUCTION allowlist to stay empty.
+`to_list`) to the §B2.9 three-legged standard (amended 2026-07-30; the
+earlier check pinned the lists against silent widening only, so a stale
+list overstating breakage stayed green): leg 1 is inventory equality
+against its `DECLARED_EXCLUSIONS` table, in both directions; legs 2-3
+are the harness's NON-ignored exclusion probes, whose existence,
+non-ignored status, and list-constant-driven bodies the oracle requires
+structurally while the probes themselves run as ordinary suite members
+(in CI continuously, and inside this oracle's harness leg). The probes'
+first execution shrank `EVAL_F64_LIST_EXCLUDED` by one row (`f64-tenth`
+rendered text-coincident since Phase 1's own-width renderer - a stale
+over-claim, caught exactly as designed). The oracle further runs the
+`chelis_format_shortest` byte locks, requires every no-third-formatter
+tripwire class's baseline paths to stay inside its per-class permitted
+set (`FORMAT_CLASS_TABLE`: the C class's PRODUCTION allowlist stays
+empty; the Rust classes' sets are the frozen annotated non-exit
+carriers), requires every tripwire pattern whose `doc()` cites this
+document to be a `FORMAT_CLASS_TABLE` key (§B2.8's doc-citation
+parity), and checks this document's §B2 item list against its
+`B2_RULE_INSTRUMENTS` manifest (§B2.8: a rule lands only with a
+deliberate instrument decision).
 
 Scope, stated rather than assumed: the ignore-inventory equality covers
 the observation harness, this plan's own instrument. The sibling matrix
@@ -525,11 +616,16 @@ un-ignored and green.
 2 oracle): it is a manual phase gate, invoked at phase acceptance and at
 any change to the observation surface, and it needs a host C toolchain
 because most obligations build, link, and run generated C. What CI does
-carry continuously is the harness's green set, the matrix oracle rows,
-the `chelis_format_shortest` byte locks, and the §B2.4 tripwire - every
-suite the oracle runs, minus the known-red re-execution and the
-structural ledger scan, which are exactly the legs that need the ledger
-to mean anything. Run it before claiming this phase, not once per PR.
+carry continuously is the harness's green set (which since 2026-07-30
+includes the three §B2.9 exclusion probes - the re-execution legs run
+per-push, not only at oracle time), the matrix oracle rows, the
+`chelis_format_shortest` byte locks, and the §B2.4 tripwire with all
+three no-third-formatter classes - every suite the oracle runs, minus
+the known-red re-execution and the structural scans (ledger equality,
+probe presence, `FORMAT_CLASS_TABLE`, doc-citation parity, the
+`B2_RULE_INSTRUMENTS` manifest), which are exactly the legs that need
+the ledger to mean anything. Run it before claiming this phase, not
+once per PR.
 
 **Scheduled execution (interlock added 2026-07-30, bidirectional with
 `loud_unsupported.md` §C7.5/§I2/B2.7):** the manual-gate standing above
@@ -692,7 +788,9 @@ never as tolerance.
   than absorbed - this plan does not own the storage side of it.
 - **With [#730]**: the `<value>` placeholder and the print helper's abort
   default are its census rows; the shared tripwire carries this plan's
-  `%.16g`/`%.1f` pattern. No delivery overlap.
+  three no-third-formatter classes (§B2.4: `c-format-narrowing`,
+  `rust-format-narrowing`, `rust-debug-numeric-format`). No delivery
+  overlap.
 
 ## Issue map
 

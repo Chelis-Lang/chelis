@@ -32,7 +32,6 @@ const EVAL_F64_LIST_EXCLUDED: &[&str] = &[
     "f64-max",
     "f64-min-subnormal",
     "f64-min-normal",
-    "f64-tenth",
     "f64-17-digit",
     "f64-2p53",
     "f64-2p53-plus-2",
@@ -442,11 +441,21 @@ class DeadExportTests(unittest.TestCase):
 
 
 class FormatNarrowingTests(unittest.TestCase):
+    def _tripwire(self) -> str:
+        return (oracle.REPO_ROOT / oracle.TRIPWIRE_SOURCE).read_text(encoding="utf-8")
+
     def test_the_shipped_production_allowlist_is_empty(self) -> None:
-        source = (oracle.REPO_ROOT / oracle.TRIPWIRE_SOURCE).read_text(encoding="utf-8")
+        source = self._tripwire()
         rows = oracle.format_narrowing_allowlist(source)
         self.assertTrue(rows, "the cfg(test) fixture row must still be parsed")
         self.assertEqual(oracle.format_narrowing_violations(source), [])
+
+    def test_every_declared_class_parses_baseline_rows(self) -> None:
+        """A silently-empty parse for a class would vacuously pass it."""
+        source = self._tripwire()
+        for variant, class_id, _permitted in oracle.FORMAT_CLASS_TABLE:
+            rows = oracle.format_narrowing_allowlist(source, variant)
+            self.assertTrue(rows, f"{class_id} ({variant}) parsed no baseline rows")
 
     def test_a_returning_production_row_is_a_violation(self) -> None:
         source = (
@@ -459,6 +468,209 @@ class FormatNarrowingTests(unittest.TestCase):
         )
         violations = oracle.format_narrowing_violations(source)
         self.assertTrue(any("third formatter" in v for v in violations), violations)
+
+    def test_an_unpermitted_rust_class_row_is_a_violation_per_class(self) -> None:
+        for variant, class_id in (
+            ("RustFormatNarrowing", "rust-format-narrowing"),
+            ("RustDebugNumericFormat", "rust-debug-numeric-format"),
+        ):
+            source = (
+                "(\n"
+                f"    Pat::{variant},\n"
+                '    "crates/chelis-backend-c/src/host_emit.rs",\n'
+                "    1,\n"
+                '    "planted",\n'
+                "),\n"
+            )
+            violations = oracle.format_narrowing_violations(source)
+            self.assertTrue(
+                any(class_id in v and "host_emit.rs" in v for v in violations),
+                (class_id, violations),
+            )
+
+    def test_a_permitted_row_growing_is_the_tripwires_business_not_ours(self) -> None:
+        """The oracle guards PATHS; counts are the tripwire's exact-count
+        ratchet. A permitted path at any count is not an oracle violation."""
+        source = (
+            "(\n"
+            "    Pat::RustDebugNumericFormat,\n"
+            '    "crates/chelis-types/src/observation.rs",\n'
+            "    999,\n"
+            '    "grown",\n'
+            "),\n"
+        )
+        self.assertEqual(oracle.format_narrowing_violations(source), [])
+
+
+class DocCitationParityTests(unittest.TestCase):
+    def _tripwire(self) -> str:
+        return (oracle.REPO_ROOT / oracle.TRIPWIRE_SOURCE).read_text(encoding="utf-8")
+
+    def test_the_shipped_tripwire_has_citation_parity(self) -> None:
+        self.assertEqual(oracle.doc_citation_violations(self._tripwire()), [])
+
+    def test_the_shipped_doc_fn_parses_non_trivially(self) -> None:
+        arms = oracle.tripwire_doc_arms(self._tripwire())
+        self.assertIsNotNone(arms)
+        assert arms is not None
+        cited = {
+            name
+            for names, citation in arms
+            if "faithful_observation.md" in citation
+            for name in names
+        }
+        self.assertEqual(
+            cited, {variant for variant, _, _ in oracle.FORMAT_CLASS_TABLE}
+        )
+
+    def test_a_hosted_detector_without_a_coverage_row_is_a_violation(self) -> None:
+        source = self._tripwire().replace(
+            '_ => "spec/design/loud_unsupported.md B2.5",',
+            'Pat::SneakyFormatter => "spec/design/faithful_observation.md B2.4",\n'
+            '            _ => "spec/design/loud_unsupported.md B2.5",',
+            1,
+        )
+        violations = oracle.doc_citation_violations(source)
+        self.assertTrue(
+            any("SneakyFormatter" in v and "cannot see" in v for v in violations),
+            violations,
+        )
+
+    def test_a_stale_coverage_row_is_a_violation(self) -> None:
+        source = self._tripwire().replace(
+            "Pat::CFormatNarrowing | Pat::RustFormatNarrowing | "
+            "Pat::RustDebugNumericFormat => {",
+            "Pat::CFormatNarrowing | Pat::RustFormatNarrowing => {",
+            1,
+        )
+        violations = oracle.doc_citation_violations(source)
+        self.assertTrue(
+            any("RustDebugNumericFormat" in v for v in violations), violations
+        )
+
+    def test_an_unparseable_doc_fn_is_reported_not_vacuous(self) -> None:
+        violations = oracle.doc_citation_violations("fn unrelated() {}\n")
+        self.assertTrue(
+            any("could not be located" in v for v in violations), violations
+        )
+
+
+class ExclusionProbeTests(unittest.TestCase):
+    def _harness(self) -> str:
+        return (oracle.REPO_ROOT / oracle.HARNESS_SOURCE).read_text(encoding="utf-8")
+
+    def test_the_shipped_probes_satisfy_all_legs(self) -> None:
+        self.assertEqual(oracle.exclusion_probe_violations(self._harness()), [])
+
+    def test_every_exclusion_declares_at_least_one_probe(self) -> None:
+        for const_name, _owner, probes, _labels in oracle.DECLARED_EXCLUSIONS:
+            self.assertTrue(probes, f"{const_name} has no re-execution probe")
+
+    def test_a_deleted_probe_is_a_violation(self) -> None:
+        source = self._harness().replace(
+            "fn eval_f64_list_excluded_rows_still_narrow_through_the_f32_tag(",
+            "fn renamed_probe(",
+        )
+        violations = oracle.exclusion_probe_violations(source)
+        self.assertTrue(
+            any("not defined" in v and "EVAL_F64_LIST_EXCLUDED" in v for v in violations),
+            violations,
+        )
+
+    def test_an_ignored_probe_is_a_disabled_leg_violation(self) -> None:
+        source = self._harness().replace(
+            "#[test]\nfn c_lane_excluded_neg_zero_still_drops_the_sign() {",
+            '#[test]\n#[ignore = "silenced"]\n'
+            "fn c_lane_excluded_neg_zero_still_drops_the_sign() {",
+            1,
+        )
+        violations = oracle.exclusion_probe_violations(source)
+        self.assertTrue(
+            any("disabled re-execution leg" in v for v in violations), violations
+        )
+
+    def test_a_probe_dropping_the_const_reference_is_a_violation(self) -> None:
+        body = oracle.test_fn_body(
+            self._harness(),
+            "eval_f64_list_excluded_rows_still_narrow_through_the_f32_tag",
+        )
+        assert body is not None
+        source = self._harness().replace(
+            body, body.replace("EVAL_F64_LIST_EXCLUDED", "LOCAL_LABELS")
+        )
+        violations = oracle.exclusion_probe_violations(source)
+        self.assertTrue(
+            any("no longer references the list constant" in v for v in violations),
+            violations,
+        )
+
+    def test_a_probe_dropping_the_shrink_protocol_is_a_violation(self) -> None:
+        body = oracle.test_fn_body(
+            self._harness(), "c_lane_excluded_labels_still_fail_at_ingress"
+        )
+        assert body is not None
+        source = self._harness().replace(
+            body, body.replace("DECLARED_EXCLUSIONS", "SOME_LEDGER")
+        )
+        violations = oracle.exclusion_probe_violations(source)
+        self.assertTrue(
+            any("shrink-protocol" in v for v in violations), violations
+        )
+
+
+class RuleManifestTests(unittest.TestCase):
+    def _doc(self) -> str:
+        return (oracle.REPO_ROOT / oracle.DESIGN_DOC).read_text(encoding="utf-8")
+
+    def test_the_shipped_doc_matches_the_manifest(self) -> None:
+        self.assertEqual(oracle.b2_manifest_violations(self._doc()), [])
+
+    def test_the_shipped_doc_parses_non_trivially(self) -> None:
+        items = oracle.b2_rule_items(self._doc())
+        self.assertIsNotNone(items)
+        assert items is not None
+        self.assertGreaterEqual(len(items), 9)
+        self.assertTrue(any("No third formatter" in title for _, title in items))
+
+    def test_a_new_rule_without_a_manifest_row_is_a_violation(self) -> None:
+        doc = self._doc().replace(
+            "## B3. How to pick up a phase",
+            "10. **A brand new rule.** With no instrument decision.\n\n"
+            "## B3. How to pick up a phase",
+            1,
+        )
+        violations = oracle.b2_manifest_violations(doc)
+        self.assertTrue(
+            any("B2.10" in v and "instrument decision" in v for v in violations),
+            violations,
+        )
+
+    def test_a_retitled_rule_is_a_violation(self) -> None:
+        doc = self._doc().replace("**No third formatter.**", "**No second formatter.**")
+        violations = oracle.b2_manifest_violations(doc)
+        self.assertTrue(
+            any("manifest fragment" in v for v in violations), violations
+        )
+
+    def test_a_manifest_instrument_that_cannot_run_is_a_violation(self) -> None:
+        original = oracle.B2_RULE_INSTRUMENTS
+        oracle.B2_RULE_INSTRUMENTS = original + (
+            (9, "Three-legged boundaries", ("nonexistent_check",)),
+        )
+        try:
+            violations = oracle.b2_manifest_violations(self._doc())
+        finally:
+            oracle.B2_RULE_INSTRUMENTS = original
+        self.assertTrue(
+            any("nonexistent_check" in v and "cannot run" in v for v in violations),
+            violations,
+        )
+
+    def test_an_unlocatable_b2_section_is_reported_not_vacuous(self) -> None:
+        violations = oracle.b2_manifest_violations("# Some other doc\n")
+        self.assertTrue(
+            any("could not be located" in v for v in violations), violations
+        )
 
 
 if __name__ == "__main__":
