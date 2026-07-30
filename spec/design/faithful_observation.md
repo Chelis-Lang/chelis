@@ -298,8 +298,9 @@ For every dtype and every storable value:
    accessor, never a view chosen at the call site. **Width is not
    representation** - `Ieee754Binary32` and `TwosComplement32` are both
    four bytes and are not interchangeable, so a width-keyed check is
-   blind to precisely this defect ([#894] makes `Repr` the ABI primitive
-   with width DERIVED from it). Ownership: the general mechanism is
+   blind to precisely this defect ([#964] defines `Repr` as the ABI
+   representation primitive and derives width from it). Ownership: the general
+   mechanism is
    [#893] (seal `chelis_tensor.data`, then type the forced accessor - in
    that order), not this plan and not [#729], whose §C3 storage decision
    is the same discipline one layer up. This plan owns the rule AT ITS
@@ -620,7 +621,10 @@ never as tolerance.
 - **Ownership**: this plan owns EXITS (rendering); [#729] owns VALUES and
   CAPACITY (what is stored, in what buffer, across which wire type).
   `dtype_semantics.md` §C4 and this §C1 are the same rules by
-  construction; edits go to both in one change set.
+  construction; edits go to both in one change set. `Repr` in `chelis-vocab`
+  describes each current physical encoding and supplies its byte width. It
+  does not select a storage format. `dtype_semantics.md` §C3 owns that
+  decision.
 - **Landing order - this plan first (expected)**: [#729] Phases 1-3 then
   inherit the formatter and validate against it; eval serves them as the
   reference RENDERER (its Phase 1 exit note - the value authority is
@@ -662,7 +666,7 @@ never as tolerance.
   the int32 misdecode PR #863's review found lived entirely upstream of
   them (§C3.5). Two consequences worth stating plainly: the C entry
   point's dtype parameter was originally spelled `width_kind`, which
-  encoded exactly the width-thinking [#894] disproves - and spec/04
+  encoded exactly the width-only model that [#964] replaces - and spec/04
   [04-NUM-8] then gave "width" a SECOND meaning (storage vs arithmetic,
   which differ for f16/bf16), so one parameter name denoted two
   properties of a thing it was not even naming. Renamed to `dtype`
@@ -736,3 +740,4 @@ guaranteed to be a real value bug wearing its own name.
 [#862]: https://github.com/Chelis-Lang/chelis/issues/862
 [#893]: https://github.com/Chelis-Lang/chelis/issues/893
 [#894]: https://github.com/Chelis-Lang/chelis/issues/894
+[#964]: https://github.com/Chelis-Lang/chelis/pull/964

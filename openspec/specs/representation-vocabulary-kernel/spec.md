@@ -6,6 +6,12 @@ Define the closed physical representation vocabulary, derived width rules, purit
 
 ## Requirements
 
+`spec/design/loud_unsupported.md` §C4 controls vocabulary ownership, purity,
+and decoder totality. `spec/design/dtype_semantics.md` §C3 controls storage
+decisions. This capability records the representation mechanism. It does not
+replace either authority. `Repr` describes each current encoding. It does
+not select a future storage format.
+
 ### Requirement: Closed physical representation vocabulary
 `chelis-vocab` SHALL define one closed `Repr` variant for each active runtime element encoding. The vocabulary SHALL contain no unknown, custom, or fallback variant.
 
