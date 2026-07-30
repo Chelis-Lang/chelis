@@ -1,6 +1,6 @@
 ## Why
 
-The runtime ABI uses byte width as the dtype identity. Equal widths cannot distinguish incompatible encodings such as IEEE binary32 and two's-complement int32.
+`RuntimeDType` currently models physical storage only through byte width. Equal widths cannot identify different physical encodings, such as IEEE 754 binary32 and two's-complement int32.
 
 `chelis-vocab` also emits C source with allocation and `std`, although the crate is the dependency-bottom vocabulary. PR #896 needs a closed representation model before it adds arithmetic width.
 
