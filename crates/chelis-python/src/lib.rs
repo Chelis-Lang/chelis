@@ -1832,13 +1832,20 @@ loss = (mean(x, 0) : tensor[f32])
             serde_json::from_str(&fs::read_to_string(&manifest_path).expect("read manifest"))
                 .expect("parse manifest");
 
+        // DIAGNOSTIC (chelis#963): checkpoints locating the Linux-only
+        // SIGSEGV. Revert with the rest of this commit once the crash
+        // site is known. stderr is unbuffered, so the last line printed
+        // before the signal is the last step that completed.
+        eprintln!("[ckpt] compiled: {:?}", output.lib_path);
         let library = unsafe { Library::new(&output.lib_path) }.expect("load shared library");
+        eprintln!("[ckpt] dlopen ok");
         let symbol_name = nul_terminated(&manifest.host_entry_name);
         let entry = unsafe {
             library
                 .get::<HostEntry>(symbol_name.as_bytes())
                 .expect("resolve host entry")
         };
+        eprintln!("[ckpt] symbol resolved: {}", manifest.host_entry_name);
 
         assert!(element_stride >= 1, "element stride must be positive");
         const POISON: f64 = -12345.5;
@@ -1869,6 +1876,10 @@ loss = (mean(x, 0) : tensor[f32])
         };
         let mut input_ptrs: Vec<*mut ChelisTensor> = vec![&mut tensor as *mut ChelisTensor];
         let mut output_ptrs: Vec<*mut ChelisTensor> = vec![std::ptr::null_mut()];
+        eprintln!(
+            "[ckpt] calling entry (size={}, stride={element_stride})",
+            input.len()
+        );
         unsafe {
             (*entry)(
                 input_ptrs.as_mut_ptr(),
@@ -1877,14 +1888,21 @@ loss = (mean(x, 0) : tensor[f32])
                 output_ptrs.len() as c_int,
             );
         }
+        eprintln!("[ckpt] entry returned");
 
         let out = output_ptrs[0];
+        eprintln!("[ckpt] out ptr = {out:?}");
         assert!(!out.is_null(), "compiled execution returned a NULL output");
         let (out_dtype, values) = unsafe {
             let t = &*out;
+            eprintln!(
+                "[ckpt] out header: dtype={} ndim={} size={} data={:?} owns={}",
+                t.dtype, t.ndim, t.size, t.data, t.owns_data
+            );
             let values = std::slice::from_raw_parts(t.data.cast::<f64>(), t.size as usize).to_vec();
             (t.dtype, values)
         };
+        eprintln!("[ckpt] values read: {values:?}");
         // chelis#933: a compiled kernel may read its inputs but must
         // never write to them. Checked for every f64 case, not just the
         // dedicated test, because the in-place fusion that caused this
@@ -2098,13 +2116,17 @@ loss = (mean(x, 0) : tensor[f32])
         let manifest: ArtifactManifest =
             serde_json::from_str(&fs::read_to_string(&manifest_path).expect("read manifest"))
                 .expect("parse manifest");
+        // DIAGNOSTIC (chelis#963): see run_f64_kernel_strided.
+        eprintln!("[ckpt-f32] compiled: {:?}", output.lib_path);
         let library = unsafe { Library::new(&output.lib_path) }.expect("load shared library");
+        eprintln!("[ckpt-f32] dlopen ok");
         let symbol_name = nul_terminated(&manifest.host_entry_name);
         let entry = unsafe {
             library
                 .get::<HostEntry>(symbol_name.as_bytes())
                 .expect("resolve host entry")
         };
+        eprintln!("[ckpt-f32] symbol resolved: {}", manifest.host_entry_name);
 
         let mut data: Vec<f32> = vec![1.0];
         let mut shape = [0i32; CHELIS_MAX_DIM];
@@ -2122,6 +2144,7 @@ loss = (mean(x, 0) : tensor[f32])
         };
         let mut input_ptrs: Vec<*mut ChelisTensor> = vec![&mut tensor as *mut ChelisTensor];
         let mut output_ptrs: Vec<*mut ChelisTensor> = vec![std::ptr::null_mut()];
+        eprintln!("[ckpt-f32] calling entry");
         unsafe {
             (*entry)(
                 input_ptrs.as_mut_ptr(),
@@ -2130,13 +2153,21 @@ loss = (mean(x, 0) : tensor[f32])
                 output_ptrs.len() as c_int,
             );
         }
+        eprintln!("[ckpt-f32] entry returned");
         let out = output_ptrs[0];
+        eprintln!("[ckpt-f32] out ptr = {out:?}");
         assert!(!out.is_null(), "compiled execution returned a NULL output");
         let (out_dtype, value) = unsafe {
             let t = &*out;
+            eprintln!(
+                "[ckpt-f32] out header: dtype={} ndim={} size={} data={:?} owns={}",
+                t.dtype, t.ndim, t.size, t.data, t.owns_data
+            );
             (t.dtype, *t.data)
         };
+        eprintln!("[ckpt-f32] value read: {value}");
         drop(library);
+        eprintln!("[ckpt-f32] library dropped");
 
         assert_eq!(out_dtype, CHELIS_F32, "f32 output must stay tagged f32");
         assert_eq!(

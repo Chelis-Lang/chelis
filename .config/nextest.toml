@@ -45,6 +45,11 @@ default-filter = '''
 '''
 
 [profile.ci]
+# DIAGNOSTIC (chelis#963): fail-fast is off for this run only. The default
+# cancelled after the first two SIGSEGVs and left 1609 tests unrun, so the
+# blast radius of the Linux crash is unmeasured. Revert with the rest of
+# this commit.
+fail-fast = false
 # Same fast-suite scope as `default`; the only additions are the JUnit
 # timing report and the shared exclusion of the heavy e2e suite.
 default-filter = '''
