@@ -455,7 +455,17 @@ hand-maintained list (hand lists are how `HOST_ONLY_BUILTINS` rotted,
    language builtins in Table A, with checker acceptance DERIVED from
    it at Phase 4 so an unregistered builtin is `UnknownForm` by
    construction; runtime exports in the capacity census itself
-   (deliverable 1 - the census IS that family's registry);
+   (deliverable 1) - for EXISTENCE and capacity shape; the SEMANTIC
+   decision layer for runtime callables is the capability table's
+   Phase 4 B-cells, and until then the census's structural
+   `numeric-op` classification (fixed-width numeric types in the
+   resolved signature) binds every NEW numeric export to cite its
+   spec/05 entry in the same change set - a hook, not the registry
+   (the re-red-team's `chelis_abs_i64` mutation is the standing test;
+   known residual, recorded rather than implied away: the
+   plain-baseline citation string is copyable onto a new row to dodge
+   the hook - visible in diff, liveness-bound, retired when Phase 4's
+   table replaces the hook);
    prelude/stdlib defs via the desugared-AST leg; binding callables
    via the rustdoc-JSON leg. An op registered in no family's registry
    is a build failure, not a doc comment (`capability_table.md`
@@ -542,7 +552,12 @@ Deliverables, with phase homes:
      ONLY chokepoint 5's oracle build-set derivation and is never a
      signature census. A macro-generated export, a typedef-hidden
      `int`, or an expansion-built ADT must be visible; text-level
-     scanning is evadable by construction.
+     scanning is evadable by construction. The header leg runs the
+     REAL preprocessor (`cc -E`, linemarker-attributed to the
+     published headers; a missing compiler fails LOUDLY, since a skip
+     would be an evasion channel) and resolves typedef spellings
+     before classifying - the re-red-team's executed macro and
+     typedef mutations are standing negative tests.
    - **A new row cannot self-bless, and a new SEAM cannot be cited
      into existence at all** (red team P1-1: an open-issue citation
      path for capacity rows would make the known-red set monotonically
@@ -551,7 +566,10 @@ Deliverables, with phase homes:
      a valid citation names an OPEN issue (invariant 7's release
      policy governs the addition). For a FLAGGED capacity row there is
      NO issue-citation path: the grandfathered 2026-07-30 seam set is
-     frozen - exact citation string and count locked in the test - and
+     frozen - exact citation string, COUNT, and row-IDENTITY set locked
+     in the test, so removing one seam cannot relocate its citation
+     onto a brand-new one (the re-red-team's executed relocation
+     mutation is a standing test) - and
      the only sanctioned outcomes for a new flagged row are
      redesigning onto the tagged carrier, removing the surface, or a
      `maintainer-override(...)` citation naming its reason and issue,
@@ -566,9 +584,15 @@ Deliverables, with phase homes:
      the §C6 pointer. For a context-poor agent the error text is the
      only documentation that provably gets read; the cheapest passing
      action must be visible IN the message and must be the wanted one.
-   - **The census and tripwire files are review-routed** (the
-     CODEOWNERS move [#733] makes for `spec/**`): an agent editing the
-     guard to pass it is flagged structurally, not by vigilance.
+   - **The census and tripwire files are review-ROUTED, stated at the
+     enforcement actually configured** (re-red-team probe:
+     `require_code_owner_reviews` is OFF on main, with named bypass
+     allowances): CODEOWNERS auto-requests the human owner but does
+     not BLOCK. Enabling the ruleset's code-owner toggle for the guard
+     paths is a flagged repo-policy decision; until then the
+     structural guard against editing-the-guard is the in-test
+     identity/count freeze plus ordinary required review, and this
+     bullet claims no more than that.
 2. **Phase 1**: the census re-derivation defines §C3's atomic set (the
    §C3 amendment above); the tripwire baseline regenerates in the same
    change set.
@@ -761,8 +785,18 @@ on the existing corpus with the fallback removed.
 **You inherit:** Phase 0's detectors (your acceptance instruments),
 Part I as the spec of what to build, and the §C6 capacity census +
 tripwire (PR #956), whose landing PRECEDES this phase (the roadmap's
-Wave 3 entry gate) - its checked-in baseline is your starting
-inventory of every public numeric channel.
+Wave 3 entry gate). The checked-in baseline is your starting
+inventory and is EXPLICITLY PARTIAL by its own `legs` declaration
+(headers, struct layouts, stdlib ADTs today - the re-red-team's P1:
+never read it as "every public numeric channel"). Phase 1 ENTRY
+therefore begins by closing the two contracted legs: the WIRE leg
+(enumerate the serde-serialized schema artifacts, with its own
+mutation oracle) is this phase's deliverable zero, before the storage
+decision touches `schema.rs`; the BINDING leg (rustdoc-JSON over
+chelis-python, with a PyO3 `fn(..., dtype: i32)` mutation case)
+carries the same pre-storage-decision hard edge. "Every public
+numeric channel" is the state AFTER those legs are green, never the
+baseline's claim.
 
 **You deliver:**
 

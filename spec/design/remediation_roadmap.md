@@ -121,8 +121,10 @@ at) is hard-gated on byte-identical rendering.
 module + storage decision; the kernel split + prove; backend adoption),
 validated by everything Waves 0-2 built. Entry gate: the [#729] §C6
 capacity census/tripwire (PR #956) lands BEFORE Phase 1 entry, and
-Phase 1 re-derives its §C3 layer set from the census baseline - a hard
-edge recorded here (PR #950 red team P2-4) in lieu of a DAG node.
+Phase 1 entry ALSO requires the census's wire and binding legs green
+(the baseline is explicitly partial), and Phase 1 re-derives its §C3
+layer set from the completed census - a hard edge recorded here (PR
+#950 red teams P2-4 and re-P1) in lieu of a DAG node.
 
 **Wave 4 - the permanent guards.** [#729] Phase 4 delivers the capability
 table per [`capability_table.md`](capability_table.md); [#730] Phase 3 (gates become UX) and [#733]
