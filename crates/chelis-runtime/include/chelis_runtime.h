@@ -291,6 +291,12 @@ chelis_list *chelis_list_empty(void);
 chelis_list *chelis_list_from_values(const chelis_value *items, int64_t len);
 chelis_value chelis_list_index(const chelis_list *list, int64_t index);
 chelis_list *chelis_list_append(const chelis_list *list, chelis_value value);
+/* chelis#943: in-place accumulation for exclusively-owned lists (refcount 1).
+ * Unlike the persistent chelis_list_append/chelis_list_concat, these mutate
+ * `list` directly with amortized growth and never clone the predecessor. */
+chelis_list *chelis_list_with_capacity(int64_t capacity);
+void chelis_list_push(chelis_list *list, chelis_value value);
+void chelis_list_extend(chelis_list *list, const chelis_list *src);
 chelis_list *chelis_list_concat(const chelis_list *lhs, const chelis_list *rhs);
 chelis_list *chelis_list_take(const chelis_list *list, int64_t count);
 chelis_list *chelis_list_drop(const chelis_list *list, int64_t count);

@@ -8806,6 +8806,123 @@ fn build_c_grad_program_has_zero_definitely_lost_under_valgrind() {
     );
 }
 
+// issue #943: the emitted `map`/`filter` accumulation loops used to
+// rebuild the result list per element (`target = chelis_list_append(
+// target, …)`) without releasing the predecessor — Θ(n²) allocation,
+// with every intermediate generation unreachable at exit ("definitely
+// lost"). The fix accumulates in place (`chelis_list_with_capacity` +
+// `chelis_list_push`), so a combinator pipeline must now run leak-free.
+// Elements are floats deliberately: heap-payload elements (strings)
+// still leak linearly through the `chelis_list_index` retain imbalance,
+// which is tracked separately on #943 and not fixed by this oracle's
+// subject.
+//
+// Same toolchain gating and no-suppression contract as the #406 oracle
+// above. Manual gate:
+//   cargo test -p chelis-cli --test cli \
+//     build_c_list_combinator_program_has_zero_definitely_lost_under_valgrind \
+//     -- --nocapture
+#[test]
+#[cfg(unix)]
+fn build_c_list_combinator_program_has_zero_definitely_lost_under_valgrind() {
+    fn tool_available(tool: &str) -> bool {
+        StdCommand::new(tool)
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
+    if !tool_available("valgrind") {
+        eprintln!("SKIP: valgrind not installed; cannot run the #943 leak oracle");
+        return;
+    }
+    if !tool_available("gcc") {
+        eprintln!("SKIP: gcc not installed; cannot link the #943 leak oracle");
+        return;
+    }
+
+    let dir = tempdir().expect("tempdir");
+    let source = dir.path().join("combinators.ch");
+    write_file(
+        &source,
+        "module Combinators\n\
+         vals = map(fn (x) -> mul(x, 2.0f64), [1.0f64, 2.0f64, 3.0f64, 4.0f64])\n\
+         kept = filter(fn (x) -> gt(x, 3.0f64), vals)\n\
+         total = fold(fn (a, x) -> add(a, x), 0.0f64, kept)\n",
+    );
+
+    let out_dir = dir.path().join("combinators-build");
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .env("CHELIS_RUNTIME_DIR", runtime_library_dir())
+        .args([
+            "build",
+            source.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let bin = out_dir.join("combinators");
+    let link = StdCommand::new("gcc")
+        .current_dir(&out_dir)
+        .args([
+            "-O2",
+            "-mavx2",
+            "-fopenmp",
+            "combinators.c",
+            "-L.",
+            "-lchelis_runtime",
+            "-lm",
+            "-lpthread",
+            "-ldl",
+            "-o",
+            bin.to_str().unwrap(),
+        ])
+        .output()
+        .expect("gcc should run");
+    assert!(
+        link.status.success(),
+        "gcc link failed:\n{}",
+        String::from_utf8_lossy(&link.stderr)
+    );
+
+    let valgrind = StdCommand::new("valgrind")
+        .current_dir(&out_dir)
+        .args([
+            "--leak-check=full",
+            "--errors-for-leak-kinds=definite",
+            bin.to_str().unwrap(),
+        ])
+        .output()
+        .expect("valgrind should run");
+
+    let vg_stdout = String::from_utf8_lossy(&valgrind.stdout);
+    let vg_stderr = String::from_utf8_lossy(&valgrind.stderr);
+    println!("valgrind stdout:\n{vg_stdout}");
+    println!("valgrind stderr:\n{vg_stderr}");
+
+    assert!(
+        vg_stdout.contains("total = 18.0"),
+        "combinator pipeline produced wrong output under valgrind:\n{vg_stdout}"
+    );
+    assert!(
+        vg_stderr.contains("definitely lost: 0 bytes in 0 blocks"),
+        "chelis-built map/filter program must have zero definitely-lost \
+         bytes under valgrind (issue #943); valgrind reported:\n{vg_stderr}"
+    );
+    assert!(
+        vg_stderr.contains("suppressed: 0 bytes in 0 blocks"),
+        "the #943 leak oracle must run with NO suppressions; \
+         valgrind reported:\n{vg_stderr}"
+    );
+}
+
 // issue #406 (complete): the sibling leaks #412 did not reach. #412 freed
 // the heap temporaries the program-root `main` allocates, but two more
 // "definitely lost" classes of the same shape survived, each via a

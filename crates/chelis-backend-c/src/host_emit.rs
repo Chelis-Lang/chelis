@@ -1612,8 +1612,12 @@ impl<'a> HostEmitter<'a> {
         // `match` arm -- are emitted at a deeper indent and are block-
         // scoped, so they are not visible at the function-level cleanup
         // and must not be released there (that would emit C referencing
-        // an out-of-scope identifier). Those temporaries are already
-        // freed where they are consumed by the surrounding helper.
+        // an out-of-scope identifier). The combinator loops accumulate
+        // in place (`chelis_list_push`/`chelis_list_extend`, chelis#943)
+        // so they create no per-iteration list generations; the `append`
+        // builtin's per-call result inside a nested block is still
+        // unreleased -- that remaining half of chelis#943 needs
+        // consumption facts this emitter does not have yet.
         if self.indent.len() != BASE_MAIN_INDENT.len() {
             return;
         }
@@ -4571,8 +4575,10 @@ impl<'a> HostEmitter<'a> {
             "{}int64_t {} = chelis_list_len({});",
             self.indent, len_var, list_var
         ));
-        self.lines
-            .push(format!("{}{target} = chelis_list_empty();", self.indent));
+        self.lines.push(format!(
+            "{}{target} = chelis_list_with_capacity({});",
+            self.indent, len_var
+        ));
         self.lines.push(format!(
             "{}for (int64_t __i = 0; __i < {}; __i++) {{",
             self.indent, len_var
@@ -4602,7 +4608,7 @@ impl<'a> HostEmitter<'a> {
         self.assign_unboxed_value(&arg_var, &param.ty, &item_value)?;
         self.emit_callback_assign(callback, std::slice::from_ref(&arg_var), &result_var)?;
         self.lines.push(format!(
-            "{}{target} = chelis_list_append({target}, {});",
+            "{}chelis_list_push({target}, {});",
             self.indent,
             self.box_value_expr(&result_var, &callback.ret_ty)?
         ));
@@ -4625,8 +4631,10 @@ impl<'a> HostEmitter<'a> {
             "{}int64_t {} = chelis_list_len({});",
             self.indent, len_var, list_var
         ));
-        self.lines
-            .push(format!("{}{target} = chelis_list_empty();", self.indent));
+        self.lines.push(format!(
+            "{}{target} = chelis_list_with_capacity({});",
+            self.indent, len_var
+        ));
         self.lines.push(format!(
             "{}for (int64_t __i = 0; __i < {}; __i++) {{",
             self.indent, len_var
@@ -4656,7 +4664,7 @@ impl<'a> HostEmitter<'a> {
         let nested_indent = format!("{}    ", self.indent);
         let nested_previous = std::mem::replace(&mut self.indent, nested_indent);
         self.lines.push(format!(
-            "{}{target} = chelis_list_append({target}, {});",
+            "{}chelis_list_push({target}, {});",
             self.indent, item_value
         ));
         self.indent = nested_previous;
@@ -4731,14 +4739,16 @@ impl<'a> HostEmitter<'a> {
         let acc_ty = inner_ty.as_ref().clone();
         let acc_var = self.next_temp("scan_acc");
         self.emit_expr_to_var(init, &acc_var, &acc_ty)?;
-        self.lines
-            .push(format!("{}{target} = chelis_list_empty();", self.indent));
         let list_var = self.next_temp("scan_list");
         self.emit_expr_to_var(list, &list_var, &host_type(list))?;
         let len_var = self.next_temp("scan_len");
         self.lines.push(format!(
             "{}int64_t {} = chelis_list_len({});",
             self.indent, len_var, list_var
+        ));
+        self.lines.push(format!(
+            "{}{target} = chelis_list_with_capacity({});",
+            self.indent, len_var
         ));
         self.lines.push(format!(
             "{}for (int64_t __i = 0; __i < {}; __i++) {{",
@@ -4770,7 +4780,7 @@ impl<'a> HostEmitter<'a> {
         self.assign_unboxed_value(&item_arg, &params[1].ty, &item_value)?;
         self.emit_callback_assign(callback, &[acc_arg, item_arg], &acc_var)?;
         self.lines.push(format!(
-            "{}{target} = chelis_list_append({target}, {});",
+            "{}chelis_list_push({target}, {});",
             self.indent,
             self.box_value_expr(&acc_var, &acc_ty)?
         ));
@@ -4814,24 +4824,26 @@ impl<'a> HostEmitter<'a> {
         };
         let pass_var = self.next_temp("partition_pass");
         let fail_var = self.next_temp("partition_fail");
-        self.lines.push(format!(
-            "{}{} {} = chelis_list_empty();",
-            self.indent,
-            c_type(pass_ty)?,
-            pass_var
-        ));
-        self.lines.push(format!(
-            "{}{} {} = chelis_list_empty();",
-            self.indent,
-            c_type(fail_ty)?,
-            fail_var
-        ));
         let list_var = self.next_temp("partition_list");
         self.emit_expr_to_var(list, &list_var, &host_type(list))?;
         let len_var = self.next_temp("partition_len");
         self.lines.push(format!(
             "{}int64_t {} = chelis_list_len({});",
             self.indent, len_var, list_var
+        ));
+        self.lines.push(format!(
+            "{}{} {} = chelis_list_with_capacity({});",
+            self.indent,
+            c_type(pass_ty)?,
+            pass_var,
+            len_var
+        ));
+        self.lines.push(format!(
+            "{}{} {} = chelis_list_with_capacity({});",
+            self.indent,
+            c_type(fail_ty)?,
+            fail_var,
+            len_var
         ));
         self.lines.push(format!(
             "{}for (int64_t __i = 0; __i < {}; __i++) {{",
@@ -4862,16 +4874,16 @@ impl<'a> HostEmitter<'a> {
         let then_indent = format!("{}    ", self.indent);
         let then_previous = std::mem::replace(&mut self.indent, then_indent);
         self.lines.push(format!(
-            "{}{} = chelis_list_append({}, {});",
-            self.indent, pass_var, pass_var, item_value
+            "{}chelis_list_push({}, {});",
+            self.indent, pass_var, item_value
         ));
         self.indent = then_previous;
         self.lines.push(format!("{}}} else {{", self.indent));
         let else_indent = format!("{}    ", self.indent);
         let else_previous = std::mem::replace(&mut self.indent, else_indent);
         self.lines.push(format!(
-            "{}{} = chelis_list_append({}, {});",
-            self.indent, fail_var, fail_var, item_value
+            "{}chelis_list_push({}, {});",
+            self.indent, fail_var, item_value
         ));
         self.indent = else_previous;
         self.lines.push(format!("{}}}", self.indent));
@@ -4909,8 +4921,10 @@ impl<'a> HostEmitter<'a> {
             "{}int64_t {} = chelis_list_len({});",
             self.indent, len_var, list_var
         ));
-        self.lines
-            .push(format!("{}{target} = chelis_list_empty();", self.indent));
+        self.lines.push(format!(
+            "{}{target} = chelis_list_with_capacity({});",
+            self.indent, len_var
+        ));
         self.lines.push(format!(
             "{}for (int64_t __i = 0; __i < {}; __i++) {{",
             self.indent, len_var
@@ -4940,7 +4954,7 @@ impl<'a> HostEmitter<'a> {
         self.assign_unboxed_value(&arg_var, &param.ty, &item_value)?;
         self.emit_callback_assign(callback, std::slice::from_ref(&arg_var), &result_var)?;
         self.lines.push(format!(
-            "{}{target} = chelis_list_concat({target}, {});",
+            "{}chelis_list_extend({target}, {});",
             self.indent, result_var
         ));
         self.indent = previous;
