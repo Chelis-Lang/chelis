@@ -49,8 +49,8 @@ def test_ok() -> unit = test_assert(true, "ok")
 
 fn run_json_hang(pkg: &Path, hook: &str, timeout_seconds: &str) -> std::process::Output {
     let started = Instant::now();
-    let output = Command::cargo_bin("chelis")
-        .expect("binary")
+    let mut command = Command::cargo_bin("chelis").expect("binary");
+    command
         .timeout(Duration::from_secs(10))
         .current_dir(pkg)
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
@@ -62,9 +62,11 @@ fn run_json_hang(pkg: &Path, hook: &str, timeout_seconds: &str) -> std::process:
             "--json",
             "--suite-timeout",
             timeout_seconds,
-        ])
-        .output()
-        .expect("run");
+        ]);
+    if hook == "CHELIS_TEST_HANG_AFTER_SUITE" {
+        command.env("CHELIS_TEST_EMIT_FINALIZED_SUITE", "1");
+    }
+    let output = command.output().expect("run");
     assert!(
         started.elapsed() < Duration::from_secs(8),
         "public suite deadline did not bound {hook}"
@@ -140,6 +142,7 @@ fn hang_hook_requires_internal_testing_gate() {
         .current_dir(&pkg)
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env_remove("CHELIS_TEST_INTERNAL_TESTING")
+        .env("CHELIS_TEST_EMIT_FINALIZED_SUITE", "1")
         .env("CHELIS_TEST_HANG_BEFORE_SUITE", "1")
         .args(["test", "tests/", "--suite-timeout", "3"])
         .output()
@@ -618,6 +621,7 @@ fn expect_finalization_hang_retains_verdict_and_mode_summary() {
         .current_dir(&pkg)
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_TEST_INTERNAL_TESTING", "1")
+        .env("CHELIS_TEST_EMIT_FINALIZED_SUITE", "1")
         .env("CHELIS_TEST_HANG_AFTER_SUITE", "1")
         .args([
             "test",
@@ -665,6 +669,7 @@ fn expect_finalization_hang_plain_output_retains_mode_verdict() {
         .current_dir(&pkg)
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_TEST_INTERNAL_TESTING", "1")
+        .env("CHELIS_TEST_EMIT_FINALIZED_SUITE", "1")
         .env("CHELIS_TEST_HANG_AFTER_SUITE", "1")
         .args(["test", "tests/", "--expect", "neg", "--suite-timeout", "3"])
         .output()
