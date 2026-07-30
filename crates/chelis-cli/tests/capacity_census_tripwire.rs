@@ -62,8 +62,42 @@ const GRANDFATHER_SEAM_CITATION: &str = "baseline-2026-07-30 pre-ratchet seam; \
 unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break";
 
 /// The frozen seam set may only SHRINK. Copying the grandfather citation
-/// onto a new flagged row trips this count lock.
+/// onto a new flagged row trips the count lock AND the identity lock below.
 const GRANDFATHER_SEAM_COUNT: usize = 21;
+
+/// The plain-baseline citation for non-seam pre-ratchet rows.
+const GRANDFATHER_PLAIN_CITATION: &str =
+    "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)";
+
+/// The exact (id) identities of the frozen 2026-07-30 seam set. Living in
+/// THIS file rather than the regeneratable baseline is the point (PR #950
+/// re-red-team P1: a count-only freeze permits removing one seam and
+/// relocating its citation onto a brand-new one).
+// GRANDFATHER_SEAM_IDS_BEGIN
+const GRANDFATHER_SEAM_IDS: &[&str] = &[
+    "chelis_runtime.h: chelis_string chelis_string_from_f32(float value);",
+    "chelis_runtime.h: chelis_string chelis_string_from_f64(double value);",
+    "chelis_runtime.h: chelis_tensor *chelis_alloc(int ndim, const int *shape, int dtype);",
+    "chelis_runtime.h: chelis_tensor *chelis_alloc_view(int ndim, const int *shape, int dtype, float *data);",
+    "chelis_runtime.h: chelis_tensor *chelis_scalar_tensor_from_f32(float value);",
+    "chelis_runtime.h: chelis_tensor *chelis_scalar_tensor_from_f64(double value);",
+    "chelis_runtime.h: chelis_tensor *chelis_tensor_from_value_list_typed(const chelis_list *list, int dst_dtype);",
+    "chelis_runtime.h: chelis_value chelis_value_from_f64(double value);",
+    "chelis_runtime.h: double chelis_tensor_to_f64(const chelis_tensor *t);",
+    "chelis_runtime.h: double chelis_value_as_f64(chelis_value value);",
+    "chelis_runtime.h: int chelis_dtype_size(int dtype);",
+    "chelis_runtime.h: int chelis_format_shortest(double value, int dtype, char *buf, size_t cap);",
+    "chelis_runtime.h: void chelis_bf16_buffer_to_f32(const uint16_t *src, float *dst, int64_t n);",
+    "chelis_runtime.h: void chelis_f16_buffer_to_f32(const uint16_t *src, float *dst, int64_t n);",
+    "chelis_runtime.h: void chelis_f32_buffer_to_bf16(const float *src, uint16_t *dst, int64_t n);",
+    "chelis_runtime.h: void chelis_f32_buffer_to_f16(const float *src, uint16_t *dst, int64_t n);",
+    "chelis_runtime.h: void chelis_fill_f32(chelis_tensor *t, float val);",
+    "chelis_runtime.h: void chelis_fill_f64(chelis_tensor *t, double val);",
+    "chelis_runtime.h: typedef struct { _Bool is_some; double value; } chelis_option_f64",
+    "chelis_runtime.h: typedef struct { chelis_value_tag tag; union { int64_t i64; double f64; _Bool boolean; chelis_string string; chelis_tensor *tensor; chelis_list *list; chelis_tuple *tuple; chelis_dict *dict; chelis_adt *adt; } as; } chelis_value",
+    "chelis_runtime.h: typedef struct { float *data; int shape[8]; int strides[8]; int ndim; int dtype; int size; int owns_data; } chelis_tensor",
+];
+// GRANDFATHER_SEAM_IDS_END
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 struct Row {
@@ -94,34 +128,17 @@ fn repo_root() -> PathBuf {
 // Leg A: published header exports and struct layouts
 // ---------------------------------------------------------------------------
 
-/// Transitive closure of quoted `#include "..."` directives, resolved inside
-/// the include dir. Enumerating the closure (not a file list) is what makes
-/// an export added to a transitively-included header visible - the evasion
-/// path the §C6 acceptance requirements name.
-fn header_closure(include_dir: &Path, roots: &[&str]) -> Vec<(String, String)> {
-    let mut seen: BTreeSet<String> = BTreeSet::new();
-    let mut queue: Vec<String> = roots.iter().map(|s| s.to_string()).collect();
-    let mut out = Vec::new();
-    while let Some(name) = queue.pop() {
-        if !seen.insert(name.clone()) {
-            continue;
+/// Preprocess every root and merge the per-header outputs. The include
+/// closure is followed by the real preprocessor, so an export added to a
+/// transitively-included header - or hidden behind a macro - is visible.
+fn preprocessed_headers(include_dir: &Path, roots: &[&str]) -> BTreeMap<String, String> {
+    let mut per_file: BTreeMap<String, String> = BTreeMap::new();
+    for root in roots {
+        for (name, text) in preprocess_root(include_dir, root) {
+            per_file.entry(name).or_insert(text);
         }
-        let path = include_dir.join(&name);
-        let text = fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("read header {}: {e}", path.display()));
-        for line in text.lines() {
-            let line = line.trim();
-            if let Some(rest) = line.strip_prefix("#include") {
-                let rest = rest.trim();
-                if let Some(inner) = rest.strip_prefix('"').and_then(|r| r.split('"').next()) {
-                    queue.push(inner.to_string());
-                }
-            }
-        }
-        out.push((name, text));
     }
-    out.sort_by(|a, b| a.0.cmp(&b.0));
-    out
+    per_file
 }
 
 fn strip_c_comments(text: &str) -> String {
@@ -162,16 +179,88 @@ fn cites_a_chelis_issue(citation: &str) -> bool {
         .any(|(i, m)| citation[i + m.len()..].starts_with(|c: char| c.is_ascii_digit()))
 }
 
-/// Classification is informational (it shapes the failure message); the
+/// Fixed-width numeric C value types: a signature mentioning one (after
+/// typedef resolution) is a numeric runtime callable and carries the
+/// `numeric-op` flag, which binds NEW rows to semantic registration (the
+/// PR #950 re-red-team's P1 finding: surface existence is not a semantic
+/// decision). Bare `int` is deliberately absent - it is dtype-id/ndim
+/// plumbing, and the raw-dtype-int seam rule handles its dangerous shape.
+const NUMERIC_C_TYPES: &[&str] = &[
+    "double", "float", "int64_t", "int32_t", "int16_t", "int8_t", "uint64_t", "uint32_t",
+    "uint16_t", "uint8_t",
+];
+
+/// The flags that make a row a capacity SEAM (subject to the grandfather
+/// freeze). `numeric-op` is classification, not a seam.
+fn is_seam(flags: &[String]) -> bool {
+    flags
+        .iter()
+        .any(|f| f == "float-carrier" || f == "raw-dtype-int")
+}
+
+/// Collect simple `typedef <target...> <name>;` aliases (no struct bodies)
+/// so classification sees through spellings like
+/// `typedef int chelis_dtype_id;` - the re-red-team's executed typedef
+/// evasion. Struct forward typedefs resolve to their `struct X` spelling,
+/// which is harmless.
+fn collect_typedefs(text: &str) -> BTreeMap<String, Vec<String>> {
+    let mut map = BTreeMap::new();
+    for stmt in text.split(';') {
+        let stmt = normalize_ws(stmt);
+        if let Some(rest) = stmt.strip_prefix("typedef ")
+            && !rest.contains('{')
+            && !rest.contains('(')
+        {
+            let mut words: Vec<String> = rest
+                .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                .filter(|w| !w.is_empty())
+                .map(|w| w.to_string())
+                .collect();
+            if words.len() >= 2 {
+                let name = words.pop().expect("nonempty");
+                map.insert(name, words);
+            }
+        }
+    }
+    map
+}
+
+/// Expand typedef aliases (transitively, depth-capped) so classification
+/// operates on resolved spellings.
+fn resolve_words(words: Vec<String>, typedefs: &BTreeMap<String, Vec<String>>) -> Vec<String> {
+    let mut out = words;
+    for _ in 0..8 {
+        let mut changed = false;
+        let mut next = Vec::with_capacity(out.len());
+        for w in &out {
+            if let Some(target) = typedefs.get(w) {
+                next.extend(target.iter().cloned());
+                changed = true;
+            } else {
+                next.push(w.clone());
+            }
+        }
+        out = next;
+        if !changed {
+            break;
+        }
+    }
+    out
+}
+
+/// Classification shapes the enforcement rule a row falls under; the
 /// citation requirement applies to EVERY inventory change, so renaming a
-/// parameter to dodge a flag dodges nothing.
-fn classify(sig: &str) -> Vec<String> {
+/// parameter to dodge a flag dodges nothing, and typedef/macro spellings
+/// are resolved before classifying.
+fn classify(sig: &str, typedefs: &BTreeMap<String, Vec<String>>) -> Vec<String> {
     let mut flags = Vec::new();
-    let words: Vec<&str> = sig
+    let words: Vec<String> = sig
         .split(|c: char| !(c.is_alphanumeric() || c == '_'))
         .filter(|w| !w.is_empty())
+        .map(|w| w.to_string())
         .collect();
-    if words.iter().any(|w| *w == "double" || *w == "float") {
+    let words = resolve_words(words, typedefs);
+    if words.iter().any(|w| w == "double" || w == "float") {
         flags.push("float-carrier".to_string());
     }
     // A raw `int` (never int8_t/int32_t/uint32_t, which are exact-width
@@ -183,13 +272,78 @@ fn classify(sig: &str) -> Vec<String> {
             break;
         }
     }
+    if words.iter().any(|w| NUMERIC_C_TYPES.contains(&w.as_str())) {
+        flags.push("numeric-op".to_string());
+    }
     flags
+}
+
+/// Run the REAL C preprocessor over a root header and return its output
+/// attributed per header file via linemarkers, restricted to files under
+/// `include_dir` (system-header content is dropped). This is the
+/// compiled-artifact requirement made literal: `#define`-hidden spellings
+/// arrive expanded, so the re-red-team's macro evasion is visible. A
+/// missing C compiler fails LOUDLY - a skip here would be an evasion
+/// channel.
+fn preprocess_root(include_dir: &Path, root: &str) -> BTreeMap<String, String> {
+    let out = std::process::Command::new("cc")
+        .arg("-E")
+        .arg("-x")
+        .arg("c")
+        .arg("-I")
+        .arg(include_dir)
+        .arg(include_dir.join(root))
+        .output()
+        .unwrap_or_else(|e| {
+            panic!(
+                "{}the capacity census requires a C compiler (`cc`) on PATH to \
+                 preprocess the published headers; none ran: {e}{}",
+                teaching_header(),
+                teaching_footer()
+            )
+        });
+    assert!(
+        out.status.success(),
+        "cc -E failed for {root}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    let dir_str = include_dir.to_string_lossy().to_string();
+    let mut per_file: BTreeMap<String, String> = BTreeMap::new();
+    let mut current: Option<String> = None;
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("# ") {
+            // Linemarker: `# <num> "<file>" <flags...>`.
+            if let Some(file) = rest.split('"').nth(1) {
+                current = if file.contains(&dir_str) || file.ends_with(root) {
+                    Path::new(file)
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                } else {
+                    None
+                };
+            }
+            continue;
+        }
+        if let Some(name) = &current {
+            per_file.entry(name.clone()).or_default().push_str(line);
+            per_file.entry(name.clone()).or_default().push('\n');
+        }
+    }
+    per_file
 }
 
 /// Extract exported declarations and struct layouts from one preprocessed
 /// header body. `static` definitions carry no ABI and are skipped; the
 /// `extern "C" {` wrapper is neutralized; preprocessor lines are dropped.
-fn header_rows(header_name: &str, raw: &str) -> Vec<Row> {
+/// Planted-test convenience: classify with the typedefs found in the
+/// same text (the real pipeline builds a global map across headers).
+fn header_rows_local(header_name: &str, raw: &str) -> Vec<Row> {
+    let typedefs = collect_typedefs(&strip_c_comments(raw));
+    header_rows(header_name, raw, &typedefs)
+}
+
+fn header_rows(header_name: &str, raw: &str, typedefs: &BTreeMap<String, Vec<String>>) -> Vec<Row> {
     let text = strip_c_comments(raw);
     let text: String = text
         .lines()
@@ -235,7 +389,7 @@ fn header_rows(header_name: &str, raw: &str) -> Vec<Row> {
                         normalize_ws(&body),
                         normalize_ws(&tail)
                     );
-                    let flags = classify(&id);
+                    let flags = classify(&id, typedefs);
                     rows.push(Row {
                         kind: "header-struct".to_string(),
                         id: format!("{header_name}: {id}"),
@@ -272,7 +426,7 @@ fn header_rows(header_name: &str, raw: &str) -> Vec<Row> {
                     continue;
                 }
                 if stmt.contains('(') && stmt.ends_with(')') {
-                    let flags = classify(&stmt);
+                    let flags = classify(&stmt, typedefs);
                     rows.push(Row {
                         kind: "header-export".to_string(),
                         id: format!("{header_name}: {stmt};"),
@@ -410,8 +564,13 @@ fn std_adt_rows(root: &Path) -> Vec<Row> {
 fn current_inventory(root: &Path) -> Vec<Row> {
     let include_dir = root.join(INCLUDE_DIR_REL);
     let mut rows = Vec::new();
-    for (name, text) in header_closure(&include_dir, HEADER_ROOTS) {
-        rows.extend(header_rows(&name, &text));
+    let per_file = preprocessed_headers(&include_dir, HEADER_ROOTS);
+    let mut typedefs = BTreeMap::new();
+    for text in per_file.values() {
+        typedefs.append(&mut collect_typedefs(text));
+    }
+    for (name, text) in &per_file {
+        rows.extend(header_rows(name, text, &typedefs));
     }
     rows.extend(std_adt_rows(root));
     rows.sort_by(|a, b| (a.kind.as_str(), a.id.as_str()).cmp(&(b.kind.as_str(), b.id.as_str())));
@@ -438,7 +597,10 @@ fn teaching_footer() -> String {
      onto the tagged carrier, remove the surface, or obtain a \
      maintainer-override(<reason>, chelis#N) citation, which only a human \
      reviewer adds (the baseline file is review-routed).\n\
-     3. A removed row is an ABI removal: 0.19 payload by default per \
+     3. NEW numeric-op export: cite BOTH its chelis#N issue AND its \
+     spec/05 entry (authored in the same change set; a doc comment is not \
+     an authority).\n\
+     4. A removed row is an ABI removal: 0.19 payload by default per \
      remediation_roadmap.md anti-churn invariant 7.\n\
      This test and spec/design/capacity_census.json are guard artifacts; \
      editing either to make a change pass is never the fix.\n"
@@ -477,13 +639,35 @@ fn check_against_baseline(current: &[Row], baseline: &Baseline) -> Result<(), St
                 "UNCITED census row (citation is TODO/empty): [{}] {}",
                 row.kind, row.id
             ));
-        } else if !row.flags.is_empty()
+        } else if is_seam(&row.flags)
             && row.citation != GRANDFATHER_SEAM_CITATION
             && !row.citation.starts_with("maintainer-override(")
         {
             problems.push(format!(
                 "NEW capacity seam without a sanctioned disposition (an issue \
                  citation is NOT a path for flagged rows): [{}] {}",
+                row.kind, row.id
+            ));
+        } else if row.citation == GRANDFATHER_SEAM_CITATION
+            && !GRANDFATHER_SEAM_IDS.contains(&row.id.as_str())
+        {
+            problems.push(format!(
+                "GRANDFATHER citation on an identity outside the frozen \
+                 2026-07-30 seam set (identity relocation; the set may only \
+                 shrink): [{}] {}",
+                row.kind, row.id
+            ));
+        } else if row.flags.iter().any(|f| f == "numeric-op")
+            && row.citation != GRANDFATHER_PLAIN_CITATION
+            && row.citation != GRANDFATHER_SEAM_CITATION
+            && !row.citation.starts_with("maintainer-override(")
+            && !(row.citation.contains("spec/05") || row.citation.contains("[05-"))
+        {
+            problems.push(format!(
+                "NUMERIC OP WITHOUT SEMANTIC REGISTRATION (a new numeric \
+                 runtime export cites its spec/05 entry, authored in the same \
+                 change set, alongside its chelis#N issue; capability Table B \
+                 mechanizes this at chelis#729 Phase 4): [{}] {}",
                 row.kind, row.id
             ));
         } else if !cites_a_chelis_issue(&row.citation) {
@@ -613,7 +797,7 @@ fn capacity_census_matches_public_surface() {
 #[test]
 fn planted_dtype_int_export_is_flagged() {
     // The chelis#891 pad_sequences shape: a (value, int dtype) pair.
-    let rows = header_rows(
+    let rows = header_rows_local(
         "planted.h",
         "chelis_tensor *chelis_pad_sequences(const chelis_list *sequences,\n\
          chelis_value pad_value, int pad_dtype);\n",
@@ -627,7 +811,7 @@ fn planted_dtype_int_export_is_flagged() {
 
 #[test]
 fn planted_multiline_and_float_carrier() {
-    let rows = header_rows(
+    let rows = header_rows_local(
         "planted.h",
         "double chelis_read_scalar(\n    const chelis_tensor *t,\n    int index);\n",
     );
@@ -641,7 +825,7 @@ fn planted_multiline_and_float_carrier() {
 
 #[test]
 fn planted_static_inline_carries_no_abi_row() {
-    let rows = header_rows(
+    let rows = header_rows_local(
         "planted.h",
         "static inline float bits_to_f32(uint32_t b) { return 0.0f; }\n\
          void chelis_real_export(int x);\n",
@@ -656,7 +840,7 @@ fn planted_static_inline_carries_no_abi_row() {
 
 #[test]
 fn planted_struct_layout_is_inventoried() {
-    let rows = header_rows(
+    let rows = header_rows_local(
         "planted.h",
         "typedef struct {\n  int dtype;\n  double f64_;\n} planted_value;\n",
     );
@@ -859,4 +1043,117 @@ fn unflagged_row_with_issue_citation_passes() {
         rows: vec![row.clone()],
     };
     assert!(check_against_baseline(&[row], &baseline).is_ok());
+}
+
+// ---------------------------------------------------------------------------
+// The re-red-team's four executed mutations (PR #950, 2026-07-30), kept as
+// standing negative tests.
+// ---------------------------------------------------------------------------
+
+/// A macro-hidden float carrier must be visible: the census consumes the
+/// REAL preprocessor's output, so the spelling arrives expanded.
+#[test]
+fn reviewer_preprocessor_capacity_seam_is_visible() {
+    let dir = std::env::temp_dir().join(format!("census-pp-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("temp include dir");
+    fs::write(
+        dir.join("planted.h"),
+        "#define CHELIS_NUM double\n\
+         CHELIS_NUM chelis_macro_result(int64_t x);\n",
+    )
+    .expect("write planted header");
+    let per_file = preprocessed_headers(&dir, &["planted.h"]);
+    let text = per_file.get("planted.h").expect("planted attributed");
+    let rows = header_rows("planted.h", text, &collect_typedefs(text));
+    let row = rows
+        .iter()
+        .find(|r| r.id.contains("chelis_macro_result"))
+        .expect("export enumerated");
+    assert!(
+        row.flags.iter().any(|f| f == "float-carrier"),
+        "the preprocessed declaration carries double: {row:?}"
+    );
+    fs::remove_dir_all(&dir).ok();
+}
+
+/// A typedef-hidden raw dtype int must be visible: classification resolves
+/// typedef spellings before matching.
+#[test]
+fn reviewer_typedef_capacity_seam_is_visible() {
+    let rows = header_rows_local(
+        "planted.h",
+        "typedef int chelis_dtype_id;\n\
+         void chelis_typedef_dtype(chelis_value value, chelis_dtype_id dtype);\n",
+    );
+    let row = rows
+        .iter()
+        .find(|r| r.id.contains("chelis_typedef_dtype"))
+        .expect("export enumerated");
+    assert!(
+        row.flags.iter().any(|f| f == "raw-dtype-int"),
+        "the typedef resolves to raw int: {row:?}"
+    );
+}
+
+/// Removing one grandfathered seam and relocating its citation onto a
+/// brand-new seam must fail even though the count stays constant: the
+/// identity set is frozen in this file, not the regeneratable baseline.
+#[test]
+fn reviewer_grandfathered_identity_relocation_must_fail() {
+    let mut rows: Vec<Row> = GRANDFATHER_SEAM_IDS
+        .iter()
+        .skip(1)
+        .map(|id| flagged_row(id, GRANDFATHER_SEAM_CITATION))
+        .collect();
+    rows.push(flagged_row(
+        "planted.h: void brand_new_seam(int output_dtype);",
+        GRANDFATHER_SEAM_CITATION,
+    ));
+    let regenerated = Baseline {
+        version: 1,
+        legs: serde_json::json!({}),
+        rows: rows.clone(),
+    };
+    let err = check_against_baseline(&rows, &regenerated).unwrap_err();
+    assert!(
+        err.contains("identity relocation") || err.contains("outside the frozen"),
+        "the count-only freeze must not accept identity relocation: {err}"
+    );
+}
+
+/// A numeric runtime export (exact-width types, so not a capacity seam)
+/// cannot enter with only a tracker citation: it needs its spec/05
+/// semantic registration in the same change set.
+#[test]
+fn reviewer_runtime_numeric_op_requires_semantic_registration() {
+    let mut rows = header_rows_local("planted.h", "int64_t chelis_abs_i64(int64_t value);");
+    assert_eq!(rows.len(), 1);
+    assert!(!is_seam(&rows[0].flags), "exact-width types are not seams");
+    assert!(
+        rows[0].flags.iter().any(|f| f == "numeric-op"),
+        "numeric-op membership is structural: {:?}",
+        rows[0]
+    );
+    rows[0].citation = "chelis#729".to_string();
+    let row = rows.remove(0);
+    let regenerated = Baseline {
+        version: 1,
+        legs: serde_json::json!({}),
+        rows: vec![row.clone()],
+    };
+    let err = check_against_baseline(&[row.clone()], &regenerated).unwrap_err();
+    assert!(
+        err.contains("NUMERIC OP WITHOUT SEMANTIC REGISTRATION"),
+        "a tracker citation is not a semantic decision: {err}"
+    );
+    let mut registered = row;
+    registered.citation =
+        "chelis#123456; spec/05-risc-primitives.md abs entry authored in this change set"
+            .to_string();
+    let ok_baseline = Baseline {
+        version: 1,
+        legs: serde_json::json!({}),
+        rows: vec![registered.clone()],
+    };
+    assert!(check_against_baseline(&[registered], &ok_baseline).is_ok());
 }
