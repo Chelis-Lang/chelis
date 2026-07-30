@@ -515,7 +515,7 @@ impl CEmitter {
                         &fused_node.output_type.clone(),
                         &node.output_type,
                         "sum",
-                    );
+                    )?;
                 } else {
                     self.emit_reduce_sum(
                         id,
@@ -542,7 +542,7 @@ impl CEmitter {
                         &fused_node.output_type.clone(),
                         &node.output_type,
                         "max",
-                    );
+                    )?;
                 } else {
                     self.emit_reduce_max(id, *axis, &node.inputs, &node.output_type, dag)?;
                 }
@@ -641,7 +641,7 @@ impl CEmitter {
                         reusable_input,
                         slot_has_later_owner: self.slot_has_later_owner(id, dag),
                     });
-                self.emit_fused_elem(id, ops, &node.inputs, &node.output_type, in_place);
+                self.emit_fused_elem(id, ops, &node.inputs, &node.output_type, in_place)?;
             }
             RiscOp::BlasMatmul {
                 batch_dims,
@@ -2703,17 +2703,41 @@ impl CEmitter {
 
     /// Emit one fused-step expression for the scalar fast/tail path.
     ///
-    /// The fused-elem and fused-reduce entry points (`emit_fused_elem`,
-    /// `emit_fused_reduce`) panic at the WS-A1 guard if any non-f32
-    /// precision reaches them, so this emitter is f32-only by
-    /// construction. The `1.0f` literal in `Recip` / `CmpLt`
-    /// reflects that invariant; widening to f64 requires lifting the
-    /// guard first.
+    /// chelis#919: `is_f64` selects the double-precision math symbols
+    /// (`exp` rather than `expf`, `fmax` rather than `fmaxf`) and the
+    /// unsuffixed `1.0` / `0.0` literals. It must agree with the
+    /// element type the caller declared for the `v{s}` step variables:
+    /// emitting `expf` into a `double v0` silently narrows through the
+    /// single-precision libm entry point, which is exactly the F1
+    /// footgun. `emit_fused_elem` derives both from the same
+    /// `Self::is_f64(ty)`.
+    ///
+    /// Callers admit only f32 and f64; `emit_fused_reduce` still passes
+    /// `false` because its accumulator path stays f32-only.
     fn scalar_step_expr(
         op: &FusedStepOp,
         resolve: &dyn Fn(&FusedInput) -> String,
         inputs: &[FusedInput],
+        is_f64: bool,
     ) -> String {
+        // Map a single-precision libm symbol to its double-precision
+        // counterpart when the chain computes in `double`. Same helper
+        // `emit_unary_func` uses, so the fused and unfused lanes cannot
+        // disagree about which entry point a given op resolves to.
+        let mf = |scalar_f: &'static str| -> &'static str {
+            if is_f64 {
+                Self::double_math_fn(scalar_f)
+            } else {
+                scalar_f
+            }
+        };
+        // `1.0f` in a `double` expression is a float constant that the
+        // usual arithmetic conversions then widen; correct here but
+        // misleading, and it becomes wrong the moment a literal is not
+        // exactly representable in f32. Emit the literal at the chain's
+        // own precision.
+        let one = if is_f64 { "1.0" } else { "1.0f" };
+        let zero = if is_f64 { "0.0" } else { "0.0f" };
         match op {
             FusedStepOp::Add => {
                 let a = resolve(&inputs[0]);
@@ -2730,31 +2754,34 @@ impl CEmitter {
                 let b = resolve(&inputs[1]);
                 format!("{a} / {b}")
             }
-            // chelis#178: the fused-elem path is f32-only by construction
-            // (the WS-A1 guard panics on non-f32), so only `floor_div` on
-            // float operands can reach here — emit `floorf(a / b)`.
-            // `trunc_div` is integer-only and can never fuse to this f32
+            // chelis#178: the fused path carries float operands only
+            // (`emit_fused_elem` admits f32 and f64; `emit_fused_reduce`
+            // admits f32), so only `floor_div` on float operands can
+            // reach here — emit `floorf(a / b)` / `floor(a / b)`.
+            // `trunc_div` is integer-only and can never fuse to a float
             // path, so it is unreachable.
             FusedStepOp::FloorDiv => {
                 let a = resolve(&inputs[0]);
                 let b = resolve(&inputs[1]);
-                format!("floorf({a} / {b})")
+                let f = mf("floorf");
+                format!("{f}({a} / {b})")
             }
             FusedStepOp::TruncDiv => {
                 unreachable!(
                     "trunc_div is integer-only (chelis#178); the fused-elem path is \
-                     f32-only and cannot carry an integer trunc_div step"
+                     float-only (f32/f64) and cannot carry an integer trunc_div step"
                 )
             }
             FusedStepOp::MaxElem => {
                 let a = resolve(&inputs[0]);
                 let b = resolve(&inputs[1]);
-                format!("fmaxf({a}, {b})")
+                let f = mf("fmaxf");
+                format!("{f}({a}, {b})")
             }
             FusedStepOp::CmpLt => {
                 let a = resolve(&inputs[0]);
                 let b = resolve(&inputs[1]);
-                format!("({a} < {b}) ? 1.0f : 0.0f")
+                format!("({a} < {b}) ? {one} : {zero}")
             }
             FusedStepOp::Neg => {
                 let a = resolve(&inputs[0]);
@@ -2762,51 +2789,62 @@ impl CEmitter {
             }
             FusedStepOp::Recip => {
                 let a = resolve(&inputs[0]);
-                format!("1.0f / {a}")
+                format!("{one} / {a}")
             }
             FusedStepOp::Exp => {
                 let a = resolve(&inputs[0]);
-                format!("expf({a})")
+                let f = mf("expf");
+                format!("{f}({a})")
             }
             FusedStepOp::Log => {
                 let a = resolve(&inputs[0]);
-                format!("logf({a})")
+                let f = mf("logf");
+                format!("{f}({a})")
             }
             FusedStepOp::Sin => {
                 let a = resolve(&inputs[0]);
-                format!("sinf({a})")
+                let f = mf("sinf");
+                format!("{f}({a})")
             }
             FusedStepOp::Sqrt => {
                 let a = resolve(&inputs[0]);
-                format!("sqrtf({a})")
+                let f = mf("sqrtf");
+                format!("{f}({a})")
             }
             FusedStepOp::Cos => {
                 let a = resolve(&inputs[0]);
-                format!("cosf({a})")
+                let f = mf("cosf");
+                format!("{f}({a})")
             }
             FusedStepOp::Tan => {
                 let a = resolve(&inputs[0]);
-                format!("tanf({a})")
+                let f = mf("tanf");
+                format!("{f}({a})")
             }
             FusedStepOp::Atan => {
                 let a = resolve(&inputs[0]);
-                format!("atanf({a})")
+                let f = mf("atanf");
+                format!("{f}({a})")
             }
             FusedStepOp::Abs => {
                 let a = resolve(&inputs[0]);
-                format!("fabsf({a})")
+                let f = mf("fabsf");
+                format!("{f}({a})")
             }
             FusedStepOp::Floor => {
                 let a = resolve(&inputs[0]);
-                format!("floorf({a})")
+                let f = mf("floorf");
+                format!("{f}({a})")
             }
             FusedStepOp::Ceil => {
                 let a = resolve(&inputs[0]);
-                format!("ceilf({a})")
+                let f = mf("ceilf");
+                format!("{f}({a})")
             }
             FusedStepOp::Round => {
                 let a = resolve(&inputs[0]);
-                format!("rintf({a})")
+                let f = mf("rintf");
+                format!("{f}({a})")
             }
         }
     }
@@ -2923,25 +2961,60 @@ impl CEmitter {
         inputs: &[NodeId],
         ty: &TensorType,
         in_place: Option<FusedInPlaceSpec>,
-    ) {
-        // WS-A1 guard: this codegen path is f32-hardcoded (`float*` data
-        // pointers, `float v{s}` step variables, single-precision math
-        // symbols). A non-f32 output dtype would silently truncate to
-        // f32 — exactly the F1 footgun class. Reject loudly until a
-        // follow-on parameterizes the path on the IR-pinned dtype per
-        // spec/04-type-system.md §5.7.1. The fuse pass currently only
-        // produces f32 fused chains in practice; this guard catches a
-        // future regression that admits non-f32 fused chains.
-        if !matches!(ty.precision, Prim::F32) {
-            panic!(
-                "WS-A1 / F1: emit_fused_elem path is f32-hardcoded; node {id} has \
-                 output precision `{}`. The silent f32 truncation that would \
-                 result is exactly the destructure-`..` footgun RT-1 surfaced. \
-                 Widen the fused-elem emit path before admitting non-f32 fused \
-                 chains.",
-                ty.precision.name(),
-            );
+    ) -> Result<(), Unsupported> {
+        // chelis#919: this path is parameterized on the IR-pinned
+        // element type for f32 and f64 (`Self::elem_type` for the data
+        // pointers and the `v{s}` step variables, `Self::double_math_fn`
+        // for the math symbols) — the same treatment `emit_unary_func`
+        // already had. Every other dtype is still unsupported here:
+        // bf16/f16 are stored as `uint16_t` and need the
+        // convert-then-compute routing that `emit_unary_func_reduced_f`
+        // uses, and the integer dtypes need integer step operators
+        // (chelis#691) rather than libm calls.
+        //
+        // The pre-#919 comment claimed the fuse pass "currently only
+        // produces f32 fused chains in practice", making this a
+        // future-regression tripwire. That was false: it produces f64
+        // chains today for every ordinary f64 activation — `sigmoid`,
+        // `tanh`, `gelu`, and any composite such as `exp(x) * x`. The
+        // guard only looked unreachable because `chelis-python`'s
+        // artifact gate rejected f64 one layer earlier, and it was a
+        // `panic!`, so it crossed the pyo3 FFI boundary as a
+        // `PanicException` instead of a diagnostic.
+        if !matches!(ty.precision, Prim::F32 | Prim::F64) {
+            // chelis#730 Phase 1 (census row 11) channel: a section C3
+            // diagnostic, not a compiler panic.
+            return Err(Unsupported::new(
+                UnsupportedKind::Op("fused elementwise chain".to_string()),
+                format!(
+                    "`{}` tensors in the C DAG emitter (node {id})",
+                    ty.precision.name()
+                ),
+                Stage::Codegen("c"),
+                "the fused elementwise kernel emits float or double step variables \
+                 and libm math symbols; it supports f32 and f64 only. Cast to f32 \
+                 or f64 before the fused chain. Widening to the reduced-float and \
+                 integer dtypes is follow-on work (chelis#919, chelis#691)",
+            ));
         }
+        // Element type and math-symbol precision come from the same
+        // `ty`, so a `double v0` can never be fed by an `expf`.
+        let et = Self::elem_type(ty);
+        let is_f64 = Self::is_f64(ty);
+        // `chelis_runtime.h` declares the payload as `float *data`, so
+        // f64 access needs an explicit reinterpreting cast. f32 keeps
+        // the bare `t{id}->data` form: it needs no cast, and the
+        // in-place aliasing tests pin that exact text.
+        let out_cast = if is_f64 {
+            format!("({et}*)")
+        } else {
+            String::new()
+        };
+        let in_cast = if is_f64 {
+            format!("(const {et}*)")
+        } else {
+            String::new()
+        };
         if let Some(spec) = in_place {
             self.emit_fused_in_place_wrapper(id, ty, spec);
         } else {
@@ -2963,24 +3036,32 @@ impl CEmitter {
 
         // Declare restrict pointers for each external input (used by all fast paths).
         if in_place.is_some() {
-            self.line(&format!("float* __out_{id} = t{id}->data;"));
+            self.line(&format!("{et}* __out_{id} = {out_cast}t{id}->data;"));
         } else {
-            self.line(&format!("float* restrict __out_{id} = t{id}->data;"));
+            self.line(&format!(
+                "{et}* restrict __out_{id} = {out_cast}t{id}->data;"
+            ));
         }
         for (ext_idx, ext_node) in inputs.iter().enumerate() {
             let ext_id = ext_node.0;
             if in_place.is_some_and(|spec| spec.reusable_input == *ext_node) {
                 self.line(&format!(
-                    "const float* __ext{ext_idx}_{id} = t{ext_id}->data;"
+                    "const {et}* __ext{ext_idx}_{id} = {in_cast}t{ext_id}->data;"
                 ));
             } else {
                 self.line(&format!(
-                    "const float* restrict __ext{ext_idx}_{id} = t{ext_id}->data;"
+                    "const {et}* restrict __ext{ext_idx}_{id} = {in_cast}t{ext_id}->data;"
                 ));
             }
         }
 
-        let use_sleef = self.math_lib == crate::MathLib::Sleef && Self::has_math_ops(ops);
+        // The Sleef path is 8-wide `__m256` single precision
+        // (`_mm256_loadu_ps`, `_mm256_storeu_ps`), so it is f32-only.
+        // f64 chains take the scalar OMP SIMD loop, mirroring how
+        // `emit_unary_func` skips its vForce/Sleef batch paths when
+        // `is_f64`.
+        let use_sleef =
+            !is_f64 && self.math_lib == crate::MathLib::Sleef && Self::has_math_ops(ops);
 
         // Closures for resolving fused inputs in scalar (fast-path) context.
         let resolve_fast = |fi: &FusedInput| -> String {
@@ -3031,12 +3112,13 @@ impl CEmitter {
             self.indent += 1;
             for (ext_idx, _) in inputs.iter().enumerate() {
                 self.line(&format!(
-                    "float __in_ext{ext_idx} = __ext{ext_idx}_{id}[__i];"
+                    "{et} __in_ext{ext_idx} = __ext{ext_idx}_{id}[__i];"
                 ));
             }
             for (s, step) in ops.iter().enumerate() {
-                let expr = Self::scalar_step_expr(&step.op, &resolve_fast, &step.input_indices);
-                self.line(&format!("float v{s} = {expr};"));
+                let expr =
+                    Self::scalar_step_expr(&step.op, &resolve_fast, &step.input_indices, is_f64);
+                self.line(&format!("{et} v{s} = {expr};"));
             }
             self.line(&format!("__out_{id}[__i] = v{last};"));
             self.indent -= 1;
@@ -3049,13 +3131,12 @@ impl CEmitter {
             self.line(&format!("for (int i = 0; i < t{id}->size; i++) {{"));
             self.indent += 1;
             for (ext_idx, _) in inputs.iter().enumerate() {
-                self.line(&format!(
-                    "float __in_ext{ext_idx} = __ext{ext_idx}_{id}[i];"
-                ));
+                self.line(&format!("{et} __in_ext{ext_idx} = __ext{ext_idx}_{id}[i];"));
             }
             for (s, step) in ops.iter().enumerate() {
-                let expr = Self::scalar_step_expr(&step.op, &resolve_fast, &step.input_indices);
-                self.line(&format!("float v{s} = {expr};"));
+                let expr =
+                    Self::scalar_step_expr(&step.op, &resolve_fast, &step.input_indices, is_f64);
+                self.line(&format!("{et} v{s} = {expr};"));
             }
             self.line(&format!("__out_{id}[i] = v{last};"));
             self.indent -= 1;
@@ -3067,13 +3148,12 @@ impl CEmitter {
             self.line(&format!("for (int i = 0; i < t{id}->size; i++) {{"));
             self.indent += 1;
             for (ext_idx, _) in inputs.iter().enumerate() {
-                self.line(&format!(
-                    "float __in_ext{ext_idx} = __ext{ext_idx}_{id}[i];"
-                ));
+                self.line(&format!("{et} __in_ext{ext_idx} = __ext{ext_idx}_{id}[i];"));
             }
             for (s, step) in ops.iter().enumerate() {
-                let expr = Self::scalar_step_expr(&step.op, &resolve_fast, &step.input_indices);
-                self.line(&format!("float v{s} = {expr};"));
+                let expr =
+                    Self::scalar_step_expr(&step.op, &resolve_fast, &step.input_indices, is_f64);
+                self.line(&format!("{et} v{s} = {expr};"));
             }
             self.line(&format!("__out_{id}[i] = v{last};"));
             self.indent -= 1;
@@ -3101,28 +3181,41 @@ impl CEmitter {
             ));
         }
 
-        // Emit each fused step using slow-path indexed access.
+        // Emit each fused step using slow-path indexed access. The
+        // strided reads go straight through `t{n}->data`, which is
+        // declared `float *`, so an f64 chain must reinterpret the
+        // pointer before indexing — indexing first would advance by
+        // 4 bytes per element and read half of each double.
         let resolve_slow = |fi: &FusedInput| -> String {
             match fi {
                 FusedInput::External(i) => {
                     let ext_id = inputs[*i].0;
-                    format!("t{ext_id}->data[idx_ext{i}]")
+                    if is_f64 {
+                        format!("((const {et}*)t{ext_id}->data)[idx_ext{i}]")
+                    } else {
+                        format!("t{ext_id}->data[idx_ext{i}]")
+                    }
                 }
                 FusedInput::PreviousStep(j) => format!("v{j}"),
             }
         };
 
         for (s, step) in ops.iter().enumerate() {
-            let expr = Self::scalar_step_expr(&step.op, &resolve_slow, &step.input_indices);
-            self.line(&format!("float v{s} = {expr};"));
+            let expr = Self::scalar_step_expr(&step.op, &resolve_slow, &step.input_indices, is_f64);
+            self.line(&format!("{et} v{s} = {expr};"));
         }
 
         // Store last step's result.
-        self.line(&format!("t{id}->data[i] = v{last};"));
+        if is_f64 {
+            self.line(&format!("(({et}*)t{id}->data)[i] = v{last};"));
+        } else {
+            self.line(&format!("t{id}->data[i] = v{last};"));
+        }
         self.indent -= 1;
         self.line("}");
         self.indent -= 1;
         self.line("}");
+        Ok(())
     }
 
     // ---- BLAS matmul ----
@@ -4944,7 +5037,7 @@ impl CEmitter {
         fused_input_type: &TensorType,
         out_ty: &TensorType,
         reduce_kind: &str,
-    ) {
+    ) -> Result<(), Unsupported> {
         let ops = match fused_op {
             RiscOp::FusedElem { ops } => ops,
             _ => panic!("expected FusedElem op"),
@@ -4953,23 +5046,38 @@ impl CEmitter {
         // zero, `float acc = 0.0f` initializer, `expf`/`logf`/`sinf`
         // single-precision math symbols, fmaxf reduction operator). A
         // non-f32 output dtype would silently truncate to f32 — exactly
-        // the F1 footgun class. Reject loudly until a follow-on widens
-        // the fused path to honor the IR `Sum`/`MaxReduce` accumulator
-        // and the input element type per spec/04-type-system.md §5.7.1.
+        // the F1 footgun class. Reject until a follow-on widens the
+        // fused path to honor the IR `Sum`/`MaxReduce` accumulator and
+        // the input element type per spec/04-type-system.md §5.7.1.
+        //
+        // chelis#919: unlike `emit_fused_elem` this is still a
+        // rejection, not a widening — the reduce body needs a
+        // `chelis_fill_f64` zero, a `double` accumulator cascade, and
+        // `fmax`, which is more than the fused-elem parameterization.
+        // But it is no longer a `panic!`: it is reachable from ordinary
+        // Surf (`sum(exp(x), 0)` at f64 inlines the elementwise node
+        // into the reduction) and through `chelis-python` it crossed
+        // the FFI boundary as a `PanicException`.
         if !matches!(out_ty.precision, Prim::F32)
             || !matches!(fused_input_type.precision, Prim::F32)
         {
-            panic!(
-                "WS-A1 / F1: emit_fused_reduce path is f32-hardcoded; node {id} has \
-                 fused_input precision `{}` and reduction output precision `{}`. The \
-                 silent f32 truncation that would result is exactly the destructure-\
-                 `..` footgun RT-1 surfaced. Widen this path before admitting \
-                 non-f32 fused reductions; the safe stop-gap is to keep \
-                 reduction_inlined_fused_elems out of the f64/i32/i64 path until \
-                 then.",
-                fused_input_type.precision.name(),
-                out_ty.precision.name(),
-            );
+            // chelis#730 Phase 1 (census row 11) channel: a section C3
+            // diagnostic, not a compiler panic.
+            return Err(Unsupported::new(
+                UnsupportedKind::Op(format!("fused elementwise {reduce_kind}_reduce")),
+                format!(
+                    "`{}` fused input / `{}` reduction output in the C DAG emitter \
+                     (node {id})",
+                    fused_input_type.precision.name(),
+                    out_ty.precision.name()
+                ),
+                Stage::Codegen("c"),
+                "the fused reduction kernel is f32-hardcoded (WS-A1/F1): \
+                 `chelis_fill_f32` zero, a `float` accumulator cascade, and `fmaxf`. \
+                 Cast to f32 before the reduction, or keep the elementwise chain out \
+                 of the reduction so the unfused f64 reduce path runs. Widening is \
+                 follow-on work (chelis#919)",
+            ));
         }
         let axis_size = Self::emit_dim_info(&fused_input_type.dims[axis]);
         // ndim of the fused input (pre-reduction shape)
@@ -5161,6 +5269,7 @@ impl CEmitter {
         }
         self.indent -= 1;
         self.line("}");
+        Ok(())
     }
 
     // ---- Reshape ----
