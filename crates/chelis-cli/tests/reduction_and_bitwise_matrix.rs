@@ -5,7 +5,7 @@
 //!
 //! | issue | one line |
 //! |---|---|
-//! | chelis#682 | bitand/shl stub to 0 in C at EVERY width (int8/16/32/64); eval is width-correct |
+//! | chelis#682 | bitand/shifts now agree across eval/C at every integer width, including boundary counts |
 //! | chelis#692 | max/min/prod/argmax/argmin reduce on an int64 tensor PANIC the compiler (emit.rs:4238/4406/4777) |
 //! | chelis#723 | the C print helper renders int64 elements through double, hiding an EXACT sum of 2^53 + 1 |
 //! | chelis#724 | mean of an int64 tensor: eval 187.5 (fractional in an int64 tensor), C 187.0 |
@@ -17,9 +17,8 @@
 //! the C lane's int64 `sum` is EXACT at 2^53 + 1 (provable only through
 //! `to_list`, which is what #723 is about).
 //!
-//! One lucky green is documented so nobody cites it: `shl(1i8, 9)` prints 0
-//! in both lanes - eval because the shift leaves the 8-bit window, C
-//! because of the #682 stub. Two unrelated mechanisms colliding.
+//! Shift counts are explicitly width-bounded: bits shifted beyond the declared
+//! integer width are discarded in both lanes.
 
 #![allow(clippy::uninlined_format_args)]
 
@@ -109,23 +108,82 @@ fn c_first_line(program: &str, name: &str) -> String {
     stdout.expect("ran")
 }
 
+/// Compile and run generated C with undefined-behavior sanitization enabled.
+/// The returned output lets callers assert either successful value parity or
+/// the language-defined negative-count trap without hiding a sanitizer report.
+fn c_ubsan_run(program: &str, name: &str) -> std::process::Output {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join(format!("{name}.ch"));
+    let out_dir = dir.path().join(format!("{name}-out"));
+    write_file(&path, program);
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let toolchain = chelis_backend_c::toolchain::runtime_toolchain(
+        chelis_backend_c::toolchain::CodegenRequirements {
+            wants_openmp: false,
+            needs_blas: false,
+        },
+    );
+    // Prefer clang's compiler-rt UBSan when available. Some GCC
+    // installations provide the compiler but omit the separately packaged
+    // libubsan shared object; that is an environment gap, not a reason to
+    // weaken this executable oracle.
+    let clang_available = std::process::Command::new("clang")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success());
+    let sanitizer_compiler = if clang_available {
+        "clang"
+    } else {
+        toolchain.compiler.as_str()
+    };
+    let mut compiler = std::process::Command::new(sanitizer_compiler);
+    compiler
+        .current_dir(&out_dir)
+        .args([
+            "-O1",
+            "-fsanitize=undefined",
+            "-fno-sanitize-recover=undefined",
+        ])
+        .args(&toolchain.compile_flags)
+        .arg(format!("{name}.c"))
+        .args(["-L.", "-lchelis_runtime"])
+        .args(&toolchain.link_flags)
+        .args(["-fsanitize=undefined", "-o", name]);
+    let linked = compiler.output().expect("invoke UBSan C compiler");
+    assert!(
+        linked.status.success(),
+        "UBSan link failed for {name}: {}",
+        String::from_utf8_lossy(&linked.stderr)
+    );
+    std::process::Command::new(out_dir.join(name))
+        .env("UBSAN_OPTIONS", "halt_on_error=1:print_stacktrace=1")
+        .output()
+        .expect("run UBSan binary")
+}
+
 fn scalar_program(expr: &str, ret_ty: &str) -> String {
     format!("module M.Main\ndef run() -> {ret_ty} = {expr}\nout = print(run())\n")
 }
 
 // ===========================================================================
-// chelis#682 at every width - eval width-correct, C stubs to 0
+// chelis#682 at every width - eval/C parity locks
 // ===========================================================================
 
-/// Value-parity row: red-for-a-better-reason since chelis#730 Phase 1
-/// (the build rejects instead of stubbing 0); goes green when the ops gain
-/// compiled arms.
+/// Value-parity row promoted when chelis#682 gained closed C-expression arms.
 #[test]
-#[ignore = "chelis#682: bitwise ops have no compiled-C arms; since chelis#730 Phase 1 the \
-            build REJECTS them loudly (previously a silent 0 stub) - red for a better \
-            reason. Value support is the op-owner half of chelis#682; eval is \
-            correct (bitand 8, shl 16 at int8/int16/int32/int64). Run with \
-            `cargo test -p chelis-cli --test reduction_and_bitwise_matrix -- --ignored`."]
 fn bitwise_ops_agree_across_lanes_at_every_width() {
     if !c_toolchain_available() {
         panic!("needs a host C toolchain");
@@ -152,9 +210,7 @@ fn bitwise_ops_agree_across_lanes_at_every_width() {
     }
 }
 
-/// eval's width semantics for shifts, locked eval-only: shl(1i8, 7) lands on
-/// the sign bit and wraps to -128 (today's wrap behavior; if #680's trap
-/// contract is extended to shifts this row gets re-authored consciously).
+/// [04-NUM-13]: shifts use declared-width two's-complement semantics.
 #[test]
 fn eval_shift_width_semantics_are_locked() {
     assert_eq!(
@@ -173,27 +229,98 @@ fn eval_shift_width_semantics_are_locked() {
     );
 }
 
-/// The formerly "lucky green" coincidence row, re-authored by chelis#730
-/// Phase 1: eval still prints 0 (the bit left the 8-bit window); the C
-/// lane no longer stubs `shl` to 0 - the build is rejected with the
-/// branded diagnostic (census row 2), so the coincidence is gone and can
-/// never again be cited as cross-lane evidence.
+/// Both lanes apply the declared int8 width after the shift.
 #[test]
-fn shl_past_width_agreement_is_a_coincidence_not_evidence() {
+fn shl_past_width_is_defined_as_fully_shifted_out() {
     if !c_toolchain_available() {
         eprintln!("skipping: no host C toolchain");
         return;
     }
     let program = scalar_program("shl(cast(1, int8), cast(9, int8))", "int8");
     assert_eq!(eval_first_line(&program).expect("eval"), "0");
-    let (ok, stderr, _) = c_build_outcome(&program, "shl_past_width");
+    assert_eq!(c_first_line(&program, "shl_past_width"), "0");
+}
+
+/// Red-team regression for chelis#682: signed C `<<` is undefined for a
+/// negative lhs and for results entering the sign bit, while any count at
+/// least the promoted width is undefined. Generated code must instead use the
+/// unsigned width-aware helpers and remain clean under UBSan.
+#[test]
+fn shift_boundaries_agree_across_lanes_and_are_ubsan_clean() {
+    if !c_toolchain_available() {
+        panic!("needs a host C toolchain with UBSan");
+    }
+    for (ty, width, min) in [
+        ("int8", 8, "-128"),
+        ("int16", 16, "-32768"),
+        ("int32", 32, "-2147483648"),
+        ("int64", 64, "-9223372036854775808"),
+    ] {
+        for (label, expr, expected) in [
+            (
+                "sign_bit",
+                format!("shl(cast(1, {ty}), cast({}, {ty}))", width - 1),
+                min,
+            ),
+            (
+                "negative_lhs",
+                format!("shl(cast(-1, {ty}), cast(1, {ty}))"),
+                "-2",
+            ),
+            (
+                "count_at_width",
+                format!("shl(cast(1, {ty}), cast({width}, {ty}))"),
+                "0",
+            ),
+            (
+                "negative_shr_at_width",
+                format!("shr(cast(-1, {ty}), cast({width}, {ty}))"),
+                "-1",
+            ),
+        ] {
+            let program = scalar_program(&expr, ty);
+            assert_eq!(
+                eval_first_line(&program).expect("eval boundary shift"),
+                expected
+            );
+            let run = c_ubsan_run(&program, &format!("shift_{ty}_{label}"));
+            assert!(
+                run.status.success(),
+                "{ty}/{label}: UBSan binary failed: {}",
+                String::from_utf8_lossy(&run.stderr)
+            );
+            assert!(
+                !String::from_utf8_lossy(&run.stderr).contains("runtime error:"),
+                "{ty}/{label}: UBSan reported undefined behavior: {}",
+                String::from_utf8_lossy(&run.stderr)
+            );
+            assert_eq!(
+                String::from_utf8_lossy(&run.stdout)
+                    .lines()
+                    .next()
+                    .unwrap_or_default(),
+                expected,
+                "{ty}/{label}: eval/C shift divergence"
+            );
+        }
+    }
+}
+
+#[test]
+fn negative_shift_count_traps_without_ubsan() {
+    if !c_toolchain_available() {
+        panic!("needs a host C toolchain with UBSan");
+    }
+    let program = scalar_program("shl(cast(1, int64), cast(-1, int64))", "int64");
+    let eval_err = eval_first_line(&program).expect_err("negative eval shift must fail");
+    assert!(eval_err.contains("shift amount must be non-negative, got -1"));
+    let run = c_ubsan_run(&program, "shift_negative_count");
+    assert!(!run.status.success(), "negative compiled shift must trap");
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(stderr.contains("shift amount must be non-negative, got -1"));
     assert!(
-        !ok,
-        "the compiled lane must reject the stubbed builtin, not print 0"
-    );
-    assert!(
-        stderr.contains("unsupported:"),
-        "the rejection must carry the branded diagnostic; got: {stderr}"
+        !stderr.contains("runtime error:"),
+        "language trap must precede any undefined shift: {stderr}"
     );
 }
 

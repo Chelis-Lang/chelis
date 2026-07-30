@@ -650,6 +650,7 @@ struct InferenceProduct {
     active_epoch: Option<TypeStampEpoch>,
     owner_types: HashMap<usize, FinalOwnerType>,
     type_headers: TypeResolutionEnv,
+    adt_registry: AdtRegistry,
 }
 
 struct TypeStampEpoch {
@@ -994,6 +995,8 @@ pub(crate) fn run_finalization_mutation_case(
                 "poison".to_string(),
                 FunctionSignatureInference {
                     name: "poison".to_string(),
+                    authored_signature: false,
+                    authored_signature_type: None,
                     recursive_cycle: false,
                     checked_signature: error_ty.clone(),
                     display_signature: error_ty,
@@ -1008,6 +1011,7 @@ pub(crate) fn run_finalization_mutation_case(
         HashMap::new(),
         &signature_context,
         &TypeResolutionEnv::default(),
+        &AdtRegistry::default(),
         errors,
     );
 }
@@ -1185,6 +1189,8 @@ pub struct CheckedProgram {
     linearity: LinearityInfo,
     signature_inference: SignatureInferenceMetadata,
     type_headers: TypeResolutionEnv,
+    #[serde(default)]
+    adt_registry: AdtRegistry,
 }
 
 impl CheckedProgram {
@@ -1199,6 +1205,7 @@ impl CheckedProgram {
             linearity: LinearityInfo::default(),
             signature_inference: SignatureInferenceMetadata::default(),
             type_headers: TypeResolutionEnv::default(),
+            adt_registry: AdtRegistry::default(),
         }
     }
 
@@ -1237,6 +1244,14 @@ impl CheckedProgram {
 
     pub(crate) fn type_headers(&self) -> &TypeResolutionEnv {
         &self.type_headers
+    }
+
+    /// Checker-owned, alias-resolved ADT definitions used by lowering.
+    ///
+    /// Consumers must use this registry instead of reconstructing constructor
+    /// layouts or generic-parameter roles from authored `deftype` syntax.
+    pub fn adt_registry(&self) -> &AdtRegistry {
+        &self.adt_registry
     }
 
     pub fn with_linearity(mut self, linearity: LinearityInfo) -> Self {
@@ -1296,12 +1311,30 @@ impl CheckedProgram {
         let mut type_headers = library.type_headers.clone();
         type_headers.extend_from(&new_code.type_headers);
 
+        // A context-checked new-code program normally already carries the
+        // library registry. Back-fill defensively so composition remains
+        // total for independently deserialized legacy programs as well.
+        let mut adt_registry = new_code.adt_registry.clone();
+        for (name, definition) in &library.adt_registry.defs {
+            adt_registry
+                .defs
+                .entry(name.clone())
+                .or_insert_with(|| definition.clone());
+        }
+        for (name, alias) in &library.adt_registry.aliases {
+            adt_registry
+                .aliases
+                .entry(name.clone())
+                .or_insert_with(|| alias.clone());
+        }
+
         Self {
             annotated_exprs,
             type_env,
             linearity,
             signature_inference,
             type_headers,
+            adt_registry,
         }
     }
 }
@@ -1314,6 +1347,7 @@ fn finalize_checked_program(
     type_env: HashMap<String, deep::Expr>,
     signature_context: &SignatureInferenceMetadata,
     type_headers: &TypeResolutionEnv,
+    adt_registry: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
 ) -> CheckedProgram {
     let signature_inference = infer_signature_metadata_with_context_and_headers(
@@ -1329,6 +1363,7 @@ fn finalize_checked_program(
         linearity: LinearityInfo::default(),
         signature_inference,
         type_headers: type_headers.clone(),
+        adt_registry: adt_registry.clone(),
     };
 
     validate_checked_program_totality(&checked, signature_context, errors);
@@ -1367,6 +1402,17 @@ impl SignatureInferenceMetadata {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct FunctionSignatureInference {
     pub name: String,
+    /// True when this function has an authored or Surf-synthesized `defsig`.
+    /// Lowering uses this checker-owned fact to distinguish declared
+    /// polymorphism from generalized local-callback inference.
+    #[serde(default)]
+    pub authored_signature: bool,
+    /// The checker-decoded authored signature before body inference sharpens
+    /// wildcard dimensions or otherwise specializes the checked function.
+    ///
+    /// Lowering consumes this record instead of reparsing `defsig` syntax.
+    #[serde(default)]
+    pub authored_signature_type: Option<Type>,
     pub recursive_cycle: bool,
     pub checked_signature: Type,
     pub display_signature: Type,
@@ -1406,6 +1452,7 @@ pub(crate) fn checked_program_with_effect_annotations_in_session(
         linearity: original.linearity.clone(),
         signature_inference: original.signature_inference.clone(),
         type_headers: original.type_headers.clone(),
+        adt_registry: original.adt_registry.clone(),
     };
     validate_checked_program_totality(&checked, original.signature_inference(), errors);
     checked
@@ -1565,6 +1612,7 @@ fn infer_program_with_product_in_session(
     let items = top_level_decl_items_with_modules(exprs);
     collect_all_declarations(&items, &mut env, &mut vg, &mut subst, &mut adt_reg, errors);
     product.type_headers = adt_reg.resolution_env().clone();
+    product.adt_registry = adt_reg.clone();
 
     // Checker-enforced opacity (RFC D-CHECK): install the per-run
     // context so the inference hooks see module identity, exports,
@@ -1921,6 +1969,7 @@ pub(crate) fn build_compiled_library_context_in_session(
         library_ir_annotated,
         &SignatureInferenceMetadata::default(),
         &product.type_headers,
+        &product.adt_registry,
         errors,
     );
     if !errors.is_empty() {
@@ -2081,6 +2130,7 @@ pub(crate) fn build_compiled_library_context_with_base_in_session(
         checked_type_env,
         &SignatureInferenceMetadata::default(),
         &product.type_headers,
+        &product.adt_registry,
         errors,
     );
     if !errors.is_empty() {
@@ -2219,6 +2269,7 @@ pub(crate) fn check_ir_with_signature_context_in_session(
         annotated_type_env,
         signature_context,
         &product.type_headers,
+        &product.adt_registry,
         errors,
     );
     if !errors.is_empty() {
@@ -2254,6 +2305,7 @@ pub(crate) fn check_typed_program_in_session(
             annotated_type_env,
             &SignatureInferenceMetadata::default(),
             &product.type_headers,
+            &product.adt_registry,
             errors,
         );
         if !errors.is_empty() {
@@ -2339,6 +2391,7 @@ fn infer_ir_program_with_state(
         errors,
     );
     product.type_headers = state.adt_reg.resolution_env().clone();
+    product.adt_registry = state.adt_reg.clone();
 
     // Checker-enforced opacity (RFC D-CHECK): accumulate this phase's
     // program-shape metadata into the persistent state (so the
@@ -3251,6 +3304,7 @@ fn infer_signature_metadata_with_context_and_headers(
     errors: &mut DiagnosticSink<'_>,
 ) -> SignatureInferenceMetadata {
     let defsig_names = collect_defsig_names(exprs);
+    let authored_signature_types = collect_authored_signature_types(exprs, type_headers, errors);
     let recursive_members = recursive_call_cycle_members(exprs);
     let mut functions = BTreeMap::new();
     let ordered_defs = signature_inference_def_order(exprs);
@@ -3343,6 +3397,8 @@ fn infer_signature_metadata_with_context_and_headers(
                 name.to_string(),
                 FunctionSignatureInference {
                     name: name.to_string(),
+                    authored_signature: defsig_names.contains(name),
+                    authored_signature_type: authored_signature_types.get(name).cloned(),
                     recursive_cycle,
                     checked_signature,
                     display_signature,
@@ -3520,6 +3576,31 @@ fn collect_defsig_names(exprs: &[deep::Expr]) -> HashSet<String> {
         }
     }
     names
+}
+
+fn collect_authored_signature_types(
+    exprs: &[deep::Expr],
+    type_headers: &TypeResolutionEnv,
+    errors: &mut DiagnosticSink<'_>,
+) -> HashMap<String, Type> {
+    let mut signatures = HashMap::new();
+    for expr in top_level_decl_items(exprs) {
+        let deep::Expr::List(list, _) = expr else {
+            continue;
+        };
+        if get_tag(list) != Some(DeepTag::Defsig) {
+            continue;
+        }
+        let kids = children(list);
+        let (Some(name), Some(signature_expr)) = (kids.first().and_then(symbol_name), kids.get(1))
+        else {
+            continue;
+        };
+        if let Some(signature) = type_from_deep_expr(signature_expr, type_headers, errors) {
+            signatures.insert(name.to_string(), signature);
+        }
+    }
+    signatures
 }
 
 fn recursive_call_cycle_members(exprs: &[deep::Expr]) -> HashSet<String> {
@@ -7059,7 +7140,11 @@ fn should_attach_type_metadata(tag: DeepTag) -> bool {
     }
 }
 
-fn type_to_deep_expr(ty: &Type) -> deep::Expr {
+/// Encode a checker-owned type as canonical Deep type metadata.
+///
+/// Lowering consumers use this boundary when they need the checker's
+/// alias-resolved ADT field types without reparsing authored declarations.
+pub fn type_to_deep_expr(ty: &Type) -> deep::Expr {
     match ty {
         Type::Prim(prim) => node_expr(DeepTag::TPrim, vec![symbol_expr(prim.name())]),
         Type::Fn(args, ret) => {
@@ -21212,6 +21297,90 @@ mod tests {
         let decls = chelis_surf::parser::parse_str(src).expect("surf parse");
         let exprs = chelis_surf::desugar::desugar_program(&decls);
         check_ir_program(&exprs).expect("IR check")
+    }
+
+    #[test]
+    fn checked_program_preserves_alias_resolved_generic_adt_registry() {
+        let checked = checked_surf(
+            r#"
+type Payload[a] = a
+type Boxed[a] = | Boxed(Payload[a])
+def identity[a](value: Boxed[a]) -> Boxed[a] = value
+"#,
+        );
+        let boxed = checked
+            .adt_registry()
+            .lookup("Boxed")
+            .expect("checked registry must retain Boxed");
+        assert_eq!(boxed.type_params, ["a"]);
+        assert_eq!(boxed.variants.len(), 1);
+        let field = &boxed.variants[0].fields[0].1;
+        assert!(
+            matches!(field, Type::Var(_)),
+            "aliases must be checker-resolved and the stored payload retained: {field:?}"
+        );
+
+        let encoded = bincode::serialize(&checked).expect("CheckedProgram serializes");
+        let decoded: CheckedProgram =
+            bincode::deserialize(&encoded).expect("CheckedProgram deserializes");
+        assert_eq!(
+            decoded
+                .adt_registry()
+                .lookup("Boxed")
+                .expect("registry survives serialization")
+                .variants[0]
+                .fields[0]
+                .1,
+            *field
+        );
+        assert_eq!(
+            decoded
+                .signature_inference()
+                .functions
+                .get("identity")
+                .and_then(|signature| signature.authored_signature_type.as_ref()),
+            checked
+                .signature_inference()
+                .functions
+                .get("identity")
+                .and_then(|signature| signature.authored_signature_type.as_ref()),
+            "checker-decoded authored signatures survive serialization"
+        );
+        let effects_reannotated = checked
+            .try_with_effect_annotations(checked.annotated_exprs().to_vec())
+            .expect("effects-only rewrite preserves checked metadata");
+        assert!(
+            effects_reannotated.adt_registry().lookup("Boxed").is_some(),
+            "effects reannotation must preserve the checker registry"
+        );
+        let composed = CheckedProgram::compose(&checked, &effects_reannotated);
+        assert!(
+            composed.adt_registry().lookup("Boxed").is_some(),
+            "CheckedProgram composition must preserve the checker registry"
+        );
+
+        let dimensional = checked_surf(
+            r#"
+type Column[n, a] = | Column(tensor[n, a])
+def identity[n, a](column: Column[n, a]) -> Column[n, a] = column
+"#,
+        );
+        let column = dimensional
+            .adt_registry()
+            .lookup("Column")
+            .expect("checked registry must retain dimensional Column");
+        let Type::Tensor(_, TensorPrec::Var(stored_precision)) = &column.variants[0].fields[0].1
+        else {
+            panic!("Column must retain its checker-owned polymorphic tensor field");
+        };
+        assert_eq!(
+            *stored_precision, column.param_vars[1],
+            "dtype parameter is the tensor's stored precision"
+        );
+        assert_ne!(
+            *stored_precision, column.param_vars[0],
+            "dimension parameter must not be reconstructed as a stored dtype"
+        );
     }
 
     /// Run the full Surf → desugar → infer pipeline and return the raw

@@ -4,6 +4,43 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.17.4] — 2026-07-30
+
+### Fixed
+
+- **Concrete return contexts now specialize nullary generic ADT
+  constructors before C ABI projection (chelis#935).** A layout-free
+  constructor may retain its named generic ADT term through host-expression
+  lowering until the checked enclosing expectation supplies applied type
+  arguments. Zero-argument generic constructor wrappers are emitted through
+  concrete call-site specialization, so the exact `Box[a]`/`Empty`
+  reproducer C-builds without inventing a type. Unconstrained uses still fail
+  at the resolved-type boundary, while wrong ADT names and arities continue
+  to reject before emission.
+- **Generic ADT match patterns now receive their checked concrete application
+  at bounded call sites (chelis#936).** Ordinary stored type parameters are
+  distinguished from tensor dimensions nested through ADTs (chelis#940), so
+  `Hamt[a]` follows ordinary specialization while `Column[n]`/`Frame[n]`
+  retain rank specialization. Invoked recursive ordinary generics reject
+  before C emission pending memoized monomorphized symbols (chelis#941).
+- **Host generic classification now consumes checker-owned signature and ADT
+  records instead of reconstructing them from authored syntax (chelis#948).**
+  Alias-resolved constructor fields survive `CheckedProgram` serialization,
+  composition, effects annotation, and lowering. Mixed
+  `Frame[n,a] -> Hamt[Column[n,a]] -> tensor[n,a]` programs erase only the
+  dimension parameter while specializing the stored dtype, including after
+  beta reduction removes an expression-local type stamp.
+- **`fold` materializes the checked callback accumulator type onto unresolved
+  initializers (chelis#939).** An empty `[]` initializer now resolves when the
+  callback declares the accumulator, without defaulting genuinely
+  unconstrained lists.
+- **Integer bitwise and shift builtins now emit real scalar C expressions
+  (chelis#682).** `bitand`, `bitor`, `bitxor`, `shl`, and `shr` have promoted
+  eval/C parity locks at `int8`, `int16`, `int32`, and `int64` instead of
+  reaching the compiled-lane unsupported boundary. Shift lowering uses
+  declared-width unsigned helpers rather than undefined signed C shifts;
+  boundary counts and negative-count traps are locked under UBSan.
+
 ## [0.17.3] — 2026-07-30
 
 ### Fixed

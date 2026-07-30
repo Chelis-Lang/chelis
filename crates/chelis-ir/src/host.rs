@@ -1,19 +1,21 @@
 use chelis_deep::DeepTag;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use chelis_deep::ast::{Atom, Expr, List};
 use chelis_deep::decode_effect_kind;
-use chelis_types::types::Prim;
+use chelis_types::adt::{AdtDef, AdtRegistry};
+use chelis_types::infer::type_to_deep_expr;
+use chelis_types::types::{Prim, TensorPrec, Type};
 use chelis_types::{BUILTIN_NAMES, CheckedProgram};
 use chelis_vocab::EffectKind;
 
 use crate::dag::{DimExpr, DimInfo, RiscOp, TensorType};
 use crate::host_type_state::{
-    ConcreteHostType, HostInferenceVar, HostPrecisionTerm, HostTypeDecodeError, HostTypeTerm,
-    decode_host_type,
+    ConcreteHostType, HostInferenceVar, HostPrecisionTerm, HostShapeTerm, HostTensorTypeTerm,
+    HostTypeDecodeError, HostTypeTerm, decode_host_type,
 };
 use crate::lower::top_level_lowering_map;
 
@@ -23,6 +25,12 @@ thread_local! {
     // recursive/mutually recursive definitions — the specialized body would
     // re-encounter the same call and inline forever.
     static INLINING_STACK: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+    static TYPE_POLYMORPHIC_FN_CACHE: RefCell<HashMap<(usize, String), bool>> =
+        RefCell::new(HashMap::new());
+    static TOP_LEVEL_FN_CALL_GRAPH_CACHE:
+        RefCell<HashMap<usize, HashMap<String, HashSet<String>>>> =
+        RefCell::new(HashMap::new());
+    static HOST_LOWERING_CACHE_ACTIVE: Cell<bool> = const { Cell::new(false) };
 }
 
 static NEXT_HOST_INFERENCE_VAR: AtomicU32 = AtomicU32::new(0);
@@ -45,6 +53,25 @@ fn pop_inlining(name: &str) {
     INLINING_STACK.with(|stack| {
         stack.borrow_mut().remove(name);
     });
+}
+
+struct HostLoweringCacheGuard;
+
+impl HostLoweringCacheGuard {
+    fn begin() -> Self {
+        TYPE_POLYMORPHIC_FN_CACHE.with(|cache| cache.borrow_mut().clear());
+        TOP_LEVEL_FN_CALL_GRAPH_CACHE.with(|cache| cache.borrow_mut().clear());
+        HOST_LOWERING_CACHE_ACTIVE.with(|active| active.set(true));
+        Self
+    }
+}
+
+impl Drop for HostLoweringCacheGuard {
+    fn drop(&mut self) {
+        HOST_LOWERING_CACHE_ACTIVE.with(|active| active.set(false));
+        TYPE_POLYMORPHIC_FN_CACHE.with(|cache| cache.borrow_mut().clear());
+        TOP_LEVEL_FN_CALL_GRAPH_CACHE.with(|cache| cache.borrow_mut().clear());
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1220,6 +1247,7 @@ fn resolve_host_expr(expr: HostExpr) -> Result<ConcreteHostExpr, crate::HostType
 pub fn try_lower_compiled_program(
     program: &CheckedProgram,
 ) -> Result<CompiledProgram, crate::lower::LowerDiagnostic> {
+    let _cache_guard = HostLoweringCacheGuard::begin();
     let lowered_names = top_level_lowering_map(program.exprs(), program.type_env());
     // Issue #197: a *fatal* diagnostic from IR lowering (e.g. the AD
     // pass refused to differentiate a non-differentiable op) must
@@ -1358,7 +1386,7 @@ pub fn lower_named_tensor_entry_dag(program: &CheckedProgram, name: &str) -> Opt
     }
 
     let declared_param_tys = lookup_declared_type_expr(program, name)
-        .and_then(parse_fn_type_expr)
+        .and_then(|ty| parse_fn_type_expr(&ty))
         .map(|(params, _)| params)
         .unwrap_or_default();
     let mut scope = HashMap::new();
@@ -1499,7 +1527,10 @@ fn lower_host_program(
         // the body); the standalone host symbol is intentionally
         // omitted because no caller can use it without supplying the
         // monomorphization binding the inliner provides.
-        if ty_expr.is_some_and(crate::lower::type_expr_has_precision_var) {
+        if ty_expr
+            .as_ref()
+            .is_some_and(crate::lower::type_expr_has_precision_var)
+        {
             continue;
         }
         // Tier-2 rank polymorphism (spec/design/rank_polymorphism.md): skip
@@ -1514,7 +1545,20 @@ fn lower_host_program(
         // `tensor_rank_substitutions` in `lower.rs`); the standalone host
         // symbol is intentionally omitted because no caller can use it
         // without supplying the monomorphization binding the inliner provides.
-        if ty_expr.is_some_and(crate::lower::type_expr_has_rank_var) {
+        if ty_expr
+            .as_ref()
+            .is_some_and(crate::lower::type_expr_has_rank_var)
+            || top_level_fn_is_nested_rank_polymorphic(program, name)
+        {
+            continue;
+        }
+        // chelis#935: ordinary type-polymorphic host functions likewise
+        // have no standalone concrete ABI. They are specialized by
+        // call-site inlining below, where the checked application's result
+        // type supplies the concrete ADT arguments. Emitting the generic
+        // body here would force a `Box[a]` (or sibling generic term) across
+        // the concrete host boundary before any call site can bind `a`.
+        if top_level_fn_is_type_polymorphic(program, name) {
             continue;
         }
         // Pure-tensor top-level function defs are normally lowered to the
@@ -1645,7 +1689,7 @@ fn lower_host_program(
         // says so); otherwise we have no good lowering and must drop the
         // def — at least the caller will get `implicit declaration` rather
         // than `call(…)` undefined-symbol.
-        if let Some(mut function) = lower_host_function(name, body, ty_expr, program)? {
+        if let Some(mut function) = lower_host_function(name, body, ty_expr.as_ref(), program)? {
             // N→1 lowering collapse per `spec/design/chelis_span_survival.md`
             // §2.3 host-side table, rule "Lowering. Top-level def collapses
             // to fn body": when a `(def {span: a} name (fn ... body))` lowers
@@ -1697,6 +1741,7 @@ fn lower_host_program(
             // type to dispatch the typed runtime call so the storage
             // matches the declared dtype.
             let declared_ty = ty_expr
+                .as_ref()
                 .map(|ty| decode_host_type_or_raise(ty, &HashMap::new()))
                 .filter(|ty| !ty.is_unresolved());
             let ty = declared_ty.clone().unwrap_or_else(|| inferred_ty.clone());
@@ -2488,7 +2533,7 @@ fn lower_host_function(
 ) -> Result<Option<HostFunction>, crate::lower::LowerDiagnostic> {
     let declared_fn_type_expr = ty_expr
         .cloned()
-        .or_else(|| lookup_declared_type_expr(program, name).cloned());
+        .or_else(|| lookup_declared_type_expr(program, name));
     let fn_type_parts = declared_fn_type_expr
         .as_ref()
         .and_then(parse_fn_type_expr_parts);
@@ -3631,7 +3676,17 @@ fn lower_host_expr(
     scope: &HashMap<String, HostTypeTerm>,
     tensor_helpers: &mut Vec<HostTensorHelper>,
 ) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
-    let mut result = lower_host_expr_kind(expr, program, scope, tensor_helpers)?;
+    lower_host_expr_with_expected(expr, program, scope, tensor_helpers, None)
+}
+
+fn lower_host_expr_with_expected(
+    expr: &Expr,
+    program: &CheckedProgram,
+    scope: &HashMap<String, HostTypeTerm>,
+    tensor_helpers: &mut Vec<HostTensorHelper>,
+    expected_ty: Option<&HostTypeTerm>,
+) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
+    let mut result = lower_host_expr_kind(expr, program, scope, tensor_helpers, expected_ty)?;
     // Per `spec/design/chelis_span_survival.md` §2.3 host-side table,
     // rule "Lowering": every freshly-produced HostExpr inherits the
     // enclosing Deep `Expr`'s `meta["span"]` as its `span_id`. When the
@@ -3793,6 +3848,7 @@ fn lower_host_expr_kind(
     program: &CheckedProgram,
     scope: &HashMap<String, HostTypeTerm>,
     tensor_helpers: &mut Vec<HostTensorHelper>,
+    expected_ty: Option<&HostTypeTerm>,
 ) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
     let is_app_expr = matches!(expr, Expr::List(list, _) if tag(list) == Some(DeepTag::App));
     if !is_app_expr
@@ -3826,7 +3882,7 @@ fn lower_host_expr_kind(
             HostExpr::new(HostExprKind::Tuple(items, ty))
         }
         Expr::List(list, _) if tag(list) == Some(DeepTag::Record) => {
-            lower_record_host_expr(list, program, scope, tensor_helpers)?
+            lower_record_host_expr(list, program, scope, tensor_helpers, expected_ty)?
         }
         Expr::List(list, _) if tag(list) == Some(DeepTag::Lit) => lower_host_expr(
             children(list).first().ok_or_else(|| {
@@ -3859,7 +3915,7 @@ fn lower_host_expr_kind(
             if let Some(definition) = lookup_adt_constructor_definition(program, &name)
                 && definition.is_nullary()
             {
-                let instantiated = definition.instantiate(&ty).map_err(|error| {
+                let instantiated = definition.instantiate_nullary_term(&ty).map_err(|error| {
                     host_expr_lowering_error(
                         expr,
                         format!("constructor `{name}` is not concretely instantiated: {error}"),
@@ -4057,7 +4113,7 @@ fn lower_host_expr_kind(
             })
         }
         Expr::List(list, _) if tag(list) == Some(DeepTag::App) => {
-            lower_app_host_expr(list, program, scope, tensor_helpers)?
+            lower_app_host_expr(list, program, scope, tensor_helpers, expected_ty)?
         }
         Expr::List(list, _) if tag(list) == Some(DeepTag::Pipe) => {
             // Bucket 4e: a pipe expression that survives to host
@@ -4136,7 +4192,9 @@ fn lower_host_expr_kind(
                 EffectKind::Resource => lower_host_expr(body, program, scope, tensor_helpers)?,
             }
         }
-        Expr::MetaExpr(meta, _) => lower_host_expr(&meta.expr, program, scope, tensor_helpers)?,
+        Expr::MetaExpr(meta, _) => {
+            lower_host_expr_with_expected(&meta.expr, program, scope, tensor_helpers, expected_ty)?
+        }
         Expr::List(list, _)
             if matches!(tag(list), Some(DeepTag::Grad | DeepTag::Vmap))
                 || list.unknown_tag_symbol() == Some("vmap-grad") =>
@@ -5250,8 +5308,7 @@ fn lower_match_host_expr(
                     let ctor_fields = if let Some(definition) =
                         lookup_adt_constructor_definition(program, ctor_name)
                     {
-                        definition
-                            .instantiate(&scrutinee_ty)
+                        instantiate_adt_constructor(program, &definition, &scrutinee_ty)
                             .map_err(|error| {
                                 host_expr_lowering_error(
                                     &match_expr,
@@ -5492,6 +5549,7 @@ fn lower_record_host_expr(
     program: &CheckedProgram,
     scope: &HashMap<String, HostTypeTerm>,
     tensor_helpers: &mut Vec<HostTensorHelper>,
+    expected_ty: Option<&HostTypeTerm>,
 ) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
     let kids = children(list);
     let record_expr = Expr::List(list.clone(), list_span(list));
@@ -5508,23 +5566,31 @@ fn lower_record_host_expr(
     // example) exact `int8` or `bf16` terms. Looking up the bare constructor
     // first preserves the declaration's named variable and lets it leak all
     // the way to host resolution even though the use site is monomorphic.
-    let explicit_ty = expr_host_type(
-        &Expr::List(list.clone(), chelis_deep::Span::new(0, 0)),
-        program,
-        scope,
-    );
     let ctor_definition = lookup_adt_constructor_definition(program, &ctor).ok_or_else(|| {
         host_expr_lowering_error(
             &record_expr,
             format!("record constructor `{ctor}` has no matching ADT declaration"),
         )
     })?;
-    let ctor_info = ctor_definition.instantiate(&explicit_ty).map_err(|error| {
-        host_expr_lowering_error(
-            &record_expr,
-            format!("record constructor `{ctor}` is not concretely instantiated: {error}"),
-        )
-    })?;
+    let checked_ty = expr_host_type(
+        &Expr::List(list.clone(), chelis_deep::Span::new(0, 0)),
+        program,
+        scope,
+    );
+    let explicit_ty = expected_ty
+        .filter(|expected| {
+            checked_ty.is_unresolved()
+                && matches!(expected, HostTypeTerm::Adt(name, _) if terminal_name_matches(name, &ctor_definition.adt_name))
+        })
+        .cloned()
+        .unwrap_or(checked_ty);
+    let ctor_info =
+        instantiate_adt_constructor(program, &ctor_definition, &explicit_ty).map_err(|error| {
+            host_expr_lowering_error(
+                &record_expr,
+                format!("record constructor `{ctor}` is not concretely instantiated: {error}"),
+            )
+        })?;
     let mut supplied = HashMap::new();
     for field in kids.iter().skip(1) {
         let kv_list = as_list(field).ok_or_else(|| {
@@ -5541,7 +5607,21 @@ fn lower_record_host_expr(
             .first()
             .and_then(symbol_name)
             .ok_or_else(|| host_expr_lowering_error(&record_expr, "a record field has no name"))?;
-        let value = lower_host_expr(
+        let expected_field = ctor_info
+            .fields
+            .iter()
+            .find(|field| field.name.as_deref() == Some(name))
+            .ok_or_else(|| {
+                host_expr_lowering_error(
+                    &record_expr,
+                    format!("record constructor `{ctor}` has no field `{name}`"),
+                )
+            })?;
+        // The instantiated constructor field is the checker-owned expected
+        // type. Thread it into nested generic calls before lowering rather
+        // than forcing it afterward: `Frame[Unit].cols` must specialize
+        // `singleton` as `Hamt[Column[Unit]]` before its `Leaf` body lowers.
+        let value = lower_host_expr_with_expected(
             kv_kids.get(1).ok_or_else(|| {
                 host_expr_lowering_error(
                     &record_expr,
@@ -5551,6 +5631,7 @@ fn lower_record_host_expr(
             program,
             scope,
             tensor_helpers,
+            Some(&expected_field.ty),
         )?;
         if supplied.insert(name.to_string(), value).is_some() {
             return Err(host_expr_lowering_error(
@@ -6269,6 +6350,7 @@ fn lower_app_host_expr(
     program: &CheckedProgram,
     scope: &HashMap<String, HostTypeTerm>,
     tensor_helpers: &mut Vec<HostTensorHelper>,
+    expected_ty: Option<&HostTypeTerm>,
 ) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
     // chelis#405: host-lane scalar forward-mode AD. When the callee is a
     // `grad(...)` form differentiating a scalar `f32 -> f32` (or
@@ -6289,7 +6371,13 @@ fn lower_app_host_expr(
     // specialized below: substituting an `fn` argument into `f(x)` creates an
     // app whose callee is that inline function.
     if let Some(specialized) = beta_reduce_inline_host_call(&app_expr) {
-        return lower_host_expr(&specialized, program, scope, tensor_helpers);
+        return lower_host_expr_with_expected(
+            &specialized,
+            program,
+            scope,
+            tensor_helpers,
+            expected_ty,
+        );
     }
     let name = kids
         .first()
@@ -6324,12 +6412,50 @@ fn lower_app_host_expr(
         .and_then(host_fn_signature)
         .or_else(|| lookup_declared_fn_type(program, &name))
         .or_else(|| kids.first().and_then(expr_fn_type));
-    let explicit_ty = expr_host_type(&app_expr, program, scope);
+    let checked_ty = expr_host_type(&app_expr, program, scope);
+    let explicit_ty = expected_ty
+        .filter(|_| checked_ty.is_unresolved())
+        .cloned()
+        .unwrap_or(checked_ty);
     let ctor_definition = lookup_adt_constructor_definition(program, &name);
     let inferred_ret_ty = fn_sig
         .as_ref()
         .map(|(_, ret_ty)| ret_ty.clone())
         .unwrap_or_else(fresh_host_inference);
+    // chelis#935/#936: specialize these bounded generic forms before any
+    // helper-summary probe attempts to lower their standalone generic body.
+    // The checked application metadata is the authoritative applied result
+    // type; source-level reconstruction is neither needed nor allowed.
+    let callee_is_nullary_generic_constructor_wrapper =
+        top_level_fn_is_nullary_generic_constructor_wrapper(program, &name);
+    let callee_is_nonrecursive_type_polymorphic =
+        top_level_fn_is_nonrecursive_type_polymorphic(program, &name);
+    if (callee_is_nullary_generic_constructor_wrapper || callee_is_nonrecursive_type_polymorphic)
+        && let Some(specialized) = inline_top_level_host_call(&app_expr, program)
+    {
+        let pushed = push_inlining(&name);
+        let definitions = adt_constructor_definitions(program);
+        let specialized_ty =
+            canonicalize_representation_erased_adt_args(explicit_ty.clone(), &definitions);
+        let lowered = lower_host_expr_with_expected(
+            &specialized,
+            program,
+            scope,
+            tensor_helpers,
+            (!specialized_ty.is_unresolved()).then_some(&specialized_ty),
+        )
+        .map(|body| {
+            if specialized_ty.is_unresolved() {
+                body
+            } else {
+                force_host_expr_type(body, specialized_ty.clone())
+            }
+        });
+        if pushed {
+            pop_inlining(&name);
+        }
+        return lowered;
+    }
     if name == "Cons" && kids.len() == 3 {
         let expr = Expr::List(list.clone(), chelis_deep::Span::new(0, 0));
         if let Some(items) = lower_list_literal_items(&expr, program, scope, tensor_helpers)? {
@@ -6400,11 +6526,26 @@ fn lower_app_host_expr(
             lower_host_callback(&kids[1], program, scope, tensor_helpers)?.ok_or_else(|| {
                 host_expr_lowering_error(&app_expr, "`fold` requires a lowerable callback")
             })?;
+        // chelis#939: the checked callback signature owns the accumulator
+        // type. Materialize it onto an empty/unresolved initializer rather
+        // than reconstructing the element type from source syntax.
+        let accumulator_ty = match &callback.kind {
+            HostCallbackKind::Named { params, .. } | HostCallbackKind::Inline { params, .. } => {
+                params.first().map(|param| param.ty.clone())
+            }
+        }
+        .filter(|ty| !ty.is_unresolved())
+        .unwrap_or_else(|| callback.ret_ty.clone());
         let init_expr = lower_host_expr(&kids[2], program, scope, tensor_helpers)?;
+        let init_expr = if accumulator_ty.is_unresolved() {
+            init_expr
+        } else {
+            force_host_expr_type(init_expr, accumulator_ty.clone())
+        };
         let list_expr = lower_host_expr(&kids[3], program, scope, tensor_helpers)?;
         let ty = expr_host_type(&app_expr, program, scope);
         let ty = if ty.is_unresolved() {
-            host_expr_type(&init_expr)
+            accumulator_ty
         } else {
             ty
         };
@@ -6578,6 +6719,7 @@ fn lower_app_host_expr(
     // call site so the precision is supplied from the call's
     // concrete arg types. Force inlining for this case.
     let callee_is_polymorphic_precision = lookup_declared_type_expr(program, &name)
+        .as_ref()
         .is_some_and(crate::lower::type_expr_has_precision_var);
     // Tier-2 rank polymorphism (spec/design/rank_polymorphism.md): the exact
     // analogue of the precision case above. The host emitter elided the
@@ -6586,13 +6728,30 @@ fn lower_app_host_expr(
     // undefined-symbol link error. The only legal lowering is to inline the
     // body at the call site so the rank var is monomorphized from the call's
     // concrete arg shapes (via the DAG `tensor_rank_substitutions` path).
-    let callee_is_polymorphic_rank =
-        lookup_declared_type_expr(program, &name).is_some_and(crate::lower::type_expr_has_rank_var);
+    let callee_is_polymorphic_rank = lookup_declared_type_expr(program, &name)
+        .as_ref()
+        .is_some_and(crate::lower::type_expr_has_rank_var)
+        || top_level_fn_is_nested_rank_polymorphic(program, &name);
+    // chelis#935: a generic host function has no standalone C symbol.
+    // Inline it at a checked call site and materialize the application's
+    // concrete result type onto the specialized body. This is the ordinary
+    // type-variable analogue of the precision/rank specialization paths
+    // below, kept separate so those tensor-specific paths retain their own
+    // lowering rules.
     if (callee_is_polymorphic_precision || callee_is_polymorphic_rank)
         && let Some(specialized) = inline_top_level_host_call(&app_expr, program)
     {
         let pushed = push_inlining(&name);
-        let lowered = lower_host_expr(&specialized, program, scope, tensor_helpers);
+        let definitions = adt_constructor_definitions(program);
+        let specialized_ty =
+            canonicalize_representation_erased_adt_args(explicit_ty.clone(), &definitions);
+        let lowered = lower_host_expr_with_expected(
+            &specialized,
+            program,
+            scope,
+            tensor_helpers,
+            (!specialized_ty.is_unresolved()).then_some(&specialized_ty),
+        );
         if pushed {
             pop_inlining(&name);
         }
@@ -6606,6 +6765,20 @@ fn lower_app_host_expr(
             pop_inlining(&name);
         }
         return lowered;
+    }
+    // chelis#941: a recursive ordinary-generic function has no standalone C
+    // symbol, and eager inlining would expand without a bound. Until checked
+    // type-application monomorphs are memoized as real symbols, reject a
+    // surviving call here rather than emitting a reference to the omitted
+    // generic definition.
+    if top_level_fn_is_type_polymorphic(program, &name) {
+        return Err(host_expr_lowering_error(
+            &app_expr,
+            format!(
+                "recursive generic host call `{name}` requires bounded monomorphized symbols \
+                 (chelis#941; [05-UNS-1])"
+            ),
+        ));
     }
     let args = kids[1..]
         .iter()
@@ -6623,12 +6796,13 @@ fn lower_app_host_expr(
     if let Some(definition) = ctor_definition
         && !matches!(name.as_str(), "Some" | "None")
     {
-        let instantiated = definition.instantiate(&construct_ty).map_err(|error| {
-            host_expr_lowering_error(
-                &app_expr,
-                format!("constructor `{name}` is not concretely instantiated: {error}"),
-            )
-        })?;
+        let instantiated = instantiate_adt_constructor(program, &definition, &construct_ty)
+            .map_err(|error| {
+                host_expr_lowering_error(
+                    &app_expr,
+                    format!("constructor `{name}` is not concretely instantiated: {error}"),
+                )
+            })?;
         let expected_fields = instantiated.fields;
         let fields = args
             .into_iter()
@@ -6769,6 +6943,55 @@ fn inline_top_level_host_call(expr: &Expr, program: &CheckedProgram) -> Option<E
         &substitutions,
         &HashSet::new(),
     )))
+}
+
+/// Whether `name` has the narrow chelis#935 specialization shape: a
+/// zero-argument type-polymorphic function whose body is exactly a nullary
+/// generic ADT constructor. Broader generic functions keep their existing
+/// lowering path; eagerly inlining those can expand recursive library code
+/// exponentially.
+fn top_level_fn_is_nullary_generic_constructor_wrapper(
+    program: &CheckedProgram,
+    name: &str,
+) -> bool {
+    let Some((params, ret)) = lookup_declared_fn_type(program, name) else {
+        return false;
+    };
+    if !params.is_empty() || !ret.is_unresolved() {
+        return false;
+    }
+    let Some(body) = find_top_level_def_expr(program.exprs(), name) else {
+        return false;
+    };
+    let Expr::List(fn_list, _) = body else {
+        return false;
+    };
+    if tag(fn_list) != Some(DeepTag::Fn) {
+        return false;
+    }
+    let fn_kids = children(fn_list);
+    if fn_kids
+        .first()
+        .and_then(as_list)
+        .is_none_or(|params| tag(params) != Some(DeepTag::Params) || !children(params).is_empty())
+    {
+        return false;
+    }
+    let mut constructor = fn_kids.get(1);
+    while let Some(Expr::MetaExpr(meta, _)) = constructor {
+        constructor = Some(&meta.expr);
+    }
+    let Some(Expr::List(var, _)) = constructor else {
+        return false;
+    };
+    if tag(var) != Some(DeepTag::Var) {
+        return false;
+    }
+    let Some(ctor_name) = children(var).first().and_then(symbol_name) else {
+        return false;
+    };
+    lookup_adt_constructor_definition(program, ctor_name)
+        .is_some_and(|definition| !definition.parameters.is_empty() && definition.is_nullary())
 }
 
 fn substitute_expr(
@@ -7009,14 +7232,22 @@ fn top_level_fn_helper_summary_rejects(
     program: &CheckedProgram,
     name: &str,
 ) -> Result<bool, crate::lower::LowerDiagnostic> {
+    // chelis#935/#936 bounded generic functions are specialized before
+    // helper extraction. Probing their unspecialized body here would discard
+    // the checked call-site application and fail before the specialization
+    // path gets a chance to run.
+    if top_level_fn_is_type_polymorphic(program, name)
+        || top_level_fn_is_nested_rank_polymorphic(program, name)
+    {
+        return Ok(false);
+    }
     // Guard against unbounded re-entry: while we are already inlining
     // `name` we must not recursively re-lower it to probe its
     // rejections.
     if is_inlining(name) {
         return Ok(false);
     }
-    let defs = collect_program_defs(program.exprs());
-    let Some(body) = lookup_program_def(&defs, name) else {
+    let Some(body) = find_top_level_def_expr(program.exprs(), name) else {
         return Ok(false);
     };
     if !matches!(body, Expr::List(list, _) if tag(list) == Some(DeepTag::Fn)) {
@@ -7082,6 +7313,13 @@ fn expr_calls_summary_rejecting_top_level_fn(
 }
 
 fn top_level_fn_call_graph(program: &CheckedProgram) -> HashMap<String, HashSet<String>> {
+    let key = program as *const CheckedProgram as usize;
+    if HOST_LOWERING_CACHE_ACTIVE.with(Cell::get)
+        && let Some(cached) =
+            TOP_LEVEL_FN_CALL_GRAPH_CACHE.with(|cache| cache.borrow().get(&key).cloned())
+    {
+        return cached;
+    }
     let defs = collect_program_defs(program.exprs());
     let fn_names = defs
         .iter()
@@ -7089,7 +7327,7 @@ fn top_level_fn_call_graph(program: &CheckedProgram) -> HashMap<String, HashSet<
         .map(|(name, _)| name.clone())
         .collect::<HashSet<_>>();
 
-    fn_names
+    let graph: HashMap<String, HashSet<String>> = fn_names
         .iter()
         .map(|name| {
             let callees = defs
@@ -7098,7 +7336,13 @@ fn top_level_fn_call_graph(program: &CheckedProgram) -> HashMap<String, HashSet<
                 .unwrap_or_default();
             (name.clone(), callees)
         })
-        .collect()
+        .collect();
+    if HOST_LOWERING_CACHE_ACTIVE.with(Cell::get) {
+        TOP_LEVEL_FN_CALL_GRAPH_CACHE.with(|cache| {
+            cache.borrow_mut().insert(key, graph.clone());
+        });
+    }
+    graph
 }
 
 fn recursive_top_level_fn_names_from_graph(
@@ -7246,6 +7490,160 @@ fn host_fn_signature(ty: &HostTypeTerm) -> Option<(Vec<HostTypeTerm>, HostTypeTe
         HostTypeTerm::Fn(params, ret) => Some((params.clone(), (**ret).clone())),
         _ => None,
     }
+}
+
+fn top_level_fn_is_type_polymorphic(program: &CheckedProgram, name: &str) -> bool {
+    let key = (program as *const CheckedProgram as usize, name.to_string());
+    if HOST_LOWERING_CACHE_ACTIVE.with(Cell::get)
+        && let Some(cached) =
+            TYPE_POLYMORPHIC_FN_CACHE.with(|cache| cache.borrow().get(&key).copied())
+    {
+        return cached;
+    }
+    // Only checker-recorded authored/synthesized signatures establish
+    // source-level polymorphism. Generalized local callbacks deliberately
+    // carry `authored_signature = false`.
+    let polymorphic = checked_authored_function_signature(program, name).is_some_and(|signature| {
+        checker_type_has_stored_variable(signature, program.adt_registry(), &mut HashSet::new())
+    });
+    if HOST_LOWERING_CACHE_ACTIVE.with(Cell::get) {
+        TYPE_POLYMORPHIC_FN_CACHE.with(|cache| {
+            cache.borrow_mut().insert(key, polymorphic);
+        });
+    }
+    polymorphic
+}
+
+fn top_level_fn_is_nested_rank_polymorphic(program: &CheckedProgram, name: &str) -> bool {
+    // chelis#940: a dimension may be hidden behind `Frame[n] -> Column[n] ->
+    // tensor[n, _]`, so a signature-local `d-var` scan is insufficient.
+    // Inspect checker-owned ADT parameter roles specifically: a direct
+    // `tensor[n, _]` dimension remains a valid generic C surface, while an
+    // ADT argument used only as a nested tensor dimension has no stored ABI
+    // field and must be specialized at its call site.
+    checked_authored_function_signature(program, name).is_some_and(|signature| {
+        checker_type_has_erased_adt_variable(signature, program.adt_registry(), &mut HashSet::new())
+    })
+}
+
+fn checked_authored_function_signature<'a>(
+    program: &'a CheckedProgram,
+    name: &str,
+) -> Option<&'a Type> {
+    if let Some(inference) = program.signature_inference().functions.get(name)
+        && inference.authored_signature
+    {
+        return Some(
+            inference
+                .authored_signature_type
+                .as_ref()
+                .unwrap_or(&inference.checked_signature),
+        );
+    }
+    let mut matches = program
+        .signature_inference()
+        .functions
+        .iter()
+        .filter(|(candidate, inference)| {
+            inference.authored_signature && terminal_name_matches(candidate, name)
+        })
+        .map(|(_, inference)| {
+            inference
+                .authored_signature_type
+                .as_ref()
+                .unwrap_or(&inference.checked_signature)
+        });
+    let first = matches.next()?;
+    matches.next().is_none().then_some(first)
+}
+
+fn checker_type_has_stored_variable(
+    ty: &Type,
+    registry: &AdtRegistry,
+    visiting: &mut HashSet<(String, usize)>,
+) -> bool {
+    match ty {
+        Type::Var(_) => true,
+        Type::Tensor(_, TensorPrec::Var(_)) => true,
+        Type::Tensor(_, TensorPrec::Concrete(_)) | Type::Prim(_) | Type::Unit => false,
+        Type::Fn(params, ret) => {
+            params
+                .iter()
+                .any(|ty| checker_type_has_stored_variable(ty, registry, visiting))
+                || checker_type_has_stored_variable(ret, registry, visiting)
+        }
+        Type::Ref(inner) => checker_type_has_stored_variable(inner, registry, visiting),
+        Type::Tuple(items) => items
+            .iter()
+            .any(|ty| checker_type_has_stored_variable(ty, registry, visiting)),
+        Type::Adt(name, args) => {
+            if let Some(definition) = registry.lookup(name) {
+                args.iter().enumerate().any(|(index, arg)| {
+                    checker_adt_parameter_is_stored(definition, index, registry, visiting)
+                        && checker_type_has_stored_variable(arg, registry, visiting)
+                })
+            } else {
+                args.iter()
+                    .any(|ty| checker_type_has_stored_variable(ty, registry, visiting))
+            }
+        }
+        Type::Error(_) => true,
+    }
+}
+
+fn checker_type_has_variable(ty: &Type) -> bool {
+    match ty {
+        Type::Var(_) | Type::Tensor(_, TensorPrec::Var(_)) => true,
+        Type::Tensor(dims, TensorPrec::Concrete(_)) => dims.iter().any(|dim| {
+            matches!(
+                dim,
+                chelis_types::types::Dim::Var(_) | chelis_types::types::Dim::Rank(_)
+            )
+        }),
+        Type::Fn(params, ret) => {
+            params.iter().any(checker_type_has_variable) || checker_type_has_variable(ret)
+        }
+        Type::Ref(inner) => checker_type_has_variable(inner),
+        Type::Adt(_, args) | Type::Tuple(args) => args.iter().any(checker_type_has_variable),
+        Type::Prim(_) | Type::Unit => false,
+        Type::Error(_) => true,
+    }
+}
+
+fn checker_type_has_erased_adt_variable(
+    ty: &Type,
+    registry: &AdtRegistry,
+    visiting: &mut HashSet<(String, usize)>,
+) -> bool {
+    match ty {
+        Type::Fn(params, ret) => {
+            params
+                .iter()
+                .any(|ty| checker_type_has_erased_adt_variable(ty, registry, visiting))
+                || checker_type_has_erased_adt_variable(ret, registry, visiting)
+        }
+        Type::Ref(inner) => checker_type_has_erased_adt_variable(inner, registry, visiting),
+        Type::Tuple(items) => items
+            .iter()
+            .any(|ty| checker_type_has_erased_adt_variable(ty, registry, visiting)),
+        Type::Adt(name, args) => {
+            let Some(definition) = registry.lookup(name) else {
+                return false;
+            };
+            args.iter().enumerate().any(|(index, arg)| {
+                (!checker_adt_parameter_is_stored(definition, index, registry, visiting)
+                    && checker_type_has_variable(arg))
+                    || checker_type_has_erased_adt_variable(arg, registry, visiting)
+            })
+        }
+        Type::Var(_) | Type::Tensor(_, _) | Type::Prim(_) | Type::Unit | Type::Error(_) => false,
+    }
+}
+
+fn top_level_fn_is_nonrecursive_type_polymorphic(program: &CheckedProgram, name: &str) -> bool {
+    top_level_fn_is_type_polymorphic(program, name)
+        && !recursive_top_level_fn_names_from_graph(&top_level_fn_call_graph(program))
+            .contains(name)
 }
 
 fn lower_host_callback(
@@ -7994,7 +8392,30 @@ fn infer_app_expr_host_type(
     }
     let name = children(callee).first().and_then(symbol_name)?;
     if !BUILTIN_NAMES.contains(&name) {
-        return lookup_declared_fn_type(program, name).map(|(_, ret)| ret);
+        if let Some(definition) = lookup_adt_constructor_definition(program, name) {
+            let mut substitutions = HashMap::new();
+            for (field, argument) in definition.fields.iter().zip(kids.iter().skip(1)) {
+                let applied = expr_host_type(argument, program, scope);
+                collect_host_type_variable_substitutions(&field.term, &applied, &mut substitutions);
+            }
+            let result = HostTypeTerm::Adt(
+                definition.adt_name,
+                definition
+                    .parameters
+                    .into_iter()
+                    .map(HostTypeTerm::TypeVariable)
+                    .collect(),
+            );
+            return Some(substitute_host_type_term(result, &substitutions));
+        }
+        let (params, ret) = lookup_declared_fn_type(program, name)?;
+        let mut substitutions = HashMap::new();
+        for (pattern, argument) in params.iter().zip(kids.iter().skip(1)) {
+            let applied = expr_host_type(argument, program, scope);
+            collect_host_type_variable_substitutions(pattern, &applied, &mut substitutions);
+        }
+        let ret = substitute_host_type_term(ret, &substitutions);
+        return Some(ret);
     }
     if name == "einsum" {
         let equation = match kids.get(1) {
@@ -8293,13 +8714,15 @@ fn lookup_type_expr<'a>(type_env: &'a HashMap<String, Expr>, name: &str) -> Opti
     })
 }
 
-fn lookup_declared_type_expr<'a>(program: &'a CheckedProgram, name: &str) -> Option<&'a Expr> {
-    find_top_level_sig_expr(program.exprs(), name)
-        .or_else(|| lookup_type_expr(program.type_env(), name))
+fn lookup_declared_type_expr(program: &CheckedProgram, name: &str) -> Option<Expr> {
+    checked_authored_function_signature(program, name)
+        .map(type_to_deep_expr)
+        .or_else(|| lookup_type_expr(program.type_env(), name).cloned())
 }
 
 fn lookup_declared_host_type(program: &CheckedProgram, name: &str) -> Option<HostTypeTerm> {
     lookup_declared_type_expr(program, name)
+        .as_ref()
         .map(|ty| decode_host_type_or_raise(ty, &HashMap::new()))
 }
 
@@ -8307,7 +8730,9 @@ fn lookup_declared_fn_type(
     program: &CheckedProgram,
     name: &str,
 ) -> Option<(Vec<HostTypeTerm>, HostTypeTerm)> {
-    lookup_declared_type_expr(program, name).and_then(parse_fn_type_expr)
+    lookup_declared_type_expr(program, name)
+        .as_ref()
+        .and_then(parse_fn_type_expr)
 }
 
 fn lookup_program_def<'a>(defs: &'a HashMap<String, Expr>, name: &str) -> Option<&'a Expr> {
@@ -8331,19 +8756,19 @@ fn terminal_name(name: &str) -> &str {
         .unwrap_or(name)
 }
 
-fn find_top_level_sig_expr<'a>(exprs: &'a [Expr], name: &str) -> Option<&'a Expr> {
+fn find_top_level_def_expr<'a>(exprs: &'a [Expr], name: &str) -> Option<&'a Expr> {
     for expr in top_level_items(exprs) {
         let Expr::List(list, _) = expr else {
             continue;
         };
-        if tag(list) != Some(DeepTag::Defsig) {
+        if tag(list) != Some(DeepTag::Def) {
             continue;
         }
         let kids = children(list);
-        let Some(sig_name) = kids.first().and_then(symbol_name) else {
+        let Some(def_name) = kids.first().and_then(symbol_name) else {
             continue;
         };
-        if terminal_name_matches(sig_name, name) {
+        if terminal_name_matches(def_name, name) {
             return kids.get(1);
         }
     }
@@ -8423,6 +8848,12 @@ fn substitute_host_type_term(
     subst: &HashMap<String, HostTypeTerm>,
 ) -> HostTypeTerm {
     match term {
+        HostTypeTerm::Scalar(HostPrecisionTerm::Variable(name)) => match subst.get(&name) {
+            Some(HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(precision))) => {
+                HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(*precision))
+            }
+            _ => HostTypeTerm::Scalar(HostPrecisionTerm::Variable(name)),
+        },
         HostTypeTerm::TypeVariable(name) => subst
             .get(&name)
             .cloned()
@@ -8456,7 +8887,95 @@ fn substitute_host_type_term(
         HostTypeTerm::Option(inner) => {
             HostTypeTerm::Option(Box::new(substitute_host_type_term(*inner, subst)))
         }
+        HostTypeTerm::PolymorphicTensor(HostTensorTypeTerm { precision, shape }) => {
+            let precision = match precision {
+                HostPrecisionTerm::Variable(name) => match subst.get(&name) {
+                    Some(HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(precision))) => {
+                        HostPrecisionTerm::Concrete(*precision)
+                    }
+                    _ => HostPrecisionTerm::Variable(name),
+                },
+                concrete => concrete,
+            };
+            match (&precision, &shape) {
+                (HostPrecisionTerm::Concrete(precision), HostShapeTerm::Concrete(dims)) => {
+                    HostTypeTerm::Tensor(TensorType {
+                        dims: dims.clone(),
+                        precision: *precision,
+                    })
+                }
+                _ => HostTypeTerm::PolymorphicTensor(HostTensorTypeTerm { precision, shape }),
+            }
+        }
         concrete_or_state => concrete_or_state,
+    }
+}
+
+fn collect_host_type_variable_substitutions(
+    pattern: &HostTypeTerm,
+    applied: &HostTypeTerm,
+    subst: &mut HashMap<String, HostTypeTerm>,
+) {
+    match (pattern, applied) {
+        (
+            HostTypeTerm::Scalar(HostPrecisionTerm::Variable(name)),
+            HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(precision)),
+        ) => {
+            subst
+                .entry(name.clone())
+                .or_insert(HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(
+                    *precision,
+                )));
+        }
+        (
+            HostTypeTerm::PolymorphicTensor(HostTensorTypeTerm {
+                precision: HostPrecisionTerm::Variable(name),
+                ..
+            }),
+            HostTypeTerm::Tensor(tensor),
+        ) => {
+            subst
+                .entry(name.clone())
+                .or_insert(HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(
+                    tensor.precision,
+                )));
+        }
+        (HostTypeTerm::TypeVariable(name), concrete) if !concrete.is_unresolved() => {
+            subst
+                .entry(name.clone())
+                .or_insert_with(|| concrete.clone());
+        }
+        (HostTypeTerm::Fn(pattern_params, pattern_ret), HostTypeTerm::Fn(params, ret))
+            if pattern_params.len() == params.len() =>
+        {
+            for (pattern, applied) in pattern_params.iter().zip(params) {
+                collect_host_type_variable_substitutions(pattern, applied, subst);
+            }
+            collect_host_type_variable_substitutions(pattern_ret, ret, subst);
+        }
+        (HostTypeTerm::Adt(pattern_name, pattern_args), HostTypeTerm::Adt(name, args))
+            if terminal_name_matches(pattern_name, name) && pattern_args.len() == args.len() =>
+        {
+            for (pattern, applied) in pattern_args.iter().zip(args) {
+                collect_host_type_variable_substitutions(pattern, applied, subst);
+            }
+        }
+        (HostTypeTerm::List(pattern), HostTypeTerm::List(applied))
+        | (HostTypeTerm::Option(pattern), HostTypeTerm::Option(applied)) => {
+            collect_host_type_variable_substitutions(pattern, applied, subst);
+        }
+        (HostTypeTerm::Dict(pattern_key, pattern_value), HostTypeTerm::Dict(key, value)) => {
+            collect_host_type_variable_substitutions(pattern_key, key, subst);
+            collect_host_type_variable_substitutions(pattern_value, value, subst);
+        }
+        (HostTypeTerm::Tuple(pattern_items), HostTypeTerm::Tuple(items))
+            if pattern_items.len() == items.len() =>
+        {
+            for (pattern, applied) in pattern_items.iter().zip(items) {
+                collect_host_type_variable_substitutions(pattern, applied, subst);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -8618,12 +9137,27 @@ fn force_host_expr_type(expr: HostExpr, ty: HostTypeTerm) -> HostExpr {
                 .map(|expr| Box::new(force_host_expr_type(*expr, ty.clone()))),
             ty,
         },
-        HostExprKind::Let { bindings, body, .. } => {
+        HostExprKind::Let {
+            bindings,
+            body,
+            ty: actual_ty,
+        } => {
+            let mut substitutions = HashMap::new();
+            collect_host_type_variable_substitutions(&actual_ty, &ty, &mut substitutions);
+            collect_host_type_variable_substitutions(
+                &host_expr_type(&body),
+                &ty,
+                &mut substitutions,
+            );
             let bindings = bindings
                 .into_iter()
-                .map(|binding| HostBinding {
-                    value: force_host_expr_type(binding.value, binding.ty.clone()),
-                    ..binding
+                .map(|binding| {
+                    let binding_ty = substitute_host_type_term(binding.ty, &substitutions);
+                    HostBinding {
+                        value: force_host_expr_type(binding.value, binding_ty.clone()),
+                        ty: binding_ty,
+                        ..binding
+                    }
                 })
                 .collect();
             HostExprKind::Let {
@@ -9398,6 +9932,7 @@ struct GenericAdtConstructor {
     adt_name: String,
     ctor_name: String,
     parameters: Vec<String>,
+    stored_parameters: Vec<bool>,
     fields: Vec<GenericAdtField>,
 }
 
@@ -9535,72 +10070,307 @@ impl GenericAdtConstructor {
             .collect::<Result<Vec<_>, _>>()?;
         Ok(InstantiatedAdtConstructor { ty, fields })
     }
+
+    /// A nullary constructor has no field layout to instantiate yet, so it
+    /// may retain the declaration's named type arguments until the sole
+    /// checked-expectation boundary (`conform_host_program_types`) supplies
+    /// a concrete enclosing type. Wrong ADT names and arities still reject
+    /// immediately; only genuinely absent/unresolved arguments survive.
+    fn instantiate_nullary_term(
+        &self,
+        instantiated_ty: &HostTypeTerm,
+    ) -> Result<InstantiatedAdtConstructor, AdtInstantiationError> {
+        debug_assert!(self.is_nullary());
+        match self.instantiate(instantiated_ty) {
+            Ok(instantiated) => Ok(instantiated),
+            Err(AdtInstantiationError::MissingAppliedType { .. })
+                if instantiated_ty.is_unresolved() =>
+            {
+                Ok(InstantiatedAdtConstructor {
+                    ty: HostTypeTerm::Adt(
+                        self.adt_name.clone(),
+                        self.parameters
+                            .iter()
+                            .cloned()
+                            .map(HostTypeTerm::TypeVariable)
+                            .collect(),
+                    ),
+                    fields: Vec::new(),
+                })
+            }
+            Err(AdtInstantiationError::UnresolvedArgument { .. }) => {
+                Ok(InstantiatedAdtConstructor {
+                    ty: instantiated_ty.clone(),
+                    fields: Vec::new(),
+                })
+            }
+            Err(error) => Err(error),
+        }
+    }
 }
 
 fn adt_constructor_definitions(program: &CheckedProgram) -> Vec<GenericAdtConstructor> {
     let mut definitions = Vec::new();
-    for expr in top_level_items(program.exprs()) {
-        let Expr::List(list, _) = expr else {
-            continue;
-        };
-        if tag(list) != Some(DeepTag::Deftype) {
+    for definition in program.adt_registry().defs.values() {
+        // These prelude declarations have dedicated host representations and
+        // constructor lowering. A composed checker registry includes them,
+        // unlike the old source-local scan, so keep them out of the generic
+        // ADT constructor table.
+        if matches!(
+            definition.name.as_str(),
+            "Option" | "List" | "Dict" | "MappedFile"
+        ) {
             continue;
         }
-        let kids = children(list);
-        let Some(adt_name) = kids.first().and_then(symbol_name) else {
-            continue;
-        };
-        let parameters = children(list)
-            .get(1)
-            .and_then(as_list)
-            .map(|params| {
-                params
-                    .elements
-                    .iter()
-                    .filter_map(symbol_name)
-                    .map(str::to_string)
-                    .collect::<Vec<_>>()
+        let checker_parameter_names = definition
+            .param_vars
+            .iter()
+            .zip(&definition.type_params)
+            .map(|(variable, name)| (format!("t{}", variable.0), name.clone()))
+            .collect::<HashMap<_, _>>();
+        let parameters = definition.type_params.clone();
+        let stored_parameters = definition
+            .param_vars
+            .iter()
+            .enumerate()
+            .map(|(index, _)| {
+                checker_adt_parameter_is_stored(
+                    definition,
+                    index,
+                    program.adt_registry(),
+                    &mut HashSet::new(),
+                )
             })
-            .unwrap_or_default();
-        for variant in kids.iter().skip(2) {
-            let Some(variant_list) = as_list(variant) else {
-                continue;
-            };
-            if tag(variant_list) != Some(DeepTag::Variant) {
-                continue;
-            }
-            let variant_kids = children(variant_list);
-            let Some(name) = variant_kids.first().and_then(symbol_name) else {
-                continue;
-            };
-            let mut fields = Vec::new();
-            for field in variant_kids.iter().skip(1) {
-                if let Some(field_list) = as_list(field)
-                    && tag(field_list) == Some(DeepTag::Field)
-                {
-                    let field_kids = children(field_list);
-                    if let Some(ty_expr) = field_kids.get(1) {
-                        fields.push(GenericAdtField {
-                            name: field_kids.first().and_then(symbol_name).map(str::to_string),
-                            term: decode_host_type_or_raise(ty_expr, &HashMap::new()),
-                        });
-                    }
-                } else {
-                    fields.push(GenericAdtField {
-                        name: None,
-                        term: decode_host_type_or_raise(field, &HashMap::new()),
-                    });
-                }
-            }
+            .collect::<Vec<_>>();
+        for variant in &definition.variants {
+            let fields = variant
+                .fields
+                .iter()
+                .map(|(name, ty)| GenericAdtField {
+                    name: name.clone(),
+                    term: rename_host_type_variables(
+                        decode_host_type_or_raise(&type_to_deep_expr(ty), &HashMap::new()),
+                        &checker_parameter_names,
+                    ),
+                })
+                .collect();
             definitions.push(GenericAdtConstructor {
-                adt_name: adt_name.to_string(),
-                ctor_name: name.to_string(),
+                adt_name: definition.name.clone(),
+                ctor_name: variant.name.clone(),
                 parameters: parameters.clone(),
+                stored_parameters: stored_parameters.clone(),
                 fields,
             });
         }
     }
+    definitions.sort_by(|left, right| {
+        (&left.adt_name, &left.ctor_name).cmp(&(&right.adt_name, &right.ctor_name))
+    });
     definitions
+}
+
+fn rename_host_type_variables(term: HostTypeTerm, names: &HashMap<String, String>) -> HostTypeTerm {
+    match term {
+        HostTypeTerm::TypeVariable(name) => {
+            HostTypeTerm::TypeVariable(names.get(&name).cloned().unwrap_or(name))
+        }
+        HostTypeTerm::Scalar(HostPrecisionTerm::Variable(name)) => HostTypeTerm::Scalar(
+            HostPrecisionTerm::Variable(names.get(&name).cloned().unwrap_or(name)),
+        ),
+        HostTypeTerm::Fn(params, ret) => HostTypeTerm::Fn(
+            params
+                .into_iter()
+                .map(|param| rename_host_type_variables(param, names))
+                .collect(),
+            Box::new(rename_host_type_variables(*ret, names)),
+        ),
+        HostTypeTerm::Adt(name, args) => HostTypeTerm::Adt(
+            name,
+            args.into_iter()
+                .map(|arg| rename_host_type_variables(arg, names))
+                .collect(),
+        ),
+        HostTypeTerm::List(inner) => {
+            HostTypeTerm::List(Box::new(rename_host_type_variables(*inner, names)))
+        }
+        HostTypeTerm::Dict(key, value) => HostTypeTerm::Dict(
+            Box::new(rename_host_type_variables(*key, names)),
+            Box::new(rename_host_type_variables(*value, names)),
+        ),
+        HostTypeTerm::Tuple(items) => HostTypeTerm::Tuple(
+            items
+                .into_iter()
+                .map(|item| rename_host_type_variables(item, names))
+                .collect(),
+        ),
+        HostTypeTerm::Option(inner) => {
+            HostTypeTerm::Option(Box::new(rename_host_type_variables(*inner, names)))
+        }
+        HostTypeTerm::PolymorphicTensor(HostTensorTypeTerm { precision, shape }) => {
+            let precision = match precision {
+                HostPrecisionTerm::Variable(name) => {
+                    HostPrecisionTerm::Variable(names.get(&name).cloned().unwrap_or(name))
+                }
+                concrete => concrete,
+            };
+            HostTypeTerm::PolymorphicTensor(HostTensorTypeTerm { precision, shape })
+        }
+        other => other,
+    }
+}
+
+fn checker_adt_parameter_is_stored(
+    definition: &AdtDef,
+    parameter_index: usize,
+    registry: &AdtRegistry,
+    visiting: &mut HashSet<(String, usize)>,
+) -> bool {
+    let Some(parameter) = definition.param_vars.get(parameter_index).copied() else {
+        return true;
+    };
+    let key = (definition.name.clone(), parameter_index);
+    if !visiting.insert(key.clone()) {
+        return false;
+    }
+    let stored = definition.variants.iter().any(|variant| {
+        variant
+            .fields
+            .iter()
+            .any(|(_, field)| checker_type_stores_variable(field, parameter, registry, visiting))
+    });
+    visiting.remove(&key);
+    stored
+}
+
+fn checker_type_stores_variable(
+    ty: &Type,
+    target: chelis_types::types::TypeVar,
+    registry: &AdtRegistry,
+    visiting: &mut HashSet<(String, usize)>,
+) -> bool {
+    match ty {
+        Type::Var(variable) => *variable == target,
+        Type::Tensor(_, TensorPrec::Var(variable)) => *variable == target,
+        Type::Tensor(_, TensorPrec::Concrete(_)) | Type::Prim(_) | Type::Unit => false,
+        Type::Fn(params, ret) => {
+            params
+                .iter()
+                .any(|ty| checker_type_stores_variable(ty, target, registry, visiting))
+                || checker_type_stores_variable(ret, target, registry, visiting)
+        }
+        Type::Ref(inner) => checker_type_stores_variable(inner, target, registry, visiting),
+        Type::Tuple(items) => items
+            .iter()
+            .any(|ty| checker_type_stores_variable(ty, target, registry, visiting)),
+        Type::Adt(name, args) => {
+            if let Some(nested) = registry.lookup(name) {
+                args.iter().enumerate().any(|(index, arg)| {
+                    checker_adt_parameter_is_stored(nested, index, registry, visiting)
+                        && checker_type_stores_variable(arg, target, registry, visiting)
+                })
+            } else {
+                // Built-in/container ADTs have value-represented arguments.
+                args.iter()
+                    .any(|ty| checker_type_stores_variable(ty, target, registry, visiting))
+            }
+        }
+        // A checked program cannot carry Error, but fail closed if a legacy
+        // deserialized artifact violates that invariant.
+        Type::Error(_) => true,
+    }
+}
+
+/// Canonicalize only representation-erased generic ADT arguments before
+/// host layout instantiation (chelis#940).
+///
+/// A dimension parameter can survive the checker as a named ADT argument even
+/// after the tensor carrying that dimension has a concrete checked shape. It
+/// has no host ABI representation: `Frame[n] -> Hamt[Column[n]] ->
+/// tensor[n, _]` stores the tensor handle, not `n`. Replace such arguments
+/// with `Unit` as a private layout witness. Ordinary value parameters remain
+/// untouched and therefore still fail loudly if unresolved.
+fn instantiate_adt_constructor(
+    program: &CheckedProgram,
+    definition: &GenericAdtConstructor,
+    instantiated_ty: &HostTypeTerm,
+) -> Result<InstantiatedAdtConstructor, AdtInstantiationError> {
+    let definitions = adt_constructor_definitions(program);
+    let canonical =
+        canonicalize_representation_erased_adt_args(instantiated_ty.clone(), &definitions);
+    definition.instantiate(&canonical)
+}
+
+fn canonicalize_representation_erased_adt_args(
+    ty: HostTypeTerm,
+    definitions: &[GenericAdtConstructor],
+) -> HostTypeTerm {
+    match ty {
+        HostTypeTerm::Fn(params, ret) => HostTypeTerm::Fn(
+            params
+                .into_iter()
+                .map(|ty| canonicalize_representation_erased_adt_args(ty, definitions))
+                .collect(),
+            Box::new(canonicalize_representation_erased_adt_args(
+                *ret,
+                definitions,
+            )),
+        ),
+        HostTypeTerm::Adt(name, args) => {
+            let args = args
+                .into_iter()
+                .enumerate()
+                .map(|(index, arg)| {
+                    let arg = canonicalize_representation_erased_adt_args(arg, definitions);
+                    if arg.is_unresolved() && !adt_parameter_is_stored(&name, index, definitions) {
+                        HostTypeTerm::Unit
+                    } else {
+                        arg
+                    }
+                })
+                .collect();
+            HostTypeTerm::Adt(name, args)
+        }
+        HostTypeTerm::Tuple(items) => HostTypeTerm::Tuple(
+            items
+                .into_iter()
+                .map(|ty| canonicalize_representation_erased_adt_args(ty, definitions))
+                .collect(),
+        ),
+        HostTypeTerm::List(inner) => HostTypeTerm::List(Box::new(
+            canonicalize_representation_erased_adt_args(*inner, definitions),
+        )),
+        HostTypeTerm::Option(inner) => HostTypeTerm::Option(Box::new(
+            canonicalize_representation_erased_adt_args(*inner, definitions),
+        )),
+        HostTypeTerm::Dict(key, value) => HostTypeTerm::Dict(
+            Box::new(canonicalize_representation_erased_adt_args(
+                *key,
+                definitions,
+            )),
+            Box::new(canonicalize_representation_erased_adt_args(
+                *value,
+                definitions,
+            )),
+        ),
+        other => other,
+    }
+}
+
+fn adt_parameter_is_stored(
+    adt_name: &str,
+    parameter_index: usize,
+    definitions: &[GenericAdtConstructor],
+) -> bool {
+    definitions
+        .iter()
+        .filter(|definition| terminal_name_matches(&definition.adt_name, adt_name))
+        .any(|definition| {
+            definition
+                .stored_parameters
+                .get(parameter_index)
+                .copied()
+                .unwrap_or(true)
+        })
 }
 
 fn lookup_adt_constructor_definition(
@@ -9622,7 +10392,7 @@ fn lookup_access_field(
             let Some(definition) = lookup_adt_constructor_definition(program, ctor) else {
                 return Ok(None);
             };
-            let instantiated = definition.instantiate(ty)?;
+            let instantiated = instantiate_adt_constructor(program, &definition, ty)?;
             Ok(instantiated
                 .fields
                 .iter()
@@ -9652,7 +10422,7 @@ fn lookup_adt_field_on_type(
         if !terminal_name_matches(&definition.adt_name, adt_name) {
             continue;
         }
-        let instantiated = definition.instantiate(&instantiated_ty)?;
+        let instantiated = instantiate_adt_constructor(program, &definition, &instantiated_ty)?;
         if let Some((index, field)) = instantiated
             .fields
             .iter()
@@ -9776,6 +10546,67 @@ mod tests {
         let deep = chelis_surf::desugar::desugar_program(&decls);
         chelis_types::check_ir_program(&deep)
             .unwrap_or_else(|result| panic!("IR check failed: {:?}", result.errors))
+    }
+
+    #[test]
+    fn adt_constructor_layouts_come_from_checked_registry() {
+        let checked = surf_check(
+            r#"
+type Column[n, a] = | Column(tensor[n, a])
+type Hamt[a] = | Leaf { value: a }
+type Frame[n, a] = | Frame { cols: Hamt[Column[n, a]] }
+def singleton[a](value: a) -> Hamt[a] = Leaf { value: value }
+def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
+  Frame { cols: singleton(column) }
+"#,
+        );
+        let definitions = adt_constructor_definitions(&checked);
+        assert!(
+            definitions
+                .iter()
+                .all(|definition| definition.adt_name != "Option"),
+            "prelude ADTs with dedicated host layouts must not enter the generic constructor table"
+        );
+        let column = definitions
+            .iter()
+            .find(|definition| definition.adt_name == "Column")
+            .expect("Column constructor metadata");
+        assert_eq!(column.parameters.len(), 2);
+        assert_eq!(
+            column.stored_parameters,
+            [false, true],
+            "the dimension parameter is erased while the dtype is stored"
+        );
+        assert!(matches!(
+            column.fields[0].term,
+            HostTypeTerm::PolymorphicTensor(HostTensorTypeTerm {
+                precision: HostPrecisionTerm::Variable(_),
+                shape: HostShapeTerm::Concrete(_),
+            })
+        ));
+        let frame = definitions
+            .iter()
+            .find(|definition| definition.adt_name == "Frame")
+            .expect("Frame constructor metadata");
+        assert_eq!(
+            frame.stored_parameters,
+            [false, true],
+            "nested Frame -> Hamt -> Column storage classification"
+        );
+        assert!(
+            checked
+                .signature_inference()
+                .functions
+                .get("from_column")
+                .is_some_and(|signature| {
+                    signature.authored_signature && signature.authored_signature_type.is_some()
+                }),
+            "checker metadata must record the authored generic signature"
+        );
+        assert!(
+            top_level_fn_is_type_polymorphic(&checked, "from_column"),
+            "the stored dtype behind Frame -> Hamt -> Column must classify from checker metadata"
+        );
     }
 
     #[test]
@@ -10953,5 +11784,83 @@ mod tests {
             vec!["probe".to_string()],
             "a typed-but-unresolved callee carries a marker in `Call` position"
         );
+    }
+
+    #[test]
+    fn nullary_generic_constructor_retains_named_term_until_checked_expectation() {
+        let definition = GenericAdtConstructor {
+            adt_name: "Box".into(),
+            ctor_name: "Empty".into(),
+            parameters: vec!["a".into()],
+            stored_parameters: vec![false],
+            fields: Vec::new(),
+        };
+        let carried = definition
+            .instantiate_nullary_term(&fresh_host_inference())
+            .expect("nullary generic term may await its checked context");
+        assert_eq!(
+            carried.ty,
+            HostTypeTerm::Adt("Box".into(), vec![HostTypeTerm::TypeVariable("a".into())])
+        );
+        let concrete = force_host_expr_type(
+            HostExpr::new(HostExprKind::AdtConstruct {
+                ctor: "Empty".into(),
+                fields: Vec::new(),
+                ty: carried.ty,
+            }),
+            HostTypeTerm::Adt("Box".into(), vec![HostTypeTerm::Float32]),
+        );
+        assert_eq!(
+            host_expr_type(&concrete),
+            HostTypeTerm::Adt("Box".into(), vec![HostTypeTerm::Float32])
+        );
+    }
+
+    #[test]
+    fn nullary_generic_constructor_still_rejects_wrong_name_and_arity() {
+        let definition = GenericAdtConstructor {
+            adt_name: "Box".into(),
+            ctor_name: "Empty".into(),
+            parameters: vec!["a".into()],
+            stored_parameters: vec![false],
+            fields: Vec::new(),
+        };
+        assert!(matches!(
+            definition.instantiate_nullary_term(&HostTypeTerm::Adt(
+                "Other".into(),
+                vec![HostTypeTerm::Float32]
+            )),
+            Err(AdtInstantiationError::WrongAppliedType { .. })
+        ));
+        assert!(matches!(
+            definition.instantiate_nullary_term(&HostTypeTerm::Adt("Box".into(), Vec::new())),
+            Err(AdtInstantiationError::Arity {
+                expected: 1,
+                got: 0,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn nonrecursive_generic_match_is_a_bounded_callsite_specialization() {
+        let checked = surf_check(
+            "type Box[a] =\n\
+               | Empty\n\
+               | Full { value: a }\n\
+             def empty[a]() -> Box[a] = Empty\n\
+             def is_empty[a](value: Box[a]) -> bool = match value with {\n\
+               | Empty => true\n\
+               | Full { value: item } => false\n\
+             }\n\
+             def concrete() -> Box[f32] = empty()\n\
+             def main() -> bool = is_empty(concrete())\n",
+        );
+        assert!(
+            top_level_fn_is_nonrecursive_type_polymorphic(&checked, "is_empty"),
+            "a nonrecursive generic match is safe to specialize at its concrete call site"
+        );
+        try_lower_compiled_program(&checked)
+            .expect("the bounded generic match must lower through its concrete caller");
     }
 }

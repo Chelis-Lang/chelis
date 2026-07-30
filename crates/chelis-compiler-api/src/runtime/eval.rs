@@ -997,8 +997,8 @@ impl<'a> EvalContext<'a> {
             "bitand" => int_binop(args, |lhs, rhs| lhs & rhs),
             "bitor" => int_binop(args, |lhs, rhs| lhs | rhs),
             "bitxor" => int_binop(args, |lhs, rhs| lhs ^ rhs),
-            "shl" => int_shift_binop(args, |lhs, rhs| lhs << rhs),
-            "shr" => int_shift_binop(args, |lhs, rhs| lhs >> rhs),
+            "shl" => int_shift_binop(args, IntShiftOp::Left),
+            "shr" => int_shift_binop(args, IntShiftOp::Right),
             "string_len" => {
                 let value = expect_string_arg(args, 0)?;
                 Ok(RuntimeValue::int64(value.chars().count() as i64))
