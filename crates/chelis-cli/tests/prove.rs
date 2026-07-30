@@ -172,7 +172,7 @@ fn prove_json_schema_has_property_and_summary_records() {
     assert_eq!(records[1]["passed"], 1);
 }
 
-#[cfg(feature = "smt")]
+#[cfg(feature = "chelis-prove")]
 #[test]
 fn prove_surf_reef_input_lowers_against_linked_declarations() {
     let dir = tempdir().expect("tempdir");
@@ -241,6 +241,140 @@ import Mylib.Math (double)
     assert_eq!(props[0]["status"], "passed");
     assert_eq!(props[0]["proof_tier"], "smt");
     assert_eq!(props[0]["arith_model"], "real");
+}
+
+#[cfg(feature = "chelis-prove")]
+#[test]
+fn prove_does_not_recheck_unreachable_dependency_declarations_after_verdict() {
+    let dir = tempdir().expect("tempdir");
+    let root = dir.path().join("myapp");
+    write_file(
+        &root.join("reef.toml"),
+        &format!(
+            r#"[package]
+name = "myapp"
+version = "0.1.0"
+compiler = "={}"
+module_prefix = "App"
+
+[dependencies]
+mylib = {{ path = "./mylib" }}
+"#,
+            env!("CARGO_PKG_VERSION")
+        ),
+    );
+    write_file(
+        &root.join("mylib/reef.toml"),
+        &format!(
+            r#"[package]
+name = "mylib"
+version = "0.1.0"
+compiler = "={}"
+module_prefix = "Mylib"
+"#,
+            env!("CARGO_PKG_VERSION")
+        ),
+    );
+    write_file(
+        &root.join("mylib/src/math.ch"),
+        "module Mylib.Math\n\
+         export (double)\n\
+         def double(x: f32) -> f32 = x + x\n\
+         def unrelated_broken(x: f32) -> f32 = to_tensor([x])\n",
+    );
+    let entry = root.join("src/proofs.ch");
+    write_file(
+        &entry,
+        "module App.Proofs\n\
+         import Mylib.Math (double)\n\
+         @property double_identity forall(x: f32): double(x) == x + x\n",
+    );
+
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "prove",
+            entry.to_str().unwrap(),
+            "--json",
+            "--tier",
+            "fuzz-only",
+        ])
+        .output()
+        .expect("run prove");
+    assert!(
+        output.status.success(),
+        "an unreachable broken dependency declaration is outside the selected \
+         module's fail-closed check\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[cfg(feature = "chelis-prove")]
+#[test]
+fn prove_rejects_a_broken_dependency_declaration_reachable_from_entry() {
+    let dir = tempdir().expect("tempdir");
+    let root = dir.path().join("myapp");
+    write_file(
+        &root.join("reef.toml"),
+        &format!(
+            r#"[package]
+name = "myapp"
+version = "0.1.0"
+compiler = "={}"
+module_prefix = "App"
+
+[dependencies]
+mylib = {{ path = "./mylib" }}
+"#,
+            env!("CARGO_PKG_VERSION")
+        ),
+    );
+    write_file(
+        &root.join("mylib/reef.toml"),
+        &format!(
+            r#"[package]
+name = "mylib"
+version = "0.1.0"
+compiler = "={}"
+module_prefix = "Mylib"
+"#,
+            env!("CARGO_PKG_VERSION")
+        ),
+    );
+    write_file(
+        &root.join("mylib/src/math.ch"),
+        "module Mylib.Math\n\
+         export (broken)\n\
+         def broken(x: f32) -> f32 = to_tensor([x])\n",
+    );
+    let entry = root.join("src/proofs.ch");
+    write_file(
+        &entry,
+        "module App.Proofs\n\
+         import Mylib.Math (broken)\n\
+         def selected(x: f32) -> f32 = broken(x)\n\
+         @property reflexive forall(x: f32): x == x\n",
+    );
+
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "prove",
+            entry.to_str().unwrap(),
+            "--json",
+            "--tier",
+            "fuzz-only",
+        ])
+        .output()
+        .expect("run prove");
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "a reachable broken dependency must fail closed\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 // chelis#580: proving a reef PACKAGE that carries a `@property` must not

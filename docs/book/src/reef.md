@@ -201,6 +201,22 @@ regardless of whether the project listed chelis-std in
 chelis-std as `LocalRegistry` are auto-migrated to `Bundled` on read
 and rewritten on the next `chelis reef build`.
 
+### Prepared package cache
+
+Commands that repeatedly consume the same locked package graph reuse a
+prepared-graph cache under `$CHELIS_REEF_HOME/.cache/prepared-graphs/` (or the
+normal XDG/Home cache fallback). Entries are tied to the compiler version and
+canonical project root, and are invalidated by changes to source files,
+manifests, `reef.lock`, or published archive/shell identities. The cache file
+has a versioned, checksummed envelope; corrupt or version-skewed entries emit a
+stderr diagnostic and are rebuilt rather than trusted.
+
+For `chelis prove`, the package graph is prepared once per invocation. The
+post-verdict type check remains fail-closed for every declaration in the
+selected module and for all transitively referenced dependency declarations;
+unreachable declarations in an otherwise large installed shell are not
+rechecked.
+
 ## Import Syntax
 
 ```chelis-surf-fragment

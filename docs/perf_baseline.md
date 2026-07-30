@@ -32,5 +32,25 @@ Current baseline from `/home/jeff/Documents/scratch/coral` on this workstation w
 
 `--jobs auto` uses `min(selected_test_files, available_parallelism())`; it has no
 fixed cap. Output remains deterministic in discovery order, so CI logs do not depend
-on worker completion order. LocalRegistry packages bypass the disk-cache hash probe
-and still compile one in-memory context that is shared by every worker.
+on worker completion order.
+
+## Package-context prove latency (chelis#924)
+
+Reef graph preparation is persisted across processes in a versioned,
+integrity-checked cache. Its determinant includes the compiler version,
+canonical package root, every source and manifest, `reef.lock`, and published
+archive/shell identities. `LocalRegistry` packages participate in both this
+cache and the compiled-context cache.
+
+After a property verdict, `chelis prove` checks every declaration in the
+selected entry module and follows linker-resolved references transitively.
+Unreachable declarations elsewhere in an installed shell are not rechecked.
+The manual Shoals cold/warm oracle is recorded in
+[`manual_gates.md`](manual_gates.md).
+
+On 2026-07-30, the development binary for the chelis#924 change completed
+that oracle against the published Shoals 0.24.1 artifacts in 1.06 seconds
+cold and 0.74 seconds warm. Both runs exited successfully immediately after
+emitting identical passing property and summary NDJSON. These measurements
+characterize the development change; the release gate must repeat them with
+the published binary.

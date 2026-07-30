@@ -480,15 +480,37 @@ fn prove_surf_file(
         let prop_status = match &linked_program {
             Ok(Some(prepared)) => {
                 let display_names = linked_property_display_names(&flat, &prepared.entry_decls);
-                property_run::run_surf_linked_properties_shared(
-                    path,
-                    &prepared.decls,
-                    &prepared.entry_decls,
-                    &prepared.stdlib_decls,
-                    &display_names,
-                    options,
-                    totals,
-                )
+                match prepared.reachable_decls() {
+                    Ok(reachable_decls) => property_run::run_surf_linked_properties_shared(
+                        path,
+                        &reachable_decls,
+                        &prepared.entry_decls,
+                        &prepared.stdlib_decls,
+                        &display_names,
+                        options,
+                        totals,
+                    ),
+                    Err(message) => {
+                        totals.errors += 1;
+                        if options.json {
+                            println!(
+                                "{}",
+                                json!({
+                                    "kind": "error",
+                                    "stage": "property-discovery",
+                                    "reason": format!("reachable linked-program selection failed; properties not verified: {message}"),
+                                    "source": json!({ "kind": "surf", "file": path.display().to_string() }),
+                                })
+                            );
+                        } else {
+                            eprintln!(
+                                "prove error: reachable linked-program selection failed in {}: {message}",
+                                path.display()
+                            );
+                        }
+                        Status::Error
+                    }
+                }
             }
             Ok(None) => property_run::run_surf_properties_shared(path, &source, options, totals),
             Err(message) => {
@@ -516,9 +538,14 @@ fn prove_surf_file(
 
         let obligation_count = count_invariant_opaque_surf(&flat);
         let ob_status = match (&linked_program, obligation_count) {
-            (Ok(Some(prepared)), 0) => {
-                obligation_run::check_linked_decls(&prepared.decls, options, totals)
-            }
+            (Ok(Some(prepared)), 0) => match prepared.reachable_decls() {
+                Ok(reachable_decls) => {
+                    obligation_run::check_linked_decls(&reachable_decls, options, totals)
+                }
+                Err(message) => {
+                    obligation_run::emit_reachable_selection_failure(&message, options, totals)
+                }
+            },
             (Ok(None), 0) => obligation_run::run_obligations(&parsed, options, totals),
             (Err(_), 0) => Status::Passed,
             (Ok(_), _) => obligation_run::run_obligations(&parsed, options, totals),
