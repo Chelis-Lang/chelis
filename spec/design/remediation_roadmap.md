@@ -150,9 +150,11 @@ pilot - its own deliverable stands on "let the emitter's channel speak"
 whether or not the table has landed. This doc previously read as if it
 were gated; per this doc's own rule the plan won and the sentence was
 corrected 2026-07-30. [#730] Phase 4 (ratchet totality, added
-2026-07-30: derived-universe ratchets, the structural panic contract,
-and the nightly structural-authority job) is guard work that may land
-any time after [#730] Phase 2 and carries no wave assignment. Citation
+2026-07-30: product-source-manifest ratchets, the structural panic
+contract, and the change-gated + nightly structural-authority jobs) is
+guard work that may land any time after [#730] Phase 2 and carries no
+wave assignment. Its user-visible halves are decided by [05-UNS-5..6]
+(spec/05 §7, authored 2026-07-30); the plan implements them. Citation
 presence may land before blocking freshness and coverage, but every
 selected capability row ultimately binds one current controlling atom
 revision.
