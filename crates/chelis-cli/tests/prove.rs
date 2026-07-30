@@ -3,6 +3,9 @@ use predicates::prelude::*;
 use serde_json::Value;
 use tempfile::tempdir;
 
+#[path = "common/mod.rs"]
+mod common;
+
 fn write_prop(source: &str) -> tempfile::TempDir {
     let dir = tempdir().expect("tempdir");
     std::fs::write(dir.path().join("prop.ch"), source).expect("write property");
@@ -206,15 +209,25 @@ module_prefix = "Mylib"
     );
     write_file(
         &root.join("mylib/src/math.ch"),
-        "module Mylib.Math\nexport (double)\ndef double(x: f32) -> f32 = x + x\n",
+        "module Mylib.Math\n\
+         export (double, quotient)\n\
+         def double(x: f32) -> f32 = x + x\n\
+         def quotient(d: f32, r: f32, g: f32) -> f32 = {\n\
+         \x20 denominator = r - g\n\
+         \x20 d / denominator\n\
+         }\n",
     );
     let entry = root.join("src/proofs.ch");
     write_file(
         &entry,
         r#"module App.Proofs
-import Mylib.Math (double)
+import Mylib.Math (double, quotient)
 @property double_identity forall(x: f32):
   double(x) == x + x
+@property imported_grad_formula forall(d: f32, r: f32, g: f32)
+where (r > g):
+  (grad(quotient, wrt=r)(d, r, g)
+    == (0.0 - d) / ((r - g) * (r - g)))
 "#,
     );
 
@@ -236,11 +249,16 @@ import Mylib.Math (double)
         String::from_utf8_lossy(&output.stderr)
     );
     let props = property_records(&output.stdout);
-    assert_eq!(props.len(), 1, "records: {props:?}");
-    assert_eq!(props[0]["name"], "double_identity");
-    assert_eq!(props[0]["status"], "passed");
-    assert_eq!(props[0]["proof_tier"], "smt");
-    assert_eq!(props[0]["arith_model"], "real");
+    assert_eq!(props.len(), 2, "records: {props:?}");
+    for name in ["double_identity", "imported_grad_formula"] {
+        let prop = props
+            .iter()
+            .find(|prop| prop["name"] == name)
+            .unwrap_or_else(|| panic!("missing {name}: {props:?}"));
+        assert_eq!(prop["status"], "passed", "{prop}");
+        assert_eq!(prop["proof_tier"], "smt", "{prop}");
+        assert_eq!(prop["arith_model"], "real", "{prop}");
+    }
 }
 
 #[cfg(feature = "chelis-prove")]
@@ -2755,6 +2773,240 @@ where (x > 0.5), (x < 9.5):
         "{}",
         props[0]
     );
+}
+
+// chelis#923 negative parity: the prover-owned symbolic transform must not
+// certify a conditional gradient while the compiler's scalar-AD transform
+// cannot build the same program.
+#[cfg(feature = "smt")]
+#[test]
+fn issue_923_conditional_grad_is_unsupported_by_prove_and_build() {
+    let source = r#"module Audit.Main
+
+def conditional_value(x: f32) -> f32 =
+  if x > 0.0 then x * x else 0.0 - x
+
+def conditional_derivative(x: f32) -> f32 =
+  grad(conditional_value, wrt=x)(x)
+
+out = conditional_derivative(2.0)
+
+@property conditional_grad_nonnegative forall(x: f32):
+  (grad(conditional_value, wrt=x)(x) >= 0.0)
+"#;
+    let dir = write_prop(source);
+    let path = dir.path().join("prop.ch");
+    let prove = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "prove",
+            path.to_str().unwrap(),
+            "--tier",
+            "smt-only",
+            "--json",
+        ])
+        .output()
+        .expect("run prove");
+    assert_eq!(prove.status.code(), Some(2));
+    let props = property_records(&prove.stdout);
+    assert_eq!(props.len(), 1, "records: {props:?}");
+    assert_eq!(props[0]["status"], "unsupported", "{}", props[0]);
+    assert_eq!(
+        props[0]["reason"], "scalar grad SMT lowering does not support conditionals",
+        "{}",
+        props[0]
+    );
+
+    let build = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            dir.path().join("build").to_str().unwrap(),
+        ])
+        .output()
+        .expect("run build");
+    assert!(
+        !build.status.success(),
+        "conditional scalar grad unexpectedly built; the prover subset may \
+         only widen after compiler support lands\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&build.stdout),
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&build.stderr);
+    assert!(
+        stderr.contains("can't lower these defs"),
+        "build must fail at the compiler scalar-AD boundary, got:\n{stderr}"
+    );
+}
+
+// The executable-parity oracle also found that the compiler scalar-AD path
+// rejects casts in differentiated bodies. Keep Tier B fail-closed until that
+// compiler boundary widens.
+#[cfg(feature = "smt")]
+#[test]
+fn issue_923_cast_grad_is_unsupported_by_prove_and_build() {
+    let source = r#"def cast_value(x: f32) -> f32 = cast(x * x, f32)
+def cast_derivative(x: f32) -> f32 = grad(cast_value, wrt=x)(x)
+out = cast_derivative(2.0)
+@property cast_grad_nonnegative forall(x: f32):
+  (grad(cast_value, wrt=x)(x) >= 0.0)
+"#;
+    let dir = write_prop(source);
+    let path = dir.path().join("prop.ch");
+    let prove = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "prove",
+            path.to_str().unwrap(),
+            "--tier",
+            "smt-only",
+            "--json",
+        ])
+        .output()
+        .expect("run prove");
+    assert_eq!(prove.status.code(), Some(2));
+    let props = property_records(&prove.stdout);
+    assert_eq!(props.len(), 1, "records: {props:?}");
+    assert_eq!(props[0]["status"], "unsupported", "{}", props[0]);
+    assert_eq!(
+        props[0]["reason"],
+        "scalar grad SMT lowering does not support casts in differentiated bodies",
+        "{}",
+        props[0]
+    );
+
+    let build = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            dir.path().join("cast-build").to_str().unwrap(),
+        ])
+        .output()
+        .expect("run build");
+    assert!(
+        !build.status.success(),
+        "cast-bearing scalar grad unexpectedly built\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&build.stdout),
+        String::from_utf8_lossy(&build.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&build.stderr).contains("can't lower these defs"),
+        "build must fail at the compiler scalar-AD boundary:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+}
+
+// Independent three-way parity oracle for the supported intersection:
+//  1. the compiler evaluator executes scalar AD,
+//  2. generated C executes the compiler's backend transform, and
+//  3. Tier B proves the same derivative's closed form symbolically.
+// A finite-difference reference guards against evaluator/backend agreement on
+// the same wrong transform.
+#[cfg(feature = "smt")]
+#[test]
+fn issue_923_symbolic_grad_matches_evaluator_backend_and_finite_difference() {
+    if !common::gcc_available() {
+        eprintln!("skipping: no host C compiler available");
+        return;
+    }
+    let runtime_source = r#"def square(x: f32) -> f32 = x * x
+def quadratic(x: f32) -> f32 = {
+  squared = square(x)
+  squared + x
+}
+def quadratic_grad(x: f32) -> f32 =
+  grad(quadratic, wrt=x)(x)
+
+out = quadratic_grad(3.0)
+"#;
+    let proof_source = format!(
+        r#"{runtime_source}
+
+@property quadratic_grad_formula forall(x: f32):
+  (grad(quadratic, wrt=x)(x) == 2.0 * x + 1.0)
+"#
+    );
+    let dir = write_prop(&proof_source);
+    let path = dir.path().join("prop.ch");
+    let runtime_dir = write_prop(runtime_source);
+    let runtime_path = runtime_dir.path().join("prop.ch");
+
+    let eval = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["eval", "--file", runtime_path.to_str().unwrap()])
+        .output()
+        .expect("run evaluator");
+    assert!(
+        eval.status.success(),
+        "evaluator failed:\n{}",
+        String::from_utf8_lossy(&eval.stderr)
+    );
+    let eval_stdout = String::from_utf8(eval.stdout).expect("utf-8 evaluator output");
+    let eval_value = parse_scalar_out(&eval_stdout);
+
+    let backend_stdout = common::build_and_run(runtime_source, "issue_923_grad_parity");
+    let backend_value = parse_scalar_out(&backend_stdout);
+
+    let prove = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "prove",
+            path.to_str().unwrap(),
+            "--tier",
+            "smt-only",
+            "--json",
+        ])
+        .output()
+        .expect("run prover");
+    assert!(
+        prove.status.success(),
+        "symbolic formula did not prove:\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&prove.stdout),
+        String::from_utf8_lossy(&prove.stderr)
+    );
+    let props = property_records(&prove.stdout);
+    assert_eq!(props.len(), 1, "records: {props:?}");
+    assert_eq!(props[0]["status"], "passed", "{}", props[0]);
+    assert_eq!(props[0]["proof_tier"], "smt", "{}", props[0]);
+
+    let quadratic = |x: f64| x * x + x;
+    let h = 1e-4;
+    let finite_difference = (quadratic(3.0 + h) - quadratic(3.0 - h)) / (2.0 * h);
+    for (surface, value) in [("evaluator", eval_value), ("generated C", backend_value)] {
+        assert!(
+            (value - finite_difference).abs() < 1e-5,
+            "{surface} derivative {value} disagrees with finite difference {finite_difference}"
+        );
+        assert!(
+            (value - 7.0).abs() < 1e-6,
+            "{surface} derivative must equal the proved closed form 7.0, got {value}"
+        );
+    }
+    assert!(
+        (eval_value - backend_value).abs() < 1e-7,
+        "evaluator/backend mismatch: {eval_value} vs {backend_value}"
+    );
+}
+
+#[cfg(feature = "smt")]
+fn parse_scalar_out(stdout: &str) -> f64 {
+    stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("out = "))
+        .and_then(|value| value.trim().parse().ok())
+        .or_else(|| stdout.trim().parse().ok())
+        .unwrap_or_else(|| panic!("missing scalar `out` in:\n{stdout}"))
 }
 
 // chelis#425 regression lock (stale-fixed by chelis#426): a NESTED helper call

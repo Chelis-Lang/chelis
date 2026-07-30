@@ -53,19 +53,22 @@ obligation language as an ordinary scalar property. The supported v1 shape is
 `grad(f, wrt=x)(args...)`, with exactly one explicit `wrt`, where `f` is an
 inline lambda or pure top-level function whose parameters are `f32`/`f64`.
 The differentiated body may contain scalar literals and variables, negation,
-`+`, `-`, `*`, `/`, named scalar block bindings, float-to-float casts,
-conditionals, and recursively inlined pure scalar helpers within the normal
-Tier B inlining-depth bound. Argument substitutions are resolved in the
-caller's scope before differentiation.
+`+`, `-`, `*`, `/`, named scalar block bindings, and recursively inlined pure
+scalar helpers within the normal Tier B inlining-depth bound. Argument
+substitutions are resolved in the caller's scope before differentiation.
 
 This is a prover-owned symbolic dual lowering; it must agree with Chelis scalar
 AD semantics but does not replace the compiler's `grad` transform. Its SMT
 verdict retains the `real_arithmetic` qualifier. Multi-target or implicit
-`wrt`, tensor/ADT gradients, effects, recursion, nested transforms, unsupported
-intrinsics, and malformed calls do not silently sample under `smt-only`: they
-return `status:"unsupported"` with a reason naming the scalar-gradient
-capability boundary. Under `auto`, the same boundary may continue to Tier C
-fuzz validation.
+`wrt`, tensor/ADT gradients, conditionals, casts in differentiated bodies,
+effects, recursion, nested transforms, helper-inlining depth overflow,
+unsupported intrinsics, and malformed calls do not silently sample under
+`smt-only`: they return
+`status:"unsupported"` with a reason naming the scalar-gradient capability
+boundary. Under `auto`, the same boundary may continue to Tier C fuzz
+validation. In particular, conditionals remain outside this prover-owned
+subset until the compiler's scalar AD transform can build the same programs.
+Float casts in differentiated bodies follow the same executable-parity rule.
 
 ## Deep Representation
 

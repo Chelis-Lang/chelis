@@ -814,13 +814,6 @@ fn scalar_grad_application(
     ctx: &InlineCtx,
     lower_arg: impl Fn(&Expr) -> Option<crate::solver::SmtExpr>,
 ) -> Result<crate::solver::SmtExpr, String> {
-    let lowered_args = args
-        .iter()
-        .map(lower_arg)
-        .collect::<Option<Vec<_>>>()
-        .ok_or_else(|| {
-            "scalar grad SMT lowering requires scalar arithmetic arguments".to_string()
-        })?;
     let (params, body, target_name) = match target {
         Expr::Lambda(params, body, _) => (params.as_slice(), body.as_ref(), None),
         Expr::Var(name, _) => {
@@ -845,6 +838,15 @@ fn scalar_grad_application(
             }
             (params, body, Some(name.as_str()))
         }
+        Expr::Grad(_, _, _) => {
+            return Err("scalar grad SMT lowering does not support nested gradients".to_string());
+        }
+        Expr::Vmap(_, _, _) => {
+            return Err("scalar grad SMT lowering does not support nested `vmap`".to_string());
+        }
+        Expr::Jit(_, _) => {
+            return Err("scalar grad SMT lowering does not support nested `jit`".to_string());
+        }
         _ => {
             return Err(
                 "scalar grad SMT lowering requires an inline lambda or top-level function"
@@ -852,11 +854,11 @@ fn scalar_grad_application(
             );
         }
     };
-    if params.len() != lowered_args.len() {
+    if params.len() != args.len() {
         return Err(format!(
             "scalar grad SMT lowering expected {} arguments, found {}",
             params.len(),
-            lowered_args.len()
+            args.len()
         ));
     }
     if !params.iter().all(scalar_param) {
@@ -872,6 +874,13 @@ fn scalar_grad_application(
             "scalar grad SMT lowering cannot find `wrt` parameter `{wrt_name}`"
         ));
     }
+    let lowered_args = args
+        .iter()
+        .map(lower_arg)
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| {
+            "scalar grad SMT lowering requires scalar arithmetic arguments".to_string()
+        })?;
     if let Some(name) = target_name
         && ctx.call_stack.iter().any(|active| active == name)
     {
@@ -1067,28 +1076,12 @@ fn scalar_dual(
                 },
             )
         }
-        Expr::If(condition, then_expr, else_expr, _) => {
-            let values = env
-                .iter()
-                .map(|(name, dual)| (name.clone(), dual.value.clone()))
-                .collect();
-            let condition = surf_expr_to_smt_subst(condition, &values, ctx).ok_or_else(|| {
-                "scalar grad SMT lowering does not support this conditional predicate".to_string()
-            })?;
-            let then_dual = scalar_dual(then_expr, env, ctx)?;
-            let else_dual = scalar_dual(else_expr, env, ctx)?;
-            Ok(ScalarDual {
-                value: SmtExpr::Ite(
-                    Box::new(condition.clone()),
-                    Box::new(then_dual.value),
-                    Box::new(else_dual.value),
-                ),
-                tangent: SmtExpr::Ite(
-                    Box::new(condition),
-                    Box::new(then_dual.tangent),
-                    Box::new(else_dual.tangent),
-                ),
-            })
+        // Keep the prover-owned transform inside the compiler's executable
+        // scalar-AD intersection. The compiler currently rejects conditional
+        // scalar gradients, so proving an independently reconstructed ITE
+        // derivative here would certify a program that cannot be built.
+        Expr::If(_, _, _, _) => {
+            Err("scalar grad SMT lowering does not support conditionals".to_string())
         }
         Expr::Block(bindings, body, _) => {
             let mut env = env.clone();
@@ -1104,12 +1097,9 @@ fn scalar_dual(
             }
             scalar_dual(body, &env, ctx)
         }
-        Expr::Cast(inner, precision, _) if matches!(precision.as_str(), "f32" | "f64") => {
-            // Tier B is explicitly real arithmetic, so float-to-float casts
-            // are the identity in the same qualified model as ordinary f32/f64
-            // arithmetic.
-            scalar_dual(inner, env, ctx)
-        }
+        Expr::Cast(_, precision, _) if matches!(precision.as_str(), "f32" | "f64") => Err(
+            "scalar grad SMT lowering does not support casts in differentiated bodies".to_string(),
+        ),
         Expr::Annotate(inner, _, _) => scalar_dual(inner, env, ctx),
         Expr::Grad(_, _, _) => {
             Err("scalar grad SMT lowering does not support nested gradients".to_string())
@@ -1742,5 +1732,76 @@ mod tests {
             }
             _ => false,
         }
+    }
+
+    fn parsed_grad_error(source: &str, target: &str, wrt: &[&str]) -> String {
+        let decls = chelis_surf::parser::parse_str(source).expect("parse boundary fixture");
+        let wrt = wrt
+            .iter()
+            .map(|name| (*name).to_string())
+            .collect::<Vec<_>>();
+        scalar_grad_application(
+            &var(target),
+            Some(&wrt),
+            &[var("argument")],
+            &ctx(&decls),
+            |_| Some(SmtExpr::Var("argument".into())),
+        )
+        .expect_err("boundary must fail closed")
+    }
+
+    #[test]
+    fn scalar_grad_multi_wrt_reports_specific_boundary() {
+        let error = parsed_grad_error("def f(x: f32) -> f32 = x * x\n", "f", &["x", "also_x"]);
+        assert_eq!(
+            error,
+            "scalar grad SMT lowering requires exactly one explicit `wrt` parameter"
+        );
+    }
+
+    #[test]
+    fn scalar_grad_tensor_and_adt_params_report_specific_boundary() {
+        for (source, target) in [
+            (
+                "def tensor_loss(x: tensor[2, f32]) -> f32 = sum(x, 0)\n",
+                "tensor_loss",
+            ),
+            (
+                "type Box =\n\
+                 \x20 | Box { value: f32 }\n\
+                 def record_loss(x: Box) -> f32 = 0.0\n",
+                "record_loss",
+            ),
+        ] {
+            assert_eq!(
+                parsed_grad_error(source, target, &["x"]),
+                "scalar grad SMT lowering supports only f32/f64 parameters",
+                "{target}"
+            );
+        }
+    }
+
+    #[test]
+    fn scalar_grad_effectful_target_reports_specific_boundary() {
+        assert_eq!(
+            parsed_grad_error(
+                "def random_loss(x: f32) -> f32 ! { Random } = x * x\n",
+                "random_loss",
+                &["x"],
+            ),
+            "scalar grad SMT lowering does not support effectful function `random_loss`"
+        );
+    }
+
+    #[test]
+    fn scalar_grad_recursive_target_reports_specific_boundary() {
+        assert_eq!(
+            parsed_grad_error(
+                "def recursive_loss(x: f32) -> f32 = x * recursive_loss(x)\n",
+                "recursive_loss",
+                &["x"],
+            ),
+            "scalar grad SMT lowering does not support recursion through `recursive_loss`"
+        );
     }
 }

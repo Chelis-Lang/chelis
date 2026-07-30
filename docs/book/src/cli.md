@@ -196,11 +196,14 @@ metadata. SMT-amenable scalar Deep properties lower directly to Tier B;
 unsupported Deep property shapes follow the normal requested-tier policy.
 Surf properties may also prove an applied single-target scalar gradient such
 as `grad(price, wrt=rate)(args...)` when the differentiated lambda or pure
-top-level function uses scalar arithmetic, blocks, float casts, conditionals,
-and inlineable scalar helpers. These proofs are still over the reals and carry
-the `real_arithmetic` qualifier. Tensor or multi-target gradients and
-unsupported differentiated operations return a specific unsupported reason
-under `--tier smt-only`; `auto` may fuzz-validate them instead.
+top-level function uses scalar arithmetic, blocks, and inlineable scalar
+helpers. These proofs are still over the reals and carry the `real_arithmetic`
+qualifier. Tensor or multi-target gradients, conditionals, casts in
+differentiated bodies, effects, recursion, nested transforms, helper-depth
+overflow, and unsupported differentiated operations return a specific
+unsupported reason under `--tier smt-only`; `auto` may fuzz-validate them
+instead. Conditional scalar gradients and differentiated casts remain outside
+the prover subset until the compiler can build them.
 
 Exit codes are stable for CI: `0` pass, `1` counterexample, `2` selected
 property unsupported by the v1 generator, and `3` setup/input/config error.
