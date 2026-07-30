@@ -1,7 +1,10 @@
 //! Memory planning for generated C code.
 //!
 //! M2a adds conservative slot planning to the C backend:
-//! - caller loads are borrowed and never freed here
+//! - caller loads are borrowed and never freed here, and (chelis#933)
+//!   never written through: the buffer belongs to whoever called the
+//!   compiled entry point, so an optimization may read it but must not
+//!   use it as a destination
 //! - materialized nodes get reusable backing slots plus per-node metadata views
 //! - movement nodes are metadata views over their source owner
 //! - stores remain standalone owned outputs
@@ -59,6 +62,35 @@ impl MemoryPlan {
 
     pub fn node_kind(&self, id: NodeId) -> &NodeMemoryKind {
         &self.node_kinds[id.0]
+    }
+
+    /// chelis#933: true when `id`'s bytes live in a buffer the caller
+    /// supplied, rather than in a slot this program allocated.
+    ///
+    /// `BorrowedLoad` marks the program's own inputs, and a metadata
+    /// view (`reshape` / `permute` / `expand` / `stride`) over one is
+    /// still a window onto the same bytes, so the walk follows `source`
+    /// to the root exactly as `compute_owner_map` does. Termination is
+    /// guaranteed because a view's source is always an earlier node.
+    ///
+    /// Read this before choosing any tensor as an in-place destination.
+    /// Reading a borrowed buffer is fine; writing to one hands the
+    /// caller back a mutated argument. Ownership is not visible in the
+    /// runtime `chelis_tensor` at all: `chelis_alloc_view` sets
+    /// `owns_data = 0` for every intermediate view as well, so the
+    /// runtime flag cannot distinguish the two and this plan-level fact
+    /// is the only place the distinction exists.
+    pub fn borrows_caller_storage(&self, id: NodeId) -> bool {
+        let mut cursor = id;
+        loop {
+            match &self.node_kinds[cursor.0] {
+                NodeMemoryKind::BorrowedLoad => return true,
+                NodeMemoryKind::MetadataView { source }
+                | NodeMemoryKind::StandaloneStore { source }
+                | NodeMemoryKind::TerminalDrop { source } => cursor = *source,
+                NodeMemoryKind::SlotBacked { .. } | NodeMemoryKind::Skipped => return false,
+            }
+        }
     }
 
     pub fn slot(&self, id: usize) -> &SlotPlan {
@@ -415,6 +447,90 @@ mod tests {
                 .emit_cleanup(&[y])
                 .iter()
                 .any(|line| line == "    chelis_free(t0);")
+        );
+    }
+
+    // chelis#933: `borrows_caller_storage` is what stops an in-place
+    // optimization from writing into a buffer the caller owns, so it
+    // needs both directions pinned — a false positive silently deletes
+    // the optimization, a false negative silently corrupts an argument.
+    #[test]
+    fn borrows_caller_storage_reports_program_inputs() {
+        let mut dag = Dag::new();
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
+        let y = dag.add_node(RiscOp::Neg, vec![x], vec_f32(4), None);
+        dag.add_root(y);
+
+        let plan = build_plan(&dag, &[y]);
+        assert!(
+            plan.borrows_caller_storage(x),
+            "a program input's bytes belong to the caller"
+        );
+        assert!(
+            !plan.borrows_caller_storage(y),
+            "an operator result lives in a slot this program allocated"
+        );
+    }
+
+    #[test]
+    fn borrows_caller_storage_sees_through_a_view_of_an_input() {
+        // A `reshape`/`expand`/`permute` of an input is a metadata view:
+        // different shape, same bytes. Checking only the node itself
+        // would miss it.
+        let mut dag = Dag::new();
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
+        let v = dag.add_node(
+            RiscOp::Expand {
+                axis: 0,
+                size: DimExpr::Concrete(4),
+            },
+            vec![x],
+            TensorType {
+                dims: vec![DimInfo::Lit(4), DimInfo::Lit(4)],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        let y = dag.add_node(RiscOp::Neg, vec![v], vec_f32(4), None);
+        dag.add_root(y);
+
+        let plan = build_plan(&dag, &[y]);
+        assert_eq!(
+            plan.node_kind(v),
+            &NodeMemoryKind::MetadataView { source: x }
+        );
+        assert!(
+            plan.borrows_caller_storage(v),
+            "a view of a program input is still a window onto the caller's bytes"
+        );
+    }
+
+    #[test]
+    fn borrows_caller_storage_clears_a_view_of_an_owned_intermediate() {
+        // Negative parity for the case above: the same view shape over a
+        // program-owned node must stay reusable, or the fix would delete
+        // in-place fusion everywhere rather than only where it was wrong.
+        let mut dag = Dag::new();
+        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(4), None);
+        let v = dag.add_node(
+            RiscOp::Expand {
+                axis: 0,
+                size: DimExpr::Concrete(4),
+            },
+            vec![a],
+            TensorType {
+                dims: vec![DimInfo::Lit(4), DimInfo::Lit(4)],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        let y = dag.add_node(RiscOp::Neg, vec![v], vec_f32(4), None);
+        dag.add_root(y);
+
+        let plan = build_plan(&dag, &[y]);
+        assert!(
+            !plan.borrows_caller_storage(v),
+            "a view of an owned intermediate is program-owned storage"
         );
     }
 

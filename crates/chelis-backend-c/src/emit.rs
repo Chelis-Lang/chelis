@@ -637,10 +637,11 @@ impl CEmitter {
             RiscOp::Store { name } => self.emit_store(id, name.as_str(), &node.inputs),
             RiscOp::FusedElem { ops } => {
                 let in_place =
-                    Self::fused_in_place_spec(node, dag).map(|reusable_input| FusedInPlaceSpec {
-                        reusable_input,
-                        slot_has_later_owner: self.slot_has_later_owner(id, dag),
-                    });
+                    self.fused_in_place_spec(node, dag)
+                        .map(|reusable_input| FusedInPlaceSpec {
+                            reusable_input,
+                            slot_has_later_owner: self.slot_has_later_owner(id, dag),
+                        });
                 self.emit_fused_elem(id, ops, &node.inputs, &node.output_type, in_place)?;
             }
             RiscOp::BlasMatmul {
@@ -1444,9 +1445,32 @@ impl CEmitter {
             .any(|node| matches!(self.memory_plan.node_kind(node.id), NodeMemoryKind::SlotBacked { slot } if *slot == slot_id))
     }
 
-    fn fused_in_place_spec(node: &DagNode, dag: &Dag) -> Option<NodeId> {
+    fn fused_in_place_spec(&self, node: &DagNode, dag: &Dag) -> Option<NodeId> {
         let reusable_input = node.reusable_input?;
         if !matches!(node.op, RiscOp::FusedElem { .. }) {
+            return None;
+        }
+        // chelis#933: never write into a buffer the caller owns.
+        //
+        // `reusable_input` is a *linearity* fact: the analyzer proved
+        // the value is dead after this op, so reusing its storage is
+        // safe within the program. That says nothing about who owns the
+        // storage. When the value traces back to a program input, the
+        // bytes belong to the caller — `cpu_input_tensor` in
+        // `chelis-python` hands the compiled entry point a pointer
+        // straight into the caller's NumPy buffer — so reusing it
+        // in-place silently overwrites an argument. Observed as
+        // `sigmoid(x)` mutating `x`, a second call on the same array
+        // returning `sigmoid(sigmoid(x))`, and a `writeable=False`
+        // array being written to without an error.
+        //
+        // Dropping the in-place path here costs one buffer for a chain
+        // that reads a program input directly, and nothing anywhere
+        // else: intermediates are `SlotBacked`, so a chain fed by
+        // another operator still aliases. That is the narrowest form of
+        // the fix — the optimization is removed exactly where it was
+        // incorrect.
+        if self.memory_plan.borrows_caller_storage(reusable_input) {
             return None;
         }
         if node
@@ -7069,6 +7093,63 @@ mod tests {
 
     #[test]
     fn target_fused_in_place_restrict_shape_aliases_only_reusable_input() {
+        // The reusable input is an intermediate (`Realize` over the
+        // load), so it is `SlotBacked` and this program owns its
+        // bytes. That is the case in-place fusion is *for*, and this
+        // test pins its wiring: the aliased output and the aliased
+        // external input drop `restrict`, while the non-aliased
+        // external input keeps it.
+        //
+        // chelis#933: this test previously used the `Load` directly and
+        // asserted the emitter aliased `t0->data` — i.e. it pinned a
+        // write into the caller's buffer as correct. The `Realize`
+        // here restores the property the test was named for without
+        // asserting that defect; the borrowed-input case is covered by
+        // `fused_in_place_does_not_alias_a_caller_owned_input` below.
+        use chelis_ir::dag::{FusedInput, FusedStep, FusedStepOp};
+        let mut dag = Dag::new();
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
+        let owned = dag.add_node(RiscOp::Realize, vec![x], vec_f32(4), None);
+        let scale = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], vec_f32(4), None);
+        let ops = vec![FusedStep {
+            op: FusedStepOp::Mul,
+            input_indices: vec![FusedInput::External(0), FusedInput::External(1)],
+        }];
+        let fused = dag.add_node(
+            RiscOp::FusedElem { ops },
+            vec![owned, scale],
+            vec_f32(4),
+            None,
+        );
+        dag.set_reusable_input(fused, owned);
+
+        let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
+
+        assert!(
+            c.contains("chelis_alloc_view(1, (int[]){ 4 }, CHELIS_F32, t1->data);"),
+            "an owned intermediate must still be reused in place; got:\n{c}"
+        );
+        assert!(!c.contains("float* restrict __out_3 = t3->data;"), "{c}");
+        assert!(
+            !c.contains("const float* restrict __ext0_3 = t1->data;"),
+            "{c}"
+        );
+        assert!(c.contains("float* __out_3 = t3->data;"), "{c}");
+        assert!(c.contains("const float* __ext0_3 = t1->data;"), "{c}");
+        assert!(
+            c.contains("const float* restrict __ext1_3 = t2->data;"),
+            "{c}"
+        );
+    }
+
+    #[test]
+    fn fused_in_place_does_not_alias_a_caller_owned_input() {
+        // chelis#933: `reusable_input` is a linearity fact — the value
+        // is dead after this op — and says nothing about who owns the
+        // storage. When it resolves to a program input the bytes belong
+        // to the caller (`cpu_input_tensor` in `chelis-python` passes a
+        // pointer straight into the caller's NumPy buffer), so writing
+        // the result there overwrites an argument.
         use chelis_ir::dag::{FusedInput, FusedStep, FusedStepOp};
         let mut dag = Dag::new();
         let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
@@ -7082,12 +7163,61 @@ mod tests {
 
         let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
 
-        assert!(c.contains("chelis_alloc_view(1, (int[]){ 4 }, CHELIS_F32, t0->data);"));
-        assert!(!c.contains("float* restrict __out_2 = t2->data;"));
-        assert!(!c.contains("const float* restrict __ext0_2 = t0->data;"));
-        assert!(c.contains("float* __out_2 = t2->data;"));
-        assert!(c.contains("const float* __ext0_2 = t0->data;"));
-        assert!(c.contains("const float* restrict __ext1_2 = t1->data;"));
+        assert!(
+            !c.contains("CHELIS_F32, t0->data)"),
+            "the fused output must not be a view over the caller's input buffer; got:\n{c}"
+        );
+        // With no in-place reuse the output takes an ordinary owned
+        // slot, so every pointer is `restrict` again.
+        assert!(c.contains("float* restrict __out_2 = t2->data;"), "{c}");
+        assert!(
+            c.contains("const float* restrict __ext0_2 = t0->data;"),
+            "{c}"
+        );
+    }
+
+    #[test]
+    fn fused_in_place_does_not_alias_a_view_of_a_caller_owned_input() {
+        // chelis#933, second shape: a metadata view (`reshape`) over a
+        // program input is still a window onto the caller's bytes, so
+        // the borrowed-storage walk has to follow `MetadataView`
+        // sources rather than only checking the node itself.
+        use chelis_ir::dag::{FusedInput, FusedStep, FusedStepOp};
+        let mut dag = Dag::new();
+        let x = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            tensor_ty(&[2, 2], Prim::F32),
+            None,
+        );
+        let flat = dag.add_node(
+            RiscOp::Reshape {
+                new_shape: vec![RtDim::Lit(4)],
+            },
+            vec![x],
+            vec_f32(4),
+            None,
+        );
+        let scale = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], vec_f32(4), None);
+        let ops = vec![FusedStep {
+            op: FusedStepOp::Mul,
+            input_indices: vec![FusedInput::External(0), FusedInput::External(1)],
+        }];
+        let fused = dag.add_node(
+            RiscOp::FusedElem { ops },
+            vec![flat, scale],
+            vec_f32(4),
+            None,
+        );
+        dag.set_reusable_input(fused, flat);
+
+        let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
+
+        assert!(
+            !c.contains("CHELIS_F32, t1->data)"),
+            "the fused output must not be a view over a reshape of the caller's \
+             input buffer; got:\n{c}"
+        );
     }
 
     #[test]

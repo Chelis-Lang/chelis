@@ -1833,6 +1833,11 @@ loss = (mean(x, 0) : tensor[f32])
         for (index, value) in input.iter().enumerate() {
             data[index * element_stride] = *value;
         }
+        // chelis#933: the input buffer belongs to the caller. Snapshot
+        // it so every f64 case below also proves the kernel treated it
+        // as read-only; `f64_fused_chain_does_not_mutate_the_input`
+        // states the invariant under its own name.
+        let input_before = data.clone();
         let mut shape = [0i32; CHELIS_MAX_DIM];
         shape[0] = input.len() as i32;
         let mut strides = [0i32; CHELIS_MAX_DIM];
@@ -1867,6 +1872,16 @@ loss = (mean(x, 0) : tensor[f32])
             let values = std::slice::from_raw_parts(t.data.cast::<f64>(), t.size as usize).to_vec();
             (t.dtype, values)
         };
+        // chelis#933: a compiled kernel may read its inputs but must
+        // never write to them. Checked for every f64 case, not just the
+        // dedicated test, because the in-place fusion that caused this
+        // is chosen per DAG shape and a future shape could reintroduce
+        // it somewhere none of the named tests look.
+        assert_eq!(
+            data, input_before,
+            "compiled execution mutated its input buffer (chelis#933): the buffer \
+             belongs to the caller and must be treated as read-only"
+        );
         drop(library);
         (out_dtype, values)
     }
@@ -1988,6 +2003,37 @@ loss = (mean(x, 0) : tensor[f32])
     }
 
     #[test]
+    fn f64_fused_chain_does_not_mutate_the_input() {
+        // chelis#933. `sigmoid(x)` fuses to a single elementwise chain
+        // whose input the linearity analyzer marks reusable, so the
+        // emitter used to make the output a view over the input buffer
+        // (`chelis_alloc_view(..., t0->data)`). Through
+        // `compile_and_load` that buffer is the caller's NumPy array,
+        // so calling the model overwrote the caller's argument.
+        //
+        // The bug was pre-existing and reproduced on f32 too; it is
+        // fixed here because this is the change that makes the f64
+        // path usable, and its own acceptance probes hand a NumPy array
+        // to `sigmoid`.
+        let x = [1.0_f64, 0.5, 2.0, 0.25];
+        let (dtype, values) = run_f64_kernel(
+            "def sg(x: tensor[4, f64]) -> tensor[4, f64] = sigmoid(x)\n",
+            &x,
+        );
+        // `run_f64_kernel` asserts the input buffer is untouched; the
+        // result must still be right, so the fix is not "stop computing".
+        assert_eq!(dtype, CHELIS_F64);
+        for (index, input) in x.iter().enumerate() {
+            let expected = 1.0 / (1.0 + (-input).exp());
+            assert!(
+                (values[index] - expected).abs() < 1e-14,
+                "sigmoid({input}) = {:?}, expected ~{expected:?}",
+                values[index]
+            );
+        }
+    }
+
+    #[test]
     fn f64_fused_chain_is_correct_on_the_strided_slow_path() {
         // The contiguous fast path and the strided slow path emit
         // different pointer forms, and only the slow path indexes
@@ -2084,6 +2130,15 @@ loss = (mean(x, 0) : tensor[f32])
             value,
             1.0f32.exp() * 1.0f32,
             "the f32 fused chain must keep single-precision results"
+        );
+        // chelis#933 covers both lanes. The defect reproduced
+        // identically at f32 — it was never f64-specific — so the f32
+        // lane gets the same input-is-read-only assertion as the f64
+        // harness.
+        assert_eq!(
+            data,
+            vec![1.0f32],
+            "the f32 fused chain mutated its input buffer (chelis#933)"
         );
     }
 

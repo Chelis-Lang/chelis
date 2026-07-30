@@ -185,6 +185,16 @@ int main(void) {
     String::from_utf8(run.stdout).unwrap()
 }
 
+/// Compile and run a fused chain whose reusable input is a program
+/// input, over a contiguous and a strided tensor.
+///
+/// chelis#933: this test used to assert `contig_input 2.0 4.0 6.0 8.0`,
+/// i.e. it baked the *mutated* caller buffer into the expected stdout
+/// and pinned the defect as correct. A program input belongs to the
+/// caller, so the kernel must leave it at `1 2 3 4`. The strided
+/// expectation is unchanged and always was correct: a non-contiguous
+/// input already took the allocate-a-slot branch, which is why the
+/// `100.0` markers in `strided_base` survived even before the fix.
 #[test]
 fn fused_in_place_compile_run_matches_contiguous_and_strided_inputs() {
     let mut dag = Dag::new();
@@ -209,7 +219,7 @@ fn fused_in_place_compile_run_matches_contiguous_and_strided_inputs() {
         stdout,
         "\
 contig_out 2.000000 4.000000 6.000000 8.000000
-contig_input 2.000000 4.000000 6.000000 8.000000
+contig_input 1.000000 2.000000 3.000000 4.000000
 strided_out 2.000000 4.000000 6.000000 8.000000
 strided_base 100.000000 1.000000 100.000000 2.000000 100.000000 3.000000 100.000000 4.000000
 "
