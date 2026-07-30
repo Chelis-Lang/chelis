@@ -436,6 +436,17 @@ impl RuntimeValue {
 #[derive(Debug, Default)]
 pub(crate) struct RuntimeOutcome {
     pub(crate) host_bindings: HashMap<String, RuntimeValue>,
+    /// Applied values of host-lane *zero-argument fn* top-level roots
+    /// (the desugared shape of the arrow-form `def name -> T = body`,
+    /// which the Surf desugarer wraps as `(def name (fn () body))`).
+    /// Such a def is a nullary thunk of type `() -> T`: it is a display
+    /// root whose value is the result of APPLYING it, but it is NOT a
+    /// value binding, so it never lands in `host_bindings` (the
+    /// call-resolution frame — binding the applied tensor there under
+    /// the bare name would shadow the callable and break any `name()`
+    /// call). Keyed by bare root name; consulted by `eval_compiled` as a
+    /// fallback after `lookup_runtime_value_for_root`.
+    pub(crate) host_root_values: HashMap<String, RuntimeValue>,
     pub(crate) transcript: Vec<String>,
 }
 
@@ -606,8 +617,108 @@ pub(crate) fn evaluate_host_program_with_library_and_types(
         let _ = ctx.resolve_top_level(&name)?;
     }
 
+    // Surface host-lane *zero-argument fn* roots. The arrow-form
+    // `def priced -> T = body` desugars to `(def priced (fn () body))`,
+    // a nullary thunk of type `() -> T`. `register_top_level_defs`'
+    // `is_fn` guard skips it from the eager value-binding order (it looks
+    // like a function), yet `root_names_from_checked_exprs` lists it as a
+    // display root (unwrapping the declared `t-fn` return type). Without
+    // this pass the root has no host binding and `eval_compiled` drops it
+    // (`lookup_runtime_value_for_root` → None → filter_map), so an
+    // in-context library call like `bs_call_f64_vector(...)` returned
+    // `{"roots":[]}` instead of its value (chelis blocker2).
+    //
+    // We evaluate the value here by APPLYING the thunk (zero args) rather
+    // than binding it in `ctx.bindings`, so the call-resolution frame is
+    // untouched and a `name()` call elsewhere still resolves the callable.
+    // Only host-lane roots are applied — a tensor-lane (lowered) nullary
+    // def surfaces through the DAG/`tensor_bindings` path instead. Apply
+    // failures are swallowed (the root stays unsurfaced, exactly as
+    // before) so this can only add values, never regress.
+    let mut host_root_values = HashMap::new();
+    for expr in top_level_items(program.exprs()) {
+        let Expr::List(list, _) = expr else {
+            continue;
+        };
+        if tag(list) != Some(DeepTag::Def) {
+            continue;
+        }
+        let kids = children(list);
+        let Some(name) = kids.first().and_then(symbol_name) else {
+            continue;
+        };
+        let Some(body) = kids.get(1) else {
+            continue;
+        };
+        // Zero-argument fn wrapper only: `(fn (params-empty) inner)`.
+        let Expr::List(fn_list, _) = body else {
+            continue;
+        };
+        let is_zero_arg_fn = tag(fn_list) == Some(DeepTag::Fn)
+            && matches!(
+                children(fn_list).first(),
+                Some(Expr::List(params, _))
+                    if tag(params) == Some(DeepTag::Params)
+                        && children(params).is_empty()
+            );
+        if !is_zero_arg_fn {
+            continue;
+        }
+        // Effect-free guard (chelis blocker2 red-team). Only surface a
+        // root whose body carries NO effect row. The effects checker
+        // (`chelis_effects::check_effects_with_context`, run in
+        // `compile_new_source_in_context` and threaded through library
+        // context) stamps a non-empty `(effects ...)` node under the
+        // `"effects"` meta key on this `fn` wrapper when — and only when —
+        // the body has a latent effect. Applying such a thunk here would
+        // RUN that effect at display time (1× where the host runtime
+        // otherwise runs it 0×), and 2× when the root is also consumed by
+        // a `name()` call. A root that carries any effect row therefore
+        // stays unsurfaced: status quo, no regression, no display-time
+        // effect. Purity is decided by the checker's annotation, not by
+        // re-inferring here, so a library-inherited effect is honored too.
+        if carries_effect_row(fn_list) {
+            continue;
+        }
+        // Host-lane only; tensor-lane roots come through the DAG.
+        if lowered_names.get(name).copied().unwrap_or(false) {
+            continue;
+        }
+        // Honor the same selected-roots filter the eager order uses.
+        let selected = match selected_roots {
+            None => true,
+            Some(filter) => filter.iter().any(|s| {
+                s == name
+                    || s.strip_prefix(name)
+                        .is_some_and(|rest| rest.starts_with('.'))
+            }),
+        };
+        if !selected {
+            continue;
+        }
+        // If a host binding for this name already exists, the
+        // `lookup_runtime_value_for_root` path already surfaces it and
+        // this fallback would be dead. Skip so we do NOT re-apply the
+        // thunk a second time: another root may have called `name()`,
+        // binding its closure here, and a second application would re-run
+        // any effects in the body (e.g. `print`/`debug`) and waste the
+        // whole computation, whose value is then discarded anyway
+        // (chelis blocker2 red-team: double-execution of body effects).
+        if ctx.bindings.contains_key(name) {
+            continue;
+        }
+        // Apply the thunk: build the closure, call it with no args.
+        let applied = ctx
+            .eval_expr(body)
+            .and_then(|closure| ctx.apply_resolved_callable(closure, Vec::new()));
+        if let Ok(value) = applied {
+            host_root_values.insert(name.to_string(), value);
+        }
+    }
+
     Ok(RuntimeOutcome {
         host_bindings: ctx.bindings,
+        host_root_values,
         transcript: ctx.transcript,
     })
 }
@@ -870,6 +981,29 @@ fn get_meta(list: &List) -> Option<&MetaMap> {
         Some(Expr::Map(map, _)) => Some(map),
         _ => None,
     }
+}
+
+/// True when the checked-program effect annotation on this node carries a
+/// NON-EMPTY effect row. `chelis_effects`' `update_effect_metadata`
+/// stamps an `(effects ...)` node under the `"effects"` meta key on a
+/// `fn` node exactly when its inferred latent effect row is non-empty, so
+/// a populated `effects` node is a sufficient, checker-authoritative
+/// signal that the body is effectful. The host-root surfacing pass uses
+/// this to keep effectful roots unsurfaced — an effectful zero-arg root
+/// must not run its effect at display time.
+fn carries_effect_row(list: &List) -> bool {
+    let Some(meta) = get_meta(list) else {
+        return false;
+    };
+    meta.entries.iter().any(|(key, value)| {
+        key == "effects"
+            && matches!(
+                value,
+                Expr::List(effects, _)
+                    if tag(effects) == Some(DeepTag::Effects)
+                        && !children(effects).is_empty()
+            )
+    })
 }
 
 /// Extract the primitive dtype written into a `(lit {type: ...})` meta

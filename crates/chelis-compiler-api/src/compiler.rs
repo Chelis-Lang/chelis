@@ -1434,11 +1434,17 @@ fn eval_compiled(
         .enumerate()
         .filter(|(_, name)| selected.as_ref().is_none_or(|set| set.contains(*name)))
         .filter_map(|(index, name)| {
+            // Host value bindings and tensor-lane roots first; then fall
+            // back to a host-lane *zero-argument fn* root's applied value
+            // (arrow-form `def name -> T = body`), which is a display root
+            // but not a value binding, so it never lands in
+            // `host_bindings` (chelis blocker2).
             let value = lookup_runtime_value_for_root(
                 name,
                 &host_outcome.host_bindings,
                 &tensor_values_by_name,
-            )?;
+            )
+            .or_else(|| host_outcome.host_root_values.get(name).cloned())?;
             let node_id = compiled
                 .named_roots
                 .get(name)
