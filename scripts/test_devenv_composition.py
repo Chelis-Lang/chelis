@@ -58,32 +58,27 @@ class DevenvGeneratedFiles:
     paths: frozenset[str]
 
 
-def parse_local_imports(text: str) -> DevenvComposition:
-    lines = text.splitlines()
-    try:
-        start = lines.index("imports:") + 1
-    except ValueError as error:
-        raise ValueError("devenv.yaml must define local imports") from error
+def parse_root_composition(root_text: str, yaml_text: str) -> DevenvComposition:
+    if re.search(r"(?m)^\s*imports:\s*$", yaml_text):
+        raise ValueError("devenv.yaml must not define local imports")
 
-    imports: list[str] = []
-    for line in lines[start:]:
-        if line.startswith("  - "):
-            imports.append(line.removeprefix("  - "))
-            continue
-        if line and not line.startswith(" "):
-            break
-        if line:
-            raise ValueError("devenv.yaml contains a malformed import")
+    match = re.fullmatch(
+        (
+            r"\s*\{ \.\.\. \}:\s*\{\s*imports\s*=\s*\[\s*"
+            r"(?P<imports>.*?)\s*\];\s*\}\s*"
+        ),
+        root_text,
+        flags=re.DOTALL,
+    )
+    if match is None:
+        raise ValueError("devenv.nix must remain the local module composition root")
 
-    parsed = tuple(imports)
+    parsed = tuple(match.group("imports").split())
+    if any(re.fullmatch(r"\./devenv/[a-z-]+\.nix", item) is None for item in parsed):
+        raise ValueError("devenv.nix must remain the local module composition root")
     if parsed != EXPECTED_IMPORTS:
-        raise ValueError(f"devenv.yaml must import the local modules: {parsed!r}")
+        raise ValueError(f"devenv.nix must import the local modules: {parsed!r}")
     return DevenvComposition(imports=parsed)
-
-
-def parse_minimal_root(text: str) -> None:
-    if re.fullmatch(r"\{ \.\.\. \}:\s*\{\s*\}\s*", text) is None:
-        raise ValueError("devenv.nix must remain a minimal composition root")
 
 
 def parse_python_module(text: str) -> DevenvPython:
@@ -180,13 +175,13 @@ def parse_contributor_docs(text: str) -> None:
 
 
 class DevenvCompositionTests(unittest.TestCase):
-    def test_repository_composes_the_local_modules(self) -> None:
+    def test_repository_composes_the_local_modules_from_the_root_file(self) -> None:
+        root_text = (REPO_ROOT / "devenv.nix").read_text(encoding="utf-8")
         yaml_text = (REPO_ROOT / "devenv.yaml").read_text(encoding="utf-8")
-        self.assertEqual(parse_local_imports(yaml_text).imports, EXPECTED_IMPORTS)
-
-    def test_root_devenv_file_is_only_a_composition_root(self) -> None:
-        text = (REPO_ROOT / "devenv.nix").read_text(encoding="utf-8")
-        parse_minimal_root(text)
+        self.assertEqual(
+            parse_root_composition(root_text, yaml_text).imports,
+            EXPECTED_IMPORTS,
+        )
 
     def test_devenv_manages_python_and_the_pyo3_interpreter(self) -> None:
         text = (REPO_ROOT / "devenv/toolchains.nix").read_text(encoding="utf-8")
@@ -217,10 +212,24 @@ class DevenvCompositionTests(unittest.TestCase):
         parse_contributor_docs(text)
 
     def test_missing_import_fails_at_the_parse_boundary(self) -> None:
+        root_text = (REPO_ROOT / "devenv.nix").read_text(encoding="utf-8")
         yaml_text = (REPO_ROOT / "devenv.yaml").read_text(encoding="utf-8")
-        mutated = yaml_text.replace("  - ./devenv/commands.nix\n", "")
+        mutated = root_text.replace("    ./devenv/commands.nix\n", "")
         with self.assertRaisesRegex(ValueError, "must import the local modules"):
-            parse_local_imports(mutated)
+            parse_root_composition(mutated, yaml_text.replace("imports:", "other:"))
+
+    def test_extra_root_setting_fails_at_the_parse_boundary(self) -> None:
+        root_text = (REPO_ROOT / "devenv.nix").read_text(encoding="utf-8")
+        yaml_text = (REPO_ROOT / "devenv.yaml").read_text(encoding="utf-8")
+        mutated = root_text.replace("\n}", "\n  packages = [ ];\n}")
+        with self.assertRaisesRegex(ValueError, "composition root"):
+            parse_root_composition(mutated, yaml_text.replace("imports:", "other:"))
+
+    def test_yaml_imports_fail_at_the_parse_boundary(self) -> None:
+        root_text = (REPO_ROOT / "devenv.nix").read_text(encoding="utf-8")
+        yaml_text = (REPO_ROOT / "devenv.yaml").read_text(encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "must not define local imports"):
+            parse_root_composition(root_text, f"{yaml_text}\nimports:\n  - ./other.nix\n")
 
     def test_disabled_python_venv_fails_at_the_parse_boundary(self) -> None:
         text = (REPO_ROOT / "devenv/toolchains.nix").read_text(encoding="utf-8")

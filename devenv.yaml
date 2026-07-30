@@ -1,3 +1,4 @@
+require_version: true
 inputs:
   devenv:
     url: github:cachix/devenv/v2.2?dir=src/modules
@@ -13,9 +14,3 @@ inputs:
     inputs:
       nixpkgs:
         follows: nixpkgs
-imports:
-  - ./devenv/toolchains.nix
-  - ./devenv/commands.nix
-  - ./devenv/generated-files.nix
-  - ./devenv/git-hooks.nix
-  - ./devenv/smoke-tests.nix

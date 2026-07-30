@@ -55,7 +55,11 @@ The rest of this README builds the Chelis compiler from a checkout.
 
 **Optional Devenv shell.** Devenv supplies the pinned Rust, Python, C, and contributor tools from the tracked shell inputs.
 
-The repository pins the Devenv module input to release `v2.2`. `devenv.yaml` pins the shared `nixpkgs` and `rust-overlay` inputs to exact revisions, so `devenv update` cannot drift them. `scripts/check_nix_lock_parity.py` keeps them aligned with `flake.lock`.
+The repository pins the Devenv module input to release `v2.2`. `devenv.yaml` requires the local CLI version to match the pinned module version.
+
+`devenv.nix` imports the five local configuration modules. `devenv.yaml` owns the inputs and CLI options.
+
+`devenv.yaml` pins the shared `nixpkgs` and `rust-overlay` inputs to exact revisions. Thus, `devenv update` cannot change them. `scripts/check_nix_lock_parity.py` keeps them aligned with `flake.lock`.
 
 On macOS, the `gcc` and `g++` shims invoke the Nixpkgs clang wrapper from `pkgs.stdenv.cc`. They do not invoke host Apple clang.
 

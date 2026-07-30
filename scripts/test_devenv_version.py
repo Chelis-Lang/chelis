@@ -71,6 +71,11 @@ class DevenvPin:
 
 
 @dataclass(frozen=True)
+class DevenvCliVersionRequirement:
+    matches_modules: bool
+
+
+@dataclass(frozen=True)
 class DevenvTestTasks:
     names: frozenset[str]
 
@@ -239,6 +244,15 @@ def parse_devenv_url(text: str) -> str:
     return parse_input_url(text, "devenv")
 
 
+def parse_cli_version_requirement(text: str) -> DevenvCliVersionRequirement:
+    declarations = tuple(
+        line for line in text.splitlines() if line.lstrip().startswith("require_version:")
+    )
+    if declarations != ("require_version: true",):
+        raise ValueError("devenv.yaml must require CLI and module version parity")
+    return DevenvCliVersionRequirement(matches_modules=True)
+
+
 def parse_git_hooks_input(text: str) -> str:
     lines = text.splitlines()
     try:
@@ -377,6 +391,22 @@ class DevenvVersionTests(unittest.TestCase):
         yaml_text = (REPO_ROOT / "devenv.yaml").read_text(encoding="utf-8")
         lock_data = json.loads((REPO_ROOT / "devenv.lock").read_text(encoding="utf-8"))
         require_v22(parse_devenv_pin(yaml_text, lock_data))
+
+    def test_repository_requires_cli_and_module_version_parity(self) -> None:
+        yaml_text = (REPO_ROOT / "devenv.yaml").read_text(encoding="utf-8")
+        self.assertTrue(parse_cli_version_requirement(yaml_text).matches_modules)
+
+    def test_absent_cli_version_requirement_fails_at_the_parse_boundary(self) -> None:
+        yaml_text = (REPO_ROOT / "devenv.yaml").read_text(encoding="utf-8")
+        mutated = yaml_text.replace("require_version: true\n", "")
+        with self.assertRaisesRegex(ValueError, "must require CLI"):
+            parse_cli_version_requirement(mutated)
+
+    def test_false_cli_version_requirement_fails_at_the_parse_boundary(self) -> None:
+        yaml_text = (REPO_ROOT / "devenv.yaml").read_text(encoding="utf-8")
+        mutated = yaml_text.replace("require_version: true", "require_version: false")
+        with self.assertRaisesRegex(ValueError, "must require CLI"):
+            parse_cli_version_requirement(mutated)
 
     def test_repository_uses_named_tasks_for_the_devenv_test_contract(self) -> None:
         config = SMOKE_TEST_MODULE.read_text(encoding="utf-8")
