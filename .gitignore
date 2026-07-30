@@ -13,6 +13,7 @@ node_modules/
 # Devenv generates local state from the tracked input files.
 /.devenv/
 /.devenv.flake.nix
+/.pre-commit-config.yaml
 # WI-13 Option B: the no-sudo local prefix where the dep-setup script builds
 # Sollya + fplll from source. A build artifact, never committed (the committed
 # proof bundle under crates/chelis-prove/data is the source of truth).

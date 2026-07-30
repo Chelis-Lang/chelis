@@ -370,20 +370,22 @@ When a public surface has an implicit invariant, make it explicit and test it.
   (`sh -n` parse plus `shellcheck` when available). This is a single-purpose carve-out for
   the one artifact that cannot be anything else; every other script remains Python.
 - Existing `scripts/` directory uses Python; follow that convention.
-- **Use the uv-managed Python** at `.venv/bin/python`, not the system Python.
-  Create it once with `uv venv --python 3.11` from the repo root. `py/pyproject.toml`
-  pins `requires-python = ">=3.11"`. See [`README.md`](README.md) for the full setup.
+- **Use a managed Python**, not the system Python. Inside Devenv, use the activated
+  environment at `.devenv/state/venv`. Outside Devenv, use `.venv/bin/python`.
+  Create the manual environment once with `uv venv --python 3.11` from the repo root.
+  `py/pyproject.toml` pins `requires-python = ">=3.11"`. See [`README.md`](README.md)
+  for the full setup.
 
 ## Build Toolchain
 
-`chelis-python` links against `libpython` and `.cargo/config.toml` sets
-`PYO3_PYTHON` to `.venv/bin/python` so the link step finds the project-pinned
-interpreter. This is a hard prerequisite on every platform: `cargo build` for
-any crate that transitively pulls pyo3 will fail without a `.venv/`. On macOS
-specifically, Apple's bundled `python3` is 3.9 and reports a stale
-`sysconfig.LIBDIR` pointing at a non-existent Xcode framework path; using the
-uv-managed interpreter sidesteps that. Run `uv venv --python 3.11` once before
-building.
+`chelis-python` links against `libpython`. Outside Devenv, `.cargo/config.toml`
+sets `PYO3_PYTHON` to `.venv/bin/python`. Devenv overrides that variable with
+`.devenv/state/venv/bin/python` and activates the same environment.
+
+A managed Python is a hard prerequisite on every platform. Outside Devenv,
+`cargo build` for a crate that pulls pyo3 will fail without `.venv/`. On macOS,
+Apple's bundled Python reports a stale `sysconfig.LIBDIR` path. A managed
+interpreter avoids that path. Run `uv venv --python 3.11` before a manual build.
 
 ## Build And Gate Commands
 
@@ -486,7 +488,9 @@ default workspace run.
   the builds and feature/profile differences invalidate each other's caches.
 - Before building, list orphaned cargo/rustc/cargo-nextest/chelis processes with
   `python3 scripts/reap_orphans.py` and reap them with
-  `python3 scripts/reap_orphans.py --kill`. Review the dry-run listing first:
+  `python3 scripts/reap_orphans.py --kill`. Inside Devenv, use
+  `chelis-reap-orphans` and `chelis-reap-orphans --kill`. Review the dry-run
+  listing first:
   ppid==1 cannot distinguish an abandoned build from a deliberately detached
   one (`nohup cargo build` you are still tailing). Run it from the checkout
   whose `target/` you are about to use; scoping is per-checkout. Orphaned runs
@@ -501,8 +505,9 @@ default workspace run.
 - macOS workstation only: first-exec assessment can degrade under mass
   fresh-binary bursts and stall multi-binary test runs at ~0 CPU (chelis#356).
   Probe with `python3 scripts/preflight_exec_probe.py` (exit 1 wedged, exit 3
-  slow) before trusting the gate's workspace nextest stage locally; when
-  degraded, fall back to CI (macOS Smoke) for that stage per
+  slow). Inside Devenv, use `chelis-exec-preflight`. Run the probe before the
+  local workspace nextest stage. If the probe reports degradation, use the
+  macOS Smoke CI stage per
   [`docs/local_macos_environment.md`](docs/local_macos_environment.md).
 
 ## Local HIP Environment
@@ -513,6 +518,7 @@ runnable. The authoritative runbook is [`docs/local_hip_environment.md`](docs/lo
 **For any HIP manual gate (especially hipBLAS-linked tests), run via**
 `scripts/hip_test.py` — e.g.
 `scripts/hip_test.py -p chelis-backend-hip --test gpu_correctness -- --ignored --test-threads=1`.
+Inside Devenv, use the equivalent `chelis-hip-test` command.
 The wrapper sets `HSA_OVERRIDE_GFX_VERSION=11.5.1`, the full `LD_LIBRARY_PATH`, and
 the full `HIPCC_COMPILE_FLAGS_APPEND` (including `-L` to the gfx1151 wheel lib that
 hipBLAS link resolution needs). Plain `cargo test --ignored` inherits only the

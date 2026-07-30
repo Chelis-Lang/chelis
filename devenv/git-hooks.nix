@@ -1,0 +1,42 @@
+{ ... }:
+
+{
+  # Keep this catalog inactive until a separate policy change enables hooks.
+  git-hooks.hooks = {
+    actionlint.enable = false;
+    check-added-large-files.enable = false;
+    check-case-conflicts.enable = false;
+    check-executables-have-shebangs.enable = false;
+    check-json.enable = false;
+    check-merge-conflicts.enable = false;
+    check-python.enable = false;
+    check-symlinks.enable = false;
+    check-toml.enable = false;
+    check-yaml.enable = false;
+    detect-private-keys.enable = false;
+    end-of-file-fixer.enable = false;
+    fix-byte-order-marker.enable = false;
+    forbid-new-submodules.enable = false;
+    mixed-line-endings.enable = false;
+
+    nixfmt = {
+      enable = false;
+      excludes = [ "^Cargo\\.nix$" ];
+    };
+
+    rustfmt = {
+      enable = false;
+      settings.check = true;
+    };
+
+    shellcheck = {
+      enable = false;
+      files = "^crates/chelisup/bootstrap/chelisup\\.sh$";
+    };
+
+    trim-trailing-whitespace = {
+      enable = false;
+      args = [ "--markdown-linebreak-ext=md" ];
+    };
+  };
+}

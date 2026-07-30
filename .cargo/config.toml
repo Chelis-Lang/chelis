@@ -1,5 +1,6 @@
-# Point pyo3-build-config at the uv-managed Python 3.11 in `.venv/`
-# instead of letting it auto-detect a system Python. On macOS, Apple's
+# Outside Devenv, point pyo3-build-config at the uv-managed Python 3.11
+# in `.venv/` instead of a system Python. Devenv overrides PYO3_PYTHON
+# with its activated `.devenv/state/venv/bin/python`. On macOS, Apple's
 # bundled Python 3.9 reports a `sysconfig.LIBDIR` of
 # `/Applications/Xcode.app/.../Python3.framework/.../lib` (baked at
 # framework build time), which doesn't exist on workstations with
@@ -9,14 +10,13 @@
 # project policy on every platform (see AGENTS.md "Scripting Language
 # Policy") so behavior is consistent across dev and CI.
 #
-# REQUIRES: a `.venv/` at the repo root. Create it once with:
+# MANUAL BUILDS REQUIRE: a `.venv/` at the repo root. Create it once with:
 #     uv venv --python 3.11
-# (see README.md "Prerequisites"). On a fresh clone without `.venv/`,
-# `cargo build` for any crate that transitively pulls pyo3 (today
-# only `chelis-python`) will fail with
-# `failed to run the Python interpreter at .venv/bin/python: No such
-# file or directory`. This is the project policy, not a bug: run
-# `uv venv --python 3.11` first.
+# (see README.md "Prerequisites"). Devenv builds use the managed state
+# environment instead. On a fresh manual checkout without `.venv/`, `cargo
+# build` for a crate that pulls pyo3 (today only `chelis-python`) will fail
+# with `failed to run the Python interpreter at .venv/bin/python: No such
+# file or directory`. Run `uv venv --python 3.11` before a manual build.
 #
 # The `relative = true` flag resolves `.venv/bin/python` against the
 # directory containing this config.toml, so the setting works from

@@ -70,9 +70,25 @@ devenv test
 
 # Run the authoritative C-backend acceptance oracle.
 devenv shell -- cargo nextest run -p chelis-backend-c
+
+# Run common repository commands without an interactive shell.
+devenv shell -- chelis-gate --list
+devenv shell -- chelis-reap-orphans
 ```
 
-`devenv test` runs separate toolchain, Python, C, and C++ tasks. It exits with status 0 when all four tasks pass.
+Devenv creates and activates Python 3.11 at `.devenv/state/venv`. It sets `PYO3_PYTHON` to that interpreter.
+
+Devenv does not modify the repository-root `.venv`. The manual setup path below owns that environment outside Devenv.
+
+`devenv test` initializes managed files and Python. It then runs separate toolchain, Python, C, and C++ smoke tasks.
+
+The shell also provides these platform commands:
+
+- `chelis-exec-preflight` on macOS
+- `chelis-z3-test` on Linux
+- `chelis-hip-test` on Linux
+
+Each command forwards its arguments to the tested Python file under `scripts/`.
 
 Both native Nix package jobs use the reviewed portable Devenv action from `Chelis-Lang/ci`. They run these tasks through its portable shell.
 
@@ -199,12 +215,13 @@ uv venv --python 3.11
 ```
 
 The project pins Python 3.11 (`py/pyproject.toml` requires `>=3.11`).
-Always use the uv-managed interpreter at `.venv/bin/python` — `.cargo/config.toml`
-sets `PYO3_PYTHON` to it so `cargo build -p chelis-python` links against the
-right `libpython` on every developer's machine. Using the system Python is
-**not supported**; on macOS, Apple's bundled `python3` reports a stale
-`sysconfig.LIBDIR` that breaks the PyO3 link step, and on Linux the
-system Python may not match the chelis-tools version constraint.
+Outside Devenv, always use the uv-managed interpreter at `.venv/bin/python`.
+`.cargo/config.toml` sets `PYO3_PYTHON` to that manual environment.
+
+Inside Devenv, use the activated environment at `.devenv/state/venv`.
+Devenv overrides `PYO3_PYTHON` with its managed interpreter.
+
+Using the system Python is **not supported**. Apple's bundled Python reports a stale library path, and Linux Python can violate the version contract.
 
 Install Python dependencies into the uv venv as needed:
 
@@ -218,10 +235,11 @@ but no pip installs.
 
 ## Build
 
-**The uv venv is a hard prerequisite for `cargo build` on every platform**:
-`chelis-python` links against `libpython`, and the PyO3 link step fails
-with an obscure linker error if `.venv/` does not exist. Run
-`uv venv --python 3.11` (see Prerequisites) before your first build.
+Outside Devenv, the root uv environment is a hard prerequisite for `cargo build` on every platform.
+
+Inside Devenv, the activated `.devenv/state/venv` environment satisfies the same PyO3 requirement.
+
+`chelis-python` links against `libpython`. Run `uv venv --python 3.11` before a manual build if `.venv/` does not exist.
 
 ```sh
 cargo build --workspace
@@ -246,8 +264,9 @@ is the single source of truth for the per-PR gate; CI runs the same
 commands:
 
 ```sh
-.venv/bin/python scripts/gate.py --list   # print the canonical command list
-.venv/bin/python scripts/gate.py --local  # developer pre-push subset
+.venv/bin/python scripts/gate.py --list   # manual environment
+.venv/bin/python scripts/gate.py --local  # manual environment
+chelis-gate --local                       # active Devenv shell
 ```
 
 `--local` runs workspace clippy, `cargo fmt --check`,

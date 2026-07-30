@@ -12,6 +12,7 @@ wheel paths, verifies the paths exist, and execs `cargo test` with your args:
 ```sh
 scripts/hip_test.py -p chelis-backend-hip --test gpu_correctness -- --ignored --test-threads=1
 scripts/hip_test.py -p chelis-cli --test cross_library_semantic_gap_hip_gpu -- --ignored --test-threads=1
+# Inside an active Devenv shell, replace scripts/hip_test.py with chelis-hip-test.
 ```
 
 The wrapper is required for any test that links `libhipblas`. Plain

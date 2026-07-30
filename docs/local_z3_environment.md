@@ -15,6 +15,7 @@ loader env vars, and execs the cargo command (defaulting to
 scripts/z3_test.py
 scripts/z3_test.py -p chelis-prove --features z3 --test cross_engine_oracle
 scripts/z3_test.py --features "smt z3" --test cross_engine_oracle   # cross-engine oracle
+# Inside an active Devenv shell, replace scripts/z3_test.py with chelis-z3-test.
 ```
 
 If you need the env in your own shell:
