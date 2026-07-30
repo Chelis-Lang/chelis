@@ -341,9 +341,14 @@ REGISTRIES of what actually exists:
   populate this type through the same validation, and the registries
   become derivation inputs rather than the standalone source.
 
-**Calibrated claim:** construction proves the citation names a real,
-currently-valid authority - an existing atom, an open tracked issue.
-Whether that atom semantically DECIDES this particular rejection is
+**Calibrated claim:** construction proves the citation names a real
+authority - an existing atom, or a tracked issue that was live-verified
+open when its manifest row was added and at the last scheduled
+re-verification since. Between schedules the manifest means "valid at
+last verification", never "valid this instant"; the pre-merge check on
+manifest edits and the scheduled re-verification are where the truth
+question is asked, at the two times it can change. Whether an atom
+semantically DECIDES this particular rejection is
 not mechanizable and remains review's job; the fixed text says so
 rather than implying otherwise. The frozen four-clause message format
 does not change: the authority renders into the existing `; <hint>`
@@ -875,10 +880,13 @@ hand-maintained crate or file list is mis-rung on the
 enforcement ladder (compile-error > lint > tripwire > gate > prose) for
 the same reason a gate must not carry correctness: it rots invisibly.
 Scope narrowing is an annotated `(class, path, reason[, issue])`
-exclusion; an absent entry is never an exclusion; exclusion lists only
-shrink, or grow with a filed issue. A new product-source root - Cargo
-member or not - is born inside every ratchet or visibly excluded from
-it, never silently outside it.
+exclusion, and every exclusion for every mechanism lives in ONE
+canonical exclusion registry - a single checked-in artifact the §C7.5
+filter can name; an exclusion recorded anywhere else is itself a red
+discovery test. An absent entry is never an exclusion; the registry
+only shrinks, or grows with a filed issue. A new product-source
+root - Cargo member or not - is born inside every ratchet or visibly
+excluded from it, never silently outside it.
 
 ### C7.1 Derived scopes over the product-source manifest
 
@@ -1077,13 +1085,17 @@ new consumer or root must not depend on anyone predicting its path.
 **Exclusion is the third authorization route and is gated like the
 other two** (the 2026-07-30 addendum's countermodel: a candidate can
 be silenced by an annotated exclusion without the mutation job ever
-running). Two closures: the exclusion lists are in the §C7.5 mutation
-filter, so an exclusion edit runs the legs pre-merge; and the
-discovery tests validate exclusion annotations - a dependency-edge
-consumer candidate may be excluded only with an issue citation, and
-an uncited production-code exclusion is red. Control: a planted
-exclusion for a vocab-edge candidate must trigger the mutation job
-and fail annotation validation until it cites an issue.
+running). Three closures: every exclusion lives in the ONE canonical
+exclusion registry (§C7's contract - an exclusion in any other
+source is itself red, so there is no unnamed source the filter could
+miss); that registry is in the §C7.5 mutation filter, so an exclusion
+edit runs the legs pre-merge; and the discovery tests validate
+exclusion annotations - a dependency-edge consumer candidate may be
+excluded only with an issue citation, and an uncited production-code
+exclusion is red. Control: a planted exclusion for a vocab-edge
+candidate must trigger the mutation job and fail annotation
+validation until it cites an issue; a planted exclusion OUTSIDE the
+registry is red regardless of its annotation.
 
 ### C7.4 The census is doc-bound and its backings are selected
 
@@ -1151,19 +1163,21 @@ both halves:
    inventory or the registry. Second, the mutation job's path filter
    covers the files that edit therefore touches: the vocabulary owner
    sources, `host_abi.rs`, the RATIFIED INVENTORY FILE itself, the
-   EXCLUSION LISTS (the third authorization route, per §C7.3), the
+   CANONICAL EXCLUSION REGISTRY (the third authorization route, per
+   §C7.3 - one artifact, so the filter names it exhaustively), the
    §C2.1 issue manifest, the root `Cargo.toml`, the non-Cargo
    product-root registry, the oracle scripts, and the workflows. A new
    consumer thus cannot reach main without the discovery test forcing
-   an inventory, exclusion, or registry edit, and none of those edits
+   an inventory, exclusion-registry, or root-registry edit, and none
+   of those edits
    can merge without the mutation legs running. The same job carries
    the §C2.1 manifest live validation: added or modified manifest rows
    are verified against the tracker (exists, is an issue, is open)
    before merge. The crate-scoped `HostAbiType` leg runs on every
    filter match; the workspace vocabulary leg runs when the vocab
-   owner, the inventory, the exclusions, the root manifest, or the
-   registry changes. The job is classified in `scripts/test_gate.py`'s
-   job tables in the same change.
+   owner, the inventory, the exclusion registry, the root manifest, or
+   the product-root registry changes. The job is classified in
+   `scripts/test_gate.py`'s job tables in the same change.
    Trigger controls land with the workflow: a planted new workspace
    member, a planted vocab dependency edge, a planted file in a
    previously uninventoried consumer, and a planted non-Cargo root
@@ -1204,7 +1218,7 @@ gated job is a canary mislabeled as prevention.
 | gate inventory (§C5 rows 17-18 resolution) | Phase 3 | this doc |
 | §C2.2 `DiagnosticKind` vocabulary + wire spellings | Phase 3 | the deciding atom [05-UNS-6] (spec/05 §7) + this doc + the wire-spelling lock test, same PR |
 | §C2.1 `RejectionAuthority` shape | Phase 3 | the deciding atom [05-UNS-5] (spec/05 §7) + this doc + [#687] corpus, same PR |
-| §C7 universe derivations + exclusion lists | Phase 4 | exclusions shrink-only; additions via filed issue + annotation |
+| §C7 universe derivations + the canonical exclusion registry | Phase 4 | exclusions shrink-only, in the one registry only; additions via filed issue + annotation |
 | §C7.5 execution jobs (the change-gated `ci.yml` job + the nightly workflow + `NON_GATE_WORKFLOWS` entry) | Phase 4 | this doc + `scripts/test_gate.py`, same PR |
 
 ## B2. Invariants that hold across every boundary
@@ -1545,9 +1559,9 @@ tripwire, §C7, and census rows 24-25 and 27.
 6. **Both §C7.5 execution halves**: the change-gated blocking `ci.yml`
    job for the mutation legs and the manifest live validation (path
    filter per §C7.5: the vocab owners, `host_abi.rs`, the ratified
-   inventory, the exclusion lists, the issue manifest, the root
-   `Cargo.toml`, the non-Cargo registry, the oracle scripts, the
-   workflows; classified in `scripts/test_gate.py`), and
+   inventory, the canonical exclusion registry, the issue manifest,
+   the root `Cargo.toml`, the non-Cargo registry, the oracle scripts,
+   the workflows; classified in `scripts/test_gate.py`), and
    `loud-unsupported-nightly.yml` + the `NON_GATE_WORKFLOWS` entry +
    the open/close report job, running both plans' Phase 2 oracle
    runners and this phase's oracle as the full-matrix drift canary.
@@ -1580,8 +1594,8 @@ existence check; the §C7.3 dual-source discovery scan; the
 selected test set or the atom registry); the execution-wiring
 assertions (the change-gated `ci.yml` job exists, is classified in
 `scripts/test_gate.py`, and its path filter covers the ratified
-inventory file, the exclusion lists, the §C2.1 issue manifest, the
-root `Cargo.toml`, and the non-Cargo registry -
+inventory file, the canonical exclusion registry, the §C2.1 issue
+manifest, the root `Cargo.toml`, and the non-Cargo registry -
 the §C7.5 trigger-loop closure, asserted against the workflow's
 actual path list; the nightly file exists, names both oracle runners,
 and appears in `NON_GATE_WORKFLOWS`; the mutation legs and the
