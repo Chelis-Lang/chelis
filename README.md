@@ -53,60 +53,184 @@ Packages](docs/book/src/reef.md)**.
 
 The rest of this README builds the Chelis compiler from a checkout.
 
-**Optional Devenv shell.** Devenv supplies the pinned Rust, Python, C, and contributor tools from the tracked shell inputs.
+### Devenv development shell
 
-The repository pins the Devenv module input to release `v2.2`. `devenv.yaml` requires the local CLI version to match the pinned module version.
+Devenv is optional for local work. Native Nix CI requires Devenv. The shell
+supplies pinned Rust, Python, C, and contributor tools.
 
-`devenv.nix` imports the five local configuration modules. `devenv.yaml` owns the inputs and CLI options.
+The tracked environment supports `x86_64-linux` and Apple silicon macOS
+(`aarch64-darwin`). Other systems must use the manual setup below.
 
-`devenv.yaml` pins the shared `nixpkgs` and `rust-overlay` inputs to exact revisions. Thus, `devenv update` cannot change them. `scripts/check_nix_lock_parity.py` keeps them aligned with `flake.lock`.
+These installation commands come from the
+[Devenv getting-started guide](https://devenv.sh/getting-started/).
 
-On macOS, the `gcc` and `g++` shims invoke the Nixpkgs clang wrapper from `pkgs.stdenv.cc`. They do not invoke host Apple clang.
+#### Install Nix on macOS
 
-Run these commands from the repository root:
+The macOS environment requires Apple silicon.
+
+1. Install Nix with the official Nix installer:
+
+   ```sh
+   curl -sSfL https://artifacts.nixos.org/nix-installer | sh -s -- install
+   ```
+
+2. When the installation is complete, open a new terminal.
+
+#### Install Nix on Linux
+
+The Linux environment requires an x86_64 system.
+
+1. Install Nix in multi-user mode:
+
+   ```sh
+   sh <(curl -L https://nixos.org/nix/install) --daemon
+   ```
+
+2. When the installation is complete, open a new login shell.
+
+#### Install Devenv
+
+After Nix is available, run these steps.
+
+1. Install the Devenv release that this repository pins:
+
+   ```sh
+   nix --extra-experimental-features 'nix-command flakes' profile install github:cachix/devenv/v2.2
+   ```
+
+2. Make sure that Devenv reports version `2.2.0`:
+
+   ```sh
+   devenv --version
+   ```
+
+If Devenv reports a Bash evaluation error on macOS, install a current Bash
+version:
 
 ```sh
-# Enter the interactive development shell.
-devenv shell
+nix-env --install --attr bashInteractive -f https://github.com/NixOS/nixpkgs/tarball/nixpkgs-unstable
+```
 
-# Check the shell tools and compiler contract.
-devenv test
+Do not run `devenv init` because this repository already contains the required
+Devenv files.
 
+#### Use the shell
+
+1. From the repository root, run the environment smoke test:
+
+   ```sh
+   devenv test
+   ```
+
+2. Enter the interactive shell:
+
+   ```sh
+   devenv shell
+   ```
+
+3. Inside the shell, build the workspace:
+
+   ```sh
+   cargo build --workspace
+   ```
+
+4. Run the Chelis command from the workspace:
+
+   ```sh
+   cargo run -p chelis-cli --bin chelis -- --help
+   ```
+
+5. Before a code push, run the local gate:
+
+   ```sh
+   chelis-gate --local
+   ```
+
+Use `devenv shell --` to run one command without an interactive shell:
+
+```sh
 # Run the authoritative C-backend acceptance oracle.
 devenv shell -- cargo nextest run -p chelis-backend-c
 
-# Run common repository commands without an interactive shell.
+# List the repository gate commands.
 devenv shell -- chelis-gate --list
+
+# List orphaned Chelis build processes.
 devenv shell -- chelis-reap-orphans
 ```
 
-Devenv creates and activates Python 3.11 at `.devenv/state/venv`. It sets `PYO3_PYTHON` to that interpreter.
+#### Shell behavior
 
-Devenv does not modify the repository-root `.venv`. The manual setup path below owns that environment outside Devenv.
+The repository pins the Devenv modules to release `v2.2`. The version of the
+local Devenv CLI must match this module version.
 
-`devenv test` initializes managed files and Python. It then runs separate toolchain, Python, C, and C++ smoke tasks.
+`devenv.nix` imports five local configuration modules. `devenv.yaml` defines
+the inputs and CLI options.
 
-The shell also provides these platform commands:
+`devenv.yaml` pins the shared `nixpkgs` and `rust-overlay` inputs to exact
+revisions. Therefore, `devenv update` cannot change them.
+`scripts/check_nix_lock_parity.py` keeps these revisions aligned with
+`flake.lock`.
+
+On macOS, the `gcc` and `g++` shims invoke the Nixpkgs clang wrapper from
+`pkgs.stdenv.cc`. They do not invoke host Apple clang.
+
+On Linux, the shell supplies GCC, OpenBLAS, and Valgrind from Nixpkgs.
+
+Devenv creates and activates Python 3.11 at `.devenv/state/venv`. It sets
+`PYO3_PYTHON` to that interpreter.
+
+Devenv does not modify the repository-root `.venv`. The manual setup path below
+owns that environment outside Devenv.
+
+`devenv test` initializes the managed files and Python. It then runs separate
+smoke tasks for the toolchain, Python, C, and C++.
+
+The shell also supplies these platform commands:
 
 - `chelis-exec-preflight` on macOS
 - `chelis-z3-test` on Linux
 - `chelis-hip-test` on Linux
 
-Each command forwards its arguments to the tested Python file under `scripts/`.
+Each command forwards its arguments to the applicable Python file under
+`scripts/`.
 
-Devenv installs the `no-ai-authorship` hook at the `commit-msg` stage. The hook runs `scripts/check_commit_message.py`.
+Devenv installs the `no-ai-authorship` hook at the `commit-msg` stage. The hook
+runs `scripts/check_commit_message.py`.
 
-The hook rejects AI tool authorship markers before Git creates a commit. All listed formatting and lint hooks remain disabled.
+The hook rejects AI tool authorship markers before Git creates a commit. All
+listed format and lint hooks remain disabled.
 
-Both native Nix package jobs use the reviewed portable Devenv action from `Chelis-Lang/ci`. They run these tasks through its portable shell.
+#### Native Nix CI
 
-The action uses exact Nix and Devenv inputs. Its public Devenv cache is read-only and does not contain the custom cvc5 derivation. Each job therefore stores the prebuilt cvc5 toolchain closure in the GitHub Actions cache, keyed by its derivation name.
+Both jobs for native Nix packages use the reviewed portable Devenv action from
+`Chelis-Lang/ci`. The jobs run their tasks through the portable shell.
 
-The Linux job runs on every code pull request and push to `main`. Docs-only pull requests skip it through the shared job-level detector; the skipped required context reports success. The job reclaims unused preinstalled toolchain disk space first and bounds Nix to two concurrent builds.
+The action uses exact Nix and Devenv inputs. Its public Devenv cache is
+read-only. The cache does not contain the custom cvc5 derivation.
 
-The macOS job is a manual gate, and default CI does not run it. Dispatch it with `gh workflow run "Nix Packages" --ref <branch>`. The gate passes when the dispatched `Nix Packages (aarch64-darwin)` job completes with every check green.
+Each job stores the prebuilt cvc5 toolchain closure in the GitHub Actions cache.
+The derivation name identifies the cache entry.
 
-Devenv is optional for local work and is not a product requirement. If you do not use Devenv locally, use the manual setup below.
+The Linux job runs for each code pull request and each push to `main`. The
+shared detector skips documentation-only pull requests and reports success.
+The job first removes unused preinstalled toolchains. It limits Nix to two
+concurrent builds.
+
+The macOS job is a manual gate. Default CI does not run this job.
+
+Run this command to dispatch the macOS job:
+
+```sh
+gh workflow run "Nix Packages" --ref <branch>
+```
+
+When the `Nix Packages (aarch64-darwin)` job completes with all checks green,
+the gate passes.
+
+Devenv is not a product requirement.
+
+If you do not use Devenv locally, use the manual setup below.
 
 ### Nix source packages
 
