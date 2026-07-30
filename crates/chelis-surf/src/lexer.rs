@@ -20,20 +20,30 @@ pub enum LexError {
     #[error("unterminated block comment starting at byte {offset}")]
     UnterminatedBlockComment { offset: usize },
 
-    /// `f8e4m3` suffix attached to a numeric literal per
-    /// `spec/04-type-system.md` §5.5: f8e4m3 is deferred (§1.1.1).
-    #[error(
-        "invalid literal suffix `f8e4m3` on `{literal}` at byte {offset}: \
-         f8e4m3 is deferred per spec/04-type-system.md §1.1.1"
-    )]
-    DeferredF8e4m3Suffix { literal: String, offset: usize },
-
-    /// Unsigned integer suffix attached to a numeric literal per
-    /// `spec/04-type-system.md` §5.5: unsigned integer types are out of
-    /// scope (§1.1.2).
+    /// A suffix spelling one of the reserved-but-deferred dtype names of
+    /// `spec/04-type-system.md` §1.1.1 (`f8e4m3`, `f8e5m2`, `int4`/`uint4`,
+    /// `complex64`/`complex128`, `decimal128`/`decimal256`). No suffix
+    /// exists for a deferred name; one is authored only when the dtype
+    /// activates (§5.5).
     #[error(
         "invalid literal suffix `{suffix}` on `{literal}` at byte {offset}: \
-         unsigned integer types are out of scope per spec/04-type-system.md §1.1.2"
+         {suffix} is deferred per spec/04-type-system.md §1.1.1"
+    )]
+    DeferredSuffix {
+        literal: String,
+        suffix: String,
+        offset: usize,
+    },
+
+    /// Unsigned integer suffix attached to a numeric literal. The `uint*`
+    /// family is reserved-but-deferred per `spec/04-type-system.md`
+    /// §1.1.1; the short `u*` spellings are not reserved at all (§1.1.2
+    /// names `uint8`/`uint16`/`uint32`/`uint64` canonical).
+    #[error(
+        "invalid literal suffix `{suffix}` on `{literal}` at byte {offset}: \
+         unsigned integer types are deferred per spec/04-type-system.md \
+         §1.1.1 (canonical spelling uint8/uint16/uint32/uint64 per §1.1.2; \
+         the short u* spellings are not reserved)"
     )]
     UnsignedSuffix {
         literal: String,
@@ -776,9 +786,11 @@ fn lex_literal_suffix(
         "i16" => LiteralSuffix::I16,
         "i32" => LiteralSuffix::I32,
         "i64" => LiteralSuffix::I64,
-        "f8e4m3" => {
-            return Err(LexError::DeferredF8e4m3Suffix {
+        "f8e4m3" | "f8e5m2" | "int4" | "uint4" | "complex64" | "complex128" | "decimal128"
+        | "decimal256" => {
+            return Err(LexError::DeferredSuffix {
                 literal: literal_text.to_string(),
+                suffix: suffix_text.to_string(),
                 offset: literal_offset,
             });
         }
@@ -1340,23 +1352,38 @@ mod tests {
     }
 
     #[test]
-    fn deferred_f8e4m3_suffix_is_lex_error() {
-        let err = lex("1.0f8e4m3").unwrap_err();
-        assert!(
-            matches!(err, LexError::DeferredF8e4m3Suffix { .. }),
-            "expected DeferredF8e4m3Suffix, got {err:?}"
-        );
-        // Diagnostic must mention deferral and §1.1.1 spec section.
-        let msg = format!("{err}");
-        assert!(
-            msg.contains("f8e4m3 is deferred") && msg.contains("§1.1.1"),
-            "diagnostic must cite §1.1.1 and contain 'f8e4m3 is deferred', got: {msg}"
-        );
+    fn deferred_suffix_is_lex_error() {
+        // Every reserved-but-deferred name of spec/04 §1.1.1: no suffix
+        // exists until the dtype activates, and the diagnostic cites the
+        // owning section.
+        for (src, name) in [
+            ("1.0f8e4m3", "f8e4m3"),
+            ("1.0f8e5m2", "f8e5m2"),
+            ("42int4", "int4"),
+            ("42uint4", "uint4"),
+            ("1.0complex64", "complex64"),
+            ("1.0complex128", "complex128"),
+            ("1.0decimal128", "decimal128"),
+            ("1.0decimal256", "decimal256"),
+        ] {
+            let err = lex(src).unwrap_err();
+            assert!(
+                matches!(err, LexError::DeferredSuffix { ref suffix, .. } if suffix == name),
+                "expected DeferredSuffix for {src}, got {err:?}"
+            );
+            let msg = format!("{err}");
+            assert!(
+                msg.contains(&format!("{name} is deferred")) && msg.contains("§1.1.1"),
+                "diagnostic must cite §1.1.1 and contain '{name} is deferred', got: {msg}"
+            );
+        }
     }
 
     #[test]
     fn unsigned_suffix_is_lex_error() {
-        for src in ["42u8", "42u16", "42u32", "42u64"] {
+        for src in [
+            "42u8", "42u16", "42u32", "42u64", "42uint8", "42uint16", "42uint32", "42uint64",
+        ] {
             let err = lex(src).unwrap_err();
             assert!(
                 matches!(err, LexError::UnsignedSuffix { .. }),
@@ -1364,8 +1391,9 @@ mod tests {
             );
             let msg = format!("{err}");
             assert!(
-                msg.contains("unsigned integer types are out of scope") && msg.contains("§1.1.2"),
-                "diagnostic must cite §1.1.2 and contain 'unsigned integer types are out of scope', got: {msg}"
+                msg.contains("unsigned integer types are deferred") && msg.contains("§1.1.1"),
+                "diagnostic must cite §1.1.1 and contain 'unsigned integer types are deferred', \
+                 got: {msg}"
             );
         }
     }

@@ -604,13 +604,14 @@ const PRIMITIVES: &[&str] = &[
     "f32", "f64", "f16", "bf16", "int8", "int16", "int32", "int64", "bool", "string", "unit",
 ];
 
-/// Unsigned dtype names per `spec/04-type-system.md` §1.1.2. These are
-/// not in the active numeric primitive set, but they are well-known
-/// dtype identifiers that users (especially LLMs translating from
-/// numpy/PyTorch) reach for. Treat them as "intended-precision"
-/// identifiers in desugar so they reach the type-checker's §1.1.2
-/// rejection path with a precise diagnostic, NOT as candidate
-/// quantified type variables.
+/// Unsigned dtype names, deferred per `spec/04-type-system.md` §1.1.1
+/// (§1.1.2 names the `uint*` spellings canonical; the short `u*`
+/// spellings are not reserved). These are not in the active numeric
+/// primitive set, but they are well-known dtype identifiers that users
+/// (especially LLMs translating from numpy/PyTorch) reach for. Treat
+/// them as "intended-precision" identifiers in desugar so they reach
+/// the type-checker's §1.1.1 rejection path with a precise diagnostic,
+/// NOT as candidate quantified type variables.
 ///
 /// Mirrors `chelis_types::infer::is_unsigned_dtype_name`. Kept as a
 /// parallel const here because chelis-surf does not depend on
@@ -618,6 +619,24 @@ const PRIMITIVES: &[&str] = &[
 /// would invert the desugar / typecheck layering.
 const UNSIGNED_DTYPE_NAMES: &[&str] = &[
     "u8", "u16", "u32", "u64", "uint8", "uint16", "uint32", "uint64",
+];
+
+/// The remaining reserved-but-deferred dtype names of
+/// `spec/04-type-system.md` §1.1.1 (`f8e4m3` is absent because it is a
+/// real `Prim` variant and takes the `Prim::parse_name` path). Same
+/// treatment as the unsigned family above: these must reach the
+/// type-checker's §1.1.1 rejection path as `(t-prim {} <name>)`, not be
+/// quietly absorbed as candidate quantified type variables.
+///
+/// Mirrors `chelis_types::infer::is_deferred_dtype_name`.
+const DEFERRED_DTYPE_NAMES: &[&str] = &[
+    "f8e5m2",
+    "int4",
+    "uint4",
+    "complex64",
+    "complex128",
+    "decimal128",
+    "decimal256",
 ];
 
 // ---------------------------------------------------------------------------
@@ -1978,13 +1997,14 @@ fn desugar_declaration_type(ty: &TypeExpr, explicit_params: &HashSet<String>) ->
 
 /// True if `name` is a candidate quantified type variable per
 /// `spec/04-type-system.md` §5.8: lowercase, not a known active
-/// primitive, and not a §1.1.2 unsigned alias (those should reach the
-/// type-checker's rejection path as `(t-prim {} <name>)`, not be
-/// quietly absorbed as a quantifier).
+/// primitive, and not a §1.1.1 deferred dtype name (unsigned alias or
+/// reserved name - those should reach the type-checker's rejection path
+/// as `(t-prim {} <name>)`, not be quietly absorbed as a quantifier).
 fn is_candidate_tvar_name(name: &str) -> bool {
     name.starts_with(|c: char| c.is_lowercase())
         && !PRIMITIVES.contains(&name)
         && !UNSIGNED_DTYPE_NAMES.contains(&name)
+        && !DEFERRED_DTYPE_NAMES.contains(&name)
 }
 
 /// Compute the set of free, lowercase, non-primitive identifiers used
@@ -2000,9 +2020,10 @@ fn is_candidate_tvar_name(name: &str) -> bool {
 /// a quantified type variable. That is the load-bearing change WS-A5
 /// makes possible.
 ///
-/// Names listed in `UNSIGNED_DTYPE_NAMES` are EXCLUDED so the type
-/// checker still surfaces a `spec/04-type-system.md §1.1.2`-citing
-/// diagnostic for them via the `(t-prim {} u8)` path.
+/// Names listed in `UNSIGNED_DTYPE_NAMES` and `DEFERRED_DTYPE_NAMES`
+/// are EXCLUDED so the type checker still surfaces a
+/// `spec/04-type-system.md §1.1.1`-citing diagnostic for them via the
+/// `(t-prim {} u8)` path.
 fn collect_sig_type_vars(ty: &TypeExpr, out: &mut HashSet<String>) {
     match ty {
         TypeExpr::Named(name, _) => {

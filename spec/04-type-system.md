@@ -62,15 +62,6 @@ silently dropped so producers do not assume they have gone away. Every name
 below is rejected by the type checker with a diagnostic pointing at this
 section, and `cast(x, <name>)` is rejected with it.
 
-*(Diagnostic status, 2026-07-30: every name below IS rejected today, but only
-`f8e4m3`'s diagnostics cite this section. The `u*`/`uint*` family is rejected
-with messages that still cite §1.1.2's superseded "out of scope" stance
-(`chelis-surf`/`chelis-deep` lexers, the checker's unsigned-family
-diagnostic, and their locking tests), and the names newly reserved by this
-amendment fall to the generic unknown-suffix / unknown-primitive rejections
-with no citation. Re-pointing them all at this section is chelis#944; delete
-this note in that change set.)*
-
 Each reserved name declares its ARITHMETIC WIDTH ([04-NUM-8]) at reservation
 time, so the width question is settled before anyone implements the dtype
 rather than being decided per-lane during implementation - the failure mode
@@ -1738,9 +1729,6 @@ Deferred suffixes:
   `uint*` family, `int4`/`uint4`, `complex64`/`complex128`,
   `decimal128`/`decimal256`). Each is rejected at lex time with a diagnostic
   pointing at §1.1.1. A suffix is authored only when its dtype activates.
-  *(Today only `f8e4m3`'s lex diagnostic cites §1.1.1; the `u*`/`uint*`
-  suffixes cite §1.1.2's superseded stance and the rest fall to the generic
-  unknown-suffix rejection - chelis#944 re-points them.)*
 - The short unsigned spellings (`u8`, `u16`, `u32`, `u64`) are not reserved in
   any form; `uint8`/`uint16`/`uint32`/`uint64` are the canonical names per
   §1.1.2, matching numpy and Arrow.
@@ -2383,8 +2371,12 @@ contract. The same pass stated the availability trade in the rationale
 (trapping converts silent corruption into loud termination,
 deliberately), scoped [04-NUM-8]'s native-narrow permission to the basic
 operations so it no longer conflicts with the reduced-precision opt-in
-rule, and annotated §1.1.1's and §5.5's diagnostic claims with shipped
-reality (chelis#944).
+rule, and re-pointed the deferred-name rejection diagnostics at §1.1.1
+in the same change set (chelis#944: both lexers, the checker's
+tensor-element and cast-target arms, and their locking tests - the
+`uint*` messages formerly cited §1.1.2's superseded "out of scope"
+stance, and the newly reserved names fell to the generic unknown-name
+rejections with no citation).
 
 > **[04-NUM-1]** Every numeric op result SHALL be finalized into its
 > declared dtype - rounding for floats, width and domain checks for
