@@ -948,14 +948,13 @@ fn scalar_grad_application(
     }
     let has_float_result = match declared_result {
         Some(ty) => scalar_float_type(Some(ty)),
-        None if target_name.is_none() => {
+        None => {
             let float_names = params
                 .iter()
                 .map(|param| param.name.clone())
                 .collect::<HashSet<_>>();
             inline_scalar_float_result(body, &float_names, ctx.decls)
         }
-        None => false,
     };
     if !has_float_result {
         return Err("scalar grad SMT lowering requires an f32/f64 result".to_string());
@@ -1152,9 +1151,16 @@ fn scalar_dual(
                     "scalar grad SMT lowering does not support recursion through `{name}`"
                 ));
             }
+            let helper_has_float_result = scalar_float_type(ret_ty) || {
+                let float_names = params
+                    .iter()
+                    .map(|param| param.name.clone())
+                    .collect::<HashSet<_>>();
+                ret_ty.is_none() && inline_scalar_float_result(body, &float_names, ctx.decls)
+            };
             if params.len() != dual_args.len()
                 || !params.iter().all(scalar_param)
-                || !scalar_float_type(ret_ty)
+                || !helper_has_float_result
             {
                 return Err(format!(
                     "scalar grad SMT lowering requires scalar f32/f64 helper `{name}`"
@@ -1218,8 +1224,8 @@ fn surf_arith(expr: &Expr, ctx: &InlineCtx) -> Option<crate::solver::SmtExpr> {
     use crate::solver::{ArithOp as SA, SmtExpr};
     match expr {
         Expr::Var(name, _) => Some(SmtExpr::Var(name.clone())),
-        Expr::Lit(Literal::Float(v), _) => Some(SmtExpr::RealLit(*v)),
-        Expr::Lit(Literal::Int(v), _) => Some(SmtExpr::IntLit(*v)),
+        Expr::Lit(Literal::Float(v) | Literal::TypedFloat(v, _), _) => Some(SmtExpr::RealLit(*v)),
+        Expr::Lit(Literal::Int(v) | Literal::TypedInt(v, _), _) => Some(SmtExpr::IntLit(*v)),
         Expr::Unary(UnaryOp::Neg, inner, _) => Some(SmtExpr::Arith(
             SA::Neg,
             Box::new(surf_arith(inner, ctx)?),
@@ -1358,8 +1364,8 @@ fn surf_arith_subst(
                 Some(SmtExpr::Var(name.clone()))
             }
         }
-        Expr::Lit(Literal::Float(v), _) => Some(SmtExpr::RealLit(*v)),
-        Expr::Lit(Literal::Int(v), _) => Some(SmtExpr::IntLit(*v)),
+        Expr::Lit(Literal::Float(v) | Literal::TypedFloat(v, _), _) => Some(SmtExpr::RealLit(*v)),
+        Expr::Lit(Literal::Int(v) | Literal::TypedInt(v, _), _) => Some(SmtExpr::IntLit(*v)),
         Expr::Unary(UnaryOp::Neg, inner, _) => Some(SmtExpr::Arith(
             SA::Neg,
             Box::new(surf_arith_subst(inner, subst, ctx)?),

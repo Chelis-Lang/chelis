@@ -543,15 +543,26 @@ fn prove_surf_file(
             Ok(Some(prepared)) => {
                 let display_names = linked_property_display_names(&flat, &prepared.entry_decls);
                 match prepared.reachable_decls() {
-                    Ok(reachable_decls) => property_run::run_surf_linked_properties_shared(
-                        path,
-                        &reachable_decls,
-                        &prepared.entry_decls,
-                        &prepared.stdlib_decls,
-                        &display_names,
-                        options,
-                        totals,
-                    ),
+                    Ok(reachable_decls) => {
+                        // Check the exact linked declaration closure before
+                        // emitting any property verdict. A later compiler
+                        // rejection must never coexist with an earlier green
+                        // proof record for the same ill-typed program.
+                        let check_status =
+                            obligation_run::check_linked_decls(&reachable_decls, options, totals);
+                        if check_status != Status::Passed {
+                            return Ok(check_status);
+                        }
+                        property_run::run_surf_linked_properties_shared(
+                            path,
+                            &reachable_decls,
+                            &prepared.entry_decls,
+                            &prepared.stdlib_decls,
+                            &display_names,
+                            options,
+                            totals,
+                        )
+                    }
                     Err(message) => {
                         totals.errors += 1;
                         if options.json {
@@ -574,7 +585,13 @@ fn prove_surf_file(
                     }
                 }
             }
-            Ok(None) => property_run::run_surf_properties_shared(path, &source, options, totals),
+            Ok(None) => {
+                let check_status = obligation_run::check_linked_decls(&parsed, options, totals);
+                if check_status != Status::Passed {
+                    return Ok(check_status);
+                }
+                property_run::run_surf_properties_shared(path, &source, options, totals)
+            }
             Err(message) => {
                 totals.errors += 1;
                 if options.json {
@@ -600,15 +617,9 @@ fn prove_surf_file(
 
         let obligation_count = count_invariant_opaque_surf(&flat);
         let ob_status = match (&linked_program, obligation_count) {
-            (Ok(Some(prepared)), 0) => match prepared.reachable_decls() {
-                Ok(reachable_decls) => {
-                    obligation_run::check_linked_decls(&reachable_decls, options, totals)
-                }
-                Err(message) => {
-                    obligation_run::emit_reachable_selection_failure(&message, options, totals)
-                }
-            },
-            (Ok(None), 0) => obligation_run::run_obligations(&parsed, options, totals),
+            // The property path above has already checked these exact
+            // declarations before producing any verdict.
+            (Ok(_), 0) => Status::Passed,
             (Err(_), 0) => Status::Passed,
             (Ok(_), _) => obligation_run::run_obligations(&parsed, options, totals),
             (Err(_), _) => Status::Passed,

@@ -91,21 +91,6 @@ pub(super) fn check_linked_decls(
     Status::Passed
 }
 
-pub(super) fn emit_reachable_selection_failure(
-    message: &str,
-    options: &ProveOptions<'_>,
-    totals: &mut Summary,
-) -> Status {
-    emit_check_failure(
-        options,
-        &[format!(
-            "reachable linked-program selection failed: {message}"
-        )],
-        totals,
-    );
-    Status::Error
-}
-
 /// Emit a module type-check failure as a prove error record (RT3-F2). The
 /// check diagnostics are surfaced so the failure is visible, never hidden.
 fn emit_check_failure(options: &ProveOptions<'_>, messages: &[String], totals: &mut Summary) {

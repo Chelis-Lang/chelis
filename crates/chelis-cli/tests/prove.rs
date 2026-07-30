@@ -2764,6 +2764,100 @@ where (d > 0.5), (r > g), (r < 9.5):
 
 #[cfg(feature = "smt")]
 #[test]
+fn issue_923_f64_and_inferred_float_results_receive_smt_verdicts() {
+    let fixtures = [
+        (
+            "f64",
+            r#"def square64(x: f64) -> f64 = x * x
+@property named64 forall(x: f64):
+  grad(square64, wrt=x)(x) == (2.0f64 * x)
+@property inline64 forall(x: f64):
+  grad(fn (xx: f64) -> xx * xx, wrt=xx)(x) == (x + x)
+"#,
+            2,
+        ),
+        (
+            "inferred-f32",
+            r#"def square(x: f32) = x * x
+@property inferred_result forall(x: f32):
+  grad(square, wrt=x)(x) == (x + x)
+"#,
+            1,
+        ),
+    ];
+    for (name, source, expected_properties) in fixtures {
+        let dir = write_prop(source);
+        let output = Command::cargo_bin("chelis")
+            .expect("binary")
+            .args([
+                "prove",
+                dir.path().join("prop.ch").to_str().unwrap(),
+                "--tier",
+                "smt-only",
+                "--json",
+            ])
+            .output()
+            .expect("run prove");
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{name} stdout={}\nstderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let props = property_records(&output.stdout);
+        assert_eq!(props.len(), expected_properties, "{name}: {props:?}");
+        for prop in props {
+            assert_eq!(prop["status"], "passed", "{name}: {prop}");
+            assert_eq!(prop["proof_tier"], "smt", "{name}: {prop}");
+            assert_eq!(
+                prop["composite_verdict"], "proven_modulo_real_arithmetic",
+                "{name}: {prop}"
+            );
+        }
+    }
+}
+
+#[cfg(feature = "smt")]
+#[test]
+fn issue_923_type_errors_are_reported_before_any_property_verdict() {
+    let dir = write_prop(
+        r#"def square64(x: f64) -> f64 = x * x
+@property ill_typed forall(x: f64):
+  grad(square64, wrt=x)(x) == (2.0 * x)
+"#,
+    );
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "prove",
+            dir.path().join("prop.ch").to_str().unwrap(),
+            "--tier",
+            "smt-only",
+            "--json",
+        ])
+        .output()
+        .expect("run prove");
+    assert_eq!(output.status.code(), Some(3));
+    assert!(
+        property_records(&output.stdout).is_empty(),
+        "an ill-typed module must emit no property verdicts: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let records: Vec<serde_json::Value> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("NDJSON"))
+        .collect();
+    assert!(
+        records
+            .iter()
+            .any(|record| record["kind"] == "error" && record["stage"] == "check"),
+        "missing pre-proof checker error: {records:?}"
+    );
+}
+
+#[cfg(feature = "smt")]
+#[test]
 fn issue_923_unsupported_grad_intrinsic_is_prompt_and_specific() {
     let dir = write_prop(
         r#"module Audit.Main
@@ -2837,17 +2931,19 @@ fn issue_923_non_float_results_are_never_proven_and_do_not_build() {
             "{name} non-float gradient unexpectedly proved"
         );
         let props = property_records(&prove.stdout);
-        assert_eq!(props.len(), 1, "{name}: {props:?}");
-        assert_eq!(props[0]["status"], "unsupported", "{name}: {}", props[0]);
-        assert_eq!(
-            props[0]["reason"], "scalar grad SMT lowering requires an f32/f64 result",
-            "{name}: {}",
-            props[0]
+        assert!(
+            props.is_empty(),
+            "{name}: an invalid gradient must emit no property verdict: {props:?}"
         );
-        assert_ne!(
-            props[0]["composite_verdict"], "proven_modulo_real_arithmetic",
-            "{name}: {}",
-            props[0]
+        let records: Vec<serde_json::Value> = String::from_utf8_lossy(&prove.stdout)
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("NDJSON"))
+            .collect();
+        assert!(
+            records
+                .iter()
+                .any(|record| record["kind"] == "error" && record["stage"] == "check"),
+            "{name}: missing pre-proof checker error: {records:?}"
         );
 
         let build = Command::cargo_bin("chelis")
