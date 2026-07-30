@@ -19,8 +19,8 @@ pub use chelis_types::{
 };
 pub use chelis_types::{LinkedProgramGuard, install_linked_program_guard};
 pub use compiler::{
-    PreparedEvalInContext, check_in_context, eval_in_context, eval_many_in_context,
-    prepare_eval_in_context,
+    EVAL_CANCELLED_KIND, PreparedEvalInContext, check_in_context, eval_in_context,
+    eval_many_in_context, prepare_eval_in_context,
 };
 pub use compiler::{add_function, replace_function_body};
 pub use context::{

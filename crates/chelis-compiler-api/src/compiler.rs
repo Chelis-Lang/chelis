@@ -85,6 +85,43 @@ pub struct CompilerError {
     pub errors: Vec<Diagnostic>,
 }
 
+/// `Diagnostic::kind` for an evaluation abandoned via a cancellation token
+/// (chelis#914), as opposed to one that failed on its own merits.
+///
+/// `Diagnostic::kind` is an open string, so this is purely additive: existing
+/// consumers that do not know the value simply see an unfamiliar kind, and the
+/// serialized shape is unchanged.
+pub const EVAL_CANCELLED_KIND: &str = "cancelled";
+
+impl CompilerError {
+    /// Whether this error is a cancellation rather than a genuine failure.
+    ///
+    /// Prefer this over inspecting messages: it reads the structured
+    /// `Diagnostic::kind` set at the eval-stage boundary, so it cannot be
+    /// confused by a program whose own error text discusses cancellation.
+    pub fn is_cancellation(&self) -> bool {
+        self.errors
+            .iter()
+            .any(|diagnostic| diagnostic.kind == EVAL_CANCELLED_KIND)
+    }
+}
+
+/// Lift an eval-lane failure message into a `CompilerError`, classifying a
+/// cancellation as such.
+///
+/// This is the one place the string sentinel is interpreted. Both eval lanes
+/// report failures as `Result<_, String>`, so cancellation arrives here as
+/// text; from here on it is carried structurally by
+/// [`EVAL_CANCELLED_KIND`] and callers never need to match on a message.
+fn eval_stage_error(message: String) -> CompilerError {
+    let kind = if chelis_types::is_cancellation(&message) {
+        EVAL_CANCELLED_KIND
+    } else {
+        "eval_error"
+    };
+    stage_error("eval", message, kind)
+}
+
 type Result<T> = std::result::Result<T, CompilerError>;
 
 pub fn parse(request: ParseRequest) -> Result<ParseResult> {
@@ -1365,7 +1402,7 @@ fn eval_compiled(
         eval::eval_tensor_roots_with_strict(&compiled.dag, &roots, |name| {
             bindings.get(name).cloned()
         })
-        .map_err(|message| stage_error("eval", message, "eval_error"))?
+        .map_err(eval_stage_error)?
     };
 
     let mut tensor_values_by_name = HashMap::<String, RuntimeTensorValue>::new();
@@ -1426,7 +1463,7 @@ fn eval_compiled(
             selected_root_names,
         )
     }
-    .map_err(|message| stage_error("eval", message, "eval_error"))?;
+    .map_err(eval_stage_error)?;
 
     let roots = compiled
         .all_root_names
@@ -1460,8 +1497,7 @@ fn eval_compiled(
                 // dtype tags still exist; the wire `value` below cannot
                 // carry them (chelis#732 P1, [05-OBS-1]).
                 display: Some(crate::runtime::render_value(&value)),
-                value: runtime_value_to_schema(&value)
-                    .map_err(|message| stage_error("eval", message, "eval_error"))?,
+                value: runtime_value_to_schema(&value).map_err(eval_stage_error)?,
             })
         })
         .collect::<Result<Vec<_>>>()?;

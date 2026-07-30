@@ -1336,15 +1336,8 @@ fn run_eval_in_context(
                 return Err(EvalInContextError::Compile(msg));
             }
         };
-    let result = chelis_compiler_api::eval_in_context(&context, source).map_err(|err| {
-        EvalInContextError::Compile(
-            err.errors
-                .iter()
-                .map(|d| d.message.clone())
-                .collect::<Vec<_>>()
-                .join("; "),
-        )
-    })?;
+    let result = chelis_compiler_api::eval_in_context(&context, source)
+        .map_err(|err| EvalInContextError::Compile(join_eval_error(err)))?;
     if json {
         // JSON mode: stdout carries the raw `EvalResult` serde JSON
         // only. Empty-roots inputs serialize to `{"roots":[]}` (valid
@@ -9089,13 +9082,25 @@ fn try_eval_result(
     } else {
         chelis_compiler_api::compiler::eval(request)
     }
-    .map_err(|err| {
-        err.errors
-            .iter()
-            .map(|diag| diag.message.clone())
-            .collect::<Vec<_>>()
-            .join("; ")
-    })
+    .map_err(join_eval_error)
+}
+
+/// Flatten a `CompilerError` into the single string this CLI's error channel
+/// carries.
+///
+/// Cancellation (chelis#914) is decided on the STRUCTURED
+/// `CompilerError::is_cancellation`, never by inspecting message text, and is
+/// then transported as the bare sentinel. `cmd_eval` recognizes it at the
+/// `Box<dyn Error>` boundary, where the typed error is no longer available.
+fn join_eval_error(err: chelis_compiler_api::compiler::CompilerError) -> String {
+    if err.is_cancellation() {
+        return chelis_compiler_api::EVAL_CANCELLED_MSG.to_string();
+    }
+    err.errors
+        .iter()
+        .map(|diag| diag.message.clone())
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 fn try_eval(

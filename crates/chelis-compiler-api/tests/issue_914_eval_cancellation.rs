@@ -41,7 +41,9 @@ use std::time::{Duration, Instant};
 
 use chelis_compiler_api::compiler;
 use chelis_compiler_api::schema::{EvalRequest, SourceKind};
-use chelis_compiler_api::{CancelToken, install_cancel_token, is_cancellation};
+use chelis_compiler_api::{
+    CancelToken, EVAL_CANCELLED_KIND, install_cancel_token, is_cancellation,
+};
 
 /// A host-lane program: plain scalar arithmetic through the interpreter.
 const HOST_PROGRAM: &str = "def answer() -> i32 = 6 * 7\n\nresult = answer()\n";
@@ -87,6 +89,50 @@ fn cancelled_tensor_program_returns_sentinel() {
     assert!(
         is_cancellation(&err),
         "tensor lane must report cancellation, got: {err}"
+    );
+}
+
+/// Embedders must be able to tell cancellation from failure WITHOUT parsing
+/// message text. The string sentinel is a lane-internal carrier, interpreted
+/// once at the eval-stage boundary and re-expressed as a diagnostic kind.
+#[test]
+fn cancellation_is_reported_structurally_not_just_in_the_message() {
+    let token = CancelToken::new();
+    token.cancel();
+    let _guard = install_cancel_token(token);
+
+    let err = compiler::eval(request(HOST_PROGRAM)).expect_err("expected cancellation");
+
+    assert!(
+        err.is_cancellation(),
+        "CompilerError::is_cancellation must recognise it: {err:?}"
+    );
+    assert!(
+        err.errors
+            .iter()
+            .any(|diagnostic| diagnostic.kind == EVAL_CANCELLED_KIND),
+        "expected a diagnostic with kind {EVAL_CANCELLED_KIND:?}, got {:?}",
+        err.errors.iter().map(|d| &d.kind).collect::<Vec<_>>()
+    );
+}
+
+/// The converse: a genuine evaluation failure must NOT be classified as
+/// cancellation. Without this, the CLI would translate a real error into
+/// `evaluation timed out`, reporting the wrong cause.
+#[test]
+fn a_real_evaluation_error_is_not_classified_as_cancellation() {
+    let err = compiler::eval(request("result = no_such_function(1)\n"))
+        .expect_err("expected an evaluation error");
+
+    assert!(
+        !err.is_cancellation(),
+        "a real error must not be classified as cancellation: {err:?}"
+    );
+    assert!(
+        err.errors
+            .iter()
+            .all(|diagnostic| diagnostic.kind != EVAL_CANCELLED_KIND),
+        "no diagnostic should carry the cancellation kind: {err:?}"
     );
 }
 

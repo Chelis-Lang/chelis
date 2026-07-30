@@ -40,6 +40,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// message, and the bindings never surface it (a cancelled call raises the
 /// pending Python exception instead). Keep it stable regardless — both
 /// callers match on it.
+///
+/// This string is the *lane-internal* carrier only. It is interpreted exactly
+/// once, at the eval-stage boundary in `compiler-api`, which re-expresses
+/// cancellation structurally as `Diagnostic::kind ==
+/// chelis_compiler_api::EVAL_CANCELLED_KIND`. Embedders should test that kind
+/// (or `CompilerError::is_cancellation`) rather than matching on text.
 pub const EVAL_CANCELLED_MSG: &str = "chelis::eval::cancelled";
 
 /// Shared cancellation flag handed to an evaluation.
