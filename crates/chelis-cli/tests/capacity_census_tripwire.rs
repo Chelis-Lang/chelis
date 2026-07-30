@@ -1141,7 +1141,7 @@ fn reviewer_runtime_numeric_op_requires_semantic_registration() {
         legs: serde_json::json!({}),
         rows: vec![row.clone()],
     };
-    let err = check_against_baseline(&[row.clone()], &regenerated).unwrap_err();
+    let err = check_against_baseline(std::slice::from_ref(&row), &regenerated).unwrap_err();
     assert!(
         err.contains("NUMERIC OP WITHOUT SEMANTIC REGISTRATION"),
         "a tracker citation is not a semantic decision: {err}"
