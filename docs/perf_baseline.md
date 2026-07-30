@@ -40,7 +40,11 @@ Reef graph preparation is persisted across processes in a versioned,
 integrity-checked cache. Its determinant includes the compiler version,
 canonical package root, every source and manifest, `reef.lock`, and published
 archive/shell identities. `LocalRegistry` packages participate in both this
-cache and the compiled-context cache.
+cache and the compiled-context cache. “Every source” means a live inventory of
+relative paths and exact bytes, not only modules remembered by a cached graph;
+additions, deletions, and renames invalidate it. Cold construction requires
+matching snapshots before and after graph preparation so a concurrent edit
+cannot publish a mismatched graph/hash pair.
 
 After a property verdict, `chelis prove` checks every declaration in the
 selected entry module and follows linker-resolved references transitively.
@@ -48,9 +52,10 @@ Unreachable declarations elsewhere in an installed shell are not rechecked.
 The manual Shoals cold/warm oracle is recorded in
 [`manual_gates.md`](manual_gates.md).
 
-On 2026-07-30, the development binary for the chelis#924 change completed
-that oracle against the published Shoals 0.24.1 artifacts in 1.06 seconds
-cold and 0.74 seconds warm. Both runs exited successfully immediately after
+On 2026-07-30, the final development binary for the chelis#924 change
+(including complete source-inventory and mutation-race hardening) completed
+that oracle against the published Shoals 0.24.1 artifacts in 1.38 seconds
+cold and 0.75 seconds warm. Both runs exited successfully immediately after
 emitting identical passing property and summary NDJSON. These measurements
 characterize the development change; the release gate must repeat them with
 the published binary.

@@ -799,68 +799,199 @@ impl PreparedReefGraph {
         bincode::deserialize(bytes).map_err(|e| format!("decode prepared graph: {e}"))
     }
 
-    /// Returns a content digest for every `.ch` source file backing this
-    /// graph, including path-dep packages. The result is the load-bearing
-    /// input to `chelis_compiler_api::ContextHash` and the Phase I disk
-    /// cache; deterministic ordering is guaranteed by sorting on
-    /// (package_name, package_version, module_name) before returning.
+    /// Returns a content digest for the complete live `.ch` inventory under
+    /// every declared source root backing this graph, including path and
+    /// registry dependencies. Inventory paths as well as exact file bytes are
+    /// determinants, so additions, deletions, and renames invalidate caches
+    /// even when the cached graph did not know about the changed file.
+    ///
+    /// The result is the load-bearing input to
+    /// `chelis_compiler_api::ContextHash` and the Phase I disk cache;
+    /// deterministic ordering is guaranteed by sorting on
+    /// (package_name, package_version, inventory_path) before returning.
     ///
     pub fn source_digests(&self) -> Result<Vec<SourceDigest>, String> {
+        self.source_digests_inner(false)
+    }
+
+    fn validated_source_digests(&self) -> Result<Vec<SourceDigest>, String> {
+        self.source_digests_inner(true)
+    }
+
+    fn source_digests_inner(
+        &self,
+        validate_graph_against_snapshot: bool,
+    ) -> Result<Vec<SourceDigest>, String> {
         let mut digests = Vec::new();
         for package in self.graph.packages.values() {
             let source_root = &package.source_root;
             let manifest_path = source_root.join("reef.toml");
             let manifest_bytes = fs::read(&manifest_path)
                 .map_err(|e| format!("read manifest `{}`: {e}", manifest_path.display()))?;
+            if validate_graph_against_snapshot {
+                let snapshot_manifest: ReefManifest =
+                    toml::from_str(std::str::from_utf8(&manifest_bytes).map_err(|error| {
+                        format!(
+                            "manifest `{}` is not UTF-8: {error}",
+                            manifest_path.display()
+                        )
+                    })?)
+                    .map_err(|error| {
+                        format!(
+                            "parse manifest snapshot `{}`: {error}",
+                            manifest_path.display()
+                        )
+                    })?;
+                if snapshot_manifest != package.manifest {
+                    return Err(format!(
+                        "manifest `{}` changed while its graph was prepared",
+                        manifest_path.display()
+                    ));
+                }
+            }
             digests.push(SourceDigest {
                 package_name: package.id.name.clone(),
                 package_version: package.id.version.clone(),
                 module_name: "<manifest::reef.toml>".to_string(),
                 sha256: Sha256::digest(&manifest_bytes).into(),
             });
-            for module in package.modules.values() {
-                // Multi-root: resolve via the per-module source_root, which
-                // is "src" for legacy packages and a manifest-declared
-                // additional_sources entry for non-src roots.
-                let abs = source_root.join(&module.source_root).join(&module.file_rel);
-                let bytes = fs::read(&abs)
-                    .map_err(|e| format!("read source file `{}`: {e}", abs.display()))?;
-                let sha256: [u8; 32] = Sha256::digest(&bytes).into();
-                digests.push(SourceDigest {
-                    package_name: package.id.name.clone(),
-                    package_version: package.id.version.clone(),
-                    module_name: module.module_name.clone(),
-                    sha256,
-                });
-            }
-            // Cache invalidation: the file-content walk above does not
-            // change when a manifest *adds* additional_sources entries
-            // that point at empty/absent dirs — same files walked, same
-            // digests, stale cache hit. Mix the manifest's
-            // additional_sources list into the digest set as a synthetic
-            // SourceDigest so any change to the declared roots flips the
-            // downstream cache key (ContextHash::from_digests includes
-            // every row in its sort+hash). The synthetic row uses a
-            // module_name of `<manifest::additional_sources>` which is
-            // syntactically not a valid module name, so it cannot collide
-            // with a real module digest.
-            if !package.manifest.package.additional_sources.is_empty() {
-                let serialized = serde_json::to_string(
-                    &package.manifest.package.additional_sources,
+            let canonical_package_root = source_root.canonicalize().map_err(|error| {
+                format!(
+                    "canonicalize package source root `{}`: {error}",
+                    source_root.display()
                 )
-                .map_err(|e| {
+            })?;
+            let mut seen_module_paths = BTreeSet::new();
+            for declared_root in std::iter::once("src").chain(
+                package
+                    .manifest
+                    .package
+                    .additional_sources
+                    .iter()
+                    .map(String::as_str),
+            ) {
+                let abs_root = canonical_package_root.join(declared_root);
+                if !abs_root.exists() {
+                    continue;
+                }
+                let canonical_abs_root = abs_root.canonicalize().map_err(|error| {
                     format!(
-                        "serialize additional_sources for `{}` v{}: {e}",
-                        package.id.name, package.id.version
+                        "canonicalize declared source root `{}`: {error}",
+                        abs_root.display()
                     )
                 })?;
-                let sha256: [u8; 32] = Sha256::digest(serialized.as_bytes()).into();
-                digests.push(SourceDigest {
-                    package_name: package.id.name.clone(),
-                    package_version: package.id.version.clone(),
-                    module_name: "<manifest::additional_sources>".to_string(),
-                    sha256,
-                });
+                if !canonical_abs_root.starts_with(&canonical_package_root) {
+                    return Err(format!(
+                        "declared source root `{}` escapes package root `{}`",
+                        abs_root.display(),
+                        canonical_package_root.display()
+                    ));
+                }
+                for entry in WalkDir::new(&abs_root).follow_links(false) {
+                    let entry = entry.map_err(|error| {
+                        format!(
+                            "walk declared source root `{}`: {error}",
+                            abs_root.display()
+                        )
+                    })?;
+                    if !entry.file_type().is_file()
+                        || entry.path().extension().and_then(|ext| ext.to_str()) != Some("ch")
+                    {
+                        continue;
+                    }
+                    let canonical_file = entry.path().canonicalize().map_err(|error| {
+                        format!(
+                            "canonicalize source file `{}`: {error}",
+                            entry.path().display()
+                        )
+                    })?;
+                    if !canonical_file.starts_with(&canonical_abs_root) {
+                        return Err(format!(
+                            "source file `{}` escapes declared source root `{}`",
+                            entry.path().display(),
+                            canonical_abs_root.display()
+                        ));
+                    }
+                    let rel =
+                        entry
+                            .path()
+                            .strip_prefix(&canonical_package_root)
+                            .map_err(|error| {
+                                format!(
+                                    "source file `{}` is outside package root `{}`: {error}",
+                                    entry.path().display(),
+                                    canonical_package_root.display()
+                                )
+                            })?;
+                    let path_hex = rel
+                        .as_os_str()
+                        .as_encoded_bytes()
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect::<String>();
+                    let bytes = fs::read(entry.path()).map_err(|error| {
+                        format!("read source file `{}`: {error}", entry.path().display())
+                    })?;
+                    if validate_graph_against_snapshot {
+                        let rel_in_declared_root = entry
+                            .path()
+                            .strip_prefix(&abs_root)
+                            .map_err(|error| {
+                                format!(
+                                    "source file `{}` is outside declared root `{}`: {error}",
+                                    entry.path().display(),
+                                    abs_root.display()
+                                )
+                            })?
+                            .to_path_buf();
+                        let module = package
+                            .modules
+                            .values()
+                            .find(|module| {
+                                module.source_root == declared_root
+                                    && module.file_rel == rel_in_declared_root
+                            })
+                            .ok_or_else(|| {
+                                format!(
+                                    "source inventory gained `{}` while its graph was prepared",
+                                    entry.path().display()
+                                )
+                            })?;
+                        let source = std::str::from_utf8(&bytes).map_err(|error| {
+                            format!(
+                                "source file `{}` is not UTF-8: {error}",
+                                entry.path().display()
+                            )
+                        })?;
+                        let parsed = chelis_surf::parser::parse_str(source)
+                            .map_err(|error| format!("{}: {error}", entry.path().display()))?;
+                        let [Decl::Module { name, decls, .. }] = parsed.as_slice() else {
+                            return Err(format!(
+                                "{} must contain exactly one top-level module declaration",
+                                entry.path().display()
+                            ));
+                        };
+                        if name != &module.module_name || decls != &module.decls {
+                            return Err(format!(
+                                "source file `{}` changed while its graph was prepared",
+                                entry.path().display()
+                            ));
+                        }
+                        seen_module_paths.insert((declared_root.to_string(), rel_in_declared_root));
+                    }
+                    digests.push(SourceDigest {
+                        package_name: package.id.name.clone(),
+                        package_version: package.id.version.clone(),
+                        module_name: format!("<source::{path_hex}>"),
+                        sha256: Sha256::digest(&bytes).into(),
+                    });
+                }
+            }
+            if validate_graph_against_snapshot && seen_module_paths.len() != package.modules.len() {
+                return Err(format!(
+                    "source inventory for `{}` v{} lost a module while its graph was prepared",
+                    package.id.name, package.id.version
+                ));
             }
             for (module_name, identity) in [
                 (
@@ -1294,14 +1425,52 @@ pub fn prepare_reef_graph_cached(context_dir: &Path) -> Result<PreparedReefGraph
         ),
     }
 
-    let graph = prepare_reef_graph(&root)?;
-    if let Err(message) = save_prepared_graph_cache(&cache_path, &graph) {
+    let (graph, source_hash) = prepare_reef_graph_consistently(&root, || {})?;
+    if let Err(message) = save_prepared_graph_cache_with_hash(&cache_path, &graph, source_hash) {
         eprintln!(
             "chelis reef: warning: failed to save prepared graph cache to {}: {message}",
             cache_path.display()
         );
     }
     Ok(graph)
+}
+
+/// Build a graph whose serialized declarations and source determinant describe
+/// one stable filesystem observation. The first preparation discovers package
+/// topology. Each candidate build is then bracketed by complete live-inventory
+/// snapshots. A concurrent mutation retries rather than persisting a graph
+/// parsed from one version under another version's hash.
+fn prepare_reef_graph_consistently(
+    root: &Path,
+    mut after_candidate_build: impl FnMut(),
+) -> Result<(PreparedReefGraph, [u8; 32]), String> {
+    const MAX_ATTEMPTS: usize = 3;
+
+    let mut topology = prepare_reef_graph(root)?;
+    let mut last_validation_error = None;
+    for _ in 0..MAX_ATTEMPTS {
+        let before = prepared_graph_source_hash(&topology)?;
+        let candidate = prepare_reef_graph(root)?;
+        after_candidate_build();
+        match prepared_graph_validated_source_hash(&candidate) {
+            Ok(after) if before == after => return Ok((candidate, before)),
+            Ok(_) => {
+                topology = candidate;
+            }
+            Err(error) => {
+                last_validation_error = Some(error);
+                topology = candidate;
+            }
+        }
+    }
+    let mut message = format!(
+        "package sources changed during graph preparation {} consecutive times; retry when writes are quiescent",
+        MAX_ATTEMPTS
+    );
+    if let Some(error) = last_validation_error {
+        message.push_str(&format!(" (last validation error: {error})"));
+    }
+    Err(message)
 }
 
 fn prepared_graph_cache_path(root: &Path) -> Option<PathBuf> {
@@ -1330,9 +1499,17 @@ fn prepared_graph_cache_path(root: &Path) -> Option<PathBuf> {
 }
 
 fn prepared_graph_source_hash(graph: &PreparedReefGraph) -> Result<[u8; 32], String> {
+    prepared_graph_source_hash_from_digests(graph.source_digests()?)
+}
+
+fn prepared_graph_validated_source_hash(graph: &PreparedReefGraph) -> Result<[u8; 32], String> {
+    prepared_graph_source_hash_from_digests(graph.validated_source_digests()?)
+}
+
+fn prepared_graph_source_hash_from_digests(digests: Vec<SourceDigest>) -> Result<[u8; 32], String> {
     let mut hasher = Sha256::new();
     hasher.update(env!("CARGO_PKG_VERSION").as_bytes());
-    for digest in graph.source_digests()? {
+    for digest in digests {
         hasher.update((digest.package_name.len() as u64).to_le_bytes());
         hasher.update(digest.package_name.as_bytes());
         hasher.update((digest.package_version.len() as u64).to_le_bytes());
@@ -1389,12 +1566,22 @@ fn load_prepared_graph_cache(
     Ok(Some(graph))
 }
 
+#[cfg(test)]
 fn save_prepared_graph_cache(path: &Path, graph: &PreparedReefGraph) -> Result<(), String> {
+    let source_hash = prepared_graph_source_hash(graph)?;
+    save_prepared_graph_cache_with_hash(path, graph, source_hash)
+}
+
+fn save_prepared_graph_cache_with_hash(
+    path: &Path,
+    graph: &PreparedReefGraph,
+    source_hash: [u8; 32],
+) -> Result<(), String> {
     let payload = graph.encode()?;
     let envelope = PreparedGraphCacheEnvelope {
         version: PREPARED_GRAPH_CACHE_VERSION,
         compiler_version: env!("CARGO_PKG_VERSION").to_string(),
-        source_hash: prepared_graph_source_hash(graph)?,
+        source_hash,
         payload_sha256: Sha256::digest(&payload).into(),
         payload,
     };
@@ -6980,7 +7167,10 @@ fn rewrite_decl(decl: &Decl, resolver: &NameResolver, package: &str, module: &st
             }
         }
         Decl::Dim { names, span } => Decl::Dim {
-            names: names.clone(),
+            names: names
+                .iter()
+                .map(|name| internal_name(package, module, name))
+                .collect(),
             span: *span,
         },
         Decl::Module { .. } | Decl::Import { .. } | Decl::Export { .. } => decl.clone(),
@@ -10404,6 +10594,157 @@ module_prefix = "RegistryLib"
         );
     }
 
+    #[test]
+    fn reachable_linked_decls_follow_imported_type_dimension_pattern_and_invariant_edges() {
+        let (_dir, root) = shared_graph_fixture();
+        write(
+            &root.join("mylib/src/math.ch"),
+            "module Mylib.Math\n\
+             export (n, Values, Wrapped, Probability, add)\n\
+             dim n\n\
+             type Values = tensor[n, int32]\n\
+             type Wrapped = | Wrapped(Values)\n\
+             def floor() -> f32 = 0.0\n\
+             @opaque\n\
+             @invariant(p) p.value >= floor()\n\
+             type Probability = | Probability { value: f32 }\n\
+             def add(x: int32, y: int32) -> int32 = x + y\n\
+             def unreachable_dependency() -> int32 = 99\n",
+        );
+        let entry = chelis_surf::parser::parse_str(
+            "import Mylib.Math (Wrapped, Probability)\n\
+             def inspect(value: Wrapped, probability: Probability) -> int32 = \
+               match value with { | Wrapped(xs) => 1 }\n",
+        )
+        .expect("entry parses");
+        let graph = prepare_reef_graph(&root).expect("prepare graph");
+        let prepared = compile_with_reef_graph(&graph, &entry).expect("link entry");
+        let rendered = chelis_surf::format::format_program(
+            &prepared
+                .reachable_decls()
+                .expect("reachable linked declarations"),
+        );
+        for expected in ["dim ", "Values", "Wrapped", "Probability", "floor"] {
+            assert!(
+                rendered.contains(expected),
+                "linked dependency `{expected}` retained:\n{rendered}"
+            );
+        }
+        assert!(
+            !rendered.contains("unreachable_dependency"),
+            "unreferenced dependency sibling pruned"
+        );
+        assert!(
+            !rendered.contains("__double"),
+            "unreferenced root-library sibling pruned"
+        );
+    }
+
+    #[test]
+    fn reachable_decls_follow_types_dimensions_constructors_and_patterns() {
+        let decls = chelis_surf::parser::parse_str(
+            "dim n\n\
+             type Values = tensor[n, int32]\n\
+             type Wrapped = | Wrapped(Values)\n\
+             def inspect(value: Wrapped) -> int32 = match value with { | Wrapped(xs) => 1 }\n\
+             def unrelated() -> int32 = 0\n",
+        )
+        .expect("fixture parses");
+        let entry_decls = decls
+            .iter()
+            .filter(|decl| matches!(decl, Decl::FunDef { name, .. } if name == "inspect"))
+            .cloned()
+            .collect();
+        let prepared = PreparedProgram {
+            decls,
+            entry_decls,
+            package_root: PathBuf::new(),
+            stdlib_decls: Vec::new(),
+            non_stdlib_decls: Vec::new(),
+        };
+        let rendered = chelis_surf::format::format_program(
+            &prepared.reachable_decls().expect("reachable declarations"),
+        );
+        assert!(rendered.contains("dim n"), "dimension dependency retained");
+        assert!(rendered.contains("type Values"), "type alias retained");
+        assert!(
+            rendered.contains("type Wrapped"),
+            "constructor owner retained"
+        );
+        assert!(
+            rendered.contains("Wrapped(xs)"),
+            "pattern reference retained"
+        );
+        assert!(!rendered.contains("unrelated"), "unreachable value pruned");
+    }
+
+    #[test]
+    fn reachable_decls_follow_invariant_only_and_macro_body_references() {
+        let invariant_decls = chelis_surf::parser::parse_str(
+            "def floor() -> f32 = 0.0\n\
+             @opaque\n\
+             @invariant(p) p.value >= floor()\n\
+             type Probability = | Probability { value: f32 }\n\
+             def unrelated() -> f32 = 1.0\n",
+        )
+        .expect("invariant fixture parses");
+        let invariant_entry = invariant_decls
+            .iter()
+            .filter(|decl| matches!(decl, Decl::TypeDef { name, .. } if name == "Probability"))
+            .cloned()
+            .collect();
+        let invariant_program = PreparedProgram {
+            decls: invariant_decls,
+            entry_decls: invariant_entry,
+            package_root: PathBuf::new(),
+            stdlib_decls: Vec::new(),
+            non_stdlib_decls: Vec::new(),
+        };
+        let invariant_rendered = chelis_surf::format::format_program(
+            &invariant_program
+                .reachable_decls()
+                .expect("invariant reachability"),
+        );
+        assert!(
+            invariant_rendered.contains("floor"),
+            "reference used only by an invariant is retained"
+        );
+        assert!(
+            !invariant_rendered.contains("unrelated"),
+            "unreachable sibling remains pruned"
+        );
+
+        let macro_decls = chelis_surf::parser::parse_str(
+            "def increment() -> int32 = 1\n\
+             macro bump(x) = x + increment()\n\
+             def unrelated() -> int32 = 2\n",
+        )
+        .expect("macro fixture parses");
+        let macro_entry = macro_decls
+            .iter()
+            .filter(|decl| matches!(decl, Decl::MacroDef { name, .. } if name == "bump"))
+            .cloned()
+            .collect();
+        let macro_program = PreparedProgram {
+            decls: macro_decls,
+            entry_decls: macro_entry,
+            package_root: PathBuf::new(),
+            stdlib_decls: Vec::new(),
+            non_stdlib_decls: Vec::new(),
+        };
+        let macro_rendered = chelis_surf::format::format_program(
+            &macro_program.reachable_decls().expect("macro reachability"),
+        );
+        assert!(
+            macro_rendered.contains("increment"),
+            "macro-body dependency retained"
+        );
+        assert!(
+            !macro_rendered.contains("unrelated"),
+            "unreachable macro sibling pruned"
+        );
+    }
+
     /// Phase A foundation: PreparedReefGraph round-trips through bincode.
     /// This is prerequisite for the Phase I disk cache (CompiledContext::save/
     /// load_if_fresh will use the same bincode + content-hash pattern).
@@ -10460,6 +10801,136 @@ module_prefix = "RegistryLib"
         assert!(
             chelis_surf::format::format_program(&changed.linked_library_decls).contains("x - y"),
             "changed dependency source cannot reuse stale graph"
+        );
+    }
+
+    #[test]
+    fn prepared_graph_cache_invalidates_added_deleted_and_renamed_sources() {
+        let _guard = lock_reef_home_env();
+        let (dir, root) = shared_graph_fixture();
+        unsafe {
+            std::env::set_var("CHELIS_REEF_HOME", dir.path().join("reef-home"));
+        }
+
+        let initial = prepare_reef_graph_cached(&root).expect("initial graph");
+        assert_eq!(
+            initial.graph.packages["myapp"].modules.len(),
+            1,
+            "fixture begins with one root module"
+        );
+
+        let second = root.join("src/second.ch");
+        write(
+            &second,
+            "module Myapp.Second\nexport (second)\ndef second() -> int32 = 2\n",
+        );
+        let added = prepare_reef_graph_cached(&root).expect("addition rebuilds");
+        assert!(
+            added.graph.packages["myapp"]
+                .modules
+                .contains_key("Myapp.Second"),
+            "new inventory member cannot be hidden by a stale cached graph"
+        );
+
+        fs::remove_file(&second).expect("delete second source");
+        let deleted = prepare_reef_graph_cached(&root).expect("deletion rebuilds");
+        assert!(
+            !deleted.graph.packages["myapp"]
+                .modules
+                .contains_key("Myapp.Second"),
+            "deleted inventory member cannot survive in the cached graph"
+        );
+
+        write(
+            &second,
+            "module Myapp.Second\nexport (second)\ndef second() -> int32 = 2\n",
+        );
+        prepare_reef_graph_cached(&root).expect("cache second source");
+        let renamed = root.join("src/renamed.ch");
+        fs::rename(&second, &renamed).expect("rename source");
+        write(
+            &renamed,
+            "module Myapp.Renamed\nexport (renamed)\ndef renamed() -> int32 = 3\n",
+        );
+        let after_rename = prepare_reef_graph_cached(&root).expect("rename rebuilds");
+        let modules = &after_rename.graph.packages["myapp"].modules;
+        assert!(modules.contains_key("Myapp.Renamed"));
+        assert!(!modules.contains_key("Myapp.Second"));
+    }
+
+    #[test]
+    fn prepared_graph_consistent_build_retries_after_mid_build_mutation() {
+        let (dir, root) = shared_graph_fixture();
+        let dependency = root.join("mylib/src/math.ch");
+        let mut mutated = false;
+        let (graph, source_hash) = prepare_reef_graph_consistently(&root, || {
+            if !mutated {
+                write(
+                    &dependency,
+                    "module Mylib.Math\n\nexport (add)\ndef add(x: int32, y: int32) -> int32 = x - y\n",
+                );
+                mutated = true;
+            }
+        })
+        .expect("mutation triggers a consistent retry");
+        assert!(mutated, "deterministic mutation hook ran");
+        assert!(
+            chelis_surf::format::format_program(&graph.linked_library_decls).contains("x - y"),
+            "returned graph was rebuilt from the post-mutation bytes"
+        );
+        assert_eq!(
+            source_hash,
+            prepared_graph_source_hash(&graph).expect("live post-build hash"),
+            "saved determinant describes the exact stable build inventory"
+        );
+
+        let cache_path = dir.path().join("prepared.graph");
+        save_prepared_graph_cache_with_hash(&cache_path, &graph, source_hash)
+            .expect("save consistent graph");
+        let loaded = load_prepared_graph_cache(&cache_path, &root)
+            .expect("valid envelope")
+            .expect("live inventory matches");
+        assert!(
+            chelis_surf::format::format_program(&loaded.linked_library_decls).contains("x - y")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn source_inventory_rejects_declared_root_symlinks_that_escape_package() {
+        use std::os::unix::fs::symlink;
+
+        let (_dir, root) = shared_graph_fixture();
+        let _guard = lock_reef_home_env();
+        unsafe {
+            std::env::set_var(
+                "CHELIS_REEF_HOME",
+                root.parent().expect("parent").join("reef-home"),
+            );
+        }
+        prepare_reef_graph_cached(&root).expect("initial safe graph");
+        let outside = root.parent().expect("parent").join("outside");
+        write(
+            &outside.join("escape.ch"),
+            "module Myapp.Properties.Escape\ndef escaped() -> int32 = 1\n",
+        );
+        symlink(&outside, root.join("properties")).expect("source-root symlink");
+        let manifest_path = root.join("reef.toml");
+        let manifest = fs::read_to_string(&manifest_path).expect("manifest");
+        fs::write(
+            &manifest_path,
+            manifest.replace(
+                "module_prefix = \"Myapp\"",
+                "module_prefix = \"Myapp\"\nadditional_sources = [\"properties\"]",
+            ),
+        )
+        .expect("declare symlink root");
+
+        let error = prepare_reef_graph_cached(&root)
+            .expect_err("cache inventory fails closed on escaping source root");
+        assert!(
+            error.contains("escapes package root"),
+            "unexpected path-safety error: {error}"
         );
     }
 

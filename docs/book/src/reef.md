@@ -206,10 +206,15 @@ and rewritten on the next `chelis reef build`.
 Commands that repeatedly consume the same locked package graph reuse a
 prepared-graph cache under `$CHELIS_REEF_HOME/.cache/prepared-graphs/` (or the
 normal XDG/Home cache fallback). Entries are tied to the compiler version and
-canonical project root, and are invalidated by changes to source files,
-manifests, `reef.lock`, or published archive/shell identities. The cache file
-has a versioned, checksummed envelope; corrupt or version-skewed entries emit a
-stderr diagnostic and are rebuilt rather than trusted.
+canonical project root. The determinant inventories the path and exact bytes
+of every `.ch` file under every declared source root, so source additions,
+deletions, and renames invalidate it alongside content changes, manifests,
+`reef.lock`, and published archive/shell identities. Graph construction is
+bracketed by identical pre/post inventory snapshots; concurrent edits cause a
+retry instead of storing declarations parsed from one version under another
+version's hash. The cache file has a versioned, checksummed envelope; corrupt
+or version-skewed entries emit a stderr diagnostic and are rebuilt rather than
+trusted. Declared source-root symlinks may not escape their package root.
 
 For `chelis prove`, the package graph is prepared once per invocation. The
 post-verdict type check remains fail-closed for every declaration in the
