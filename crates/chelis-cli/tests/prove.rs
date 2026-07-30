@@ -2666,6 +2666,97 @@ fn issue_417_mixed_call_form_arith_false_goal_disproves_at_smt() {
     );
 }
 
+// chelis#923: an applied scalar single-wrt gradient is a Tier-B arithmetic
+// term. The public CLI must prove the true sensitivity claim, disprove its
+// reversed corrupt twin, and preserve the real-arithmetic qualification.
+#[cfg(feature = "smt")]
+#[test]
+fn issue_923_scalar_grad_and_corrupt_twin_receive_smt_verdicts() {
+    let source = r#"module Audit.Main
+
+@property inline_grad_negative forall(d: f32, r: f32, g: f32)
+where (d > 0.5), (r > g), (r < 9.5):
+  (grad(fn (dd: f32, rr: f32, gg: f32) ->
+    (dd / (rr - gg)), wrt=rr)(d, r, g) < 0.0)
+"#;
+    for (source, expected_code, expected_status) in [
+        (source.to_string(), 0, "passed"),
+        (source.replace("< 0.0)", "> 0.0)"), 1, "failed"),
+    ] {
+        let dir = write_prop(&source);
+        let output = Command::cargo_bin("chelis")
+            .expect("binary")
+            .args([
+                "prove",
+                dir.path().join("prop.ch").to_str().unwrap(),
+                "--tier",
+                "smt-only",
+                "--json",
+            ])
+            .output()
+            .expect("run prove");
+        assert_eq!(
+            output.status.code(),
+            Some(expected_code),
+            "stdout={}\nstderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let props = property_records(&output.stdout);
+        assert_eq!(props.len(), 1, "records: {props:?}");
+        assert_eq!(props[0]["status"], expected_status, "{}", props[0]);
+        assert_eq!(props[0]["proof_tier"], "smt", "{}", props[0]);
+        assert_eq!(props[0]["samples"], 0, "{}", props[0]);
+        if expected_status == "passed" {
+            assert_eq!(
+                props[0]["composite_verdict"], "proven_modulo_real_arithmetic",
+                "{}",
+                props[0]
+            );
+        } else {
+            assert!(
+                props[0].get("counterexample").is_some(),
+                "SMT disproof must carry a model: {}",
+                props[0]
+            );
+        }
+    }
+}
+
+#[cfg(feature = "smt")]
+#[test]
+fn issue_923_unsupported_grad_intrinsic_is_prompt_and_specific() {
+    let dir = write_prop(
+        r#"module Audit.Main
+
+@property exp_grad_positive forall(x: f32)
+where (x > 0.5), (x < 9.5):
+  (grad(fn (xx: f32) -> exp(xx), wrt=xx)(x) > 0.0)
+"#,
+    );
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "prove",
+            dir.path().join("prop.ch").to_str().unwrap(),
+            "--tier",
+            "smt-only",
+            "--json",
+        ])
+        .output()
+        .expect("run prove");
+    assert_eq!(output.status.code(), Some(2));
+    let props = property_records(&output.stdout);
+    assert_eq!(props.len(), 1, "records: {props:?}");
+    assert_eq!(props[0]["status"], "unsupported", "{}", props[0]);
+    assert_eq!(props[0]["proof_tier"], "smt", "{}", props[0]);
+    assert_eq!(
+        props[0]["reason"], "scalar grad SMT lowering does not support call `exp`",
+        "{}",
+        props[0]
+    );
+}
+
 // chelis#425 regression lock (stale-fixed by chelis#426): a NESTED helper call
 // written DIRECTLY at the property goal site -- not pushed into a def body --
 // must lower to the SMT tier and prove a TRUE goal. The bug was that nested

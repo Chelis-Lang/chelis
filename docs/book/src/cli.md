@@ -194,6 +194,13 @@ imports are for name resolution, not discovery. Explicit `.dp` inputs are
 validated first, then scanned for canonical `chelis_role: "property"`
 metadata. SMT-amenable scalar Deep properties lower directly to Tier B;
 unsupported Deep property shapes follow the normal requested-tier policy.
+Surf properties may also prove an applied single-target scalar gradient such
+as `grad(price, wrt=rate)(args...)` when the differentiated lambda or pure
+top-level function uses scalar arithmetic, blocks, float casts, conditionals,
+and inlineable scalar helpers. These proofs are still over the reals and carry
+the `real_arithmetic` qualifier. Tensor or multi-target gradients and
+unsupported differentiated operations return a specific unsupported reason
+under `--tier smt-only`; `auto` may fuzz-validate them instead.
 
 Exit codes are stable for CI: `0` pass, `1` counterexample, `2` selected
 property unsupported by the v1 generator, and `3` setup/input/config error.

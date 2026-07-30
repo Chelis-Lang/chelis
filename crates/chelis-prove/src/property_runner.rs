@@ -844,6 +844,7 @@ fn try_surf_tier_b(
         &contracts,
         trusted_contract_decls,
     ));
+    let grad_diagnostic = RefCell::new(None);
     let postcondition = surf_expr_to_smt(
         &property.body,
         &InlineCtx {
@@ -852,8 +853,27 @@ fn try_surf_tier_b(
             max_depth: 3,
             call_stack: vec![],
             contracts: Some(&contract_abstraction),
+            grad_diagnostic: Some(&grad_diagnostic),
         },
-    )?;
+    );
+    let postcondition = match postcondition {
+        Some(postcondition) => postcondition,
+        None if options.tier == "smt-only" => {
+            let reason = grad_diagnostic.into_inner()?;
+            return Some(PropertyOutcome::new(
+                property.name.clone(),
+                PropertyStatus::Unsupported,
+                PropertyTier::Smt,
+                0,
+                seed,
+                None,
+                Some(reason),
+                false,
+                Vec::new(),
+            ));
+        }
+        None => return None,
+    };
     let variables: Vec<(String, crate::solver::SmtSort)> = property
         .params
         .iter()
@@ -890,6 +910,7 @@ fn try_surf_tier_b(
                     max_depth: 3,
                     call_stack: vec![],
                     contracts: Some(&contract_abstraction),
+                    grad_diagnostic: None,
                 },
             )
         })
