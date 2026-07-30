@@ -69,8 +69,8 @@
       },
       "original": {
         "owner": "cachix",
-        "ref": "rolling",
         "repo": "devenv-nixpkgs",
+        "rev": "6004ea8c229fe9d41b21c6f4c76bf6c2e10771dd",
         "type": "github"
       }
     },
@@ -116,6 +116,7 @@
       "original": {
         "owner": "oxalica",
         "repo": "rust-overlay",
+        "rev": "19a19f3921ae195f2fbd85f5dc57e6d1df63aa0b",
         "type": "github"
       }
     }

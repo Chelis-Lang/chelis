@@ -26,6 +26,14 @@ EXPECTED_TEST_TASKS = (
     "chelis:cpp-compiler-test",
 )
 EXPECTED_GIT_HOOKS_URL = "github:cachix/git-hooks.nix"
+# Shared inputs must pin an exact revision so `devenv update` cannot
+# drift them away from the flake pins that check_nix_lock_parity.py
+# compares. The revision values live in devenv.yaml and the lock files,
+# not here; this contract locks the shape (no floating references).
+SHARED_INPUT_URL_PREFIXES = {
+    "nixpkgs": "github:cachix/devenv-nixpkgs/",
+    "rust-overlay": "github:oxalica/rust-overlay/",
+}
 EXPECTED_ACTIVE_GIT_HOOKS = frozenset({"no-ai-authorship"})
 EXPECTED_DISABLED_GIT_HOOKS = frozenset(
     {
@@ -75,6 +83,13 @@ class GitHookCatalog:
 
 @dataclass(frozen=True)
 class GitHooksPin:
+    url: str
+    revision: str
+
+
+@dataclass(frozen=True)
+class SharedInputPin:
+    name: str
     url: str
     revision: str
 
@@ -283,6 +298,34 @@ def parse_git_hooks_pin(yaml_text: str, lock_data: Any) -> GitHooksPin:
     return GitHooksPin(url=url, revision=revision)
 
 
+def parse_shared_input_pin(
+    yaml_text: str, lock_data: Any, input_name: str
+) -> SharedInputPin:
+    url = parse_input_url(yaml_text, input_name)
+    prefix = SHARED_INPUT_URL_PREFIXES[input_name]
+    if not url.startswith(prefix):
+        raise ValueError(f"the {input_name} input must use {prefix}<revision>")
+    revision = url.removeprefix(prefix)
+    if re.fullmatch(r"[0-9a-f]{40}", revision) is None:
+        raise ValueError(
+            f"the {input_name} input must pin a full commit revision, "
+            "not a floating reference"
+        )
+    try:
+        node = lock_data["nodes"][input_name]
+        original_revision = node["original"]["rev"]
+        locked_revision = node["locked"]["rev"]
+    except (KeyError, TypeError) as error:
+        raise ValueError(
+            f"devenv.lock does not contain a complete {input_name} pin"
+        ) from error
+    if {original_revision, locked_revision} != {revision}:
+        raise ValueError(
+            f"the locked {input_name} revision must match the configured pin"
+        )
+    return SharedInputPin(name=input_name, url=url, revision=revision)
+
+
 def parse_generated_git_hook_ignore(text: str) -> str:
     matches = [line for line in text.splitlines() if line == GENERATED_GIT_HOOK_CONFIG]
     if matches != [GENERATED_GIT_HOOK_CONFIG]:
@@ -353,6 +396,32 @@ class DevenvVersionTests(unittest.TestCase):
         lock_data = json.loads((REPO_ROOT / "devenv.lock").read_text(encoding="utf-8"))
         pin = parse_git_hooks_pin(yaml_text, lock_data)
         self.assertEqual(pin.url, EXPECTED_GIT_HOOKS_URL)
+
+    def test_repository_pins_the_shared_inputs_by_revision(self) -> None:
+        yaml_text = (REPO_ROOT / "devenv.yaml").read_text(encoding="utf-8")
+        lock_data = json.loads((REPO_ROOT / "devenv.lock").read_text(encoding="utf-8"))
+        for input_name in SHARED_INPUT_URL_PREFIXES:
+            with self.subTest(input=input_name):
+                pin = parse_shared_input_pin(yaml_text, lock_data, input_name)
+                self.assertEqual(pin.name, input_name)
+
+    def test_floating_shared_input_reference_fails_the_pin_contract(self) -> None:
+        yaml_text = (REPO_ROOT / "devenv.yaml").read_text(encoding="utf-8")
+        lock_data = json.loads((REPO_ROOT / "devenv.lock").read_text(encoding="utf-8"))
+        mutated = re.sub(
+            r"(url: github:cachix/devenv-nixpkgs/)[0-9a-f]{40}",
+            r"\1rolling",
+            yaml_text,
+        )
+        with self.assertRaisesRegex(ValueError, "full commit revision"):
+            parse_shared_input_pin(mutated, lock_data, "nixpkgs")
+
+    def test_stale_shared_input_lock_fails_the_pin_contract(self) -> None:
+        yaml_text = (REPO_ROOT / "devenv.yaml").read_text(encoding="utf-8")
+        lock_data = json.loads((REPO_ROOT / "devenv.lock").read_text(encoding="utf-8"))
+        lock_data["nodes"]["rust-overlay"]["locked"]["rev"] = "0" * 40
+        with self.assertRaisesRegex(ValueError, "must match the configured pin"):
+            parse_shared_input_pin(yaml_text, lock_data, "rust-overlay")
 
     def test_repository_ignores_generated_git_hook_config(self) -> None:
         ignore_text = (REPO_ROOT / ".gitignore").read_text(encoding="utf-8")

@@ -13,12 +13,22 @@ The lock file MUST pin all resolved input revisions.
 
 `devenv.yaml` MUST pin the Devenv module input to release `v2.2`. `devenv.lock` MUST resolve that input to commit `ffce215a42d09c6375c3d60dd9c4110438fc4d87`.
 
+`devenv.yaml` MUST pin the shared `nixpkgs` and `rust-overlay` inputs to exact commit revisions, not floating references. `devenv.lock` MUST resolve each shared input to its configured revision.
+
 The repository MUST ignore `.devenv/` and `.devenv.flake.nix`. These paths contain generated local state, not reproducible inputs.
 
 The repository lint policy MUST exclude both generated paths. It MUST keep the tracked root files and local modules in the editable corpus.
 
 #### Scenario: The repository checks the Devenv release pin
 - **WHEN** the configured URL or locked revision differs from Devenv `v2.2`
+- **THEN** the static Devenv version contract test fails
+
+#### Scenario: A shared input uses a floating reference
+- **WHEN** `devenv.yaml` names a shared input by branch or tag instead of a full commit revision
+- **THEN** the static Devenv version contract test fails
+
+#### Scenario: A shared input lock drifts from its pin
+- **WHEN** the locked revision of a shared input differs from the configured revision
 - **THEN** the static Devenv version contract test fails
 
 #### Scenario: A clean checkout evaluates the shell

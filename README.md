@@ -55,7 +55,7 @@ The rest of this README builds the Chelis compiler from a checkout.
 
 **Optional Devenv shell.** Devenv supplies the pinned Rust, Python, C, and contributor tools from the tracked shell inputs.
 
-The repository pins the Devenv module input to release `v2.2`.
+The repository pins the Devenv module input to release `v2.2`. `devenv.yaml` pins the shared `nixpkgs` and `rust-overlay` inputs to exact revisions, so `devenv update` cannot drift them. `scripts/check_nix_lock_parity.py` keeps them aligned with `flake.lock`.
 
 On macOS, the `gcc` and `g++` shims invoke the Nixpkgs clang wrapper from `pkgs.stdenv.cc`. They do not invoke host Apple clang.
 
@@ -98,7 +98,7 @@ Both native Nix package jobs use the reviewed portable Devenv action from `Cheli
 
 The action uses exact Nix and Devenv inputs. Its public Devenv cache is read-only and does not contain the custom cvc5 derivation. Each job therefore stores the prebuilt cvc5 toolchain closure in the GitHub Actions cache, keyed by its derivation name.
 
-The Linux job runs on every pull request and push to `main`. It reclaims unused preinstalled toolchain disk space first and bounds Nix to two concurrent builds.
+The Linux job runs on every code pull request and push to `main`. Docs-only pull requests skip it through the shared job-level detector; the skipped required context reports success. The job reclaims unused preinstalled toolchain disk space first and bounds Nix to two concurrent builds.
 
 The macOS job is a manual gate, and default CI does not run it. Dispatch it with `gh workflow run "Nix Packages" --ref <branch>`. The gate passes when the dispatched `Nix Packages (aarch64-darwin)` job completes with every check green.
 
@@ -166,6 +166,17 @@ nix run github:nix-community/crate2nix/0.15.0 -- \
 ```
 
 The repository check rejects `Cargo.nix` when its recorded input digest is stale.
+
+To bump the shared Nix pins, pick a `cachix/devenv-nixpkgs` revision and read its locked inner `NixOS/nixpkgs` revision. Set that inner revision in `flake.nix` and the outer revision in `devenv.yaml`. Keep the `rust-overlay` revision identical in both files.
+
+Then refresh both lock files and verify the result:
+
+```sh
+nix flake lock
+devenv update
+.venv/bin/python scripts/check_nix_lock_parity.py
+.venv/bin/python scripts/test_devenv_version.py
+```
 
 **Rust toolchain.** Install [rustup](https://rustup.rs) (the Rust toolchain
 installer) if you do not already have it:

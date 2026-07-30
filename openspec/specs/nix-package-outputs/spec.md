@@ -209,9 +209,9 @@ The repository MUST provide a parity checker with positive and negative tests. A
 - **THEN** the checker exits with a nonzero status and names the Rust overlay nodes
 
 ### Requirement: Native Nix checks protect every supported system
-Each supported system MUST define checks for package construction, package contents, executable behavior, app paths, SMT activation, and lock parity.
+Each supported system MUST define checks for package construction, package contents, executable behavior, launcher shell lint, app paths, SMT activation, and lock parity.
 
-CI MUST run the complete check set and the Nix flake contract suite on native `x86_64-linux` and `aarch64-darwin` builders. The `x86_64-linux` job MUST run on every pull request and push to `main`. The `aarch64-darwin` job MUST run the identical steps and MUST be a documented manual dispatch gate; default CI does not run it. A system MUST NOT count as supported from evaluation-only evidence.
+CI MUST run the complete check set and the Nix flake contract suite on native `x86_64-linux` and `aarch64-darwin` builders. The `x86_64-linux` job MUST run on every code pull request and push to `main`. A docs-only pull request MUST skip the `x86_64-linux` job through a job-level gate fed by the shared docs-only detector; the skipped required context reports success. The `aarch64-darwin` job MUST run the identical steps and MUST be a documented manual dispatch gate; default CI does not run it. A system MUST NOT count as supported from evaluation-only evidence.
 
 The supported-system list and the named native CI jobs MUST have exact parity. The repository script suite MUST fail when either list contains an unmatched system.
 
@@ -220,6 +220,14 @@ The authoritative completion oracle MUST be the two successful native CI check j
 #### Scenario: Linux checks pass
 - **WHEN** CI runs the complete flake check set on `x86_64-linux`
 - **THEN** every package and contract check exits with status 0
+
+#### Scenario: A docs-only pull request skips the Linux job
+- **WHEN** a pull request changes only documentation paths
+- **THEN** the shared detector reports docs-only and the `x86_64-linux` job skips with a successful context
+
+#### Scenario: The generated launcher fails shell lint
+- **WHEN** the built `chelisup` launcher fails `bash -n` or `shellcheck`
+- **THEN** the launcher lint check fails the native check set
 
 #### Scenario: macOS checks pass
 - **WHEN** a manually dispatched CI run executes the complete flake check set on `aarch64-darwin`

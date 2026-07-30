@@ -367,8 +367,11 @@ When a public surface has an implicit invariant, make it explicit and test it.
   runs on a bare machine *before* any chelis, cargo, or even Python exists, so Python is
   not an option — it is not guaranteed present either, which is the whole bootstrap
   problem. It MUST be minimal POSIX `sh`, `shellcheck`-clean, and covered by a test
-  (`sh -n` parse plus `shellcheck` when available). This is a single-purpose carve-out for
-  the one artifact that cannot be anything else; every other script remains Python.
+  (`sh -n` parse plus `shellcheck` when available). The generated Nix `chelisup`
+  launcher (`nix/packages.nix`) is the same kind of artifact: it runs with only the
+  package closure present, so it is shell by necessity, and the `chelisupLauncherLint`
+  flake check gates it with `bash -n` plus `shellcheck`. These carve-outs cover the
+  artifacts that cannot be anything else; every other script remains Python.
 - Existing `scripts/` directory uses Python; follow that convention.
 - **Use a managed Python**, not the system Python. Inside Devenv, use the activated
   environment at `.devenv/state/venv`. Outside Devenv, use `.venv/bin/python`.
@@ -667,7 +670,9 @@ and [`docs/book/src/reef.md`](docs/book/src/reef.md).
   staging root before it changes that root. After success, the Nix wrapper
   restores itself at `$CHELIS_HOME/bin/chelisup`. The generic Rust installer
   contains no Nix root path or cleanup logic. The installed Nix wrapper removes
-  all three roots after the real `self uninstall` command succeeds.
+  all three roots after the real `self uninstall` command succeeds. The
+  `chelisupLauncherLint` flake check gates the generated launcher with `bash -n`
+  plus `shellcheck`.
 - **Shim resolution order** (first match wins): `+<ver>` arg → `CHELIS_TOOLCHAIN`
   → nearest `chelis-toolchain` file → nearest `reef.toml` `compiler =` pin →
   recorded default. A resolved-but-not-installed version is a loud error naming

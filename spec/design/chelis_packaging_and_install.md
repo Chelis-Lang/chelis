@@ -278,6 +278,11 @@ the real installer and then removes the stable, staging, and partial roots.
 A direct real-binary copy has no Nix root management. Nix does not scan files
 outside the store, so garbage collection can remove its store dependencies.
 
+The launcher is generated shell: it runs where only the package closure exists,
+so Python is not available to it. The `chelisupLauncherLint` flake check gates
+the built launcher with `bash -n` plus `shellcheck`, mirroring the static gate
+on the bootstrap installer.
+
 ## 6. Layer 1 — binary distribution (chelis#468)
 
 Specified in full as Item 11 of [`reef_distribution.md`](reef_distribution.md).

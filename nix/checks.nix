@@ -225,6 +225,19 @@ let
     touch "$out"
   '';
 
+  # The generated launcher is the one shell program in the package
+  # outputs; it gets the same static gate the bootstrap script has.
+  chelisupLauncherLint =
+    pkgs.runCommand "chelisup-launcher-lint"
+      {
+        nativeBuildInputs = [ pkgs.shellcheck ];
+      }
+      ''
+        bash -n ${packages.chelisup}/bin/chelisup
+        shellcheck ${packages.chelisup}/bin/chelisup
+        touch "$out"
+      '';
+
   nixFormat =
     pkgs.runCommand "nix-format"
       {
@@ -233,6 +246,11 @@ let
       ''
         nixfmt --check \
           ${root}/devenv.nix \
+          ${root}/devenv/commands.nix \
+          ${root}/devenv/generated-files.nix \
+          ${root}/devenv/git-hooks.nix \
+          ${root}/devenv/smoke-tests.nix \
+          ${root}/devenv/toolchains.nix \
           ${root}/flake.nix \
           ${./checks.nix} \
           ${./contracts.nix} \
@@ -246,6 +264,7 @@ let
     appContract
     chelisShape
     chelisupBehavior
+    chelisupLauncherLint
     chelisupShape
     compilerBehavior
     crate2nixGraphSync
@@ -269,6 +288,7 @@ in
     appContract
     chelisShape
     chelisupBehavior
+    chelisupLauncherLint
     chelisupShape
     compilerBehavior
     crate2nixGraphSync

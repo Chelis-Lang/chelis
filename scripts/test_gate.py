@@ -47,6 +47,10 @@ DEVENV_SETUP_ACTION = (
     "73f017c4d3179dc313844e9d5f08d17a7879c824"
 )
 PORTABLE_DEVENV_SHELL = "devenv-ci bash --noprofile --norc -e -o pipefail {0}"
+DOCS_ONLY_GATE_IF = (
+    "if: ${{ !cancelled() && (needs.changes.result != 'success' "
+    "|| needs.changes.outputs.docs_only != 'true') }}"
+)
 WORKFLOWS_DIR = REPO_ROOT / ".github" / "workflows"
 
 
@@ -121,6 +125,26 @@ def _assert_native_devenv_recipe(workflow: str) -> None:
             raise AssertionError(
                 f"native Devenv recipe duplicates central setup marker {marker!r}"
             )
+
+
+def _assert_nix_docs_only_gate(workflow: str) -> None:
+    blocks = _workflow_job_blocks(workflow)
+    changes = blocks.get("changes", "")
+    if "scripts/ci_detect_docs_only.py" not in changes:
+        raise AssertionError(
+            "the Nix workflow must compute docs_only with the shared detector"
+        )
+    linux = blocks.get("nix-linux-x86-64", "")
+    if "needs: [changes]" not in linux or DOCS_ONLY_GATE_IF not in linux:
+        raise AssertionError(
+            "the Linux Nix job must skip docs-only pull requests via the "
+            "shared job-level gate"
+        )
+    darwin = blocks.get("nix-darwin-arm64", "")
+    if "needs.changes" in darwin:
+        raise AssertionError(
+            "the darwin Nix job must keep manual dispatch as its only gate"
+        )
 
 
 def _assert_darwin_manual_dispatch(workflow: str) -> None:
@@ -697,6 +721,33 @@ class NixPackagesWorkflowTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(AssertionError, "precede the runner verification"):
             _assert_native_devenv_recipe(mutated)
+
+    def test_linux_job_skips_docs_only_pull_requests(self):
+        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
+        _assert_nix_docs_only_gate(text)
+
+    def test_missing_docs_only_gate_fails_the_skip_lock(self):
+        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
+        mutated = text.replace(f"    {DOCS_ONLY_GATE_IF}\n", "", 1)
+        with self.assertRaisesRegex(AssertionError, "shared job-level gate"):
+            _assert_nix_docs_only_gate(mutated)
+
+    def test_missing_docs_only_detector_fails_the_skip_lock(self):
+        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
+        mutated = text.replace("scripts/ci_detect_docs_only.py", "omitted.py", 1)
+        with self.assertRaisesRegex(AssertionError, "shared detector"):
+            _assert_nix_docs_only_gate(mutated)
+
+    def test_docs_only_gate_on_the_darwin_job_fails_the_skip_lock(self):
+        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
+        mutated = text.replace(
+            "    if: github.event_name == 'workflow_dispatch'\n",
+            "    needs: [changes]\n"
+            f"    {DOCS_ONLY_GATE_IF}\n",
+            1,
+        )
+        with self.assertRaisesRegex(AssertionError, "manual dispatch as its only"):
+            _assert_nix_docs_only_gate(mutated)
 
     def test_darwin_job_runs_on_manual_dispatch_only(self):
         text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
