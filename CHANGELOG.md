@@ -4,6 +4,37 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.17.3] — 2026-07-30
+
+### Fixed
+
+- **`chelis test` now has a hard whole-suite deadline (chelis#927).**
+  The public command supervises Reef preparation, batch and file workers,
+  output collection, and finalization in a dedicated process group.
+  `--suite-timeout` defaults to 600 seconds and is independent of the
+  per-test `--timeout`; expiry terminates the suite and all descendants
+  without retrying through another execution mode. Plain output reports an
+  incomplete-suite failure. NDJSON retains completed test rows, replaces any
+  child-produced perfect summary, and ends with an explicit timeout record
+  plus `summary.incomplete:true`, so a wedged worker cannot leave CI hanging
+  or emit a false green. Flushed auto-batch rows and completed `--expect`
+  verdicts are retained on timeout, with a mode-correct incomplete summary.
+  Non-Unix targets fail closed before starting the suite because equivalent
+  descendant-cleanup guarantees are not yet implemented there. The public
+  command cannot be switched into worker mode through an inherited environment
+  variable; batch progress uses a dedicated temporary record file, while
+  ordinary stderr remains byte-preserving and separate from the protocol.
+  Captured-output forwarding is deadline-bounded under consumer backpressure,
+  and very large accepted timeout values no longer overflow `Instant`.
+  A zero-second suite deadline is rejected. The TERM grace period is contained
+  within the advertised deadline. On Unix the supervisor forks the suite
+  directly instead of exposing a hidden worker subcommand; an inherited
+  lifecycle pipe removes the progress file and kills the suite process group
+  if the public supervisor disappears. If the suite leader itself is killed,
+  the supervisor kills remaining descendants before collecting output and
+  emits an explicit incomplete-suite record instead of hanging on inherited
+  output descriptors or returning an empty runner error.
+
 ## [0.17.2] — 2026-07-30
 
 ### Added

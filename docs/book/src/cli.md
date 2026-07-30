@@ -160,7 +160,7 @@ itself lives outside `src/` and does not declare a top-level `module`.
 chelis test
 chelis test tests/
 chelis test tests/core.ch
-chelis test tests/ --filter pricing --timeout 10 --batch-mode auto
+chelis test tests/ --filter pricing --timeout 10 --suite-timeout 120 --batch-mode auto
 chelis test tests/ --json --batch-mode file --jobs 1
 ```
 
@@ -174,6 +174,34 @@ Use `--batch-mode file` to force per-file subprocess isolation while debugging.
 `--jobs auto` caps worker concurrency on file-worker paths; pass `--jobs 1` for
 serial file execution. Output remains stable in discovery order for both plain
 text and NDJSON.
+
+`--timeout` is a per-test budget (30 seconds by default).
+`--suite-timeout` is an independent bound around the complete command,
+including Reef/context preparation, workers, output collection, and
+finalization (600 seconds by default). On suite expiry, Chelis terminates the
+suite process group and exits `1`; it does not fall back to a second execution
+mode. The value must be at least one second, and the termination grace is
+inside the stated deadline. Plain output marks the suite incomplete. JSON output remains NDJSON,
+retains completed test rows and completed `--expect` verdicts, and ends with a
+`suite.status:"timeout"` record plus a mode-correct summary carrying
+`incomplete:true`. Whole-suite supervision currently requires Unix process
+groups (the supported Linux and macOS release targets); other targets fail
+closed before starting `chelis test`.
+
+The public `test` route cannot be converted into an unsupervised worker by an
+environment variable. On Unix the suite is forked directly, with no hidden
+suite-worker CLI route. A private lifecycle pipe removes progress state and
+kills the suite process group if the supervisor disappears. If the suite
+leader is killed, the public supervisor reaps its remaining process group
+before collecting output and reports the suite as incomplete. Internally,
+batch progress uses a supervisor-owned
+temporary record file; stderr is forwarded byte-for-byte and is never used as
+the progress protocol. Captured output is also forwarded within the
+whole-command deadline: a consumer that stops reading causes exit `1` instead
+of an unbounded write. The incomplete diagnostic uses a bounded one-second
+best-effort reporting grace. Stderr is delivered before a normal stdout
+summary, preventing a blocked diagnostic stream from leaving machine output
+that appears perfectly successful.
 
 ## Property Proof Loop
 
