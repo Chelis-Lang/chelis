@@ -15,9 +15,11 @@ Manual gate (needs network + gh auth, so it does not run in default CI):
 
 Success is exit 0 with the final line `CAPACITY CENSUS LIVENESS: PASS`.
 Run it at every release cut and in red-team passes over the numeric surface.
-Rows whose citation is the dated baseline tag (no issue reference) are
-exempt: they describe the pre-ratchet surface and retire with the
-chelis#893/chelis#894 payload work.
+Every sanctioned citation names at least one chelis#N reference (the Rust
+tripwire enforces this, maintainer-override included), so every row is
+liveness-bound: the seam rows cite chelis#893 and the plain baseline rows
+cite chelis#729, which means the entire baseline comes up for
+re-adjudication when the plan closes.
 """
 
 from __future__ import annotations

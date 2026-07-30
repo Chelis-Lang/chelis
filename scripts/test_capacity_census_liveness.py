@@ -29,7 +29,10 @@ class Adjudicate(unittest.TestCase):
         problems = adjudicate([row("chelis#893")], {893: "OPEN"})
         self.assertEqual(problems, [])
 
-    def test_baseline_only_citation_passes_without_lookup(self) -> None:
+    def test_refless_citation_is_not_liveness_checked(self) -> None:
+        # The pure verdict logic is lenient about ref-less citations; the
+        # Rust tripwire owns that rejection (CITATION NAMES NO ISSUE), so
+        # this documents the division of labor rather than an allowance.
         problems = adjudicate([row("baseline-2026-07-30")], {})
         self.assertEqual(problems, [])
 

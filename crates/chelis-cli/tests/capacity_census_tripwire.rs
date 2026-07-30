@@ -152,6 +152,16 @@ fn normalize_ws(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// True when the citation names at least one chelis issue (`chelis#N`), so
+/// the liveness gate (`scripts/capacity_census_liveness.py`) has purchase on
+/// every sanctioned citation - including `maintainer-override(...)`, which
+/// must name its issue per §C6.
+fn cites_a_chelis_issue(citation: &str) -> bool {
+    citation
+        .match_indices("chelis#")
+        .any(|(i, m)| citation[i + m.len()..].starts_with(|c: char| c.is_ascii_digit()))
+}
+
 /// Classification is informational (it shapes the failure message); the
 /// citation requirement applies to EVERY inventory change, so renaming a
 /// parameter to dodge a flag dodges nothing.
@@ -476,6 +486,13 @@ fn check_against_baseline(current: &[Row], baseline: &Baseline) -> Result<(), St
                  citation is NOT a path for flagged rows): [{}] {}",
                 row.kind, row.id
             ));
+        } else if !cites_a_chelis_issue(&row.citation) {
+            problems.push(format!(
+                "CITATION NAMES NO ISSUE (every sanctioned citation carries a \
+                 chelis#N reference so the liveness gate has purchase; prose \
+                 is not a citation): [{}] {}",
+                row.kind, row.id
+            ));
         }
     }
     let grandfathered = baseline
@@ -787,6 +804,43 @@ fn maintainer_override_is_the_human_exception() {
         rows: vec![row.clone()],
     };
     assert!(check_against_baseline(&[row], &baseline).is_ok());
+}
+
+/// Prose is not a citation: every sanctioned citation names a chelis
+/// issue so the liveness gate has purchase (PR #950 §C6: a valid
+/// citation "names an OPEN issue").
+#[test]
+fn prose_citation_without_issue_ref_fails() {
+    let row = Row {
+        kind: "header-export".to_string(),
+        id: "planted.h: void plain(chelis_string s);".to_string(),
+        flags: vec![],
+        citation: "reviewed and fine".to_string(),
+    };
+    let baseline = Baseline {
+        version: 1,
+        legs: serde_json::json!({}),
+        rows: vec![row.clone()],
+    };
+    let err = check_against_baseline(&[row], &baseline).unwrap_err();
+    assert!(err.contains("CITATION NAMES NO ISSUE"), "{err}");
+}
+
+/// A maintainer override must name its issue too (§C6: "naming its
+/// reason and issue"), or the liveness gate has nothing to hold it to.
+#[test]
+fn maintainer_override_without_issue_ref_fails() {
+    let row = flagged_row(
+        "planted.h: void staged(int out_dtype);",
+        "maintainer-override(because I said so)",
+    );
+    let baseline = Baseline {
+        version: 1,
+        legs: serde_json::json!({}),
+        rows: vec![row.clone()],
+    };
+    let err = check_against_baseline(&[row], &baseline).unwrap_err();
+    assert!(err.contains("CITATION NAMES NO ISSUE"), "{err}");
 }
 
 /// Unflagged rows keep the open-issue path (invariant 7's release
