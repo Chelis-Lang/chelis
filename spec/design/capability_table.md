@@ -139,31 +139,56 @@ same change set: signature, per-dtype semantics at [04-NUM-8]'s
 declared arithmetic widths, adjoint or a non-differentiability
 statement, and an accumulator rule where applicable. A doc comment is
 not an authority (`AGENTS.md` §Numbered Specs Decide; the ops of
-chelis#898 are the standing backlog of exactly this omission). At
-Phase 4 the requirement becomes structural: the conformance suite's
-totality leg (`dtype_semantics.md` §C6 chokepoint 3) fails the build
-for any op absent from its FAMILY's registry - Table A for language
-builtins (whose checker acceptance is derived from it), the capacity
-census for runtime exports, the desugared-AST leg for stdlib defs, the
-rustdoc-JSON leg for bindings. Table A's (builtin, surface, dtype) key
-deliberately does NOT stretch to the other families: runtime exports
-and PyO3 functions have no `BuiltinId`, and container/boundary
-callables have no `Scalar|Tensor` surface - the `to_string` x
-Tensor/List seed row above already strains that axis (PR #950 red team
-P1-2; open question 5). Numeric-ness is signature-derived: a callable
-whose signature mentions a numeric dtype requires a row in its
-family's registry, and the non-numeric classification is available
-only for dtype-free surface, so an op cannot classify itself out of
-the requirement.
+chelis#898 are the standing backlog of exactly this omission).
 
-Registration decides LANGUAGE legality only - what is legal in Surf,
+The requirement is structural per family. Table A remains the
+language-builtin registry (and checker acceptance is derived from it at
+Phase 4). Runtime exports and exported stdlib defs use the §C6
+operation-semantic registry delivered with the capacity tripwire:
+each structurally discovered numeric callable's exact canonical
+identity is a key whose value is one exact `[05-OP-N]` authority. The
+registry validator requires chapter `05`, group `OP`, and verbatim atom
+existence as a normative line beginning `> **[05-OP-N]**`; it does not
+accept a free-text `spec/05` substring, a cross-reference,
+`[05-OBS-1]`, or an absent `[05-OP-999]`. Existing numeric-callable
+rows at the 2026-07-30 baseline are explicitly grandfathered because
+the OP atoms do not yet exist. A NEW runtime or exported stdlib
+numeric callable authors a new `[05-OP-N]` normative atom in spec/05
+and adds its exact registry mapping in the same change set. The
+deferred PyO3 leg must deliver the same identity-to-authority shape
+before Phase 1 entry. Table A's (builtin, surface, dtype) key
+deliberately does NOT stretch to those families: runtime exports and
+PyO3 functions have no `BuiltinId`, and container/boundary callables
+have no `Scalar|Tensor` surface - the `to_string` x Tensor/List seed
+row above already strains that axis (PR #950 red team P1-2; open
+question 5).
+
+Numeric-ness is signature-derived: a callable whose signature mentions
+a numeric dtype requires a registry entry, and the non-numeric
+classification is available only for genuinely dtype-free surface.
+Positive controls bind a discovered callable to the exact atom that
+decides it. Negative mutation controls add one runtime export and one
+exported stdlib numeric def with no entry, bind a callable to a missing
+OP atom, and bind it to a non-OP atom; each must fail. Tooling validates
+the structured authority kind and existence; it does not infer whether
+the human-selected OP atom is semantically relevant, which remains a
+normative review check. Review cannot make a mismatched atom
+authoritative: if no OP atom's normative text governs the callable, the
+numbered spec must gain the decision before the mapping can land.
+Changing a callable's canonical identity also invalidates its old
+registration. These controls are permanent parts of the §C6 tripwire,
+not review instructions.
+
+Table A registration decides LANGUAGE legality - what is legal in Surf,
 Deep, and the RISC DAG, target-independently, reported by the checker.
-Per-backend executability is Table B's separate decision, reported at
-build through [#730]'s `Unsupported` channel where the target is
-known: a language-legal op a backend cannot run is a CAPABILITY
-rejection, never a checker type error (§Derivations owns this split;
-restated here because a new-op author is the person most tempted to
-collapse it).
+The other family registries record which existing normative decision
+controls each discovered callable; they do not create language
+semantics. Per-backend executability is Table B's separate decision,
+reported at build through [#730]'s `Unsupported` channel where the
+target is known: a language-legal op a backend cannot run is a
+CAPABILITY rejection, never a checker type error (§Derivations owns
+this split; restated here because a new-op author is the person most
+tempted to collapse it).
 
 `round_to` specifically: widening an f32 operand to f64, rounding
 decimally, and re-narrowing is computing at other than the declared

@@ -120,11 +120,14 @@ at) is hard-gated on byte-identical rendering.
 **Wave 3 - the semantics refactor.** [#729] Phases 1-3 in order (the
 module + storage decision; the kernel split + prove; backend adoption),
 validated by everything Waves 0-2 built. Entry gate: the [#729] §C6
-capacity census/tripwire (PR #956) lands BEFORE Phase 1 entry, and
-Phase 1 entry ALSO requires the census's wire and binding legs green
-(the baseline is explicitly partial), and Phase 1 re-derives its §C3
-layer set from the completed census - a hard edge recorded here (PR
-#950 red teams P2-4 and re-P1) in lieu of a DAG node.
+covered-family capacity census/tripwire (PR #956) lands BEFORE Phase 1
+entry. The baseline is explicitly partial: Phase 1 entry ALSO requires
+the typed wire-schema and PyO3 binding leg commands in [#729] §C6 to be
+implemented and green (`capacity_census_wire` and
+`capacity_census_bindings`, respectively), and Phase 1 re-derives its
+§C3 layer set from that completed census. These are explicit thick-red
+DAG edges below, not editable coverage metadata (PR #950 red teams P2-4
+and re-P1).
 
 **Wave 4 - the permanent guards.** [#729] Phase 4 delivers the capability
 table per [`capability_table.md`](capability_table.md); [#730] Phase 3 (gates become UX) and [#733]
@@ -156,9 +159,10 @@ plan set, [#719]'s fix precedes [#732] Phase 3's `sqrt = 0` tolerance
 row (SATISFIED 2026-07-17: PR #760 merged, [#719] closed - the row may
 be authored when Phase 3 arrives); downstream of the set, [#754]'s
 ecosystem gate is hard-gated on [#732] Phase 2's byte-identical
-rendering. Not drawn (for legibility): OpenSpec remains [#733]'s planning
-workflow while a pinned Buoy shell and one-way Chelis adapter provide
-enforcement.
+rendering. [#729] Phase 1 is separately hard-gated on PR #956's
+covered-family tripwire and both typed deferred-leg oracles. Not drawn
+(for legibility): OpenSpec remains [#733]'s planning workflow while a
+pinned Buoy shell and one-way Chelis adapter provide enforcement.
 The graph is acyclic. Node colors
 are the waves above: grey = Wave 0, green = Wave 1, blue = Wave 2, orange =
 Wave 3, purple = Wave 4 (so [#733]'s advisory Buoy pilot, blue, may ride Wave
@@ -215,11 +219,19 @@ flowchart TB
   subgraph S729["#729 dtype semantics"]
     direction TB
     n729p0["P0 · domain checker + #687 oracle lanes (LANDED)"]:::w0
+    n729c6["C6 · covered-family capacity tripwire<br/>(PR #956)"]:::w3
+    n729c6wire["C6 · wire-schema enumerator<br/>+ mutation oracle"]:::w3
+    n729c6binding["C6 · PyO3 enumerator<br/>+ mutation oracle"]:::w3
     n729p1["P1 · semantics module + storage decision<br/>+ eval adoption"]:::w3
     n729p2["P2 · kernel split + traps + prove"]:::w3
     n729p3["P3 · C backend adoption<br/>+ generated observation"]:::w3
     n729p4["P4 · capability table"]:::w4
-    n729p0 --> n729p1 --> n729p2 --> n729p3 --> n729p4
+    n729p0 --> n729c6
+    n729c6 ==>|"HARD: covered-family oracle"| n729c6wire
+    n729c6 ==>|"HARD: covered-family oracle"| n729c6binding
+    n729c6wire ==>|"HARD: wire leg green"| n729p1
+    n729c6binding ==>|"HARD: binding leg green"| n729p1
+    n729p1 --> n729p2 --> n729p3 --> n729p4
   end
 
   n719["#719 sqrt fix (FIXED: PR #760)"]:::ext
@@ -246,8 +258,8 @@ flowchart TB
   style S732 fill:#FFFFFF,stroke:#C3CCD3
   style S729 fill:#FFFFFF,stroke:#C3CCD3
   linkStyle default stroke-width:2.5px
-  linkStyle 16,17 stroke:#9AA7B0,color:#7A8894,stroke-width:2.5px
-  linkStyle 23,26 stroke:#B3362B,stroke-width:5px,color:#B3362B
+  linkStyle 21,22 stroke:#9AA7B0,color:#7A8894,stroke-width:2.5px
+  linkStyle 13,14,15,16,28,31 stroke:#B3362B,stroke-width:5px,color:#B3362B
 ```
 
 ## Release slicing: where the version cuts fall

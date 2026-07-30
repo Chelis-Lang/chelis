@@ -138,21 +138,36 @@ Two rules follow, and both are cheap:
 
 ### Numeric Surface Discipline
 
-The numeric remediation's surface ratchet (`spec/design/dtype_semantics.md` §C6)
-binds every change that touches numeric data, whether or not you have read that
-document:
+The numeric remediation's covered-family surface ratchet and typed entry
+edges (`spec/design/dtype_semantics.md` §C6) bind every change that touches
+numeric data, whether or not you have read that document:
 
 - **No new numeric channel outside the tagged carrier.** A public ADT variant, wire
   field, exported C signature, or binding parameter that carries numeric values as
   bare `f64`/`double`, or that takes a raw integer dtype id, is a review-blocking
-  finding. The capacity census is the inventory: an UNFLAGGED addition cites an OPEN
-  issue; a FLAGGED capacity seam has NO citation path at all - redesign onto the
-  tagged carrier, remove it, or obtain a maintainer override in review. Opening a
-  fresh issue to cite is not authorization; new capacity debt does not land.
-- **A new numeric op requires its `spec/05-risc-primitives.md` entry in the same
-  change set** (signature, per-dtype semantics at [04-NUM-8]'s declared widths,
-  adjoint or non-differentiability statement, accumulator rule where applicable). A
-  Rust doc comment is not an authority.
+  finding. On every covered family the capacity census freezes both the canonical
+  surface identity and its enforcement-relevant derived classification: an UNFLAGGED
+  addition cites an OPEN issue; a FLAGGED capacity seam has NO citation path at all -
+  redesign onto the tagged carrier, remove it, or obtain a maintainer override in
+  review. Opening a fresh issue to cite is not authorization; new capacity debt does
+  not land. The pre-Phase-1 baseline is deliberately partial: wire-schema and PyO3
+  coverage become mandatory only through their named executable entry gates in §C6,
+  and Phase 1 may not start before both are green. Coverage state comes from the
+  test's typed `coverage_manifest()` (artifact, enumerator, command, expected
+  success, and mutations), never an editable field in the baseline JSON.
+- **A new numeric op requires an exact semantic registration in the same change
+  set.** The owning family registry binds the callable's exact canonical identity to
+  one verbatim, existing `[05-OP-N]` authority in
+  `spec/05-risc-primitives.md`. A new callable authors that atom and its mapping
+  together. A chapter substring, `[05-OBS-1]`, an absent atom, or a Rust doc comment
+  is not authority; existence means a normative definition line beginning
+  `> **[05-OP-N]**`, not a cross-reference elsewhere. The atom states the signature,
+  per-dtype semantics at [04-NUM-8]'s declared widths, adjoint or
+  non-differentiability rule, and accumulator rule where applicable. Tooling validates
+  the atom group and existence; reviewers validate that the selected atom's normative
+  text actually governs the callable. Review does not confer semantic authority: if
+  no existing atom governs it, amend the numbered spec first and register that new
+  atom.
 - **Never silently narrow at ingress.** Choosing a lossy dtype for ingested data
   (int64 IDs into an f32 tensor) is a decision: use the named lossy form (the
   chelis#759 pattern) or the exact dtype, never a quiet convenience cast. Better
@@ -163,6 +178,10 @@ document:
 - **A new surface KIND** (a new serialization format, IPC channel, or export
   mechanism that can carry numbers) extends the §C6 enumerators in the same change
   set, or does not land.
+- **Published C ABI is configuration-invariant.** Public declarations may not vary
+  by preprocessor feature/context. The §C6 header leg enforces that prohibition and
+  compares toolchain-stable canonical declaration identities, never a
+  preprocessor's whitespace or pretty-print spelling.
 - The census, tripwire, and oracle files are guard artifacts: editing one to make
   your change pass is never the fix. The failure message names the sanctioned
   actions; take one of those.

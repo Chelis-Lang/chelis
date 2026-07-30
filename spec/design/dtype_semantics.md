@@ -1,6 +1,8 @@
 # Grounded Dtype Semantics
 
-**Status:** Design proposal, pre-implementation. Tracking issue: [#729].
+**Status:** Active phased plan. Phase 0 has landed; the §C6 covered-family
+tripwire is implemented in PR #956 pending merge; Phases 1-4 have not
+started. Tracking issue: [#729].
 **Owning specs:** `spec/04-type-system.md` (gains an authored overflow/rounding
 section, today silent), `spec/05-risc-primitives.md` (op result semantics),
 and the audit record in `docs/investigations/numeric_audit_next_sweeps.md` /
@@ -412,7 +414,19 @@ dyn dispatch; `cargo test --workspace` stays inside the ~60s inner-loop
 budget; the conformance matrix's compile+run cells live in the per-crate
 integration tier, not the workspace loop.
 
-## C6. The surface-growth ratchet (added 2026-07-30)
+## C6. The covered-family capacity ratchet and Phase 1 entry edges (added 2026-07-30)
+
+**Current enforcement status.** The PR #956 change set implements the
+structurally enforced successor for the header and stdlib families:
+canonical C declaration identity, matched-row metadata freeze, stdlib
+ADT-shape identity, runtime/stdlib numeric-callable authority
+registration, public-header context invariance, and issue-kind-aware
+liveness are executable tripwires. These checks are not active on main
+until that PR lands. The checked-in baseline is still explicitly
+PARTIAL: wire-schema fields and PyO3 signatures are deferred typed legs
+whose named commands below are hard Phase 1 entry edges. No sentence in
+this section upgrades those legs to covered merely because metadata says
+so.
 
 §C1-§C5 make the EXISTING numeric surface correct and make
 supported-cell semantics unavoidable at op-result construction. The
@@ -454,22 +468,30 @@ hand-maintained list (hand lists are how `HOST_ONLY_BUILTINS` rotted,
    REGISTRIES PER FAMILY, each exhaustive over its own enumeration:
    language builtins in Table A, with checker acceptance DERIVED from
    it at Phase 4 so an unregistered builtin is `UnknownForm` by
-   construction; runtime exports in the capacity census itself
-   (deliverable 1) - for EXISTENCE and capacity shape; the SEMANTIC
-   decision layer for runtime callables is the capability table's
-   Phase 4 B-cells, and until then the census's structural
-   `numeric-op` classification (fixed-width numeric types in the
-   resolved signature) binds every NEW numeric export to cite its
-   spec/05 entry in the same change set - a hook, not the registry
-   (the re-red-team's `chelis_abs_i64` mutation is the standing test;
-   known residual, recorded rather than implied away: the
-   plain-baseline citation string is copyable onto a new row to dodge
-   the hook - visible in diff, liveness-bound, retired when Phase 4's
-   table replaces the hook);
-   prelude/stdlib defs via the desugared-AST leg; binding callables
-   via the rustdoc-JSON leg. An op registered in no family's registry
-   is a build failure, not a doc comment (`capability_table.md`
-   §New numeric ops carries the interim rule).
+   construction; runtime exports and exported prelude/stdlib defs in
+   deliverable 1's structured operation-semantic registry; binding
+   callables in the same registry shape once the rustdoc-JSON leg
+   lands. Each non-Table-A entry binds the callable's exact canonical
+   identity to one verbatim `[05-OP-N]` authority. The registry
+   validates chapter `05`, group `OP`, and a normative definition line
+   beginning `> **[05-OP-N]**`; a free-text chapter substring or
+   cross-reference, a missing `[05-OP-999]`, or an observation atom such
+   as `[05-OBS-1]` is not semantic registration. Tooling does not
+   infer whether the selected existing OP atom is semantically relevant;
+   review verifies that its normative text already governs the callable
+   but cannot make a mismatched atom authoritative. If no atom governs
+   the callable, the numbered spec gains the decision first. Existing
+   numeric-callable rows at the initial baseline are grandfathered.
+   Every NEW runtime or exported stdlib numeric callable authors its new
+   `[05-OP-N]` atom and exact mapping in the same change set. The
+   implementation record is `SemanticRegistration { callable, atom }` in
+   `SEMANTIC_REGISTRATIONS`; `callable` is exactly
+   `[<kind>] <canonical id>`, so family identity is part of the key.
+   This registration is deliberately separate from the capacity row's issue citation: the
+   citation owns liveness, while the structured authority binding owns
+   meaning. An operation registered in no family's registry is a build
+   failure, not a doc comment (`capability_table.md` §New numeric ops
+   carries the interim authoring rule).
 
    **Language legality and backend capability stay decoupled, here as
    everywhere** (the standing Table A / Table B split,
@@ -486,7 +508,8 @@ hand-maintained list (hand lists are how `HOST_ONLY_BUILTINS` rotted,
    collapse a backend gap into language illegality.
 
    Numeric-ness is STRUCTURAL, never declared: any callable whose
-   signature mentions a numeric dtype requires a row, and the
+   canonical signature mentions a numeric dtype requires a row and an
+   authority binding, and the
    non-numeric classification exists only for genuinely dtype-free
    surface - so the cheapest evasion (an op classifying itself
    non-numeric) is not representable. Wherever a consumer can be
@@ -510,9 +533,9 @@ cannot exist (PR #950 red team P1-3):
 | runtime tensor data (`chelis_tensor.data`) | sealed typed access path | chelis#893 - a PEER class OUTSIDE [#729], unsequenced by the waves; a hard edge, never an assumption | types |
 | execution wire schema | per-dtype tagged payload | [#729] Phase 1 (§C3) | types |
 | language ops | checker acceptance derived from Table A | [#729] Phase 4 | derivation |
-| published C signatures | `RuntimeDType` fragment regenerated byte-for-byte today ([#730] §C4.3); FULL header generation is in NO phase contract and claiming it requires a B1-protocol amendment to Phase 3 | fragment: [#729] Phase 3; full: open question | regeneration (partial) |
-| prelude / stdlib value ADTs | census + review-routing, PERMANENTLY - a numeric field in an ADT is legal Surf, so no type seal can exist for this family | this section | census |
-| binding (PyO3) signatures | rustdoc-JSON registry + mutation case | deliverable 1's deferred leg | census/registry |
+| published C signatures | tokenized canonical declaration inventory, frozen derived classification, and a mechanically enforced ban on context-varying public ABI; this detects and blocks drift but does not generate the whole header | deliverable 1; the `RuntimeDType` fragment remains [#729] Phase 3 | census/tripwire |
+| prelude / stdlib value ADTs | permanent census whose identity preserves type, variant, and numeric field shape; a numeric field is legal Surf, so no type seal can exist for this family | deliverable 1 | census/tripwire |
+| binding (PyO3) signatures | rustdoc-JSON registry + typed raw-dtype mutation oracle | the named pre-Phase-1 binding leg below | census/registry (deferred until its hard-edge command is green) |
 
 [#729] can close Phase 4 while chelis#893 remains open. Any
 C6-complete claim at the [#729] close is therefore scoped to the
@@ -522,77 +545,137 @@ absorbed silently.
 
 Deliverables, with phase homes:
 
-1. **Now, pre-Phase-1: the capacity census + tripwire.** A checked-in
-   inventory of (a) exported signatures in the published runtime
-   headers, (b) numeric-typed fields in the wire schema, (c) numeric
-   variants in prelude value ADTs, (d) raw-dtype-integer parameters
-   anywhere on the public surface - GENERATED by parsing the actual
-   artifacts and diffed in CI (the `reef conform` MANIFEST pattern
-   pointed at the numeric surface). An addition passes only per the
-   citation rules in the acceptance requirements below; the
-   payload-work citation is chelis#893, an ISSUE - never PR #894,
-   which the liveness leg has no purchase on (red team P1-1). This
-   guard would have caught the sweep's three surface instances
-   mechanically at PR time. Implemented by PR #956:
-   `cargo nextest run -p chelis-cli --test capacity_census_tripwire`
-   is the authoritative command (regeneration: the same command with
-   `CHELIS_CAPACITY_CENSUS_WRITE=1`); the liveness leg is
-   `.venv/bin/python scripts/capacity_census_liveness.py`, success =
+1. **Now, pre-Phase-1: the capacity census + tripwire.** PR #956
+   checks the covered families generated from actual artifacts:
+   published-header declarations and struct layouts, stdlib ADT
+   numeric carrier shapes, and exported runtime/stdlib numeric
+   callables. The header legs use
+   `preprocessed_headers -> header_rows`; the stdlib legs use exactly
+   `stdlib_rows -> scan_deftypes + scan_exported_numeric_defs`.
+   Its leg manifest is a typed executable contract, not editable
+   `covered` prose; wire-schema fields and PyO3 signatures remain named
+   deferred legs until their separate entry commands below are
+   implemented and green. The payload-work citation is chelis#893, an
+   ISSUE - never PR #894. Implemented command:
+   `cargo nextest run -p chelis-cli --test capacity_census_tripwire --no-fail-fast`
+   is the authoritative covered-family oracle (regeneration: the same
+   command with `CHELIS_CAPACITY_CENSUS_WRITE=1`). The liveness command
+   is `.venv/bin/python scripts/capacity_census_liveness.py`; success is
    exit 0 with final line `CAPACITY CENSUS LIVENESS: PASS`, run at
    release cuts and red-team passes.
-   Acceptance requirements, from the 2026-07-30 adversarial pass -
-   each closes a measured or predicted evasion, and together they
-   implement the design criterion stated under Scope honesty below:
-   - **Enumerate compiled artifacts, never source text**: the
-     preprocessed header (transitive `#include`s included), the
-     desugared prelude AST, and - for the deferred Rust/PyO3 binding
-     leg - rustdoc JSON or a typed registration macro. `cargo
-     metadata` carries package and target metadata, NOT item
-     signatures (the PR #950 red team's executed probe), so it serves
-     ONLY chokepoint 5's oracle build-set derivation and is never a
-     signature census. A macro-generated export, a typedef-hidden
-     `int`, or an expansion-built ADT must be visible; text-level
-     scanning is evadable by construction. The header leg runs the
-     REAL preprocessor (`cc -E`, linemarker-attributed to the
-     published headers; a missing compiler fails LOUDLY, since a skip
-     would be an evasion channel) and resolves typedef spellings
-     before classifying - the re-red-team's executed macro and
-     typedef mutations are standing negative tests.
+
+   `coverage_manifest()` in
+   `crates/chelis-cli/tests/capacity_census_tripwire.rs` is the fixed
+   executable coverage contract. Its typed `CoverageManifest` records
+   `covered: Vec<CoveredLeg>` and `deferred: Vec<DeferredLeg>`; both leg
+   types carry `leg`, `artifact`, `enumerator`, `command`,
+   `expected_success`, and `mutations`, and a deferred leg additionally
+   carries `owner`. `Baseline { version, legs: CoverageManifest, rows }`
+   is version 2, and its serialized `legs` value must equal the
+   executable manifest exactly. Editing
+   `spec/design/capacity_census.json` therefore cannot promote a
+   deferred leg. The two Phase 1 entry commitments are:
+
+   | typed leg | owner | artifact | required enumerator | required command and expected success | standing mutations |
+   |---|---|---|---|---|---|
+   | `wire-schema-numeric-fields` | `chelis#729 Phase 1 entry hard edge` | `crates/chelis-compiler-api/src/schema.rs public serde/JsonSchema graph` | `PLANNED: typed public wire-schema numeric-field enumerator` | `PLANNED: cargo nextest run -p chelis-compiler-api --test capacity_census_wire`; `PLANNED: exact schema rows match a reviewed baseline` | `PLANNED: add/remove public f64 serde/JsonSchema field`; `CURRENT DEFERRED PROBE: ReviewerWireNumericProbe leaves this census unchanged` |
+   | `binding-raw-dtype-params` | `chelis#729 Phase 1 entry hard edge` | `crates/chelis-python/src/lib.rs registered PyO3 callables` | `PLANNED: rustdoc-JSON PyO3 callable-signature enumerator` | `PLANNED: cargo nextest run -p chelis-python --test capacity_census_bindings`; `PLANNED: exact binding rows match a reviewed baseline` | `PLANNED: add/remove registered #[pyfunction] dtype: i32 parameter`; `CURRENT DEFERRED PROBE: reviewer_raw_dtype_probe leaves this census unchanged` |
+
+   The `PLANNED:` strings are deliberately non-success states. Before
+   Phase 1, each owning change replaces every one with a live enumerator,
+   executable command, exact success condition, and mutation test in
+   `coverage_manifest()`; runs that command green; and updates this table
+   in the same change set. Merely deleting `PLANNED:` or moving a record
+   between vectors does not satisfy the edge.
+
+   Acceptance requirements, from the 2026-07-30 adversarial passes:
+
+   - **C declaration identity is canonical, not pretty-print text.**
+     The real preprocessor supplies the transitive published-header
+     artifact, including macro expansion; the census then tokenizes
+     declarations into a punctuation/whitespace-independent canonical
+     identity. A missing compiler fails loudly. Typedefs are resolved
+     for classification, while the canonical declaration key remains
+     stable across supported toolchains. The standing
+     `c_identity_is_token_canonical_across_preprocessor_whitespace`
+     control feeds the observed Apple-clang and Linux spellings through
+     `canonical_c_tokens` and requires identical rows; the hosted
+     toolchain lanes then compare one canonical baseline. The
+     Apple-clang-versus-Linux spacing difference that failed PR #956's
+     first hosted oracle is the motivating case. Adding a second
+     observed spelling to the baseline is not a fix.
+   - **Published ABI has one preprocessing context.** Public
+     declarations may not vary under feature macros or include-root
+     context. `assert_context_invariant_headers` mechanically rejects conditional
+     declaration regions and multiple expansions of one public header
+     that produce different canonical inventories. This is the chosen
+     alternative to a supported configuration matrix: first-expansion
+     wins is forbidden, and a future decision to permit
+     configuration-varying ABI requires a B1 amendment defining
+     context identities and inventorying the union.
+   - **Matched rows freeze enforcement metadata.** Equality is not
+     merely `(kind, id)`: the tripwire compares the complete
+     enforcement-relevant derived classification for every matched
+     row. A typedef target changing from an exact integer to `double`
+     must fail as classification drift even when the declaration's
+     surface spelling and key are unchanged. Positive controls keep
+     exact-width types unflagged; negative controls cover drift into
+     `float-carrier`, `raw-dtype-int`, and `numeric-op`
+     (`matched_row_float_carrier_metadata_change_fails` and
+     `matched_row_typedef_int64_to_double_metadata_change_fails`).
+   - **Stdlib carrier identity is shape-complete.** A numeric ADT row
+     preserves its public type, variant, and field position/type shape,
+     including multiplicity. Adding a second same-dtype variant or a
+     numeric field to an existing variant changes the identity and
+     fails. Collapsing a type to the SET of dtypes it mentions is not a
+     permanent carrier census.
+   - **Operation meaning is a structured exact binding.** Runtime
+     exports and exported stdlib numeric defs are exhaustively
+     discovered and keyed by exact canonical callable identity. Their
+     separate semantic registry names one exact `[05-OP-N]` atom and
+     validates its chapter/group and normative `> **[05-OP-N]**`
+     definition. Initial numeric-callable
+     rows are grandfathered; a new callable authors a new OP atom and
+     mapping together. Positive controls bind known callables to their
+     decisions.
+     Negative mutations add an unregistered runtime export and stdlib
+     `export def`, name absent `[05-OP-999]`, and substitute
+     `[05-OBS-1]`; all fail. An issue citation or a bare chapter
+     substring is never semantic authority. The tool does not infer
+     semantic relevance within the OP group; review verifies the
+     numbered-spec decision but cannot create it.
    - **A new row cannot self-bless, and a new SEAM cannot be cited
-     into existence at all** (red team P1-1: an open-issue citation
-     path for capacity rows would make the known-red set monotonically
-     growable - a debt ledger wearing a ratchet's name). The generator
-     emits `citation: TODO` and CI fails on TODO. For an UNFLAGGED row
-     a valid citation names an OPEN issue (invariant 7's release
-     policy governs the addition). For a FLAGGED capacity row there is
-     NO issue-citation path: the grandfathered 2026-07-30 seam set is
-     frozen - exact citation string, COUNT, and row-IDENTITY set locked
-     in the test, so removing one seam cannot relocate its citation
-     onto a brand-new one (the re-red-team's executed relocation
-     mutation is a standing test) - and
-     the only sanctioned outcomes for a new flagged row are
-     redesigning onto the tagged carrier, removing the surface, or a
-     `maintainer-override(...)` citation naming its reason and issue,
-     a marker the teaching message assigns to HUMAN review and the
-     review-routing on this file enforces; opening a fresh issue is
-     not authorization to grow the seam set.
-   - **Rows carry the known-red liveness leg** (the [#732] Phase 2
-     oracle's pattern): a row citing a closed issue FAILS, forcing
-     re-adjudication instead of permanent grandfathering - a wrongly
-     admitted row does not become blessed by surviving.
-   - **Failure messages teach**: the rule, the sanctioned actions, and
+     into existence at all.** Regeneration emits `citation: TODO` and
+     CI fails on TODO. An UNFLAGGED row names an OPEN issue (invariant
+     7 governs the release). A FLAGGED capacity row has NO
+     issue-citation path: the grandfathered 2026-07-30 seam set is
+     frozen by exact citation, count, row identity, and derived
+     classification. Removing one seam cannot relocate its citation to
+     a new row. The only sanctioned outcomes are redesign onto the
+     tagged carrier, removal, or
+     `maintainer-override(<reason>, chelis#N)`, which is assigned to
+     human review; opening an issue is not authorization.
+   - **Liveness is issue-typed.** Every sanctioned `chelis#N`
+     reference must exist, must be an ISSUE rather than a pull request,
+     and must be OPEN. A closed, missing, or PR reference fails and
+     forces re-adjudication. `capacity_census_liveness.py` represents
+     the result as `IssueRecord { kind: IssueKind, state: IssueState }`;
+     `fetch_issue` calls
+     `gh api repos/Chelis-Lang/chelis/issues/N` and treats the REST
+     payload's `pull_request` field as the wrong object kind. The unit
+     controls include an open issue, closed issue, missing issue, and
+     open PR.
+   - **Failure messages teach** the rule, the sanctioned actions, and
      the §C6 pointer. For a context-poor agent the error text is the
      only documentation that provably gets read; the cheapest passing
      action must be visible IN the message and must be the wanted one.
    - **The census and tripwire files are review-ROUTED, stated at the
-     enforcement actually configured** (re-red-team probe:
-     `require_code_owner_reviews` is OFF on main, with named bypass
-     allowances): CODEOWNERS auto-requests the human owner but does
-     not BLOCK. Enabling the ruleset's code-owner toggle for the guard
-     paths is a flagged repo-policy decision; until then the
-     structural guard against editing-the-guard is the in-test
-     identity/count freeze plus ordinary required review, and this
-     bullet claims no more than that.
+     enforcement actually configured.** CODEOWNERS auto-requests the
+     human owner but does not block (`require_code_owner_reviews` is
+     off and bypasses exist). Enabling the code-owner toggle is a
+     separate repository-policy decision. The structural enforcement
+     here is the executable identity/metadata/registry freeze plus the
+     ordinary required review; this document claims no more.
 2. **Phase 1**: the census re-derivation defines §C3's atomic set (the
    §C3 amendment above); the tripwire baseline regenerates in the same
    change set.
@@ -607,10 +690,14 @@ Deliverables, with phase homes:
 4. **Phase 3**: the `RuntimeDType` header FRAGMENT is already
    generated with a byte-for-byte regeneration test ([#730] §C4.3);
    the census asserts the fragment-owned rows against regeneration
-   rather than diff. FULL header generation - which would make a
-   hand-added export unwritable - is in NO phase contract today;
-   adopting it is a B1-protocol amendment to Phase 3, recorded as an
-   open question rather than assumed (red team P1-3).
+   rather than diff. The rest of the public header is structurally
+   guarded by canonical inventory, metadata freeze, semantic
+   registration, and the no-context-variance rule; it is NOT generated,
+   and a hand-added export remains representable but cannot pass the
+   tripwire without its sanctioned disposition. FULL header generation
+   is in no phase contract today. Adopting it would be a stronger
+   B1-protocol amendment to Phase 3, not a prerequisite silently inferred
+   from the standing census (red team P1-3).
 5. **Phase 4**: the totality leg over the reachable surface, plus the
    table's mandatory atom citation, make every new numeric op force
    spec authorship - the authoring-forcing function generalized from
@@ -620,21 +707,29 @@ Deliverables, with phase homes:
    escape in the sweep is the motivating instance ([#730] §C6 owns the
    oracle; this row records the derivation rule).
 
-Scope honesty, sharpened by the 2026-07-30 adversarial pass. The END
-STATE's guarantees are types and build failures and survive adversarial
-review on their own; the INTERIM census is a visibility mechanism whose
-strength is review attention. Its design criterion is therefore
-CHEAPEST-PASSING-ACTION: agents do not evade guards, they satisfy them
-literally, so an agent blocked by the tripwire must find that the
-sanctioned action (the split citation rule - and for a capacity seam
-the sanctioned action is redesign or removal, never a citation -
-extend the enumerator, author the spec entry) is cheaper than any
-evasion - that is what the TODO-citation, seam-freeze, liveness,
-message-pedagogy, and review-routing requirements above exist to
-arrange. The doctrine also lives where
-context-poor agents actually read: `AGENTS.md` §Numeric Surface
-Discipline carries the binding rules, and this section is its
-elaboration.
+Scope honesty, sharpened by the 2026-07-30 adversarial passes. On the
+families PR #956 covers, additions, removals, classification drift,
+missing semantic registrations, ADT-shape growth, and context-varying
+public ABI are executable build failures. Those mechanisms are
+structural guards, not review-only visibility, but they do not make the
+underlying source forms unrepresentable: a contributor can still write
+a C export or stdlib variant, and the tripwire then blocks it until the
+sanctioned disposition is present. The registry can validate an
+`[05-OP-N]` identity and existence, not infer whether a human selected
+the right OP atom. CODEOWNERS routes that judgment but does not enforce
+owner approval.
+
+The baseline is also deliberately PARTIAL until its wire and PyO3 hard
+edges land, and a genuinely new surface kind remains invisible until an
+enumerator is added. For both covered and deferred families, the design
+criterion is CHEAPEST-PASSING-ACTION: an agent blocked by the tripwire
+must find that redesign/removal, extending the enumerator, or authoring
+the exact spec entry is the cheapest sanctioned action. The TODO flow,
+seam/metadata freeze, typed legs, liveness, mutation controls, and
+teaching messages exist to make that true. The doctrine also lives
+where context-poor agents read it:
+`AGENTS.md` §Numeric Surface Discipline carries the binding rules, and
+this section is its elaboration.
 
 Named non-goals, each with its owner, so coverage is never inferred:
 
@@ -674,10 +769,12 @@ Named non-goals, each with its owner, so coverage is never inferred:
   set is a review-blocking finding; the rule lives in `AGENTS.md`
   because the enumerators cannot see what they were never pointed at.
 
-Within those bounds: silent or undecided additions are unwritable; bad
-decisions are not - they are forced to a visible, cited, reviewed
-point. That is the same claim §C3 makes for values, extended to the
-surface.
+Within the covered bounds, silent or undecided additions fail the
+tripwire; bad human authority selection is still possible and is forced
+to a visible, structured, reviewed point. Deferred families have only
+the explicit pre-Phase-1 hard edge until their enumerators land. This is
+the enforceable surface successor to §C3, not a claim that every public
+numeric form is type-unrepresentable.
 
 ---
 
@@ -692,7 +789,8 @@ surface.
 | §C2 trap kinds + exact message strings | Phase 2 | this doc + [#687] corpus update in the same PR |
 | §C4 formatting rules 1-4 | Phase 1 (Rust) / Phase 3 (C parity) | this doc + [#687] corpus update |
 | §C5 kernel signatures | Phase 2 | this doc |
-| §C6 census baseline + tripwire | at the tripwire's landing (PR #956); unflagged rows append by citation, FLAGGED capacity rows shrink-only (grandfathered set frozen 2026-07-30; maintainer-override is the sole human exception) | this doc + the tripwire artifact, same change set |
+| §C6 covered-family census + tripwire | at PR #956 landing: canonical row identities, complete derived classifications, stdlib ADT shapes, callable-to-`[05-OP-N]` registrations, public-header context invariance, and the grandfathered seam set all freeze; unflagged rows append by live ISSUE citation, new numeric callables also author/register a new OP atom, and FLAGGED rows are shrink-only (maintainer override is the sole human exception) | this doc + the executable tripwire/registry artifacts and their positive/negative controls, same change set |
+| §C6 deferred wire/PyO3 leg state | before Phase 1 entry, only when each named enumerator and mutation command below is green; an editable baseline field cannot change coverage | this doc + the typed leg manifest + owning enumerator/oracle in the same change set |
 | capability table schema | Phase 4 entry | `capability_table.md` (the owning doc) + this doc |
 
 "Frozen" means: later phases may ADD consumers but not reinterpret
@@ -785,18 +883,20 @@ on the existing corpus with the fallback removed.
 **You inherit:** Phase 0's detectors (your acceptance instruments),
 Part I as the spec of what to build, and the §C6 capacity census +
 tripwire (PR #956), whose landing PRECEDES this phase (the roadmap's
-Wave 3 entry gate). The checked-in baseline is your starting
-inventory and is EXPLICITLY PARTIAL by its own `legs` declaration
-(headers, struct layouts, stdlib ADTs today - the re-red-team's P1:
-never read it as "every public numeric channel"). Phase 1 ENTRY
-therefore begins by closing the two contracted legs: the WIRE leg
-(enumerate the serde-serialized schema artifacts, with its own
-mutation oracle) is this phase's deliverable zero, before the storage
-decision touches `schema.rs`; the BINDING leg (rustdoc-JSON over
-chelis-python, with a PyO3 `fn(..., dtype: i32)` mutation case)
-carries the same pre-storage-decision hard edge. "Every public
-numeric channel" is the state AFTER those legs are green, never the
-baseline's claim.
+Wave 3 entry gate). The checked-in baseline is your starting inventory
+and is EXPLICITLY PARTIAL by the typed `coverage_manifest()` contract:
+header exports/layouts and stdlib ADTs/defs are covered; wire and PyO3
+are deferred. Phase 1 ENTRY therefore has two deliverables zero, before
+the storage decision touches `schema.rs`: implement the
+`wire-schema-numeric-fields` enumerator and make
+`cargo nextest run -p chelis-compiler-api --test capacity_census_wire`
+meet the exact §C6 success condition and mutations; implement the
+`binding-raw-dtype-params` rustdoc-JSON enumerator and make
+`cargo nextest run -p chelis-python --test capacity_census_bindings`
+meet its exact condition and mutations. Then replace the corresponding
+`PLANNED:` manifest fields and move each leg to `covered` in the same
+change set. "Every public numeric channel" is the state AFTER those
+commands are green, never the baseline's claim.
 
 **You deliver:**
 
