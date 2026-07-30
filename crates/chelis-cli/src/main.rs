@@ -4306,6 +4306,85 @@ fn hang_test_suite_if_requested(name: &str) {
     }
 }
 
+fn emit_finalized_test_suite_if_requested(
+    json: bool,
+    expect: Option<ExpectArg>,
+) -> Option<Result<i32, String>> {
+    if !testing_hook_enabled("CHELIS_TEST_EMIT_FINALIZED_SUITE") {
+        return None;
+    }
+
+    // Finalization-timeout tests need a child that has conclusively emitted
+    // rows and a summary before it hangs. Keep that lifecycle oracle
+    // independent of Reef compilation and worker spawning: under a saturated
+    // workspace run, those unrelated prerequisites can exhaust process
+    // resources and return runner-error 2 before the finalization hook.
+    let result = (|| {
+        let stdout = io::stdout();
+        let mut out = stdout.lock();
+        if let Some(expect) = expect {
+            if json {
+                writeln!(
+                    out,
+                    "{}",
+                    serde_json::json!({
+                        "file": "tests/smoke.ch",
+                        "expect": expect.cli_value(),
+                        "verdict": "config-error",
+                        "detail": "missing .expect sidecar",
+                    })
+                )
+                .map_err(|e| e.to_string())?;
+                writeln!(
+                    out,
+                    "{}",
+                    serde_json::json!({
+                        "summary": {
+                            "ok": 0,
+                            "failed": 1,
+                            "mode": expect.cli_value(),
+                        }
+                    })
+                )
+                .map_err(|e| e.to_string())?;
+            } else {
+                writeln!(out, "CONFIG-ERROR       tests/smoke.ch").map_err(|e| e.to_string())?;
+                writeln!(out, "    missing .expect sidecar").map_err(|e| e.to_string())?;
+                writeln!(out, "\n0 ok, 1 failing ({} mode)", expect.cli_value())
+                    .map_err(|e| e.to_string())?;
+            }
+            out.flush().map_err(|e| e.to_string())?;
+            return Ok(1);
+        }
+
+        if json {
+            writeln!(
+                out,
+                "{}",
+                serde_json::json!({
+                    "file": "tests/smoke.ch",
+                    "test": "test_ok",
+                    "status": "pass",
+                })
+            )
+            .map_err(|e| e.to_string())?;
+            writeln!(
+                out,
+                "{}",
+                serde_json::json!({ "summary": { "passed": 1, "failed": 0 } })
+            )
+            .map_err(|e| e.to_string())?;
+        } else {
+            writeln!(out, "tests/smoke.ch").map_err(|e| e.to_string())?;
+            writeln!(out, "  test_ok ....................... PASS").map_err(|e| e.to_string())?;
+            writeln!(out, "\n1 passed, 0 failed").map_err(|e| e.to_string())?;
+        }
+        out.flush().map_err(|e| e.to_string())?;
+        Ok(0)
+    })();
+    Some(result)
+}
+
 fn write_test_progress_rows_if_requested(path: &Path) {
     if env::var("CHELIS_TEST_INTERNAL_TESTING").as_deref() != Ok("1") {
         return;
@@ -6219,16 +6298,20 @@ fn run_forked_test_suite(
         ignore_test_suite_sigterm_if_requested();
         write_test_progress_rows_if_requested(&progress_path);
         hang_test_suite_if_requested("CHELIS_TEST_HANG_BEFORE_SUITE");
-        let code = match cmd_test(
-            path,
-            filter,
-            json,
-            timeout_secs,
-            jobs,
-            batch_mode,
-            expect,
-            Some(&progress_path),
-        ) {
+        let suite_result =
+            emit_finalized_test_suite_if_requested(json, expect).unwrap_or_else(|| {
+                cmd_test(
+                    path,
+                    filter,
+                    json,
+                    timeout_secs,
+                    jobs,
+                    batch_mode,
+                    expect,
+                    Some(&progress_path),
+                )
+            });
+        let code = match suite_result {
             Ok(code) => code,
             Err(err) => {
                 eprintln!("error: {err}");
