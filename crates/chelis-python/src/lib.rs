@@ -1443,22 +1443,36 @@ fn spec_dtype_mapping(dtype: &str) -> PyResult<(&'static str, i32)> {
     }
 }
 
+/// Decode a raw `CHELIS_*` runtime dtype tag into the vocabulary type.
+///
+/// `loud_unsupported.md` §C4.2: sizing and reading helpers accept
+/// `RuntimeDType`, never a bare `c_int`. `RuntimeDType::decode_id` is the
+/// one decoder, so an id the ABI never defined is rejected here rather
+/// than falling through a hand-rolled if/else chain.
+fn decode_runtime_dtype(dtype: i32) -> PyResult<RuntimeDType> {
+    RuntimeDType::decode_id(dtype).map_err(|err| {
+        PyValueError::new_err(format!(
+            "compiled output tensor carries runtime dtype tag {dtype}, which is \
+             not a Chelis runtime dtype id ({err})"
+        ))
+    })
+}
+
 /// chelis#920: NumPy dtype name for a `CHELIS_*` runtime dtype tag.
 ///
 /// No default arm, for the same reason as `spec_dtype_mapping`: an
 /// unmapped tag must be a loud error rather than a float32 answer that
 /// makes a wider buffer read as garbage.
 fn numpy_dtype_name(dtype: i32) -> PyResult<&'static str> {
-    if dtype == CHELIS_F32 {
-        Ok("float32")
-    } else if dtype == CHELIS_F64 {
-        Ok("float64")
-    } else {
-        Err(PyValueError::new_err(format!(
-            "compiled output tensor carries runtime dtype tag {dtype}, which \
+    match decode_runtime_dtype(dtype)? {
+        RuntimeDType::F32 => Ok("float32"),
+        RuntimeDType::F64 => Ok("float64"),
+        other => Err(PyValueError::new_err(format!(
+            "compiled output tensor carries runtime dtype {} (tag {dtype}), which \
              chelis-python cannot describe to NumPy (known tags: \
-             {CHELIS_F32} = float32, {CHELIS_F64} = float64)"
-        )))
+             {CHELIS_F32} = float32, {CHELIS_F64} = float64)",
+            other.c_macro()
+        ))),
     }
 }
 
@@ -1466,16 +1480,15 @@ fn numpy_dtype_name(dtype: i32) -> PyResult<&'static str> {
 /// dtype tag. Paired with `numpy_dtype_name`, which rejects the tags
 /// this function has no width for.
 fn dlpack_bits(dtype: i32) -> PyResult<u8> {
-    if dtype == CHELIS_F32 {
-        Ok(32)
-    } else if dtype == CHELIS_F64 {
-        Ok(64)
-    } else {
-        Err(PyValueError::new_err(format!(
-            "compiled output tensor carries runtime dtype tag {dtype}, which has \
+    match decode_runtime_dtype(dtype)? {
+        RuntimeDType::F32 => Ok(32),
+        RuntimeDType::F64 => Ok(64),
+        other => Err(PyValueError::new_err(format!(
+            "compiled output tensor carries runtime dtype {} (tag {dtype}), which has \
              no DLPack width in chelis-python (known tags: {CHELIS_F32} = 32-bit \
-             float, {CHELIS_F64} = 64-bit float)"
-        )))
+             float, {CHELIS_F64} = 64-bit float)",
+            other.c_macro()
+        ))),
     }
 }
 
@@ -2180,6 +2193,25 @@ loss = (mean(x, 0) : tensor[f32])
             assert!(
                 err.to_string().contains("no NumPy marshalling"),
                 "expected a loud unmapped-spec-dtype error, got: {err}"
+            );
+
+            // §C4.2: an id the ABI never defined is rejected by the one
+            // decoder, not by a hand-rolled if/else that would have to
+            // re-enumerate the vocabulary to notice.
+            let undefined_tag = 9999;
+            assert!(
+                RuntimeDType::decode_id(undefined_tag).is_err(),
+                "test needs an id outside the runtime dtype vocabulary"
+            );
+            let err = numpy_dtype_name(undefined_tag).expect_err("undefined id must not map");
+            assert!(
+                err.to_string().contains("not a Chelis runtime dtype id"),
+                "expected the decoder's rejection, got: {err}"
+            );
+            let err = dlpack_bits(undefined_tag).expect_err("undefined id must have no width");
+            assert!(
+                err.to_string().contains("not a Chelis runtime dtype id"),
+                "expected the decoder's rejection, got: {err}"
             );
         });
     }

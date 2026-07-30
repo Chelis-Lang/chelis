@@ -3006,8 +3006,9 @@ impl CEmitter {
         // `panic!`, so it crossed the pyo3 FFI boundary as a
         // `PanicException` instead of a diagnostic.
         if !matches!(ty.precision, Prim::F32 | Prim::F64) {
-            // chelis#730 Phase 1 (census row 11) channel: a section C3
-            // diagnostic, not a compiler panic.
+            // The channel chelis#730 Phase 1 (census row 11) established: a
+            // section C3 diagnostic, not a compiler panic. This site is
+            // census row 24, not row 11.
             return Err(Unsupported::new(
                 UnsupportedKind::Op("fused elementwise chain".to_string()),
                 format!(
@@ -3018,7 +3019,7 @@ impl CEmitter {
                 "the fused elementwise kernel emits float or double step variables \
                  and libm math symbols; it supports f32 and f64 only. Cast to f32 \
                  or f64 before the fused chain. Widening to the reduced-float and \
-                 integer dtypes is follow-on work (chelis#919, chelis#691)",
+                 integer dtypes is follow-on work (chelis#691)",
             ));
         }
         // Element type and math-symbol precision come from the same
@@ -5074,7 +5075,7 @@ impl CEmitter {
         // fused path to honor the IR `Sum`/`MaxReduce` accumulator and
         // the input element type per spec/04-type-system.md §5.7.1.
         //
-        // chelis#919: unlike `emit_fused_elem` this is still a
+        // chelis#951: unlike `emit_fused_elem` this is still a
         // rejection, not a widening — the reduce body needs a
         // `chelis_fill_f64` zero, a `double` accumulator cascade, and
         // `fmax`, which is more than the fused-elem parameterization.
@@ -5085,8 +5086,9 @@ impl CEmitter {
         if !matches!(out_ty.precision, Prim::F32)
             || !matches!(fused_input_type.precision, Prim::F32)
         {
-            // chelis#730 Phase 1 (census row 11) channel: a section C3
-            // diagnostic, not a compiler panic.
+            // The channel chelis#730 Phase 1 (census row 11) established: a
+            // section C3 diagnostic, not a compiler panic. This site is
+            // census row 24, not row 11.
             return Err(Unsupported::new(
                 UnsupportedKind::Op(format!("fused elementwise {reduce_kind}_reduce")),
                 format!(
@@ -5100,7 +5102,7 @@ impl CEmitter {
                  `chelis_fill_f32` zero, a `float` accumulator cascade, and `fmaxf`. \
                  Cast to f32 before the reduction, or keep the elementwise chain out \
                  of the reduction so the unfused f64 reduce path runs. Widening is \
-                 follow-on work (chelis#919)",
+                 follow-on work (chelis#951)",
             ));
         }
         let axis_size = Self::emit_dim_info(&fused_input_type.dims[axis]);

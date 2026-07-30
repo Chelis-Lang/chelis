@@ -228,10 +228,10 @@ fn integer_fused_chain_is_a_diagnostic_not_a_panic() {
 fn f64_fused_reduce_is_a_diagnostic_not_a_panic() {
     // `emit_fused_reduce` is a separate, still-f32-only path: its body
     // needs a `chelis_fill_f64` zero, a `double` accumulator cascade,
-    // and `fmax`. chelis#919 does not widen it — but it is reachable
-    // from ordinary Surf, because `sum(exp(x), 0)` at f64 inlines the
-    // elementwise node into the reduction, so it must reject rather
-    // than panic.
+    // and `fmax`. chelis#919 does not widen it (chelis#951 owns that
+    // half) — but it is reachable from ordinary Surf, because
+    // `sum(exp(x), 0)` at f64 inlines the elementwise node into the
+    // reduction, so it must reject rather than panic.
     let mut dag = Dag::new();
     let ty = mat_ty(3, 4, Prim::F64);
     let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
