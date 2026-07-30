@@ -17,9 +17,25 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   types, constructors, aliases, macros, and invariant references retain their
   compiler identity. The legacy name-only `dependency_edges` field remains
   for one compatibility release.
+- **SMT proofs can lower supported scalar `grad` applications
+  (chelis#923).** Applied, single-target gradients of pure `f32`/`f64`
+  functions with scalar floating inputs now reach cvc5 instead of being
+  categorically unsupported. Named and inline functions share the compiler's
+  result-type restrictions; unsupported control flow, casts, effects,
+  recursion, transforms, intrinsics, and non-floating results fail explicitly
+  before any green verdict is emitted.
 
 ### Fixed
 
+- **Reef package proofs reuse a race-safe prepared graph and check only the
+  reachable declaration closure (chelis#924).** Cache identity covers the
+  exact source-root inventory and source bytes, including additions,
+  deletions, renames, dependency sources, and escaping symlinks. A stable
+  pre/post snapshot prevents caching a graph built from different bytes than
+  its determinant, while lookup independently rechecks the live inventory.
+  Reachability follows functions, types, dimensions, constructors, patterns,
+  macros, and invariants, so unrelated dependency declarations no longer
+  dominate package-proof latency without hiding reachable errors.
 - **Lint traversal exclusions are structured and configurable (chelis#740).**
   `walker.rs` no longer hard-codes generated, dependency, build, or
   infrastructure directory names. `chelis-lint` now composes a shipped
