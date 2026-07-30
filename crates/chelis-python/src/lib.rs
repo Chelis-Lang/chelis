@@ -589,6 +589,45 @@ where
         .map_err(|err| ChelisError::new_err(format!("serialization failed: {err}")))
 }
 
+/// `dlopen` a compiled artifact so that dropping it does not unmap it.
+///
+/// chelis#963: a compiled kernel's elementwise loops carry
+/// `#pragma omp parallel for simd`, and on Linux `-fopenmp` is live
+/// (`chelis-backend-c/src/toolchain.rs`: OpenMP is gated on
+/// `is_real_gcc`, true for the `gcc` Linux resolves to and false for the
+/// Apple clang macOS resolves to). Executing such a kernel spawns
+/// libgomp's thread pool and registers thread-local destructors that
+/// point into the artifact's code segment. A plain `dlclose` then unmaps
+/// that segment while those destructors are still live, and the process
+/// dies with SIGSEGV *after* the kernel has run and returned correct
+/// results -- no traceback, no `ChelisError`, invisible to `catch_unwind`.
+///
+/// `RTLD_NODELETE` keeps the mapping resident for the life of the
+/// process, so the drop becomes a refcount decrement and libgomp's
+/// destructors always have live code to return into. The cost is one
+/// resident mapping per distinct artifact -- bounded by the number of
+/// models loaded, not by the number of calls. Dropping `-fopenmp` from
+/// this path instead would restore unload semantics at the price of
+/// parallelism in every compiled model, which is the feature's whole
+/// point.
+///
+/// `RTLD_NOW` over the default lazy binding is deliberate: it surfaces an
+/// unresolved symbol as a load error here rather than as a crash on first
+/// call. `RTLD_LOCAL` matches `Library::new`'s default so two artifacts
+/// exporting the same entry name cannot interpose on each other.
+fn open_compiled_library(path: &Path) -> Result<Library, libloading::Error> {
+    #[cfg(unix)]
+    {
+        use libloading::os::unix::Library as UnixLibrary;
+        let flags = libc::RTLD_NOW | libc::RTLD_LOCAL | libc::RTLD_NODELETE;
+        unsafe { UnixLibrary::open(Some(path), flags) }.map(Library::from)
+    }
+    #[cfg(not(unix))]
+    {
+        unsafe { Library::new(path) }
+    }
+}
+
 fn load_artifact(
     py: Python<'_>,
     library_path: &Path,
@@ -601,7 +640,7 @@ fn load_artifact(
     let manifest: ArtifactManifest = serde_json::from_str(&manifest_text)
         .map_err(|err| ChelisError::new_err(format!("parse manifest failed: {err}")))?;
     warn_if_stale_source(py, &manifest)?;
-    let library = unsafe { Library::new(&library_path) }
+    let library = open_compiled_library(&library_path)
         .map_err(|err| ChelisError::new_err(format!("load shared library failed: {err}")))?;
     Ok(NativeCompiledModel {
         loaded: LoadedArtifact {
@@ -1770,9 +1809,124 @@ loss = (mean(x, 0) : tensor[f32])
             "runtime archive should be staged next to the shared library"
         );
 
-        let library = unsafe { Library::new(&output.lib_path) }
+        let library = open_compiled_library(&output.lib_path)
             .expect("shared library should load without unresolved runtime symbols");
         drop(library);
+    }
+
+    /// chelis#963: unloading an artifact whose kernel has *run* must not
+    /// kill the process.
+    ///
+    /// The test above loads and unloads without ever calling the entry
+    /// point, which is why it stayed green on Linux while the whole f64
+    /// suite aborted: no entry call means no OpenMP parallel region, so
+    /// libgomp's thread pool is never spawned and there are no
+    /// thread-local destructors pointing into the artifact when it is
+    /// unmapped. That made the crash invisible to the only
+    /// `compile_and_load` coverage on `main`.
+    ///
+    /// This one closes that hole by doing all three in order -- load,
+    /// execute, unload -- and then continuing to run afterwards. Under a
+    /// plain `dlclose` it dies with SIGSEGV *after* producing the correct
+    /// answer, so asserting on the returned value is not enough; the
+    /// assertions after `drop(library)` are the actual oracle, and they
+    /// only report anything if the process is still alive to run them.
+    #[test]
+    fn unloading_an_artifact_whose_kernel_ran_does_not_abort_the_process() {
+        let dir = tempdir().expect("tempdir");
+        let source_path = dir.path().join("model.ch");
+        // An elementwise chain, so the emitted C carries
+        // `#pragma omp parallel for simd` and executing it starts
+        // libgomp's pool -- the precondition for the crash.
+        fs::write(
+            &source_path,
+            "def fc(x: tensor[4, f32]) -> tensor[4, f32] = exp(x) * x\n",
+        )
+        .expect("write source");
+
+        let output = run_compile_and_load_job(CompileAndLoadJob {
+            source_path: source_path.clone(),
+            source_kind: SourceKind::Surf,
+            target: CompileTarget::C,
+            entry_name: None,
+            artifact_dir: Some(PathBuf::from(dir.path())),
+        })
+        .expect("compile and load job");
+
+        let manifest_path = output.lib_path.with_extension("json");
+        let manifest: ArtifactManifest =
+            serde_json::from_str(&fs::read_to_string(&manifest_path).expect("read manifest"))
+                .expect("parse manifest");
+
+        let value = {
+            let library = open_compiled_library(&output.lib_path).expect("load compiled artifact");
+            let symbol_name = nul_terminated(&manifest.host_entry_name);
+            let entry = unsafe {
+                library
+                    .get::<HostEntry>(symbol_name.as_bytes())
+                    .expect("resolve host entry")
+            };
+
+            let mut data: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0];
+            let mut shape = [0i32; CHELIS_MAX_DIM];
+            shape[0] = 4;
+            let mut strides = [0i32; CHELIS_MAX_DIM];
+            strides[0] = 1;
+            let mut tensor = ChelisTensor {
+                data: data.as_mut_ptr(),
+                shape,
+                strides,
+                ndim: 1,
+                dtype: CHELIS_F32,
+                size: 4,
+                owns_data: 0,
+            };
+            let mut input_ptrs: Vec<*mut ChelisTensor> = vec![&mut tensor as *mut ChelisTensor];
+            let mut output_ptrs: Vec<*mut ChelisTensor> = vec![std::ptr::null_mut()];
+            unsafe {
+                (*entry)(
+                    input_ptrs.as_mut_ptr(),
+                    input_ptrs.len() as c_int,
+                    output_ptrs.as_mut_ptr(),
+                    output_ptrs.len() as c_int,
+                );
+            }
+            let out = output_ptrs[0];
+            assert!(!out.is_null(), "compiled execution returned a NULL output");
+            let value = unsafe { *(*out).data };
+            // The unload under test. Everything below this line only runs
+            // if it did not take the process down with it.
+            drop(library);
+            value
+        };
+
+        assert_eq!(
+            value,
+            1.0f32.exp() * 1.0f32,
+            "the kernel must still have produced the right answer"
+        );
+
+        // Load, execute and unload a second artifact after the first was
+        // dropped. A surviving-but-corrupted loader state shows up here
+        // rather than in the single-shot case above.
+        let second_dir = tempdir().expect("tempdir");
+        let second_source = second_dir.path().join("model.ch");
+        fs::write(
+            &second_source,
+            "def fc2(x: tensor[4, f32]) -> tensor[4, f32] = exp(x) * x\n",
+        )
+        .expect("write source");
+        let second = run_compile_and_load_job(CompileAndLoadJob {
+            source_path: second_source,
+            source_kind: SourceKind::Surf,
+            target: CompileTarget::C,
+            entry_name: None,
+            artifact_dir: Some(PathBuf::from(second_dir.path())),
+        })
+        .expect("second compile and load job");
+        let second_library =
+            open_compiled_library(&second.lib_path).expect("load second compiled artifact");
+        drop(second_library);
     }
 
     // ---------------------------------------------------------------
@@ -1832,7 +1986,7 @@ loss = (mean(x, 0) : tensor[f32])
             serde_json::from_str(&fs::read_to_string(&manifest_path).expect("read manifest"))
                 .expect("parse manifest");
 
-        let library = unsafe { Library::new(&output.lib_path) }.expect("load shared library");
+        let library = open_compiled_library(&output.lib_path).expect("load shared library");
         let symbol_name = nul_terminated(&manifest.host_entry_name);
         let entry = unsafe {
             library
@@ -2098,7 +2252,7 @@ loss = (mean(x, 0) : tensor[f32])
         let manifest: ArtifactManifest =
             serde_json::from_str(&fs::read_to_string(&manifest_path).expect("read manifest"))
                 .expect("parse manifest");
-        let library = unsafe { Library::new(&output.lib_path) }.expect("load shared library");
+        let library = open_compiled_library(&output.lib_path).expect("load shared library");
         let symbol_name = nul_terminated(&manifest.host_entry_name);
         let entry = unsafe {
             library
