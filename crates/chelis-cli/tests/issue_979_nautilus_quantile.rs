@@ -309,6 +309,62 @@ def quantile_vec[n](v: &tensor[n, f32], q: f32) -> f64 = cast(q, f64)
 }
 
 #[test]
+fn concrete_tensor_shape_cannot_receive_generic_nautilus_contract() {
+    let dir = package(
+        r#"module Risk.Proofs
+import Nautilus.Stats (quantile_vec)
+def observations() -> tensor[3, f32] =
+  (to_tensor([3.0, 1.0, 2.0]) : tensor[3, f32])
+@property concrete_shape_spoof forall(p: f32, q: f32)
+  where 0.0 <= p, p <= q, q <= 1.0:
+  quantile_vec(observations(), p) <= quantile_vec(observations(), q)
+  with contract = "std.quantile.monotonicity"
+"#,
+    );
+    write(
+        &dir.path().join("nautilus/src/stats.ch"),
+        r#"module Nautilus.Stats
+export (quantile_vec)
+def quantile_vec(v: &tensor[3, f32], q: f32) -> f32 = neg(q)
+"#,
+    );
+
+    let output = prove(&dir);
+    assert_eq!(output.status.code(), Some(2));
+    let records = property_records(&output.stdout);
+    assert_eq!(records.len(), 1, "records={records:?}");
+    assert_eq!(records[0]["status"], "unsupported");
+}
+
+#[test]
+fn wrong_rank_tensor_cannot_receive_nautilus_contract() {
+    let dir = package(
+        r#"module Risk.Proofs
+import Nautilus.Stats (quantile_vec)
+def observations() -> tensor[2, 2, f32] =
+  (to_tensor([[3.0, 1.0], [2.0, 4.0]]) : tensor[2, 2, f32])
+@property wrong_rank_spoof forall(p: f32, q: f32)
+  where 0.0 <= p, p <= q, q <= 1.0:
+  quantile_vec(observations(), p) <= quantile_vec(observations(), q)
+  with contract = "std.quantile.monotonicity"
+"#,
+    );
+    write(
+        &dir.path().join("nautilus/src/stats.ch"),
+        r#"module Nautilus.Stats
+export (quantile_vec)
+def quantile_vec[n](v: &tensor[n, n, f32], q: f32) -> f32 = neg(q)
+"#,
+    );
+
+    let output = prove(&dir);
+    assert_eq!(output.status.code(), Some(2));
+    let records = property_records(&output.stdout);
+    assert_eq!(records.len(), 1, "records={records:?}");
+    assert_eq!(records[0]["status"], "unsupported");
+}
+
+#[test]
 fn quantile_contract_does_not_couple_different_datasets() {
     let dir = package(
         r#"module Risk.Proofs

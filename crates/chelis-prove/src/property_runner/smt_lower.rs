@@ -326,19 +326,28 @@ fn trusted_quantile_symbols(decls: &[Decl]) -> Vec<String> {
         .filter_map(|decl| match decl {
             Decl::FunDef {
                 name,
+                dim_params,
                 params,
                 ret_ty,
                 ..
-            }
-                if name == LINKED_NAUTILUS_QUANTILE
-                    && params.len() == 2
-                    && matches!(
-                        params[0].ty.as_ref(),
-                        Some(TypeExpr::Ref(inner, _))
-                            if matches!(inner.as_ref(), TypeExpr::Tensor(_, precision, _) if precision == "f32")
-                    )
-                    && matches!(params[1].ty.as_ref(), Some(TypeExpr::Named(name, _)) if name == "f32")
-                    && matches!(ret_ty.as_ref(), Some(TypeExpr::Named(name, _)) if name == "f32") =>
+            } if name == LINKED_NAUTILUS_QUANTILE
+                && dim_params.as_slice() == ["n"]
+                && params.len() == 2
+                && matches!(
+                    params[0].ty.as_ref(),
+                    Some(TypeExpr::Ref(inner, _))
+                        if matches!(
+                            inner.as_ref(),
+                            TypeExpr::Tensor(dimensions, precision, _)
+                                if precision == "f32"
+                                    && matches!(
+                                        dimensions.as_slice(),
+                                        [TypeExpr::Named(dimension, _)] if dimension == "n"
+                                    )
+                        )
+                )
+                && matches!(params[1].ty.as_ref(), Some(TypeExpr::Named(name, _)) if name == "f32")
+                && matches!(ret_ty.as_ref(), Some(TypeExpr::Named(name, _)) if name == "f32") =>
             {
                 Some(name.clone())
             }
