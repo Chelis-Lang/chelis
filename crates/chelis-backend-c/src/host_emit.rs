@@ -545,6 +545,15 @@ pub(crate) fn emit_host_abi_program(
         "#include \"chelis_runtime.h\"".to_string(),
         "#include <assert.h>".to_string(),
         "#include <math.h>".to_string(),
+        String::new(),
+        // chelis#943: emitter-internal accumulator ABI. Deliberately absent
+        // from the published chelis_runtime.h (the capacity census governs
+        // that surface, and these exist only for compiler-owned accumulators
+        // whose refcount-1 exclusivity this emitter proves). The symbols are
+        // exported by libchelis_runtime; only the declarations are private.
+        "chelis_list *chelis_list_with_capacity(int64_t capacity);".to_string(),
+        "void chelis_list_push(chelis_list *list, chelis_value value);".to_string(),
+        "void chelis_list_extend(chelis_list *list, const chelis_list *src);".to_string(),
     ];
     if helper_requirements.needs_blas_header {
         out.push("#include \"chelis_blas.h\"".to_string());
