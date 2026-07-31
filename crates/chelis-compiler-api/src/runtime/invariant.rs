@@ -107,6 +107,13 @@ pub(crate) enum InvariantViolation {
         invariant: String,
         reason: String,
     },
+    /// The enclosing evaluation was cancelled while the predicate was
+    /// running. NOT a property of the user's opaque type: attributing the
+    /// cancellation sentinel to the type as a `PredicateError` would be a
+    /// section C1.1 substituted response, so the sentinel passes through
+    /// verbatim and stays matchable by `chelis_types::is_cancellation`
+    /// (chelis#914 review).
+    Cancelled { reason: String },
     /// The deftype declared an invariant whose metadata is malformed (not
     /// the `(fn {} (params {} <binder>) <body>)` shape). The predicate
     /// cannot be evaluated, so the value cannot be safely materialized
@@ -148,6 +155,10 @@ impl std::fmt::Display for InvariantViolation {
                 "decode rejected for opaque type `{type_name}`: the declared invariant `{invariant}` \
                  could not be evaluated on the value ({reason})"
             ),
+            // Verbatim: the sentinel must survive so downstream
+            // `is_cancellation` checks and the CLI/pyo3 mappers see a
+            // cancellation, not a decode failure of the user's type.
+            InvariantViolation::Cancelled { reason } => write!(f, "{reason}"),
             InvariantViolation::MalformedInvariant { type_name } => write!(
                 f,
                 "decode rejected for opaque type `{type_name}`: the declared invariant metadata is \
@@ -784,6 +795,12 @@ pub(crate) fn revalidate_adt_value(
             invariant: invariant_text,
             reason: format!("predicate did not evaluate to a boolean (got {other:?})"),
         }),
+        // Cancellation is the enclosing evaluation's state, not a defect in
+        // this predicate: pass the sentinel through before the attributing
+        // arm below can claim it (chelis#914 review).
+        Err(reason) if chelis_types::is_cancellation(&reason) => {
+            Err(InvariantViolation::Cancelled { reason })
+        }
         Err(reason) => Err(InvariantViolation::PredicateError {
             type_name: pred.type_name.clone(),
             invariant: invariant_text,

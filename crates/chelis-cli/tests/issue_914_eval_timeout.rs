@@ -135,13 +135,16 @@ fn timeout_message_is_absent_from_a_successful_run() {
     let dir = tempdir().expect("tempdir");
     let path = write_program(dir.path(), "fast.ch", FAST_PROGRAM);
 
-    // A timeout shorter than the watchdog's hard-exit grace, on a program that
-    // finishes immediately: the process must exit 0 on its own before the
-    // watchdog has any say.
+    // A program that finishes immediately, under a timeout wide enough that
+    // even a contended CI box completes the whole subprocess (compile phases
+    // included) inside it: the process must exit 0 on its own before the
+    // watchdog has any say. Review flagged `--timeout 1` here as a measured
+    // flake risk under contention (2,434s vs 24s observed on rank_poly_tier3);
+    // 10s keeps the assertion meaningful without racing the scheduler.
     let (code, stdout, stderr) = eval(&[
         "eval",
         "--timeout",
-        "1",
+        "10",
         "--file",
         path.to_str().expect("utf-8 path"),
     ]);

@@ -620,6 +620,12 @@ where
 
     let worker = thread::Builder::new()
         .name("chelis-eval".to_string())
+        // The evaluator's AST walker recurses per program node and has no
+        // stack guard; Rust's 2 MiB thread default would drop the recursion
+        // ceiling ~4x below the Python main thread's 8 MiB, and a stack
+        // overflow is abort(), not panic() -- it kills the whole CPython
+        // process. Match `chelis test`'s worker size (cli/src/main.rs).
+        .stack_size(32 * 1024 * 1024)
         .spawn(move || {
             // The token must be installed on the thread that runs the eval:
             // the guard is thread-local, and the guard drop on scope exit
@@ -2529,5 +2535,50 @@ loss = (mean(x, 0) : tensor[f32])
             err.contains("CHELIS_RUNTIME_DIR"),
             "error must name CHELIS_RUNTIME_DIR, got: {err}"
         );
+    }
+}
+
+#[cfg(test)]
+mod worker_stack_tests {
+    use super::*;
+    use pyo3::Python;
+    use pyo3::types::PyModule;
+
+    /// The eval worker thread must carry the 32 MiB stack `chelis test`
+    /// uses, not Rust's 2 MiB default. Review measured the default
+    /// dropping the recursion ceiling ~4x below the Python main thread's
+    /// 8 MiB (depth 200 evaluated on `main`, SIGBUS-aborted the whole
+    /// CPython process through the 2 MiB worker), so this pins a depth
+    /// that must keep succeeding: a regression back to the default stack
+    /// aborts this test's process rather than failing an assertion,
+    /// which is exactly the loudness we want (chelis#914 review).
+    #[test]
+    fn eval_worker_survives_depth_that_overflowed_the_default_stack() {
+        let program = "def down(n: int64) -> int64 = \
+                       if lte(n, 0i64) then 0i64 else add(1i64, down(sub(n, 1i64)))\n\
+                       depth = down(200i64)\n";
+        Python::with_gil(|py| {
+            let module = PyModule::new(py, "_native").expect("module");
+            register_module(&module).expect("register");
+            let result = module
+                .getattr("eval_json")
+                .expect("eval_json")
+                .call1((program, "{}"))
+                .expect("eval must survive depth 200 on the widened worker stack")
+                .extract::<String>()
+                .expect("json");
+            let payload: serde_json::Value = serde_json::from_str(&result).expect("payload");
+            let depth = payload["roots"]
+                .as_array()
+                .expect("roots")
+                .iter()
+                .find(|root| root["name"] == "depth")
+                .expect("depth root");
+            // Int roots surface as {"type": "int", "value": N}; the exact
+            // number proves the recursion ran to completion rather than
+            // being clipped by a partial-result path.
+            assert_eq!(depth["value"]["type"].as_str(), Some("int64"));
+            assert_eq!(depth["value"]["value"].as_i64(), Some(200));
+        });
     }
 }
