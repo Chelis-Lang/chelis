@@ -228,7 +228,12 @@ fn ensure_runtime_static_lib(canonical: &Path) -> std::io::Result<()> {
                 .ok_or_else(|| std::io::Error::other("no libchelis_runtime-*.a after rebuild"))?
         }
     };
-    let tmp = canonical.with_extension(format!("a.tmp.{}", std::process::id()));
+    static NEXT_TEMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let tmp = canonical.with_extension(format!(
+        "a.tmp.{}.{}",
+        std::process::id(),
+        NEXT_TEMP.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
     fs::copy(&hashed, &tmp)?;
     match fs::rename(&tmp, canonical) {
         Ok(()) => Ok(()),

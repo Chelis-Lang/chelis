@@ -136,6 +136,96 @@ Two rules follow, and both are cheap:
    stronger rule than the spec states, amend the spec first and say so in the PR;
    `spec/design/dtype_semantics.md` §B1 calls that "the protocol, not a failure."
 
+### Numeric Surface Discipline
+
+The numeric remediation's covered-family surface ratchet and typed entry
+edges (`spec/design/dtype_semantics.md` §C6) bind every change that touches
+numeric data, whether or not you have read that document:
+
+- **No new numeric channel outside the tagged carrier.** A public ADT variant, wire
+  field, exported C signature, exported C data declaration, or binding parameter that
+  carries numeric values as
+  bare `f64`/`double`, or that takes a raw integer dtype id, is a review-blocking
+  finding. On every covered family the capacity census freezes both the canonical
+  surface identity and its enforcement-relevant derived classification: an UNFLAGGED
+  addition cites an OPEN issue; a FLAGGED capacity seam has NO citation path at all -
+  redesign onto the tagged carrier, remove it, or obtain a maintainer override in
+  review. Opening a fresh issue to cite is not authorization; new capacity debt does
+  not land. This applies to the stdlib ADT family on the same terms as the C ones: a
+  variant or field carrying a bare float primitive is a seam, while an INTEGER
+  primitive is classified `numeric-op` and owes the semantic registration below
+  rather than being a seam - which is why source-faithful ingestion variants
+  (`JsonInt(int64)`) are the wanted shape and a float funnel is not. Both
+  pre-ratchet citation strings are frozen to exact identity lists, so neither can be
+  copied onto a new row to skip its own disposition. The pre-Phase-1 baseline is deliberately partial: wire-schema and PyO3
+  coverage become mandatory only through their named executable entry gates in §C6,
+  and Phase 1 may not start before both are green. Coverage state comes from the
+  test's typed `coverage_manifest()` (artifact, enumerator, command, expected
+  success, and mutations), never an editable field in the baseline JSON.
+- **A new numeric op requires an exact semantic registration in the same change
+  set.** The owning family registry binds the callable's exact canonical identity to
+  one verbatim, existing `[05-OP-N]` authority in
+  `spec/05-risc-primitives.md`. A new callable authors that atom and its mapping
+  together. A chapter substring, `[05-OBS-1]`, an absent atom, or a Rust doc comment
+  is not authority; existence means a normative definition line beginning
+  `> **[05-OP-N]**`, not a cross-reference elsewhere. The atom states the signature,
+  per-dtype semantics at [04-NUM-8]'s declared widths, adjoint or
+  non-differentiability rule, and accumulator rule where applicable. Tooling validates
+  the atom group and existence; reviewers validate that the selected atom's normative
+  text actually governs the callable. Review does not confer semantic authority: if
+  no existing atom governs it, amend the numbered spec first and register that new
+  atom.
+- **Never silently narrow at ingress.** Choosing a lossy dtype for ingested data
+  (int64 IDs into an f32 tensor) is a decision: use the named lossy form (the
+  chelis#759 pattern) or the exact dtype, never a quiet convenience cast. Better
+  still, type the boundary so the checker can defend it: ingestion APIs preserve
+  the source format's numeric distinctions as ADT variants (`io/json`'s
+  `JsonInt(int64)` beside `JsonFloat(f64)` is the precedent), never one float
+  funnel.
+- **A new surface KIND** (a new serialization format, IPC channel, or export
+  mechanism that can carry numbers) extends the §C6 enumerators in the same change
+  set, or does not land.
+- **Published C ABI is configuration-invariant, and every declaration in it is
+  attributable.** Public declarations may not vary
+  by preprocessor feature/context. The §C6 header leg enforces that prohibition and
+  compares toolchain-stable canonical declaration identities, never a
+  preprocessor's whitespace or pretty-print spelling. Published headers may contain
+  no `#line` directive or hand-written linemarker - those rewrite the file
+  attribution the census reads back from `cc -E`, which can delete a real callable
+  export from the inventory - and every `.h` in the published include directory must
+  be reachable from a declared root.
+- **C numeric-callable classification is conservative.** A non-boolean,
+  non-character built-in arithmetic value type - including bare `int`, `short`,
+  `long`, signed/unsigned forms, pointer-sized integers, and the exact-width integer
+  types - makes a callable `numeric-op`. Names and parameter-name heuristics never
+  turn a future callable into plumbing. The only exception is the frozen set of
+  exactly three pre-ratchet canonical declarations in
+  `NON_NUMERIC_INTEGER_PLUMBING_EXPORTS`; each must also remain in the frozen seam
+  identity set. Conditional macro definitions likewise taint their whole connected
+  local-include component, by either include spelling: a public declaration consuming
+  a tainted token is rejected even when the definition lives in another header. These two rules are
+  locked by PR #956 commit
+  `6ddf1a72d6dea6770a330d5c2ef3b8fa7d023c43`; widening either exception requires
+  changing this contract and the negative controls together.
+- **An arithmetic spelling the census does not recognize is a BUILD FAILURE, not an
+  unflagged row.** The closed list is the non-numeric one
+  (`NON_NUMERIC_C_TYPE_WORDS`): qualifier and aggregate keywords plus the two
+  non-arithmetic value spellings. An allowlist of arithmetic spellings can never be
+  complete - `_Float16`, `__fp16`, `__bf16`, `_Decimal64`, and `__int128` were all
+  classifying as dtype-free - so the rule is inverted. If you add a type word to a
+  published header and the census rejects it, decide which list it belongs in; do
+  not route around it. The same lock exists on the language side: adding a variant
+  to `chelis_types::Prim` stops the tripwire compiling until the new dtype is
+  classified. Typedef aliases are resolved before classifying, including array
+  aliases (`typedef double chelis_vec4[4];`), and a typedef shape the resolver
+  cannot read is rejected rather than skipped.
+- **An exported stdlib `def` declares its signature.** The census reads a public
+  def's numeric capacity off its `defsig`, so an exported def that declares none is
+  numeric surface nobody can see. Declare it, or stop exporting the binding.
+- The census, tripwire, and oracle files are guard artifacts: editing one to make
+  your change pass is never the fix. The failure message names the sanctioned
+  actions; take one of those.
+
 ### Public-Surface Change Rule
 
 When behavior changes, update the owning code, tests, docs, and examples in the same

@@ -21,7 +21,7 @@ The plan set: [`dtype_semantics.md`](dtype_semantics.md) ([#729]), [`loud_unsupp
 | meta (the class) | method (design spec) | tracker |
 |---|---|---|
 | [#727] no dtype's semantics enforced at any single point ([#695] = its integer instance) | [`dtype_semantics.md`](dtype_semantics.md) - per-dtype finalizer behind private constructors, int/float kernel split, one storage decision, generated backend dispatch | [#729] |
-| [#703] unsupported cases substitute values instead of failing | [`loud_unsupported.md`](loud_unsupported.md) - Result-typed failure channels, the census sweep, dependency-bottom closed identities, fail-closed HostType/ABI states, structured emission, and gates demoted to UX | [#730] |
+| [#703] unsupported cases substitute values instead of failing | [`loud_unsupported.md`](loud_unsupported.md) - Result-typed failure channels, the census sweep, dependency-bottom closed identities, fail-closed HostType/ABI states, structured emission, gates demoted to UX, and (2026-07-30) §C7 ratchet totality: derived-universe guards including Python/C consumers, typed/live exclusion authority with review-owned relevance, the typed kind/authority channel, and a non-shippable mutation-based panic-surfacing oracle | [#730] |
 | [#709] unrecognized constructs silently exempt from checking (+[#710]'s silent half) | [`checker_totality.md`](checker_totality.md) - loud wildcard + handle-effect case, ErrorWitness token (silent Type::Error unconstructible), totality invariant, DeepTag exhaustiveness | [#731] |
 | [#728] the observation channel is not dtype-faithful | [`faithful_observation.md`](faithful_observation.md) - one Rust formatter, generated C print helper, round-trip invariant, tolerance table; landable before [#729]; unblocks [#687] | [#732] |
 | spec silence + stale claims ([#694]; the unauthored cells) | [`spec_provenance.md`](spec_provenance.md) - OpenSpec plans changes after Phase 0 activation, while a pinned Buoy shell and one-way Chelis adapter provide repository-independent authority, freshness, coverage, and impact enforcement; design/fixtures may proceed now, advisory execution waits for Buoy's final oracle, and blocking waits for the adapter and Chelis configuration oracles | [#733] |
@@ -97,15 +97,15 @@ the known-red ledger that keeps every annexed [#729]-family cell
 re-executed rather than silently skipped, and fails when one goes
 green, so the upstream repair's landing forces the un-ignore in the
 same change set) in parallel with [#731] Phases 2-3 (the
-witness token + DeepTag). [#730] Phase 2's final typed implementation is in
-PR [#799] (acceptance validation pending): closed vocabularies, staged
-HostType/ABI separation, and structured emission. Its initial source-lint
-approach was explicitly re-planned after execution showed incomplete and
-false-positive behavior; the lint was extracted to PR [#815] and is not a
-Wave 2 dependency. Its one authoritative completion oracle is
-`.venv/bin/python scripts/loud_unsupported_phase2_oracle.py`; acceptance
-requires exit 0 with final line `PHASE 2 ORACLE: PASS` plus the plan-set's
-fresh-context adversarial review. [#733] Phase 1's Buoy shell-side design
+witness token + DeepTag). [#730] Phase 2 is COMPLETE AND
+ACCEPTED (PR [#799], merged 2026-07-24): closed vocabularies, staged
+HostType/ABI separation, and structured emission, with the authoritative
+oracle green (`PHASE 2 ORACLE: PASS`) and the plan-set's fresh-context
+adversarial review run and dispositioned
+(`docs/investigations/pr799_returned_function_values_redteam.md`). Its
+initial source-lint approach was explicitly re-planned after execution
+showed incomplete and false-positive behavior; the lint was extracted to
+PR [#815] (since closed unmerged) and is not a Wave 2 dependency. [#733] Phase 1's Buoy shell-side design
 and fixture preparation may ride alongside: OpenSpec still plans new
 normative text and atom IDs remain stable. The executable advisory pilot
 waits for the selected Buoy revision's standalone `devenv test` final
@@ -119,13 +119,44 @@ at) is hard-gated on byte-identical rendering.
 
 **Wave 3 - the semantics refactor.** [#729] Phases 1-3 in order (the
 module + storage decision; the kernel split + prove; backend adoption),
-validated by everything Waves 0-2 built.
+validated by everything Waves 0-2 built. Entry gate: the [#729] §C6
+covered-family capacity census/tripwire (PR #956) lands BEFORE Phase 1
+entry. The baseline is explicitly partial: Phase 1 entry ALSO requires
+the typed wire-schema and PyO3 binding leg commands in [#729] §C6 to be
+implemented and green (`capacity_census_wire` and
+`capacity_census_bindings`, respectively), and Phase 1 re-derives its
+§C3 layer set from that completed census. These are explicit thick-red
+DAG edges below, not editable coverage metadata (PR #950 red teams P2-4
+and re-P1). The exact PR #956 follow-up
+`6ddf1a72d6dea6770a330d5c2ef3b8fa7d023c43` is part of that entry gate:
+conditional macro definitions taint their connected local-include
+component, bare and pointer-sized integer C callables classify
+conservatively as `numeric-op`, and only the three byte-frozen
+pre-ratchet plumbing declarations named in [#729] §C6 are exempt. The
+2026-07-31 round-4 fold-in completes that entry gate: an arithmetic
+spelling the census does not recognize is a build failure rather than an
+unflagged row, and adding a `chelis_types::Prim` variant stops the
+tripwire compiling until the new dtype is classified.
 
 **Wave 4 - the permanent guards.** [#729] Phase 4 delivers the capability
-table per [`capability_table.md`](capability_table.md); [#730] Phase 3 (gates become UX) and [#733]
+table per [`capability_table.md`](capability_table.md); [#733]
 Phase 3 (the first blocking provenance ratchet) ships with it only after
 the advisory Buoy pilot and change-impact phases are green; [#732] Phase 3
-(the tolerance table + the [#687] handshake) closes the oracle. Citation
+(the tolerance table + the [#687] handshake) closes the oracle.
+[#730] Phase 3 (gates become UX; amended 2026-07-30 to also deliver the
+typed diagnostic-kind and rejection-authority work) keeps Wave 4 as its
+recommended slot but is NOT gated on the capability table or the Buoy
+pilot - its own deliverable stands on "let the emitter's channel speak"
+whether or not the table has landed. This doc previously read as if it
+were gated; per this doc's own rule the plan won and the sentence was
+corrected 2026-07-30. [#730] Phase 4 (ratchet totality, added
+2026-07-30: product-source-manifest ratchets with non-Cargo language
+adapters, typed/live exclusion references, the non-product
+mutation-based panic contract, and the change-gated + nightly
+structural-authority jobs) is
+guard work that may land any time after [#730] Phase 2 and carries no
+wave assignment. Its user-visible halves are decided by [05-UNS-5..6]
+(spec/05 §7, authored 2026-07-30); the plan implements them. Citation
 presence may land before blocking freshness and coverage, but every
 selected capability row ultimately binds one current controlling atom
 revision.
@@ -151,15 +182,19 @@ plan set, [#719]'s fix precedes [#732] Phase 3's `sqrt = 0` tolerance
 row (SATISFIED 2026-07-17: PR #760 merged, [#719] closed - the row may
 be authored when Phase 3 arrives); downstream of the set, [#754]'s
 ecosystem gate is hard-gated on [#732] Phase 2's byte-identical
-rendering. Not drawn (for legibility): OpenSpec remains [#733]'s planning
-workflow while a pinned Buoy shell and one-way Chelis adapter provide
-enforcement.
+rendering. [#729] Phase 1 is separately hard-gated on PR #956's
+covered-family tripwire and both typed deferred-leg oracles. Not drawn
+(for legibility): OpenSpec remains [#733]'s planning workflow while a
+pinned Buoy shell and one-way Chelis adapter provide enforcement.
 The graph is acyclic. Node colors
 are the waves above: grey = Wave 0, green = Wave 1, blue = Wave 2, orange =
 Wave 3, purple = Wave 4 (so [#733]'s advisory Buoy pilot, blue, may ride Wave
 2); white boxes with dashed borders are standalone fixes outside the wave
-structure. LANDED marks the four Phase 0s merged 2026-07-17 and the three
-Phase 1s merged 2026-07-20 (PRs #793/#792/#791).
+structure. LANDED marks the four Phase 0s merged 2026-07-17, the three
+Phase 1s merged 2026-07-20 (PRs #793/#792/#791), and [#730] Phase 2
+merged and accepted 2026-07-24 (PR [#799]). [#730] Phase 4 (ratchet
+totality, added 2026-07-30) hangs off its Phase 2 and interleaves
+freely with its Phase 3.
 
 ```mermaid
 %%{init: {"themeVariables": {"fontSize": "18px"}, "flowchart": {"nodeSpacing": 45, "rankSpacing": 42}}}%%
@@ -184,8 +219,9 @@ flowchart TB
     direction TB
     n730p0["P0 · census re-verify + token tripwire<br/>+ rejected-cells corpus stub (LANDED)"]:::w0
     n730p1["P1 · Result channel + live-site sweep (LANDED)"]:::w1
-    n730p2["P2 · typed vocabularies + Host ABI<br/>+ structured emission"]:::w2
-    n730p3["P3 · gates become UX"]:::w4
+    n730p2["P2 · typed vocabularies + Host ABI<br/>+ structured emission (LANDED)"]:::w2
+    n730p3["P3 · gates become UX<br/>+ typed kind/authority"]:::w4
+    n730p4["P4 · ratchet totality"]:::w4
     n730p0 --> n730p1 --> n730p2 --> n730p3
   end
 
@@ -210,11 +246,19 @@ flowchart TB
   subgraph S729["#729 dtype semantics"]
     direction TB
     n729p0["P0 · domain checker + #687 oracle lanes (LANDED)"]:::w0
+    n729c6["C6 · covered-family capacity tripwire<br/>(PR #956)"]:::w3
+    n729c6wire["C6 · wire-schema enumerator<br/>+ mutation oracle"]:::w3
+    n729c6binding["C6 · PyO3 enumerator<br/>+ mutation oracle"]:::w3
     n729p1["P1 · semantics module + storage decision<br/>+ eval adoption"]:::w3
     n729p2["P2 · kernel split + traps + prove"]:::w3
     n729p3["P3 · C backend adoption<br/>+ generated observation"]:::w3
     n729p4["P4 · capability table"]:::w4
-    n729p0 --> n729p1 --> n729p2 --> n729p3 --> n729p4
+    n729p0 --> n729c6
+    n729c6 ==>|"HARD: covered-family oracle"| n729c6wire
+    n729c6 ==>|"HARD: covered-family oracle"| n729c6binding
+    n729c6wire ==>|"HARD: wire leg green"| n729p1
+    n729c6binding ==>|"HARD: binding leg green"| n729p1
+    n729p1 --> n729p2 --> n729p3 --> n729p4
   end
 
   n719["#719 sqrt fix (FIXED: PR #760)"]:::ext
@@ -234,15 +278,22 @@ flowchart TB
   n683 -.->|"natural moment"| n729p2
   n713 -.->|"natural moment"| n729p3
   n732p2 ==>|"HARD: byte-identical rendering<br/>is the gate's prerequisite"| n754
+  n730p2 --> n730p4
 
   style S733 fill:#FFFFFF,stroke:#C3CCD3
   style S730 fill:#FFFFFF,stroke:#C3CCD3
   style S731 fill:#FFFFFF,stroke:#C3CCD3
   style S732 fill:#FFFFFF,stroke:#C3CCD3
   style S729 fill:#FFFFFF,stroke:#C3CCD3
+  %% linkStyle indices are 0-based over EVERY edge in declaration order, and a
+  %% chain (a --> b --> c) contributes one index per arrow. There are 33 edges
+  %% here (0-32; index 32 is the appended #730 P2->P4 phase edge, default
+  %% styling). 21,22 are the two `-.-` either-order links; 13,14,15,16,28,31
+  %% are exactly the six `==>` HARD edges. Adding or removing any edge above
+  %% renumbers everything after it - recount before editing these two lines.
   linkStyle default stroke-width:2.5px
-  linkStyle 16,17 stroke:#9AA7B0,color:#7A8894,stroke-width:2.5px
-  linkStyle 23,26 stroke:#B3362B,stroke-width:5px,color:#B3362B
+  linkStyle 21,22 stroke:#9AA7B0,color:#7A8894,stroke-width:2.5px
+  linkStyle 13,14,15,16,28,31 stroke:#B3362B,stroke-width:5px,color:#B3362B
 ```
 
 ## Release slicing: where the version cuts fall
@@ -293,7 +344,7 @@ decisions 0.19 already made, so it is behavior-preserving by construction.
 |---|---|---|---|
 | **v0.17.0 - loud checking + canonical eval rendering** (ship now) | [#730] P1 + [#731] P1 + [#732] P1, and everything else merged since 0.16.1 | **source migration** (wave 1) | breaking deltas only: loud rejections (incl. the new loud compiled-lane `test_*` assert, [#796] - the old inert-`0` stub is gone, so anything leaning on it fails heavily in E2E), `with seed(n)` -> `42i64` ([#731] P1 - the Shoals / Whale / hello-chelis HEAD canaries fail on unsuffixed seeds), and dtype-faithful eval rendering. Seed form frozen ([#735] changes only meaning); eval render frozen (C matches it at 0.18) |
 | **v0.18.0 - checker totality, DeepTag, host-type/ABI boundary, compiled rendering** | [#731] P2 (PR #800) + [#731] P3 (DeepTag) + [#730] P2 (PR #799 vocab + host-type/ABI state) + [#732] P2 (compiled render) | **mechanical** for shells | no wire break ([#730] P2 preserves the `CHELIS_*` ids); the added loudness lands on already-broken code, so no *expected* source migration. Completes byte-identical rendering. Release-hygiene gate: the tarball must now ship `chelis_runtime_dtype.h` - PR 799's public `chelis_runtime.h` `#include`s it, but the release workflow currently copies only `chelis_runtime.h` |
-| **v0.19.0 - grounded dtype storage/wire break + every behavior-changing capability decision** | [#729] P1-P3 landed atomic per §C3, **plus every capability decision that changes behavior** - integer-overflow traps and each supported-vs-`Unimplemented` disposition (int `mean` [#724], bool arithmetic [#726], the [#715] rows, the HIP/Metal/C reject cells) | **source migration** (wave 2) | the one wire break, isolated from the checker-loudness cuts; class E resolves here, not at the 0.20 table. Bindings adapt to the per-dtype payload once; capability behavior is final |
+| **v0.19.0 - grounded dtype storage/wire break + every behavior-changing capability decision** | [#729] P1-P3 landed atomic per §C3, **plus every capability decision that changes behavior** - integer-overflow traps and each supported-vs-`Unimplemented` disposition (int `mean` [#724], bool arithmetic [#726], the [#715] rows, the HIP/Metal/C reject cells) - plus the prelude JSON/CSV integer-capacity decision (a `JInt`-shaped variant and integer accessors) for any prelude numeric channel this cut admits - invariant 7 HOLDS such channels out of every earlier release unless they land integer-capable from the start ([#729] §C3's amended census) - and any published-ABI signature change deferred here by anti-churn invariant 7 | **source migration** (wave 2) | the one wire break, isolated from the checker-loudness cuts; class E resolves here, not at the 0.20 table. Bindings adapt to the per-dtype payload once; capability behavior is final |
 | **v0.20.0 - behavior-preserving permanent guards** | [#729] P4 (the capability *table*, mechanizing 0.19's decisions) + [#730] P3 (gates -> UX) + [#732] P3 (tolerance / cross-lane oracle) + [#733] P3 (first blocking provenance ratchet) | **mechanical** for shells | guaranteed behavior-preserving: no decision, rejection, or rendered byte changes here - 0.19 shipped them all. [#733] P0 lands independently before this cut, while its P1-P2 advisory integration is a prerequisite rather than v0.20 release payload. `tests_blocked/` probes are re-adjudicated against the now-standing table |
 
 Net downstream shape: there are **four mechanical `conform` bump waves** - one
@@ -332,6 +383,21 @@ needs it now; otherwise it rides 0.18.
    file to every tarball; a published-artifact smoke that compiles a trivial C
    unit against the shipped `chelis_runtime.h` catches the omission before it
    reaches a downstream build.
+7. **Published-ABI signatures freeze between cuts.** From now until the 0.19
+   storage break, a change to an exported signature in the published runtime
+   headers is 0.19 payload by default - it rides the one budgeted ABI break,
+   never a cut promised "mechanical". A mechanical cut must be able to assert
+   the header-signature inventory unchanged; [#729]'s §C6 capacity tripwire is
+   the mechanism once it lands. Motivating instance: PR #891's
+   `chelis_pad_sequences` gaining an `int pad_dtype` parameter (flagged in the
+   2026-07-30 sweep, unmerged) inside the window the 0.18 note promises "no
+   wire break". The same freeze governs prelude numeric channels: a PR adding
+   one (the #891 `Json` shape) ships in NO release before 0.19 unless it lands
+   with its final integer-capable form from the start - "if it lands before
+   the break" is a fact pattern, not a hold; THIS sentence is the hold (PR
+   #950 red team P2-5). The in-tree precedent is already final-from-the-start:
+   `packages/chelis-std/src/io/json.ch` carries `JsonInt(int64)` beside
+   `JsonFloat(f64)`.
 
 ### Per-cut conform checklist
 

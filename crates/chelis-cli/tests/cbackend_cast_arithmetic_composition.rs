@@ -74,10 +74,53 @@ fn ensure_runtime_static_lib(canonical: &Path) -> std::io::Result<()> {
             deps_dir.display()
         )));
     };
-    let tmp = canonical.with_extension("a.tmp");
+    static NEXT_TEMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let tmp = canonical.with_extension(format!(
+        "a.tmp.{}.{}",
+        std::process::id(),
+        NEXT_TEMP.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
     fs::copy(&hashed, &tmp)?;
     fs::rename(&tmp, canonical)?;
     Ok(())
+}
+
+#[test]
+fn runtime_archive_materialization_is_safe_within_one_process() {
+    let source_root = target_debug_dir();
+    let source_deps = source_root.join("deps");
+    let source = fs::read_dir(&source_deps)
+        .expect("read source deps")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.file_name().is_some_and(|name| {
+                let name = name.to_string_lossy();
+                name.starts_with("libchelis_runtime-") && name.ends_with(".a")
+            })
+        })
+        .expect("hashed runtime archive");
+
+    let sandbox = tempdir().expect("runtime materialization sandbox");
+    let deps = sandbox.path().join("deps");
+    fs::create_dir(&deps).expect("create sandbox deps");
+    fs::copy(&source, deps.join(source.file_name().unwrap())).expect("seed hashed archive");
+    let canonical = sandbox.path().join("libchelis_runtime.a");
+
+    std::thread::scope(|scope| {
+        let mut threads = Vec::new();
+        for _ in 0..16 {
+            threads.push(scope.spawn(|| ensure_runtime_static_lib(&canonical)));
+        }
+        for thread in threads {
+            thread.join().expect("materialization thread").unwrap();
+        }
+    });
+
+    assert!(
+        canonical.is_file(),
+        "canonical runtime archive was not created"
+    );
 }
 
 fn chelis_build_c(source: &str, fn_name: &str) -> tempfile::TempDir {

@@ -69,6 +69,9 @@ sha2 = "0.10"
 tar = "0.4"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+# The faithful-observation tripwire parses Rust format captures. Use Rust's
+# Unicode identifier tables so valid non-ASCII captures cannot evade it.
+unicode-ident = "1"
 # `toml` is needed by `crates/chelis-cli/tests/reef_lockfile_remote_origin.rs`
 # (Item 9 lockfile-origin oracle) for byte-level round-trip assertions
 # against `ReefLock`. Pinned to the same version chelis-reef itself

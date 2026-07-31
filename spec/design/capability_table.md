@@ -128,6 +128,96 @@ authored:
 | `wrap_add`/`wrap_sub`/`wrap_mul` x (both surfaces) x int widths (spec/04 [04-NUM-7], [#753]) | A `Supported` on int8/16/32/64, `Rejected` on bool/float ("no modular arithmetic on non-integer dtypes; see [04-NUM-7]"); B-cells `Unimplemented { issue: #753 }` until kernels land ([#729] Phase 2's natural moment; SMT lowers to `bvadd`/`bvsub`/`bvmul` exactly, no tolerance row) |
 | named lossy cast x directions x dtypes ([#759]) | the explicit truncating/narrowing rung over the checked-cast default (same discipline as [#753]): per-direction rules authored as atoms - proposals: float->float RNE at target width; float->int truncate-toward-zero with an authored out-of-range rule; int->narrower-int ONE authored rule; never the default; bool out of scope per [04-NUM-4]; B-cells land with [#729] Phase 2's kernel work |
 
+## New numeric ops before the table lands (added 2026-07-30)
+
+Recorded after the 2026-07-30 PR sweep found a new numeric op
+(`round_to`, PR #891, unmerged) at review with per-dtype semantics
+stated only in a Rust doc comment. Between now and [#729] Phase 4, a
+NEW numeric op entering the public surface (builtin, prelude, stdlib,
+or runtime export) requires a `spec/05-risc-primitives.md` entry in the
+same change set: signature, per-dtype semantics at [04-NUM-8]'s
+declared arithmetic widths, adjoint or a non-differentiability
+statement, and an accumulator rule where applicable. A doc comment is
+not an authority (`AGENTS.md` §Numbered Specs Decide; the ops of
+chelis#898 are the standing backlog of exactly this omission).
+
+The requirement is structural per family. Table A remains the
+language-builtin registry (and checker acceptance is derived from it at
+Phase 4). Runtime exports and exported stdlib defs use the §C6
+operation-semantic registry delivered with the capacity tripwire:
+each structurally discovered numeric callable's exact canonical
+identity is a key whose value is one exact `[05-OP-N]` authority. The
+registry validator requires chapter `05`, group `OP`, and verbatim atom
+existence as a normative line beginning `> **[05-OP-N]**`; it does not
+accept a free-text `spec/05` substring, a cross-reference,
+`[05-OBS-1]`, or an absent `[05-OP-999]`. Existing numeric-callable
+rows at the 2026-07-30 baseline are explicitly grandfathered because
+the OP atoms do not yet exist. That grandfathering is an exact IDENTITY
+list frozen in the tripwire source, not a citation string a new row can
+copy: both pre-ratchet citations are locked that way, so the exemption
+covers precisely the rows that predate the ratchet and no others. A NEW
+runtime or exported stdlib
+numeric callable authors a new `[05-OP-N]` normative atom in spec/05
+and adds its exact registry mapping in the same change set. The
+deferred PyO3 leg must deliver the same identity-to-authority shape
+before Phase 1 entry. Table A's (builtin, surface, dtype) key
+deliberately does NOT stretch to those families: runtime exports and
+PyO3 functions have no `BuiltinId`, and container/boundary callables
+have no `Scalar|Tensor` surface - the `to_string` x Tensor/List seed
+row above already strains that axis (PR #950 red team P1-2; open
+question 5).
+
+Numeric-ness is signature-derived: a callable whose signature mentions
+a numeric dtype requires a registry entry, and the non-numeric
+classification is available only for genuinely dtype-free surface.
+For the C family this is deliberately conservative: every
+non-boolean/non-character built-in arithmetic value type, including bare
+`int` and the pointer-sized integer spellings, yields `numeric-op` - and
+a spelling the census does not recognize at all is a build failure rather
+than a dtype-free row, which is what makes "conservative" true rather
+than aspirational (`dtype_semantics.md` §C6, the inverted type-word
+rule). PR #956
+commit `6ddf1a72d6dea6770a330d5c2ef3b8fa7d023c43` permits exactly three
+pre-ratchet plumbing identities to remove that flag - `chelis_alloc`,
+`chelis_tensor_from_value_list_typed`, and `chelis_dtype_size`, with their
+complete canonical declarations frozen verbatim in
+`dtype_semantics.md` §C6. A callable name, parameter name, or substring is
+never an exemption. Conditional macro definitions are propagated across
+their connected local-include component (either include spelling) before
+classification, so a
+cross-file type alias cannot make a configuration-varying numeric callable
+disappear from this obligation.
+Positive controls bind a discovered callable to the exact atom that
+decides it. Negative mutation controls add one runtime export and one
+exported stdlib numeric def with no entry, bind a callable to a missing
+OP atom, and bind it to a non-OP atom; each must fail. Tooling validates
+the structured authority kind and existence; it does not infer whether
+the human-selected OP atom is semantically relevant, which remains a
+normative review check. Review cannot make a mismatched atom
+authoritative: if no OP atom's normative text governs the callable, the
+numbered spec must gain the decision before the mapping can land.
+Changing a callable's canonical identity also invalidates its old
+registration. These controls are permanent parts of the §C6 tripwire,
+not review instructions.
+
+Table A registration decides LANGUAGE legality - what is legal in Surf,
+Deep, and the RISC DAG, target-independently, reported by the checker.
+The other family registries record which existing normative decision
+controls each discovered callable; they do not create language
+semantics. Per-backend executability is Table B's separate decision,
+reported at build through [#730]'s `Unsupported` channel where the
+target is known: a language-legal op a backend cannot run is a
+CAPABILITY rejection, never a checker type error (§Derivations owns
+this split; restated here because a new-op author is the person most
+tempted to collapse it).
+
+`round_to` specifically: widening an f32 operand to f64, rounding
+decimally, and re-narrowing is computing at other than the declared
+arithmetic width - non-conforming under [04-NUM-8] as of its 2026-07-28
+amendment, which provides no exception vocabulary. Its semantics must
+be authored at declared widths, or its dtype set restricted to f64,
+before it lands.
+
 ## Open questions (decided at [#729] Phase 4 entry, recorded here)
 
 1. Machine form: `const` Rust table vs a checked-in data file with a
@@ -141,6 +231,11 @@ authored:
    expressible; where [#725]'s "window must be literal" rule sits).
 4. Row count management (builtins x 2 surfaces x 10 dtypes is a few
    thousand cells; the dtype-class authoring macro's ergonomics).
+5. Surface axis for container/boundary callables: the `to_string` x
+   Tensor/List seed row already names a `List` surface the
+   `Scalar|Tensor` axis forbids (PR #950 red team P1-2). Decide before
+   Phase 4 entry: extend the axis, or move container ops to a sibling
+   registry per `dtype_semantics.md` §C6's registries-per-family rule.
 
 [#682]: https://github.com/Chelis-Lang/chelis/issues/682
 [#690]: https://github.com/Chelis-Lang/chelis/issues/690

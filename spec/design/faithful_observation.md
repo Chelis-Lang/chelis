@@ -368,8 +368,62 @@ For every dtype and every storable value:
 4. **No third formatter.** Any new exit added to either lane must route
    through `format_element` / the generated helper; a hand-rolled
    `printf`/`format!` of a tensor element in the numeric crates is a
-   review-blocking finding (and the tripwire greps for the old
-   `%.16g`/`%.1f` pair).
+   review-blocking finding. The rule spans BOTH lanes and every Rust
+   exit surface, and its instruments (stated per §B2.8) are the three
+   hosted classes in `loud_unsupported_tripwire.rs`, each a two-sided
+   exact-count ratchet: `c-format-narrowing` (C printf tokens
+   `%.16g`/`%.1f`, all crate src; production allowlist empty since
+   Phase 2), `rust-format-narrowing` (interpolations whose format spec
+   pins a decimal precision - `.N`, argument-supplied `.*`, named
+   `.prec$`, in any combination with fill/alignment/sign/width, so
+   `{value:8.2}` and `{v:0>8.2}` count alongside `{x:.N}` - or selects
+   the exponential trait grammar (`{v:e}`/`{v:E}` render 0.5 as `5e-1`,
+   a float grammar the normative form never produces; round-4 F5); all
+   crate src, comment lines excluded), and `rust-debug-numeric-format`
+   (interpolations whose spec selects the Debug trait, i.e. ends in `?`
+   - `{v:?}`, `{x:#?}`, `{value:8?}`, `{v:x?}` - over the declared
+   `OBSERVATION_EXIT_SURFACES`: directory prefixes deliberately, so a
+   NEW file inside a declared surface is covered from its first line at
+   baseline zero; BOTH identifier positions - the capture argument and
+   the named dynamic precision `.ident$` - are parsed with Rust's
+   Unicode XID rules, so `{值:.2}` and `{v:.精度$}` both count
+   (round-4 F1: upgrading only the capture position left the
+   dynamic-precision position evadable); creating an exit surface
+   anywhere else obliges adding its prefix in the same change set).
+   Interlock with the host doc (bidirectional, recorded in its §C5):
+   `loud_unsupported.md`'s own §B2.8 requires DERIVED universes for its
+   own tripwire classes; a hosted class's scope is instead declared by
+   the owning plan's §B2 rule with residue declared per this doc's
+   §B2.8, and `OBSERVATION_EXIT_SURFACES` is revisited when [#730]
+   Phase 4's §C7.1 derived-universe rewrite lands.
+   Both Rust classes scan LOGICAL
+   lines - string continuations (`\` at end of line) are joined first,
+   so a format spec split across physical lines is the single spec the
+   compiler sees (round-2 F3's executed evasion, closed). The
+   sanctioned implementations -
+   the only sites where the grammar may be spelled directly - are
+   `chelis-types/src/observation.rs` (`format_element`) and
+   `chelis-runtime/src/format_shortest.rs` (`chelis_format_shortest`);
+   their baseline rows say so. Declared residue the token instruments
+   cannot see, each with its owner per §B2.8: derived-`Debug`
+   containers embedding floats (`{other:?}` on a `#[derive(Debug)]`
+   value; today's diagnostic carriers are annotated in the tripwire
+   baseline, retired by [#729]'s dtype-carrying payload plus the review
+   rule), bare `{}` Display / `.to_string()` of a numeric payload (the
+   review rule; too common to token-scan), ALTERNATE INTEGER/POINTER
+   grammars (`{v:x}`/`{v:X}`/`{v:o}`/`{v:b}`/`{v:p}` - legitimately
+   common for addresses, ids, and bitmasks, so a token scan would drown
+   in benign hits; the review rule), an exp selector behind a non-ASCII
+   fill or dynamic width (the grammar-only-prefix rule that keeps prose
+   brace-groups from counting also skips those; review rule), exits
+   born outside the
+   declared surfaces (the review rule), and MACRO-COMPOSED format
+   strings (`concat!`/`format_args!` indirection assembles a spec that
+   never appears whole in source; the scanner joins string
+   continuations but does not expand macros - the review rule). The
+   Rust lane was added by the 2026-07-30 detector-scope review, after
+   the rule's only instrument - C tokens - let PR #891's Rust-side
+   `format_f64_json` reach review with no mechanical signal.
 5. **Discoveries fork** (shared rule): new unfaithful exits found
    mid-phase are filed, added to the census in the tracking issue, and
    scheduled - not silently absorbed.
@@ -390,6 +444,103 @@ For every dtype and every storable value:
    programs. `chelis_print_f32` was exactly that, and carried the §C3.5
    misdecode for as long as it existed. Removed at Phase 2; the oracle
    fails if it returns in either the Rust source or the published header.
+8. **Detector-scope parity** (added 2026-07-30). A §B2 prohibition
+   exists only with a named instrument, and the instrument's covered
+   scope is stated at the rule beside the rule's own scope; whatever
+   the instrument cannot see is declared residue with a named owner (an
+   issue that retires it, or the review rule). An undeclared gap
+   between what a rule claims and what its detector covers is itself a
+   violation of this item - that gap is how `format_f64_json` shipped
+   with no mechanical signal while §B2.4 said "either lane".
+   Enforcement, with its own limits stated (PR #962 red-team F5, then
+   round-2 M2): the Phase 2 oracle carries `B2_RULE_INSTRUMENTS`, one
+   row per item of this section, checked three ways - the doc's §B2
+   item list must equal the manifest (a new rule lands only with a
+   deliberate instrument decision, which may be the literal review-rule
+   entry with a substantive justification), every named instrument must
+   exist, and every callable or suite instrument must have produced both
+   a RUNTIME invocation receipt and a centrally consumed-result receipt
+   by the end of the run (the `@instrument` decorator records entry;
+   `consume_findings` refuses any list that is not THE active verdict
+   sink and records consumption only after extending it, and the sink's
+   own context - not the leg's caller - raises from that same list;
+   suites record both on success). The first
+   cut checked invocation by scanning the oracle's own source, which
+   round-2 M2 refuted with an `if False:` branch - only a receipt
+   written by the running code counts. The exact-head review then showed
+   that entry alone is insufficient: a manifest detector returned a
+   non-empty violation which its caller discarded; round-4 F2 showed a
+   scratch list could impersonate the sink, so sink identity is now
+   asserted and the raise is helper-owned. Stated as the mechanism's
+   limit rather than hidden: a receipt proves detector -> active sink ->
+   helper-owned raise; it cannot prove the oracle's own code was not
+   edited to tamper with the sink between extend and exit - an oracle
+   cannot police modifications to itself, and that residue is the
+   review rule. A detector named in
+   the manifest but absent from result consumption now fails the final
+   check. The oracle
+   further requires every tripwire pattern whose `doc()` cites this
+   document to carry an oracle coverage row (its per-class permitted
+   baseline paths), closing the review's second finding one layer up.
+   What the manifest deliberately does NOT prove: that an instrument's
+   checks are non-vacuous. That burden sits with the mutation tests in
+   `test_faithful_observation_phase2_oracle.py` - one shipped-clean
+   test plus one mutation test per failure mode per instrument - and a
+   new instrument owes its mutation tests in the same change set.
+9. **Three-legged boundaries** (added 2026-07-30). Every artifact that
+   DECLARES current breakage - the `#[ignore]` ledger, the
+   corpus-exclusion lists, the tripwire baselines - carries three legs,
+   or may not exist: (1) inventory equality between the artifact and
+   its declared ledger; (2) continuous re-execution of the declared
+   behavior; (3) fail-on-unexpected-green, with a wrong-reason
+   discriminator wherever the declared failure has a fingerprint. A
+   boundary with fewer legs decays silently: the pre-2026-07-30
+   exclusion check compared lists for equality only, so a stale list
+   overstating breakage stayed green forever. Standing conformance:
+   `KNOWN_RED_CELLS` has all three legs from the oracle's authoring
+   (ledger equality, per-cell re-runs, the gone-green failure with its
+   `fragment` discriminator); the tripwire baseline carries the three
+   legs at NET-COUNT granularity - the row list, the every-CI scan, and
+   the DECREASE branch as its gone-green leg - which is honestly weaker
+   than per-occurrence identity: a same-file edit that removes one
+   benign token and adds one violating token preserves the count and
+   fires neither branch (PR #962 red-team F4; `loud_unsupported.md`
+   §C4.5 has always named count relocation among the inventory's
+   evasions, and the review rule owns the swap case); the exclusion
+   lists gained legs 2-3 via TWO mechanisms with different trust
+   models (PR #962 round-2 M1 forced the split): the harness's
+   exclusion probes
+   (`eval_f64_list_excluded_rows_still_narrow_through_the_f32_tag`,
+   `c_lane_excluded_labels_still_fail_at_ingress`,
+   `c_lane_excluded_neg_zero_still_drops_the_sign`) are the CONTINUOUS
+   CI leg - each carries exactly the unconditional `#[test]` attribute
+   (checked structurally; cfg-gated or cfg_attr-ignored probes fail
+   the scan, unrecognized attribute shapes fail closed), iterates the
+   exclusion const itself, and prints an ORDERED visited receipt the
+   oracle compares against the probe's declared sequence with
+   multiplicity (shrunken, duplicated, or reordered receipts fail).
+   Receipts are probe-authored text, so a probe could forge them -
+   which is why the INDEPENDENT leg is
+   `run_exclusion_ground_truth`: the oracle itself writes the
+   per-label programs, runs eval and the C emitter, then compiles and runs
+   every executable C exclusion and compares the rendered bits; it
+   re-derives each exclusion's fingerprint from its own observations,
+   trusting no
+   probe output. The fingerprints: the chelis#717 F32-tag narrowing;
+   the chelis#751 bare-integer-literal EMISSION (the lexical scanner
+   ignores C line/block comments and string/character literals, so a
+   stale expected token in non-code cannot earn the exclusion; the
+   native-stage result is always driven, and exact rendered bits fire
+   the shrink protocol even if an active-code fingerprint remains;
+   fingerprint presence discriminates the reason for a still-broken
+   result but never suppresses behavioral verification); the dropped
+   -0.0 sign. Every gone-green failure names
+   `DECLARED_EXCLUSIONS` and the shrink protocol. Scope notes: corpus
+   FLOORS (the §C2.3 byte-identity floor) assert coverage, not
+   breakage - they owe legs 1 and 2 only, since unexpected green is
+   meaningless for a floor; a declared boundary whose behavior cannot
+   be driven is converted into a probe of the rejection (the C-lane
+   probes are the worked example) or deleted.
 
 ## B3. How to pick up a phase
 
@@ -509,11 +660,39 @@ suite covers), runs each
 cell, and fails if one is red for an undeclared reason **or has gone
 green**. A green known-red cell means its upstream [#729]-family repair
 landed: un-ignore the cell on its original assertion and delete the
-ledger row in that change set. The oracle also pins the harness's two
+ledger row in that change set. The oracle also holds the harness's two
 documented corpus-exclusion lists ([#751] C ingress, [#717] eval
-`to_list`) against silent widening, runs the `chelis_format_shortest`
-byte locks, and requires the §B2.4 format-narrowing tripwire's
-PRODUCTION allowlist to stay empty.
+`to_list`) to the §B2.9 three-legged standard (amended 2026-07-30; the
+earlier check pinned the lists against silent widening only, so a stale
+list overstating breakage stayed green): leg 1 is inventory equality
+against its `DECLARED_EXCLUSIONS` table, in both directions; legs 2-3
+are carried twice, at different trust levels (round-2 M1): the
+harness's NON-ignored exclusion probes (existence, exactly-`#[test]`
+attributes, list-constant-driven bodies, and per-probe ORDERED
+receipts compared with multiplicity, all oracle-checked while the
+probes run as ordinary suite members in CI), and - independently -
+`run_exclusion_ground_truth`, where the oracle writes each excluded
+label's program itself, runs eval and the C emitter, compiles/runs every
+executable C exclusion, compares intended bits, and re-derives every
+exclusion fingerprint from comment/string-aware code tokens, so no
+probe-authored output is trusted for the re-execution claim. The
+probes' first execution shrank `EVAL_F64_LIST_EXCLUDED` by one row
+(`f64-tenth` rendered text-coincident since Phase 1's own-width
+renderer - a stale over-claim, caught exactly as designed). The oracle
+further runs the
+`chelis_format_shortest` byte locks, requires every no-third-formatter
+tripwire class's baseline paths to stay inside its per-class permitted
+set (`FORMAT_CLASS_TABLE`: the C class's PRODUCTION allowlist stays
+empty; the Rust classes' sets are the frozen annotated non-exit
+carriers), requires every tripwire pattern whose `doc()` cites this
+document to be a `FORMAT_CLASS_TABLE` key (§B2.8's doc-citation
+parity), checks this document's §B2 item list against its
+`B2_RULE_INSTRUMENTS` manifest (§B2.8: a rule lands only with a
+deliberate instrument decision), and finishes by verifying every
+manifest instrument's RUNTIME invocation and centrally consumed-result
+receipts (round-2 M2 plus exact-head F2: an instrument that never
+executed, or whose returned violation was discarded, fails the final
+check).
 
 Scope, stated rather than assumed: the ignore-inventory equality covers
 the observation harness, this plan's own instrument. The sibling matrix
@@ -525,11 +704,27 @@ un-ignored and green.
 2 oracle): it is a manual phase gate, invoked at phase acceptance and at
 any change to the observation surface, and it needs a host C toolchain
 because most obligations build, link, and run generated C. What CI does
-carry continuously is the harness's green set, the matrix oracle rows,
-the `chelis_format_shortest` byte locks, and the §B2.4 tripwire - every
-suite the oracle runs, minus the known-red re-execution and the
-structural ledger scan, which are exactly the legs that need the ledger
-to mean anything. Run it before claiming this phase, not once per PR.
+carry continuously is the harness's green set (which since 2026-07-30
+includes the three §B2.9 exclusion probes - the re-execution legs run
+per-push, not only at oracle time), the matrix oracle rows, the
+`chelis_format_shortest` byte locks, and the §B2.4 tripwire with all
+three no-third-formatter classes - every suite the oracle runs, minus
+the known-red re-execution and the structural scans (ledger equality,
+probe presence, `FORMAT_CLASS_TABLE`, doc-citation parity, the
+`B2_RULE_INSTRUMENTS` manifest), which are exactly the legs that need
+the ledger to mean anything. Run it before claiming this phase, not
+once per PR.
+
+**Scheduled execution (interlock added 2026-07-30, bidirectional with
+`loud_unsupported.md` §C7.5/§I2/B2.7):** the manual-gate standing above
+is being upgraded, not by this plan. [#730] Phase 4 delivers a nightly
+workflow (`loud-unsupported-nightly.yml`, with the repo's open/close
+tracking-issue report pattern) that runs this oracle on a schedule
+alongside [#730]'s own - their B2.7 rule is that a named structural
+authority with no scheduled execution is itself a defect of their
+class. This oracle's contents, stages, ledger semantics, and pass
+criteria remain this plan's alone; [#730] owns only the scheduling.
+Until that workflow lands, the paragraph above stands as written.
 
 **Delivered** (2026-07-24), with five recorded notes (note 5 added
 2026-07-28, with the oracle it describes). (1) The
@@ -681,7 +876,9 @@ never as tolerance.
   than absorbed - this plan does not own the storage side of it.
 - **With [#730]**: the `<value>` placeholder and the print helper's abort
   default are its census rows; the shared tripwire carries this plan's
-  `%.16g`/`%.1f` pattern. No delivery overlap.
+  three no-third-formatter classes (§B2.4: `c-format-narrowing`,
+  `rust-format-narrowing`, `rust-debug-numeric-format`). No delivery
+  overlap.
 
 ## Issue map
 
@@ -725,6 +922,7 @@ guaranteed to be a real value bug wearing its own name.
 [#723]: https://github.com/Chelis-Lang/chelis/issues/723
 [#724]: https://github.com/Chelis-Lang/chelis/issues/724
 [#726]: https://github.com/Chelis-Lang/chelis/issues/726
+[#703]: https://github.com/Chelis-Lang/chelis/issues/703
 [#727]: https://github.com/Chelis-Lang/chelis/issues/727
 [#728]: https://github.com/Chelis-Lang/chelis/issues/728
 [#729]: https://github.com/Chelis-Lang/chelis/issues/729
