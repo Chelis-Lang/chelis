@@ -2803,9 +2803,71 @@ pub(super) fn finish_unified_app(
                     Type::Prim(Prim::String),
                 ]);
             }
+            // Special-function builtins (chelis#902): erf/erfc and
+            // the standard normal CDF/quantile. Eval-only; the build
+            // backends reject them (see
+            // `reject_eval_only_builtins_host`).
+            "erf" | "erfc" | "norm_cdf" | "norm_ppf" => {
+                return check_special_fn_builtin_signature(fname, list, &arg_tys, subst, errors);
+            }
             _ => {}
         }
     }
 
     result_ty
+}
+
+/// Concrete argument/return contract for the special-function builtins
+/// (chelis#902): `erf`, `erfc`, `norm_cdf`, `norm_ppf`.
+///
+/// The env schemes (`builtin_env`) only declare arity; this arm pins the
+/// real type: exactly one argument, either a scalar float (any float
+/// precision — unsuffixed literals default to f32 per
+/// spec/04-type-system.md §5.3, and a hard f64 slot would reject
+/// `norm_cdf(0.5)` outright) or a float-precision tensor (elementwise in
+/// the eval lane). The return is precision-preserving: a scalar keeps
+/// its operand's float precision (the `round_to` rule from chelis#890)
+/// and a tensor keeps its full type. An unresolved operand defaults to
+/// the canonical f64 — the eval lane computes in f64 regardless.
+fn check_special_fn_builtin_signature(
+    fname: &str,
+    list: &deep::List,
+    arg_tys: &[Type],
+    subst: &mut Subst,
+    errors: &mut DiagnosticSink<'_>,
+) -> Type {
+    if arg_tys.len() != 1 {
+        return report_builtin_arity(errors, list, fname, 1, arg_tys.len());
+    }
+
+    let mut reject = |slot_description: String, got: &Type| -> Type {
+        report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::TypeMismatch,
+                with_macro_provenance(
+                    &deep::Expr::List(list.clone(), zero_span()),
+                    format!("{fname} expects {slot_description}, got {got}"),
+                ),
+                vec![],
+            ),
+        )
+    };
+
+    let resolved = type_for_readonly_check(&arg_tys[0], subst);
+    match &resolved {
+        Type::Prim(p) if p.is_float() => Type::Prim(*p),
+        Type::Tensor(_, TensorPrec::Concrete(p)) if p.is_float() => resolved.clone(),
+        // A polymorphic tensor precision is admitted so rank-/precision-
+        // generic bodies type-check; a non-float instantiation fails in
+        // the eval lane with the runtime's loud float-only diagnostic.
+        Type::Tensor(_, TensorPrec::Var(_)) => resolved.clone(),
+        Type::Var(_) | Type::Error(_) => Type::Prim(Prim::F64),
+        other => reject(
+            "a float argument, scalar or tensor (any float precision; for an \
+             integer value use cast(n, f64))"
+                .to_string(),
+            other,
+        ),
+    }
 }
