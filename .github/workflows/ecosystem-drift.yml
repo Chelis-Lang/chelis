@@ -479,7 +479,12 @@ jobs:
             echo "No tests/*.ch files; skipping chelis test (reef build is the gate)."
             exit 0
           fi
-          chelis test tests/ --timeout 600 --jobs auto
+          # Shoals now carries 367 tests. The 0.17.4 HEAD canary observed 291
+          # clean passes before the old 600s whole-suite deadline killed the
+          # process group, which is a harness timeout rather than language
+          # drift. Raise the whole-suite bound explicitly while preserving the
+          # existing 600s per-test budget; the two limits are independent.
+          chelis test tests/ --timeout 600 --suite-timeout 900 --jobs auto
 
       # ----------------------------------------------------------------------
       # cargo legs only: build the shell's Rust workspace against HEAD chelis
@@ -625,9 +630,12 @@ jobs:
           python3 "$CHELIS_TOOLCHAIN/scripts/drift_repin_compiler.py" \
             shell "${{ needs.build-chelis.outputs.chelis_version }}"
 
-      # Mirror hello-chelis ci.yml's `chelis-native` gates, run inside the
-      # HEAD-overlaid image. `-v "$PWD/shell:/workspace"` mounts the checked-out
-      # corpus so `chelis check` / `chelis test` / pytest see the source tree.
+      # Exercise hello-chelis semantics inside the HEAD-overlaid image.
+      # Release-pinned hello-chelis CI owns byte-for-byte Deep sidecar drift;
+      # regenerating with a different compiler version is expected to change
+      # serialization and is not an ecosystem-compatibility signal.
+      # `-v "$PWD/shell:/workspace"` mounts the checked-out corpus so `chelis
+      # check` / `chelis test` / pytest see the source tree.
       - name: hello-chelis check + test + C-backend (vs HEAD)
         if: matrix.type == 'docker'
         run: |
@@ -643,9 +651,6 @@ jobs:
           echo "::endgroup::"
           echo "::group::chelis test tests/"
           run timeout 900s chelis test tests/ --jobs auto
-          echo "::endgroup::"
-          echo "::group::Deep s-expression drift check"
-          run python3 scripts/regen_deep.py --check
           echo "::endgroup::"
           echo "::group::C-backend pytest"
           run bash -c 'pip install pytest --break-system-packages 2>/dev/null || pip install pytest; python3 -m pytest -q tests/test_c_backend.py'
