@@ -9,8 +9,22 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+#[derive(Clone, Copy)]
+enum ConsumerSource {
+    File(&'static str),
+    RustTree(&'static str),
+}
+
+impl ConsumerSource {
+    fn path(self) -> &'static str {
+        match self {
+            Self::File(path) | Self::RustTree(path) => path,
+        }
+    }
+}
+
 struct Consumer {
-    path: &'static str,
+    source: ConsumerSource,
     role: &'static str,
     required: &'static [&'static str],
     forbidden: &'static [&'static str],
@@ -18,19 +32,19 @@ struct Consumer {
 
 const EFFECT_KIND_CONSUMERS: &[Consumer] = &[
     Consumer {
-        path: "crates/chelis-deep/src/effect_kind.rs",
+        source: ConsumerSource::File("crates/chelis-deep/src/effect_kind.rs"),
         role: "Deep metadata decode boundary",
         required: &["EffectKindInput", "Result<EffectKind"],
         forbidden: &["Option<EffectKind"],
     },
     Consumer {
-        path: "crates/chelis-types/src/infer.rs",
+        source: ConsumerSource::RustTree("crates/chelis-types/src/infer"),
         role: "checker handle-effect semantics",
         required: &["use chelis_vocab::EffectKind", "decode_effect_kind("],
         forbidden: &["EffectKind::from_symbol", ".and_then(EffectKind"],
     },
     Consumer {
-        path: "crates/chelis-effects/src/lib.rs",
+        source: ConsumerSource::File("crates/chelis-effects/src/lib.rs"),
         role: "effect inference and handler/target validation",
         required: &["use chelis_vocab::EffectKind", "decode_effect_kind("],
         forbidden: &[
@@ -39,25 +53,25 @@ const EFFECT_KIND_CONSUMERS: &[Consumer] = &[
         ],
     },
     Consumer {
-        path: "crates/chelis-ir/src/lower.rs",
+        source: ConsumerSource::File("crates/chelis-ir/src/lower.rs"),
         role: "IR lowering handle-effect semantics",
         required: &["use chelis_vocab::EffectKind", "decode_effect_kind("],
         forbidden: &["EffectKind::from_symbol", ".and_then(EffectKind"],
     },
     Consumer {
-        path: "crates/chelis-ir/src/host.rs",
+        source: ConsumerSource::File("crates/chelis-ir/src/host.rs"),
         role: "host lowering handle-effect semantics",
         required: &["chelis_vocab::EffectKind", "decode_effect_kind("],
         forbidden: &["EffectKind::from_symbol(effect)"],
     },
     Consumer {
-        path: "crates/chelis-compiler-api/src/runtime/eval.rs",
+        source: ConsumerSource::File("crates/chelis-compiler-api/src/runtime/eval.rs"),
         role: "compiler-api evaluator handle-effect semantics",
         required: &["use chelis_vocab::EffectKind", "decode_effect_kind("],
         forbidden: &["if effect == \"random\""],
     },
     Consumer {
-        path: "crates/chelis-surf/src/desugar.rs",
+        source: ConsumerSource::File("crates/chelis-surf/src/desugar.rs"),
         role: "Surf-to-Deep canonical effect serialization",
         required: &["use chelis_vocab::EffectKind", ".symbol()"],
         forbidden: &[
@@ -66,7 +80,7 @@ const EFFECT_KIND_CONSUMERS: &[Consumer] = &[
         ],
     },
     Consumer {
-        path: "crates/chelis-surf/src/decompile.rs",
+        source: ConsumerSource::File("crates/chelis-surf/src/decompile.rs"),
         role: "both Deep-to-Surf handle-effect decompilers",
         required: &["use chelis_vocab::EffectKind", "decode_effect_kind("],
         forbidden: &[
@@ -78,13 +92,13 @@ const EFFECT_KIND_CONSUMERS: &[Consumer] = &[
 
 const RUNTIME_DTYPE_CONSUMERS: &[Consumer] = &[
     Consumer {
-        path: "crates/chelis-types/src/types.rs",
+        source: ConsumerSource::File("crates/chelis-types/src/types.rs"),
         role: "Prim-to-runtime ABI adapter",
         required: &["runtime_dtype(self)", "Result<RuntimeDType"],
         forbidden: &[],
     },
     Consumer {
-        path: "crates/chelis-runtime/src/lib.rs",
+        source: ConsumerSource::File("crates/chelis-runtime/src/lib.rs"),
         role: "runtime ABI decode and semantic dispatch",
         required: &[
             "decode_runtime_dtype(dtype: c_int)",
@@ -99,37 +113,37 @@ const RUNTIME_DTYPE_CONSUMERS: &[Consumer] = &[
         ],
     },
     Consumer {
-        path: "crates/chelis-backend-c/src/emit.rs",
+        source: ConsumerSource::File("crates/chelis-backend-c/src/emit.rs"),
         role: "C codegen dtype macro selection",
         required: &[".runtime_dtype()", ".c_macro()"],
         forbidden: &["Prim::F32 => \"CHELIS_F32\""],
     },
     Consumer {
-        path: "crates/chelis-backend-c/src/host_emit.rs",
+        source: ConsumerSource::File("crates/chelis-backend-c/src/host_emit.rs"),
         role: "C host/sparse dtype macro selection",
         required: &["prim.runtime_dtype()", "self.runtime_dtype().c_macro()"],
         forbidden: &[],
     },
     Consumer {
-        path: "crates/chelis-backend-hip/src/emit.rs",
+        source: ConsumerSource::File("crates/chelis-backend-hip/src/emit.rs"),
         role: "HIP codegen dtype macro selection",
         required: &[".runtime_dtype()", ".c_macro()"],
         forbidden: &["Prim::F32 => \"CHELIS_F32\""],
     },
     Consumer {
-        path: "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h",
+        source: ConsumerSource::File("crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"),
         role: "HIP allocation byte width",
         required: &["chelis_runtime_dtype_size_checked(dtype)"],
         forbidden: &["return sizeof(float);"],
     },
     Consumer {
-        path: "crates/chelis-backend-metal/src/dtype.rs",
+        source: ConsumerSource::File("crates/chelis-backend-metal/src/dtype.rs"),
         role: "Metal runtime dtype tag selection",
         required: &["prec.runtime_dtype()", ".c_macro()"],
         forbidden: &["Prim::F32 => \"CHELIS_F32\""],
     },
     Consumer {
-        path: "crates/chelis-python/src/lib.rs",
+        source: ConsumerSource::File("crates/chelis-python/src/lib.rs"),
         role: "Python FFI dtype constant",
         required: &["RuntimeDType::F32.id()"],
         forbidden: &["const CHELIS_F32: i32 = 0"],
@@ -144,18 +158,48 @@ fn repo_root() -> PathBuf {
         .to_path_buf()
 }
 
+fn read_consumer_source(root: &Path, source: ConsumerSource) -> std::io::Result<String> {
+    match source {
+        ConsumerSource::File(relative) => fs::read_to_string(root.join(relative)),
+        ConsumerSource::RustTree(relative) => {
+            let mut files = Vec::new();
+            collect_rust_files(&root.join(relative), &mut files)?;
+            files.sort();
+
+            let mut combined = String::new();
+            for path in files {
+                combined.push_str(&fs::read_to_string(path)?);
+                combined.push('\n');
+            }
+            Ok(combined)
+        }
+    }
+}
+
+fn collect_rust_files(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
+    for entry in fs::read_dir(dir)? {
+        let path = entry?.path();
+        if path.is_dir() {
+            collect_rust_files(&path, out)?;
+        } else if path.extension().is_some_and(|extension| extension == "rs") {
+            out.push(path);
+        }
+    }
+    Ok(())
+}
+
 #[test]
 fn added_effect_variant_will_force_every_semantic_consumer_to_decide() {
     let root = repo_root();
     let mut failures = Vec::new();
     for consumer in EFFECT_KIND_CONSUMERS {
-        let path = root.join(consumer.path);
-        let source = match fs::read_to_string(&path) {
+        let source_path = consumer.source.path();
+        let source = match read_consumer_source(&root, consumer.source) {
             Ok(source) => source,
             Err(err) => {
                 failures.push(format!(
                     "{} ({}): missing inventory target: {err}",
-                    consumer.path, consumer.role
+                    source_path, consumer.role
                 ));
                 continue;
             }
@@ -164,7 +208,7 @@ fn added_effect_variant_will_force_every_semantic_consumer_to_decide() {
             if !source.contains(needle) {
                 failures.push(format!(
                     "{} ({}): missing typed marker `{needle}`",
-                    consumer.path, consumer.role
+                    source_path, consumer.role
                 ));
             }
         }
@@ -172,7 +216,7 @@ fn added_effect_variant_will_force_every_semantic_consumer_to_decide() {
             if source.contains(needle) {
                 failures.push(format!(
                     "{} ({}): raw semantic dispatch remains: `{needle}`",
-                    consumer.path, consumer.role
+                    source_path, consumer.role
                 ));
             }
         }
@@ -189,13 +233,13 @@ fn added_runtime_dtype_will_force_runtime_and_codegen_consumers_to_decide() {
     let root = repo_root();
     let mut failures = Vec::new();
     for consumer in RUNTIME_DTYPE_CONSUMERS {
-        let path = root.join(consumer.path);
-        let source = match fs::read_to_string(&path) {
+        let source_path = consumer.source.path();
+        let source = match read_consumer_source(&root, consumer.source) {
             Ok(source) => source,
             Err(err) => {
                 failures.push(format!(
                     "{} ({}): missing inventory target: {err}",
-                    consumer.path, consumer.role
+                    source_path, consumer.role
                 ));
                 continue;
             }
@@ -204,7 +248,7 @@ fn added_runtime_dtype_will_force_runtime_and_codegen_consumers_to_decide() {
             if !source.contains(needle) {
                 failures.push(format!(
                     "{} ({}): missing typed marker `{needle}`",
-                    consumer.path, consumer.role
+                    source_path, consumer.role
                 ));
             }
         }
@@ -212,7 +256,7 @@ fn added_runtime_dtype_will_force_runtime_and_codegen_consumers_to_decide() {
             if source.contains(needle) {
                 failures.push(format!(
                     "{} ({}): duplicate/raw dtype authority remains: `{needle}`",
-                    consumer.path, consumer.role
+                    source_path, consumer.role
                 ));
             }
         }

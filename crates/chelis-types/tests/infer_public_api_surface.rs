@@ -26,6 +26,8 @@ use chelis_deep::ast as deep;
 use chelis_types::TypeEnv;
 use chelis_types::types::Type;
 
+type CompiledLibraryContextResult = Result<(TypeEnv, CheckedProgram), InferResult>;
+
 // ── Function signatures ─────────────────────────────────────────────────────
 //
 // Binding each function to a `const` of its written-out type pins the
@@ -48,17 +50,13 @@ const _TYPE_TO_DEEP_EXPR: fn(&Type) -> deep::Expr = type_to_deep_expr;
 
 const _SET_GROW_SEGMENT_BYTES_FOR_TEST: fn(usize) = set_grow_segment_bytes_for_test;
 
-const _BUILD_COMPILED_LIBRARY_CONTEXT: fn(
-    &[deep::Expr],
-) -> Result<(TypeEnv, CheckedProgram), InferResult> = build_compiled_library_context;
+const _BUILD_COMPILED_LIBRARY_CONTEXT: fn(&[deep::Expr]) -> CompiledLibraryContextResult =
+    build_compiled_library_context;
 
 const _BUILD_COMPILED_LIBRARY_CONTEXT_WITH_BASE: fn(
     &TypeEnv,
     &[deep::Expr],
-) -> Result<
-    (TypeEnv, CheckedProgram),
-    InferResult,
-> = build_compiled_library_context_with_base;
+) -> CompiledLibraryContextResult = build_compiled_library_context_with_base;
 
 const _CHECK_IR_WITH_CONTEXT: fn(&TypeEnv, &[deep::Expr]) -> Result<CheckedProgram, InferResult> =
     check_ir_with_context;
@@ -78,7 +76,7 @@ const _CHECK_IR_WITH_SIGNATURE_CONTEXT: fn(
 /// renamed field is a compile error here.
 fn _read_signature_metadata_fields(meta: &SignatureInferenceMetadata) {
     let _empty: bool = meta.is_empty();
-    for (_name, function) in &meta.functions {
+    for function in meta.functions.values() {
         let _: &String = &function.name;
         let _: bool = function.authored_signature;
         let _: &Option<Type> = &function.authored_signature_type;
@@ -134,8 +132,8 @@ fn public_result_shape_is_reachable() {
 fn public_context_entry_points_are_reachable() {
     let empty: Vec<deep::Expr> = Vec::new();
 
-    let (env, library): (TypeEnv, CheckedProgram) =
-        build_compiled_library_context(&empty).expect("empty library context builds");
+    let context: CompiledLibraryContextResult = build_compiled_library_context(&empty);
+    let (env, library) = context.expect("empty library context builds");
 
     let (based_env, _based): (TypeEnv, CheckedProgram) =
         build_compiled_library_context_with_base(&env, &empty)

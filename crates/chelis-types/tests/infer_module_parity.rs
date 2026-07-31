@@ -60,7 +60,7 @@ fn accepted_snapshot(checked: &CheckedProgram) -> String {
 
     out.push_str("\n== signature inference ==\n");
     let mut functions: Vec<_> = checked.signature_inference().functions.iter().collect();
-    functions.sort_by(|(left, _), (right, _)| left.cmp(right));
+    functions.sort_by_key(|(name, _)| *name);
     for (binding, function) in functions {
         out.push_str(&format!("binding = {binding}\n"));
         out.push_str(&format!("  name = {}\n", function.name));
