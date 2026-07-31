@@ -21,8 +21,9 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   at bounded call sites (chelis#936).** Ordinary stored type parameters are
   distinguished from tensor dimensions nested through ADTs (chelis#940), so
   `Hamt[a]` follows ordinary specialization while `Column[n]`/`Frame[n]`
-  retain rank specialization. Invoked recursive ordinary generics reject
-  before C emission pending memoized monomorphized symbols (chelis#941).
+  retain rank specialization. Invoked self- and mutually recursive ordinary
+  generics reject before C emission pending memoized monomorphized symbols
+  (chelis#941).
 - **Host generic classification now consumes checker-owned signature and ADT
   records instead of reconstructing them from authored syntax (chelis#948).**
   Alias-resolved constructor fields survive `CheckedProgram` serialization,

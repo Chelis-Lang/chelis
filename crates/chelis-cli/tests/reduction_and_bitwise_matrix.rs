@@ -189,13 +189,28 @@ fn bitwise_ops_agree_across_lanes_at_every_width() {
         panic!("needs a host C toolchain");
     }
     for ty in ["int8", "int16", "int32", "int64"] {
-        for (expr, expected) in [
-            (format!("bitand(cast(12, {ty}), cast(10, {ty}))"), "8"),
-            (format!("shl(cast(1, {ty}), cast(4, {ty}))"), "16"),
+        for (label, expr, expected) in [
+            (
+                "bitand",
+                format!("bitand(cast(12, {ty}), cast(10, {ty}))"),
+                "8",
+            ),
+            (
+                "bitor",
+                format!("bitor(cast(12, {ty}), cast(10, {ty}))"),
+                "14",
+            ),
+            (
+                "bitxor",
+                format!("bitxor(cast(12, {ty}), cast(10, {ty}))"),
+                "6",
+            ),
+            ("shl", format!("shl(cast(1, {ty}), cast(4, {ty}))"), "16"),
+            ("shr", format!("shr(cast(-16, {ty}), cast(2, {ty}))"), "-4"),
         ] {
             let program = scalar_program(&expr, ty);
             assert_eq!(eval_first_line(&program).expect("eval"), expected);
-            let c_got = c_first_line(&program, &format!("bw_{ty}_{}", &expr[..4]));
+            let c_got = c_first_line(&program, &format!("bw_{ty}_{label}"));
             // Only the C lane is domain-wired here by design: it is the
             // #718 width-escape suspect, and a domain diagnostic before
             // the generic LANE DIVERGENCE assert names the failure class.
@@ -307,21 +322,34 @@ fn shift_boundaries_agree_across_lanes_and_are_ubsan_clean() {
 }
 
 #[test]
-fn negative_shift_count_traps_without_ubsan() {
+fn negative_shift_counts_trap_before_ubsan_at_every_width() {
     if !c_toolchain_available() {
         panic!("needs a host C toolchain with UBSan");
     }
-    let program = scalar_program("shl(cast(1, int64), cast(-1, int64))", "int64");
-    let eval_err = eval_first_line(&program).expect_err("negative eval shift must fail");
-    assert!(eval_err.contains("shift amount must be non-negative, got -1"));
-    let run = c_ubsan_run(&program, "shift_negative_count");
-    assert!(!run.status.success(), "negative compiled shift must trap");
-    let stderr = String::from_utf8_lossy(&run.stderr);
-    assert!(stderr.contains("shift amount must be non-negative, got -1"));
-    assert!(
-        !stderr.contains("runtime error:"),
-        "language trap must precede any undefined shift: {stderr}"
-    );
+    for ty in ["int8", "int16", "int32", "int64"] {
+        for op in ["shl", "shr"] {
+            let program = scalar_program(&format!("{op}(cast(1, {ty}), cast(-1, {ty}))"), ty);
+            let eval_err = eval_first_line(&program).expect_err("negative eval shift must fail");
+            assert!(
+                eval_err.contains("shift amount must be non-negative, got -1"),
+                "{ty}/{op}: wrong eval diagnostic: {eval_err}"
+            );
+            let run = c_ubsan_run(&program, &format!("shift_negative_count_{ty}_{op}"));
+            assert!(
+                !run.status.success(),
+                "{ty}/{op}: negative compiled shift must trap"
+            );
+            let stderr = String::from_utf8_lossy(&run.stderr);
+            assert!(
+                stderr.contains("shift amount must be non-negative, got -1"),
+                "{ty}/{op}: wrong C diagnostic: {stderr}"
+            );
+            assert!(
+                !stderr.contains("runtime error:"),
+                "{ty}/{op}: language trap must precede any undefined shift: {stderr}"
+            );
+        }
+    }
 }
 
 // ===========================================================================

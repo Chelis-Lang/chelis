@@ -356,6 +356,43 @@ def main() -> bool = loop(Full { value: cast(1.0, f32) })
 }
 
 #[test]
+fn invoked_mutual_recursive_generic_cycle_fails_loudly() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("mutual_recursive_generic.ch");
+    write_file(
+        &path,
+        "\
+type Box[a] =
+  | Empty
+  | Full { value: a }
+def ping[a](box: Box[a], again: bool) -> bool =
+  if again then pong(box, false) else true
+def pong[a](box: Box[a], again: bool) -> bool =
+  if again then ping(box, false) else true
+def main() -> bool = ping(Full { value: cast(1.0, f32) }, true)
+",
+    );
+    Command::cargo_bin("chelis")
+        .expect("chelis binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            dir.path().join("out").to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("chelis#941"))
+        .stderr(predicates::str::contains(
+            "requires bounded monomorphized symbols",
+        ))
+        .stderr(predicates::str::contains("[05-UNS-1]"));
+}
+
+#[test]
 fn concrete_nullary_generic_constructor_eval_and_c_agree() {
     let source = "\
 type Box[a] =

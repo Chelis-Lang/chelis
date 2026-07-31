@@ -21308,6 +21308,26 @@ type Boxed[a] = | Boxed(Payload[a])
 def identity[a](value: Boxed[a]) -> Boxed[a] = value
 "#,
         );
+        let assert_checker_metadata = |stage: &str, program: &CheckedProgram| {
+            assert!(
+                program.adt_registry().lookup("Boxed").is_some(),
+                "{stage}: checker-owned ADT registry must survive"
+            );
+            let identity = program
+                .signature_inference()
+                .functions
+                .get("identity")
+                .unwrap_or_else(|| panic!("{stage}: identity signature must survive"));
+            assert!(
+                identity.authored_signature,
+                "{stage}: authored-signature provenance must survive"
+            );
+            assert!(
+                identity.authored_signature_type.is_some(),
+                "{stage}: checker-decoded authored signature must survive"
+            );
+        };
+        assert_checker_metadata("initial checking", &checked);
         let boxed = checked
             .adt_registry()
             .lookup("Boxed")
@@ -21323,6 +21343,7 @@ def identity[a](value: Boxed[a]) -> Boxed[a] = value
         let encoded = bincode::serialize(&checked).expect("CheckedProgram serializes");
         let decoded: CheckedProgram =
             bincode::deserialize(&encoded).expect("CheckedProgram deserializes");
+        assert_checker_metadata("serialization", &decoded);
         assert_eq!(
             decoded
                 .adt_registry()
@@ -21349,15 +21370,12 @@ def identity[a](value: Boxed[a]) -> Boxed[a] = value
         let effects_reannotated = checked
             .try_with_effect_annotations(checked.annotated_exprs().to_vec())
             .expect("effects-only rewrite preserves checked metadata");
-        assert!(
-            effects_reannotated.adt_registry().lookup("Boxed").is_some(),
-            "effects reannotation must preserve the checker registry"
-        );
+        assert_checker_metadata("effects reannotation", &effects_reannotated);
+        let linearity_checked = crate::linearity::check_linearity(&effects_reannotated)
+            .expect("linearity preserves checked metadata");
+        assert_checker_metadata("linearity", &linearity_checked);
         let composed = CheckedProgram::compose(&checked, &effects_reannotated);
-        assert!(
-            composed.adt_registry().lookup("Boxed").is_some(),
-            "CheckedProgram composition must preserve the checker registry"
-        );
+        assert_checker_metadata("composition", &composed);
 
         let dimensional = checked_surf(
             r#"
@@ -21380,6 +21398,34 @@ def identity[n, a](column: Column[n, a]) -> Column[n, a] = column
         assert_ne!(
             *stored_precision, column.param_vars[0],
             "dimension parameter must not be reconstructed as a stored dtype"
+        );
+    }
+
+    #[test]
+    fn generalized_unannotated_function_is_not_an_authored_signature() {
+        let checked = checked_surf(
+            r#"
+def identity(x) = x
+def use_int() = identity(1)
+def use_bool() = identity(true)
+"#,
+        );
+        let identity = checked
+            .signature_inference()
+            .functions
+            .get("identity")
+            .expect("generalized identity metadata");
+        assert!(
+            !identity.authored_signature,
+            "body inference/generalization must not fabricate authored provenance"
+        );
+        assert!(
+            identity.authored_signature_type.is_none(),
+            "an unannotated function has no checker-decoded authored signature"
+        );
+        assert!(
+            matches!(identity.checked_signature, Type::Fn(_, _)),
+            "the function is still generalized and callable"
         );
     }
 

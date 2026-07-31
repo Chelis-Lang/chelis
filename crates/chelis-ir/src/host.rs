@@ -10610,6 +10610,54 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
     }
 
     #[test]
+    fn generalized_unannotated_callback_is_not_classified_as_authored_polymorphism() {
+        let checked = surf_check(
+            "def apply(callback, value) = callback(value)\n\
+             def increment(value: int32) -> int32 = add(value, 1)\n\
+             def use_callback() -> int32 = apply(increment, 1)\n",
+        );
+        let apply = checked
+            .signature_inference()
+            .functions
+            .get("apply")
+            .expect("generalized callback metadata");
+        assert!(!apply.authored_signature);
+        assert!(apply.authored_signature_type.is_none());
+        assert!(
+            !top_level_fn_is_type_polymorphic(&checked, "apply"),
+            "an inferred/generalized callback is not an authored generic ABI"
+        );
+    }
+
+    #[test]
+    fn authored_signature_classifier_requires_exact_or_unambiguous_name() {
+        let checked = parse_and_check(
+            r#"
+                (defsig {} Left.identity
+                  (t-fn {} (t-var {} a) (t-var {} a)))
+                (def {} Left.identity
+                  (fn {} (params {} (x {type: (t-var {} a)})) (var {} x)))
+                (defsig {} Right.identity
+                  (t-fn {} (t-var {} b) (t-var {} b)))
+                (def {} Right.identity
+                  (fn {} (params {} (x {type: (t-var {} b)})) (var {} x)))
+            "#,
+        );
+        assert!(
+            top_level_fn_is_type_polymorphic(&checked, "Left.identity"),
+            "an exact qualified checker record must classify"
+        );
+        assert!(
+            top_level_fn_is_type_polymorphic(&checked, "Right.identity"),
+            "the other exact qualified checker record must classify"
+        );
+        assert!(
+            !top_level_fn_is_type_polymorphic(&checked, "identity"),
+            "an ambiguous terminal name must not select either qualified checker record"
+        );
+    }
+
+    #[test]
     fn empty_to_tensor_uses_checked_default_before_concrete_resolution() {
         let checked = surf_check("result = numel(to_tensor([]))\n");
         let compiled = try_lower_compiled_program(&checked)
