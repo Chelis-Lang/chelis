@@ -141,6 +141,18 @@ Default samples are `100`; `with samples` and `--samples` override it. Default
 seed is `0`; `with seed` and `--seed` override it. Runs with the same seed and
 inputs must produce the same sample sequence.
 
+For a guarded property whose binders are all `f32`/`f64`, Tier C derives a
+sampling domain from conjunctions of scalar interval and binder-order
+comparisons (`<`, `<=`, `>`, `>=`). Constant bounds propagate through binder
+orders before sampling, so narrow guards such as
+`0.99 < alpha1 < alpha2 < 1.0` are generated in-domain rather than discovered
+by rejection from `[-10, 10]`. The construction and its random choices are
+seed-deterministic. An empty interval, cyclic ordering, disjunction, equality,
+arithmetic operand, function predicate, or other unsupported guard shape is
+`status:"unsupported"` (exit `2`) under `fuzz-only`; it cannot fall through to
+a green empirical verdict. Non-scalar guarded properties retain their existing
+typed generator and rejection behavior.
+
 V1 reports the first deterministic counterexample. Shrinking is deferred.
 
 ## CLI Contract
@@ -193,7 +205,7 @@ that the module type-checked and every obligation was discharged.
 summary record.
 
 ```json
-{"kind":"property","name":"call_price_non_negative","status":"passed","composite_verdict":"fuzz_validated","qualifiers":["fuzz_base"],"assumptions":[],"samples":100,"seed":0}
+{"kind":"property","name":"confidence_tail_order","status":"passed","composite_verdict":"fuzz_validated","qualifiers":["fuzz","fuzz_base"],"assumptions":[{"name":"preconditions:confidence_tail_order","discharge":{"method":"fuzz","evidence":{"status":"validated","sampling_method":"constraint_directed","accepted_samples":100,"attempted_samples":100,"rejected_samples":0}},"non_vacuity":{"status":"established","evidence":{"method":"fuzz","sampling_method":"constraint_directed","accepted_samples":100,"attempted_samples":100,"rejected_samples":0}}}],"proof_tier":"fuzz","sampling_method":"constraint_directed","accepted_samples":100,"attempted_samples":100,"rejected_samples":0,"samples":100,"seed":0}
 {"kind":"property","name":"req_PRC_001","status":"failed","composite_verdict":"failed","assumptions":[],"samples":1,"seed":0,"source":{"kind":"bridge:c-earchin","spans":"references/pricing_rules.spans.json"}}
 {"kind":"property","name":"tensor_symbolic_shape","status":"unsupported","composite_verdict":"unsupported","assumptions":[],"reason":"symbolic tensor dimensions are not supported in L2 v1"}
 {"kind":"summary","total":3,"passed":1,"failed":1,"unsupported":1,"errors":0,"dependency_graph":{"status":"complete","declarations":[{"id":"decl:…","name":"call_price","kind":"function","package":"pricing","module":"Pricing.BlackScholes","source":{"file":"src/black_scholes.ch","span":{"offset":42,"len":180}}}],"edges":[{"from":"decl:…property","to":"decl:…"}]}}
@@ -223,6 +235,13 @@ wire (chelis#922):
   cycles without name guessing.
 - A multi-input summary is `unavailable` if any selected input lacks complete
   attribution; Chelis does not present a partial union as complete.
+
+Every Tier-C property record additively reports `sampling_method`,
+`accepted_samples`, `attempted_samples`, and `rejected_samples`. Guarded
+properties repeat those counts and the method in their precondition discharge
+and non-vacuity evidence, so a consumer can distinguish empirical evidence
+from an exhausted or unsupported generator without reconstructing it from
+source.
 
 The legacy name-only `dependency_edges` array remains additive and deprecated
 for at least one published release after `dependency_graph` is introduced.

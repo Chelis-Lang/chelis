@@ -371,6 +371,14 @@ fn parity_dict_foundation() {
 }
 
 #[test]
+fn parity_constraint_directed_risk_guards_library_only() {
+    drive_parity(
+        &examples_root().join("constraint_directed_risk_guards.ch"),
+        false,
+    );
+}
+
+#[test]
 fn parity_iter_foundation() {
     drive_parity(&examples_root().join("iter_foundation.ch"), true);
 }
@@ -462,6 +470,7 @@ fn parity_rank_poly_borrow_library_only() {
 #[test]
 fn parity_corpus_is_complete() {
     let known: &[&str] = &[
+        "constraint_directed_risk_guards.ch",
         "dict_foundation.ch",
         "hello_tensor.ch",
         "iter_foundation.ch",

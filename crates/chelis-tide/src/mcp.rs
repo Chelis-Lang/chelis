@@ -552,6 +552,12 @@ fn property_to_json(o: &chelis_prove::property_runner::PropertyOutcome) -> Value
     if let Some(goal) = &o.goal {
         value["goal"] = json!(goal);
     }
+    if let Some(method) = &o.sampling_method {
+        value["sampling_method"] = json!(method);
+        value["accepted_samples"] = json!(o.samples);
+        value["attempted_samples"] = json!(o.attempted_samples);
+        value["rejected_samples"] = json!(o.rejected_samples);
+    }
     if let Some(cx) = &o.counterexample {
         value["counterexample"] = cx.clone();
         value["shrink_steps"] = json!(o.shrink_steps);

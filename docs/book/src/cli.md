@@ -249,6 +249,15 @@ unsupported reason under `--tier smt-only`; `auto` may fuzz-validate them
 instead. Conditional scalar gradients and differentiated casts remain outside
 the prover subset until the compiler can build them.
 
+Under `--tier fuzz-only` (and an `auto` fallback), guarded `f32`/`f64`
+properties use deterministic constraint-directed generation for conjunctions
+of scalar interval and binder-order comparisons. This keeps narrow finance
+domains such as ordered VaR confidence levels non-vacuous. Unsupported or
+inconsistent scalar guard shapes exit `2` instead of producing a green result.
+NDJSON property records disclose `sampling_method` plus accepted, attempted,
+and rejected sample counts; guarded records repeat this evidence in the
+precondition non-vacuity record.
+
 Exit codes are stable for CI: `0` pass, `1` counterexample, `2` selected
 property unsupported by the v1 generator, and `3` setup/input/config error.
 `--json` emits NDJSON property records followed by one summary record.
