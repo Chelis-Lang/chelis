@@ -1237,28 +1237,112 @@ struct OrderEdge {
     strict: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FloatKind {
+    F32,
+    F64,
+}
+
+impl FloatKind {
+    fn from_type_name(name: &str) -> Self {
+        match name {
+            "f32" => Self::F32,
+            "f64" => Self::F64,
+            _ => unreachable!("constraint plans only admit f32/f64 binders"),
+        }
+    }
+
+    fn lower_value(self, value: f64, strict: bool) -> f64 {
+        match self {
+            Self::F64 => {
+                if strict {
+                    value.next_up()
+                } else {
+                    value
+                }
+            }
+            Self::F32 => {
+                let rounded = value as f32;
+                if strict {
+                    rounded.next_up() as f64
+                } else {
+                    rounded as f64
+                }
+            }
+        }
+    }
+
+    fn upper_value(self, value: f64, strict: bool) -> f64 {
+        match self {
+            Self::F64 => {
+                if strict {
+                    value.next_down()
+                } else {
+                    value
+                }
+            }
+            Self::F32 => {
+                let rounded = value as f32;
+                if strict {
+                    rounded.next_down() as f64
+                } else {
+                    rounded as f64
+                }
+            }
+        }
+    }
+
+    fn next_up(self, value: f64) -> f64 {
+        match self {
+            Self::F32 => (value as f32).next_up() as f64,
+            Self::F64 => value.next_up(),
+        }
+    }
+
+    fn next_down(self, value: f64) -> f64 {
+        match self {
+            Self::F32 => (value as f32).next_down() as f64,
+            Self::F64 => value.next_down(),
+        }
+    }
+
+    fn round_into_domain(self, value: f64, lower: f64, upper: f64) -> Option<f64> {
+        let mut rounded = match self {
+            Self::F32 => (value as f32) as f64,
+            Self::F64 => value,
+        };
+        if rounded < lower {
+            rounded = self.next_up(rounded);
+        } else if rounded > upper {
+            rounded = self.next_down(rounded);
+        }
+        (rounded.is_finite() && lower <= rounded && rounded <= upper).then_some(rounded)
+    }
+}
+
 #[derive(Debug, Clone)]
 struct ConstraintSamplingPlan {
     domains: BTreeMap<String, ScalarDomain>,
+    kinds: BTreeMap<String, FloatKind>,
     incoming: BTreeMap<String, Vec<(String, bool)>>,
     topo: Vec<String>,
     reserve_depth: BTreeMap<String, usize>,
-    epsilon: f64,
 }
 
 impl ConstraintSamplingPlan {
     fn derive(
-        variables: impl IntoIterator<Item = String>,
+        variables: impl IntoIterator<Item = (String, FloatKind)>,
         preconditions: &[crate::solver::SmtExpr],
     ) -> Result<Self, String> {
-        let names = variables.into_iter().collect::<BTreeSet<_>>();
+        let kinds = variables.into_iter().collect::<BTreeMap<_, _>>();
+        let names = kinds.keys().cloned().collect::<BTreeSet<_>>();
         let default = ScalarDomain {
             lower: ScalarBound {
-                value: -10.0,
+                value: f64::NEG_INFINITY,
                 strict: false,
             },
             upper: ScalarBound {
-                value: 10.0,
+                value: f64::INFINITY,
                 strict: false,
             },
         };
@@ -1310,6 +1394,34 @@ impl ConstraintSamplingPlan {
             }
         }
 
+        // A missing side is a generator choice, not a hidden semantic bound.
+        // Keep the historical width only as a finite sampling window anchored
+        // at the user's actual guard; never intersect an explicit domain with
+        // the old uniform [-10, 10] range.
+        for domain in domains.values_mut() {
+            match (
+                domain.lower.value.is_finite(),
+                domain.upper.value.is_finite(),
+            ) {
+                (false, false) => {
+                    domain.lower.value = -10.0;
+                    domain.upper.value = 10.0;
+                }
+                (true, false) => {
+                    let width = (domain.lower.value.abs() * 0.1).max(20.0);
+                    domain.upper.value = domain.lower.value + width;
+                }
+                (false, true) => {
+                    let width = (domain.upper.value.abs() * 0.1).max(20.0);
+                    domain.lower.value = domain.upper.value - width;
+                }
+                (true, true) => {}
+            }
+            if !domain.lower.value.is_finite() || !domain.upper.value.is_finite() {
+                return Err("scalar guard bounds exceed the finite sampling range".to_string());
+            }
+        }
+
         let mut incoming_count = names
             .iter()
             .cloned()
@@ -1349,12 +1461,6 @@ impl ConstraintSamplingPlan {
             );
         }
 
-        let span = domains
-            .values()
-            .map(|domain| domain.upper.value - domain.lower.value)
-            .filter(|span| span.is_finite() && *span > 0.0)
-            .fold(20.0_f64, f64::min);
-        let epsilon = (span * 1.0e-5).max(1.0e-9);
         let mut reserve_depth = names
             .iter()
             .cloned()
@@ -1365,17 +1471,17 @@ impl ConstraintSamplingPlan {
                 .get(name)
                 .into_iter()
                 .flatten()
-                .map(|(successor, _)| reserve_depth[successor] + 1)
+                .map(|(successor, strict)| reserve_depth[successor] + usize::from(*strict))
                 .max()
                 .unwrap_or(0);
             reserve_depth.insert(name.clone(), depth);
         }
         Ok(Self {
             domains,
+            kinds,
             incoming,
             topo,
             reserve_depth,
-            epsilon,
         })
     }
 
@@ -1383,29 +1489,34 @@ impl ConstraintSamplingPlan {
         let mut values = BTreeMap::new();
         for name in &self.topo {
             let domain = self.domains[name];
-            let mut lower = domain.lower.value
-                + if domain.lower.strict {
-                    self.epsilon
-                } else {
-                    0.0
-                };
+            let kind = self.kinds[name];
+            let mut lower = kind.lower_value(domain.lower.value, domain.lower.strict);
             for (predecessor, strict) in self.incoming.get(name).into_iter().flatten() {
                 let predecessor_value = values[predecessor];
-                lower = lower.max(predecessor_value + if *strict { self.epsilon } else { 0.0 });
-            }
-            let upper = domain.upper.value
-                - if domain.upper.strict {
-                    self.epsilon
+                lower = lower.max(if *strict {
+                    kind.next_up(predecessor_value)
                 } else {
-                    0.0
-                }
-                - self.epsilon * self.reserve_depth[name] as f64;
+                    predecessor_value
+                });
+            }
+            let mut upper = kind.upper_value(domain.upper.value, domain.upper.strict);
+            for _ in 0..self.reserve_depth[name] {
+                upper = kind.next_down(upper);
+            }
             if !lower.is_finite() || !upper.is_finite() || lower > upper {
                 return Err(format!(
                     "inconsistent scalar guards leave `{name}` with no representable sample"
                 ));
             }
-            values.insert(name.clone(), rng.next_f64(lower, upper));
+            let draw = if lower == upper {
+                lower
+            } else {
+                rng.next_f64(lower, upper)
+            };
+            let value = kind.round_into_domain(draw, lower, upper).ok_or_else(|| {
+                format!("inconsistent scalar guards leave `{name}` with no representable sample")
+            })?;
+            values.insert(name.clone(), value);
         }
         Ok(values)
     }
@@ -1506,6 +1617,9 @@ fn scalar_guard_literal(expr: &crate::solver::SmtExpr) -> Option<f64> {
     match expr {
         crate::solver::SmtExpr::RealLit(value) => Some(*value),
         crate::solver::SmtExpr::IntLit(value) => Some(*value as f64),
+        crate::solver::SmtExpr::Arith(crate::solver::ArithOp::Neg, inner, _) => {
+            scalar_guard_literal(inner).map(|value| -value)
+        }
         _ => None,
     }
 }
@@ -1813,7 +1927,13 @@ fn surf_constraint_sampling_plan(
         })
         .collect::<Result<Vec<_>, _>>()?;
     ConstraintSamplingPlan::derive(
-        property.params.iter().map(|param| param.name.clone()),
+        property.params.iter().map(|param| {
+            let TypeExpr::Named(type_name, _) = param.ty.as_ref().expect("typed float binder")
+            else {
+                unreachable!("constraint plan requires scalar float binders")
+            };
+            (param.name.clone(), FloatKind::from_type_name(type_name))
+        }),
         &preconditions,
     )
     .map(Some)
@@ -2959,7 +3079,13 @@ fn deep_constraint_sampling_plan(
         })
         .collect::<Result<Vec<_>, _>>()?;
     ConstraintSamplingPlan::derive(
-        property.params.iter().map(|param| param.name.clone()),
+        property.params.iter().map(|param| {
+            let TypeExpr::Named(type_name, _) = param.ty.as_ref().expect("typed float binder")
+            else {
+                unreachable!("constraint plan requires scalar float binders")
+            };
+            (param.name.clone(), FloatKind::from_type_name(type_name))
+        }),
         &preconditions,
     )
     .map(Some)

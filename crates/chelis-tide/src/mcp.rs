@@ -546,6 +546,7 @@ fn property_to_json(o: &chelis_prove::property_runner::PropertyOutcome) -> Value
         "proof_tier": o.proof_tier.as_str(),
         "samples": o.samples,
         "seed": o.seed,
+        "assumptions": &o.assumptions,
     });
     // chelis#436: the discharged proposition travels with the record on the
     // tide surface too, so a tide prove and a CLI prove agree on the goal.

@@ -175,7 +175,7 @@ fn prove_json_schema_has_property_and_summary_records() {
     assert_eq!(records[1]["passed"], 1);
 }
 
-#[cfg(feature = "chelis-prove")]
+#[cfg(feature = "smt")]
 #[test]
 fn prove_surf_reef_input_lowers_against_linked_declarations() {
     let dir = tempdir().expect("tempdir");
@@ -1868,10 +1868,19 @@ fn chelis_prove_without_smt_still_warns_obligations_not_smt_verified() {
             && stderr.contains("Rebuild with --features smt"),
         "chelis-prove-without-smt must still warn; stderr={stderr}"
     );
-    // The warning never leaks into the stdout NDJSON stream.
+    // The machine-facing stream carries the same warning so an NDJSON-only
+    // consumer cannot mistake Tier-C obligation evidence for an SMT proof.
+    let records = stdout
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .collect::<Vec<_>>();
     assert!(
-        !stdout.contains("obligation verification requires"),
-        "warning must not leak into stdout; stdout={stdout}"
+        records.iter().any(|record| {
+            record["kind"] == "warning"
+                && record["stage"] == "obligations"
+                && record["skipped"] == 1
+        }),
+        "machine-facing warning missing; stdout={stdout}"
     );
 }
 

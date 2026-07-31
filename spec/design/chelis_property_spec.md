@@ -146,12 +146,32 @@ sampling domain from conjunctions of scalar interval and binder-order
 comparisons (`<`, `<=`, `>`, `>=`). Constant bounds propagate through binder
 orders before sampling, so narrow guards such as
 `0.99 < alpha1 < alpha2 < 1.0` are generated in-domain rather than discovered
-by rejection from `[-10, 10]`. The construction and its random choices are
-seed-deterministic. An empty interval, cyclic ordering, disjunction, equality,
-arithmetic operand, function predicate, or other unsupported guard shape is
+by rejection from `[-10, 10]`. Explicit bounds are not clipped to that legacy
+uniform range; negative literals and reversed comparison spellings are
+equivalent interval bounds. Strict spacing is computed with the binders'
+actual IEEE `f32`/`f64` successor and predecessor values. Non-strict order
+edges permit equality and reserve no strict spacing, while strict chains
+reserve enough representable values for their remaining successors. The
+construction and its random choices are seed-deterministic. An empty interval,
+an interval with too few representable values for its strict order chain,
+cyclic ordering, disjunction, equality, arithmetic operand other than unary
+literal negation, function predicate, or other unsupported guard shape is
 `status:"unsupported"` (exit `2`) under `fuzz-only`; it cannot fall through to
 a green empirical verdict. Non-scalar guarded properties retain their existing
 typed generator and rejection behavior.
+
+The shared Tier-C runner is enabled in every normal CLI build, including a
+build without the `smt` feature, and is also the Tide implementation. Solver
+availability may change `auto` dispatch into Tier B, but it never changes
+`fuzz-only` generation or its machine record.
+
+The authoritative chelis#977 acceptance oracle is:
+
+```sh
+cargo test -p chelis-cli --test issue_977_constraint_fuzz
+cargo test -p chelis-tide --test mcp issue_977_tide_and_cli_match_full_constraint_sampling_evidence -- --exact
+cargo test -p chelis-cli --features smt --test issue_977_constraint_fuzz
+```
 
 V1 reports the first deterministic counterexample. Shrinking is deferred.
 

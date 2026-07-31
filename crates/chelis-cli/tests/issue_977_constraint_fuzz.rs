@@ -1,14 +1,33 @@
 //! chelis#977: constraint-directed fuzz generation for narrow scalar guards.
-#![cfg(feature = "smt")]
-
 use assert_cmd::Command;
 use serde_json::Value;
 use tempfile::tempdir;
 
 fn prove(source: &str, seed: u64) -> (i32, Value) {
+    prove_with_kind(source, seed, false)
+}
+
+fn prove_with_kind(source: &str, seed: u64, deep: bool) -> (i32, Value) {
     let dir = tempdir().expect("tempdir");
-    let path = dir.path().join("risk.ch");
-    std::fs::write(&path, source).expect("write fixture");
+    let surf_path = dir.path().join("risk.ch");
+    std::fs::write(&surf_path, source).expect("write fixture");
+    let path = if deep {
+        let deep_path = dir.path().join("risk.dp");
+        let output = Command::cargo_bin("chelis")
+            .expect("chelis binary")
+            .args(["deep", surf_path.to_str().expect("utf-8 path")])
+            .output()
+            .expect("desugar fixture");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        std::fs::write(&deep_path, output.stdout).expect("write deep fixture");
+        deep_path
+    } else {
+        surf_path
+    };
     let output = Command::cargo_bin("chelis")
         .expect("chelis binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
@@ -136,4 +155,111 @@ where ((alpha1 + alpha2) < 1.0):
             .unwrap_or_default()
             .contains("unsupported")
     );
+}
+
+#[test]
+fn default_non_smt_build_uses_the_shared_constraint_sampler() {
+    let (code, record) = prove(NARROW_VAR_GUARD, 42);
+    assert_eq!(code, 0, "{record}");
+    assert_eq!(record["sampling_method"], "constraint_directed");
+    assert_eq!(record["accepted_samples"], 32);
+    assert_eq!(record["attempted_samples"], 32);
+    assert_eq!(record["rejected_samples"], 0);
+}
+
+#[test]
+fn f32_and_f64_interval_bounds_are_not_clipped_to_the_uniform_range() {
+    for (ty, suffix) in [("f32", ""), ("f64", "f64")] {
+        let source = format!(
+            "module Risk.Outside\n@property outside forall(x: {ty})\nwhere (x > 20.0{suffix}), (x < 30.0{suffix}):\n  (x == x)\n"
+        );
+        let (code, record) = prove(&source, 5);
+        assert_eq!(code, 0, "{ty}: {record}");
+        assert_eq!(record["sampling_method"], "constraint_directed");
+        assert_eq!(record["accepted_samples"], 32);
+        assert_eq!(record["rejected_samples"], 0);
+    }
+}
+
+#[test]
+fn negative_literals_and_reversed_comparisons_are_directed() {
+    let source = "module Risk.Negative
+@property negative forall(x: f32)
+where (-1.0 < x), (0.0 > x):
+  (x < 0.0)
+";
+    let (code, record) = prove(source, 11);
+    assert_eq!(code, 0, "{record}");
+    assert_eq!(record["sampling_method"], "constraint_directed");
+    assert_eq!(record["accepted_samples"], 32);
+    assert_eq!(record["rejected_samples"], 0);
+}
+
+#[test]
+fn non_strict_order_allows_equal_singleton_domains() {
+    for (ty, suffix) in [("f32", ""), ("f64", "f64")] {
+        let source = format!(
+            "module Risk.Equal\n@property equal forall(x: {ty}, y: {ty})\nwhere (x >= 1.0{suffix}), (x <= 1.0{suffix}), (y >= 1.0{suffix}), (y <= 1.0{suffix}), (x <= y):\n  (x == y)\n"
+        );
+        let (code, record) = prove(&source, 13);
+        assert_eq!(code, 0, "{ty}: {record}");
+        assert_eq!(record["accepted_samples"], 32);
+        assert_eq!(record["rejected_samples"], 0);
+    }
+}
+
+#[test]
+fn narrow_f64_interval_uses_representable_successors_not_fixed_epsilon() {
+    let source = "module Risk.Narrow64
+@property narrow forall(x: f64, y: f64)
+where (x > 0.9999999999999997f64), (x < y), (y < 1.0000000000000002f64):
+  (x < y)
+";
+    let (code, record) = prove(source, 17);
+    assert_eq!(code, 0, "{record}");
+    assert_eq!(record["accepted_samples"], 32);
+    assert_eq!(record["attempted_samples"], 32);
+    assert_eq!(record["rejected_samples"], 0);
+}
+
+#[test]
+fn narrow_f32_interval_uses_representable_successors() {
+    let source = "module Risk.Narrow32
+@property narrow forall(x: f32, y: f32)
+where (x > 0.9999998), (x < y), (y < 1.0000002):
+  (x < y)
+";
+    let (code, record) = prove(source, 19);
+    assert_eq!(code, 0, "{record}");
+    assert_eq!(record["accepted_samples"], 32);
+    assert_eq!(record["attempted_samples"], 32);
+    assert_eq!(record["rejected_samples"], 0);
+}
+
+#[test]
+fn interval_without_enough_machine_values_fails_closed() {
+    let source = "module Risk.NoSlots
+@property no_slots forall(x: f32, y: f32)
+where (x > 0.9999999), (x < y), (y < 1.0):
+  (x < y)
+";
+    let (code, record) = prove(source, 21);
+    assert_eq!(code, 2, "{record}");
+    assert_eq!(record["status"], "unsupported");
+    assert_eq!(record["sampling_method"], "constraint_directed");
+    assert_eq!(record["accepted_samples"], 0);
+    assert_ne!(record["composite_verdict"], "fuzz_validated");
+}
+
+#[test]
+fn deep_constraint_sampler_matches_surf_evidence() {
+    let (surf_code, mut surf) = prove_with_kind(NARROW_VAR_GUARD, 23, false);
+    let (deep_code, mut deep) = prove_with_kind(NARROW_VAR_GUARD, 23, true);
+    assert_eq!(surf_code, 0, "{surf}");
+    assert_eq!(deep_code, 0, "{deep}");
+    for record in [&mut surf, &mut deep] {
+        record.as_object_mut().expect("record").remove("source");
+        record.as_object_mut().expect("record").remove("goal");
+    }
+    assert_eq!(surf, deep);
 }
