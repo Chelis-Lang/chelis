@@ -54,7 +54,7 @@ pub(super) fn describe_tuple_index(expr: &deep::Expr) -> String {
         Some(deep::Expr::Atom(deep::Atom::Float(f), _)) => format!("float literal {f}"),
         Some(deep::Expr::Atom(deep::Atom::Bool(b), _)) => format!("bool literal {b}"),
         Some(deep::Expr::Atom(deep::Atom::Str(_), _)) => "a string literal".to_string(),
-        Some(deep::Expr::Atom(deep::Atom::Symbol(s), _)) => format!("symbol `{s}`"),
+        Some(deep::Expr::Atom(deep::Atom::Name(s), _)) => format!("symbol `{s}`"),
         _ => "a non-literal expression".to_string(),
     }
 }

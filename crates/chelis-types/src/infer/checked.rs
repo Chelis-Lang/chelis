@@ -407,6 +407,9 @@ impl InferenceProduct {
                     deep::Expr::Atom(_, _) => "<atom>",
                     deep::Expr::Map(_, _) => "<map>",
                     deep::Expr::MetaExpr(_, _) => "<meta-expr>",
+                    deep::Expr::Node(node, _) => node.tag().as_str(),
+                    deep::Expr::BareList(_, _) => "<bare-list>",
+                    deep::Expr::UnknownForm(data) => &data.head,
                 };
                 errors.push(internal_owner_stamp_error(format!(
                     "missing authoritative type stamp for {role} `{construct}`"
@@ -1215,5 +1218,9 @@ pub(super) fn effect_metadata_is_singular(expr: &deep::Expr) -> bool {
             };
             singular_here && list.elements.iter().all(effect_metadata_is_singular)
         }
+        // Transitional: Node children are expression-only, recurse.
+        deep::Expr::Node(node, _) => node.expr_children().all(effect_metadata_is_singular),
+        deep::Expr::BareList(elems, _) => elems.iter().all(effect_metadata_is_singular),
+        deep::Expr::UnknownForm(data) => data.children.iter().all(effect_metadata_is_singular),
     }
 }

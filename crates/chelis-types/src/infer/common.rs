@@ -220,7 +220,7 @@ pub(super) fn deftype_opaque_meta(list: &deep::List) -> bool {
 /// Extract a symbol name from an Expr.
 pub(super) fn symbol_name(expr: &deep::Expr) -> Option<&str> {
     match expr {
-        deep::Expr::Atom(deep::Atom::Symbol(s), _) => Some(s.as_str()),
+        deep::Expr::Atom(deep::Atom::Name(s), _) => Some(s.as_str()),
         _ => None,
     }
 }

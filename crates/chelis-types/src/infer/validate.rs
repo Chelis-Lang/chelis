@@ -553,6 +553,22 @@ pub(super) fn walk_for_tensor_precision(
             walk_for_tensor_precision(&meta.expr, errors, seen, def_context);
         }
         deep::Expr::Atom(_, _) => {}
+        // Transitional: recurse into expression children.
+        deep::Expr::Node(node, _) => {
+            for child in node.expr_children() {
+                walk_for_tensor_precision(child, errors, seen, def_context);
+            }
+        }
+        deep::Expr::BareList(elems, _) => {
+            for child in elems {
+                walk_for_tensor_precision(child, errors, seen, def_context);
+            }
+        }
+        deep::Expr::UnknownForm(data) => {
+            for child in &data.children {
+                walk_for_tensor_precision(child, errors, seen, def_context);
+            }
+        }
     }
 }
 
@@ -669,9 +685,9 @@ pub(super) fn param_name_and_inline_type(
     param: &deep::Expr,
 ) -> Option<(String, Option<deep::Expr>)> {
     match param {
-        deep::Expr::Atom(deep::Atom::Symbol(name), _) => Some((name.clone(), None)),
+        deep::Expr::Atom(deep::Atom::Name(name), _) => Some((name.clone(), None)),
         deep::Expr::List(list, _) => {
-            let Some(deep::Expr::Atom(deep::Atom::Symbol(name), _)) = list.elements.first() else {
+            let Some(deep::Expr::Atom(deep::Atom::Name(name), _)) = list.elements.first() else {
                 return None;
             };
             let ty = match list.elements.get(1) {
@@ -685,7 +701,7 @@ pub(super) fn param_name_and_inline_type(
             Some((name.clone(), ty))
         }
         deep::Expr::MetaExpr(meta, _) => {
-            let deep::Expr::Atom(deep::Atom::Symbol(name), _) = meta.expr.as_ref() else {
+            let deep::Expr::Atom(deep::Atom::Name(name), _) = meta.expr.as_ref() else {
                 return None;
             };
             let ty = meta
@@ -805,6 +821,22 @@ pub(super) fn walk_for_poly_op_constraint_violations(
             }
         }
         deep::Expr::Atom(_, _) => {}
+        // Transitional: recurse into expression children.
+        deep::Expr::Node(node, _) => {
+            for child in node.expr_children() {
+                walk_for_poly_op_constraint_violations(child, defs, type_env, scope, errors);
+            }
+        }
+        deep::Expr::BareList(elems, _) => {
+            for child in elems {
+                walk_for_poly_op_constraint_violations(child, defs, type_env, scope, errors);
+            }
+        }
+        deep::Expr::UnknownForm(data) => {
+            for child in &data.children {
+                walk_for_poly_op_constraint_violations(child, defs, type_env, scope, errors);
+            }
+        }
     }
 }
 
@@ -1508,6 +1540,27 @@ pub(super) fn validate_ir_expr(
             validate_ir_expr(&meta.expr, type_env, static_env, failed_let_names, errors)
         }
         deep::Expr::Atom(_, _) => literal_static_value(expr),
+        // Transitional: recurse into expression children, return Unknown.
+        deep::Expr::Node(node, _) => {
+            let mut last = StaticValue::Unknown;
+            for child in node.expr_children() {
+                last = validate_ir_expr(child, type_env, static_env, failed_let_names, errors);
+            }
+            last
+        }
+        deep::Expr::BareList(elems, _) => {
+            let mut last = StaticValue::Unknown;
+            for child in elems {
+                last = validate_ir_expr(child, type_env, static_env, failed_let_names, errors);
+            }
+            last
+        }
+        deep::Expr::UnknownForm(data) => {
+            for child in &data.children {
+                validate_ir_expr(child, type_env, static_env, failed_let_names, errors);
+            }
+            StaticValue::Unknown
+        }
     }
 }
 
@@ -1572,7 +1625,7 @@ pub(super) fn node_expr(tag: DeepTag, children: Vec<deep::Expr>) -> deep::Expr {
 }
 
 pub(super) fn symbol_expr(name: &str) -> deep::Expr {
-    deep::Expr::Atom(deep::Atom::Symbol(name.to_string()), zero_span())
+    deep::Expr::Atom(deep::Atom::Name(name.to_string()), zero_span())
 }
 
 pub(super) fn zero_span() -> Span {
@@ -1584,7 +1637,10 @@ pub(super) fn span_of_expr(expr: &deep::Expr) -> Span {
         deep::Expr::Atom(_, span)
         | deep::Expr::List(_, span)
         | deep::Expr::Map(_, span)
-        | deep::Expr::MetaExpr(_, span) => *span,
+        | deep::Expr::MetaExpr(_, span)
+        | deep::Expr::Node(_, span)
+        | deep::Expr::BareList(_, span) => *span,
+        deep::Expr::UnknownForm(data) => data.span,
     }
 }
 
@@ -1602,7 +1658,7 @@ pub(super) fn ir_builtin_name(list: &deep::List) -> Option<&str> {
         _ => return None,
     };
     match (func_list.tag(), func_list.elements.get(2)) {
-        (Some(DeepTag::Var), Some(deep::Expr::Atom(deep::Atom::Symbol(name), _))) => {
+        (Some(DeepTag::Var), Some(deep::Expr::Atom(deep::Atom::Name(name), _))) => {
             Some(name.as_str())
         }
         _ => None,
@@ -2700,6 +2756,22 @@ pub(super) fn annotated_totality_invariant_traces(exprs: &[deep::Expr]) -> Vec<S
                             | ChildStampRole::Type,
                         ) => {}
                     }
+                }
+            }
+            // Transitional: recurse into expression children.
+            deep::Expr::Node(node, _) => {
+                for child in node.expr_children() {
+                    walk(child, traces);
+                }
+            }
+            deep::Expr::BareList(elems, _) => {
+                for child in elems {
+                    walk(child, traces);
+                }
+            }
+            deep::Expr::UnknownForm(data) => {
+                for child in &data.children {
+                    walk(child, traces);
                 }
             }
         }

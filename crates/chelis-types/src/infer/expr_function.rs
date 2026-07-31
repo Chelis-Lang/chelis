@@ -180,11 +180,11 @@ pub(super) fn extract_params(
 
     for expr in elems {
         match expr {
-            deep::Expr::Atom(deep::Atom::Symbol(name), _) => {
+            deep::Expr::Atom(deep::Atom::Name(name), _) => {
                 params.push((name.to_string(), None));
             }
             deep::Expr::MetaExpr(meta, _) => {
-                let deep::Expr::Atom(deep::Atom::Symbol(name), _) = meta.expr.as_ref() else {
+                let deep::Expr::Atom(deep::Atom::Name(name), _) = meta.expr.as_ref() else {
                     continue;
                 };
                 let annotation =

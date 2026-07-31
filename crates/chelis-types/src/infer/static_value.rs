@@ -34,7 +34,7 @@ pub(super) fn bind_fn_params_unknown(fn_list: &deep::List, env: &mut HashMap<Str
     }
     for param in children(params_list) {
         match param {
-            deep::Expr::Atom(deep::Atom::Symbol(name), _) => {
+            deep::Expr::Atom(deep::Atom::Name(name), _) => {
                 env.insert(name.clone(), StaticValue::Unknown);
             }
             deep::Expr::List(param_list, _) => {

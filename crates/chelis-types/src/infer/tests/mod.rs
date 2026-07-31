@@ -327,7 +327,7 @@ fn check_err(src: &str, expected_kind: CheckErrorKind) {
 /// Build a left-nested `app` chain of `depth` distinct names directly in
 /// Deep, for the recursion-depth guard tests.
 fn deep_app_chain_node(depth: usize) -> deep::Expr {
-    let sym = |s: &str| deep::Expr::Atom(deep::Atom::Symbol(s.to_string()), Span::new(0, 0));
+    let sym = |s: &str| deep::Expr::Atom(deep::Atom::Name(s.to_string()), Span::new(0, 0));
     let meta = || deep::Expr::Map(deep::MetaMap::default(), Span::new(0, 0));
     let var = |n: &str| {
         deep::Expr::List(
