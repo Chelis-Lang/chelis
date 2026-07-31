@@ -170,6 +170,18 @@ question 5).
 Numeric-ness is signature-derived: a callable whose signature mentions
 a numeric dtype requires a registry entry, and the non-numeric
 classification is available only for genuinely dtype-free surface.
+For the C family this is deliberately conservative: every
+non-boolean/non-character built-in arithmetic value type, including bare
+`int` and the pointer-sized integer spellings, yields `numeric-op`. PR #956
+commit `6ddf1a72d6dea6770a330d5c2ef3b8fa7d023c43` permits exactly three
+pre-ratchet plumbing identities to remove that flag - `chelis_alloc`,
+`chelis_tensor_from_value_list_typed`, and `chelis_dtype_size`, with their
+complete canonical declarations frozen verbatim in
+`dtype_semantics.md` §C6. A callable name, parameter name, or substring is
+never an exemption. Conditional macro definitions are propagated across
+their connected quoted-local-include component before classification, so a
+cross-file type alias cannot make a configuration-varying numeric callable
+disappear from this obligation.
 Positive controls bind a discovered callable to the exact atom that
 decides it. Negative mutation controls add one runtime export and one
 exported stdlib numeric def with no entry, bind a callable to a missing

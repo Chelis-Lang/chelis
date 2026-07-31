@@ -444,6 +444,40 @@ their class ([#730]'s token tripwire and append-only census; [#732]'s
 exit census plus its no-third-formatter and no-untyped-decode rules);
 this plan had none. This section is that guard.
 
+**Exact PR #956 follow-up calibration.** Commit
+`6ddf1a72d6dea6770a330d5c2ef3b8fa7d023c43` closes two specific
+classification escapes, and this paragraph freezes its exact strength:
+
+- `closure_conditional_macro_taint` propagates every macro defined under a
+  non-include-guard conditional across the whole connected component of
+  QUOTED local includes already in the header closure. A public declaration
+  consuming any such token is rejected even when the definition and use are
+  in different headers
+  (`conditional_macro_taint_across_include_closure_is_rejected`).
+- Numeric-callable classification treats every non-boolean, non-character
+  built-in arithmetic value type conservatively as `numeric-op`: `double`,
+  `float`, `int`, `short`, `long`, `signed`, `unsigned`, `size_t`,
+  `ptrdiff_t`, `intptr_t`, `uintptr_t`, and the exact-width signed/unsigned
+  integer types. Bare `int` is not generally control plumbing
+  (`bare_int_export_is_numeric_op_and_requires_registration`).
+- `NON_NUMERIC_INTEGER_PLUMBING_EXPORTS` contains exactly THREE exemptions,
+  reproduced byte-for-byte here:
+
+  ```text
+  chelis_runtime.h: chelis_tensor * chelis_alloc ( int ndim , const int * shape , int dtype ) ;
+  chelis_runtime.h: chelis_tensor * chelis_tensor_from_value_list_typed ( const chelis_list * list , int dst_dtype ) ;
+  chelis_runtime.h: int chelis_dtype_size ( int dtype ) ;
+  ```
+
+  `apply_exact_integer_plumbing_exemption` removes `numeric-op` only when the
+  complete canonical identity is in that list AND
+  `GRANDFATHER_SEAM_IDS`; `integer_plumbing_exemptions_are_exact_and_closed`
+  locks the count, membership, and same-shaped-neighbor behavior. A name,
+  parameter spelling, substring, or newly added identity cannot inherit the
+  exemption. The quoted-include boundary above is deliberate scope
+  calibration, not a claim that this follow-up added an angle-include
+  configuration matrix.
+
 The architecture is this plan's own move applied one layer up: three
 chokepoints, each total over a DISCOVERED surface, never a
 hand-maintained list (hand lists are how `HOST_ONLY_BUILTINS` rotted,

@@ -127,7 +127,12 @@ implemented and green (`capacity_census_wire` and
 `capacity_census_bindings`, respectively), and Phase 1 re-derives its
 §C3 layer set from that completed census. These are explicit thick-red
 DAG edges below, not editable coverage metadata (PR #950 red teams P2-4
-and re-P1).
+and re-P1). The exact PR #956 follow-up
+`6ddf1a72d6dea6770a330d5c2ef3b8fa7d023c43` is part of that entry gate:
+conditional macro definitions taint their connected quoted-local-include
+component, bare and pointer-sized integer C callables classify
+conservatively as `numeric-op`, and only the three byte-frozen
+pre-ratchet plumbing declarations named in [#729] §C6 are exempt.
 
 **Wave 4 - the permanent guards.** [#729] Phase 4 delivers the capability
 table per [`capability_table.md`](capability_table.md); [#730] Phase 3 (gates become UX) and [#733]

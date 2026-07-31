@@ -194,6 +194,19 @@ numeric data, whether or not you have read that document:
   attribution the census reads back from `cc -E`, which can delete a real callable
   export from the inventory - and every `.h` in the published include directory must
   be reachable from a declared root.
+- **C numeric-callable classification is conservative.** A non-boolean,
+  non-character built-in arithmetic value type - including bare `int`, `short`,
+  `long`, signed/unsigned forms, pointer-sized integers, and the exact-width integer
+  types - makes a callable `numeric-op`. Names and parameter-name heuristics never
+  turn a future callable into plumbing. The only exception is the frozen set of
+  exactly three pre-ratchet canonical declarations in
+  `NON_NUMERIC_INTEGER_PLUMBING_EXPORTS`; each must also remain in the frozen seam
+  identity set. Conditional macro definitions likewise taint their whole connected
+  quoted-local-include component: a public declaration consuming a tainted token is
+  rejected even when the definition lives in another header. These two rules are
+  locked by PR #956 commit
+  `6ddf1a72d6dea6770a330d5c2ef3b8fa7d023c43`; widening either exception requires
+  changing this contract and the negative controls together.
 - The census, tripwire, and oracle files are guard artifacts: editing one to make
   your change pass is never the fix. The failure message names the sanctioned
   actions; take one of those.
