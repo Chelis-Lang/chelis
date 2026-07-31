@@ -8,6 +8,44 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **Bare file diagnostics now drive native expected-failure suites
+  (chelis#967).** `chelis test --expect neg|blocked` preserves file-level
+  compile and check failures even when a probe declares no `test_*` function,
+  so `.expect` substrings can match the diagnostic instead of receiving a
+  recordless `config-error`. Mismatches retain the complete diagnostic for
+  plain and NDJSON reporting; genuinely clean testless files remain
+  fail-closed configuration errors. Ordinary non-`--expect` testless files
+  retain their legacy zero-record behavior. Exact regressions lock both modes.
+- **Layered stdlib checks report the same honest checked-node counters as
+  monolithic checks (chelis#973).** Cached checked programs now retain the
+  inference product's `typed_nodes` and `total_nodes`; layered fitness reports
+  add those counters across their partition instead of substituting a
+  structural AST count.
+- **Package-owned source-file checks and builds repair a missing or malformed
+  `reef.lock` even on a warm prepared-graph cache hit (chelis#971).** A
+  successful `chelis check <package-source>` or `chelis build
+  <package-source>` can no longer omit the resolved lockfile merely because
+  graph preparation came from cache.
+- **Imported rank-generic functions instantiate independently at every call
+  site (chelis#968).** Environment free-variable analysis now protects a
+  scheme's quantified type, dimension, and rank variables from unrelated
+  global substitutions, including alias chains, so an earlier concrete tensor
+  extent cannot leak into a later use.
+- **Reef package artifacts are byte-reproducible across unchanged builds
+  (chelis#970).** Source archives now use lexical UTF-8 member ordering and
+  canonical regular-file metadata (mode `0644`, uid/gid `0`, and
+  `SOURCE_DATE_EPOCH` mtime with a fixed zero default). Invalid epoch values
+  fail loudly. Repeated builds produce identical `.tar.zst` and `.chb` bytes,
+  while the CHB continues to embed the canonical archive SHA-256.
+- **Reef now validates complete canonical CHB envelopes (chelis#972).**
+  CHB decoding rejects trailing bytes, truncation, noncanonical encodings and
+  malformed or ambiguously ordered metadata, including fields installation
+  does not otherwise consume. Every Reef install path applies that validation
+  before registry mutation and still checks the paired archive against the
+  embedded SHA-256. The new read-only
+  `chelis reef verify-artifact --shell <CHB> --archive <ARCHIVE>` command
+  exposes the same boundary to downstream release gates; `--json` emits a
+  JSON-only report with `valid == errors.is_empty()` and matching exit status.
 - **Concrete return contexts now specialize nullary generic ADT
   constructors before C ABI projection (chelis#935).** A layout-free
   constructor may retain its named generic ADT term through host-expression

@@ -352,6 +352,206 @@ impl Subst {
         }
     }
 
+    /// Apply this substitution to a scheme body without substituting through
+    /// the scheme's universally quantified variables.
+    ///
+    /// A global inference substitution can contain bindings whose numeric IDs
+    /// coincide with a quantified variable in an environment scheme. Those
+    /// bindings belong to an instantiation, not to the scheme itself. Applying
+    /// them while computing the environment's free variables turns a
+    /// quantified dimension into a free one and prevents later
+    /// generalization (chelis#968).
+    pub fn apply_scheme(&self, scheme: &Scheme) -> Type {
+        let quantified_tvars = scheme.tvars.iter().copied().collect();
+        let quantified_dvars = scheme.dvars.iter().copied().collect();
+        let quantified_rvars = scheme.rvars.iter().copied().collect();
+        self.apply_excluding(
+            &scheme.body,
+            &quantified_tvars,
+            &quantified_dvars,
+            &quantified_rvars,
+        )
+    }
+
+    fn apply_excluding(
+        &self,
+        ty: &Type,
+        quantified_tvars: &std::collections::HashSet<TypeVar>,
+        quantified_dvars: &std::collections::HashSet<DimVar>,
+        quantified_rvars: &std::collections::HashSet<RankVar>,
+    ) -> Type {
+        match ty {
+            Type::Var(v) if quantified_tvars.contains(v) => ty.clone(),
+            Type::Var(v) => {
+                let resolved = self.resolve_tvar_excluding(*v, quantified_tvars);
+                if resolved == Type::Var(*v) {
+                    resolved
+                } else {
+                    self.apply_excluding(
+                        &resolved,
+                        quantified_tvars,
+                        quantified_dvars,
+                        quantified_rvars,
+                    )
+                }
+            }
+            Type::Fn(args, ret) => Type::Fn(
+                args.iter()
+                    .map(|arg| {
+                        self.apply_excluding(
+                            arg,
+                            quantified_tvars,
+                            quantified_dvars,
+                            quantified_rvars,
+                        )
+                    })
+                    .collect(),
+                Box::new(self.apply_excluding(
+                    ret,
+                    quantified_tvars,
+                    quantified_dvars,
+                    quantified_rvars,
+                )),
+            ),
+            Type::Ref(inner) => Type::Ref(Box::new(self.apply_excluding(
+                inner,
+                quantified_tvars,
+                quantified_dvars,
+                quantified_rvars,
+            ))),
+            Type::Tensor(dims, prec) => {
+                let mut resolved_dims = Vec::with_capacity(dims.len());
+                for dim in dims {
+                    match dim {
+                        Dim::Var(var) if quantified_dvars.contains(var) => {
+                            resolved_dims.push(dim.clone());
+                        }
+                        Dim::Rank(var) if quantified_rvars.contains(var) => {
+                            resolved_dims.push(dim.clone());
+                        }
+                        Dim::Rank(var) => {
+                            for resolved in self.resolve_rvar_excluding(*var, quantified_rvars) {
+                                resolved_dims
+                                    .push(self.apply_dim_excluding(&resolved, quantified_dvars));
+                            }
+                        }
+                        _ => resolved_dims.push(self.apply_dim_excluding(dim, quantified_dvars)),
+                    }
+                }
+                let resolved_prec = match prec {
+                    TensorPrec::Var(var) if quantified_tvars.contains(var) => prec.clone(),
+                    TensorPrec::Var(var) => {
+                        match self.resolve_tvar_excluding(*var, quantified_tvars) {
+                            Type::Prim(prim) => TensorPrec::Concrete(prim),
+                            Type::Var(resolved) => TensorPrec::Var(resolved),
+                            _ => prec.clone(),
+                        }
+                    }
+                    TensorPrec::Concrete(_) => prec.clone(),
+                };
+                Type::Tensor(resolved_dims, resolved_prec)
+            }
+            Type::Adt(name, args) => Type::Adt(
+                name.clone(),
+                args.iter()
+                    .map(|arg| {
+                        self.apply_excluding(
+                            arg,
+                            quantified_tvars,
+                            quantified_dvars,
+                            quantified_rvars,
+                        )
+                    })
+                    .collect(),
+            ),
+            Type::Tuple(items) => Type::Tuple(
+                items
+                    .iter()
+                    .map(|item| {
+                        self.apply_excluding(
+                            item,
+                            quantified_tvars,
+                            quantified_dvars,
+                            quantified_rvars,
+                        )
+                    })
+                    .collect(),
+            ),
+            Type::Prim(_) | Type::Unit | Type::Error(_) => ty.clone(),
+        }
+    }
+
+    fn resolve_tvar_excluding(
+        &self,
+        start: TypeVar,
+        quantified: &std::collections::HashSet<TypeVar>,
+    ) -> Type {
+        let map = self.types.lock().expect("subst.types poisoned");
+        let mut current = start;
+        let max_steps = map.len() + 1;
+        for _ in 0..max_steps {
+            if quantified.contains(&current) {
+                return Type::Var(current);
+            }
+            match map.get(&current) {
+                None => return Type::Var(current),
+                Some(Type::Var(next)) if *next != current => current = *next,
+                Some(Type::Var(_)) => return Type::Var(current),
+                Some(other) => return other.clone(),
+            }
+        }
+        Type::Var(current)
+    }
+
+    fn apply_dim_excluding(
+        &self,
+        dim: &Dim,
+        quantified: &std::collections::HashSet<DimVar>,
+    ) -> Dim {
+        let Dim::Var(start) = dim else {
+            return dim.clone();
+        };
+        let map = self.dims.lock().expect("subst.dims poisoned");
+        let mut current = *start;
+        let max_steps = map.len() + 1;
+        for _ in 0..max_steps {
+            if quantified.contains(&current) {
+                return Dim::Var(current);
+            }
+            match map.get(&current) {
+                None => return Dim::Var(current),
+                Some(Dim::Var(next)) if *next != current => current = *next,
+                Some(Dim::Var(_)) => return Dim::Var(current),
+                Some(other) => return other.clone(),
+            }
+        }
+        Dim::Var(current)
+    }
+
+    fn resolve_rvar_excluding(
+        &self,
+        start: RankVar,
+        quantified: &std::collections::HashSet<RankVar>,
+    ) -> Vec<Dim> {
+        let map = self.ranks.lock().expect("subst.ranks poisoned");
+        let mut current = start;
+        let max_steps = map.len() + 1;
+        for _ in 0..max_steps {
+            if quantified.contains(&current) {
+                return vec![Dim::Rank(current)];
+            }
+            match map.get(&current) {
+                None => return vec![Dim::Rank(current)],
+                Some(bound) => match bound.as_slice() {
+                    [Dim::Rank(next)] if *next != current => current = *next,
+                    [Dim::Rank(_)] => return vec![Dim::Rank(current)],
+                    _ => return bound.clone(),
+                },
+            }
+        }
+        vec![Dim::Rank(current)]
+    }
+
     /// Apply this substitution to a dimension. Path-compresses chains.
     pub fn apply_dim(&self, dim: &Dim) -> Dim {
         match dim {

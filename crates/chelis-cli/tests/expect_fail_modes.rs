@@ -73,6 +73,15 @@ fn verdict_is(tag: &str) -> predicates::str::ContainsPredicate {
     predicate::str::contains(format!("\"verdict\":\"{tag}\""))
 }
 
+/// Write a file-level expected-failure probe with no `test_*` declaration.
+///
+/// The expected-failure adapter must still compile/check the file: the
+/// diagnostic itself is the probe outcome. A genuinely clean file remains
+/// recordless and therefore a config error.
+fn write_file_probe(pkg: &Path, name: &str, body: &str, sidecar: &str) {
+    write_probe(pkg, name, "FileProbe", body, Some(sidecar));
+}
+
 // ---------------------------------------------------------------- neg mode
 
 #[test]
@@ -118,6 +127,77 @@ fn neg_fail_wrong_diagnostic() {
         .failure()
         .code(1)
         .stdout(verdict_is("wrong-diagnostic"));
+}
+
+#[test]
+fn neg_bare_file_check_failure_matches_sidecar() {
+    let (_d, pkg) = make_probe_package("neg-file-check");
+    write_file_probe(
+        &pkg,
+        "case",
+        r#"def helper() -> int64 = true"#,
+        "body doesn't match declared signature\n",
+    );
+    run_expect(&pkg, "neg").success().stdout(predicate::eq(
+        "{\"detail\":\"\",\"expect\":\"neg\",\"file\":\"tests/case.ch\",\"verdict\":\"ok\"}\n\
+             {\"summary\":{\"ok\":1,\"failed\":0,\"mode\":\"neg\"}}\n",
+    ));
+}
+
+#[test]
+fn ordinary_testless_compile_mismatch_keeps_legacy_zero_record_behavior() {
+    let (_d, pkg) = make_probe_package("ordinary-testless");
+    write_file_probe(
+        &pkg,
+        "case",
+        r#"def helper() -> int64 = true"#,
+        "body doesn't match declared signature\n",
+    );
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .current_dir(&pkg)
+        .args([
+            "test",
+            "tests/case.ch",
+            "--json",
+            "--batch-mode",
+            "file",
+            "--jobs",
+            "1",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::eq("{\"summary\":{\"passed\":0,\"failed\":0}}\n"));
+}
+
+#[test]
+fn neg_bare_file_mismatch_ndjson_preserves_actual_diagnostic() {
+    let (_d, pkg) = make_probe_package("neg-file-drift");
+    write_file_probe(
+        &pkg,
+        "case",
+        r#"def helper() -> int64 = true"#,
+        "diagnostic that must not match\n",
+    );
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .current_dir(&pkg)
+        .args(["test", "tests/", "--expect", "neg", "--json"])
+        .output()
+        .expect("run neg expected-failure adapter");
+    assert_eq!(output.status.code(), Some(1));
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    let record: serde_json::Value =
+        serde_json::from_str(stdout.lines().next().expect("verdict row")).expect("valid NDJSON");
+    assert_eq!(record["verdict"], "wrong-diagnostic");
+    assert_eq!(
+        record["got"],
+        serde_json::json!([
+            "compile: def 'helper' body doesn't match declared signature: body has type `() -> bool`, declared type is `() -> int64`"
+        ])
+    );
 }
 
 // ------------------------------------------------------------ blocked mode
@@ -169,6 +249,82 @@ fn blocked_fail_wrong_diagnostic_is_drifted() {
         .stdout(verdict_is("drifted"));
 }
 
+#[test]
+fn blocked_bare_file_compile_failure_matches_sidecar_in_plain_output() {
+    let (_d, pkg) = make_probe_package("blocked-file-compile");
+    write_file_probe(
+        &pkg,
+        "probe",
+        r#"def helper() -> unit = missing_file_level_symbol()"#,
+        "unbound variable\nchelis#967: preserve bare file diagnostics\n",
+    );
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .current_dir(&pkg)
+        .args(["test", "tests/", "--expect", "blocked"])
+        .assert()
+        .success()
+        .stdout(predicate::eq(
+            "OK                 tests/probe.ch\n\n\
+             1 ok, 0 failing (blocked mode)\n",
+        ));
+}
+
+#[test]
+fn blocked_bare_file_diagnostic_mismatch_is_drifted_and_preserved() {
+    let (_d, pkg) = make_probe_package("blocked-file-mismatch");
+    write_file_probe(
+        &pkg,
+        "probe",
+        r#"def helper() -> unit = missing_file_level_symbol()"#,
+        "some other diagnostic\nchelis#967: preserve bare file diagnostics\n",
+    );
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .current_dir(&pkg)
+        .args(["test", "tests/", "--expect", "blocked"])
+        .assert()
+        .failure()
+        .code(1)
+        .stdout(predicate::eq(
+            "DRIFTED            tests/probe.ch\n\
+             \x20   expected diagnostic substring: \"some other diagnostic\"\n\
+             \x20   got: compile: unbound variable: missing_file_level_symbol; def 'helper' body doesn't match declared signature: body has type `() -> <error>`, declared type is `() -> unit`\n\n\
+             0 ok, 1 failing (blocked mode)\n",
+        ));
+}
+
+#[test]
+fn blocked_bare_file_mismatch_ndjson_preserves_actual_diagnostic() {
+    let (_d, pkg) = make_probe_package("blocked-file-drift-json");
+    write_file_probe(
+        &pkg,
+        "probe",
+        r#"def helper() -> unit = missing_file_level_symbol()"#,
+        "some other diagnostic\nchelis#967: preserve bare file diagnostics\n",
+    );
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .current_dir(&pkg)
+        .args(["test", "tests/", "--expect", "blocked", "--json"])
+        .output()
+        .expect("run blocked expected-failure adapter");
+    assert_eq!(output.status.code(), Some(1));
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    let record: serde_json::Value =
+        serde_json::from_str(stdout.lines().next().expect("verdict row")).expect("valid NDJSON");
+    assert_eq!(record["verdict"], "drifted");
+    assert_eq!(
+        record["got"],
+        serde_json::json!([
+            "compile: unbound variable: missing_file_level_symbol; def 'helper' body doesn't match declared signature: body has type `() -> <error>`, declared type is `() -> unit`"
+        ])
+    );
+}
+
 // ---------------------------------------------------------- fail-closed
 
 #[test]
@@ -201,6 +357,19 @@ fn blocked_without_citation_is_config_error() {
         .failure()
         .code(1)
         .stdout(verdict_is("config-error"));
+}
+
+#[test]
+fn clean_bare_file_is_config_error_with_exact_ndjson() {
+    let (_d, pkg) = make_probe_package("clean-file");
+    write_file_probe(&pkg, "clean", r#"def helper() -> unit = ()"#, "must fail\n");
+    run_expect(&pkg, "neg")
+        .failure()
+        .code(1)
+        .stdout(predicate::eq(
+            "{\"detail\":\"no test records produced (nothing compiled-failed and no test_* functions)\",\"expect\":\"neg\",\"file\":\"tests/clean.ch\",\"verdict\":\"config-error\"}\n\
+             {\"summary\":{\"ok\":0,\"failed\":1,\"mode\":\"neg\"}}\n",
+        ));
 }
 
 // ------------------------------------------------ empty suite / filter guards

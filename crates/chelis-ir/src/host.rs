@@ -6428,8 +6428,21 @@ fn lower_app_host_expr(
     // type; source-level reconstruction is neither needed nor allowed.
     let callee_is_nullary_generic_constructor_wrapper =
         top_level_fn_is_nullary_generic_constructor_wrapper(program, &name);
+    // Precision and rank polymorphism have dedicated tensor-aware
+    // specialization paths below. A nested rank parameter also appears as a
+    // stored ADT type variable, so the broad ordinary-generic predicate must
+    // not preempt that path (chelis#968).
+    let callee_is_polymorphic_precision = lookup_declared_type_expr(program, &name)
+        .as_ref()
+        .is_some_and(crate::lower::type_expr_has_precision_var);
+    let callee_is_polymorphic_rank = lookup_declared_type_expr(program, &name)
+        .as_ref()
+        .is_some_and(crate::lower::type_expr_has_rank_var)
+        || top_level_fn_is_nested_rank_polymorphic(program, &name);
     let callee_is_nonrecursive_type_polymorphic =
-        top_level_fn_is_nonrecursive_type_polymorphic(program, &name);
+        top_level_fn_is_nonrecursive_type_polymorphic(program, &name)
+            && !callee_is_polymorphic_precision
+            && !callee_is_polymorphic_rank;
     if (callee_is_nullary_generic_constructor_wrapper || callee_is_nonrecursive_type_polymorphic)
         && let Some(specialized) = inline_top_level_host_call(&app_expr, program)
     {
@@ -6718,9 +6731,6 @@ fn lower_app_host_expr(
     // error; the only legal lowering is to inline the body at the
     // call site so the precision is supplied from the call's
     // concrete arg types. Force inlining for this case.
-    let callee_is_polymorphic_precision = lookup_declared_type_expr(program, &name)
-        .as_ref()
-        .is_some_and(crate::lower::type_expr_has_precision_var);
     // Tier-2 rank polymorphism (spec/design/rank_polymorphism.md): the exact
     // analogue of the precision case above. The host emitter elided the
     // rank-poly callee's standalone definition (per the `type_expr_has_rank_var`
@@ -6728,10 +6738,6 @@ fn lower_app_host_expr(
     // undefined-symbol link error. The only legal lowering is to inline the
     // body at the call site so the rank var is monomorphized from the call's
     // concrete arg shapes (via the DAG `tensor_rank_substitutions` path).
-    let callee_is_polymorphic_rank = lookup_declared_type_expr(program, &name)
-        .as_ref()
-        .is_some_and(crate::lower::type_expr_has_rank_var)
-        || top_level_fn_is_nested_rank_polymorphic(program, &name);
     // chelis#935: a generic host function has no standalone C symbol.
     // Inline it at a checked call site and materialize the application's
     // concrete result type onto the specialized body. This is the ordinary

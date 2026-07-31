@@ -233,13 +233,13 @@ fn structure_score(exprs: &[chelis_deep::Expr]) -> f64 {
 /// (`chelis_deep::validate::validate` is per-expr; `count_nodes` is a
 /// recursive sum) with no cross-expr-list interaction. They are the
 /// inputs the cross-process chelis-std typecheck cache stores so the
-/// in-context fitness report can reconstitute a whole-program
-/// `total_nodes` and `structure` component byte-identically to the
-/// monolithic path, without re-walking the chelis-std library decls.
+/// in-context fitness report can reconstitute the whole-program `structure`
+/// component without re-walking the chelis-std library decls. Fitness
+/// `typed_nodes` / `total_nodes` are the inference product's distinct
+/// checker-visit counters (chelis#973).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct StructuralStats {
-    /// Total AST nodes visited (the monolithic `total_nodes` for a
-    /// clean program).
+    /// Total nodes in the structural AST walk.
     pub total_nodes: usize,
     /// Count of distinct node offsets the Deep tag validator flagged.
     pub invalid_nodes: usize,
