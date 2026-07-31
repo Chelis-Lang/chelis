@@ -383,3 +383,116 @@ fn extract_prims_recursive(expr: &Expr, out: &mut Vec<Prim>) {
         _ => {}
     }
 }
+
+// ─── Manifest computation ────────────────────────────────────────────────────
+
+use chelis_types::manifest::{HostReason as ManifestHostReason, RootEntry, RootManifest};
+
+/// Compute the root manifest from a checked program and its realizability result.
+/// This walks top-level non-fn defs, expands tuples/ADTs into dotted names,
+/// and populates each entry from the realizability result keyed on originating def.
+pub fn compute_root_manifest(
+    program: &CheckedProgram,
+    realizability: &RealizabilityResult,
+) -> RootManifest {
+    let exprs = program.annotated_exprs();
+    let type_env = program.type_env();
+    let mut entries = Vec::new();
+
+    for expr in exprs {
+        collect_manifest_entries(expr, type_env, realizability, &mut entries);
+    }
+
+    RootManifest { entries }
+}
+
+fn collect_manifest_entries(
+    expr: &Expr,
+    type_env: &HashMap<String, Expr>,
+    realizability: &RealizabilityResult,
+    out: &mut Vec<RootEntry>,
+) {
+    let Expr::List(list, _) = expr else { return };
+    let tag = get_tag(list);
+
+    if tag == Some("module") {
+        for child in get_children(list).iter().skip(1) {
+            collect_manifest_entries(child, type_env, realizability, out);
+        }
+        return;
+    }
+
+    if tag != Some("def") {
+        return;
+    }
+
+    let children = get_children(list);
+    let Some(name) = children.first().and_then(symbol_name) else {
+        return;
+    };
+    let body = children.get(1);
+
+    // Skip fn-typed defs (they're callable, not roots).
+    if let Some(Expr::List(body_list, _)) = body {
+        if get_tag(body_list) == Some("fn") {
+            return;
+        }
+    }
+
+    let lane = realizability
+        .lane_by_def
+        .get(name)
+        .copied()
+        .unwrap_or(Lane::Host);
+    let required_inputs = realizability
+        .required_inputs_by_def
+        .get(name)
+        .cloned()
+        .unwrap_or_default();
+    let reasons: Vec<ManifestHostReason> = realizability
+        .reasons_by_def
+        .get(name)
+        .map(|rs| rs.iter().map(convert_reason).collect())
+        .unwrap_or_default();
+
+    let ty = type_env
+        .get(name)
+        .or_else(|| body.and_then(expr_type_metadata))
+        .cloned()
+        .unwrap_or_else(|| Expr::Atom(Atom::Symbol("unknown".to_string()), chelis_deep::Span::new(0, 0)));
+
+    // TODO: expand tuples/ADTs into dotted names (Task 7 full implementation).
+    // For now, emit a single entry per def.
+    out.push(RootEntry {
+        name: name.to_string(),
+        def_name: name.to_string(),
+        ty,
+        lane,
+        required_inputs,
+        reasons,
+    });
+}
+
+fn convert_reason(r: &HostReason) -> ManifestHostReason {
+    match r {
+        HostReason::HostOnlyBuiltin { name } => ManifestHostReason::HostOnlyBuiltin { name: name.clone() },
+        HostReason::ScalarTypedOp { builtin } => ManifestHostReason::ScalarTypedOp { builtin: builtin.clone() },
+        HostReason::PrecisionExceedsCapability { prim } => ManifestHostReason::PrecisionExceedsCapability { prim: *prim },
+        HostReason::StructuralForm { tag } => ManifestHostReason::StructuralForm { tag: tag.clone() },
+        HostReason::TransitiveCaller { callee } => ManifestHostReason::TransitiveCaller { callee: callee.clone() },
+        HostReason::UnrecognizedTag { tag } => ManifestHostReason::UnrecognizedTag { tag: tag.clone() },
+    }
+}
+
+/// Extract type metadata from an expression's metadata map.
+fn expr_type_metadata(expr: &Expr) -> Option<&Expr> {
+    let Expr::List(list, _) = expr else { return None };
+    if let Some(Expr::Map(meta, _)) = list.elements.get(1) {
+        for (key, value) in &meta.entries {
+            if key == "type" {
+                return Some(value);
+            }
+        }
+    }
+    None
+}

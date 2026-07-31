@@ -1690,9 +1690,13 @@ fn compile_source_scoped(
     // Issue #912: compute realizability and manifest alongside existing
     // routing. This is observe-only — the existing code path is unchanged.
     // The manifest will replace root_names_from_checked_exprs at Task 8.
-    let _realizability = chelis_effects::realizability::infer_realizability(
+    let realizability_result = chelis_effects::realizability::infer_realizability(
         &checked,
         crate::target_capability::tensor_capable_prims(chelis_types::types::Target::C),
+    );
+    let _manifest = chelis_effects::realizability::compute_root_manifest(
+        &checked,
+        &realizability_result,
     );
 
     // chelis#730 Phase 1: the whole-program DAG here is AUXILIARY for a
