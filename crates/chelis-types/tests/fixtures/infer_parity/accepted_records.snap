@@ -1,0 +1,81 @@
+== annotated deep ==
+(module {}
+  parity.records
+  (deftype {}
+    Point
+    ()
+    (variant {} Point (field {} x (t-prim {} f32)) (field {} y (t-prim {} f32))))
+  (defsig {} make (t-fn {} (t-prim {} f32) (t-prim {} f32) (t-adt {} Point)))
+  (def {type: (t-fn {} (t-prim {} f32) (t-prim {} f32) (t-adt {} Point))}
+    make
+    (fn {type: (t-fn {} (t-prim {} f32) (t-prim {} f32) (t-adt {} Point))}
+      (params {} (a {type: (t-prim {} f32)}) (b {type: (t-prim {} f32)}))
+      (record {span: "surf:100..120", type: (t-adt {} Point)}
+        Point
+        (kv {} x (var {span: "surf:111..112"} a))
+        (kv {} y (var {span: "surf:117..118"} b)))))
+  (defsig {} read_x (t-fn {} (t-adt {} Point) (t-prim {} f32)))
+  (def {type: (t-fn {} (t-adt {} Point) (t-prim {} f32))}
+    read_x
+    (fn {type: (t-fn {} (t-adt {} Point) (t-prim {} f32))}
+      (params {} (p {type: (t-adt {} Point)}))
+      (access {span: "surf:151..154", type: (t-prim {} f32)}
+        (var {span: "surf:151..152"} p)
+        x)))
+  (defsig {} shift (t-fn {} (t-adt {} Point) (t-prim {} f32) (t-adt {} Point)))
+  (def {type: (t-fn {} (t-adt {} Point) (t-prim {} f32) (t-adt {} Point))}
+    shift
+    (fn {type: (t-fn {} (t-adt {} Point) (t-prim {} f32) (t-adt {} Point))}
+      (params {} (p {type: (t-adt {} Point)}) (dx {type: (t-prim {} f32)}))
+      (record {span: "surf:195..228", type: (t-adt {} Point)}
+        Point
+        (kv {}
+          x
+          (app {span: "surf:206..218", type: (t-prim {} f32)}
+            (var {span: "surf:206..209"} add)
+            (access {span: "surf:210..213", type: (t-prim {} f32)}
+              (var {span: "surf:210..211"} p)
+              x)
+            (var {span: "surf:215..217"} dx)))
+        (kv {}
+          y
+          (access {span: "surf:223..226", type: (t-prim {} f32)}
+            (var {span: "surf:223..224"} p)
+            y))))))
+
+== type env ==
+make : (t-fn {} (t-prim {} f32) (t-prim {} f32) (t-adt {} Point))
+read_x : (t-fn {} (t-adt {} Point) (t-prim {} f32))
+shift : (t-fn {} (t-adt {} Point) (t-prim {} f32) (t-adt {} Point))
+
+== signature inference ==
+binding = make
+  name = make
+  authored_signature = true
+  authored_signature_type = Some(Fn([Prim(F32), Prim(F32)], Adt("Point", [])))
+  recursive_cycle = false
+  checked_signature = Fn([Prim(F32), Prim(F32)], Adt("Point", []))
+  display_signature = Fn([Prim(F32), Prim(F32)], Adt("Point", []))
+  param[0] name = a; written = true; inferred_read_only = false; checked_type = Prim(F32); display_type = Prim(F32)
+  param[1] name = b; written = true; inferred_read_only = false; checked_type = Prim(F32); display_type = Prim(F32)
+binding = read_x
+  name = read_x
+  authored_signature = true
+  authored_signature_type = Some(Fn([Adt("Point", [])], Prim(F32)))
+  recursive_cycle = false
+  checked_signature = Fn([Adt("Point", [])], Prim(F32))
+  display_signature = Fn([Adt("Point", [])], Prim(F32))
+  param[0] name = p; written = true; inferred_read_only = false; checked_type = Adt("Point", []); display_type = Adt("Point", [])
+binding = shift
+  name = shift
+  authored_signature = true
+  authored_signature_type = Some(Fn([Adt("Point", []), Prim(F32)], Adt("Point", [])))
+  recursive_cycle = false
+  checked_signature = Fn([Adt("Point", []), Prim(F32)], Adt("Point", []))
+  display_signature = Fn([Adt("Point", []), Prim(F32)], Adt("Point", []))
+  param[0] name = p; written = true; inferred_read_only = false; checked_type = Adt("Point", []); display_type = Adt("Point", [])
+  param[1] name = dx; written = true; inferred_read_only = false; checked_type = Prim(F32); display_type = Prim(F32)
+
+== infer stats ==
+typed_nodes = 13
+total_nodes = 13

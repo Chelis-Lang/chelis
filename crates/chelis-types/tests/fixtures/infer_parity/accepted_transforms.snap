@@ -1,0 +1,102 @@
+== annotated deep ==
+(module {}
+  parity.transforms
+  (defsig {}
+    process
+    (t-fn {}
+      (t-tensor {} (d-name {} features) (t-prim {} f32))
+      (t-tensor {} (d-name {} features) (t-prim {} f32))))
+  (def {type: (t-fn {}
+                 (t-tensor {} (d-name {} features) (t-prim {} f32))
+                 (t-tensor {} (d-name {} features) (t-prim {} f32)))
+       }
+    process
+    (fn {type: (t-fn {}
+                  (t-tensor {} (d-name {} features) (t-prim {} f32))
+                  (t-tensor {} (d-name {} features) (t-prim {} f32)))
+        }
+      (params {} (x {type: (t-tensor {} (d-name {} features) (t-prim {} f32))}))
+      (app {span: "surf:90..97",
+             type: (t-tensor {} (d-name {} features) (t-prim {} f32))
+           }
+        (var {span: "surf:90..94"} relu)
+        (var {span: "surf:95..96"} x))))
+  (defsig {}
+    batch_process
+    (t-fn {}
+      (t-tensor {} (d-name {} batch) (d-name {} features) (t-prim {} f32))
+      (t-tensor {} (d-name {} batch) (d-name {} features) (t-prim {} f32))))
+  (def {type: (t-fn {}
+                 (t-tensor {}
+                   (d-name {} batch)
+                   (d-name {} features)
+                   (t-prim {} f32))
+                 (t-tensor {}
+                   (d-name {} batch)
+                   (d-name {} features)
+                   (t-prim {} f32)))
+       }
+    batch_process
+    (fn {type: (t-fn {}
+                  (t-tensor {}
+                    (d-name {} batch)
+                    (d-name {} features)
+                    (t-prim {} f32))
+                  (t-tensor {}
+                    (d-name {} batch)
+                    (d-name {} features)
+                    (t-prim {} f32)))
+        }
+      (params {}
+        (xs
+          {type: (t-tensor {}
+                    (d-name {} batch)
+                    (d-name {} features)
+                    (t-prim {} f32))
+          }))
+      (pipe {span: "surf:184..211",
+              type: (t-tensor {}
+                      (d-name {} batch)
+                      (d-name {} features)
+                      (t-prim {} f32))
+            }
+        (var {span: "surf:184..186"} xs)
+        (vmap {span: "surf:190..211",
+                type: (t-fn {}
+                        (t-tensor {}
+                          (d-name {} batch)
+                          (d-name {} features)
+                          (t-prim {} f32))
+                        (t-tensor {}
+                          (d-name {} batch)
+                          (d-name {} features)
+                          (t-prim {} f32)))
+              }
+          (var {span: "surf:195..202"} process)
+          (lit {type: (t-prim {} int32)} 0))))))
+
+== type env ==
+batch_process : (t-fn {} (t-tensor {} (d-name {} batch) (d-name {} features) (t-prim {} f32)) (t-tensor {} (d-name {} batch) (d-name {} features) (t-prim {} f32)))
+process : (t-fn {} (t-tensor {} (d-name {} features) (t-prim {} f32)) (t-tensor {} (d-name {} features) (t-prim {} f32)))
+
+== signature inference ==
+binding = batch_process
+  name = batch_process
+  authored_signature = true
+  authored_signature_type = Some(Fn([Tensor([Name("batch"), Name("features")], Concrete(F32))], Tensor([Name("batch"), Name("features")], Concrete(F32))))
+  recursive_cycle = false
+  checked_signature = Fn([Tensor([Name("batch"), Name("features")], Concrete(F32))], Tensor([Name("batch"), Name("features")], Concrete(F32)))
+  display_signature = Fn([Tensor([Name("batch"), Name("features")], Concrete(F32))], Tensor([Name("batch"), Name("features")], Concrete(F32)))
+  param[0] name = xs; written = true; inferred_read_only = false; checked_type = Tensor([Name("batch"), Name("features")], Concrete(F32)); display_type = Tensor([Name("batch"), Name("features")], Concrete(F32))
+binding = process
+  name = process
+  authored_signature = true
+  authored_signature_type = Some(Fn([Tensor([Name("features")], Concrete(F32))], Tensor([Name("features")], Concrete(F32))))
+  recursive_cycle = false
+  checked_signature = Fn([Tensor([Name("features")], Concrete(F32))], Tensor([Name("features")], Concrete(F32)))
+  display_signature = Fn([Tensor([Name("features")], Concrete(F32))], Tensor([Name("features")], Concrete(F32)))
+  param[0] name = x; written = true; inferred_read_only = false; checked_type = Tensor([Name("features")], Concrete(F32)); display_type = Tensor([Name("features")], Concrete(F32))
+
+== infer stats ==
+typed_nodes = 7
+total_nodes = 7

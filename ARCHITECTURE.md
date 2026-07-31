@@ -94,6 +94,31 @@ It also owns best-effort decompilation back to Surf.
 Implements Hindley-Milner inference extended with named tensor dimensions, precision
 tracking, and fitness-oriented error reporting.
 
+#### Type-inference module map
+
+`crates/chelis-types/src/infer/mod.rs` defines the public facade and the shared imports.
+Its child modules have these roles:
+
+- `stack.rs` owns stack growth and recursion protection.
+- `checked.rs` owns checked-program construction, metadata, and totality finalization.
+- `program.rs` owns the public check entry points and the inference schedules.
+- `declarations.rs` owns declaration collection, dependency analysis, and signature schedules.
+- `validate.rs`, `static_value.rs`, and `annotate.rs` own IR checks and type annotation.
+- `expr.rs` owns expression dispatch and common expression helpers.
+- `expr_function.rs` owns functions, definitions, local bindings, conditionals, and pipes.
+- `expr_pattern.rs` owns match and pattern inference.
+- `expr_record.rs` owns tuples, records, access, updates, and casts.
+- `expr_transform.rs` owns gradient and vector-map inference.
+- `app.rs` owns generic calls and dispatch to operation families.
+- `app_numeric.rs` owns numeric rules and precision diagnostics.
+- `app_tensor.rs` owns tensor signature checks.
+- `app_shape.rs` and `app_shape_helpers.rs` own shape rules and static shape readers.
+- `app_collection.rs` owns collection rules and constructor helpers.
+- `app_post.rs` applies operation-family checks after generic unification.
+
+The source guard is in `crates/chelis-types/src/source_arch.rs`.
+It rejects the legacy `src/infer.rs` path, a missing role module, or a source file with more than 3,000 lines.
+
 ### `chelis-ir`
 
 Defines the RISC DAG, lowering, verification, optimization passes, transform passes,

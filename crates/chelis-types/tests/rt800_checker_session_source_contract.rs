@@ -2,8 +2,54 @@
 //! `errors::report`. These scans do not replace the compiler tests; they make
 //! accidental reintroduction of the old ambient and throwaway-vector seams
 //! fail with a targeted explanation.
+//!
+//! The inference source is read as the concatenation of every module under
+//! `src/infer/`, in sorted path order. The scans below ask "does the
+//! inference implementation contain (or avoid) this construct", which is a
+//! property of the implementation as a whole, not of any one file it happens
+//! to be split across.
 
-const INFER: &str = include_str!("../src/infer.rs");
+use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
+
+/// Every module of the inference tree, concatenated in sorted path order.
+static INFER_SOURCE: LazyLock<String> = LazyLock::new(read_infer_tree);
+
+fn read_infer_tree() -> String {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/infer");
+    let mut files = Vec::new();
+    collect_rs_files(&root, &mut files);
+    files.sort();
+    assert!(
+        !files.is_empty(),
+        "found no inference source under {}; these scans would pass vacuously",
+        root.display()
+    );
+    files
+        .iter()
+        .map(|path| {
+            std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    let entries = std::fs::read_dir(dir).unwrap_or_else(|e| panic!("read {}: {e}", dir.display()));
+    for entry in entries {
+        let path = entry.expect("read dir entry").path();
+        if path.is_dir() {
+            collect_rs_files(&path, out);
+        } else if path.extension().is_some_and(|ext| ext == "rs") {
+            out.push(path);
+        }
+    }
+}
+
+fn infer() -> &'static str {
+    &INFER_SOURCE
+}
+
 const ERRORS: &str = include_str!("../src/errors.rs");
 const DEEP_TYPE: &str = include_str!("../src/deep_type.rs");
 const OPACITY: &str = include_str!("../src/opacity.rs");
@@ -48,7 +94,7 @@ fn every_production_sink_constructor_has_a_returned_diagnostic_owner() {
 #[test]
 fn arbitrary_vec_diagnostic_output_is_test_only() {
     assert!(
-        INFER.contains("#[cfg(test)]\nimpl DiagnosticOutput for Vec<CheckError>"),
+        infer().contains("#[cfg(test)]\nimpl DiagnosticOutput for Vec<CheckError>"),
         "production validation must only emit through DiagnosticSink"
     );
 }
@@ -56,7 +102,7 @@ fn arbitrary_vec_diagnostic_output_is_test_only() {
 #[test]
 fn binder_and_signature_resolution_have_no_ambient_symbols() {
     for (label, source) in [
-        ("infer", INFER),
+        ("infer", infer()),
         ("deep_type", DEEP_TYPE),
         ("opacity", OPACITY),
     ] {
@@ -86,7 +132,7 @@ fn witness_minting_requires_the_session_sink() {
         "an arbitrary diagnostic vector must never mint a witness"
     );
     assert!(
-        !INFER.contains("let mut hidden_errors"),
+        !infer().contains("let mut hidden_errors"),
         "the retained reviewer mutation must remain uncompilable, not planted"
     );
 }
@@ -94,7 +140,7 @@ fn witness_minting_requires_the_session_sink() {
 #[test]
 fn sink_construction_and_storage_stay_inside_the_owner() {
     for (label, source) in [
-        ("infer", INFER),
+        ("infer", infer()),
         ("errors", ERRORS),
         ("deep_type", DEEP_TYPE),
     ] {
@@ -123,7 +169,7 @@ fn sink_construction_and_storage_stay_inside_the_owner() {
 
 #[test]
 fn annotation_consumes_owner_stamps_without_semantic_reinference() {
-    let annotation = INFER
+    let annotation = infer()
         .split_once("fn annotate_expr_with_scope(")
         .expect("annotation entry should exist")
         .1
@@ -143,7 +189,7 @@ fn annotation_consumes_owner_stamps_without_semantic_reinference() {
         );
     }
     assert!(
-        !INFER.contains("fn infer_expr_in_scope("),
+        !infer().contains("fn infer_expr_in_scope("),
         "the old fresh-substitution annotation inference seam must be deleted"
     );
 }
@@ -151,15 +197,15 @@ fn annotation_consumes_owner_stamps_without_semantic_reinference() {
 #[test]
 fn checked_results_share_one_totality_finalizer() {
     assert!(
-        INFER.contains("fn finalize_checked_program("),
+        infer().contains("fn finalize_checked_program("),
         "all CheckedProgram results need one totality finalization boundary"
     );
     assert!(
-        INFER.contains("annotated_totality_invariant_traces("),
+        infer().contains("annotated_totality_invariant_traces("),
         "finalization must inspect the authoritative annotated tree"
     );
 
-    let constructor_calls = INFER.matches("CheckedProgram::from_parts_with_").count();
+    let constructor_calls = infer().matches("CheckedProgram::from_parts_with_").count();
     assert_eq!(
         constructor_calls, 0,
         "result paths must not bypass finalize_checked_program; found {constructor_calls} direct constructors"
@@ -169,7 +215,7 @@ fn checked_results_share_one_totality_finalizer() {
 #[test]
 fn checked_result_reconstruction_is_effect_only_fallible_and_session_owned() {
     assert!(
-        INFER.contains("pub fn try_with_effect_annotations("),
+        infer().contains("pub fn try_with_effect_annotations("),
         "the only public reconstruction seam must be effects-owned and fallible"
     );
     for forbidden in [
@@ -183,7 +229,7 @@ fn checked_result_reconstruction_is_effect_only_fallible_and_session_owned() {
         "pub(crate) fn checked_program_from_parts_with_signature_context(",
     ] {
         assert!(
-            !INFER.contains(forbidden) && !SESSION.contains(forbidden),
+            !infer().contains(forbidden) && !SESSION.contains(forbidden),
             "infallible/discarding reconstruction seam must be absent: `{forbidden}`"
         );
     }
@@ -205,12 +251,12 @@ fn diagnostic_sink_is_append_only_and_cycle_errors_are_never_erased() {
         "suppress_unbound_for_cycle_members",
     ] {
         assert!(
-            !SESSION.contains(forbidden) && !INFER.contains(forbidden),
+            !SESSION.contains(forbidden) && !infer().contains(forbidden),
             "the witness-owning diagnostic session must be monotonic: `{forbidden}`"
         );
     }
     assert!(
-        INFER.contains("prebind_recursive_function_schemes("),
+        infer().contains("prebind_recursive_function_schemes("),
         "known recursive callables must be bound before body inference"
     );
 }
@@ -227,16 +273,16 @@ fn annotation_ownership_uses_the_canonical_exhaustive_child_role_table() {
         "ExplicitInferenceBypass",
     ] {
         assert!(
-            INFER.contains(role),
+            infer().contains(role),
             "the shared child ownership classifier must name the `{role}` role"
         );
     }
     assert!(
-        INFER.contains("child_stamp_role("),
+        infer().contains("child_stamp_role("),
         "registration, annotation, and finalization need one shared child-role classifier"
     );
     assert!(
-        INFER.contains("chelis_deep::validate::VALID_TAGS"),
+        infer().contains("chelis_deep::validate::VALID_TAGS"),
         "classifier completeness must be checked against the canonical Deep vocabulary"
     );
     assert!(
@@ -244,7 +290,7 @@ fn annotation_ownership_uses_the_canonical_exhaustive_child_role_table() {
         "the source contract expects chelis-deep to remain the vocabulary owner"
     );
     assert!(
-        !INFER.contains("unwrap_or(ChildStampRole::RuntimeExpr)"),
+        !infer().contains("unwrap_or(ChildStampRole::RuntimeExpr)"),
         "unknown child roles must never silently default to runtime ownership"
     );
 }

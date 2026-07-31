@@ -1,0 +1,11 @@
+typed_nodes = 5
+total_nodes = 5
+diagnostics = 1
+
+[0] kind = TypeMismatch
+    message = def 'batch_label' body doesn't match declared signature: body has type `(tensor[batch, features, f32]) -> tensor[batch, string]`, declared type is `(tensor[batch, features, f32]) -> tensor[batch, features, f32]`
+    severity = 0.5
+    expected = None
+    got = None
+    span_offset = None
+    span_id = None
