@@ -914,8 +914,15 @@ pub(super) fn special_float_unop(
             let out = op(payload.bits().as_f64())?;
             RuntimeValue::scalar_like_float(payload.dtype(), out)
         }
-        other => Err(format!(
-            "{name} expects a float scalar or float tensor argument, got {other:?}"
+        // Faithful observation (B2.4): render the offending value through
+        // the shared renderer (which exits through format_element for
+        // numeric payloads), not a Debug dump.
+        Some(other) => Err(format!(
+            "{name} expects a float scalar or float tensor argument, got {}",
+            render_value(other)
+        )),
+        None => Err(format!(
+            "{name} expects a float scalar or float tensor argument, got none"
         )),
     }
 }

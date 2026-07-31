@@ -548,6 +548,17 @@ const BASELINE: &[Entry] = &[
     // uses a precision spec today, and a new one is a third formatter. --
     (
         Pat::RustFormatNarrowing,
+        "crates/chelis-compiler-api/src/runtime/special_fns.rs",
+        12,
+        "cfg(test): {err:e}/{sum:e}/{p:e}/{bound:e} renders inside the \
+         chelis#902 special-function accuracy assert MESSAGES (rel-err \
+         tolerance reporting on erf/erfc/norm_cdf/norm_ppf reference \
+         sweeps) - test-only diagnostic carriers, not product exits; the \
+         one product exit this file had (norm_ppf's domain error) renders \
+         through format_element",
+    ),
+    (
+        Pat::RustFormatNarrowing,
         "crates/chelis-backend-c/src/lib.rs",
         6,
         "cfg(test): the fill negative-lock needle ({value:.8}f must NOT \

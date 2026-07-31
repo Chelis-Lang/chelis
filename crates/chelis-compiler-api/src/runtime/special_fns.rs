@@ -263,8 +263,14 @@ pub fn norm_ppf(p: f64) -> Result<f64, String> {
         return Ok(f64::NAN);
     }
     if !(0.0..=1.0).contains(&p) {
+        // Faithful observation (B2.4): the rejected payload renders through
+        // the generated formatter, not a Debug spelling.
         return Err(format!(
-            "norm_ppf domain error: p must be in [0, 1], got {p:?}"
+            "norm_ppf domain error: p must be in [0, 1], got {}",
+            chelis_types::format_element(
+                chelis_types::types::Prim::F64,
+                chelis_types::ElementRef::F64(p),
+            )
         ));
     }
     if p == 0.0 {
