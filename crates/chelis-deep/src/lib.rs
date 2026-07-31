@@ -11,6 +11,7 @@ pub mod lexer;
 pub mod parser;
 pub mod path;
 pub mod printer;
+pub mod role;
 pub mod span;
 pub mod tag;
 pub mod validate;

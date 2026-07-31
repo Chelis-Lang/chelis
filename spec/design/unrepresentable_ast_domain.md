@@ -1,0 +1,450 @@
+# Unrepresentable AST Domain — Design Doc
+
+**Issue:** #908  
+**Status:** Plan approved, implementation pending  
+**Prerequisite:** #855 (merged 2026-07-29)
+
+## Class Statement
+
+> A structural token (Name) at a RuntimeExpr child position is
+> unrepresentable — the constructor rejects it, and no accessor can
+> return it from an expression traversal.
+
+This is the domain-restructuring answer (technique three) to the defect
+class #908 names: the Deep AST admits states no consumer can honestly
+handle, because `Atom` unions structural tokens with value literals in
+the same child sequence, `List.elements` carries the tag where traversal
+visits it as an expression, and `List::tag()` returns `Option` whose
+`None` conflates three cases.
+
+## Acceptance Criteria
+
+1. A Name atom at a RuntimeExpr child position is unrepresentable.
+2. Bypass slots with declared expectations (Module, Match, Record, etc.)
+   get StampError on undecodable heads, closing #858.
+3. Form-expecting slots (RuntimeExpr, Type, EffectHandler) with
+   undecodable heads produce a distinct `UnknownForm` variant that the
+   checker scores (preserves fitness gradient).
+4. `BareList` explicit in type forces stated disposition for [04-TOT-2]
+   (technique two — explicit, not impossible; #908 amended).
+5. Pre-expansion forms (defmacro) never enter the Deep AST.
+6. `Atom::Tag` and `Atom::Keyword` deleted.
+
+## The Cut — What Becomes True
+
+| Before | After |
+|--------|-------|
+| Tag in child sequence, visitable as expression | Head in Node's private field, not traversable |
+| `List::tag() -> Option<DeepTag>` conflating three cases | `Node::tag() -> DeepTag` (total); `BareList` and `UnknownForm` distinct variants |
+| Name at RuntimeExpr admitted by type, caught at check time | Rejected by constructor; no accessor can yield it |
+| Untagged top-level list silently passes (#858) | Module bypass expects declaration vocabulary → StampError |
+| `defmacro` embedded in AST, every consumer disposes of it | Transported as `MacroDef`, never enters `Expr` |
+
+## API Surface (Closed List)
+
+### Constructor Blame Rule
+
+- `Node::try_new` (returns Result → diagnostic): violation means the
+  **user** wrote something wrong. Used wherever construction input could
+  be incorrect due to user text — stamp pass, desugar, macro expansion.
+- `Node::new` (panics — validates always in all build modes): violation
+  means the **compiler** is wrong. Used for passes rewriting
+  already-validated trees (prune, AD, transforms).
+- **Rule:** if a violation at this site would be a compiler bug, use
+  `new`. If it could be a user error, use `try_new`. New construction
+  sites inherit this rule.
+- Note: a rewrite panic is a live risk (recombining valid children can
+  produce invalid output via arity or role mismatch), not a formality.
+
+### Ways to Obtain a Node
+
+1. `Node::try_new` (boundary — returns `Result<Node, NodeError>`)
+2. `Node::new` (internal — panics on violation, validates always)
+3. Custom `Deserialize` routes through `try_new`, surfaces failure as
+   `serde::de::Error` (caller can catch and rebuild)
+
+No other path constructs a `Node`.
+
+### Ways to Observe Children
+
+- Role-typed accessors: `expr_children()`, `binder_names()`,
+  `type_children()`, `selectors()`
+- Total traversal: `children_iter() -> impl Iterator<Item = ChildRef>`
+  (the default migration target for `children(list)`)
+- Indexed: `expr_child(i)` panics on role mismatch (consumer bug)
+- **No** `&[Expr]` accessor. **No** `&mut` child access.
+- Rebuilds reconstruct through the constructor.
+
+### Construction Failure Channels
+
+- `try_new` returns `NodeError` (tag, index, found, expected) →
+  surfaced as `StampError` (distinct kind from `ParseError`)
+- `new` panics with the same diagnostic information
+- Both validate in all build modes (not debug-only)
+
+### Arity
+
+`arity_contract(tag: DeepTag) -> AritySpec` total over DeepTag. Gives
+the legal child count (Fixed, AtLeast, Range). `try_new` rejects wrong
+child count.
+
+### Deserialization
+
+Deserialize into shadow struct → call `try_new` → surface failure as
+`D::Error`. The cache layer can catch and rebuild.
+
+### Deny-Lint
+
+`clippy::wildcard_enum_match_arm` activated per-crate in each migration
+commit.
+
+## Stamp Rule (Top-Down, Role-Directed)
+
+The stamp pass converts `Vec<RawExpr>` → `Result<Vec<Expr>, StampError>`
+via a top-down walk. The expectation comes from the **slot**, not from
+inspecting element zero.
+
+### Per-Role Stamp Table
+
+| Role | Name atom? | List at this slot? |
+|------|-----------|-------------------|
+| RuntimeExpr | **StampError** | Vocabulary head → Node. Undecodable head → **`UnknownForm`** (checker rung, scored) |
+| Type | Permitted | Vocabulary head → Node. Undecodable head → **`UnknownForm`** (type resolver diagnoses) |
+| EffectHandler | Permitted | Vocabulary head → Node. Undecodable head → **`UnknownForm`** (form-expecting) |
+| Syntax | Permitted | → **BareList** without head decode |
+| Binder | Permitted | → **BareList** without head decode |
+| Selector | Permitted | → **BareList** without head decode |
+| Bypass | Permitted | **Per-tag child expectation** (see below) |
+
+### Strict/Lenient Reasoning Per Row
+
+- **RuntimeExpr, Type, EffectHandler** — lenient (→ UnknownForm). A
+  typo'd head does not produce a vacuous pass; the checker/type-resolver
+  scores it and the rest of the program is assessed. Leniency preserves
+  the fitness gradient.
+- **Bypass with declared expectation** — strict (→ StampError). A wrong
+  child in these slots gets **skipped** rather than scored — the walker
+  doesn't enter it and the invariant is satisfied vacuously. That is
+  #858, and hard rejection is the only disposition that prevents it.
+- **Syntax/Binder/Selector** — structural. Content is names or
+  structural data (params lists, import name lists). No head decode
+  attempted.
+
+### Per-Tag Bypass Child Expectation
+
+`bypass_child_expectation(tag, index) -> BypassExpectation` — total over
+(tag, index) pairs where the role is Bypass.
+
+Allowed-tag sets derived from **total classifiers** (exhaustive matches
+with deny-lint active) rather than literal enumerations:
+
+```rust
+pub fn is_declaration_tag(tag: DeepTag) -> bool { /* exhaustive */ }
+pub fn is_pattern_tag(tag: DeepTag) -> bool { /* exhaustive */ }
+```
+
+| Tag | Bypass children | Expectation |
+|-----|----------------|-------------|
+| Module(1+) | Declarations | `RequiresVocabulary(is_declaration_tag)` → StampError |
+| Match(1+) | Arms | `RequiresVocabulary(Arm)` → StampError |
+| Record(1+), RecordUpdate(1+) | Kvs | `RequiresVocabulary(Kv)` → StampError |
+| Pipe(1+) | Stages | `FormExpecting` → UnknownForm |
+| Let(0) | Bind | `RequiresVocabulary(Bind)` → StampError |
+| Arm(0) | Pattern | `RequiresVocabulary(is_pattern_tag)` → StampError |
+| PatCtor(1+), PatRecord(1+), PatTuple, PatAs(1+) | Sub-patterns | `RequiresVocabulary(is_pattern_tag)` → StampError |
+| Kv(1) | Value | `FormExpecting` → UnknownForm |
+
+Adding a new declaration or pattern tag breaks the build at the
+classifier (deny-lint enforced exhaustive match).
+
+## AST Shape
+
+### Raw Stage (Parser Output)
+
+```rust
+pub enum RawExpr {
+    Atom(RawAtom, Span),
+    List(Vec<RawExpr>, Span),
+    Map(Vec<(String, RawExpr)>, Span),
+    MetaExpr { entries: Vec<(String, RawExpr)>, expr: Box<RawExpr>, span: Span },
+}
+
+pub enum RawAtom {
+    Symbol(String),
+    Int(i64),
+    Float(f64),
+    Str(String),
+    Bool(bool),
+}
+// No Keyword (map keys are String; bare :kw is parse error)
+// No Tag (decode happens at stamp, not parse)
+```
+
+### Stamped Stage (Post `stamp_to_typed`)
+
+```rust
+pub enum Expr {
+    Atom(Atom, Span),
+    Node(Node, Span),
+    BareList(Vec<Expr>, Span),
+    UnknownForm { head: String, meta: MetaMap, children: Vec<Expr>, span: Span },
+    Map(MetaMap, Span),
+    MetaExpr(MetaExpr, Span),
+}
+
+pub enum Atom {
+    Name(String),
+    Int(i64),
+    Float(f64),
+    Str(String),
+    Bool(bool),
+}
+
+pub enum ListHead { Node(DeepTag), Bare }
+
+pub enum ChildRef<'a> {
+    Expr(&'a Expr),
+    Binder(&'a str),
+    Selector(&'a str),
+    Syntax(&'a Expr),
+    Type(&'a Expr),
+    EffectHandler(&'a Expr),
+    Bypass(&'a Expr),
+}
+
+pub struct Node { /* private: tag: DeepTag, meta: MetaMap, children: Vec<Expr> */ }
+```
+
+### Staging (Minimal — Technique C)
+
+The parser emits `RawExpr`. The stamp pass converts to `Expr`. `RawExpr`
+is kept permanently (the design requires it). This is technique C in
+minimal form: two representations parameterized by stage.
+
+## Pre-Expansion
+
+Macros are **Surf-only** (confirmed: `.dp` strict parse rejects
+`defmacro`; no `.dp` path runs expansion).
+
+- Desugar returns `(Vec<Expr>, Vec<MacroDef>)`
+- `expand_program(exprs: &[Expr], macros: &[MacroDef], options: &...)`
+- Template placeholders are ordinary `(var {} param)` nodes (confirmed
+  from live test `simple_macro_expands_to_base_tags_with_source_metadata`)
+- Macro invocations are ordinary `App` nodes (live path recognizes
+  `(app {} (var {} macroname) args...)`)
+- `macro-invoke` dead (consumer at lib.rs:304, no producer; live tests
+  use App path; confirm branch unexercised before deletion)
+- Template body stamp entry: RuntimeExpr expected role.
+  `arity_contract` checked against template as written.
+
+```rust
+pub struct MacroDef {
+    pub name: String,
+    pub params: Vec<String>,
+    pub body: Expr,
+}
+```
+
+## Explicit Rejections
+
+- **BareList + name-check for pre-expansion:** rejected. Reintroduces
+  head-in-child-sequence dispatch by name inspection. Evidence:
+  `macro-invoke`, `vmap-grad`, `drop`, `list` are dead (no producer).
+- **`Node` unioning vocabulary + internal tags:** rejected. Creates
+  `Option`-shaped disposition for every downstream consumer and
+  permanently admits pre-expansion forms into post-expansion tree.
+- **Content-inspection for head classification:** rejected. Classifying
+  by element zero's value type reintroduces the defect at the
+  classification layer.
+
+## Scope Limitations
+
+- The guarantee covers RuntimeExpr slots only for Name-atom rejection.
+  Name is legitimate at Syntax, Binder, Selector, Type, EffectHandler,
+  Bypass positions.
+- BareList interiors are not role-typed.
+- Bypass child that is itself a Node was validated at construction;
+  validation recurses through Nodes. The genuine gap: Atom or BareList
+  directly in a bypass slot — those are not role-typed by the parent.
+- [04-TOT-2] addressed by technique two (BareList explicit, every match
+  forces stated disposition), not technique three. Issue #908 amended.
+- `infer_atom` Name arm: **kept as diagnostic** (#881). Not
+  `unreachable!()`. Bypass interiors can route a Name to `infer_expr`
+  via owning traversals that do not filter by role.
+- `assert_decode_once_at_boundary`: **deleted**. The type replaced it
+  (no representable input can fail it post-migration).
+
+## Oracle Contract
+
+1. **Headline criterion:** Name at RuntimeExpr slot → StampError
+2. **#858 criterion:** misspelled tag at Module child → StampError
+3. **#858 negative control:** legitimate params list and import list
+   stamp clean
+4. **Fitness gradient:** program with one unknown-head expression gets a
+   scored result (UnknownForm → checker), not stamp failure
+5. **Keyword:** bare `:kw` in expression position → ParseError
+6. **Score-one control:** programs with Name at structural positions
+   score 1.0
+
+Mechanisms:
+- trybuild (compile-fail): closed API surface (no struct literal, no raw
+  child access)
+- deny-lint: exhaustiveness (per-crate, per migration commit)
+- Python oracle: behavioral (parse-rejection, stamp-rejection, scoring)
+
+## Keyword Ladder Argument
+
+Per-case enumeration of corpus members that move from check rung to
+parse rung (to be filled during implementation):
+
+| Corpus case | Old rung | New rung | Reason |
+|-------------|----------|----------|--------|
+| `dp_bare_keyword_body_no_defsig` | check | parse | keyword has no expression semantics; parse is earliest honest rejection |
+| `dp_bare_keyword_body_unit_defsig` | check | parse | same |
+| `dp_bare_keyword_toplevel_def` | check | parse | same |
+| `dp_bare_keyword_unused_let_binding` | check | parse | same |
+
+## Unknown-Head Ladder Argument
+
+Per-case enumeration of programs with unrecognized heads — fitness
+consequence stated (to be filled during implementation):
+
+| Case | Old behavior | New behavior | Fitness consequence |
+|------|-------------|--------------|---------------------|
+| Typo'd expression head (e.g. `apl` for `app`) | lenient parse + checker diagnosis, scored | `UnknownForm` + checker diagnosis, scored | **Unchanged** — same rung, same gradient |
+| Typo'd declaration in Module | lenient parse, silently skipped (#858) | **StampError** | Hard rejection. Correct: silent skip was vacuous pass |
+| Typo'd arm in Match | lenient parse, silently skipped | **StampError** | Hard rejection. Correct: same as Module |
+| Typo'd type tag | checker diagnosis (unknown type tag) | `UnknownForm` + type resolver diagnosis | **Unchanged** — same rung |
+
+## Task Breakdown
+
+### Task 1: Design Doc — Constraining Sections
+
+This file. All design forks resolved before implementation.
+
+### Task 2: Move `child_stamp_role` to chelis-deep; write `arity_contract`; write `bypass_child_expectation`
+
+- Move `ChildStampRole` and `child_stamp_role` to `chelis-deep/src/role.rs`
+- Write `arity_contract(tag) -> AritySpec` total over DeepTag
+- Write `bypass_child_expectation(tag, index) -> BypassExpectation` total
+  over bypass (tag, index) pairs
+- Write `is_declaration_tag`, `is_pattern_tag` classifiers (exhaustive,
+  deny-lint)
+- Completeness tests for all
+
+**Demo:** `cargo nextest run -p chelis-deep -p chelis-types` green.
+
+### Task 3: Introduce `RawExpr`, `Node`, `Expr::Node`, `Expr::BareList`, `Expr::UnknownForm`, `ChildRef`, custom Deserialize, trybuild
+
+- `RawExpr`/`RawAtom` in `chelis-deep/src/raw.rs` (no Keyword, no Tag)
+- `Node::try_new`: validates arity + per-role (Name rejected at
+  RuntimeExpr only; permitted elsewhere)
+- `Node::new`: same validation, panics (blame: compiler bug)
+- Role-typed accessors, `ChildRef`, total iterator
+- Custom Deserialize → shadow → try_new → D::Error
+- trybuild: closed API surface (no struct literal, no raw access)
+- Existing `Expr::node()` sites confirmed internal → `Node::new`
+
+**Demo:** `cargo nextest run -p chelis-deep` green.
+
+### Task 4: Remove `Atom::Keyword`; make bare `:kw` a parse error
+
+- Remove variant; parser rejects outside metadata
+- Ladder argument per corpus case (table above)
+- Tag deletion deferred to Task 5
+
+**Demo:** `cargo nextest run -p chelis-deep` green.
+
+### Task 5: Rename `Atom::Symbol` → `Atom::Name`; delete `Atom::Tag`; retarget parser to `RawExpr`; write `stamp_to_typed`; extract defmacro
+
+- Rename variant, delete `Atom::Tag`
+- Retarget parser: `parse_str` deleted. New entry points:
+  - `parse_raw(source) -> Result<Vec<RawExpr>, ParseError>`
+  - `parse_and_stamp(source) -> Result<Vec<Expr>, StampError>`
+- Write `stamp_to_typed(exprs: Vec<RawExpr>) -> Result<Vec<Expr>, StampError>`
+  implementing the per-role table above
+- Stamp-pass conversion: `RawExpr::MetaExpr` → `Expr::MetaExpr`,
+  `RawExpr::Map` → `Expr::Map(MetaMap)`
+- `StampError` distinct from `ParseError`
+- Desugar: `MacroDef` as separate return; uses `try_new`
+- `expand_program` new signature
+- Desugar's `sym()` → `name()`
+- Unknown-head ladder per corpus case (table above)
+
+**Tests:**
+- Params list `(x y z)` at Binder → BareList (not error)
+- Name at RuntimeExpr → StampError
+- Unknown head at RuntimeExpr → UnknownForm (not StampError)
+- Misspelled declaration in Module → StampError (#858)
+- Name at Type slot → permitted
+- Print/parse roundtrip with params list passes
+- Desugar/expansion tests pass
+
+**Demo:** `cargo nextest run -p chelis-deep -p chelis-surf -p chelis-macros` green.
+
+### Task 6: Migrate chelis-effects and chelis-types
+
+- `children(list)` → `children_iter()` (total, per-role disposition)
+- `expr_children()` only where confirmed expression-only
+- `infer_atom` Name arm kept as diagnostic
+- Effects: `effect_set_expr` uses `Node::new` (internal — builds from
+  EffectSet enum, not user text)
+- Deny-lint per-crate
+
+**Demo:** `cargo nextest run -p chelis-effects -p chelis-types` green.
+
+### Task 7: Migrate chelis-ir, chelis-compiler-api, chelis-prove; remove dead guards
+
+- Same migration pattern
+- Remove dead guards (`vmap-grad` 4 sites, `macro-invoke` 1 site) —
+  confirm unexercised before deletion
+- Delete `assert_decode_once_at_boundary`
+- Deny-lint per-crate
+
+**Demo:** All green.
+
+### Task 8: Migrate remaining crates; remove `Expr::List`
+
+- Backends, lint, tide, reef, cli, e2e — per-crate commits
+- Delete `Expr::List`, `struct List`, all deprecated accessors
+- `RawExpr` kept (the design requires it)
+- Cache format identity updated
+- Deny-lint per-crate
+
+**Demo:** `cargo nextest run --workspace --profile ci` green.
+
+### Task 9: Wire the Oracle
+
+- Python `scripts/unrepresentable_domain_oracle.py` (behavioral)
+- Python `scripts/test_unrepresentable_domain_oracle.py` (unit tests)
+- trybuild (Task 3): API surface
+- deny-lint (Tasks 6-8): exhaustiveness
+
+### Task 10: Retrospective; amend #908; PR; self-review; merge
+
+- Append retrospective to this doc
+- Amend #908 issue ([04-TOT-2] technique two)
+- `gh pr create`
+- Fresh-context self-review against constraining sections
+- Fix, push, merge on green
+
+## Evidence Records
+
+- `macro-invoke` dead: consumer at `chelis-macros/src/lib.rs:304`, no
+  producer found. Live test `simple_macro_expands_to_base_tags_with_source_metadata`
+  uses the `App`-recognition path. To be confirmed by branch-panic test.
+- `vmap-grad` dead: 4 consumers in `host.rs`, no construction site.
+- `drop` (internal tag) dead: 1 consumer in `infer.rs`, no producer.
+- `list` (internal tag) dead: 2 consumers in `infer.rs`, no producer.
+- Macros Surf-only: `.dp` path uses `parse_str_strict` which rejects
+  unknown tags. No `.dp` path runs expansion.
+- Template placeholders: `(var {} param)` nodes (confirmed from
+  `substitute_expr` in expander — matches Var by name).
+- `effect_set_expr` internal: builds from `EffectSet` enum (closed,
+  compiler-computed). Effect names are fixed strings at Syntax slots.
+- `child_stamp_role` has no type-crate dependencies: pure function over
+  `(DeepTag, usize, usize)`.
+
+## Amendments
+
+(To be recorded here if implementation diverges from the above.)
