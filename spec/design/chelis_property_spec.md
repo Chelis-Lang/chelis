@@ -152,7 +152,10 @@ equivalent interval bounds. Strict spacing is computed with the binders'
 actual IEEE `f32`/`f64` successor and predecessor values. Non-strict order
 edges permit equality and reserve no strict spacing, while strict chains
 reserve enough representable values for their remaining successors. The
-construction and its random choices are seed-deterministic. An empty interval,
+construction and its random choices are seed-deterministic. A one-sided finite
+interval chooses its missing endpoint within the binder dtype's finite range;
+the synthesis clamps at `f32::MAX`/`f64::MAX` rather than overflowing near an
+IEEE extremum. An empty interval,
 an interval with too few representable values for its strict order chain,
 cyclic ordering, disjunction, equality, arithmetic operand other than unary
 literal negation, function predicate, or other unsupported guard shape is
@@ -169,7 +172,7 @@ The authoritative chelis#977 acceptance oracle is:
 
 ```sh
 cargo test -p chelis-cli --test issue_977_constraint_fuzz
-cargo test -p chelis-tide --test mcp issue_977_tide_and_cli_match_full_constraint_sampling_evidence -- --exact
+cargo test -p chelis-tide --test mcp issue_977_tide_and_cli_match
 cargo test -p chelis-cli --features smt --test issue_977_constraint_fuzz
 ```
 
@@ -227,7 +230,7 @@ summary record.
 ```json
 {"kind":"property","name":"confidence_tail_order","status":"passed","composite_verdict":"fuzz_validated","qualifiers":["fuzz","fuzz_base"],"assumptions":[{"name":"preconditions:confidence_tail_order","discharge":{"method":"fuzz","evidence":{"status":"validated","sampling_method":"constraint_directed","accepted_samples":100,"attempted_samples":100,"rejected_samples":0}},"non_vacuity":{"status":"established","evidence":{"method":"fuzz","sampling_method":"constraint_directed","accepted_samples":100,"attempted_samples":100,"rejected_samples":0}}}],"proof_tier":"fuzz","sampling_method":"constraint_directed","accepted_samples":100,"attempted_samples":100,"rejected_samples":0,"samples":100,"seed":0}
 {"kind":"property","name":"req_PRC_001","status":"failed","composite_verdict":"failed","assumptions":[],"samples":1,"seed":0,"source":{"kind":"bridge:c-earchin","spans":"references/pricing_rules.spans.json"}}
-{"kind":"property","name":"tensor_symbolic_shape","status":"unsupported","composite_verdict":"unsupported","assumptions":[],"reason":"symbolic tensor dimensions are not supported in L2 v1"}
+{"kind":"property","name":"tensor_symbolic_shape","status":"unsupported","composite_verdict":"unsupported","assumptions":[],"proof_tier":"none","reason":"symbolic tensor dimensions are not supported in L2 v1"}
 {"kind":"summary","total":3,"passed":1,"failed":1,"unsupported":1,"errors":0,"dependency_graph":{"status":"complete","declarations":[{"id":"decl:…","name":"call_price","kind":"function","package":"pricing","module":"Pricing.BlackScholes","source":{"file":"src/black_scholes.ch","span":{"offset":42,"len":180}}}],"edges":[{"from":"decl:…property","to":"decl:…"}]}}
 ```
 
@@ -261,7 +264,9 @@ Every Tier-C property record additively reports `sampling_method`,
 properties repeat those counts and the method in their precondition discharge
 and non-vacuity evidence, so a consumer can distinguish empirical evidence
 from an exhausted or unsupported generator without reconstructing it from
-source.
+source. CLI and Tide user-property records rendered by the shared runner always
+carry `proof_tier`; terminal outcomes report the explicit value `none` rather
+than encoding it as field absence.
 
 The legacy name-only `dependency_edges` array remains additive and deprecated
 for at least one published release after `dependency_graph` is introduced.

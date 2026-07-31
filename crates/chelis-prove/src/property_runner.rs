@@ -1312,6 +1312,13 @@ impl FloatKind {
         }
     }
 
+    fn max_finite(self) -> f64 {
+        match self {
+            Self::F32 => f32::MAX as f64,
+            Self::F64 => f64::MAX,
+        }
+    }
+
     fn round_into_domain(self, value: f64, lower: f64, upper: f64) -> Option<f64> {
         let mut rounded = match self {
             Self::F32 => (value as f32) as f64,
@@ -1404,7 +1411,8 @@ impl ConstraintSamplingPlan {
         // Keep the historical width only as a finite sampling window anchored
         // at the user's actual guard; never intersect an explicit domain with
         // the old uniform [-10, 10] range.
-        for domain in domains.values_mut() {
+        for (name, domain) in &mut domains {
+            let max_finite = kinds[name].max_finite();
             match (
                 domain.lower.value.is_finite(),
                 domain.upper.value.is_finite(),
@@ -1415,11 +1423,11 @@ impl ConstraintSamplingPlan {
                 }
                 (true, false) => {
                     let width = (domain.lower.value.abs() * 0.1).max(20.0);
-                    domain.upper.value = domain.lower.value + width;
+                    domain.upper.value = (domain.lower.value + width).min(max_finite);
                 }
                 (false, true) => {
                     let width = (domain.upper.value.abs() * 0.1).max(20.0);
-                    domain.lower.value = domain.upper.value - width;
+                    domain.lower.value = (domain.upper.value - width).max(-max_finite);
                 }
                 (true, true) => {}
             }

@@ -216,6 +216,7 @@ fn exhausted_run_preserves_the_accepted_sample_count() {
     let (code, record) = prove_with_attempt_limit(NARROW_VAR_GUARD, "8", "3");
     assert_eq!(code, 3, "{record}");
     assert_eq!(record["status"], "error");
+    assert_eq!(record["proof_tier"], "none");
     assert_eq!(record["accepted_samples"], 3);
     assert_eq!(record["attempted_samples"], 3);
     assert_eq!(record["rejected_samples"], 0);
@@ -233,6 +234,31 @@ where (x > -1e308f64), (x < 1e308f64):
     assert_eq!(code, 0, "{record}");
     assert_eq!(record["accepted_samples"], 32);
     assert_eq!(record["rejected_samples"], 0);
+}
+
+#[test]
+fn one_sided_extreme_intervals_clamp_windows_to_the_binder_range() {
+    for (module, ty, lower, upper) in [
+        ("High32", "f32", "3.3e38", ""),
+        ("Low32", "f32", "", "-3.3e38"),
+        ("High64", "f64", "1.7e308f64", ""),
+        ("Low64", "f64", "", "-1.7e308f64"),
+    ] {
+        let guard = if lower.is_empty() {
+            format!("x < {upper}")
+        } else {
+            format!("x > {lower}")
+        };
+        let source = format!(
+            "module Risk.{module}\n@property extreme forall(x: {ty})\nwhere ({guard}):\n  (x == x)\n"
+        );
+        let (code, record) = prove(&source, 31);
+        assert_eq!(code, 0, "{module}: {record}");
+        assert_eq!(record["sampling_method"], "constraint_directed");
+        assert_eq!(record["accepted_samples"], 32);
+        assert_eq!(record["attempted_samples"], 32);
+        assert_eq!(record["rejected_samples"], 0);
+    }
 }
 
 #[test]

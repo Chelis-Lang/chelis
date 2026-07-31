@@ -1692,9 +1692,55 @@ fn issue_977_tide_and_cli_match_exhausted_sampling_evidence() {
     .expect("prove response");
     let tide = response["result"]["structuredContent"]["properties"][0].clone();
 
-    assert_eq!(tide["status"], "error");
-    assert_eq!(tide["accepted_samples"], 3);
-    assert_eq!(tide["attempted_samples"], 3);
-    assert_eq!(tide["rejected_samples"], 0);
-    assert_eq!(tide["samples"], 0);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("risk.ch");
+    std::fs::write(&path, source).expect("write fixture");
+    let output = assert_cmd::Command::cargo_bin("chelis")
+        .expect("chelis binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "prove",
+            path.to_str().expect("utf-8 path"),
+            "--json",
+            "--tier",
+            "fuzz-only",
+            "--samples",
+            "8",
+            "--max-attempts",
+            "3",
+            "--seed",
+            "42",
+        ])
+        .output()
+        .expect("run CLI prove");
+    assert_eq!(output.status.code(), Some(3));
+    let cli = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .find(|record| record["kind"] == "property")
+        .expect("CLI property record");
+
+    for key in [
+        "name",
+        "status",
+        "composite_verdict",
+        "qualifiers",
+        "proof_tier",
+        "samples",
+        "seed",
+        "sampling_method",
+        "accepted_samples",
+        "attempted_samples",
+        "rejected_samples",
+        "assumptions",
+        "reason",
+        "goal",
+    ] {
+        assert_eq!(tide[key], cli[key], "field `{key}` differs");
+    }
+    assert_eq!(cli["proof_tier"], "none");
+    assert_eq!(cli["accepted_samples"], 3);
+    assert_eq!(cli["attempted_samples"], 3);
+    assert_eq!(cli["rejected_samples"], 0);
+    assert_eq!(cli["samples"], 0);
 }
