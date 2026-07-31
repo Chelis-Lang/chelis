@@ -883,19 +883,38 @@ where its universe comes from - the §C7.1 product-source manifest, the
 hand-maintained crate or file list is mis-rung on the
 enforcement ladder (compile-error > lint > tripwire > gate > prose) for
 the same reason a gate must not carry correctness: it rots invisibly.
-Scope narrowing is an annotated
-`Exclusion { class, path, reason, issue: IssueRef }`
-exclusion, and every exclusion for every mechanism lives in ONE
-canonical exclusion registry - a single checked-in artifact the §C7.5
-filter can name; an exclusion recorded anywhere else is itself a red
-discovery test. An absent entry is never an exclusion; the registry
-only shrinks, or grows with that typed, live-validated issue
-reference; there is no issue-optional production form. It consumes
-the SAME §C2.1 issue manifest and validator as a rejection - not a
-second regex or bare-number channel. This proves existence, kind, and
-open state at the specified validation times, not that the issue is
-relevant to the exclusion; relevance remains a named review
-obligation. A new product-source
+Scope narrowing is a typed exclusion row with exactly two variants,
+and every exclusion for every mechanism lives in ONE canonical
+exclusion registry - a single checked-in artifact the §C7.5 filter
+can name; an exclusion recorded anywhere else is itself a red
+discovery test. An absent entry is never an exclusion. The variants
+encode the one distinction that decides whether an issue belongs:
+
+- `Exclusion::Structural { class, path, reason }` - a PERMANENT,
+  correct classification: upstream-generated code, non-product prose,
+  a language a Rust-only class cannot apply to. No issue field, by
+  design: a classification no future work will change must not
+  manufacture a permanently-open tracker entry (the work queue is
+  `-label:tracking`, and an issue that can never close is noise
+  there). The review that admits a `Structural` row is the registry
+  edit itself, which the §C7.5 filter gates.
+- `Exclusion::Deferred { class, path, reason, issue: IssueRef }` -
+  temporary narrowing that parks real coverage work. The issue is
+  mandatory and consumes the SAME §C2.1 issue manifest and validator
+  as a rejection - not a second regex or bare-number channel. The
+  §C7.5 standing re-validation applies, and the cited issue CLOSING
+  makes the row red, forcing the exclusion's removal or its honest
+  reclassification - the deferral ratchet working as intended.
+
+The variant choice is enforced, not advisory: an exclusion that
+silences a DISCOVERED consumer candidate (a cargo dependency edge, an
+adapter hit) is always `Deferred` - deferring discovered coverage is
+work, and work has an issue; the discovery tests reject a
+`Structural` row over a discovered candidate. Validation proves
+existence, kind, and open state at the specified verification times,
+not that the issue is relevant to the exclusion; relevance remains a
+named review obligation. The registry only shrinks, or grows through
+one of these two typed forms. A new product-source
 root - Cargo member or not - is born inside every ratchet or visibly
 excluded from it, never silently outside it.
 
@@ -914,32 +933,74 @@ every one of them structurally invisible. The manifest is therefore:
 2. a checked-in registry of non-Cargo product roots, guarded by a
    totality check: every top-level repository directory containing
    shipped source must be classified - in-universe, or excluded with a
-   typed `Exclusion { class, path, reason, issue: IssueRef }` row - and
-   an unclassified root is
+   typed §C7 exclusion row (`Structural` for permanent
+   classifications like generated or upstream-owned trees; `Deferred`
+   with its `IssueRef` where coverage work is parked) - and an
+   unclassified root is
    a red test (the conformance MANIFEST/REGISTRY pattern). Adding a
    new product root of any language without classifying it is
    impossible to do quietly.
+
+**"Shipped source", defined** (the totality guard's predicate, so it
+cannot be a reading exercise): source whose content reaches a product
+artifact or executes on the product/toolchain path - Rust sources and
+`build.rs`, C/HIP/Metal headers and kernel templates, Python under
+the registered binding/tooling roots, Chelis `.ch` sources, and
+generated-code templates. Prose (`.md`), manifests and lockfiles,
+editor and asset files are not source; binary artifacts (`.chb`,
+`.zst`) are classified as ARTIFACTS, not source. `.ch` files are
+Chelis-language product source whose ratchet surface is the
+language's own gate (`chelis fmt`/`chelis lint`, the repo Style
+Gate) - that classification IS their declared adapter, so a root like
+`packages/` (46 shipped `.ch` files) is handled, not red, and the
+Rust token classes do not pretend to scan a language they cannot
+parse.
 
 Each in-universe root is walked recursively (`src/**`, `build.rs`,
 `include/**`, and for non-Cargo roots their own source globs - not
 only `src/*.rs`, which is how the generated dtype headers escaped
 scanning). Every non-Cargo root declares a language adapter and the
 walker requires every shipped source extension beneath it to be
-handled; an unknown extension is red, not silently skipped.
+handled - by a scanning adapter or by an explicit classification (the
+`.ch` and artifact classifications above); an unknown extension is
+red, not silently skipped.
+
+**An adapter is derived from the boundary the root ACTUALLY uses, not
+from a countermodel's shape.** The Python boundary in
+`bindings/python/` is numpy and DLPack flowing into the pyo3
+`_native` extension module - `grep ctypes` over every registered root
+returns nothing, and an adapter whose floor is
+`ctypes.Structure`/`_fields_` flags zero real files while the [#900]
+corruption line (`np.asarray(array, dtype=np.float64)` at
+`bindings/python/chelis/__init__.py:393`) walks past it. The Python
+adapter therefore works the way §C7.3 already works for Rust - edge
+first, tokens within edges:
+
+- **candidacy by import edge**: a Python file that imports `chelis`
+  or the `chelis._native` extension module is a consumer candidate
+  (the import graph is Python's cargo-dependency-edge analogue);
+  numpy usage in a file with no such edge is not a candidate, which
+  is what keeps the adapter from firing on every scientific-Python
+  file and drowning the registry in exclusions;
+- **within candidates**, the flagged forms are the real ingress/
+  egress shapes: `np.asarray`/`np.array` calls carrying a `dtype=`
+  argument that feed `_native` calls (the [#900] shape is the
+  REQUIRED positive case), `np.from_dlpack` and DLPack capsule
+  handling, `dtype` attribute plumbing on `_native`-owned objects,
+  and any literal `CHELIS_*` constant or integer dtype id. The
+  `ctypes` form stays recognized when it appears, but it is not the
+  floor - the observed boundary is.
+
+The C-family adapter recognizes integral `dtype` struct members and
+`CHELIS_*` uses/definitions (that shape DOES match the real headers).
 Language-independent boundary names are generated from the closed
-vocabulary declaration - canonical names, C macro spellings including
-`CHELIS_F32`, decoder names, and ABI field names - then combined with
-language AST forms. At minimum the Python adapter recognizes
-`ctypes.Structure`/`_fields_` integral `dtype` members and local
-`CHELIS_*` integer constants; the C-family adapter recognizes integral
-`dtype` struct members and `CHELIS_*` uses/definitions. Those forms are
-consumer candidates even inside an ALREADY registered non-Cargo root:
-Cargo edges cannot see them, and a Rust-shaped token scan is not their
-coverage argument. Raw ABI declarations outside generated bindings are
-forbidden. Rust-only classes use a typed exclusion row for genuinely
-inapplicable non-Rust files. The point the registry establishes is
-that both the ROOT and its language-specific coverage state are
-visible and deliberate.
+vocabulary declaration - canonical names, C macro spellings, decoder
+names, ABI field names - and combined with these language forms. Raw
+ABI declarations outside generated bindings are forbidden. Rust-only
+classes use a `Structural` exclusion row for genuinely inapplicable
+non-Rust files. The point the registry establishes is that both the
+ROOT and its language-specific coverage state are visible and
+deliberate.
 
 Each token class declares an explicit `TestsPolicy` (production-only
 via `#[cfg(test)]` region splitting, or tests-included) so that
@@ -962,9 +1023,14 @@ contract:
   the non-match spellings;
 - the §C7.2 panic-token class (including the assertion macros).
 
-`tree-sitter-chelis` is the worked exclusion example: generated parser
-C, upstream-owned grammar - excluded per class with that reason, not by
-sitting outside a walked directory.
+`tree-sitter-chelis` is the worked exclusion example:
+`Exclusion::Structural { class, path: "tree-sitter-chelis", reason:
+"generated parser C, upstream-owned grammar" }` per class - a
+permanent classification carrying no issue, recorded in the registry
+rather than implied by sitting outside a walked directory. A
+`Deferred` worked example is a registered root whose adapter is not
+yet written: that row cites the issue tracking the adapter work and
+goes red when it closes.
 
 ### C7.2 Panic terminals: sealed adapters, one validated invariant, spelling ratchets
 
@@ -1048,27 +1114,60 @@ feature - a disconnected planted function proves only that an
 explicitly invoked panic panics, while a selectable feature remains
 available to optimized and `--all-features` product builds. The
 Phase 4 oracle refuses a dirty owner, temporarily replaces one REAL
-lowering/emission site's behind-`Result` body with an invariant-naming
-panic, builds the CLI into an oracle-only target directory, and drives
-that real site with a named `.ch` probe. It asserts nonzero exit, the
-internal-error rendering, and absence of any emitted artifact, then
-restores the source byte-for-byte before reporting success.
+lowering/emission site's behind-`Result` body with a
+`compiler_invariant!` call - the sanctioned terminal, not a bare
+`panic!` - builds the CLI into an oracle-only target directory,
+drives that real site with a named `.ch` probe, then restores the
+source byte-for-byte before reporting success. **What it asserts is
+the invariant FRAME, not the planted prose.** The existing surfacing
+machinery already converts a lowering panic payload verbatim into an
+ordinary diagnostic (`catch_lowering` and
+`panic_payload_to_lower_diagnostic`, `crates/chelis-ir/src/lower.rs`;
+hook installed by the CLI), so a control that asserts its own planted
+message cannot distinguish "the surfacing contract holds" from
+"`catch_unwind` returned my string". `compiler_invariant!` therefore
+emits a structured payload frame - the literal
+`compiler invariant violated:` marker plus the guarantee and guard -
+which only the sanctioned macro produces (a Phase 4 deliverable-4
+item), and the oracle asserts nonzero exit, THAT frame with its guard
+token in the rendering, and absence of any emitted artifact.
+Calibrated: this proves panic-to-diagnostic conversion and frame
+preservation for the sanctioned terminal at one named real site per
+run.
 
-No `internal-panic-seam` feature, environment selector, or equivalent
-runtime switch exists in any product manifest or product source. A
-derived architecture guard checks the full Cargo feature graph and
-release/package workflows and rejects any such selector; its negative
-control temporarily adds the feature to a product crate and must go
-red. The shipped-neighbor control executes the ACTUAL release/package
-workflow from a clean source tree and, separately, an optimized
-`--all-features` product build; it inspects the staged artifacts and
-both feature graphs, drives the same ordinary input without the
-mutation, and verifies the oracle-only sentinel and panic path are
-absent. The mutation checkout and target directory are
-never inputs to a package/publish step, and the oracle fails if either
-path overlaps a release staging directory. Thus the instrumented
-binary is explicitly non-product and cannot become a shipped artifact
-by choosing a build feature. Stated plainly: this validates the
+**The no-shipped-seam guard is a NAMED-ARTIFACT check, stated on the
+supporting rung.** It asserts the specific artifacts this plan
+defines - the `internal-panic-seam` feature name and the oracle's
+mutation sentinel - appear in no product manifest, product source, or
+release/package workflow; its negative control temporarily adds that
+named feature to a product crate and must go red. It is deliberately
+NOT presented as a derived guard over "any runtime switch": the
+repository legitimately carries a sanctioned test-selector
+convention (`CHELIS_TEST_*`, `CHELIS_STYLE_GATE_DISABLE` - the
+latter documented in the repo Style Gate section) at dozens of
+product-source sites, and product crates carry eight legitimate
+features; no derivation distinguishes those from a forbidden switch,
+so a guard claiming to derive the class would be either red on day
+one or a literal grep wearing B2.8's language. This plan polices the
+one artifact it invented and does not adjudicate the pre-existing
+selector convention.
+
+The shipped-neighbor control is a STAGEABLE, credential-free subset
+of the release path, not the release workflow itself: executing
+`.github/workflows/release.yml` is a publish action (it holds
+`contents: write` and creates releases), and an `--all-features`
+build enables the z3/clarabel/carcara/arb native-dependency graph no
+CI job routinely builds - neither is an oracle step. The control
+builds `cargo build --release -p chelis-cli --features smt` (the
+release configuration's own product build) from the clean restored
+tree and runs `scripts/verify_release_smt.py` against it, drives the
+same ordinary input without the mutation, and verifies the sentinel,
+the frame marker, and the named feature are absent from the artifact
+and its feature graph. Sequencing is one checkout, in order:
+clean-tree refusal, in-place mutation with byte-for-byte restore
+(the Phase 2 oracle's pattern), then the neighbor build from the
+restored clean tree; the oracle-only target directory is never an
+input to any package step. Stated plainly: this validates the
 panic-SURFACING path. DISCOVERY of an unknown internal panic is what
 the probe corpus and fuzzing are for; no planted control can certify
 it, and this plan does not claim one does.
@@ -1101,12 +1200,15 @@ Two independent derivations, both feeding the same obligation:
    (`dtype: c_int` and `dtype: i32`, plus `#[repr(C)]` structs carrying
    integer dtype fields). Non-Cargo files are not searched only for
    Rust-shaped tokens: the declared Python/C adapters consume the
-   generated language-independent boundary names and recognize the raw
-   ABI forms in §C7.1. A Python `ctypes.Structure` with
-   `("dtype", ctypes.c_int)` and a C struct with `int dtype` or a
-   `CHELIS_F32` use are candidates even when planted in an already
-   registered root. A root language with no adapter, and a shipped
-   source extension not covered by its adapter, are red.
+   generated language-independent boundary names and recognize the
+   real boundary forms in §C7.1. A Python file importing
+   `chelis._native` with an `np.asarray(.., dtype=..)` coercion
+   feeding a `_native` call (the [#900] shape), and a C struct with
+   `int dtype` or a `CHELIS_F32` use, are candidates even when
+   planted in an already registered root; a `ctypes` ABI mirror is
+   recognized too, but it is not the adapter's floor (§C7.1). A root
+   language with no adapter or classification, and a shipped source
+   extension not covered by either, are red.
 
 Every candidate from either source must appear in the §C6 inventory or
 in an annotated exclusion; a candidate in neither is a red test. The
@@ -1134,10 +1236,11 @@ source is itself red, so there is no unnamed source the filter could
 miss); that registry is in the §C7.5 mutation filter, so an exclusion
 edit runs the legs pre-merge; and the discovery tests validate
 exclusion annotations through the SAME `IssueRef` type/manifest/live
-validator as §C2.1 - a dependency-edge consumer candidate may be
-excluded only with a typed reference to a real open issue at last
-verification. A bare number or unchecked issue token is not a valid
-schema value. Control: a planted exclusion for a vocab-edge candidate
+validator as §C2.1 - a discovered consumer candidate (dependency edge
+or adapter hit) may be excluded only as `Exclusion::Deferred` with a
+typed reference to a real open issue at last verification, and a
+`Structural` row over a discovered candidate is red. A bare number or
+unchecked issue token is not a valid schema value. Control: a planted exclusion for a vocab-edge candidate
 must trigger the mutation job and fail until its `IssueRef` passes the
 manifest and live checks; chelis#944 (closed issue), chelis#1 (PR),
 chelis#999999999 (missing), and same-PR additions for those values are
@@ -1225,7 +1328,17 @@ both halves:
    resolved through the same validator against the tracker (exists,
    is an issue rather than a PR, is open) before merge. An exclusion
    row cannot bypass the check by citing a standing manifest entry:
-   the changed exclusion's `IssueRef` is re-queried too. The
+   the changed exclusion's `IssueRef` is re-queried too. **The live
+   check's operational consequences, named rather than implied:** the
+   validation step requires `issues: read` on its job (`ci.yml`'s
+   restrictive permissions block grants nothing by default, and no
+   blocking job queries the issue API today - the open/close pattern
+   this doc cites lives in separate `report` jobs with
+   `issues: write`); tracker unavailability fails CLOSED as a
+   retryable job failure, never a merge-through; and the live half is
+   CI-owned - `scripts/gate.py --local` runs the membership and shape
+   half offline, exactly as the workspace nextest stage is CI-owned
+   in the existing gate split. The
    crate-scoped `HostAbiType` leg runs on every
    filter match; the workspace vocabulary leg runs when the vocab
    owner, the inventory, the exclusion registry, the root manifest, or
@@ -1243,7 +1356,9 @@ both halves:
    `scripts/faithful_observation_phase2_oracle.py` (the sibling
    authority in the identical position; contents remain [#732]'s, per
    §I2), and the Phase 4 oracle, with full standing re-validation of
-   both the issue manifest and every canonical-exclusion `IssueRef`,
+   both the issue manifest and every `Deferred` exclusion's
+   `IssueRef` (`Structural` rows carry no issue and are outside the
+   liveness sweep by design),
    plus the open/close tracking-issue
    report pattern the repo's other nightlies use (the `heavy-e2e`
    precedent - "scheduled-run failures do not show a red status on
@@ -1273,7 +1388,7 @@ gated job is a canary mislabeled as prevention.
 | gate inventory (§C5 rows 17-18 resolution) | Phase 3 | this doc |
 | §C2.2 `DiagnosticKind` vocabulary + wire spellings | Phase 3 | the deciding atom [05-UNS-6] (spec/05 §7) + this doc + the wire-spelling lock test, same PR |
 | §C2.1 `RejectionAuthority` shape | Phase 3 | the deciding atom [05-UNS-5] (spec/05 §7) + this doc + [#687] corpus, same PR |
-| §C7 universe derivations + the canonical exclusion registry | Phase 4 | exclusions shrink-only, in the one registry only; additions carry `IssueRef`, pass changed-row live validation, and receive relevance review |
+| §C7 universe derivations + the canonical exclusion registry | Phase 4 | exclusions shrink-only, in the one registry only; additions are typed rows - `Structural` with a reviewed reason, or `Deferred` carrying an `IssueRef` that passes changed-row live validation and relevance review |
 | §C7.5 execution jobs (the change-gated `ci.yml` job + the nightly workflow + `NON_GATE_WORKFLOWS` entry) | Phase 4 | this doc + `scripts/test_gate.py`, same PR |
 
 ## B2. Invariants that hold across every boundary
@@ -1611,7 +1726,10 @@ tripwire, §C7, and census rows 24-25 and 27.
    with the mutation oracle's
    evidence set staying on the ratified §C6 inventory.
 4. **The structural panic work** (§C7.2): adapter privatization with
-   `compile_fail` locks; `compiler_invariant!`; then the [#957] triage
+   `compile_fail` locks; `compiler_invariant!` including its
+   structured payload frame (the `compiler invariant violated:`
+   marker + guarantee + guard, which only the sanctioned macro
+   produces and the surfacing control keys on); then the [#957] triage
    sweep in crate-scoped PRs (metal -> hip -> backend-c -> ir), each
    crate's `clippy::panic`/`clippy::unreachable` deny flipping as its
    triage completes, `clippy::todo`/`clippy::unimplemented` denied
@@ -1630,9 +1748,9 @@ tripwire, §C7, and census rows 24-25 and 27.
    the open/close report job, running both plans' Phase 2 oracle
    runners and this phase's oracle as the full-matrix drift canary.
 
-**Frozen at your exit:** the §C7 universe derivations and exclusion
-lists (shrink-only thereafter); the workspace lints table; the nightly
-authority job.
+**Frozen at your exit:** the §C7 universe derivations and the
+canonical exclusion registry (shrink-only thereafter); the workspace
+lints table; the nightly authority job.
 
 **Explicitly not yours:** making any rejected cell supported ([#729]);
 `chelis-python`'s FFI/representation redesign ([#893] - this phase only
@@ -1672,29 +1790,39 @@ derived-universe member each go red; a planted census row naming a
 nonexistent test, an ignored-undeclared backing, a phantom
 probe-record citation, and an unregistered non-Cargo product root
 each go red; a planted new consumer (vocab dependency edge), a
-planted uninventoried Rust consumer file, a planted raw Python
-`ctypes.Structure` carrying `("dtype", ctypes.c_int)`, and a planted C
-ABI struct carrying `int dtype` plus `CHELIS_F32` inside ALREADY
-REGISTERED non-Cargo roots each fail discovery. A planted exclusion
+planted uninventoried Rust consumer file, a planted Python file that
+imports `chelis._native` and carries an
+`np.asarray(x, dtype=np.float64)` coercion feeding a `_native` call
+(the [#900] shape, the adapter's REQUIRED positive case), and a
+planted C ABI struct carrying `int dtype` plus `CHELIS_F32` inside
+ALREADY REGISTERED non-Cargo roots each fail discovery, while a
+numpy-using Python file with no `chelis` import is the
+supported-neighbor control and does not become a candidate. A planted
+`Deferred` exclusion
 for a vocab-edge candidate fails until its `IssueRef` names a
 live open issue: chelis#944 (closed issue), chelis#1 (PR),
 chelis#999999999 (missing), and same-PR manifest/exclusion additions
 for each are negative controls, while chelis#879 is the structurally
-valid open-issue control. A same-PR exclusion citing chelis#879 but
+valid open-issue control; a planted `Structural` exclusion over a
+discovered candidate is red regardless of its reason. A same-PR
+exclusion citing chelis#879 but
 unrelated to the excluded candidate is the paired review-negative
 control: structural validation passes and review MUST reject it.
 The §C7.2 surfacing control applies a temporary mutation at a REAL
-lowering/emission site behind its `Result` signature, builds an
+lowering/emission site behind its `Result` signature - planting the
+sanctioned `compiler_invariant!`, not a bare panic - builds an
 isolated non-product CLI from that dirty oracle checkout, and drives
-the site through a named `.ch` probe, asserting nonzero exit,
-invariant-naming rendering, and no artifact. The runner refuses a
+the site through a named `.ch` probe, asserting nonzero exit, the
+invariant FRAME (marker + guard token, which no ordinary diagnostic
+produces), and no artifact. The runner refuses a
 pre-dirty owner and restores every planted file byte-for-byte before
-success. Architecture negatives plant an `internal-panic-seam` Cargo
-feature or any equivalent product-build selector and require the
-product-manifest/release-graph guard to go red; the positive neighbor
-executes the actual release/package staging path plus a separate
-optimized `--all-features` product build and proves no selector,
-sentinel, or seam is present in either artifact/feature graph. Its
+success. Architecture negatives plant the NAMED `internal-panic-seam`
+Cargo feature in a product crate and require the named-artifact guard
+to go red; the shipped-neighbor positive builds the stageable release
+subset (`cargo build --release -p chelis-cli --features smt` +
+`scripts/verify_release_smt.py`) from the restored clean tree and
+proves no selector, sentinel, or frame marker is present in the
+artifact or its feature graph. Its
 self-tests ride the
 existing per-PR `unittest discover` CI step automatically, which
 keeps the oracle's anchors continuously verified between scheduled
