@@ -853,15 +853,7 @@ fn c_lane_rows(r: &FRow) -> bool {
 /// F32-narrowed (chelis#717's subject); text coincidence is not repair,
 /// and the label rejoins nothing when [#729] lands - it is simply covered
 /// by the main assertion either way.
-const EVAL_F64_LIST_EXCLUDED: &[&str] = &[
-    "f64-max",
-    "f64-min-subnormal",
-    "f64-min-normal",
-    "f64-17-digit",
-    "f64-2p53",
-    "f64-2p53-plus-2",
-    "f64-audit-e19",
-];
+const EVAL_F64_LIST_EXCLUDED: &[&str] = &[];
 
 fn eval_f64_list_rows(r: &FRow) -> bool {
     !EVAL_F64_LIST_EXCLUDED.contains(&r.label)
