@@ -1235,13 +1235,17 @@ tolerance (1e-6 for f32, 1e-12 for f64) pending the per-op tolerance table of
 ## 7. The Unsupported-Case Response Contract (Decided 2026-07; Implementation Tracked As chelis#730)
 
 **Status banner - read before citing.** RATIFIED and enforced for the
-censused live sites by chelis#730 Phase 1. Phase 2's implementation is complete
-in PR #799: dependency-bottom `EffectKind`/`RuntimeDType` identities,
-Result-only boundary decoders, exhaustive consumers, immediate invalid-ID
-rejection, generated Rust/C dtype agreement, the staged host-type/ABI
-boundary, and the structured C-expression AST. Phase acceptance still
-requires its authoritative oracle and fresh adversarial review. Count
+censused live sites by chelis#730 Phase 1. Phase 2 is complete and ACCEPTED
+(PR #799, merged 2026-07-24): dependency-bottom `EffectKind`/`RuntimeDType`
+identities, Result-only boundary decoders, exhaustive consumers, immediate
+invalid-ID rejection, generated Rust/C dtype agreement, the staged
+host-type/ABI boundary, and the structured C-expression AST, with the
+authoritative oracle green (`PHASE 2 ORACLE: PASS`) and the fresh
+adversarial review run and dispositioned
+(`docs/investigations/pr799_returned_function_values_redteam.md`). Count
 baselines and the token tripwire are supporting checks, not the authority.
+Atoms [05-UNS-5..6] below were DECIDED 2026-07-30 and are not yet
+enforced; each carries its own status note.
 
 The implementation was explicitly re-planned on 2026-07-22 after execution
 showed that the initial source lint was neither complete nor false-positive
@@ -1321,6 +1325,42 @@ speaks even where a gate is missing or permissive, so no gate is the
 sole defense against a SILENT wrong binary any more; the gate
 dedup/demotion itself - chelis#697/#698/#705's gate halves - is that
 plan's Phase 3.)*
+
+> **[05-UNS-5]** An unsupported diagnostic SHALL carry the authority
+> for its rejection: a deliberately unsupported case cites the spec
+> atom that decides it, and a not-yet-implemented case cites its
+> tracking issue. The two SHALL be distinguishable at the diagnostic
+> surface, and a rejection carrying neither citation is a defect.
+
+*(Decided 2026-07-30; NOT yet enforced. Today the citation is a prose
+convention on the diagnostic's hint field - 31 of 33 production sites
+conform and two do not (chelis#959). chelis#730's amended Phase 3
+makes the distinction structural through a validated authority type
+(design doc §C2.1); the capability table (chelis#729 Phase 4) later
+populates the deliberate-versus-unimplemented decision per cell. The
+validator proves citation identity and last-verified issue kind/open
+state, not that a cited issue actually tracks the rejected
+site/capability: that relevance judgment remains a required review
+step, with an open-but-unrelated issue as the negative review control.
+The design doc implements; this atom decides.)*
+
+> **[05-UNS-6]** The machine-facing kind of a diagnostic is drawn from
+> a closed vocabulary with stable spellings; the build surface's
+> spelling for this contract's rejections is `unsupported_feature`.
+> A machine consumer SHALL be able to distinguish an unsupported-case
+> rejection from an internal compiler error by kind alone. Producing
+> this kind for anything other than a typed unsupported rejection, or
+> a different kind for one, is a defect.
+
+*(Decided 2026-07-30; NOT yet enforced. Today kinds are free strings
+chosen independently at each producing site, plus a Debug-format leak
+and message-substring dispatch (chelis#959; PR #822 shipped a
+mislabel). chelis#730's amended Phase 3 delivers the closed
+`DiagnosticKind` vocabulary, the sealed producer chokepoint, and the
+wire-spelling lock test (design doc §C2.2). The structured `check`
+payload remains separately gated per that doc's §C2 STATUS relaxation
+(chelis#871); this atom governs the kind spelling, not the payload
+schema.)*
 
 ---
 

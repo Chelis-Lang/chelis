@@ -21,7 +21,7 @@ The plan set: [`dtype_semantics.md`](dtype_semantics.md) ([#729]), [`loud_unsupp
 | meta (the class) | method (design spec) | tracker |
 |---|---|---|
 | [#727] no dtype's semantics enforced at any single point ([#695] = its integer instance) | [`dtype_semantics.md`](dtype_semantics.md) - per-dtype finalizer behind private constructors, int/float kernel split, one storage decision, generated backend dispatch | [#729] |
-| [#703] unsupported cases substitute values instead of failing | [`loud_unsupported.md`](loud_unsupported.md) - Result-typed failure channels, the census sweep, dependency-bottom closed identities, fail-closed HostType/ABI states, structured emission, and gates demoted to UX | [#730] |
+| [#703] unsupported cases substitute values instead of failing | [`loud_unsupported.md`](loud_unsupported.md) - Result-typed failure channels, the census sweep, dependency-bottom closed identities, fail-closed HostType/ABI states, structured emission, gates demoted to UX, and (2026-07-30) §C7 ratchet totality: derived-universe guards including Python/C consumers, typed/live exclusion authority with review-owned relevance, the typed kind/authority channel, and a non-shippable mutation-based panic-surfacing oracle | [#730] |
 | [#709] unrecognized constructs silently exempt from checking (+[#710]'s silent half) | [`checker_totality.md`](checker_totality.md) - loud wildcard + handle-effect case, ErrorWitness token (silent Type::Error unconstructible), totality invariant, DeepTag exhaustiveness | [#731] |
 | [#728] the observation channel is not dtype-faithful | [`faithful_observation.md`](faithful_observation.md) - one Rust formatter, generated C print helper, round-trip invariant, tolerance table; landable before [#729]; unblocks [#687] | [#732] |
 | spec silence + stale claims ([#694]; the unauthored cells) | [`spec_provenance.md`](spec_provenance.md) - OpenSpec plans changes after Phase 0 activation, while a pinned Buoy shell and one-way Chelis adapter provide repository-independent authority, freshness, coverage, and impact enforcement; design/fixtures may proceed now, advisory execution waits for Buoy's final oracle, and blocking waits for the adapter and Chelis configuration oracles | [#733] |
@@ -97,15 +97,15 @@ the known-red ledger that keeps every annexed [#729]-family cell
 re-executed rather than silently skipped, and fails when one goes
 green, so the upstream repair's landing forces the un-ignore in the
 same change set) in parallel with [#731] Phases 2-3 (the
-witness token + DeepTag). [#730] Phase 2's final typed implementation is in
-PR [#799] (acceptance validation pending): closed vocabularies, staged
-HostType/ABI separation, and structured emission. Its initial source-lint
-approach was explicitly re-planned after execution showed incomplete and
-false-positive behavior; the lint was extracted to PR [#815] and is not a
-Wave 2 dependency. Its one authoritative completion oracle is
-`.venv/bin/python scripts/loud_unsupported_phase2_oracle.py`; acceptance
-requires exit 0 with final line `PHASE 2 ORACLE: PASS` plus the plan-set's
-fresh-context adversarial review. [#733] Phase 1's Buoy shell-side design
+witness token + DeepTag). [#730] Phase 2 is COMPLETE AND
+ACCEPTED (PR [#799], merged 2026-07-24): closed vocabularies, staged
+HostType/ABI separation, and structured emission, with the authoritative
+oracle green (`PHASE 2 ORACLE: PASS`) and the plan-set's fresh-context
+adversarial review run and dispositioned
+(`docs/investigations/pr799_returned_function_values_redteam.md`). Its
+initial source-lint approach was explicitly re-planned after execution
+showed incomplete and false-positive behavior; the lint was extracted to
+PR [#815] (since closed unmerged) and is not a Wave 2 dependency. [#733] Phase 1's Buoy shell-side design
 and fixture preparation may ride alongside: OpenSpec still plans new
 normative text and atom IDs remain stable. The executable advisory pilot
 waits for the selected Buoy revision's standalone `devenv test` final
@@ -139,10 +139,24 @@ unflagged row, and adding a `chelis_types::Prim` variant stops the
 tripwire compiling until the new dtype is classified.
 
 **Wave 4 - the permanent guards.** [#729] Phase 4 delivers the capability
-table per [`capability_table.md`](capability_table.md); [#730] Phase 3 (gates become UX) and [#733]
+table per [`capability_table.md`](capability_table.md); [#733]
 Phase 3 (the first blocking provenance ratchet) ships with it only after
 the advisory Buoy pilot and change-impact phases are green; [#732] Phase 3
-(the tolerance table + the [#687] handshake) closes the oracle. Citation
+(the tolerance table + the [#687] handshake) closes the oracle.
+[#730] Phase 3 (gates become UX; amended 2026-07-30 to also deliver the
+typed diagnostic-kind and rejection-authority work) keeps Wave 4 as its
+recommended slot but is NOT gated on the capability table or the Buoy
+pilot - its own deliverable stands on "let the emitter's channel speak"
+whether or not the table has landed. This doc previously read as if it
+were gated; per this doc's own rule the plan won and the sentence was
+corrected 2026-07-30. [#730] Phase 4 (ratchet totality, added
+2026-07-30: product-source-manifest ratchets with non-Cargo language
+adapters, typed/live exclusion references, the non-product
+mutation-based panic contract, and the change-gated + nightly
+structural-authority jobs) is
+guard work that may land any time after [#730] Phase 2 and carries no
+wave assignment. Its user-visible halves are decided by [05-UNS-5..6]
+(spec/05 §7, authored 2026-07-30); the plan implements them. Citation
 presence may land before blocking freshness and coverage, but every
 selected capability row ultimately binds one current controlling atom
 revision.
@@ -176,8 +190,11 @@ The graph is acyclic. Node colors
 are the waves above: grey = Wave 0, green = Wave 1, blue = Wave 2, orange =
 Wave 3, purple = Wave 4 (so [#733]'s advisory Buoy pilot, blue, may ride Wave
 2); white boxes with dashed borders are standalone fixes outside the wave
-structure. LANDED marks the four Phase 0s merged 2026-07-17 and the three
-Phase 1s merged 2026-07-20 (PRs #793/#792/#791).
+structure. LANDED marks the four Phase 0s merged 2026-07-17, the three
+Phase 1s merged 2026-07-20 (PRs #793/#792/#791), and [#730] Phase 2
+merged and accepted 2026-07-24 (PR [#799]). [#730] Phase 4 (ratchet
+totality, added 2026-07-30) hangs off its Phase 2 and interleaves
+freely with its Phase 3.
 
 ```mermaid
 %%{init: {"themeVariables": {"fontSize": "18px"}, "flowchart": {"nodeSpacing": 45, "rankSpacing": 42}}}%%
@@ -202,8 +219,9 @@ flowchart TB
     direction TB
     n730p0["P0 · census re-verify + token tripwire<br/>+ rejected-cells corpus stub (LANDED)"]:::w0
     n730p1["P1 · Result channel + live-site sweep (LANDED)"]:::w1
-    n730p2["P2 · typed vocabularies + Host ABI<br/>+ structured emission"]:::w2
-    n730p3["P3 · gates become UX"]:::w4
+    n730p2["P2 · typed vocabularies + Host ABI<br/>+ structured emission (LANDED)"]:::w2
+    n730p3["P3 · gates become UX<br/>+ typed kind/authority"]:::w4
+    n730p4["P4 · ratchet totality"]:::w4
     n730p0 --> n730p1 --> n730p2 --> n730p3
   end
 
@@ -260,6 +278,7 @@ flowchart TB
   n683 -.->|"natural moment"| n729p2
   n713 -.->|"natural moment"| n729p3
   n732p2 ==>|"HARD: byte-identical rendering<br/>is the gate's prerequisite"| n754
+  n730p2 --> n730p4
 
   style S733 fill:#FFFFFF,stroke:#C3CCD3
   style S730 fill:#FFFFFF,stroke:#C3CCD3
@@ -267,8 +286,9 @@ flowchart TB
   style S732 fill:#FFFFFF,stroke:#C3CCD3
   style S729 fill:#FFFFFF,stroke:#C3CCD3
   %% linkStyle indices are 0-based over EVERY edge in declaration order, and a
-  %% chain (a --> b --> c) contributes one index per arrow. There are 32 edges
-  %% here (0-31). 21,22 are the two `-.-` either-order links; 13,14,15,16,28,31
+  %% chain (a --> b --> c) contributes one index per arrow. There are 33 edges
+  %% here (0-32; index 32 is the appended #730 P2->P4 phase edge, default
+  %% styling). 21,22 are the two `-.-` either-order links; 13,14,15,16,28,31
   %% are exactly the six `==>` HARD edges. Adding or removing any edge above
   %% renumbers everything after it - recount before editing these two lines.
   linkStyle default stroke-width:2.5px
