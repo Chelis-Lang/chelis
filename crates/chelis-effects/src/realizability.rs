@@ -200,61 +200,57 @@ fn list_needs_host(
     let tag_str = tag.unwrap_or("");
 
     // Uppercase var references (ADT constructors) → Host.
-    if tag_str == "var" {
-        if let Some(name) = children.first().and_then(symbol_name) {
-            if name.chars().next().is_some_and(|c| c.is_uppercase()) {
-                reasons.push(HostReason::StructuralForm {
-                    tag: format!("var({})", name),
-                });
-                return true;
-            }
-            // Track free variables as potential inputs.
-            if !lane_by_def.contains_key(name) && !is_builtin(name) {
-                inputs.insert(name.to_string());
-            }
+    if tag_str == "var" && let Some(name) = children.first().and_then(symbol_name) {
+        if name.chars().next().is_some_and(|c| c.is_uppercase()) {
+            reasons.push(HostReason::StructuralForm {
+                tag: format!("var({})", name),
+            });
+            return true;
+        }
+        // Track free variables as potential inputs.
+        if !lane_by_def.contains_key(name) && !is_builtin(name) {
+            inputs.insert(name.to_string());
         }
     }
 
     // App: check the callee builtin.
-    if tag_str == "app" {
-        if let Some(callee_name) = app_callee_name(list) {
-            // Uppercase callee (ADT constructor call) → Host.
-            if callee_name.chars().next().is_some_and(|c| c.is_uppercase()) {
-                reasons.push(HostReason::StructuralForm {
-                    tag: format!("app({})", callee_name),
-                });
-                return true;
-            }
+    if tag_str == "app" && let Some(callee_name) = app_callee_name(list) {
+        // Uppercase callee (ADT constructor call) → Host.
+        if callee_name.chars().next().is_some_and(|c| c.is_uppercase()) {
+            reasons.push(HostReason::StructuralForm {
+                tag: format!("app({})", callee_name),
+            });
+            return true;
+        }
 
-            // Check builtin realizability.
-            if let Some(decl) = builtin_decl(&callee_name) {
-                match decl.realizability {
-                    Realizability::HostOnly => {
-                        reasons.push(HostReason::HostOnlyBuiltin {
-                            name: callee_name.to_string(),
+        // Check builtin realizability.
+        if let Some(decl) = builtin_decl(&callee_name) {
+            match decl.realizability {
+                Realizability::HostOnly => {
+                    reasons.push(HostReason::HostOnlyBuiltin {
+                        name: callee_name.to_string(),
+                    });
+                    return true;
+                }
+                Realizability::TensorAtTensorType => {
+                    // Check if the application's type is scalar.
+                    if app_type_is_scalar(list) {
+                        reasons.push(HostReason::ScalarTypedOp {
+                            builtin: callee_name.to_string(),
                         });
                         return true;
                     }
-                    Realizability::TensorAtTensorType => {
-                        // Check if the application's type is scalar.
-                        if app_type_is_scalar(list) {
-                            reasons.push(HostReason::ScalarTypedOp {
-                                builtin: callee_name.to_string(),
-                            });
-                            return true;
-                        }
-                    }
-                    Realizability::Universal => {}
                 }
+                Realizability::Universal => {}
             }
+        }
 
-            // Check transitive callee lane.
-            if let Some(Lane::Host) = lane_by_def.get(&callee_name) {
-                reasons.push(HostReason::TransitiveCaller {
-                    callee: callee_name.to_string(),
-                });
-                return true;
-            }
+        // Check transitive callee lane.
+        if let Some(Lane::Host) = lane_by_def.get(&callee_name) {
+            reasons.push(HostReason::TransitiveCaller {
+                callee: callee_name.to_string(),
+            });
+            return true;
         }
     }
 
@@ -329,10 +325,8 @@ fn app_type_is_scalar(list: &List) -> bool {
     // under the "type" key.
     if let Some(Expr::Map(meta, _)) = list.elements.get(1) {
         for (key, value) in &meta.entries {
-            if key == "type" {
-                if let Expr::List(ty_list, _) = value {
-                    return get_tag(ty_list) == Some("t-prim");
-                }
+            if key == "type" && let Expr::List(ty_list, _) = value {
+                return get_tag(ty_list) == Some("t-prim");
             }
         }
     }
@@ -351,14 +345,14 @@ fn extract_def(expr: &Expr) -> Option<(String, &Expr)> {
     let name = children.first().and_then(symbol_name)?;
     let body = children.get(1)?;
     // Skip fn-typed defs (they're callable, not roots).
-    if let Expr::List(body_list, _) = body {
-        if get_tag(body_list) == Some("fn") {
-            // Still register the def for transitive analysis, but the body
-            // is the fn body, not the fn itself.
-            let fn_children = get_children(body_list);
-            let fn_body = fn_children.get(1).unwrap_or(body);
-            return Some((name.to_string(), fn_body));
-        }
+    if let Expr::List(body_list, _) = body
+        && get_tag(body_list) == Some("fn")
+    {
+        // Still register the def for transitive analysis, but the body
+        // is the fn body, not the fn itself.
+        let fn_children = get_children(body_list);
+        let fn_body = fn_children.get(1).unwrap_or(body);
+        return Some((name.to_string(), fn_body));
     }
     Some((name.to_string(), body))
 }
