@@ -128,14 +128,15 @@ up while staying byte-identical:
 
 1. A context-aware `check_ir_fitness_with_context` runs the fitness pass
    `_with_context` against the cached layers so it does not re-infer stdlib.
-2. The in-context fitness report reconstitutes the **whole-program** node counts.
-   Today `check_in_context` (`crates/chelis-compiler-api/src/compiler.rs:552`)
-   reports new-code-only counts, so its JSON is *not* byte-identical to the
-   monolithic path. `count_nodes` and `structure_score` are pure structural
-   walks, so the stdlib + package contributions are computed once and stored in
-   the cached contexts (`StdLibContext`, `CompiledContext`); the in-context
-   report adds them back so `total_nodes` / `typed_nodes` / the `structure`
-   component match the monolithic output exactly.
+2. The in-context fitness report reconstitutes the **whole-program** metrics.
+   Since chelis#858, `typed_nodes` / `total_nodes` are the inference product's
+   honest checker-visit counters rather than structural AST counts. Each
+   serialized `CheckedProgram` retains those counters, and the layered report
+   adds them across the stdlib / non-stdlib partition. `count_nodes` and
+   `structure_score` remain separate pure structural walks whose cached
+   partition sums reconstruct only the `structure` component. This keeps the
+   layered and monolithic JSON byte-identical without fabricating either metric
+   (chelis#973).
 
 ## Acceptance oracle
 

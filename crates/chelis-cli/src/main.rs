@@ -424,6 +424,11 @@ enum Command {
         /// Per-test timeout in seconds.
         #[clap(long, default_value = "30")]
         timeout: u64,
+        /// Preserve a bare file-level compile/check diagnostic even when the
+        /// file declares no `test_*` function. Internal adapter flag used only
+        /// by `chelis test --expect`.
+        #[clap(long)]
+        expect_file_diagnostic: bool,
     },
     /// Internal: run a manifest of test files in a single batch worker.
     #[command(hide = true, name = "__test_batch")]
@@ -485,6 +490,24 @@ enum ReefCommand {
         /// reproducible-rebuild auditing).
         #[arg(long = "no-auto-fetch")]
         no_auto_fetch: bool,
+    },
+    /// Validate a standalone Reef CHB/archive pair without installing it.
+    ///
+    /// Strictly consumes the complete CHB envelope, rejects malformed or
+    /// noncanonical metadata, and checks the archive bytes against the
+    /// SHA-256 embedded in the CHB. This command is read-only and is
+    /// suitable for downstream release gates.
+    VerifyArtifact {
+        /// Source archive paired with the CHB.
+        #[arg(long, value_name = "PATH")]
+        archive: PathBuf,
+        /// Compiled shell metadata (`.chb`) to validate.
+        #[arg(long, value_name = "PATH")]
+        shell: PathBuf,
+        /// Emit a stable JSON report. In this mode stdout is JSON only,
+        /// stderr is empty, and `valid` is true iff `errors` is empty.
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
     },
     /// Publish a package into the local Reef registry
     Publish { path: Option<PathBuf> },
@@ -850,11 +873,13 @@ fn main() {
             rel_display,
             filter,
             timeout,
+            expect_file_diagnostic,
         }) => match cmd_internal_test_file(
             &file,
             &rel_display,
             filter.as_deref(),
             Duration::from_secs(timeout.max(1)),
+            expect_file_diagnostic,
         ) {
             Ok(code) => std::process::exit(code),
             Err(err) => {
@@ -3058,6 +3083,45 @@ fn cmd_reef(command: ReefCommand) -> Result<(), Box<dyn std::error::Error>> {
             println!("Shell: {}", artifacts.shell_path.display());
             println!("Archive: {}", artifacts.archive_path.display());
         }
+        ReefCommand::VerifyArtifact {
+            archive,
+            shell,
+            json,
+        } => match chelis_reef::verify_artifact_pair(&archive, &shell) {
+            Ok(verified) => {
+                if json {
+                    let report = serde_json::json!({
+                        "valid": true,
+                        "package": verified.package,
+                        "compiler": verified.compiler,
+                        "shell_sha256": verified.shell_sha256,
+                        "archive_sha256": verified.archive_sha256,
+                        "errors": [],
+                    });
+                    println!("{}", serde_json::to_string_pretty(&report)?);
+                } else {
+                    println!(
+                        "Verified {} {}",
+                        verified.package.name, verified.package.version
+                    );
+                    println!("Shell SHA-256: {}", verified.shell_sha256);
+                    println!("Archive SHA-256: {}", verified.archive_sha256);
+                }
+            }
+            Err(error) if json => {
+                let report = serde_json::json!({
+                    "valid": false,
+                    "package": null,
+                    "compiler": null,
+                    "shell_sha256": null,
+                    "archive_sha256": null,
+                    "errors": [error],
+                });
+                println!("{}", serde_json::to_string_pretty(&report)?);
+                std::process::exit(1);
+            }
+            Err(error) => return Err(error.into()),
+        },
         ReefCommand::Publish { path } => {
             let root = path.unwrap_or_else(|| PathBuf::from("."));
             let artifacts = chelis_reef::publish_package(&root)?;
@@ -5271,7 +5335,10 @@ fn run_expect(
         worker_count,
         None,
         timeout_secs,
-        context_path,
+        TestFileWorkerOptions {
+            compiled_context_path: Some(context_path),
+            expect_file_diagnostic: true,
+        },
     )?;
 
     let mut ok = 0usize;
@@ -5349,12 +5416,17 @@ fn emit_expect(
 ) -> Result<(), String> {
     use chelis_conformance::expect::Verdict;
     if json {
-        let record = serde_json::json!({
+        let mut record = serde_json::json!({
             "file": file,
             "expect": mode.as_str(),
             "verdict": verdict.tag(),
             "detail": expect_detail(verdict),
         });
+        if let Verdict::WrongDiagnostic { got, .. } | Verdict::Drifted { got, .. } = verdict {
+            // Machine consumers need the real compiler diagnostic to triage
+            // drift without re-running the probe in plain mode (chelis#967).
+            record["got"] = serde_json::json!(got);
+        }
         writeln!(out, "{record}").map_err(|e| e.to_string())?;
         return Ok(());
     }
@@ -5506,7 +5578,10 @@ fn run_test_jobs_auto(
             worker_count,
             filter,
             timeout_secs,
-            compiled_context_path,
+            TestFileWorkerOptions {
+                compiled_context_path: Some(compiled_context_path),
+                expect_file_diagnostic: false,
+            },
         )?);
     }
 
@@ -5746,7 +5821,7 @@ fn collect_test_file_jobs(
     worker_count: usize,
     filter: Option<&str>,
     timeout_secs: u64,
-    compiled_context_path: &Path,
+    worker_options: TestFileWorkerOptions<'_>,
 ) -> Result<BTreeMap<usize, Vec<TestRow>>, String> {
     if worker_count <= 1 {
         let mut out = BTreeMap::new();
@@ -5758,7 +5833,7 @@ fn collect_test_file_jobs(
                 &job.rel_display,
                 filter,
                 timeout_secs,
-                Some(compiled_context_path),
+                worker_options,
             );
             out.insert(job.index, rows);
         }
@@ -5771,7 +5846,8 @@ fn collect_test_file_jobs(
     let self_path = self_path.to_path_buf();
     let cwd = cwd.to_path_buf();
     let filter = filter.map(str::to_string);
-    let compiled_context_path = compiled_context_path.to_path_buf();
+    let compiled_context_path = worker_options.compiled_context_path.map(Path::to_path_buf);
+    let expect_file_diagnostic = worker_options.expect_file_diagnostic;
     let mut handles = Vec::new();
 
     for _ in 0..worker_count {
@@ -5796,7 +5872,10 @@ fn collect_test_file_jobs(
                         &job.rel_display,
                         filter.as_deref(),
                         timeout_secs,
-                        Some(&compiled_context_path),
+                        TestFileWorkerOptions {
+                            compiled_context_path: compiled_context_path.as_deref(),
+                            expect_file_diagnostic,
+                        },
                     )
                 })) {
                     Ok(rows) => rows,
@@ -5858,7 +5937,10 @@ fn run_test_file_jobs(
                 &job.rel_display,
                 filter,
                 timeout_secs,
-                Some(compiled_context_path),
+                TestFileWorkerOptions {
+                    compiled_context_path: Some(compiled_context_path),
+                    expect_file_diagnostic: false,
+                },
             );
             emit_test_file_rows(out, json, &job.rel_display, &rows, passed, failed)?;
         }
@@ -5896,7 +5978,10 @@ fn run_test_file_jobs(
                         &job.rel_display,
                         filter.as_deref(),
                         timeout_secs,
-                        Some(&compiled_context_path),
+                        TestFileWorkerOptions {
+                            compiled_context_path: Some(&compiled_context_path),
+                            expect_file_diagnostic: false,
+                        },
                     )
                 })) {
                     Ok(rows) => rows,
@@ -6591,6 +6676,12 @@ fn estimate_selected_test_count(file: &Path, filter: Option<&str>, rel_display: 
 /// as a subprocess. Capture its NDJSON stdout and parse into TestRows. A
 /// child crash (stack overflow, panic in the evaluator) only kills the child;
 /// the parent attributes the loss as a file-level worker crash and moves on.
+#[derive(Clone, Copy)]
+struct TestFileWorkerOptions<'a> {
+    compiled_context_path: Option<&'a Path>,
+    expect_file_diagnostic: bool,
+}
+
 fn run_test_file_subprocess(
     self_path: &Path,
     cwd: &Path,
@@ -6598,7 +6689,7 @@ fn run_test_file_subprocess(
     rel_display: &str,
     filter: Option<&str>,
     timeout_secs: u64,
-    compiled_context_path: Option<&Path>,
+    worker_options: TestFileWorkerOptions<'_>,
 ) -> Vec<TestRow> {
     let mut cmd = std::process::Command::new(self_path);
     cmd.arg("__test_file")
@@ -6608,7 +6699,10 @@ fn run_test_file_subprocess(
         .arg("--timeout")
         .arg(timeout_secs.to_string())
         .current_dir(cwd);
-    if let Some(path) = compiled_context_path {
+    if worker_options.expect_file_diagnostic {
+        cmd.arg("--expect-file-diagnostic");
+    }
+    if let Some(path) = worker_options.compiled_context_path {
         // Phase H: hand the bincode-encoded `CompiledContext` to the
         // worker via env var so the worker can deserialize the library
         // snapshot instead of re-running `prepare_reef_graph` per file.
@@ -6751,6 +6845,7 @@ fn cmd_internal_test_file(
     rel_display: &str,
     filter: Option<&str>,
     timeout: Duration,
+    expect_file_diagnostic: bool,
 ) -> Result<i32, String> {
     // Hidden testing knob — gates the regression test for per-file
     // subprocess isolation in `crates/chelis-cli/tests/subprocess_isolation.rs`.
@@ -6791,28 +6886,36 @@ fn cmd_internal_test_file(
     // the rows emitted before it. Previously the worker buffered every row
     // in a Vec and printed all of them on exit, so a stack-overflow on test
     // #90 silently dropped the 89 prior PASS rows.
-    let file_result = run_test_file(&exec_context, file, filter, rel_display, timeout, |row| {
-        if io_err.is_some() {
-            return;
-        }
-        if let Err(e) = writeln!(out, "{}", row.to_json()) {
-            io_err = Some(e.to_string());
-            return;
-        }
-        if let Err(e) = out.flush() {
-            io_err = Some(e.to_string());
-            return;
-        }
-        if row.status == TestStatus::Fail {
-            failed += 1;
-        }
-        if let Some(needle) = abort_after_test_substring.as_deref()
-            && !needle.is_empty()
-            && row.test.contains(needle)
-        {
-            std::process::abort();
-        }
-    });
+    let file_result = run_test_file(
+        &exec_context,
+        file,
+        filter,
+        rel_display,
+        timeout,
+        expect_file_diagnostic,
+        |row| {
+            if io_err.is_some() {
+                return;
+            }
+            if let Err(e) = writeln!(out, "{}", row.to_json()) {
+                io_err = Some(e.to_string());
+                return;
+            }
+            if let Err(e) = out.flush() {
+                io_err = Some(e.to_string());
+                return;
+            }
+            if row.status == TestStatus::Fail {
+                failed += 1;
+            }
+            if let Some(needle) = abort_after_test_substring.as_deref()
+                && !needle.is_empty()
+                && row.test.contains(needle)
+            {
+                std::process::abort();
+            }
+        },
+    );
     if let Some(e) = io_err {
         return Err(e);
     }
@@ -7190,6 +7293,7 @@ fn run_test_file<F>(
     filter: Option<&str>,
     rel_display: &str,
     timeout: Duration,
+    expect_file_diagnostic: bool,
     mut on_row: F,
 ) -> Result<(), String>
 where
@@ -7217,7 +7321,12 @@ where
             return Ok(());
         }
     };
-    if matched_tests.is_empty() {
+
+    if matched_tests.is_empty() && !expect_file_diagnostic {
+        // Preserve the legacy ordinary-test contract: a testless file is a
+        // zero-record file and does not pay compile/check preparation. Only
+        // `--expect` opts into treating a bare file diagnostic as the probe
+        // outcome (chelis#967).
         return Ok(());
     }
 
@@ -7231,6 +7340,26 @@ where
             status: TestStatus::Fail,
             message: Some(format!("compile: {compile_err}")),
         });
+        return Ok(());
+    }
+
+    if matched_tests.is_empty() {
+        // Expected-failure files may intentionally contain no `test_*`
+        // declaration because the file-level checker diagnostic *is* the
+        // expected outcome. The cheap reef precheck above only resolves names
+        // and module shape, so run the full check/lowering preparation before
+        // deciding this is a clean, recordless file. A real failure becomes
+        // the same synthetic `<file>` row consumed by the expected-failure
+        // adapter; a genuinely clean file still emits no row and classifies as
+        // config-error under `--expect` (chelis#967).
+        if let Err(check_err) = prepare_eval_in_exec_context(exec_context, &flat_decls) {
+            on_row(&TestRow {
+                file: rel_display.to_string(),
+                test: "<file>".to_string(),
+                status: TestStatus::Fail,
+                message: Some(format!("compile: {check_err}")),
+            });
+        }
         return Ok(());
     }
 

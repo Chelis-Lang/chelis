@@ -37,6 +37,9 @@ not designed in this round.
   `--no-auto-fetch` is passed. It type-checks, lowers, and emits
   `dist/<name>-<version>.{chb,tar.zst}` plus a `reef.lock` recording the resolved
   dependency tuples.
+- `chelis check <package-source>` and `chelis build <package-source>` use the same
+  resolved package graph and MUST repair a missing or malformed `reef.lock`, including
+  when the prepared graph itself came from a warm cache (chelis#971).
 - `chelis reef publish` runs build, then copies artifacts into
   `$CHELIS_REEF_HOME/packages/<name>/<version>/` and updates
   `$CHELIS_REEF_HOME/index.json`.
@@ -52,9 +55,38 @@ not designed in this round.
   runtime rather than a bootstrap target.
 - `chelis reef install --from-lockfile` re-fetches lockfile dependencies from their
   recorded `remote_origin` and verifies bytes against the lockfile hashes.
+- `chelis reef verify-artifact --shell <path> --archive <path>` performs the
+  install path's complete, read-only CHB/archive validation for release gates.
 
 The validation step at install time is the same regardless of source. It
 runs entirely on bytes already on disk; no code from the artifact executes.
+CHB decoding consumes the complete input and re-encodes to the same canonical
+bytes. It rejects appended bytes, truncation, malformed field encodings,
+noncanonical metadata ordering, duplicate module/export/dependency entries,
+invalid exact compiler pins, and invalid embedded SHA-256 text before checking
+the paired archive digest. These checks cover fields the installer does not
+otherwise consume (chelis#972).
+
+### Reproducible package artifact contract
+
+For identical package inputs, compiler version, and `SOURCE_DATE_EPOCH`,
+repeated `chelis reef build` invocations produce byte-identical
+`<name>-<version>.tar.zst` and `<name>-<version>.chb` artifacts. Source archive
+members are emitted in bytewise lexical order by their UTF-8 package-relative
+paths. Every regular-file tar header has mode `0644`, uid `0`, gid `0`, and an
+mtime equal to `SOURCE_DATE_EPOCH`; when the variable is absent, Reef uses the
+fixed Unix epoch (`0`). A present value must be a non-negative integer number
+of seconds or the build fails. Filesystem mtimes, ownership, permissions, and
+directory enumeration order never enter the artifact.
+
+The CHB continues to embed the SHA-256 of the resulting canonical source
+archive. Changing `SOURCE_DATE_EPOCH` can therefore intentionally change both
+artifacts; keeping it fixed (or absent) makes repeated builds reproducible.
+The executable contract oracle is:
+
+```sh
+cargo test -p chelis-cli --test reef_build_reproducible
+```
 
 ### Historical gap this doc closed
 
@@ -133,6 +165,10 @@ Multiple `--from-github` flags are independent installs.
   `install_validated_artifact_pair(archive_path, shell_path, name, version,
   registry_root)` helper. Same SHA256 verification, same
   name/version-agreement check, same registry placement.
+- Before placement, call the read-only `verify_artifact_pair` boundary used by
+  `chelis reef verify-artifact`. A successful decode must consume and
+  canonically validate the complete CHB envelope, not merely the package ID and
+  embedded archive digest needed by installation (chelis#972).
 - Lockfile records the fetched artifacts' content hashes. First fetch is
   trust-on-first-use against the bytes the canonical repo serves;
   subsequent fetches verify against the pinned hashes from the lockfile
@@ -513,6 +549,10 @@ explain the scope of the shipped Phase A change set.
   produce byte-identical local registry state for the same
   `(name, version)` — locked as a contract invariant by the byte-
   equality sub-case of the named oracle.
+- `verify_artifact_pair` is the read-only complete-envelope and archive-digest
+  boundary. The CLI exposes it as `chelis reef verify-artifact`; installation
+  calls it before creating package directories or updating `index.json`
+  (chelis#972).
 - SHA256 verification logic already shipped (computes
   `archive_sha256` and `shell_sha256` per
   `LockedDependency` at `lib.rs:64-71`).
@@ -539,12 +579,13 @@ explain the scope of the shipped Phase A change set.
   of artifacts (publisher key, signature verification on install)
   is tracked separately under the trust-stack expansion's Item 5
   and is demand-driven; not in this round.
-- **Bit-reproducible artifact comparison across machines.** The
-  install path verifies bytes received against bytes pinned in the
-  lockfile, but does not verify that two independent rebuilds from
-  source would produce bit-identical bytes. That is a separate
-  workstream contingent on auditing the C emitter for non-
-  determinism.
+- **Cross-machine reproducibility certification.** The build contract above
+  canonicalizes package inputs, archive metadata, and the epoch, and its
+  executable oracle compares repeated builds on one runner. A release matrix
+  that compares independent rebuilds across operating systems, filesystems,
+  and compression-library implementations is not yet present. Until that
+  matrix exists, claim the deterministic build contract and same-runner byte
+  oracle, not empirical cross-machine certification.
 
 ---
 

@@ -9,3 +9,4 @@ repository.workspace = true
 [dependencies]
 serde.workspace = true
 bincode = "1"
+semver = "1"

@@ -53,6 +53,12 @@ The host lane is the *outer* program; tensor math is carved out of it into DAG
 regions. Type/effect/linearity checking runs **before** the split, so both lanes are
 equally checked; AD, GPU codegen, and SMT proof only reach the DAG lane.
 
+Generic ADT layout and polymorphism classification on the host lane consume the
+checker's alias-resolved ADT registry and authored-signature metadata. They are
+not reconstructed from source declarations. Nested dimension parameters remain
+representation-erased (chelis#940), while stored tensor dtype parameters stay
+concrete through ADT nesting and beta reduction (chelis#948).
+
 **Lane legend used in the tables below:**
 
 | Mark | Meaning |
@@ -290,7 +296,10 @@ The host lane is eager (no lazy list fusion).
 
 ### 3.7 Integer / bitwise elementwise
 
-`mod`, `bitand`, `bitor`, `bitxor`, `shl`, `shr` — integer-only, host-lane, no AD.
+`mod`, `bitand`, `bitor`, `bitxor`, `shl`, `shr` — integer-only, host-lane,
+no AD. Shifts use declared-width two's-complement semantics; counts at or
+above the width fully shift out the value, while negative counts trap
+([04-NUM-13]).
 
 ---
 

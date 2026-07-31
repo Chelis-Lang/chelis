@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::time::Duration;
-use tar::{Archive, Builder};
+use tar::{Archive, Builder, Header};
 use walkdir::WalkDir;
 
 /// Version-keyed source-crate store (class-(c) dependency) for shells that
@@ -1913,6 +1913,14 @@ pub fn prepare_program_for_file(file: &Path) -> Result<Option<PreparedProgram>, 
         }
         Err(error) => return Err(error),
     };
+    // chelis#971: a prepared-graph cache hit can succeed without consulting
+    // the package lockfile. `prepare_program_for_file` is the source-file
+    // check/build path and historically owns lockfile repair, so persist the
+    // resolved graph even when the cache supplied it. Otherwise a warm cache
+    // makes a successful package build silently omit `reef.lock`.
+    if !lock_path.exists() || read_lockfile(&lock_path).is_err() {
+        write_lockfile(&lock_path, &build_lockfile(&graph.graph))?;
+    }
     let entry_module = module_name_for_input(&root, file, &graph.graph.root_package)?;
     let root_package = graph
         .graph
@@ -2528,6 +2536,61 @@ pub struct InstalledArtifact {
     pub archive_sha256: String,
 }
 
+/// Read-only result of validating a complete Reef `(archive, CHB)` pair.
+///
+/// This is the same validation boundary used before installation. It
+/// hashes both files, strictly decodes and structurally validates the
+/// complete CHB envelope, and checks the archive bytes against the digest
+/// embedded in the CHB. It does not create registry state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct VerifiedArtifactPair {
+    pub package: PackageId,
+    pub compiler: String,
+    pub shell_sha256: String,
+    pub archive_sha256: String,
+}
+
+/// Validate a standalone Reef archive/CHB pair without installing it.
+///
+/// The CHB decoder rejects trailing bytes, truncation, noncanonical
+/// encodings, and malformed metadata. The archive digest must equal the
+/// CHB's embedded `archive_sha256`.
+pub fn verify_artifact_pair(
+    archive_path: &Path,
+    shell_path: &Path,
+) -> Result<VerifiedArtifactPair, String> {
+    let archive_sha256 = sha256_file(archive_path).map_err(|error| {
+        format!(
+            "hash archive {} for artifact verification: {error}",
+            archive_path.display()
+        )
+    })?;
+    let shell_sha256 = sha256_file(shell_path).map_err(|error| {
+        format!(
+            "hash shell {} for artifact verification: {error}",
+            shell_path.display()
+        )
+    })?;
+    let shell = read_shell(shell_path)
+        .map_err(|error| format!("decode shell {}: {error}", shell_path.display()))?;
+    if shell.archive_sha256 != archive_sha256 {
+        return Err(format!(
+            "shell {} disagrees with archive {} on archive_sha256: \
+             embedded {}, computed {}",
+            shell_path.display(),
+            archive_path.display(),
+            shell.archive_sha256,
+            archive_sha256
+        ));
+    }
+    Ok(VerifiedArtifactPair {
+        package: shell.package,
+        compiler: shell.compiler,
+        shell_sha256,
+        archive_sha256,
+    })
+}
+
 /// Canonical hosting org for chelis pre-launch shell distribution.
 ///
 /// Used as the implicit publisher when a tag is referenced without an
@@ -2951,6 +3014,21 @@ pub fn install_validated_artifact_pair(
     registry_root: &Path,
     remote_origin: Option<&str>,
 ) -> Result<InstalledArtifact, String> {
+    // Fail closed on the complete on-disk pair before creating or reading
+    // any registry state. The same boundary is exposed read-only through
+    // `chelis reef verify-artifact`.
+    let verified = verify_artifact_pair(archive_path, shell_path)?;
+    if verified.package.name != name || verified.package.version != version {
+        return Err(format!(
+            "prebuilt shell {} advertises `{}-{}` but was requested as `{name}-{version}`",
+            shell_path.display(),
+            verified.package.name,
+            verified.package.version
+        ));
+    }
+    let archive_sha256 = verified.archive_sha256;
+    let shell_sha256 = verified.shell_sha256;
+
     fs::create_dir_all(registry_root).map_err(|e| {
         format!(
             "failed to create registry root {}: {e}",
@@ -2966,26 +3044,6 @@ pub fn install_validated_artifact_pair(
     } else {
         LocalRegistryIndex::default()
     };
-
-    let archive_sha256 = sha256_file(archive_path)?;
-    let shell_sha256 = sha256_file(shell_path)?;
-    let shell = read_shell(shell_path).map_err(|e| e.to_string())?;
-    if shell.archive_sha256 != archive_sha256 {
-        return Err(format!(
-            "prebuilt shell {} disagrees with archive {} on archive_sha256: \
-             the dist/ tree is stale; run `chelis reef build` in the monorepo",
-            shell_path.display(),
-            archive_path.display()
-        ));
-    }
-    if shell.package.name != name || shell.package.version != version {
-        return Err(format!(
-            "prebuilt shell {} advertises `{}-{}` but was requested as `{name}-{version}`",
-            shell_path.display(),
-            shell.package.name,
-            shell.package.version
-        ));
-    }
 
     let target_dir = registry_root.join("packages").join(name).join(version);
     fs::create_dir_all(&target_dir).map_err(|e| {
@@ -3015,7 +3073,7 @@ pub fn install_validated_artifact_pair(
     versions.retain(|entry| entry.version != version);
     versions.push(RegistryVersion {
         version: version.to_string(),
-        compiler: shell.compiler.clone(),
+        compiler: verified.compiler,
         archive_sha256: archive_sha256.clone(),
         shell_sha256: shell_sha256.clone(),
         remote_origin: remote_origin.map(str::to_string),
@@ -3310,10 +3368,17 @@ fn resolve_github_token() -> Result<String, GitHubFetchError> {
             return Ok(trimmed.to_string());
         }
     }
+    // Test-only escape hatch for deterministic auth-missing coverage. Do not
+    // empty process-wide PATH here: parallel Git fixtures need it (chelis#974).
+    #[cfg(test)]
+    if env::var_os("CHELIS_REEF_TEST_DISABLE_GH_AUTH_FALLBACK").is_some() {
+        return Err(GitHubFetchError::AuthMissing {
+            reason: "`gh auth token` fallback disabled by test".to_string(),
+        });
+    }
     // `gh auth token` is the documented escape hatch for devs who use
     // the `gh` CLI but don't keep a long-lived `GITHUB_TOKEN` exported.
-    // We shell out only here, deliberately keeping this seam thin so
-    // tests can disable the fallback by un-PATH-ing `gh`.
+    // We shell out only here, deliberately keeping this seam thin.
     let result = std::process::Command::new("gh")
         .args(["auth", "token"])
         .output();
@@ -6995,62 +7060,114 @@ fn build_archive(root: &Path, out_path: &Path) -> Result<(), String> {
     // already been resolved; reading once more here is cheap and keeps
     // the archive packing self-contained.)
     let manifest = read_manifest(&root.join("reef.toml"))?;
+    let archive_mtime = canonical_archive_mtime()?;
+    let mut members = BTreeMap::<String, PathBuf>::new();
+    let metadata_files: &[&str] = if manifest.package.name == CHELIS_STD_PACKAGE_NAME {
+        // chelis-std is the bundled runtime and therefore has a
+        // self-referential lock entry. Including reef.lock in its own
+        // archive makes the archive hash depend on the previous bundle
+        // hash and prevents the committed lock from reaching a fixed
+        // point. Downstream shells still pack reef.lock normally.
+        &["reef.toml"]
+    } else {
+        &["reef.toml", "reef.lock"]
+    };
+    for rel in metadata_files {
+        let path = root.join(rel);
+        if path.exists() {
+            members.insert((*rel).to_string(), path);
+        }
+    }
+    // Pack src/ plus every declared additional source root. Tar paths
+    // remain relative to the package root. A BTreeMap gives every
+    // supported host the same bytewise UTF-8 member ordering, independent
+    // of creation order or filesystem directory enumeration.
+    let roots = std::iter::once("src").chain(
+        manifest
+            .package
+            .additional_sources
+            .iter()
+            .map(String::as_str),
+    );
+    for source_root_name in roots {
+        let abs_root = root.join(source_root_name);
+        if !abs_root.exists() {
+            continue;
+        }
+        for entry in WalkDir::new(&abs_root) {
+            let entry = entry.map_err(|e| {
+                format!(
+                    "failed to enumerate archive source root {}: {e}",
+                    abs_root.display()
+                )
+            })?;
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let rel = entry.path().strip_prefix(root).map_err(|e| e.to_string())?;
+            let archive_path = portable_archive_path(rel)?;
+            members.insert(archive_path, entry.path().to_path_buf());
+        }
+    }
+
     let mut tar_bytes = Vec::new();
     {
         let mut builder = Builder::new(&mut tar_bytes);
-        let metadata_files: &[&str] = if manifest.package.name == CHELIS_STD_PACKAGE_NAME {
-            // chelis-std is the bundled runtime and therefore has a
-            // self-referential lock entry. Including reef.lock in its own
-            // archive makes the archive hash depend on the previous bundle
-            // hash and prevents the committed lock from reaching a fixed
-            // point. Downstream shells still pack reef.lock normally.
-            &["reef.toml"]
-        } else {
-            &["reef.toml", "reef.lock"]
-        };
-        for rel in metadata_files {
-            let path = root.join(rel);
-            if path.exists() {
-                builder
-                    .append_path_with_name(&path, rel)
-                    .map_err(|e| e.to_string())?;
-            }
-        }
-        // Pack src/ plus every declared additional source root. Tar
-        // paths remain relative to the package root, so an archive with
-        // additional_sources = ["properties"] contains both src/main.ch
-        // and properties/foo.ch at their canonical relative locations.
-        // extract_archive (just below) is path-agnostic — it unpacks
-        // whatever paths were packed.
-        let roots: Vec<&str> = std::iter::once("src")
-            .chain(
-                manifest
-                    .package
-                    .additional_sources
-                    .iter()
-                    .map(|s| s.as_str()),
-            )
-            .collect();
-        for source_root_name in &roots {
-            let abs_root = root.join(source_root_name);
-            if !abs_root.exists() {
-                continue;
-            }
-            for entry in WalkDir::new(&abs_root).into_iter().filter_map(Result::ok) {
-                if !entry.file_type().is_file() {
-                    continue;
-                }
-                let rel = entry.path().strip_prefix(root).map_err(|e| e.to_string())?;
-                builder
-                    .append_path_with_name(entry.path(), rel)
-                    .map_err(|e| e.to_string())?;
-            }
+        for (archive_path, source_path) in members {
+            let contents = fs::read(&source_path)
+                .map_err(|e| format!("failed to read {}: {e}", source_path.display()))?;
+            let mut header = Header::new_gnu();
+            header.set_size(contents.len() as u64);
+            header.set_mode(0o644);
+            header.set_uid(0);
+            header.set_gid(0);
+            header.set_mtime(archive_mtime);
+            builder
+                .append_data(&mut header, &archive_path, Cursor::new(contents))
+                .map_err(|e| format!("failed to append archive member `{archive_path}`: {e}"))?;
         }
         builder.finish().map_err(|e| e.to_string())?;
     }
     let compressed =
         zstd::stream::encode_all(Cursor::new(tar_bytes), 19).map_err(|e| e.to_string())?;
     fs::write(out_path, compressed).map_err(|e| e.to_string())
+}
+
+const DEFAULT_ARCHIVE_MTIME: u64 = 0;
+
+fn canonical_archive_mtime() -> Result<u64, String> {
+    match env::var("SOURCE_DATE_EPOCH") {
+        Ok(value) => value.parse::<u64>().map_err(|_| {
+            format!(
+                "SOURCE_DATE_EPOCH must be a non-negative integer number of seconds, got `{value}`"
+            )
+        }),
+        Err(env::VarError::NotPresent) => Ok(DEFAULT_ARCHIVE_MTIME),
+        Err(env::VarError::NotUnicode(_)) => {
+            Err("SOURCE_DATE_EPOCH must be a non-negative integer number of seconds".to_string())
+        }
+    }
+}
+
+fn portable_archive_path(path: &Path) -> Result<String, String> {
+    let mut parts = Vec::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Normal(part) => parts.push(part.to_str().ok_or_else(|| {
+                format!(
+                    "package archive path `{}` is not valid UTF-8",
+                    path.display()
+                )
+            })?),
+            _ => {
+                return Err(format!(
+                    "package archive path `{}` is not package-relative",
+                    path.display()
+                ));
+            }
+        }
+    }
+    Ok(parts.join("/"))
 }
 
 fn extract_archive(archive_path: &Path, out_dir: &Path) -> Result<(), String> {
@@ -9630,15 +9747,18 @@ some-registry-lib = {{ version = "0.1.0" }}
         // env so auto-fetch surfaces `auth-missing` instantly instead of
         // attempting a real network round trip:
         // - `GITHUB_TOKEN` removed
-        // - `PATH` emptied so the `gh auth token` shell-out fails
+        // - the test-only `gh auth token` fallback disabled
+        // Do not mutate process-wide PATH: parallel Git fixtures need it
+        // (chelis#974).
         // The downstream error is still `is_err()`, which is what this
         // negative test guards against.
         let prior_token = std::env::var_os("GITHUB_TOKEN");
-        let prior_path = std::env::var_os("PATH");
+        let prior_disable_fallback = std::env::var_os("CHELIS_REEF_TEST_DISABLE_GH_AUTH_FALLBACK");
+        let path_before = std::env::var_os("PATH");
         unsafe {
             std::env::set_var("CHELIS_REEF_HOME", dir.path().join("empty_registry"));
             std::env::remove_var("GITHUB_TOKEN");
-            std::env::set_var("PATH", "");
+            std::env::set_var("CHELIS_REEF_TEST_DISABLE_GH_AUTH_FALLBACK", "1");
         }
         let entry_decls =
             chelis_surf::parser::parse_str("def result -> int32 = 42").expect("parse");
@@ -9649,11 +9769,16 @@ some-registry-lib = {{ version = "0.1.0" }}
                 Some(v) => std::env::set_var("GITHUB_TOKEN", v),
                 None => std::env::remove_var("GITHUB_TOKEN"),
             }
-            match prior_path {
-                Some(v) => std::env::set_var("PATH", v),
-                None => std::env::remove_var("PATH"),
+            match prior_disable_fallback {
+                Some(v) => std::env::set_var("CHELIS_REEF_TEST_DISABLE_GH_AUTH_FALLBACK", v),
+                None => std::env::remove_var("CHELIS_REEF_TEST_DISABLE_GH_AUTH_FALLBACK"),
             }
         }
+        assert_eq!(
+            std::env::var_os("PATH"),
+            path_before,
+            "auth-missing test seam must preserve process-wide PATH (chelis#974)"
+        );
 
         // Should either succeed (if somehow resolved) or return an error — the
         // key invariant is that it DOES NOT hang.  Since the registry is empty

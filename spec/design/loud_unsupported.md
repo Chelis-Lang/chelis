@@ -416,7 +416,7 @@ is the un-ignored acceptance tests named in PR [#791] plus
 | # | site | substitutes | issue | status |
 |---|---|---|---|---|
 | 1 | `lower.rs` `lower_transcendental` non-float arm | `Const 0.0`, operand dropped | [#699] (+[#722] via grad) | live (test `cos_on_integer_tensor_is_not_silently_zeroed`) |
-| 2 | `host_emit.rs:2300` builtin fallback | literal `0` | [#682] [#704] [#705] [#715] | live (test `no_build_ever_emits_a_silent_unsupported_builtin_stub`) |
+| 2 | `host_emit.rs:2300` builtin fallback | literal `0` | [#704] [#705] [#715] | live (test `no_build_ever_emits_a_silent_unsupported_builtin_stub`); [#682]'s bitwise/shift instances are closed |
 | 3 | `host_emit.rs:2236` string fallback | `chelis_string_from_cstr("<value>")` | [#734] | **live** (test `to_string_of_a_tensor_stringifies_in_the_compiled_lane`; probed 2026-07-16, status carried by P0 - scalar-arm controls green in `issue_734_tostring_placeholder.rs`) |
 | 4 | `host_emit.rs:4305/4390` print of unclassifiable value | literal `<value>` text | [#714] symptom | live (test `c_f16_floor_prints_the_value_placeholder_today`) |
 | 5 | HIP `emit.rs` `elem_kind` `_` arm | `ElemKind::F32` | [#689] | live (test `hip_int64_neg_emits_the_f32_fallback_kernel_today`; emission-proven) |
@@ -431,7 +431,7 @@ is the un-ignored acceptance tests named in PR [#791] plus
 | 14 | `named_axis.rs:430` `unwrap_or(Prim::F32)` | F32 dtype | audit item 7 | dead (reachable-surface clearance: `canary_vmap_int64_roots_keep_integer_precision`; the arm is internal-desync-only, undrivable from input); §C1.4 applies |
 | 15 | `host_emit.rs` `assign_partition` non-tuple arm | emits a C comment, no assignment | audit item 7 | dead (reachable-surface clearance: `partition_agrees_across_lanes`; the arm is internal-desync-only, undrivable from input); §C1.4 applies |
 | 16 | ~25 guarded `Const { 0.0 }` sites in `lower.rs` | zero values | backlog §pattern | dead (canaries `canary_unknown_deep_tag_is_rejected`, `canary_bare_keyword_atom_fails_cleanly`, `canary_dynamic_fail_aborts_loudly`); §C1.4 applies |
-| 17 | `HOST_ONLY_BUILTINS` one-entry allowlist | (gate, not site - lets sites 1-2 fire) | [#682] [#705] | live (test `tensor_scan_does_not_silently_compile_to_a_stub`) |
+| 17 | `HOST_ONLY_BUILTINS` one-entry allowlist | (gate, not site - lets sites 1-2 fire) | [#705] | live (test `tensor_scan_does_not_silently_compile_to_a_stub`); [#682] no longer depends on this gate |
 | 18 | duplicated/drifted gates | (gate skew) | [#697] [#698] | live (tests `hip_int64_neg_emits_the_f32_fallback_kernel_today` for the [#698] half, `int64_max_reduce_does_not_panic_the_compiler` for the [#697] half) |
 | 19 | Metal `emit.rs:1419` `host_scalar_literal` pad-fill catch-all | `/* unsupported pad fill dtype */ 0` | [#745] (P0 token-sweep discovery, B2.5) | dead (canaries `metal_rejects_f64_with_a_specific_diagnostic`, `f8e4m3_is_rejected_in_both_lanes` - the gate/checker are the only defense); §C1.4 applies |
 
@@ -604,6 +604,40 @@ applications are specialized before host emission; an unresolved callable is
 never represented by a null function pointer or numeric value. An expression
 node may inhabit only its resolved ABI type: in particular, `Unit` emission
 cannot satisfy a function, callback, or numeric ABI expectation.
+
+A nullary generic constructor is the one layout-free exception to immediate
+field substitution: it may carry its declaration's named ADT term until the
+checked enclosing expectation supplies the applied arguments
+([chelis#935](https://github.com/Chelis-Lang/chelis/issues/935)).
+Zero-argument generic functions whose body is exactly that constructor have no
+standalone C ABI and are specialized at concrete call sites; the call's checked
+result type is materialized onto the inlined body before host-type resolution.
+A missing call-site application still fails at the same resolved-type boundary,
+and wrong ADT names or arities still reject before emission. This exception
+does not permit an unresolved constructor term to cross into
+`ConcreteHostType` or target ABI selection.
+
+The same checked-application rule owns generic ADT match patterns
+([chelis#936](https://github.com/Chelis-Lang/chelis/issues/936)):
+nonrecursive ordinary-generic functions are specialized before helper-summary
+probing, so each constructor arm sees the concrete scrutinee application.
+Dimension parameters hidden behind ADTs are classified by recursively following
+checked constructor-field types rather than by source spelling
+([chelis#940](https://github.com/Chelis-Lang/chelis/issues/940)); parameters
+that reach only tensor dimensions stay on the existing rank-specialization
+path, while stored value parameters remain ordinary type polymorphism.
+Invoked recursive ordinary-generic functions remain a loud unsupported
+boundary until the compiler has memoized monomorphized symbols
+([chelis#941](https://github.com/Chelis-Lang/chelis/issues/941)); lowering must
+not emit a reference to an omitted generic symbol or expand recursive source
+without a bound.
+
+For `fold`, the checked callback's first parameter is the authoritative
+accumulator type. Host lowering materializes that type onto an unresolved
+initializer such as `[]` before concrete host resolution
+([chelis#939](https://github.com/Chelis-Lang/chelis/issues/939)). If the
+callback accumulator is itself unresolved, no default is invented and the
+existing resolved-type boundary remains loud.
 
 The C ABI vocabulary distinguishes a typed callback declarator from a
 first-class function value. General `ConcreteHostType -> HostAbiType`

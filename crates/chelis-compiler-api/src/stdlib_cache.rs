@@ -63,7 +63,7 @@ use crate::compiler::CompilerError;
 /// Internal struct-format version. Bumped when [`StdLibContext`]'s shape
 /// changes so a stale on-disk entry is a clean miss, not a bad decode.
 /// Mixed into the content-addressed key.
-const STDLIB_CACHE_FORMAT_VERSION: u32 = 2;
+const STDLIB_CACHE_FORMAT_VERSION: u32 = 3;
 
 /// The typechecked + lowered chelis-std library sub-context.
 ///
@@ -95,11 +95,11 @@ pub struct StdLibContext {
     /// is `None`, so a non-lowerable stdlib never blocks a build, it just
     /// does not get the cache speedup on the lowering stage.
     pub library_dag: Option<LoweredLibrary>,
-    /// Total AST node count + Deep-validator-flagged node count over the
-    /// chelis-std library decls. The in-context fitness report adds
-    /// these to the package + entry stats so `total_nodes` and the
-    /// `structure` component match the monolithic whole-program report
-    /// byte-for-byte.
+    /// Total structural AST node count + Deep-validator-flagged node count
+    /// over the chelis-std library decls. The in-context fitness report uses
+    /// these for the `structure` component; its `typed_nodes` / `total_nodes`
+    /// come from `library_checked`'s serialized inference counters
+    /// (chelis#973).
     pub structural_stats: StructuralStats,
 }
 

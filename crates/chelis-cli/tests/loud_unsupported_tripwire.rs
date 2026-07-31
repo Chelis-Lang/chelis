@@ -217,10 +217,11 @@ const BASELINE: &[Entry] = &[
     (
         Pat::UnwrapOrDefault,
         "crates/chelis-ir/src/host.rs",
-        7,
+        6,
         "one effect-kind extraction fallback removed by the Phase 2 typed \
          decoder and one generic-ADT substitution default removed by the \
-         applied-type Result boundary; the remaining 7 pre-existing \
+         applied-type Result boundary; source-reconstructed ADT parameters \
+         now come from the checker registry; the remaining 6 pre-existing \
          non-censused uses stay frozen",
     ),
     (

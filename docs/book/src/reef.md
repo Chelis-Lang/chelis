@@ -98,6 +98,26 @@ Note the convention: the **tag** is `v<version>` (with the leading
 without the leading `v`. Both forms are accepted by the
 `<org>/<repo>@<tag>` parser (`@v<version>` and `@<version>` are equivalent).
 
+### Reproducible builds
+
+Unchanged package inputs produce byte-identical archive and CHB files across
+repeated `chelis reef build` runs. Reef sorts archive members by their UTF-8
+package-relative paths and normalizes regular-file headers to mode `0644`,
+uid/gid `0`, and mtime `0`.
+
+Set `SOURCE_DATE_EPOCH` to a non-negative integer number of seconds when a
+release requires a different canonical timestamp:
+
+```sh
+SOURCE_DATE_EPOCH=1700000000 chelis reef build
+```
+
+The same inputs and epoch produce the same bytes. A malformed
+`SOURCE_DATE_EPOCH` stops the build instead of silently producing artifacts
+under a different timestamp. The CHB embeds the SHA-256 of the canonical
+source archive, so changing the epoch intentionally changes both artifact
+identities.
+
 ## Auto-fetch During Build
 
 `chelis reef build` is auto-fetch-by-default: if a dependency is

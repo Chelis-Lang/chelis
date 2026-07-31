@@ -162,6 +162,8 @@ chelis test tests/
 chelis test tests/core.ch
 chelis test tests/ --filter pricing --timeout 10 --suite-timeout 120 --batch-mode auto
 chelis test tests/ --json --batch-mode file --jobs 1
+chelis test tests_neg/ --expect neg --json
+chelis test tests_blocked/ --expect blocked
 ```
 
 Directory runs use `--batch-mode auto` by default: eligible files are compiled
@@ -202,6 +204,19 @@ of an unbounded write. The incomplete diagnostic uses a bounded one-second
 best-effort reporting grace. Stderr is delivered before a normal stdout
 summary, preventing a blocked diagnostic stream from leaving machine output
 that appears perfectly successful.
+
+`--expect neg|blocked` treats each discovered `.ch` file as one
+expected-failure probe paired with a same-stem `.expect` sidecar. Sidecar line
+1 is the required diagnostic substring; `blocked` sidecars must also contain
+an auditable blocker citation such as `chelis#NNN`. A probe may express its
+failure as either a failing `test_*` row or a bare file-level compile/check
+diagnostic: the latter is preserved as the adapter input even when the file
+declares no `test_*` function (chelis#967). A clean file with no `test_*` and
+no compile/check failure is still a `config-error`, rather than an
+expected-failure success. Plain and NDJSON modes emit one verdict per file
+plus a mode-specific summary. A `wrong-diagnostic` or `drifted` NDJSON record
+also carries the compiler messages in its `"got"` string array, so machine
+consumers do not need a second plain-text run to diagnose the mismatch.
 
 ## Property Proof Loop
 
@@ -247,6 +262,30 @@ multi-input selection instead emits
 `dependency_graph:{status:"unavailable",reason:"..."}`. The deprecated,
 name-only `dependency_edges` field remains for one compatibility release.
 
+## Reef Artifact Verification
+
+Release workflows can validate a prebuilt Reef shell and its source archive
+without installing either file:
+
+```sh
+chelis reef verify-artifact \
+  --shell dist/example-1.2.3.chb \
+  --archive dist/example-1.2.3.tar.zst
+```
+
+Verification strictly consumes the complete CHB, requires its bytes and
+metadata ordering to be canonical, validates structural invariants across the
+envelope, and checks the archive bytes against the CHB's embedded SHA-256.
+Appended bytes, truncation, malformed metadata, and a mismatched archive fail
+before any registry state is written. `reef install` uses this same verifier.
+
+Pass `--json` for release automation. Stdout is JSON only, stderr is empty,
+and exit status is zero exactly when `valid` is `true` and `errors` is empty.
+The success report includes the package identity, compiler pin, and both
+computed SHA-256 digests. This is content and structural validation, not
+publisher authentication; release transport should separately pin or sign the
+CHB digest.
+
 ## Output Contract
 
 - `check` is machine-facing: perfect score implies an empty error list.
@@ -256,6 +295,8 @@ name-only `dependency_edges` field remains for one compatibility release.
 - `lint` prints `path:line:col: rule_id (§spec_ref): message`; with
   `--check` it exits non-zero on any blocking violation. Advisory
   warnings are prefixed with `warning:` and do not affect the exit code.
+- `reef verify-artifact --json` emits one JSON document where
+  `valid == errors.is_empty()` and exits non-zero for an invalid pair.
 
 ## Shell Author Checklist
 

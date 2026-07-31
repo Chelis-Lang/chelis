@@ -579,24 +579,12 @@ fn decimal_mul_does_not_silently_saturate() {
 // ---------------------------------------------------------------------------
 // Group 7: bitwise / shift codegen parity (chelis#682).
 //
-// `chelis build --target c` has no match arm for bitand/bitor/bitxor/shl/shr
-// in `crates/chelis-backend-c/src/host_emit.rs`, so all five fall through to
-// the generic fallback `other => format!("/* unsupported builtin {other} */ 0")`
-// and silently compile to the literal 0. The evaluator implements all five
-// correctly via `int_binop` / `int_shift_binop`
-// (`crates/chelis-compiler-api/src/runtime/eval.rs:942-946`), so the lanes
-// disagree on every one of them.
-//
-// Verified by compiling and running: eval gives 8/14/6/1024/128 while the
-// compiled binary gives 0 for all five. No large values are involved; this is
-// a missing-codegen bug, not a precision bug.
+// The five rows below were the minimized red corpus for chelis#682. They are
+// now permanent eval/C parity locks over the closed C-expression operators.
 // ---------------------------------------------------------------------------
 
-/// `bitand(12, 10) == 8`. Verified: eval 8, compiled C 0.
+/// `bitand(12, 10) == 8` in both lanes.
 #[test]
-#[ignore = "chelis#682: eval 8, compiled C 0. This test asserts the CORRECT \
-            behavior and fails until the fix lands. Run with `cargo test -p \
-            chelis-cli --test issue_680_int_exactness -- --ignored`."]
 fn bitand_agrees_across_lanes() {
     assert_lane_parity(
         "bitand(cast(12, int64), cast(10, int64))",
@@ -605,11 +593,8 @@ fn bitand_agrees_across_lanes() {
     );
 }
 
-/// `bitor(12, 10) == 14`. Verified: eval 14, compiled C 0.
+/// `bitor(12, 10) == 14` in both lanes.
 #[test]
-#[ignore = "chelis#682: eval 14, compiled C 0. This test asserts the CORRECT \
-            behavior and fails until the fix lands. Run with `cargo test -p \
-            chelis-cli --test issue_680_int_exactness -- --ignored`."]
 fn bitor_agrees_across_lanes() {
     assert_lane_parity(
         "bitor(cast(12, int64), cast(10, int64))",
@@ -618,11 +603,8 @@ fn bitor_agrees_across_lanes() {
     );
 }
 
-/// `bitxor(12, 10) == 6`. Verified: eval 6, compiled C 0.
+/// `bitxor(12, 10) == 6` in both lanes.
 #[test]
-#[ignore = "chelis#682: eval 6, compiled C 0. This test asserts the CORRECT \
-            behavior and fails until the fix lands. Run with `cargo test -p \
-            chelis-cli --test issue_680_int_exactness -- --ignored`."]
 fn bitxor_agrees_across_lanes() {
     assert_lane_parity(
         "bitxor(cast(12, int64), cast(10, int64))",
@@ -631,20 +613,14 @@ fn bitxor_agrees_across_lanes() {
     );
 }
 
-/// `shl(1, 10) == 1024`. Verified: eval 1024, compiled C 0.
+/// `shl(1, 10) == 1024` in both lanes.
 #[test]
-#[ignore = "chelis#682: eval 1024, compiled C 0. This test asserts the CORRECT \
-            behavior and fails until the fix lands. Run with `cargo test -p \
-            chelis-cli --test issue_680_int_exactness -- --ignored`."]
 fn shl_agrees_across_lanes() {
     assert_lane_parity("shl(cast(1, int64), cast(10, int64))", 1024, "shl_parity");
 }
 
-/// `shr(1024, 3) == 128`. Verified: eval 128, compiled C 0.
+/// `shr(1024, 3) == 128` in both lanes.
 #[test]
-#[ignore = "chelis#682: eval 128, compiled C 0. This test asserts the CORRECT \
-            behavior and fails until the fix lands. Run with `cargo test -p \
-            chelis-cli --test issue_680_int_exactness -- --ignored`."]
 fn shr_agrees_across_lanes() {
     assert_lane_parity("shr(cast(1024, int64), cast(3, int64))", 128, "shr_parity");
 }
@@ -658,9 +634,6 @@ fn shr_agrees_across_lanes() {
 /// garbage at runtime. This test pins that no emitted C ever contains the
 /// silent-stub marker.
 #[test]
-#[ignore = "chelis#682: build emits a silent `unsupported builtin` stub. This test asserts the CORRECT \
-            behavior and fails until the fix lands. Run with \
-            `cargo test -p chelis-cli --test issue_680_int_exactness -- --ignored`."]
 fn unsupported_builtin_never_silently_emits_a_zero_stub() {
     if !c_toolchain_available() {
         eprintln!("skipping: no host C toolchain");

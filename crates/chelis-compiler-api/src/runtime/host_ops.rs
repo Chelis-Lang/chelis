@@ -787,9 +787,15 @@ fn checked_int_binop(
     }
 }
 
+#[derive(Clone, Copy)]
+pub(super) enum IntShiftOp {
+    Left,
+    Right,
+}
+
 pub(super) fn int_shift_binop(
     args: &[RuntimeValue],
-    op: impl Fn(i64, u32) -> i64,
+    op: IntShiftOp,
 ) -> Result<RuntimeValue, String> {
     match (args.first(), args.get(1)) {
         (Some(RuntimeValue::Scalar(lp)), Some(RuntimeValue::Scalar(rp)))
@@ -799,7 +805,32 @@ pub(super) fn int_shift_binop(
             if rhs < 0 {
                 return Err(format!("shift amount must be non-negative, got {rhs}"));
             }
-            RuntimeValue::scalar_like_int(lp.dtype(), op(lp.bits().as_i64(), rhs as u32))
+            let width = match lp.dtype() {
+                Prim::Int8 => 8_u32,
+                Prim::Int16 => 16,
+                Prim::Int32 => 32,
+                Prim::Int64 => 64,
+                _ => unreachable!("integer guard above excludes non-integer shift operands"),
+            };
+            // [04-NUM-13]: shifts are width-bounded, not host-language
+            // shifts. A count at or above the declared width produces the
+            // fully shifted-out value (zero for left shift/nonnegative right
+            // shift, all ones for negative arithmetic right shift). Avoid
+            // invoking Rust's debug-panic shift path for those counts.
+            let lhs = lp.bits().as_i64();
+            let value = if rhs >= i64::from(width) {
+                match op {
+                    IntShiftOp::Left => 0,
+                    IntShiftOp::Right if lhs < 0 => -1,
+                    IntShiftOp::Right => 0,
+                }
+            } else {
+                match op {
+                    IntShiftOp::Left => lhs.wrapping_shl(rhs as u32),
+                    IntShiftOp::Right => lhs.wrapping_shr(rhs as u32),
+                }
+            };
+            RuntimeValue::scalar_like_int(lp.dtype(), value)
         }
         other => Err(format!("shift op expects int args, got {other:?}")),
     }
