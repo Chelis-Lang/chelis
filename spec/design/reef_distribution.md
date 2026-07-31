@@ -59,6 +59,27 @@ not designed in this round.
 The validation step at install time is the same regardless of source. It
 runs entirely on bytes already on disk; no code from the artifact executes.
 
+### Reproducible package artifact contract
+
+For identical package inputs, compiler version, and `SOURCE_DATE_EPOCH`,
+repeated `chelis reef build` invocations produce byte-identical
+`<name>-<version>.tar.zst` and `<name>-<version>.chb` artifacts. Source archive
+members are emitted in bytewise lexical order by their UTF-8 package-relative
+paths. Every regular-file tar header has mode `0644`, uid `0`, gid `0`, and an
+mtime equal to `SOURCE_DATE_EPOCH`; when the variable is absent, Reef uses the
+fixed Unix epoch (`0`). A present value must be a non-negative integer number
+of seconds or the build fails. Filesystem mtimes, ownership, permissions, and
+directory enumeration order never enter the artifact.
+
+The CHB continues to embed the SHA-256 of the resulting canonical source
+archive. Changing `SOURCE_DATE_EPOCH` can therefore intentionally change both
+artifacts; keeping it fixed (or absent) makes repeated builds reproducible.
+The executable contract oracle is:
+
+```sh
+cargo test -p chelis-cli --test reef_build_reproducible
+```
+
 ### Historical gap this doc closed
 
 Before Phase A, Reef only installed from monorepo-built artifacts. New developers had

@@ -31,6 +31,12 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   scheme's quantified type, dimension, and rank variables from unrelated
   global substitutions, including alias chains, so an earlier concrete tensor
   extent cannot leak into a later use.
+- **Reef package artifacts are byte-reproducible across unchanged builds
+  (chelis#970).** Source archives now use lexical UTF-8 member ordering and
+  canonical regular-file metadata (mode `0644`, uid/gid `0`, and
+  `SOURCE_DATE_EPOCH` mtime with a fixed zero default). Invalid epoch values
+  fail loudly. Repeated builds produce identical `.tar.zst` and `.chb` bytes,
+  while the CHB continues to embed the canonical archive SHA-256.
 - **Concrete return contexts now specialize nullary generic ADT
   constructors before C ABI projection (chelis#935).** A layout-free
   constructor may retain its named generic ADT term through host-expression

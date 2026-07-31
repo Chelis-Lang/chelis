@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::time::Duration;
-use tar::{Archive, Builder};
+use tar::{Archive, Builder, Header};
 use walkdir::WalkDir;
 
 /// Version-keyed source-crate store (class-(c) dependency) for shells that
@@ -7010,62 +7010,114 @@ fn build_archive(root: &Path, out_path: &Path) -> Result<(), String> {
     // already been resolved; reading once more here is cheap and keeps
     // the archive packing self-contained.)
     let manifest = read_manifest(&root.join("reef.toml"))?;
+    let archive_mtime = canonical_archive_mtime()?;
+    let mut members = BTreeMap::<String, PathBuf>::new();
+    let metadata_files: &[&str] = if manifest.package.name == CHELIS_STD_PACKAGE_NAME {
+        // chelis-std is the bundled runtime and therefore has a
+        // self-referential lock entry. Including reef.lock in its own
+        // archive makes the archive hash depend on the previous bundle
+        // hash and prevents the committed lock from reaching a fixed
+        // point. Downstream shells still pack reef.lock normally.
+        &["reef.toml"]
+    } else {
+        &["reef.toml", "reef.lock"]
+    };
+    for rel in metadata_files {
+        let path = root.join(rel);
+        if path.exists() {
+            members.insert((*rel).to_string(), path);
+        }
+    }
+    // Pack src/ plus every declared additional source root. Tar paths
+    // remain relative to the package root. A BTreeMap gives every
+    // supported host the same bytewise UTF-8 member ordering, independent
+    // of creation order or filesystem directory enumeration.
+    let roots = std::iter::once("src").chain(
+        manifest
+            .package
+            .additional_sources
+            .iter()
+            .map(String::as_str),
+    );
+    for source_root_name in roots {
+        let abs_root = root.join(source_root_name);
+        if !abs_root.exists() {
+            continue;
+        }
+        for entry in WalkDir::new(&abs_root) {
+            let entry = entry.map_err(|e| {
+                format!(
+                    "failed to enumerate archive source root {}: {e}",
+                    abs_root.display()
+                )
+            })?;
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let rel = entry.path().strip_prefix(root).map_err(|e| e.to_string())?;
+            let archive_path = portable_archive_path(rel)?;
+            members.insert(archive_path, entry.path().to_path_buf());
+        }
+    }
+
     let mut tar_bytes = Vec::new();
     {
         let mut builder = Builder::new(&mut tar_bytes);
-        let metadata_files: &[&str] = if manifest.package.name == CHELIS_STD_PACKAGE_NAME {
-            // chelis-std is the bundled runtime and therefore has a
-            // self-referential lock entry. Including reef.lock in its own
-            // archive makes the archive hash depend on the previous bundle
-            // hash and prevents the committed lock from reaching a fixed
-            // point. Downstream shells still pack reef.lock normally.
-            &["reef.toml"]
-        } else {
-            &["reef.toml", "reef.lock"]
-        };
-        for rel in metadata_files {
-            let path = root.join(rel);
-            if path.exists() {
-                builder
-                    .append_path_with_name(&path, rel)
-                    .map_err(|e| e.to_string())?;
-            }
-        }
-        // Pack src/ plus every declared additional source root. Tar
-        // paths remain relative to the package root, so an archive with
-        // additional_sources = ["properties"] contains both src/main.ch
-        // and properties/foo.ch at their canonical relative locations.
-        // extract_archive (just below) is path-agnostic — it unpacks
-        // whatever paths were packed.
-        let roots: Vec<&str> = std::iter::once("src")
-            .chain(
-                manifest
-                    .package
-                    .additional_sources
-                    .iter()
-                    .map(|s| s.as_str()),
-            )
-            .collect();
-        for source_root_name in &roots {
-            let abs_root = root.join(source_root_name);
-            if !abs_root.exists() {
-                continue;
-            }
-            for entry in WalkDir::new(&abs_root).into_iter().filter_map(Result::ok) {
-                if !entry.file_type().is_file() {
-                    continue;
-                }
-                let rel = entry.path().strip_prefix(root).map_err(|e| e.to_string())?;
-                builder
-                    .append_path_with_name(entry.path(), rel)
-                    .map_err(|e| e.to_string())?;
-            }
+        for (archive_path, source_path) in members {
+            let contents = fs::read(&source_path)
+                .map_err(|e| format!("failed to read {}: {e}", source_path.display()))?;
+            let mut header = Header::new_gnu();
+            header.set_size(contents.len() as u64);
+            header.set_mode(0o644);
+            header.set_uid(0);
+            header.set_gid(0);
+            header.set_mtime(archive_mtime);
+            builder
+                .append_data(&mut header, &archive_path, Cursor::new(contents))
+                .map_err(|e| format!("failed to append archive member `{archive_path}`: {e}"))?;
         }
         builder.finish().map_err(|e| e.to_string())?;
     }
     let compressed =
         zstd::stream::encode_all(Cursor::new(tar_bytes), 19).map_err(|e| e.to_string())?;
     fs::write(out_path, compressed).map_err(|e| e.to_string())
+}
+
+const DEFAULT_ARCHIVE_MTIME: u64 = 0;
+
+fn canonical_archive_mtime() -> Result<u64, String> {
+    match env::var("SOURCE_DATE_EPOCH") {
+        Ok(value) => value.parse::<u64>().map_err(|_| {
+            format!(
+                "SOURCE_DATE_EPOCH must be a non-negative integer number of seconds, got `{value}`"
+            )
+        }),
+        Err(env::VarError::NotPresent) => Ok(DEFAULT_ARCHIVE_MTIME),
+        Err(env::VarError::NotUnicode(_)) => {
+            Err("SOURCE_DATE_EPOCH must be a non-negative integer number of seconds".to_string())
+        }
+    }
+}
+
+fn portable_archive_path(path: &Path) -> Result<String, String> {
+    let mut parts = Vec::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Normal(part) => parts.push(part.to_str().ok_or_else(|| {
+                format!(
+                    "package archive path `{}` is not valid UTF-8",
+                    path.display()
+                )
+            })?),
+            _ => {
+                return Err(format!(
+                    "package archive path `{}` is not package-relative",
+                    path.display()
+                ));
+            }
+        }
+    }
+    Ok(parts.join("/"))
 }
 
 fn extract_archive(archive_path: &Path, out_dir: &Path) -> Result<(), String> {

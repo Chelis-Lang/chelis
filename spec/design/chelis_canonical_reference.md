@@ -315,6 +315,13 @@ chelis prove src/ --seed 42            # reproducible property run
 chelis prove src/ --json               # machine-readable output for CI integration
 ```
 
+`chelis reef build` is byte-reproducible for unchanged inputs. Its source
+archive uses lexical UTF-8 member order, normalized regular-file metadata
+(`0644`, uid/gid `0`), and `SOURCE_DATE_EPOCH` as the member mtime (Unix epoch
+`0` when absent); malformed epoch values fail the build. The CHB embeds the
+canonical archive SHA-256. See `spec/design/reef_distribution.md` for the
+complete artifact contract.
+
 `chelis manifest` and `chelis prove` are demo-blocking for the first commercial CProof prospect. Full CLI surface and JSON schemas: `chelis_manifest_spec.md`, `chelis_property_spec.md`.
 
 This is the intended stable surface for project-level documentation.
