@@ -783,6 +783,10 @@ impl InferenceProduct {
                     deep::Expr::Atom(_, _) => "<atom>",
                     deep::Expr::Map(_, _) => "<map>",
                     deep::Expr::MetaExpr(_, _) => "<meta-expr>",
+                    // Transitional arms for new Expr variants (#908)
+                    deep::Expr::Node(node, _) => node.tag().as_str(),
+                    deep::Expr::BareList(_, _) => "<bare-list>",
+                    deep::Expr::UnknownForm(_) => "<unknown-form>",
                 };
                 errors.push(internal_owner_stamp_error(format!(
                     "missing authoritative type stamp for {role} `{construct}`"
@@ -1585,6 +1589,10 @@ fn effect_metadata_is_singular(expr: &deep::Expr) -> bool {
             };
             singular_here && list.elements.iter().all(effect_metadata_is_singular)
         }
+        // Transitional arms for new Expr variants (#908)
+        deep::Expr::Node(node, _) => node.expr_children().all(effect_metadata_is_singular),
+        deep::Expr::BareList(elems, _) => elems.iter().all(effect_metadata_is_singular),
+        deep::Expr::UnknownForm(data) => data.children.iter().all(effect_metadata_is_singular),
     }
 }
 
@@ -3757,6 +3765,22 @@ fn collect_top_level_calls(
                 }
             }
         },
+        // Transitional arms for new Expr variants (#908)
+        deep::Expr::Node(node, _) => {
+            for child in node.expr_children() {
+                collect_top_level_calls(child, def_names, bound, calls);
+            }
+        }
+        deep::Expr::BareList(elems, _) => {
+            for elem in elems {
+                collect_top_level_calls(elem, def_names, bound, calls);
+            }
+        }
+        deep::Expr::UnknownForm(data) => {
+            for child in &data.children {
+                collect_top_level_calls(child, def_names, bound, calls);
+            }
+        }
     }
 }
 
@@ -3994,6 +4018,40 @@ fn param_has_consuming_use_inner(
                 )
             }),
         },
+        // Transitional arms for new Expr variants (#908)
+        deep::Expr::Node(node, _) => node.expr_children().any(|child| {
+            param_has_consuming_use_inner(
+                child,
+                param,
+                bound,
+                available_signatures,
+                type_env,
+                type_headers,
+                errors,
+            )
+        }),
+        deep::Expr::BareList(elems, _) => elems.iter().any(|child| {
+            param_has_consuming_use_inner(
+                child,
+                param,
+                bound,
+                available_signatures,
+                type_env,
+                type_headers,
+                errors,
+            )
+        }),
+        deep::Expr::UnknownForm(data) => data.children.iter().any(|child| {
+            param_has_consuming_use_inner(
+                child,
+                param,
+                bound,
+                available_signatures,
+                type_env,
+                type_headers,
+                errors,
+            )
+        }),
     }
 }
 
@@ -4199,6 +4257,17 @@ fn expr_mentions_unshadowed_name(
                 .iter()
                 .any(|child| expr_mentions_unshadowed_name(child, name, bound)),
         },
+        // Transitional arms for new Expr variants (#908)
+        deep::Expr::Node(node, _) => {
+            node.expr_children()
+                .any(|child| expr_mentions_unshadowed_name(child, name, bound))
+        }
+        deep::Expr::BareList(elems, _) => {
+            elems.iter().any(|child| expr_mentions_unshadowed_name(child, name, bound))
+        }
+        deep::Expr::UnknownForm(data) => {
+            data.children.iter().any(|child| expr_mentions_unshadowed_name(child, name, bound))
+        }
     }
 }
 
@@ -4927,6 +4996,22 @@ fn collect_eager_refs(
             collect_eager_refs(&meta.expr, bound, refs, applied);
         }
         deep::Expr::Atom(_, _) => {}
+        // Transitional arms for new Expr variants (#908)
+        deep::Expr::Node(node, _) => {
+            for child in node.expr_children() {
+                collect_eager_refs(child, bound, refs, applied);
+            }
+        }
+        deep::Expr::BareList(elems, _) => {
+            for elem in elems {
+                collect_eager_refs(elem, bound, refs, applied);
+            }
+        }
+        deep::Expr::UnknownForm(data) => {
+            for child in &data.children {
+                collect_eager_refs(child, bound, refs, applied);
+            }
+        }
     }
 }
 
@@ -5121,6 +5206,22 @@ fn walk_for_tensor_precision(
             walk_for_tensor_precision(&meta.expr, errors, seen, def_context);
         }
         deep::Expr::Atom(_, _) => {}
+        // Transitional arms for new Expr variants (#908)
+        deep::Expr::Node(node, _) => {
+            for child in node.expr_children() {
+                walk_for_tensor_precision(child, errors, seen, def_context);
+            }
+        }
+        deep::Expr::BareList(elems, _) => {
+            for elem in elems {
+                walk_for_tensor_precision(elem, errors, seen, def_context);
+            }
+        }
+        deep::Expr::UnknownForm(data) => {
+            for child in &data.children {
+                walk_for_tensor_precision(child, errors, seen, def_context);
+            }
+        }
     }
 }
 
@@ -5368,6 +5469,22 @@ fn walk_for_poly_op_constraint_violations(
             }
         }
         deep::Expr::Atom(_, _) => {}
+        // Transitional arms for new Expr variants (#908)
+        deep::Expr::Node(node, _) => {
+            for child in node.expr_children() {
+                walk_for_poly_op_constraint_violations(child, defs, type_env, scope, errors);
+            }
+        }
+        deep::Expr::BareList(elems, _) => {
+            for elem in elems {
+                walk_for_poly_op_constraint_violations(elem, defs, type_env, scope, errors);
+            }
+        }
+        deep::Expr::UnknownForm(data) => {
+            for child in &data.children {
+                walk_for_poly_op_constraint_violations(child, defs, type_env, scope, errors);
+            }
+        }
     }
 }
 
@@ -6068,6 +6185,25 @@ fn validate_ir_expr(
             validate_ir_expr(&meta.expr, type_env, static_env, failed_let_names, errors)
         }
         deep::Expr::Atom(_, _) => literal_static_value(expr),
+        // Transitional arms for new Expr variants (#908)
+        deep::Expr::Node(node, _) => {
+            for child in node.expr_children() {
+                validate_ir_expr(child, type_env, static_env, failed_let_names, errors);
+            }
+            StaticValue::Unknown
+        }
+        deep::Expr::BareList(elems, _) => {
+            for elem in elems {
+                validate_ir_expr(elem, type_env, static_env, failed_let_names, errors);
+            }
+            StaticValue::Unknown
+        }
+        deep::Expr::UnknownForm(data) => {
+            for child in &data.children {
+                validate_ir_expr(child, type_env, static_env, failed_let_names, errors);
+            }
+            StaticValue::Unknown
+        }
     }
 }
 
@@ -6854,6 +6990,10 @@ fn annotate_expr_with_scope(
             elements.extend(annotated_children);
             deep::Expr::List(deep::List { elements }, *span)
         }
+        // Transitional arms for new Expr variants (#908)
+        deep::Expr::Node(_, _) | deep::Expr::BareList(_, _) | deep::Expr::UnknownForm(_) => {
+            expr.clone()
+        }
     }
 }
 
@@ -7235,7 +7375,11 @@ fn span_of_expr(expr: &deep::Expr) -> Span {
         deep::Expr::Atom(_, span)
         | deep::Expr::List(_, span)
         | deep::Expr::Map(_, span)
-        | deep::Expr::MetaExpr(_, span) => *span,
+        | deep::Expr::MetaExpr(_, span)
+        // Transitional arms for new Expr variants (#908)
+        | deep::Expr::Node(_, span)
+        | deep::Expr::BareList(_, span) => *span,
+        deep::Expr::UnknownForm(data) => data.span,
     }
 }
 
@@ -8325,6 +8469,22 @@ fn annotated_totality_invariant_traces(exprs: &[deep::Expr]) -> Vec<String> {
                             | ChildStampRole::Type,
                         ) => {}
                     }
+                }
+            }
+            // Transitional arms for new Expr variants (#908)
+            deep::Expr::Node(node, _) => {
+                for child in node.expr_children() {
+                    walk(child, traces);
+                }
+            }
+            deep::Expr::BareList(elems, _) => {
+                for elem in elems {
+                    walk(elem, traces);
+                }
+            }
+            deep::Expr::UnknownForm(data) => {
+                for child in &data.children {
+                    walk(child, traces);
                 }
             }
         }
@@ -10513,6 +10673,28 @@ fn infer_expr_with_type_metadata_ownership(
         deep::Expr::Map(_, _) => Type::Unit,
         deep::Expr::MetaExpr(meta, _) => {
             infer_expr(&meta.expr, env, vg, subst, adt_reg, errors, product)
+        }
+        // Transitional arms for new Expr variants (#908)
+        deep::Expr::Node(node, _) => {
+            let mut last_ty = Type::Unit;
+            for child in node.expr_children() {
+                last_ty = infer_expr(child, env, vg, subst, adt_reg, errors, product);
+            }
+            last_ty
+        }
+        deep::Expr::BareList(elems, _) => {
+            let mut last_ty = Type::Unit;
+            for elem in elems {
+                last_ty = infer_expr(elem, env, vg, subst, adt_reg, errors, product);
+            }
+            last_ty
+        }
+        deep::Expr::UnknownForm(data) => {
+            let mut last_ty = Type::Unit;
+            for child in &data.children {
+                last_ty = infer_expr(child, env, vg, subst, adt_reg, errors, product);
+            }
+            last_ty
         }
     };
 

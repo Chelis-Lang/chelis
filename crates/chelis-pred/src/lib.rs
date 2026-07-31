@@ -312,6 +312,11 @@ fn check_in_grammar(expr: &Expr) -> Result<(), PredGrammarError> {
             Err(PredGrammarError::DisallowedNode(node_desc(expr)))
         }
         Expr::List(_, _) => check_list_in_grammar(expr),
+        // Migration: new variants from #908; treated as list-like for now.
+        Expr::Node(_, _) => check_list_in_grammar(expr),
+        Expr::BareList(_, _) | Expr::UnknownForm(_) => {
+            Err(PredGrammarError::DisallowedNode(node_desc(expr)))
+        }
     }
 }
 
@@ -381,6 +386,9 @@ fn node_desc(expr: &Expr) -> String {
             Some(t) => format!("`{}` node", t.as_str()),
             None => "malformed list".to_string(),
         },
+        Expr::Node(node, _) => format!("`{}` node", node.tag().as_str()),
+        Expr::BareList(_, _) => "bare list".to_string(),
+        Expr::UnknownForm(_) => "unknown form".to_string(),
     }
 }
 

@@ -562,6 +562,8 @@ fn strip_span_meta(expr: &mut Expr) {
             strip_span_meta(&mut meta.expr);
         }
         Expr::Atom(_, _) => {}
+        // Transitional arms for new Expr variants (#908)
+        Expr::Node(_, _) | Expr::BareList(_, _) | Expr::UnknownForm(_) => {}
     }
 }
 

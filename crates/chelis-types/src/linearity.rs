@@ -605,6 +605,22 @@ impl Checker {
                     }
                 }
             },
+            // Transitional arms for new Expr variants (#908)
+            Expr::Node(node, _) => {
+                for child in node.expr_children() {
+                    self.check_expr(child, scope);
+                }
+            }
+            Expr::BareList(elems, _) => {
+                for elem in elems {
+                    self.check_expr(elem, scope);
+                }
+            }
+            Expr::UnknownForm(data) => {
+                for child in &data.children {
+                    self.check_expr(child, scope);
+                }
+            }
         }
     }
 
@@ -1582,6 +1598,22 @@ fn collect_free_vars(expr: &Expr, bound: &mut Vec<HashSet<String>>, free: &mut H
                 }
             }
         },
+        // Transitional arms for new Expr variants (#908)
+        Expr::Node(node, _) => {
+            for child in node.expr_children() {
+                collect_free_vars(child, bound, free);
+            }
+        }
+        Expr::BareList(elems, _) => {
+            for elem in elems {
+                collect_free_vars(elem, bound, free);
+            }
+        }
+        Expr::UnknownForm(data) => {
+            for child in &data.children {
+                collect_free_vars(child, bound, free);
+            }
+        }
     }
 }
 

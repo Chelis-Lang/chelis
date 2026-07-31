@@ -3410,6 +3410,25 @@ fn wire_deep_expr(expr: &DeepExpr) -> WireDeepExpr {
             },
             span: Some(span(*s)),
         },
+        // Transitional arms for new Expr variants (#908)
+        DeepExpr::Node(node, s) => WireDeepExpr {
+            kind: WireDeepExprKind::List {
+                elements: node.expr_children().map(wire_deep_expr).collect(),
+            },
+            span: Some(span(*s)),
+        },
+        DeepExpr::BareList(elems, s) => WireDeepExpr {
+            kind: WireDeepExprKind::List {
+                elements: elems.iter().map(wire_deep_expr).collect(),
+            },
+            span: Some(span(*s)),
+        },
+        DeepExpr::UnknownForm(data) => WireDeepExpr {
+            kind: WireDeepExprKind::List {
+                elements: data.children.iter().map(wire_deep_expr).collect(),
+            },
+            span: Some(span(data.span)),
+        },
     }
 }
 

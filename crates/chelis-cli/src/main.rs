@@ -9535,6 +9535,22 @@ fn collect_symbolic_dims_expr(expr: &chelis_deep::ast::Expr, dims: &mut Vec<Stri
             }
         }
         chelis_deep::ast::Expr::Atom(_, _) => {}
+        // Transitional arms for new Expr variants (#908)
+        chelis_deep::ast::Expr::Node(node, _) => {
+            for child in node.expr_children() {
+                collect_symbolic_dims_expr(child, dims);
+            }
+        }
+        chelis_deep::ast::Expr::BareList(elems, _) => {
+            for elem in elems {
+                collect_symbolic_dims_expr(elem, dims);
+            }
+        }
+        chelis_deep::ast::Expr::UnknownForm(data) => {
+            for child in &data.children {
+                collect_symbolic_dims_expr(child, dims);
+            }
+        }
     }
 }
 

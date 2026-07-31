@@ -195,6 +195,22 @@ fn collect_deep_referenced_vars<'a>(expr: &'a DeepExpr, out: &mut Vec<&'a str>) 
                 collect_deep_referenced_vars(child, out);
             }
         }
+        // Transitional arms for new Expr variants (#908)
+        DeepExpr::Node(node, _) => {
+            for child in node.expr_children() {
+                collect_deep_referenced_vars(child, out);
+            }
+        }
+        DeepExpr::BareList(elems, _) => {
+            for elem in elems {
+                collect_deep_referenced_vars(elem, out);
+            }
+        }
+        DeepExpr::UnknownForm(data) => {
+            for child in &data.children {
+                collect_deep_referenced_vars(child, out);
+            }
+        }
     }
 }
 

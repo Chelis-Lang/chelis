@@ -394,6 +394,29 @@ fn infer_expr_effects(
                     }),
             }
         }
+        // Transitional arms for new Expr variants (#908)
+        Expr::Node(node, _) => node
+            .expr_children()
+            .map(|child| infer_expr_effects(child, top_level_effects, top_level_callables, locals))
+            .fold(EffectSet::new(), |mut acc, set| {
+                acc.extend(&set);
+                acc
+            }),
+        Expr::BareList(elems, _) => elems
+            .iter()
+            .map(|elem| infer_expr_effects(elem, top_level_effects, top_level_callables, locals))
+            .fold(EffectSet::new(), |mut acc, set| {
+                acc.extend(&set);
+                acc
+            }),
+        Expr::UnknownForm(data) => data
+            .children
+            .iter()
+            .map(|child| infer_expr_effects(child, top_level_effects, top_level_callables, locals))
+            .fold(EffectSet::new(), |mut acc, set| {
+                acc.extend(&set);
+                acc
+            }),
     }
 }
 
@@ -665,6 +688,8 @@ fn annotate_effects(
                 )
             }
         }
+        // Transitional arms for new Expr variants (#908)
+        Expr::Node(_, _) | Expr::BareList(_, _) | Expr::UnknownForm(_) => expr.clone(),
     }
 }
 
@@ -752,6 +777,22 @@ fn validate_handler_expr(expr: &Expr, errors: &mut Vec<EffectError>) {
             }
         }
         Expr::Atom(_, _) => {}
+        // Transitional arms for new Expr variants (#908)
+        Expr::Node(node, _) => {
+            for child in node.expr_children() {
+                validate_handler_expr(child, errors);
+            }
+        }
+        Expr::BareList(elems, _) => {
+            for elem in elems {
+                validate_handler_expr(elem, errors);
+            }
+        }
+        Expr::UnknownForm(data) => {
+            for child in &data.children {
+                validate_handler_expr(child, errors);
+            }
+        }
     }
 }
 
@@ -956,6 +997,22 @@ fn validate_build_target_expr(expr: &Expr, target: &str, errors: &mut Vec<Effect
             }
         }
         Expr::Atom(_, _) => {}
+        // Transitional arms for new Expr variants (#908)
+        Expr::Node(node, _) => {
+            for child in node.expr_children() {
+                validate_build_target_expr(child, target, errors);
+            }
+        }
+        Expr::BareList(elems, _) => {
+            for elem in elems {
+                validate_build_target_expr(elem, target, errors);
+            }
+        }
+        Expr::UnknownForm(data) => {
+            for child in &data.children {
+                validate_build_target_expr(child, target, errors);
+            }
+        }
     }
 }
 

@@ -1948,6 +1948,12 @@ pub fn find_direct_builtin_call(program: &CheckedProgram, builtins: &[&str]) -> 
                     .find_map(|(_, value)| find(value, builtins))
             }),
             Expr::Atom(_, _) => None,
+            // Transitional arms for new Expr variants (#908)
+            Expr::Node(node, _) => node.expr_children().find_map(|child| find(child, builtins)),
+            Expr::BareList(elems, _) => elems.iter().find_map(|elem| find(elem, builtins)),
+            Expr::UnknownForm(data) => {
+                data.children.iter().find_map(|child| find(child, builtins))
+            }
         }
     }
 
@@ -3721,6 +3727,10 @@ fn host_expr_lowering_error(
         Expr::Atom(_, _) => "raw Deep atom expression".to_string(),
         Expr::Map(_, _) => "raw Deep metadata map expression".to_string(),
         Expr::MetaExpr(_, _) => "wrapped Deep expression".to_string(),
+        // Transitional arms for new Expr variants (#908)
+        Expr::Node(node, _) => format!("stamped Node `{}`", node.tag().as_str()),
+        Expr::BareList(_, _) => "bare list expression".to_string(),
+        Expr::UnknownForm(data) => format!("unknown form `{}`", data.head),
     };
     let unsupported = chelis_types::unsupported::Unsupported::new(
         chelis_types::unsupported::UnsupportedKind::Construct(construct),
@@ -3840,6 +3850,8 @@ fn substitute_var(expr: &Expr, name: &str, replacement: &Expr) -> Expr {
             )
         }
         Expr::Atom(_, _) | Expr::Map(_, _) => expr.clone(),
+        // Transitional arms for new Expr variants (#908)
+        Expr::Node(_, _) | Expr::BareList(_, _) | Expr::UnknownForm(_) => expr.clone(),
     }
 }
 
