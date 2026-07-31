@@ -1,27 +1,27 @@
 module Std.Io.Json
-export (JsonValue, load_json, parse_json_value, try_load_json, try_parse_json, json_get, json_string, json_int, json_float, json_bool, json_array, json_object, json_is_null)
-type JsonValue =
+export (Json, load_json, parse_json, try_load_json, try_parse_json, json_get, json_string, json_int, json_float, json_bool, json_array, json_object, json_is_null)
+type Json =
   | JsonNull
   | JsonBool(bool)
   | JsonInt(int64)
   | JsonFloat(f64)
   | JsonString(string)
-  | JsonArray(List[JsonValue])
-  | JsonObject(Dict[string, JsonValue])
-def load_json(path: string) -> JsonValue = {
+  | JsonArray(List[Json])
+  | JsonObject(Dict[string, Json])
+def load_json(path: string) -> Json = {
   match try_load_json(path) with {
     | Some(value) => value
     | None => fail(string_concat("load_json failed for ", path))
   }
 }
-def try_load_json(path: string) -> Option[JsonValue] = try_parse_json(read_file(path))
-def parse_json_value(text: string) -> JsonValue = {
+def try_load_json(path: string) -> Option[Json] = try_parse_json(read_file(path))
+def parse_json(text: string) -> Json = {
   match try_parse_json(text) with {
     | Some(value) => value
-    | None => fail("parse_json_value failed: malformed JSON")
+    | None => fail("parse_json failed: malformed JSON")
   }
 }
-def try_parse_json(text: string) -> Option[JsonValue] = {
+def try_parse_json(text: string) -> Option[Json] = {
   start = skip_ws(text, cast(0, int64))
   match parse_value(text, start) with {
     | Some(pair) => {
@@ -31,13 +31,13 @@ def try_parse_json(text: string) -> Option[JsonValue] = {
     | None => None
   }
 }
-def json_get(value: JsonValue, key: string) -> Option[JsonValue] = {
+def json_get(value: Json, key: string) -> Option[Json] = {
   match value with {
     | JsonObject(entries) => dict_get(entries, key)
     | _ => None
   }
 }
-def json_string(value: Option[JsonValue]) -> Option[string] = {
+def json_string(value: Option[Json]) -> Option[string] = {
   match value with {
     | Some(inner) => match inner with {
     | JsonString(text) => Some(text)
@@ -46,7 +46,7 @@ def json_string(value: Option[JsonValue]) -> Option[string] = {
     | None => None
   }
 }
-def json_int(value: Option[JsonValue]) -> Option[int64] = {
+def json_int(value: Option[Json]) -> Option[int64] = {
   match value with {
     | Some(inner) => match inner with {
     | JsonInt(n) => Some(n)
@@ -55,7 +55,7 @@ def json_int(value: Option[JsonValue]) -> Option[int64] = {
     | None => None
   }
 }
-def json_float(value: Option[JsonValue]) -> Option[f64] = {
+def json_float(value: Option[Json]) -> Option[f64] = {
   match value with {
     | Some(inner) => match inner with {
     | JsonFloat(n) => Some(n)
@@ -65,7 +65,7 @@ def json_float(value: Option[JsonValue]) -> Option[f64] = {
     | None => None
   }
 }
-def json_bool(value: Option[JsonValue]) -> Option[bool] = {
+def json_bool(value: Option[Json]) -> Option[bool] = {
   match value with {
     | Some(inner) => match inner with {
     | JsonBool(flag) => Some(flag)
@@ -74,7 +74,7 @@ def json_bool(value: Option[JsonValue]) -> Option[bool] = {
     | None => None
   }
 }
-def json_array(value: Option[JsonValue]) -> Option[List[JsonValue]] = {
+def json_array(value: Option[Json]) -> Option[List[Json]] = {
   match value with {
     | Some(inner) => match inner with {
     | JsonArray(items) => Some(items)
@@ -83,7 +83,7 @@ def json_array(value: Option[JsonValue]) -> Option[List[JsonValue]] = {
     | None => None
   }
 }
-def json_object(value: Option[JsonValue]) -> Option[Dict[string, JsonValue]] = {
+def json_object(value: Option[Json]) -> Option[Dict[string, Json]] = {
   match value with {
     | Some(inner) => match inner with {
     | JsonObject(entries) => Some(entries)
@@ -92,7 +92,7 @@ def json_object(value: Option[JsonValue]) -> Option[Dict[string, JsonValue]] = {
     | None => None
   }
 }
-def json_is_null(value: Option[JsonValue]) -> bool = {
+def json_is_null(value: Option[Json]) -> bool = {
   match value with {
     | Some(inner) => match inner with {
     | JsonNull => true
@@ -101,7 +101,7 @@ def json_is_null(value: Option[JsonValue]) -> bool = {
     | None => false
   }
 }
-def parse_value(text: string, idx: int64) -> Option[(JsonValue, int64)] = {
+def parse_value(text: string, idx: int64) -> Option[(Json, int64)] = {
   if gte(idx, string_len(text)) then None else {
     ch = char_at(text, idx)
     if eq(ch, "{") then {
@@ -131,7 +131,7 @@ def parse_value(text: string, idx: int64) -> Option[(JsonValue, int64)] = {
     } else if starts_with_at(text, idx, "true") then Some((JsonBool(true), add(idx, cast(4, int64)))) else if starts_with_at(text, idx, "false") then Some((JsonBool(false), add(idx, cast(5, int64)))) else if starts_with_at(text, idx, "null") then Some((JsonNull, add(idx, cast(4, int64)))) else if or(eq(ch, "-"), is_digit(ch)) then parse_number(text, idx) else None
   }
 }
-def parse_object(text: string, idx: int64) -> Option[(Dict[string, JsonValue], int64)] = {
+def parse_object(text: string, idx: int64) -> Option[(Dict[string, Json], int64)] = {
   next = skip_ws(text, idx)
   if gte(next, string_len(text)) then None else if eq(char_at(text, next), "}") then Some((dict_of([]), add(next, cast(1, int64)))) else match parse_string(text, next) with {
     | Some(key_pair) => {
@@ -148,7 +148,7 @@ def parse_object(text: string, idx: int64) -> Option[(Dict[string, JsonValue], i
     | None => None
   }
 }
-def parse_object_rest(text: string, idx: int64, entries: List[(string, JsonValue)]) -> Option[(Dict[string, JsonValue], int64)] = {
+def parse_object_rest(text: string, idx: int64, entries: List[(string, Json)]) -> Option[(Dict[string, Json], int64)] = {
   next = skip_ws(text, idx)
   if gte(next, string_len(text)) then None else {
     ch = char_at(text, next)
@@ -171,7 +171,7 @@ def parse_object_rest(text: string, idx: int64, entries: List[(string, JsonValue
     } else None
   }
 }
-def parse_array(text: string, idx: int64) -> Option[(List[JsonValue], int64)] = {
+def parse_array(text: string, idx: int64) -> Option[(List[Json], int64)] = {
   next = skip_ws(text, idx)
   if gte(next, string_len(text)) then None else if eq(char_at(text, next), "]") then Some(([], add(next, cast(1, int64)))) else match parse_value(text, next) with {
     | Some(pair) => {
@@ -181,7 +181,7 @@ def parse_array(text: string, idx: int64) -> Option[(List[JsonValue], int64)] = 
     | None => None
   }
 }
-def parse_array_rest(text: string, idx: int64, items: List[JsonValue]) -> Option[(List[JsonValue], int64)] = {
+def parse_array_rest(text: string, idx: int64, items: List[Json]) -> Option[(List[Json], int64)] = {
   next = skip_ws(text, idx)
   if gte(next, string_len(text)) then None else {
     ch = char_at(text, next)
@@ -208,7 +208,7 @@ def parse_string_chars(text: string, idx: int64, acc: string) -> Option[(string,
   }
 }
 def decode_escape(ch: string) -> Option[string] = { if eq(ch, "\"") then Some("\"") else if eq(ch, "\\") then Some("\\") else if eq(ch, "/") then Some("/") else if eq(ch, "n") then Some("\n") else if eq(ch, "r") then Some("\r") else if eq(ch, "t") then Some("\t") else None }
-def parse_number(text: string, idx: int64) -> Option[(JsonValue, int64)] = {
+def parse_number(text: string, idx: int64) -> Option[(Json, int64)] = {
   end = scan_number_end(text, idx)
   raw = string_slice(text, idx, sub(end, idx))
   if or(string_contains(raw, "."), or(string_contains(raw, "e"), string_contains(raw, "E"))) then match to_float(raw) with {

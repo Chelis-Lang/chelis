@@ -1,0 +1,888 @@
+gate --local: changed crates vs origin/main: chelis-backend-c, chelis-cli, chelis-compiler-api, chelis-ir, chelis-runtime, chelis-types
++ cargo clippy --workspace --all-targets -- -D warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.56s
++ cargo fmt --all -- --check
++ cargo run -p chelis-cli --bin chelis --quiet -- lint --check .
+warning: /Users/vrk93/chelis-json-io-fix/crates/chelis-cli/tests/fixtures/pseudo_nautilus/src/special.ch:21:7: prefer-pipe-operator (§3.6): nested first-argument call chain can be written with `|>` [fix]
+warning: /Users/vrk93/chelis-json-io-fix/crates/chelis-cli/tests/fixtures/pseudo_nautilus/src/special.ch:28:3: prefer-pipe-operator (§3.6): nested first-argument call chain can be written with `|>` [fix]
+warning: /Users/vrk93/chelis-json-io-fix/crates/chelis-cli/tests/fixtures/pseudo_nautilus/src/special.ch:31:17: prefer-pipe-operator (§3.6): nested first-argument call chain can be written with `|>` [fix]
+warning: /Users/vrk93/chelis-json-io-fix/crates/chelis-cli/tests/fixtures/pseudo_nautilus/src/special.ch:32:31: prefer-pipe-operator (§3.6): nested first-argument call chain can be written with `|>` [fix]
+warning: /Users/vrk93/chelis-json-io-fix/crates/chelis-cli/tests/fixtures/pseudo_nautilus/src/special.ch:34:23: prefer-pipe-operator (§3.6): nested first-argument call chain can be written with `|>` [fix]
+warning: /Users/vrk93/chelis-json-io-fix/crates/chelis-prove/tests/fixtures/bs_vec.ch:10:33: prefer-pipe-operator (§3.6): nested first-argument call chain can be written with `|>` [fix]
+warning: /Users/vrk93/chelis-json-io-fix/crates/chelis-prove/tests/fixtures/bs_vec.ch:12:9: prefer-pipe-operator (§3.6): nested first-argument call chain can be written with `|>` [fix]
+warning: /Users/vrk93/chelis-json-io-fix/crates/chelis-prove/tests/fixtures/bs_vec.ch:12:13: redundant-linearity-call (implicit-linearity): `copy()` is valid for migration compatibility but redundant; implicit linearity inserts the corresponding IR node [fix]
+warning: /Users/vrk93/chelis-json-io-fix/crates/chelis-prove/tests/fixtures/bs_vec.ch:12:25: redundant-linearity-call (implicit-linearity): `copy()` is valid for migration compatibility but redundant; implicit linearity inserts the corresponding IR node [fix]
+warning: /Users/vrk93/chelis-json-io-fix/crates/chelis-prove/tests/fixtures/bs_vec.ch:13:18: redundant-linearity-call (implicit-linearity): `copy()` is valid for migration compatibility but redundant; implicit linearity inserts the corresponding IR node [fix]
+warning: /Users/vrk93/chelis-json-io-fix/crates/chelis-prove/tests/fixtures/bs_vec.ch:14:11: redundant-linearity-call (implicit-linearity): `copy()` is valid for migration compatibility but redundant; implicit linearity inserts the corresponding IR node [fix]
+warning: /Users/vrk93/chelis-json-io-fix/crates/chelis-prove/tests/fixtures/bs_vec.ch:19:10: prefer-pipe-operator (§3.6): nested first-argument call chain can be written with `|>` [fix]
+warning: /Users/vrk93/chelis-json-io-fix/crates/chelis-prove/tests/fixtures/bs_vec.ch:19:14: redundant-linearity-call (implicit-linearity): `copy()` is valid for migration compatibility but redundant; implicit linearity inserts the corresponding IR node [fix]
+warning: /Users/vrk93/chelis-json-io-fix/crates/chelis-prove/tests/fixtures/bs_vec.ch:19:23: redundant-linearity-call (implicit-linearity): `copy()` is valid for migration compatibility but redundant; implicit linearity inserts the corresponding IR node [fix]
+warning: /Users/vrk93/chelis-json-io-fix/crates/chelis-prove/tests/fixtures/bs_vec.ch:20:18: redundant-linearity-call (implicit-linearity): `copy()` is valid for migration compatibility but redundant; implicit linearity inserts the corresponding IR node [fix]
+warning: /Users/vrk93/chelis-json-io-fix/crates/chelis-prove/tests/fixtures/bs_vec.ch:21:14: prefer-pipe-operator (§3.6): nested first-argument call chain can be written with `|>` [fix]
+warning: /Users/vrk93/chelis-json-io-fix/crates/chelis-prove/tests/fixtures/bs_vec.ch:21:18: redundant-linearity-call (implicit-linearity): `copy()` is valid for migration compatibility but redundant; implicit linearity inserts the corresponding IR node [fix]
+warning: /Users/vrk93/chelis-json-io-fix/crates/chelis-prove/tests/fixtures/bs_vec.ch:28:9: prefer-pipe-operator (§3.6): nested first-argument call chain can be written with `|>` [fix]
+warning: /Users/vrk93/chelis-json-io-fix/crates/chelis-prove/tests/fixtures/bs_vec.ch:28:13: redundant-linearity-call (implicit-linearity): `copy()` is valid for migration compatibility but redundant; implicit linearity inserts the corresponding IR node [fix]
+warning: /Users/vrk93/chelis-json-io-fix/crates/chelis-prove/tests/fixtures/bs_vec.ch:28:25: redundant-linearity-call (implicit-linearity): `copy()` is valid for migration compatibility but redundant; implicit linearity inserts the corresponding IR node [fix]
+warning: /Users/vrk93/chelis-json-io-fix/crates/chelis-prove/tests/fixtures/bs_vec.ch:29:10: prefer-pipe-operator (§3.6): nested first-argument call chain can be written with `|>` [fix]
+warning: /Users/vrk93/chelis-json-io-fix/crates/chelis-prove/tests/fixtures/bs_vec.ch:29:14: redundant-linearity-call (implicit-linearity): `copy()` is valid for migration compatibility but redundant; implicit linearity inserts the corresponding IR node [fix]
+warning: /Users/vrk93/chelis-json-io-fix/crates/chelis-prove/tests/fixtures/bs_vec.ch:29:23: redundant-linearity-call (implicit-linearity): `copy()` is valid for migration compatibility but redundant; implicit linearity inserts the corresponding IR node [fix]
+warning: /Users/vrk93/chelis-json-io-fix/crates/chelis-prove/tests/fixtures/bs_vec.ch:32:18: prefer-pipe-operator (§3.6): nested first-argument call chain can be written with `|>` [fix]
+warning: /Users/vrk93/chelis-json-io-fix/crates/chelis-prove/tests/fixtures/bs_vec.ch:32:22: redundant-linearity-call (implicit-linearity): `copy()` is valid for migration compatibility but redundant; implicit linearity inserts the corresponding IR node [fix]
+warning: /Users/vrk93/chelis-json-io-fix/crates/chelis-prove/tests/fixtures/bs_vec.ch:32:31: redundant-linearity-call (implicit-linearity): `copy()` is valid for migration compatibility but redundant; implicit linearity inserts the corresponding IR node [fix]
+warning: /Users/vrk93/chelis-json-io-fix/crates/chelis-prove/tests/fixtures/bs_vec.ch:34:11: redundant-linearity-call (implicit-linearity): `copy()` is valid for migration compatibility but redundant; implicit linearity inserts the corresponding IR node [fix]
+warning: /Users/vrk93/chelis-json-io-fix/crates/chelis-prove/tests/fixtures/bs_vec.ch:34:27: redundant-linearity-call (implicit-linearity): `copy()` is valid for migration compatibility but redundant; implicit linearity inserts the corresponding IR node [fix]
+warning: /Users/vrk93/chelis-json-io-fix/crates/chelis-prove/tests/fixtures/bs_vec.ch:34:43: redundant-linearity-call (implicit-linearity): `copy()` is valid for migration compatibility but redundant; implicit linearity inserts the corresponding IR node [fix]
+warning: /Users/vrk93/chelis-json-io-fix/crates/chelis-prove/tests/fixtures/bs_vec.ch:34:52: redundant-linearity-call (implicit-linearity): `copy()` is valid for migration compatibility but redundant; implicit linearity inserts the corresponding IR node [fix]
+warning: /Users/vrk93/chelis-json-io-fix/crates/chelis-prove/tests/fixtures/bs_vec.ch:35:14: redundant-linearity-call (implicit-linearity): `copy()` is valid for migration compatibility but redundant; implicit linearity inserts the corresponding IR node [fix]
+warning: /Users/vrk93/chelis-json-io-fix/crates/chelis-prove/tests/fixtures/bs_vec.ch:35:28: redundant-linearity-call (implicit-linearity): `copy()` is valid for migration compatibility but redundant; implicit linearity inserts the corresponding IR node [fix]
+warning: /Users/vrk93/chelis-json-io-fix/crates/chelis-prove/tests/fixtures/bs_vec.ch:35:42: redundant-linearity-call (implicit-linearity): `copy()` is valid for migration compatibility but redundant; implicit linearity inserts the corresponding IR node [fix]
+warning: /Users/vrk93/chelis-json-io-fix/crates/chelis-prove/tests/fixtures/bs_vec.ch:35:56: redundant-linearity-call (implicit-linearity): `copy()` is valid for migration compatibility but redundant; implicit linearity inserts the corresponding IR node [fix]
+warning: /Users/vrk93/chelis-json-io-fix/crates/chelis-prove/tests/fixtures/bs_vec.ch:35:70: redundant-linearity-call (implicit-linearity): `copy()` is valid for migration compatibility but redundant; implicit linearity inserts the corresponding IR node [fix]
+warning: /Users/vrk93/chelis-json-io-fix/crates/chelis-prove/tests/fixtures/bs_vec.ch:35:84: redundant-linearity-call (implicit-linearity): `copy()` is valid for migration compatibility but redundant; implicit linearity inserts the corresponding IR node [fix]
+warning: /Users/vrk93/chelis-json-io-fix/crates/chelis-prove/tests/fixtures/bs_vec.ch:35:98: redundant-linearity-call (implicit-linearity): `copy()` is valid for migration compatibility but redundant; implicit linearity inserts the corresponding IR node [fix]
+warning: /Users/vrk93/chelis-json-io-fix/crates/chelis-prove/tests/fixtures/bs_vec.ch:35:112: redundant-linearity-call (implicit-linearity): `copy()` is valid for migration compatibility but redundant; implicit linearity inserts the corresponding IR node [fix]
+warning: /Users/vrk93/chelis-json-io-fix/crates/chelis-prove/tests/fixtures/bs_vec.ch:35:126: redundant-linearity-call (implicit-linearity): `copy()` is valid for migration compatibility but redundant; implicit linearity inserts the corresponding IR node [fix]
+warning: /Users/vrk93/chelis-json-io-fix/crates/chelis-prove/tests/fixtures/bs_vec.ch:35:136: redundant-linearity-call (implicit-linearity): `copy()` is valid for migration compatibility but redundant; implicit linearity inserts the corresponding IR node [fix]
+warning: /Users/vrk93/chelis-json-io-fix/crates/chelis-prove/tests/fixtures/bs_vec.ch:36:19: redundant-linearity-call (implicit-linearity): `copy()` is valid for migration compatibility but redundant; implicit linearity inserts the corresponding IR node [fix]
+warning: /Users/vrk93/chelis-json-io-fix/crates/chelis-prove/tests/fixtures/bs_vec.ch:36:30: redundant-linearity-call (implicit-linearity): `copy()` is valid for migration compatibility but redundant; implicit linearity inserts the corresponding IR node [fix]
+warning: /Users/vrk93/chelis-json-io-fix/crates/chelis-prove/tests/fixtures/bs_vec.ch:39:22: redundant-linearity-call (implicit-linearity): `copy()` is valid for migration compatibility but redundant; implicit linearity inserts the corresponding IR node [fix]
+warning: /Users/vrk93/chelis-json-io-fix/crates/chelis-prove/tests/fixtures/bs_vec.ch:40:33: redundant-linearity-call (implicit-linearity): `copy()` is valid for migration compatibility but redundant; implicit linearity inserts the corresponding IR node [fix]
+warning: /Users/vrk93/chelis-json-io-fix/crates/chelis-prove/tests/fixtures/bs_vec.ch:42:14: prefer-pipe-operator (§3.6): nested first-argument call chain can be written with `|>` [fix]
+warning: /Users/vrk93/chelis-json-io-fix/crates/chelis-prove/tests/fixtures/bs_vec.ch:42:26: redundant-linearity-call (implicit-linearity): `copy()` is valid for migration compatibility but redundant; implicit linearity inserts the corresponding IR node [fix]
+warning: /Users/vrk93/chelis-json-io-fix/crates/chelis-prove/tests/fixtures/bs_vec.ch:48:9: prefer-pipe-operator (§3.6): nested first-argument call chain can be written with `|>` [fix]
+warning: /Users/vrk93/chelis-json-io-fix/crates/chelis-prove/tests/fixtures/bs_vec.ch:48:13: redundant-linearity-call (implicit-linearity): `copy()` is valid for migration compatibility but redundant; implicit linearity inserts the corresponding IR node [fix]
+warning: /Users/vrk93/chelis-json-io-fix/crates/chelis-prove/tests/fixtures/bs_vec.ch:48:25: redundant-linearity-call (implicit-linearity): `copy()` is valid for migration compatibility but redundant; implicit linearity inserts the corresponding IR node [fix]
+warning: /Users/vrk93/chelis-json-io-fix/crates/chelis-prove/tests/fixtures/bs_vec.ch:49:12: prefer-pipe-operator (§3.6): nested first-argument call chain can be written with `|>` [fix]
+warning: /Users/vrk93/chelis-json-io-fix/crates/chelis-prove/tests/fixtures/bs_vec.ch:49:16: redundant-linearity-call (implicit-linearity): `copy()` is valid for migration compatibility but redundant; implicit linearity inserts the corresponding IR node [fix]
+warning: /Users/vrk93/chelis-json-io-fix/crates/chelis-prove/tests/fixtures/bs_vec.ch:49:25: redundant-linearity-call (implicit-linearity): `copy()` is valid for migration compatibility but redundant; implicit linearity inserts the corresponding IR node [fix]
+warning: /Users/vrk93/chelis-json-io-fix/crates/chelis-prove/tests/fixtures/bs_vec.ch:51:3: prefer-pipe-operator (§3.6): nested first-argument call chain can be written with `|>` [fix]
+warning: /Users/vrk93/chelis-json-io-fix/crates/chelis-prove/tests/fixtures/bs_vec.ch:51:7: redundant-linearity-call (implicit-linearity): `copy()` is valid for migration compatibility but redundant; implicit linearity inserts the corresponding IR node [fix]
+warning: /Users/vrk93/chelis-json-io-fix/crates/chelis-prove/tests/fixtures/bs_vec.ch:56:21: redundant-linearity-call (implicit-linearity): `copy()` is valid for migration compatibility but redundant; implicit linearity inserts the corresponding IR node [fix]
+warning: /Users/vrk93/chelis-json-io-fix/crates/chelis-prove/tests/fixtures/bs_vec.ch:56:30: redundant-linearity-call (implicit-linearity): `copy()` is valid for migration compatibility but redundant; implicit linearity inserts the corresponding IR node [fix]
+warning: /Users/vrk93/chelis-json-io-fix/crates/chelis-prove/tests/fixtures/bs_vec.ch:56:49: redundant-linearity-call (implicit-linearity): `copy()` is valid for migration compatibility but redundant; implicit linearity inserts the corresponding IR node [fix]
+warning: /Users/vrk93/chelis-json-io-fix/crates/chelis-prove/tests/fixtures/bs_vec.ch:56:62: redundant-linearity-call (implicit-linearity): `copy()` is valid for migration compatibility but redundant; implicit linearity inserts the corresponding IR node [fix]
+warning: /Users/vrk93/chelis-json-io-fix/crates/chelis-prove/tests/fixtures/bs_vec.ch:56:78: redundant-linearity-call (implicit-linearity): `copy()` is valid for migration compatibility but redundant; implicit linearity inserts the corresponding IR node [fix]
+warning: /Users/vrk93/chelis-json-io-fix/crates/chelis-prove/tests/fixtures/bs_vec.ch:56:91: redundant-linearity-call (implicit-linearity): `copy()` is valid for migration compatibility but redundant; implicit linearity inserts the corresponding IR node [fix]
+warning: /Users/vrk93/chelis-json-io-fix/crates/chelis-prove/tests/fixtures/bs_vec.ch:56:107: redundant-linearity-call (implicit-linearity): `copy()` is valid for migration compatibility but redundant; implicit linearity inserts the corresponding IR node [fix]
+warning: /Users/vrk93/chelis-json-io-fix/crates/chelis-prove/tests/fixtures/bs_vec.ch:57:12: prefer-pipe-operator (§3.6): nested first-argument call chain can be written with `|>` [fix]
+warning: /Users/vrk93/chelis-json-io-fix/crates/chelis-prove/tests/fixtures/bs_vec.ch:57:16: redundant-linearity-call (implicit-linearity): `copy()` is valid for migration compatibility but redundant; implicit linearity inserts the corresponding IR node [fix]
+warning: /Users/vrk93/chelis-json-io-fix/crates/chelis-prove/tests/fixtures/bs_vec.ch:57:34: redundant-linearity-call (implicit-linearity): `copy()` is valid for migration compatibility but redundant; implicit linearity inserts the corresponding IR node [fix]
+warning: /Users/vrk93/chelis-json-io-fix/crates/chelis-prove/tests/fixtures/bs_vec.ch:62:3: prefer-pipe-operator (§3.6): nested first-argument call chain can be written with `|>` [fix]
+warning: /Users/vrk93/chelis-json-io-fix/crates/chelis-prove/tests/fixtures/bs_vec.ch:62:43: redundant-linearity-call (implicit-linearity): `copy()` is valid for migration compatibility but redundant; implicit linearity inserts the corresponding IR node [fix]
+warning: /Users/vrk93/chelis-json-io-fix/crates/chelis-prove/tests/fixtures/bs_vec.ch:62:61: redundant-linearity-call (implicit-linearity): `copy()` is valid for migration compatibility but redundant; implicit linearity inserts the corresponding IR node [fix]
+warning: /Users/vrk93/chelis-json-io-fix/crates/chelis-prove/tests/fixtures/bs_vec.ch:70:22: redundant-linearity-call (implicit-linearity): `copy()` is valid for migration compatibility but redundant; implicit linearity inserts the corresponding IR node [fix]
+warning: /Users/vrk93/chelis-json-io-fix/crates/chelis-prove/tests/fixtures/bs_vec.ch:70:32: redundant-linearity-call (implicit-linearity): `copy()` is valid for migration compatibility but redundant; implicit linearity inserts the corresponding IR node [fix]
+warning: /Users/vrk93/chelis-json-io-fix/crates/chelis-prove/tests/fixtures/bs_vec.ch:71:3: prefer-pipe-operator (§3.6): nested first-argument call chain can be written with `|>` [fix]
+warning: /Users/vrk93/chelis-json-io-fix/crates/chelis-prove/tests/fixtures/bs_vec.ch:82:22: redundant-linearity-call (implicit-linearity): `copy()` is valid for migration compatibility but redundant; implicit linearity inserts the corresponding IR node [fix]
+warning: /Users/vrk93/chelis-json-io-fix/crates/chelis-prove/tests/fixtures/bs_vec.ch:82:32: redundant-linearity-call (implicit-linearity): `copy()` is valid for migration compatibility but redundant; implicit linearity inserts the corresponding IR node [fix]
+warning: /Users/vrk93/chelis-json-io-fix/crates/chelis-prove/tests/fixtures/bs_vec.ch:83:3: prefer-pipe-operator (§3.6): nested first-argument call chain can be written with `|>` [fix]
+warning: /Users/vrk93/chelis-json-io-fix/examples/dict_foundation.ch:27:13: prefer-pipe-operator (§3.6): nested first-argument call chain can be written with `|>` [fix]
+warning: /Users/vrk93/chelis-json-io-fix/examples/dict_foundation.ch:28:15: prefer-pipe-operator (§3.6): nested first-argument call chain can be written with `|>` [fix]
+warning: /Users/vrk93/chelis-json-io-fix/examples/illustrative/copy_elision_probe.ch:2:11: redundant-linearity-call (implicit-linearity): `copy()` is valid for migration compatibility but redundant; implicit linearity inserts the corresponding IR node [fix]
+warning: /Users/vrk93/chelis-json-io-fix/examples/illustrative/copy_elision_probe.ch:3:11: redundant-linearity-call (implicit-linearity): `copy()` is valid for migration compatibility but redundant; implicit linearity inserts the corresponding IR node [fix]
+warning: /Users/vrk93/chelis-json-io-fix/examples/illustrative/copy_elision_probe.ch:4:11: redundant-linearity-call (implicit-linearity): `copy()` is valid for migration compatibility but redundant; implicit linearity inserts the corresponding IR node [fix]
+warning: /Users/vrk93/chelis-json-io-fix/examples/illustrative/copy_elision_probe.ch:5:11: redundant-linearity-call (implicit-linearity): `copy()` is valid for migration compatibility but redundant; implicit linearity inserts the corresponding IR node [fix]
+warning: /Users/vrk93/chelis-json-io-fix/examples/illustrative/copy_elision_probe.ch:6:7: prefer-pipe-operator (§3.6): nested first-argument call chain can be written with `|>` [fix]
+warning: /Users/vrk93/chelis-json-io-fix/examples/illustrative/copy_elision_probe.ch:6:12: redundant-linearity-call (implicit-linearity): `copy()` is valid for migration compatibility but redundant; implicit linearity inserts the corresponding IR node [fix]
+warning: /Users/vrk93/chelis-json-io-fix/examples/illustrative/copy_elision_probe.ch:8:7: redundant-linearity-call (implicit-linearity): `drop()` is valid for migration compatibility but redundant; implicit linearity inserts the corresponding IR node [fix]
+warning: /Users/vrk93/chelis-json-io-fix/examples/illustrative/copy_elision_probe.ch:9:7: redundant-linearity-call (implicit-linearity): `drop()` is valid for migration compatibility but redundant; implicit linearity inserts the corresponding IR node [fix]
+warning: /Users/vrk93/chelis-json-io-fix/examples/illustrative/copy_elision_probe.ch:10:7: redundant-linearity-call (implicit-linearity): `drop()` is valid for migration compatibility but redundant; implicit linearity inserts the corresponding IR node [fix]
+warning: /Users/vrk93/chelis-json-io-fix/examples/illustrative/copy_elision_probe.ch:11:7: redundant-linearity-call (implicit-linearity): `drop()` is valid for migration compatibility but redundant; implicit linearity inserts the corresponding IR node [fix]
+warning: /Users/vrk93/chelis-json-io-fix/examples/illustrative/copy_elision_probe.ch:12:7: redundant-linearity-call (implicit-linearity): `drop()` is valid for migration compatibility but redundant; implicit linearity inserts the corresponding IR node [fix]
+warning: /Users/vrk93/chelis-json-io-fix/examples/illustrative/mha_single_head.ch:2:14: redundant-linearity-call (implicit-linearity): `copy()` is valid for migration compatibility but redundant; implicit linearity inserts the corresponding IR node [fix]
+warning: /Users/vrk93/chelis-json-io-fix/examples/illustrative/mha_single_head.ch:3:14: redundant-linearity-call (implicit-linearity): `copy()` is valid for migration compatibility but redundant; implicit linearity inserts the corresponding IR node [fix]
+warning: /Users/vrk93/chelis-json-io-fix/examples/illustrative/mha_single_head.ch:4:14: redundant-linearity-call (implicit-linearity): `copy()` is valid for migration compatibility but redundant; implicit linearity inserts the corresponding IR node [fix]
+warning: /Users/vrk93/chelis-json-io-fix/examples/illustrative/mha_single_head.ch:7:14: prefer-pipe-operator (§3.6): nested first-argument call chain can be written with `|>` [fix]
+warning: /Users/vrk93/chelis-json-io-fix/examples/illustrative/mha_slice_combined_qkv.ch:13:16: redundant-linearity-call (implicit-linearity): `copy()` is valid for migration compatibility but redundant; implicit linearity inserts the corresponding IR node [fix]
+warning: /Users/vrk93/chelis-json-io-fix/examples/illustrative/mha_slice_combined_qkv.ch:19:14: prefer-pipe-operator (§3.6): nested first-argument call chain can be written with `|>` [fix]
+warning: /Users/vrk93/chelis-json-io-fix/examples/illustrative/mha_two_heads_unrolled.ch:2:15: redundant-linearity-call (implicit-linearity): `copy()` is valid for migration compatibility but redundant; implicit linearity inserts the corresponding IR node [fix]
+warning: /Users/vrk93/chelis-json-io-fix/examples/illustrative/mha_two_heads_unrolled.ch:3:15: redundant-linearity-call (implicit-linearity): `copy()` is valid for migration compatibility but redundant; implicit linearity inserts the corresponding IR node [fix]
+warning: /Users/vrk93/chelis-json-io-fix/examples/illustrative/mha_two_heads_unrolled.ch:4:15: redundant-linearity-call (implicit-linearity): `copy()` is valid for migration compatibility but redundant; implicit linearity inserts the corresponding IR node [fix]
+warning: /Users/vrk93/chelis-json-io-fix/examples/illustrative/mha_two_heads_unrolled.ch:7:11: prefer-pipe-operator (§3.6): nested first-argument call chain can be written with `|>` [fix]
+warning: /Users/vrk93/chelis-json-io-fix/examples/illustrative/mha_two_heads_unrolled.ch:8:15: redundant-linearity-call (implicit-linearity): `copy()` is valid for migration compatibility but redundant; implicit linearity inserts the corresponding IR node [fix]
+warning: /Users/vrk93/chelis-json-io-fix/examples/illustrative/mha_two_heads_unrolled.ch:9:15: redundant-linearity-call (implicit-linearity): `copy()` is valid for migration compatibility but redundant; implicit linearity inserts the corresponding IR node [fix]
+warning: /Users/vrk93/chelis-json-io-fix/examples/illustrative/mha_two_heads_unrolled.ch:10:15: redundant-linearity-call (implicit-linearity): `copy()` is valid for migration compatibility but redundant; implicit linearity inserts the corresponding IR node [fix]
+warning: /Users/vrk93/chelis-json-io-fix/examples/illustrative/mha_two_heads_unrolled.ch:13:11: prefer-pipe-operator (§3.6): nested first-argument call chain can be written with `|>` [fix]
+warning: /Users/vrk93/chelis-json-io-fix/examples/illustrative/runtime_shape_semantics.ch:4:57: prefer-pipe-operator (§3.6): nested first-argument call chain can be written with `|>` [fix]
+warning: /Users/vrk93/chelis-json-io-fix/examples/illustrative/runtime_shape_semantics.ch:6:55: prefer-pipe-operator (§3.6): nested first-argument call chain can be written with `|>` [fix]
+warning: /Users/vrk93/chelis-json-io-fix/examples/illustrative/runtime_shape_semantics.ch:6:94: prefer-pipe-operator (§3.6): nested first-argument call chain can be written with `|>` [fix]
+warning: /Users/vrk93/chelis-json-io-fix/examples/iter_foundation.ch:3:36: prefer-pipe-operator (§3.6): nested first-argument call chain can be written with `|>` [fix]
+warning: /Users/vrk93/chelis-json-io-fix/examples/iter_foundation.ch:15:11: prefer-pipe-operator (§3.6): nested first-argument call chain can be written with `|>` [fix]
+warning: /Users/vrk93/chelis-json-io-fix/examples/list_foundation.ch:5:14: prefer-pipe-operator (§3.6): nested first-argument call chain can be written with `|>` [fix]
+warning: /Users/vrk93/chelis-json-io-fix/examples/list_foundation.ch:6:13: prefer-pipe-operator (§3.6): nested first-argument call chain can be written with `|>` [fix]
+warning: /Users/vrk93/chelis-json-io-fix/examples/list_foundation.ch:11:46: prefer-pipe-operator (§3.6): nested first-argument call chain can be written with `|>` [fix]
+warning: /Users/vrk93/chelis-json-io-fix/examples/list_foundation.ch:11:218: prefer-pipe-operator (§3.6): nested first-argument call chain can be written with `|>` [fix]
+warning: /Users/vrk93/chelis-json-io-fix/examples/scalar_string_foundation.ch:12:53: prefer-pipe-operator (§3.6): nested first-argument call chain can be written with `|>` [fix]
+warning: /Users/vrk93/chelis-json-io-fix/examples/scalar_string_foundation.ch:20:12: prefer-pipe-operator (§3.6): nested first-argument call chain can be written with `|>` [fix]
+warning: /Users/vrk93/chelis-json-io-fix/examples/transformer_block.ch:7:10: prefer-pipe-operator (§3.6): nested first-argument call chain can be written with `|>` [fix]
+warning: /Users/vrk93/chelis-json-io-fix/examples/transformer_block.ch:8:11: prefer-pipe-operator (§3.6): nested first-argument call chain can be written with `|>` [fix]
+warning: /Users/vrk93/chelis-json-io-fix/packages/chelis-std/src/contracts.ch:7:9: prefer-pipe-operator (§3.6): nested first-argument call chain can be written with `|>` [fix]
+warning: /Users/vrk93/chelis-json-io-fix/packages/chelis-std/src/contracts.ch:9:9: prefer-pipe-operator (§3.6): nested first-argument call chain can be written with `|>` [fix]
+warning: /Users/vrk93/chelis-json-io-fix/packages/chelis-std/src/contracts.ch:13:34: prefer-pipe-operator (§3.6): nested first-argument call chain can be written with `|>` [fix]
+warning: /Users/vrk93/chelis-json-io-fix/packages/chelis-std/src/contracts.ch:14:33: prefer-pipe-operator (§3.6): nested first-argument call chain can be written with `|>` [fix]
+warning: /Users/vrk93/chelis-json-io-fix/packages/chelis-std/src/init/random.ch:9:7: redundant-linearity-call (implicit-linearity): `drop()` is valid for migration compatibility but redundant; implicit linearity inserts the corresponding IR node [fix]
+warning: /Users/vrk93/chelis-json-io-fix/packages/chelis-std/src/init/random.ch:10:7: redundant-linearity-call (implicit-linearity): `drop()` is valid for migration compatibility but redundant; implicit linearity inserts the corresponding IR node [fix]
+warning: /Users/vrk93/chelis-json-io-fix/packages/chelis-std/src/init/random.ch:14:16: prefer-pipe-operator (§3.6): nested first-argument call chain can be written with `|>` [fix]
+warning: /Users/vrk93/chelis-json-io-fix/packages/chelis-std/src/io/csv.ch:6:15: prefer-pipe-operator (§3.6): nested first-argument call chain can be written with `|>` [fix]
+warning: /Users/vrk93/chelis-json-io-fix/packages/chelis-std/src/io/csv.ch:10:6: prefer-pipe-operator (§3.6): nested first-argument call chain can be written with `|>` [fix]
+warning: /Users/vrk93/chelis-json-io-fix/packages/chelis-std/src/io/csv.ch:12:41: prefer-pipe-operator (§3.6): nested first-argument call chain can be written with `|>` [fix]
+warning: /Users/vrk93/chelis-json-io-fix/packages/chelis-std/src/io/csv.ch:13:8: prefer-pipe-operator (§3.6): nested first-argument call chain can be written with `|>` [fix]
+warning: /Users/vrk93/chelis-json-io-fix/packages/chelis-std/src/io/csv.ch:13:64: prefer-pipe-operator (§3.6): nested first-argument call chain can be written with `|>` [fix]
+warning: /Users/vrk93/chelis-json-io-fix/packages/chelis-std/src/io/csv.ch:20:6: prefer-pipe-operator (§3.6): nested first-argument call chain can be written with `|>` [fix]
+warning: /Users/vrk93/chelis-json-io-fix/packages/chelis-std/src/io/csv.ch:23:28: prefer-pipe-operator (§3.6): nested first-argument call chain can be written with `|>` [fix]
+warning: /Users/vrk93/chelis-json-io-fix/packages/chelis-std/src/io/csv.ch:23:136: prefer-pipe-operator (§3.6): nested first-argument call chain can be written with `|>` [fix]
+warning: /Users/vrk93/chelis-json-io-fix/packages/chelis-std/src/io/csv.ch:30:66: prefer-pipe-operator (§3.6): nested first-argument call chain can be written with `|>` [fix]
+warning: /Users/vrk93/chelis-json-io-fix/packages/chelis-std/src/io/csv.ch:35:92: prefer-pipe-operator (§3.6): nested first-argument call chain can be written with `|>` [fix]
+warning: /Users/vrk93/chelis-json-io-fix/packages/chelis-std/src/io.ch:5:84: prefer-pipe-operator (§3.6): nested first-argument call chain can be written with `|>` [fix]
+warning: /Users/vrk93/chelis-json-io-fix/packages/chelis-std/src/io.ch:6:66: prefer-pipe-operator (§3.6): nested first-argument call chain can be written with `|>` [fix]
+warning: /Users/vrk93/chelis-json-io-fix/packages/chelis-std/src/io.ch:9:40: prefer-pipe-operator (§3.6): nested first-argument call chain can be written with `|>` [fix]
+warning: /Users/vrk93/chelis-json-io-fix/packages/chelis-std/src/tensor/construct.ch:7:12: prefer-pipe-operator (§3.6): nested first-argument call chain can be written with `|>` [fix]
+warning: /Users/vrk93/chelis-json-io-fix/packages/chelis-std/src/tensor/construct.ch:9:9: redundant-linearity-call (implicit-linearity): `drop()` is valid for migration compatibility but redundant; implicit linearity inserts the corresponding IR node [fix]
+warning: /Users/vrk93/chelis-json-io-fix/packages/chelis-std/src/tensor/construct.ch:14:11: prefer-pipe-operator (§3.6): nested first-argument call chain can be written with `|>` [fix]
+warning: /Users/vrk93/chelis-json-io-fix/packages/chelis-std/src/tensor/construct.ch:15:11: prefer-pipe-operator (§3.6): nested first-argument call chain can be written with `|>` [fix]
+warning: /Users/vrk93/chelis-json-io-fix/packages/chelis-std/src/tensor/construct.ch:19:11: prefer-pipe-operator (§3.6): nested first-argument call chain can be written with `|>` [fix]
+warning: /Users/vrk93/chelis-json-io-fix/packages/chelis-std/src/tensor/construct.ch:20:11: prefer-pipe-operator (§3.6): nested first-argument call chain can be written with `|>` [fix]
+warning: /Users/vrk93/chelis-json-io-fix/packages/chelis-std/src/tensor/mask.ch:4:11: prefer-pipe-operator (§3.6): nested first-argument call chain can be written with `|>` [fix]
+warning: /Users/vrk93/chelis-json-io-fix/packages/chelis-std/src/time.ch:21:76: prefer-pipe-operator (§3.6): nested first-argument call chain can be written with `|>` [fix]
+warning: /Users/vrk93/chelis-json-io-fix/packages/chelis-std/src/time.ch:21:165: prefer-pipe-operator (§3.6): nested first-argument call chain can be written with `|>` [fix]
+warning: /Users/vrk93/chelis-json-io-fix/packages/chelis-std/src/time.ch:25:67: prefer-pipe-operator (§3.6): nested first-argument call chain can be written with `|>` [fix]
+warning: /Users/vrk93/chelis-json-io-fix/packages/chelis-std/src/time.ch:26:51: prefer-pipe-operator (§3.6): nested first-argument call chain can be written with `|>` [fix]
+warning: /Users/vrk93/chelis-json-io-fix/packages/chelis-std/src/time.ch:27:45: prefer-pipe-operator (§3.6): nested first-argument call chain can be written with `|>` [fix]
+warning: /Users/vrk93/chelis-json-io-fix/packages/chelis-std/src/time.ch:28:46: prefer-pipe-operator (§3.6): nested first-argument call chain can be written with `|>` [fix]
+warning: /Users/vrk93/chelis-json-io-fix/packages/chelis-std/src/time.ch:29:45: prefer-pipe-operator (§3.6): nested first-argument call chain can be written with `|>` [fix]
+warning: /Users/vrk93/chelis-json-io-fix/packages/chelis-std/src/time.ch:30:46: prefer-pipe-operator (§3.6): nested first-argument call chain can be written with `|>` [fix]
+warning: /Users/vrk93/chelis-json-io-fix/packages/chelis-std/src/time.ch:33:6: prefer-pipe-operator (§3.6): nested first-argument call chain can be written with `|>` [fix]
+warning: /Users/vrk93/chelis-json-io-fix/packages/chelis-std/src/time.ch:33:63: prefer-pipe-operator (§3.6): nested first-argument call chain can be written with `|>` [fix]
+warning: /Users/vrk93/chelis-json-io-fix/packages/chelis-std/src/time.ch:33:121: prefer-pipe-operator (§3.6): nested first-argument call chain can be written with `|>` [fix]
+warning: /Users/vrk93/chelis-json-io-fix/packages/chelis-std/src/time.ch:33:182: prefer-pipe-operator (§3.6): nested first-argument call chain can be written with `|>` [fix]
+warning: /Users/vrk93/chelis-json-io-fix/packages/chelis-std/src/time.ch:34:27: prefer-pipe-operator (§3.6): nested first-argument call chain can be written with `|>` [fix]
+warning: /Users/vrk93/chelis-json-io-fix/packages/chelis-std/src/time.ch:35:28: prefer-pipe-operator (§3.6): nested first-argument call chain can be written with `|>` [fix]
+warning: /Users/vrk93/chelis-json-io-fix/packages/chelis-std/src/time.ch:46:12: prefer-pipe-operator (§3.6): nested first-argument call chain can be written with `|>` [fix]
+warning: /Users/vrk93/chelis-json-io-fix/packages/chelis-std/src/time.ch:68:41: prefer-pipe-operator (§3.6): nested first-argument call chain can be written with `|>` [fix]
+warning: /Users/vrk93/chelis-json-io-fix/packages/chelis-std/src/time.ch:87:47: prefer-pipe-operator (§3.6): nested first-argument call chain can be written with `|>` [fix]
+warning: /Users/vrk93/chelis-json-io-fix/packages/chelis-std/src/time.ch:88:140: prefer-pipe-operator (§3.6): nested first-argument call chain can be written with `|>` [fix]
+warning: /Users/vrk93/chelis-json-io-fix/packages/chelis-std/src/time.ch:91:82: prefer-pipe-operator (§3.6): nested first-argument call chain can be written with `|>` [fix]
+warning: /Users/vrk93/chelis-json-io-fix/packages/chelis-std/src/time.ch:91:138: prefer-pipe-operator (§3.6): nested first-argument call chain can be written with `|>` [fix]
+warning: /Users/vrk93/chelis-json-io-fix/packages/chelis-std/src/time.ch:94:75: prefer-pipe-operator (§3.6): nested first-argument call chain can be written with `|>` [fix]
+warning: /Users/vrk93/chelis-json-io-fix/packages/chelis-std/src/time.ch:99:82: prefer-pipe-operator (§3.6): nested first-argument call chain can be written with `|>` [fix]
+warning: /Users/vrk93/chelis-json-io-fix/packages/chelis-std/src/time.ch:108:6: prefer-pipe-operator (§3.6): nested first-argument call chain can be written with `|>` [fix]
++ cargo test -p chelis-types --doc
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.17s
+   Doc-tests chelis_types
+
+running 2 tests
+test crates/chelis-types/src/infer.rs - infer::stack_guard (line 323) ... ignored
+test crates/chelis-types/src/unsupported.rs - unsupported (line 51) ... ok
+
+test result: ok. 1 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+
+running 12 tests
+test crates/chelis-types/src/errors.rs - errors::report (line 100) - compile fail ... ok
+test crates/chelis-types/src/errors.rs - errors::report (line 125) - compile fail ... ok
+test crates/chelis-types/src/errors.rs - errors::report (line 114) - compile fail ... ok
+test crates/chelis-types/src/unsupported.rs - unsupported (line 66) - compile fail ... ok
+test crates/chelis-types/src/unsupported.rs - unsupported (line 61) - compile fail ... ok
+test crates/chelis-types/src/unsupported.rs - unsupported (line 56) - compile fail ... ok
+test crates/chelis-types/src/errors.rs - errors::report (line 109) - compile fail ... ok
+test crates/chelis-types/src/errors.rs - errors::report (line 89) - compile fail ... ok
+test crates/chelis-types/src/errors.rs - errors::report (line 120) - compile fail ... ok
+test crates/chelis-types/src/errors.rs - errors::ErrorWitness (line 40) - compile fail ... ok
+test crates/chelis-types/src/errors.rs - errors::ErrorWitness (line 68) - compile fail ... ok
+test crates/chelis-types/src/unsupported.rs - unsupported (line 71) - compile fail ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s
+
+all doctests ran in 2.51s; merged doctests compilation took 0.14s
++ cargo nextest run -p chelis-backend-c
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.08s
+────────────
+ Nextest run ID 6e9b541e-868b-436b-b7c7-60152ec7e8e2 with nextest profile: default
+    Starting 392 tests across 23 binaries (1 test skipped)
+        PASS [   0.010s] (  1/392) chelis-backend-c blas::tests::rejects_non_sum_node
+        PASS [   0.009s] (  2/392) chelis-backend-c blas::tests::rejects_nonexistent_node
+        PASS [   0.009s] (  3/392) chelis-backend-c blas::tests::detects_matmul_pattern
+        PASS [   0.009s] (  4/392) chelis-backend-c blas::tests::rejects_mismatched_k_dims
+        PASS [   0.010s] (  5/392) chelis-backend-c emit::tests::abs_numerical_correctness
+        PASS [   0.011s] (  6/392) chelis-backend-c emit::tests::abs_emits_fabsf
+        PASS [   0.011s] (  7/392) chelis-backend-c emit::tests::add_then_mul_chains
+        PASS [   0.011s] (  8/392) chelis-backend-c emit::tests::add_emits_stride_aware_loop
+        PASS [   0.011s] (  9/392) chelis-backend-c emit::tests::binary_add_fast_path_emits_restrict_and_simd
+        PASS [   0.015s] ( 10/392) chelis-backend-c emit::tests::atan_emits_atanf
+        PASS [   0.015s] ( 11/392) chelis-backend-c blas::tests::rejects_sum_without_mul_input
+        PASS [   0.007s] ( 12/392) chelis-backend-c emit::tests::ceil_emits_ceilf
+        PASS [   0.007s] ( 13/392) chelis-backend-c emit::tests::cmplt_emits_ternary_float
+        PASS [   0.007s] ( 14/392) chelis-backend-c emit::tests::bool_outputs_use_bool_dtype
+        PASS [   0.007s] ( 15/392) chelis-backend-c emit::tests::cast_emits_elementwise_conversion_loop
+        PASS [   0.007s] ( 16/392) chelis-backend-c emit::tests::const_emits_alloc_and_fill
+        PASS [   0.008s] ( 17/392) chelis-backend-c emit::tests::binary_add_with_expanded_input_includes_slow_path
+        PASS [   0.007s] ( 18/392) chelis-backend-c emit::tests::cos_numerical_correctness
+        PASS [   0.007s] ( 19/392) chelis-backend-c emit::tests::cos_emits_cosf
+        PASS [   0.009s] ( 20/392) chelis-backend-c emit::tests::copy_materializes_and_drop_emits_no_wrapper
+        PASS [   0.006s] ( 21/392) chelis-backend-c emit::tests::exp_emits_expf
+        PASS [   0.008s] ( 22/392) chelis-backend-c emit::tests::default_codegen_uses_generic_matmul_path
+        PASS [   0.005s] ( 23/392) chelis-backend-c emit::tests::function_signature_correct
+        PASS [   0.007s] ( 24/392) chelis-backend-c emit::tests::f64_tensor_add_uses_double_pointer_cast
+        PASS [   0.008s] ( 25/392) chelis-backend-c emit::tests::expand_sets_stride_zero
+        PASS [   0.006s] ( 26/392) chelis-backend-c emit::tests::floor_emits_floorf
+        PASS [   0.007s] ( 27/392) chelis-backend-c emit::tests::f64_tensor_exp_emits_exp_not_expf
+        PASS [   0.008s] ( 28/392) chelis-backend-c emit::tests::fused_elem_without_reusable_input_keeps_non_in_place_restrict_shape
+        PASS [   0.006s] ( 29/392) chelis-backend-c emit::tests::includes_runtime_header
+        PASS [   0.010s] ( 30/392) chelis-backend-c emit::tests::f64_const_uses_chelis_fill_f64_and_dtype_macro
+        PASS [   0.009s] ( 31/392) chelis-backend-c emit::tests::fused_elem_fast_path_emits_restrict_and_simd
+        PASS [   0.007s] ( 32/392) chelis-backend-c emit::tests::fused_reusable_input_with_multiple_consumers_does_not_alias
+        PASS [   0.007s] ( 33/392) chelis-backend-c emit::tests::int64_add_does_not_panic
+        PASS [   0.007s] ( 34/392) chelis-backend-c emit::tests::load_emits_input_reference
+        PASS [   0.009s] ( 35/392) chelis-backend-c emit::tests::input_labels_follow_first_load_occurrence
+        PASS [   0.007s] ( 36/392) chelis-backend-c emit::tests::log_emits_logf
+        PASS [   0.009s] ( 37/392) chelis-backend-c emit::tests::load_is_borrowed_not_freed
+        PASS [   0.011s] ( 38/392) chelis-backend-c emit::tests::int64_const_does_not_panic
+        PASS [   0.008s] ( 39/392) chelis-backend-c emit::tests::max_reduce_emits_nan_propagating_max
+        PASS [   0.009s] ( 40/392) chelis-backend-c emit::tests::matmul_pattern_emits_cblas_call
+        PASS [   0.009s] ( 41/392) chelis-backend-c emit::tests::max_elem_emits_fmaxf
+        PASS [   0.009s] ( 42/392) chelis-backend-c emit::tests::mul_emits_star_op
+        PASS [   0.010s] ( 43/392) chelis-backend-c emit::tests::neg_emits_unary_minus
+        PASS [   0.007s] ( 44/392) chelis-backend-c emit::tests::pad_emits_fill_and_copy
+        PASS [   0.009s] ( 45/392) chelis-backend-c emit::tests::omp_pragma_in_elementwise
+        PASS [   0.007s] ( 46/392) chelis-backend-c emit::tests::realize_emits_materialization_loop
+        PASS [   0.009s] ( 47/392) chelis-backend-c emit::tests::permute_emits_stride_swap
+        PASS [   0.007s] ( 48/392) chelis-backend-c emit::tests::reduce_window_max_min_drop_nan
+        PASS [   0.007s] ( 49/392) chelis-backend-c emit::tests::repeated_load_names_share_one_input_slot
+        PASS [   0.007s] ( 50/392) chelis-backend-c emit::tests::roots_are_emitted_as_multiple_outputs
+        PASS [   0.008s] ( 51/392) chelis-backend-c emit::tests::reshape_emits_contiguous_check
+        PASS [   0.008s] ( 52/392) chelis-backend-c emit::tests::shrink_emits_offset_copy
+        PASS [   0.006s] ( 53/392) chelis-backend-c emit::tests::sin_emits_sinf
+        PASS [   0.009s] ( 54/392) chelis-backend-c emit::tests::round_emits_rintf
+        PASS [   0.009s] ( 55/392) chelis-backend-c emit::tests::shrink_to_end_sentinel_rejected_by_c_backend
+        PASS [   0.008s] ( 56/392) chelis-backend-c emit::tests::sparse_gather_rejects_float_indices_at_emit_boundary
+        PASS [   0.008s] ( 57/392) chelis-backend-c emit::tests::sparse_gather_embedding_probe_does_not_allocate_dense_one_hot_product
+        PASS [   0.007s] ( 58/392) chelis-backend-c emit::tests::sparse_gather_uses_typed_indices_and_payload_pointers
+        PASS [   0.007s] ( 59/392) chelis-backend-c emit::tests::sparse_scatter_add_uses_typed_indices_payload_and_copy_size
+        PASS [   0.007s] ( 60/392) chelis-backend-c emit::tests::sqrt_emits_sqrtf
+        PASS [   0.009s] ( 61/392) chelis-backend-c emit::tests::sparse_scatter_add_rejects_float_indices_at_emit_boundary
+        PASS [   0.009s] ( 62/392) chelis-backend-c emit::tests::store_is_alias
+        PASS [   0.007s] ( 63/392) chelis-backend-c emit::tests::stride_emits_stride_multiply
+        PASS [   0.007s] ( 64/392) chelis-backend-c emit::tests::sum_then_neg_chains
+        PASS [   0.007s] ( 65/392) chelis-backend-c emit::tests::sum_emits_reduction_loop
+        PASS [   0.006s] ( 66/392) chelis-backend-c emit::tests::target_fused_in_place_restrict_shape_aliases_only_reusable_input
+        PASS [   0.007s] ( 67/392) chelis-backend-c emit::tests::tan_emits_tanf
+        PASS [   0.007s] ( 68/392) chelis-backend-c emit::tests::unary_neg_fast_path_emits_restrict_and_simd
+        PASS [   0.006s] ( 69/392) chelis-backend-c emit::tests::vector_add_uses_correct_shape
+        PASS [   0.007s] ( 70/392) chelis-backend-c emitted_expr::tests::arbitrary_c_text_cannot_launder_through_identifier_node
+        PASS [   0.009s] ( 71/392) chelis-backend-c emit::tests::unsupported_precision_panics_for_f8e4m3
+        PASS [   0.008s] ( 72/392) chelis-backend-c emitted_expr::tests::operator_precedence_is_explicit_in_rendering
+        PASS [   0.007s] ( 73/392) chelis-backend-c emitted_expr::tests::structured_vocabulary_has_no_raw_expression_node_or_constructor
+        PASS [   0.007s] ( 74/392) chelis-backend-c host_abi_tests::nested_values_cannot_hide_an_unsupported_scalar_abi
+        PASS [   0.008s] ( 75/392) chelis-backend-c emitted_expr::tests::structured_tree_renders_only_after_construction
+        PASS [   0.008s] ( 76/392) chelis-backend-c host_abi_tests::first_class_function_type_has_no_general_c_host_value_abi
+        PASS [   0.008s] ( 77/392) chelis-backend-c host_abi_tests::abi_conversion_accepts_only_resolved_logical_types
+        PASS [   0.007s] ( 78/392) chelis-backend-c host_abi_tests::unresolved_callee_markers_are_rejected_at_projection_in_both_positions
+        PASS [   0.008s] ( 79/392) chelis-backend-c host_abi_tests::unsupported_scalar_abis_return_the_shared_typed_diagnostic
+        PASS [   0.009s] ( 80/392) chelis-backend-c host_abi_tests::reduced_float_boxed_element_has_no_scalar_c_spelling
+        PASS [   0.009s] ( 81/392) chelis-backend-c host_abi_tests::supported_concrete_types_map_to_exact_c_host_abis
+        PASS [   0.007s] ( 82/392) chelis-backend-c memory::tests::cleanup_frees_wrappers_at_epilogue_then_slots
+        PASS [   0.009s] ( 83/392) chelis-backend-c host_emit::expression_dispatch_tests::open_builtin_name_must_decode_before_expression_construction
+        PASS [   0.006s] ( 84/392) chelis-backend-c memory::tests::metadata_view_extends_source_lifetime
+        PASS [   0.008s] ( 85/392) chelis-backend-c memory::tests::planner_does_not_alpha_rename_unrelated_symbolic_capacity
+        PASS [   0.010s] ( 86/392) chelis-backend-c memory::tests::capacity_fits_concrete_larger_and_rejects_distinct_symbolic_keys
+        PASS [   0.008s] ( 87/392) chelis-backend-c memory::tests::planner_reuses_commuted_symbolic_product_capacity
+        PASS [   0.008s] ( 88/392) chelis-backend-c memory::tests::planner_keeps_loads_borrowed
+        PASS [   0.007s] ( 89/392) chelis-backend-c memory::tests::store_outputs_are_standalone_not_slots
+        PASS [   0.007s] ( 90/392) chelis-backend-c memory::tests::planner_reuses_identity_simplified_symbolic_capacity
+        PASS [   0.010s] ( 91/392) chelis-backend-c memory::tests::planner_keeps_overlapping_values_separate
+        PASS [   0.007s] ( 92/392) chelis-backend-c memory::tests::planner_reuses_non_overlapping_slots
+        PASS [   0.005s] ( 93/392) chelis-backend-c memory::tests::terminal_drop_closes_slot_lifetime_for_reuse
+        PASS [   0.007s] ( 94/392) chelis-backend-c memory::tests::symbolic_exact_match_reuses_but_non_match_falls_back
+        PASS [   0.009s] ( 95/392) chelis-backend-c tests::adv_abs_emits_fabsf_not_absf
+        PASS [   0.007s] ( 96/392) chelis-backend-c tests::codegen_accepts_well_sized_leading_axis_pad
+        PASS [   0.011s] ( 97/392) chelis-backend-c tests::adv_host_program_with_globals_fns_are_static_inline_helpers_remain_static_void
+        PASS [   0.008s] ( 98/392) chelis-backend-c tests::adv_tan_emits_tanf_not_tanhf
+        PASS [   0.009s] ( 99/392) chelis-backend-c tests::codegen_does_not_surface_openblas_by_default
+        PASS [   0.008s] (100/392) chelis-backend-c tests::codegen_header_is_declaration
+        PASS [   0.006s] (101/392) chelis-backend-c tests::codegen_rejects_mis_sized_leading_axis_pad
+        PASS [   0.008s] (102/392) chelis-backend-c tests::codegen_returns_source_and_header
+        PASS [   0.008s] (103/392) chelis-backend-c tests::codegen_surfaces_distinct_input_labels
+        PASS [   0.007s] (104/392) chelis-backend-c tests::codegen_with_blas_surfaces_openblas_requirement_for_matmul_pattern
+        PASS [   0.008s] (105/392) chelis-backend-c tests::codegen_surfaces_store_output_labels
+        PASS [   0.007s] (106/392) chelis-backend-c tests::dag_codegen_exported_entry_has_no_static_prefix
+        PASS [   0.008s] (107/392) chelis-backend-c tests::dag_codegen_with_static_entry_option_emits_static_prefix
+        PASS [   0.009s] (108/392) chelis-backend-c tests::host_program_tensor_helper_blas_sets_toolchain_requirement
+        PASS [   0.008s] (109/392) chelis-backend-c tests::host_program_tensor_helpers_are_static_entry_not_exported
+        PASS [   0.009s] (110/392) chelis-backend-c tests::issue_252_harness_input_fill_round_trips_exact_f32_bits
+        PASS [   0.023s] (111/392) chelis-backend-c tests::generated_code_compiles_with_openmp
+        PASS [   0.010s] (112/392) chelis-backend-c tests::noncontiguous_matrix_slice_stays_on_generic_matmul_path
+        PASS [   0.586s] (113/392) chelis-backend-c tests::adv_host_program_compiles_as_shared_library_with_fpic
+        PASS [   1.062s] (114/392) chelis-backend-c tests::matmul_codegen_compiles_with_openblas_when_available
+        PASS [   2.849s] (115/392) chelis-backend-c tests::adv_numerical_floor_negative
+        PASS [   2.957s] (116/392) chelis-backend-c tests::adv_numerical_atan_at_1
+        PASS [   3.076s] (117/392) chelis-backend-c tests::adv_numerical_ceil_negative
+        PASS [   3.205s] (118/392) chelis-backend-c tests::adv_numerical_cos_at_pi_over_4
+        PASS [   3.290s] (119/392) chelis-backend-c tests::multiple_roots_return_multiple_outputs
+        PASS [   3.451s] (120/392) chelis-backend-c tests::adv_numerical_abs_negative_pi
+        PASS [   3.555s] (121/392) chelis-backend-c tests::f64_tensor_const_and_add_produces_correct_output
+        PASS [   3.674s] (122/392) chelis-backend-c tests::f64_tensor_sin_at_pi_over_4
+        PASS [   3.762s] (123/392) chelis-backend-c tests::numerical_add_const
+        PASS [   3.724s] (124/392) chelis-backend-c tests::numerical_add_then_mul
+        PASS [   3.721s] (125/392) chelis-backend-c tests::numerical_add_then_mul_then_sum
+        PASS [   3.350s] (126/392) chelis-backend-c tests::numerical_cast_identity
+        PASS [   3.357s] (127/392) chelis-backend-c tests::numerical_cmplt_false
+        PASS [   3.357s] (128/392) chelis-backend-c tests::numerical_cmplt_true
+        PASS [   3.352s] (129/392) chelis-backend-c tests::numerical_exp_zero
+        PASS [   3.349s] (130/392) chelis-backend-c tests::numerical_expand_add_broadcast
+        PASS [   3.354s] (131/392) chelis-backend-c tests::numerical_large_vector_add_then_sum
+        PASS [   3.351s] (132/392) chelis-backend-c tests::numerical_log_e
+        PASS [   3.578s] (133/392) chelis-backend-c tests::numerical_matmul_fallback
+        PASS [   3.816s] (134/392) chelis-backend-c tests::numerical_matmul_blas_when_available
+        PASS [   3.689s] (135/392) chelis-backend-c tests::numerical_max_elem
+        PASS [   3.674s] (136/392) chelis-backend-c tests::numerical_max_reduce
+        PASS [   3.323s] (137/392) chelis-backend-c tests::numerical_mul
+        PASS [   3.323s] (138/392) chelis-backend-c tests::numerical_neg
+        PASS [   3.323s] (139/392) chelis-backend-c tests::numerical_pad_with_runtime_input
+        PASS [   3.330s] (140/392) chelis-backend-c tests::numerical_permute_transpose
+        PASS [   3.329s] (141/392) chelis-backend-c tests::numerical_relu
+        PASS [   3.513s] (142/392) chelis-backend-c tests::numerical_reshape_preserves_values
+        PASS [   3.701s] (143/392) chelis-backend-c tests::numerical_reshape_then_add
+        PASS [   3.524s] (144/392) chelis-backend-c tests::numerical_shrink_with_runtime_input
+        PASS [   0.106s] (145/392) chelis-backend-c tests::runtime_compiles_standalone
+        PASS [   3.709s] (146/392) chelis-backend-c tests::numerical_sigmoid_zero
+        PASS [   3.522s] (147/392) chelis-backend-c tests::numerical_sin_zero
+        PASS [   0.005s] (148/392) chelis-backend-c tests::simd_math_fused_kernel_generates_sleef_path
+        PASS [   3.511s] (149/392) chelis-backend-c tests::numerical_sparse_gather_and_scatter_add_with_duplicate_indices
+        PASS [   0.004s] (150/392) chelis-backend-c tests::simd_math_none_path_does_not_include_math_header
+        PASS [   0.004s] (151/392) chelis-backend-c tests::simd_pure_arithmetic_fused_kernel_skips_sleef_path
+        PASS [   0.004s] (152/392) chelis-backend-c tests::simd_single_math_op_generates_sleef_path
+        PASS [   3.331s] (153/392) chelis-backend-c tests::numerical_sqrt
+        PASS [   3.329s] (154/392) chelis-backend-c tests::numerical_stride_with_runtime_input
+        PASS [   3.334s] (155/392) chelis-backend-c tests::numerical_sum_vector
+        PASS [   0.363s] (156/392) chelis-backend-c tests::simple_add_compiles
+        PASS [   3.516s] (157/392) chelis-backend-c tests::numerical_tensor_add_is_elementwise_with_runtime_inputs
+        PASS [   0.005s] (158/392) chelis-backend-c tests::symbolic_preamble_checks_every_non_canonical_occurrence
+        PASS [   0.011s] (159/392) chelis-backend-c::codegen_determinism codegen_is_byte_deterministic_across_repeated_emissions
+        PASS [   0.005s] (160/392) chelis-backend-c::codegen_determinism input_validation_preamble_emits_labels_in_lex_sorted_order
+        PASS [   0.006s] (161/392) chelis-backend-c::dtype_boundary_adversarial c_backend_admits_bf16_tensor_with_uint16_storage_post_ws_1
+        PASS [   0.005s] (162/392) chelis-backend-c::dtype_boundary_adversarial c_backend_admits_f16_tensor_with_uint16_storage_post_ws_1
+        PASS [   0.005s] (163/392) chelis-backend-c::dtype_boundary_adversarial c_backend_blas_matmul_bf16_routes_through_convert_then_sgemm_post_ws_1
+        PASS [   0.005s] (164/392) chelis-backend-c::dtype_boundary_adversarial c_backend_blas_matmul_f64_does_not_silently_lower_to_sgemm
+        PASS [   0.005s] (165/392) chelis-backend-c::dtype_boundary_adversarial matmul_info_struct_carries_accumulator_field_post_ws_a1
+        PASS [   0.005s] (166/392) chelis-backend-c::dtype_boundary_adversarial ws_a4_c_backend_emits_int8_tensor_via_int8_t_no_silent_downgrade
+        PASS [   0.008s] (167/392) chelis-backend-c::dtype_matrix_adversarial c_backend_blas_matmul_bf16_routes_through_convert_then_sgemm_post_ws_1
+        PASS [   0.005s] (168/392) chelis-backend-c::dtype_matrix_adversarial c_backend_blas_matmul_f16_routes_through_convert_then_sgemm_post_ws_1
+        PASS [   0.004s] (169/392) chelis-backend-c::dtype_matrix_adversarial c_backend_f32_operand_f64_accumulator_reduce_sum_uses_double_acc
+        PASS [   0.004s] (170/392) chelis-backend-c::dtype_matrix_adversarial c_backend_f64_matmul_emits_cblas_dgemm_not_sgemm
+        PASS [   0.004s] (171/392) chelis-backend-c::dtype_matrix_adversarial c_backend_int16_reduce_sum_uses_int32_accumulator
+        PASS [   0.004s] (172/392) chelis-backend-c::dtype_matrix_adversarial c_backend_int32_reduce_sum_emits_int32_no_silent_float_downgrade
+        PASS [   0.004s] (173/392) chelis-backend-c::dtype_matrix_adversarial c_backend_int64_reduce_sum_emits_int64
+        PASS [   0.004s] (174/392) chelis-backend-c::dtype_matrix_adversarial c_backend_int8_reduce_sum_uses_int32_accumulator_no_silent_overflow
+        PASS [   3.517s] (175/392) chelis-backend-c tests::numerical_tensor_mul_is_elementwise_with_runtime_inputs
+        PASS [   3.554s] (176/392) chelis-backend-c tests::output_from_load_is_materialized_not_borrowed
+        PASS [   3.664s] (177/392) chelis-backend-c tests::parameterized_input_helper_supports_multiple_cases
+        PASS [   0.005s] (178/392) chelis-backend-c::dtype_matrix_bf16_f16 bf16_matmul_routes_through_convert_then_sgemm
+        PASS [   3.561s] (179/392) chelis-backend-c tests::runtime_view_free_is_safe
+        PASS [   3.657s] (180/392) chelis-backend-c tests::simd_math_fused_kernel_matches_scalar_output
+        PASS [   3.650s] (181/392) chelis-backend-c tests::simd_single_math_op_sleef_compiles_and_runs
+        PASS [   3.548s] (182/392) chelis-backend-c tests::symbolic_batch_codegen_reuses_one_artifact_for_multiple_input_shapes
+        PASS [   3.533s] (183/392) chelis-backend-c tests::symbolic_batched_matmul_emits_runtime_blas_loop
+        PASS [   3.526s] (184/392) chelis-backend-c tests::symbolic_matmul_codegen_reuses_one_artifact_for_multiple_batch_sizes
+        PASS [   0.005s] (185/392) chelis-backend-c::dtype_matrix_bf16_f16 f16_matmul_routes_through_convert_then_sgemm
+        PASS [   3.568s] (186/392) chelis-backend-c::dtype_matrix_bf16_f16 bf16_add_agrees_with_evaluator
+        PASS [   3.616s] (187/392) chelis-backend-c::dtype_matrix_bf16_f16 bf16_matmul_agrees_with_evaluator
+        PASS [   3.492s] (188/392) chelis-backend-c::dtype_matrix_bf16_f16 bf16_mul_agrees_with_evaluator
+        PASS [   3.498s] (189/392) chelis-backend-c::dtype_matrix_bf16_f16 bf16_reduce_max_agrees_with_evaluator
+        PASS [   7.164s] (190/392) chelis-backend-c tests::simd_math_fused_kernel_compiles_and_runs
+        PASS [   3.555s] (191/392) chelis-backend-c::dtype_matrix_bf16_f16 bf16_reduce_sum_uses_f32_accumulator_per_spec_5_7_1
+        PASS [   3.552s] (192/392) chelis-backend-c::dtype_matrix_bf16_f16 f16_add_agrees_with_evaluator
+        PASS [   3.559s] (193/392) chelis-backend-c::dtype_matrix_bf16_f16 f16_matmul_agrees_with_evaluator
+        PASS [   0.005s] (194/392) chelis-backend-c::dtype_matrix_bf16_f16_extended bf16_min_reduce_is_structurally_unsupported_today
+        PASS [   0.007s] (195/392) chelis-backend-c::dtype_matrix_bf16_f16_extended bf16_prod_reduce_is_structurally_unsupported_today
+        PASS [   3.551s] (196/392) chelis-backend-c::dtype_matrix_bf16_f16 f16_mul_agrees_with_evaluator
+        PASS [   3.543s] (197/392) chelis-backend-c::dtype_matrix_bf16_f16 f16_reduce_max_agrees_with_evaluator
+        PASS [   3.582s] (198/392) chelis-backend-c::dtype_matrix_bf16_f16 f16_reduce_sum_uses_f32_accumulator_per_spec_5_7_1
+        PASS [   3.578s] (199/392) chelis-backend-c::dtype_matrix_bf16_f16_extended bf16_atan_agrees_with_evaluator
+        PASS [   3.578s] (200/392) chelis-backend-c::dtype_matrix_bf16_f16_extended bf16_ceil_agrees_with_evaluator
+        PASS [   3.577s] (201/392) chelis-backend-c::dtype_matrix_bf16_f16_extended bf16_cos_agrees_with_evaluator
+        PASS [   3.519s] (202/392) chelis-backend-c::dtype_matrix_bf16_f16_extended bf16_div_agrees_with_evaluator
+        PASS [   3.525s] (203/392) chelis-backend-c::dtype_matrix_bf16_f16_extended bf16_floor_agrees_with_evaluator
+        PASS [   3.520s] (204/392) chelis-backend-c::dtype_matrix_bf16_f16_extended bf16_recip_agrees_with_evaluator
+        PASS [   3.532s] (205/392) chelis-backend-c::dtype_matrix_bf16_f16_extended bf16_round_agrees_with_evaluator
+        PASS [   3.349s] (206/392) chelis-backend-c::dtype_matrix_bf16_f16_extended bf16_sin_agrees_with_evaluator
+        PASS [   3.483s] (207/392) chelis-backend-c::dtype_matrix_bf16_f16_extended bf16_sqrt_agrees_with_evaluator
+        PASS [   3.485s] (208/392) chelis-backend-c::dtype_matrix_bf16_f16_extended bf16_tan_agrees_with_evaluator
+        PASS [   0.004s] (209/392) chelis-backend-c::dtype_matrix_bf16_f16_extended eval_last_helper_returns_const_value
+        PASS [   3.487s] (210/392) chelis-backend-c::dtype_matrix_bf16_f16_extended cast_bf16_to_f16_chains_through_f32
+        PASS [   3.486s] (211/392) chelis-backend-c::dtype_matrix_bf16_f16_extended cast_bf16_to_f32_value_preserved
+        PASS [   3.487s] (212/392) chelis-backend-c::dtype_matrix_bf16_f16_extended cast_f16_to_bf16_chains_through_f32
+        PASS [   3.486s] (213/392) chelis-backend-c::dtype_matrix_bf16_f16_extended cast_f16_to_f32_value_preserved
+        PASS [   3.298s] (214/392) chelis-backend-c::dtype_matrix_bf16_f16_extended cast_f32_to_bf16_bit_pattern_and_roundtrip
+        PASS [   0.004s] (215/392) chelis-backend-c::dtype_matrix_bf16_f16_extended f16_min_reduce_is_structurally_unsupported_today
+        PASS [   0.004s] (216/392) chelis-backend-c::dtype_matrix_bf16_f16_extended f16_prod_reduce_is_structurally_unsupported_today
+        PASS [   3.483s] (217/392) chelis-backend-c::dtype_matrix_bf16_f16_extended cast_f32_to_f16_bit_pattern_and_roundtrip
+        PASS [  14.225s] (218/392) chelis-backend-c::dtype_matrix_bf16_f16 bf16_const_fill_produces_exact_bit_pattern
+        PASS [   3.501s] (219/392) chelis-backend-c::dtype_matrix_bf16_f16_extended f16_atan_agrees_with_evaluator
+        PASS [   3.501s] (220/392) chelis-backend-c::dtype_matrix_bf16_f16_extended f16_ceil_agrees_with_evaluator
+        PASS [   3.513s] (221/392) chelis-backend-c::dtype_matrix_bf16_f16_extended f16_cos_agrees_with_evaluator
+        PASS [   0.006s] (222/392) chelis-backend-c::emit_uniform_like_bit_pattern issue_248_uniform_like_does_not_use_lossy_format
+        PASS [   0.005s] (223/392) chelis-backend-c::emit_uniform_like_bit_pattern issue_248_uniform_like_low_arg_emits_exact_bit_pattern
+        PASS [   3.510s] (224/392) chelis-backend-c::dtype_matrix_bf16_f16_extended f16_div_agrees_with_evaluator
+        PASS [   3.656s] (225/392) chelis-backend-c::dtype_matrix_bf16_f16_extended f16_floor_agrees_with_evaluator
+        PASS [  14.221s] (226/392) chelis-backend-c::dtype_matrix_bf16_f16 f16_const_fill_produces_exact_bit_pattern
+        PASS [   3.827s] (227/392) chelis-backend-c::dtype_matrix_bf16_f16_extended f16_recip_agrees_with_evaluator
+        PASS [   3.926s] (228/392) chelis-backend-c::dtype_matrix_bf16_f16_extended f16_round_agrees_with_evaluator
+        PASS [   3.915s] (229/392) chelis-backend-c::dtype_matrix_bf16_f16_extended f16_sin_agrees_with_evaluator
+        PASS [   4.089s] (230/392) chelis-backend-c::dtype_matrix_bf16_f16_extended f16_sqrt_agrees_with_evaluator
+        PASS [   4.086s] (231/392) chelis-backend-c::dtype_matrix_bf16_f16_extended f16_tan_agrees_with_evaluator
+        PASS [   4.059s] (232/392) chelis-backend-c::exec_compile exec_cmplt_f64_runtime_operands_match_evaluator
+        PASS [   4.067s] (233/392) chelis-backend-c::exec_compile exec_cmplt_int32_runtime_operands_match_evaluator
+        PASS [   3.926s] (234/392) chelis-backend-c::exec_compile exec_cmplt_int64_runtime_operands_match_evaluator
+        PASS [   3.553s] (235/392) chelis-backend-c::exec_compile exec_div_ieee_corner_cases
+        PASS [   3.555s] (236/392) chelis-backend-c::exec_compile exec_floor_div_int16_rounds_toward_neg_inf
+        PASS [   3.354s] (237/392) chelis-backend-c::exec_compile exec_floor_div_int32_rounds_toward_neg_inf
+        PASS [   3.486s] (238/392) chelis-backend-c::exec_compile exec_floor_div_int64_rounds_toward_neg_inf
+        PASS [   3.301s] (239/392) chelis-backend-c::exec_compile exec_floor_div_int8_rounds_toward_neg_inf
+        PASS [   3.315s] (240/392) chelis-backend-c::exec_compile exec_floor_div_int_zero_divisor_traps
+        PASS [   3.514s] (241/392) chelis-backend-c::exec_compile exec_i16_add_correct_output
+        PASS [   3.533s] (242/392) chelis-backend-c::exec_compile exec_i16_reduce_sum_promotes_to_i32
+        PASS [   3.516s] (243/392) chelis-backend-c::exec_compile exec_i8_add_correct_output
+        PASS [   3.510s] (244/392) chelis-backend-c::exec_compile exec_i8_add_overflow_wraps_two_complement
+        PASS [   3.510s] (245/392) chelis-backend-c::exec_compile exec_i8_mul_correct_output_with_wrap
+        PASS [   3.501s] (246/392) chelis-backend-c::exec_compile exec_i8_reduce_sum_promotes_to_i32
+        PASS [   0.079s] (247/392) chelis-backend-c::exec_compile exec_simd_header_compiles_as_cxx
+        PASS [   3.187s] (248/392) chelis-backend-c::exec_compile exec_math_none_exp_kernel_correct_output
+        PASS [   3.186s] (249/392) chelis-backend-c::exec_compile exec_recip_ieee_corner_cases
+        PASS [   3.472s] (250/392) chelis-backend-c::exec_compile exec_reduce_sum_correct_output
+        PASS [   3.469s] (251/392) chelis-backend-c::exec_compile exec_reduce_sum_issue_163_repro_is_bit_exact_with_evaluator
+        PASS [   3.473s] (252/392) chelis-backend-c::exec_compile exec_reduce_window_grad_max_matches_evaluator_oracle
+        PASS [   3.549s] (253/392) chelis-backend-c::exec_compile exec_reduce_window_grad_sum_matches_evaluator_oracle
+        PASS [   3.190s] (254/392) chelis-backend-c::exec_compile exec_reduce_window_max_matches_evaluator_oracle
+        PASS [   3.194s] (255/392) chelis-backend-c::exec_compile exec_reduce_window_mean_matches_evaluator_oracle
+        PASS [   2.919s] (256/392) chelis-backend-c::exec_compile exec_simd_nan_propagation_inconsistency_probe
+        PASS [   3.002s] (257/392) chelis-backend-c::exec_compile exec_sleef_kernel_scalar_fallback_correct
+        PASS [  17.637s] (258/392) chelis-backend-c::dtype_matrix_bf16_f16_extended cast_f32_to_bf16_sweep_non_round_values
+        PASS [   0.005s] (259/392) chelis-backend-c::exec_compile ws_a1_negative_integer_matmul_rejected_with_spec_citation
+        PASS [   0.005s] (260/392) chelis-backend-c::exec_compile ws_a3_bf16_f16_matmul_admitted_at_ir_validation
+        PASS [   0.004s] (261/392) chelis-backend-c::exec_compile ws_a4_i8_sum_with_narrower_accumulator_is_ir_error
+        PASS [   0.006s] (262/392) chelis-backend-c::f64_matmul_miscompile f32_matmul_subgraph_still_hits_blas_path_in_c_backend
+        PASS [   2.662s] (263/392) chelis-backend-c::exec_compile exec_trunc_div_int16_truncates_toward_zero
+        PASS [  17.163s] (264/392) chelis-backend-c::dtype_matrix_bf16_f16_extended cast_f32_to_f16_sweep_non_round_values
+        PASS [   0.005s] (265/392) chelis-backend-c::fused_compile c_fused_reduce_max_no_intermediate
+        PASS [   0.005s] (266/392) chelis-backend-c::fused_compile c_fused_reduce_sum_no_intermediate
+        PASS [   0.252s] (267/392) chelis-backend-c::fused_compile c_fused_codegen_compiles
+        PASS [   0.006s] (268/392) chelis-backend-c::fused_in_place_forall_alias fan_in_binder_equivalent_lit_to_named_aliases_reusable_input
+        PASS [   0.004s] (269/392) chelis-backend-c::fused_in_place_forall_alias fan_in_binder_equivalent_named_to_lit_aliases_reusable_input
+        PASS [   0.004s] (270/392) chelis-backend-c::fused_in_place_forall_alias fan_in_different_named_binders_does_not_alias
+        PASS [   0.004s] (271/392) chelis-backend-c::fused_in_place_forall_alias fan_in_different_precision_does_not_alias
+        PASS [   0.004s] (272/392) chelis-backend-c::fused_in_place_forall_alias fan_in_different_rank_does_not_alias
+        PASS [   0.004s] (273/392) chelis-backend-c::fused_in_place_forall_alias fan_in_literal_equal_shapes_aliases_reusable_input
+        PASS [   0.004s] (274/392) chelis-backend-c::fused_in_place_forall_alias fan_in_multi_consumer_reusable_input_does_not_alias
+        PASS [   0.004s] (275/392) chelis-backend-c::fused_in_place_forall_alias fan_in_named_binder_with_unknown_size_aliases
+        PASS [   0.004s] (276/392) chelis-backend-c::fused_in_place_forall_alias fan_in_same_binder_different_known_size_does_not_alias
+        PASS [   0.004s] (277/392) chelis-backend-c::fused_in_place_forall_alias fan_in_same_named_binder_aliases_reusable_input
+        PASS [   0.007s] (278/392) chelis-backend-c::host_emit_dtype_dispatch binary_elementwise_emits_dtype_switch_at_f32
+        PASS [   0.005s] (279/392) chelis-backend-c::host_emit_dtype_dispatch binary_elementwise_emits_dtype_switch_at_f64
+        PASS [   0.004s] (280/392) chelis-backend-c::host_emit_dtype_dispatch binary_elementwise_emits_dtype_switch_at_i64
+        PASS [   0.004s] (281/392) chelis-backend-c::host_emit_dtype_dispatch binary_elementwise_f32_arm_keeps_float_pointers
+        PASS [   0.004s] (282/392) chelis-backend-c::host_emit_dtype_dispatch binary_elementwise_int32_arm_contains_no_float_pointer
+        PASS [   0.004s] (283/392) chelis-backend-c::host_emit_dtype_dispatch binary_elementwise_int32_arm_uses_int32_t_pointers
+        PASS [   0.004s] (284/392) chelis-backend-c::host_emit_dtype_dispatch binary_func_elementwise_emits_typed_pointer_access
+        PASS [   0.004s] (285/392) chelis-backend-c::host_emit_dtype_dispatch binary_func_f32_max_keeps_fmaxf
+        PASS [   0.250s] (286/392) chelis-backend-c::fused_compile c_fused_reduce_compiles
+        PASS [   2.326s] (287/392) chelis-backend-c::exec_compile exec_trunc_div_int32_truncates_toward_zero
+        PASS [   0.005s] (288/392) chelis-backend-c::host_emit_dtype_dispatch scalar_to_tensor_coercion_bool_uses_typed_pointer
+        PASS [   0.006s] (289/392) chelis-backend-c::host_emit_dtype_dispatch scalar_to_tensor_coercion_f64_uses_f64_typed_pointer
+        PASS [   0.006s] (290/392) chelis-backend-c::host_emit_dtype_dispatch scalar_to_tensor_coercion_int64_keeps_typed_pointer
+        PASS [   0.005s] (291/392) chelis-backend-c::host_emit_dtype_dispatch unary_elementwise_emits_dtype_switch_at_f32
+        PASS [   0.004s] (292/392) chelis-backend-c::host_emit_dtype_dispatch unary_elementwise_emits_dtype_switch_at_f64
+        PASS [   0.004s] (293/392) chelis-backend-c::host_emit_dtype_dispatch unary_elementwise_emits_dtype_switch_at_i64
+        PASS [   0.004s] (294/392) chelis-backend-c::host_emit_dtype_dispatch unary_func_elementwise_emits_typed_pointer_access
+        PASS [   0.004s] (295/392) chelis-backend-c::host_emit_dtype_dispatch unary_func_int32_arm_aborts_without_binary32_conversion
+        PASS [   0.009s] (296/392) chelis-backend-c::host_span_comments s6_host_canonical_span_id_emitted_as_comment
+        PASS [   0.004s] (297/392) chelis-backend-c::host_span_comments s6_host_clean_span_emitted_verbatim_audit_invariant
+        PASS [   0.004s] (298/392) chelis-backend-c::host_span_comments s6_host_forbidden_newline_in_merged_spans_is_escaped_at_emit
+        PASS [   0.004s] (299/392) chelis-backend-c::host_span_comments s6_host_forbidden_newline_in_span_is_escaped_at_emit
+        PASS [   0.004s] (300/392) chelis-backend-c::host_span_comments s6_host_merged_spans_dedup_against_canonical
+        PASS [   0.004s] (301/392) chelis-backend-c::host_span_comments s6_host_merged_spans_emitted_lex_sorted_after_canonical
+        PASS [   0.004s] (302/392) chelis-backend-c::host_span_comments s6_host_no_spans_emits_no_comment_block
+        PASS [   1.958s] (303/392) chelis-backend-c::exec_compile exec_trunc_div_int64_truncates_toward_zero
+        PASS [   0.005s] (304/392) chelis-backend-c::issue_189_const_bit_pattern issue_189_f32_const_does_not_use_lossy_format
+        PASS [   0.005s] (305/392) chelis-backend-c::issue_189_const_bit_pattern issue_189_f32_const_emits_exact_bit_pattern
+        PASS [   0.004s] (306/392) chelis-backend-c::issue_189_const_bit_pattern issue_189_f32_const_smallest_denormal_round_trips
+        PASS [   1.765s] (307/392) chelis-backend-c::exec_compile exec_trunc_div_int8_truncates_toward_zero
+        PASS [   0.005s] (308/392) chelis-backend-c::issue_189_const_bit_pattern issue_189_f64_const_emits_exact_bit_pattern
+        PASS [   0.004s] (309/392) chelis-backend-c::issue_189_const_bit_pattern issue_189_f64_const_one_ulp_pair_round_trips
+        PASS [   0.007s] (310/392) chelis-backend-c::issue_254_reduce_window_emit issue254_emit_reduce_window_max_uses_fmaxf_and_neg_infinity
+        PASS [   0.005s] (311/392) chelis-backend-c::issue_254_reduce_window_emit issue254_emit_reduce_window_max_uses_stride_in_index_arithmetic
+        PASS [   0.004s] (312/392) chelis-backend-c::issue_254_reduce_window_emit issue254_emit_reduce_window_mean_divides_by_window_volume
+        PASS [   0.004s] (313/392) chelis-backend-c::issue_254_reduce_window_emit issue254_emit_reduce_window_min_uses_fminf_and_positive_infinity
+        PASS [   0.004s] (314/392) chelis-backend-c::issue_254_reduce_window_emit issue254_emit_reduce_window_sum_uses_plus_equals
+        PASS [   0.007s] (315/392) chelis-backend-c::issue_310_zero_length_arrays issue_310_adt_variant_with_fields_still_emits_array
+        PASS [   0.077s] (316/392) chelis-backend-c::issue_310_zero_length_arrays issue_310_empty_tuple_compiles_under_pedantic_iso_c
+        PASS [   0.006s] (317/392) chelis-backend-c::issue_310_zero_length_arrays issue_310_empty_tuple_emits_no_zero_length_array
+        PASS [   0.005s] (318/392) chelis-backend-c::issue_310_zero_length_arrays issue_310_nonempty_tuple_still_emits_array
+        PASS [   0.079s] (319/392) chelis-backend-c::issue_310_zero_length_arrays issue_310_nullary_adt_compiles_under_pedantic_iso_c
+        PASS [   0.005s] (320/392) chelis-backend-c::issue_310_zero_length_arrays issue_310_nullary_adt_variant_emits_no_zero_length_array
+        PASS [   0.005s] (321/392) chelis-backend-c::pattern_matcher_brittleness canonical_matmul_pattern_is_detected
+        PASS [   0.005s] (322/392) chelis-backend-c::pattern_matcher_brittleness cast_perturbed_matmul_specializes_after_noop_cleanup
+        PASS [   0.004s] (323/392) chelis-backend-c::pattern_matcher_brittleness internal_one_hot_gather_tree_specializes_to_sparse_gather
+        PASS [   0.009s] (324/392) chelis-backend-c::producer_string_sanitization c_clean_func_name_emitted_verbatim
+        PASS [   0.004s] (325/392) chelis-backend-c::producer_string_sanitization c_codegen_with_options_inherits_sanitization
+        PASS [   0.005s] (326/392) chelis-backend-c::producer_string_sanitization c_fprintf_format_string_escapes_double_quote_in_func_name
+        PASS [   0.005s] (327/392) chelis-backend-c::producer_string_sanitization c_fprintf_format_string_escapes_newline_in_func_name
+        PASS [   0.005s] (328/392) chelis-backend-c::producer_string_sanitization c_fprintf_format_string_escapes_percent_in_func_name
+        PASS [   0.004s] (329/392) chelis-backend-c::producer_string_sanitization c_fprintf_format_string_escapes_percent_in_load_name
+        PASS [   0.004s] (330/392) chelis-backend-c::producer_string_sanitization c_fprintf_format_string_escapes_percent_in_symbolic_dim_name
+        PASS [   0.234s] (331/392) chelis-backend-c::producer_string_sanitization c_sanitized_format_strings_still_compile_cleanly
+        PASS [   2.148s] (332/392) chelis-backend-c::exec_compile exec_zero_size_tensor_does_not_crash
+        PASS [   2.164s] (333/392) chelis-backend-c::exec_compile ws_a1_exec_f64_matmul_dispatches_dgemm_and_matches_reference
+        PASS [   2.170s] (334/392) chelis-backend-c::exec_compile ws_a1_exec_f64_reduce_sum_matches_reference
+        PASS [   2.185s] (335/392) chelis-backend-c::exec_compile ws_a1_exec_i32_reduce_sum_produces_integer_result_no_float_cast
+        PASS [   2.188s] (336/392) chelis-backend-c::exec_compile ws_a1_exec_mixed_f64_tensors_and_i32_indices_compile_and_run
+        PASS [   1.820s] (337/392) chelis-backend-c::host_emit_dtype_dispatch binary_func_int32_max_preserves_values_above_f32_exact_range
+        PASS [   1.911s] (338/392) chelis-backend-c::host_emit_dtype_dispatch binary_func_int32_min_preserves_values_below_f32_exact_range
+        PASS [   2.159s] (339/392) chelis-backend-c::fused_in_place_exec fused_in_place_compile_run_matches_contiguous_and_strided_inputs
+        PASS [   2.089s] (340/392) chelis-backend-c::issue_189_const_bit_pattern issue_189_f32_const_byte_identical_to_eval_under_gcc
+        PASS [   0.012s] (341/392) chelis-backend-c::rt_cleanup_redteam bf16_matmul_with_f32_output_still_routes_through_convert_wrapper
+        PASS [   0.013s] (342/392) chelis-backend-c::rt_cleanup_redteam bf16_matmul_wrapper_balances_scratch_alloc_and_free_when_output_is_bf16
+        PASS [   0.012s] (343/392) chelis-backend-c::rt_cleanup_redteam bf16_matmul_wrapper_balances_scratch_alloc_and_free_when_output_is_f32
+        PASS [   2.154s] (344/392) chelis-backend-c::issue_189_const_bit_pattern issue_189_f64_const_byte_identical_to_eval_under_gcc
+        PASS [   1.673s] (345/392) chelis-backend-c::rt_cleanup_redteam bf16_abs_flips_negative_infinity_to_positive_infinity
+        PASS [   1.743s] (346/392) chelis-backend-c::rt_cleanup_redteam bf16_abs_flips_negative_zero_to_positive_zero
+        PASS [   2.225s] (347/392) chelis-backend-c::rt_cleanup_redteam bf16_abs_preserves_nan_ness
+        PASS [   2.787s] (348/392) chelis-backend-c::rt_cleanup_redteam bf16_abs_preserves_max_finite_bit_pattern
+        PASS [   2.670s] (349/392) chelis-backend-c::rt_cleanup_redteam bf16_abs_preserves_positive_infinity
+        PASS [   2.665s] (350/392) chelis-backend-c::rt_cleanup_redteam bf16_abs_preserves_positive_zero
+        PASS [   2.675s] (351/392) chelis-backend-c::rt_cleanup_redteam bf16_abs_preserves_smallest_normal
+        PASS [   2.815s] (352/392) chelis-backend-c::rt_cleanup_redteam bf16_abs_preserves_smallest_subnormal
+        PASS [   2.765s] (353/392) chelis-backend-c::rt_cleanup_redteam bf16_reduce_sum_4096_x_0_001_uses_f32_accumulator_per_spec_5_7_1
+        PASS [   2.798s] (354/392) chelis-backend-c::rt_cleanup_redteam cast_bf16_to_f32_preserves_value_per_ieee_754
+        PASS [   2.806s] (355/392) chelis-backend-c::rt_cleanup_redteam cast_f32_to_bf16_preserves_value_per_ieee_754
+        PASS [   2.804s] (356/392) chelis-backend-c::rt_cleanup_redteam cast_f32_to_f16_preserves_value_per_ieee_754
+        PASS [   2.815s] (357/392) chelis-backend-c::rt_cleanup_redteam cross_backend_bf16_add_mul_chain_agrees_with_evaluator
+        PASS [   0.008s] (358/392) chelis-backend-c::rt_cleanup_redteam f16_matmul_with_f32_output_still_routes_through_convert_wrapper
+        PASS [   0.011s] (359/392) chelis-backend-c::rt_cleanup_redteam sibling_sweep_no_bf16_f16_panic_in_production_emit
+        PASS [   0.007s] (360/392) chelis-backend-c::rt_cleanup_redteam sibling_sweep_no_default_float_arm_in_backend_c
+        PASS [   0.028s] (361/392) chelis-backend-c::rt_cleanup_redteam sibling_sweep_no_em_dash_in_string_literals_in_touched_crates
+        PASS [   0.006s] (362/392) chelis-backend-c::rt_cleanup_redteam sibling_sweep_no_value_as_f32_in_emit_outside_helper
+        PASS [   0.007s] (363/392) chelis-backend-c::simd_math_codegen_adversarial redteam_five_op_sleef_contains_all_macros
+        PASS [   0.005s] (364/392) chelis-backend-c::simd_math_codegen_adversarial redteam_math_lib_none_uses_scalar_expf
+        PASS [   0.004s] (365/392) chelis-backend-c::simd_math_codegen_adversarial redteam_pure_arithmetic_with_sleef_forced_uses_level1_path
+        PASS [   0.004s] (366/392) chelis-backend-c::simd_math_codegen_adversarial redteam_vforce_single_exp_kernel
+        PASS [   0.005s] (367/392) chelis-backend-c::simd_math_codegen_adversarial redteam_vforce_two_op_kernel_falls_through_to_level1
+        PASS [   0.006s] (368/392) chelis-backend-c::simd_math_codegen_adversarial redteam_zero_size_tensor_loop_does_not_execute
+        PASS [   0.061s] (369/392) chelis-backend-c::simd_reductions hex_float_literal_round_trips_exact_f32_bits
+        PASS [   0.004s] (370/392) chelis-backend-c::simd_reductions simd_argmax_f32_all_sizes
+        PASS [   0.004s] (371/392) chelis-backend-c::simd_reductions simd_argmin_f32_all_sizes
+        PASS [   0.004s] (372/392) chelis-backend-c::simd_reductions simd_max_f32_all_sizes
+        PASS [   0.004s] (373/392) chelis-backend-c::simd_reductions simd_min_f32_all_sizes
+        PASS [   0.004s] (374/392) chelis-backend-c::simd_reductions simd_sum_f32_all_sizes
+        PASS [   2.773s] (375/392) chelis-backend-c::rt_cleanup_redteam f16_abs_flips_negative_infinity_to_positive_infinity
+        PASS [   0.265s] (376/392) chelis-backend-c::span_comments s4_c_canonical_span_id_emitted_as_comment
+        PASS [   2.758s] (377/392) chelis-backend-c::rt_cleanup_redteam f16_abs_flips_negative_zero_to_positive_zero
+        PASS [   2.760s] (378/392) chelis-backend-c::rt_cleanup_redteam f16_abs_preserves_max_finite_bit_pattern
+        PASS [   0.259s] (379/392) chelis-backend-c::span_comments s4_c_clean_span_emitted_verbatim_audit_invariant
+        PASS [   0.257s] (380/392) chelis-backend-c::span_comments s4_c_forbidden_newline_in_merged_spans_is_escaped_at_emit
+        PASS [   2.757s] (381/392) chelis-backend-c::rt_cleanup_redteam f16_abs_preserves_nan_ness
+        PASS [   0.261s] (382/392) chelis-backend-c::span_comments s4_c_forbidden_newline_in_span_is_escaped_at_emit
+        PASS [   0.274s] (383/392) chelis-backend-c::span_comments s4_c_merged_spans_dedup_against_canonical
+        PASS [   0.263s] (384/392) chelis-backend-c::span_comments s4_c_merged_spans_emitted_lex_sorted_after_canonical
+        PASS [   0.264s] (385/392) chelis-backend-c::span_comments s4_c_no_spans_emits_no_comment_block
+        PASS [   2.755s] (386/392) chelis-backend-c::rt_cleanup_redteam f16_abs_preserves_positive_infinity
+        PASS [   0.268s] (387/392) chelis-backend-c::span_comments s4_c_oracle_richer_combinations_compile_and_grep
+        PASS [   2.751s] (388/392) chelis-backend-c::rt_cleanup_redteam f16_abs_preserves_positive_zero
+        PASS [   2.751s] (389/392) chelis-backend-c::rt_cleanup_redteam f16_abs_preserves_smallest_normal
+        PASS [   2.735s] (390/392) chelis-backend-c::rt_cleanup_redteam f16_abs_preserves_smallest_subnormal
+        PASS [   7.395s] (391/392) chelis-backend-c::rt_cleanup_redteam bf16_const_fill_pinned_bit_patterns_for_0_1_0_01_pi
+        PASS [   5.524s] (392/392) chelis-backend-c::rt_cleanup_redteam f16_const_fill_pinned_bit_patterns_for_0_1_0_01_pi
+────────────
+     Summary [  53.167s] 392 tests run: 392 passed, 1 skipped
++ cargo nextest run -p chelis-cli
+   Compiling quote v1.0.45
+   Compiling regex-automata v0.4.14
+   Compiling num-traits v0.2.19
+   Compiling predicates-core v1.0.10
+   Compiling num_cpus v1.17.0
+   Compiling lazy_static v1.5.0
+   Compiling termtree v0.5.1
+   Compiling normalize-line-endings v0.3.0
+   Compiling difflib v0.4.0
+   Compiling deadpool-runtime v0.1.4
+   Compiling cargo-husky v1.5.0
+   Compiling predicates-tree v1.0.13
+   Compiling syn v2.0.117
+   Compiling float-cmp v0.10.0
+   Compiling regex v1.12.3
+   Compiling bstr v1.12.1
+   Compiling tree-sitter v0.26.8
+   Compiling predicates v3.1.4
+   Compiling globset v0.4.19
+   Compiling ignore v0.4.31
+   Compiling assert_cmd v2.2.1
+   Compiling tree-sitter-chelis v0.17.5 (/Users/vrk93/chelis-json-io-fix/tree-sitter-chelis)
+   Compiling synstructure v0.13.2
+   Compiling serde_derive_internals v0.29.1
+   Compiling darling_core v0.23.0
+   Compiling pest_generator v2.8.6
+   Compiling serde_derive v1.0.228
+   Compiling zerofrom-derive v0.1.7
+   Compiling thiserror-impl v2.0.18
+   Compiling yoke-derive v0.8.2
+   Compiling zerovec-derive v0.11.3
+   Compiling tokio-macros v2.7.0
+   Compiling displaydoc v0.2.5
+   Compiling futures-macro v0.3.32
+   Compiling tracing-attributes v0.1.31
+   Compiling tokio v1.52.3
+   Compiling miette-derive v7.6.0
+   Compiling futures-util v0.3.32
+   Compiling zerocopy-derive v0.8.48
+   Compiling zerofrom v0.1.7
+   Compiling pest_derive v2.8.6
+   Compiling schemars_derive v0.8.22
+   Compiling tracing v0.1.44
+   Compiling async-trait v0.1.89
+   Compiling thiserror v2.0.18
+   Compiling yoke v0.8.2
+   Compiling miette v7.6.0
+   Compiling strum_macros v0.27.2
+   Compiling derive_more-impl v2.1.1
+   Compiling zerocopy v0.8.48
+   Compiling pin-project-internal v1.1.12
+   Compiling kasuari v0.4.12
+   Compiling zerovec v0.11.6
+   Compiling zerotrie v0.2.4
+   Compiling darling_macro v0.23.0
+   Compiling derive_more v2.1.1
+   Compiling darling v0.23.0
+   Compiling crossterm v0.29.0
+   Compiling serde_repr v0.1.20
+   Compiling pin-project v1.1.12
+   Compiling instability v0.3.12
+   Compiling tower-lsp-macros v0.9.0
+   Compiling clap_derive v4.6.1
+   Compiling tinystr v0.8.3
+   Compiling icu_locale_core v2.2.0
+   Compiling potential_utf v0.1.5
+   Compiling auto_impl v1.3.0
+   Compiling serde v1.0.228
+   Compiling icu_collections v2.2.0
+   Compiling strum v0.27.2
+   Compiling ratatui-core v0.1.0
+   Compiling chelis-deep v0.17.5 (/Users/vrk93/chelis-json-io-fix/crates/chelis-deep)
+   Compiling toml_datetime v0.6.11
+   Compiling serde_spanned v0.6.9
+   Compiling serde_urlencoded v0.7.1
+   Compiling toml_edit v0.22.27
+   Compiling bincode v1.3.3
+   Compiling schemars v0.8.22
+   Compiling assert-json-diff v2.0.2
+   Compiling chelis-shell v0.17.5 (/Users/vrk93/chelis-json-io-fix/crates/chelis-shell)
+   Compiling chelis-std-bundle v0.17.5 (/Users/vrk93/chelis-json-io-fix/crates/chelis-std-bundle)
+   Compiling icu_provider v2.2.0
+   Compiling icu_normalizer v2.2.0
+   Compiling icu_properties v2.2.0
+   Compiling axum-core v0.4.5
+   Compiling futures-executor v0.3.32
+   Compiling futures v0.3.32
+   Compiling tower v0.4.13
+   Compiling clap v4.6.1
+   Compiling ratatui-crossterm v0.1.0
+   Compiling ratatui-widgets v0.3.0
+   Compiling chelis-pred v0.17.5 (/Users/vrk93/chelis-json-io-fix/crates/chelis-pred)
+   Compiling chelis-macros v0.17.5 (/Users/vrk93/chelis-json-io-fix/crates/chelis-macros)
+   Compiling chelis-surf v0.17.5 (/Users/vrk93/chelis-json-io-fix/crates/chelis-surf)
+   Compiling idna_adapter v1.2.2
+   Compiling idna v1.1.0
+   Compiling url v2.5.8
+   Compiling tokio-util v0.7.18
+   Compiling tokio-rustls v0.24.1
+   Compiling tower v0.5.3
+   Compiling ratatui v0.30.0
+   Compiling deadpool v0.12.3
+   Compiling h2 v0.3.27
+   Compiling toml v0.8.23
+   Compiling h2 v0.4.14
+   Compiling lsp-types v0.94.1
+   Compiling half v2.7.1
+   Compiling chelis-types v0.17.5 (/Users/vrk93/chelis-json-io-fix/crates/chelis-types)
+   Compiling chelis-runtime v0.17.5 (/Users/vrk93/chelis-json-io-fix/crates/chelis-runtime)
+   Compiling chelis-validate v0.17.5 (/Users/vrk93/chelis-json-io-fix/crates/chelis-validate)
+   Compiling chelis-lint v0.17.5 (/Users/vrk93/chelis-json-io-fix/crates/chelis-lint)
+   Compiling hyper v0.14.32
+   Compiling hyper v1.9.0
+   Compiling hyper-util v0.1.20
+   Compiling axum v0.7.9
+   Compiling wiremock v0.6.5
+   Compiling chelis-ir v0.17.5 (/Users/vrk93/chelis-json-io-fix/crates/chelis-ir)
+   Compiling chelis-effects v0.17.5 (/Users/vrk93/chelis-json-io-fix/crates/chelis-effects)
+   Compiling hyper-rustls v0.24.2
+   Compiling reqwest v0.11.27
+   Compiling chelis-reef v0.17.5 (/Users/vrk93/chelis-json-io-fix/crates/chelis-reef)
+   Compiling chelisup v0.17.5 (/Users/vrk93/chelis-json-io-fix/crates/chelisup)
+   Compiling tower-lsp v0.20.0
+   Compiling chelis-backend-c v0.17.5 (/Users/vrk93/chelis-json-io-fix/crates/chelis-backend-c)
+   Compiling chelis-backend-hip v0.17.5 (/Users/vrk93/chelis-json-io-fix/crates/chelis-backend-hip)
+   Compiling chelis-backend-metal v0.17.5 (/Users/vrk93/chelis-json-io-fix/crates/chelis-backend-metal)
+   Compiling chelis-compiler-api v0.17.5 (/Users/vrk93/chelis-json-io-fix/crates/chelis-compiler-api)
+   Compiling chelis-prove v0.17.5 (/Users/vrk93/chelis-json-io-fix/crates/chelis-prove)
+   Compiling chelis-tide v0.17.5 (/Users/vrk93/chelis-json-io-fix/crates/chelis-tide)
+   Compiling chelis-cove v0.17.5 (/Users/vrk93/chelis-json-io-fix/crates/chelis-cove)
+   Compiling chelis-lsp v0.17.5 (/Users/vrk93/chelis-json-io-fix/crates/chelis-lsp)
+   Compiling chelis-cli v0.17.5 (/Users/vrk93/chelis-json-io-fix/crates/chelis-cli)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 11s
+────────────
+ Nextest run ID c242da62-48d7-4fc5-a319-ee344efba803 with nextest profile: default
+    Starting 1796 tests across 189 binaries (191 tests and 3 binaries skipped, including 5 tests and 3 binaries via profile.default.default-filter)
+        PASS [   0.839s] (   1/1796) chelis-cli::ad_host_list_combinators eval_grad_through_to_list_to_tensor_identity_returns_identity_cotangent
+        PASS [   0.839s] (   2/1796) chelis-cli::ad_host_list_combinators eval_grad_through_fold_uses_reverse_scan_cotangents
+        PASS [   0.840s] (   3/1796) chelis-cli::bareref_return_inference bare_arg_add_with_borrow_sig_concrete_precision_type_checks
+        PASS [   0.851s] (   4/1796) chelis-cli::ad_host_list_combinators eval_grad_through_filter_uses_primal_mask_as_constant
+        PASS [   0.851s] (   5/1796) chelis-cli::ad_host_list_combinators eval_vmap_of_grad_composed_with_map_matches_unbatched_gradients
+        PASS [   0.038s] (   6/1796) chelis-cli::bareref_return_inference bare_arg_borrow_body_with_owned_return_sig_errors
+        PASS [   0.040s] (   7/1796) chelis-cli::bareref_return_inference bare_arg_add_with_borrow_sig_polymorphic_precision_type_checks
+        PASS [   0.038s] (   8/1796) chelis-cli::bareref_return_inference bare_arg_owned_body_with_borrow_return_sig_errors
+        PASS [   0.891s] (   9/1796) chelis-cli::ad_host_list_combinators eval_scalar_black_scholes_f64_delta_can_be_read_as_rank0_greek
+        PASS [   0.895s] (  10/1796) chelis-cli::ad_host_list_combinators eval_nested_grad_named_black_scholes_f64_args_matches_analytic_gamma
+        PASS [   0.898s] (  11/1796) chelis-cli::ad_host_list_combinators eval_grad_through_to_list_map_black_scholes_matches_analytic_and_fd_delta
+        PASS [   0.898s] (  12/1796) chelis-cli::ad_host_list_combinators eval_nested_grad_through_to_list_map_black_scholes_matches_analytic_and_fd_gamma
+        PASS [   0.899s] (  13/1796) chelis-cli::ad_host_list_combinators eval_grad_through_to_list_map_black_scholes_f64_args_matches_analytic_delta
+        PASS [   0.048s] (  14/1796) chelis-cli::bareref_return_inference baseline_annotated_args_with_borrow_sig_still_type_checks
+        PASS [   0.903s] (  15/1796) chelis-cli::ad_host_list_combinators eval_vmap_grad_black_scholes_f64_args_matches_unbatched_deltas
+        PASS [   0.032s] (  16/1796) chelis-cli::bareref_return_inference baseline_bare_arg_matmul_with_borrow_sig_still_type_checks
+        PASS [   0.059s] (  17/1796) chelis-cli::blas_surf_precision_adversarial surf_f32_matmul_helper_emits_no_blas_rejection
+        PASS [   0.047s] (  18/1796) chelis-cli::build_deep_audit_chain_canary s6_backward_compat_span_free_dp_emits_no_span_comments_on_host_path
+        PASS [   0.083s] (  19/1796) chelis-cli::borrow_checker_tensor_carrying_adts borrow_tensor_carrying_record_adt_is_accepted
+        PASS [   0.082s] (  20/1796) chelis-cli::borrow_checker_tensor_carrying_adts destructured_generic_adt_nontensor_field_borrow_is_rejected
+        PASS [   0.087s] (  21/1796) chelis-cli::borrow_checker_tensor_carrying_adts destructured_generic_adt_field_borrow_with_nested_adt
+        PASS [   0.100s] (  22/1796) chelis-cli::borrow_checker_tensor_carrying_adts borrow_nested_tensor_carrying_adt_is_accepted
+        PASS [   0.098s] (  23/1796) chelis-cli::borrow_checker_tensor_carrying_adts borrow_parametric_adt_at_tensor_arg_is_accepted
+        PASS [   0.091s] (  24/1796) chelis-cli::borrow_checker_tensor_carrying_adts borrow_tensorless_adt_is_still_rejected
+        PASS [   0.053s] (  25/1796) chelis-cli::build_deep_ingestion build_ch_with_deep_flag_routes_through_deep_path
+        PASS [   0.048s] (  26/1796) chelis-cli::build_deep_ingestion build_ch_without_deep_flag_takes_the_surf_path
+        PASS [   0.112s] (  27/1796) chelis-cli::borrow_checker_tensor_carrying_adts destructured_generic_adt_field_borrow_is_accepted
+        PASS [   0.172s] (  28/1796) chelis-cli::bareref_return_inference bare_arg_add_with_borrow_sig_typechecks_at_every_arithmetic_dtype
+        PASS [   0.029s] (  29/1796) chelis-cli::build_deep_ingestion build_deep_hip_target_emits_spans_in_cpp_and_kernel_strings
+        PASS [   0.026s] (  30/1796) chelis-cli::bundled_chelis_std_loader phaseA_item1_negative_parity_explicit_version_mismatch
+        PASS [   0.050s] (  31/1796) chelis-cli::build_deep_ingestion build_deep_audit_chain_is_recoverable_from_emitted_c
+        PASS [   0.014s] (  32/1796) chelis-cli::capacity_census_tripwire a_declared_stdlib_signature_enumerates_and_a_type_export_does_not
+        PASS [   0.018s] (  33/1796) chelis-cli::capacity_census_tripwire a_declaration_missing_from_every_attributed_bucket_fails
+        PASS [   0.042s] (  34/1796) chelis-cli::build_deep_ingestion build_span_free_deep_matches_surf_shape
+        PASS [   0.010s] (  35/1796) chelis-cli::capacity_census_tripwire a_new_stdlib_numeric_def_requires_semantic_registration
+        PASS [   0.047s] (  36/1796) chelis-cli::build_deep_ingestion build_dp_extension_auto_detects_deep_path
+        PASS [   0.011s] (  37/1796) chelis-cli::capacity_census_tripwire a_stdlib_registration_against_a_nonexistent_atom_fails
+        PASS [   0.013s] (  38/1796) chelis-cli::capacity_census_tripwire a_spliced_line_directive_is_caught_by_the_ban_itself
+        PASS [   0.056s] (  39/1796) chelis-cli::build_deep_ingestion build_replaces_a_read_only_stale_runtime_archive
+        PASS [   0.042s] (  40/1796) chelis-cli::capacity_census_tripwire a_declaration_free_root_is_still_reached
+        PASS [   0.008s] (  41/1796) chelis-cli::capacity_census_tripwire an_exported_stdlib_def_without_a_signature_fails_loudly
+        PASS [   0.012s] (  42/1796) chelis-cli::capacity_census_tripwire an_array_typedef_cannot_launder_a_float_carrier
+        PASS [   0.010s] (  43/1796) chelis-cli::capacity_census_tripwire an_unresolvable_array_typedef_is_rejected
+        PASS [   0.009s] (  44/1796) chelis-cli::capacity_census_tripwire angle_included_local_header_is_inside_the_context_guard
+        PASS [   0.075s] (  45/1796) chelis-cli::build_deep_ingestion build_dp_with_deep_flag_is_a_noop_relative_to_auto_detect
+        PASS [   0.008s] (  46/1796) chelis-cli::capacity_census_tripwire attribution_totality_survives_legal_macro_expansion
+        PASS [   0.008s] (  47/1796) chelis-cli::capacity_census_tripwire bare_int_export_is_numeric_op_and_requires_registration
+        PASS [   0.035s] (  48/1796) chelis-cli::capacity_census_tripwire a_typedef_alias_cannot_introduce_an_unknown_type_word
+        PASS [   0.009s] (  49/1796) chelis-cli::capacity_census_tripwire c_identity_is_stable_across_bool_preprocessor_spellings
+        PASS [   0.011s] (  50/1796) chelis-cli::capacity_census_tripwire c_identity_is_token_canonical_across_preprocessor_whitespace
+        PASS [   0.168s] (  51/1796) chelis-cli::build_deep_audit_chain_canary s6_oracle_audit_chain_resolves_span_to_latex_text
+        PASS [   0.008s] (  52/1796) chelis-cli::capacity_census_tripwire census_prim_lists_cover_every_prim_variant
+        PASS [   0.011s] (  53/1796) chelis-cli::capacity_census_tripwire conditional_macro_taint_across_include_closure_is_rejected
+        PASS [   0.011s] (  54/1796) chelis-cli::capacity_census_tripwire conditional_macro_taint_follows_angle_spelled_includes
+        PASS [   0.009s] (  55/1796) chelis-cli::capacity_census_tripwire conditional_public_abi_is_mechanically_rejected
+        PASS [   0.007s] (  56/1796) chelis-cli::capacity_census_tripwire exported_public_numeric_stdlib_def_is_enumerated
+        PASS [   0.009s] (  57/1796) chelis-cli::capacity_census_tripwire coverage_legs_cannot_claim_covered_without_live_oracles
+        PASS [   0.006s] (  58/1796) chelis-cli::capacity_census_tripwire frozen_grandfather_sets_are_consistent_and_disjoint
+        PASS [   0.008s] (  59/1796) chelis-cli::capacity_census_tripwire extern_data_declarations_are_inventoried_and_classified
+        PASS [   0.007s] (  60/1796) chelis-cli::capacity_census_tripwire function_pointer_typedef_cannot_launder_a_seam
+        PASS [   0.066s] (  61/1796) chelis-cli::capacity_census_tripwire a_published_header_in_a_subdirectory_is_reached_or_fails
+        PASS [   0.008s] (  62/1796) chelis-cli::capacity_census_tripwire integer_plumbing_exemptions_are_exact_and_closed
+        PASS [   0.010s] (  63/1796) chelis-cli::capacity_census_tripwire grandfather_citation_cannot_be_copied_onto_new_rows
+        PASS [   0.010s] (  64/1796) chelis-cli::capacity_census_tripwire line_directive_in_a_published_header_is_rejected
+        PASS [   0.119s] (  65/1796) chelis-cli::build_deep_ingestion build_deep_emitted_c_compiles_via_gcc
+        PASS [   0.010s] (  66/1796) chelis-cli::capacity_census_tripwire local_include_reads_both_spellings_and_nothing_else
+        PASS [   0.009s] (  67/1796) chelis-cli::capacity_census_tripwire maintainer_override_does_not_waive_numeric_semantic_registration
+        PASS [   0.008s] (  68/1796) chelis-cli::capacity_census_tripwire maintainer_override_without_issue_ref_fails
+        PASS [   0.011s] (  69/1796) chelis-cli::capacity_census_tripwire maintainer_override_is_the_human_exception
+        PASS [   0.007s] (  70/1796) chelis-cli::capacity_census_tripwire malformed_maintainer_overrides_fail_and_the_exact_form_passes
+        PASS [   0.009s] (  71/1796) chelis-cli::capacity_census_tripwire matched_row_float_carrier_metadata_change_fails
+        PASS [   0.008s] (  72/1796) chelis-cli::capacity_census_tripwire matched_row_raw_dtype_metadata_change_fails
+        PASS [   0.008s] (  73/1796) chelis-cli::capacity_census_tripwire new_and_removed_rows_fail
+        PASS [   0.009s] (  74/1796) chelis-cli::capacity_census_tripwire new_flagged_seam_cannot_be_cited_with_an_issue
+        PASS [   0.013s] (  75/1796) chelis-cli::capacity_census_tripwire matched_row_typedef_int64_to_double_metadata_change_fails
+        PASS [   0.007s] (  76/1796) chelis-cli::capacity_census_tripwire operation_atom_cross_reference_is_not_a_normative_definition
+        PASS [   0.011s] (  77/1796) chelis-cli::capacity_census_tripwire nonexistent_operation_atom_is_not_a_numeric_registration
+        PASS [   0.006s] (  78/1796) chelis-cli::capacity_census_tripwire planted_dtype_int_export_is_flagged
+        PASS [   0.011s] (  79/1796) chelis-cli::capacity_census_tripwire plain_baseline_citation_cannot_be_copied_onto_a_new_row
+        PASS [   0.009s] (  80/1796) chelis-cli::capacity_census_tripwire planted_deftype_with_f64_variant_is_detected
+        PASS [   0.006s] (  81/1796) chelis-cli::capacity_census_tripwire planted_static_inline_carries_no_abi_row
+        PASS [   0.007s] (  82/1796) chelis-cli::capacity_census_tripwire planted_struct_layout_is_inventoried
+        PASS [   0.095s] (  83/1796) chelis-cli::capacity_census_tripwire a_published_header_reachable_from_no_root_fails
+        PASS [   0.009s] (  84/1796) chelis-cli::capacity_census_tripwire planted_multiline_and_float_carrier
+        PASS [   0.006s] (  85/1796) chelis-cli::capacity_census_tripwire registered_numeric_callable_still_requires_issue_reference
+        PASS [   0.098s] (  86/1796) chelis-cli::capacity_census_tripwire a_reserved_shaped_declarator_name_is_rejected
+        PASS [   0.007s] (  87/1796) chelis-cli::capacity_census_tripwire prose_citation_without_issue_ref_fails
+        PASS [   0.008s] (  88/1796) chelis-cli::capacity_census_tripwire reviewer_runtime_numeric_op_requires_semantic_registration
+        PASS [   0.045s] (  89/1796) chelis-cli::capacity_census_tripwire known_c_type_words_still_classify_without_rejection
+        PASS [   0.006s] (  90/1796) chelis-cli::capacity_census_tripwire std_adt_identity_changes_when_same_dtype_variant_changes
+        PASS [   0.007s] (  91/1796) chelis-cli::capacity_census_tripwire std_adt_bare_f64_variant_has_no_issue_citation_path
+        PASS [   0.014s] (  92/1796) chelis-cli::capacity_census_tripwire reviewer_grandfathered_identity_relocation_must_fail
+        PASS [   0.011s] (  93/1796) chelis-cli::capacity_census_tripwire reviewer_typedef_capacity_seam_is_visible
+        PASS [   0.009s] (  94/1796) chelis-cli::capacity_census_tripwire std_adt_integer_carrier_is_numeric_op_not_a_seam
+        PASS [   0.008s] (  95/1796) chelis-cli::capacity_census_tripwire todo_citation_fails_with_teaching_message
+        PASS [   0.006s] (  96/1796) chelis-cli::capacity_census_tripwire unflagged_row_with_issue_citation_passes
+        PASS [   0.007s] (  97/1796) chelis-cli::capacity_census_tripwire unrelated_observation_atom_is_not_a_numeric_registration
+        PASS [   0.010s] (  98/1796) chelis-cli::capacity_census_tripwire unresolvable_parenthesized_typedef_is_rejected
+        PASS [   0.009s] (  99/1796) chelis-cli::cbackend_cast_arithmetic_composition runtime_archive_materialization_is_safe_within_one_process
+        PASS [   0.038s] ( 100/1796) chelis-cli::capacity_census_tripwire reviewer_preprocessor_capacity_seam_is_visible
+        PASS [   0.060s] ( 101/1796) chelis-cli::capacity_census_tripwire shared_header_cannot_have_multiple_public_macro_contexts
+        PASS [   0.155s] ( 102/1796) chelis-cli::capacity_census_tripwire an_unknown_c_type_word_is_rejected_rather_than_classified_empty
+        PASS [   0.348s] ( 103/1796) chelis-cli::cbackend_empty_tensor_numel cbackend_numel_empty_tensor_matches_eval
+        PASS [   0.765s] ( 104/1796) chelis-cli::cbackend_cast_arithmetic_composition cbackend_add_of_two_casts_f64_from_f32
+        FAIL [   0.927s] ( 105/1796) chelis-cli::capacity_census_tripwire capacity_census_matches_public_surface
+  stdout ───
+
+    running 1 test
+    test capacity_census_matches_public_surface ... FAILED
+
+    failures:
+
+    failures:
+        capacity_census_matches_public_surface
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 64 filtered out; finished in 0.92s
+
+  stderr ───
+
+    thread 'capacity_census_matches_public_surface' (8869508) panicked at crates/chelis-cli/tests/capacity_census_tripwire.rs:2283:9:
+    capacity census violation (spec/design/dtype_semantics.md §C6 deliverable 1; AGENTS.md §Numeric Surface Discipline; chelis#729)
+    NEW surface not in the census: [header-export] chelis_runtime.h: chelis_tensor * chelis_pad_sequences_f64 ( const chelis_list * sequences , chelis_value pad_value ) ; (flags: [])
+    NEW surface not in the census: [header-export] chelis_runtime.h: chelis_tensor * chelis_pad_sequences_to_f64 ( const chelis_list * sequences , int64_t width , chelis_value pad_value ) ; (flags: ["numeric-op"])
+    NEW surface not in the census: [std-adt-numeric] io/json::JsonValue: () (variant {} JsonNull) (variant {} JsonBool (t-prim {} bool)) (variant {} JsonInt (t-prim {} int64)) (variant {} JsonFloat (t-prim {} f64)) (variant {} JsonString (t-prim {} string)) (variant {} JsonArray (t-adt {} List (t-adt {} JsonValue))) (variant {} JsonObject (t-adt {} Dict (t-prim {} string) (t-adt {} JsonValue))) (flags: ["float-carrier", "numeric-op"])
+    NEW surface not in the census: [std-def-numeric] io/json::json_float: (t-fn {} (t-adt {} Option (t-adt {} JsonValue)) (t-adt {} Option (t-prim {} f64))) (flags: ["float-carrier"])
+    NEW surface not in the census: [std-def-numeric] io/json::json_int: (t-fn {} (t-adt {} Option (t-adt {} JsonValue)) (t-adt {} Option (t-prim {} int64))) (flags: ["numeric-op"])
+    REMOVED surface still in the census: [std-adt-numeric] io/json::Json: () (variant {} JsonNull) (variant {} JsonBool (t-prim {} bool)) (variant {} JsonInt (t-prim {} int64)) (variant {} JsonFloat (t-prim {} f64)) (variant {} JsonString (t-prim {} string)) (variant {} JsonArray (t-adt {} List (t-adt {} Json))) (variant {} JsonObject (t-adt {} Dict (t-prim {} string) (t-adt {} Json)))
+    REMOVED surface still in the census: [std-def-numeric] io/json::json_float: (t-fn {} (t-adt {} Option (t-adt {} Json)) (t-adt {} Option (t-prim {} f64)))
+    REMOVED surface still in the census: [std-def-numeric] io/json::json_int: (t-fn {} (t-adt {} Option (t-adt {} Json)) (t-adt {} Option (t-prim {} int64)))
+
+    Sanctioned actions:
+    1. UNFLAGGED addition (no capacity shape): regenerate with CHELIS_CAPACITY_CENSUS_WRITE=1 cargo test -p chelis-cli --test capacity_census_tripwire, then replace the generated citation TODO with an OPEN chelis issue reference. A citation invented to pass this gate is the defect, not a fix.
+    2. FLAGGED capacity seam (float-carrier / raw-dtype-int): there is NO citation path - opening a fresh issue is not authorization. Redesign onto the tagged carrier, remove the surface, or obtain a maintainer-override(<reason>, chelis#N) citation, which only a human reviewer adds (the baseline file is review-routed).
+    3. NEW numeric-op callable: cite its chelis#N issue, author one exact [05-OP-N] atom in spec/05, and add its exact `SemanticRegistration` mapping in this file. An unrelated or nonexistent atom is not authority.
+    4. A removed row is an ABI removal: 0.19 payload by default per remediation_roadmap.md anti-churn invariant 7.
+    This test and spec/design/capacity_census.json are guard artifacts; editing either to make a change pass is never the fix.
+
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  Cancelling due to test failure: 10 tests still running
+        PASS [   0.860s] ( 106/1796) chelis-cli::cbackend_cast_memcpy cbackend_cast_tensor_f64_to_f32
+        PASS [   1.003s] ( 107/1796) chelis-cli::cbackend_cast_arithmetic_composition cbackend_mul_cast_with_native_f64
+        PASS [   0.715s] ( 108/1796) chelis-cli::cbackend_print_tensor_f64 cbackend_print_tensor_f32_control
+        PASS [   1.272s] ( 109/1796) chelis-cli::cbackend_cast_arithmetic_composition cbackend_cast_after_add_widens_to_f64
+        PASS [   1.343s] ( 110/1796) chelis-cli::cbackend_cast_memcpy cbackend_cast_tensor_int32_to_f32
+        PASS [   1.516s] ( 111/1796) chelis-cli::cbackend_cast_arithmetic_composition cbackend_add_of_two_casts_f64_from_int32
+        PASS [   1.625s] ( 112/1796) chelis-cli::cbackend_cast_memcpy cbackend_cast_tensor_f32_to_f64
+        PASS [   1.751s] ( 113/1796) chelis-cli::cbackend_cast_arithmetic_composition cbackend_mul_of_two_casts_f64_from_f32
+        PASS [   1.858s] ( 114/1796) chelis-cli::cbackend_cast_memcpy cbackend_cast_tensor_f32_to_int32
+        PASS [   1.232s] ( 115/1796) chelis-cli::cbackend_print_tensor_f64 cbackend_print_tensor_f64
+────────────
+     Summary [   3.133s] 115/1796 tests run: 114 passed, 1 failed, 191 skipped
+        FAIL [   0.927s] ( 105/1796) chelis-cli::capacity_census_tripwire capacity_census_matches_public_surface
+warning: 1681/1796 tests were not run due to test failure (run with --no-fail-fast to run all tests, or run with --max-fail)
+error: test run failed
+gate: command failed with exit 100: cargo nextest run -p chelis-cli
