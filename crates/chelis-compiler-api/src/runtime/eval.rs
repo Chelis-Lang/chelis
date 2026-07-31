@@ -770,7 +770,7 @@ impl<'a> EvalContext<'a> {
         }
     }
 
-    fn apply_resolved_callable(
+    pub(super) fn apply_resolved_callable(
         &mut self,
         callable: RuntimeValue,
         args: Vec<RuntimeValue>,

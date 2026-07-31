@@ -478,3 +478,170 @@ module_prefix = "Mylib"
         serde_json::json!({"shape": [], "data": [7.0]})
     );
 }
+
+/// Host-arrow-root surfacing, case (a) — POSITIVE.
+///
+/// The arrow form `def n -> int32 = <host expr>` desugars to a nullary
+/// thunk `(def n (fn () body))`. The host runtime's eager value-binding
+/// order skips it (it looks like a function), so before the surfacing
+/// pass a host-lane arrow root was dropped entirely: `--json` reported
+/// `{"roots":[]}` for it. This is the arrow-form counterpart to the
+/// chelis#423 colon-form drop above.
+///
+/// The body here (`add(20, 22)`) is a PURE host-lane call, so the
+/// effect-free guard admits it and the pass applies the thunk and
+/// surfaces `42`.
+#[test]
+fn cmd_eval_host_arrow_pure_root_surfaces_applied_value() {
+    let (_dir, root) = path_dep_package();
+    let entry_path = root.join("src/arrowpure.ch");
+    let snippet = "module App.ArrowPure\n\
+                   import Mylib.Math (add)\n\n\
+                   def priced -> int32 = add(20, 22)\n";
+    write_file(&entry_path, snippet);
+
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["eval", "--file", entry_path.to_str().unwrap(), "--json"])
+        .output()
+        .expect("run chelis eval");
+    assert!(
+        output.status.success(),
+        "exit status: {:?} stderr={}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    let parsed: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("eval --json must emit valid JSON, got {stdout:?}: {e}"));
+    let roots = parsed["roots"].as_array().expect("roots array");
+    let priced = roots.iter().find_map(|r| {
+        (r["name"].as_str() == Some("priced")).then(|| r["value"]["value"].as_i64())?
+    });
+    assert_eq!(
+        priced,
+        Some(42),
+        "a PURE host-lane arrow-form root must surface its applied value, \
+         not be silently dropped; got roots: {roots:?}"
+    );
+}
+
+/// Host-arrow-root surfacing, case (b) — NEGATIVE (the effect-free guard).
+///
+/// The surfacing pass APPLIES a nullary host thunk to compute its display
+/// value. If the body carries an effect (here `debug`, which is `Io`),
+/// applying it at display time would RUN that effect — 1x where the host
+/// runtime otherwise runs it 0x. The effect-free guard keeps any
+/// effect-carrying root UNsurfaced, so the effect must NOT fire and the
+/// root must NOT appear. This is the negative-parity partner of the pure
+/// case above: the pass adds a value only when doing so is side-effect
+/// free.
+#[test]
+fn cmd_eval_host_arrow_effectful_root_stays_unsurfaced_and_effect_does_not_run() {
+    let (_dir, root) = path_dep_package();
+    let entry_path = root.join("src/arroweff.ch");
+    // `SENTINEL_QF017` is the rendered `debug` argument; if the effect ran
+    // it would land in the transcript (stdout) and/or the surfaced value.
+    let snippet = "module App.ArrowEff\n\n\
+                   def logged -> string = debug(\"SENTINEL_QF017\")\n";
+    write_file(&entry_path, snippet);
+
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["eval", "--file", entry_path.to_str().unwrap(), "--json"])
+        .output()
+        .expect("run chelis eval");
+    assert!(
+        output.status.success(),
+        "exit status: {:?} stderr={}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("eval --json must emit valid JSON, got {stdout:?}: {e}"));
+    let roots = parsed["roots"].as_array().expect("roots array");
+    assert!(
+        !roots.iter().any(|r| r["name"].as_str() == Some("logged")),
+        "an EFFECTFUL host-lane arrow-form root must NOT be surfaced \
+         (applying it would run its effect at display time); got roots: {roots:?}"
+    );
+    assert!(
+        !stdout.contains("SENTINEL_QF017"),
+        "the effect of an unsurfaced host-arrow root must not run (0x): \
+         the debug sentinel leaked into stdout: {stdout:?}"
+    );
+    assert!(
+        !stderr.contains("SENTINEL_QF017"),
+        "the effect of an unsurfaced host-arrow root must not run (0x): \
+         the debug sentinel leaked into stderr: {stderr}"
+    );
+}
+
+/// Host-arrow-root surfacing, case (c) — CONSUMED pure root, applied once.
+///
+/// When a pure host-arrow root is also CONSUMED (something calls `name()`),
+/// resolving that call binds the root's closure in the runtime frame. The
+/// surfacing pass then SKIPS it (the existing binding already satisfies
+/// `lookup_runtime_value_for_root`), so the thunk is not applied a second
+/// time — there is no wasted recompute and, for an effectful body, no
+/// double-run (that path is additionally covered by the guard in case (b)).
+///
+/// A pure re-application would be behaviorally invisible (deterministic,
+/// and the existing binding wins the lookup regardless), so this locks the
+/// observable contract: the consumer evaluates correctly exactly once
+/// (`base() + 100 == 142`) and the consumed root surfaces via its existing
+/// binding rather than a re-applied value (it displays as a closure — the
+/// documented consumed-root shape).
+#[test]
+fn cmd_eval_host_arrow_consumed_pure_root_is_not_double_applied() {
+    let (_dir, root) = path_dep_package();
+    let entry_path = root.join("src/arrowconsumed.ch");
+    let snippet = "module App.ArrowConsumed\n\
+                   import Mylib.Math (add)\n\n\
+                   def base -> int32 = add(20, 22)\n\
+                   consumer: int32 = base() + cast(100, int32)\n";
+    write_file(&entry_path, snippet);
+
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["eval", "--file", entry_path.to_str().unwrap(), "--json"])
+        .output()
+        .expect("run chelis eval");
+    assert!(
+        output.status.success(),
+        "exit status: {:?} stderr={}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    let parsed: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("eval --json must emit valid JSON, got {stdout:?}: {e}"));
+    let roots = parsed["roots"].as_array().expect("roots array");
+    let consumer = roots.iter().find_map(|r| {
+        (r["name"].as_str() == Some("consumer")).then(|| r["value"]["value"].as_i64())?
+    });
+    assert_eq!(
+        consumer,
+        Some(142),
+        "the consumer of a host-arrow root must evaluate it once and correctly \
+         (42 + 100); got roots: {roots:?}"
+    );
+    // The consumed root still surfaces, but via its existing closure
+    // binding (the pass deferred to it rather than re-applying the thunk).
+    let base = roots.iter().find(|r| r["name"].as_str() == Some("base"));
+    assert!(
+        base.is_some(),
+        "the consumed root `base` must still surface; got roots: {roots:?}"
+    );
+    assert_eq!(
+        base.and_then(|r| r["value"]["value"].as_str()),
+        Some("<closure>"),
+        "a consumed host-arrow root surfaces via its existing closure binding, \
+         not a re-applied value (fix #3 skip); got roots: {roots:?}"
+    );
+}
