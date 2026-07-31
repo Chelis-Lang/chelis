@@ -171,3 +171,23 @@ def test_write_json_reads_back() -> unit ! { Test, IO } = {
     | None => fail("write_json output did not load back")
   }
 }
+-- to_string renders f64 via the Rust Debug formatter, which always emits a
+-- decimal point, so a whole-valued JsonFloat stays a float and round-trips as
+-- JsonFloat, never collapsing to JsonInt; this pins the int/float boundary the
+-- prelude JInt/JNum split (chelis#891) makes load-bearing.
+def test_to_json_whole_valued_float_keeps_its_point() -> unit ! { Test } = {
+  _ = assert_eq_string(to_json(JsonFloat(2.0f64)), "2.0", "a whole-valued float renders with a decimal point")
+  _ = assert_eq_string(to_json(JsonInt(cast(2, int64))), "2", "an int renders without a decimal point")
+  _ = match json_float(Some(parse_json("2.0"))) with {
+    | Some(x) => assert_true(eq(x, 2.0f64), "\"2.0\" parses back as a float")
+    | None => fail("\"2.0\" did not parse back as a float")
+  }
+  _ = match json_int(Some(parse_json("2.0"))) with {
+    | Some(_) => fail("a whole-valued float must not read back as an int")
+    | None => assert_true(true, "json_int refuses the whole-valued float")
+  }
+  match json_int(Some(parse_json("2"))) with {
+    | Some(n) => assert_eq_int(n, cast(2, int64), "\"2\" parses back as an exact int")
+    | None => fail("\"2\" did not parse back as an int")
+  }
+}
