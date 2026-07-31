@@ -91,7 +91,12 @@ fn ensure_runtime_static_lib(canonical: &Path) -> std::io::Result<()> {
     // exec-style tests in parallel; they all materialize the same
     // canonical path) do not race on a shared tmp filename and trip
     // ENOENT on rename when a peer renames it away first.
-    let tmp = canonical.with_extension(format!("a.tmp.{}", std::process::id()));
+    static NEXT_TEMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let tmp = canonical.with_extension(format!(
+        "a.tmp.{}.{}",
+        std::process::id(),
+        NEXT_TEMP.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
     fs::copy(&hashed, &tmp)?;
     match fs::rename(&tmp, canonical) {
         Ok(()) => Ok(()),

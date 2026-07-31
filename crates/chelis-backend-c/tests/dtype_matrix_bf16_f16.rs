@@ -74,7 +74,12 @@ fn ensure_runtime_static_lib(canonical: &Path) -> std::io::Result<()> {
     // race is harmless. Without the PID, two processes that interleave
     // `fs::copy` and `fs::rename` produce an ENOENT on the second
     // rename because the first rename moved the shared tmp away.
-    let tmp = canonical.with_extension(format!("a.tmp.{}", std::process::id()));
+    static NEXT_TEMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let tmp = canonical.with_extension(format!(
+        "a.tmp.{}.{}",
+        std::process::id(),
+        NEXT_TEMP.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
     fs::copy(&hashed, &tmp)?;
     // The rename can still race with another process renaming its own
     // unique tmp into the same canonical path. On POSIX, rename onto an
