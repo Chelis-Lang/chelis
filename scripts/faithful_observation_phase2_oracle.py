@@ -255,58 +255,12 @@ DECLARED_EXCLUSIONS: tuple[
             ("f32-max", "f32", "3.4028234663852886e38", "3.4028234663852886e38"),
         ),
     ),
-    (
-        "EVAL_F64_LIST_EXCLUDED",
-        "chelis#717 (eval's to_list narrows through the stale F32 tag)",
-        (
-            (
-                "eval_f64_list_excluded_rows_still_narrow_through_the_f32_tag",
-                (
-                    "f64-max",
-                    "f64-min-subnormal",
-                    "f64-min-normal",
-                    "f64-17-digit",
-                    "f64-2p53",
-                    "f64-2p53-plus-2",
-                    "f64-audit-e19",
-                ),
-            ),
-        ),
-        (
-            (
-                "f64-max",
-                "f64",
-                "cast(1.7976931348623157e308, f64)",
-                "1.7976931348623157e308",
-            ),
-            ("f64-min-subnormal", "f64", "cast(5e-324, f64)", "5e-324"),
-            (
-                "f64-min-normal",
-                "f64",
-                "cast(2.2250738585072014e-308, f64)",
-                "2.2250738585072014e-308",
-            ),
-            (
-                "f64-17-digit",
-                "f64",
-                "cast(0.30000000000000004, f64)",
-                "0.30000000000000004",
-            ),
-            ("f64-2p53", "f64", "cast(9007199254740992.0, f64)", "9007199254740992.0"),
-            (
-                "f64-2p53-plus-2",
-                "f64",
-                "cast(9007199254740994.0, f64)",
-                "9007199254740994.0",
-            ),
-            (
-                "f64-audit-e19",
-                "f64",
-                "cast(9.999999980506448e19, f64)",
-                "9.999999980506448e19",
-            ),
-        ),
-    ),
+    # 2026-07-31: the EVAL_F64_LIST_EXCLUDED entry is GONE -- PR #891's
+    # list_to_tensor_data retag repairs the chelis#717 to_list exit for
+    # ALL seven remaining labels (the harness's GOOD-NEWS probe fired on
+    # f64-max and the other six passed on direct re-run with the list
+    # emptied), so per B2.3 the exclusion shrank to nothing in the same
+    # change set. The main assertions now cover every f64 list row.
 )
 
 
@@ -436,6 +390,11 @@ PERMITTED_FORMAT_NARROWING_PATHS: frozenset[str] = frozenset(
 # formatter before extending either side.
 PERMITTED_RUST_FORMAT_NARROWING_PATHS: frozenset[str] = frozenset(
     {
+        # 2026-07-31 (PR #891): round_to's decimal-rounding MECHANISM
+        # (format at `places` precision + exact re-parse) -- an internal
+        # numeric algorithm, not an observation exit. Tripwire row
+        # annotated identically.
+        "crates/chelis-compiler-api/src/runtime/json.rs",
         "crates/chelis-backend-c/src/lib.rs",
         "crates/chelis-backend-hip/src/emit.rs",
         "crates/chelis-cli/src/main.rs",
@@ -462,6 +421,11 @@ PERMITTED_RUST_FORMAT_NARROWING_PATHS: frozenset[str] = frozenset(
 # carriers per faithful_observation.md §B2.4.
 PERMITTED_RUST_DEBUG_FORMAT_PATHS: frozenset[str] = frozenset(
     {
+        # 2026-07-31 (PR #891, chelis#997): runtime/json.rs joins the
+        # residue-carrier set -- Err(format!) parse/shape diagnostics over
+        # Json ADT fields, the same class as eval.rs/host_ops.rs; the
+        # sweep fix is chelis#997. Tripwire row annotated identically.
+        "crates/chelis-compiler-api/src/runtime/json.rs",
         "crates/chelis-types/src/observation.rs",
         "crates/chelis-runtime/src/format_shortest.rs",
         "crates/chelis-compiler-api/src/runtime/host_ops.rs",
@@ -1797,11 +1761,11 @@ def c_has_bare_giant_integer_literal(c_source: str) -> bool:
 def eval_exclusion_ground_truth_violations(
     texts: Sequence[str], rows: Sequence[tuple[str, str, str, str]]
 ) -> list[str]:
-    """The chelis#717 fingerprint, re-derived by the ORACLE from a
-    to_list render it produced itself: each excluded element's text must
-    parse to the F32-narrowing of the intended value (any other shape is
-    a different defect) and must NOT round-trip at f64 (when it does,
-    the repair landed and the exclusion must shrink). No probe output is
+    """The chelis#717 REPAIR ground truth (inverted 2026-07-31, PR #891),
+    re-derived by the ORACLE from a to_list render it produced itself:
+    each former-exclusion element's text must round-trip at f64 exactly.
+    The historical F32-narrowing shape is detected and named as a
+    regression; any other shape is a different defect. No probe output is
     trusted anywhere in this leg (PR #962 round-2 M1)."""
 
     violations: list[str] = []
@@ -1820,21 +1784,25 @@ def eval_exclusion_ground_truth_violations(
                 "different defect; file it per B2.5."
             )
             continue
-        if f32_bits(rendered) != f32_bits(value):
-            violations.append(
-                f"eval ground truth [{label}]: `{text}` is not the F32-tag "
-                "narrowing of the intended value - the declared chelis#717 "
-                "fingerprint no longer matches; file the new defect per B2.5 "
-                "before touching the exclusion."
-            )
-        elif f64_bits(rendered) == f64_bits(value):
-            violations.append(
-                f"eval ground truth [{label}]: the to_list render now "
-                "round-trips at f64 - the chelis#717/[#729] repair landed (or "
-                "the row went text-coincident). Remove the label from "
-                "EVAL_F64_LIST_EXCLUDED and DECLARED_EXCLUSIONS in one change "
-                "set."
-            )
+        # 2026-07-31 (PR #891): inverted from the F32-fingerprint check.
+        # The repair landed for every former exclusion row, so the
+        # oracle-owned re-execution now asserts the REPAIRED behavior:
+        # exact f64 round-trip. A reappearing F32 narrowing (or any other
+        # divergence) fails loudly with the regression named.
+        if f64_bits(rendered) != f64_bits(value):
+            if f32_bits(rendered) == f32_bits(value):
+                violations.append(
+                    f"eval ground truth [{label}]: `{text}` is the F32-tag "
+                    "narrowing of the intended value - the chelis#717 to_list "
+                    "defect REGRESSED after the PR #891 repair; do not "
+                    "re-exclude, fix the retag."
+                )
+            else:
+                violations.append(
+                    f"eval ground truth [{label}]: `{text}` does not "
+                    "round-trip at f64 and is not the historical F32 "
+                    "narrowing - a different defect; file it per B2.5."
+                )
     return violations
 
 
@@ -2065,13 +2033,51 @@ def run_exclusion_ground_truth(env: dict[str, str]) -> None:
     )
 
 
+# 2026-07-31 (PR #891): the former EVAL_F64_LIST_EXCLUDED rows, kept as the
+# oracle-owned REPAIR ground truth. The exclusion itself is gone -- #891's
+# list_to_tensor_data retag repairs the chelis#717 to_list exit for every
+# row -- so this leg now independently re-executes the same programs and
+# asserts the REPAIRED behavior: each element round-trips at f64 exactly.
+# A regression back to the F32 narrowing fails here AND in the harness's
+# main assertions (which now cover these rows continuously).
+EVAL_F64_REPAIRED_ROWS: tuple[tuple[str, str, str, str], ...] = (
+    (
+        "f64-max",
+        "f64",
+        "cast(1.7976931348623157e308, f64)",
+        "1.7976931348623157e308",
+    ),
+    ("f64-min-subnormal", "f64", "cast(5e-324, f64)", "5e-324"),
+    (
+        "f64-min-normal",
+        "f64",
+        "cast(2.2250738585072014e-308, f64)",
+        "2.2250738585072014e-308",
+    ),
+    (
+        "f64-17-digit",
+        "f64",
+        "cast(0.15110743269565682, f64)",
+        "0.15110743269565682",
+    ),
+    ("f64-2p53", "f64", "cast(9007199254740992.0, f64)", "9007199254740992.0"),
+    (
+        "f64-2p53-plus-2",
+        "f64",
+        "cast(9007199254740994.0, f64)",
+        "9007199254740994.0",
+    ),
+    ("f64-audit-e19", "f64", "cast(1.1e19, f64)", "1.1e19"),
+)
+
+
 def run_exclusion_ground_truth_into(violations: list[str], env: dict[str, str]) -> None:
     exclusions = {name: rows for name, _o, _p, rows in DECLARED_EXCLUSIONS}
 
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
 
-        eval_rows = exclusions["EVAL_F64_LIST_EXCLUDED"]
+        eval_rows = EVAL_F64_REPAIRED_ROWS
         elems = ", ".join(elem for _l, _d, elem, _v in eval_rows)
         program = (
             "module M.Main\n"
@@ -2080,7 +2086,7 @@ def run_exclusion_ground_truth_into(violations: list[str], env: dict[str, str]) 
         )
         source = tmp_path / "eval_ground_truth.ch"
         source.write_text(program, encoding="utf-8")
-        print("+ oracle-driven eval re-execution of EVAL_F64_LIST_EXCLUDED", flush=True)
+        print("+ oracle-driven eval re-execution of the repaired f64 to_list rows", flush=True)
         completed = run_chelis(("eval", "--file", str(source)), env)
         if completed.returncode != 0:
             violations.append(
