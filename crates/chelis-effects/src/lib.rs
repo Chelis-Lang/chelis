@@ -7,6 +7,8 @@ use chelis_types::types::{Effect, EffectSet};
 use chelis_types::{CheckedProgram, InferResult};
 use chelis_vocab::EffectKind;
 
+pub mod realizability;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EffectErrorKind {
     UnhandledEffect,
