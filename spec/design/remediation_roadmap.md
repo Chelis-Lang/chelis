@@ -286,8 +286,9 @@ flowchart TB
   style S732 fill:#FFFFFF,stroke:#C3CCD3
   style S729 fill:#FFFFFF,stroke:#C3CCD3
   %% linkStyle indices are 0-based over EVERY edge in declaration order, and a
-  %% chain (a --> b --> c) contributes one index per arrow. There are 32 edges
-  %% here (0-31). 21,22 are the two `-.-` either-order links; 13,14,15,16,28,31
+  %% chain (a --> b --> c) contributes one index per arrow. There are 33 edges
+  %% here (0-32; index 32 is the appended #730 P2->P4 phase edge, default
+  %% styling). 21,22 are the two `-.-` either-order links; 13,14,15,16,28,31
   %% are exactly the six `==>` HARD edges. Adding or removing any edge above
   %% renumbers everything after it - recount before editing these two lines.
   linkStyle default stroke-width:2.5px

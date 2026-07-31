@@ -651,8 +651,13 @@ Deliverables, with phase homes:
    is the authoritative covered-family oracle (regeneration: the same
    command with `CHELIS_CAPACITY_CENSUS_WRITE=1`). The liveness command
    is `.venv/bin/python scripts/capacity_census_liveness.py`; success is
-   exit 0 with final line `CAPACITY CENSUS LIVENESS: PASS`, run at
-   release cuts and red-team passes.
+   exit 0 with final line `CAPACITY CENSUS LIVENESS: PASS`. Execution
+   is CI-owned through [#730]'s §C7.5 channel (converged 2026-07-31,
+   superseding the earlier manual-only contract): the change-gated
+   blocking job runs it when the census or its citations change, and
+   the nightly full sweep re-runs it for standing-citation drift;
+   release cuts and red-team passes remain additional manual
+   invocations, not the only ones.
 
    `coverage_manifest()` in
    `crates/chelis-cli/tests/capacity_census_tripwire.rs` is the fixed
@@ -880,17 +885,29 @@ Deliverables, with phase homes:
      controls include an open issue, closed issue, missing issue, and
      open PR.
      The division of labour is deliberate and stated here so nobody
-     infers more from a green CI run than it proves: **CI checks
-     citation SHAPE only** - that a `chelis#N` reference is present, and
-     that a `maintainer-override(...)` marker is balanced with its issue
-     inside the parentheses - because the tripwire runs offline and
-     network access would make it flaky and unrunnable in a sandbox.
-     **Existence, kind, and open-state are the LIVENESS gate's job**, and
-     it is a manual gate: `.venv/bin/python
-     scripts/capacity_census_liveness.py`, run at release cuts and
-     red-team passes. A citation naming an issue that does not exist, or
-     one that names a PR, passes CI and fails liveness. That is the
-     designed boundary, not a gap (round-4 red team N8, recorded).
+     infers more from a green tripwire run than it proves: **the
+     tripwire checks citation SHAPE only** - that a `chelis#N`
+     reference is present, and that a `maintainer-override(...)` marker
+     is balanced with its issue inside the parentheses - because it
+     runs offline and network access would make it flaky and
+     unrunnable in a sandbox. **Existence, kind, and open-state are the
+     LIVENESS gate's job**: `.venv/bin/python
+     scripts/capacity_census_liveness.py`. As originally landed this
+     was a manual gate run at release cuts and red-team passes, with
+     the offline constraint as its rationale (round-4 red team N8,
+     recorded); **converged 2026-07-31 onto [#730]'s §C7.5 CI channel**,
+     which resolves the same offline/online split without leaving the
+     live half manual: the change-gated blocking `ci.yml` job (with
+     `issues: read`, failing CLOSED on tracker unavailability) runs the
+     liveness command pre-merge whenever the census or a citation
+     changes, and the nightly full sweep re-runs it so a cited issue
+     closing goes red within a day rather than at the next release
+     cut. A citation naming a missing issue or a PR now fails
+     pre-merge, not only at the next manual pass; the shape/liveness
+     boundary itself is unchanged. Scheduling and gating are [#730]
+     §C7.5's; this script, its pass line, and the census contract
+     remain this plan's (the same contents-vs-scheduling split as the
+     [#732] oracle interlock).
    - **Failure messages teach** the rule, the sanctioned actions, and
      the §C6 pointer. For a context-poor agent the error text is the
      only documentation that provably gets read; the cheapest passing

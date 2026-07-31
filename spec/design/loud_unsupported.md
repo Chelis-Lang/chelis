@@ -594,7 +594,7 @@ between the amended Phase 3 (row 26) and Phase 4 scope entry plus
 | # | site | substitutes | issue | status |
 |---|---|---|---|---|
 | 24 | the lowering/emission panic family: `emit_fused_elem`/`emit_fused_reduce` f32-hardcoded panics in `chelis-backend-c/src/emit.rs` plus ~150 production `panic!`/`unreachable!`/`todo!` across `chelis-ir` and the three backends, ~44 of them §C2 rejections wearing panics (row-two: panic, not substitution - the rows 11/12 class, uncensused growth) | - | [#919] (the fused pair) + [#957] (the family) | live (population measured 2026-07-30; the fused pair execution-confirmed per [#919]); backing tests land with the Phase 4 §C7.2 sweep |
-| 25 | `chelis-ir/src/host.rs:8207` einsum output precision `.unwrap_or(chelis_types::types::Prim::F32)` - path-qualified, so the `unwrap_or(Prim::` token misses it; in-scope for the class and absent from BASELINE | F32 precision | [#958] | live-suspect (liveness not execution-confirmed - the empty-operand path may be checker-guarded); §C1.4 raise-or-prove applies regardless; converted at Phase 4 |
+| 25 | `chelis-ir/src/host.rs` einsum output-precision inference: the `.unwrap_or(chelis_types::types::Prim::F32)` site (line 8634 as of 2026-07-31; the token is the durable anchor - #975 already moved it once) - path-qualified, so the `unwrap_or(Prim::` token misses it; in-scope for the class and absent from BASELINE | F32 precision | [#958] | live-suspect (liveness not execution-confirmed - the empty-operand path may be checker-guarded); §C1.4 raise-or-prove applies regardless; converted at Phase 4 |
 | 26 | the unbranded/mislabeled rejection inventory: kindless CLI `reject_*` gates (`main.rs:8137-8420`, incl. the `process_run` eval-only gate PR [#891] widens 1 -> 21), hand-typed `"unsupported: "` literals at `main.rs:7963/:7978/:8055`, ~23 free-literal `"unsupported_feature"` sites and the `format!("{:?}")` / substring-dispatch kind paths in compiler-api, and the two uncited `reduce_window` hints (gate row, the 17/18 precedent) | (gate/kind skew, not a value) | [#959] | live (read-confirmed 2026-07-30, instances executed in the PR sweep); resolved by the amended Phase 3 |
 | 27 | `chelis-python` raw-i32 dtype surface: `dtype: i32` struct fields, no decode-on-entry anywhere, string-gated dtype checks, hardcoded DLPack `code: 2, bits: 32`, 4 production `unwrap_or_default()` - the crate is outside every `UnwrapOr*` tripwire scope and the Phase 2 oracle's evidence set | dtype identity by convention | [#960] (requirement half; representation fix shape is [#893]'s - the runtime-representation tracker, corrected 2026-07-30 from the earlier [#909] misassignment) | live ([#900] is the executed value-corrupting instance); scope entry + §C6.2 row at Phase 4; FFI/representation redesign at [#893] |
 
@@ -1326,7 +1326,14 @@ both halves:
    the §C2.1/§C7 exclusion live validation: added or modified issue-
    manifest rows AND added or modified canonical-exclusion rows are
    resolved through the same validator against the tracker (exists,
-   is an issue rather than a PR, is open) before merge. An exclusion
+   is an issue rather than a PR, is open) before merge. It also runs
+   the sibling [#729] §C6 census-liveness command
+   (`scripts/capacity_census_liveness.py`) when the capacity census or
+   its citations change - converged 2026-07-31 from that plan's
+   original manual-only gate; the script, pass line, and census
+   contract remain [#729]'s, the scheduling and gating are this
+   section's (the [#732] oracle split), and the census artifacts join
+   this filter. An exclusion
    row cannot bypass the check by citing a standing manifest entry:
    the changed exclusion's `IssueRef` is re-queried too. **The live
    check's operational consequences, named rather than implied:** the
@@ -1358,7 +1365,9 @@ both halves:
    §I2), and the Phase 4 oracle, with full standing re-validation of
    both the issue manifest and every `Deferred` exclusion's
    `IssueRef` (`Structural` rows carry no issue and are outside the
-   liveness sweep by design),
+   liveness sweep by design), plus the [#729] §C6 census-liveness
+   sweep (`scripts/capacity_census_liveness.py`, converged here
+   2026-07-31 so a cited census issue closing goes red within a day),
    plus the open/close tracking-issue
    report pattern the repo's other nightlies use (the `heavy-e2e`
    precedent - "scheduled-run failures do not show a red status on
