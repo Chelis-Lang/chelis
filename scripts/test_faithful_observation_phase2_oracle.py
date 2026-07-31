@@ -32,7 +32,6 @@ const EVAL_F64_LIST_EXCLUDED: &[&str] = &[
     "f64-max",
     "f64-min-subnormal",
     "f64-min-normal",
-    "f64-tenth",
     "f64-17-digit",
     "f64-2p53",
     "f64-2p53-plus-2",
@@ -442,11 +441,21 @@ class DeadExportTests(unittest.TestCase):
 
 
 class FormatNarrowingTests(unittest.TestCase):
+    def _tripwire(self) -> str:
+        return (oracle.REPO_ROOT / oracle.TRIPWIRE_SOURCE).read_text(encoding="utf-8")
+
     def test_the_shipped_production_allowlist_is_empty(self) -> None:
-        source = (oracle.REPO_ROOT / oracle.TRIPWIRE_SOURCE).read_text(encoding="utf-8")
+        source = self._tripwire()
         rows = oracle.format_narrowing_allowlist(source)
         self.assertTrue(rows, "the cfg(test) fixture row must still be parsed")
         self.assertEqual(oracle.format_narrowing_violations(source), [])
+
+    def test_every_declared_class_parses_baseline_rows(self) -> None:
+        """A silently-empty parse for a class would vacuously pass it."""
+        source = self._tripwire()
+        for variant, class_id, _permitted in oracle.FORMAT_CLASS_TABLE:
+            rows = oracle.format_narrowing_allowlist(source, variant)
+            self.assertTrue(rows, f"{class_id} ({variant}) parsed no baseline rows")
 
     def test_a_returning_production_row_is_a_violation(self) -> None:
         source = (
@@ -459,6 +468,645 @@ class FormatNarrowingTests(unittest.TestCase):
         )
         violations = oracle.format_narrowing_violations(source)
         self.assertTrue(any("third formatter" in v for v in violations), violations)
+
+    def test_an_unpermitted_rust_class_row_is_a_violation_per_class(self) -> None:
+        for variant, class_id in (
+            ("RustFormatNarrowing", "rust-format-narrowing"),
+            ("RustDebugNumericFormat", "rust-debug-numeric-format"),
+        ):
+            source = (
+                "(\n"
+                f"    Pat::{variant},\n"
+                '    "crates/chelis-backend-c/src/host_emit.rs",\n'
+                "    1,\n"
+                '    "planted",\n'
+                "),\n"
+            )
+            violations = oracle.format_narrowing_violations(source)
+            self.assertTrue(
+                any(class_id in v and "host_emit.rs" in v for v in violations),
+                (class_id, violations),
+            )
+
+    def test_a_permitted_row_growing_is_the_tripwires_business_not_ours(self) -> None:
+        """The oracle guards PATHS; counts are the tripwire's exact-count
+        ratchet. A permitted path at any count is not an oracle violation."""
+        source = (
+            "(\n"
+            "    Pat::RustDebugNumericFormat,\n"
+            '    "crates/chelis-types/src/observation.rs",\n'
+            "    999,\n"
+            '    "grown",\n'
+            "),\n"
+        )
+        self.assertEqual(oracle.format_narrowing_violations(source), [])
+
+
+class DocCitationParityTests(unittest.TestCase):
+    def _tripwire(self) -> str:
+        return (oracle.REPO_ROOT / oracle.TRIPWIRE_SOURCE).read_text(encoding="utf-8")
+
+    def test_the_shipped_tripwire_has_citation_parity(self) -> None:
+        self.assertEqual(oracle.doc_citation_violations(self._tripwire()), [])
+
+    def test_the_shipped_doc_fn_parses_non_trivially(self) -> None:
+        arms = oracle.tripwire_doc_arms(self._tripwire())
+        self.assertIsNotNone(arms)
+        assert arms is not None
+        cited = {
+            name
+            for names, citation in arms
+            if "faithful_observation.md" in citation
+            for name in names
+        }
+        self.assertEqual(
+            cited, {variant for variant, _, _ in oracle.FORMAT_CLASS_TABLE}
+        )
+
+    def test_a_hosted_detector_without_a_coverage_row_is_a_violation(self) -> None:
+        source = self._tripwire().replace(
+            '_ => "spec/design/loud_unsupported.md B2.5",',
+            'Pat::SneakyFormatter => "spec/design/faithful_observation.md B2.4",\n'
+            '            _ => "spec/design/loud_unsupported.md B2.5",',
+            1,
+        )
+        violations = oracle.doc_citation_violations(source)
+        self.assertTrue(
+            any("SneakyFormatter" in v and "cannot see" in v for v in violations),
+            violations,
+        )
+
+    def test_a_stale_coverage_row_is_a_violation(self) -> None:
+        source = self._tripwire().replace(
+            "Pat::CFormatNarrowing | Pat::RustFormatNarrowing | "
+            "Pat::RustDebugNumericFormat => {",
+            "Pat::CFormatNarrowing | Pat::RustFormatNarrowing => {",
+            1,
+        )
+        violations = oracle.doc_citation_violations(source)
+        self.assertTrue(
+            any("RustDebugNumericFormat" in v for v in violations), violations
+        )
+
+    def test_an_unparseable_doc_fn_is_reported_not_vacuous(self) -> None:
+        violations = oracle.doc_citation_violations("fn unrelated() {}\n")
+        self.assertTrue(
+            any("could not be located" in v for v in violations), violations
+        )
+
+
+class ExclusionProbeTests(unittest.TestCase):
+    def _harness(self) -> str:
+        return (oracle.REPO_ROOT / oracle.HARNESS_SOURCE).read_text(encoding="utf-8")
+
+    def test_the_shipped_probes_satisfy_all_legs(self) -> None:
+        self.assertEqual(oracle.exclusion_probe_violations(self._harness()), [])
+
+    def test_every_exclusion_declares_at_least_one_probe(self) -> None:
+        for const_name, _owner, probes, _labels in oracle.DECLARED_EXCLUSIONS:
+            self.assertTrue(probes, f"{const_name} has no re-execution probe")
+
+    def test_a_deleted_probe_is_a_violation(self) -> None:
+        source = self._harness().replace(
+            "fn eval_f64_list_excluded_rows_still_narrow_through_the_f32_tag(",
+            "fn renamed_probe(",
+        )
+        violations = oracle.exclusion_probe_violations(source)
+        self.assertTrue(
+            any("not defined" in v and "EVAL_F64_LIST_EXCLUDED" in v for v in violations),
+            violations,
+        )
+
+    def test_an_ignored_probe_is_a_disabled_leg_violation(self) -> None:
+        source = self._harness().replace(
+            "#[test]\nfn c_lane_excluded_neg_zero_still_drops_the_sign() {",
+            '#[test]\n#[ignore = "silenced"]\n'
+            "fn c_lane_excluded_neg_zero_still_drops_the_sign() {",
+            1,
+        )
+        violations = oracle.exclusion_probe_violations(source)
+        self.assertTrue(
+            any("disabled re-execution leg" in v for v in violations), violations
+        )
+
+    def test_a_probe_dropping_the_const_reference_is_a_violation(self) -> None:
+        body = oracle.test_fn_body(
+            self._harness(),
+            "eval_f64_list_excluded_rows_still_narrow_through_the_f32_tag",
+        )
+        assert body is not None
+        source = self._harness().replace(
+            body, body.replace("EVAL_F64_LIST_EXCLUDED", "LOCAL_LABELS")
+        )
+        violations = oracle.exclusion_probe_violations(source)
+        self.assertTrue(
+            any("no longer references the list constant" in v for v in violations),
+            violations,
+        )
+
+    def test_a_probe_dropping_the_shrink_protocol_is_a_violation(self) -> None:
+        body = oracle.test_fn_body(
+            self._harness(), "c_lane_excluded_labels_still_fail_at_ingress"
+        )
+        assert body is not None
+        source = self._harness().replace(
+            body, body.replace("DECLARED_EXCLUSIONS", "SOME_LEDGER")
+        )
+        violations = oracle.exclusion_probe_violations(source)
+        self.assertTrue(
+            any("shrink-protocol" in v for v in violations), violations
+        )
+
+
+class ProbeAttributeTests(unittest.TestCase):
+    def _harness(self) -> str:
+        return (oracle.REPO_ROOT / oracle.HARNESS_SOURCE).read_text(encoding="utf-8")
+
+    def test_the_shipped_probes_are_unconditional_tests(self) -> None:
+        self.assertEqual(oracle.probe_attribute_violations(self._harness()), [])
+        for _const, _owner, probes, _rows in oracle.DECLARED_EXCLUSIONS:
+            for probe, _expected in probes:
+                self.assertEqual(
+                    oracle.probe_attributes(self._harness(), probe), ["#[test]"]
+                )
+
+    def test_a_cfg_attr_ignore_is_a_violation(self) -> None:
+        source = self._harness().replace(
+            "#[test]\nfn c_lane_excluded_neg_zero_still_drops_the_sign() {",
+            "#[test]\n#[cfg_attr(all(), ignore)]\n"
+            "fn c_lane_excluded_neg_zero_still_drops_the_sign() {",
+            1,
+        )
+        violations = oracle.probe_attribute_violations(source)
+        self.assertTrue(
+            any("cfg_attr" in v or "exactly the" in v for v in violations), violations
+        )
+
+    def test_a_missing_test_attribute_is_a_violation(self) -> None:
+        source = self._harness().replace(
+            "#[test]\nfn eval_f64_list_excluded_rows_still_narrow_through_the_f32_tag() {",
+            "fn eval_f64_list_excluded_rows_still_narrow_through_the_f32_tag() {",
+            1,
+        )
+        violations = oracle.probe_attribute_violations(source)
+        self.assertTrue(
+            any(
+                "eval_f64_list_excluded_rows_still_narrow_through_the_f32_tag" in v
+                for v in violations
+            ),
+            violations,
+        )
+
+    def test_a_multi_line_attribute_fails_closed(self) -> None:
+        source = self._harness().replace(
+            "#[test]\nfn c_lane_excluded_labels_still_fail_at_ingress() {",
+            "#[test]\n#[cfg_attr(\n    all(),\n    ignore\n)]\n"
+            "fn c_lane_excluded_labels_still_fail_at_ingress() {",
+            1,
+        )
+        violations = oracle.probe_attribute_violations(source)
+        self.assertTrue(
+            any("c_lane_excluded_labels_still_fail_at_ingress" in v for v in violations),
+            "an attribute shape the parser cannot vouch for must be a "
+            f"violation, never a pass; got {violations}",
+        )
+
+
+class ProbeReceiptTests(unittest.TestCase):
+    def test_receipt_lines_parse_into_ordered_lists(self) -> None:
+        output = (
+            "running 1 test\n"
+            "exclusion probe C_LANE_EXCLUDED visited: f64-max f32-max\n"
+            "exclusion probe C_LANE_EXCLUDED visited: f64-neg-zero\n"
+            "ok\n"
+        )
+        self.assertEqual(
+            oracle.probe_receipts(output),
+            {"C_LANE_EXCLUDED": ["f64-max", "f32-max", "f64-neg-zero"]},
+        )
+
+    def test_exact_ordered_receipts_pass(self) -> None:
+        runs = [
+            ("trio", ("a", "b"), 0, "running 1 test\nexclusion probe C visited: a b\nok"),
+            ("solo", ("c",), 0, "running 1 test\nexclusion probe C visited: c\nok"),
+        ]
+        self.assertEqual(oracle.classify_probe_outputs("C", runs), [])
+
+    def test_a_shrunken_receipt_is_a_violation(self) -> None:
+        runs = [("trio", ("a", "b"), 0, "running 1 test\nexclusion probe C visited: a\nok")]
+        violations = oracle.classify_probe_outputs("C", runs)
+        self.assertTrue(
+            any("ordered receipt" in v for v in violations),
+            f"a probe that stops iterating the ledger must fail; got {violations}",
+        )
+
+    def test_a_duplicated_receipt_is_a_violation(self) -> None:
+        """PR #962 round-2 M1: the set-union form accepted `a a b b` for
+        the declaration ["a", "b"]. Multiplicity now fails."""
+        runs = [
+            ("trio", ("a", "b"), 0, "running 1 test\nexclusion probe C visited: a a b b\nok")
+        ]
+        violations = oracle.classify_probe_outputs("C", runs)
+        self.assertTrue(any("ordered receipt" in v for v in violations), violations)
+
+    def test_a_reordered_receipt_is_a_violation(self) -> None:
+        runs = [
+            ("trio", ("a", "b"), 0, "running 1 test\nexclusion probe C visited: b a\nok")
+        ]
+        violations = oracle.classify_probe_outputs("C", runs)
+        self.assertTrue(any("ordered receipt" in v for v in violations), violations)
+
+    def test_a_failing_probe_is_reported_with_its_output(self) -> None:
+        runs = [("trio", ("a",), 101, "running 1 test\nGOOD NEWS: ...\nFAILED")]
+        violations = oracle.classify_probe_outputs("C", runs)
+        self.assertTrue(any("FAILED (exit 101)" in v for v in violations), violations)
+
+    def test_a_zero_test_run_is_a_violation(self) -> None:
+        runs = [("trio", ("a",), 0, "running 0 tests\nok")]
+        violations = oracle.classify_probe_outputs("C", runs)
+        self.assertTrue(
+            any("did not execute exactly one test" in v for v in violations), violations
+        )
+
+
+class GroundTruthTests(unittest.TestCase):
+    """PR #962 round-2 M1's required regression: the strict-subset probe
+    with a forged full receipt passes the receipt check by construction
+    (receipts are probe-authored), so the catch is the oracle's OWN
+    re-execution - these tests pin its classifiers on real current
+    behavior and on both failure directions."""
+
+    def _eval_rows(self):
+        return dict(
+            (name, rows) for name, _o, _p, rows in oracle.DECLARED_EXCLUSIONS
+        )["EVAL_F64_LIST_EXCLUDED"]
+
+    # The texts eval actually renders today for the excluded labels
+    # (verified by execution 2026-07-30).
+    _CURRENT = [
+        "inf",
+        "0.0",
+        "0.0",
+        "0.3",
+        "9007199000000000.0",
+        "9007199000000000.0",
+        "1e20",
+    ]
+
+    def test_current_eval_behavior_confirms_every_exclusion(self) -> None:
+        self.assertEqual(
+            oracle.eval_exclusion_ground_truth_violations(
+                self._CURRENT, self._eval_rows()
+            ),
+            [],
+        )
+
+    def test_a_repaired_row_is_a_gone_green_violation(self) -> None:
+        texts = list(self._CURRENT)
+        texts[0] = "1.7976931348623157e308"
+        violations = oracle.eval_exclusion_ground_truth_violations(
+            texts, self._eval_rows()
+        )
+        self.assertTrue(
+            any("f64-max" in v and "repair landed" in v for v in violations),
+            violations,
+        )
+
+    def test_a_wrong_fingerprint_is_a_different_defect_violation(self) -> None:
+        texts = list(self._CURRENT)
+        texts[3] = "1.5"
+        violations = oracle.eval_exclusion_ground_truth_violations(
+            texts, self._eval_rows()
+        )
+        self.assertTrue(
+            any("f64-17-digit" in v and "B2.5" in v for v in violations), violations
+        )
+
+    def test_a_length_drift_is_reported(self) -> None:
+        violations = oracle.eval_exclusion_ground_truth_violations(
+            self._CURRENT[:2], self._eval_rows()
+        )
+        self.assertTrue(any("drifted" in v for v in violations), violations)
+
+    def test_c_fingerprints_confirm_and_flip(self) -> None:
+        giant = "chelis_fill(t, 179769313486231570000000000000000000000000.0);"
+        bare = giant.replace(".0", "")
+        self.assertFalse(oracle.c_has_bare_giant_integer_literal(giant))
+        self.assertTrue(oracle.c_has_bare_giant_integer_literal(bare))
+        entries = [
+            oracle.CExclusionGroundTruth("f64-max", True, bare, "wrong-bits")
+        ]
+        self.assertEqual(oracle.c_exclusion_ground_truth_violations(entries), [])
+        violations = oracle.c_exclusion_ground_truth_violations(
+            [oracle.CExclusionGroundTruth("f64-max", True, giant, "exact")]
+        )
+        self.assertTrue(any("repair landed" in v for v in violations), violations)
+        violations = oracle.c_exclusion_ground_truth_violations(
+            [oracle.CExclusionGroundTruth("f64-max", False, "", "not-run")]
+        )
+        self.assertTrue(any("build" in v.lower() for v in violations), violations)
+
+    def test_c_fingerprint_ignores_comments_and_strings(self) -> None:
+        giant = "12345678901234567890"
+        self.assertTrue(oracle.c_has_bare_giant_integer_literal(f"double x = {giant};"))
+        self.assertFalse(
+            oracle.c_has_bare_giant_integer_literal(
+                f'double x = 1e20; // stale {giant}\n'
+                f'const char *s = "{giant}"; char c = \'0\'; /* stale {giant} */'
+            )
+        )
+
+    def test_exact_native_behavior_forces_shrink_even_with_a_fingerprint(self) -> None:
+        violations = oracle.c_exclusion_ground_truth_violations(
+            [
+                oracle.CExclusionGroundTruth(
+                    "f64-max",
+                    True,
+                    "double x = 12345678901234567890;",
+                    "exact",
+                )
+            ]
+        )
+        self.assertTrue(any("repair landed" in v for v in violations), violations)
+
+    def test_neg_zero_emission_legs(self) -> None:
+        self.assertEqual(
+            oracle.c_exclusion_ground_truth_violations(
+                [
+                    oracle.CExclusionGroundTruth(
+                        "f64-neg-zero", True, "double c = -0;", "wrong-bits"
+                    )
+                ]
+            ),
+            [],
+        )
+        violations = oracle.c_exclusion_ground_truth_violations(
+            [
+                oracle.CExclusionGroundTruth(
+                    "f64-neg-zero", True, "double c = -0.0;", "exact"
+                )
+            ]
+        )
+        self.assertTrue(any("repair landed" in v for v in violations), violations)
+
+
+class VerdictSinkTests(unittest.TestCase):
+    """PR #962 round-4 F2: sink identity is asserted and the raise is
+    helper-owned, so a scratch list can neither mint a consumed receipt
+    nor swallow a failure."""
+
+    def test_a_scratch_list_cannot_mint_a_consumed_receipt(self) -> None:
+        oracle.CONSUMED_INSTRUMENTS.discard("classify_probe_outputs")
+        with self.assertRaisesRegex(oracle.OracleFailure, "scratch-list"):
+            with oracle.verdict_sink("test leg"):
+                oracle.consume_findings([], oracle.classify_probe_outputs, "C", [])
+        self.assertNotIn("classify_probe_outputs", oracle.CONSUMED_INSTRUMENTS)
+
+    def test_the_sink_context_owns_the_raise(self) -> None:
+        def mandatory(_arg: object) -> list[str]:
+            return ["RT4 mandatory violation"]
+
+        with self.assertRaisesRegex(oracle.OracleFailure, "RT4 mandatory violation"):
+            with oracle.verdict_sink("test leg") as sink:
+                oracle.consume_findings(sink, mandatory, None)
+                # A caller "forgetting" to raise changes nothing: the
+                # context raises from the same list on exit.
+
+    def test_an_empty_sink_exits_clean_and_records_consumption(self) -> None:
+        def clean(_arg: object) -> list[str]:
+            return []
+
+        with oracle.verdict_sink("test leg") as sink:
+            oracle.consume_findings(sink, clean, None)
+        self.assertIn("clean", oracle.CONSUMED_INSTRUMENTS)
+
+    def test_nested_sinks_are_rejected(self) -> None:
+        with self.assertRaisesRegex(oracle.OracleFailure, "nested"):
+            with oracle.verdict_sink("outer"):
+                with oracle.verdict_sink("inner"):
+                    pass
+
+    def test_consume_outside_any_sink_is_a_forgery(self) -> None:
+        def clean(_arg: object) -> list[str]:
+            return []
+
+        with self.assertRaisesRegex(oracle.OracleFailure, "scratch-list"):
+            oracle.consume_findings([], clean, None)
+
+
+class GroundTruthDriverTests(unittest.TestCase):
+    """PR #962 round-4 F4: the executable-C driver's helpers are covered
+    directly, and plumbing failures raise instead of degrading to a
+    native status the classifier accepts as 'still broken'."""
+
+    def test_compile_command_parses_from_build_output(self) -> None:
+        command = oracle.parse_compile_command(
+            "Wrote p.c\nCompile: cc p.c runtime.c -o p_bin -lm\nDone\n"
+        )
+        self.assertEqual(command[0], "cc")
+        self.assertIn("-o", command)
+
+    def test_a_missing_compile_line_is_loud_plumbing(self) -> None:
+        with self.assertRaisesRegex(oracle.OracleFailure, "no `Compile:` line"):
+            oracle.parse_compile_command("Wrote p.c\nDone\n")
+
+    def test_a_compile_line_without_output_is_loud_plumbing(self) -> None:
+        with self.assertRaisesRegex(oracle.OracleFailure, "names no `-o`"):
+            oracle.parse_compile_command("Compile: cc p.c runtime.c -lm\n")
+
+    def test_rendered_bit_classification_both_directions(self) -> None:
+        self.assertEqual(
+            oracle.classify_rendered_bits(["0.1", "0.1"], "f64", "0.1"), "exact"
+        )
+        self.assertEqual(
+            oracle.classify_rendered_bits(["0.1", "0.2"], "f64", "0.1"),
+            "wrong-bits",
+        )
+        self.assertEqual(
+            oracle.classify_rendered_bits(["garbage"], "f64", "0.1"), "wrong-bits"
+        )
+        # The f32 comparison reconciles an f64-image spelling against the
+        # narrowed width.
+        self.assertEqual(
+            oracle.classify_rendered_bits(
+                ["0.10000000149011612"], "f32", "0.1"
+            ),
+            "exact",
+        )
+
+    def test_rendered_values_parse_every_exit_shape(self) -> None:
+        stdout = (
+            "tensor(shape=[1], data=[5e-324])\n"
+            "[5e-324]\n"
+            "lroot = [5e-324]\n"
+            "shown = ()\n"
+        )
+        self.assertEqual(
+            oracle.c_rendered_values(stdout), ["5e-324", "5e-324", "5e-324"]
+        )
+        self.assertEqual(oracle.c_rendered_values("no renders here\n"), [])
+
+
+class KnownRedCellRunTests(unittest.TestCase):
+    """PR #962 round-4 F3: the known-red leg's failure paths are executed
+    by the unit suite through an injected runner - the gone-green branch
+    shipped a NameError because nothing ran it."""
+
+    class _Completed:
+        def __init__(self, returncode: int, stdout: str) -> None:
+            self.returncode = returncode
+            self.stdout = stdout
+            self.stderr = ""
+
+    def test_all_cells_red_on_their_fragments_passes(self) -> None:
+        def runner(_command, **_kwargs):
+            name = _command[-1]
+            cell = next(c for c in oracle.KNOWN_RED_CELLS if c.name == name)
+            return self._Completed(101, f"running 1 test\n{cell.fragment}\nFAILED")
+
+        oracle.run_known_red_cells({}, runner=runner)
+
+    def test_a_gone_green_cell_raises_the_shrink_protocol(self) -> None:
+        def runner(_command, **_kwargs):
+            return self._Completed(0, "running 1 test\nok")
+
+        with self.assertRaisesRegex(oracle.OracleFailure, "Un-ignore"):
+            oracle.run_known_red_cells({}, runner=runner)
+
+    def test_a_wrong_reason_cell_raises_with_the_fragment(self) -> None:
+        def runner(_command, **_kwargs):
+            return self._Completed(101, "running 1 test\nsome unrelated panic")
+
+        with self.assertRaisesRegex(oracle.OracleFailure, "NOT on its declared"):
+            oracle.run_known_red_cells({}, runner=runner)
+
+
+class RuleManifestTests(unittest.TestCase):
+    def _doc(self) -> str:
+        return (oracle.REPO_ROOT / oracle.DESIGN_DOC).read_text(encoding="utf-8")
+
+    def test_the_shipped_doc_matches_the_manifest(self) -> None:
+        self.assertEqual(oracle.b2_manifest_violations(self._doc()), [])
+
+    def test_the_shipped_doc_parses_non_trivially(self) -> None:
+        items = oracle.b2_rule_items(self._doc())
+        self.assertIsNotNone(items)
+        assert items is not None
+        self.assertGreaterEqual(len(items), 9)
+        self.assertTrue(any("No third formatter" in title for _, title in items))
+
+    def test_a_new_rule_without_a_manifest_row_is_a_violation(self) -> None:
+        doc = self._doc().replace(
+            "## B3. How to pick up a phase",
+            "10. **A brand new rule.** With no instrument decision.\n\n"
+            "## B3. How to pick up a phase",
+            1,
+        )
+        violations = oracle.b2_manifest_violations(doc)
+        self.assertTrue(
+            any("B2.10" in v and "instrument decision" in v for v in violations),
+            violations,
+        )
+
+    def test_a_retitled_rule_is_a_violation(self) -> None:
+        doc = self._doc().replace("**No third formatter.**", "**No second formatter.**")
+        violations = oracle.b2_manifest_violations(doc)
+        self.assertTrue(
+            any("manifest fragment" in v for v in violations), violations
+        )
+
+    def test_a_manifest_instrument_that_cannot_run_is_a_violation(self) -> None:
+        original = oracle.B2_RULE_INSTRUMENTS
+        oracle.B2_RULE_INSTRUMENTS = original + (
+            (9, "Three-legged boundaries", ("nonexistent_check",)),
+        )
+        try:
+            violations = oracle.b2_manifest_violations(self._doc())
+        finally:
+            oracle.B2_RULE_INSTRUMENTS = original
+        self.assertTrue(
+            any("nonexistent_check" in v and "cannot run" in v for v in violations),
+            violations,
+        )
+
+    def test_a_missing_runtime_receipt_is_a_violation(self) -> None:
+        """PR #962 round-2 M2's required regression: 'invoked' means a
+        RUNTIME receipt, so an instrument referenced only from an
+        `if False:` branch (which records nothing) fails at end of run -
+        no source-text scan is consulted at all."""
+        invoked = {
+            entry
+            for _n, _f, instruments in oracle.B2_RULE_INSTRUMENTS
+            for entry in instruments
+            if not entry.startswith("review-rule")
+        }
+        self.assertEqual(oracle.instrument_invocation_violations(invoked), [])
+        invoked.discard("classify_red_run")
+        violations = oracle.instrument_invocation_violations(invoked)
+        self.assertTrue(
+            any(
+                "classify_red_run" in v and "runtime invocation receipt" in v
+                for v in violations
+            ),
+            violations,
+        )
+
+    def test_the_instrument_decorator_writes_runtime_receipts(self) -> None:
+        oracle.INVOKED_INSTRUMENTS.discard("classify_probe_outputs")
+        oracle.classify_probe_outputs("C", [])
+        self.assertIn("classify_probe_outputs", oracle.INVOKED_INSTRUMENTS)
+
+    def test_an_invoked_but_unconsumed_result_is_a_violation(self) -> None:
+        invoked = {
+            entry
+            for _n, _f, instruments in oracle.B2_RULE_INSTRUMENTS
+            for entry in instruments
+            if not entry.startswith("review-rule")
+        }
+        consumed = set(invoked)
+        consumed.discard("b2_manifest_violations")
+        violations = oracle.instrument_result_violations(invoked, consumed)
+        self.assertTrue(
+            any(
+                "b2_manifest_violations" in v and "result was not consumed" in v
+                for v in violations
+            ),
+            violations,
+        )
+
+    def test_suite_receipts_are_manifest_checkable(self) -> None:
+        """Suite instruments are satisfied only by their runtime receipt
+        (recorded by run_green_suites on success), never by existence."""
+        invoked = {
+            entry
+            for _n, _f, instruments in oracle.B2_RULE_INSTRUMENTS
+            for entry in instruments
+            if not entry.startswith("review-rule") and not entry.startswith("suite:")
+        }
+        violations = oracle.instrument_invocation_violations(invoked)
+        self.assertTrue(
+            any("suite:" in v for v in violations),
+            f"a suite instrument without its runtime receipt must fail; got {violations}",
+        )
+
+    def test_a_bare_review_rule_tag_is_a_violation(self) -> None:
+        original = oracle.B2_RULE_INSTRUMENTS
+        oracle.B2_RULE_INSTRUMENTS = original + (
+            (9, "Three-legged boundaries", ("review-rule: trust me",)),
+        )
+        try:
+            violations = oracle.b2_manifest_violations(self._doc())
+        finally:
+            oracle.B2_RULE_INSTRUMENTS = original
+        self.assertTrue(
+            any("justification" in v for v in violations), violations
+        )
+
+    def test_an_unlocatable_b2_section_is_reported_not_vacuous(self) -> None:
+        violations = oracle.b2_manifest_violations("# Some other doc\n")
+        self.assertTrue(
+            any("could not be located" in v for v in violations), violations
+        )
 
 
 if __name__ == "__main__":

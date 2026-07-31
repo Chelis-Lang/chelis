@@ -530,6 +530,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "toml",
+ "unicode-ident",
  "walkdir",
  "wiremock",
  "zstd",

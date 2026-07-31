@@ -56,11 +56,18 @@
 //! undeclared reason OR has gone green. The green case is the [#729]
 //! handoff: when its value/capacity repair lands, the oracle goes red
 //! until the cell is un-ignored on its original assertion and the ledger
-//! row deleted in that change set. The same enforcement covers the two
-//! documented corpus-exclusion lists below (`C_LANE_EXCLUDED`,
-//! `EVAL_F64_LIST_EXCLUDED`), which cannot widen without editing the
-//! ledger, and the §C2.3 cross-lane byte-identity corpus, which may grow
-//! but never shrink.
+//! row deleted in that change set. The two documented corpus-exclusion
+//! lists below (`C_LANE_EXCLUDED`, `EVAL_F64_LIST_EXCLUDED`) carry the
+//! full §B2.9 three-legged treatment: inventory equality against the
+//! oracle's `DECLARED_EXCLUSIONS` (neither list changes without editing
+//! the ledger), plus the NON-ignored exclusion probes below
+//! (`eval_f64_list_excluded_rows_still_narrow_through_the_f32_tag`,
+//! `c_lane_excluded_labels_still_fail_at_ingress`,
+//! `c_lane_excluded_neg_zero_still_drops_the_sign`), which re-execute
+//! every excluded behavior in the DEFAULT suite and fail with a
+//! shrink-the-list message the moment an upstream repair lands - a stale
+//! exclusion that overstates breakage cannot stay green. The §C2.3
+//! cross-lane byte-identity corpus may grow but never shrink.
 //!
 //! Everything else is green by contract; a new red here is a new
 //! faithful-observation bug (file it, per §B2.5).
@@ -835,11 +842,21 @@ fn c_lane_rows(r: &FRow) -> bool {
 /// value class. Faithful rendering makes the value bug visible instead of
 /// laundered (faithful_observation.md, non-goals) - the cell returns when
 /// [#729] repairs the to_list value path.
+///
+/// `f64-tenth` LEFT the list 2026-07-30, caught by the §B2.9 exclusion
+/// probe's first execution: 0.1's F32-narrowed image renders as `0.1`,
+/// which parses back to the original f64 exactly, so the TEXT assertion
+/// this list guards passes for it (verified by execution: the to_list
+/// line reads `[inf, 0.0, 0.0, -0.0, 0.1, 0.3, ...]`). The row's earlier
+/// membership was rendering-era residue, not a current failure - exactly
+/// the stale over-claim the probe exists to catch. The VALUE is still
+/// F32-narrowed (chelis#717's subject); text coincidence is not repair,
+/// and the label rejoins nothing when [#729] lands - it is simply covered
+/// by the main assertion either way.
 const EVAL_F64_LIST_EXCLUDED: &[&str] = &[
     "f64-max",
     "f64-min-subnormal",
     "f64-min-normal",
-    "f64-tenth",
     "f64-17-digit",
     "f64-2p53",
     "f64-2p53-plus-2",
@@ -862,6 +879,378 @@ fn c_print_safe_rows(r: &FRow) -> bool {
 
 fn c_print_red_rows(r: &FRow) -> bool {
     c_lane_rows(r) && !r.c_print_safe
+}
+
+// ---------------------------------------------------------------------------
+// Exclusion probes (faithful_observation.md §B2.9: three-legged boundaries).
+//
+// The two exclusion lists above are DECLARED-BREAKAGE artifacts: each label
+// claims a specific upstream defect still holds. Inventory equality against
+// the oracle's `DECLARED_EXCLUSIONS` is leg 1; these probes are legs 2 and 3
+// - they RE-EXECUTE each excluded behavior in the default suite (CI runs
+// them continuously) and FAIL the moment a repair lands, naming the shrink
+// protocol. They are interim locks in the retired
+// `c_f16_tensor_print_aborts_with_dtype_id_instead_of_misreading` tradition:
+// each asserts today's WRONG behavior on its declared fingerprint (the
+// wrong-reason discriminator) and carries its own retirement instructions.
+// The probes iterate the exclusion consts THEMSELVES, so shrinking a list
+// shrinks the probe in the same edit - inventory parity by construction.
+// ---------------------------------------------------------------------------
+
+/// The chelis#751 emission fingerprint: a bare integer literal too wide to
+/// be any legitimate C integer constant (Rust `{}` Display of an integral
+/// float >= 2^64 has no e-notation and no decimal point). i64::MAX is 19
+/// digits, so a digit run longer than that, not followed by a decimal
+/// point or exponent, is the defect's own shape - toolchain-independent,
+/// unlike clang's "integer literal is too large" stderr text.
+fn has_bare_giant_integer_literal(c_source: &str) -> bool {
+    let bytes = c_source.as_bytes();
+    let mut i = 0usize;
+    #[derive(Clone, Copy)]
+    enum State {
+        Code,
+        LineComment,
+        BlockComment,
+        String,
+        Char,
+    }
+    let mut state = State::Code;
+    while i < bytes.len() {
+        let byte = bytes[i];
+        let next = bytes.get(i + 1).copied();
+        match state {
+            State::Code if byte == b'/' && next == Some(b'/') => {
+                state = State::LineComment;
+                i += 2;
+            }
+            State::Code if byte == b'/' && next == Some(b'*') => {
+                state = State::BlockComment;
+                i += 2;
+            }
+            State::Code if byte == b'"' => {
+                state = State::String;
+                i += 1;
+            }
+            State::Code if byte == b'\'' => {
+                state = State::Char;
+                i += 1;
+            }
+            State::Code if byte.is_ascii_digit() => {
+                let start = i;
+                while i < bytes.len() && bytes[i].is_ascii_digit() {
+                    i += 1;
+                }
+                let following = bytes.get(i).copied();
+                if i - start > 19
+                    && following != Some(b'.')
+                    && following != Some(b'e')
+                    && following != Some(b'E')
+                {
+                    return true;
+                }
+            }
+            State::Code => i += 1,
+            State::LineComment if byte == b'\n' => {
+                state = State::Code;
+                i += 1;
+            }
+            State::LineComment => i += 1,
+            State::BlockComment if byte == b'*' && next == Some(b'/') => {
+                state = State::Code;
+                i += 2;
+            }
+            State::BlockComment => i += 1,
+            State::String | State::Char if byte == b'\\' && next.is_some() => {
+                i += 2;
+            }
+            State::String if byte == b'"' => {
+                state = State::Code;
+                i += 1;
+            }
+            State::Char if byte == b'\'' => {
+                state = State::Code;
+                i += 1;
+            }
+            State::String | State::Char => i += 1,
+        }
+    }
+    false
+}
+
+#[test]
+fn giant_integer_fingerprint_ignores_c_comments_and_literals() {
+    let giant = "12345678901234567890";
+    assert!(has_bare_giant_integer_literal(&format!(
+        "double x = {giant};"
+    )));
+    assert!(!has_bare_giant_integer_literal(&format!(
+        "double x = 1e20; // stale {giant}"
+    )));
+    assert!(!has_bare_giant_integer_literal(&format!(
+        "double x = 1e20; /* stale {giant} */"
+    )));
+    assert!(!has_bare_giant_integer_literal(&format!(
+        "const char *s = \"{giant}\"; double x = 1e20;"
+    )));
+    assert!(!has_bare_giant_integer_literal(&format!(
+        "char c = '0'; /* {giant} */ double x = 1e20;"
+    )));
+}
+
+/// §B2.9 leg 2+3 for `EVAL_F64_LIST_EXCLUDED`: every excluded label still
+/// narrows through the stale F32 tag (chelis#717), verified on the same
+/// rendered output the main test skips it in. Per label: the to_list text
+/// IS the faithful shortest render of the F32-narrowed value (the declared
+/// fingerprint - any other failure shape is a different bug and trips the
+/// first assertion), and the f64 round-trip still fails (the fact that
+/// justifies the exclusion - when it stops failing, the repair landed).
+#[test]
+fn eval_f64_list_excluded_rows_still_narrow_through_the_f32_tag() {
+    let out = eval_stdout(&float_table_program("f64", F64_ROWS, false)).expect("eval");
+    let llines = list_lines(&out);
+    assert_eq!(llines.len(), 2, "expected both to_list renders:\n{out}");
+    let elems_per_line: Vec<Vec<String>> = llines.iter().map(|l| list_payload_elems(l)).collect();
+    for elems in &elems_per_line {
+        assert_eq!(elems.len(), F64_ROWS.len(), "element count:\n{out}");
+    }
+    let mut visited: Vec<&str> = Vec::new();
+    for label in EVAL_F64_LIST_EXCLUDED {
+        let (idx, row) = F64_ROWS
+            .iter()
+            .enumerate()
+            .find(|(_, r)| r.label == *label)
+            .unwrap_or_else(|| panic!("excluded label `{label}` is not an F64_ROWS row"));
+        for elems in &elems_per_line {
+            let text = &elems[idx];
+            let f32_bits = text_bits_at(text, Width::F32)
+                .unwrap_or_else(|e| panic!("[probe/{label}] to_list exit: {e}"));
+            assert_eq!(
+                f32_bits,
+                value_bits_at(row.value, Width::F32),
+                "[probe/{label}] to_list text `{text}` is not the F32-tag \
+                 narrowing of the stored value - the exclusion's declared \
+                 chelis#717 fingerprint no longer matches. Whatever this is, \
+                 it is a DIFFERENT defect: file it per \
+                 faithful_observation.md B2.5 before touching the exclusion."
+            );
+            let still_narrowed = text_bits_at(text, Width::F64)
+                .map(|bits| bits != value_bits_at(row.value, Width::F64))
+                .unwrap_or(true);
+            assert!(
+                still_narrowed,
+                "[probe/{label}] GOOD NEWS: the to_list exit now round-trips \
+                 at f64 - either the chelis#717/[#729] to_list value repair \
+                 landed, or the row's F32-narrowed image renders \
+                 text-coincident with the original (the f64-tenth shape, \
+                 shrunk 2026-07-30). Either way the exclusion overstates \
+                 breakage: remove `{label}` from EVAL_F64_LIST_EXCLUDED and \
+                 from DECLARED_EXCLUSIONS in \
+                 scripts/faithful_observation_phase2_oracle.py in this same \
+                 change set, so the main assertions cover it (B2.3: \
+                 red-to-green only by un-ignoring)."
+            );
+        }
+        visited.push(label);
+    }
+    // The ordered execution receipt (PR #962 round-1 F2 and round-2 M1):
+    // exact sequence, compared by the oracle against the declared order
+    // with multiplicity. The receipt is still probe-authored text - the
+    // INDEPENDENT re-execution evidence is the oracle's own per-label
+    // ground-truth driver, which re-derives these facts without trusting
+    // this line.
+    println!(
+        "exclusion probe EVAL_F64_LIST_EXCLUDED visited: {}",
+        visited.join(" ")
+    );
+}
+
+/// Run a linked exit binary and decode every rendered element at `w`.
+fn run_and_decode_elements(bin: &std::path::Path, w: Width) -> Result<Vec<u64>, String> {
+    let run = std::process::Command::new(bin)
+        .output()
+        .map_err(|e| format!("spawn: {e}"))?;
+    if !run.status.success() {
+        return Err(format!("binary exited {}", run.status));
+    }
+    let stdout = String::from_utf8_lossy(&run.stdout).into_owned();
+    let mut bits = Vec::new();
+    for line in tensor_lines(&stdout) {
+        for text in tensor_elems(line) {
+            bits.push(text_bits_at(&text, w)?);
+        }
+    }
+    for line in list_lines(&stdout) {
+        for text in list_payload_elems(line) {
+            bits.push(text_bits_at(&text, w)?);
+        }
+    }
+    if bits.is_empty() {
+        return Err(format!("no rendered elements in:\n{stdout}"));
+    }
+    Ok(bits)
+}
+
+/// §B2.9 leg 2+3 for `C_LANE_EXCLUDED`'s giant-constant trio. The defect
+/// (chelis#751) is an EMISSION defect - the generated C carries a bare
+/// integer literal too wide for any C integer constant - so the lexical
+/// fingerprint is the toolchain-independent defect check. The NATIVE
+/// outcome is the independent behavioral verdict: compilation failure or
+/// wrong bits corroborate the declared defect, while a successful exact
+/// run ALWAYS fires the shrink protocol. The fingerprint is comment/string
+/// aware and discriminates the reason for a non-exact outcome; it cannot
+/// suppress a repaired exact run (PR #962 exact-head red team F1).
+#[test]
+fn c_lane_excluded_labels_still_fail_at_ingress() {
+    if !c_toolchain_available() {
+        eprintln!("skipping: no C toolchain");
+        return;
+    }
+    let mut visited: Vec<&str> = Vec::new();
+    for label in C_LANE_EXCLUDED {
+        if *label == "f64-neg-zero" {
+            continue; // its failure mode is a wrong RENDER, probed below
+        }
+        let (dt, w, rows): (&str, Width, &[FRow]) = if label.starts_with("f64") {
+            ("f64", Width::F64, F64_ROWS)
+        } else {
+            ("f32", Width::F32, F32_ROWS)
+        };
+        let row = rows
+            .iter()
+            .find(|r| r.label == *label)
+            .unwrap_or_else(|| panic!("excluded label `{label}` is not a table row"))
+            .clone();
+        let name = format!("obs_excl_{}", label.replace('-', "_"));
+        let program = float_table_program(dt, std::slice::from_ref(&row), false);
+
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join(format!("{name}.ch"));
+        let out_dir = dir.path().join(format!("{name}-out"));
+        write_file(&path, &program);
+        let built = Command::cargo_bin("chelis")
+            .expect("binary")
+            .env("CHELIS_STYLE_GATE_DISABLE", "1")
+            .args([
+                "build",
+                path.to_str().unwrap(),
+                "--target",
+                "c",
+                "--output",
+                out_dir.to_str().unwrap(),
+            ])
+            .output()
+            .expect("chelis build should run");
+        assert!(
+            built.status.success(),
+            "[probe/{label}] `chelis build` itself failed - the exclusion \
+             declares a NATIVE-stage failure from a successful build \
+             (chelis#751). A build-time rejection is a different behavior: \
+             re-adjudicate the exclusion (B2.5) rather than assuming the \
+             repair landed.\n{}",
+            String::from_utf8_lossy(&built.stderr)
+        );
+        let c_source =
+            std::fs::read_to_string(out_dir.join(format!("{name}.c"))).expect("generated C source");
+        let fingerprint = has_bare_giant_integer_literal(&c_source);
+        let link_ok = common::link_generated(&out_dir, &format!("{name}.c"), &name).success();
+        let end_to_end = if link_ok {
+            run_and_decode_elements(&out_dir.join(&name), w)
+        } else {
+            Err("native stage failed".into())
+        };
+        if matches!(
+            &end_to_end,
+            Ok(bits) if bits.iter().all(|b| *b == value_bits_at(row.value, w))
+        ) {
+            panic!(
+                "[probe/{label}] GOOD NEWS: the generated program builds, \
+                 links, runs, and renders the exact intended bits - the \
+                 ingress behavior is repaired (source fingerprint present: \
+                 {fingerprint}). Remove `{label}` from C_LANE_EXCLUDED and \
+                 from DECLARED_EXCLUSIONS in \
+                 scripts/faithful_observation_phase2_oracle.py in this \
+                 change set, so the row rejoins the compiled-lane corpus."
+            );
+        }
+        if !fingerprint {
+            panic!(
+                "[probe/{label}] the generated C no longer carries the \
+                 chelis#751 fingerprint, but the native outcome is still \
+                 broken ({end_to_end:?}). That is a DIFFERENT defect: file \
+                 it per faithful_observation.md B2.5 before touching the \
+                 exclusion."
+            );
+        }
+        visited.push(label);
+    }
+    println!(
+        "exclusion probe C_LANE_EXCLUDED visited: {}",
+        visited.join(" ")
+    );
+}
+
+/// §B2.9 leg 2+3 for `C_LANE_EXCLUDED`'s `f64-neg-zero`: the constant
+/// compiles and runs, but the Display route spells -0.0 as the integer
+/// literal `-0`, whose double conversion drops the sign - so every exit
+/// faithfully renders the WRONG stored value, +0.0. The render being
+/// faithful to wrong bits is exactly why this is an ingress exclusion and
+/// not a red rendering cell (faithful_observation.md non-goals).
+#[test]
+fn c_lane_excluded_neg_zero_still_drops_the_sign() {
+    if !c_toolchain_available() {
+        eprintln!("skipping: no C toolchain");
+        return;
+    }
+    assert!(
+        C_LANE_EXCLUDED.contains(&"f64-neg-zero"),
+        "this probe exists for the f64-neg-zero exclusion; if the label \
+         left C_LANE_EXCLUDED, retire the probe in the same change set"
+    );
+    let row = F64_ROWS
+        .iter()
+        .find(|r| r.label == "f64-neg-zero")
+        .expect("f64-neg-zero row")
+        .clone();
+    let out = c_stdout(
+        &float_table_program("f64", std::slice::from_ref(&row), false),
+        "obs_excl_f64_neg_zero",
+    )
+    .expect("C lane");
+    let mut renders = 0usize;
+    for line in tensor_lines(&out) {
+        for text in tensor_elems(line) {
+            renders += 1;
+            let got = text_bits_at(&text, Width::F64)
+                .unwrap_or_else(|e| panic!("[probe/f64-neg-zero] print exit: {e}"));
+            assert_eq!(
+                got,
+                0.0f64.to_bits(),
+                "[probe/f64-neg-zero] GOOD NEWS if this is -0.0's bit \
+                 pattern: the chelis#751 sign-preserving emission landed. \
+                 Remove `f64-neg-zero` from C_LANE_EXCLUDED and from \
+                 DECLARED_EXCLUSIONS in \
+                 scripts/faithful_observation_phase2_oracle.py in this \
+                 change set. Any OTHER value is a new defect: file it \
+                 (B2.5). Got `{text}`."
+            );
+        }
+    }
+    for line in list_lines(&out) {
+        for text in list_payload_elems(line) {
+            renders += 1;
+            let got = text_bits_at(&text, Width::F64)
+                .unwrap_or_else(|e| panic!("[probe/f64-neg-zero] to_list exit: {e}"));
+            assert_eq!(
+                got,
+                0.0f64.to_bits(),
+                "[probe/f64-neg-zero] GOOD NEWS if this is -0.0: the sign \
+                 now survives ingress - shrink C_LANE_EXCLUDED and \
+                 DECLARED_EXCLUSIONS in this change set. Got `{text}`."
+            );
+        }
+    }
+    assert_eq!(renders, 4, "expected all four exit renders:\n{out}");
+    println!("exclusion probe C_LANE_EXCLUDED visited: f64-neg-zero");
 }
 
 fn float_table_program(dt: &str, rows: &[FRow], via_cast: bool) -> String {
@@ -1502,6 +1891,8 @@ fn c_scalar_exits_round_trip() {
         ("f32", "0.1", Width::F32, 0.10000000149011612),
         // f32::MAX is absent: the emitted constant is an integer literal
         // clang rejects (the C_LANE_EXCLUDED ingress defect, [#729]).
+        // `c_lane_excluded_labels_still_fail_at_ingress` is the executable
+        // witness for this absent row - it re-proves the defect per run.
         ("f32", "1e-45", Width::F32, 1.401298464324817e-45),
     ];
     for (i, (ret, expr, w, value)) in float_rows.iter().enumerate() {
@@ -2037,7 +2428,8 @@ fn c_print_format_selection_preserves_small_and_17_digit_values() {
     // The scalar %.16g path starves the same 17-digit f64 values. (f64::MAX
     // would starve too - %.16g parses back as inf - but its C cell is
     // unconstructible today: the emitted constant is an integer literal
-    // clang rejects, the C_LANE_EXCLUDED ingress defect.)
+    // clang rejects, the C_LANE_EXCLUDED ingress defect, re-proved per run
+    // by `c_lane_excluded_labels_still_fail_at_ingress`.)
     for (i, (expr, value)) in [("cast(0.30000000000000004, f64)", 0.30000000000000004)]
         .iter()
         .enumerate()

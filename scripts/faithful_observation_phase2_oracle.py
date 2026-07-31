@@ -35,15 +35,67 @@ The obligations, in execution order:
      leaves a permanently-skipped test behind and nobody learns.
 5. **The formatter byte locks** (`chelis_format_shortest` == the Rust
    `format_element`, exhaustive over both half formats) must pass.
-6. **The corpus-exclusion lists** must match their declared contents. The
-   harness excludes rows for chelis#751 (C ingress) and chelis#717 (the
-   eval f64 to_list tag); both are documented at their definitions, both
-   are legitimate, and both are also exactly how a corpus gets narrowed
-   until "green" means nothing. Widening either list is a deliberate act
-   that must edit this ledger too.
-7. **The §B2.4 no-third-formatter tripwire** must run green with a
-   PRODUCTION allowlist of zero: the only permitted `c-format-narrowing`
-   row is the cfg(test) fixture-string one.
+6. **The corpus-exclusion lists** carry the full §B2.9 three-legged
+   treatment. The harness excludes rows for chelis#751 (C ingress) and
+   chelis#717 (the eval f64 to_list tag); both are documented at their
+   definitions, both are legitimate, and both are also exactly how a
+   corpus gets narrowed until "green" means nothing. Leg 1: each list
+   must EQUAL its `DECLARED_EXCLUSIONS` row - changing a list in either
+   direction edits this ledger too (the pre-2026-07-30 check stopped
+   here, so a stale list overstating breakage stayed green). Legs 2-3:
+   each list's declared, NON-ignored exclusion probe must exist in the
+   harness, iterate the list constant itself, and carry the
+   shrink-protocol message - the probes run in the default suite (and in
+   obligation 3's harness leg), re-executing every excluded behavior and
+   failing the moment an upstream repair lands. Their first execution
+   shrank `EVAL_F64_LIST_EXCLUDED` by the text-coincident `f64-tenth`.
+   Hardened per PR #962's red team (round 1 F2, round 2 M1): each probe
+   must carry exactly the unconditional `#[test]` attribute (a
+   `cfg_attr` ignore or a cfg gate fails the scan, and unrecognized
+   attribute shapes fail closed); the oracle RUNS each probe
+   individually, requiring exactly one executed test plus an ORDERED
+   receipt equal to the probe's declared sequence (multiplicity and
+   order compared); and - because receipts are probe-authored text a
+   probe could forge - `run_exclusion_ground_truth` re-executes every
+   excluded behavior ITSELF: the oracle writes the per-label programs,
+   runs eval / the C emitter, and re-derives each exclusion's
+   fingerprint (the chelis#717 F32 narrowing, the chelis#751
+   bare-integer-literal emission, the signless -0.0 spelling) without
+   trusting any probe output. That oracle-owned leg is the
+   independently observable re-execution; the probes remain the
+   continuous CI leg.
+7. **The §B2.4 no-third-formatter tripwire** must run green, and every
+   hosted class's baseline paths must stay inside its per-class
+   permitted set (`FORMAT_CLASS_TABLE`): `c-format-narrowing`'s
+   PRODUCTION allowlist is zero (the only permitted row is the
+   cfg(test) fixture-string one), and the Rust classes'
+   (`rust-format-narrowing`, `rust-debug-numeric-format`) permitted
+   sets are the frozen annotated non-exit carriers. A new baseline path
+   requires editing BOTH the tripwire and this oracle - the
+   two-instrument interlock.
+8. **Doc-citation parity** (§B2.8). Every tripwire `Pat` whose `doc()`
+   cites `faithful_observation.md` must be a `FORMAT_CLASS_TABLE` key,
+   and vice versa: a hosted detector this oracle cannot see, or a
+   coverage row for a detector that no longer exists, is structural
+   failure - the 2026-07-30 review's finding one layer up.
+9. **The §B2 rule-instrument manifest** (§B2.8). The design doc's §B2
+   item list must equal `B2_RULE_INSTRUMENTS` (numbers and titles),
+   every named instrument must exist, and - checked at the END of the
+   run - every callable instrument must have produced a RUNTIME
+   invocation receipt AND a centrally consumed-result receipt (the
+   `@instrument` decorator records execution; `consume_findings` refuses
+   any list that is not THE active verdict sink and records only after
+   extending it, and `verdict_sink` itself - not the leg's caller -
+   raises from that same list). Source-text scanning was demonstrated to
+   certify an `if False:` branch; entry-only receipts were demonstrated
+   to certify a non-empty result discarded by its caller; a scratch list
+   was demonstrated to impersonate the sink (PR #962 round-2 M2,
+   exact-head F2, round-4 F2). The receipts bind detector -> active sink
+   -> helper-owned raise; they cannot prove this oracle's own code was
+   not edited to tamper with the sink in between - self-tampering is the
+   review rule's residue. Review-rule entries need a substantive
+   justification; per-instrument mutation tests live in
+   test_faithful_observation_phase2_oracle.py, one per failure mode.
 
 Scope, stated rather than assumed (the harness's own no-silent-caps rule):
 the set-equality obligation in (4) covers the OBSERVATION HARNESS only -
@@ -63,9 +115,14 @@ host C toolchain: most obligations build, link, and run generated C.
 
 from __future__ import annotations
 
+import contextlib
+import functools
+import math
 import os
 from pathlib import Path
 import re
+import shlex
+import struct
 import subprocess
 import sys
 import tempfile
@@ -78,6 +135,7 @@ HARNESS_SOURCE = Path("crates/chelis-cli/tests/observation_roundtrip_harness.rs"
 NARROW_MATRIX_SOURCE = Path("crates/chelis-cli/tests/narrow_dtype_matrix.rs")
 REDUCTION_MATRIX_SOURCE = Path("crates/chelis-cli/tests/reduction_and_bitwise_matrix.rs")
 TRIPWIRE_SOURCE = Path("crates/chelis-cli/tests/loud_unsupported_tripwire.rs")
+DESIGN_DOC = Path("spec/design/faithful_observation.md")
 
 
 class RedCell:
@@ -133,30 +191,127 @@ RETIRED_LOCKS: tuple[str, ...] = (
     "c_f16_tensor_print_aborts_with_dtype_id_instead_of_misreading",
 )
 
-# Declared corpus exclusions (obligation 6). Both are documented at their
-# definitions with the owning issue; this table is the mechanical guard
-# against either growing silently.
-DECLARED_EXCLUSIONS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+# Declared corpus exclusions (obligation 6, §B2.9 three-legged). Both are
+# documented at their definitions with the owning issue. Leg 1 is the
+# equality check against the row labels (either direction). Legs 2-3 come
+# from TWO mechanisms with different trust models (PR #962 round-2 M1):
+#
+# - the `probes`: NON-ignored harness tests, each with its declared
+#   ordered receipt sequence. Receipts are probe-authored text - they
+#   bind ordering and coverage of the CI leg but a probe could forge
+#   them, so they are never the independence evidence;
+# - the `rows`: per-label ground truth (dtype, the constructing Chelis
+#   element expression, the exact intended value) that
+#   `run_exclusion_ground_truth` re-executes ITSELF - the oracle builds
+#   the programs, runs the toolchain, compiles/runs executable C rows,
+#   compares intended bits, and re-derives each exclusion's fingerprint
+#   without trusting any probe output. That leg is the
+#   independently observable re-execution §B2.9 requires.
+#
+# A list may not exist here without probes and rows (§B2.9: a boundary
+# that cannot be re-executed may not exist).
+#
+# 2026-07-30: `f64-tenth` left EVAL_F64_LIST_EXCLUDED on the probes' first
+# execution - its F32-narrowed image renders `0.1`, text-coincident with
+# the original f64, so the text assertion the list guards passes for it.
+# The stale row is precisely what the pre-probe equality-only check could
+# never catch.
+DECLARED_EXCLUSIONS: tuple[
+    tuple[
+        str,
+        str,
+        tuple[tuple[str, tuple[str, ...]], ...],
+        tuple[tuple[str, str, str, str], ...],
+    ],
+    ...,
+] = (
     (
         "C_LANE_EXCLUDED",
         "chelis#751 (C constant-emission ingress; rows are unconstructible, not red)",
-        ("f64-neg-zero", "f64-max", "f64-audit-e19", "f32-max"),
+        (
+            (
+                "c_lane_excluded_labels_still_fail_at_ingress",
+                ("f64-max", "f64-audit-e19", "f32-max"),
+            ),
+            (
+                "c_lane_excluded_neg_zero_still_drops_the_sign",
+                ("f64-neg-zero",),
+            ),
+        ),
+        (
+            ("f64-neg-zero", "f64", "cast(-0.0, f64)", "-0.0"),
+            (
+                "f64-max",
+                "f64",
+                "cast(1.7976931348623157e308, f64)",
+                "1.7976931348623157e308",
+            ),
+            (
+                "f64-audit-e19",
+                "f64",
+                "cast(9.999999980506448e19, f64)",
+                "9.999999980506448e19",
+            ),
+            ("f32-max", "f32", "3.4028234663852886e38", "3.4028234663852886e38"),
+        ),
     ),
     (
         "EVAL_F64_LIST_EXCLUDED",
         "chelis#717 (eval's to_list narrows through the stale F32 tag)",
         (
-            "f64-max",
-            "f64-min-subnormal",
-            "f64-min-normal",
-            "f64-tenth",
-            "f64-17-digit",
-            "f64-2p53",
-            "f64-2p53-plus-2",
-            "f64-audit-e19",
+            (
+                "eval_f64_list_excluded_rows_still_narrow_through_the_f32_tag",
+                (
+                    "f64-max",
+                    "f64-min-subnormal",
+                    "f64-min-normal",
+                    "f64-17-digit",
+                    "f64-2p53",
+                    "f64-2p53-plus-2",
+                    "f64-audit-e19",
+                ),
+            ),
+        ),
+        (
+            (
+                "f64-max",
+                "f64",
+                "cast(1.7976931348623157e308, f64)",
+                "1.7976931348623157e308",
+            ),
+            ("f64-min-subnormal", "f64", "cast(5e-324, f64)", "5e-324"),
+            (
+                "f64-min-normal",
+                "f64",
+                "cast(2.2250738585072014e-308, f64)",
+                "2.2250738585072014e-308",
+            ),
+            (
+                "f64-17-digit",
+                "f64",
+                "cast(0.30000000000000004, f64)",
+                "0.30000000000000004",
+            ),
+            ("f64-2p53", "f64", "cast(9007199254740992.0, f64)", "9007199254740992.0"),
+            (
+                "f64-2p53-plus-2",
+                "f64",
+                "cast(9007199254740994.0, f64)",
+                "9007199254740994.0",
+            ),
+            (
+                "f64-audit-e19",
+                "f64",
+                "cast(9.999999980506448e19, f64)",
+                "9.999999980506448e19",
+            ),
         ),
     ),
 )
+
+
+def exclusion_labels(rows: Sequence[tuple[str, str, str, str]]) -> tuple[str, ...]:
+    return tuple(label for label, _dt, _elem, _value in rows)
 
 # The §C2.3 cross-lane byte-identity corpus floor. This lock is what makes
 # "the two lanes render identically" a fact rather than an assertion, so it
@@ -274,6 +429,68 @@ PERMITTED_FORMAT_NARROWING_PATHS: frozenset[str] = frozenset(
     {"crates/chelis-backend-c/src/lib.rs"}
 )
 
+# Obligation 7, the Rust precision class (2026-07-30): every permitted row
+# is an annotated NON-EXIT carrier (test assertion messages, tooling
+# eprintln reports, UX displays). A new PATH here means a precision spec
+# appeared in a file that never had one - review it as a possible third
+# formatter before extending either side.
+PERMITTED_RUST_FORMAT_NARROWING_PATHS: frozenset[str] = frozenset(
+    {
+        "crates/chelis-backend-c/src/lib.rs",
+        "crates/chelis-backend-hip/src/emit.rs",
+        "crates/chelis-cli/src/main.rs",
+        "crates/chelis-compiler-api/src/context.rs",
+        "crates/chelis-cove/src/live.rs",
+        "crates/chelis-deep/src/ast.rs",
+        "crates/chelis-e2e/src/bench.rs",
+        "crates/chelis-e2e/src/bin/train_mnist.rs",
+        "crates/chelis-ir/src/grad.rs",
+        "crates/chelis-ir/src/lower.rs",
+        "crates/chelis-prove/src/bin/certify_erf_envelope.rs",
+        "crates/chelis-prove/src/bin/certify_special_fn_envelope.rs",
+        "crates/chelis-prove/src/erf_envelope.rs",
+        "crates/chelis-prove/src/opaque.rs",
+        "crates/chelis-runtime/src/format_shortest.rs",
+        "crates/chelis-types/src/infer.rs",
+        "crates/chelis-types/src/observation.rs",
+    }
+)
+
+# Obligation 7, the Rust Debug class (2026-07-30): the first two rows ARE
+# the sanctioned formatters (`{:?}` is the normative grammar's definition
+# there); the compiler-api rows are the declared derived-Debug residue
+# carriers per faithful_observation.md §B2.4.
+PERMITTED_RUST_DEBUG_FORMAT_PATHS: frozenset[str] = frozenset(
+    {
+        "crates/chelis-types/src/observation.rs",
+        "crates/chelis-runtime/src/format_shortest.rs",
+        "crates/chelis-compiler-api/src/runtime/host_ops.rs",
+        "crates/chelis-compiler-api/src/runtime/eval.rs",
+        "crates/chelis-compiler-api/src/runtime/invariant.rs",
+        "crates/chelis-compiler-api/src/runtime/named_axis.rs",
+        "crates/chelis-compiler-api/src/runtime/tests.rs",
+        "crates/chelis-compiler-api/src/runtime/transforms.rs",
+    }
+)
+
+# The no-third-formatter classes and their permitted baseline path sets.
+# §B2.8's doc-citation parity leg requires this table to equal the set of
+# tripwire patterns whose `doc()` cites faithful_observation.md, so a
+# hosted detector this oracle cannot see is unrepresentable.
+FORMAT_CLASS_TABLE: tuple[tuple[str, str, frozenset[str]], ...] = (
+    ("CFormatNarrowing", "c-format-narrowing", PERMITTED_FORMAT_NARROWING_PATHS),
+    (
+        "RustFormatNarrowing",
+        "rust-format-narrowing",
+        PERMITTED_RUST_FORMAT_NARROWING_PATHS,
+    ),
+    (
+        "RustDebugNumericFormat",
+        "rust-debug-numeric-format",
+        PERMITTED_RUST_DEBUG_FORMAT_PATHS,
+    ),
+)
+
 GREEN_SUITES: tuple[tuple[str, tuple[str, ...]], ...] = (
     (
         "the round-trip harness green set",
@@ -332,6 +549,105 @@ class OracleFailure(RuntimeError):
     """A failed Phase 2 oracle obligation."""
 
 
+# Runtime entry and result-consumption receipts. Entry alone is insufficient:
+# exact-head F2 demonstrated a detector returning a violation that its caller
+# discarded. The final check requires both sets.
+INVOKED_INSTRUMENTS: set[str] = set()
+CONSUMED_INSTRUMENTS: set[str] = set()
+
+# The one active verdict sink (round-4 F2: `consume_findings` previously
+# accepted ANY list, so a caller could hand it a scratch list and still
+# mint a consumed receipt). `verdict_sink` registers the list it hands
+# out AND owns the raise from it, so a leg's caller can neither divert
+# findings to a scratch list nor skip the failure. What this cannot
+# stop - stated as the mechanism's limit, not hidden - is in-process
+# tampering with the oracle's own code between the extend and the exit
+# (e.g. mutating the sink in place); the oracle cannot police edits to
+# itself, and that residue is the review rule (§B2.8).
+_ACTIVE_VERDICT_SINK: list[str] | None = None
+
+
+@contextlib.contextmanager
+def verdict_sink(banner: str):
+    """Yield THE verdict sink for one oracle leg and raise from it."""
+
+    global _ACTIVE_VERDICT_SINK
+    if _ACTIVE_VERDICT_SINK is not None:
+        raise OracleFailure(
+            "nested verdict sinks: an oracle leg opened a sink while "
+            "another was active - the legs are sequential by design."
+        )
+    sink: list[str] = []
+    _ACTIVE_VERDICT_SINK = sink
+    try:
+        yield sink
+    finally:
+        _ACTIVE_VERDICT_SINK = None
+    if sink:
+        raise OracleFailure(f"{banner}:\n" + "\n".join(sink))
+
+
+def instrument(fn):
+    """Record fn's execution in INVOKED_INSTRUMENTS when it runs."""
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        INVOKED_INSTRUMENTS.add(fn.__name__)
+        return fn(*args, **kwargs)
+
+    return wrapper
+
+
+def consume_findings(sink: list[str], fn, *args) -> None:
+    """Run one list-valued instrument and connect every result to verdict.
+
+    The consumed receipt is written only after this helper extends the
+    ACTIVE verdict sink - a scratch list raises instead of minting a
+    receipt (round-4 F2), and the sink's own context raises from the
+    same list, so the receipt binds detector -> sink -> failure.
+    """
+
+    if sink is not _ACTIVE_VERDICT_SINK:
+        raise OracleFailure(
+            f"consume_findings({fn.__name__}): the supplied list is not the "
+            "active verdict sink - a scratch-list receipt forgery (round-4 "
+            "F2)."
+        )
+    findings = fn(*args)
+    sink.extend(findings)
+    CONSUMED_INSTRUMENTS.add(fn.__name__)
+
+
+def consume_optional_finding(sink: list[str], fn, *args) -> None:
+    """Consume an instrument returning either one violation or ``None``."""
+
+    if sink is not _ACTIVE_VERDICT_SINK:
+        raise OracleFailure(
+            f"consume_optional_finding({fn.__name__}): the supplied list is "
+            "not the active verdict sink - a scratch-list receipt forgery "
+            "(round-4 F2)."
+        )
+    finding = fn(*args)
+    if finding is not None:
+        sink.append(finding)
+    CONSUMED_INSTRUMENTS.add(fn.__name__)
+
+
+def f64_bits(value: float) -> int:
+    return struct.unpack("<Q", struct.pack("<d", value))[0]
+
+
+def f32_bits(value: float) -> int:
+    """Bits of value narrowed to f32, saturating to the infinities the
+    way Rust `as f32` does (struct.pack raises on out-of-range instead)."""
+
+    try:
+        packed = struct.pack("<f", value)
+    except OverflowError:
+        packed = struct.pack("<f", math.inf if value > 0 else -math.inf)
+    return struct.unpack("<I", packed)[0]
+
+
 # ---------------------------------------------------------------------------
 # Source structure (pure; unit-tested in test_faithful_observation_phase2_oracle.py)
 # ---------------------------------------------------------------------------
@@ -378,6 +694,7 @@ def defines_test(source: str, name: str) -> bool:
     return re.search(r"^\s*fn\s+" + re.escape(name) + r"\s*\(", source, re.M) is not None
 
 
+@instrument
 def ledger_violations(source: str, cells: Sequence[RedCell]) -> list[str]:
     """Require the harness's ignore inventory to equal the declared ledger."""
 
@@ -451,9 +768,11 @@ def exclusion_list(source: str, const_name: str) -> list[str] | None:
     return re.findall(r'"([^"]*)"', match.group(1))
 
 
+@instrument
 def exclusion_violations(source: str) -> list[str]:
     violations: list[str] = []
-    for const_name, owner, declared in DECLARED_EXCLUSIONS:
+    for const_name, owner, _probes, rows in DECLARED_EXCLUSIONS:
+        declared = exclusion_labels(rows)
         found = exclusion_list(source, const_name)
         if found is None:
             violations.append(
@@ -468,6 +787,134 @@ def exclusion_violations(source: str) -> list[str]:
                 "corpus entirely - update this ledger deliberately, with the "
                 "issue that owns the exclusion."
             )
+    return violations
+
+
+def test_fn_body(source: str, name: str) -> str | None:
+    """The body of a top-level `fn name()` (through its closing `\\n}`)."""
+
+    match = re.search(r"fn " + re.escape(name) + r"\(\)(.*?)\n\}", source, re.S)
+    return None if match is None else match.group(1)
+
+
+def probe_attributes(source: str, name: str) -> list[str] | None:
+    """The attribute lines bound to `fn name(`, outermost first.
+
+    Walks upward through single-line attributes and comments. A
+    multi-line attribute (its closing `)]` on its own line) stops the
+    walk early, which FAILS CLOSED: the collected list then cannot equal
+    the required `["#[test]"]`, so an attribute shape this parser cannot
+    vouch for is a violation, never a pass. None when the fn is absent.
+    """
+
+    lines = source.splitlines()
+    for index, line in enumerate(lines):
+        if re.match(r"\s*fn\s+" + re.escape(name) + r"\s*\(", line) is None:
+            continue
+        attrs: list[str] = []
+        walk = index - 1
+        while walk >= 0:
+            stripped = lines[walk].strip()
+            if stripped.startswith("#["):
+                attrs.append(stripped)
+            elif stripped.startswith("//"):
+                pass
+            else:
+                break
+            walk -= 1
+        attrs.reverse()
+        return attrs
+    return None
+
+
+@instrument
+def probe_attribute_violations(source: str) -> list[str]:
+    """PR #962 red-team F2: a probe must be an unconditional `#[test]` -
+    exactly that attribute and nothing else. `#[cfg_attr(all(), ignore)]`
+    disables a probe without matching the ignore scan; a `#[cfg(...)]`
+    compiles it away; any unrecognized or multi-line attribute shape
+    fails closed."""
+
+    violations: list[str] = []
+    for const_name, _owner, probes, _rows in DECLARED_EXCLUSIONS:
+        for probe, _expected in probes:
+            attrs = probe_attributes(source, probe)
+            if attrs is None:
+                continue  # absence is exclusion_probe_violations' finding
+            if attrs != ["#[test]"]:
+                violations.append(
+                    f"{const_name}: probe {probe} must carry exactly the "
+                    f"unconditional `#[test]` attribute; found {attrs!r}. "
+                    "Conditional or additional attributes (cfg, cfg_attr, "
+                    "ignore) can disable the re-execution leg without "
+                    "tripping the ignore scan."
+                )
+    return violations
+
+
+@instrument
+def exclusion_probe_violations(source: str) -> list[str]:
+    """§B2.9 CI-leg structure: each exclusion's probes exist, are NOT
+    `#[ignore]`d (an ignored probe is a disabled leg), iterate the list
+    constant itself, carry the shrink-protocol message naming this
+    ledger, and between them are assigned every declared label. These
+    are source-shape checks on the probe-authored leg; the independent
+    re-execution evidence is `run_exclusion_ground_truth`."""
+
+    ignored = ignored_cells(source)
+    violations: list[str] = []
+    for const_name, owner, probes, rows in DECLARED_EXCLUSIONS:
+        if not probes:
+            violations.append(
+                f"{const_name}: no exclusion probe declared. §B2.9: a declared "
+                "boundary that is not re-executed may not exist."
+            )
+            continue
+        assigned = [label for _probe, expected in probes for label in expected]
+        if sorted(assigned) != sorted(exclusion_labels(rows)):
+            violations.append(
+                f"{const_name}: the probes' declared receipt sequences cover "
+                f"{sorted(set(assigned))} but the ledger declares "
+                f"{sorted(exclusion_labels(rows))}. Every label is assigned to "
+                "exactly one probe's expected receipt."
+            )
+        for probe, _expected in probes:
+            if not defines_test(source, probe):
+                violations.append(
+                    f"{const_name} [{owner}]: exclusion probe {probe} is not "
+                    "defined in the harness. The re-execution leg is gone; "
+                    "restore the probe or delete the exclusion with its rows."
+                )
+                continue
+            if probe in ignored:
+                violations.append(
+                    f"{const_name}: exclusion probe {probe} is `#[ignore]`d - "
+                    "a disabled re-execution leg. Probes run in the DEFAULT "
+                    "suite; if the probe is failing, that is the §B2.9 signal "
+                    "working (shrink the list or file the new defect), not a "
+                    "flake to silence."
+                )
+                continue
+            body = test_fn_body(source, probe)
+            if body is None:
+                violations.append(
+                    f"{const_name}: exclusion probe {probe}'s body could not "
+                    "be extracted; the probe-shape checks cannot run."
+                )
+                continue
+            if const_name not in body:
+                violations.append(
+                    f"{const_name}: probe {probe} no longer references the "
+                    "list constant. Probes iterate the exclusion const itself "
+                    "so shrinking the list shrinks the probe in the same edit "
+                    "- hard-coded labels drift."
+                )
+            if "DECLARED_EXCLUSIONS" not in body:
+                violations.append(
+                    f"{const_name}: probe {probe} no longer carries the "
+                    "shrink-protocol message naming DECLARED_EXCLUSIONS; the "
+                    "gone-green failure must say what to do."
+                )
     return violations
 
 
@@ -634,6 +1081,7 @@ def observation_decode_arms(source: str) -> dict[str, str] | None:
     return arms
 
 
+@instrument
 def observation_decode_violations(source: str) -> list[str]:
     arms = observation_decode_arms(source)
     if arms is None:
@@ -718,6 +1166,7 @@ def header_declared_functions(header: str) -> set[str]:
     return set(re.findall(r"[A-Za-z_][A-Za-z0-9_ \*]*\b([A-Za-z0-9_]+)\s*\([^;{]*\)\s*;", code))
 
 
+@instrument
 def dead_export_violations(source: str, header: str) -> list[str]:
     """A retired public exit must be gone from the ABI, not just the text.
 
@@ -747,27 +1196,350 @@ def dead_export_violations(source: str, header: str) -> list[str]:
     return violations
 
 
-def format_narrowing_allowlist(source: str) -> list[tuple[str, int]]:
+def format_narrowing_allowlist(
+    source: str, variant: str = "CFormatNarrowing"
+) -> list[tuple[str, int]]:
     rows = re.findall(
-        r"Pat::CFormatNarrowing\s*,\s*\"([^\"]+)\"\s*,\s*(\d+)\s*,",
+        r"Pat::" + re.escape(variant) + r"\s*,\s*\"([^\"]+)\"\s*,\s*(\d+)\s*,",
         source,
     )
     return [(path, int(count)) for path, count in rows]
 
 
+@instrument
 def format_narrowing_violations(source: str) -> list[str]:
     violations: list[str] = []
-    for path, count in format_narrowing_allowlist(source):
-        if path not in PERMITTED_FORMAT_NARROWING_PATHS:
+    for variant, class_id, permitted in FORMAT_CLASS_TABLE:
+        for path, count in format_narrowing_allowlist(source, variant):
+            if path not in permitted:
+                violations.append(
+                    f"{path}: a {class_id} allowlist row of {count} outside "
+                    "the permitted set. A new baseline path is a possible "
+                    "third formatter (§B2.4, a review-blocking finding); if "
+                    "review clears it as a non-exit carrier, extend the "
+                    "permitted set here in the same change set - the "
+                    "two-instrument interlock is deliberate."
+                )
+    return violations
+
+
+_DOC_ARM = re.compile(
+    r"((?:Pat::\w+\s*\|\s*)*Pat::\w+|_)\s*=>\s*\{?\s*\"([^\"]+)\"",
+)
+
+
+def tripwire_doc_arms(source: str) -> list[tuple[tuple[str, ...], str]] | None:
+    """Parse `fn doc()`'s match arms into (variant names, citation) pairs.
+
+    Returns None when the function cannot be located; a located-but-empty
+    parse is reported by the caller as non-triviality failure (a silently
+    empty parse would otherwise pass every check).
+    """
+
+    match = re.search(r"fn doc\(self\) -> &'static str \{(.*?)\n    \}", source, re.S)
+    if match is None:
+        return None
+    arms: list[tuple[tuple[str, ...], str]] = []
+    for patterns, citation in _DOC_ARM.findall(match.group(1)):
+        names = tuple(re.findall(r"Pat::(\w+)", patterns))
+        arms.append((names, citation))
+    return arms
+
+
+@instrument
+def doc_citation_violations(source: str) -> list[str]:
+    """§B2.8's doc-citation parity: tripwire patterns citing this plan's
+    doc and FORMAT_CLASS_TABLE must be the same set, both ways."""
+
+    arms = tripwire_doc_arms(source)
+    if arms is None:
+        return [
+            "loud_unsupported_tripwire.rs: fn doc() could not be located; the "
+            "doc-citation parity check cannot run."
+        ]
+    if not arms or not any("loud_unsupported.md" in cite for _, cite in arms):
+        return [
+            "loud_unsupported_tripwire.rs: fn doc() parsed to nothing "
+            "recognizable (no loud_unsupported.md arm). The parser has gone "
+            "non-trivial-blind; fix it before trusting parity."
+        ]
+    cited = {
+        name
+        for names, citation in arms
+        if "faithful_observation.md" in citation
+        for name in names
+    }
+    covered = {variant for variant, _, _ in FORMAT_CLASS_TABLE}
+    violations: list[str] = []
+    for name in sorted(cited - covered):
+        violations.append(
+            f"Pat::{name} cites faithful_observation.md in doc() but has no "
+            "FORMAT_CLASS_TABLE row - a hosted detector this oracle cannot "
+            "see. Add its permitted-path row here in the same change set "
+            "(§B2.8)."
+        )
+    for name in sorted(covered - cited):
+        violations.append(
+            f"FORMAT_CLASS_TABLE covers Pat::{name} but the tripwire's doc() "
+            "no longer cites faithful_observation.md for it - a stale "
+            "coverage row or a detector that changed owner. Reconcile both "
+            "sides deliberately."
+        )
+    return violations
+
+
+# §B2.8's rule-instrument manifest: one row per §B2 item of the design
+# doc - (item number, a fragment of the item's bold title, instruments).
+# An instrument is an oracle function name (checked against this module),
+# `suite:<label>` naming a GREEN_SUITES entry, or `review-rule: <why>` -
+# an explicit, justified decision that the rule's enforcement is human
+# review. The point is not that every rule gets a mechanical check; it is
+# that NO rule gets to exist without the decision being recorded and
+# tripwired against the doc drifting away from it.
+B2_RULE_INSTRUMENTS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
+    (
+        1,
+        "one-time migration carve-out",
+        (
+            "review-rule: the migration completed at Phases 1-2; its proof "
+            "was the round-trip harness surviving both §B2.1 PRs unchanged",
+        ),
+    ),
+    (
+        2,
+        "Bits before text",
+        (
+            "review-rule: bit-level companions are corpus content, checked "
+            "where the migration touched expectations",
+        ),
+    ),
+    (
+        3,
+        "Red-to-green only by un-ignoring",
+        ("ledger_violations", "classify_red_run"),
+    ),
+    (
+        4,
+        "No third formatter",
+        (
+            "format_narrowing_violations",
+            "doc_citation_violations",
+            "suite:the §B2.4 no-third-formatter tripwire",
+        ),
+    ),
+    (
+        5,
+        "Discoveries fork",
+        (
+            "review-rule: filing and censusing are process acts; the "
+            "append-only census lives on the tracking issue",
+        ),
+    ),
+    (
+        6,
+        "No untyped decode at an exit",
+        ("observation_decode_violations",),
+    ),
+    (
+        7,
+        "A public exit owes exit coverage",
+        ("dead_export_violations",),
+    ),
+    (
+        8,
+        "Detector-scope parity",
+        ("b2_manifest_violations", "doc_citation_violations"),
+    ),
+    (
+        9,
+        "Three-legged boundaries",
+        (
+            "exclusion_violations",
+            "exclusion_probe_violations",
+            "probe_attribute_violations",
+            "classify_probe_outputs",
+            "eval_exclusion_ground_truth_violations",
+            "c_exclusion_ground_truth_violations",
+        ),
+    ),
+)
+
+
+def b2_rule_items(doc: str) -> list[tuple[int, str]] | None:
+    """The §B2 section's numbered items as (number, bold title) pairs."""
+
+    match = re.search(r"^## B2\..*?$(.*?)^## ", doc, re.S | re.M)
+    if match is None:
+        return None
+    return [
+        (int(number), title)
+        for number, title in re.findall(r"^(\d+)\. \*\*(.+?)\*\*", match.group(1), re.M)
+    ]
+
+
+@instrument
+def b2_manifest_violations(doc: str) -> list[str]:
+    items = b2_rule_items(doc)
+    if items is None:
+        return [
+            "spec/design/faithful_observation.md: the §B2 section could not "
+            "be located; the rule-instrument manifest cannot run."
+        ]
+    if len(items) < 7:
+        return [
+            f"spec/design/faithful_observation.md: the §B2 parse found only "
+            f"{len(items)} items where at least 7 are known to exist - the "
+            "parser has gone non-trivial-blind; fix it before trusting the "
+            "manifest."
+        ]
+    violations: list[str] = []
+    titles = dict(items)
+    manifest_numbers = {number for number, _, _ in B2_RULE_INSTRUMENTS}
+    for number in sorted(set(titles) - manifest_numbers):
+        violations.append(
+            f"§B2.{number} ({titles[number]!r}) has no B2_RULE_INSTRUMENTS "
+            "row. A §B2 rule lands only with a deliberate instrument decision "
+            "(§B2.8) - name its check, its suite, or an explicit justified "
+            "review-rule entry, in this same change set."
+        )
+    for number in sorted(manifest_numbers - set(titles)):
+        violations.append(
+            f"B2_RULE_INSTRUMENTS declares §B2.{number}, which the doc no "
+            "longer has. Delete the manifest row with the rule, never before."
+        )
+    suite_labels = {label for label, _ in GREEN_SUITES}
+    for number, fragment, instruments in B2_RULE_INSTRUMENTS:
+        title = titles.get(number)
+        if title is not None and fragment not in title:
             violations.append(
-                f"{path}: a c-format-narrowing allowlist row of {count} outside "
-                "the permitted cfg(test) fixture row. Phase 2 deleted every "
-                "PRODUCTION row; a new one is a third formatter (§B2.4, a "
-                "review-blocking finding)."
+                f"§B2.{number}'s title {title!r} no longer contains its "
+                f"manifest fragment {fragment!r} - the rule moved or was "
+                "rewritten; re-bind the manifest deliberately."
+            )
+        for entry in instruments:
+            if entry.startswith("review-rule"):
+                if len(entry.removeprefix("review-rule:").strip()) < 30:
+                    violations.append(
+                        f"§B2.{number}: a review-rule instrument needs its "
+                        "justification spelled out, not a bare tag (PR #962 "
+                        "red-team F5.2)."
+                    )
+                continue
+            if entry.startswith("suite:"):
+                label = entry.removeprefix("suite:")
+                if label not in suite_labels:
+                    violations.append(
+                        f"§B2.{number}: instrument {entry!r} names no "
+                        "GREEN_SUITES entry."
+                    )
+                continue
+            if not callable(globals().get(entry)):
+                violations.append(
+                    f"§B2.{number}: instrument `{entry}` is not a "
+                    "function in this oracle - the manifest names something "
+                    "that cannot run."
+                )
+    return violations
+
+
+def instrument_result_violations(
+    invoked: set[str], consumed: set[str]
+) -> list[str]:
+    """Require both runtime entry and a centrally consumed detector result.
+
+    A receipt written on function entry proves only that code ran. PR #962's
+    exact-head review demonstrated a non-empty detector result discarded by
+    its caller while every entry receipt remained green. Callable instruments
+    therefore owe two independent facts: the decorator's runtime receipt and
+    a receipt written only by ``consume_findings`` after the result reaches a
+    verdict sink. Suite receipts are both invoked and consumed on success.
+    """
+
+    violations: list[str] = []
+    for number, _fragment, instruments in B2_RULE_INSTRUMENTS:
+        for entry in instruments:
+            if entry.startswith("review-rule"):
+                continue
+            if entry not in invoked:
+                violations.append(
+                    f"§B2.{number}: instrument `{entry}` produced no runtime "
+                    "invocation receipt during this oracle run - it is named "
+                    "but never executed (manifest theater)."
+                )
+            elif entry not in consumed:
+                violations.append(
+                    f"§B2.{number}: instrument `{entry}` executed, but its "
+                    "result was not consumed by the oracle verdict "
+                    "(discarded-result detector theater)."
+                )
+    return violations
+
+
+def instrument_invocation_violations(invoked: set[str]) -> list[str]:
+    """Compatibility unit seam: treat every supplied invocation as consumed."""
+
+    return instrument_result_violations(invoked, invoked)
+
+
+_RECEIPT = re.compile(r"^exclusion probe (\w+) visited: (.*)$", re.M)
+
+
+def probe_receipts(output: str) -> dict[str, list[str]]:
+    """Parse `exclusion probe <CONST> visited: <labels>` receipt lines
+    into ORDERED label lists, concatenated in line order. Order and
+    multiplicity are preserved (PR #962 round-2 M1: the set-union form
+    accepted `a a b b` for the declaration `["a", "b"]`)."""
+
+    receipts: dict[str, list[str]] = {}
+    for const_name, labels in _RECEIPT.findall(output):
+        receipts.setdefault(const_name, []).extend(labels.split())
+    return receipts
+
+
+@instrument
+def classify_probe_outputs(
+    const_name: str,
+    probe_runs: Sequence[tuple[str, Sequence[str], int, str]],
+) -> list[str]:
+    """The CI-leg receipt check: each probe run must have executed
+    exactly one test, passed, and printed EXACTLY its declared ordered
+    receipt sequence - order and multiplicity compared, so shrunken,
+    duplicated, or reordered receipts fail. The receipt is still
+    probe-authored text; a probe that forges the expected sequence while
+    skipping rows passes THIS check and is caught by
+    `run_exclusion_ground_truth`, which re-derives every label's
+    fingerprint without trusting probe output (PR #962 round-2 M1)."""
+
+    violations: list[str] = []
+    for probe, expected, returncode, output in probe_runs:
+        if returncode != 0:
+            violations.append(
+                f"{const_name}: probe {probe} FAILED (exit {returncode}). "
+                "If the output carries a GOOD NEWS message, follow its "
+                "shrink protocol; otherwise a probe leg broke. Output "
+                f"tail:\n{output[-2000:]}"
+            )
+            continue
+        if "running 1 test" not in output:
+            violations.append(
+                f"{const_name}: the {probe} run did not execute exactly "
+                "one test (filter or harness drift) - a zero-test result "
+                "is not a green probe."
+            )
+            continue
+        receipt = probe_receipts(output).get(const_name, [])
+        if receipt != list(expected):
+            violations.append(
+                f"{const_name}: probe {probe}'s ordered receipt "
+                f"{receipt} does not equal its declared sequence "
+                f"{list(expected)}. A shrunken, duplicated, or reordered "
+                "receipt means the probe stopped visiting what the "
+                "ledger declares."
             )
     return violations
 
 
+@instrument
 def classify_red_run(cell: RedCell, returncode: int, output: str) -> str | None:
     """Decide whether a known-red cell met its obligation."""
 
@@ -829,6 +1601,7 @@ def read_sources() -> dict[Path, str]:
         TRIPWIRE_SOURCE,
         RUNTIME_SOURCE,
         RUNTIME_HEADER,
+        DESIGN_DOC,
     ):
         try:
             sources[relative] = (REPO_ROOT / relative).read_text(encoding="utf-8")
@@ -839,27 +1612,38 @@ def read_sources() -> dict[Path, str]:
 
 
 def run_structural_scan(sources: dict[Path, str]) -> None:
-    violations: list[str] = []
-    violations.extend(unignored_violations(sources))
-    violations.extend(retired_lock_violations(sources))
-    violations.extend(ledger_violations(sources[HARNESS_SOURCE], KNOWN_RED_CELLS))
-    violations.extend(exclusion_violations(sources[HARNESS_SOURCE]))
-    violations.extend(cross_lane_corpus_violations(sources[HARNESS_SOURCE]))
-    violations.extend(observation_decode_violations(sources[RUNTIME_SOURCE]))
-    violations.extend(
-        dead_export_violations(sources[RUNTIME_SRC_DIR], sources[RUNTIME_HEADER])
+    checks = (
+        (unignored_violations, (sources,)),
+        (retired_lock_violations, (sources,)),
+        (ledger_violations, (sources[HARNESS_SOURCE], KNOWN_RED_CELLS)),
+        (exclusion_violations, (sources[HARNESS_SOURCE],)),
+        (exclusion_probe_violations, (sources[HARNESS_SOURCE],)),
+        (probe_attribute_violations, (sources[HARNESS_SOURCE],)),
+        (cross_lane_corpus_violations, (sources[HARNESS_SOURCE],)),
+        (observation_decode_violations, (sources[RUNTIME_SOURCE],)),
+        (
+            dead_export_violations,
+            (sources[RUNTIME_SRC_DIR], sources[RUNTIME_HEADER]),
+        ),
+        (format_narrowing_violations, (sources[TRIPWIRE_SOURCE],)),
+        (doc_citation_violations, (sources[TRIPWIRE_SOURCE],)),
+        (b2_manifest_violations, (sources[DESIGN_DOC],)),
     )
-    violations.extend(format_narrowing_violations(sources[TRIPWIRE_SOURCE]))
-    if violations:
-        raise OracleFailure("structural scan failed:\n" + "\n".join(violations))
+    with verdict_sink("structural scan failed") as violations:
+        for check, args in checks:
+            consume_findings(violations, check, *args)
+    probe_count = sum(len(probes) for _, _, probes, _ in DECLARED_EXCLUSIONS)
     print(
         "+ structural scan: un-ignored oracle rows present, interim locks "
         f"retired, {len(KNOWN_RED_CELLS)} known-red cells declared and cited, "
-        "corpus exclusions unchanged, the §C2.3 cross-lane corpus floor "
+        f"corpus exclusions unchanged with {probe_count} non-ignored "
+        "re-execution probes bound, the §C2.3 cross-lane corpus floor "
         f"({len(CROSS_LANE_CORPUS_FLOOR)} programs) intact, all "
         f"{len(OBSERVATION_DECODE_TABLE)} observation decode arms on their "
-        "declared pointer views, no zero-emitter public exit, production "
-        "format-narrowing allowlist empty",
+        f"declared pointer views, no zero-emitter public exit, all "
+        f"{len(FORMAT_CLASS_TABLE)} no-third-formatter classes inside their "
+        "permitted sets with doc-citation parity, and the §B2 "
+        f"rule-instrument manifest bound ({len(B2_RULE_INSTRUMENTS)} rules)",
         flush=True,
     )
 
@@ -873,44 +1657,544 @@ def run_green_suites(env: dict[str, str]) -> None:
                 f"{label} failed with exit {completed.returncode}: "
                 f"{command_text(command)}"
             )
+        # The suite's runtime invocation receipt for the manifest.
+        INVOKED_INSTRUMENTS.add(f"suite:{label}")
+        CONSUMED_INSTRUMENTS.add(f"suite:{label}")
 
 
-def run_known_red_cells(env: dict[str, str]) -> None:
-    violations: list[str] = []
-    for cell in KNOWN_RED_CELLS:
-        command = (
-            "cargo",
-            "test",
-            "-p",
-            "chelis-cli",
-            "--test",
-            "observation_roundtrip_harness",
-            "--",
-            "--ignored",
-            "--exact",
-            cell.name,
-        )
-        print(f"+ {command_text(command)}", flush=True)
-        completed = subprocess.run(
-            command,
-            cwd=REPO_ROOT,
-            env=env,
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        output = completed.stdout + completed.stderr
-        violation = classify_red_run(cell, completed.returncode, output)
-        if violation is None:
+def run_exclusion_probes(env: dict[str, str]) -> None:
+    with verdict_sink("exclusion probe receipts failed") as violations:
+        run_exclusion_probes_into(violations, env)
+
+
+def run_exclusion_probes_into(violations: list[str], env: dict[str, str]) -> None:
+    for const_name, _owner, probes, rows in DECLARED_EXCLUSIONS:
+        probe_runs: list[tuple[str, Sequence[str], int, str]] = []
+        for probe, expected in probes:
+            command = (
+                "cargo",
+                "test",
+                "-p",
+                "chelis-cli",
+                "--test",
+                "observation_roundtrip_harness",
+                "--",
+                "--exact",
+                probe,
+                "--nocapture",
+            )
+            print(f"+ {command_text(command)}", flush=True)
+            completed = subprocess.run(
+                command,
+                cwd=REPO_ROOT,
+                env=env,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            probe_runs.append(
+                (probe, expected, completed.returncode, completed.stdout + completed.stderr)
+            )
+        consume_findings(violations, classify_probe_outputs, const_name, probe_runs)
+        if not violations:
             print(
-                f"  known-red as declared: {cell.name} ({cell.issue}, "
-                f"repair owned by {cell.owner})",
+                f"  probe receipts exact: {const_name} "
+                f"({len(exclusion_labels(rows))} labels across {len(probes)} probe(s))",
                 flush=True,
             )
+
+
+def c_code_without_comments_or_literals(c_source: str) -> str:
+    """Mask C comments plus string/character literals, preserving positions.
+
+    NOT preprocessor-aware (round-4 F7, recorded): a fingerprint inside
+    an `#if 0` region still counts. That errs conservative - it can keep
+    an exclusion looking earned, never mint a false repair - and the
+    behavioral leg decides the verdict regardless.
+    """
+
+    out = list(c_source)
+    index = 0
+    state = "code"
+    while index < len(c_source):
+        char = c_source[index]
+        following = c_source[index + 1] if index + 1 < len(c_source) else ""
+        if state == "code":
+            if char == "/" and following == "/":
+                out[index] = out[index + 1] = " "
+                index += 2
+                state = "line-comment"
+                continue
+            if char == "/" and following == "*":
+                out[index] = out[index + 1] = " "
+                index += 2
+                state = "block-comment"
+                continue
+            if char == '"':
+                out[index] = " "
+                index += 1
+                state = "string"
+                continue
+            if char == "'":
+                out[index] = " "
+                index += 1
+                state = "char"
+                continue
+        elif state == "line-comment":
+            if char == "\n":
+                state = "code"
+            else:
+                out[index] = " "
+            index += 1
+            continue
+        elif state == "block-comment":
+            out[index] = " "
+            if char == "*" and following == "/":
+                out[index + 1] = " "
+                index += 2
+                state = "code"
+                continue
+            index += 1
+            continue
         else:
-            violations.append(violation)
-    if violations:
-        raise OracleFailure("known-red ledger failed:\n" + "\n".join(violations))
+            out[index] = " "
+            if char == "\\" and following:
+                out[index + 1] = " "
+                index += 2
+                continue
+            delimiter = '"' if state == "string" else "'"
+            if char == delimiter:
+                state = "code"
+            index += 1
+            continue
+        index += 1
+    return "".join(out)
+
+
+def c_has_bare_giant_integer_literal(c_source: str) -> bool:
+    """Python replica of the harness's chelis#751 fingerprint: a digit
+    run longer than i64::MAX's 19 digits, not followed by a decimal
+    point or exponent - no legitimate C integer constant has that shape."""
+
+    code = c_code_without_comments_or_literals(c_source)
+    index = 0
+    length = len(code)
+    digits = set("0123456789")
+    while index < length:
+        if code[index] in digits:
+            start = index
+            while index < length and code[index] in digits:
+                index += 1
+            following = code[index] if index < length else ""
+            if index - start > 19 and following not in (".", "e", "E"):
+                return True
+        else:
+            index += 1
+    return False
+
+
+@instrument
+def eval_exclusion_ground_truth_violations(
+    texts: Sequence[str], rows: Sequence[tuple[str, str, str, str]]
+) -> list[str]:
+    """The chelis#717 fingerprint, re-derived by the ORACLE from a
+    to_list render it produced itself: each excluded element's text must
+    parse to the F32-narrowing of the intended value (any other shape is
+    a different defect) and must NOT round-trip at f64 (when it does,
+    the repair landed and the exclusion must shrink). No probe output is
+    trusted anywhere in this leg (PR #962 round-2 M1)."""
+
+    violations: list[str] = []
+    if len(texts) != len(rows):
+        return [
+            f"eval ground truth: expected {len(rows)} rendered elements, "
+            f"got {len(texts)} - the driver program and the ledger drifted."
+        ]
+    for (label, _dt, _elem, value_text), text in zip(rows, texts):
+        value = float(value_text)
+        try:
+            rendered = float(text)
+        except ValueError:
+            violations.append(
+                f"eval ground truth [{label}]: `{text}` is not a float - a "
+                "different defect; file it per B2.5."
+            )
+            continue
+        if f32_bits(rendered) != f32_bits(value):
+            violations.append(
+                f"eval ground truth [{label}]: `{text}` is not the F32-tag "
+                "narrowing of the intended value - the declared chelis#717 "
+                "fingerprint no longer matches; file the new defect per B2.5 "
+                "before touching the exclusion."
+            )
+        elif f64_bits(rendered) == f64_bits(value):
+            violations.append(
+                f"eval ground truth [{label}]: the to_list render now "
+                "round-trips at f64 - the chelis#717/[#729] repair landed (or "
+                "the row went text-coincident). Remove the label from "
+                "EVAL_F64_LIST_EXCLUDED and DECLARED_EXCLUSIONS in one change "
+                "set."
+            )
+    return violations
+
+
+class CExclusionGroundTruth:
+    """One oracle-owned C emission plus its independently observed behavior."""
+
+    def __init__(
+        self, label: str, build_ok: bool, c_source: str, native_status: str
+    ) -> None:
+        self.label = label
+        self.build_ok = build_ok
+        self.c_source = c_source
+        self.native_status = native_status
+
+
+@instrument
+def c_exclusion_ground_truth_violations(
+    entries: Sequence[CExclusionGroundTruth],
+) -> list[str]:
+    """Judge C exclusions from source reason AND independently run behavior."""
+
+    violations: list[str] = []
+    for entry in entries:
+        label = entry.label
+        if not entry.build_ok:
+            violations.append(
+                f"C ground truth [{label}]: `chelis build` failed - the "
+                "exclusion declares a successful build with defective "
+                "emission (chelis#751); a build-time rejection is different "
+                "behavior. Re-adjudicate per B2.5."
+            )
+            continue
+        if entry.native_status == "exact":
+            violations.append(
+                f"C ground truth [{label}]: generated C compiles, runs, and "
+                "renders the exact intended bits - the chelis#751 repair "
+                "landed. Shrink C_LANE_EXCLUDED and DECLARED_EXCLUSIONS in "
+                "one change set."
+            )
+            continue
+        if label == "f64-neg-zero":
+            if entry.native_status != "wrong-bits":
+                violations.append(
+                    "C ground truth [f64-neg-zero]: native execution did not "
+                    "reproduce the declared dropped-sign behavior; this is a "
+                    "different defect or incomplete repair. Re-adjudicate "
+                    "under B2.5."
+                )
+            continue
+        fingerprint = c_has_bare_giant_integer_literal(entry.c_source)
+        if entry.native_status not in ("compile-failed", "wrong-bits", "run-failed"):
+            violations.append(
+                f"C ground truth [{label}]: unknown native observation "
+                f"{entry.native_status!r}; the executable boundary is not "
+                "proved."
+            )
+        elif not fingerprint:
+            violations.append(
+                f"C ground truth [{label}]: the generated C no longer "
+                "carries the chelis#751 bare-integer-literal fingerprint, but "
+                "native execution is not exact. The old defect is gone and a "
+                "different defect remains; file it under B2.5 before "
+                "touching the exclusion."
+            )
+    return violations
+
+
+def run_chelis(args: Sequence[str], env: dict[str, str]) -> subprocess.CompletedProcess:
+    command = (
+        "cargo",
+        "run",
+        "-p",
+        "chelis-cli",
+        "--bin",
+        "chelis",
+        "--quiet",
+        "--",
+        *args,
+    )
+    child_env = dict(env)
+    child_env["CHELIS_STYLE_GATE_DISABLE"] = "1"
+    return subprocess.run(
+        command,
+        cwd=REPO_ROOT,
+        env=child_env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+
+def c_rendered_values(stdout: str) -> list[str]:
+    """Numeric element spellings from generated tensor/list exit lines."""
+
+    values: list[str] = []
+    for line in stdout.splitlines():
+        data = re.search(r"data=\[([^\]]*)\]", line)
+        if data is not None:
+            values.extend(
+                item.strip() for item in data.group(1).split(",") if item.strip()
+            )
+            continue
+        payload = line.strip()
+        if " = [" in payload:
+            payload = payload.split(" = ", 1)[1]
+        if payload.startswith("[") and payload.endswith("]"):
+            values.extend(
+                item.strip()
+                for item in payload.removeprefix("[").removesuffix("]").split(",")
+                if item.strip()
+            )
+    return values
+
+
+def parse_compile_command(build_stdout: str) -> list[str]:
+    """The native compile command a `chelis build` run advertised.
+
+    Driver PLUMBING failures raise instead of degrading to a native
+    status (round-4 F4: any plumbing breakage previously returned
+    'run-failed', which the classifier accepts as 'still broken', so a
+    broken driver silently reverted the leg to fingerprint-only).
+    """
+
+    compile_line = next(
+        (
+            line.removeprefix("Compile: ")
+            for line in build_stdout.splitlines()
+            if line.startswith("Compile: ")
+        ),
+        None,
+    )
+    if compile_line is None:
+        raise OracleFailure(
+            "C ground truth driver: the build output carried no `Compile:` "
+            "line - the CLI contract or this parser drifted; the executable "
+            "leg cannot run (round-4 F4: plumbing failures are loud, never "
+            "a native status)."
+        )
+    command = shlex.split(compile_line)
+    if "-o" not in command or command.index("-o") + 1 >= len(command):
+        raise OracleFailure(
+            "C ground truth driver: the advertised compile command names no "
+            "`-o` output - the leg cannot locate the binary (plumbing, not "
+            "a native outcome)."
+        )
+    return command
+
+
+def classify_rendered_bits(rendered: Sequence[str], dtype: str, intended_text: str) -> str:
+    """'exact' iff every rendered element carries the intended bits."""
+
+    intended = float(intended_text)
+    intended_bits = f32_bits(intended) if dtype == "f32" else f64_bits(intended)
+    try:
+        rendered_bits = [
+            f32_bits(float(text)) if dtype == "f32" else f64_bits(float(text))
+            for text in rendered
+        ]
+    except ValueError:
+        return "wrong-bits"
+    return (
+        "exact"
+        if all(bits == intended_bits for bits in rendered_bits)
+        else "wrong-bits"
+    )
+
+
+def run_generated_c_ground_truth(
+    build_stdout: str,
+    out_dir: Path,
+    dtype: str,
+    intended_text: str,
+    env: dict[str, str],
+) -> str:
+    """Compile/run the CLI's emitted command and compare rendered bits.
+
+    Returns a NATIVE status only ('compile-failed', 'run-failed',
+    'wrong-bits', 'exact'); driver plumbing raises OracleFailure.
+    """
+
+    command = parse_compile_command(build_stdout)
+    compiled = subprocess.run(
+        command,
+        cwd=out_dir,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if compiled.returncode != 0:
+        return "compile-failed"
+    binary = Path(command[command.index("-o") + 1])
+    if not binary.is_absolute():
+        binary = out_dir / binary
+    ran = subprocess.run(
+        (str(binary),),
+        cwd=out_dir,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if ran.returncode != 0:
+        return "run-failed"
+    rendered = c_rendered_values(ran.stdout)
+    if not rendered:
+        raise OracleFailure(
+            "C ground truth driver: the compiled program ran successfully "
+            "but no exit render was parsed from its stdout - the render "
+            "parser or the program shape drifted (plumbing, not a native "
+            "outcome)."
+        )
+    return classify_rendered_bits(rendered, dtype, intended_text)
+
+
+def run_exclusion_ground_truth(env: dict[str, str]) -> None:
+    """§B2.9 leg 2's INDEPENDENT half: the oracle re-executes every
+    excluded behavior itself - it writes the programs, runs the
+    toolchain, drives native C behavior, and re-derives each fingerprint
+    - so a forged probe receipt changes nothing here."""
+
+    with verdict_sink("independent exclusion re-execution failed") as violations:
+        run_exclusion_ground_truth_into(violations, env)
+    print(
+        "+ independent exclusion re-execution: every declared label's "
+        "fingerprint and executable C behavior re-derived by the oracle itself",
+        flush=True,
+    )
+
+
+def run_exclusion_ground_truth_into(violations: list[str], env: dict[str, str]) -> None:
+    exclusions = {name: rows for name, _o, _p, rows in DECLARED_EXCLUSIONS}
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+
+        eval_rows = exclusions["EVAL_F64_LIST_EXCLUDED"]
+        elems = ", ".join(elem for _l, _d, elem, _v in eval_rows)
+        program = (
+            "module M.Main\n"
+            f"def mk() -> tensor[{len(eval_rows)}, f64] = to_tensor([{elems}])\n"
+            "lroot = to_list(mk())\n"
+        )
+        source = tmp_path / "eval_ground_truth.ch"
+        source.write_text(program, encoding="utf-8")
+        print("+ oracle-driven eval re-execution of EVAL_F64_LIST_EXCLUDED", flush=True)
+        completed = run_chelis(("eval", "--file", str(source)), env)
+        if completed.returncode != 0:
+            violations.append(
+                f"eval ground truth: `chelis eval` failed:\n{completed.stderr[-2000:]}"
+            )
+        else:
+            # A single-root program renders its list BARE in eval; a
+            # multi-root program labels it `lroot = [...]` (the chelis#862
+            # root-labeling behavior). Accept both.
+            line = next(
+                (
+                    stripped.removeprefix("lroot = ")
+                    for stripped in (
+                        l.strip() for l in completed.stdout.splitlines()
+                    )
+                    if stripped.startswith("lroot = [") or stripped.startswith("[")
+                ),
+                None,
+            )
+            if line is None:
+                violations.append(
+                    "eval ground truth: no to_list render in the driver "
+                    f"output:\n{completed.stdout[-2000:]}"
+                )
+            else:
+                texts = [
+                    t.strip()
+                    for t in line.removeprefix("[").rstrip("]").split(",")
+                    if t.strip()
+                ]
+                consume_findings(
+                    violations,
+                    eval_exclusion_ground_truth_violations,
+                    texts,
+                    eval_rows,
+                )
+
+        entries: list[CExclusionGroundTruth] = []
+        for label, dt, elem, value_text in exclusions["C_LANE_EXCLUDED"]:
+            name = f"gt_{label.replace('-', '_')}"
+            program = (
+                "module M.Main\n"
+                f"def mk() -> tensor[1, {dt}] = to_tensor([{elem}])\n"
+                "shown = print(mk())\n"
+                "listed = print(to_list(mk()))\n"
+                "troot = mk()\n"
+                "lroot = to_list(mk())\n"
+            )
+            source = tmp_path / f"{name}.ch"
+            out_dir = tmp_path / f"{name}-out"
+            source.write_text(program, encoding="utf-8")
+            print(f"+ oracle-driven C emission re-execution of {label}", flush=True)
+            completed = run_chelis(
+                ("build", str(source), "--target", "c", "--output", str(out_dir)), env
+            )
+            c_file = out_dir / f"{name}.c"
+            c_source = (
+                c_file.read_text(encoding="utf-8") if c_file.is_file() else ""
+            )
+            native_status = (
+                run_generated_c_ground_truth(
+                    completed.stdout, out_dir, dt, value_text, env
+                )
+                if completed.returncode == 0
+                else "not-run"
+            )
+            entries.append(
+                CExclusionGroundTruth(
+                    label, completed.returncode == 0, c_source, native_status
+                )
+            )
+        consume_findings(violations, c_exclusion_ground_truth_violations, entries)
+
+
+def run_known_red_cells(env: dict[str, str], runner=subprocess.run) -> None:
+    """Re-run each known-red cell; `runner` is injectable so the unit
+    suite can exercise this leg's classification and failure paths
+    without cargo (round-4 F3: the gone-green branch shipped a
+    `NameError` because nothing executed it)."""
+
+    with verdict_sink("known-red ledger failed") as violations:
+        for cell in KNOWN_RED_CELLS:
+            command = (
+                "cargo",
+                "test",
+                "-p",
+                "chelis-cli",
+                "--test",
+                "observation_roundtrip_harness",
+                "--",
+                "--ignored",
+                "--exact",
+                cell.name,
+            )
+            print(f"+ {command_text(command)}", flush=True)
+            completed = runner(
+                command,
+                cwd=REPO_ROOT,
+                env=env,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            output = completed.stdout + completed.stderr
+            before = len(violations)
+            consume_optional_finding(
+                violations, classify_red_run, cell, completed.returncode, output
+            )
+            if len(violations) == before:
+                print(
+                    f"  known-red as declared: {cell.name} ({cell.issue}, "
+                    f"repair owned by {cell.owner})",
+                    flush=True,
+                )
 
 
 def main() -> int:
@@ -919,7 +2203,22 @@ def main() -> int:
         sources = read_sources()
         run_structural_scan(sources)
         run_green_suites(env)
+        run_exclusion_probes(env)
+        run_exclusion_ground_truth(env)
         run_known_red_cells(env)
+        receipts = instrument_result_violations(
+            INVOKED_INSTRUMENTS, CONSUMED_INSTRUMENTS
+        )
+        if receipts:
+            raise OracleFailure(
+                "instrument result receipts failed:\n" + "\n".join(receipts)
+            )
+        print(
+            "+ runtime result receipts: all manifest instruments executed "
+            "and their results reached the verdict "
+            f"({len(CONSUMED_INSTRUMENTS)} consumed receipts)",
+            flush=True,
+        )
     except OracleFailure as error:
         print(f"PHASE 2 ORACLE: FAIL: {error}", file=sys.stderr)
         return 1
