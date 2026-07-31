@@ -1,0 +1,11 @@
+typed_nodes = 11
+total_nodes = 12
+diagnostics = 1
+
+[0] kind = DimensionMismatch
+    message = dimension mismatch: Lit(32) vs Lit(16)
+    severity = 0.8
+    expected = None
+    got = None
+    span_offset = None
+    span_id = None

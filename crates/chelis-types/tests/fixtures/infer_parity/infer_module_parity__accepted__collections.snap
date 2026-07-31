@@ -1,0 +1,102 @@
+== annotated deep ==
+(module {}
+  parity.collections
+  (defsig {} values (t-adt {} List (t-prim {} int32)))
+  (def {type: (t-adt {} List (t-prim {} int32))}
+    values
+    (app {span: "surf:48..60", type: (t-adt {} List (t-prim {} int32))}
+      (var {} Cons)
+      (lit {span: "surf:49..50", type: (t-prim {} int32)} 1)
+      (app {type: (t-adt {} List (t-prim {} int32))}
+        (var {} Cons)
+        (lit {span: "surf:52..53", type: (t-prim {} int32)} 2)
+        (app {type: (t-adt {} List (t-prim {} int32))}
+          (var {} Cons)
+          (lit {span: "surf:55..56", type: (t-prim {} int32)} 3)
+          (app {type: (t-adt {} List (t-prim {} int32))}
+            (var {} Cons)
+            (lit {span: "surf:58..59", type: (t-prim {} int32)} 4)
+            (var {} Nil))))))
+  (def {type: (t-adt {} List (t-prim {} int32))}
+    doubled
+    (app {span: "surf:71..110", type: (t-adt {} List (t-prim {} int32))}
+      (var {span: "surf:71..74"} map)
+      (fn {span: "surf:75..101",
+            type: (t-fn {} (t-prim {} int32) (t-prim {} int32))
+          }
+        (params {} (v {type: (t-prim {} int32)}))
+        (app {span: "surf:92..101", type: (t-prim {} int32)}
+          (var {span: "surf:92..95"} mul)
+          (var {span: "surf:96..97"} v)
+          (lit {span: "surf:99..100", type: (t-prim {} int32)} 2)))
+      (var {span: "surf:103..109"} values)))
+  (def {type: (t-adt {} List (t-prim {} int32))}
+    kept
+    (app {span: "surf:118..159", type: (t-adt {} List (t-prim {} int32))}
+      (var {span: "surf:118..124"} filter)
+      (fn {span: "surf:125..150",
+            type: (t-fn {} (t-prim {} int32) (t-prim {} bool))
+          }
+        (params {} (v {type: (t-prim {} int32)}))
+        (app {span: "surf:142..150", type: (t-prim {} bool)}
+          (var {span: "surf:142..144"} gt)
+          (var {span: "surf:145..146"} v)
+          (lit {span: "surf:148..149", type: (t-prim {} int32)} 2)))
+      (var {span: "surf:152..158"} values)))
+  (def {type: (t-prim {} int32)}
+    total
+    (app {span: "surf:168..225", type: (t-prim {} int32)}
+      (var {span: "surf:168..172"} fold)
+      (fn {span: "surf:173..213",
+            type: (t-fn {}
+                    (t-prim {} int32)
+                    (t-prim {} int32)
+                    (t-prim {} int32))
+          }
+        (params {}
+          (acc {type: (t-prim {} int32)})
+          (v {type: (t-prim {} int32)}))
+        (app {span: "surf:202..213", type: (t-prim {} int32)}
+          (var {span: "surf:202..205"} add)
+          (var {span: "surf:206..209"} acc)
+          (var {span: "surf:211..212"} v)))
+      (lit {span: "surf:215..216", type: (t-prim {} int32)} 0)
+      (var {span: "surf:218..224"} values)))
+  (def {type: (t-prim {} int64)}
+    count
+    (app {span: "surf:234..245", type: (t-prim {} int64)}
+      (var {span: "surf:234..237"} len)
+      (var {span: "surf:238..244"} values)))
+  (def {type: (t-adt {} List (t-prim {} int32))}
+    first_two
+    (app {span: "surf:258..286", type: (t-adt {} List (t-prim {} int32))}
+      (var {span: "surf:258..262"} take)
+      (var {span: "surf:263..269"} values)
+      (cast {span: "surf:271..285", type: (t-prim {} int64)}
+        (lit {span: "surf:276..277", type: (t-prim {} int64)} 2)
+        (t-prim {} int64))))
+  (def {type: (t-adt {} List (t-tuple {} (t-prim {} int32) (t-prim {} int32)))}
+    paired
+    (app {span: "surf:296..315",
+           type: (t-adt {}
+                   List
+                   (t-tuple {} (t-prim {} int32) (t-prim {} int32)))
+         }
+      (var {span: "surf:296..299"} zip)
+      (var {span: "surf:300..306"} values)
+      (var {span: "surf:308..314"} values))))
+
+== type env ==
+count : (t-prim {} int64)
+doubled : (t-adt {} List (t-prim {} int32))
+first_two : (t-adt {} List (t-prim {} int32))
+kept : (t-adt {} List (t-prim {} int32))
+paired : (t-adt {} List (t-tuple {} (t-prim {} int32) (t-prim {} int32)))
+total : (t-prim {} int32)
+values : (t-adt {} List (t-prim {} int32))
+
+== signature inference ==
+
+== infer stats ==
+typed_nodes = 50
+total_nodes = 50

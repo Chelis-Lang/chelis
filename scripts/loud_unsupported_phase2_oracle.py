@@ -317,7 +317,7 @@ def run_vocab_mutation(env: dict[str, str]) -> None:
             "non-exhaustive patterns",
             # EffectKind: the two independently-checkable consumer roots.
             "crates/chelis-surf/src/decompile.rs",
-            "crates/chelis-types/src/infer.rs",
+            "crates/chelis-types/src/infer/expr.rs",
             # RuntimeDType: every runtime FFI dtype boundary matches
             # exhaustively; an added dtype must go red there before any
             # sizing, allocation, or element-access decision exists for it.

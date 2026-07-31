@@ -1,0 +1,1219 @@
+//! Checked-program construction, metadata ownership, and totality finalization.
+//!
+//! This module contains code moved from the former inference monolith.
+//! The extraction preserves control flow and diagnostic order.
+
+use super::*;
+
+#[derive(Clone)]
+pub(super) struct DeclaredSigMetadata {
+    pub(super) param_types: Vec<deep::Expr>,
+    pub(super) binders: HashSet<String>,
+}
+
+/// Explicit annotation-time declaration context. The declared signature map
+/// belongs to one annotation unit; `current_type_binders` is narrowed to the
+/// `def` whose children are being annotated and is passed through every
+/// recursive annotation call.
+#[derive(Clone, Copy)]
+pub(super) struct AnnotationResolutionContext<'a> {
+    declared_signatures: &'a HashMap<String, DeclaredSigMetadata>,
+}
+
+impl<'a> AnnotationResolutionContext<'a> {
+    pub(super) fn root(declared_signatures: &'a HashMap<String, DeclaredSigMetadata>) -> Self {
+        Self {
+            declared_signatures,
+        }
+    }
+
+    pub(super) fn declared_signature(self, name: &str) -> Option<&'a DeclaredSigMetadata> {
+        self.declared_signatures.get(name)
+    }
+}
+
+/// Semantic role of one tagged Deep node's child in checker-owned type
+/// stamping. This is deliberately distinct from the child's syntactic tag:
+/// a `lit` is a runtime expression under `app`, but the same shape is selector
+/// syntax in `tuple-get`, `grad`, or `vmap`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ChildStampRole {
+    /// Traversed by ordinary expression inference.
+    RuntimeExpr,
+    /// Compiler/source syntax which is preserved verbatim.
+    Syntax,
+    /// A field, axis, projection, or transform selector.
+    Selector,
+    /// Handler payload syntax whose literal-form contract is owned by
+    /// `chelis-effects`, not expression inference.
+    EffectHandler,
+    /// A declaration, parameter, or binding name.
+    Binder,
+    /// Type/dimension syntax resolved by its owning type consumer.
+    Type,
+    /// Traversed by a dedicated inference owner rather than `infer_expr` on
+    /// the structural parent (module declarations, patterns, helper nodes,
+    /// and synthesized pipe stages).
+    ExplicitInferenceBypass,
+}
+
+/// Exhaustive child-role table for the canonical closed Deep vocabulary.
+///
+/// Returning `None` is a loud version-skew signal, never permission to treat
+/// an unknown child as a runtime expression. The completeness test below
+/// iterates `chelis_deep::validate::VALID_TAGS`, the grammar's single source
+/// of truth, so adding a tag requires an explicit ownership decision here.
+pub(super) fn child_stamp_role(tag: DeepTag, index: usize, _arity: usize) -> ChildStampRole {
+    use ChildStampRole::{
+        Binder, EffectHandler, ExplicitInferenceBypass, RuntimeExpr, Selector, Syntax, Type,
+    };
+
+    match tag {
+        // Module wrappers are not inferred as one expression. Their
+        // declarations each own a separate inference epoch.
+        DeepTag::Module => {
+            if index == 0 {
+                Binder
+            } else {
+                ExplicitInferenceBypass
+            }
+        }
+        DeepTag::Import | DeepTag::ImportAll | DeepTag::Export => Syntax,
+
+        // Declarations.
+        DeepTag::Def => {
+            if index == 0 {
+                Binder
+            } else {
+                RuntimeExpr
+            }
+        }
+        DeepTag::Defsig => {
+            if index == 0 {
+                Binder
+            } else {
+                Type
+            }
+        }
+        DeepTag::Deftype | DeepTag::Typealias | DeepTag::Variant | DeepTag::Field => {
+            if index == 0 {
+                Binder
+            } else {
+                Type
+            }
+        }
+        DeepTag::Defdim => Binder,
+
+        // Expressions and their structural helper positions.
+        DeepTag::Fn => {
+            if index == 0 {
+                Binder
+            } else {
+                RuntimeExpr
+            }
+        }
+        DeepTag::App
+        | DeepTag::If
+        | DeepTag::Block
+        | DeepTag::Tuple
+        | DeepTag::Par
+        | DeepTag::Jit
+        | DeepTag::Realize
+        | DeepTag::Copy
+        | DeepTag::Borrow
+        | DeepTag::Unquote
+        | DeepTag::Splice => RuntimeExpr,
+        DeepTag::HandleEffect => {
+            if index == 0 {
+                EffectHandler
+            } else {
+                RuntimeExpr
+            }
+        }
+        DeepTag::Let => {
+            if index == 0 {
+                ExplicitInferenceBypass
+            } else {
+                RuntimeExpr
+            }
+        }
+        DeepTag::Match => {
+            if index == 0 {
+                RuntimeExpr
+            } else {
+                ExplicitInferenceBypass
+            }
+        }
+        DeepTag::Arm => {
+            if index == 0 {
+                ExplicitInferenceBypass
+            } else {
+                RuntimeExpr
+            }
+        }
+        DeepTag::Var | DeepTag::Lit => Syntax,
+        DeepTag::Record => {
+            if index == 0 {
+                Type
+            } else {
+                ExplicitInferenceBypass
+            }
+        }
+        DeepTag::Access => {
+            if index == 0 {
+                RuntimeExpr
+            } else {
+                Selector
+            }
+        }
+        DeepTag::Pipe => {
+            if index == 0 {
+                RuntimeExpr
+            } else {
+                ExplicitInferenceBypass
+            }
+        }
+        DeepTag::TupleGet => {
+            if index == 0 {
+                RuntimeExpr
+            } else {
+                Selector
+            }
+        }
+        DeepTag::RecordUpdate => {
+            if index == 0 {
+                RuntimeExpr
+            } else {
+                ExplicitInferenceBypass
+            }
+        }
+
+        // Pattern nodes are consumed by the primary pattern traversal.
+        DeepTag::PatVar => Binder,
+        DeepTag::PatLit => Syntax,
+        DeepTag::PatCtor | DeepTag::PatRecord => {
+            if index == 0 {
+                Selector
+            } else {
+                ExplicitInferenceBypass
+            }
+        }
+        DeepTag::PatTuple => ExplicitInferenceBypass,
+        DeepTag::PatWild => Syntax,
+        DeepTag::PatAs => {
+            if index == 0 {
+                Binder
+            } else {
+                ExplicitInferenceBypass
+            }
+        }
+
+        // Type and dimension nodes are owned recursively by DeepTypeResolver,
+        // never by expression annotation.
+        DeepTag::TPrim
+        | DeepTag::TFn
+        | DeepTag::TTensor
+        | DeepTag::TAdt
+        | DeepTag::TVar
+        | DeepTag::TRef
+        | DeepTag::TUnit
+        | DeepTag::TTuple
+        | DeepTag::DName
+        | DeepTag::DVar
+        | DeepTag::DLit
+        | DeepTag::DRank => Type,
+
+        // Transform-specific selector/type positions.
+        DeepTag::Grad | DeepTag::Vmap => {
+            if index == 0 {
+                RuntimeExpr
+            } else {
+                Selector
+            }
+        }
+        DeepTag::Cast => {
+            if index == 0 {
+                RuntimeExpr
+            } else {
+                Type
+            }
+        }
+
+        // Quoted children and effect/resource payloads are syntax data.
+        DeepTag::Quote | DeepTag::Effects | DeepTag::Resource => Syntax,
+
+        // Structural helper nodes. `kv` is also used by pattern records, so
+        // its value/pattern slot is an explicit owning traversal in both
+        // contexts; canonical runtime values still record their normal stamp.
+        DeepTag::Params => Binder,
+        DeepTag::Bind => {
+            if index.is_multiple_of(2) {
+                Binder
+            } else {
+                RuntimeExpr
+            }
+        }
+        DeepTag::Kv => {
+            if index == 0 {
+                Selector
+            } else {
+                ExplicitInferenceBypass
+            }
+        }
+    }
+}
+
+/// One checker operation's typed inference result. The product is private,
+/// session-local, and never serialized: annotation consumes it immediately
+/// after the owning inference traversal completes.
+#[derive(Default)]
+pub(super) struct InferenceProduct {
+    pub(super) typed_nodes: usize,
+    pub(super) total_nodes: usize,
+    pub(super) next_epoch: u64,
+    pub(super) active_epoch: Option<TypeStampEpoch>,
+    pub(super) owner_types: HashMap<usize, FinalOwnerType>,
+    pub(super) type_headers: TypeResolutionEnv,
+    pub(super) adt_registry: AdtRegistry,
+}
+
+pub(super) struct TypeStampEpoch {
+    id: u64,
+    owners: HashMap<usize, StampRequirement>,
+    writes: HashMap<usize, Vec<OwnerTypeWrite>>,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct StampRequirement {
+    role: &'static str,
+    stamp_required: bool,
+}
+
+pub(super) struct OwnerTypeWrite {
+    ty: Type,
+    source: &'static str,
+}
+
+pub(super) struct FinalOwnerType {
+    epoch: u64,
+    ty: Type,
+}
+
+impl InferenceProduct {
+    pub(super) fn stats(&self) -> InferStats {
+        InferStats {
+            typed_nodes: self.typed_nodes,
+            total_nodes: self.total_nodes,
+        }
+    }
+
+    pub(super) fn begin_root(&mut self, root: &deep::Expr) {
+        assert!(
+            self.active_epoch.is_none(),
+            "type-stamp epochs must not overlap"
+        );
+        let id = self.next_epoch;
+        self.next_epoch += 1;
+        let mut epoch = TypeStampEpoch {
+            id,
+            owners: HashMap::new(),
+            writes: HashMap::new(),
+        };
+        register_annotation_owners(root, &mut epoch);
+        self.active_epoch = Some(epoch);
+    }
+
+    pub(super) fn record_canonical(&mut self, expr: &deep::Expr, ty: Type) {
+        self.record(expr, ty, "canonical infer_expr traversal");
+    }
+
+    pub(super) fn record_bypass(&mut self, expr: &deep::Expr, ty: Type, source: &'static str) {
+        self.record(expr, ty, source);
+    }
+
+    pub(super) fn record(&mut self, expr: &deep::Expr, ty: Type, source: &'static str) {
+        let Some(epoch) = self.active_epoch.as_mut() else {
+            return;
+        };
+        let key = expr_key(expr);
+        if !epoch.owners.contains_key(&key) {
+            return;
+        }
+        epoch
+            .writes
+            .entry(key)
+            .or_default()
+            .push(OwnerTypeWrite { ty, source });
+    }
+
+    pub(super) fn finish_root(&mut self, subst: &Subst, errors: &mut DiagnosticSink<'_>) {
+        let Some(epoch) = self.active_epoch.take() else {
+            errors.push(internal_owner_stamp_error(
+                "attempted to finish a type-stamp epoch that was not active".to_string(),
+            ));
+            return;
+        };
+
+        for (key, requirement) in epoch.owners {
+            let Some(writes) = epoch.writes.get(&key) else {
+                // Missing owners are diagnosed at the exact annotation lookup,
+                // where the original construct and role are still available.
+                continue;
+            };
+            let mut resolved = writes
+                .iter()
+                .map(|write| (subst.apply(&write.ty), write.source));
+            let Some((canonical, canonical_source)) = resolved.next() else {
+                continue;
+            };
+            for (candidate, candidate_source) in resolved {
+                if !owner_types_compatible(&canonical, &candidate) {
+                    errors.push(internal_owner_stamp_error(format!(
+                        "conflicting authoritative type writes for {} in epoch {}: \
+                         `{canonical}` from {canonical_source} vs `{candidate}` from \
+                         {candidate_source}",
+                        requirement.role, epoch.id
+                    )));
+                }
+            }
+            if requirement.stamp_required {
+                self.owner_types.insert(
+                    key,
+                    FinalOwnerType {
+                        epoch: epoch.id,
+                        ty: canonical,
+                    },
+                );
+            }
+        }
+    }
+
+    pub(super) fn owner_type(
+        &self,
+        expr: &deep::Expr,
+        role: &'static str,
+        errors: &mut DiagnosticSink<'_>,
+    ) -> Option<Type> {
+        match self.owner_types.get(&expr_key(expr)) {
+            Some(owner) => {
+                let _owning_epoch = owner.epoch;
+                Some(owner.ty.clone())
+            }
+            None => {
+                let construct = match expr {
+                    deep::Expr::List(list, _) => get_tag(list)
+                        .map(DeepTag::as_str)
+                        .unwrap_or("<untagged-list>"),
+                    deep::Expr::Atom(_, _) => "<atom>",
+                    deep::Expr::Map(_, _) => "<map>",
+                    deep::Expr::MetaExpr(_, _) => "<meta-expr>",
+                };
+                errors.push(internal_owner_stamp_error(format!(
+                    "missing authoritative type stamp for {role} `{construct}`"
+                )));
+                None
+            }
+        }
+    }
+
+    pub(super) fn current_owner_type(
+        &self,
+        expr: &deep::Expr,
+        subst: &Subst,
+        errors: &mut DiagnosticSink<'_>,
+    ) -> Option<Type> {
+        let Some(epoch) = self.active_epoch.as_ref() else {
+            errors.push(internal_owner_stamp_error(
+                "canonical inference requested a stamp outside an active epoch".to_string(),
+            ));
+            return None;
+        };
+        let Some(writes) = epoch.writes.get(&expr_key(expr)) else {
+            errors.push(internal_owner_stamp_error(
+                "canonical inference could not find an already-inferred child stamp".to_string(),
+            ));
+            return None;
+        };
+        let mut resolved = writes.iter().map(|write| subst.apply(&write.ty));
+        let canonical = resolved.next()?;
+        if resolved.any(|candidate| !owner_types_compatible(&canonical, &candidate)) {
+            errors.push(internal_owner_stamp_error(
+                "canonical inference observed conflicting child stamps".to_string(),
+            ));
+            return None;
+        }
+        Some(canonical)
+    }
+}
+
+pub(super) fn expr_key(expr: &deep::Expr) -> usize {
+    std::ptr::from_ref(expr).addr()
+}
+
+pub(super) fn owner_types_compatible(left: &Type, right: &Type) -> bool {
+    let mut compatibility_subst = Subst::new();
+    unify(left, right, &mut compatibility_subst).is_ok()
+}
+
+pub(super) fn internal_owner_stamp_error(message: String) -> CheckError {
+    CheckError::new(
+        CheckErrorKind::Other,
+        format!("internal: annotation owner-stamp invariant violated: {message}"),
+        vec![],
+    )
+}
+
+// Decode-once left this walk with no diagnostic of its own to report: the
+// only arm that ever wrote to a sink was the version-skew fallback that
+// `child_stamp_role`'s totality made unrepresentable, so the walk no longer
+// takes a `DiagnosticSink`.
+pub(super) fn register_annotation_owners(expr: &deep::Expr, epoch: &mut TypeStampEpoch) {
+    stack_guard!("register_annotation_owners", expr);
+    let deep::Expr::List(list, _) = expr else {
+        if let deep::Expr::MetaExpr(meta, _) = expr {
+            register_annotation_owners(&meta.expr, epoch);
+        }
+        return;
+    };
+    let tag = get_tag(list);
+    if let Some(tag) = tag {
+        let (role, stamp_required) = if tag == DeepTag::Fn {
+            ("function node", true)
+        } else if should_attach_type_metadata(tag) {
+            ("metadata-eligible expression", true)
+        } else if matches!(tag, DeepTag::PatVar | DeepTag::PatAs) {
+            ("pattern binding", true)
+        } else {
+            ("semantic runtime node", false)
+        };
+        register_owner(epoch, expr, role, stamp_required);
+    }
+    let kids = children(list);
+    for (index, child) in kids.iter().enumerate() {
+        // Decode-once: `child_stamp_role` is total over `DeepTag`, so the
+        // old "no child ownership classification" version-skew arm is
+        // unrepresentable; only genuinely untagged structural lists (empty
+        // guards and malformed nested input) take the recursive fallback,
+        // and their owning checker rejects the shape before annotation is
+        // returned.
+        match tag.map(|tag| child_stamp_role(tag, index, kids.len())) {
+            Some(ChildStampRole::RuntimeExpr | ChildStampRole::ExplicitInferenceBypass) | None => {
+                register_annotation_owners(child, epoch);
+            }
+            Some(
+                ChildStampRole::Syntax
+                | ChildStampRole::Selector
+                | ChildStampRole::EffectHandler
+                | ChildStampRole::Binder
+                | ChildStampRole::Type,
+            ) => {}
+        }
+    }
+}
+
+pub(super) fn register_owner(
+    epoch: &mut TypeStampEpoch,
+    expr: &deep::Expr,
+    role: &'static str,
+    stamp_required: bool,
+) {
+    epoch
+        .owners
+        .entry(expr_key(expr))
+        .or_insert(StampRequirement {
+            role,
+            stamp_required,
+        });
+}
+
+#[cfg(test)]
+pub(crate) enum TypeStampMutationCase {
+    Missing,
+    CompatibleRepeat,
+    IncompatibleRepeat,
+    UnregisteredSynthesized,
+    RuntimeNonStampOwnerLookup,
+}
+
+#[cfg(test)]
+pub(crate) fn run_type_stamp_mutation_case(
+    case: TypeStampMutationCase,
+    errors: &mut DiagnosticSink<'_>,
+) -> bool {
+    let owner = node_expr(DeepTag::App, vec![]);
+    let mut product = InferenceProduct::default();
+    product.begin_root(&owner);
+    match case {
+        TypeStampMutationCase::Missing => {
+            product.finish_root(&Subst::new(), errors);
+            product.owner_type(&owner, "test owner", errors).is_none()
+        }
+        TypeStampMutationCase::CompatibleRepeat => {
+            let ty = Type::Prim(Prim::Int64);
+            product.record_canonical(&owner, ty.clone());
+            product.record_bypass(&owner, ty.clone(), "compatible test repeat");
+            product.finish_root(&Subst::new(), errors);
+            product.owner_type(&owner, "test owner", errors) == Some(ty)
+        }
+        TypeStampMutationCase::IncompatibleRepeat => {
+            product.record_canonical(&owner, Type::Prim(Prim::Int64));
+            product.record_bypass(&owner, Type::Prim(Prim::String), "incompatible test repeat");
+            product.finish_root(&Subst::new(), errors);
+            true
+        }
+        TypeStampMutationCase::UnregisteredSynthesized => {
+            let synthesized = node_expr(DeepTag::Var, vec![symbol_expr("temporary")]);
+            product.record_bypass(
+                &synthesized,
+                Type::Prim(Prim::Int64),
+                "unregistered synthesized test node",
+            );
+            product.record_canonical(&owner, Type::Prim(Prim::Int64));
+            product.finish_root(&Subst::new(), errors);
+            product
+                .owner_type(&synthesized, "synthesized test node", errors)
+                .is_none()
+        }
+        TypeStampMutationCase::RuntimeNonStampOwnerLookup => {
+            let runtime_child = node_expr(DeepTag::Var, vec![symbol_expr("x")]);
+            let root = node_expr(DeepTag::App, vec![runtime_child]);
+            let mut product = InferenceProduct::default();
+            product.begin_root(&root);
+            let deep::Expr::List(root_list, _) = &root else {
+                unreachable!("node_expr produces a list")
+            };
+            let runtime_child = &children(root_list)[0];
+            product.record_canonical(runtime_child, Type::Prim(Prim::Int64));
+            product.current_owner_type(runtime_child, &Subst::new(), errors)
+                == Some(Type::Prim(Prim::Int64))
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) enum FinalizationMutationCase {
+    MissingRuntimeStamp,
+    SilentErrorOwner,
+    SilentErrorSignature,
+}
+
+#[cfg(test)]
+pub(crate) fn run_finalization_mutation_case(
+    case: FinalizationMutationCase,
+    errors: &mut DiagnosticSink<'_>,
+) {
+    let runtime = node_expr(DeepTag::App, vec![]);
+    let mut signature_context = SignatureInferenceMetadata::default();
+    let annotated = match case {
+        FinalizationMutationCase::MissingRuntimeStamp => vec![runtime],
+        FinalizationMutationCase::SilentErrorOwner => {
+            let mut product = InferenceProduct::default();
+            product.begin_root(&runtime);
+            product.record_canonical(&runtime, crate::errors::error_sentinel_for_test());
+            product.finish_root(&Subst::new(), errors);
+            annotate_ir_program(std::slice::from_ref(&runtime), &product, errors)
+        }
+        FinalizationMutationCase::SilentErrorSignature => {
+            let error_ty = crate::errors::error_sentinel_for_test();
+            signature_context.functions.insert(
+                "poison".to_string(),
+                FunctionSignatureInference {
+                    name: "poison".to_string(),
+                    authored_signature: false,
+                    authored_signature_type: None,
+                    recursive_cycle: false,
+                    checked_signature: error_ty.clone(),
+                    display_signature: error_ty,
+                    params: vec![],
+                },
+            );
+            vec![]
+        }
+    };
+    let _ = finalize_checked_program(
+        annotated,
+        HashMap::new(),
+        &signature_context,
+        &TypeResolutionEnv::default(),
+        &AdtRegistry::default(),
+        InferStats::default(),
+        errors,
+    );
+}
+
+/// Collect the declared signature metadata owned by one inference or
+/// annotation unit. The returned map is passed explicitly; nested, sequential,
+/// and parallel checks cannot observe another unit's declarations.
+pub(super) fn collect_declared_sig_metadata<'a>(
+    exprs: impl IntoIterator<Item = &'a deep::Expr>,
+) -> HashMap<String, DeclaredSigMetadata> {
+    let exprs = exprs.into_iter().collect::<Vec<_>>();
+    let mut map: HashMap<String, DeclaredSigMetadata> = HashMap::new();
+    for expr in &exprs {
+        collect_defsig_param_types(expr, &mut map);
+    }
+    for expr in exprs {
+        extend_declared_sig_binders_from_def_params(expr, &mut map);
+    }
+    map
+}
+
+/// Merge declaration-owned binders preserved by an explicit generic `def`
+/// into the matching standalone signature's scope. Surf suppresses the
+/// synthesized `defsig` when a same-name explicit `sig` exists; in that case
+/// the `def f[piece](x: tensor[piece, ...])` parameter syntax is the only Deep
+/// node that still distinguishes the bound `d-var piece` from an ordinary
+/// closed annotation. Restricting this merge to names that already own a
+/// `defsig` keeps an unrelated direct-Deep `(d-var ...)` annotation closed.
+pub(super) fn extend_declared_sig_binders_from_def_params(
+    expr: &deep::Expr,
+    map: &mut HashMap<String, DeclaredSigMetadata>,
+) {
+    stack_guard!("extend_declared_sig_binders_from_def_params", expr);
+    let deep::Expr::List(list, _) = expr else {
+        return;
+    };
+    if get_tag(list) == Some(DeepTag::Module) {
+        for child in children(list) {
+            extend_declared_sig_binders_from_def_params(child, map);
+        }
+        return;
+    }
+    if get_tag(list) != Some(DeepTag::Def) {
+        return;
+    }
+    let kids = children(list);
+    let (Some(name), Some(deep::Expr::List(fn_list, _))) =
+        (kids.first().and_then(symbol_name), kids.get(1))
+    else {
+        return;
+    };
+    if get_tag(fn_list) != Some(DeepTag::Fn) {
+        return;
+    }
+    let Some(params) = children(fn_list).first() else {
+        return;
+    };
+    let Some(metadata) = map.get_mut(name) else {
+        return;
+    };
+    let deep::Expr::List(params_list, _) = params else {
+        return;
+    };
+    for param in children(params_list) {
+        let type_expr = match param {
+            deep::Expr::MetaExpr(meta, _) => meta
+                .entries
+                .iter()
+                .find(|(key, _)| key == "type")
+                .map(|(_, value)| value),
+            deep::Expr::List(param_list, _) => param_list.elements.get(1).and_then(|meta| {
+                let deep::Expr::Map(meta, _) = meta else {
+                    return None;
+                };
+                meta.entries
+                    .iter()
+                    .find(|(key, _)| key == "type")
+                    .map(|(_, value)| value)
+            }),
+            _ => None,
+        };
+        if let Some(type_expr) = type_expr {
+            metadata.binders.extend(deep_type_binder_names(type_expr));
+        }
+    }
+}
+
+/// Recursively collect `(defsig name (t-fn arg-exprs... ret))` entries,
+/// descending through `(module ...)` wrappers. Only the leading
+/// argument type expressions are stored (the trailing return type is
+/// dropped). A re-declared name keeps the first sig seen.
+pub(super) fn collect_defsig_param_types(
+    expr: &deep::Expr,
+    map: &mut HashMap<String, DeclaredSigMetadata>,
+) {
+    // Bail before unbounded recursion exhausts the native stack on a
+    // deeply-nested input. No error vector here; `stack_guard_tripped`
+    // records the bail so the check entry boundary fails hard with a located
+    // diagnostic. See `STACK_RED_ZONE_BYTES`. (In practice this walker only
+    // descends `module` wrappers, which do not nest deeply, but the guard
+    // keeps the "every recursive walker is bounded" invariant uniform and
+    // cheap.)
+    stack_guard!("collect_defsig_param_types", expr);
+    let deep::Expr::List(list, _) = expr else {
+        return;
+    };
+    match get_tag(list) {
+        Some(DeepTag::Module) => {
+            for child in children(list) {
+                collect_defsig_param_types(child, map);
+            }
+        }
+        Some(DeepTag::Defsig) => {
+            let kids = children(list);
+            let Some(name) = kids.first().and_then(symbol_name) else {
+                return;
+            };
+            let Some(deep::Expr::List(fn_list, _)) = kids.get(1) else {
+                return;
+            };
+            if get_tag(fn_list) != Some(DeepTag::TFn) {
+                return;
+            }
+            let fn_kids = children(fn_list);
+            if fn_kids.is_empty() {
+                return;
+            }
+            // All but the trailing return type are parameter types.
+            let param_type_exprs: Vec<deep::Expr> = fn_kids[..fn_kids.len() - 1].to_vec();
+            map.entry(name.to_string())
+                .or_insert_with(|| DeclaredSigMetadata {
+                    param_types: param_type_exprs,
+                    binders: deep_type_binder_names(&kids[1]),
+                });
+        }
+        _ => {}
+    }
+}
+
+pub(super) fn deep_type_binder_names(type_expr: &deep::Expr) -> HashSet<String> {
+    let mut names = HashSet::new();
+    let mut pending = vec![type_expr];
+    while let Some(current) = pending.pop() {
+        let deep::Expr::List(type_list, _) = current else {
+            continue;
+        };
+        if matches!(
+            get_tag(type_list),
+            Some(DeepTag::TVar | DeepTag::DVar | DeepTag::DRank)
+        ) && let Some(variable) = children(type_list).first().and_then(symbol_name)
+            && variable != "_"
+        {
+            names.insert(variable.to_string());
+        }
+        pending.extend(children(type_list));
+    }
+    names
+}
+
+/// Result of running type inference on a program.
+#[derive(Debug)]
+pub struct InferResult {
+    pub errors: Vec<CheckError>,
+    pub typed_nodes: usize,
+    pub total_nodes: usize,
+}
+
+#[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
+pub struct InferStats {
+    pub typed_nodes: usize,
+    pub total_nodes: usize,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct CheckedProgram {
+    annotated_exprs: Vec<deep::Expr>,
+    type_env: HashMap<String, deep::Expr>,
+    linearity: LinearityInfo,
+    signature_inference: SignatureInferenceMetadata,
+    type_headers: TypeResolutionEnv,
+    #[serde(default)]
+    adt_registry: AdtRegistry,
+    /// Honest checker-visit counters for this checked unit. These are
+    /// serialized with cached contexts so layered fitness reports can sum the
+    /// same inference-product metric as the monolithic path (chelis#973).
+    #[serde(default)]
+    infer_stats: InferStats,
+}
+
+impl CheckedProgram {
+    #[cfg(test)]
+    pub(crate) fn unchecked_for_linearity_diagnostic_test(
+        annotated_exprs: Vec<deep::Expr>,
+        type_env: HashMap<String, deep::Expr>,
+    ) -> Self {
+        Self {
+            annotated_exprs,
+            type_env,
+            linearity: LinearityInfo::default(),
+            signature_inference: SignatureInferenceMetadata::default(),
+            type_headers: TypeResolutionEnv::default(),
+            adt_registry: AdtRegistry::default(),
+            infer_stats: InferStats::default(),
+        }
+    }
+
+    /// Replace only effects-owned metadata on an already-checked program.
+    ///
+    /// Every span, atom, child, and non-`effects` metadata entry must remain
+    /// byte-for-byte identical to `self`. The returned program preserves the
+    /// original type/signature/linearity contexts and crosses the same
+    /// fallible totality boundary as a fresh checker result.
+    pub fn try_with_effect_annotations(
+        &self,
+        annotated_exprs: Vec<deep::Expr>,
+    ) -> Result<Self, InferResult> {
+        crate::session::try_checked_program_with_effect_annotations(self, annotated_exprs)
+    }
+
+    pub fn exprs(&self) -> &[deep::Expr] {
+        &self.annotated_exprs
+    }
+
+    pub fn annotated_exprs(&self) -> &[deep::Expr] {
+        &self.annotated_exprs
+    }
+
+    pub fn type_env(&self) -> &HashMap<String, deep::Expr> {
+        &self.type_env
+    }
+
+    pub fn linearity(&self) -> &LinearityInfo {
+        &self.linearity
+    }
+
+    pub fn signature_inference(&self) -> &SignatureInferenceMetadata {
+        &self.signature_inference
+    }
+
+    pub(crate) fn type_headers(&self) -> &TypeResolutionEnv {
+        &self.type_headers
+    }
+
+    /// Checker-owned, alias-resolved ADT definitions used by lowering.
+    ///
+    /// Consumers must use this registry instead of reconstructing constructor
+    /// layouts or generic-parameter roles from authored `deftype` syntax.
+    pub fn adt_registry(&self) -> &AdtRegistry {
+        &self.adt_registry
+    }
+
+    pub fn infer_stats(&self) -> InferStats {
+        self.infer_stats
+    }
+
+    pub fn with_linearity(mut self, linearity: LinearityInfo) -> Self {
+        self.linearity = linearity;
+        self
+    }
+
+    /// Compose a `library` checked program with a `new_code` checked
+    /// program into a single whole-program `CheckedProgram`, equivalent
+    /// to what `check_ir_program(library_exprs ++ new_code_exprs)` plus
+    /// effects + linearity would produce — provided `new_code` was
+    /// produced by the `_with_context` variants stacked on `library`.
+    ///
+    /// This is the seam the cross-process chelis-std typecheck cache's
+    /// `chelis build` path uses: `library` is the cached chelis-std
+    /// sub-context's `library_checked` and `new_code` is the
+    /// `_with_context`-checked non-chelis-std decls + entry. The result
+    /// is the one monolithic `CheckedProgram` the `build` lowering
+    /// pipeline consumes, without re-inferring chelis-std.
+    ///
+    /// Composition rule (mirrors the monolithic `library ++ new` shape):
+    /// - `annotated_exprs`: `library` exprs followed by `new_code` exprs,
+    ///   in that order. Monolithic `check_ir_program` annotates in
+    ///   source order, and the linked program places library decls
+    ///   before the entry, so this ordering matches.
+    /// - `type_env`: union, `new_code` winning on shadow. `new_code`'s
+    ///   `type_env` is already unioned with the library's by the
+    ///   `_with_context` builder, so this just back-fills any
+    ///   library-only entries.
+    /// - `linearity`: the two `reusable_inputs_by_offset` maps merged.
+    /// - `signature_inference`: the two `functions` maps merged,
+    ///   `new_code` winning on a name clash.
+    ///
+    /// The monolithic-vs-layered acceptance oracle is what proves this
+    /// composition is byte-identical to the monolithic path; a
+    /// divergence is a compiler-correctness bug, not a tuning knob.
+    pub fn compose(library: &CheckedProgram, new_code: &CheckedProgram) -> Self {
+        let mut annotated_exprs =
+            Vec::with_capacity(library.annotated_exprs.len() + new_code.annotated_exprs.len());
+        annotated_exprs.extend(library.annotated_exprs.iter().cloned());
+        annotated_exprs.extend(new_code.annotated_exprs.iter().cloned());
+
+        let mut type_env = new_code.type_env.clone();
+        for (name, ty) in &library.type_env {
+            type_env.entry(name.clone()).or_insert_with(|| ty.clone());
+        }
+
+        let linearity = library.linearity.merged_with(&new_code.linearity);
+
+        let mut signature_inference = library.signature_inference.clone();
+        for (name, sig) in &new_code.signature_inference.functions {
+            signature_inference
+                .functions
+                .insert(name.clone(), sig.clone());
+        }
+
+        let mut type_headers = library.type_headers.clone();
+        type_headers.extend_from(&new_code.type_headers);
+
+        // A context-checked new-code program normally already carries the
+        // library registry. Back-fill defensively so composition remains
+        // total for independently deserialized legacy programs as well.
+        let mut adt_registry = new_code.adt_registry.clone();
+        for (name, definition) in &library.adt_registry.defs {
+            adt_registry
+                .defs
+                .entry(name.clone())
+                .or_insert_with(|| definition.clone());
+        }
+        for (name, alias) in &library.adt_registry.aliases {
+            adt_registry
+                .aliases
+                .entry(name.clone())
+                .or_insert_with(|| alias.clone());
+        }
+
+        Self {
+            annotated_exprs,
+            type_env,
+            linearity,
+            signature_inference,
+            type_headers,
+            adt_registry,
+            infer_stats: InferStats {
+                typed_nodes: library.infer_stats.typed_nodes + new_code.infer_stats.typed_nodes,
+                total_nodes: library.infer_stats.total_nodes + new_code.infer_stats.total_nodes,
+            },
+        }
+    }
+}
+
+/// The sole construction boundary for checked results. It observes the
+/// authoritative session sink before adding an invariant diagnostic, so a
+/// real root error is never duplicated by the totality backstop.
+pub(super) fn finalize_checked_program(
+    annotated_exprs: Vec<deep::Expr>,
+    type_env: HashMap<String, deep::Expr>,
+    signature_context: &SignatureInferenceMetadata,
+    type_headers: &TypeResolutionEnv,
+    adt_registry: &AdtRegistry,
+    infer_stats: InferStats,
+    errors: &mut DiagnosticSink<'_>,
+) -> CheckedProgram {
+    let signature_inference = infer_signature_metadata_with_context_and_headers(
+        &annotated_exprs,
+        &type_env,
+        signature_context,
+        type_headers,
+        errors,
+    );
+    let checked = CheckedProgram {
+        annotated_exprs,
+        type_env,
+        linearity: LinearityInfo::default(),
+        signature_inference,
+        type_headers: type_headers.clone(),
+        adt_registry: adt_registry.clone(),
+        infer_stats,
+    };
+
+    validate_checked_program_totality(&checked, signature_context, errors);
+    checked
+}
+
+pub(super) fn validate_checked_program_totality(
+    checked: &CheckedProgram,
+    signature_context: &SignatureInferenceMetadata,
+    errors: &mut DiagnosticSink<'_>,
+) {
+    if !errors.is_empty() {
+        return;
+    }
+    let mut traces = totality_invariant_traces(signature_context);
+    traces.extend(annotated_totality_invariant_traces(
+        checked.annotated_exprs(),
+    ));
+    traces.extend(totality_invariant_traces(checked.signature_inference()));
+    if !traces.is_empty() {
+        errors.push(totality_violation_error(&traces));
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SignatureInferenceMetadata {
+    pub functions: BTreeMap<String, FunctionSignatureInference>,
+}
+
+impl SignatureInferenceMetadata {
+    pub fn is_empty(&self) -> bool {
+        self.functions.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct FunctionSignatureInference {
+    pub name: String,
+    /// True when this function has an authored or Surf-synthesized `defsig`.
+    /// Lowering uses this checker-owned fact to distinguish declared
+    /// polymorphism from generalized local-callback inference.
+    #[serde(default)]
+    pub authored_signature: bool,
+    /// The checker-decoded authored signature before body inference sharpens
+    /// wildcard dimensions or otherwise specializes the checked function.
+    ///
+    /// Lowering consumes this record instead of reparsing `defsig` syntax.
+    #[serde(default)]
+    pub authored_signature_type: Option<Type>,
+    pub recursive_cycle: bool,
+    pub checked_signature: Type,
+    pub display_signature: Type,
+    pub params: Vec<ParamSignatureInference>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ParamSignatureInference {
+    pub index: usize,
+    pub name: String,
+    pub written: bool,
+    pub inferred_read_only: bool,
+    pub checked_type: Type,
+    pub display_type: Type,
+}
+
+pub(crate) fn checked_program_with_effect_annotations_in_session(
+    original: &CheckedProgram,
+    annotated_exprs: Vec<deep::Expr>,
+    errors: &mut DiagnosticSink<'_>,
+) -> CheckedProgram {
+    if !effects_only_rewrite_matches(original.annotated_exprs(), &annotated_exprs) {
+        errors.push(CheckError::new(
+            CheckErrorKind::Other,
+            "checked-program effects-only reannotation changed a span, atom, child, or non-`effects` metadata entry"
+                .to_string(),
+            vec![
+                "Run type checking again for structural, body, type, `eff`, or source-span changes"
+                    .to_string(),
+            ],
+        ));
+    }
+
+    let checked = CheckedProgram {
+        annotated_exprs,
+        type_env: original.type_env.clone(),
+        linearity: original.linearity.clone(),
+        signature_inference: original.signature_inference.clone(),
+        type_headers: original.type_headers.clone(),
+        adt_registry: original.adt_registry.clone(),
+        infer_stats: original.infer_stats,
+    };
+    validate_checked_program_totality(&checked, original.signature_inference(), errors);
+    checked
+}
+
+pub(super) fn effects_only_rewrite_matches(
+    original: &[deep::Expr],
+    candidate: &[deep::Expr],
+) -> bool {
+    original.len() == candidate.len()
+        && original
+            .iter()
+            .zip(candidate)
+            .all(|(before, after)| effects_only_expr_matches(before, after))
+        && candidate.iter().all(effect_metadata_is_singular)
+}
+
+pub(super) fn effects_only_expr_matches(before: &deep::Expr, after: &deep::Expr) -> bool {
+    stack_guard!("effects_only_expr_matches", before, false);
+    match (before, after) {
+        (deep::Expr::Atom(before_atom, before_span), deep::Expr::Atom(after_atom, after_span)) => {
+            before_atom == after_atom && before_span == after_span
+        }
+        (deep::Expr::Map(before_map, before_span), deep::Expr::Map(after_map, after_span)) => {
+            before_span == after_span
+                && metadata_entries_match(&before_map.entries, &after_map.entries, false)
+        }
+        (
+            deep::Expr::MetaExpr(before_meta, before_span),
+            deep::Expr::MetaExpr(after_meta, after_span),
+        ) => {
+            before_span == after_span
+                && metadata_entries_match(&before_meta.entries, &after_meta.entries, false)
+                && effects_only_expr_matches(&before_meta.expr, &after_meta.expr)
+        }
+        (deep::Expr::List(before_list, before_span), deep::Expr::List(after_list, after_span)) => {
+            before_span == after_span
+                && before_list.elements.len() == after_list.elements.len()
+                && before_list
+                    .elements
+                    .iter()
+                    .zip(&after_list.elements)
+                    .enumerate()
+                    .all(|(index, (before_element, after_element))| {
+                        if index == 1
+                            && let (
+                                deep::Expr::Map(before_map, before_map_span),
+                                deep::Expr::Map(after_map, after_map_span),
+                            ) = (before_element, after_element)
+                        {
+                            return before_map_span == after_map_span
+                                && metadata_entries_match(
+                                    &before_map.entries,
+                                    &after_map.entries,
+                                    true,
+                                );
+                        }
+                        effects_only_expr_matches(before_element, after_element)
+                    })
+        }
+        _ => false,
+    }
+}
+
+pub(super) fn metadata_entries_match(
+    before: &[(String, deep::Expr)],
+    after: &[(String, deep::Expr)],
+    ignore_effects: bool,
+) -> bool {
+    let mut before_entries = before
+        .iter()
+        .filter(|(key, _)| !ignore_effects || key != "effects");
+    let mut after_entries = after
+        .iter()
+        .filter(|(key, _)| !ignore_effects || key != "effects");
+    loop {
+        match (before_entries.next(), after_entries.next()) {
+            (Some((before_key, before_value)), Some((after_key, after_value))) => {
+                if before_key != after_key || !effects_only_expr_matches(before_value, after_value)
+                {
+                    return false;
+                }
+            }
+            (None, None) => return true,
+            _ => return false,
+        }
+    }
+}
+
+pub(super) fn effect_metadata_is_singular(expr: &deep::Expr) -> bool {
+    stack_guard!("effect_metadata_is_singular", expr, false);
+    match expr {
+        deep::Expr::Atom(_, _) => true,
+        deep::Expr::Map(map, _) => map
+            .entries
+            .iter()
+            .all(|(_, value)| effect_metadata_is_singular(value)),
+        deep::Expr::MetaExpr(meta, _) => {
+            effect_metadata_is_singular(&meta.expr)
+                && meta
+                    .entries
+                    .iter()
+                    .all(|(_, value)| effect_metadata_is_singular(value))
+        }
+        deep::Expr::List(list, _) => {
+            let singular_here = match list.elements.get(1) {
+                Some(deep::Expr::Map(map, _)) => {
+                    map.entries
+                        .iter()
+                        .filter(|(key, _)| key == "effects")
+                        .count()
+                        <= 1
+                }
+                _ => true,
+            };
+            singular_here && list.elements.iter().all(effect_metadata_is_singular)
+        }
+    }
+}
