@@ -2840,6 +2840,7 @@ fn parse_error_span_surf(source: &str, err: &chelis_surf::parser::ParseError) ->
         chelis_surf::parser::ParseError::Lex(_) => return None,
         chelis_surf::parser::ParseError::UnexpectedEof => source.len(),
         chelis_surf::parser::ParseError::Expected { offset, .. }
+        | chelis_surf::parser::ParseError::ReservedWordBinding { offset, .. }
         | chelis_surf::parser::ParseError::NonAssocChain { offset }
         | chelis_surf::parser::ParseError::BareStatementInBlock { offset } => *offset,
     };

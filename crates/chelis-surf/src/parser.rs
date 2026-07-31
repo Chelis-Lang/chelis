@@ -17,6 +17,16 @@ pub enum ParseError {
         found: String,
         offset: usize,
     },
+    #[error(
+        "`{keyword}` is a reserved word that introduces {role}; to bind a value, \
+         rename it (for example `{suggestion}`) at byte {offset}"
+    )]
+    ReservedWordBinding {
+        keyword: &'static str,
+        role: &'static str,
+        suggestion: &'static str,
+        offset: usize,
+    },
     #[error("non-associative operator chained at byte {offset}")]
     NonAssocChain { offset: usize },
     #[error(
@@ -427,6 +437,36 @@ impl Parser {
         }
         self.pos = end;
         Ok(expr)
+    }
+
+    /// Diagnose a reserved declaration keyword used as a value-binding name.
+    ///
+    /// `sig = 0.2f64` is a natural thing to write (`sig` for volatility), but
+    /// `sig` heads a signature declaration, so `parse_decl` dispatches into
+    /// `parse_sig_decl` and the failure surfaces one token later, at the `=`,
+    /// as `expected identifier, found Eq` (chelis#915). By then the reserved
+    /// word has already been consumed, so the *found* token is never the
+    /// keyword — a special case keyed on the found token would not fire on
+    /// this form at all.
+    ///
+    /// Call this immediately after the keyword is consumed. When the next
+    /// token is `=` the user's intent is unambiguously a value binding, so
+    /// name the reserved word and point at the keyword rather than the `=`.
+    /// Any other following token is a genuine malformed declaration and falls
+    /// through to the ordinary `expected …, found …` path.
+    fn reserved_word_binding_error(
+        &self,
+        keyword: &'static str,
+        role: &'static str,
+        suggestion: &'static str,
+        keyword_span: Span,
+    ) -> Option<ParseError> {
+        (*self.peek() == TokenKind::Eq).then_some(ParseError::ReservedWordBinding {
+            keyword,
+            role,
+            suggestion,
+            offset: keyword_span.offset,
+        })
     }
 
     fn expect_ident(&mut self) -> Result<(String, Span), ParseError> {
@@ -939,6 +979,11 @@ impl Parser {
 
     fn parse_sig_decl(&mut self) -> Result<Decl, ParseError> {
         let start = self.advance().span; // consume Sig
+        if let Some(err) =
+            self.reserved_word_binding_error("sig", "a signature declaration", "sigma", start)
+        {
+            return Err(err);
+        }
         let (name, _) = self.expect_ident()?;
         self.expect(&TokenKind::Colon)?;
         let ty = self.parse_type()?;
@@ -959,6 +1004,11 @@ impl Parser {
 
     fn parse_dim_decl(&mut self) -> Result<Decl, ParseError> {
         let start = self.advance().span; // consume Dim
+        if let Some(err) =
+            self.reserved_word_binding_error("dim", "a dimension declaration", "d", start)
+        {
+            return Err(err);
+        }
         let names = self.parse_ident_list(TokenKind::Eof)?;
         let end = self.tokens[self.pos - 1].span;
         Ok(Decl::Dim {
@@ -1053,6 +1103,11 @@ impl Parser {
 
     fn parse_type_decl_with_opaque(&mut self, opaque: bool) -> Result<Decl, ParseError> {
         let start = self.advance().span; // consume Type
+        if let Some(err) =
+            self.reserved_word_binding_error("type", "a type declaration", "ty", start)
+        {
+            return Err(err);
+        }
         let (name, _) = self.expect_type_ident()?;
         let params = if *self.peek() == TokenKind::LBracket {
             self.parse_name_bracket_list()?
