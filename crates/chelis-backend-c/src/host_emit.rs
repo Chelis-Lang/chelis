@@ -545,6 +545,15 @@ pub(crate) fn emit_host_abi_program(
         "#include \"chelis_runtime.h\"".to_string(),
         "#include <assert.h>".to_string(),
         "#include <math.h>".to_string(),
+        String::new(),
+        // chelis#891: emitter-internal f64 pad lanes, deliberately absent
+        // from the published chelis_runtime.h (selected statically by the
+        // emitter; publishing them would grow the census-governed surface
+        // for symbols only generated code calls -- chelis#949 precedent).
+        "chelis_tensor *chelis_pad_sequences_f64(const chelis_list *sequences, chelis_value pad_value);"
+            .to_string(),
+        "chelis_tensor *chelis_pad_sequences_to_f64(const chelis_list *sequences, int64_t width, chelis_value pad_value);"
+            .to_string(),
     ];
     if helper_requirements.needs_blas_header {
         out.push("#include \"chelis_blas.h\"".to_string());
