@@ -183,7 +183,10 @@ exported, so documents can be built directly):
 - `json_get`, and the typed accessors `json_string`, `json_int`, `json_float`, `json_bool`,
   `json_array`, `json_object`, plus `json_is_null`.
 - `to_json(value)` renders a `Json` value compactly (object keys in dictionary
-  insertion order, f64 via `to_string`'s shortest-round-trip form, escapes for
+  insertion order, f64 via `to_string`'s shortest-round-trip form — a claim
+  scoped to **f64 specifically**: narrower floats route through a compiled-lane
+  `to_string` funnel that PR #863 fixes and that fix is not on `main` at this
+  writing, so only the f64 path is version-independent — escapes for
   `\" \\ \n \t \r`). Non-finite numbers have no JSON representation: `to_json`
   fails on them and `try_to_json` returns `None`. `write_json(path, value)`
   writes the rendered text and names the path on failure; `try_write_json` is
