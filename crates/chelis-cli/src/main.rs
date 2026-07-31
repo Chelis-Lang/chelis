@@ -7217,9 +7217,6 @@ where
             return Ok(());
         }
     };
-    if matched_tests.is_empty() {
-        return Ok(());
-    }
 
     // File-level compile pre-check (RT3 H2). If the whole module doesn't
     // type-check, emit ONE file-level failure row instead of cascading the
@@ -7231,6 +7228,26 @@ where
             status: TestStatus::Fail,
             message: Some(format!("compile: {compile_err}")),
         });
+        return Ok(());
+    }
+
+    if matched_tests.is_empty() {
+        // Expected-failure files may intentionally contain no `test_*`
+        // declaration because the file-level checker diagnostic *is* the
+        // expected outcome. The cheap reef precheck above only resolves names
+        // and module shape, so run the full check/lowering preparation before
+        // deciding this is a clean, recordless file. A real failure becomes
+        // the same synthetic `<file>` row consumed by the expected-failure
+        // adapter; a genuinely clean file still emits no row and classifies as
+        // config-error under `--expect` (chelis#967).
+        if let Err(check_err) = prepare_eval_in_exec_context(exec_context, &flat_decls) {
+            on_row(&TestRow {
+                file: rel_display.to_string(),
+                test: "<file>".to_string(),
+                status: TestStatus::Fail,
+                message: Some(format!("compile: {check_err}")),
+            });
+        }
         return Ok(());
     }
 

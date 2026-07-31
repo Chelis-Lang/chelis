@@ -162,6 +162,8 @@ chelis test tests/
 chelis test tests/core.ch
 chelis test tests/ --filter pricing --timeout 10 --suite-timeout 120 --batch-mode auto
 chelis test tests/ --json --batch-mode file --jobs 1
+chelis test tests_neg/ --expect neg --json
+chelis test tests_blocked/ --expect blocked
 ```
 
 Directory runs use `--batch-mode auto` by default: eligible files are compiled
@@ -202,6 +204,17 @@ of an unbounded write. The incomplete diagnostic uses a bounded one-second
 best-effort reporting grace. Stderr is delivered before a normal stdout
 summary, preventing a blocked diagnostic stream from leaving machine output
 that appears perfectly successful.
+
+`--expect neg|blocked` treats each discovered `.ch` file as one
+expected-failure probe paired with a same-stem `.expect` sidecar. Sidecar line
+1 is the required diagnostic substring; `blocked` sidecars must also contain
+an auditable blocker citation such as `chelis#NNN`. A probe may express its
+failure as either a failing `test_*` row or a bare file-level compile/check
+diagnostic: the latter is preserved as the adapter input even when the file
+declares no `test_*` function (chelis#967). A clean file with no `test_*` and
+no compile/check failure is still a `config-error`, rather than an
+expected-failure success. Plain and NDJSON modes emit one verdict per file
+plus a mode-specific summary.
 
 ## Property Proof Loop
 

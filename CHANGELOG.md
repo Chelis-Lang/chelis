@@ -8,6 +8,13 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **Bare file diagnostics now drive native expected-failure suites
+  (chelis#967).** `chelis test --expect neg|blocked` preserves file-level
+  compile and check failures even when a probe declares no `test_*` function,
+  so `.expect` substrings can match the diagnostic instead of receiving a
+  recordless `config-error`. Mismatches retain the complete diagnostic for
+  native reporting; genuinely clean testless files remain fail-closed
+  configuration errors. Exact plain and NDJSON regressions lock both modes.
 - **Concrete return contexts now specialize nullary generic ADT
   constructors before C ABI projection (chelis#935).** A layout-free
   constructor may retain its named generic ADT term through host-expression

@@ -452,6 +452,22 @@ $ chelis test tests/ --json
 Failing rows carry an additional `"message"` field with the assertion's label and
 expected/got values (e.g. `"assert failed: assert_close (double(1.5) ~ 3.0): expected 3.01, got 3, tol 0.000001"`).
 
+### Expected-failure files
+
+`chelis test <path> --expect neg|blocked` classifies each `.ch` file against
+its same-stem `.expect` sidecar. Line 1 pins the required diagnostic
+substring. `blocked` additionally requires an auditable citation
+(`chelis#NNN`, `docs/issue_drafts/`, or `docs/UPSTREAM_BUGS.md`). Each file is
+isolated and yields one verdict record plus the final mode-specific summary.
+
+The expected-failure adapter consumes both ordinary failing `test_*` rows and
+synthetic `<file>` rows from file-level compile/check failures. The worker
+must therefore run the file-level compile and full checker preparation before
+classifying a file with no `test_*` functions as recordless; it must preserve
+the resulting diagnostic for sidecar substring matching and mismatch
+reporting (chelis#967). A genuinely clean file with neither test records nor
+a compile/check failure remains a fail-closed `config-error`.
+
 ### Bounding wall time with `--timeout`
 
 `--timeout <seconds>` caps per-test wall-clock time. The default is 30 seconds;
