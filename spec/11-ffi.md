@@ -35,7 +35,11 @@ The Phase 3 Python path is split into two cuts:
   that ABI
 - GIL release during native compile/build and compiled host/device execution
 - NumPy DLPack guarantee as a documented/tested promise
-- compiled execution currently limited to fully concrete `f32` tensors
+- compiled execution currently limited to fully concrete `f32` / `f64` tensors on the C
+  target, and to fully concrete `f32` tensors on the HIP target (chelis#919, chelis#920).
+  The per-target admit-list is `supported_execution_dtypes` in `chelis-python`; the
+  marshalling layer derives the NumPy dtype and the DLPack element width from it rather
+  than assuming f32, and rejects any dtype it cannot describe
 
 ### Phase 5a
 
