@@ -10,7 +10,8 @@
         "expected_success": "capacity_census_matches_public_surface passes",
         "mutations": [
           "reviewer_preprocessor_capacity_seam_is_visible",
-          "c_identity_is_token_canonical_across_preprocessor_whitespace"
+          "c_identity_is_token_canonical_across_preprocessor_whitespace",
+          "c_identity_is_stable_across_bool_preprocessor_spellings"
         ]
       },
       {
