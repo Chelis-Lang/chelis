@@ -570,28 +570,22 @@ fn int_condition_selects_the_same_branch_in_every_lane() {
 }
 
 // ===========================================================================
-// BITWISE / SHIFT: #682. No large values; C emits the literal 0.
+// BITWISE / SHIFT: #682 compiled-lane parity locks.
 // ===========================================================================
 
 macro_rules! bitwise_row {
     ($fn_name:ident, $label:literal, $expr:literal, $expected:literal) => {
         #[test]
-        #[ignore = "chelis#682: the C backend has no match arm for this builtin \
-                    and emits `/* unsupported builtin */ 0`, so eval and \
-                    compiled C disagree. This test asserts the CORRECT behavior \
-                    and fails until the fix lands. Run with `cargo test -p \
-                    chelis-cli --test precision_matrix -- --ignored`."]
         fn $fn_name() {
             check_row(
                 &Row {
                     name: $label,
                     expr: $expr,
                     expected: $expected,
-                    status: Status::Broken("chelis#682"),
+                    status: Status::Locked,
                     lanes: Lanes::Both,
-                    note: "C backend has no match arm for this builtin \
-                           (host_emit.rs) and falls through to \
-                           `/* unsupported builtin */ 0`. Not a precision bug.",
+                    note: "chelis#682 closed C-expression emission; eval and C \
+                           must retain exact integer parity.",
                 },
                 "int64",
             );

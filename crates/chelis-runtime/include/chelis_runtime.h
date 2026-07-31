@@ -149,6 +149,59 @@ static inline int64_t chelis_int_div_guard(int64_t divisor) {
     }
     return divisor;
 }
+/* [04-NUM-13] / chelis#682: width-bounded two's-complement shifts.
+ * Generated code must not use C's signed shift operators directly:
+ * left-shifting a negative value or into the sign bit is undefined, a
+ * negative count is undefined, and a count at least the promoted width is
+ * undefined. These helpers perform every bit movement on uint64_t, then
+ * decode the declared-width two's-complement result without an
+ * out-of-range unsigned-to-signed cast. */
+static inline uint64_t chelis_int_width_mask(int bits) {
+    if (bits == 64) return UINT64_MAX;
+    return (UINT64_C(1) << bits) - UINT64_C(1);
+}
+
+static inline int64_t chelis_int_from_twos(uint64_t value, int bits) {
+    uint64_t mask = chelis_int_width_mask(bits);
+    uint64_t sign = UINT64_C(1) << (bits - 1);
+    value &= mask;
+    if ((value & sign) == 0) return (int64_t)value;
+    uint64_t magnitude = ((~value) & mask) + UINT64_C(1);
+    if (bits == 64 && magnitude == (UINT64_C(1) << 63)) return INT64_MIN;
+    return -(int64_t)magnitude;
+}
+
+static inline void chelis_int_shift_validate(int64_t amount, int bits) {
+    if (bits != 8 && bits != 16 && bits != 32 && bits != 64) {
+        fprintf(stderr, "invalid integer shift width: %d\n", bits);
+        abort();
+    }
+    if (amount < 0) {
+        fprintf(stderr, "shift amount must be non-negative, got %lld\n",
+                (long long)amount);
+        abort();
+    }
+}
+
+static inline int64_t chelis_int_shl(int64_t value, int64_t amount, int bits) {
+    chelis_int_shift_validate(amount, bits);
+    if (amount >= bits) return 0;
+    uint64_t mask = chelis_int_width_mask(bits);
+    uint64_t shifted = (((uint64_t)value & mask) << (uint32_t)amount) & mask;
+    return chelis_int_from_twos(shifted, bits);
+}
+
+static inline int64_t chelis_int_shr(int64_t value, int64_t amount, int bits) {
+    chelis_int_shift_validate(amount, bits);
+    uint64_t mask = chelis_int_width_mask(bits);
+    uint64_t raw = (uint64_t)value & mask;
+    bool negative = (raw & (UINT64_C(1) << (bits - 1))) != 0;
+    if (amount >= bits) return negative ? -1 : 0;
+    uint32_t count = (uint32_t)amount;
+    uint64_t shifted = raw >> count;
+    if (negative && count != 0) shifted |= mask ^ (mask >> count);
+    return chelis_int_from_twos(shifted, bits);
+}
 /* WS-1 (dtype + Metal cleanup cycle): two-byte fill helpers for bf16
  * and f16 tensors. Codegen computes the exact 16-bit pattern from the
  * IR literal at compile time (the `half` crate's `to_bits()`) and

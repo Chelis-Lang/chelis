@@ -157,20 +157,18 @@ fn assert_branded_rejection(stderr: &str, what_fragment: &str, ctx: &str) {
 }
 
 // ===========================================================================
-// Row 2 (chelis#682/#704/#705/#715): the builtin stub arm, branded.
+// Row 2 (chelis#704/#705/#715): the remaining builtin stub arm, branded.
 // ===========================================================================
 
-/// The three op families that used to hit the stub - bitwise, scalar
-/// activations, host-only builtins - now fail the build with the branded
+/// The remaining op families that used to hit the stub - scalar
+/// activations and host-only builtins - fail the build with the branded
 /// diagnostic naming the builtin, and leave no stub marker behind.
+///
+/// The former bitwise case was promoted to supported C lowering in
+/// chelis#682 and is covered by the positive precision matrix.
 #[test]
 fn stubbed_builtins_are_rejected_with_the_branded_shape() {
     let cases: &[(&str, &str, &str)] = &[
-        (
-            "bitand_682",
-            "def f() -> int64 = bitand(cast(12, int64), cast(10, int64))\nout = f()\n",
-            "bitand",
-        ),
         (
             "scalar_floor_715",
             "def f(x: f32) -> f32 = floor(x)\nout = f(3.5)\n",

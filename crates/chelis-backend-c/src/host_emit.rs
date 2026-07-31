@@ -27,6 +27,11 @@ enum CExpressionBuiltin {
     TruncDiv,
     FloorDiv,
     Mod,
+    BitAnd,
+    BitOr,
+    BitXor,
+    ShiftLeft,
+    ShiftRight,
     CompareLess,
     Less,
     Greater,
@@ -78,6 +83,11 @@ impl CExpressionBuiltin {
             "trunc_div" => Self::TruncDiv,
             "floor_div" => Self::FloorDiv,
             "mod" => Self::Mod,
+            "bitand" => Self::BitAnd,
+            "bitor" => Self::BitOr,
+            "bitxor" => Self::BitXor,
+            "shl" => Self::ShiftLeft,
+            "shr" => Self::ShiftRight,
             "cmplt" => Self::CompareLess,
             "lt" => Self::Less,
             "gt" => Self::Greater,
@@ -2642,6 +2652,11 @@ impl<'a> HostEmitter<'a> {
             "floor_div",
             "trunc_div",
             "mod",
+            "bitand",
+            "bitor",
+            "bitxor",
+            "shl",
+            "shr",
             "neg",
             "cmplt",
             "lt",
@@ -2773,6 +2788,29 @@ impl<'a> HostEmitter<'a> {
                     BinaryOperator::Remainder,
                     arg(0),
                     EmittedExpr::call("chelis_int_div_guard", [arg(1)]),
+                ),
+                CExpressionBuiltin::BitAnd => binary(BinaryOperator::BitAnd, arg(0), arg(1)),
+                CExpressionBuiltin::BitOr => binary(BinaryOperator::BitOr, arg(0), arg(1)),
+                CExpressionBuiltin::BitXor => binary(BinaryOperator::BitXor, arg(0), arg(1)),
+                // [04-NUM-13]: never emit raw signed C shifts. The runtime
+                // helper implements declared-width two's-complement movement,
+                // including negative-count traps and fully shifted-out values,
+                // without C undefined or implementation-defined behavior.
+                CExpressionBuiltin::ShiftLeft => EmittedExpr::call(
+                    "chelis_int_shl",
+                    [
+                        arg(0),
+                        arg(1),
+                        EmittedExpr::integer(integer_abi_width(&arg_vars[0].1)?),
+                    ],
+                ),
+                CExpressionBuiltin::ShiftRight => EmittedExpr::call(
+                    "chelis_int_shr",
+                    [
+                        arg(0),
+                        arg(1),
+                        EmittedExpr::integer(integer_abi_width(&arg_vars[0].1)?),
+                    ],
                 ),
                 CExpressionBuiltin::CompareLess if matches!(arg_vars[0].1, HostType::Tensor(_)) => {
                     EmittedExpr::call("chelis_tensor_cmplt", [arg(0), arg(1)])
@@ -5359,6 +5397,19 @@ fn is_integer_abi(ty: &HostAbiType) -> bool {
         ty,
         HostAbiType::Int8 | HostAbiType::Int16 | HostAbiType::Int32 | HostAbiType::Int64
     )
+}
+
+fn integer_abi_width(ty: &HostAbiType) -> Result<i64, Unsupported> {
+    match ty {
+        HostAbiType::Int8 => Ok(8),
+        HostAbiType::Int16 => Ok(16),
+        HostAbiType::Int32 => Ok(32),
+        HostAbiType::Int64 => Ok(64),
+        other => Err(invalid_abi_shape(
+            format!("integer shift operand resolved to {other:?}"),
+            "C host integer shift emission",
+        )),
+    }
 }
 
 /// The C / C++ reserved words a Chelis identifier must not collide with

@@ -516,7 +516,7 @@ PRODUCTION allowlist to stay empty.
 
 Scope, stated rather than assumed: the ignore-inventory equality covers
 the observation harness, this plan's own instrument. The sibling matrix
-files carry `#[ignore]`d cells owned by [#682]/[#714]/[#717]/[#724]/[#729];
+files carry `#[ignore]`d cells owned by [#714]/[#717]/[#724]/[#729];
 for those the oracle asserts only that the three rows named above are
 un-ignored and green.
 

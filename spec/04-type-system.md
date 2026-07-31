@@ -431,6 +431,21 @@ The recursive `List` example shows the intended type-level shape of collection s
 It should not be read as a claim that the full practical collection runtime and
 iteration surface are already shipped today.
 
+### 2.3.1 Generic ADT representation classification
+
+> **[04-ADT-1]** Backend layout and generic-function specialization SHALL use
+> the checked program's alias-resolved ADT registry and checked authored
+> signatures. They SHALL NOT reconstruct parameter ownership, constructor
+> fields, or polymorphism from authored `deftype` / `defsig` syntax.
+
+A parameter used only as a tensor dimension is representation-erased; a
+parameter used as a tensor precision or another value-represented field is
+stored. The distinction is recursive through nested ADTs. Thus
+`Frame[n,a] -> Hamt[Column[n,a]] -> tensor[n,a]` erases `n` but must retain
+and specialize `a` (chelis#940, chelis#948). The checked registry and authored
+signature marker survive serialization, context composition, effects
+reannotation, and linearity annotation.
+
 ### 2.4 Exhaustive Pattern Matching
 
 The type checker verifies that `match` expressions cover all variants. Missing variants are a type error, not a warning.
@@ -2645,6 +2660,17 @@ integer overflow today ([04-NUM-3]'s divergence note), so this atom
 rides chelis#729 Phase 2 with the trap contract itself; the chelis#687
 and chelis#754 cross-lane oracles treat a trap-versus-complete
 divergence as conforming only under this atom's conditions.)*
+ > **[04-NUM-13]** `shl` and `shr` on a signed integer dtype SHALL operate
+> on that dtype's fixed-width two's-complement bit pattern. `shl` discards
+> bits beyond the declared width and `shr` is arithmetic (sign-extending).
+> A non-negative count at least the declared width produces zero for
+> `shl` and for `shr` of a non-negative value, and `-1` for `shr` of a
+> negative value. A negative count SHALL trap with
+> `shift amount must be non-negative, got N`. These semantics are
+> independent of host-language signed-shift behavior; a compiled backend
+> SHALL NOT invoke undefined or implementation-defined signed shifts.
+
+ *(Implemented and UBSan-locked in eval and the C host lane for chelis#682.)*
 
 ---
 
