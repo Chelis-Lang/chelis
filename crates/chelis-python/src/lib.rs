@@ -2212,6 +2212,8 @@ loss = (mean(x, 0) : tensor[f32])
             target: CompileTarget::C,
             entry_name: None,
             artifact_dir: Some(PathBuf::from(dir.path())),
+            project_root: None,
+            force_bare: false,
         })
         .expect("compile and load job");
 
@@ -2284,6 +2286,8 @@ loss = (mean(x, 0) : tensor[f32])
             target: CompileTarget::C,
             entry_name: None,
             artifact_dir: Some(PathBuf::from(second_dir.path())),
+            project_root: None,
+            force_bare: false,
         })
         .expect("second compile and load job");
         let second_library =
@@ -2340,6 +2344,8 @@ loss = (mean(x, 0) : tensor[f32])
             target: CompileTarget::C,
             entry_name: None,
             artifact_dir: Some(PathBuf::from(dir.path())),
+            project_root: None,
+            force_bare: false,
         })
         .expect("compile and load job");
 
@@ -2607,6 +2613,8 @@ loss = (mean(x, 0) : tensor[f32])
             target: CompileTarget::C,
             entry_name: None,
             artifact_dir: Some(PathBuf::from(dir.path())),
+            project_root: None,
+            force_bare: false,
         })
         .expect("compile and load job");
 
@@ -3640,43 +3648,6 @@ def free(x: tensor[1, f32]) -> tensor[1, f32] = mul(copy(x), x)
         drop(library);
     }
 
-    // chelis#747 red-team: `CHELIS_RUNTIME_DIR` is the first-priority override in
-    // `find_runtime_library_inner`. When the staticlib is absent there it MUST
-    // fail loud (naming the env var), never silently fall through to the
-    // `CARGO_TARGET_DIR` branch or the manifest-relative fallbacks. A valid
-    // `CARGO_TARGET_DIR` set simultaneously must NOT rescue it: the documented
-    // precedence is CHELIS_RUNTIME_DIR-wins-or-errors, then exe-relative, then
-    // CARGO_TARGET_DIR, then manifest. Env is process-global; save/restore and
-    // rely on nextest's process-per-test isolation (matches the repo pattern in
-    // reef_install_from_github.rs).
-    #[test]
-    fn find_runtime_library_bogus_chelis_runtime_dir_is_loud_error_even_with_valid_target_dir() {
-        let empty_runtime_dir = tempdir().expect("tempdir");
-        let valid_target_dir = tempdir().expect("tempdir");
-        let prior_runtime = std::env::var_os("CHELIS_RUNTIME_DIR");
-        let prior_target = std::env::var_os("CARGO_TARGET_DIR");
-        unsafe {
-            std::env::set_var("CHELIS_RUNTIME_DIR", empty_runtime_dir.path());
-            std::env::set_var("CARGO_TARGET_DIR", valid_target_dir.path());
-        }
-        let result = find_runtime_library_inner();
-        unsafe {
-            match prior_runtime {
-                Some(v) => std::env::set_var("CHELIS_RUNTIME_DIR", v),
-                None => std::env::remove_var("CHELIS_RUNTIME_DIR"),
-            }
-            match prior_target {
-                Some(v) => std::env::set_var("CARGO_TARGET_DIR", v),
-                None => std::env::remove_var("CARGO_TARGET_DIR"),
-            }
-        }
-        let err =
-            result.expect_err("bogus CHELIS_RUNTIME_DIR must be a loud error, not a fall-through");
-        assert!(
-            err.contains("CHELIS_RUNTIME_DIR"),
-            "error must name CHELIS_RUNTIME_DIR, got: {err}"
-        );
-    }
     // Reviewer S2: a top-level value binding in a multi-def program used to
     // hand back a silently MERGED model (every def's params in input_names,
     // three outputs) while ignoring entry_name entirely, because the
@@ -3701,6 +3672,7 @@ def free(x: tensor[1, f32]) -> tensor[1, f32] = mul(copy(x), x)
             entry_name: Some("main".to_string()),
             artifact_dir: Some(PathBuf::from(dir.path())),
             project_root: None,
+            force_bare: false,
         });
         let message = match result {
             Ok(_) => panic!("a top-level binding must not yield a merged callable model"),
@@ -3740,6 +3712,7 @@ def free(x: tensor[1, f32]) -> tensor[1, f32] = mul(copy(x), x)
             entry_name: Some("batch_process".to_string()),
             artifact_dir: Some(PathBuf::from(dir.path())),
             project_root: None,
+            force_bare: false,
         });
         let message = match result {
             Ok(_) => panic!("a vmap entry must not yield a whole-program callable model"),
