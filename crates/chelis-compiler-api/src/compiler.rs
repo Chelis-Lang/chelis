@@ -1698,6 +1698,27 @@ fn compile_source_scoped(
         &checked,
         &realizability_result,
     );
+    // Task 8 migration diff: compare manifest lane assignments against
+    // the old predicate's root classification. Log disagreements.
+    #[cfg(debug_assertions)]
+    {
+        use chelis_types::types::Lane;
+        let old_tensor = root_names_from_checked_exprs(checked.exprs(), checked.type_env(), true);
+        let old_tensor_set: std::collections::HashSet<&str> =
+            old_tensor.iter().map(|s| s.as_str()).collect();
+        for entry in &_manifest.entries {
+            let old_is_tensor = old_tensor_set.contains(entry.name.as_str());
+            let new_is_tensor = entry.lane == Lane::Tensor;
+            if old_is_tensor != new_is_tensor {
+                eprintln!(
+                    "[#912 migration-diff] def `{}`: old={} new={}",
+                    entry.name,
+                    if old_is_tensor { "Tensor" } else { "Host" },
+                    if new_is_tensor { "Tensor" } else { "Host" },
+                );
+            }
+        }
+    }
 
     // chelis#730 Phase 1: the whole-program DAG here is AUXILIARY for a
     // program whose roots are all host-evaluated (e.g. `out = print(...)`)
