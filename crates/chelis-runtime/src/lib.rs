@@ -4201,7 +4201,7 @@ mod tests {
             let with_row = chelis_list_append(base, chelis_value_from_list(row));
             let sequences = chelis_list_append(with_row, chelis_value_from_list(empty_row));
 
-            let out = chelis_pad_sequences(sequences, chelis_value_from_f64(0.1), CHELIS_F64);
+            let out = chelis_pad_sequences_f64(sequences, chelis_value_from_f64(0.1));
             assert_eq!(
                 (*out).dtype,
                 CHELIS_F64,
@@ -4227,7 +4227,7 @@ mod tests {
             chelis_free(out);
 
             // The f32 dtype keeps the historical behavior.
-            let out32 = chelis_pad_sequences(sequences, chelis_value_from_f64(0.1), CHELIS_F32);
+            let out32 = chelis_pad_sequences(sequences, chelis_value_from_f64(0.1));
             assert_eq!((*out32).dtype, CHELIS_F32);
             chelis_free(out32);
 
