@@ -6,3 +6,4 @@
 /spec/design/capacity_census.json @rlronan
 /crates/chelis-cli/tests/capacity_census_tripwire.rs @rlronan
 /scripts/capacity_census_liveness.py @rlronan
+/scripts/test_capacity_census_liveness.py @rlronan

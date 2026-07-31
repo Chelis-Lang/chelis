@@ -54,6 +54,9 @@ const CONTROLLING_SPEC_REL: &str = "spec/05-risc-primitives.md";
 const NUMERIC_PRIMS: &[&str] = &[
     "f64", "f32", "f16", "bf16", "int8", "int16", "int32", "int64",
 ];
+/// The subset of `NUMERIC_PRIMS` whose appearance in an untagged public
+/// position is a capacity SEAM, mirroring `double`/`float` on the C side.
+const FLOAT_PRIMS: &[&str] = &["f64", "f32", "f16", "bf16"];
 
 /// The exact citation carried by the grandfathered 2026-07-30 capacity
 /// seams. A FLAGGED row (float-carrier / raw-dtype-int) has NO
@@ -67,9 +70,14 @@ unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break
 
 /// The frozen seam set may only SHRINK. Copying the grandfather citation
 /// onto a new flagged row trips the count lock AND the identity lock below.
-const GRANDFATHER_SEAM_COUNT: usize = 21;
+const GRANDFATHER_SEAM_COUNT: usize = 42;
 
-/// The plain-baseline citation for non-seam pre-ratchet rows.
+/// The plain-baseline citation for non-seam pre-ratchet rows. Like the seam
+/// citation it is frozen to an exact identity set (`GRANDFATHER_PLAIN_IDS`)
+/// living in THIS file. Without that lock the string was copyable onto a
+/// brand-new row to skip the `numeric-op` semantic hook, which the prior
+/// round recorded as a known residual and the round-3 red team executed:
+/// the residual is now closed structurally rather than disclosed.
 const GRANDFATHER_PLAIN_CITATION: &str =
     "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)";
 
@@ -79,29 +87,218 @@ const GRANDFATHER_PLAIN_CITATION: &str =
 /// relocating its citation onto a brand-new one).
 // GRANDFATHER_SEAM_IDS_BEGIN
 const GRANDFATHER_SEAM_IDS: &[&str] = &[
-    "chelis_runtime.h: chelis_string chelis_string_from_f32(float value);",
-    "chelis_runtime.h: chelis_string chelis_string_from_f64(double value);",
-    "chelis_runtime.h: chelis_tensor *chelis_alloc(int ndim, const int *shape, int dtype);",
-    "chelis_runtime.h: chelis_tensor *chelis_alloc_view(int ndim, const int *shape, int dtype, float *data);",
-    "chelis_runtime.h: chelis_tensor *chelis_scalar_tensor_from_f32(float value);",
-    "chelis_runtime.h: chelis_tensor *chelis_scalar_tensor_from_f64(double value);",
-    "chelis_runtime.h: chelis_tensor *chelis_tensor_from_value_list_typed(const chelis_list *list, int dst_dtype);",
-    "chelis_runtime.h: chelis_value chelis_value_from_f64(double value);",
-    "chelis_runtime.h: double chelis_tensor_to_f64(const chelis_tensor *t);",
-    "chelis_runtime.h: double chelis_value_as_f64(chelis_value value);",
-    "chelis_runtime.h: int chelis_dtype_size(int dtype);",
-    "chelis_runtime.h: int chelis_format_shortest(double value, int dtype, char *buf, size_t cap);",
-    "chelis_runtime.h: void chelis_bf16_buffer_to_f32(const uint16_t *src, float *dst, int64_t n);",
-    "chelis_runtime.h: void chelis_f16_buffer_to_f32(const uint16_t *src, float *dst, int64_t n);",
-    "chelis_runtime.h: void chelis_f32_buffer_to_bf16(const float *src, uint16_t *dst, int64_t n);",
-    "chelis_runtime.h: void chelis_f32_buffer_to_f16(const float *src, uint16_t *dst, int64_t n);",
-    "chelis_runtime.h: void chelis_fill_f32(chelis_tensor *t, float val);",
-    "chelis_runtime.h: void chelis_fill_f64(chelis_tensor *t, double val);",
-    "chelis_runtime.h: typedef struct { _Bool is_some; double value; } chelis_option_f64",
-    "chelis_runtime.h: typedef struct { chelis_value_tag tag; union { int64_t i64; double f64; _Bool boolean; chelis_string string; chelis_tensor *tensor; chelis_list *list; chelis_tuple *tuple; chelis_dict *dict; chelis_adt *adt; } as; } chelis_value",
-    "chelis_runtime.h: typedef struct { float *data; int shape[8]; int strides[8]; int ndim; int dtype; int size; int owns_data; } chelis_tensor",
+    "chelis_runtime.h: chelis_string chelis_string_from_f32 ( float value ) ;",
+    "chelis_runtime.h: chelis_string chelis_string_from_f64 ( double value ) ;",
+    "chelis_runtime.h: chelis_tensor * chelis_alloc ( int ndim , const int * shape , int dtype ) ;",
+    "chelis_runtime.h: chelis_tensor * chelis_alloc_view ( int ndim , const int * shape , int dtype , float * data ) ;",
+    "chelis_runtime.h: chelis_tensor * chelis_scalar_tensor_from_f32 ( float value ) ;",
+    "chelis_runtime.h: chelis_tensor * chelis_scalar_tensor_from_f64 ( double value ) ;",
+    "chelis_runtime.h: chelis_tensor * chelis_tensor_from_value_list_typed ( const chelis_list * list , int dst_dtype ) ;",
+    "chelis_runtime.h: chelis_value chelis_value_from_f64 ( double value ) ;",
+    "chelis_runtime.h: double chelis_tensor_to_f64 ( const chelis_tensor * t ) ;",
+    "chelis_runtime.h: double chelis_value_as_f64 ( chelis_value value ) ;",
+    "chelis_runtime.h: int chelis_dtype_size ( int dtype ) ;",
+    "chelis_runtime.h: int chelis_format_shortest ( double value , int dtype , char * buf , size_t cap ) ;",
+    "chelis_runtime.h: typedef struct { _Bool is_some ; double value ; } chelis_option_f64",
+    "chelis_runtime.h: typedef struct { chelis_value_tag tag ; union { int64_t i64 ; double f64 ; _Bool boolean ; chelis_string string ; chelis_tensor * tensor ; chelis_list * list ; chelis_tuple * tuple ; chelis_dict * dict ; chelis_adt * adt ; } as ; } chelis_value",
+    "chelis_runtime.h: typedef struct { float * data ; int shape [ 8 ] ; int strides [ 8 ] ; int ndim ; int dtype ; int size ; int owns_data ; } chelis_tensor",
+    "chelis_runtime.h: void chelis_bf16_buffer_to_f32 ( const uint16_t * src , float * dst , int64_t n ) ;",
+    "chelis_runtime.h: void chelis_f16_buffer_to_f32 ( const uint16_t * src , float * dst , int64_t n ) ;",
+    "chelis_runtime.h: void chelis_f32_buffer_to_bf16 ( const float * src , uint16_t * dst , int64_t n ) ;",
+    "chelis_runtime.h: void chelis_f32_buffer_to_f16 ( const float * src , uint16_t * dst , int64_t n ) ;",
+    "chelis_runtime.h: void chelis_fill_f32 ( chelis_tensor * t , float val ) ;",
+    "chelis_runtime.h: void chelis_fill_f64 ( chelis_tensor * t , double val ) ;",
+    "contracts::normal_cdf: (t-fn {} (t-prim {} f32) (t-prim {} f32))",
+    "contracts::standard_contract_tolerance: (t-fn {} (t-prim {} f32))",
+    "decimal::decimal_to_float: (t-fn {} (t-adt {} Decimal) (t-prim {} f64))",
+    "init/kaiming::kaiming_normal: (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-var {} n) (t-prim {} f32))) (t-prim {} f32) (t-tensor {} (d-var {} n) (t-prim {} f32)))",
+    "init/kaiming::kaiming_uniform: (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-var {} n) (t-prim {} f32))) (t-prim {} f32) (t-tensor {} (d-var {} n) (t-prim {} f32)))",
+    "init/random::normal_like: (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-var {} n) (t-prim {} f32))) (t-prim {} f32) (t-prim {} f32) (t-tensor {} (d-var {} n) (t-prim {} f32)))",
+    "init/xavierext::trunc_normal: (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-var {} n) (t-prim {} f32))) (t-prim {} f32) (t-prim {} f32) (t-prim {} f32) (t-prim {} f32) (t-tensor {} (d-var {} n) (t-prim {} f32)))",
+    "init/xavierext::xavier_normal: (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-var {} n) (t-prim {} f32))) (t-prim {} f32) (t-prim {} f32) (t-tensor {} (d-var {} n) (t-prim {} f32)))",
+    "init/xavierext::xavier_uniform: (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-var {} n) (t-prim {} f32))) (t-prim {} f32) (t-prim {} f32) (t-tensor {} (d-var {} n) (t-prim {} f32)))",
+    "io/json::Json: () (variant {} JsonNull) (variant {} JsonBool (t-prim {} bool)) (variant {} JsonInt (t-prim {} int64)) (variant {} JsonFloat (t-prim {} f64)) (variant {} JsonString (t-prim {} string)) (variant {} JsonArray (t-adt {} List (t-adt {} Json))) (variant {} JsonObject (t-adt {} Dict (t-prim {} string) (t-adt {} Json)))",
+    "io/json::json_float: (t-fn {} (t-adt {} Option (t-adt {} Json)) (t-adt {} Option (t-prim {} f64)))",
+    "scalar::abs: (t-fn {} (t-prim {} f32) (t-prim {} f32))",
+    "scalar::max: (t-fn {} (t-prim {} f32) (t-prim {} f32) (t-prim {} f32))",
+    "scalar::min: (t-fn {} (t-prim {} f32) (t-prim {} f32) (t-prim {} f32))",
+    "tensor/construct::linspace: (t-fn {} (t-prim {} f32) (t-prim {} f32) (t-prim {} int32) (t-tensor {} (d-var {} n) (t-prim {} f32)))",
+    "tensor/construct::squeeze: (t-fn {} (t-ref {} (t-tensor {} (d-var {} a) (d-lit {} 1) (d-var {} b) (t-prim {} f32))) (t-var {} _))",
+    "tensor/construct::stack: (t-fn {} (t-adt {} List (t-tensor {} (d-var {} d) (t-prim {} f32))) (t-var {} _))",
+    "tensor/construct::unsqueeze: (t-fn {} (t-ref {} (t-tensor {} (d-var {} a) (d-var {} b) (t-prim {} f32))) (t-var {} _))",
+    "test::assert_close: (t-fn {eff: (effects {} test)} (t-prim {} f32) (t-prim {} f32) (t-prim {} f32) (t-prim {} string) (t-unit {}))",
+    "test::assert_close_tensor: (t-fn {eff: (effects {} test)} (t-ref {} (t-tensor {} (d-var {} n) (t-var {} p))) (t-ref {} (t-tensor {} (d-var {} n) (t-var {} p))) (t-prim {} f32) (t-prim {} string) (t-unit {}))",
+    "test::assert_eq: (t-fn {eff: (effects {} test)} (t-prim {} f32) (t-prim {} f32) (t-prim {} string) (t-unit {}))",
 ];
 // GRANDFATHER_SEAM_IDS_END
+
+/// The exact (id) identities carrying the PLAIN pre-ratchet citation,
+/// frozen on the same principle as the seam set and for the same reason: a
+/// citation string any new row may copy is not a disposition. Like
+/// `GRANDFATHER_SEAM_IDS` this list is hand-maintained and SHRINK-ONLY -
+/// deliberately not regenerated, because a generator that re-derived it
+/// from the baseline would re-bless whatever a contributor had just pasted
+/// the citation onto.
+// GRANDFATHER_PLAIN_IDS_BEGIN
+const GRANDFATHER_PLAIN_IDS: &[&str] = &[
+    "chelis_runtime.h: _Bool chelis_adt_tag_equals ( const chelis_adt * adt , chelis_string ctor ) ;",
+    "chelis_runtime.h: _Bool chelis_dict_contains ( const chelis_dict * dict , chelis_value key ) ;",
+    "chelis_runtime.h: _Bool chelis_file_exists ( chelis_string path ) ;",
+    "chelis_runtime.h: _Bool chelis_string_contains ( chelis_string haystack , chelis_string needle ) ;",
+    "chelis_runtime.h: _Bool chelis_string_ends_with ( chelis_string value , chelis_string suffix ) ;",
+    "chelis_runtime.h: _Bool chelis_string_eq ( chelis_string lhs , chelis_string rhs ) ;",
+    "chelis_runtime.h: _Bool chelis_string_starts_with ( chelis_string value , chelis_string prefix ) ;",
+    "chelis_runtime.h: _Bool chelis_value_as_bool ( chelis_value value ) ;",
+    "chelis_runtime.h: _Noreturn void chelis_fail ( chelis_string message ) ;",
+    "chelis_runtime.h: chelis_adt * chelis_adt_construct ( chelis_string ctor , const chelis_value * fields , int64_t len ) ;",
+    "chelis_runtime.h: chelis_adt * chelis_value_as_adt ( chelis_value value ) ;",
+    "chelis_runtime.h: chelis_dict * chelis_dict_from_pairs ( const chelis_list * pairs ) ;",
+    "chelis_runtime.h: chelis_dict * chelis_dict_insert ( const chelis_dict * dict , chelis_value key , chelis_value value ) ;",
+    "chelis_runtime.h: chelis_dict * chelis_dict_merge ( const chelis_dict * lhs , const chelis_dict * rhs ) ;",
+    "chelis_runtime.h: chelis_dict * chelis_dict_remove ( const chelis_dict * dict , chelis_value key ) ;",
+    "chelis_runtime.h: chelis_dict * chelis_value_as_dict ( chelis_value value ) ;",
+    "chelis_runtime.h: chelis_list * chelis_dict_entries ( const chelis_dict * dict ) ;",
+    "chelis_runtime.h: chelis_list * chelis_dict_keys ( const chelis_dict * dict ) ;",
+    "chelis_runtime.h: chelis_list * chelis_dict_values ( const chelis_dict * dict ) ;",
+    "chelis_runtime.h: chelis_list * chelis_list_append ( const chelis_list * list , chelis_value value ) ;",
+    "chelis_runtime.h: chelis_list * chelis_list_chunk ( const chelis_list * list , int64_t size ) ;",
+    "chelis_runtime.h: chelis_list * chelis_list_concat ( const chelis_list * lhs , const chelis_list * rhs ) ;",
+    "chelis_runtime.h: chelis_list * chelis_list_dir ( chelis_string path ) ;",
+    "chelis_runtime.h: chelis_list * chelis_list_drop ( const chelis_list * list , int64_t count ) ;",
+    "chelis_runtime.h: chelis_list * chelis_list_empty ( void ) ;",
+    "chelis_runtime.h: chelis_list * chelis_list_enumerate ( const chelis_list * list ) ;",
+    "chelis_runtime.h: chelis_list * chelis_list_flatten ( const chelis_list * list ) ;",
+    "chelis_runtime.h: chelis_list * chelis_list_from_tensor ( const chelis_tensor * tensor ) ;",
+    "chelis_runtime.h: chelis_list * chelis_list_from_values ( const chelis_value * items , int64_t len ) ;",
+    "chelis_runtime.h: chelis_list * chelis_list_take ( const chelis_list * list , int64_t count ) ;",
+    "chelis_runtime.h: chelis_list * chelis_list_zip ( const chelis_list * lhs , const chelis_list * rhs ) ;",
+    "chelis_runtime.h: chelis_list * chelis_mmap_read ( const chelis_mapped_file * mapped , int64_t offset , int64_t len ) ;",
+    "chelis_runtime.h: chelis_list * chelis_range_i64 ( int64_t start , int64_t end ) ;",
+    "chelis_runtime.h: chelis_list * chelis_read_bytes ( chelis_string path ) ;",
+    "chelis_runtime.h: chelis_list * chelis_read_lines ( chelis_string path ) ;",
+    "chelis_runtime.h: chelis_list * chelis_tensor_split ( const chelis_tensor * tensor , int64_t axis , const chelis_list * sizes ) ;",
+    "chelis_runtime.h: chelis_list * chelis_value_as_list ( chelis_value value ) ;",
+    "chelis_runtime.h: chelis_mapped_file * chelis_mmap_file ( chelis_string path ) ;",
+    "chelis_runtime.h: chelis_option_f64 chelis_dict_get_f64 ( const chelis_dict * dict , chelis_value key ) ;",
+    "chelis_runtime.h: chelis_option_f64 chelis_parse_f64 ( chelis_string value ) ;",
+    "chelis_runtime.h: chelis_option_i64 chelis_dict_get_i64 ( const chelis_dict * dict , chelis_value key ) ;",
+    "chelis_runtime.h: chelis_option_i64 chelis_parse_int64 ( chelis_string value ) ;",
+    "chelis_runtime.h: chelis_option_value chelis_dict_get ( const chelis_dict * dict , chelis_value key ) ;",
+    "chelis_runtime.h: chelis_string chelis_adt_get_tag ( const chelis_adt * adt ) ;",
+    "chelis_runtime.h: chelis_string chelis_read_file ( chelis_string path ) ;",
+    "chelis_runtime.h: chelis_string chelis_string_concat ( chelis_string lhs , chelis_string rhs ) ;",
+    "chelis_runtime.h: chelis_string chelis_string_from_bool ( _Bool value ) ;",
+    "chelis_runtime.h: chelis_string chelis_string_from_cstr ( const char * value ) ;",
+    "chelis_runtime.h: chelis_string chelis_string_from_int64 ( int64_t value ) ;",
+    "chelis_runtime.h: chelis_string chelis_string_slice ( chelis_string value , int64_t start , int64_t len ) ;",
+    "chelis_runtime.h: chelis_string chelis_string_trim ( chelis_string value ) ;",
+    "chelis_runtime.h: chelis_string chelis_value_as_string ( chelis_value value ) ;",
+    "chelis_runtime.h: chelis_tensor * chelis_contiguous ( const chelis_tensor * t ) ;",
+    "chelis_runtime.h: chelis_tensor * chelis_pad_sequences ( const chelis_list * sequences , chelis_value pad_value ) ;",
+    "chelis_runtime.h: chelis_tensor * chelis_pad_sequences_to ( const chelis_list * sequences , int64_t width , chelis_value pad_value ) ;",
+    "chelis_runtime.h: chelis_tensor * chelis_scalar_tensor_from_i64 ( int64_t value ) ;",
+    "chelis_runtime.h: chelis_tensor * chelis_tensor_clamp ( const chelis_tensor * tensor , const chelis_tensor * lo , const chelis_tensor * hi ) ;",
+    "chelis_runtime.h: chelis_tensor * chelis_tensor_cmplt ( const chelis_tensor * lhs , const chelis_tensor * rhs ) ;",
+    "chelis_runtime.h: chelis_tensor * chelis_tensor_concat ( const chelis_list * parts , int64_t axis ) ;",
+    "chelis_runtime.h: chelis_tensor * chelis_tensor_cumsum ( const chelis_tensor * tensor , int64_t axis ) ;",
+    "chelis_runtime.h: chelis_tensor * chelis_tensor_diagonal ( const chelis_tensor * tensor , int64_t axis1 , int64_t axis2 ) ;",
+    "chelis_runtime.h: chelis_tensor * chelis_tensor_einsum ( chelis_string equation , const chelis_tensor * lhs , const chelis_tensor * rhs ) ;",
+    "chelis_runtime.h: chelis_tensor * chelis_tensor_from_value_list ( const chelis_list * list ) ;",
+    "chelis_runtime.h: chelis_tensor * chelis_tensor_gather ( const chelis_tensor * tensor , const chelis_tensor * indices , int64_t axis ) ;",
+    "chelis_runtime.h: chelis_tensor * chelis_tensor_scatter ( const chelis_tensor * base , const chelis_tensor * indices , const chelis_tensor * updates , int64_t axis , chelis_string mode ) ;",
+    "chelis_runtime.h: chelis_tensor * chelis_tensor_trace ( const chelis_tensor * tensor , int64_t axis1 , int64_t axis2 ) ;",
+    "chelis_runtime.h: chelis_tensor * chelis_tensor_where ( const chelis_tensor * cond , const chelis_tensor * then_tensor , const chelis_tensor * else_tensor ) ;",
+    "chelis_runtime.h: chelis_tensor * chelis_value_as_tensor ( chelis_value value ) ;",
+    "chelis_runtime.h: chelis_tuple * chelis_tensor_sort ( const chelis_tensor * tensor , int64_t axis ) ;",
+    "chelis_runtime.h: chelis_tuple * chelis_tuple_from_values ( const chelis_value * items , int64_t len ) ;",
+    "chelis_runtime.h: chelis_tuple * chelis_value_as_tuple ( chelis_value value ) ;",
+    "chelis_runtime.h: chelis_value chelis_adt_get_field ( const chelis_adt * adt , int64_t index ) ;",
+    "chelis_runtime.h: chelis_value chelis_list_index ( const chelis_list * list , int64_t index ) ;",
+    "chelis_runtime.h: chelis_value chelis_tuple_get ( const chelis_tuple * tuple , int64_t index ) ;",
+    "chelis_runtime.h: chelis_value chelis_value_from_adt ( chelis_adt * value ) ;",
+    "chelis_runtime.h: chelis_value chelis_value_from_bool ( _Bool value ) ;",
+    "chelis_runtime.h: chelis_value chelis_value_from_dict ( chelis_dict * value ) ;",
+    "chelis_runtime.h: chelis_value chelis_value_from_int64 ( int64_t value ) ;",
+    "chelis_runtime.h: chelis_value chelis_value_from_list ( chelis_list * value ) ;",
+    "chelis_runtime.h: chelis_value chelis_value_from_string ( chelis_string value ) ;",
+    "chelis_runtime.h: chelis_value chelis_value_from_tensor ( chelis_tensor * value ) ;",
+    "chelis_runtime.h: chelis_value chelis_value_from_tuple ( chelis_tuple * value ) ;",
+    "chelis_runtime.h: const char * chelis_string_data ( chelis_string value ) ;",
+    "chelis_runtime.h: int64_t chelis_adt_field_count ( const chelis_adt * adt ) ;",
+    "chelis_runtime.h: int64_t chelis_dict_len ( const chelis_dict * dict ) ;",
+    "chelis_runtime.h: int64_t chelis_list_len ( const chelis_list * list ) ;",
+    "chelis_runtime.h: int64_t chelis_mmap_len ( const chelis_mapped_file * mapped ) ;",
+    "chelis_runtime.h: int64_t chelis_string_len ( chelis_string value ) ;",
+    "chelis_runtime.h: int64_t chelis_tensor_numel ( const chelis_tensor * t ) ;",
+    "chelis_runtime.h: int64_t chelis_tensor_rank ( const chelis_tensor * t ) ;",
+    "chelis_runtime.h: int64_t chelis_tensor_shape ( const chelis_tensor * t , int64_t axis ) ;",
+    "chelis_runtime.h: int64_t chelis_tuple_len ( const chelis_tuple * tuple ) ;",
+    "chelis_runtime.h: int64_t chelis_value_as_int64 ( chelis_value value ) ;",
+    "chelis_runtime.h: typedef enum { CHELIS_VALUE_INT64 , CHELIS_VALUE_FLOAT64 , CHELIS_VALUE_BOOL , CHELIS_VALUE_STRING , CHELIS_VALUE_TENSOR , CHELIS_VALUE_LIST , CHELIS_VALUE_TUPLE , CHELIS_VALUE_DICT , CHELIS_VALUE_ADT } chelis_value_tag",
+    "chelis_runtime.h: typedef struct { _Bool is_some ; chelis_value value ; } chelis_option_value",
+    "chelis_runtime.h: typedef struct { _Bool is_some ; int64_t value ; } chelis_option_i64",
+    "chelis_runtime.h: typedef struct { chelis_value key ; chelis_value value ; } chelis_dict_entry",
+    "chelis_runtime.h: typedef struct { void * handle ; } chelis_string",
+    "chelis_runtime.h: void chelis_adt_release ( const chelis_adt * adt ) ;",
+    "chelis_runtime.h: void chelis_adt_retain ( const chelis_adt * adt ) ;",
+    "chelis_runtime.h: void chelis_dict_release ( const chelis_dict * dict ) ;",
+    "chelis_runtime.h: void chelis_dict_retain ( const chelis_dict * dict ) ;",
+    "chelis_runtime.h: void chelis_fill_bf16 ( chelis_tensor * t , uint16_t bits ) ;",
+    "chelis_runtime.h: void chelis_fill_bool_bits ( chelis_tensor * t , uint32_t bits ) ;",
+    "chelis_runtime.h: void chelis_fill_f16 ( chelis_tensor * t , uint16_t bits ) ;",
+    "chelis_runtime.h: void chelis_fill_f32_bits ( chelis_tensor * t , uint32_t bits ) ;",
+    "chelis_runtime.h: void chelis_fill_f64_bits ( chelis_tensor * t , uint64_t bits ) ;",
+    "chelis_runtime.h: void chelis_fill_i64 ( chelis_tensor * t , int64_t val ) ;",
+    "chelis_runtime.h: void chelis_free ( chelis_tensor * t ) ;",
+    "chelis_runtime.h: void chelis_list_release ( const chelis_list * list ) ;",
+    "chelis_runtime.h: void chelis_list_retain ( const chelis_list * list ) ;",
+    "chelis_runtime.h: void chelis_print_adt ( const chelis_adt * adt ) ;",
+    "chelis_runtime.h: void chelis_print_dict ( const chelis_dict * dict ) ;",
+    "chelis_runtime.h: void chelis_print_list ( const chelis_list * list ) ;",
+    "chelis_runtime.h: void chelis_print_tuple ( const chelis_tuple * tuple ) ;",
+    "chelis_runtime.h: void chelis_string_release ( chelis_string value ) ;",
+    "chelis_runtime.h: void chelis_string_retain ( chelis_string value ) ;",
+    "chelis_runtime.h: void chelis_tuple_release ( const chelis_tuple * tuple ) ;",
+    "chelis_runtime.h: void chelis_tuple_retain ( const chelis_tuple * tuple ) ;",
+    "chelis_runtime.h: void chelis_value_release ( chelis_value value ) ;",
+    "chelis_runtime.h: void chelis_value_retain ( chelis_value value ) ;",
+    "chelis_runtime.h: void chelis_write_file ( chelis_string path , chelis_string contents ) ;",
+    "contracts::normal_cdf_contract_samples: (t-fn {} (t-prim {} int64))",
+    "contracts::normal_cdf_contract_seed: (t-fn {} (t-prim {} int64))",
+    "decimal::Decimal: () (variant {} Decimal (field {} coefficient (t-prim {} int64)) (field {} scale (t-prim {} int64)))",
+    "decimal::decimal_div: (t-fn {} (t-adt {} Decimal) (t-adt {} Decimal) (t-prim {} int64) (t-adt {} RoundingMode) (t-adt {} Decimal))",
+    "decimal::decimal_from_int: (t-fn {} (t-prim {} int64) (t-adt {} Decimal))",
+    "index::drop_list: (t-fn {} (t-adt {} List (t-var {} item)) (t-prim {} int64) (t-adt {} List (t-var {} item)))",
+    "index::list_index: (t-fn {} (t-adt {} List (t-var {} item)) (t-prim {} int64) (t-var {} item))",
+    "index::take_list: (t-fn {} (t-adt {} List (t-var {} item)) (t-prim {} int64) (t-adt {} List (t-var {} item)))",
+    "io/json::json_int: (t-fn {} (t-adt {} Option (t-adt {} Json)) (t-adt {} Option (t-prim {} int64)))",
+    "io::mmap_size: (t-fn {} (t-prim {} string) (t-prim {} int64))",
+    "io::read_head_bytes: (t-fn {} (t-prim {} string) (t-prim {} int64) (t-adt {} List (t-prim {} int64)))",
+    "process::run: (t-fn {} (t-prim {} string) (t-adt {} List (t-prim {} string)) (t-tuple {} (t-prim {} int64) (t-prim {} string) (t-prim {} string)))",
+    "process::run_chelis: (t-fn {} (t-adt {} List (t-prim {} string)) (t-tuple {} (t-prim {} int64) (t-prim {} string) (t-prim {} string)))",
+    "sort::sort_1d: (t-fn {} (t-ref {} (t-tensor {} (d-var {} n) (t-var {} p))) (t-prim {} int32) (t-tuple {} (t-tensor {} (d-var {} n) (t-var {} p)) (t-tensor {} (d-var {} n) (t-prim {} int64))))",
+    "sort::sort_2d: (t-fn {} (t-ref {} (t-tensor {} (d-var {} m) (d-var {} n) (t-var {} p))) (t-prim {} int32) (t-tuple {} (t-tensor {} (d-var {} m) (d-var {} n) (t-var {} p)) (t-tensor {} (d-var {} m) (d-var {} n) (t-prim {} int64))))",
+    "tensor/construct::arange: (t-fn {} (t-prim {} int32) (t-prim {} int32) (t-tensor {} (d-var {} n) (t-prim {} int32)))",
+    "tensor/mask::where_indices: (t-fn {} (t-ref {} (t-tensor {} (d-var {} n) (t-prim {} bool))) (t-tensor {} (d-var {} hits) (t-prim {} int64)))",
+    "test::assert_eq_int: (t-fn {eff: (effects {} test)} (t-prim {} int64) (t-prim {} int64) (t-prim {} string) (t-unit {}))",
+    "test::assert_eq_tensor_int64: (t-fn {eff: (effects {} test)} (t-ref {} (t-tensor {} (d-var {} n) (t-prim {} int64))) (t-ref {} (t-tensor {} (d-var {} n) (t-prim {} int64))) (t-prim {} string) (t-unit {}))",
+    "test::assert_shape: (t-fn {eff: (effects {} test)} (t-ref {} (t-tensor {} (d-var {} n) (t-var {} p))) (t-prim {} int64) (t-prim {} string) (t-unit {}))",
+    "time::Date: () (variant {} Date (field {} year (t-prim {} int64)) (field {} month (t-prim {} int64)) (field {} day (t-prim {} int64)))",
+    "time::Duration: () (variant {} Duration (field {} days (t-prim {} int64)) (field {} hours (t-prim {} int64)) (field {} minutes (t-prim {} int64)) (field {} seconds (t-prim {} int64)))",
+    "time::add_days: (t-fn {} (t-adt {} Date) (t-prim {} int64) (t-adt {} Date))",
+    "time::date: (t-fn {} (t-prim {} int64) (t-prim {} int64) (t-prim {} int64) (t-adt {} Date))",
+    "time::day_of_year: (t-fn {} (t-adt {} Date) (t-prim {} int64))",
+    "time::days_between: (t-fn {} (t-adt {} Date) (t-adt {} Date) (t-prim {} int64))",
+    "time::duration: (t-fn {} (t-prim {} int64) (t-prim {} int64) (t-prim {} int64) (t-prim {} int64) (t-adt {} Duration))",
+    "time::is_leap_year: (t-fn {} (t-prim {} int64) (t-prim {} bool))",
+    "time::sub_days: (t-fn {} (t-adt {} Date) (t-prim {} int64) (t-adt {} Date))",
+    "time::try_date: (t-fn {} (t-prim {} int64) (t-prim {} int64) (t-prim {} int64) (t-adt {} Option (t-adt {} Date)))",
+    "tokenizer::Tokenizer: () (variant {} BpeTokenizer (t-adt {} Dict (t-prim {} string) (t-prim {} int64)) (t-adt {} Dict (t-prim {} string) (t-prim {} int64)) (t-adt {} Dict (t-prim {} int64) (t-prim {} string)) (t-prim {} int64))",
+    "tokenizer::batch_encode: (t-fn {} (t-adt {} Tokenizer) (t-adt {} List (t-prim {} string)) (t-prim {} int64) (t-prim {} int64) (t-tensor {} (d-name {} batch) (d-name {} seq) (t-prim {} int64)))",
+    "tokenizer::decode: (t-fn {} (t-adt {} Tokenizer) (t-adt {} List (t-prim {} int64)) (t-prim {} string))",
+    "tokenizer::encode: (t-fn {} (t-adt {} Tokenizer) (t-prim {} string) (t-adt {} List (t-prim {} int64)))",
+];
+// GRANDFATHER_PLAIN_IDS_END
 
 /// Exact reviewed C callables whose bare `int` values are control/layout
 /// plumbing rather than language numeric operations. The default is
@@ -268,6 +465,8 @@ fn repo_root() -> PathBuf {
 /// closure is followed by the real preprocessor, so an export added to a
 /// transitively-included header - or hidden behind a macro - is visible.
 fn preprocessed_headers(include_dir: &Path, roots: &[&str]) -> BTreeMap<String, String> {
+    let sources = header_source_closure(include_dir, roots);
+    assert_no_line_directives(&sources);
     assert_context_invariant_headers(include_dir, roots);
     let mut per_file: BTreeMap<String, String> = BTreeMap::new();
     for root in roots {
@@ -290,13 +489,61 @@ fn preprocessed_headers(include_dir: &Path, roots: &[&str]) -> BTreeMap<String, 
             }
         }
     }
+    assert_total_attribution(&sources, &per_file);
+    assert_roots_reach_every_published_header(include_dir, &per_file);
     per_file
 }
 
-fn quoted_include(line: &str) -> Option<&str> {
+/// `HEADER_ROOTS` is a hand-maintained list, and §C6 forbids the census
+/// from depending on one. The list survives because it also records WHY
+/// each root is published, but it is no longer TRUSTED: the preprocessed
+/// closure must account for every `.h` in the published include directory,
+/// so a header dropped in but reachable from no root fails loudly instead
+/// of being silently absent from the inventory (round-3 red team P2).
+fn assert_roots_reach_every_published_header(
+    include_dir: &Path,
+    per_file: &BTreeMap<String, String>,
+) {
+    let entries =
+        fs::read_dir(include_dir).unwrap_or_else(|e| panic!("read {}: {e}", include_dir.display()));
+    let on_disk: BTreeSet<String> = entries
+        .map(|entry| entry.expect("dir entry").path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "h"))
+        .filter_map(|path| {
+            path.file_name()
+                .map(|name| name.to_string_lossy().to_string())
+        })
+        .collect();
+    let reached: BTreeSet<String> = per_file.keys().cloned().collect();
+    assert_eq!(
+        on_disk,
+        reached,
+        "{}PUBLISHED HEADER NOT REACHED FROM ANY ROOT: every `.h` under {} \
+         must appear in the preprocessed closure of the declared roots. A \
+         header that no root includes is shipped but uninventoried, so \
+         every declaration in it is invisible to this census. Add it to \
+         `HEADER_ROOTS`, include it from a root, or remove it from the \
+         published directory.{}",
+        teaching_header(),
+        include_dir.display(),
+        teaching_footer()
+    );
+}
+
+/// A `#include` of a local header by EITHER spelling. `cc -E -I <dir>`
+/// resolves `<x>` against the include path exactly as it resolves `"x"`, so
+/// a raw-source guard that follows only quoted includes leaves a local
+/// header reachable solely through `#include <x>` outside every raw-source
+/// scan (round-3 red team P2). Callers filter by resolution inside the
+/// include directory, which keeps system includes out.
+fn local_include(line: &str) -> Option<&str> {
     let rest = line.trim_start().strip_prefix("#include")?.trim_start();
-    let rest = rest.strip_prefix('"')?;
-    rest.split('"').next()
+    let close = match rest.chars().next()? {
+        '"' => '"',
+        '<' => '>',
+        _ => return None,
+    };
+    rest[1..].split(close).next()
 }
 
 fn header_source_closure(include_dir: &Path, roots: &[&str]) -> BTreeMap<String, String> {
@@ -310,7 +557,7 @@ fn header_source_closure(include_dir: &Path, roots: &[&str]) -> BTreeMap<String,
         let source =
             fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
         for line in source.lines() {
-            if let Some(included) = quoted_include(line)
+            if let Some(included) = local_include(line)
                 && include_dir.join(included).is_file()
             {
                 pending.push(included.to_string());
@@ -319,6 +566,108 @@ fn header_source_closure(include_dir: &Path, roots: &[&str]) -> BTreeMap<String,
         sources.insert(name, source);
     }
     sources
+}
+
+/// `#line` (and a hand-written linemarker) rewrites the preprocessor's file
+/// attribution, which is precisely how the census decides that a
+/// declaration belongs to a published header. A declaration bracketed by
+/// `#line 1 "/opt/vendor/x.h"` is still callable ABI - `cc -fsyntax-only`
+/// accepts calls to it - while the census attributes it to a file outside
+/// the include directory and drops it (round-3 red team P1). The directive
+/// is banned in the published closure rather than interpreted: there is no
+/// legitimate use of it in a hand-written published header, and any
+/// interpretation would re-create the spoofing channel.
+fn assert_no_line_directives(sources: &BTreeMap<String, String>) {
+    for (name, source) in sources {
+        for (index, line) in strip_c_comments(source).lines().enumerate() {
+            let Some(rest) = line.trim_start().strip_prefix('#') else {
+                continue;
+            };
+            let rest = rest.trim_start();
+            let named = rest
+                .strip_prefix("line")
+                .is_some_and(|tail| tail.is_empty() || tail.starts_with(char::is_whitespace));
+            let linemarker = rest.starts_with(|c: char| c.is_ascii_digit());
+            assert!(
+                !(named || linemarker),
+                "{}LINE-DIRECTIVE SPOOFING SURFACE in `{name}` line {}: `{}`. \
+                 A `#line` directive or hand-written linemarker rewrites the \
+                 file attribution the census reads back from `cc -E`, so a \
+                 real, callable export can be attributed to a file outside \
+                 the published include directory and vanish from the \
+                 inventory. Published headers may not contain either; delete \
+                 the directive.{}",
+                teaching_header(),
+                index + 1,
+                line.trim(),
+                teaching_footer()
+            );
+        }
+    }
+}
+
+/// Attribution totality: every declarator the RAW published closure
+/// declares must reappear in some preprocessed bucket. The linemarker ban
+/// above removes the known spoofing channel; this is the independent
+/// backstop that does not depend on having enumerated the channels. Names
+/// are compared rather than declarations because macro expansion legally
+/// rewrites type spellings between the two forms.
+fn assert_total_attribution(
+    sources: &BTreeMap<String, String>,
+    per_file: &BTreeMap<String, String>,
+) {
+    let attributed: BTreeSet<String> = per_file
+        .values()
+        .flat_map(|text| declared_names(text))
+        .collect();
+    let mut missing: Vec<String> = Vec::new();
+    for (name, source) in sources {
+        for declared in declared_names(source) {
+            if !attributed.contains(&declared) {
+                missing.push(format!("{name}: {declared}"));
+            }
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "{}UNATTRIBUTED PUBLISHED DECLARATION {missing:?}: the raw published \
+         header closure declares these names, but no preprocessed bucket \
+         attributed to a file under the include directory contains them. \
+         Every published declaration must land in the inventory; a \
+         declaration the census cannot attribute is invisible ABI.{}",
+        teaching_header(),
+        teaching_footer()
+    );
+}
+
+/// The declarator identities a header body declares, independent of type
+/// spellings. Attribution totality is checked on these names so that
+/// legitimate macro expansion (a `#define`d return type) does not read as a
+/// missing declaration.
+fn declared_names(text: &str) -> BTreeSet<String> {
+    header_rows_local("attribution.h", text)
+        .iter()
+        .filter_map(|row| declarator_name(&row.kind, &row.id))
+        .collect()
+}
+
+fn declarator_name(kind: &str, id: &str) -> Option<String> {
+    let declaration = id.split_once(": ").map_or(id, |(_, rest)| rest);
+    let tokens: Vec<&str> = declaration.split_whitespace().collect();
+    let is_identifier =
+        |token: &str| token.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_');
+    if kind == "header-export" {
+        let open = tokens.iter().position(|token| *token == "(")?;
+        return tokens
+            .get(open.checked_sub(1)?)
+            .filter(|token| is_identifier(token))
+            .map(|token| (*token).to_string());
+    }
+    tokens
+        .iter()
+        .rev()
+        .find(|token| is_identifier(token))
+        .map(|token| (*token).to_string())
 }
 
 fn include_guard_name(source: &str) -> Option<String> {
@@ -386,7 +735,7 @@ fn closure_conditional_macro_taint(
         .flat_map(|(name, source)| {
             source
                 .lines()
-                .filter_map(quoted_include)
+                .filter_map(local_include)
                 .filter(|included| sources.contains_key(*included))
                 .map(|included| (name.clone(), included.to_string()))
         })
@@ -446,7 +795,7 @@ fn assert_context_invariant_headers(include_dir: &Path, roots: &[&str]) {
             }
 
             let varying = conditional_stack.iter().any(|frame| *frame);
-            if varying && let Some(included) = quoted_include(trimmed) {
+            if varying && let Some(included) = local_include(trimmed) {
                 conditional_includes.insert(included.to_string());
             }
             let extern_wrapper = trimmed == "extern \"C\" {" || trimmed == "}";
@@ -634,6 +983,12 @@ fn is_frozen_grandfather_seam_id(id: &str) -> bool {
         .any(|frozen| canonical_inventory_id(frozen) == id)
 }
 
+fn is_frozen_grandfather_plain_id(id: &str) -> bool {
+    GRANDFATHER_PLAIN_IDS
+        .iter()
+        .any(|frozen| canonical_inventory_id(frozen) == id)
+}
+
 /// True when the citation names at least one chelis issue (`chelis#N`), so
 /// the liveness gate (`scripts/capacity_census_liveness.py`) has purchase on
 /// every sanctioned citation - including `maintainer-override(...)`, which
@@ -642,6 +997,56 @@ fn cites_a_chelis_issue(citation: &str) -> bool {
     citation
         .match_indices("chelis#")
         .any(|(i, m)| citation[i + m.len()..].starts_with(|c: char| c.is_ascii_digit()))
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum MaintainerOverride {
+    Absent,
+    Malformed(String),
+    WellFormed,
+}
+
+/// A maintainer override is the ONE human path past a capacity seam, so its
+/// shape is validated rather than substring-matched: the
+/// `maintainer-override(` prefix, a BALANCED closing paren, a nonempty
+/// reason, and a `chelis#N` reference INSIDE the parentheses. The previous
+/// `starts_with("maintainer-override(")` test accepted a marker that was
+/// never closed and accepted an issue reference sitting outside the
+/// parentheses, so a self-authored approximation of the marker passed
+/// (round-3 red team P3).
+fn classify_maintainer_override(citation: &str) -> MaintainerOverride {
+    let Some(rest) = citation.strip_prefix("maintainer-override(") else {
+        return MaintainerOverride::Absent;
+    };
+    let mut depth = 1usize;
+    let mut reason = String::new();
+    for c in rest.chars() {
+        if c == '(' {
+            depth += 1;
+        } else if c == ')' {
+            depth -= 1;
+            if depth == 0 {
+                if reason.trim().is_empty() {
+                    return MaintainerOverride::Malformed(
+                        "the reason inside `maintainer-override(...)` is empty".to_string(),
+                    );
+                }
+                if !cites_a_chelis_issue(&reason) {
+                    return MaintainerOverride::Malformed(
+                        "no `chelis#N` reference INSIDE the override parentheses; \
+                         a reference after the closing paren is not the override's \
+                         issue and leaves it unbound by the liveness gate"
+                            .to_string(),
+                    );
+                }
+                return MaintainerOverride::WellFormed;
+            }
+        }
+        reason.push(c);
+    }
+    MaintainerOverride::Malformed(
+        "`maintainer-override(` is never closed by a balanced `)`".to_string(),
+    )
 }
 
 /// Fixed-width numeric C value types: a signature mentioning one (after
@@ -682,31 +1087,81 @@ fn is_seam(flags: &[String]) -> bool {
         .any(|f| f == "float-carrier" || f == "raw-dtype-int")
 }
 
-/// Collect simple `typedef <target...> <name>;` aliases (no struct bodies)
-/// so classification sees through spellings like
+/// Collect `typedef` aliases so classification sees through spellings like
 /// `typedef int chelis_dtype_id;` - the re-red-team's executed typedef
 /// evasion. Struct forward typedefs resolve to their `struct X` spelling,
-/// which is harmless.
+/// which is harmless. Aggregate bodies (`{ ... }`) are inventoried as
+/// `header-struct` rows instead. A FUNCTION-POINTER typedef resolves to its
+/// full return/parameter word list, so a setter taking the callback
+/// inherits the callback's numeric and dtype words (round-3 red team P1: a
+/// skipped `typedef double (*cb)(double, int elem_dtype);` launders a seam
+/// into an empty-flag row). Any other parenthesized typedef is REJECTED
+/// rather than skipped, so the resolution path stays total.
 fn collect_typedefs(text: &str) -> BTreeMap<String, Vec<String>> {
     let mut map = BTreeMap::new();
     for stmt in text.split(';') {
         let stmt = normalize_ws(stmt);
-        if let Some(rest) = stmt.strip_prefix("typedef ")
-            && !rest.contains('{')
-            && !rest.contains('(')
-        {
-            let mut words: Vec<String> = rest
-                .split(|c: char| !(c.is_alphanumeric() || c == '_'))
-                .filter(|w| !w.is_empty())
-                .map(|w| w.to_string())
-                .collect();
-            if words.len() >= 2 {
-                let name = words.pop().expect("nonempty");
-                map.insert(name, words);
-            }
+        let Some(rest) = stmt.strip_prefix("typedef ") else {
+            continue;
+        };
+        if rest.contains('{') {
+            continue;
+        }
+        if rest.contains('(') {
+            let (name, target) = function_pointer_typedef(&stmt).unwrap_or_else(|| {
+                panic!(
+                    "{}UNRESOLVABLE PARENTHESIZED TYPEDEF `{stmt};`: the census \
+                     resolves typedef spellings before classifying a \
+                     declaration, and a typedef it cannot resolve hides every \
+                     numeric and dtype word behind an opaque name. Only the \
+                     `typedef <return...> (*<name>)(<params...>)` \
+                     function-pointer shape is supported; rewrite the \
+                     declaration or teach `function_pointer_typedef` the new \
+                     shape in the same change set.{}",
+                    teaching_header(),
+                    teaching_footer()
+                )
+            });
+            map.insert(name, target);
+            continue;
+        }
+        let mut words: Vec<String> = rest
+            .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .filter(|w| !w.is_empty())
+            .map(|w| w.to_string())
+            .collect();
+        if words.len() >= 2 {
+            let name = words.pop().expect("nonempty");
+            map.insert(name, words);
         }
     }
     map
+}
+
+/// Split `typedef <return...> (*<name>)(<params...>)` into the alias name
+/// and every other word of its signature, so `resolve_words` expands a
+/// callback parameter into the return and parameter spellings it carries.
+fn function_pointer_typedef(stmt: &str) -> Option<(String, Vec<String>)> {
+    let tokens: Vec<String> = canonical_c_tokens(stmt)
+        .split(' ')
+        .map(str::to_string)
+        .collect();
+    let is_identifier =
+        |token: &String| token.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_');
+    let anchor = tokens.windows(4).position(|window| {
+        window[0] == "(" && window[1] == "*" && is_identifier(&window[2]) && window[3] == ")"
+    })?;
+    let name = tokens[anchor + 2].clone();
+    let target = tokens
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| *index != anchor + 2)
+        .map(|(_, token)| token.clone())
+        .filter(|token| {
+            token != "typedef" && token.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_')
+        })
+        .collect();
+    Some((name, target))
 }
 
 /// Expand typedef aliases (transitively, depth-capped) so classification
@@ -833,6 +1288,32 @@ fn header_rows_local(header_name: &str, raw: &str) -> Vec<Row> {
     header_rows(header_name, raw, &typedefs)
 }
 
+/// The declaration subset that names a function: a parameter list is the
+/// only thing separating a callable from published data.
+fn is_callable(declaration: &str) -> bool {
+    declaration.contains('(') && declaration.ends_with(')')
+}
+
+fn push_callable_row(
+    rows: &mut Vec<Row>,
+    header_name: &str,
+    declaration: &str,
+    typedefs: &BTreeMap<String, Vec<String>>,
+) {
+    let mut flags = classify(declaration, typedefs);
+    let id = format!(
+        "{header_name}: {}",
+        canonical_c_tokens(&format!("{declaration};"))
+    );
+    apply_exact_integer_plumbing_exemption(&id, &mut flags);
+    rows.push(Row {
+        kind: "header-export".to_string(),
+        id,
+        flags,
+        citation: String::new(),
+    });
+}
+
 fn header_rows(header_name: &str, raw: &str, typedefs: &BTreeMap<String, Vec<String>>) -> Vec<Row> {
     let text = strip_c_comments(raw);
     let text: String = text
@@ -849,23 +1330,30 @@ fn header_rows(header_name: &str, raw: &str, typedefs: &BTreeMap<String, Vec<Str
         match c {
             '{' => {
                 let head = normalize_ws(&seg);
-                if head.starts_with("typedef struct") {
-                    // Capture the brace-matched body plus the trailing name.
-                    let mut depth = 1usize;
-                    let mut body = String::new();
-                    for c2 in chars.by_ref() {
-                        match c2 {
-                            '{' => depth += 1,
-                            '}' => {
-                                depth -= 1;
-                                if depth == 0 {
-                                    break;
-                                }
+                // Consume the brace-matched body in every case; what differs
+                // is whether the construct publishes ABI.
+                let mut depth = 1usize;
+                let mut body = String::new();
+                for c2 in chars.by_ref() {
+                    match c2 {
+                        '{' => depth += 1,
+                        '}' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
                             }
-                            _ => {}
                         }
-                        body.push(c2);
+                        _ => {}
                     }
+                    body.push(c2);
+                }
+                if head.starts_with("static") {
+                    // A `static inline` definition carries no ABI export.
+                } else if head.starts_with("typedef") || (!head.is_empty() && !is_callable(&head)) {
+                    // A published type layout: `typedef struct/enum/union
+                    // { ... } name;` and its untypedef'd forms. Capture the
+                    // trailing declarator too - without it the `enum` tail
+                    // would fall through to the statement arm as a bare name.
                     let mut tail = String::new();
                     for c2 in chars.by_ref() {
                         if c2 == ';' {
@@ -886,22 +1374,11 @@ fn header_rows(header_name: &str, raw: &str, typedefs: &BTreeMap<String, Vec<Str
                         flags,
                         citation: String::new(),
                     });
-                } else {
-                    // A definition body (static inline etc.): no ABI export;
-                    // skip to the matching close brace and drop the head.
-                    let mut depth = 1usize;
-                    for c2 in chars.by_ref() {
-                        match c2 {
-                            '{' => depth += 1,
-                            '}' => {
-                                depth -= 1;
-                                if depth == 0 {
-                                    break;
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
+                } else if is_callable(&head) {
+                    // A non-static function DEFINITION in a published header
+                    // is an external definition, so it is ABI exactly as its
+                    // declaration would be.
+                    push_callable_row(&mut rows, header_name, &head, typedefs);
                 }
                 seg.clear();
             }
@@ -915,14 +1392,19 @@ fn header_rows(header_name: &str, raw: &str, typedefs: &BTreeMap<String, Vec<Str
                 if stmt.is_empty() || stmt.starts_with("typedef") || stmt.starts_with("static") {
                     continue;
                 }
-                if stmt.contains('(') && stmt.ends_with(')') {
-                    let mut flags = classify(&stmt, typedefs);
-                    let id = format!("{header_name}: {}", canonical_c_tokens(&format!("{stmt};")));
-                    apply_exact_integer_plumbing_exemption(&id, &mut flags);
+                if is_callable(&stmt) {
+                    push_callable_row(&mut rows, header_name, &stmt, typedefs);
+                } else {
+                    // Non-function published ABI: `extern double
+                    // chelis_global_scale;` is a numeric channel with no
+                    // callable to classify (round-3 red team P1). Inventorying
+                    // every leftover statement keeps the statement arm total,
+                    // so a future non-function declaration form cannot be
+                    // silently dropped.
                     rows.push(Row {
-                        kind: "header-export".to_string(),
-                        id,
-                        flags,
+                        kind: "header-data".to_string(),
+                        id: format!("{header_name}: {}", canonical_c_tokens(&format!("{stmt};"))),
+                        flags: classify(&stmt, typedefs),
                         citation: String::new(),
                     });
                 }
@@ -947,6 +1429,27 @@ fn walk_ch_files(dir: &Path, out: &mut Vec<PathBuf>) {
             out.push(path);
         }
     }
+}
+
+/// Classify a stdlib carrier by the numeric primitives it mentions, on the
+/// same rule the C families already use: a float primitive in an untagged
+/// public position is a `float-carrier` SEAM, an integer primitive makes
+/// the row a `numeric-op` bound to semantic registration. `scan_deftypes`
+/// previously hard-coded empty flags, so no `std-adt-numeric` row could be
+/// a seam and adding `| JsonBigNum(f64)` to `io/json.ch` landed by
+/// regenerating and citing an open issue - the round-1 P1-1 shape closed
+/// for the header family only, and a direct contradiction of `AGENTS.md`'s
+/// "a public ADT variant carrying bare `f64` has NO citation path"
+/// (round-3 red team P1).
+fn numeric_carrier_flags(prims: &BTreeSet<String>) -> Vec<String> {
+    let mut flags = Vec::new();
+    if prims.iter().any(|p| FLOAT_PRIMS.contains(&p.as_str())) {
+        flags.push("float-carrier".to_string());
+    }
+    if prims.iter().any(|p| !FLOAT_PRIMS.contains(&p.as_str())) {
+        flags.push("numeric-op".to_string());
+    }
+    flags
 }
 
 fn collect_numeric_tprims(expr: &Expr, prims: &mut BTreeSet<String>) {
@@ -1037,7 +1540,7 @@ fn scan_exported_numeric_defs(list: &List, file_label: &str, rows: &mut Vec<Row>
                 "{file_label}::{name}: {}",
                 chelis_deep::printer::print_expr_flat(signature)
             ),
-            flags: vec!["numeric-op".to_string()],
+            flags: numeric_carrier_flags(&prims),
             citation: String::new(),
         });
     }
@@ -1065,7 +1568,7 @@ fn scan_deftypes(exprs: &[Expr], file_label: &str, rows: &mut Vec<Row>) {
                         rows.push(Row {
                             kind: "std-adt-numeric".to_string(),
                             id,
-                            flags: Vec::new(),
+                            flags: numeric_carrier_flags(&prims),
                             citation: String::new(),
                         });
                     }
@@ -1291,9 +1794,17 @@ fn check_against_baseline_with(
             ));
             continue;
         }
+        let human_override = classify_maintainer_override(&row.citation);
+        if let MaintainerOverride::Malformed(reason) = &human_override {
+            problems.push(format!(
+                "MALFORMED MAINTAINER OVERRIDE: {reason}. The sanctioned form \
+                 is `maintainer-override(<reason>, chelis#N)`: [{}] {}",
+                row.kind, row.id
+            ));
+        }
         if is_seam(&row.flags)
             && row.citation != GRANDFATHER_SEAM_CITATION
-            && !row.citation.starts_with("maintainer-override(")
+            && human_override != MaintainerOverride::WellFormed
         {
             problems.push(format!(
                 "NEW capacity seam without a sanctioned disposition (an issue \
@@ -1306,6 +1817,17 @@ fn check_against_baseline_with(
                 "GRANDFATHER citation on an identity outside the frozen \
                  2026-07-30 seam set (identity relocation; the set may only \
                  shrink): [{}] {}",
+                row.kind, row.id
+            ));
+        }
+        if row.citation == GRANDFATHER_PLAIN_CITATION && !is_frozen_grandfather_plain_id(&row.id) {
+            problems.push(format!(
+                "PLAIN GRANDFATHER citation on an identity outside the frozen \
+                 2026-07-30 pre-ratchet set: the plain baseline citation is a \
+                 record of what predated the ratchet, not a citation a new row \
+                 may copy to skip its own disposition. A new row cites its own \
+                 OPEN issue, and a new numeric callable also authors its \
+                 `[05-OP-N]` atom and `SemanticRegistration`: [{}] {}",
                 row.kind, row.id
             ));
         }
@@ -2097,29 +2619,49 @@ fn exported_public_numeric_stdlib_def_is_enumerated() {
     );
 }
 
+/// Write a throwaway published-include directory. Stale content is cleared
+/// first because the derived-roots assertion compares against `read_dir`.
+fn planted_include_dir(label: &str, files: &[(&str, &str)]) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("census-{label}-{}", std::process::id()));
+    fs::remove_dir_all(&dir).ok();
+    fs::create_dir_all(&dir).expect("temp include dir");
+    for (name, body) in files {
+        fs::write(dir.join(name), body).expect("write planted header");
+    }
+    dir
+}
+
+/// Run a census guard expected to reject its input and return the teaching
+/// message. The message IS the contract for a context-poor agent, so every
+/// rejection test asserts on its text.
+fn expect_census_panic(guard: impl FnOnce() + std::panic::UnwindSafe) -> String {
+    let panic = std::panic::catch_unwind(guard).expect_err("the census guard must reject this");
+    if let Some(message) = panic.downcast_ref::<String>() {
+        message.clone()
+    } else if let Some(message) = panic.downcast_ref::<&str>() {
+        (*message).to_string()
+    } else {
+        String::new()
+    }
+}
+
 #[test]
 fn conditional_public_abi_is_mechanically_rejected() {
-    let dir = std::env::temp_dir().join(format!("census-context-{}", std::process::id()));
-    fs::create_dir_all(&dir).expect("temp include dir");
-    fs::write(
-        dir.join("planted.h"),
-        "#ifdef PLANTED_WIDE\n\
-         double chelis_contextual(double x);\n\
-         #else\n\
-         int64_t chelis_contextual(int64_t x);\n\
-         #endif\n",
-    )
-    .expect("write planted header");
-    let result = std::panic::catch_unwind(|| preprocessed_headers(&dir, &["planted.h"]));
+    let dir = planted_include_dir(
+        "context",
+        &[(
+            "planted.h",
+            "#ifdef PLANTED_WIDE\n\
+             double chelis_contextual(double x);\n\
+             #else\n\
+             int64_t chelis_contextual(int64_t x);\n\
+             #endif\n",
+        )],
+    );
+    let message = expect_census_panic(|| {
+        preprocessed_headers(&dir, &["planted.h"]);
+    });
     fs::remove_dir_all(&dir).ok();
-    let panic = result.expect_err("context-varying public ABI must be rejected");
-    let message = if let Some(s) = panic.downcast_ref::<String>() {
-        s.as_str()
-    } else if let Some(s) = panic.downcast_ref::<&str>() {
-        s
-    } else {
-        ""
-    };
     assert!(
         message.contains("CONTEXT-VARYING PUBLIC ABI"),
         "the rejection must teach the totality rule: {message}"
@@ -2128,33 +2670,21 @@ fn conditional_public_abi_is_mechanically_rejected() {
 
 #[test]
 fn shared_header_cannot_have_multiple_public_macro_contexts() {
-    let dir = std::env::temp_dir().join(format!("census-root-context-{}", std::process::id()));
-    fs::create_dir_all(&dir).expect("temp include dir");
-    fs::write(
-        dir.join("shared.h"),
-        "CHELIS_NUM chelis_context_result(CHELIS_NUM value);\n",
-    )
-    .unwrap();
-    fs::write(
-        dir.join("a.h"),
-        "#define CHELIS_NUM double\n#include \"shared.h\"\n",
-    )
-    .unwrap();
-    fs::write(
-        dir.join("b.h"),
-        "#define CHELIS_NUM float\n#include \"shared.h\"\n",
-    )
-    .unwrap();
-    let result = std::panic::catch_unwind(|| preprocessed_headers(&dir, &["a.h", "b.h"]));
+    let dir = planted_include_dir(
+        "root-context",
+        &[
+            (
+                "shared.h",
+                "CHELIS_NUM chelis_context_result(CHELIS_NUM value);\n",
+            ),
+            ("a.h", "#define CHELIS_NUM double\n#include \"shared.h\"\n"),
+            ("b.h", "#define CHELIS_NUM float\n#include \"shared.h\"\n"),
+        ],
+    );
+    let message = expect_census_panic(|| {
+        preprocessed_headers(&dir, &["a.h", "b.h"]);
+    });
     fs::remove_dir_all(&dir).ok();
-    let panic = result.expect_err("multiple public macro contexts must be rejected");
-    let message = if let Some(s) = panic.downcast_ref::<String>() {
-        s.as_str()
-    } else if let Some(s) = panic.downcast_ref::<&str>() {
-        s
-    } else {
-        ""
-    };
     assert!(
         message.contains("CONTEXT-VARYING PUBLIC ABI"),
         "the rejection must name the context-invariance policy: {message}"
@@ -2197,35 +2727,28 @@ fn coverage_legs_cannot_claim_covered_without_live_oracles() {
 
 #[test]
 fn conditional_macro_taint_across_include_closure_is_rejected() {
-    let dir = std::env::temp_dir().join(format!("census-closure-taint-{}", std::process::id()));
-    fs::create_dir_all(&dir).expect("temp include dir");
-    fs::write(
-        dir.join("root.h"),
-        "#ifdef CHELIS_REVIEW_WIDE\n\
-         #define CHELIS_NUM double\n\
-         #else\n\
-         #define CHELIS_NUM float\n\
-         #endif\n\
-         #include \"shared.h\"\n",
-    )
-    .unwrap();
-    fs::write(
-        dir.join("shared.h"),
-        "CHELIS_NUM chelis_context_result(CHELIS_NUM value);\n",
-    )
-    .unwrap();
-    let result = std::panic::catch_unwind(|| preprocessed_headers(&dir, &["root.h"]));
-    fs::remove_dir_all(&dir).ok();
-    let panic = result.expect_err(
-        "conditional macro taint must propagate from a root into its local include closure",
+    let dir = planted_include_dir(
+        "closure-taint",
+        &[
+            (
+                "root.h",
+                "#ifdef CHELIS_REVIEW_WIDE\n\
+                 #define CHELIS_NUM double\n\
+                 #else\n\
+                 #define CHELIS_NUM float\n\
+                 #endif\n\
+                 #include \"shared.h\"\n",
+            ),
+            (
+                "shared.h",
+                "CHELIS_NUM chelis_context_result(CHELIS_NUM value);\n",
+            ),
+        ],
     );
-    let message = if let Some(s) = panic.downcast_ref::<String>() {
-        s.as_str()
-    } else if let Some(s) = panic.downcast_ref::<&str>() {
-        s
-    } else {
-        ""
-    };
+    let message = expect_census_panic(|| {
+        preprocessed_headers(&dir, &["root.h"]);
+    });
+    fs::remove_dir_all(&dir).ok();
     assert!(
         message.contains("CONTEXT-VARYING PUBLIC ABI") && message.contains("CHELIS_NUM"),
         "the closure-wide rejection must name the tainted macro: {message}"
@@ -2279,5 +2802,406 @@ fn integer_plumbing_exemptions_are_exact_and_closed() {
         renamed.flags.iter().any(|flag| flag == "numeric-op"),
         "a new same-shaped callable is numeric until explicitly registered; \
          no name/parameter heuristic may inherit the exemption: {renamed:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Round-3 red team (2026-07-31): the remaining silent-invisibility channels in
+// the header leg, the unflagged stdlib-ADT family, and the two unvalidated
+// citation strings. Each test below is that pass's executed probe, kept as a
+// standing negative.
+// ---------------------------------------------------------------------------
+
+/// A declaration bracketed by `#line` directives is real, callable ABI that
+/// the census attributes to a file outside the include directory and drops.
+#[test]
+fn line_directive_in_a_published_header_is_rejected() {
+    let dir = planted_include_dir(
+        "line-spoof",
+        &[(
+            "planted.h",
+            "void chelis_visible(int x);\n\
+             #line 1 \"/opt/vendor/x.h\"\n\
+             double chelis_hidden(double value, int out_dtype);\n\
+             #line 4 \"planted.h\"\n",
+        )],
+    );
+    let message = expect_census_panic(|| {
+        preprocessed_headers(&dir, &["planted.h"]);
+    });
+    fs::remove_dir_all(&dir).ok();
+    assert!(
+        message.contains("LINE-DIRECTIVE SPOOFING SURFACE") && message.contains("planted.h"),
+        "a #line directive redirects the attribution the census reads back, \
+         so it is banned outright: {message}"
+    );
+}
+
+/// The backstop that does not depend on having enumerated the spoofing
+/// channels: whatever the raw closure declares must reappear in some
+/// attributed bucket.
+#[test]
+fn a_declaration_missing_from_every_attributed_bucket_fails() {
+    let sources = BTreeMap::from([(
+        "planted.h".to_string(),
+        "void chelis_attributed(int x);\n\
+         double chelis_orphaned(double value, int out_dtype);\n"
+            .to_string(),
+    )]);
+    let complete = BTreeMap::from([(
+        "planted.h".to_string(),
+        "void chelis_attributed(int x);\n\
+         double chelis_orphaned(double value, int out_dtype);\n"
+            .to_string(),
+    )]);
+    assert_total_attribution(&sources, &complete);
+
+    let truncated = BTreeMap::from([(
+        "planted.h".to_string(),
+        "void chelis_attributed(int x);\n".to_string(),
+    )]);
+    let message = expect_census_panic(|| {
+        assert_total_attribution(&sources, &truncated);
+    });
+    assert!(
+        message.contains("UNATTRIBUTED PUBLISHED DECLARATION")
+            && message.contains("chelis_orphaned"),
+        "attribution must be total over the raw published closure: {message}"
+    );
+}
+
+/// Macro expansion legally rewrites type spellings between the raw and
+/// preprocessed forms, so attribution totality compares declarator NAMES.
+#[test]
+fn attribution_totality_survives_legal_macro_expansion() {
+    let sources = BTreeMap::from([(
+        "planted.h".to_string(),
+        "#define CHELIS_NUM double\nCHELIS_NUM chelis_macro_result(int64_t x);\n".to_string(),
+    )]);
+    let expanded = BTreeMap::from([(
+        "planted.h".to_string(),
+        "double chelis_macro_result(int64_t x);\n".to_string(),
+    )]);
+    assert_total_attribution(&sources, &expanded);
+}
+
+/// `AGENTS.md` states that a public ADT variant carrying bare `f64` has NO
+/// citation path. `scan_deftypes` hard-coded empty flags, so the `io/json`
+/// instance §C6 itself cites could land by regenerating and citing an open
+/// issue - the round-1 P1-1 shape, closed for the header family only.
+#[test]
+fn std_adt_bare_f64_variant_has_no_issue_citation_path() {
+    let mut rows = Vec::new();
+    scan_deftypes(&[planted_numeric_adt("JsonBigNum")], "io/json", &mut rows);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert!(
+        rows[0].flags.iter().any(|flag| flag == "float-carrier"),
+        "a public ADT variant carrying bare f64 is a capacity seam: {rows:?}"
+    );
+    let mut row = rows.remove(0);
+    row.citation = "chelis#891".to_string();
+    let baseline = Baseline {
+        version: 2,
+        legs: coverage_manifest(),
+        rows: vec![row.clone()],
+    };
+    let err = check_against_baseline(&[row], &baseline).unwrap_err();
+    assert!(
+        err.contains("NEW capacity seam") && err.contains("NOT a path for flagged rows"),
+        "regenerate-and-cite must not land a new f64 ADT channel: {err}"
+    );
+}
+
+/// The other half of the ADT rule: an integer carrier is a numeric channel
+/// owing a semantic decision, not a seam with no citation path.
+#[test]
+fn std_adt_integer_carrier_is_numeric_op_not_a_seam() {
+    let span = chelis_deep::Span::new(0, 0);
+    let tprim = Expr::node(
+        DeepTag::TPrim,
+        Default::default(),
+        vec![Expr::Atom(Atom::Symbol("int64".to_string()), span)],
+        span,
+    );
+    let variant = Expr::node(
+        DeepTag::Variant,
+        Default::default(),
+        vec![Expr::Atom(Atom::Symbol("JsonInt".to_string()), span), tprim],
+        span,
+    );
+    let deftype = Expr::node(
+        DeepTag::Deftype,
+        Default::default(),
+        vec![
+            Expr::Atom(Atom::Symbol("Json".to_string()), span),
+            Expr::List(List { elements: vec![] }, span),
+            variant,
+        ],
+        span,
+    );
+    let mut rows = Vec::new();
+    scan_deftypes(&[deftype], "io/json", &mut rows);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert!(
+        !is_seam(&rows[0].flags) && rows[0].flags.iter().any(|flag| flag == "numeric-op"),
+        "a source-faithful integer variant is the WANTED shape - classified, \
+         not seamed: {rows:?}"
+    );
+}
+
+/// `extern <type> <name>;` is published ABI with no callable to classify,
+/// and produced no row at all before this.
+#[test]
+fn extern_data_declarations_are_inventoried_and_classified() {
+    let rows = header_rows_local(
+        "planted.h",
+        "extern double chelis_global_scale;\nextern int chelis_default_dtype;\n",
+    );
+    assert_eq!(rows.len(), 2, "both data declarations are ABI: {rows:?}");
+    assert!(
+        rows.iter().all(|row| row.kind == "header-data"),
+        "non-function ABI has its own kind: {rows:?}"
+    );
+    let scale = rows
+        .iter()
+        .find(|row| row.id.contains("chelis_global_scale"))
+        .expect("float global enumerated");
+    assert!(
+        scale.flags.iter().any(|flag| flag == "float-carrier"),
+        "an exported bare double global is a capacity seam: {scale:?}"
+    );
+    let dtype = rows
+        .iter()
+        .find(|row| row.id.contains("chelis_default_dtype"))
+        .expect("dtype global enumerated");
+    assert!(
+        dtype.flags.iter().any(|flag| flag == "raw-dtype-int"),
+        "an exported raw dtype id is a capacity seam: {dtype:?}"
+    );
+
+    let mut cited = scale.clone();
+    cited.citation = "chelis#729".to_string();
+    let baseline = Baseline {
+        version: 2,
+        legs: coverage_manifest(),
+        rows: vec![cited.clone()],
+    };
+    let err = check_against_baseline(&[cited], &baseline).unwrap_err();
+    assert!(
+        err.contains("NEW capacity seam"),
+        "data seams take the same no-citation-path rule as callables: {err}"
+    );
+}
+
+/// A callback typedef hides its return and parameter spellings behind an
+/// opaque name, so the setter taking it was inventoried with EMPTY flags.
+#[test]
+fn function_pointer_typedef_cannot_launder_a_seam() {
+    let rows = header_rows_local(
+        "planted.h",
+        "typedef double (*chelis_elem_cb)(double value, int elem_dtype);\n\
+         void chelis_set_elem_cb(chelis_elem_cb callback);\n",
+    );
+    let row = rows
+        .iter()
+        .find(|row| row.id.contains("chelis_set_elem_cb"))
+        .expect("the setter is enumerated");
+    assert!(
+        row.flags.iter().any(|flag| flag == "float-carrier"),
+        "the callback's double return/parameter reaches the setter: {row:?}"
+    );
+    assert!(
+        row.flags.iter().any(|flag| flag == "raw-dtype-int"),
+        "the callback's raw dtype parameter reaches the setter: {row:?}"
+    );
+}
+
+/// Typedef resolution stays TOTAL: a parenthesized typedef the resolver
+/// does not understand is rejected rather than skipped, because skipping it
+/// is exactly how the function-pointer seam laundered itself.
+#[test]
+fn unresolvable_parenthesized_typedef_is_rejected() {
+    let message = expect_census_panic(|| {
+        header_rows_local("planted.h", "typedef double (chelis_weird)[4];\n");
+    });
+    assert!(
+        message.contains("UNRESOLVABLE PARENTHESIZED TYPEDEF"),
+        "an unresolvable typedef must fail loudly, not silently: {message}"
+    );
+}
+
+/// §C6 forbids the census from depending on a hand-maintained list, so the
+/// roots are no longer trusted: a header dropped into the published
+/// directory but reachable from no root fails.
+#[test]
+fn a_published_header_reachable_from_no_root_fails() {
+    let dir = planted_include_dir(
+        "orphan-header",
+        &[
+            ("root.h", "void chelis_rooted(int x);\n"),
+            (
+                "orphan.h",
+                "double chelis_orphan(double value, int out_dtype);\n",
+            ),
+        ],
+    );
+    let message = expect_census_panic(|| {
+        preprocessed_headers(&dir, &["root.h"]);
+    });
+    assert!(
+        message.contains("PUBLISHED HEADER NOT REACHED FROM ANY ROOT")
+            && message.contains("orphan.h"),
+        "an unreachable published header must fail, not vanish: {message}"
+    );
+
+    let per_file = preprocessed_headers(&dir, &["root.h", "orphan.h"]);
+    fs::remove_dir_all(&dir).ok();
+    assert_eq!(
+        per_file.keys().cloned().collect::<Vec<_>>(),
+        ["orphan.h", "root.h"],
+        "declaring both roots reaches the whole published directory"
+    );
+}
+
+/// `cc -E -I <dir>` resolves `<x>` against the include path exactly as it
+/// resolves `"x"`, so a raw-source scan that follows only quoted includes
+/// leaves an angle-included local header outside every raw-source guard.
+#[test]
+fn angle_included_local_header_is_inside_the_context_guard() {
+    let dir = planted_include_dir(
+        "angle-include",
+        &[
+            ("root.h", "#include <sub.h>\n"),
+            (
+                "sub.h",
+                "#ifdef PLANTED_WIDE\n\
+                 double chelis_angle(double x);\n\
+                 #else\n\
+                 int64_t chelis_angle(int64_t x);\n\
+                 #endif\n",
+            ),
+        ],
+    );
+    let message = expect_census_panic(|| {
+        preprocessed_headers(&dir, &["root.h"]);
+    });
+    fs::remove_dir_all(&dir).ok();
+    assert!(
+        message.contains("CONTEXT-VARYING PUBLIC ABI") && message.contains("sub.h"),
+        "an angle-included local header is inside the closure: {message}"
+    );
+}
+
+#[test]
+fn local_include_reads_both_spellings_and_nothing_else() {
+    assert_eq!(
+        local_include("#include \"chelis_simd.h\""),
+        Some("chelis_simd.h")
+    );
+    assert_eq!(local_include("  #include <sub.h>"), Some("sub.h"));
+    assert_eq!(local_include("#define CHELIS_NUM double"), None);
+    assert_eq!(local_include("void f(void);"), None);
+}
+
+/// The one human path past a seam is validated for shape, not matched as a
+/// prefix: an unterminated marker, an empty reason, and an issue reference
+/// outside the parentheses are all forgeries of it.
+#[test]
+fn malformed_maintainer_overrides_fail_and_the_exact_form_passes() {
+    for (citation, why) in [
+        ("maintainer-override(FFI staging chelis#893", "unbalanced"),
+        ("maintainer-override() chelis#893", "empty reason"),
+        (
+            "maintainer-override(FFI staging) chelis#893",
+            "issue reference outside the parentheses",
+        ),
+    ] {
+        let row = flagged_row("planted.h: void staged(int out_dtype);", citation);
+        let baseline = Baseline {
+            version: 2,
+            legs: coverage_manifest(),
+            rows: vec![row.clone()],
+        };
+        let err = check_against_baseline(&[row], &baseline).unwrap_err();
+        assert!(
+            err.contains("MALFORMED MAINTAINER OVERRIDE"),
+            "{why} must be rejected: {err}"
+        );
+        assert!(
+            err.contains("NEW capacity seam"),
+            "a malformed override is not a disposition ({why}): {err}"
+        );
+    }
+
+    let row = flagged_row(
+        "planted.h: void staged(int out_dtype);",
+        "maintainer-override(FFI staging (temporary) for chelis#893)",
+    );
+    let baseline = Baseline {
+        version: 2,
+        legs: coverage_manifest(),
+        rows: vec![row.clone()],
+    };
+    assert!(
+        check_against_baseline(&[row], &baseline).is_ok(),
+        "a balanced override naming its issue inside the parentheses is the human path"
+    );
+}
+
+/// The residual the prior round recorded and this one executed: the plain
+/// baseline citation exempted any row from the `numeric-op` semantic hook,
+/// so it was copyable onto a brand-new numeric export. It is now frozen to
+/// an identity set exactly as the seam citation is.
+#[test]
+fn plain_baseline_citation_cannot_be_copied_onto_a_new_row() {
+    let mut row =
+        header_rows_local("planted.h", "int64_t chelis_abs_i64(int64_t value);").remove(0);
+    row.citation = GRANDFATHER_PLAIN_CITATION.to_string();
+    let baseline = Baseline {
+        version: 2,
+        legs: coverage_manifest(),
+        rows: vec![row.clone()],
+    };
+    let err = check_against_baseline(&[row], &baseline).unwrap_err();
+    assert!(
+        err.contains("PLAIN GRANDFATHER citation on an identity outside the frozen"),
+        "the plain citation must not exempt a brand-new numeric callable: {err}"
+    );
+
+    let frozen = Row {
+        kind: "header-export".to_string(),
+        id: GRANDFATHER_PLAIN_IDS[0].to_string(),
+        flags: vec!["numeric-op".to_string()],
+        citation: GRANDFATHER_PLAIN_CITATION.to_string(),
+    };
+    let frozen_baseline = Baseline {
+        version: 2,
+        legs: coverage_manifest(),
+        rows: vec![frozen.clone()],
+    };
+    assert!(
+        check_against_baseline(&[frozen], &frozen_baseline).is_ok(),
+        "a genuinely pre-ratchet identity keeps the plain citation"
+    );
+}
+
+#[test]
+fn frozen_grandfather_sets_are_consistent_and_disjoint() {
+    assert_eq!(
+        GRANDFATHER_SEAM_IDS.len(),
+        GRANDFATHER_SEAM_COUNT,
+        "the seam count lock and the seam identity lock must agree"
+    );
+    let seams: BTreeSet<&str> = GRANDFATHER_SEAM_IDS.iter().copied().collect();
+    let plain: BTreeSet<&str> = GRANDFATHER_PLAIN_IDS.iter().copied().collect();
+    assert_eq!(seams.len(), GRANDFATHER_SEAM_IDS.len(), "no duplicate seam");
+    assert_eq!(
+        plain.len(),
+        GRANDFATHER_PLAIN_IDS.len(),
+        "no duplicate plain identity"
+    );
+    assert!(
+        seams.is_disjoint(&plain),
+        "one identity carries one pre-ratchet disposition"
     );
 }
