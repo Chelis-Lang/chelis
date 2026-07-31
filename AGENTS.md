@@ -143,14 +143,21 @@ edges (`spec/design/dtype_semantics.md` §C6) bind every change that touches
 numeric data, whether or not you have read that document:
 
 - **No new numeric channel outside the tagged carrier.** A public ADT variant, wire
-  field, exported C signature, or binding parameter that carries numeric values as
+  field, exported C signature, exported C data declaration, or binding parameter that
+  carries numeric values as
   bare `f64`/`double`, or that takes a raw integer dtype id, is a review-blocking
   finding. On every covered family the capacity census freezes both the canonical
   surface identity and its enforcement-relevant derived classification: an UNFLAGGED
   addition cites an OPEN issue; a FLAGGED capacity seam has NO citation path at all -
   redesign onto the tagged carrier, remove it, or obtain a maintainer override in
   review. Opening a fresh issue to cite is not authorization; new capacity debt does
-  not land. The pre-Phase-1 baseline is deliberately partial: wire-schema and PyO3
+  not land. This applies to the stdlib ADT family on the same terms as the C ones: a
+  variant or field carrying a bare float primitive is a seam, while an INTEGER
+  primitive is classified `numeric-op` and owes the semantic registration below
+  rather than being a seam - which is why source-faithful ingestion variants
+  (`JsonInt(int64)`) are the wanted shape and a float funnel is not. Both
+  pre-ratchet citation strings are frozen to exact identity lists, so neither can be
+  copied onto a new row to skip its own disposition. The pre-Phase-1 baseline is deliberately partial: wire-schema and PyO3
   coverage become mandatory only through their named executable entry gates in §C6,
   and Phase 1 may not start before both are green. Coverage state comes from the
   test's typed `coverage_manifest()` (artifact, enumerator, command, expected
@@ -178,10 +185,15 @@ numeric data, whether or not you have read that document:
 - **A new surface KIND** (a new serialization format, IPC channel, or export
   mechanism that can carry numbers) extends the §C6 enumerators in the same change
   set, or does not land.
-- **Published C ABI is configuration-invariant.** Public declarations may not vary
+- **Published C ABI is configuration-invariant, and every declaration in it is
+  attributable.** Public declarations may not vary
   by preprocessor feature/context. The §C6 header leg enforces that prohibition and
   compares toolchain-stable canonical declaration identities, never a
-  preprocessor's whitespace or pretty-print spelling.
+  preprocessor's whitespace or pretty-print spelling. Published headers may contain
+  no `#line` directive or hand-written linemarker - those rewrite the file
+  attribution the census reads back from `cc -E`, which can delete a real callable
+  export from the inventory - and every `.h` in the published include directory must
+  be reachable from a declared root.
 - The census, tripwire, and oracle files are guard artifacts: editing one to make
   your change pass is never the fix. The failure message names the sanctioned
   actions; take one of those.

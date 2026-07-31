@@ -152,7 +152,11 @@ existence as a normative line beginning `> **[05-OP-N]**`; it does not
 accept a free-text `spec/05` substring, a cross-reference,
 `[05-OBS-1]`, or an absent `[05-OP-999]`. Existing numeric-callable
 rows at the 2026-07-30 baseline are explicitly grandfathered because
-the OP atoms do not yet exist. A NEW runtime or exported stdlib
+the OP atoms do not yet exist. That grandfathering is an exact IDENTITY
+list frozen in the tripwire source, not a citation string a new row can
+copy: both pre-ratchet citations are locked that way, so the exemption
+covers precisely the rows that predate the ratchet and no others. A NEW
+runtime or exported stdlib
 numeric callable authors a new `[05-OP-N]` normative atom in spec/05
 and adds its exact registry mapping in the same change set. The
 deferred PyO3 leg must deliver the same identity-to-authority shape

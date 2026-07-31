@@ -257,6 +257,11 @@ flowchart TB
   style S731 fill:#FFFFFF,stroke:#C3CCD3
   style S732 fill:#FFFFFF,stroke:#C3CCD3
   style S729 fill:#FFFFFF,stroke:#C3CCD3
+  %% linkStyle indices are 0-based over EVERY edge in declaration order, and a
+  %% chain (a --> b --> c) contributes one index per arrow. There are 32 edges
+  %% here (0-31). 21,22 are the two `-.-` either-order links; 13,14,15,16,28,31
+  %% are exactly the six `==>` HARD edges. Adding or removing any edge above
+  %% renumbers everything after it - recount before editing these two lines.
   linkStyle default stroke-width:2.5px
   linkStyle 21,22 stroke:#9AA7B0,color:#7A8894,stroke-width:2.5px
   linkStyle 13,14,15,16,28,31 stroke:#B3362B,stroke-width:5px,color:#B3362B

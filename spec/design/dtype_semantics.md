@@ -419,10 +419,12 @@ integration tier, not the workspace loop.
 **Current enforcement status.** The PR #956 change set implements the
 structurally enforced successor for the header and stdlib families:
 canonical C declaration identity, matched-row metadata freeze, stdlib
-ADT-shape identity, runtime/stdlib numeric-callable authority
-registration, public-header context invariance, and issue-kind-aware
-liveness are executable tripwires. These checks are not active on main
-until that PR lands. The checked-in baseline is still explicitly
+ADT-shape identity AND capacity classification, non-function ABI
+inventory, total linemarker attribution, a derived published-header set,
+runtime/stdlib numeric-callable authority registration, public-header
+context invariance, both pre-ratchet citation sets frozen by identity,
+and issue-kind-aware liveness are executable tripwires. These checks are
+not active on main until that PR lands. The checked-in baseline is still explicitly
 PARTIAL: wire-schema fields and PyO3 signatures are deferred typed legs
 whose named commands below are hard Phase 1 entry edges. No sentence in
 this section upgrades those legs to covered merely because metadata says
@@ -481,8 +483,17 @@ hand-maintained list (hand lists are how `HOST_ONLY_BUILTINS` rotted,
    review verifies that its normative text already governs the callable
    but cannot make a mismatched atom authoritative. If no atom governs
    the callable, the numbered spec gains the decision first. Existing
-   numeric-callable rows at the initial baseline are grandfathered.
-   Every NEW runtime or exported stdlib numeric callable authors its new
+   numeric-callable rows at the initial baseline are grandfathered, and
+   the grandfathering is an IDENTITY set, never a citation string: BOTH
+   pre-ratchet citations (the seam one and the plain one) are frozen to
+   exact `(id)` lists in the tripwire source, which ordinary baseline
+   regeneration cannot rewrite and which may only shrink. The prior
+   revision froze only the seam list and recorded the gap as a known
+   residual - the plain citation was copyable onto a brand-new numeric
+   row to skip the hook, which the 2026-07-31 red team executed.
+   Freezing both lists closes it structurally, so the next sentence is
+   now enforced rather than intended:
+   every NEW runtime or exported stdlib numeric callable authors its new
    `[05-OP-N]` atom and exact mapping in the same change set. The
    implementation record is `SemanticRegistration { callable, atom }` in
    `SEMANTIC_REGISTRATIONS`; `callable` is exactly
@@ -533,8 +544,8 @@ cannot exist (PR #950 red team P1-3):
 | runtime tensor data (`chelis_tensor.data`) | sealed typed access path | chelis#893 - a PEER class OUTSIDE [#729], unsequenced by the waves; a hard edge, never an assumption | types |
 | execution wire schema | per-dtype tagged payload | [#729] Phase 1 (§C3) | types |
 | language ops | checker acceptance derived from Table A | [#729] Phase 4 | derivation |
-| published C signatures | tokenized canonical declaration inventory, frozen derived classification, and a mechanically enforced ban on context-varying public ABI; this detects and blocks drift but does not generate the whole header | deliverable 1; the `RuntimeDType` fragment remains [#729] Phase 3 | census/tripwire |
-| prelude / stdlib value ADTs | permanent census whose identity preserves type, variant, and numeric field shape; a numeric field is legal Surf, so no type seal can exist for this family | deliverable 1 | census/tripwire |
+| published C signatures | tokenized canonical declaration inventory over callables AND non-function data, frozen derived classification, and a mechanically enforced ban on context-varying public ABI; this detects and blocks drift but does not generate the whole header | deliverable 1; the `RuntimeDType` fragment remains [#729] Phase 3 | census/tripwire |
+| prelude / stdlib value ADTs | permanent census whose identity preserves type, variant, and numeric field shape, CLASSIFIED on the same rule as the C families: a float primitive in an untagged variant or field is a `float-carrier` seam with no citation path, an integer primitive is a `numeric-op` owing a semantic decision. A numeric field is legal Surf, so no type seal can exist for this family - the seam classification is the strongest rung available | deliverable 1 | census/tripwire |
 | binding (PyO3) signatures | rustdoc-JSON registry + typed raw-dtype mutation oracle | the named pre-Phase-1 binding leg below | census/registry (deferred until its hard-edge command is green) |
 
 [#729] can close Phase 4 while chelis#893 remains open. Any
@@ -612,7 +623,60 @@ Deliverables, with phase homes:
      alternative to a supported configuration matrix: first-expansion
      wins is forbidden, and a future decision to permit
      configuration-varying ABI requires a B1 amendment defining
-     context identities and inventorying the union.
+     context identities and inventorying the union. The raw-source scans
+     that back this rule follow BOTH include spellings: `cc -E -I` resolves
+     `#include <x>` against the include path exactly as it resolves
+     `#include "x"`, so a guard reading only quoted includes would leave an
+     angle-included local header outside every raw-source check
+     (`angle_included_local_header_is_inside_the_context_guard`).
+   - **Attribution is total, and `#line` is banned.** The census decides
+     which published header a declaration belongs to by reading `cc -E`
+     linemarkers back, so a `#line` directive in a published header can
+     attribute a real, callable export to a path outside the include
+     directory and delete it from the inventory while `cc -fsyntax-only`
+     still accepts calls to it. Published headers may contain no `#line`
+     directive and no hand-written linemarker
+     (`line_directive_in_a_published_header_is_rejected`). Independently
+     of that ban, every declarator the RAW published closure declares must
+     reappear in some attributed bucket
+     (`a_declaration_missing_from_every_attributed_bucket_fails`); the
+     comparison is on declarator NAMES so that legal macro expansion of a
+     type spelling does not read as a missing declaration. The ban names
+     the known channel; totality does not depend on having enumerated the
+     channels.
+   - **The published header set is derived, not declared.** `HEADER_ROOTS`
+     survives as a record of WHY each root is published, but it is not
+     trusted: the preprocessed closure must equal the `.h` files actually
+     present in the published include directory, so a header dropped in
+     and reachable from no root fails loudly instead of contributing
+     nothing (`a_published_header_reachable_from_no_root_fails`).
+   - **Non-function ABI is inventoried too.** A published header's
+     numeric surface is not only its callables. `extern <type> <name>;`
+     data declarations are inventoried as `header-data` rows and
+     classified on the same rules, so an exported bare `double` global or
+     raw dtype id is a seam with no citation path
+     (`extern_data_declarations_are_inventoried_and_classified`).
+     Function-pointer typedefs are RESOLVED rather than skipped - a
+     setter taking `typedef double (*cb)(double, int elem_dtype)` inherits
+     the callback's numeric and dtype words
+     (`function_pointer_typedef_cannot_launder_a_seam`) - and a
+     parenthesized typedef the resolver does not understand is rejected
+     rather than silently skipped, because skipping is exactly how that
+     seam laundered itself
+     (`unresolvable_parenthesized_typedef_is_rejected`).
+   - **The stdlib carrier families carry capacity flags.** A
+     `std-adt-numeric` or `std-def-numeric` row is classified, not merely
+     inventoried: a float primitive (`f64`/`f32`/`f16`/`bf16`) in an
+     untagged public position makes the row a `float-carrier` SEAM with no
+     citation path, and an integer primitive makes it `numeric-op`, owing
+     the same semantic registration a runtime callable owes. Before this
+     the ADT leg emitted no flags at all, so adding `| JsonBigNum(f64)` to
+     `io/json.ch` landed by regenerating and citing an open issue - the
+     P1-1 shape closed for the header family only, and a direct
+     contradiction of the `AGENTS.md` rule it was meant to enforce
+     (`std_adt_bare_f64_variant_has_no_issue_citation_path`, with
+     `std_adt_integer_carrier_is_numeric_op_not_a_seam` as the positive
+     leg for the source-faithful `JsonInt(int64)` shape this plan wants).
    - **Matched rows freeze enforcement metadata.** Equality is not
      merely `(kind, id)`: the tripwire compares the complete
      enforcement-relevant derived classification for every matched
@@ -651,10 +715,23 @@ Deliverables, with phase homes:
      issue-citation path: the grandfathered 2026-07-30 seam set is
      frozen by exact citation, count, row identity, and derived
      classification. Removing one seam cannot relocate its citation to
-     a new row. The only sanctioned outcomes are redesign onto the
+     a new row. The PLAIN pre-ratchet citation is frozen the same way
+     and for the same reason - a citation string any new row may copy
+     is not a disposition, and leaving it unfrozen let a brand-new
+     numeric export skip the semantic hook
+     (`plain_baseline_citation_cannot_be_copied_onto_a_new_row`).
+     Both lists are hand-maintained and SHRINK-ONLY, deliberately not
+     regenerated: a generator that re-derived them from the baseline
+     would re-bless whatever a contributor had just pasted the citation
+     onto. The only sanctioned outcomes are redesign onto the
      tagged carrier, removal, or
      `maintainer-override(<reason>, chelis#N)`, which is assigned to
-     human review; opening an issue is not authorization.
+     human review; opening an issue is not authorization. That marker
+     is validated for SHAPE rather than matched as a prefix: a balanced
+     closing paren, a nonempty reason, and the `chelis#N` reference
+     INSIDE the parentheses, so an unterminated marker or a reference
+     that sits after the closing paren is a forgery and fails
+     (`malformed_maintainer_overrides_fail_and_the_exact_form_passes`).
    - **Liveness is issue-typed.** Every sanctioned `chelis#N`
      reference must exist, must be an ISSUE rather than a pull request,
      and must be OPEN. A closed, missing, or PR reference fails and
@@ -707,9 +784,12 @@ Deliverables, with phase homes:
    escape in the sweep is the motivating instance ([#730] §C6 owns the
    oracle; this row records the derivation rule).
 
-Scope honesty, sharpened by the 2026-07-30 adversarial passes. On the
+Scope honesty, sharpened by the 2026-07-30 and 2026-07-31 adversarial
+passes. On the
 families PR #956 covers, additions, removals, classification drift,
-missing semantic registrations, ADT-shape growth, and context-varying
+missing semantic registrations, ADT-shape growth, ADT and stdlib-def
+capacity classification, non-function data ABI, unattributed
+declarations, unreached published headers, and context-varying
 public ABI are executable build failures. Those mechanisms are
 structural guards, not review-only visibility, but they do not make the
 underlying source forms unrepresentable: a contributor can still write
@@ -789,7 +869,7 @@ numeric form is type-unrepresentable.
 | §C2 trap kinds + exact message strings | Phase 2 | this doc + [#687] corpus update in the same PR |
 | §C4 formatting rules 1-4 | Phase 1 (Rust) / Phase 3 (C parity) | this doc + [#687] corpus update |
 | §C5 kernel signatures | Phase 2 | this doc |
-| §C6 covered-family census + tripwire | at PR #956 landing: canonical row identities, complete derived classifications, stdlib ADT shapes, callable-to-`[05-OP-N]` registrations, public-header context invariance, and the grandfathered seam set all freeze; unflagged rows append by live ISSUE citation, new numeric callables also author/register a new OP atom, and FLAGGED rows are shrink-only (maintainer override is the sole human exception) | this doc + the executable tripwire/registry artifacts and their positive/negative controls, same change set |
+| §C6 covered-family census + tripwire | at PR #956 landing: canonical row identities, complete derived classifications, stdlib ADT shapes AND their capacity flags, callable-to-`[05-OP-N]` registrations, public-header context invariance, and BOTH grandfathered identity sets (seam and plain) all freeze; unflagged rows append by live ISSUE citation, new numeric callables also author/register a new OP atom, and FLAGGED rows are shrink-only (a shape-validated maintainer override is the sole human exception) | this doc + the executable tripwire/registry artifacts and their positive/negative controls, same change set |
 | §C6 deferred wire/PyO3 leg state | before Phase 1 entry, only when each named enumerator and mutation command below is green; an editable baseline field cannot change coverage | this doc + the typed leg manifest + owning enumerator/oracle in the same change set |
 | capability table schema | Phase 4 entry | `capability_table.md` (the owning doc) + this doc |
 
