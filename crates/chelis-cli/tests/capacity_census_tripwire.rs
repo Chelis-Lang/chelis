@@ -490,7 +490,7 @@ fn preprocessed_headers(include_dir: &Path, roots: &[&str]) -> BTreeMap<String, 
         }
     }
     assert_total_attribution(&sources, &per_file);
-    assert_roots_reach_every_published_header(include_dir, &per_file);
+    assert_roots_reach_every_published_header(include_dir, &sources);
     per_file
 }
 
@@ -502,7 +502,7 @@ fn preprocessed_headers(include_dir: &Path, roots: &[&str]) -> BTreeMap<String, 
 /// of being silently absent from the inventory (round-3 red team P2).
 fn assert_roots_reach_every_published_header(
     include_dir: &Path,
-    per_file: &BTreeMap<String, String>,
+    source_closure: &BTreeMap<String, String>,
 ) {
     let entries =
         fs::read_dir(include_dir).unwrap_or_else(|e| panic!("read {}: {e}", include_dir.display()));
@@ -514,7 +514,11 @@ fn assert_roots_reach_every_published_header(
                 .map(|name| name.to_string_lossy().to_string())
         })
         .collect();
-    let reached: BTreeSet<String> = per_file.keys().cloned().collect();
+    // Reachability is a property of the raw include graph, not of whether
+    // preprocessing happens to emit a locally-attributed declaration bucket.
+    // A root such as `chelis_blas.h` may contribute only a system include on
+    // one platform and therefore have no `per_file` output at all.
+    let reached: BTreeSet<String> = source_closure.keys().cloned().collect();
     assert_eq!(
         on_disk,
         reached,
@@ -3030,9 +3034,29 @@ fn unresolvable_parenthesized_typedef_is_rejected() {
     );
 }
 
-/// §C6 forbids the census from depending on a hand-maintained list, so the
-/// roots are no longer trusted: a header dropped into the published
-/// directory but reachable from no root fails.
+/// Reachability comes from the raw include graph, even when the real
+/// preprocessor emits no local declaration bucket for a root. This is the
+/// Linux `chelis_blas.h` shape: its only emitted content can be system ABI.
+#[test]
+fn a_declaration_free_root_is_still_reached() {
+    let dir = planted_include_dir(
+        "declaration-free-root",
+        &[("root.h", "#include <stddef.h>\n")],
+    );
+    let per_file = preprocessed_headers(&dir, &["root.h"]);
+    fs::remove_dir_all(&dir).ok();
+    assert!(
+        per_file
+            .iter()
+            .flat_map(|(name, text)| header_rows_local(name, text))
+            .next()
+            .is_none(),
+        "the root is reached even though it contributes no ABI row: {per_file:?}"
+    );
+}
+
+/// Negative parity for §C6's derived-root rule: a header absent from every
+/// root's raw include closure is not reached merely because it exists on disk.
 #[test]
 fn a_published_header_reachable_from_no_root_fails() {
     let dir = planted_include_dir(
