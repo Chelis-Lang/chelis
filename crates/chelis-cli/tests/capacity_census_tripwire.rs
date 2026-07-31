@@ -496,7 +496,7 @@ fn preprocessed_headers(include_dir: &Path, roots: &[&str]) -> BTreeMap<String, 
 
 /// `HEADER_ROOTS` is a hand-maintained list, and §C6 forbids the census
 /// from depending on one. The list survives because it also records WHY
-/// each root is published, but it is no longer TRUSTED: the preprocessed
+/// each root is published, but it is no longer TRUSTED: the INCLUDE
 /// closure must account for every `.h` in the published include directory,
 /// so a header dropped in but reachable from no root fails loudly instead
 /// of being silently absent from the inventory (round-3 red team P2).
@@ -523,7 +523,7 @@ fn assert_roots_reach_every_published_header(
         on_disk,
         reached,
         "{}PUBLISHED HEADER NOT REACHED FROM ANY ROOT: every `.h` under {} \
-         must appear in the preprocessed closure of the declared roots. A \
+         must appear in the include closure of the declared roots. A \
          header that no root includes is shipped but uninventoried, so \
          every declaration in it is invisible to this census. Add it to \
          `HEADER_ROOTS`, include it from a root, or remove it from the \
