@@ -1698,16 +1698,26 @@ fn execution_artifact_from_compiled(
             // exposes `target="hip"`). Tracked as chelis#829 (apply the same
             // entry-scoped selection to HIP, then lift this reject).
             if compiled.library_runtime.is_some() {
-                return Err(stage_error(
-                    "compile",
-                    "reef-context compilation (a `project_root=` with reef-declared imports) \
-                     is currently supported only for the C target. The HIP backend does not \
-                     yet apply the entry-scoped DAG selection the C path uses, so it would \
-                     merge every reef-linked def's inputs/outputs into a single kernel instead \
-                     of compiling the requested entry. Compile the entry with `target=\"c\"`, \
-                     or run it through `eval`, until HIP reef-context support lands (chelis#829)."
-                        .to_string(),
-                    "compile_error",
+                // Routed through `Unsupported` so the rejection carries the
+                // section C2 `unsupported:` brand and the
+                // `unsupported_feature` kind -- the #730 sweeps match on
+                // both, and a `compile_error` here would read as internal
+                // desync rather than a not-yet-implemented capability.
+                return Err(unsupported_stage_error(
+                    chelis_types::unsupported::Unsupported::new(
+                        chelis_types::unsupported::UnsupportedKind::Construct(
+                            "reef-context compilation (a `project_root=` with \
+                             reef-declared imports)"
+                                .to_string(),
+                        ),
+                        "the HIP backend, which does not yet apply the entry-scoped DAG \
+                         selection the C path uses and would merge every reef-linked \
+                         def's inputs/outputs into a single kernel instead of compiling \
+                         the requested entry",
+                        chelis_types::unsupported::Stage::Codegen("hip"),
+                        "compile the entry with `target=\"c\"`, or run it through `eval`, \
+                         until HIP reef-context support lands (chelis#829)",
+                    ),
                 ));
             }
             let host_requires_host_backend = host_compiled

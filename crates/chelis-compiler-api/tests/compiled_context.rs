@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use chelis_compiler_api::compiler::{eval, prepare_eval};
-use chelis_compiler_api::schema::{EvalRequest, EvaluatedRoot, SourceKind};
+use chelis_compiler_api::schema::{CompileTarget, EvalRequest, EvaluatedRoot, SourceKind};
 use chelis_compiler_api::{
     COMPILER_VERSION, CompiledContext, check_in_context, compile_reef_context, eval_in_context,
     eval_many_in_context,
@@ -577,5 +577,43 @@ fn microbench_in_context_is_at_least_10x_faster_than_prepare_eval_for_50_snippet
          baseline {} ms, in-context {} ms)",
         baseline_elapsed.as_millis(),
         in_context_elapsed.as_millis(),
+    );
+}
+
+/// The HIP arm does not yet apply entry-scoped DAG selection to a
+/// reef-linked context, so `compile_for_execution_in_context` with
+/// `target=hip` must refuse loudly -- and as an `unsupported_feature`
+/// carrying the section C2 `unsupported:` brand, not as a
+/// `compile_error` (which this file reserves for internal desync).
+/// The #730 sweeps match on both the kind and the brand; this test
+/// pins them so the rejection stays visible to those sweeps (chelis#829).
+#[test]
+fn compile_in_context_hip_rejects_as_branded_unsupported_feature() {
+    let (_dir, root) = library_fixture();
+    let ctx = compile_reef_context(Path::new("/tmp/x"), &root).expect("ctx");
+    let err = chelis_compiler_api::compiler::compile_for_execution_in_context(
+        &ctx,
+        "module App.Main\nimport Mylib.Math (add)\n\n\
+         def main_value -> int32 = add(3, 4)\n",
+        CompileTarget::Hip,
+        None,
+    )
+    .expect_err("reef-context HIP compile must be refused");
+    assert_eq!(err.stage, "compile");
+    let diag = &err.errors[0];
+    assert_eq!(
+        diag.kind, "unsupported_feature",
+        "HIP reef-context rejection must be kind-visible to the #730 sweep, got {}: {}",
+        diag.kind, diag.message
+    );
+    assert!(
+        diag.message.starts_with("unsupported:"),
+        "must carry the frozen section C2 `unsupported:` brand, got: {}",
+        diag.message
+    );
+    assert!(
+        diag.message.contains("chelis#829"),
+        "remediation must cite the tracking issue, got: {}",
+        diag.message
     );
 }
