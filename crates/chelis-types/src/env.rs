@@ -197,7 +197,7 @@ impl Env {
     pub fn free_tvars(&self, subst: &Subst) -> HashSet<TypeVar> {
         let mut result = HashSet::new();
         for scheme in self.bindings.values() {
-            let ty = subst.apply(&scheme.body);
+            let ty = subst.apply_scheme(scheme);
             let body_vars = free_tvars(&ty);
             for v in body_vars {
                 if !scheme.tvars.contains(&v) {
@@ -212,7 +212,7 @@ impl Env {
     pub fn free_dvars(&self, subst: &Subst) -> HashSet<DimVar> {
         let mut result = HashSet::new();
         for scheme in self.bindings.values() {
-            let ty = subst.apply(&scheme.body);
+            let ty = subst.apply_scheme(scheme);
             let body_dvars = free_dvars(&ty);
             for v in body_dvars {
                 if !scheme.dvars.contains(&v) {
@@ -227,7 +227,7 @@ impl Env {
     pub fn free_rvars(&self, subst: &Subst) -> HashSet<RankVar> {
         let mut result = HashSet::new();
         for scheme in self.bindings.values() {
-            let ty = subst.apply(&scheme.body);
+            let ty = subst.apply_scheme(scheme);
             for v in free_rvars(&ty) {
                 if !scheme.rvars.contains(&v) {
                     result.insert(v);
@@ -443,5 +443,106 @@ fn collect_rvars(ty: &Type, vars: &mut Vec<RankVar>) {
             }
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn free_variables_protect_quantified_ids_from_global_substitutions() {
+        let quantified_type = TypeVar(10);
+        let quantified_dim = DimVar(20);
+        let quantified_rank = RankVar(30);
+        let scheme = Scheme {
+            tvars: vec![quantified_type],
+            dvars: vec![quantified_dim],
+            rvars: vec![quantified_rank],
+            body: Type::Tuple(vec![
+                Type::Var(quantified_type),
+                Type::Tensor(
+                    vec![Dim::Var(quantified_dim), Dim::Rank(quantified_rank)],
+                    TensorPrec::Var(quantified_type),
+                ),
+            ]),
+        };
+        let mut env = Env::new();
+        env.bind("generic".to_string(), scheme);
+        let mut subst = Subst::new();
+        subst.insert_type(quantified_type, Type::Prim(Prim::F32));
+        subst.insert_dim(quantified_dim, Dim::Lit(3));
+        subst.insert_rank(quantified_rank, vec![Dim::Lit(4)]);
+
+        assert!(env.free_tvars(&subst).is_empty());
+        assert!(env.free_dvars(&subst).is_empty());
+        assert!(env.free_rvars(&subst).is_empty());
+    }
+
+    #[test]
+    fn free_variables_stop_alias_chains_at_quantified_ids() {
+        let quantified_type = TypeVar(11);
+        let quantified_dim = DimVar(21);
+        let quantified_rank = RankVar(31);
+        let outer_type = TypeVar(12);
+        let outer_dim = DimVar(22);
+        let outer_rank = RankVar(32);
+        let scheme = Scheme {
+            tvars: vec![quantified_type],
+            dvars: vec![quantified_dim],
+            rvars: vec![quantified_rank],
+            body: Type::Tuple(vec![
+                Type::Var(outer_type),
+                Type::Tensor(
+                    vec![Dim::Var(outer_dim), Dim::Rank(outer_rank)],
+                    TensorPrec::Concrete(Prim::F32),
+                ),
+            ]),
+        };
+        let mut env = Env::new();
+        env.bind("generic".to_string(), scheme);
+        let mut subst = Subst::new();
+        subst.insert_type(outer_type, Type::Var(quantified_type));
+        subst.insert_type(quantified_type, Type::Prim(Prim::F64));
+        subst.insert_dim(outer_dim, Dim::Var(quantified_dim));
+        subst.insert_dim(quantified_dim, Dim::Lit(5));
+        subst.insert_rank(outer_rank, vec![Dim::Rank(quantified_rank)]);
+        subst.insert_rank(quantified_rank, vec![Dim::Lit(6)]);
+
+        assert!(env.free_tvars(&subst).is_empty());
+        assert!(env.free_dvars(&subst).is_empty());
+        assert!(env.free_rvars(&subst).is_empty());
+    }
+
+    #[test]
+    fn free_variables_still_follow_unquantified_substitutions() {
+        let source_type = TypeVar(40);
+        let source_dim = DimVar(50);
+        let source_rank = RankVar(60);
+        let target_type = TypeVar(41);
+        let target_dim = DimVar(51);
+        let target_rank = RankVar(61);
+        let scheme = Scheme {
+            tvars: vec![],
+            dvars: vec![],
+            rvars: vec![],
+            body: Type::Tuple(vec![
+                Type::Var(source_type),
+                Type::Tensor(
+                    vec![Dim::Var(source_dim), Dim::Rank(source_rank)],
+                    TensorPrec::Concrete(Prim::F32),
+                ),
+            ]),
+        };
+        let mut env = Env::new();
+        env.bind("monomorphic".to_string(), scheme);
+        let mut subst = Subst::new();
+        subst.insert_type(source_type, Type::Var(target_type));
+        subst.insert_dim(source_dim, Dim::Var(target_dim));
+        subst.insert_rank(source_rank, vec![Dim::Rank(target_rank)]);
+
+        assert_eq!(env.free_tvars(&subst), HashSet::from([target_type]));
+        assert_eq!(env.free_dvars(&subst), HashSet::from([target_dim]));
+        assert_eq!(env.free_rvars(&subst), HashSet::from([target_rank]));
     }
 }

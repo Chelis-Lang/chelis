@@ -310,3 +310,97 @@ def caller(a, b: tensor[4, f32]) = {
         .expect("caller metadata");
     assert!(caller.params[0].inferred_read_only);
 }
+
+#[test]
+fn imported_rank_generic_adt_signatures_instantiate_independently() {
+    // chelis#968: applying the global substitution through a scheme's
+    // quantified dimension made the instantiated body dimension appear free
+    // in the environment. The exported scheme then omitted that dimension
+    // quantifier, so the first imported call concretized every later call.
+    let library_decls = parse_str(
+        r#"
+type Curve[n] =
+  | Curve { xs: tensor[n, f32] }
+def make[n](xs: tensor[n, f32]) -> Curve[n] =
+  Curve { xs: xs }
+def value[n](curve: Curve[n]) -> f32 =
+  match curve with {
+    | Curve { xs: values } => index(to_list(values), cast(0, int64))
+  }
+"#,
+    )
+    .expect("library surf parse");
+    let library_deep = desugar_program(&library_decls);
+    let (type_env, library_checked) =
+        build_compiled_library_context(&library_deep).expect("library context");
+
+    for (first_extent, second_extent) in [(3, 2), (2, 3)] {
+        let vector = |extent| {
+            (0..extent)
+                .map(|index| format!("cast({index}.0, f32)"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let app_source = format!(
+            r#"
+def first() -> f32 =
+  value(make(to_tensor([{first_values}])))
+def second() -> f32 =
+  value(make(to_tensor([{second_values}])))
+"#,
+            first_values = vector(first_extent),
+            second_values = vector(second_extent),
+        );
+        let app_decls = parse_str(&app_source).expect("app surf parse");
+        let app_deep = desugar_program(&app_decls);
+        check_ir_with_signature_context(
+            &type_env,
+            library_checked.signature_inference(),
+            &app_deep,
+        )
+        .unwrap_or_else(|err| {
+            panic!(
+                "imported generic signatures must instantiate independently for \
+                 {first_extent} then {second_extent}: {:?}",
+                err.errors
+            )
+        });
+    }
+}
+
+#[test]
+fn imported_fixed_rank_signature_still_rejects_a_different_extent() {
+    // Negative parity for chelis#968: independent generic instantiation must
+    // not weaken a genuinely fixed rank/extent contract.
+    let library_decls = parse_str(
+        r#"
+def fixed(xs: tensor[3, f32]) -> f32 =
+  index(to_list(xs), cast(0, int64))
+"#,
+    )
+    .expect("library surf parse");
+    let library_deep = desugar_program(&library_decls);
+    let (type_env, library_checked) =
+        build_compiled_library_context(&library_deep).expect("library context");
+    let app_decls = parse_str(
+        r#"
+def wrong() -> f32 =
+  fixed(to_tensor([cast(1.0, f32), cast(2.0, f32)]))
+"#,
+    )
+    .expect("app surf parse");
+    let app_deep = desugar_program(&app_decls);
+    let err = check_ir_with_signature_context(
+        &type_env,
+        library_checked.signature_inference(),
+        &app_deep,
+    )
+    .expect_err("fixed tensor extent must remain enforced");
+    assert!(
+        err.errors
+            .iter()
+            .any(|error| error.message.contains("Lit(3) vs Lit(2)")),
+        "fixed-rank negative control must fail for the actual extent mismatch: {:?}",
+        err.errors
+    );
+}

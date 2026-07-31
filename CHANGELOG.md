@@ -16,6 +16,11 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   plain and NDJSON reporting; genuinely clean testless files remain
   fail-closed configuration errors. Ordinary non-`--expect` testless files
   retain their legacy zero-record behavior. Exact regressions lock both modes.
+- **Imported rank-generic functions instantiate independently at every call
+  site (chelis#968).** Environment free-variable analysis now protects a
+  scheme's quantified type, dimension, and rank variables from unrelated
+  global substitutions, including alias chains, so an earlier concrete tensor
+  extent cannot leak into a later use.
 - **Concrete return contexts now specialize nullary generic ADT
   constructors before C ABI projection (chelis#935).** A layout-free
   constructor may retain its named generic ADT term through host-expression

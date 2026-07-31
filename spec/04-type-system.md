@@ -446,6 +446,13 @@ and specialize `a` (chelis#940, chelis#948). The checked registry and authored
 signature marker survive serialization, context composition, effects
 reannotation, and linearity annotation.
 
+> **[04-ADT-2]** Every use of a generic function signature SHALL instantiate
+> a fresh substitution. When computing the free variables of an environment
+> scheme, a substitution SHALL NOT be applied through that scheme's quantified
+> type, dimension, or rank variables, including through an alias chain. Thus
+> one concrete tensor extent, rank, precision, or stored ADT argument cannot
+> constrain a later use in the same consuming module (chelis#968).
+
 ### 2.4 Exhaustive Pattern Matching
 
 The type checker verifies that `match` expressions cover all variants. Missing variants are a type error, not a warning.
