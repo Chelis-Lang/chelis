@@ -8,6 +8,7 @@ pub mod errors;
 pub mod fitness;
 pub mod infer;
 pub mod invariants;
+pub mod known_tags;
 pub mod linearity;
 pub mod observation;
 pub(crate) mod opacity;
