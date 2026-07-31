@@ -10,6 +10,7 @@ pub mod infer;
 pub mod invariants;
 pub mod known_tags;
 pub mod linearity;
+pub mod manifest;
 pub mod observation;
 pub(crate) mod opacity;
 pub(crate) mod pipe_stage;
