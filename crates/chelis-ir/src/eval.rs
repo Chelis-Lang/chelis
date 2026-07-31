@@ -322,21 +322,24 @@ fn infer_symbolic_bindings_from_inputs(
             continue;
         } else {
             // chelis#351: a shape-only dependency Load can be outside the
-            // value-live mask. Select only sources the caller supplied;
-            // unrelated dead generic declarations remain irrelevant.
-            let supplied = occurrences
+            // value-live mask. With exactly one declaration its shape is the
+            // required source. Two dead declarations reusing the same symbol
+            // are indistinguishable after lowering; accepting whichever input
+            // happens to be supplied lets an unrelated declaration satisfy a
+            // live shape obligation (chelis#991). Fail closed on that
+            // ambiguity instead of guessing from caller inputs.
+            let dead_loads = occurrences
                 .iter()
-                .copied()
-                .filter(|occurrence| {
-                    matches!(
-                        &occurrence.source,
-                        SymbolicDimSource::Load { input_label, .. }
-                            if inputs.contains_key(input_label)
-                    )
+                .filter_map(|occurrence| match &occurrence.source {
+                    SymbolicDimSource::Load { input_label, .. } => Some(input_label.as_str()),
+                    SymbolicDimSource::OpDeclared { .. } => None,
                 })
                 .collect::<Vec<_>>();
-            if !supplied.is_empty() {
-                occurrences = supplied;
+            if dead_loads.len() > 1 {
+                return Err(format!(
+                    "ambiguous dead-load sources {:?} for live symbolic dimension `{}`",
+                    dead_loads, binding.name
+                ));
             }
         }
 
@@ -2746,6 +2749,49 @@ mod tests {
             err.contains("missing required input `x` for symbolic dimension `n`"),
             "expected the dim-targeted inference error, got: {err}"
         );
+    }
+
+    #[test]
+    fn eval_root_scoped_rejects_ambiguous_dead_shape_sources() {
+        let mut dag = Dag::new();
+        let sym_ty = TensorType {
+            dims: vec![DimInfo::Named("k".to_string(), None)],
+            precision: Prim::F32,
+        };
+        let _unrelated = dag.add_node(
+            RiscOp::Load { name: "a".into() },
+            vec![],
+            sym_ty.clone(),
+            None,
+        );
+        let _required = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            sym_ty.clone(),
+            None,
+        );
+        let one = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
+        let ones = dag.add_node(
+            RiscOp::Expand {
+                axis: 0,
+                size: crate::dag::DimExpr::Sym("k".to_string()),
+            },
+            vec![one],
+            sym_ty,
+            None,
+        );
+
+        for supplied in ["a", "x"] {
+            let err = eval_tensor_roots_with_strict(&dag, &[ones], |name| {
+                (name == supplied).then(|| TensorValue::from_vec(vec![2], vec![3.0, 4.0]))
+            })
+            .unwrap_err();
+            assert!(
+                err.contains("ambiguous dead-load sources")
+                    && err.contains("live symbolic dimension `k`"),
+                "supplying {supplied} must not resolve an ambiguous shape source: {err}"
+            );
+        }
     }
 
     fn lower(src: &str) -> Dag {
