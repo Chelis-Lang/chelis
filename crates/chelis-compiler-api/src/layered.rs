@@ -20,11 +20,10 @@
 //!
 //! - **Whole-program report reconstitution.** A `chelis check` JSON
 //!   report carries whole-program `total_nodes` / `typed_nodes` /
-//!   `structure`. The layered path reconstitutes these by adding the
-//!   cached chelis-std structural stats to the freshly-computed
-//!   non-chelis-std stats. `count_nodes` and the Deep tag validator are
-//!   pure per-expr structural walks, so for a clean program the sum is
-//!   exact.
+//!   `structure`. The layered path reconstitutes the checker-visit counters
+//!   from the two checked products, and computes structure from the cached
+//!   chelis-std structural stats plus the fresh non-chelis-std stats. Both
+//!   metrics are additive across the partition (chelis#973).
 //! - **Monolithic fallback on the error path.** When the non-chelis-std
 //!   decls do not type-check clean, [`check_layered`] returns
 //!   `Ok(None)` and the caller falls back to the monolithic checker.
@@ -172,12 +171,11 @@ fn pick_typed_program(
 /// adding the cached chelis-std structural stats to the freshly-computed
 /// non-chelis-std stats.
 ///
-/// On the clean path the monolithic `check_ir_fitness` returns
-/// `score: 1.0`, every component `1.0` except `structure`, and
-/// `typed_nodes == total_nodes == count_nodes(whole_program)`. The
-/// `structure` component is `valid_nodes / total_nodes` over the whole
-/// program. Both `count_nodes` and the Deep validator are pure per-expr
-/// walks, so the whole-program counts are the partition sums.
+/// On the clean path the monolithic `check_ir_fitness` returns the inference
+/// product's honest checker-visit counters. Those counters are stored on each
+/// `CheckedProgram` and add across the stdlib / non-stdlib partition. The
+/// `structure` component remains a distinct structural-AST metric computed
+/// from the cached and fresh structural stats (chelis#973).
 fn reconstitute_clean_fitness(
     stdlib_ctx: &StdLibContext,
     non_stdlib_deep: &[chelis_deep::Expr],
@@ -185,14 +183,14 @@ fn reconstitute_clean_fitness(
 ) -> FitnessReport {
     let stdlib_stats = stdlib_ctx.structural_stats;
     let non_stdlib_stats = chelis_types::structural_stats(non_stdlib_deep);
-    let total_nodes = stdlib_stats.total_nodes + non_stdlib_stats.total_nodes;
+    let structural_total_nodes = stdlib_stats.total_nodes + non_stdlib_stats.total_nodes;
     let invalid_nodes = stdlib_stats.invalid_nodes + non_stdlib_stats.invalid_nodes;
 
-    let structure = if total_nodes == 0 {
+    let structure = if structural_total_nodes == 0 {
         1.0
     } else {
-        let valid = total_nodes.saturating_sub(invalid_nodes);
-        valid as f64 / total_nodes as f64
+        let valid = structural_total_nodes.saturating_sub(invalid_nodes);
+        valid as f64 / structural_total_nodes as f64
     };
 
     // Mirror `chelis_types::check_ir_fitness`'s clean-path return: parse
@@ -205,10 +203,10 @@ fn reconstitute_clean_fitness(
     const W_TYPES: f64 = 0.6;
     let score = W_PARSE * 1.0 + W_STRUCTURE * structure + W_NAMES * 1.0 + W_TYPES * 1.0;
 
-    // `non_stdlib_checked` is not needed for the structural counts (they
-    // come from the partition sums); the parameter keeps call sites
-    // uniform with a possible future error-path variant.
-    let _ = non_stdlib_checked;
+    let stdlib_infer = stdlib_ctx.library_checked.infer_stats();
+    let non_stdlib_infer = non_stdlib_checked.infer_stats();
+    let typed_nodes = stdlib_infer.typed_nodes + non_stdlib_infer.typed_nodes;
+    let total_nodes = stdlib_infer.total_nodes + non_stdlib_infer.total_nodes;
 
     FitnessReport {
         score,
@@ -219,8 +217,8 @@ fn reconstitute_clean_fitness(
             types: 1.0,
         },
         errors: Vec::new(),
-        typed_nodes: total_nodes,
-        untyped_nodes: 0,
+        typed_nodes,
+        untyped_nodes: total_nodes.saturating_sub(typed_nodes),
         total_nodes,
         unresolved_names: Vec::new(),
     }

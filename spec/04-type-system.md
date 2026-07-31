@@ -2020,6 +2020,13 @@ When full type checking fails, the compiler still infers types for as many sub-e
 
 The agent can read the annotated AST and see exactly which nodes type-checked and which didn't.
 
+> **[04-FIT-1]** `typed_nodes` and `total_nodes` SHALL report the type
+> inference product's checked-node counters, not a fabricated structural AST
+> count. A cached or layered check SHALL preserve those counters per checked
+> unit and add them across the program partition, so its fitness report is
+> byte-identical to an equivalent monolithic check (chelis#858, chelis#973).
+> The `structure` component remains a separate structural-AST measurement.
+
 ### 6.3 Repair Suggestions
 
 For common error patterns, the compiler produces structured repair suggestions:

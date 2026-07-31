@@ -16,6 +16,11 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   plain and NDJSON reporting; genuinely clean testless files remain
   fail-closed configuration errors. Ordinary non-`--expect` testless files
   retain their legacy zero-record behavior. Exact regressions lock both modes.
+- **Layered stdlib checks report the same honest checked-node counters as
+  monolithic checks (chelis#973).** Cached checked programs now retain the
+  inference product's `typed_nodes` and `total_nodes`; layered fitness reports
+  add those counters across their partition instead of substituting a
+  structural AST count.
 - **Package-owned source-file checks and builds repair a missing or malformed
   `reef.lock` even on a warm prepared-graph cache hit (chelis#971).** A
   successful `chelis check <package-source>` or `chelis build

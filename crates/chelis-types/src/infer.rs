@@ -1012,6 +1012,7 @@ pub(crate) fn run_finalization_mutation_case(
         &signature_context,
         &TypeResolutionEnv::default(),
         &AdtRegistry::default(),
+        InferStats::default(),
         errors,
     );
 }
@@ -1176,10 +1177,10 @@ pub struct InferResult {
     pub total_nodes: usize,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
-pub(crate) struct InferStats {
-    pub(crate) typed_nodes: usize,
-    pub(crate) total_nodes: usize,
+#[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
+pub struct InferStats {
+    pub typed_nodes: usize,
+    pub total_nodes: usize,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -1191,6 +1192,11 @@ pub struct CheckedProgram {
     type_headers: TypeResolutionEnv,
     #[serde(default)]
     adt_registry: AdtRegistry,
+    /// Honest checker-visit counters for this checked unit. These are
+    /// serialized with cached contexts so layered fitness reports can sum the
+    /// same inference-product metric as the monolithic path (chelis#973).
+    #[serde(default)]
+    infer_stats: InferStats,
 }
 
 impl CheckedProgram {
@@ -1206,6 +1212,7 @@ impl CheckedProgram {
             signature_inference: SignatureInferenceMetadata::default(),
             type_headers: TypeResolutionEnv::default(),
             adt_registry: AdtRegistry::default(),
+            infer_stats: InferStats::default(),
         }
     }
 
@@ -1252,6 +1259,10 @@ impl CheckedProgram {
     /// layouts or generic-parameter roles from authored `deftype` syntax.
     pub fn adt_registry(&self) -> &AdtRegistry {
         &self.adt_registry
+    }
+
+    pub fn infer_stats(&self) -> InferStats {
+        self.infer_stats
     }
 
     pub fn with_linearity(mut self, linearity: LinearityInfo) -> Self {
@@ -1335,6 +1346,10 @@ impl CheckedProgram {
             signature_inference,
             type_headers,
             adt_registry,
+            infer_stats: InferStats {
+                typed_nodes: library.infer_stats.typed_nodes + new_code.infer_stats.typed_nodes,
+                total_nodes: library.infer_stats.total_nodes + new_code.infer_stats.total_nodes,
+            },
         }
     }
 }
@@ -1348,6 +1363,7 @@ fn finalize_checked_program(
     signature_context: &SignatureInferenceMetadata,
     type_headers: &TypeResolutionEnv,
     adt_registry: &AdtRegistry,
+    infer_stats: InferStats,
     errors: &mut DiagnosticSink<'_>,
 ) -> CheckedProgram {
     let signature_inference = infer_signature_metadata_with_context_and_headers(
@@ -1364,6 +1380,7 @@ fn finalize_checked_program(
         signature_inference,
         type_headers: type_headers.clone(),
         adt_registry: adt_registry.clone(),
+        infer_stats,
     };
 
     validate_checked_program_totality(&checked, signature_context, errors);
@@ -1453,6 +1470,7 @@ pub(crate) fn checked_program_with_effect_annotations_in_session(
         signature_inference: original.signature_inference.clone(),
         type_headers: original.type_headers.clone(),
         adt_registry: original.adt_registry.clone(),
+        infer_stats: original.infer_stats,
     };
     validate_checked_program_totality(&checked, original.signature_inference(), errors);
     checked
@@ -1970,6 +1988,7 @@ pub(crate) fn build_compiled_library_context_in_session(
         &SignatureInferenceMetadata::default(),
         &product.type_headers,
         &product.adt_registry,
+        stats,
         errors,
     );
     if !errors.is_empty() {
@@ -2131,6 +2150,7 @@ pub(crate) fn build_compiled_library_context_with_base_in_session(
         &SignatureInferenceMetadata::default(),
         &product.type_headers,
         &product.adt_registry,
+        stats,
         errors,
     );
     if !errors.is_empty() {
@@ -2270,6 +2290,7 @@ pub(crate) fn check_ir_with_signature_context_in_session(
         signature_context,
         &product.type_headers,
         &product.adt_registry,
+        stats,
         errors,
     );
     if !errors.is_empty() {
@@ -2306,6 +2327,7 @@ pub(crate) fn check_typed_program_in_session(
             &SignatureInferenceMetadata::default(),
             &product.type_headers,
             &product.adt_registry,
+            stats,
             errors,
         );
         if !errors.is_empty() {
