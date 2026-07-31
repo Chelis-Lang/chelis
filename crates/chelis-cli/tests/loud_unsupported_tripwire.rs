@@ -550,6 +550,16 @@ const BASELINE: &[Entry] = &[
     // uses a precision spec today, and a new one is a third formatter. --
     (
         Pat::RustFormatNarrowing,
+        "crates/chelis-compiler-api/src/runtime/json.rs",
+        1,
+        "round_to's decimal-rounding MECHANISM (chelis#890): format the \
+         operand at `places` precision then exactly re-parse -- an internal \
+         numeric algorithm whose precision spec IS the operation, not an \
+         observation exit; the observable result re-enters the value domain \
+         before any exit formats it",
+    ),
+    (
+        Pat::RustFormatNarrowing,
         "crates/chelis-backend-c/src/lib.rs",
         6,
         "cfg(test): the fill negative-lock needle ({value:.8}f must NOT \
@@ -705,18 +715,29 @@ const BASELINE: &[Entry] = &[
     (
         Pat::RustDebugNumericFormat,
         "crates/chelis-compiler-api/src/runtime/host_ops.rs",
-        50,
+        52,
         "declared derived-Debug residue carriers: Err(format!) \
          type-mismatch diagnostics over Value/Prim shapes, the tensor \
          SHAPE debug in render_tensor (elements route through \
-         format_element), and cfg(test) assertions",
+         format_element), and cfg(test) assertions; +2 from the \
+         chelis#890 JSON argument diagnostics (chelis#997 debt)",
+    ),
+    (
+        Pat::RustDebugNumericFormat,
+        "crates/chelis-compiler-api/src/runtime/json.rs",
+        23,
+        "chelis#890 JSON I/O runtime: Err(format!) parse/shape diagnostics \
+         over Json ADT fields and truncated payload renders -- the same \
+         residue-carrier class as eval.rs/host_ops.rs (chelis#997 debt; \
+         the sweep fix routes them through render_value)",
     ),
     (
         Pat::RustDebugNumericFormat,
         "crates/chelis-compiler-api/src/runtime/eval.rs",
-        24,
+        29,
         "declared derived-Debug residue carriers: Err(format!) \
-         diagnostics over Value/callable/handle shapes",
+         diagnostics over Value/callable/handle shapes; +5 from the \
+         chelis#890 JSON builtin dispatch arms (chelis#997 debt)",
     ),
     (
         Pat::RustDebugNumericFormat,
@@ -735,8 +756,9 @@ const BASELINE: &[Entry] = &[
     (
         Pat::RustDebugNumericFormat,
         "crates/chelis-compiler-api/src/runtime/tests.rs",
-        20,
-        "cfg-gated runtime unit-test assertions, not product exits",
+        30,
+        "cfg-gated runtime unit-test assertions, not product exits; +10 \
+         from the chelis#890 JSON corpus",
     ),
     (
         Pat::RustDebugNumericFormat,
