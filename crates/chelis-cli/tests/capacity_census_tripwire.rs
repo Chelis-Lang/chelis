@@ -103,6 +103,18 @@ const GRANDFATHER_SEAM_IDS: &[&str] = &[
 ];
 // GRANDFATHER_SEAM_IDS_END
 
+/// Exact reviewed C callables whose bare `int` values are control/layout
+/// plumbing rather than language numeric operations. The default is
+/// deliberately conservative: every non-boolean, non-character built-in
+/// arithmetic value type makes a callable `numeric-op`; only these complete
+/// canonical identities remove that flag. Names, parameter names, and
+/// substring heuristics never exempt a future callable.
+const NON_NUMERIC_INTEGER_PLUMBING_EXPORTS: &[&str] = &[
+    "chelis_runtime.h: chelis_tensor * chelis_alloc ( int ndim , const int * shape , int dtype ) ;",
+    "chelis_runtime.h: chelis_tensor * chelis_tensor_from_value_list_typed ( const chelis_list * list , int dst_dtype ) ;",
+    "chelis_runtime.h: int chelis_dtype_size ( int dtype ) ;",
+];
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 struct Row {
     kind: String,
@@ -321,18 +333,96 @@ fn include_guard_name(source: &str) -> Option<String> {
     (guard == defined).then(|| guard.to_string())
 }
 
+fn conditionally_defined_macros(source: &str) -> BTreeSet<String> {
+    let guard = include_guard_name(source);
+    let mut conditional_stack = Vec::new();
+    let mut macros = BTreeSet::new();
+    for line in strip_c_comments(source).lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed
+            .strip_prefix("#ifdef")
+            .or_else(|| trimmed.strip_prefix("#ifndef"))
+            .or_else(|| trimmed.strip_prefix("#if"))
+        {
+            let is_guard = conditional_stack.is_empty()
+                && guard.as_deref().is_some_and(|name| rest.trim() == name);
+            conditional_stack.push(!is_guard);
+            continue;
+        }
+        if trimmed.starts_with("#endif") {
+            conditional_stack.pop();
+            continue;
+        }
+        if conditional_stack.iter().any(|frame| *frame)
+            && let Some(rest) = trimmed.strip_prefix("#define")
+            && let Some(macro_name) = rest.split_whitespace().next()
+        {
+            macros.insert(
+                macro_name
+                    .split('(')
+                    .next()
+                    .expect("split always has first")
+                    .to_string(),
+            );
+        }
+    }
+    macros
+}
+
+/// Conditional macro definitions taint the entire connected local-include
+/// component. C preprocessing is textual: a parent definition affects a
+/// child, and a child definition can affect the parent's declarations after
+/// the include returns. Component-wide propagation is the conservative exact
+/// policy; a public declaration may not consume any such token.
+fn closure_conditional_macro_taint(
+    sources: &BTreeMap<String, String>,
+) -> BTreeMap<String, BTreeSet<String>> {
+    let mut taint: BTreeMap<String, BTreeSet<String>> = sources
+        .iter()
+        .map(|(name, source)| (name.clone(), conditionally_defined_macros(source)))
+        .collect();
+    let edges: Vec<(String, String)> = sources
+        .iter()
+        .flat_map(|(name, source)| {
+            source
+                .lines()
+                .filter_map(quoted_include)
+                .filter(|included| sources.contains_key(*included))
+                .map(|included| (name.clone(), included.to_string()))
+        })
+        .collect();
+    loop {
+        let mut changed = false;
+        for (left, right) in &edges {
+            let component: BTreeSet<String> = taint[left].union(&taint[right]).cloned().collect();
+            let left_set = taint.get_mut(left).expect("edge endpoint exists");
+            let old_left = left_set.len();
+            left_set.extend(component.iter().cloned());
+            changed |= left_set.len() != old_left;
+            let right_set = taint.get_mut(right).expect("edge endpoint exists");
+            let old_right = right_set.len();
+            right_set.extend(component.iter().cloned());
+            changed |= right_set.len() != old_right;
+        }
+        if !changed {
+            break;
+        }
+    }
+    taint
+}
+
 /// The supported preprocessing policy is total by construction: public ABI
 /// declarations in the published local-header closure may not be conditional.
 /// Platform and feature branches remain permitted inside `static` function
 /// bodies and for include/macro selection that does not declare ABI.
 fn assert_context_invariant_headers(include_dir: &Path, roots: &[&str]) {
     let sources = header_source_closure(include_dir, roots);
+    let closure_macro_taint = closure_conditional_macro_taint(&sources);
     for (name, source) in &sources {
         let guard = include_guard_name(source);
         let mut conditional_stack: Vec<bool> = Vec::new();
         let mut brace_depth = 0usize;
         let mut conditional_top_level = String::new();
-        let mut conditional_macros = BTreeSet::new();
         let mut conditional_includes = BTreeSet::new();
 
         for line in strip_c_comments(source).lines() {
@@ -356,21 +446,8 @@ fn assert_context_invariant_headers(include_dir: &Path, roots: &[&str]) {
             }
 
             let varying = conditional_stack.iter().any(|frame| *frame);
-            if varying {
-                if let Some(rest) = trimmed.strip_prefix("#define")
-                    && let Some(macro_name) = rest.split_whitespace().next()
-                {
-                    conditional_macros.insert(
-                        macro_name
-                            .split('(')
-                            .next()
-                            .expect("split always has first")
-                            .to_string(),
-                    );
-                }
-                if let Some(included) = quoted_include(trimmed) {
-                    conditional_includes.insert(included.to_string());
-                }
+            if varying && let Some(included) = quoted_include(trimmed) {
+                conditional_includes.insert(included.to_string());
             }
             let extern_wrapper = trimmed == "extern \"C\" {" || trimmed == "}";
             if varying && brace_depth == 0 && !trimmed.starts_with('#') {
@@ -393,6 +470,8 @@ fn assert_context_invariant_headers(include_dir: &Path, roots: &[&str]) {
             .split(';')
             .any(|statement| normalize_ws(statement).starts_with("typedef "));
         let raw_rows = header_rows_local(name, source);
+        let tainted_macros = &closure_macro_taint[name];
+        let mut macro_taint_hits = BTreeSet::new();
         let macro_dependent_rows: Vec<&Row> = raw_rows
             .iter()
             .filter(|row| {
@@ -401,9 +480,14 @@ fn assert_context_invariant_headers(include_dir: &Path, roots: &[&str]) {
                     .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
                     .filter(|token| !token.is_empty())
                     .collect();
-                conditional_macros
+                let hits: Vec<String> = tainted_macros
                     .iter()
-                    .any(|macro_name| tokens.contains(macro_name.as_str()))
+                    .filter(|macro_name| tokens.contains(macro_name.as_str()))
+                    .cloned()
+                    .collect();
+                let dependent = !hits.is_empty();
+                macro_taint_hits.extend(hits);
+                dependent
             })
             .collect();
         let conditional_include_rows: Vec<Row> = conditional_includes
@@ -419,7 +503,8 @@ fn assert_context_invariant_headers(include_dir: &Path, roots: &[&str]) {
             "{}CONTEXT-VARYING PUBLIC ABI in `{name}`: conditional branches \
              contain exported declarations {:?}, a top-level typedef is \
              conditional ({conditional_typedef}), conditional macros reach \
-             declarations {:?}, or conditional local includes expose {:?}. \
+             declarations {:?} via tainted tokens {:?}, or conditional local \
+             includes expose {:?}. \
              Published ABI declarations and their type spellings must be \
              unconditional in the local header closure; conditional code is \
              permitted only behind static implementation details.{}",
@@ -432,6 +517,7 @@ fn assert_context_invariant_headers(include_dir: &Path, roots: &[&str]) {
                 .iter()
                 .map(|row| row.id.as_str())
                 .collect::<Vec<_>>(),
+            macro_taint_hits,
             conditional_include_rows
                 .iter()
                 .map(|row| row.id.as_str())
@@ -542,6 +628,12 @@ fn canonical_inventory_id(id: &str) -> String {
     id.to_string()
 }
 
+fn is_frozen_grandfather_seam_id(id: &str) -> bool {
+    GRANDFATHER_SEAM_IDS
+        .iter()
+        .any(|frozen| canonical_inventory_id(frozen) == id)
+}
+
 /// True when the citation names at least one chelis issue (`chelis#N`), so
 /// the liveness gate (`scripts/capacity_census_liveness.py`) has purchase on
 /// every sanctioned citation - including `maintainer-override(...)`, which
@@ -556,11 +648,30 @@ fn cites_a_chelis_issue(citation: &str) -> bool {
 /// typedef resolution) is a numeric runtime callable and carries the
 /// `numeric-op` flag, which binds NEW rows to semantic registration (the
 /// PR #950 re-red-team's P1 finding: surface existence is not a semantic
-/// decision). Bare `int` is deliberately absent - it is dtype-id/ndim
-/// plumbing, and the raw-dtype-int seam rule handles its dangerous shape.
+/// decision). Non-boolean/non-character built-in arithmetic spellings are
+/// conservative numeric candidates too; the three existing bare-int
+/// control/layout exports are removed only by the exact frozen identity
+/// intersection in `apply_exact_integer_plumbing_exemption`.
 const NUMERIC_C_TYPES: &[&str] = &[
-    "double", "float", "int64_t", "int32_t", "int16_t", "int8_t", "uint64_t", "uint32_t",
-    "uint16_t", "uint8_t",
+    "double",
+    "float",
+    "int",
+    "short",
+    "long",
+    "signed",
+    "unsigned",
+    "size_t",
+    "ptrdiff_t",
+    "intptr_t",
+    "uintptr_t",
+    "int64_t",
+    "int32_t",
+    "int16_t",
+    "int8_t",
+    "uint64_t",
+    "uint32_t",
+    "uint16_t",
+    "uint8_t",
 ];
 
 /// The flags that make a row a capacity SEAM (subject to the grandfather
@@ -649,6 +760,12 @@ fn classify(sig: &str, typedefs: &BTreeMap<String, Vec<String>>) -> Vec<String> 
         flags.push("numeric-op".to_string());
     }
     flags
+}
+
+fn apply_exact_integer_plumbing_exemption(id: &str, flags: &mut Vec<String>) {
+    if NON_NUMERIC_INTEGER_PLUMBING_EXPORTS.contains(&id) && is_frozen_grandfather_seam_id(id) {
+        flags.retain(|flag| flag != "numeric-op");
+    }
 }
 
 /// Run the REAL C preprocessor over a root header and return its output
@@ -799,10 +916,12 @@ fn header_rows(header_name: &str, raw: &str, typedefs: &BTreeMap<String, Vec<Str
                     continue;
                 }
                 if stmt.contains('(') && stmt.ends_with(')') {
-                    let flags = classify(&stmt, typedefs);
+                    let mut flags = classify(&stmt, typedefs);
+                    let id = format!("{header_name}: {}", canonical_c_tokens(&format!("{stmt};")));
+                    apply_exact_integer_plumbing_exemption(&id, &mut flags);
                     rows.push(Row {
                         kind: "header-export".to_string(),
-                        id: format!("{header_name}: {}", canonical_c_tokens(&format!("{stmt};"))),
+                        id,
                         flags,
                         citation: String::new(),
                     });
@@ -1182,11 +1301,7 @@ fn check_against_baseline_with(
                 row.kind, row.id
             ));
         }
-        if row.citation == GRANDFATHER_SEAM_CITATION
-            && !GRANDFATHER_SEAM_IDS
-                .iter()
-                .any(|id| canonical_inventory_id(id) == row.id)
-        {
+        if row.citation == GRANDFATHER_SEAM_CITATION && !is_frozen_grandfather_seam_id(&row.id) {
             problems.push(format!(
                 "GRANDFATHER citation on an identity outside the frozen \
                  2026-07-30 seam set (identity relocation; the set may only \
@@ -2077,5 +2192,92 @@ fn coverage_legs_cannot_claim_covered_without_live_oracles() {
             && err.contains("enumerator")
             && err.contains("mutation_oracle"),
         "a prose relabel must not turn a deferred leg into covered: {err}"
+    );
+}
+
+#[test]
+fn conditional_macro_taint_across_include_closure_is_rejected() {
+    let dir = std::env::temp_dir().join(format!("census-closure-taint-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("temp include dir");
+    fs::write(
+        dir.join("root.h"),
+        "#ifdef CHELIS_REVIEW_WIDE\n\
+         #define CHELIS_NUM double\n\
+         #else\n\
+         #define CHELIS_NUM float\n\
+         #endif\n\
+         #include \"shared.h\"\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("shared.h"),
+        "CHELIS_NUM chelis_context_result(CHELIS_NUM value);\n",
+    )
+    .unwrap();
+    let result = std::panic::catch_unwind(|| preprocessed_headers(&dir, &["root.h"]));
+    fs::remove_dir_all(&dir).ok();
+    let panic = result.expect_err(
+        "conditional macro taint must propagate from a root into its local include closure",
+    );
+    let message = if let Some(s) = panic.downcast_ref::<String>() {
+        s.as_str()
+    } else if let Some(s) = panic.downcast_ref::<&str>() {
+        s
+    } else {
+        ""
+    };
+    assert!(
+        message.contains("CONTEXT-VARYING PUBLIC ABI") && message.contains("CHELIS_NUM"),
+        "the closure-wide rejection must name the tainted macro: {message}"
+    );
+}
+
+#[test]
+fn bare_int_export_is_numeric_op_and_requires_registration() {
+    let mut row = header_rows_local("planted.h", "int chelis_abs(int value);").remove(0);
+    assert!(
+        row.flags.iter().any(|flag| flag == "numeric-op"),
+        "a by-value C int callable is conservatively numeric: {row:?}"
+    );
+    row.citation = "chelis#729".to_string();
+    let baseline = Baseline {
+        version: 2,
+        legs: coverage_manifest(),
+        rows: vec![row.clone()],
+    };
+    let err = check_against_baseline(&[row], &baseline).unwrap_err();
+    assert!(
+        err.contains("NUMERIC OP WITHOUT EXACT SEMANTIC REGISTRATION"),
+        "bare-int numeric callables owe the same exact registration: {err}"
+    );
+}
+
+#[test]
+fn integer_plumbing_exemptions_are_exact_and_closed() {
+    assert_eq!(
+        NON_NUMERIC_INTEGER_PLUMBING_EXPORTS.len(),
+        3,
+        "the reviewed pre-ratchet plumbing set is closed"
+    );
+    for id in NON_NUMERIC_INTEGER_PLUMBING_EXPORTS {
+        assert!(
+            is_frozen_grandfather_seam_id(id),
+            "an exemption must already belong to the frozen seam identity set: {id}"
+        );
+        let (header, declaration) = id.split_once(": ").expect("canonical header identity");
+        let row = header_rows_local(header, declaration).remove(0);
+        assert_eq!(&row.id, id);
+        assert!(
+            !row.flags.iter().any(|flag| flag == "numeric-op"),
+            "the exact reviewed plumbing identity stays non-op: {row:?}"
+        );
+    }
+
+    let renamed =
+        header_rows_local("chelis_runtime.h", "int chelis_dtype_extent(int dtype);").remove(0);
+    assert!(
+        renamed.flags.iter().any(|flag| flag == "numeric-op"),
+        "a new same-shaped callable is numeric until explicitly registered; \
+         no name/parameter heuristic may inherit the exemption: {renamed:?}"
     );
 }
