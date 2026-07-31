@@ -2335,13 +2335,26 @@ Scope:
   package-scoped `def sum` neither collides with the builtin table nor
   mis-dispatches — inside a package the user def genuinely wins (the
   stdlib's `Std.Decimal.normalize` and `Std.Test.fail` rely on this).
-- Function parameters and block-local bindings may reuse builtin names: they
-  bind values, not call-site dispatch, and shadow harmlessly on every lane.
-  Known residual asymmetry: *calling* a function-typed parameter or local
-  named like a builtin still dispatches builtin-first under eval (a loud
-  eval-time error) while the C backend compiles the call correctly; that
-  gap is documented here rather than rejected, because rejecting it would
-  break programs the backend lane compiles and runs correctly today.
+- Function parameters and block-local bindings may reuse builtin names **in
+  value position only**: they bind values, not call-site dispatch, and shadow
+  harmlessly there on every lane. **Calling** a builtin-named parameter is
+  rejected at declaration time as `BuiltinShadowing`, the same rule as the
+  top-level case: the call can never reach the parameter.
+
+  > **Amended (chelis#891).** Earlier revisions of this section claimed the
+  > call form was a benign documented gap — that it *"still dispatches
+  > builtin-first under eval (a loud eval-time error) while the C backend
+  > compiles the call correctly"*, and that rejecting it *"would break
+  > programs the backend lane compiles and runs correctly today."* Both
+  > halves were disproved by execution. Probed with
+  > `def apply_it(abs: (f64) -> f64, x: f64) -> f64 = abs(x)`: `chelis eval`
+  > printed `2.0` — the builtin ran and the passed lambda was silently
+  > ignored, a **silent wrong answer**, not a loud error; and `chelis build`
+  > emitted `__result = fabs(__arg0_0);` with the lambda lowered to a **null
+  > function pointer** — the backend also dispatches builtin-first and never
+  > compiled the call "correctly". No conforming program is broken by the
+  > rejection, because every program it kills already returned the wrong
+  > answer or invoked undefined behavior.
 - Builtin-adjacent reserved keywords (`cast`, `grad`, `vmap`, ...) are not
   part of `BUILTIN_NAMES`; a `def cast` is already a parse error.
 

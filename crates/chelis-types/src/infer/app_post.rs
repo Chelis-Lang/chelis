@@ -3050,11 +3050,22 @@ fn check_json_builtin_signature(
             json_ty()
         }
         "round_to" => {
-            require_loose_numeric_slot!(
+            // f64-only until `round_to` has an authored [05-OP-N] atom
+            // (chelis#891 review, consolidated guidance item 3): the
+            // implementation widens the operand to f64, rounds decimally,
+            // and re-narrows, which at f32 computes at other than the
+            // declared arithmetic width -- non-conforming under [04-NUM-8],
+            // whose atom deliberately has no exception vocabulary. The
+            // f32 lane returns when its per-dtype semantics are authored
+            // in spec/05-risc-primitives.md at declared widths. Same
+            // strictness shape as `jnum` below; the diagnostic names the
+            // remediation.
+            require_slot!(
                 0,
-                is_float,
-                Prim::F64,
-                "a float first argument (any float precision)"
+                Type::Prim(Prim::F64),
+                "an f64 first argument (`round_to` is f64-only until its \
+                 per-dtype rounding semantics are authored in spec/05; \
+                 suffix the literal `f64` or `cast` the operand)"
             );
             require_loose_numeric_slot!(
                 1,
@@ -3062,14 +3073,7 @@ fn check_json_builtin_signature(
                 Prim::Int64,
                 "an integer `places` second argument"
             );
-            // Precision-preserving: `round_to` returns its operand's float
-            // precision; an unresolved operand was just unified with the
-            // canonical f64, keeping the checker and the eval lane in
-            // agreement on the result dtype (chelis#891 review finding 6).
-            match type_for_readonly_check(&arg_tys[0], subst) {
-                Type::Prim(p) if p.is_float() => Type::Prim(p),
-                _ => Type::Prim(Prim::F64),
-            }
+            Type::Prim(Prim::F64)
         }
         other => unreachable!("check_json_builtin_signature dispatched on `{other}`"),
     }

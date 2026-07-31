@@ -556,7 +556,15 @@ fn format_f64_json(value: f64) -> Result<String, String> {
             "to_json: JSON cannot represent non-finite number `{value}`"
         ));
     }
-    Ok(format!("{value:?}"))
+    // Routed through the section C4 generated formatter rather than a
+    // hand-rolled `format!("{value:?}")` (chelis#891 review): the bytes are
+    // identical today -- verified on every boundary value in the review --
+    // but a second numeric-formatting implementation makes the one-change-
+    // set migration protocol unhonorable when the formatter next moves.
+    Ok(chelis_types::format_element(
+        chelis_types::types::Prim::F64,
+        chelis_types::ElementRef::F64(value),
+    ))
 }
 
 fn escape_json_string(out: &mut String, value: &str) {

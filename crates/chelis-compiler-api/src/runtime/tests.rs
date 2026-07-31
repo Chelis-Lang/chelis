@@ -2066,10 +2066,19 @@ fn json_builtin_type_errors_reject_at_check() {
         ("x = to_json(\"raw\")\n", "to_json expects a Json argument"),
         (
             "x = round_to(\"s\", 2)\n",
-            "round_to expects a float first argument",
+            "round_to expects an f64 first argument",
         ),
+        // f64-only until the [05-OP-N] atom is authored (chelis#891
+        // review, consolidated item 3): an f32 operand is rejected with
+        // the remediation, not silently widened/rounded/re-narrowed.
         (
-            "x = round_to(1.5, 2.0)\n",
+            "x = round_to(1.5f32, 2)\n",
+            "round_to expects an f64 first argument",
+        ),
+        // Operand must be f64 (unsuffixed floats default to f32, spec/04
+        // §5.3) so the case reaches the `places` slot it exercises.
+        (
+            "x = round_to(1.5f64, 2.0)\n",
             "round_to expects an integer `places` second argument",
         ),
         (
