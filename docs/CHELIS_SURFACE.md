@@ -312,13 +312,15 @@ number) are loud eval errors — no silent defaults.
 
 | Name | Signature | Notes |
 |---|---|---|
-| `parse_json` | `(s: string) -> Json` | strict RFC 8259; a leading UTF-8 BOM is ignored (§8.1, matching `parse_csv`); numbers are f64 (ints past 2^53 lose precision); duplicate keys: first position, last value; depth cap 512 |
-| `to_json` | `(v: Json) -> string` | compact, **insertion-order keys**, **shortest-round-trip f64** (Rust `{:?}` formatter — deliberately NOT the print channel, chelis#748/#723/#734); NaN/inf fail; non-ASCII emitted as raw UTF-8; byte-stable |
-| `json_f64` | `(j: Json, path: string) -> f64` | dot-path: segment = dict key, or strictly all-digits list index (no sign, no leading zeros); fails name the missing key and list available keys |
+| `parse_json` | `(s: string) -> Json` | strict RFC 8259; a leading UTF-8 BOM is ignored (§8.1, matching `parse_csv`); **int-vs-float is decided at parse time** — a token with `.`/`e`/`E` becomes `JNum f64`, anything else becomes `JInt int64` (the `Std.Io.Json` and Python `json` rule), so integers stay exact; an integer literal too wide for int64 falls back to `JNum` and is the one remaining lossy case; duplicate keys: first position, last value; depth cap 512 |
+| `to_json` | `(v: Json) -> string` | compact, **insertion-order keys**, `JInt` emitted exactly (no decimal point, no f64 round-trip), **shortest-round-trip f64** for `JNum` (Rust `{:?}` formatter — deliberately NOT the print channel, chelis#748/#723/#734); NaN/inf fail; non-ASCII emitted as raw UTF-8; byte-stable |
+| `json_f64` | `(j: Json, path: string) -> f64` | dot-path: segment = dict key, or strictly all-digits list index (no sign, no leading zeros); fails name the missing key and list available keys; **widens `JInt` transparently** (lossy above 2^53 — use `json_int` for exactness) |
+| `json_int` | `(j: Json, path: string) -> int64` | exact integer read. Refuses a `JNum` rather than truncating it, naming `json_f64` as the remedy (§C1.1: no silent narrowing) |
 | `json_str` | `(j: Json, path: string) -> string` | |
 | `json_list` | `(j: Json, path: string) -> List[Json]` | elements re-enter the accessors (element-relative paths) |
-| `json_f64s` | `(j: Json, path: string) -> List[f64]` | list of numbers at path; any non-number element fails with its index |
+| `json_f64s` | `(j: Json, path: string) -> List[f64]` | list of numbers at path; `JInt` elements widen as in `json_f64`; any non-number element fails with its index |
 | `jnum` | `(x: f64) -> Json` | **exactly f64** (bare literals are f32 per §5.3 and are rejected loudly — suffix them `0.1f64` or use `cast(n, f64)`; an f32 would quantize through the byte-exact serializer) |
+| `jint` | `(n: int64) -> Json` | **exactly int64** (narrower integers rejected loudly — suffix `1i64` or `cast(n, int64)`), mirroring `jnum`'s width guard |
 | `jstr` | `(s: string) -> Json` | |
 | `jlist` | `(items: List[Json]) -> Json` | |
 | `jdict` | `(entries: List[(string, Json)]) -> Json` | insertion order; duplicate keys upsert |
@@ -367,8 +369,8 @@ Host lane:    cumsum sort einsum diagonal trace where clamp concat split scatter
               to_list
               read_file write_file read_lines read_bytes file_exists list_dir
               mmap_file mmap_read mmap_len process_run
-              parse_json to_json json_f64 json_str json_list json_f64s
-              jnum jstr jlist jdict json_set round_to
+              parse_json to_json json_f64 json_int json_str json_list json_f64s
+              jnum jint jstr jlist jdict json_set round_to
               print fail debug test_assert test_assert_eq_f32 test_assert_eq_int
               test_assert_eq_bool test_assert_eq_string test_assert_close_tensor
               test_assert_eq_tensor_int64

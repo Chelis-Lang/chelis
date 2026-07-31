@@ -14909,9 +14909,9 @@ fn infer_app(
                     // prelude `Json` ADT, and `round_to` decimal rounding.
                     // Eval-only; the build backends reject them (see
                     // `reject_eval_only_builtins_host`).
-                    "parse_json" | "to_json" | "json_f64" | "json_str" | "json_list"
-                    | "json_f64s" | "jnum" | "jstr" | "jlist" | "jdict" | "json_set"
-                    | "round_to" => {
+                    "parse_json" | "to_json" | "json_f64" | "json_int" | "json_str"
+                    | "json_list" | "json_f64s" | "jnum" | "jint" | "jstr" | "jlist" | "jdict"
+                    | "json_set" | "round_to" => {
                         return check_json_builtin_signature(fname, list, &arg_tys, subst, errors);
                     }
                     _ => {}
@@ -17295,7 +17295,7 @@ fn check_json_builtin_signature(
             );
             Type::Prim(Prim::String)
         }
-        "json_f64" | "json_str" | "json_list" | "json_f64s" => {
+        "json_f64" | "json_int" | "json_str" | "json_list" | "json_f64s" => {
             require_slot!(
                 0,
                 json_ty(),
@@ -17308,6 +17308,7 @@ fn check_json_builtin_signature(
             );
             match fname {
                 "json_f64" => Type::Prim(Prim::F64),
+                "json_int" => Type::Prim(Prim::Int64),
                 "json_str" => Type::Prim(Prim::String),
                 "json_list" => Type::Adt("List".to_string(), vec![json_ty()]),
                 _ => Type::Adt("List".to_string(), vec![Type::Prim(Prim::F64)]),
@@ -17319,6 +17320,14 @@ fn check_json_builtin_signature(
                 Type::Prim(Prim::F64),
                 "an f64 argument (suffix the literal, `0.1f64`, or use cast(n, f64); \
                  an f32 value would quantize through the byte-exact serializer)"
+            );
+            json_ty()
+        }
+        "jint" => {
+            require_slot!(
+                0,
+                Type::Prim(Prim::Int64),
+                "an int64 argument (suffix the literal, `1i64`, or use cast(n, int64))"
             );
             json_ty()
         }

@@ -6,15 +6,22 @@
 //! (`crates/chelis-types/src/builtins.rs::register_prelude_adts`):
 //!
 //! ```text
-//! Json = JNull | JBool bool | JNum f64 | JStr string
+//! Json = JNull | JBool bool | JInt int64 | JNum f64 | JStr string
 //!      | JList List[Json] | JDict Dict[string, Json]
 //! ```
 //!
 //! Design contract (see `docs/CHELIS_SURFACE.md` §3.8):
 //!
-//! * **Numbers are f64.** JSON numbers parse through Rust's `f64::from_str`
-//!   (correctly rounded); integers beyond 2^53 lose precision, exactly as
-//!   in every f64-backed JSON reader.
+//! * **Integers stay exact; fractions are f64.** JSON has a single number
+//!   type, so int-vs-float is decided at *parse time*: a token carrying a
+//!   `.`, `e` or `E` becomes `JNum` (through Rust's correctly-rounded
+//!   `f64::from_str`), anything else becomes `JInt` with exact int64.
+//!   This is the rule `Std.Io.Json` already uses
+//!   (`packages/chelis-std/src/io/json.ch:211-219`) and the rule Python's
+//!   `json` uses. `json_f64` widens `JInt` transparently, so callers that
+//!   only want a number are unaffected; `json_int` reads the exact value.
+//!   An integer literal too wide for int64 falls back to `JNum`, which is
+//!   the one remaining lossy case (chelis#729).
 //! * **Serialization is shortest-round-trip.** `to_json` formats each f64
 //!   with Rust's shortest-representation formatter (`{:?}`), so
 //!   `parse_json(to_json(v))` reproduces every finite f64 bit-for-bit.
@@ -69,6 +76,14 @@ pub(super) fn jnum(value: f64) -> RuntimeValue {
     }
 }
 
+pub(super) fn jint(value: i64) -> RuntimeValue {
+    RuntimeValue::Adt {
+        ctor: "JInt".to_string(),
+        fields: vec![RuntimeValue::int64(value)],
+        field_names: None,
+    }
+}
+
 pub(super) fn jstr(value: String) -> RuntimeValue {
     RuntimeValue::Adt {
         ctor: "JStr".to_string(),
@@ -109,12 +124,13 @@ fn json_kind(value: &RuntimeValue) -> Result<&'static str, String> {
         RuntimeValue::Adt { ctor, .. } => match ctor.as_str() {
             "JNull" => Ok("null"),
             "JBool" => Ok("bool"),
+            "JInt" => Ok("number"),
             "JNum" => Ok("number"),
             "JStr" => Ok("string"),
             "JList" => Ok("list"),
             "JDict" => Ok("dict"),
             other => Err(format!(
-                "expected a Json value (JNull/JBool/JNum/JStr/JList/JDict), got constructor `{other}`"
+                "expected a Json value (JNull/JBool/JInt/JNum/JStr/JList/JDict), got constructor `{other}`"
             )),
         },
         other => Err(format!("expected a Json value, got {other:?}")),
@@ -140,6 +156,7 @@ fn ensure_json_value_depth(value: &RuntimeValue, depth: usize) -> Result<(), Str
     match (ctor.as_str(), fields.as_slice()) {
         ("JNull", []) => Ok(()),
         ("JBool", [RuntimeValue::Bool(_)]) => Ok(()),
+        ("JInt", [RuntimeValue::Scalar(payload)]) if payload.dtype().is_integer() => Ok(()),
         ("JNum", [RuntimeValue::Scalar(payload)]) if payload.dtype().is_float() => Ok(()),
         ("JStr", [RuntimeValue::String(_)]) => Ok(()),
         ("JList", [RuntimeValue::List(items)]) => {
@@ -157,11 +174,11 @@ fn ensure_json_value_depth(value: &RuntimeValue, depth: usize) -> Result<(), Str
             }
             Ok(())
         }
-        ("JNull" | "JBool" | "JNum" | "JStr" | "JList" | "JDict", _) => Err(format!(
+        ("JNull" | "JBool" | "JInt" | "JNum" | "JStr" | "JList" | "JDict", _) => Err(format!(
             "malformed Json value: constructor `{ctor}` has unexpected fields {fields:?}"
         )),
         (other, _) => Err(format!(
-            "expected a Json value (JNull/JBool/JNum/JStr/JList/JDict), got constructor `{other}`"
+            "expected a Json value (JNull/JBool/JInt/JNum/JStr/JList/JDict), got constructor `{other}`"
         )),
     }
 }
@@ -487,6 +504,24 @@ impl<'a> Parser<'a> {
             }
         }
         let token = &self.text[start..self.pos];
+        // chelis#729: JSON has a single number type, so int-vs-float is a
+        // parse-time decision. A token carrying a fraction or an exponent
+        // is a float; anything else is an exact integer. This is the rule
+        // `Std.Io.Json` already uses
+        // (`packages/chelis-std/src/io/json.ch:211-219`) and the rule
+        // Python's `json` uses, so the two lanes agree.
+        //
+        // Before this, every number became `JNum f64` and
+        // `9007199254740993` silently returned `9007199254740992.0`.
+        let is_float_token = token.contains(['.', 'e', 'E']);
+        // A non-float token that does not fit i64 falls through to the f64
+        // path below. That keeps input which parses today parsing, rather
+        // than turning a silent narrowing into a new rejection; the
+        // narrowing survives for that one case and is documented in
+        // `docs/CHELIS_SURFACE.md` §3.8.
+        if !is_float_token && let Ok(value) = token.parse::<i64>() {
+            return Ok(jint(value));
+        }
         let value: f64 = token
             .parse()
             .map_err(|_| self.err(&format!("invalid number `{token}`")))?;
@@ -569,6 +604,12 @@ fn write_json_value(out: &mut String, value: &RuntimeValue, depth: usize) -> Res
         }
         ("JBool", [RuntimeValue::Bool(b)]) => {
             out.push_str(if *b { "true" } else { "false" });
+            Ok(())
+        }
+        ("JInt", [RuntimeValue::Scalar(payload)]) if payload.dtype().is_integer() => {
+            // Exact: no decimal point, no f64 round-trip. This is the
+            // whole point of the variant (chelis#729).
+            out.push_str(&payload.bits().as_i64().to_string());
             Ok(())
         }
         ("JNum", [RuntimeValue::Scalar(payload)]) if payload.dtype().is_float() => {
@@ -712,6 +753,7 @@ fn get_path<'v>(
                 let kind = match other_ctor {
                     "JNull" => "null",
                     "JBool" => "a bool",
+                    "JInt" => "a number",
                     "JNum" => "a number",
                     "JStr" => "a string",
                     _ => "a non-container value",
@@ -737,8 +779,50 @@ pub(super) fn json_f64_at(value: &RuntimeValue, path: &str) -> Result<f64, Strin
                 "json_f64: path `{path}`: malformed JNum fields {fields:?}"
             )),
         },
+        // chelis#729: `JInt` widens transparently, mirroring
+        // `Std.Io.Json`'s `json_float` (`io/json.ch:62`). Every caller
+        // written against the f64-only ADT keeps working unchanged; the
+        // widening is lossy only above 2^53, which is what `json_int` is
+        // for.
+        RuntimeValue::Adt { ctor, fields, .. } if ctor == "JInt" => match fields.as_slice() {
+            [RuntimeValue::Scalar(payload)] if payload.dtype().is_integer() => {
+                Ok(payload.bits().as_i64() as f64)
+            }
+            _ => Err(format!(
+                "json_f64: path `{path}`: malformed JInt fields {fields:?}"
+            )),
+        },
         other => Err(format!(
             "json_f64: path `{path}`: expected a number, got {}",
+            json_kind(other)?
+        )),
+    }
+}
+
+/// Exact int64 read. The counterpart to `json_f64` for the case the f64
+/// channel cannot represent: a JSON integer beyond 2^53.
+///
+/// Deliberately does *not* accept `JNum`. Narrowing a float to an integer
+/// is a silent-substitution shape (`loud_unsupported.md` §C1.1), so a
+/// caller who reaches a fractional value here gets a diagnostic naming
+/// `json_f64` rather than a truncated answer.
+pub(super) fn json_int_at(value: &RuntimeValue, path: &str) -> Result<i64, String> {
+    let node = get_path("json_int", value, path)?;
+    match node {
+        RuntimeValue::Adt { ctor, fields, .. } if ctor == "JInt" => match fields.as_slice() {
+            [RuntimeValue::Scalar(payload)] if payload.dtype().is_integer() => {
+                Ok(payload.bits().as_i64())
+            }
+            _ => Err(format!(
+                "json_int: path `{path}`: malformed JInt fields {fields:?}"
+            )),
+        },
+        RuntimeValue::Adt { ctor, .. } if ctor == "JNum" => Err(format!(
+            "json_int: path `{path}`: value is a float, not an exact integer; \
+             use `json_f64` to read it as f64"
+        )),
+        other => Err(format!(
+            "json_int: path `{path}`: expected a number, got {}",
             json_kind(other)?
         )),
     }
@@ -797,6 +881,19 @@ pub(super) fn json_f64s_at(value: &RuntimeValue, path: &str) -> Result<Vec<f64>,
     let mut out = Vec::with_capacity(items.len());
     for (index, item) in items.iter().enumerate() {
         match item {
+            // chelis#729: `JInt` widens here for the same reason it does
+            // in `json_f64` -- a numeric list must not start rejecting
+            // integer elements it used to accept.
+            RuntimeValue::Adt { ctor, fields, .. } if ctor == "JInt" => match fields.as_slice() {
+                [RuntimeValue::Scalar(payload)] if payload.dtype().is_integer() => {
+                    out.push(payload.bits().as_i64() as f64);
+                }
+                _ => {
+                    return Err(format!(
+                        "json_f64s: path `{path}`: malformed JInt fields at index {index}"
+                    ));
+                }
+            },
             RuntimeValue::Adt { ctor, fields, .. } if ctor == "JNum" => match fields.as_slice() {
                 [RuntimeValue::Scalar(payload)] if payload.dtype().is_float() => {
                     out.push(payload.bits().as_f64());
@@ -1033,7 +1130,10 @@ mod tests {
         assert_eq!(to_text(&parse("null")), "null");
         assert_eq!(to_text(&parse("true")), "true");
         assert_eq!(to_text(&parse("false")), "false");
-        assert_eq!(to_text(&parse("0")), "0.0");
+        // chelis#729: an integer token now round-trips as an integer.
+        // This asserted "0.0" before, i.e. `to_json(parse_json(x))` was not
+        // idempotent for any document containing an integer.
+        assert_eq!(to_text(&parse("0")), "0");
         assert_eq!(to_text(&parse("-2.5e3")), "-2500.0");
         assert_eq!(to_text(&parse("\"hi\"")), "\"hi\"");
     }
@@ -1041,10 +1141,7 @@ mod tests {
     #[test]
     fn parses_nested_structures() {
         let value = parse(r#"{"a": {"b": [1, 2.5, {"c": "x"}]}, "d": null}"#);
-        assert_eq!(
-            to_text(&value),
-            r#"{"a":{"b":[1.0,2.5,{"c":"x"}]},"d":null}"#
-        );
+        assert_eq!(to_text(&value), r#"{"a":{"b":[1,2.5,{"c":"x"}]},"d":null}"#);
         assert_eq!(json_f64_at(&value, "a.b.1").unwrap(), 2.5);
         assert_eq!(json_str_at(&value, "a.b.2.c").unwrap(), "x");
     }
@@ -1066,7 +1163,7 @@ mod tests {
     #[test]
     fn duplicate_keys_last_wins_first_position() {
         let value = parse(r#"{"a": 1, "b": 2, "a": 3}"#);
-        assert_eq!(to_text(&value), r#"{"a":3.0,"b":2.0}"#);
+        assert_eq!(to_text(&value), r#"{"a":3,"b":2}"#);
     }
 
     #[test]
@@ -1182,7 +1279,7 @@ mod tests {
         // Parse preserves document order (not sorted).
         let value = parse(r#"{"zeta": 1, "alpha": 2, "mid": 3}"#);
         let first = to_text(&value);
-        assert_eq!(first, r#"{"zeta":1.0,"alpha":2.0,"mid":3.0}"#);
+        assert_eq!(first, r#"{"zeta":1,"alpha":2,"mid":3}"#);
         // Serialize -> parse -> serialize is byte-stable.
         assert_eq!(to_text(&parse(&first)), first);
         // jdict/json_set append new keys in construction order.
@@ -1293,7 +1390,7 @@ mod tests {
     fn json_set_replaces_existing_list_elements_only() {
         let value = parse(r#"{"xs": [1, 2, 3]}"#);
         let updated = json_set_at(&value, "xs.1", &jnum(9.0)).unwrap();
-        assert_eq!(to_text(&updated), r#"{"xs":[1.0,9.0,3.0]}"#);
+        assert_eq!(to_text(&updated), r#"{"xs":[1,9.0,3]}"#);
         let oob = json_set_at(&value, "xs.3", &jnum(9.0)).expect_err("no growth");
         assert!(oob.contains("out of range"), "got `{oob}`");
     }
@@ -1489,5 +1586,112 @@ mod tests {
         );
         // 40 distinct keys stay distinct.
         assert_eq!(json_f64_at(&value, "k39").unwrap(), 39.5);
+    }
+
+    // -----------------------------------------------------------------
+    // chelis#729: exact integers (the `JInt` variant)
+    // -----------------------------------------------------------------
+
+    /// The defect this variant exists for. Before it, every JSON number
+    /// became `JNum f64` and 2^53+1 came back as `9007199254740992.0`
+    /// through both the round-trip and `json_f64`, silently.
+    #[test]
+    fn integers_beyond_2_53_survive_exactly() {
+        let value = parse_json_text("{\"big\": 9007199254740993}").expect("parses");
+        assert_eq!(json_int_at(&value, "big").unwrap(), 9007199254740993);
+        assert_eq!(
+            json_value_to_text(&value).unwrap(),
+            "{\"big\":9007199254740993}",
+            "serialization must not route the integer through f64"
+        );
+    }
+
+    /// The parse-time int/float split, matching `Std.Io.Json`
+    /// (`packages/chelis-std/src/io/json.ch:211-219`) and Python's `json`:
+    /// a `.`, `e` or `E` makes it a float, otherwise it is an exact int.
+    #[test]
+    fn number_tokens_split_on_fraction_or_exponent() {
+        for (text, want_int) in [
+            ("0", true),
+            ("-42", true),
+            ("9007199254740993", true),
+            ("1.5", false),
+            ("1e3", false),
+            ("1E3", false),
+            ("-0.0", false),
+            ("2.0", false),
+        ] {
+            let value = parse_json_text(&format!("{{\"v\": {text}}}")).expect("parses");
+            let is_int = json_int_at(&value, "v").is_ok();
+            assert_eq!(is_int, want_int, "`{text}` classified wrong");
+        }
+    }
+
+    /// `json_f64` widens `JInt` transparently, mirroring `Std.Io.Json`'s
+    /// `json_float` (`io/json.ch:62`). Every caller written against the
+    /// f64-only ADT keeps working.
+    #[test]
+    fn json_f64_widens_an_exact_integer() {
+        let value = parse_json_text("{\"n\": 42}").expect("parses");
+        assert_eq!(json_f64_at(&value, "n").unwrap(), 42.0);
+        // And the widening is the documented lossy case above 2^53.
+        let big = parse_json_text("{\"n\": 9007199254740993}").expect("parses");
+        assert_eq!(json_f64_at(&big, "n").unwrap(), 9007199254740992.0);
+    }
+
+    /// `json_int` refuses a float rather than truncating it — narrowing
+    /// here would be the silent-substitution shape §C1.1 forbids.
+    #[test]
+    fn json_int_refuses_a_float_instead_of_truncating() {
+        let value = parse_json_text("{\"n\": 1.5}").expect("parses");
+        let err = json_int_at(&value, "n").expect_err("must not truncate");
+        assert!(
+            err.contains("not an exact integer") && err.contains("json_f64"),
+            "diagnostic must name the remedy; got: {err}"
+        );
+    }
+
+    /// An integer literal too wide for int64 falls back to `JNum` rather
+    /// than becoming a new parse rejection: input that parsed before this
+    /// change must still parse.
+    #[test]
+    fn integers_too_wide_for_int64_fall_back_to_f64() {
+        let text = "{\"n\": 99999999999999999999999}";
+        let value = parse_json_text(text).expect("must still parse, not reject");
+        assert!(
+            json_int_at(&value, "n").is_err(),
+            "too-wide literal is not an exact int"
+        );
+        assert!(json_f64_at(&value, "n").unwrap() > 9.9e22);
+    }
+
+    /// Round-trip stability across both numeric variants in one document.
+    #[test]
+    fn mixed_numeric_document_round_trips() {
+        let text = "{\"i\":-7,\"f\":1.5,\"big\":9007199254740993,\"e\":1e3}";
+        let value = parse_json_text(text).expect("parses");
+        let out = json_value_to_text(&value).unwrap();
+        let again = parse_json_text(&out).expect("re-parses");
+        assert_eq!(
+            json_value_to_text(&again).unwrap(),
+            out,
+            "round-trip must be stable"
+        );
+        assert_eq!(json_int_at(&value, "i").unwrap(), -7);
+        assert_eq!(json_int_at(&value, "big").unwrap(), 9007199254740993);
+        assert_eq!(json_f64_at(&value, "f").unwrap(), 1.5);
+    }
+
+    /// `ensure_json_value` accepts a hand-built `JInt` and still rejects a
+    /// malformed one.
+    #[test]
+    fn ensure_json_value_accepts_jint_and_rejects_malformed() {
+        assert!(ensure_json_value(&jint(5)).is_ok());
+        let malformed = RuntimeValue::Adt {
+            ctor: "JInt".to_string(),
+            fields: vec![RuntimeValue::String("nope".to_string())],
+            field_names: None,
+        };
+        assert!(ensure_json_value(&malformed).is_err());
     }
 }

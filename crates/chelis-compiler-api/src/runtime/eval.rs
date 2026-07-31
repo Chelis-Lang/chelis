@@ -1584,6 +1584,13 @@ impl<'a> EvalContext<'a> {
                 let path = expect_string_arg(args, 1)?;
                 super::json::json_f64_at(value, &path).map(RuntimeValue::float64)
             }
+            "json_int" => {
+                let value = args
+                    .first()
+                    .ok_or_else(|| "json_int expects 2 arguments".to_string())?;
+                let path = expect_string_arg(args, 1)?;
+                super::json::json_int_at(value, &path).map(RuntimeValue::int64)
+            }
             "json_str" => {
                 let value = args
                     .first()
@@ -1630,6 +1637,28 @@ impl<'a> EvalContext<'a> {
                     }
                 };
                 Ok(super::json::jnum(value))
+            }
+            "jint" => {
+                // Exactly int64, mirroring `jnum`'s f64-only guard: a
+                // narrower integer widened here would be indistinguishable
+                // in the ADT from an exact int64 the user meant, and the
+                // whole point of the variant is that the width is honest.
+                let value = match args.first() {
+                    Some(RuntimeValue::Scalar(payload)) if payload.dtype() == Prim::Int64 => {
+                        payload.bits().as_i64()
+                    }
+                    Some(RuntimeValue::Scalar(payload)) if payload.dtype().is_integer() => {
+                        return Err(format!(
+                            "jint: expected an int64 value, got {:?} (suffix the literal, \
+                             `1i64`, or use cast(n, int64))",
+                            payload.dtype()
+                        ));
+                    }
+                    other => {
+                        return Err(format!("expected int64 arg at index 0, got {other:?}"));
+                    }
+                };
+                Ok(super::json::jint(value))
             }
             "jstr" => {
                 let value = expect_string_arg(args, 0)?;
