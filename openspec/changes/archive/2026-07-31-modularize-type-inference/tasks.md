@@ -56,4 +56,4 @@
 - [x] 7.6 Run `openspec validate --strict modularize-type-inference` and correct every diagnostic.
 - [x] 7.7 Run an independent adversarial review of API, diagnostic, metadata, and source-boundary parity.
 - [x] 7.8 Correct each confirmed finding and rerun the authoritative completion oracle.
-- [ ] 7.9 Request hosted CI after fresh approval for the remote state change, then record its result.
+- [x] 7.9 Request hosted CI after fresh approval for the remote state change, then record its result.
