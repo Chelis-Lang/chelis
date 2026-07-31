@@ -491,6 +491,24 @@ enum ReefCommand {
         #[arg(long = "no-auto-fetch")]
         no_auto_fetch: bool,
     },
+    /// Validate a standalone Reef CHB/archive pair without installing it.
+    ///
+    /// Strictly consumes the complete CHB envelope, rejects malformed or
+    /// noncanonical metadata, and checks the archive bytes against the
+    /// SHA-256 embedded in the CHB. This command is read-only and is
+    /// suitable for downstream release gates.
+    VerifyArtifact {
+        /// Source archive paired with the CHB.
+        #[arg(long, value_name = "PATH")]
+        archive: PathBuf,
+        /// Compiled shell metadata (`.chb`) to validate.
+        #[arg(long, value_name = "PATH")]
+        shell: PathBuf,
+        /// Emit a stable JSON report. In this mode stdout is JSON only,
+        /// stderr is empty, and `valid` is true iff `errors` is empty.
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
     /// Publish a package into the local Reef registry
     Publish { path: Option<PathBuf> },
     /// Install prebuilt packages into the local Reef registry
@@ -3065,6 +3083,45 @@ fn cmd_reef(command: ReefCommand) -> Result<(), Box<dyn std::error::Error>> {
             println!("Shell: {}", artifacts.shell_path.display());
             println!("Archive: {}", artifacts.archive_path.display());
         }
+        ReefCommand::VerifyArtifact {
+            archive,
+            shell,
+            json,
+        } => match chelis_reef::verify_artifact_pair(&archive, &shell) {
+            Ok(verified) => {
+                if json {
+                    let report = serde_json::json!({
+                        "valid": true,
+                        "package": verified.package,
+                        "compiler": verified.compiler,
+                        "shell_sha256": verified.shell_sha256,
+                        "archive_sha256": verified.archive_sha256,
+                        "errors": [],
+                    });
+                    println!("{}", serde_json::to_string_pretty(&report)?);
+                } else {
+                    println!(
+                        "Verified {} {}",
+                        verified.package.name, verified.package.version
+                    );
+                    println!("Shell SHA-256: {}", verified.shell_sha256);
+                    println!("Archive SHA-256: {}", verified.archive_sha256);
+                }
+            }
+            Err(error) if json => {
+                let report = serde_json::json!({
+                    "valid": false,
+                    "package": null,
+                    "compiler": null,
+                    "shell_sha256": null,
+                    "archive_sha256": null,
+                    "errors": [error],
+                });
+                println!("{}", serde_json::to_string_pretty(&report)?);
+                std::process::exit(1);
+            }
+            Err(error) => return Err(error.into()),
+        },
         ReefCommand::Publish { path } => {
             let root = path.unwrap_or_else(|| PathBuf::from("."));
             let artifacts = chelis_reef::publish_package(&root)?;

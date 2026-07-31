@@ -2536,6 +2536,61 @@ pub struct InstalledArtifact {
     pub archive_sha256: String,
 }
 
+/// Read-only result of validating a complete Reef `(archive, CHB)` pair.
+///
+/// This is the same validation boundary used before installation. It
+/// hashes both files, strictly decodes and structurally validates the
+/// complete CHB envelope, and checks the archive bytes against the digest
+/// embedded in the CHB. It does not create registry state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct VerifiedArtifactPair {
+    pub package: PackageId,
+    pub compiler: String,
+    pub shell_sha256: String,
+    pub archive_sha256: String,
+}
+
+/// Validate a standalone Reef archive/CHB pair without installing it.
+///
+/// The CHB decoder rejects trailing bytes, truncation, noncanonical
+/// encodings, and malformed metadata. The archive digest must equal the
+/// CHB's embedded `archive_sha256`.
+pub fn verify_artifact_pair(
+    archive_path: &Path,
+    shell_path: &Path,
+) -> Result<VerifiedArtifactPair, String> {
+    let archive_sha256 = sha256_file(archive_path).map_err(|error| {
+        format!(
+            "hash archive {} for artifact verification: {error}",
+            archive_path.display()
+        )
+    })?;
+    let shell_sha256 = sha256_file(shell_path).map_err(|error| {
+        format!(
+            "hash shell {} for artifact verification: {error}",
+            shell_path.display()
+        )
+    })?;
+    let shell = read_shell(shell_path)
+        .map_err(|error| format!("decode shell {}: {error}", shell_path.display()))?;
+    if shell.archive_sha256 != archive_sha256 {
+        return Err(format!(
+            "shell {} disagrees with archive {} on archive_sha256: \
+             embedded {}, computed {}",
+            shell_path.display(),
+            archive_path.display(),
+            shell.archive_sha256,
+            archive_sha256
+        ));
+    }
+    Ok(VerifiedArtifactPair {
+        package: shell.package,
+        compiler: shell.compiler,
+        shell_sha256,
+        archive_sha256,
+    })
+}
+
 /// Canonical hosting org for chelis pre-launch shell distribution.
 ///
 /// Used as the implicit publisher when a tag is referenced without an
@@ -2959,6 +3014,21 @@ pub fn install_validated_artifact_pair(
     registry_root: &Path,
     remote_origin: Option<&str>,
 ) -> Result<InstalledArtifact, String> {
+    // Fail closed on the complete on-disk pair before creating or reading
+    // any registry state. The same boundary is exposed read-only through
+    // `chelis reef verify-artifact`.
+    let verified = verify_artifact_pair(archive_path, shell_path)?;
+    if verified.package.name != name || verified.package.version != version {
+        return Err(format!(
+            "prebuilt shell {} advertises `{}-{}` but was requested as `{name}-{version}`",
+            shell_path.display(),
+            verified.package.name,
+            verified.package.version
+        ));
+    }
+    let archive_sha256 = verified.archive_sha256;
+    let shell_sha256 = verified.shell_sha256;
+
     fs::create_dir_all(registry_root).map_err(|e| {
         format!(
             "failed to create registry root {}: {e}",
@@ -2974,26 +3044,6 @@ pub fn install_validated_artifact_pair(
     } else {
         LocalRegistryIndex::default()
     };
-
-    let archive_sha256 = sha256_file(archive_path)?;
-    let shell_sha256 = sha256_file(shell_path)?;
-    let shell = read_shell(shell_path).map_err(|e| e.to_string())?;
-    if shell.archive_sha256 != archive_sha256 {
-        return Err(format!(
-            "prebuilt shell {} disagrees with archive {} on archive_sha256: \
-             the dist/ tree is stale; run `chelis reef build` in the monorepo",
-            shell_path.display(),
-            archive_path.display()
-        ));
-    }
-    if shell.package.name != name || shell.package.version != version {
-        return Err(format!(
-            "prebuilt shell {} advertises `{}-{}` but was requested as `{name}-{version}`",
-            shell_path.display(),
-            shell.package.name,
-            shell.package.version
-        ));
-    }
 
     let target_dir = registry_root.join("packages").join(name).join(version);
     fs::create_dir_all(&target_dir).map_err(|e| {
@@ -3023,7 +3073,7 @@ pub fn install_validated_artifact_pair(
     versions.retain(|entry| entry.version != version);
     versions.push(RegistryVersion {
         version: version.to_string(),
-        compiler: shell.compiler.clone(),
+        compiler: verified.compiler,
         archive_sha256: archive_sha256.clone(),
         shell_sha256: shell_sha256.clone(),
         remote_origin: remote_origin.map(str::to_string),

@@ -779,6 +779,7 @@ name = "chelis-shell"
 version = "0.17.4"
 dependencies = [
  "bincode",
+ "semver",
  "serde",
 ]
 

@@ -55,9 +55,17 @@ not designed in this round.
   runtime rather than a bootstrap target.
 - `chelis reef install --from-lockfile` re-fetches lockfile dependencies from their
   recorded `remote_origin` and verifies bytes against the lockfile hashes.
+- `chelis reef verify-artifact --shell <path> --archive <path>` performs the
+  install path's complete, read-only CHB/archive validation for release gates.
 
 The validation step at install time is the same regardless of source. It
 runs entirely on bytes already on disk; no code from the artifact executes.
+CHB decoding consumes the complete input and re-encodes to the same canonical
+bytes. It rejects appended bytes, truncation, malformed field encodings,
+noncanonical metadata ordering, duplicate module/export/dependency entries,
+invalid exact compiler pins, and invalid embedded SHA-256 text before checking
+the paired archive digest. These checks cover fields the installer does not
+otherwise consume (chelis#972).
 
 ### Reproducible package artifact contract
 
@@ -157,6 +165,10 @@ Multiple `--from-github` flags are independent installs.
   `install_validated_artifact_pair(archive_path, shell_path, name, version,
   registry_root)` helper. Same SHA256 verification, same
   name/version-agreement check, same registry placement.
+- Before placement, call the read-only `verify_artifact_pair` boundary used by
+  `chelis reef verify-artifact`. A successful decode must consume and
+  canonically validate the complete CHB envelope, not merely the package ID and
+  embedded archive digest needed by installation (chelis#972).
 - Lockfile records the fetched artifacts' content hashes. First fetch is
   trust-on-first-use against the bytes the canonical repo serves;
   subsequent fetches verify against the pinned hashes from the lockfile
@@ -537,6 +549,10 @@ explain the scope of the shipped Phase A change set.
   produce byte-identical local registry state for the same
   `(name, version)` — locked as a contract invariant by the byte-
   equality sub-case of the named oracle.
+- `verify_artifact_pair` is the read-only complete-envelope and archive-digest
+  boundary. The CLI exposes it as `chelis reef verify-artifact`; installation
+  calls it before creating package directories or updating `index.json`
+  (chelis#972).
 - SHA256 verification logic already shipped (computes
   `archive_sha256` and `shell_sha256` per
   `LockedDependency` at `lib.rs:64-71`).

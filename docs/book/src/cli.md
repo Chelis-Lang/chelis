@@ -262,6 +262,30 @@ multi-input selection instead emits
 `dependency_graph:{status:"unavailable",reason:"..."}`. The deprecated,
 name-only `dependency_edges` field remains for one compatibility release.
 
+## Reef Artifact Verification
+
+Release workflows can validate a prebuilt Reef shell and its source archive
+without installing either file:
+
+```sh
+chelis reef verify-artifact \
+  --shell dist/example-1.2.3.chb \
+  --archive dist/example-1.2.3.tar.zst
+```
+
+Verification strictly consumes the complete CHB, requires its bytes and
+metadata ordering to be canonical, validates structural invariants across the
+envelope, and checks the archive bytes against the CHB's embedded SHA-256.
+Appended bytes, truncation, malformed metadata, and a mismatched archive fail
+before any registry state is written. `reef install` uses this same verifier.
+
+Pass `--json` for release automation. Stdout is JSON only, stderr is empty,
+and exit status is zero exactly when `valid` is `true` and `errors` is empty.
+The success report includes the package identity, compiler pin, and both
+computed SHA-256 digests. This is content and structural validation, not
+publisher authentication; release transport should separately pin or sign the
+CHB digest.
+
 ## Output Contract
 
 - `check` is machine-facing: perfect score implies an empty error list.
@@ -271,6 +295,8 @@ name-only `dependency_edges` field remains for one compatibility release.
 - `lint` prints `path:line:col: rule_id (§spec_ref): message`; with
   `--check` it exits non-zero on any blocking violation. Advisory
   warnings are prefixed with `warning:` and do not affect the exit code.
+- `reef verify-artifact --json` emits one JSON document where
+  `valid == errors.is_empty()` and exits non-zero for an invalid pair.
 
 ## Shell Author Checklist
 

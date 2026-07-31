@@ -37,6 +37,15 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   `SOURCE_DATE_EPOCH` mtime with a fixed zero default). Invalid epoch values
   fail loudly. Repeated builds produce identical `.tar.zst` and `.chb` bytes,
   while the CHB continues to embed the canonical archive SHA-256.
+- **Reef now validates complete canonical CHB envelopes (chelis#972).**
+  CHB decoding rejects trailing bytes, truncation, noncanonical encodings and
+  malformed or ambiguously ordered metadata, including fields installation
+  does not otherwise consume. Every Reef install path applies that validation
+  before registry mutation and still checks the paired archive against the
+  embedded SHA-256. The new read-only
+  `chelis reef verify-artifact --shell <CHB> --archive <ARCHIVE>` command
+  exposes the same boundary to downstream release gates; `--json` emits a
+  JSON-only report with `valid == errors.is_empty()` and matching exit status.
 - **Concrete return contexts now specialize nullary generic ADT
   constructors before C ABI projection (chelis#935).** A layout-free
   constructor may retain its named generic ADT term through host-expression
