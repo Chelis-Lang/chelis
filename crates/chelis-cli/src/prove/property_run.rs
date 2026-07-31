@@ -252,7 +252,7 @@ fn emit(
         }
         if let Some(method) = &outcome.sampling_method {
             value["sampling_method"] = json!(method);
-            value["accepted_samples"] = json!(outcome.samples);
+            value["accepted_samples"] = json!(outcome.accepted_samples);
             value["attempted_samples"] = json!(outcome.attempted_samples);
             value["rejected_samples"] = json!(outcome.rejected_samples);
         }

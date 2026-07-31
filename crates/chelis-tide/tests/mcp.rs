@@ -1676,3 +1676,25 @@ where (alpha1 > 0.99), (alpha1 < alpha2), (alpha2 < 1.0):
         "constraint_directed"
     );
 }
+
+#[test]
+fn issue_977_tide_and_cli_match_exhausted_sampling_evidence() {
+    let source = "module Risk.Guards\n@property narrow forall(x: f32)\nwhere (x > 0.99), (x < 1.0):\n  (x == x)\n";
+    let response = handle_message(&json!({
+        "jsonrpc":"2.0",
+        "id":978,
+        "method":"tools/call",
+        "params":{"name":"chelis_prove","arguments":{
+            "source_kind":"surf", "source": source, "tier":"fuzz-only",
+            "samples":8, "max_attempts":3, "seed":42
+        }}
+    }))
+    .expect("prove response");
+    let tide = response["result"]["structuredContent"]["properties"][0].clone();
+
+    assert_eq!(tide["status"], "error");
+    assert_eq!(tide["accepted_samples"], 3);
+    assert_eq!(tide["attempted_samples"], 3);
+    assert_eq!(tide["rejected_samples"], 0);
+    assert_eq!(tide["samples"], 0);
+}

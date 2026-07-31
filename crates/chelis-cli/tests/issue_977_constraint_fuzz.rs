@@ -7,6 +7,36 @@ fn prove(source: &str, seed: u64) -> (i32, Value) {
     prove_with_kind(source, seed, false)
 }
 
+fn prove_with_attempt_limit(source: &str, samples: &str, max_attempts: &str) -> (i32, Value) {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("risk.ch");
+    std::fs::write(&path, source).expect("write fixture");
+    let output = Command::cargo_bin("chelis")
+        .expect("chelis binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "prove",
+            path.to_str().expect("utf-8 path"),
+            "--json",
+            "--tier",
+            "fuzz-only",
+            "--samples",
+            samples,
+            "--max-attempts",
+            max_attempts,
+            "--seed",
+            "42",
+        ])
+        .output()
+        .expect("run prove");
+    let record = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|value| value["kind"] == "property")
+        .expect("property record");
+    (output.status.code().unwrap_or(-1), record)
+}
+
 fn prove_with_kind(source: &str, seed: u64, deep: bool) -> (i32, Value) {
     let dir = tempdir().expect("tempdir");
     let surf_path = dir.path().join("risk.ch");
@@ -179,6 +209,30 @@ fn f32_and_f64_interval_bounds_are_not_clipped_to_the_uniform_range() {
         assert_eq!(record["accepted_samples"], 32);
         assert_eq!(record["rejected_samples"], 0);
     }
+}
+
+#[test]
+fn exhausted_run_preserves_the_accepted_sample_count() {
+    let (code, record) = prove_with_attempt_limit(NARROW_VAR_GUARD, "8", "3");
+    assert_eq!(code, 3, "{record}");
+    assert_eq!(record["status"], "error");
+    assert_eq!(record["accepted_samples"], 3);
+    assert_eq!(record["attempted_samples"], 3);
+    assert_eq!(record["rejected_samples"], 0);
+    assert_eq!(record["samples"], 0, "terminal verdict remains non-green");
+}
+
+#[test]
+fn wide_finite_f64_interval_is_representable_without_span_overflow() {
+    let source = "module Risk.Wide64
+@property wide forall(x: f64)
+where (x > -1e308f64), (x < 1e308f64):
+  (x == x)
+";
+    let (code, record) = prove(source, 29);
+    assert_eq!(code, 0, "{record}");
+    assert_eq!(record["accepted_samples"], 32);
+    assert_eq!(record["rejected_samples"], 0);
 }
 
 #[test]

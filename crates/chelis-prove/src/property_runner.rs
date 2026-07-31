@@ -107,6 +107,10 @@ pub struct PropertyOutcome {
     /// outcomes and declaration failures that never selected a sampler.
     pub sampling_method: Option<String>,
     pub attempted_samples: usize,
+    /// Samples that satisfied every guard and reached the property body. This
+    /// is distinct from `samples`, which is zero on terminal error/unsupported
+    /// outcomes even when useful sampling work preceded the terminal state.
+    pub accepted_samples: usize,
     pub rejected_samples: usize,
 }
 
@@ -179,6 +183,7 @@ impl PropertyOutcome {
             goal: None,
             sampling_method: None,
             attempted_samples: 0,
+            accepted_samples: 0,
             rejected_samples: 0,
         }
     }
@@ -204,6 +209,7 @@ impl PropertyOutcome {
     ) -> Self {
         self.sampling_method = Some(method.into());
         self.attempted_samples = attempted_samples;
+        self.accepted_samples = accepted_samples;
         self.rejected_samples = attempted_samples.saturating_sub(accepted_samples);
         self
     }
@@ -3516,7 +3522,10 @@ impl Lcg {
     }
     fn next_f64(&mut self, min: f64, max: f64) -> f64 {
         let unit = (self.next_u64() >> 11) as f64 / ((1u64 << 53) as f64);
-        min + (max - min) * unit
+        // Convex interpolation avoids overflowing `max - min` for a valid
+        // finite interval such as [-1e308, 1e308]. Each weighted endpoint is
+        // finite and their mathematical sum remains inside [min, max].
+        min * (1.0 - unit) + max * unit
     }
 }
 

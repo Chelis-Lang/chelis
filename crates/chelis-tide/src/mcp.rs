@@ -302,6 +302,7 @@ fn prove_tool_schema() -> Value {
                 "amenability": { "type": "string", "enum": ["linear", "polynomial", "transcendental", "opaque"], "description": "SMT amenability classification" },
                 "smt_timeout": { "type": "integer", "description": "SMT timeout in ms (default 5000)", "default": 5000 },
                 "samples": { "type": "integer", "description": "Fuzz samples per property (default 100)", "default": 100 },
+                "max_attempts": { "type": "integer", "description": "Maximum candidate draws before an incomplete fuzz run fails closed" },
                 "seed": { "type": "integer", "description": "Fuzz seed (default 0)", "default": 0 }
             },
             "required": ["source_kind", "source"]
@@ -332,6 +333,10 @@ fn handle_prove_tool(args: &Value) -> Value {
         .and_then(Value::as_u64)
         .unwrap_or(5000);
     let samples = args.get("samples").and_then(Value::as_u64).unwrap_or(100) as usize;
+    let max_attempts = args
+        .get("max_attempts")
+        .and_then(Value::as_u64)
+        .map(|value| value as usize);
     let seed = args.get("seed").and_then(Value::as_u64).unwrap_or(0);
 
     // Validate the tier and source_kind up front (the `amenability` arg is
@@ -385,7 +390,7 @@ fn handle_prove_tool(args: &Value) -> Value {
         tier: tier.to_string(),
         only: None,
         invariant_min_rate,
-        max_attempts: None,
+        max_attempts,
     };
     let property_run = if source_is_deep {
         run_deep_source_properties(&source, &prop_options)
@@ -555,7 +560,7 @@ fn property_to_json(o: &chelis_prove::property_runner::PropertyOutcome) -> Value
     }
     if let Some(method) = &o.sampling_method {
         value["sampling_method"] = json!(method);
-        value["accepted_samples"] = json!(o.samples);
+        value["accepted_samples"] = json!(o.accepted_samples);
         value["attempted_samples"] = json!(o.attempted_samples);
         value["rejected_samples"] = json!(o.rejected_samples);
     }
