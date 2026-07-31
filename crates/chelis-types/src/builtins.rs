@@ -143,10 +143,12 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "parse_json",
     "to_json",
     "json_f64",
+    "json_int",
     "json_str",
     "json_list",
     "json_f64s",
     "jnum",
+    "jint",
     "jstr",
     "jlist",
     "jdict",
@@ -1099,10 +1101,12 @@ pub fn builtin_env() -> (Env, VarGen) {
     generic_unop("parse_json", &mut env, &mut vg);
     generic_unop("to_json", &mut env, &mut vg);
     generic_binop("json_f64", &mut env, &mut vg);
+    generic_binop("json_int", &mut env, &mut vg);
     generic_binop("json_str", &mut env, &mut vg);
     generic_binop("json_list", &mut env, &mut vg);
     generic_binop("json_f64s", &mut env, &mut vg);
     generic_unop("jnum", &mut env, &mut vg);
+    generic_unop("jint", &mut env, &mut vg);
     generic_unop("jstr", &mut env, &mut vg);
     generic_unop("jlist", &mut env, &mut vg);
     generic_unop("jdict", &mut env, &mut vg);
@@ -1253,8 +1257,19 @@ pub fn register_prelude_adts(env: &mut Env, vg: &mut VarGen, adt_reg: &mut AdtRe
     // JSON builtins (`parse_json`/`to_json`/accessors). Non-parameterized
     // and recursive through `List`/`Dict`, mirroring the document model:
     //
-    //   Json = JNull | JBool bool | JNum f64 | JStr string
+    //   Json = JNull | JBool bool | JInt int64 | JNum f64 | JStr string
     //        | JList List[Json] | JDict Dict[string, Json]
+    //
+    // `JInt` carries exact int64 (chelis#729-facing). JSON has a single
+    // number type, so int-vs-float is a *parse-time* decision: a token
+    // containing `.`, `e` or `E` becomes `JNum`, anything else becomes
+    // `JInt`. That is the rule `Std.Io.Json` already uses
+    // (`packages/chelis-std/src/io/json.ch:211-219`) and the rule Python's
+    // `json` uses. Without it, `9007199254740993` came back as
+    // `9007199254740992.0` — a silent narrowing on a builtin surface, at
+    // the moment chelis#729 is removing the other f64-only numeric
+    // channels. `json_f64` widens `JInt` transparently, so every existing
+    // caller keeps working.
     //
     // The dot-path accessors (`json_f64` etc.) are the primary surface;
     // matching on these constructors stays available for power users, so
@@ -1263,6 +1278,7 @@ pub fn register_prelude_adts(env: &mut Env, vg: &mut VarGen, adt_reg: &mut AdtRe
     let json_variants: Vec<(&str, Vec<Type>)> = vec![
         ("JNull", vec![]),
         ("JBool", vec![Type::Prim(Prim::Bool)]),
+        ("JInt", vec![Type::Prim(Prim::Int64)]),
         ("JNum", vec![Type::Prim(Prim::F64)]),
         ("JStr", vec![Type::Prim(Prim::String)]),
         (
@@ -1634,6 +1650,7 @@ mod tests {
             vec![
                 "JNull".to_string(),
                 "JBool".to_string(),
+                "JInt".to_string(),
                 "JNum".to_string(),
                 "JStr".to_string(),
                 "JList".to_string(),
@@ -1651,11 +1668,26 @@ mod tests {
             }
             other => panic!("JNum should be a function type, got {other:?}"),
         }
+        // chelis#729: `JInt` carries exact int64 alongside the f64 `JNum`.
+        match &env.lookup("JInt").expect("JInt").body {
+            Type::Fn(params, ret) => {
+                assert_eq!(params.as_slice(), &[Type::Prim(Prim::Int64)]);
+                assert_eq!(**ret, json_ty);
+            }
+            other => panic!("JInt should be a function type, got {other:?}"),
+        }
         // The recursive payloads point back at Json through List/Dict.
+        // Looked up by name rather than by index: the positional form
+        // silently retargeted when `JInt` was inserted, and a wrong-variant
+        // assertion that still passes is worse than one that fails.
         let def = adt_reg.lookup("Json").expect("Json def");
-        let jdict_fields = &def.variants[5].fields;
+        let jdict = def
+            .variants
+            .iter()
+            .find(|variant| variant.name == "JDict")
+            .expect("JDict variant");
         assert_eq!(
-            jdict_fields[0].1,
+            jdict.fields[0].1,
             Type::Adt(
                 "Dict".to_string(),
                 vec![Type::Prim(Prim::String), json_ty.clone()]
