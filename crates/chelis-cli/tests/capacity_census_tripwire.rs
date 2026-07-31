@@ -19,7 +19,7 @@
 //!    self-bless.
 //! 2. FLAGGED capacity seam: NO citation path exists (PR #950 red team
 //!    P1-1) - the grandfathered 2026-07-30 seam set is frozen by exact
-//!    citation string and count. Redesign onto the tagged carrier, remove
+//!    citation string and row identity. Redesign onto the tagged carrier, remove
 //!    the surface, or obtain a `maintainer-override(...)` citation, which
 //!    only a human reviewer adds (`AGENTS.md` §Numeric Surface
 //!    Discipline).
@@ -40,6 +40,7 @@ use std::path::{Path, PathBuf};
 
 use chelis_deep::tag::DeepTag;
 use chelis_deep::{Atom, Expr, List};
+use chelis_types::types::Prim;
 use serde::{Deserialize, Serialize};
 
 const BASELINE_REL: &str = "spec/design/capacity_census.json";
@@ -52,11 +53,63 @@ const HEADER_ROOTS: &[&str] = &["chelis_runtime.h", "chelis_blas.h", "chelis_mat
 const STD_SRC_REL: &str = "packages/chelis-std/src";
 const CONTROLLING_SPEC_REL: &str = "spec/05-risc-primitives.md";
 const NUMERIC_PRIMS: &[&str] = &[
-    "f64", "f32", "f16", "bf16", "int8", "int16", "int32", "int64",
+    "f64", "f32", "f16", "bf16", "f8e4m3", "int8", "int16", "int32", "int64",
 ];
 /// The subset of `NUMERIC_PRIMS` whose appearance in an untagged public
 /// position is a capacity SEAM, mirroring `double`/`float` on the C side.
-const FLOAT_PRIMS: &[&str] = &["f64", "f32", "f16", "bf16"];
+const FLOAT_PRIMS: &[&str] = &["f64", "f32", "f16", "bf16", "f8e4m3"];
+
+/// What the census must do with one language primitive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PrimCensusClass {
+    /// A capacity SEAM in an untagged public position (no citation path).
+    Float,
+    /// A `numeric-op` owing a semantic registration.
+    Integer,
+    /// Carries no dtype, so it is not census surface at all.
+    NonNumeric,
+}
+
+/// Census membership of one `chelis_types::Prim`, decided by an EXHAUSTIVE
+/// match. `NUMERIC_PRIMS`/`FLOAT_PRIMS` are string lists because the
+/// desugared AST carries `(t-prim {} <name>)` SYMBOLS, not enum values, so
+/// nothing about widening `Prim` would otherwise reach this file: a new
+/// dtype could enter the language and every stdlib signature carrying it
+/// would enumerate as dtype-free. The match is the lock. Adding a variant
+/// makes this file stop compiling until the dtype is classified; removing
+/// one makes `ALL_PRIMS` below stop compiling; and
+/// `census_prim_lists_cover_every_prim_variant` checks this verdict against
+/// the two string lists in both directions. `chelis-types` uses the same
+/// device one layer down for its own active-set rules.
+fn prim_census_class(prim: Prim) -> PrimCensusClass {
+    match prim {
+        // A dtype RESERVED but inactive (`spec/04-type-system.md` §1.1.1) is
+        // still float for census purposes. The census asks what a spelling
+        // would carry across a public boundary, not whether the checker
+        // admits it today; letting those two answers diverge is how a
+        // reserved dtype becomes a silent seam on the day it activates.
+        Prim::F32 | Prim::F64 | Prim::F16 | Prim::Bf16 | Prim::F8e4m3 => PrimCensusClass::Float,
+        Prim::Int8 | Prim::Int16 | Prim::Int32 | Prim::Int64 => PrimCensusClass::Integer,
+        Prim::Bool | Prim::String => PrimCensusClass::NonNumeric,
+    }
+}
+
+/// Closed enumeration of `chelis_types::Prim`, paired with the exhaustive
+/// match above: a variant added to the enum breaks the match, a variant
+/// removed from it breaks this list.
+const ALL_PRIMS: &[Prim] = &[
+    Prim::F32,
+    Prim::F64,
+    Prim::F16,
+    Prim::Bf16,
+    Prim::F8e4m3,
+    Prim::Int8,
+    Prim::Int16,
+    Prim::Int32,
+    Prim::Int64,
+    Prim::Bool,
+    Prim::String,
+];
 
 /// The exact citation carried by the grandfathered 2026-07-30 capacity
 /// seams. A FLAGGED row (float-carrier / raw-dtype-int) has NO
@@ -67,10 +120,6 @@ const FLOAT_PRIMS: &[&str] = &["f64", "f32", "f16", "bf16"];
 /// the baseline file is review-routed.
 const GRANDFATHER_SEAM_CITATION: &str = "baseline-2026-07-30 pre-ratchet seam; \
 unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break";
-
-/// The frozen seam set may only SHRINK. Copying the grandfather citation
-/// onto a new flagged row trips the count lock AND the identity lock below.
-const GRANDFATHER_SEAM_COUNT: usize = 42;
 
 /// The plain-baseline citation for non-seam pre-ratchet rows. Like the seam
 /// citation it is frozen to an exact identity set (`GRANDFATHER_PLAIN_IDS`)
@@ -491,7 +540,106 @@ fn preprocessed_headers(include_dir: &Path, roots: &[&str]) -> BTreeMap<String, 
     }
     assert_total_attribution(&sources, &per_file);
     assert_roots_reach_every_published_header(include_dir, &sources);
+    assert_known_type_words(&per_file);
     per_file
+}
+
+/// Invert the classification rule: every TYPE word a published declaration
+/// uses must be a spelling the census recognizes, so an unrecognized one
+/// fails the build instead of producing an unflagged row.
+///
+/// This runs on PREPROCESSED text only. Raw sources still carry
+/// macro-spelled types (`CHELIS_NUM value`), and those are the
+/// context-invariance guard's business, on its own terms, before this one
+/// runs.
+fn assert_known_type_words(per_file: &BTreeMap<String, String>) {
+    let mut typedefs = BTreeMap::new();
+    for text in per_file.values() {
+        typedefs.append(&mut collect_typedefs(text));
+    }
+    for (name, text) in per_file {
+        for row in header_rows(name, text, &typedefs) {
+            let declaration = row.id.split_once(": ").map_or(row.id.as_str(), |(_, d)| d);
+            assert_declaration_type_words(name, declaration, &typedefs);
+        }
+        // A typedef statement is never a row of its own, so the words it
+        // introduces would otherwise reach classification only through
+        // `resolve_words` - after the positional structure is gone. Checking
+        // the statement here is what makes "the word is a local alias" a
+        // safe answer at the use site.
+        for statement in strip_c_comments(text).split(';') {
+            let statement = normalize_ws(statement);
+            if statement.starts_with("typedef ") && !statement.contains('{') {
+                assert_declaration_type_words(name, &statement, &typedefs);
+            }
+        }
+    }
+}
+
+/// A declaration's identifier tokens split into type words and declarator
+/// names by POSITION: an identifier followed by another identifier or `*`
+/// is a type word, and an identifier followed by `(`, `)`, `,`, `[`, `}`,
+/// `;` or the end of the declaration is the thing being declared. A word in
+/// either census list counts as a type word wherever it appears, so an
+/// abstract parameter (`int f(double);`) cannot hide in name position.
+///
+/// A TYPE word must be numeric, non-numeric-but-known, a local typedef
+/// alias (whose own statement `assert_known_type_words` checks by this same
+/// rule), or `chelis_`-prefixed - the project's own opaque handles, whose
+/// layouts are inventoried as their own `header-struct` rows.
+///
+/// A DECLARATOR NAME must not look like a type spelling: a leading `_` is
+/// the implementation-reserved identifier namespace and a `_t` suffix is
+/// the type-alias convention, so either one in name position means the
+/// positional read was wrong and a type word is escaping unclassified.
+fn assert_declaration_type_words(
+    header_name: &str,
+    declaration: &str,
+    typedefs: &BTreeMap<String, Vec<String>>,
+) {
+    let tokens: Vec<String> = canonical_c_tokens(declaration)
+        .split(' ')
+        .filter(|token| !token.is_empty())
+        .map(str::to_string)
+        .collect();
+    let is_identifier =
+        |token: &str| token.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_');
+    for (index, token) in tokens.iter().enumerate() {
+        if !is_identifier(token) {
+            continue;
+        }
+        let known = NUMERIC_C_TYPES.contains(&token.as_str())
+            || NON_NUMERIC_C_TYPE_WORDS.contains(&token.as_str());
+        let next = tokens.get(index + 1).map_or("", String::as_str);
+        if known || next == "*" || is_identifier(next) {
+            assert!(
+                known || typedefs.contains_key(token) || token.starts_with("chelis_"),
+                "{}UNKNOWN TYPE WORD `{token}` in `{header_name}: {declaration}`: \
+                 the census classifies a declaration by the arithmetic width \
+                 its type words carry, so a spelling it does not recognize \
+                 produces an UNFLAGGED row - which is a citation path past the \
+                 rule that flagged rows have none. An allowlist of arithmetic \
+                 spellings can never be complete, so the closed list is the \
+                 other one. Either add `{token}` to `NUMERIC_C_TYPES` (it \
+                 carries a dtype) or to `NON_NUMERIC_C_TYPE_WORDS` (it \
+                 provably does not), in a change set a human reviews.{}",
+                teaching_header(),
+                teaching_footer()
+            );
+        } else {
+            assert!(
+                !token.starts_with('_') && !token.ends_with("_t"),
+                "{}RESERVED-SHAPED DECLARATOR NAME `{token}` in \
+                 `{header_name}: {declaration}`: a leading underscore is the \
+                 implementation-reserved identifier namespace and a `_t` \
+                 suffix is the type-alias convention, so a name of this shape \
+                 means the census read a TYPE word as the thing being \
+                 declared and skipped classifying it. Rename the declarator.{}",
+                teaching_header(),
+                teaching_footer()
+            );
+        }
+    }
 }
 
 /// `HEADER_ROOTS` is a hand-maintained list, and §C6 forbids the census
@@ -504,16 +652,7 @@ fn assert_roots_reach_every_published_header(
     include_dir: &Path,
     source_closure: &BTreeMap<String, String>,
 ) {
-    let entries =
-        fs::read_dir(include_dir).unwrap_or_else(|e| panic!("read {}: {e}", include_dir.display()));
-    let on_disk: BTreeSet<String> = entries
-        .map(|entry| entry.expect("dir entry").path())
-        .filter(|path| path.extension().is_some_and(|ext| ext == "h"))
-        .filter_map(|path| {
-            path.file_name()
-                .map(|name| name.to_string_lossy().to_string())
-        })
-        .collect();
+    let on_disk = published_headers_on_disk(include_dir);
     // Reachability is a property of the raw include graph, not of whether
     // preprocessing happens to emit a locally-attributed declaration bucket.
     // A root such as `chelis_blas.h` may contribute only a system include on
@@ -532,6 +671,34 @@ fn assert_roots_reach_every_published_header(
         include_dir.display(),
         teaching_footer()
     );
+}
+
+/// Every `.h` file the published include directory ships, keyed the way an
+/// `#include` spells it: a path RELATIVE to the include directory, so
+/// `sub/x.h` compares against the closure key `sub/x.h`. The walk recurses
+/// (round-4 red team N5); a flat `read_dir` made a subdirectory an
+/// uninventoried publishing channel, which is the same hole the
+/// derived-roots rule exists to close one level up.
+fn published_headers_on_disk(include_dir: &Path) -> BTreeSet<String> {
+    fn walk(dir: &Path, include_dir: &Path, out: &mut BTreeSet<String>) {
+        let entries = fs::read_dir(dir).unwrap_or_else(|e| panic!("read {}: {e}", dir.display()));
+        for entry in entries {
+            let path = entry.expect("dir entry").path();
+            if path.is_dir() {
+                walk(&path, include_dir, out);
+            } else if path.extension().is_some_and(|ext| ext == "h") {
+                out.insert(
+                    path.strip_prefix(include_dir)
+                        .expect("under the include directory")
+                        .to_string_lossy()
+                        .replace('\\', "/"),
+                );
+            }
+        }
+    }
+    let mut out = BTreeSet::new();
+    walk(include_dir, include_dir, &mut out);
+    out
 }
 
 /// A `#include` of a local header by EITHER spelling. `cc -E -I <dir>`
@@ -583,7 +750,7 @@ fn header_source_closure(include_dir: &Path, roots: &[&str]) -> BTreeMap<String,
 /// interpretation would re-create the spoofing channel.
 fn assert_no_line_directives(sources: &BTreeMap<String, String>) {
     for (name, source) in sources {
-        for (index, line) in strip_c_comments(source).lines().enumerate() {
+        for (line_number, line) in logical_lines(&strip_c_comments(source)) {
             let Some(rest) = line.trim_start().strip_prefix('#') else {
                 continue;
             };
@@ -602,12 +769,40 @@ fn assert_no_line_directives(sources: &BTreeMap<String, String>) {
                  inventory. Published headers may not contain either; delete \
                  the directive.{}",
                 teaching_header(),
-                index + 1,
+                line_number,
                 line.trim(),
                 teaching_footer()
             );
         }
     }
+}
+
+/// Physical lines joined across phase-2 line splices, each paired with the
+/// physical line it starts on. A backslash-newline is deleted before any
+/// directive is recognized, so `#\<newline>line 1 "/opt/x.h"` IS a `#line`
+/// directive; scanning physical lines saw `#\` and a bare `line 1 "..."`
+/// and let it through to the independent attribution backstop, which
+/// rejected it for the right reason under the wrong name (round-4 red team,
+/// diagnostic quality only - the export never entered the inventory).
+fn logical_lines(text: &str) -> Vec<(usize, String)> {
+    let mut out = Vec::new();
+    let mut current = String::new();
+    let mut start = 1usize;
+    for (index, line) in text.lines().enumerate() {
+        if current.is_empty() {
+            start = index + 1;
+        }
+        if let Some(head) = line.strip_suffix('\\') {
+            current.push_str(head);
+            continue;
+        }
+        current.push_str(line);
+        out.push((start, std::mem::take(&mut current)));
+    }
+    if !current.is_empty() {
+        out.push((start, current));
+    }
+    out
 }
 
 /// Attribution totality: every declarator the RAW published closure
@@ -1083,6 +1278,44 @@ const NUMERIC_C_TYPES: &[&str] = &[
     "uint8_t",
 ];
 
+/// The FROZEN set of type words a published declaration may use that carry
+/// no arithmetic width: storage/qualifier noise, the aggregate keywords, and
+/// the two non-arithmetic value spellings. It exists so the classification
+/// rule can be INVERTED (`assert_known_type_words`): membership in
+/// `NUMERIC_C_TYPES` decides the flags, but a type word in NEITHER list is
+/// a loud rejection rather than an unflagged row.
+///
+/// Round-4 red team N1 is why. `NUMERIC_C_TYPES` alone is an allowlist, so
+/// `_Float16`, `__fp16`, `__bf16`, `_Decimal64`, and `__int128` classified
+/// as `[]` - a bare-float export could enter the census on an ordinary
+/// issue citation, past the seam rule that has no citation path. An
+/// allowlist of arithmetic spellings can never be complete (every
+/// toolchain adds its own), so the closed set has to be the OTHER one: the
+/// words that are known not to carry a dtype. A new arithmetic spelling
+/// then arrives as a build failure naming the unknown word, which is the
+/// same footing an unresolvable typedef already has.
+const NON_NUMERIC_C_TYPE_WORDS: &[&str] = &[
+    "_Bool",
+    "_Noreturn",
+    "bool",
+    "char",
+    "const",
+    "enum",
+    "extern",
+    "inline",
+    "register",
+    "restrict",
+    "static",
+    "struct",
+    "typedef",
+    "union",
+    "void",
+    "volatile",
+    "wchar_t",
+    "__restrict",
+    "__restrict__",
+];
+
 /// The flags that make a row a capacity SEAM (subject to the grandfather
 /// freeze). `numeric-op` is classification, not a seam.
 fn is_seam(flags: &[String]) -> bool {
@@ -1129,6 +1362,25 @@ fn collect_typedefs(text: &str) -> BTreeMap<String, Vec<String>> {
             map.insert(name, target);
             continue;
         }
+        if rest.contains('[') {
+            let (name, target) = array_typedef(&stmt).unwrap_or_else(|| {
+                panic!(
+                    "{}UNRESOLVABLE ARRAY TYPEDEF `{stmt};`: an array typedef \
+                     declares its alias immediately before the first `[`, and \
+                     one this resolver cannot read that way hides every \
+                     numeric and dtype word behind an opaque name. The generic \
+                     word split reads the array EXTENT as the alias, so a \
+                     setter taking the alias inherits nothing and a \
+                     `float-carrier` seam becomes an unflagged row (round-4 \
+                     red team N2). Rewrite the declaration or teach \
+                     `array_typedef` the new shape in the same change set.{}",
+                    teaching_header(),
+                    teaching_footer()
+                )
+            });
+            map.insert(name, target);
+            continue;
+        }
         let mut words: Vec<String> = rest
             .split(|c: char| !(c.is_alphanumeric() || c == '_'))
             .filter(|w| !w.is_empty())
@@ -1140,6 +1392,42 @@ fn collect_typedefs(text: &str) -> BTreeMap<String, Vec<String>> {
         }
     }
     map
+}
+
+/// Split `typedef <element...> <name>[<extent>]...` into the alias name and
+/// the element type's words. The alias is the identifier immediately before
+/// the FIRST `[`; everything between `typedef` and it is the element type,
+/// so `typedef double chelis_vec4[4];` makes a setter taking `chelis_vec4`
+/// inherit `double` (round-4 red team N2 - the generic word split popped
+/// the array extent as the alias and registered `4`, leaving the real alias
+/// unresolved and its `float-carrier` seam unflagged). A shape that does
+/// not read that way, including an empty element type or an alias that is
+/// itself a type keyword, is rejected rather than guessed at.
+fn array_typedef(stmt: &str) -> Option<(String, Vec<String>)> {
+    let tokens: Vec<String> = canonical_c_tokens(stmt)
+        .split(' ')
+        .map(str::to_string)
+        .collect();
+    let open = tokens.iter().position(|token| token == "[")?;
+    let name = tokens.get(open.checked_sub(1)?)?;
+    if !name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+        || NUMERIC_C_TYPES.contains(&name.as_str())
+        || NON_NUMERIC_C_TYPE_WORDS.contains(&name.as_str())
+    {
+        return None;
+    }
+    let target: Vec<String> = tokens[..open - 1]
+        .iter()
+        .filter(|token| {
+            *token != "typedef"
+                && token.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_')
+        })
+        .cloned()
+        .collect();
+    if target.is_empty() {
+        return None;
+    }
+    Some((name.clone(), target))
 }
 
 /// Split `typedef <return...> (*<name>)(<params...>)` into the alias name
@@ -1502,6 +1790,7 @@ fn scan_exported_numeric_defs(list: &List, file_label: &str, rows: &mut Vec<Row>
     }
     let declarations = list.elements.iter().skip(3);
     let mut exports = BTreeSet::new();
+    let mut value_definitions = BTreeSet::new();
     let mut signatures: BTreeMap<String, &Expr> = BTreeMap::new();
     for declaration in declarations.clone() {
         let Expr::List(declaration, _) = declaration else {
@@ -1518,6 +1807,11 @@ fn scan_exported_numeric_defs(list: &List, file_label: &str, rows: &mut Vec<Row>
                         .map(str::to_string),
                 );
             }
+            Some(DeepTag::Def) => {
+                if let Some(name) = declaration.elements.get(2).and_then(symbol) {
+                    value_definitions.insert(name.to_string());
+                }
+            }
             Some(DeepTag::Defsig) => {
                 if let (Some(name), Some(signature)) = (
                     declaration.elements.get(2).and_then(symbol),
@@ -1531,6 +1825,26 @@ fn scan_exported_numeric_defs(list: &List, file_label: &str, rows: &mut Vec<Row>
     }
     for name in exports {
         let Some(signature) = signatures.get(&name) else {
+            // An export naming no value definition is a type, ADT, or
+            // constructor export, which this leg does not enumerate. An
+            // export naming a `def` with no `defsig` is different: the
+            // enumerator reads capacity off the DECLARED signature, so
+            // that def's dtypes are public and invisible at once. It used
+            // to `continue` (round-4 red team N3), and the Surf style
+            // guide recommends exactly that shape for load-style bindings,
+            // so the silent path was one stdlib commit from being taken.
+            assert!(
+                !value_definitions.contains(&name),
+                "{}EXPORTED DEFINITION WITHOUT A DECLARED SIGNATURE \
+                 `{file_label}::{name}`: this leg enumerates a public \
+                 stdlib def's numeric capacity from its `defsig`, so an \
+                 exported def that declares none is public numeric surface \
+                 the census cannot see. Declare the signature (`def ... -> \
+                 T = ...` per the Surf style guide) or stop exporting the \
+                 binding.{}",
+                teaching_header(),
+                teaching_footer()
+            );
             continue;
         };
         let mut prims = BTreeSet::new();
@@ -1867,18 +2181,12 @@ fn check_against_baseline_with(
             ));
         }
     }
-    let grandfathered = baseline
-        .rows
-        .iter()
-        .filter(|r| !r.flags.is_empty() && r.citation == GRANDFATHER_SEAM_CITATION)
-        .count();
-    if grandfathered > GRANDFATHER_SEAM_COUNT {
-        problems.push(format!(
-            "grandfathered seam citation appears on {grandfathered} rows; the \
-             frozen 2026-07-30 set is {GRANDFATHER_SEAM_COUNT} and may only \
-             shrink"
-        ));
-    }
+    // There is deliberately no separate seam COUNT lock. The identity
+    // freeze above subsumes it: `GRANDFATHER_SEAM_IDS` is the whole frozen
+    // set, so a row carrying the seam citation is either one of those
+    // identities or already a rejection. A count branch that no reachable
+    // input can trip is not a second guard, it is an untested claim
+    // (round-4 red team N7).
     if problems.is_empty() {
         Ok(())
     } else {
@@ -2128,18 +2436,21 @@ fn new_flagged_seam_cannot_be_cited_with_an_issue() {
     );
 }
 
-/// Copying the grandfather citation string onto an extra flagged row
-/// trips the count lock: the frozen seam set may only shrink.
+/// Copying the grandfather citation string onto an extra flagged row trips
+/// the identity lock: the whole frozen set PLUS one more is a rejection
+/// even though nothing was removed, which is the growth direction a
+/// shrink-only set has to refuse. (There is no separate count lock - see
+/// the note in `check_against_baseline_with` for why it was redundant.)
 #[test]
 fn grandfather_citation_cannot_be_copied_onto_new_rows() {
-    let rows: Vec<Row> = (0..=GRANDFATHER_SEAM_COUNT)
-        .map(|i| {
-            flagged_row(
-                &format!("planted.h: void f{i}(int x_dtype);"),
-                GRANDFATHER_SEAM_CITATION,
-            )
-        })
+    let mut rows: Vec<Row> = GRANDFATHER_SEAM_IDS
+        .iter()
+        .map(|id| flagged_row(id, GRANDFATHER_SEAM_CITATION))
         .collect();
+    rows.push(flagged_row(
+        "planted.h: void f_extra(int x_dtype);",
+        GRANDFATHER_SEAM_CITATION,
+    ));
     let baseline = Baseline {
         version: 2,
         legs: coverage_manifest(),
@@ -2147,8 +2458,8 @@ fn grandfather_citation_cannot_be_copied_onto_new_rows() {
     };
     let err = check_against_baseline(&rows, &baseline).unwrap_err();
     assert!(
-        err.contains("may only shrink"),
-        "the grandfather count lock must trip: {err}"
+        err.contains("may only shrink") && err.contains("f_extra"),
+        "the grandfather identity lock must trip on the added row: {err}"
     );
 }
 
@@ -2624,13 +2935,19 @@ fn exported_public_numeric_stdlib_def_is_enumerated() {
 }
 
 /// Write a throwaway published-include directory. Stale content is cleared
-/// first because the derived-roots assertion compares against `read_dir`.
+/// first because the derived-roots assertion compares against the directory
+/// walk. A name may carry a subdirectory (`sub/x.h`), which is how the
+/// recursive-walk controls plant a header one level down.
 fn planted_include_dir(label: &str, files: &[(&str, &str)]) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("census-{label}-{}", std::process::id()));
     fs::remove_dir_all(&dir).ok();
     fs::create_dir_all(&dir).expect("temp include dir");
     for (name, body) in files {
-        fs::write(dir.join(name), body).expect("write planted header");
+        let path = dir.join(name);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("planted header parent");
+        }
+        fs::write(&path, body).expect("write planted header");
     }
     dir
 }
@@ -3211,11 +3528,6 @@ fn plain_baseline_citation_cannot_be_copied_onto_a_new_row() {
 
 #[test]
 fn frozen_grandfather_sets_are_consistent_and_disjoint() {
-    assert_eq!(
-        GRANDFATHER_SEAM_IDS.len(),
-        GRANDFATHER_SEAM_COUNT,
-        "the seam count lock and the seam identity lock must agree"
-    );
     let seams: BTreeSet<&str> = GRANDFATHER_SEAM_IDS.iter().copied().collect();
     let plain: BTreeSet<&str> = GRANDFATHER_PLAIN_IDS.iter().copied().collect();
     assert_eq!(seams.len(), GRANDFATHER_SEAM_IDS.len(), "no duplicate seam");
@@ -3227,5 +3539,548 @@ fn frozen_grandfather_sets_are_consistent_and_disjoint() {
     assert!(
         seams.is_disjoint(&plain),
         "one identity carries one pre-ratchet disposition"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Round-4 red team (2026-07-31) closures. Each of these locks a claim the
+// round proved was either false or untested; the guard-revert mutation that
+// makes each one RED is named in its doc comment.
+// ---------------------------------------------------------------------------
+
+/// N1, the finding that mattered: `NUMERIC_C_TYPES` was an ALLOWLIST, so an
+/// arithmetic spelling it had never heard of classified as `[]` and a bare
+/// 16-bit float export could enter the census on an ordinary issue
+/// citation - past the rule that flagged rows have no citation path. The
+/// rule is now inverted, and these are the exact spellings the round team
+/// executed end-to-end.
+///
+/// Reverting `assert_known_type_words` to a no-op turns this RED.
+#[test]
+fn an_unknown_c_type_word_is_rejected_rather_than_classified_empty() {
+    for spelling in ["_Float16", "__fp16", "__bf16", "_Decimal64", "__int128"] {
+        let dir = planted_include_dir(
+            "unknown-type-word",
+            &[("root.h", &format!("{spelling} chelis_widen(int value);\n"))],
+        );
+        let message = expect_census_panic(|| {
+            preprocessed_headers(&dir, &["root.h"]);
+        });
+        fs::remove_dir_all(&dir).ok();
+        assert!(
+            message.contains("UNKNOWN TYPE WORD") && message.contains(spelling),
+            "`{spelling}` must fail the census by name rather than classify \
+             as dtype-free: {message}"
+        );
+    }
+}
+
+/// Positive parity for the inverted rule: the spellings the published
+/// headers actually use - qualifiers, aggregate keywords, the two
+/// non-arithmetic value types, and the project's own opaque handles - pass
+/// unremarked, and the numeric ones still classify.
+#[test]
+fn known_c_type_words_still_classify_without_rejection() {
+    let dir = planted_include_dir(
+        "known-type-words",
+        &[(
+            "root.h",
+            "_Bool chelis_is_ready(const chelis_tensor *t);\n\
+             void chelis_release(struct chelis_arena *arena);\n\
+             extern char chelis_tag_byte;\n\
+             double chelis_measure(unsigned long n);\n",
+        )],
+    );
+    let per_file = preprocessed_headers(&dir, &["root.h"]);
+    fs::remove_dir_all(&dir).ok();
+    let rows: Vec<Row> = per_file
+        .iter()
+        .flat_map(|(name, text)| header_rows_local(name, text))
+        .collect();
+    let measure = rows
+        .iter()
+        .find(|row| row.id.contains("chelis_measure"))
+        .expect("the numeric export is inventoried");
+    assert!(
+        measure.flags.iter().any(|flag| flag == "float-carrier"),
+        "an accepted declaration is still classified: {measure:?}"
+    );
+    let ready = rows
+        .iter()
+        .find(|row| row.id.contains("chelis_is_ready"))
+        .expect("the dtype-free export is inventoried");
+    assert!(
+        ready.flags.is_empty(),
+        "`_Bool` and an opaque handle carry no dtype: {ready:?}"
+    );
+}
+
+/// The typedef half of N1. A use site may answer "that word is a local
+/// alias", which is only safe because the alias's own statement is checked
+/// by the same rule - otherwise `typedef _Float16 chelis_half;` restores
+/// the exact hole through a `chelis_`-prefixed name.
+#[test]
+fn a_typedef_alias_cannot_introduce_an_unknown_type_word() {
+    let dir = planted_include_dir(
+        "aliased-unknown-type-word",
+        &[(
+            "root.h",
+            "typedef _Float16 chelis_half;\n\
+             chelis_half chelis_halve(chelis_half value);\n",
+        )],
+    );
+    let message = expect_census_panic(|| {
+        preprocessed_headers(&dir, &["root.h"]);
+    });
+    fs::remove_dir_all(&dir).ok();
+    assert!(
+        message.contains("UNKNOWN TYPE WORD") && message.contains("_Float16"),
+        "a project-named alias must not launder an unknown arithmetic \
+         spelling: {message}"
+    );
+}
+
+/// The positional read is what decides which words get classified, so a
+/// declarator name shaped like a type spelling means the read was wrong.
+/// Both reserved shapes are rejected; an ordinary parameter name is not.
+#[test]
+fn a_reserved_shaped_declarator_name_is_rejected() {
+    for declarator in ["_reserved", "shape_t"] {
+        let dir = planted_include_dir(
+            "reserved-declarator",
+            &[("root.h", &format!("void chelis_take(int {declarator});\n"))],
+        );
+        let message = expect_census_panic(|| {
+            preprocessed_headers(&dir, &["root.h"]);
+        });
+        fs::remove_dir_all(&dir).ok();
+        assert!(
+            message.contains("RESERVED-SHAPED DECLARATOR NAME") && message.contains(declarator),
+            "`{declarator}` must be rejected as a declarator: {message}"
+        );
+    }
+
+    let dir = planted_include_dir(
+        "ordinary-declarator",
+        &[("root.h", "void chelis_take(int count);\n")],
+    );
+    preprocessed_headers(&dir, &["root.h"]);
+    fs::remove_dir_all(&dir).ok();
+}
+
+/// N1's language-side companion. `NUMERIC_PRIMS`/`FLOAT_PRIMS` are string
+/// lists because the desugared AST carries `(t-prim {} <name>)` symbols, so
+/// nothing about widening `chelis_types::Prim` would otherwise reach this
+/// file. The exhaustive match in `prim_census_class` is the compile-time
+/// half of the lock; this is the agreement half, checked in both
+/// directions.
+#[test]
+fn census_prim_lists_cover_every_prim_variant() {
+    for prim in ALL_PRIMS {
+        let name = prim.name();
+        match prim_census_class(*prim) {
+            PrimCensusClass::Float => {
+                assert!(
+                    FLOAT_PRIMS.contains(&name) && NUMERIC_PRIMS.contains(&name),
+                    "float prim `{name}` must be enumerated as a seam carrier"
+                );
+            }
+            PrimCensusClass::Integer => {
+                assert!(
+                    NUMERIC_PRIMS.contains(&name) && !FLOAT_PRIMS.contains(&name),
+                    "integer prim `{name}` must be enumerated as `numeric-op`"
+                );
+            }
+            PrimCensusClass::NonNumeric => {
+                assert!(
+                    !NUMERIC_PRIMS.contains(&name) && !FLOAT_PRIMS.contains(&name),
+                    "dtype-free prim `{name}` must not be census surface"
+                );
+            }
+        }
+    }
+    for name in NUMERIC_PRIMS {
+        let prim = Prim::parse_name(name)
+            .unwrap_or_else(|| panic!("`{name}` is not a chelis_types::Prim spelling"));
+        assert_ne!(
+            prim_census_class(prim),
+            PrimCensusClass::NonNumeric,
+            "`{name}` is enumerated as numeric but classified dtype-free"
+        );
+    }
+    for name in FLOAT_PRIMS {
+        let prim = Prim::parse_name(name).expect("float prim spelling");
+        assert_eq!(
+            prim_census_class(prim),
+            PrimCensusClass::Float,
+            "`{name}` is enumerated as a seam carrier but not classified float"
+        );
+    }
+}
+
+/// N2: the generic typedef word split popped the ARRAY EXTENT as the alias
+/// name, so `typedef double chelis_vec4[4];` registered `4` and left
+/// `chelis_vec4` unresolved. A setter taking it then inherited nothing, and
+/// because the alias is `chelis_`-prefixed the inverted type-word rule
+/// accepts it - so this is not subsumed by N1.
+///
+/// Reverting `collect_typedefs`' array branch turns this RED.
+#[test]
+fn an_array_typedef_cannot_launder_a_float_carrier() {
+    let rows = header_rows_local(
+        "planted.h",
+        "typedef double chelis_vec4[4];\nvoid chelis_set(chelis_vec4 v);\n",
+    );
+    let setter = rows
+        .iter()
+        .find(|row| row.id.contains("chelis_set"))
+        .expect("the setter is inventoried");
+    assert!(
+        setter.flags.iter().any(|flag| flag == "float-carrier"),
+        "a setter taking an array-of-double alias carries the seam: {setter:?}"
+    );
+
+    let dtype_rows = header_rows_local(
+        "planted.h",
+        "typedef int chelis_dtype_pair[2];\nvoid chelis_route(chelis_dtype_pair dtype);\n",
+    );
+    let router = dtype_rows
+        .iter()
+        .find(|row| row.id.contains("chelis_route"))
+        .expect("the router is inventoried");
+    assert!(
+        router.flags.iter().any(|flag| flag == "numeric-op"),
+        "an array-of-int alias still resolves to its element type: {router:?}"
+    );
+}
+
+/// Negative parity for the array branch, on the same footing the
+/// parenthesized branch already has: a shape the resolver cannot read is
+/// rejected rather than guessed at, because guessing is what produced the
+/// laundering.
+#[test]
+fn an_unresolvable_array_typedef_is_rejected() {
+    for stmt in ["typedef double [4];", "typedef chelis_vec4[4];"] {
+        let message = expect_census_panic(move || {
+            collect_typedefs(stmt);
+        });
+        assert!(
+            message.contains("UNRESOLVABLE ARRAY TYPEDEF"),
+            "`{stmt}` must fail loudly rather than register a bogus alias: {message}"
+        );
+    }
+}
+
+/// Parse one planted Surf module the way `stdlib_rows` does and run the
+/// stdlib enumerator over it.
+fn planted_stdlib_rows(label: &str, source: &str) -> Vec<Row> {
+    let decls = chelis_surf::parser::parse_str(source).expect("planted module parses");
+    let exprs = chelis_surf::desugar::desugar_program(&decls);
+    let mut rows = Vec::new();
+    scan_deftypes(&exprs, label, &mut rows);
+    rows
+}
+
+/// N3: an exported `def` with no declared signature produced NO row and no
+/// complaint. The enumerator reads capacity off the `defsig`, so such a def
+/// is public numeric surface that is invisible and uncited at once - and
+/// the Surf style guide recommends exactly that shape for load-style
+/// top-level bindings, which puts the silent path one stdlib commit away.
+///
+/// Restoring the bare `continue` in `scan_exported_numeric_defs` turns this
+/// RED.
+#[test]
+fn an_exported_stdlib_def_without_a_signature_fails_loudly() {
+    let source = "module Std.Planted\n\
+                  export (planted_weights)\n\
+                  def planted_weights = 1.0\n";
+    let message = expect_census_panic(move || {
+        planted_stdlib_rows("planted", source);
+    });
+    assert!(
+        message.contains("EXPORTED DEFINITION WITHOUT A DECLARED SIGNATURE")
+            && message.contains("planted::planted_weights"),
+        "a signature-less exported def must name itself in the failure: {message}"
+    );
+}
+
+/// Positive parity for N3, in both directions the enumerator cares about:
+/// a declared signature enumerates (and classifies), and an export that
+/// names no value definition at all - a type or ADT export - is not a
+/// missing signature.
+#[test]
+fn a_declared_stdlib_signature_enumerates_and_a_type_export_does_not() {
+    let rows = planted_stdlib_rows(
+        "planted",
+        "module Std.Planted\n\
+         export (planted_weights)\n\
+         sig planted_weights: f32\n\
+         def planted_weights = 1.0\n",
+    );
+    let row = rows
+        .iter()
+        .find(|row| row.kind == "std-def-numeric")
+        .expect("a declared numeric signature enumerates");
+    assert!(
+        row.flags.iter().any(|flag| flag == "float-carrier"),
+        "a bare f32 public value is a seam: {row:?}"
+    );
+
+    let type_only = planted_stdlib_rows(
+        "planted",
+        "module Std.Planted\n\
+         export (PlantedTag)\n\
+         type PlantedTag =\n\
+         \x20 | PlantedOn\n\
+         \x20 | PlantedOff\n",
+    );
+    assert!(
+        type_only.is_empty(),
+        "a dtype-free type export is not a signature-less def: {type_only:?}"
+    );
+}
+
+/// N4, the missing control for the newest commit's claim. The macro-taint
+/// component is built from the local include graph, and it must follow the
+/// ANGLE spelling too: `cc -E -I` resolves `<x>` and `"x"` identically
+/// inside the include directory. Here the include is UNCONDITIONAL and only
+/// the `#define` is conditional, so no other guard fires - the multi-root
+/// context check sees one root, the conditional-include check sees none,
+/// and `root.h` declares nothing itself.
+///
+/// Narrowing `closure_conditional_macro_taint`'s edges to quoted includes
+/// turns this RED and leaves the rest of the suite green, which is what
+/// made the claim vacuous before.
+#[test]
+fn conditional_macro_taint_follows_angle_spelled_includes() {
+    let dir = planted_include_dir(
+        "angle-taint",
+        &[
+            (
+                "root.h",
+                "#ifdef CHELIS_REVIEW_WIDE\n\
+                 #define CHELIS_NUM double\n\
+                 #else\n\
+                 #define CHELIS_NUM float\n\
+                 #endif\n\
+                 #include <shared.h>\n",
+            ),
+            (
+                "shared.h",
+                "CHELIS_NUM chelis_context_result(CHELIS_NUM value);\n",
+            ),
+        ],
+    );
+    let message = expect_census_panic(|| {
+        preprocessed_headers(&dir, &["root.h"]);
+    });
+    fs::remove_dir_all(&dir).ok();
+    assert!(
+        message.contains("CONTEXT-VARYING PUBLIC ABI")
+            && message.contains("shared.h")
+            && message.contains("CHELIS_NUM"),
+        "the taint component must cross an angle-spelled include and name \
+         the tainted token: {message}"
+    );
+}
+
+/// N5: the derived-roots rule compared the include closure against a FLAT
+/// `read_dir`, so a subdirectory of the published include directory was an
+/// uninventoried publishing channel - the same hole the rule exists to
+/// close one level up.
+///
+/// Reverting `published_headers_on_disk` to a non-recursive walk turns the
+/// first half RED.
+#[test]
+fn a_published_header_in_a_subdirectory_is_reached_or_fails() {
+    let dir = planted_include_dir(
+        "subdirectory-orphan",
+        &[
+            ("root.h", "void chelis_rooted(int x);\n"),
+            (
+                "detail/orphan.h",
+                "double chelis_orphan(double value, int out_dtype);\n",
+            ),
+        ],
+    );
+    let message = expect_census_panic(|| {
+        preprocessed_headers(&dir, &["root.h"]);
+    });
+    fs::remove_dir_all(&dir).ok();
+    assert!(
+        message.contains("PUBLISHED HEADER NOT REACHED FROM ANY ROOT")
+            && message.contains("detail/orphan.h"),
+        "a header one directory down is still published: {message}"
+    );
+
+    let reached = planted_include_dir(
+        "subdirectory-reached",
+        &[
+            ("root.h", "#include \"detail/sub.h\"\n"),
+            ("detail/sub.h", "void chelis_sub(int x);\n"),
+        ],
+    );
+    let per_file = preprocessed_headers(&reached, &["root.h"]);
+    fs::remove_dir_all(&reached).ok();
+    assert!(
+        per_file.values().any(|text| text.contains("chelis_sub")),
+        "a subdirectory header a root includes is inventoried: {per_file:?}"
+    );
+}
+
+/// N6: §C6 claims the stdlib side owes the same semantic registration a
+/// runtime callable owes, and the negative half of that claim had no
+/// control - only the header-side `reviewer_runtime_numeric_op_requires_
+/// semantic_registration` existed.
+///
+/// The second half covers the branch that binds `std-def-numeric` by KIND
+/// rather than by flags. A float-only stdlib def under a maintainer
+/// override reaches that branch and no other, so it is the case that
+/// proves capacity disposition and callable semantics stay independent
+/// obligations on this family. Dropping `|| row.kind ==
+/// "std-def-numeric"` from the registration check turns it RED.
+#[test]
+fn a_new_stdlib_numeric_def_requires_semantic_registration() {
+    let rows = planted_stdlib_rows(
+        "planted",
+        "module Std.Planted\n\
+         export (planted_scale)\n\
+         sig planted_scale: int32 -> int32\n\
+         def planted_scale(n) = n\n",
+    );
+    let mut row = rows
+        .into_iter()
+        .find(|row| row.kind == "std-def-numeric")
+        .expect("the exported numeric def enumerates");
+    assert!(
+        !is_seam(&row.flags),
+        "an integer carrier is not a seam: {row:?}"
+    );
+    row.citation = "chelis#729".to_string();
+    let baseline = Baseline {
+        version: 2,
+        legs: coverage_manifest(),
+        rows: vec![row.clone()],
+    };
+    let err = check_against_baseline(std::slice::from_ref(&row), &baseline).unwrap_err();
+    assert!(
+        err.contains("NUMERIC OP WITHOUT EXACT SEMANTIC REGISTRATION")
+            && err.contains("planted::planted_scale"),
+        "an issue citation is not a semantic decision on the stdlib side \
+         either: {err}"
+    );
+
+    let registration = SemanticRegistration {
+        callable: Box::leak(callable_identity(&row).into_boxed_str()),
+        atom: "[05-OP-1]",
+    };
+    assert!(
+        check_against_baseline_with(
+            std::slice::from_ref(&row),
+            &baseline,
+            &[registration],
+            "Synthetic controlling fixture:\n> **[05-OP-1]** Integer scale.",
+        )
+        .is_ok(),
+        "an exact registration against a real atom is the sanctioned path"
+    );
+
+    // The KIND branch. A float-only def carries `float-carrier` and NOT
+    // `numeric-op`, so the flags branch above cannot reach it; a maintainer
+    // override is the only disposition that gets such a row past the seam
+    // rule, and it must still not waive the semantics obligation.
+    let float_rows = planted_stdlib_rows(
+        "planted",
+        "module Std.Planted\n\
+         export (planted_ratio)\n\
+         sig planted_ratio: f32\n\
+         def planted_ratio = 1.0\n",
+    );
+    let mut float_row = float_rows
+        .into_iter()
+        .find(|row| row.kind == "std-def-numeric")
+        .expect("the exported float def enumerates");
+    assert_eq!(
+        float_row.flags,
+        vec!["float-carrier".to_string()],
+        "a float-only public def is a seam and nothing else: {float_row:?}"
+    );
+    float_row.citation = "maintainer-override(FFI staging, chelis#893)".to_string();
+    let float_baseline = Baseline {
+        version: 2,
+        legs: coverage_manifest(),
+        rows: vec![float_row.clone()],
+    };
+    let float_err =
+        check_against_baseline(std::slice::from_ref(&float_row), &float_baseline).unwrap_err();
+    assert!(
+        float_err.contains("NUMERIC OP WITHOUT EXACT SEMANTIC REGISTRATION")
+            && float_err.contains("planted::planted_ratio"),
+        "a capacity override is not a semantic decision on the stdlib side: {float_err}"
+    );
+}
+
+/// The stdlib mirror of the "an unrelated atom is not authority" rule,
+/// which the header family already covers: registering the callable
+/// against an atom that does not exist in the controlling spec fails on
+/// the registration, not on the citation.
+#[test]
+fn a_stdlib_registration_against_a_nonexistent_atom_fails() {
+    let rows = planted_stdlib_rows(
+        "planted",
+        "module Std.Planted\n\
+         export (planted_scale)\n\
+         sig planted_scale: int32 -> int32\n\
+         def planted_scale(n) = n\n",
+    );
+    let mut row = rows
+        .into_iter()
+        .find(|row| row.kind == "std-def-numeric")
+        .expect("the exported numeric def enumerates");
+    row.citation = "chelis#729".to_string();
+    let baseline = Baseline {
+        version: 2,
+        legs: coverage_manifest(),
+        rows: vec![row.clone()],
+    };
+    let registration = SemanticRegistration {
+        callable: Box::leak(callable_identity(&row).into_boxed_str()),
+        atom: "[05-OP-999]",
+    };
+    let err = check_against_baseline_with(
+        std::slice::from_ref(&row),
+        &baseline,
+        &[registration],
+        "Synthetic controlling fixture:\n> **[05-OP-1]** Integer scale.",
+    )
+    .unwrap_err();
+    assert!(
+        err.contains("does not exist as a normative"),
+        "naming an absent atom is not registration: {err}"
+    );
+}
+
+/// The `#line` ban reads DIRECTIVES, and phase-2 line splicing joins
+/// `#\<newline>line ...` into one before any directive is recognized. The
+/// physical-line scan missed it and the independent attribution backstop
+/// caught the export instead - the right outcome under the wrong name.
+/// This is a diagnostic-quality closure, not a hole: the export never
+/// entered the inventory either way.
+#[test]
+fn a_spliced_line_directive_is_caught_by_the_ban_itself() {
+    let dir = planted_include_dir(
+        "spliced-line-directive",
+        &[(
+            "root.h",
+            "#\\\nline 1 \"/opt/vendor/x.h\"\nvoid chelis_smuggled(int x);\n",
+        )],
+    );
+    let message = expect_census_panic(|| {
+        preprocessed_headers(&dir, &["root.h"]);
+    });
+    fs::remove_dir_all(&dir).ok();
+    assert!(
+        message.contains("LINE-DIRECTIVE SPOOFING SURFACE"),
+        "a spliced directive is the same directive: {message}"
     );
 }
