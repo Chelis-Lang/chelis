@@ -22,6 +22,7 @@ use chelis_surf::ast::{BinOp, Decl, Expr, LetPattern, Literal, Param, TypeExpr, 
 
 use crate::contracts::{
     NORMAL_CDF_IMPLEMENTATION, NORMAL_CDF_MONOTONICITY, NORMAL_CDF_RANGE, NORMAL_CDF_REFLECTION,
+    QUANTILE_BOUNDARY, QUANTILE_MONOTONICITY, QUANTILE_RANGE,
 };
 use crate::solver::{ArithOp, CmpOp, SmtExpr, SmtSort};
 
@@ -49,6 +50,16 @@ struct ContractCall {
     arg: SmtExpr,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DatasetIdentity(String);
+
+#[derive(Debug, Clone)]
+struct QuantileContractCall {
+    symbol: String,
+    dataset: DatasetIdentity,
+    q: SmtExpr,
+}
+
 #[derive(Debug, Clone, Default)]
 pub(super) struct ContractAbstraction {
     normal_cdf_enabled: bool,
@@ -57,6 +68,11 @@ pub(super) struct ContractAbstraction {
     normal_cdf_monotonicity: bool,
     normal_cdf_symbols: Vec<String>,
     normal_cdf_calls: Vec<ContractCall>,
+    quantile_enabled: bool,
+    quantile_monotonicity: bool,
+    quantile_has_unsupported_contract: bool,
+    quantile_symbols: Vec<String>,
+    quantile_calls: Vec<QuantileContractCall>,
 }
 
 impl ContractAbstraction {
@@ -65,6 +81,10 @@ impl ContractAbstraction {
         let normal_cdf_range =
             normal_cdf_reflection || contracts.iter().any(|id| id == NORMAL_CDF_RANGE);
         let normal_cdf_monotonicity = contracts.iter().any(|id| id == NORMAL_CDF_MONOTONICITY);
+        let quantile_monotonicity = contracts.iter().any(|id| id == QUANTILE_MONOTONICITY);
+        let quantile_has_unsupported_contract = contracts
+            .iter()
+            .any(|id| matches!(id.as_str(), QUANTILE_RANGE | QUANTILE_BOUNDARY));
         Self {
             normal_cdf_enabled: normal_cdf_range
                 || normal_cdf_reflection
@@ -74,6 +94,11 @@ impl ContractAbstraction {
             normal_cdf_monotonicity,
             normal_cdf_symbols: trusted_normal_cdf_symbols(trusted_contract_decls),
             normal_cdf_calls: Vec::new(),
+            quantile_enabled: quantile_monotonicity || quantile_has_unsupported_contract,
+            quantile_monotonicity,
+            quantile_has_unsupported_contract,
+            quantile_symbols: trusted_quantile_symbols(trusted_contract_decls),
+            quantile_calls: Vec::new(),
         }
     }
 
@@ -83,6 +108,27 @@ impl ContractAbstraction {
 
     pub(super) fn used_normal_cdf(&self) -> bool {
         !self.normal_cdf_calls.is_empty()
+    }
+
+    pub(super) fn requires_quantile(&self) -> bool {
+        self.quantile_enabled
+    }
+
+    pub(super) fn used_quantile(&self) -> bool {
+        !self.quantile_calls.is_empty()
+    }
+
+    pub(super) fn has_unsupported_quantile_contract(&self) -> bool {
+        self.quantile_has_unsupported_contract
+    }
+
+    pub(super) fn has_quantile_monotonicity_pair(&self) -> bool {
+        self.quantile_calls.iter().enumerate().any(|(idx, left)| {
+            self.quantile_calls
+                .iter()
+                .skip(idx + 1)
+                .any(|right| left.dataset == right.dataset)
+        })
     }
 
     pub(super) fn requires_reflection_pair(&self) -> bool {
@@ -102,6 +148,11 @@ impl ContractAbstraction {
         self.normal_cdf_calls
             .iter()
             .map(|call| (call.symbol.clone(), SmtSort::Real))
+            .chain(
+                self.quantile_calls
+                    .iter()
+                    .map(|call| (call.symbol.clone(), SmtSort::Real)),
+            )
             .collect()
     }
 
@@ -180,6 +231,39 @@ impl ContractAbstraction {
                 }
             }
         }
+        // chelis#979: quantile monotonicity is relational and is sound only
+        // for calls over the same compiler-bound dataset. The dataset itself
+        // never enters scalar SMT lowering; its linker-rewritten AST identity
+        // selects the pairs whose scalar q arguments may be coupled.
+        if self.quantile_monotonicity {
+            for (idx, left) in self.quantile_calls.iter().enumerate() {
+                for right in self.quantile_calls.iter().skip(idx + 1) {
+                    if left.dataset != right.dataset {
+                        continue;
+                    }
+                    let q_le = quantile_order_domain(&left.q, &right.q);
+                    let value_le = SmtExpr::Cmp(
+                        CmpOp::Le,
+                        Box::new(SmtExpr::Var(left.symbol.clone())),
+                        Box::new(SmtExpr::Var(right.symbol.clone())),
+                    );
+                    out.push(SmtExpr::Bool(
+                        crate::solver::BoolOp::Implies,
+                        vec![q_le, value_le],
+                    ));
+                    let q_ge = quantile_order_domain(&right.q, &left.q);
+                    let value_ge = SmtExpr::Cmp(
+                        CmpOp::Le,
+                        Box::new(SmtExpr::Var(right.symbol.clone())),
+                        Box::new(SmtExpr::Var(left.symbol.clone())),
+                    );
+                    out.push(SmtExpr::Bool(
+                        crate::solver::BoolOp::Implies,
+                        vec![q_ge, value_ge],
+                    ));
+                }
+            }
+        }
         out
     }
 
@@ -194,6 +278,25 @@ impl ContractAbstraction {
         self.normal_cdf_calls.push(ContractCall {
             symbol: symbol.clone(),
             arg: args[0].clone(),
+        });
+        Some(SmtExpr::Var(symbol))
+    }
+
+    fn abstract_quantile_call(
+        &mut self,
+        name: &str,
+        dataset_expr: &Expr,
+        q: SmtExpr,
+    ) -> Option<SmtExpr> {
+        if !self.quantile_enabled || !self.quantile_symbols.iter().any(|symbol| symbol == name) {
+            return None;
+        }
+        let dataset = dataset_identity(dataset_expr)?;
+        let symbol = format!("__contract_std_quantile_{}", self.quantile_calls.len());
+        self.quantile_calls.push(QuantileContractCall {
+            symbol: symbol.clone(),
+            dataset,
+            q,
         });
         Some(SmtExpr::Var(symbol))
     }
@@ -213,6 +316,79 @@ fn trusted_normal_cdf_symbols(decls: &[Decl]) -> Vec<String> {
             _ => None,
         })
         .collect()
+}
+
+const LINKED_NAUTILUS_QUANTILE: &str = "pkg__nautilus__Nautilus__Stats__quantile_vec";
+
+fn trusted_quantile_symbols(decls: &[Decl]) -> Vec<String> {
+    decls
+        .iter()
+        .filter_map(|decl| match decl {
+            Decl::FunDef {
+                name,
+                dim_params,
+                params,
+                ret_ty,
+                ..
+            } if name == LINKED_NAUTILUS_QUANTILE
+                && dim_params.as_slice() == ["n"]
+                && params.len() == 2
+                && matches!(
+                    params[0].ty.as_ref(),
+                    Some(TypeExpr::Ref(inner, _))
+                        if matches!(
+                            inner.as_ref(),
+                            TypeExpr::Tensor(dimensions, precision, _)
+                                if precision == "f32"
+                                    && matches!(
+                                        dimensions.as_slice(),
+                                        [TypeExpr::Named(dimension, _)] if dimension == "n"
+                                    )
+                        )
+                )
+                && matches!(params[1].ty.as_ref(), Some(TypeExpr::Named(name, _)) if name == "f32")
+                && matches!(ret_ty.as_ref(), Some(TypeExpr::Named(name, _)) if name == "f32") =>
+            {
+                Some(name.clone())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Stable identity for the tensor operand of a quantile call. Linker rewriting
+/// has already replaced author names with compiler-owned symbols at this
+/// point. Spans are deliberately ignored; two source occurrences of the same
+/// bound dataset must compare equal.
+fn dataset_identity(expr: &Expr) -> Option<DatasetIdentity> {
+    match expr {
+        Expr::Borrow(inner, _) | Expr::Annotate(inner, _, _) => dataset_identity(inner),
+        Expr::Var(name, _) => Some(DatasetIdentity(format!("var:{name}"))),
+        Expr::Apply(func, args, _) if args.is_empty() => match func.as_ref() {
+            Expr::Var(name, _) => Some(DatasetIdentity(format!("call:{name}"))),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn quantile_order_domain(low: &SmtExpr, high: &SmtExpr) -> SmtExpr {
+    SmtExpr::Bool(
+        crate::solver::BoolOp::And,
+        vec![
+            SmtExpr::Cmp(
+                CmpOp::Le,
+                Box::new(SmtExpr::RealLit(0.0)),
+                Box::new(low.clone()),
+            ),
+            SmtExpr::Cmp(CmpOp::Le, Box::new(low.clone()), Box::new(high.clone())),
+            SmtExpr::Cmp(
+                CmpOp::Le,
+                Box::new(high.clone()),
+                Box::new(SmtExpr::RealLit(1.0)),
+            ),
+        ],
+    )
 }
 
 fn are_negated_args(left: &SmtExpr, right: &SmtExpr) -> bool {
@@ -1270,6 +1446,22 @@ fn surf_arith(expr: &Expr, ctx: &InlineCtx) -> Option<crate::solver::SmtExpr> {
                 Expr::Var(n, _) => n.clone(),
                 _ => return None,
             };
+            // chelis#979: intercept the real linked quantile call before the
+            // generic scalar argument pass. Its tensor operand is identified
+            // from the compiler AST and must not be reconstructed or lowered
+            // as a scalar; only q enters SMT.
+            if args.len() == 2
+                && let Some(contracts) = ctx.contracts
+                && contracts.borrow().requires_quantile()
+            {
+                let q = surf_arith(&args[1], ctx)?;
+                if let Some(abs) = contracts
+                    .borrow_mut()
+                    .abstract_quantile_call(&name, &args[0], q)
+                {
+                    return Some(abs);
+                }
+            }
             let smt_args: Option<Vec<_>> = args.iter().map(|a| surf_arith(a, ctx)).collect();
             let smt_args = smt_args?;
             if name == "neg" && smt_args.len() == 1 {
@@ -1676,6 +1868,27 @@ mod tests {
             contracts: None,
             grad_diagnostic: None,
         }
+    }
+
+    #[test]
+    fn quantile_monotonicity_implication_carries_validated_unit_interval_domain() {
+        let low = SmtExpr::Var("p".into());
+        let high = SmtExpr::Var("q".into());
+        assert_eq!(
+            quantile_order_domain(&low, &high),
+            SmtExpr::Bool(
+                crate::solver::BoolOp::And,
+                vec![
+                    SmtExpr::Cmp(
+                        CmpOp::Le,
+                        Box::new(SmtExpr::RealLit(0.0)),
+                        Box::new(low.clone()),
+                    ),
+                    SmtExpr::Cmp(CmpOp::Le, Box::new(low), Box::new(high.clone())),
+                    SmtExpr::Cmp(CmpOp::Le, Box::new(high), Box::new(SmtExpr::RealLit(1.0)),),
+                ],
+            )
+        );
     }
 
     // chelis#422: call-form arithmetic must lower to an interpreted `Arith`

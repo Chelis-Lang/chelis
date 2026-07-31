@@ -939,6 +939,24 @@ PropertyDecl  <- '@property' S Ident S 'forall' S Params
 PropertyOption <- S 'with' S ('tolerance' / 'seed' / 'samples') S '=' S Expr
                 / S 'with' S 'contract' S '=' S StringLit
 
+Property contract options are proof dependencies, not labels. Before using a
+contract, the prover must bind every abstracted call to a linker-produced
+declaration from a resolved dependency package; author-written names and local
+declarations are not trusted, including names that imitate the linker's
+internal spelling.
+
+`std.quantile.monotonicity` is the source-visible contract for
+`Nautilus.Stats.quantile_vec`. Its Tier-B lane accepts exactly the linker's
+`pkg__nautilus__Nautilus__Stats__quantile_vec` declaration with the released
+`(&tensor[n, f32], f32) -> f32` surface. The tensor argument remains a compiler
+AST identity and is never reconstructed from source or lowered as a scalar.
+For two calls over the same compiler-bound dataset, the prover may introduce
+fresh results and assume `p <= q => quantile(xs, p) <= quantile(xs, q)`.
+Different datasets are not coupled. A requested quantile contract with no such
+trusted call or no same-dataset call pair is unsupported, not a successful
+proof. The source bridges for `std.quantile.range` and
+`std.quantile.boundary` are not part of this lane and remain unsupported.
+
 # ═══════════════════════════════════════════════════
 #  FUNCTION DEFINITIONS
 # ═══════════════════════════════════════════════════

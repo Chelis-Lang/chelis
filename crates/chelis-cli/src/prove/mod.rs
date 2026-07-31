@@ -566,7 +566,7 @@ fn prove_surf_file(
                             path,
                             &reachable_decls,
                             &prepared.entry_decls,
-                            &prepared.stdlib_decls,
+                            &prepared.dependency_decls,
                             &display_names,
                             options,
                             totals,

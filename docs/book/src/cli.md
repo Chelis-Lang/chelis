@@ -249,6 +249,16 @@ unsupported reason under `--tier smt-only`; `auto` may fuzz-validate them
 instead. Conditional scalar gradients and differentiated casts remain outside
 the prover subset until the compiler can build them.
 
+Contract-backed Reef proofs resolve their implementation through the linker.
+For example, a property importing `Nautilus.Stats.quantile_vec` can request
+`std.quantile.monotonicity`; Tier B couples two calls only when their tensor
+argument is the same compiler-bound dataset and reports
+`Nautilus.Stats.quantile_vec` in the consumed assumption record. A local
+function, a root declaration that imitates a linker name, two different
+datasets, or a contract request with no trusted call is unsupported rather
+than assumed. The quantile range and boundary contracts do not yet have this
+source bridge.
+
 Under `--tier fuzz-only` (and an `auto` fallback), guarded `f32`/`f64`
 properties use deterministic constraint-directed generation for conjunctions
 of scalar interval and binder-order comparisons. This keeps narrow finance

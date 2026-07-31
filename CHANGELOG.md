@@ -43,6 +43,14 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **Quantile monotonicity contracts now bind to the real linked Nautilus
+  surface (chelis#979).** Tier-B Reef proofs recognize only the
+  dependency-owned linker declaration for `Nautilus.Stats.quantile_vec`, keep
+  the tensor operand as compiler AST identity, and couple scalar quantile
+  levels only for calls over the same dataset. Proof records name the consumed
+  Nautilus implementation. Local/linker-shaped spoofs, missing trusted calls,
+  different datasets, and the not-yet-bridged range/boundary contracts fail
+  closed as unsupported.
 - **Bare file diagnostics now drive native expected-failure suites
   (chelis#967).** `chelis test --expect neg|blocked` preserves file-level
   compile and check failures even when a probe declares no `test_*` function,

@@ -26,6 +26,7 @@ pub const LOG_ONE: &str = "std.log.one";
 pub const QUANTILE_RANGE: &str = "std.quantile.range";
 pub const QUANTILE_MONOTONICITY: &str = "std.quantile.monotonicity";
 pub const QUANTILE_BOUNDARY: &str = "std.quantile.boundary";
+pub const QUANTILE_IMPLEMENTATION: &str = "Nautilus.Stats.quantile_vec";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StandardContract {
@@ -114,13 +115,13 @@ pub fn standard_contracts() -> Vec<StandardContract> {
         },
         StandardContract {
             id: "std.quantile".to_string(),
-            function: "quantile".to_string(),
+            function: QUANTILE_IMPLEMENTATION.to_string(),
             invariants: vec![
                 fuzz_invariant(
                     QUANTILE_RANGE,
                     "quantile range boundedness",
                     "forall xs q. 0 <= q <= 1 => min(xs) <= quantile(xs, q) <= max(xs)",
-                    "chelis_intrinsic.quantile",
+                    QUANTILE_IMPLEMENTATION,
                     8192,
                     0xCA_2026,
                 ),
@@ -128,7 +129,7 @@ pub fn standard_contracts() -> Vec<StandardContract> {
                     QUANTILE_MONOTONICITY,
                     "quantile monotonicity in q",
                     "forall xs p q. 0 <= p <= q <= 1 => quantile(xs, p) <= quantile(xs, q)",
-                    "chelis_intrinsic.quantile",
+                    QUANTILE_IMPLEMENTATION,
                     8192,
                     0xCB_2026,
                 ),
@@ -136,7 +137,7 @@ pub fn standard_contracts() -> Vec<StandardContract> {
                     QUANTILE_BOUNDARY,
                     "quantile boundary values",
                     "forall xs. quantile(xs, 0) = min(xs) and quantile(xs, 1) = max(xs)",
-                    "chelis_intrinsic.quantile",
+                    QUANTILE_IMPLEMENTATION,
                     4096,
                     0xCC_2026,
                 ),

@@ -1678,6 +1678,63 @@ where (alpha1 > 0.99), (alpha1 < alpha2), (alpha2 < 1.0):
 }
 
 #[test]
+fn issue_979_tide_and_cli_fail_closed_without_linked_nautilus_call() {
+    let source = "module Risk.Quantile\n@property no_trusted_quantile forall(p: f32, q: f32) where p <= q:\n  p <= q\n  with contract = \"std.quantile.monotonicity\"\n";
+    let response = handle_message(&json!({
+        "jsonrpc":"2.0",
+        "id":979,
+        "method":"tools/call",
+        "params":{"name":"chelis_prove","arguments":{
+            "source_kind":"surf", "source":source, "tier":"smt-only"
+        }}
+    }))
+    .expect("prove response");
+    let tide = response["result"]["structuredContent"]["properties"][0].clone();
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("quantile.ch");
+    std::fs::write(&path, source).expect("write fixture");
+    let output = assert_cmd::Command::cargo_bin("chelis")
+        .expect("chelis binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "prove",
+            path.to_str().expect("utf-8 path"),
+            "--json",
+            "--tier",
+            "smt-only",
+        ])
+        .output()
+        .expect("run CLI prove");
+    assert_eq!(output.status.code(), Some(2));
+    let cli = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .find(|record| record["kind"] == "property")
+        .expect("CLI property record");
+
+    for key in [
+        "name",
+        "status",
+        "composite_verdict",
+        "qualifiers",
+        "proof_tier",
+        "samples",
+        "seed",
+        "assumptions",
+        "reason",
+    ] {
+        assert_eq!(tide[key], cli[key], "field `{key}` differs");
+    }
+    assert_eq!(tide["status"], "unsupported");
+    assert!(
+        tide["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("Nautilus.Stats.quantile_vec"))
+    );
+}
+
+#[test]
 fn issue_977_tide_and_cli_match_exhausted_sampling_evidence() {
     let source = "module Risk.Guards\n@property narrow forall(x: f32)\nwhere (x > 0.99), (x < 1.0):\n  (x == x)\n";
     let response = handle_message(&json!({
