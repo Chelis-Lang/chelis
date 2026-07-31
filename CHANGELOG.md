@@ -35,6 +35,11 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **Root-scoped eval ignores dead symbolic inputs from unrelated dependency
+  modules (chelis#991).** Symbolic-dimension discovery now follows the live
+  evaluation slice, so importing a calculation from a package with unrelated
+  generic declarations no longer invents external inputs. Live shape-only
+  dependencies remain required and continue to fail closed when absent.
 - **Risk-guard fuzzing is constraint-directed and non-vacuous (chelis#977).**
   The prover derives candidate inputs from guard constraints, records observed
   in-domain coverage, and preserves evaluator/backend parity instead of

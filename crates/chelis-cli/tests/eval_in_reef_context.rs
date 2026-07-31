@@ -401,3 +401,80 @@ fn cmd_eval_value_binding_calling_imported_fn_is_not_dropped() {
          not be silently dropped; got roots: {roots:?}"
     );
 }
+
+/// Regression for Chelis-Lang/chelis#991: compiling a dependency package
+/// includes declarations outside the selected eval root. A generic parameter
+/// in one of those unrelated declarations is not a top-level input to the
+/// live imported calculation and must not make `chelis eval` demand it.
+#[test]
+fn cmd_eval_ignores_dead_generic_inputs_from_unrelated_dependency_modules() {
+    let dir = tempdir().expect("tempdir");
+    let root = dir.path().join("app");
+    fs::create_dir_all(root.join("src")).expect("app src");
+    fs::create_dir_all(root.join("mylib/src")).expect("mylib src");
+
+    write_file(
+        &root.join("reef.toml"),
+        &format!(
+            r#"[package]
+name = "app"
+version = "0.1.0"
+compiler = "={}"
+module_prefix = "App"
+
+[dependencies]
+mylib = {{ path = "./mylib" }}
+"#,
+            env!("CARGO_PKG_VERSION")
+        ),
+    );
+    write_file(
+        &root.join("mylib/reef.toml"),
+        &format!(
+            r#"[package]
+name = "mylib"
+version = "0.1.0"
+compiler = "={}"
+module_prefix = "Mylib"
+"#,
+            env!("CARGO_PKG_VERSION")
+        ),
+    );
+    write_file(
+        &root.join("mylib/src/live.ch"),
+        "module Mylib.Live\nexport (answer)\n\ndef answer() -> f32 = cast(7.0, f32)\n",
+    );
+    write_file(
+        &root.join("mylib/src/unrelated.ch"),
+        "module Mylib.Unrelated\nexport (generic_identity)\n\ndef generic_identity[k](a: tensor[k, f32]) -> tensor[k, f32] = a\n",
+    );
+    let entry = root.join("src/main.ch");
+    write_file(
+        &entry,
+        "module App.Main\nimport Mylib.Live (answer)\n\nresult = answer()\n",
+    );
+
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["eval", "--json", "--file", entry.to_str().unwrap()])
+        .output()
+        .expect("run chelis eval");
+    assert!(
+        output.status.success(),
+        "dead generic dependency declaration escaped into live eval: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("eval stdout is JSON");
+    let result = json["roots"]
+        .as_array()
+        .expect("roots")
+        .iter()
+        .find(|root| root["name"] == "result")
+        .expect("result root");
+    assert_eq!(
+        result["value"]["value"],
+        serde_json::json!({"shape": [], "data": [7.0]})
+    );
+}

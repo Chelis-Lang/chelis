@@ -3,8 +3,8 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::dag::{
-    Dag, DagNode, DimInfo, FusedInput, FusedStepOp, NodeId, ReduceWindowKind, RiscOp, RtDim,
-    SHRINK_TO_END, SymbolicDimSource, TensorType, bind_symbolic_dims, symbolic_bindings,
+    Dag, DagNode, DimExpr, DimInfo, FusedInput, FusedStepOp, NodeId, ReduceWindowKind, RiscOp,
+    RtDim, SHRINK_TO_END, SymbolicDimSource, TensorType, bind_symbolic_dims, symbolic_bindings,
 };
 use chelis_types::types::Prim;
 
@@ -259,6 +259,7 @@ fn verify_bound_movement_bounds(dag: &Dag, live: Option<&[bool]>) -> Result<(), 
 fn infer_symbolic_bindings_from_inputs(
     dag: &Dag,
     inputs: &HashMap<String, TensorValue>,
+    required_symbols: &HashSet<String>,
 ) -> Result<HashMap<String, usize>, String> {
     let mut bindings = HashMap::new();
     let mut load_types = HashMap::<String, TensorType>::new();
@@ -277,7 +278,10 @@ fn infer_symbolic_bindings_from_inputs(
         }
     }
 
-    for binding in symbolic_bindings(dag) {
+    for binding in symbolic_bindings(dag)
+        .into_iter()
+        .filter(|binding| required_symbols.contains(&binding.name))
+    {
         // chelis#616: an op-declared dim (node-valued movement output
         // extent) has no input to infer from; the evaluator resolves it
         // from actual values when the owning op evaluates.
@@ -331,6 +335,66 @@ fn infer_symbolic_bindings_from_inputs(
     }
 
     Ok(bindings)
+}
+
+fn collect_dim_expr_symbols(expr: &DimExpr, symbols: &mut HashSet<String>) {
+    match expr {
+        DimExpr::Concrete(_) => {}
+        DimExpr::Sym(name) => {
+            symbols.insert(name.clone());
+        }
+        DimExpr::Mul(lhs, rhs) | DimExpr::Div(lhs, rhs) => {
+            collect_dim_expr_symbols(lhs, symbols);
+            collect_dim_expr_symbols(rhs, symbols);
+        }
+    }
+}
+
+/// Symbolic dimensions that can affect the selected roots. Root-scoped eval
+/// deliberately ignores generic declarations from unrelated dependency
+/// modules (chelis#991), while `live_mask_for_roots` has already retained any
+/// shape dependencies a live node genuinely needs (chelis#351/#616).
+fn required_symbolic_dims(dag: &Dag, live: Option<&[bool]>) -> HashSet<String> {
+    let mut symbols = HashSet::new();
+    for node in dag.nodes() {
+        if live.is_some_and(|mask| !mask[node.id.0]) {
+            continue;
+        }
+        for dim in &node.output_type.dims {
+            if let DimInfo::Named(name, None) = dim
+                && !name.is_empty()
+                && name != "*"
+            {
+                symbols.insert(name.clone());
+            }
+        }
+        match &node.op {
+            RiscOp::Expand { size, .. } => collect_dim_expr_symbols(size, &mut symbols),
+            RiscOp::Reshape { new_shape } => {
+                for dim in new_shape {
+                    if let RtDim::Sym(name) = dim {
+                        symbols.insert(name.clone());
+                    }
+                }
+            }
+            RiscOp::BlasMatmul {
+                batch_dims,
+                m,
+                n,
+                k,
+                ..
+            } => {
+                for dim in batch_dims {
+                    collect_dim_expr_symbols(dim, &mut symbols);
+                }
+                collect_dim_expr_symbols(m, &mut symbols);
+                collect_dim_expr_symbols(n, &mut symbols);
+                collect_dim_expr_symbols(k, &mut symbols);
+            }
+            _ => {}
+        }
+    }
+    symbols
 }
 
 fn resolve_load_inputs<F>(
@@ -1320,22 +1384,8 @@ fn eval_tensor_internal<F>(
 where
     F: FnMut(&str) -> Option<TensorValue>,
 {
-    let needs_symbolic_binding = dag
-        .nodes()
-        .iter()
-        .any(|node| matches!(&node.op, RiscOp::Expand { size, .. } if !size.is_concrete()))
-        || dag.nodes().iter().any(|node| {
-            node.output_type
-                .dims
-                .iter()
-                .any(|dim| matches!(dim, DimInfo::Named(_, None)))
-        })
-        || dag.nodes().iter().any(|node| match &node.op {
-            RiscOp::Reshape { new_shape } => new_shape
-                .iter()
-                .any(|dim| matches!(dim, RtDim::Sym(_))),
-            _ => false,
-        })
+    let required_symbols = required_symbolic_dims(dag, live);
+    let needs_symbolic_binding = !required_symbols.is_empty()
         // chelis#368: a `Shrink` carrying the `SHRINK_TO_END` full-axis
         // sentinel (the Pad adjoint of the differentiable `concat` over an
         // unpadded axis) must route through `bind_symbolic_dims` so the
@@ -1350,7 +1400,8 @@ where
         // identity for concrete dims and resolves the sentinel from the bound
         // output type.
         || dag.nodes().iter().any(|node| {
-            matches!(&node.op, RiscOp::Shrink { bounds }
+            live.is_none_or(|mask| mask[node.id.0])
+                && matches!(&node.op, RiscOp::Shrink { bounds }
                 if bounds.iter().any(|(_, end)| matches!(end, RtDim::ToEnd)))
         });
     // chelis#351: symbolic-dim inference reads shapes from the Loads
@@ -1369,17 +1420,17 @@ where
     let symbolic_dim_load_inputs: HashSet<&str> = if needs_symbolic_binding && live.is_some() {
         dag.nodes()
             .iter()
-            .filter_map(|node| match &node.op {
+            .filter_map(|node| {
+                match &node.op {
                 RiscOp::Load { name }
-                    if node
-                        .output_type
-                        .dims
-                        .iter()
-                        .any(|dim| matches!(dim, DimInfo::Named(_, _))) =>
+                    if node.output_type.dims.iter().any(|dim| {
+                        matches!(dim, DimInfo::Named(name, _) if required_symbols.contains(name))
+                    }) =>
                 {
                     Some(name.as_str())
                 }
                 _ => None,
+            }
             })
             .collect()
     } else {
@@ -1394,7 +1445,19 @@ where
     )?;
     let mut prebound_dims: HashMap<String, usize> = HashMap::new();
     let bound_dag = if needs_symbolic_binding {
-        let bindings = infer_symbolic_bindings_from_inputs(dag, &resolved_inputs)?;
+        let mut bindings =
+            infer_symbolic_bindings_from_inputs(dag, &resolved_inputs, &required_symbols)?;
+        // `bind_symbolic_dims` rebuilds the complete DAG to preserve node ids.
+        // Dead named dimensions therefore need a harmless placeholder even
+        // though their nodes cannot execute under this root mask. Live names
+        // are never defaulted: they were inferred above or failed loudly.
+        if live.is_some() {
+            for binding in symbolic_bindings(dag) {
+                if !required_symbols.contains(&binding.name) {
+                    bindings.entry(binding.name).or_insert(1);
+                }
+            }
+        }
         prebound_dims = bindings.clone();
         let bound = bind_symbolic_dims(dag, &bindings)?;
         // chelis#523: `verify` (grad.rs, before eval) runs BEFORE binding, so
@@ -2503,6 +2566,24 @@ mod tests {
             vals[&live],
             TensorValue::from_vec(vec![3], vec![2.0, 4.0, 6.0])
         );
+    }
+
+    /// chelis#991: a dependency package may contribute generic declarations
+    /// outside the selected eval root. Their symbolic inputs are dead and
+    /// must not become invented top-level requirements for the live result.
+    #[test]
+    fn eval_root_scoped_ignores_unrelated_dead_symbolic_input() {
+        let mut dag = Dag::new();
+        let dead_ty = TensorType {
+            dims: vec![DimInfo::Named("k".to_string(), None)],
+            precision: Prim::F32,
+        };
+        let _dead = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], dead_ty, None);
+        let live = dag.add_node(RiscOp::Const { value: 7.0 }, vec![], scalar_f32(), None);
+
+        let values = eval_tensor_roots_with_strict(&dag, &[live], |_| None)
+            .expect("dead generic dependency input must not escape into root-scoped eval");
+        assert_eq!(values[&live], TensorValue::scalar(7.0));
     }
 
     /// chelis#351: a Load can be DEAD under the roots' live mask while a
