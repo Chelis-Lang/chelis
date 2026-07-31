@@ -256,6 +256,7 @@ fn verify_bound_movement_bounds(dag: &Dag, live: Option<&[bool]>) -> Result<(), 
     Ok(())
 }
 
+#[allow(dead_code)] // Kept as stable internal API; delegates to filtered variant.
 fn infer_symbolic_bindings_from_inputs(
     dag: &Dag,
     inputs: &HashMap<String, TensorValue>,

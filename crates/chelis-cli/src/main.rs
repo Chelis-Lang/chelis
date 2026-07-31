@@ -9089,13 +9089,8 @@ fn format_eval_result(result: &chelis_compiler_api::schema::EvalResult) -> Strin
             .expect("eval roots carry display text rendered in-process by compiler-api")
     };
     let mut lines = result.transcript.clone();
-    if result.roots.len() == 1 {
-        if let Some(root) = result.roots.first() {
-            lines.push(root_display(root));
-        }
-        return lines.join("\n");
-    }
-
+    // Issue #912 [05-OBS-6]: always label, in both lanes. The bare-when-single
+    // form is removed — it cost cross-lane byte identity and line-count parity.
     lines.extend(result.roots.iter().enumerate().map(|(index, root)| {
         let name = root.name.clone().unwrap_or_else(|| format!("_{index}"));
         format!("{} = {}", display_root_name(&name), root_display(root))
