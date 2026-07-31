@@ -5157,9 +5157,17 @@ def out(x: tensor[2, f32]) -> tensor[2, f32] = add(consume(x), consume(x))
         let err = compile_for_execution_in_context(&context, source, CompileTarget::Hip, None)
             .expect_err("reef-context HIP must be rejected");
         let message = &err.errors[0].message;
+        // The remedy and the tracking issue are what this test is for. It
+        // asserted the prose "only for the C target" until the rejection
+        // moved onto the `Unsupported` channel, which restates the same
+        // guidance as the actionable `target="c"` remediation clause. The
+        // kind and the `unsupported:` brand are pinned separately, by
+        // `compile_in_context_hip_rejects_as_branded_unsupported_feature`
+        // in `tests/compiled_context.rs`.
         assert!(
-            message.contains("only for the C target") && message.contains("chelis#829"),
-            "expected reef-context HIP rejection guidance, got: {message}"
+            message.contains(r#"target="c""#) && message.contains("chelis#829"),
+            "expected reef-context HIP rejection guidance naming the C target \
+             and the tracking issue, got: {message}"
         );
     }
 
