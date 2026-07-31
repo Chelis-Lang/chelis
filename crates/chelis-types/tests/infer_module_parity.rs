@@ -134,9 +134,12 @@ fn rejected_snapshot(report: &InferResult) -> String {
 }
 
 fn baseline_path(name: &str) -> PathBuf {
+    let (section, test_name) = name
+        .split_once('_')
+        .expect("the parity fixture name has a section prefix");
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/infer_parity")
-        .join(format!("{name}.snap"))
+        .join(format!("infer_module_parity__{section}__{test_name}.snap"))
 }
 
 /// Compare against the recorded baseline. A missing baseline is recorded and
@@ -148,7 +151,7 @@ fn assert_matches_baseline(name: &str, actual: &str) {
         fs::create_dir_all(path.parent().expect("fixture dir")).expect("create fixture dir");
         fs::write(&path, actual).expect("write baseline");
         panic!(
-            "{name}: no recorded baseline; wrote {} — review it and re-run",
+            "{name}: no recorded baseline. Wrote {}. Review it, then run the test again.",
             path.display()
         );
     }

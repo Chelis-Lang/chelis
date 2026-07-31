@@ -656,7 +656,7 @@ const BASELINE: &[Entry] = &[
     ),
     (
         Pat::RustFormatNarrowing,
-        "crates/chelis-types/src/infer.rs",
+        "crates/chelis-types/src/infer/program.rs",
         3,
         "checker timing eprintln ({:>8.4}s) - duration displays, not \
          stored-value exits",
