@@ -132,7 +132,11 @@ and re-P1). The exact PR #956 follow-up
 conditional macro definitions taint their connected local-include
 component, bare and pointer-sized integer C callables classify
 conservatively as `numeric-op`, and only the three byte-frozen
-pre-ratchet plumbing declarations named in [#729] §C6 are exempt.
+pre-ratchet plumbing declarations named in [#729] §C6 are exempt. The
+2026-07-31 round-4 fold-in completes that entry gate: an arithmetic
+spelling the census does not recognize is a build failure rather than an
+unflagged row, and adding a `chelis_types::Prim` variant stops the
+tripwire compiling until the new dtype is classified.
 
 **Wave 4 - the permanent guards.** [#729] Phase 4 delivers the capability
 table per [`capability_table.md`](capability_table.md); [#730] Phase 3 (gates become UX) and [#733]

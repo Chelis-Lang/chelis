@@ -420,10 +420,12 @@ integration tier, not the workspace loop.
 structurally enforced successor for the header and stdlib families:
 canonical C declaration identity, matched-row metadata freeze, stdlib
 ADT-shape identity AND capacity classification, non-function ABI
-inventory, total linemarker attribution, a derived published-header set,
-runtime/stdlib numeric-callable authority registration, public-header
-context invariance, both pre-ratchet citation sets frozen by identity,
-and issue-kind-aware liveness are executable tripwires. These checks are
+inventory, total linemarker attribution, a derived and recursively
+walked published-header set, an INVERTED type-word rule that rejects
+unrecognized arithmetic spellings rather than classifying them
+dtype-free, runtime/stdlib numeric-callable authority registration,
+public-header context invariance, both pre-ratchet citation sets frozen
+by identity, and issue-kind-aware liveness are executable tripwires. These checks are
 not active on main until that PR lands. The checked-in baseline is still explicitly
 PARTIAL: wire-schema fields and PyO3 signatures are deferred typed legs
 whose named commands below are hard Phase 1 entry edges. No sentence in
@@ -457,13 +459,45 @@ classification escapes, and this paragraph freezes its exact strength:
   component follows BOTH include spellings - `6ddf1a72` scoped it to
   quoted includes, and the round-3 angle-include closure below widened it,
   since `cc -E -I` resolves `<x>` and `"x"` identically inside the include
-  directory.
+  directory. That widening had no control of its own until round-4 red
+  team N4: narrowing the taint edges back to quoted includes left the
+  whole suite green, because every angle-include test in it also tripped
+  a different guard. The control plants an UNCONDITIONAL
+  `#include <shared.h>` beside a conditional `#define`, so the taint
+  component is the only thing that can reject it
+  (`conditional_macro_taint_follows_angle_spelled_includes`).
 - Numeric-callable classification treats every non-boolean, non-character
   built-in arithmetic value type conservatively as `numeric-op`: `double`,
   `float`, `int`, `short`, `long`, `signed`, `unsigned`, `size_t`,
   `ptrdiff_t`, `intptr_t`, `uintptr_t`, and the exact-width signed/unsigned
   integer types. Bare `int` is not generally control plumbing
   (`bare_int_export_is_numeric_op_and_requires_registration`).
+- **The classification rule is INVERTED, so the conservatism above is real**
+  (round-4 red team N1, folded 2026-07-31). `NUMERIC_C_TYPES` alone is an
+  allowlist, and an allowlist of arithmetic spellings can never be complete:
+  `_Float16`, `__fp16`, `__bf16`, `_Decimal64`, and `__int128` all
+  classified as `[]`, so a bare 16-bit float export entered on an ordinary
+  issue citation, past the rule that flagged rows have no citation path.
+  The CLOSED list is therefore the other one, `NON_NUMERIC_C_TYPE_WORDS`:
+  the qualifier and aggregate keywords plus the two non-arithmetic value
+  spellings. A TYPE word in neither list is a build failure naming the
+  unknown word, on the same footing an unresolvable typedef already has,
+  unless it is a local typedef alias (whose own statement is checked by the
+  same rule) or a `chelis_`-prefixed opaque handle whose layout is its own
+  inventory row. Type words are separated from declarator names by POSITION,
+  and a declarator name shaped like a type spelling - a leading underscore
+  or a `_t` suffix - is rejected too, because it means the positional read
+  was wrong. Controls:
+  `an_unknown_c_type_word_is_rejected_rather_than_classified_empty`,
+  `a_typedef_alias_cannot_introduce_an_unknown_type_word`,
+  `a_reserved_shaped_declarator_name_is_rejected`, with
+  `known_c_type_words_still_classify_without_rejection` as the positive leg.
+  The language side of the same gap is closed by an EXHAUSTIVE match over
+  `chelis_types::Prim` (`prim_census_class`): the census enumerates dtypes
+  by their `(t-prim {} <name>)` spelling, so widening `Prim` would otherwise
+  never reach the census at all. A new variant now stops the tripwire
+  compiling until it is classified
+  (`census_prim_lists_cover_every_prim_variant`).
 - `NON_NUMERIC_INTEGER_PLUMBING_EXPORTS` contains exactly THREE exemptions,
   reproduced byte-for-byte here:
 
@@ -562,7 +596,13 @@ hand-maintained list (hand lists are how `HOST_ONLY_BUILTINS` rotted,
    authority binding, and the
    non-numeric classification exists only for genuinely dtype-free
    surface - so the cheapest evasion (an op classifying itself
-   non-numeric) is not representable. Wherever a consumer can be
+   non-numeric) is not representable. That sentence holds because the
+   classification rule is inverted (the calibration bullet above): an
+   arithmetic spelling the census does not recognize is a build failure,
+   not an unflagged row. While the closed list was the NUMERIC one, an
+   unrecognized spelling classified as dtype-free, which is exactly the
+   evasion this paragraph disclaims - the round-4 red team executed it
+   with `_Float16`. Wherever a consumer can be
    DERIVED from the table rather than compared against it, derive:
    Phase 4 already plans checker acceptance as a generated table view,
    which makes an unregistered op `UnknownForm` by construction.
@@ -638,7 +678,14 @@ Deliverables, with phase homes:
    in the same change set. Merely deleting `PLANNED:` or moving a record
    between vectors does not satisfy the edge.
 
-   Acceptance requirements, from the 2026-07-30 adversarial passes:
+   Acceptance requirements, from the 2026-07-30 and 2026-07-31
+   adversarial passes. Each bullet names the standing control that turns
+   RED when its guard is reverted; the round-4 additions are the
+   inverted type-word rule and its `Prim` totality lock, the array-typedef
+   resolution, the signature-less stdlib export failure, the
+   angle-spelled macro-taint control, the recursive published-header
+   walk, the stdlib-side registration controls, the removal of the
+   redundant seam count, and the splice-aware `#line` ban:
 
    - **C declaration identity is canonical, not pretty-print text.**
      The real preprocessor supplies the transitive published-header
@@ -682,13 +729,24 @@ Deliverables, with phase homes:
      comparison is on declarator NAMES so that legal macro expansion of a
      type spelling does not read as a missing declaration. The ban names
      the known channel; totality does not depend on having enumerated the
-     channels.
+     channels - which the round-4 pass demonstrated rather than argued: a
+     `#line` split across a phase-2 line splice reached the backstop and
+     was rejected there, correctly but under the wrong name. The ban now
+     joins splices before reading directives, so the diagnostic matches
+     the defect (`a_spliced_line_directive_is_caught_by_the_ban_itself`).
+     The export never entered the inventory either way; this is
+     diagnostic quality, not a closed hole.
    - **The published header set is derived, not declared.** `HEADER_ROOTS`
      survives as a record of WHY each root is published, but it is not
      trusted: the roots' INCLUDE closure must equal the `.h` files actually
      present in the published include directory, so a header dropped in
      and reachable from no root fails loudly instead of contributing
      nothing (`a_published_header_reachable_from_no_root_fails`).
+     The directory walk RECURSES, keyed by the path an `#include` spells
+     (`sub/x.h`). A flat scan left a subdirectory as an uninventoried
+     publishing channel, which is the same hole one level down
+     (round-4 red team N5;
+     `a_published_header_in_a_subdirectory_is_reached_or_fails`).
      Reachability is asked of the include graph rather than of the
      preprocessed buckets because whether a header emits a locally
      attributed bucket at all is a preprocessor detail: `chelis_blas.h`
@@ -709,6 +767,16 @@ Deliverables, with phase homes:
      rather than silently skipped, because skipping is exactly how that
      seam laundered itself
      (`unresolvable_parenthesized_typedef_is_rejected`).
+     ARRAY typedefs are resolved on the same footing, and were the third
+     shape (round-4 red team N2): the generic word split popped the array
+     EXTENT as the alias, so `typedef double chelis_vec4[4];` registered
+     `4` and a setter taking `chelis_vec4` inherited nothing. The alias is
+     the identifier before the first `[`, and a shape the resolver cannot
+     read that way is rejected rather than guessed at
+     (`an_array_typedef_cannot_launder_a_float_carrier`,
+     `an_unresolvable_array_typedef_is_rejected`). A `chelis_`-prefixed
+     array alias is not covered by the inverted type-word rule, which
+     accepts project-named handles, so this needed its own closure.
    - **The stdlib carrier families carry capacity flags.** A
      `std-adt-numeric` or `std-def-numeric` row is classified, not merely
      inventoried: a float primitive (`f64`/`f32`/`f16`/`bf16`) in an
@@ -722,6 +790,16 @@ Deliverables, with phase homes:
      (`std_adt_bare_f64_variant_has_no_issue_citation_path`, with
      `std_adt_integer_carrier_is_numeric_op_not_a_seam` as the positive
      leg for the source-faithful `JsonInt(int64)` shape this plan wants).
+     The def leg reads capacity off the DECLARED signature, so an
+     exported `def` that declares none is public numeric surface the
+     census cannot see. That case used to produce no row and no
+     complaint, and the Surf style guide recommends exactly that shape
+     for load-style top-level bindings, which put the silent path one
+     stdlib commit away; it is now a loud census failure naming the
+     definition (round-4 red team N3;
+     `an_exported_stdlib_def_without_a_signature_fails_loudly`, with
+     `a_declared_stdlib_signature_enumerates_and_a_type_export_does_not`
+     keeping a dtype-free type export from reading as one).
    - **Matched rows freeze enforcement metadata.** Equality is not
      merely `(kind, id)`: the tripwire compares the complete
      enforcement-relevant derived classification for every matched
@@ -750,7 +828,14 @@ Deliverables, with phase homes:
      Negative mutations add an unregistered runtime export and stdlib
      `export def`, name absent `[05-OP-999]`, and substitute
      `[05-OBS-1]`; all fail. An issue citation or a bare chapter
-     substring is never semantic authority. The tool does not infer
+     substring is never semantic authority. The STDLIB half of that
+     claim had no control until round-4 red team N6, which is why it is
+     named twice now: a new exported numeric def cited with only an
+     issue fails, and - the branch that binds `std-def-numeric` by KIND
+     rather than by flags - a float-only def whose capacity seam a
+     maintainer override disposed of STILL owes its registration
+     (`a_new_stdlib_numeric_def_requires_semantic_registration`,
+     `a_stdlib_registration_against_a_nonexistent_atom_fails`). The tool does not infer
      semantic relevance within the OP group; review verifies the
      numbered-spec decision but cannot create it.
    - **A new row cannot self-bless, and a new SEAM cannot be cited
@@ -758,9 +843,16 @@ Deliverables, with phase homes:
      CI fails on TODO. An UNFLAGGED row names an OPEN issue (invariant
      7 governs the release). A FLAGGED capacity row has NO
      issue-citation path: the grandfathered 2026-07-30 seam set is
-     frozen by exact citation, count, row identity, and derived
+     frozen by exact citation, row identity, and derived
      classification. Removing one seam cannot relocate its citation to
-     a new row. The PLAIN pre-ratchet citation is frozen the same way
+     a new row, and adding one alongside the whole original set is the
+     same rejection (`grandfather_citation_cannot_be_copied_onto_new_rows`).
+     There is deliberately no separate COUNT lock. The identity freeze
+     subsumes it - `GRANDFATHER_SEAM_IDS` IS the set, so a row carrying
+     the citation is either one of those identities or already a
+     rejection - and the count branch it replaced could not be reached
+     by any input, which makes it an untested claim rather than a second
+     guard (round-4 red team N7). The PLAIN pre-ratchet citation is frozen the same way
      and for the same reason - a citation string any new row may copy
      is not a disposition, and leaving it unfrozen let a brand-new
      numeric export skip the semantic hook
@@ -787,6 +879,18 @@ Deliverables, with phase homes:
      payload's `pull_request` field as the wrong object kind. The unit
      controls include an open issue, closed issue, missing issue, and
      open PR.
+     The division of labour is deliberate and stated here so nobody
+     infers more from a green CI run than it proves: **CI checks
+     citation SHAPE only** - that a `chelis#N` reference is present, and
+     that a `maintainer-override(...)` marker is balanced with its issue
+     inside the parentheses - because the tripwire runs offline and
+     network access would make it flaky and unrunnable in a sandbox.
+     **Existence, kind, and open-state are the LIVENESS gate's job**, and
+     it is a manual gate: `.venv/bin/python
+     scripts/capacity_census_liveness.py`, run at release cuts and
+     red-team passes. A citation naming an issue that does not exist, or
+     one that names a PR, passes CI and fails liveness. That is the
+     designed boundary, not a gap (round-4 red team N8, recorded).
    - **Failure messages teach** the rule, the sanctioned actions, and
      the §C6 pointer. For a context-poor agent the error text is the
      only documentation that provably gets read; the cheapest passing

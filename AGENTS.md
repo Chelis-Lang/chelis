@@ -207,6 +207,21 @@ numeric data, whether or not you have read that document:
   locked by PR #956 commit
   `6ddf1a72d6dea6770a330d5c2ef3b8fa7d023c43`; widening either exception requires
   changing this contract and the negative controls together.
+- **An arithmetic spelling the census does not recognize is a BUILD FAILURE, not an
+  unflagged row.** The closed list is the non-numeric one
+  (`NON_NUMERIC_C_TYPE_WORDS`): qualifier and aggregate keywords plus the two
+  non-arithmetic value spellings. An allowlist of arithmetic spellings can never be
+  complete - `_Float16`, `__fp16`, `__bf16`, `_Decimal64`, and `__int128` were all
+  classifying as dtype-free - so the rule is inverted. If you add a type word to a
+  published header and the census rejects it, decide which list it belongs in; do
+  not route around it. The same lock exists on the language side: adding a variant
+  to `chelis_types::Prim` stops the tripwire compiling until the new dtype is
+  classified. Typedef aliases are resolved before classifying, including array
+  aliases (`typedef double chelis_vec4[4];`), and a typedef shape the resolver
+  cannot read is rejected rather than skipped.
+- **An exported stdlib `def` declares its signature.** The census reads a public
+  def's numeric capacity off its `defsig`, so an exported def that declares none is
+  numeric surface nobody can see. Declare it, or stop exporting the binding.
 - The census, tripwire, and oracle files are guard artifacts: editing one to make
   your change pass is never the fix. The failure message names the sanctioned
   actions; take one of those.

@@ -172,7 +172,11 @@ a numeric dtype requires a registry entry, and the non-numeric
 classification is available only for genuinely dtype-free surface.
 For the C family this is deliberately conservative: every
 non-boolean/non-character built-in arithmetic value type, including bare
-`int` and the pointer-sized integer spellings, yields `numeric-op`. PR #956
+`int` and the pointer-sized integer spellings, yields `numeric-op` - and
+a spelling the census does not recognize at all is a build failure rather
+than a dtype-free row, which is what makes "conservative" true rather
+than aspirational (`dtype_semantics.md` §C6, the inverted type-word
+rule). PR #956
 commit `6ddf1a72d6dea6770a330d5c2ef3b8fa7d023c43` permits exactly three
 pre-ratchet plumbing identities to remove that flag - `chelis_alloc`,
 `chelis_tensor_from_value_list_typed`, and `chelis_dtype_size`, with their
