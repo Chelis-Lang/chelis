@@ -1,0 +1,25 @@
+[package]
+name = "nautilus-quantile-contract"
+version = "0.1.0"
+
+[[dependencies]]
+name = "chelis-std"
+version = "0.4.0"
+compiler = "=0.17.4"
+archive_sha256 = "309abbf4c87355294538da4c90d65a86ec36119fc890ee998c282d8e9f9859c5"
+shell_sha256 = "f414ca7b624f97ec3ade5106f3b8bd16da756bd0611f40474569fdaef637e021"
+
+[dependencies.source]
+kind = "bundled"
+compiler_version = "0.17.4"
+
+[[dependencies]]
+name = "nautilus"
+version = "0.7.36"
+compiler = "=0.17.4"
+archive_sha256 = "412e24ec26f1828db394f6bed6ef8f4a9c93a7b104e020a457c93ec0a5b96572"
+shell_sha256 = "2db566d8b381fd4d49acef62f875420a59c397961954a7c27cb02b79cb3f12e4"
+
+[dependencies.source]
+kind = "local_registry"
+remote_origin = "github://Chelis-Lang/nautilus@v0.7.36"

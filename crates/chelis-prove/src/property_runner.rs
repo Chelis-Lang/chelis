@@ -485,9 +485,10 @@ pub fn run_surf_decls_properties(
 }
 
 /// Run linked Surf properties with an explicit trusted implementation slice
-/// for standard contracts. The CLI Reef path passes the bundled chelis-std
-/// declarations here; unlinked source paths pass an empty slice, so a user
-/// cannot obtain std contract assumptions by spelling a linker-shaped name.
+/// for standard contracts. The CLI Reef path passes dependency-owned linker
+/// declarations here (including chelis-std and Nautilus); unlinked source
+/// paths pass an empty slice, so a user cannot obtain contract assumptions by
+/// spelling a linker-shaped name.
 pub fn run_surf_decls_properties_with_contract_decls(
     all_decls: &[Decl],
     entry_decls: &[Decl],
@@ -958,6 +959,54 @@ fn try_surf_tier_b(
             None,
             Some(
                 "contract abstraction did not bind any call to Std.Contracts.normal_cdf"
+                    .to_string(),
+            ),
+            false,
+            Vec::new(),
+        ));
+    }
+    if abstraction.requires_quantile() && !abstraction.used_quantile() {
+        return Some(PropertyOutcome::new(
+            property.name.clone(),
+            PropertyStatus::Unsupported,
+            PropertyTier::Smt,
+            0,
+            seed,
+            None,
+            Some(
+                "contract abstraction did not bind any trusted linked call to Nautilus.Stats.quantile_vec"
+                    .to_string(),
+            ),
+            false,
+            Vec::new(),
+        ));
+    }
+    if abstraction.has_unsupported_quantile_contract() {
+        return Some(PropertyOutcome::new(
+            property.name.clone(),
+            PropertyStatus::Unsupported,
+            PropertyTier::Smt,
+            0,
+            seed,
+            None,
+            Some(
+                "Nautilus.Stats.quantile_vec contract abstraction currently supports std.quantile.monotonicity only"
+                    .to_string(),
+            ),
+            false,
+            Vec::new(),
+        ));
+    }
+    if abstraction.requires_quantile() && !abstraction.has_quantile_monotonicity_pair() {
+        return Some(PropertyOutcome::new(
+            property.name.clone(),
+            PropertyStatus::Unsupported,
+            PropertyTier::Smt,
+            0,
+            seed,
+            None,
+            Some(
+                "std.quantile.monotonicity requires two Nautilus.Stats.quantile_vec calls over the same compiler-bound dataset"
                     .to_string(),
             ),
             false,

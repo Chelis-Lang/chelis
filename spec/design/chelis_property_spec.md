@@ -39,12 +39,29 @@ Rules:
 - Numeric suffixes in property names have no harness semantics.
 
 Contract options are part of Tier B lowering, not only report metadata. A
-contract-bound call to the certified implementation is replaced by a fresh SMT
+contract-bound call to the trusted implementation is replaced by a fresh SMT
 symbol and the contract assumptions needed for that symbol. The prover must
 check that the call resolves to the implementation named by the discharge
 record before applying the abstraction. For `std.normal_cdf.reflection`, the
 lowering recognizes syntactic `normal_cdf(x)` / `normal_cdf(-x)` pairs and
 asserts the reflection coupling between their fresh symbols.
+
+For `std.quantile.monotonicity`, the trusted implementation is the resolved
+Reef dependency declaration for `Nautilus.Stats.quantile_vec`, whose linker
+symbol is `pkg__nautilus__Nautilus__Stats__quantile_vec`. Trust comes from the
+linker's dependency-owned declaration partition, not from parsing source names
+or accepting a root-package lookalike. Lowering intercepts the call before the
+generic scalar-argument pass: the tensor operand stays as compiler AST
+identity, while the scalar quantile level lowers to SMT. Only two calls over
+the same dataset identity receive the relational monotonicity assumption.
+Missing trusted calls, different-dataset pairs, and the not-yet-bridged range
+or boundary contracts return `unsupported` under `smt-only`.
+
+The chelis#979 acceptance oracle is:
+
+```sh
+cargo test -p chelis-cli --features smt --test issue_979_nautilus_quantile
+```
 
 ### Scalar gradient goals in Tier B
 

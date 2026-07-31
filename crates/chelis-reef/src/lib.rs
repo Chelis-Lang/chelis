@@ -446,6 +446,12 @@ pub struct PreparedProgram {
     /// `_with_context` against the cached chelis-std sub-context. The
     /// concatenation `stdlib_decls ++ non_stdlib_decls` equals `decls`.
     pub non_stdlib_decls: Vec<Decl>,
+    /// Linker-produced declarations owned by resolved dependency packages
+    /// (including chelis-std), excluding every declaration from the root
+    /// package and the synthetic entry module. Proof-contract consumers use
+    /// this slice as provenance: an author cannot make a local declaration
+    /// trusted by spelling a linker-shaped name.
+    pub dependency_decls: Vec<Decl>,
 }
 
 /// Linker-owned declaration graph emitted for machine consumers such as
@@ -1421,6 +1427,9 @@ pub struct PreparedReefGraph {
     /// concatenation `linked_stdlib_decls ++ linked_non_stdlib_library_decls`
     /// equals `linked_library_decls`.
     pub linked_non_stdlib_library_decls: Vec<Decl>,
+    /// Linker-produced declarations from dependency packages only. This is a
+    /// provenance partition, not a name filter.
+    pub linked_dependency_decls: Vec<Decl>,
     pub(crate) internal_maps: HashMap<(String, String), HashMap<String, String>>,
     pub(crate) dep_shells: BTreeMap<String, ShellPackage>,
     pub(crate) eval_module_prefix: String,
@@ -1943,6 +1952,7 @@ pub fn prepare_program_for_file(file: &Path) -> Result<Option<PreparedProgram>, 
         package_root: root,
         stdlib_decls: graph.linked_stdlib_decls.clone(),
         non_stdlib_decls: graph.linked_non_stdlib_library_decls.clone(),
+        dependency_decls: graph.linked_dependency_decls.clone(),
     }))
 }
 
@@ -2010,11 +2020,15 @@ fn prepare_graph_from_loaded(
     let mut linked_library_decls = Vec::new();
     let mut linked_stdlib_decls = Vec::new();
     let mut linked_non_stdlib_library_decls = Vec::new();
+    let mut linked_dependency_decls = Vec::new();
     for (package_name, module) in linked {
         if package_name == CHELIS_STD_PACKAGE_NAME {
             linked_stdlib_decls.extend(module.decls.iter().cloned());
         } else {
             linked_non_stdlib_library_decls.extend(module.decls.iter().cloned());
+        }
+        if package_name != graph.root_package {
+            linked_dependency_decls.extend(module.decls.iter().cloned());
         }
         linked_library_decls.extend(module.decls);
     }
@@ -2025,6 +2039,7 @@ fn prepare_graph_from_loaded(
         linked_library_decls,
         linked_stdlib_decls,
         linked_non_stdlib_library_decls,
+        linked_dependency_decls,
         internal_maps,
         dep_shells,
         eval_module_prefix,
@@ -2327,6 +2342,7 @@ pub fn compile_with_reef_graph(
         package_root: graph.package_root.clone(),
         stdlib_decls: graph.linked_stdlib_decls.clone(),
         non_stdlib_decls,
+        dependency_decls: graph.linked_dependency_decls.clone(),
     })
 }
 
@@ -11301,6 +11317,7 @@ module_prefix = "RegistryLib"
             linked_library_decls: Vec::new(),
             linked_stdlib_decls: Vec::new(),
             linked_non_stdlib_library_decls: Vec::new(),
+            linked_dependency_decls: Vec::new(),
             internal_maps: HashMap::new(),
             dep_shells: BTreeMap::new(),
             eval_module_prefix: "Consumer".to_string(),
@@ -11424,6 +11441,7 @@ module_prefix = "RegistryLib"
             package_root: PathBuf::new(),
             stdlib_decls: Vec::new(),
             non_stdlib_decls: Vec::new(),
+            dependency_decls: Vec::new(),
         };
         let rendered = chelis_surf::format::format_program(
             &prepared.reachable_decls().expect("reachable declarations"),
@@ -11462,6 +11480,7 @@ module_prefix = "RegistryLib"
             package_root: PathBuf::new(),
             stdlib_decls: Vec::new(),
             non_stdlib_decls: Vec::new(),
+            dependency_decls: Vec::new(),
         };
         let invariant_rendered = chelis_surf::format::format_program(
             &invariant_program
@@ -11494,6 +11513,7 @@ module_prefix = "RegistryLib"
             package_root: PathBuf::new(),
             stdlib_decls: Vec::new(),
             non_stdlib_decls: Vec::new(),
+            dependency_decls: Vec::new(),
         };
         let macro_rendered = chelis_surf::format::format_program(
             &macro_program.reachable_decls().expect("macro reachability"),
