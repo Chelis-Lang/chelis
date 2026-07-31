@@ -347,3 +347,27 @@ fn guard_drop_restores_uncancellable_compilation() {
         .expect("after the guard drops, compilation must be unaffected");
     assert!(!result.roots.is_empty());
 }
+
+/// The section C4.4 fitness-honesty case the review demanded: a cancelled
+/// `compiler::check` must NOT return `Ok(score: 1.0, errors: [])` computed
+/// over a truncated walk. Before the gate, every pass the checker runs
+/// stopped early on a tripped token and the clean-looking counts flowed
+/// into a perfect score -- "the counts become the truncated truth". With
+/// the gate, a pre-tripped token yields a structural cancellation error,
+/// never a CheckResult (chelis#930 review blocker).
+#[test]
+fn cancelled_check_is_an_error_not_a_perfect_score() {
+    let token = CancelToken::new();
+    token.cancel();
+    let _guard = install_cancel_token(token);
+    let err = compiler::check(chelis_compiler_api::schema::CheckRequest {
+        source: front_end_heavy_source(40),
+        source_kind: chelis_compiler_api::schema::SourceKind::Surf,
+    })
+    .expect_err("a cancelled check must not produce a CheckResult at all");
+    assert!(
+        err.is_cancellation(),
+        "must classify structurally via {EVAL_CANCELLED_KIND:?}, got kinds: {:?}",
+        err.errors.iter().map(|e| &e.kind).collect::<Vec<_>>()
+    );
+}

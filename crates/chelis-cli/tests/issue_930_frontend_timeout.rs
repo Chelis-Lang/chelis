@@ -77,7 +77,15 @@ fn eval(args: &[&str]) -> (Option<i32>, String, String) {
     )
 }
 
+/// Manual gate (chelis#930): this builds a 1500-declaration program,
+/// subprocesses the real binary, and asserts a wall-clock bound
+/// (`elapsed + 1s < 7s`). Wall-clock bounds do not hold on a contended
+/// box -- the repo has measured 2,434s vs 24s for the same suite under
+/// load -- so per the review it runs as a documented manual gate, not in
+/// the default suite. Command + expected success condition:
+/// `docs/manual_gates.md` ("frontend timeout trips cooperatively").
 #[test]
+#[ignore = "wall-clock bound; run manually per docs/manual_gates.md (chelis#930)"]
 fn timeout_trips_cooperatively_during_the_front_end() {
     let dir = tempdir().expect("tempdir");
     let path = write_program(

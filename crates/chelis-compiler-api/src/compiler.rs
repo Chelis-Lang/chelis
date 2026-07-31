@@ -775,6 +775,14 @@ fn wire_deep_error_path(path: crate::fragment::DeepErrorPath) -> crate::schema::
 pub fn check(request: crate::schema::CheckRequest) -> Result<CheckResult> {
     let deep_exprs = deep_exprs_from_source(request.source_kind, &request.source)?;
     let report = chelis_types::check_ir_fitness(&deep_exprs);
+    // chelis#930 review: a cancelled walk must not become a CheckResult.
+    // Every pass check_ir_fitness runs can now stop early on a tripped
+    // token, so without this bail a cancelled check returns
+    // Ok(score: 1.0, errors: []) computed over the truncated walk --
+    // "perfect success" whose empty error list is a coverage artifact.
+    // An embedder can reach this on the public API today by installing a
+    // CancelToken (exported since chelis#914) and calling compiler::check.
+    bail_if_cancelled("check")?;
     Ok(CheckResult {
         score: report.score,
         components: FitnessComponents {

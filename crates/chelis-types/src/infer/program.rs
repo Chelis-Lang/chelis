@@ -837,6 +837,17 @@ pub(crate) fn infer_ir_program_in_session(
     let stack_scope = StackExhaustionScope::enter();
     let type_env = build_ir_type_env(exprs);
     let stats = infer_ir_program_with_env(exprs, &type_env, errors);
+    // chelis#930 review: this was the one `*_in_session` entry with no gate.
+    // Without it, a tripped token let every pass below stop early and the
+    // walk's truncated counts flow into a clean-looking report -- compiler::
+    // check would return score 1.0 with an empty error list for a program
+    // whose tail was never inspected (contradicting section C4.4 and the
+    // repo Contract Invariant: perfect success requires an empty error list
+    // to be HONEST, and a truncated walk is not).
+    if cancellation_gate(errors) {
+        stack_scope.drain_into(errors);
+        return stats;
+    }
     validate_ir_program(exprs, &type_env, errors);
     validate_tensor_precisions_in_program(exprs, errors);
     crate::invariants::validate_type_invariants_in_program_with_sink(exprs, errors);
