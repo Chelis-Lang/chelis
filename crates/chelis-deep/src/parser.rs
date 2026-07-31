@@ -175,7 +175,14 @@ impl<'a> Parser<'a> {
                 return Ok(typed_literal_lit_expr(Atom::Float(*f), *suffix, span));
             }
             TokenKind::Str(s) => Atom::Str(s.clone()),
-            TokenKind::Keyword(k) => Atom::Keyword(k.clone()),
+            TokenKind::Keyword(_) => {
+                return Err(ParseError::Expected {
+                    expected: "expression (bare :keyword is valid only as a metadata map key)"
+                        .to_string(),
+                    found: format!("{:?}", tok.kind),
+                    offset: span.offset,
+                });
+            }
             TokenKind::Bool(b) => Atom::Bool(*b),
             other => {
                 return Err(ParseError::Expected {
@@ -795,12 +802,12 @@ mod tests {
     }
 
     #[test]
-    fn parse_keyword() {
-        let exprs = p(":axis");
-        match &exprs[0] {
-            Expr::Atom(Atom::Keyword(k), _) => assert_eq!(k, "axis"),
-            other => panic!("expected Keyword, got {:?}", other),
-        }
+    fn parse_bare_keyword_is_error() {
+        let result = parse_str(":axis");
+        assert!(
+            result.is_err(),
+            "bare :keyword outside metadata map must be a parse error"
+        );
     }
 
     #[test]
