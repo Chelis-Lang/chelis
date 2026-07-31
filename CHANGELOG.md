@@ -31,6 +31,14 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   - Replace `chelis_vocab::render_runtime_dtype_c_header` with `chelis_runtime::dtype_header::render_runtime_dtype_c_header`.
   - Add an explicit lifetime to each `EffectKindDecodeError` type.
 
+### Fixed
+
+- **The runtime and generated C now decode native int32 storage through signed 32-bit pointers.**
+  Runtime comparison, `where`, scatter-add, `cumsum`, `trace`, `clamp`, and `einsum` now use native `i32` access.
+  Generated C uses `int32_t` for int32 element access and keeps `float` for F32 and the current Bool payload.
+  Generated C max and min operations compare int32 values without a binary32 conversion.
+  This correction preserves the dtype IDs, element widths, storage representation, and public C signatures.
+
 ## [0.17.4] — 2026-07-30
 
 ### Fixed
