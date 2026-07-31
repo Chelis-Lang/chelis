@@ -715,21 +715,41 @@ const BASELINE: &[Entry] = &[
     (
         Pat::RustDebugNumericFormat,
         "crates/chelis-compiler-api/src/runtime/host_ops.rs",
-        52,
+        45,
         "declared derived-Debug residue carriers: Err(format!) \
          type-mismatch diagnostics over Value/Prim shapes, the tensor \
          SHAPE debug in render_tensor (elements route through \
          format_element), and cfg(test) assertions; +2 from the \
-         chelis#890 JSON argument diagnostics (chelis#997 debt)",
+         chelis#890 JSON argument diagnostics, then -7 moved into the \
+         shared truncated_debug helper by the chelis#903 arg_debug \
+         centralization (chelis#997 debt)",
+    ),
+    (
+        Pat::RustDebugNumericFormat,
+        "crates/chelis-compiler-api/src/runtime/csv.rs",
+        5,
+        "chelis#903 CSV I/O runtime: Err(format!) parse/shape diagnostics \
+         over document shapes -- the json.rs residue-carrier class \
+         (chelis#997 debt; same render_value sweep)",
+    ),
+    (
+        Pat::RustDebugNumericFormat,
+        "crates/chelis-compiler-api/src/runtime/mod.rs",
+        1,
+        "the shared truncated_debug helper the chelis#903 arg_debug \
+         centralization introduced: ONE Debug spelling all expect_*_arg \
+         diagnostics route through (7 host_ops + 7 json.rs sites moved \
+         here; the chelis#997 sweep replaces this single site)",
     ),
     (
         Pat::RustDebugNumericFormat,
         "crates/chelis-compiler-api/src/runtime/json.rs",
-        23,
+        16,
         "chelis#890 JSON I/O runtime: Err(format!) parse/shape diagnostics \
          over Json ADT fields and truncated payload renders -- the same \
          residue-carrier class as eval.rs/host_ops.rs (chelis#997 debt; \
-         the sweep fix routes them through render_value)",
+         the sweep fix routes them through render_value; -7 moved into \
+         the shared truncated_debug helper by chelis#903)",
     ),
     (
         Pat::RustDebugNumericFormat,
@@ -756,9 +776,10 @@ const BASELINE: &[Entry] = &[
     (
         Pat::RustDebugNumericFormat,
         "crates/chelis-compiler-api/src/runtime/tests.rs",
-        30,
+        38,
         "cfg-gated runtime unit-test assertions, not product exits; +10 \
-         from the chelis#890 JSON corpus",
+         from the chelis#890 JSON corpus, +8 from the chelis#903 CSV \
+         corpus",
     ),
     (
         Pat::RustDebugNumericFormat,

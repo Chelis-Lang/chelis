@@ -426,6 +426,13 @@ PERMITTED_RUST_DEBUG_FORMAT_PATHS: frozenset[str] = frozenset(
         # Json ADT fields, the same class as eval.rs/host_ops.rs; the
         # sweep fix is chelis#997. Tripwire row annotated identically.
         "crates/chelis-compiler-api/src/runtime/json.rs",
+        # 2026-07-31 (PR #904, chelis#997): csv.rs (the json.rs class) and
+        # mod.rs (the shared truncated_debug helper the arg_debug
+        # centralization routes all expect_*_arg diagnostics through --
+        # ONE Debug spelling replacing 14 scattered sites). Tripwire rows
+        # annotated identically.
+        "crates/chelis-compiler-api/src/runtime/csv.rs",
+        "crates/chelis-compiler-api/src/runtime/mod.rs",
         "crates/chelis-types/src/observation.rs",
         "crates/chelis-runtime/src/format_shortest.rs",
         "crates/chelis-compiler-api/src/runtime/host_ops.rs",
