@@ -8923,7 +8923,12 @@ mod tests {
                 &disk_archive_sha,
                 &disk_shell_sha,
             ) {
-                BundleHashDrift::InSync | BundleHashDrift::DifferentCompiler => {}
+                BundleHashDrift::InSync => {}
+                BundleHashDrift::DifferentCompiler => assert!(
+                    lock_path.starts_with(workspace_root.join("examples")),
+                    "{} is not a historical example lock and may not escape current bundle validation",
+                    lock_path.display()
+                ),
                 BundleHashDrift::ArchiveDrift => panic!(
                     "{} archive_sha256 is stale vs the embedded bundle; \
                      regenerate the lock with `chelis reef build` (or \
