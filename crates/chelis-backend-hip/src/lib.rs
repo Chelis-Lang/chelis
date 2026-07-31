@@ -3,6 +3,20 @@
 //! Generates C host code with embedded HIP kernel source strings.
 //! At runtime, `hiprtc` JIT-compiles the kernels and dispatches them to GPU.
 
+/// Primitive types the HIP backend's tensor-DAG path can realize.
+/// Declared from hardware spec + local HIP environment verification.
+/// Declaration-only in CI (no HIP toolchain) — verified in the field via
+/// [05-UNS-1] wiring when the backend rejection path fires.
+pub const TENSOR_CAPABLE_PRIMS: &[chelis_types::types::Prim] = &[
+    chelis_types::types::Prim::F32,
+    chelis_types::types::Prim::F64,
+    chelis_types::types::Prim::Bool,
+    chelis_types::types::Prim::Bf16,
+    chelis_types::types::Prim::F16,
+    chelis_types::types::Prim::Int32,
+    chelis_types::types::Prim::Int64,
+];
+
 use std::collections::HashMap;
 
 use chelis_ir::dag::DimExpr;
