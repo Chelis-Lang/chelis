@@ -214,7 +214,9 @@ diagnostic: the latter is preserved as the adapter input even when the file
 declares no `test_*` function (chelis#967). A clean file with no `test_*` and
 no compile/check failure is still a `config-error`, rather than an
 expected-failure success. Plain and NDJSON modes emit one verdict per file
-plus a mode-specific summary.
+plus a mode-specific summary. A `wrong-diagnostic` or `drifted` NDJSON record
+also carries the compiler messages in its `"got"` string array, so machine
+consumers do not need a second plain-text run to diagnose the mismatch.
 
 ## Property Proof Loop
 

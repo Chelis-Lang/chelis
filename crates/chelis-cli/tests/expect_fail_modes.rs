@@ -144,6 +144,62 @@ fn neg_bare_file_check_failure_matches_sidecar() {
     ));
 }
 
+#[test]
+fn ordinary_testless_compile_mismatch_keeps_legacy_zero_record_behavior() {
+    let (_d, pkg) = make_probe_package("ordinary-testless");
+    write_file_probe(
+        &pkg,
+        "case",
+        r#"def helper() -> int64 = true"#,
+        "body doesn't match declared signature\n",
+    );
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .current_dir(&pkg)
+        .args([
+            "test",
+            "tests/case.ch",
+            "--json",
+            "--batch-mode",
+            "file",
+            "--jobs",
+            "1",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::eq("{\"summary\":{\"passed\":0,\"failed\":0}}\n"));
+}
+
+#[test]
+fn neg_bare_file_mismatch_ndjson_preserves_actual_diagnostic() {
+    let (_d, pkg) = make_probe_package("neg-file-drift");
+    write_file_probe(
+        &pkg,
+        "case",
+        r#"def helper() -> int64 = true"#,
+        "diagnostic that must not match\n",
+    );
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .current_dir(&pkg)
+        .args(["test", "tests/", "--expect", "neg", "--json"])
+        .output()
+        .expect("run neg expected-failure adapter");
+    assert_eq!(output.status.code(), Some(1));
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    let record: serde_json::Value =
+        serde_json::from_str(stdout.lines().next().expect("verdict row")).expect("valid NDJSON");
+    assert_eq!(record["verdict"], "wrong-diagnostic");
+    assert_eq!(
+        record["got"],
+        serde_json::json!([
+            "compile: def 'helper' body doesn't match declared signature: body has type `() -> bool`, declared type is `() -> int64`"
+        ])
+    );
+}
+
 // ------------------------------------------------------------ blocked mode
 
 #[test]
@@ -238,6 +294,35 @@ fn blocked_bare_file_diagnostic_mismatch_is_drifted_and_preserved() {
              \x20   got: compile: unbound variable: missing_file_level_symbol; def 'helper' body doesn't match declared signature: body has type `() -> <error>`, declared type is `() -> unit`\n\n\
              0 ok, 1 failing (blocked mode)\n",
         ));
+}
+
+#[test]
+fn blocked_bare_file_mismatch_ndjson_preserves_actual_diagnostic() {
+    let (_d, pkg) = make_probe_package("blocked-file-drift-json");
+    write_file_probe(
+        &pkg,
+        "probe",
+        r#"def helper() -> unit = missing_file_level_symbol()"#,
+        "some other diagnostic\nchelis#967: preserve bare file diagnostics\n",
+    );
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .current_dir(&pkg)
+        .args(["test", "tests/", "--expect", "blocked", "--json"])
+        .output()
+        .expect("run blocked expected-failure adapter");
+    assert_eq!(output.status.code(), Some(1));
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    let record: serde_json::Value =
+        serde_json::from_str(stdout.lines().next().expect("verdict row")).expect("valid NDJSON");
+    assert_eq!(record["verdict"], "drifted");
+    assert_eq!(
+        record["got"],
+        serde_json::json!([
+            "compile: unbound variable: missing_file_level_symbol; def 'helper' body doesn't match declared signature: body has type `() -> <error>`, declared type is `() -> unit`"
+        ])
+    );
 }
 
 // ---------------------------------------------------------- fail-closed

@@ -466,7 +466,11 @@ must therefore run the file-level compile and full checker preparation before
 classifying a file with no `test_*` functions as recordless; it must preserve
 the resulting diagnostic for sidecar substring matching and mismatch
 reporting (chelis#967). A genuinely clean file with neither test records nor
-a compile/check failure remains a fail-closed `config-error`.
+a compile/check failure remains a fail-closed `config-error`. This additional
+file preparation is exclusive to `--expect`; ordinary testless files retain
+the legacy zero-record behavior. Machine-facing `wrong-diagnostic` and
+`drifted` verdicts SHALL include the actual diagnostic messages in a `"got"`
+array as well as the expected-substring detail.
 
 ### Bounding wall time with `--timeout`
 
