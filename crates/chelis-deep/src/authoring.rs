@@ -847,6 +847,7 @@ where
         }
         Expr::List(list, _) => list,
         Expr::Atom(..) => return,
+        Expr::Node(..) | Expr::BareList(..) | Expr::UnknownForm(..) => return,
     };
     let tag = list_tag(list);
     if let Some(meta) = list.elements.get(1) {
@@ -902,6 +903,7 @@ where
         }
         Expr::List(list, _) => list,
         Expr::Atom(..) => return,
+        Expr::Node(..) | Expr::BareList(..) | Expr::UnknownForm(..) => return,
     };
     let tag = list_tag(list);
     if let Some(meta) = list.elements.get_mut(1) {

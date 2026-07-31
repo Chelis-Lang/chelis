@@ -15,12 +15,14 @@ pub mod printer;
 pub mod raw;
 pub mod role;
 pub mod span;
+pub mod stamp_to_typed;
 pub mod tag;
 pub mod validate;
 
-pub use ast::{Atom, Expr, List, MetaExpr, MetaMap};
+pub use ast::{Atom, Expr, List, MetaExpr, MetaMap, UnknownFormData};
 pub use effect_kind::decode_effect_kind;
 pub use lexer::LiteralSuffix;
+pub use stamp_to_typed::{StampError, StampErrorKind, stamp_to_typed};
 pub use path::{
     DeepPath, InsertFunctionError, PathError, PathSegment, ResolveError, ResolvedFunction,
     function_body, function_defsig, insert_function_decls, module_excluding_function_def,

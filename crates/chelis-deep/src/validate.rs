@@ -31,6 +31,10 @@ pub fn find_raw_vocabulary_tag(exprs: &[Expr]) -> Option<String> {
                 walk(&meta.expr).or_else(|| meta.entries.iter().find_map(|(_, value)| walk(value)))
             }
             Expr::Atom(_, _) => None,
+            // Stamped variants: Node children are already validated;
+            // BareList/UnknownForm don't carry raw vocabulary tags by
+            // construction.
+            Expr::Node(_, _) | Expr::BareList(_, _) | Expr::UnknownForm(..) => None,
         }
     }
     exprs.iter().find_map(walk)
@@ -147,6 +151,9 @@ fn validate_expr(expr: &Expr, warnings: &mut Vec<ValidationWarning>) {
             }
         }
         Expr::Atom(_, _) => {} // Atoms are always valid
+        // Stamped variants: these are produced by stamp_to_typed and are
+        // structurally valid by construction. No further validation needed.
+        Expr::Node(_, _) | Expr::BareList(_, _) | Expr::UnknownForm(..) => {}
     }
 }
 

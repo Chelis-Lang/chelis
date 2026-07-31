@@ -649,6 +649,7 @@ fn normalize_typed_literals_in_expr(expr: &mut Expr) -> Result<(), ParseError> {
                     }
                 }
                 Expr::Atom(_, _) => {}
+                Expr::Node(..) | Expr::BareList(..) | Expr::UnknownForm(..) => {}
             }
         } else if let Expr::List(list, span) = node {
             // All descendants already normalized. Check shape and
@@ -726,6 +727,7 @@ fn stamp_tags_expr(expr: &mut Expr) {
             }
         }
         Expr::Atom(_, _) => {}
+        Expr::Node(..) | Expr::BareList(..) | Expr::UnknownForm(..) => {}
     }
 }
 
