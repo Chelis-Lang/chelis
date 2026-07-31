@@ -49,4 +49,4 @@
 
 - [x] 6.1 Run a fresh-context adversarial review against the proposal, specification, code, and tests.
 - [x] 6.2 Correct each valid high-severity finding and rerun the authoritative oracle.
-- [ ] 6.3 After pull request creation, require green hosted Linux C tests as GNU C evidence.
+- [x] 6.3 After pull request creation, require green hosted Linux C tests as GNU C evidence.

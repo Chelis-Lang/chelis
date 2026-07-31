@@ -46,3 +46,7 @@ The review compiled the generated expression. `max(16_777_217, 0)` returned `16_
 Two tests then compiled the generated max and min expressions. Before the correction, the focused suite reported 15 passed and 2 failed. After the correction, all 17 tests passed. A later I32 unary-rejection test increased the suite to 18 tests.
 
 A second fresh local review found no remaining issues. Its oracle reported 439 passed and one skipped. The focused emitter and runtime suites reported 18 passed and 10 passed.
+
+## Hosted GNU C evidence
+
+PR #975 ran `Backend Sanitizers` on `ubuntu-latest` with GCC, ASan, and UBSan. [The job](https://github.com/Chelis-Lang/chelis/actions/runs/30601342605/job/91064510373) completed successfully.
