@@ -21,7 +21,7 @@ The plan set: [`dtype_semantics.md`](dtype_semantics.md) ([#729]), [`loud_unsupp
 | meta (the class) | method (design spec) | tracker |
 |---|---|---|
 | [#727] no dtype's semantics enforced at any single point ([#695] = its integer instance) | [`dtype_semantics.md`](dtype_semantics.md) - per-dtype finalizer behind private constructors, int/float kernel split, one storage decision, generated backend dispatch | [#729] |
-| [#703] unsupported cases substitute values instead of failing | [`loud_unsupported.md`](loud_unsupported.md) - Result-typed failure channels, the census sweep, dependency-bottom closed identities, fail-closed HostType/ABI states, structured emission, gates demoted to UX, and (2026-07-30) §C7 ratchet totality: derived-universe guards, the typed kind/authority channel, the structural panic contract | [#730] |
+| [#703] unsupported cases substitute values instead of failing | [`loud_unsupported.md`](loud_unsupported.md) - Result-typed failure channels, the census sweep, dependency-bottom closed identities, fail-closed HostType/ABI states, structured emission, gates demoted to UX, and (2026-07-30) §C7 ratchet totality: derived-universe guards including Python/C consumers, typed/live exclusion authority with review-owned relevance, the typed kind/authority channel, and a non-shippable mutation-based panic-surfacing oracle | [#730] |
 | [#709] unrecognized constructs silently exempt from checking (+[#710]'s silent half) | [`checker_totality.md`](checker_totality.md) - loud wildcard + handle-effect case, ErrorWitness token (silent Type::Error unconstructible), totality invariant, DeepTag exhaustiveness | [#731] |
 | [#728] the observation channel is not dtype-faithful | [`faithful_observation.md`](faithful_observation.md) - one Rust formatter, generated C print helper, round-trip invariant, tolerance table; landable before [#729]; unblocks [#687] | [#732] |
 | spec silence + stale claims ([#694]; the unauthored cells) | [`spec_provenance.md`](spec_provenance.md) - OpenSpec plans changes after Phase 0 activation, while a pinned Buoy shell and one-way Chelis adapter provide repository-independent authority, freshness, coverage, and impact enforcement; design/fixtures may proceed now, advisory execution waits for Buoy's final oracle, and blocking waits for the adapter and Chelis configuration oracles | [#733] |
@@ -150,8 +150,10 @@ pilot - its own deliverable stands on "let the emitter's channel speak"
 whether or not the table has landed. This doc previously read as if it
 were gated; per this doc's own rule the plan won and the sentence was
 corrected 2026-07-30. [#730] Phase 4 (ratchet totality, added
-2026-07-30: product-source-manifest ratchets, the structural panic
-contract, and the change-gated + nightly structural-authority jobs) is
+2026-07-30: product-source-manifest ratchets with non-Cargo language
+adapters, typed/live exclusion references, the non-product
+mutation-based panic contract, and the change-gated + nightly
+structural-authority jobs) is
 guard work that may land any time after [#730] Phase 2 and carries no
 wave assignment. Its user-visible halves are decided by [05-UNS-5..6]
 (spec/05 §7, authored 2026-07-30); the plan implements them. Citation

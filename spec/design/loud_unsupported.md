@@ -341,25 +341,29 @@ REGISTRIES of what actually exists:
   populate this type through the same validation, and the registries
   become derivation inputs rather than the standalone source.
 
-**Calibrated claim:** construction proves the citation names a real
-authority - an existing atom, or a tracked issue that was live-verified
-open when its manifest row was added and at the last scheduled
-re-verification since. Between schedules the manifest means "valid at
-last verification", never "valid this instant"; the pre-merge check on
-manifest edits and the scheduled re-verification are where the truth
-question is asked, at the two times it can change. Whether an atom
-semantically DECIDES this particular rejection is
-not mechanizable and remains review's job; the fixed text says so
-rather than implying otherwise. The frozen four-clause message format
-does not change: the authority renders into the existing `; <hint>`
-clause. Negative controls land with the change, one per admission
-route: the empty atom, the malformed atom, the WELL-SHAPED
+**Calibrated claim:** construction proves only citation IDENTITY and
+last-verified tracker STATE - an existing atom, or a manifest member
+that was live-verified as an open ISSUE when its row was added and at
+the last scheduled re-verification since. Between schedules the issue
+manifest means "open at last verification", never "open this instant".
+Neither registry proves RELEVANCE: whether an atom semantically
+decides this rejection, or an issue actually tracks implementing this
+rejected site/capability, remains an explicit review obligation.
+`IssueRef` therefore MUST NOT be described as proving "the tracking
+issue"; it proves only "a real open issue at last verification" until
+review establishes the relationship. The frozen four-clause message
+format does not change: the authority renders into the existing
+`; <hint>` clause. Negative controls land with the change, one per
+admission route: the empty atom, the malformed atom, the WELL-SHAPED
 NONEXISTENT atom, issue zero, a real-but-closed issue, a real number
 that is a PR rather than an issue, a nonexistent nonzero issue, and
 the out-of-module struct literal each fail to compile, construct, or
 validate; a same-PR manifest addition of a closed issue, a PR number,
-or a nonexistent number fails the change-gated live validation; the
-[#687] corpus update rides the same PR per B1. Which
+or a nonexistent number fails the change-gated live validation. An
+open but unrelated issue (chelis#879) is the supported structural
+control: it passes construction/live validation and MUST fail review
+when attached to an unrelated rejection. The [#687] corpus update
+rides the same PR per B1. Which
 cells are `Deliberate` versus `Unimplemented` remains [#729]
 Table A/B's decision - the plan never authors a capability decision
 (§I1).
@@ -879,12 +883,19 @@ where its universe comes from - the §C7.1 product-source manifest, the
 hand-maintained crate or file list is mis-rung on the
 enforcement ladder (compile-error > lint > tripwire > gate > prose) for
 the same reason a gate must not carry correctness: it rots invisibly.
-Scope narrowing is an annotated `(class, path, reason[, issue])`
+Scope narrowing is an annotated
+`Exclusion { class, path, reason, issue: IssueRef }`
 exclusion, and every exclusion for every mechanism lives in ONE
 canonical exclusion registry - a single checked-in artifact the §C7.5
 filter can name; an exclusion recorded anywhere else is itself a red
 discovery test. An absent entry is never an exclusion; the registry
-only shrinks, or grows with a filed issue. A new product-source
+only shrinks, or grows with that typed, live-validated issue
+reference; there is no issue-optional production form. It consumes
+the SAME §C2.1 issue manifest and validator as a rejection - not a
+second regex or bare-number channel. This proves existence, kind, and
+open state at the specified validation times, not that the issue is
+relevant to the exclusion; relevance remains a named review
+obligation. A new product-source
 root - Cargo member or not - is born inside every ratchet or visibly
 excluded from it, never silently outside it.
 
@@ -903,7 +914,8 @@ every one of them structurally invisible. The manifest is therefore:
 2. a checked-in registry of non-Cargo product roots, guarded by a
    totality check: every top-level repository directory containing
    shipped source must be classified - in-universe, or excluded with a
-   `(path, reason[, issue])` annotation - and an unclassified root is
+   typed `Exclusion { class, path, reason, issue: IssueRef }` row - and
+   an unclassified root is
    a red test (the conformance MANIFEST/REGISTRY pattern). Adding a
    new product root of any language without classifying it is
    impossible to do quietly.
@@ -911,11 +923,23 @@ every one of them structurally invisible. The manifest is therefore:
 Each in-universe root is walked recursively (`src/**`, `build.rs`,
 `include/**`, and for non-Cargo roots their own source globs - not
 only `src/*.rs`, which is how the generated dtype headers escaped
-scanning). Non-Rust roots initially carry the language-independent
-string-token classes; Rust-specific classes annotate them excluded
-with that reason, and root-specific classes are filed as they are
-designed. The point the registry establishes is that the ROOT is
-visible and its coverage state deliberate.
+scanning). Every non-Cargo root declares a language adapter and the
+walker requires every shipped source extension beneath it to be
+handled; an unknown extension is red, not silently skipped.
+Language-independent boundary names are generated from the closed
+vocabulary declaration - canonical names, C macro spellings including
+`CHELIS_F32`, decoder names, and ABI field names - then combined with
+language AST forms. At minimum the Python adapter recognizes
+`ctypes.Structure`/`_fields_` integral `dtype` members and local
+`CHELIS_*` integer constants; the C-family adapter recognizes integral
+`dtype` struct members and `CHELIS_*` uses/definitions. Those forms are
+consumer candidates even inside an ALREADY registered non-Cargo root:
+Cargo edges cannot see them, and a Rust-shaped token scan is not their
+coverage argument. Raw ABI declarations outside generated bindings are
+forbidden. Rust-only classes use a typed exclusion row for genuinely
+inapplicable non-Rust files. The point the registry establishes is
+that both the ROOT and its language-specific coverage state are
+visible and deliberate.
 
 Each token class declares an explicit `TestsPolicy` (production-only
 via `#[cfg(test)]` region splitting, or tests-included) so that
@@ -1019,23 +1043,32 @@ each go red; a `compiler_invariant!` with empty metadata fails to
 compile and one with a fabricated non-empty guard (`"TODO"`) fails
 the oracle's referent tier; the sealed adapters' privacy is
 `compile_fail`-locked. For the non-enumerable routes, the control is a
-TEST SEAM, not a scratch member - a disconnected planted function
-proves only that an explicitly invoked panic panics, which proves
-nothing about coverage. The seam is FEATURE-gated, never
-`cfg(test)`-gated: `cfg(test)` does not propagate into the dependency
-crates of a CLI binary, so a test-cfg hook in an emitter crate is
-compiled OUT of exactly the binary the probe drives (executed in the
-2026-07-30 addendum: `cli_dependency_cfg_test=false`). Instead, a
-dedicated cargo feature (`internal-panic-seam`) on the emitter crate
-compiles the hook in; the env selector
-(`CHELIS_TEST_INTERNAL_PANIC=<site>`) picks the site at run time; and
-only the oracle's dedicated `--features` build carries it. The seam
-makes a REAL lowering/emission site panic behind its `Result`
-signature, and a named `.ch` probe drives that site through the
-seam-built CLI, asserting the surfacing contract (nonzero exit; an
-internal-error rendering that names the invariant, never a silent
-artifact). A control asserts the default and release builds do not
-contain the feature. Stated plainly: this validates the
+CONTROLLED SOURCE MUTATION, not a scratch member or a product Cargo
+feature - a disconnected planted function proves only that an
+explicitly invoked panic panics, while a selectable feature remains
+available to optimized and `--all-features` product builds. The
+Phase 4 oracle refuses a dirty owner, temporarily replaces one REAL
+lowering/emission site's behind-`Result` body with an invariant-naming
+panic, builds the CLI into an oracle-only target directory, and drives
+that real site with a named `.ch` probe. It asserts nonzero exit, the
+internal-error rendering, and absence of any emitted artifact, then
+restores the source byte-for-byte before reporting success.
+
+No `internal-panic-seam` feature, environment selector, or equivalent
+runtime switch exists in any product manifest or product source. A
+derived architecture guard checks the full Cargo feature graph and
+release/package workflows and rejects any such selector; its negative
+control temporarily adds the feature to a product crate and must go
+red. The shipped-neighbor control executes the ACTUAL release/package
+workflow from a clean source tree and, separately, an optimized
+`--all-features` product build; it inspects the staged artifacts and
+both feature graphs, drives the same ordinary input without the
+mutation, and verifies the oracle-only sentinel and panic path are
+absent. The mutation checkout and target directory are
+never inputs to a package/publish step, and the oracle fails if either
+path overlaps a release staging directory. Thus the instrumented
+binary is explicitly non-product and cannot become a shipped artifact
+by choosing a build feature. Stated plainly: this validates the
 panic-SURFACING path. DISCOVERY of an unknown internal panic is what
 the probe corpus and fuzzing are for; no planted control can certify
 it, and this plan does not claim one does.
@@ -1062,11 +1095,18 @@ Two independent derivations, both feeding the same obligation:
    candidate, derived from `cargo metadata` - no spelling involved. An
    aliased import (`use chelis_vocab::RuntimeDType as R`) cannot hide
    the edge.
-2. **Token-scan candidates** over the §C7.1 universe: the vocabulary
-   type names, the decoder names, effect symbol literals, and the
-   raw-boundary signatures in BOTH spellings (`dtype: c_int` and
-   `dtype: i32`, plus `#[repr(C)]` structs carrying integer dtype
-   fields).
+2. **Language-adapter candidates** over the §C7.1 universe. Rust
+   carries the vocabulary type names, decoder names, effect symbol
+   literals, and raw-boundary signatures in BOTH spellings
+   (`dtype: c_int` and `dtype: i32`, plus `#[repr(C)]` structs carrying
+   integer dtype fields). Non-Cargo files are not searched only for
+   Rust-shaped tokens: the declared Python/C adapters consume the
+   generated language-independent boundary names and recognize the raw
+   ABI forms in §C7.1. A Python `ctypes.Structure` with
+   `("dtype", ctypes.c_int)` and a C struct with `int dtype` or a
+   `CHELIS_F32` use are candidates even when planted in an already
+   registered root. A root language with no adapter, and a shipped
+   source extension not covered by its adapter, are red.
 
 Every candidate from either source must appear in the §C6 inventory or
 in an annotated exclusion; a candidate in neither is a red test. The
@@ -1075,9 +1115,12 @@ inventory, not from either scan - scan finds, a human ratifies into
 §C6, the oracle proves §C6 - so the compile-failure proof and the
 discovery mechanism cannot silently agree on a shrunken universe.
 Adversarial controls land with the change: an aliased import, a
-`dtype: i32` field in a new file, a scratch crate with a vocab edge
-and no inventory row, and an unregistered non-Cargo root must each go
-red. **Discovery is never path-filtered**: both derivations and the
+`dtype: i32` field in a new Rust file, a scratch crate with a vocab
+edge and no inventory row, a raw Python consumer and a raw C consumer
+inside existing registered non-Cargo roots, and an unregistered
+non-Cargo root must each go red. Benign Python/C files in those same
+roots are the supported-neighbor controls and do not become consumers.
+**Discovery is never path-filtered**: both derivations and the
 manifest-totality guard run as ordinary workspace tests on every PR
 (exactly as today's architecture test does). §C7.5's filter question
 applies only to the expensive mutation legs; the cheap detection of a
@@ -1090,12 +1133,18 @@ exclusion registry (§C7's contract - an exclusion in any other
 source is itself red, so there is no unnamed source the filter could
 miss); that registry is in the §C7.5 mutation filter, so an exclusion
 edit runs the legs pre-merge; and the discovery tests validate
-exclusion annotations - a dependency-edge consumer candidate may be
-excluded only with an issue citation, and an uncited production-code
-exclusion is red. Control: a planted exclusion for a vocab-edge
-candidate must trigger the mutation job and fail annotation
-validation until it cites an issue; a planted exclusion OUTSIDE the
-registry is red regardless of its annotation.
+exclusion annotations through the SAME `IssueRef` type/manifest/live
+validator as §C2.1 - a dependency-edge consumer candidate may be
+excluded only with a typed reference to a real open issue at last
+verification. A bare number or unchecked issue token is not a valid
+schema value. Control: a planted exclusion for a vocab-edge candidate
+must trigger the mutation job and fail until its `IssueRef` passes the
+manifest and live checks; chelis#944 (closed issue), chelis#1 (PR),
+chelis#999999999 (missing), and same-PR additions for those values are
+negative controls. Chelis#879 is the live/open structural positive
+control; using it for an unrelated exclusion MUST still fail review,
+because the validator does not certify relevance. A planted exclusion
+OUTSIDE the registry is red regardless of its annotation.
 
 ### C7.4 The census is doc-bound and its backings are selected
 
@@ -1171,9 +1220,13 @@ both halves:
    an inventory, exclusion-registry, or root-registry edit, and none
    of those edits
    can merge without the mutation legs running. The same job carries
-   the §C2.1 manifest live validation: added or modified manifest rows
-   are verified against the tracker (exists, is an issue, is open)
-   before merge. The crate-scoped `HostAbiType` leg runs on every
+   the §C2.1/§C7 exclusion live validation: added or modified issue-
+   manifest rows AND added or modified canonical-exclusion rows are
+   resolved through the same validator against the tracker (exists,
+   is an issue rather than a PR, is open) before merge. An exclusion
+   row cannot bypass the check by citing a standing manifest entry:
+   the changed exclusion's `IssueRef` is re-queried too. The
+   crate-scoped `HostAbiType` leg runs on every
    filter match; the workspace vocabulary leg runs when the vocab
    owner, the inventory, the exclusion registry, the root manifest, or
    the product-root registry changes. The job is classified in
@@ -1189,7 +1242,9 @@ both halves:
    `scripts/loud_unsupported_phase2_oracle.py` in full,
    `scripts/faithful_observation_phase2_oracle.py` (the sibling
    authority in the identical position; contents remain [#732]'s, per
-   §I2), and the Phase 4 oracle, with the open/close tracking-issue
+   §I2), and the Phase 4 oracle, with full standing re-validation of
+   both the issue manifest and every canonical-exclusion `IssueRef`,
+   plus the open/close tracking-issue
    report pattern the repo's other nightlies use (the `heavy-e2e`
    precedent - "scheduled-run failures do not show a red status on
    main" is exactly the failure mode to avoid). This half catches what
@@ -1218,7 +1273,7 @@ gated job is a canary mislabeled as prevention.
 | gate inventory (§C5 rows 17-18 resolution) | Phase 3 | this doc |
 | §C2.2 `DiagnosticKind` vocabulary + wire spellings | Phase 3 | the deciding atom [05-UNS-6] (spec/05 §7) + this doc + the wire-spelling lock test, same PR |
 | §C2.1 `RejectionAuthority` shape | Phase 3 | the deciding atom [05-UNS-5] (spec/05 §7) + this doc + [#687] corpus, same PR |
-| §C7 universe derivations + the canonical exclusion registry | Phase 4 | exclusions shrink-only, in the one registry only; additions via filed issue + annotation |
+| §C7 universe derivations + the canonical exclusion registry | Phase 4 | exclusions shrink-only, in the one registry only; additions carry `IssueRef`, pass changed-row live validation, and receive relevance review |
 | §C7.5 execution jobs (the change-gated `ci.yml` job + the nightly workflow + `NON_GATE_WORKFLOWS` entry) | Phase 4 | this doc + `scripts/test_gate.py`, same PR |
 
 ## B2. Invariants that hold across every boundary
@@ -1517,7 +1572,12 @@ and the authority admission set - empty atom, malformed atom,
 well-shaped nonexistent atom, issue zero, closed issue, PR-number
 citation, nonexistent nonzero issue, and the same-PR manifest
 addition of any such number - each rejected at construction,
-validation, or the change-gated live check.
+validation, or the change-gated live check. The supported-neighbor
+control is an open ISSUE manifest row (chelis#879), which passes those
+structural checks; deliberately attaching that unrelated issue to a
+rejection is the paired review-negative control and MUST be rejected
+in review. The machine check does not pretend to prove that semantic
+relationship.
 
 ## Phase 4 - ratchet totality (added 2026-07-30)
 
@@ -1533,6 +1593,8 @@ tripwire, §C7, and census rows 24-25 and 27.
 1. **The derived-universe tripwire** (§C7.1): the product-source
    manifest (Cargo members joined with the registered non-Cargo roots,
    under the top-level totality guard), recursive per-root walk,
+   required Python/C language adapters over vocabulary-derived boundary
+   names and raw ABI AST forms,
    per-class `TestsPolicy`, the new and widened token classes
    (line-conjunction `unwrap_or` x `Prim::`, `.unwrap(`/`.expect(`,
    early-return defaults, the panic + assertion classes), annotated
@@ -1545,7 +1607,8 @@ tripwire, §C7, and census rows 24-25 and 27.
    and - for live-by-execution rows - an existing probe-corpus record.
 3. **Consumer discovery** (§C7.3): `closed_vocabulary_architecture.rs`
    inverted from a fixed file list to the dual-source derivation
-   (dependency graph + token scan), with the mutation oracle's
+   (Cargo dependency graph + Rust and non-Cargo language adapters),
+   with the mutation oracle's
    evidence set staying on the ratified §C6 inventory.
 4. **The structural panic work** (§C7.2): adapter privatization with
    `compile_fail` locks; `compiler_invariant!`; then the [#957] triage
@@ -1557,7 +1620,8 @@ tripwire, §C7, and census rows 24-25 and 27.
 5. **Census row 25's conversion** ([#958], the einsum default), the
    row shrinking with the fix per B1.
 6. **Both §C7.5 execution halves**: the change-gated blocking `ci.yml`
-   job for the mutation legs and the manifest live validation (path
+   job for the mutation legs and the shared manifest/exclusion live
+   validation (path
    filter per §C7.5: the vocab owners, `host_abi.rs`, the ratified
    inventory, the canonical exclusion registry, the issue manifest,
    the root `Cargo.toml`, the non-Cargo registry, the oracle scripts,
@@ -1598,8 +1662,9 @@ inventory file, the canonical exclusion registry, the §C2.1 issue
 manifest, the root `Cargo.toml`, and the non-Cargo registry -
 the §C7.5 trigger-loop closure, asserted against the workflow's
 actual path list; the nightly file exists, names both oracle runners,
-and appears in `NON_GATE_WORKFLOWS`; the mutation legs and the
-manifest live validation are executed by those jobs, not by this
+and appears in `NON_GATE_WORKFLOWS`; the mutation legs, changed-row
+manifest/exclusion live validation, and scheduled full standing
+manifest/exclusion validation are executed by those jobs, not by this
 assertion); and negative controls
 in the Phase 2 oracle's planted style - a planted production
 `panic!`, a planted `.unwrap()`, and a planted bare `assert!` in a
@@ -1607,15 +1672,30 @@ derived-universe member each go red; a planted census row naming a
 nonexistent test, an ignored-undeclared backing, a phantom
 probe-record citation, and an unregistered non-Cargo product root
 each go red; a planted new consumer (vocab dependency edge), a
-planted uninventoried consumer file, and a planted uncited exclusion
-for a vocab-edge candidate each fail the discovery tests;
-the §C7.2 test seam - under its dedicated feature build, since
-`cfg(test)` does not reach a CLI binary's dependency crates - drives
-a real lowering/emission site's internal panic through a named `.ch`
-probe and asserts the surfacing contract (nonzero exit,
-invariant-naming rendering, no artifact), with a companion control
-asserting the default and release builds carry no seam - with
-byte-for-byte restore of every planted file. Its self-tests ride the
+planted uninventoried Rust consumer file, a planted raw Python
+`ctypes.Structure` carrying `("dtype", ctypes.c_int)`, and a planted C
+ABI struct carrying `int dtype` plus `CHELIS_F32` inside ALREADY
+REGISTERED non-Cargo roots each fail discovery. A planted exclusion
+for a vocab-edge candidate fails until its `IssueRef` names a
+live open issue: chelis#944 (closed issue), chelis#1 (PR),
+chelis#999999999 (missing), and same-PR manifest/exclusion additions
+for each are negative controls, while chelis#879 is the structurally
+valid open-issue control. A same-PR exclusion citing chelis#879 but
+unrelated to the excluded candidate is the paired review-negative
+control: structural validation passes and review MUST reject it.
+The §C7.2 surfacing control applies a temporary mutation at a REAL
+lowering/emission site behind its `Result` signature, builds an
+isolated non-product CLI from that dirty oracle checkout, and drives
+the site through a named `.ch` probe, asserting nonzero exit,
+invariant-naming rendering, and no artifact. The runner refuses a
+pre-dirty owner and restores every planted file byte-for-byte before
+success. Architecture negatives plant an `internal-panic-seam` Cargo
+feature or any equivalent product-build selector and require the
+product-manifest/release-graph guard to go red; the positive neighbor
+executes the actual release/package staging path plus a separate
+optimized `--all-features` product build and proves no selector,
+sentinel, or seam is present in either artifact/feature graph. Its
+self-tests ride the
 existing per-PR `unittest discover` CI step automatically, which
 keeps the oracle's anchors continuously verified between scheduled
 runs.
@@ -1733,8 +1813,10 @@ an unsupported case and a plausible wrong number. Then take the pen away from
 the ratchets themselves (§C7): derive every guard's universe from the
 product-source manifest instead of enumerating it, seal the kind behind a
 private producer field and the citation behind registry-validated
-constructors so a mislabeled, uncited, or fabricated-citation rejection
-cannot be built, sanction exactly one invariant terminal whose metadata is
+constructors so a mislabeled or uncited rejection cannot be built and a
+closed/PR/missing issue identity cannot masquerade as live. Citation
+RELEVANCE remains explicitly review-owned; the registries do not claim to
+prove it. Sanction exactly one invariant terminal whose metadata is
 shape-checked at compile time and referent-checked by the oracle, and run
 discovery unconditionally on every PR with the mutation authority
 change-gated pre-merge and nightly otherwise, so the proof never goes stale

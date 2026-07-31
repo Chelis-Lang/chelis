@@ -1338,7 +1338,11 @@ conform and two do not (chelis#959). chelis#730's amended Phase 3
 makes the distinction structural through a validated authority type
 (design doc §C2.1); the capability table (chelis#729 Phase 4) later
 populates the deliberate-versus-unimplemented decision per cell. The
-design doc implements; this atom decides.)*
+validator proves citation identity and last-verified issue kind/open
+state, not that a cited issue actually tracks the rejected
+site/capability: that relevance judgment remains a required review
+step, with an open-but-unrelated issue as the negative review control.
+The design doc implements; this atom decides.)*
 
 > **[05-UNS-6]** The machine-facing kind of a diagnostic is drawn from
 > a closed vocabulary with stable spellings; the build surface's
