@@ -3318,10 +3318,17 @@ fn resolve_github_token() -> Result<String, GitHubFetchError> {
             return Ok(trimmed.to_string());
         }
     }
+    // Test-only escape hatch for deterministic auth-missing coverage. Do not
+    // empty process-wide PATH here: parallel Git fixtures need it (chelis#974).
+    #[cfg(test)]
+    if env::var_os("CHELIS_REEF_TEST_DISABLE_GH_AUTH_FALLBACK").is_some() {
+        return Err(GitHubFetchError::AuthMissing {
+            reason: "`gh auth token` fallback disabled by test".to_string(),
+        });
+    }
     // `gh auth token` is the documented escape hatch for devs who use
     // the `gh` CLI but don't keep a long-lived `GITHUB_TOKEN` exported.
-    // We shell out only here, deliberately keeping this seam thin so
-    // tests can disable the fallback by un-PATH-ing `gh`.
+    // We shell out only here, deliberately keeping this seam thin.
     let result = std::process::Command::new("gh")
         .args(["auth", "token"])
         .output();
@@ -9638,15 +9645,18 @@ some-registry-lib = {{ version = "0.1.0" }}
         // env so auto-fetch surfaces `auth-missing` instantly instead of
         // attempting a real network round trip:
         // - `GITHUB_TOKEN` removed
-        // - `PATH` emptied so the `gh auth token` shell-out fails
+        // - the test-only `gh auth token` fallback disabled
+        // Do not mutate process-wide PATH: parallel Git fixtures need it
+        // (chelis#974).
         // The downstream error is still `is_err()`, which is what this
         // negative test guards against.
         let prior_token = std::env::var_os("GITHUB_TOKEN");
-        let prior_path = std::env::var_os("PATH");
+        let prior_disable_fallback = std::env::var_os("CHELIS_REEF_TEST_DISABLE_GH_AUTH_FALLBACK");
+        let path_before = std::env::var_os("PATH");
         unsafe {
             std::env::set_var("CHELIS_REEF_HOME", dir.path().join("empty_registry"));
             std::env::remove_var("GITHUB_TOKEN");
-            std::env::set_var("PATH", "");
+            std::env::set_var("CHELIS_REEF_TEST_DISABLE_GH_AUTH_FALLBACK", "1");
         }
         let entry_decls =
             chelis_surf::parser::parse_str("def result -> int32 = 42").expect("parse");
@@ -9657,11 +9667,16 @@ some-registry-lib = {{ version = "0.1.0" }}
                 Some(v) => std::env::set_var("GITHUB_TOKEN", v),
                 None => std::env::remove_var("GITHUB_TOKEN"),
             }
-            match prior_path {
-                Some(v) => std::env::set_var("PATH", v),
-                None => std::env::remove_var("PATH"),
+            match prior_disable_fallback {
+                Some(v) => std::env::set_var("CHELIS_REEF_TEST_DISABLE_GH_AUTH_FALLBACK", v),
+                None => std::env::remove_var("CHELIS_REEF_TEST_DISABLE_GH_AUTH_FALLBACK"),
             }
         }
+        assert_eq!(
+            std::env::var_os("PATH"),
+            path_before,
+            "auth-missing test seam must preserve process-wide PATH (chelis#974)"
+        );
 
         // Should either succeed (if somehow resolved) or return an error — the
         // key invariant is that it DOES NOT hang.  Since the registry is empty
