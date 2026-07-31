@@ -29,12 +29,17 @@
 //!
 //! ## Honest limitations
 //!
-//! The induction tier CAN establish:
+//! The intended induction tier scope is:
 //! - Properties over any fixed lattice depth, given base+step proofs
 //! - Monotonicity / boundedness over lattice steps when each step preserves
 //!   the invariant
 //!
-//! The induction tier CANNOT establish:
+//! The current release does not dispatch base or step obligations and therefore
+//! fails closed rather than emitting an induction proof. No `ASSUMED` case is
+//! classified as proved. A future dispatch may target the scope above, but must
+//! first establish both obligations through an existing sound proof tier.
+//!
+//! The induction tier will not establish:
 //! - Properties requiring global reasoning across all steps simultaneously
 //!   (e.g., path-dependent options where the full path matters)
 //! - Non-structural recursion (general recursion, mutual recursion)
@@ -190,7 +195,7 @@ pub fn attempt_induction(
     }
 }
 
-#[allow(dead_code)] // Failed variant is scaffolding for when tier_d is wired to dispatch
+#[allow(dead_code)] // Proved is reserved for a future sound base/step dispatcher.
 enum CaseResult {
     Proved(InductionCase),
     Failed(String),
@@ -200,8 +205,8 @@ enum CaseResult {
 /// variable fixed to `base_value`. Uses fuzz as the default method
 /// (SMT integration deferred to when the tier is wired into dispatch).
 ///
-/// NOTE: This is currently a STUB that trusts the claim. The full
-/// implementation (when tier_d is wired into dispatch) will call the
+/// This is currently undispatched and fails closed. The full implementation
+/// will call the
 /// existing tier_b/tier_c infrastructure with the induction variable
 /// specialized. The base case at small fixed sizes (n=1, n=2) is exactly
 /// what the existing prover already handles — those are the "small
@@ -210,21 +215,18 @@ fn verify_base_case(
     _property_source: &str,
     _property_name: &str,
     _induction_variable: &str,
-    base_value: u64,
+    _base_value: u64,
     _options: &InductionOptions,
 ) -> CaseResult {
-    CaseResult::Proved(InductionCase {
-        method: format!("stub@n={base_value}"),
-        evidence: format!(
-            "base case P({base_value}) ASSUMED (stub: not yet wired to tier_b/tier_c dispatch)"
-        ),
-    })
+    CaseResult::Failed(
+        "Tier D base obligation is not dispatched; induction fails closed".to_string(),
+    )
 }
 
 /// Verify the step case: P(k) => P(k+1).
 ///
-/// NOTE: This is currently a STUB that trusts the claim. The full
-/// implementation will construct the step obligation (with induction
+/// This is currently undispatched and fails closed. The full implementation
+/// will construct the step obligation (with induction
 /// hypothesis as an assumption) and discharge it via tier_b or tier_c.
 ///
 /// The step case is the hard part. For CRR-style lattices:
@@ -240,11 +242,9 @@ fn verify_step_case(
     _induction_variable: &str,
     _options: &InductionOptions,
 ) -> CaseResult {
-    CaseResult::Proved(InductionCase {
-        method: "stub@step".to_string(),
-        evidence: "step case P(k)=>P(k+1) ASSUMED (stub: not yet wired to tier_b/tier_c dispatch)"
-            .to_string(),
-    })
+    CaseResult::Failed(
+        "Tier D step obligation is not dispatched; induction fails closed".to_string(),
+    )
 }
 
 /// Classify whether a property's model exhibits structural recursion.
@@ -281,7 +281,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn lattice_steps_induction_proves() {
+    fn undispatched_lattice_induction_fails_closed() {
         let class = RecursionClass::LatticeSteps {
             parameter: "n".to_string(),
         };
@@ -291,17 +291,11 @@ mod tests {
             &class,
             &InductionOptions::default(),
         );
-        match result {
-            InductionResult::Proved {
-                induction_variable,
-                base_value,
-                ..
-            } => {
-                assert_eq!(induction_variable, "n");
-                assert_eq!(base_value, 1);
-            }
-            other => panic!("expected Proved, got {other:?}"),
-        }
+        let InductionResult::BaseFailed { base_failure } = result else {
+            panic!("undischarged induction must fail closed");
+        };
+        assert!(base_failure.contains("not dispatched"));
+        assert!(!base_failure.contains("ASSUMED"));
     }
 
     #[test]
@@ -345,18 +339,15 @@ mod tests {
     }
 
     #[test]
-    fn periods_classification_accepted() {
+    fn undispatched_period_induction_fails_closed() {
         let class = RecursionClass::Periods {
             parameter: "t".to_string(),
         };
         let result = attempt_induction("", "bond_convexity", &class, &InductionOptions::default());
-        match result {
-            InductionResult::Proved {
-                induction_variable, ..
-            } => {
-                assert_eq!(induction_variable, "t");
-            }
-            other => panic!("expected Proved, got {other:?}"),
-        }
+        let InductionResult::BaseFailed { base_failure } = result else {
+            panic!("undischarged induction must fail closed");
+        };
+        assert!(base_failure.contains("not dispatched"));
+        assert!(!base_failure.contains("ASSUMED"));
     }
 }

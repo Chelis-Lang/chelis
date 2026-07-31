@@ -127,6 +127,14 @@ proof. Admission policies that quote the composed opaque-invariant
 guarantee quote this gap. See `spec/design/chelis_property_spec.md`
 (Derived obligation records / Tier B SMT note) for the record schema.
 
+**Induction fails closed until both obligations are dispatched.** A structural
+induction result may be classified as proved only when an existing sound proof
+tier has discharged both its concrete base obligation and its symbolic step
+obligation. An `ASSUMED` base or step record is never proof evidence. The
+current Tier D scaffold is not connected to that dispatcher, so it reports a
+terminal failure/inconclusive result and neither the CLI nor Tide may emit a
+green induction record from it.
+
 ### `chelis tide lsp`
 
 Launch the Tide LSP server on stdio.
