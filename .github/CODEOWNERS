@@ -1,0 +1,9 @@
+# Guard artifacts of the chelis#729 capacity ratchet
+# (spec/design/dtype_semantics.md C6): editing a guard to pass it is never
+# the fix, so changes to these files always route to a human owner.
+# chelis#733 Phase 0 owns the broader spec/** signoff and may absorb these
+# rows when it lands.
+/spec/design/capacity_census.json @rlronan
+/crates/chelis-cli/tests/capacity_census_tripwire.rs @rlronan
+/scripts/capacity_census_liveness.py @rlronan
+/scripts/test_capacity_census_liveness.py @rlronan

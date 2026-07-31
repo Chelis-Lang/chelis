@@ -1,0 +1,1521 @@
+{
+  "version": 2,
+  "legs": {
+    "covered": [
+      {
+        "leg": "header-export",
+        "artifact": "crates/chelis-runtime/include/*.h published closure",
+        "enumerator": "preprocessed_headers -> header_rows",
+        "command": "cargo nextest run -p chelis-cli --test capacity_census_tripwire",
+        "expected_success": "capacity_census_matches_public_surface passes",
+        "mutations": [
+          "reviewer_preprocessor_capacity_seam_is_visible",
+          "c_identity_is_token_canonical_across_preprocessor_whitespace"
+        ]
+      },
+      {
+        "leg": "header-struct",
+        "artifact": "crates/chelis-runtime/include/*.h published closure",
+        "enumerator": "preprocessed_headers -> header_rows",
+        "command": "cargo nextest run -p chelis-cli --test capacity_census_tripwire",
+        "expected_success": "capacity_census_matches_public_surface passes",
+        "mutations": [
+          "planted_struct_layout_is_inventoried"
+        ]
+      },
+      {
+        "leg": "std-adt-numeric",
+        "artifact": "packages/chelis-std/src/**/*.ch desugared Deep AST",
+        "enumerator": "stdlib_rows -> scan_deftypes + scan_exported_numeric_defs",
+        "command": "cargo nextest run -p chelis-cli --test capacity_census_tripwire",
+        "expected_success": "capacity_census_matches_public_surface passes",
+        "mutations": [
+          "std_adt_identity_changes_when_same_dtype_variant_changes"
+        ]
+      },
+      {
+        "leg": "std-def-numeric",
+        "artifact": "packages/chelis-std/src/**/*.ch desugared Deep AST",
+        "enumerator": "stdlib_rows -> scan_deftypes + scan_exported_numeric_defs",
+        "command": "cargo nextest run -p chelis-cli --test capacity_census_tripwire",
+        "expected_success": "capacity_census_matches_public_surface passes",
+        "mutations": [
+          "exported_public_numeric_stdlib_def_is_enumerated"
+        ]
+      }
+    ],
+    "deferred": [
+      {
+        "leg": "wire-schema-numeric-fields",
+        "owner": "chelis#729 Phase 1 entry hard edge",
+        "artifact": "crates/chelis-compiler-api/src/schema.rs public serde/JsonSchema graph",
+        "enumerator": "PLANNED: typed public wire-schema numeric-field enumerator",
+        "command": "PLANNED: cargo nextest run -p chelis-compiler-api --test capacity_census_wire",
+        "expected_success": "PLANNED: exact schema rows match a reviewed baseline",
+        "mutations": [
+          "PLANNED: add/remove public f64 serde/JsonSchema field",
+          "CURRENT DEFERRED PROBE: ReviewerWireNumericProbe leaves this census unchanged"
+        ]
+      },
+      {
+        "leg": "binding-raw-dtype-params",
+        "owner": "chelis#729 Phase 1 entry hard edge",
+        "artifact": "crates/chelis-python/src/lib.rs registered PyO3 callables",
+        "enumerator": "PLANNED: rustdoc-JSON PyO3 callable-signature enumerator",
+        "command": "PLANNED: cargo nextest run -p chelis-python --test capacity_census_bindings",
+        "expected_success": "PLANNED: exact binding rows match a reviewed baseline",
+        "mutations": [
+          "PLANNED: add/remove registered #[pyfunction] dtype: i32 parameter",
+          "CURRENT DEFERRED PROBE: reviewer_raw_dtype_probe leaves this census unchanged"
+        ]
+      }
+    ]
+  },
+  "rows": [
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: _Bool chelis_adt_tag_equals ( const chelis_adt * adt , chelis_string ctor ) ;",
+      "flags": [],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: _Bool chelis_dict_contains ( const chelis_dict * dict , chelis_value key ) ;",
+      "flags": [],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: _Bool chelis_file_exists ( chelis_string path ) ;",
+      "flags": [],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: _Bool chelis_string_contains ( chelis_string haystack , chelis_string needle ) ;",
+      "flags": [],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: _Bool chelis_string_ends_with ( chelis_string value , chelis_string suffix ) ;",
+      "flags": [],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: _Bool chelis_string_eq ( chelis_string lhs , chelis_string rhs ) ;",
+      "flags": [],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: _Bool chelis_string_starts_with ( chelis_string value , chelis_string prefix ) ;",
+      "flags": [],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: _Bool chelis_value_as_bool ( chelis_value value ) ;",
+      "flags": [],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: _Noreturn void chelis_fail ( chelis_string message ) ;",
+      "flags": [],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_adt * chelis_adt_construct ( chelis_string ctor , const chelis_value * fields , int64_t len ) ;",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_adt * chelis_value_as_adt ( chelis_value value ) ;",
+      "flags": [],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_dict * chelis_dict_from_pairs ( const chelis_list * pairs ) ;",
+      "flags": [],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_dict * chelis_dict_insert ( const chelis_dict * dict , chelis_value key , chelis_value value ) ;",
+      "flags": [],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_dict * chelis_dict_merge ( const chelis_dict * lhs , const chelis_dict * rhs ) ;",
+      "flags": [],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_dict * chelis_dict_remove ( const chelis_dict * dict , chelis_value key ) ;",
+      "flags": [],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_dict * chelis_value_as_dict ( chelis_value value ) ;",
+      "flags": [],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_list * chelis_dict_entries ( const chelis_dict * dict ) ;",
+      "flags": [],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_list * chelis_dict_keys ( const chelis_dict * dict ) ;",
+      "flags": [],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_list * chelis_dict_values ( const chelis_dict * dict ) ;",
+      "flags": [],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_list * chelis_list_append ( const chelis_list * list , chelis_value value ) ;",
+      "flags": [],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_list * chelis_list_chunk ( const chelis_list * list , int64_t size ) ;",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_list * chelis_list_concat ( const chelis_list * lhs , const chelis_list * rhs ) ;",
+      "flags": [],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_list * chelis_list_dir ( chelis_string path ) ;",
+      "flags": [],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_list * chelis_list_drop ( const chelis_list * list , int64_t count ) ;",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_list * chelis_list_empty ( void ) ;",
+      "flags": [],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_list * chelis_list_enumerate ( const chelis_list * list ) ;",
+      "flags": [],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_list * chelis_list_flatten ( const chelis_list * list ) ;",
+      "flags": [],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_list * chelis_list_from_tensor ( const chelis_tensor * tensor ) ;",
+      "flags": [],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_list * chelis_list_from_values ( const chelis_value * items , int64_t len ) ;",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_list * chelis_list_take ( const chelis_list * list , int64_t count ) ;",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_list * chelis_list_zip ( const chelis_list * lhs , const chelis_list * rhs ) ;",
+      "flags": [],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_list * chelis_mmap_read ( const chelis_mapped_file * mapped , int64_t offset , int64_t len ) ;",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_list * chelis_range_i64 ( int64_t start , int64_t end ) ;",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_list * chelis_read_bytes ( chelis_string path ) ;",
+      "flags": [],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_list * chelis_read_lines ( chelis_string path ) ;",
+      "flags": [],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_list * chelis_tensor_split ( const chelis_tensor * tensor , int64_t axis , const chelis_list * sizes ) ;",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_list * chelis_value_as_list ( chelis_value value ) ;",
+      "flags": [],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_mapped_file * chelis_mmap_file ( chelis_string path ) ;",
+      "flags": [],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_option_f64 chelis_dict_get_f64 ( const chelis_dict * dict , chelis_value key ) ;",
+      "flags": [],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_option_f64 chelis_parse_f64 ( chelis_string value ) ;",
+      "flags": [],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_option_i64 chelis_dict_get_i64 ( const chelis_dict * dict , chelis_value key ) ;",
+      "flags": [],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_option_i64 chelis_parse_int64 ( chelis_string value ) ;",
+      "flags": [],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_option_value chelis_dict_get ( const chelis_dict * dict , chelis_value key ) ;",
+      "flags": [],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_string chelis_adt_get_tag ( const chelis_adt * adt ) ;",
+      "flags": [],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_string chelis_read_file ( chelis_string path ) ;",
+      "flags": [],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_string chelis_string_concat ( chelis_string lhs , chelis_string rhs ) ;",
+      "flags": [],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_string chelis_string_from_bool ( _Bool value ) ;",
+      "flags": [],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_string chelis_string_from_cstr ( const char * value ) ;",
+      "flags": [],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_string chelis_string_from_f32 ( float value ) ;",
+      "flags": [
+        "float-carrier",
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_string chelis_string_from_f64 ( double value ) ;",
+      "flags": [
+        "float-carrier",
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_string chelis_string_from_int64 ( int64_t value ) ;",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_string chelis_string_slice ( chelis_string value , int64_t start , int64_t len ) ;",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_string chelis_string_trim ( chelis_string value ) ;",
+      "flags": [],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_string chelis_value_as_string ( chelis_value value ) ;",
+      "flags": [],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_tensor * chelis_alloc ( int ndim , const int * shape , int dtype ) ;",
+      "flags": [
+        "raw-dtype-int"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_tensor * chelis_alloc_view ( int ndim , const int * shape , int dtype , float * data ) ;",
+      "flags": [
+        "float-carrier",
+        "raw-dtype-int",
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_tensor * chelis_contiguous ( const chelis_tensor * t ) ;",
+      "flags": [],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_tensor * chelis_pad_sequences ( const chelis_list * sequences , chelis_value pad_value ) ;",
+      "flags": [],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_tensor * chelis_pad_sequences_to ( const chelis_list * sequences , int64_t width , chelis_value pad_value ) ;",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_tensor * chelis_scalar_tensor_from_f32 ( float value ) ;",
+      "flags": [
+        "float-carrier",
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_tensor * chelis_scalar_tensor_from_f64 ( double value ) ;",
+      "flags": [
+        "float-carrier",
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_tensor * chelis_scalar_tensor_from_i64 ( int64_t value ) ;",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_clamp ( const chelis_tensor * tensor , const chelis_tensor * lo , const chelis_tensor * hi ) ;",
+      "flags": [],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_cmplt ( const chelis_tensor * lhs , const chelis_tensor * rhs ) ;",
+      "flags": [],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_concat ( const chelis_list * parts , int64_t axis ) ;",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_cumsum ( const chelis_tensor * tensor , int64_t axis ) ;",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_diagonal ( const chelis_tensor * tensor , int64_t axis1 , int64_t axis2 ) ;",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_einsum ( chelis_string equation , const chelis_tensor * lhs , const chelis_tensor * rhs ) ;",
+      "flags": [],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_from_value_list ( const chelis_list * list ) ;",
+      "flags": [],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_from_value_list_typed ( const chelis_list * list , int dst_dtype ) ;",
+      "flags": [
+        "raw-dtype-int"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_gather ( const chelis_tensor * tensor , const chelis_tensor * indices , int64_t axis ) ;",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_scatter ( const chelis_tensor * base , const chelis_tensor * indices , const chelis_tensor * updates , int64_t axis , chelis_string mode ) ;",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_trace ( const chelis_tensor * tensor , int64_t axis1 , int64_t axis2 ) ;",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_where ( const chelis_tensor * cond , const chelis_tensor * then_tensor , const chelis_tensor * else_tensor ) ;",
+      "flags": [],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_tensor * chelis_value_as_tensor ( chelis_value value ) ;",
+      "flags": [],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_tuple * chelis_tensor_sort ( const chelis_tensor * tensor , int64_t axis ) ;",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_tuple * chelis_tuple_from_values ( const chelis_value * items , int64_t len ) ;",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_tuple * chelis_value_as_tuple ( chelis_value value ) ;",
+      "flags": [],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_value chelis_adt_get_field ( const chelis_adt * adt , int64_t index ) ;",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_value chelis_list_index ( const chelis_list * list , int64_t index ) ;",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_value chelis_tuple_get ( const chelis_tuple * tuple , int64_t index ) ;",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_value chelis_value_from_adt ( chelis_adt * value ) ;",
+      "flags": [],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_value chelis_value_from_bool ( _Bool value ) ;",
+      "flags": [],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_value chelis_value_from_dict ( chelis_dict * value ) ;",
+      "flags": [],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_value chelis_value_from_f64 ( double value ) ;",
+      "flags": [
+        "float-carrier",
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_value chelis_value_from_int64 ( int64_t value ) ;",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_value chelis_value_from_list ( chelis_list * value ) ;",
+      "flags": [],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_value chelis_value_from_string ( chelis_string value ) ;",
+      "flags": [],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_value chelis_value_from_tensor ( chelis_tensor * value ) ;",
+      "flags": [],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_value chelis_value_from_tuple ( chelis_tuple * value ) ;",
+      "flags": [],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: const char * chelis_string_data ( chelis_string value ) ;",
+      "flags": [],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: double chelis_tensor_to_f64 ( const chelis_tensor * t ) ;",
+      "flags": [
+        "float-carrier",
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: double chelis_value_as_f64 ( chelis_value value ) ;",
+      "flags": [
+        "float-carrier",
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: int chelis_dtype_size ( int dtype ) ;",
+      "flags": [
+        "raw-dtype-int"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: int chelis_format_shortest ( double value , int dtype , char * buf , size_t cap ) ;",
+      "flags": [
+        "float-carrier",
+        "raw-dtype-int",
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: int64_t chelis_adt_field_count ( const chelis_adt * adt ) ;",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: int64_t chelis_dict_len ( const chelis_dict * dict ) ;",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: int64_t chelis_list_len ( const chelis_list * list ) ;",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: int64_t chelis_mmap_len ( const chelis_mapped_file * mapped ) ;",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: int64_t chelis_string_len ( chelis_string value ) ;",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: int64_t chelis_tensor_numel ( const chelis_tensor * t ) ;",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: int64_t chelis_tensor_rank ( const chelis_tensor * t ) ;",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: int64_t chelis_tensor_shape ( const chelis_tensor * t , int64_t axis ) ;",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: int64_t chelis_tuple_len ( const chelis_tuple * tuple ) ;",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: int64_t chelis_value_as_int64 ( chelis_value value ) ;",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_adt_release ( const chelis_adt * adt ) ;",
+      "flags": [],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_adt_retain ( const chelis_adt * adt ) ;",
+      "flags": [],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_bf16_buffer_to_f32 ( const uint16_t * src , float * dst , int64_t n ) ;",
+      "flags": [
+        "float-carrier",
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_dict_release ( const chelis_dict * dict ) ;",
+      "flags": [],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_dict_retain ( const chelis_dict * dict ) ;",
+      "flags": [],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_f16_buffer_to_f32 ( const uint16_t * src , float * dst , int64_t n ) ;",
+      "flags": [
+        "float-carrier",
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_f32_buffer_to_bf16 ( const float * src , uint16_t * dst , int64_t n ) ;",
+      "flags": [
+        "float-carrier",
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_f32_buffer_to_f16 ( const float * src , uint16_t * dst , int64_t n ) ;",
+      "flags": [
+        "float-carrier",
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_fill_bf16 ( chelis_tensor * t , uint16_t bits ) ;",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_fill_bool_bits ( chelis_tensor * t , uint32_t bits ) ;",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_fill_f16 ( chelis_tensor * t , uint16_t bits ) ;",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_fill_f32 ( chelis_tensor * t , float val ) ;",
+      "flags": [
+        "float-carrier",
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_fill_f32_bits ( chelis_tensor * t , uint32_t bits ) ;",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_fill_f64 ( chelis_tensor * t , double val ) ;",
+      "flags": [
+        "float-carrier",
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_fill_f64_bits ( chelis_tensor * t , uint64_t bits ) ;",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_fill_i64 ( chelis_tensor * t , int64_t val ) ;",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_free ( chelis_tensor * t ) ;",
+      "flags": [],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_list_release ( const chelis_list * list ) ;",
+      "flags": [],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_list_retain ( const chelis_list * list ) ;",
+      "flags": [],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_print_adt ( const chelis_adt * adt ) ;",
+      "flags": [],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_print_dict ( const chelis_dict * dict ) ;",
+      "flags": [],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_print_list ( const chelis_list * list ) ;",
+      "flags": [],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_print_tuple ( const chelis_tuple * tuple ) ;",
+      "flags": [],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_string_release ( chelis_string value ) ;",
+      "flags": [],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_string_retain ( chelis_string value ) ;",
+      "flags": [],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_tuple_release ( const chelis_tuple * tuple ) ;",
+      "flags": [],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_tuple_retain ( const chelis_tuple * tuple ) ;",
+      "flags": [],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_value_release ( chelis_value value ) ;",
+      "flags": [],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_value_retain ( chelis_value value ) ;",
+      "flags": [],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_write_file ( chelis_string path , chelis_string contents ) ;",
+      "flags": [],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-struct",
+      "id": "chelis_runtime.h: typedef enum { CHELIS_VALUE_INT64 , CHELIS_VALUE_FLOAT64 , CHELIS_VALUE_BOOL , CHELIS_VALUE_STRING , CHELIS_VALUE_TENSOR , CHELIS_VALUE_LIST , CHELIS_VALUE_TUPLE , CHELIS_VALUE_DICT , CHELIS_VALUE_ADT } chelis_value_tag",
+      "flags": [],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-struct",
+      "id": "chelis_runtime.h: typedef struct { _Bool is_some ; chelis_value value ; } chelis_option_value",
+      "flags": [],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-struct",
+      "id": "chelis_runtime.h: typedef struct { _Bool is_some ; double value ; } chelis_option_f64",
+      "flags": [
+        "float-carrier",
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
+    },
+    {
+      "kind": "header-struct",
+      "id": "chelis_runtime.h: typedef struct { _Bool is_some ; int64_t value ; } chelis_option_i64",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-struct",
+      "id": "chelis_runtime.h: typedef struct { chelis_value key ; chelis_value value ; } chelis_dict_entry",
+      "flags": [],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "header-struct",
+      "id": "chelis_runtime.h: typedef struct { chelis_value_tag tag ; union { int64_t i64 ; double f64 ; _Bool boolean ; chelis_string string ; chelis_tensor * tensor ; chelis_list * list ; chelis_tuple * tuple ; chelis_dict * dict ; chelis_adt * adt ; } as ; } chelis_value",
+      "flags": [
+        "float-carrier",
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
+    },
+    {
+      "kind": "header-struct",
+      "id": "chelis_runtime.h: typedef struct { float * data ; int shape [ 8 ] ; int strides [ 8 ] ; int ndim ; int dtype ; int size ; int owns_data ; } chelis_tensor",
+      "flags": [
+        "float-carrier",
+        "raw-dtype-int",
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
+    },
+    {
+      "kind": "header-struct",
+      "id": "chelis_runtime.h: typedef struct { void * handle ; } chelis_string",
+      "flags": [],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "std-adt-numeric",
+      "id": "decimal::Decimal: () (variant {} Decimal (field {} coefficient (t-prim {} int64)) (field {} scale (t-prim {} int64)))",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "std-adt-numeric",
+      "id": "io/json::Json: () (variant {} JsonNull) (variant {} JsonBool (t-prim {} bool)) (variant {} JsonInt (t-prim {} int64)) (variant {} JsonFloat (t-prim {} f64)) (variant {} JsonString (t-prim {} string)) (variant {} JsonArray (t-adt {} List (t-adt {} Json))) (variant {} JsonObject (t-adt {} Dict (t-prim {} string) (t-adt {} Json)))",
+      "flags": [
+        "float-carrier",
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
+    },
+    {
+      "kind": "std-adt-numeric",
+      "id": "time::Date: () (variant {} Date (field {} year (t-prim {} int64)) (field {} month (t-prim {} int64)) (field {} day (t-prim {} int64)))",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "std-adt-numeric",
+      "id": "time::Duration: () (variant {} Duration (field {} days (t-prim {} int64)) (field {} hours (t-prim {} int64)) (field {} minutes (t-prim {} int64)) (field {} seconds (t-prim {} int64)))",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "std-adt-numeric",
+      "id": "tokenizer::Tokenizer: () (variant {} BpeTokenizer (t-adt {} Dict (t-prim {} string) (t-prim {} int64)) (t-adt {} Dict (t-prim {} string) (t-prim {} int64)) (t-adt {} Dict (t-prim {} int64) (t-prim {} string)) (t-prim {} int64))",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "contracts::normal_cdf: (t-fn {} (t-prim {} f32) (t-prim {} f32))",
+      "flags": [
+        "float-carrier"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "contracts::normal_cdf_contract_samples: (t-fn {} (t-prim {} int64))",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "contracts::normal_cdf_contract_seed: (t-fn {} (t-prim {} int64))",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "contracts::standard_contract_tolerance: (t-fn {} (t-prim {} f32))",
+      "flags": [
+        "float-carrier"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "decimal::decimal_div: (t-fn {} (t-adt {} Decimal) (t-adt {} Decimal) (t-prim {} int64) (t-adt {} RoundingMode) (t-adt {} Decimal))",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "decimal::decimal_from_int: (t-fn {} (t-prim {} int64) (t-adt {} Decimal))",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "decimal::decimal_to_float: (t-fn {} (t-adt {} Decimal) (t-prim {} f64))",
+      "flags": [
+        "float-carrier"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "index::drop_list: (t-fn {} (t-adt {} List (t-var {} item)) (t-prim {} int64) (t-adt {} List (t-var {} item)))",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "index::list_index: (t-fn {} (t-adt {} List (t-var {} item)) (t-prim {} int64) (t-var {} item))",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "index::take_list: (t-fn {} (t-adt {} List (t-var {} item)) (t-prim {} int64) (t-adt {} List (t-var {} item)))",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "init/kaiming::kaiming_normal: (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-var {} n) (t-prim {} f32))) (t-prim {} f32) (t-tensor {} (d-var {} n) (t-prim {} f32)))",
+      "flags": [
+        "float-carrier"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "init/kaiming::kaiming_uniform: (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-var {} n) (t-prim {} f32))) (t-prim {} f32) (t-tensor {} (d-var {} n) (t-prim {} f32)))",
+      "flags": [
+        "float-carrier"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "init/random::normal_like: (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-var {} n) (t-prim {} f32))) (t-prim {} f32) (t-prim {} f32) (t-tensor {} (d-var {} n) (t-prim {} f32)))",
+      "flags": [
+        "float-carrier"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "init/xavierext::trunc_normal: (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-var {} n) (t-prim {} f32))) (t-prim {} f32) (t-prim {} f32) (t-prim {} f32) (t-prim {} f32) (t-tensor {} (d-var {} n) (t-prim {} f32)))",
+      "flags": [
+        "float-carrier"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "init/xavierext::xavier_normal: (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-var {} n) (t-prim {} f32))) (t-prim {} f32) (t-prim {} f32) (t-tensor {} (d-var {} n) (t-prim {} f32)))",
+      "flags": [
+        "float-carrier"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "init/xavierext::xavier_uniform: (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-var {} n) (t-prim {} f32))) (t-prim {} f32) (t-prim {} f32) (t-tensor {} (d-var {} n) (t-prim {} f32)))",
+      "flags": [
+        "float-carrier"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "io/json::json_float: (t-fn {} (t-adt {} Option (t-adt {} Json)) (t-adt {} Option (t-prim {} f64)))",
+      "flags": [
+        "float-carrier"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "io/json::json_int: (t-fn {} (t-adt {} Option (t-adt {} Json)) (t-adt {} Option (t-prim {} int64)))",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "io::mmap_size: (t-fn {} (t-prim {} string) (t-prim {} int64))",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "io::read_head_bytes: (t-fn {} (t-prim {} string) (t-prim {} int64) (t-adt {} List (t-prim {} int64)))",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "process::run: (t-fn {} (t-prim {} string) (t-adt {} List (t-prim {} string)) (t-tuple {} (t-prim {} int64) (t-prim {} string) (t-prim {} string)))",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "process::run_chelis: (t-fn {} (t-adt {} List (t-prim {} string)) (t-tuple {} (t-prim {} int64) (t-prim {} string) (t-prim {} string)))",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "scalar::abs: (t-fn {} (t-prim {} f32) (t-prim {} f32))",
+      "flags": [
+        "float-carrier"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "scalar::max: (t-fn {} (t-prim {} f32) (t-prim {} f32) (t-prim {} f32))",
+      "flags": [
+        "float-carrier"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "scalar::min: (t-fn {} (t-prim {} f32) (t-prim {} f32) (t-prim {} f32))",
+      "flags": [
+        "float-carrier"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "sort::sort_1d: (t-fn {} (t-ref {} (t-tensor {} (d-var {} n) (t-var {} p))) (t-prim {} int32) (t-tuple {} (t-tensor {} (d-var {} n) (t-var {} p)) (t-tensor {} (d-var {} n) (t-prim {} int64))))",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "sort::sort_2d: (t-fn {} (t-ref {} (t-tensor {} (d-var {} m) (d-var {} n) (t-var {} p))) (t-prim {} int32) (t-tuple {} (t-tensor {} (d-var {} m) (d-var {} n) (t-var {} p)) (t-tensor {} (d-var {} m) (d-var {} n) (t-prim {} int64))))",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "tensor/construct::arange: (t-fn {} (t-prim {} int32) (t-prim {} int32) (t-tensor {} (d-var {} n) (t-prim {} int32)))",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "tensor/construct::linspace: (t-fn {} (t-prim {} f32) (t-prim {} f32) (t-prim {} int32) (t-tensor {} (d-var {} n) (t-prim {} f32)))",
+      "flags": [
+        "float-carrier",
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "tensor/construct::squeeze: (t-fn {} (t-ref {} (t-tensor {} (d-var {} a) (d-lit {} 1) (d-var {} b) (t-prim {} f32))) (t-var {} _))",
+      "flags": [
+        "float-carrier"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "tensor/construct::stack: (t-fn {} (t-adt {} List (t-tensor {} (d-var {} d) (t-prim {} f32))) (t-var {} _))",
+      "flags": [
+        "float-carrier"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "tensor/construct::unsqueeze: (t-fn {} (t-ref {} (t-tensor {} (d-var {} a) (d-var {} b) (t-prim {} f32))) (t-var {} _))",
+      "flags": [
+        "float-carrier"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "tensor/mask::where_indices: (t-fn {} (t-ref {} (t-tensor {} (d-var {} n) (t-prim {} bool))) (t-tensor {} (d-var {} hits) (t-prim {} int64)))",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "test::assert_close: (t-fn {eff: (effects {} test)} (t-prim {} f32) (t-prim {} f32) (t-prim {} f32) (t-prim {} string) (t-unit {}))",
+      "flags": [
+        "float-carrier"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "test::assert_close_tensor: (t-fn {eff: (effects {} test)} (t-ref {} (t-tensor {} (d-var {} n) (t-var {} p))) (t-ref {} (t-tensor {} (d-var {} n) (t-var {} p))) (t-prim {} f32) (t-prim {} string) (t-unit {}))",
+      "flags": [
+        "float-carrier"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "test::assert_eq: (t-fn {eff: (effects {} test)} (t-prim {} f32) (t-prim {} f32) (t-prim {} string) (t-unit {}))",
+      "flags": [
+        "float-carrier"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "test::assert_eq_int: (t-fn {eff: (effects {} test)} (t-prim {} int64) (t-prim {} int64) (t-prim {} string) (t-unit {}))",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "test::assert_eq_tensor_int64: (t-fn {eff: (effects {} test)} (t-ref {} (t-tensor {} (d-var {} n) (t-prim {} int64))) (t-ref {} (t-tensor {} (d-var {} n) (t-prim {} int64))) (t-prim {} string) (t-unit {}))",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "test::assert_shape: (t-fn {eff: (effects {} test)} (t-ref {} (t-tensor {} (d-var {} n) (t-var {} p))) (t-prim {} int64) (t-prim {} string) (t-unit {}))",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "time::add_days: (t-fn {} (t-adt {} Date) (t-prim {} int64) (t-adt {} Date))",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "time::date: (t-fn {} (t-prim {} int64) (t-prim {} int64) (t-prim {} int64) (t-adt {} Date))",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "time::day_of_year: (t-fn {} (t-adt {} Date) (t-prim {} int64))",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "time::days_between: (t-fn {} (t-adt {} Date) (t-adt {} Date) (t-prim {} int64))",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "time::duration: (t-fn {} (t-prim {} int64) (t-prim {} int64) (t-prim {} int64) (t-prim {} int64) (t-adt {} Duration))",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "time::is_leap_year: (t-fn {} (t-prim {} int64) (t-prim {} bool))",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "time::sub_days: (t-fn {} (t-adt {} Date) (t-prim {} int64) (t-adt {} Date))",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "time::try_date: (t-fn {} (t-prim {} int64) (t-prim {} int64) (t-prim {} int64) (t-adt {} Option (t-adt {} Date)))",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "tokenizer::batch_encode: (t-fn {} (t-adt {} Tokenizer) (t-adt {} List (t-prim {} string)) (t-prim {} int64) (t-prim {} int64) (t-tensor {} (d-name {} batch) (d-name {} seq) (t-prim {} int64)))",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "tokenizer::decode: (t-fn {} (t-adt {} Tokenizer) (t-adt {} List (t-prim {} int64)) (t-prim {} string))",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "tokenizer::encode: (t-fn {} (t-adt {} Tokenizer) (t-prim {} string) (t-adt {} List (t-prim {} int64)))",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    }
+  ]
+}
