@@ -328,13 +328,15 @@ fn infer_symbolic_bindings_from_inputs(
             // happens to be supplied lets an unrelated declaration satisfy a
             // live shape obligation (chelis#991). Fail closed on that
             // ambiguity instead of guessing from caller inputs.
-            let dead_loads = occurrences
+            let mut dead_loads = occurrences
                 .iter()
                 .filter_map(|occurrence| match &occurrence.source {
                     SymbolicDimSource::Load { input_label, .. } => Some(input_label.as_str()),
                     SymbolicDimSource::OpDeclared { .. } => None,
                 })
                 .collect::<Vec<_>>();
+            dead_loads.sort_unstable();
+            dead_loads.dedup();
             if dead_loads.len() > 1 {
                 return Err(format!(
                     "ambiguous dead-load sources {:?} for live symbolic dimension `{}`",
@@ -2792,6 +2794,43 @@ mod tests {
                 "supplying {supplied} must not resolve an ambiguous shape source: {err}"
             );
         }
+    }
+
+    #[test]
+    fn eval_root_scoped_accepts_repeated_symbol_axes_from_one_dead_source() {
+        let mut dag = Dag::new();
+        let square_ty = TensorType {
+            dims: vec![
+                DimInfo::Named("n".to_string(), None),
+                DimInfo::Named("n".to_string(), None),
+            ],
+            precision: Prim::F32,
+        };
+        let _shape_source =
+            dag.add_node(RiscOp::Load { name: "x".into() }, vec![], square_ty, None);
+        let one = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
+        let vector_ty = TensorType {
+            dims: vec![DimInfo::Named("n".to_string(), None)],
+            precision: Prim::F32,
+        };
+        let ones = dag.add_node(
+            RiscOp::Expand {
+                axis: 0,
+                size: crate::dag::DimExpr::Sym("n".to_string()),
+            },
+            vec![one],
+            vector_ty,
+            None,
+        );
+
+        let values = eval_tensor_roots_with_strict(&dag, &[ones], |name| {
+            (name == "x").then(|| TensorValue::from_vec(vec![2, 2], vec![0.0; 4]))
+        })
+        .expect("one dead source may declare the same symbolic extent on multiple axes");
+        assert_eq!(
+            values[&ones],
+            TensorValue::from_vec(vec![2], vec![1.0, 1.0])
+        );
     }
 
     fn lower(src: &str) -> Dag {
