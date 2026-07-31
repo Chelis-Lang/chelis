@@ -141,13 +141,15 @@ declare_pats! {
     /// whose precision-spec scan subsumes it; this class is purely C
     /// format tokens, matching its name.
     CFormatNarrowing,
-    /// A Rust precision-format spec (`{v:.17}`, `{:.8}`, `{rel_err:.2e}`)
-    /// on a non-comment line, anywhere in crate sources - the Rust-lane
-    /// twin of `CFormatNarrowing`: a fixed decimal precision applied to a
-    /// numeric payload narrows or pads it away from the shortest
-    /// round-trip grammar, the same third-formatter shape in the other
-    /// lane (chelis#732 B2.4; added by the 2026-07-30 detector-scope
-    /// review, which found the rule's instrument saw only C tokens).
+    /// A Rust precision-format spec (`{v:.17}`, `{:.8}`, `{rel_err:.2e}`,
+    /// `{v:.精度$}`) or a bare exponential trait selector (`{v:e}`,
+    /// `{v:E}` - round-4 F5) on a non-comment line, anywhere in crate
+    /// sources - the Rust-lane twin of `CFormatNarrowing`: a fixed
+    /// decimal precision or an exp grammar applied to a numeric payload
+    /// moves it away from the shortest round-trip grammar, the same
+    /// third-formatter shape in the other lane (chelis#732 B2.4; added
+    /// by the 2026-07-30 detector-scope review, which found the rule's
+    /// instrument saw only C tokens).
     RustFormatNarrowing,
     /// A Debug-format token (`:?}` or `:#?}`) on a non-comment line at
     /// the declared `OBSERVATION_EXIT_SURFACES` - the exact spelling of
@@ -546,10 +548,12 @@ const BASELINE: &[Entry] = &[
     (
         Pat::RustFormatNarrowing,
         "crates/chelis-backend-c/src/lib.rs",
-        4,
+        6,
         "cfg(test): the fill negative-lock needle ({value:.8}f must NOT \
-         appear), its escaped {{:.8}} message quote, and two rel_err \
-         tolerance-assert messages - not product exits",
+         appear), its escaped {{:.8}} message quote, two rel_err \
+         tolerance-assert messages, and two {value:e} renders inside the \
+         same lock messages (counted since the round-4 F5 exp-selector \
+         widening) - not product exits",
     ),
     (
         Pat::RustFormatNarrowing,
@@ -642,10 +646,12 @@ const BASELINE: &[Entry] = &[
     (
         Pat::RustFormatNarrowing,
         "crates/chelis-runtime/src/format_shortest.rs",
-        1,
+        2,
         "the sanctioned compiled-lane routine's own spec/05 8.1 \
-         escalation candidate ({:.*e} at digit count p) - the normative \
-         grammar's implementation, not a third formatter",
+         escalation candidate ({:.*e} at digit count p) plus one {abs:e} \
+         inside its panic diagnostic (round-4 F5 widening) - the \
+         normative grammar's implementation and its self-check, not \
+         additional exits",
     ),
     (
         Pat::RustFormatNarrowing,
@@ -657,10 +663,19 @@ const BASELINE: &[Entry] = &[
     (
         Pat::RustFormatNarrowing,
         "crates/chelis-types/src/observation.rs",
-        2,
+        5,
         "format_element's own spec/05 8.1 escalation candidates ({:.*e}) \
-         - the sanctioned formatter's implementation of the grammar it \
-         defines",
+         plus three {v:e} spellings inside its panic/assert DIAGNOSTIC \
+         messages (round-4 F5 widening) - the sanctioned formatter's \
+         implementation and its self-checks, not additional exits",
+    ),
+    (
+        Pat::RustFormatNarrowing,
+        "crates/chelis-prove/src/erf_envelope.rs",
+        10,
+        "proof-integrity assert/panic messages rendering committed \
+         envelope bounds at exp grammar ({v:e}; round-4 F5 widening) - \
+         prover diagnostics, not stored-value exits",
     ),
     // -- rust-debug-numeric-format (hosted for chelis#732 B2.4's Rust
     // lane; scoped to OBSERVATION_EXIT_SURFACES). The first two rows ARE
@@ -859,7 +874,10 @@ fn format_specs(line: &str) -> Vec<&str> {
 /// Whether a format spec pins a decimal precision: a `.` followed by
 /// digits (`.2`), by `*` (argument-supplied), or by an identifier ending
 /// in `$` (named dynamic precision) - in any combination with fill,
-/// alignment, sign, or width.
+/// alignment, sign, or width. The dynamic-precision identifier is parsed
+/// with Rust's Unicode XID rules, matching the capture-argument parse in
+/// `format_specs` - round-4 F1: upgrading only the argument position
+/// left `{v:.精度$}` invisible while `{值:.2}` was caught.
 fn spec_has_precision(spec: &str) -> bool {
     let bytes = spec.as_bytes();
     for (idx, &byte) in bytes.iter().enumerate() {
@@ -870,23 +888,51 @@ fn spec_has_precision(spec: &str) -> bool {
         if rest.starts_with(|c: char| c.is_ascii_digit()) || rest.starts_with('*') {
             return true;
         }
-        let ident_len = rest
-            .bytes()
-            .take_while(|c| c.is_ascii_alphanumeric() || *c == b'_')
-            .count();
-        if ident_len > 0 && rest.as_bytes().get(ident_len) == Some(&b'$') {
-            return true;
+        let mut chars = rest.char_indices();
+        if let Some((_, first)) = chars.next()
+            && (first == '_' || unicode_ident::is_xid_start(first))
+        {
+            let mut end = first.len_utf8();
+            for (pos, next) in chars {
+                if next == '_' || unicode_ident::is_xid_continue(next) {
+                    end = pos + next.len_utf8();
+                } else {
+                    break;
+                }
+            }
+            if rest.as_bytes().get(end) == Some(&b'$') {
+                return true;
+            }
         }
     }
     false
 }
 
+/// Whether a format spec selects the exponential trait grammar
+/// (`LowerExp`/`UpperExp`): a final `e`/`E` preceded ONLY by
+/// fill/align/sign/width/precision grammar characters. `{v:e}` renders
+/// 0.5 as `5e-1` - a float grammar the normative shortest form never
+/// produces, so a bare exp selector is the same third-formatter shape
+/// as a pinned precision (round-4 F5). The grammar-only prefix rule
+/// keeps prose in brace groups (`{effect: resource}` ends in `e` too)
+/// from counting; a non-ASCII fill character or dynamic width before an
+/// exp selector evades this and stays declared residue.
+fn spec_selects_exp(spec: &str) -> bool {
+    match spec.strip_suffix(['e', 'E']) {
+        Some(prefix) => prefix.chars().all(|c| {
+            c.is_ascii_digit() || matches!(c, '<' | '>' | '^' | '+' | '-' | '#' | '.' | '*' | '$')
+        }),
+        None => false,
+    }
+}
+
 /// Count interpolations whose spec pins a decimal precision (`{v:.17}`,
-/// `{:.8}`, `{rel_err:.2e}`, `{value:8.2}`, `{v:0>8.2}`, `{v:.prec$}`).
+/// `{:.8}`, `{rel_err:.2e}`, `{value:8.2}`, `{v:0>8.2}`, `{v:.prec$}`,
+/// `{v:.精度$}`) or selects the exp grammar (`{v:e}`, `{v:E}`).
 fn count_precision_format_specs(line: &str) -> usize {
     format_specs(line)
         .into_iter()
-        .filter(|spec| spec_has_precision(spec))
+        .filter(|spec| spec_has_precision(spec) || spec_selects_exp(spec))
         .count()
 }
 
@@ -1303,6 +1349,49 @@ fn format_specs_follow_rust_unicode_identifier_rules() {
     assert_eq!(format_specs("format!(\"{值:.2}\")"), vec![".2"]);
     assert_eq!(format_specs("format!(\"{值:?}\")"), vec!["?"]);
     assert!(format_specs("format!(\"{💥:.2}\")").is_empty());
+    // Round-4 F1: the DYNAMIC-PRECISION identifier position follows the
+    // same XID rules as the capture argument - upgrading only one
+    // position left `{v:.精度$}` invisible.
+    assert_eq!(count_precision_format_specs("format!(\"{v:.精度$}\")"), 1);
+    assert_eq!(count_precision_format_specs("format!(\"{值:.精度$}\")"), 1);
+    assert_eq!(count_precision_format_specs("format!(\"{v:.prec$}\")"), 1);
+    // A non-identifier after the dot is still not precision.
+    assert_eq!(count_precision_format_specs("format!(\"{v:.💥$}\")"), 0);
+}
+
+/// Round-4 F5: the bare exponential trait selectors are third-formatter
+/// spellings (`0.5` renders `5e-1`), while width-only, sign-only, and
+/// alternate-integer selectors remain declared residue, not hits.
+#[test]
+fn exp_trait_selectors_count_as_narrowing() {
+    assert_eq!(count_precision_format_specs("format!(\"{v:e}\")"), 1);
+    assert_eq!(count_precision_format_specs("format!(\"{v:E}\")"), 1);
+    assert_eq!(count_precision_format_specs("format!(\"{v:+e}\")"), 1);
+    assert_eq!(count_precision_format_specs("format!(\"{v:^8e}\")"), 1);
+    assert_eq!(count_precision_format_specs("format!(\"{v:.2e}\")"), 1);
+    // Fill-char `e` never reaches the final position.
+    assert_eq!(count_precision_format_specs("format!(\"{v:e^8}\")"), 0);
+    assert_eq!(count_precision_format_specs("format!(\"{v:12}\")"), 0);
+    assert_eq!(count_precision_format_specs("format!(\"{v:+}\")"), 0);
+    assert_eq!(count_precision_format_specs("format!(\"{v:x}\")"), 0);
+}
+
+/// Round-4 F6: a pattern's scopes must intersect the real repository - a
+/// scope naming a nonexistent tree scans nothing while the sample test
+/// (which builds its own synthetic tree) stays green.
+#[test]
+fn every_scope_prefix_matches_repo_files() {
+    let sources = crate_sources(&repo_root());
+    for &pat in ALL_PATS {
+        for scope in pat.scopes() {
+            assert!(
+                sources.iter().any(|(rel, _)| rel.starts_with(scope)),
+                "pattern `{}` scope `{scope}` matches no file under \
+                 crates/*/src - a detector aimed at nothing",
+                pat.id()
+            );
+        }
+    }
 }
 
 /// The chelis#732 B2.4 new-file guarantee (the PR #891 shape, executed):

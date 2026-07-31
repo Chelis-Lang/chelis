@@ -850,6 +850,137 @@ class GroundTruthTests(unittest.TestCase):
         self.assertTrue(any("repair landed" in v for v in violations), violations)
 
 
+class VerdictSinkTests(unittest.TestCase):
+    """PR #962 round-4 F2: sink identity is asserted and the raise is
+    helper-owned, so a scratch list can neither mint a consumed receipt
+    nor swallow a failure."""
+
+    def test_a_scratch_list_cannot_mint_a_consumed_receipt(self) -> None:
+        oracle.CONSUMED_INSTRUMENTS.discard("classify_probe_outputs")
+        with self.assertRaisesRegex(oracle.OracleFailure, "scratch-list"):
+            with oracle.verdict_sink("test leg"):
+                oracle.consume_findings([], oracle.classify_probe_outputs, "C", [])
+        self.assertNotIn("classify_probe_outputs", oracle.CONSUMED_INSTRUMENTS)
+
+    def test_the_sink_context_owns_the_raise(self) -> None:
+        def mandatory(_arg: object) -> list[str]:
+            return ["RT4 mandatory violation"]
+
+        with self.assertRaisesRegex(oracle.OracleFailure, "RT4 mandatory violation"):
+            with oracle.verdict_sink("test leg") as sink:
+                oracle.consume_findings(sink, mandatory, None)
+                # A caller "forgetting" to raise changes nothing: the
+                # context raises from the same list on exit.
+
+    def test_an_empty_sink_exits_clean_and_records_consumption(self) -> None:
+        def clean(_arg: object) -> list[str]:
+            return []
+
+        with oracle.verdict_sink("test leg") as sink:
+            oracle.consume_findings(sink, clean, None)
+        self.assertIn("clean", oracle.CONSUMED_INSTRUMENTS)
+
+    def test_nested_sinks_are_rejected(self) -> None:
+        with self.assertRaisesRegex(oracle.OracleFailure, "nested"):
+            with oracle.verdict_sink("outer"):
+                with oracle.verdict_sink("inner"):
+                    pass
+
+    def test_consume_outside_any_sink_is_a_forgery(self) -> None:
+        def clean(_arg: object) -> list[str]:
+            return []
+
+        with self.assertRaisesRegex(oracle.OracleFailure, "scratch-list"):
+            oracle.consume_findings([], clean, None)
+
+
+class GroundTruthDriverTests(unittest.TestCase):
+    """PR #962 round-4 F4: the executable-C driver's helpers are covered
+    directly, and plumbing failures raise instead of degrading to a
+    native status the classifier accepts as 'still broken'."""
+
+    def test_compile_command_parses_from_build_output(self) -> None:
+        command = oracle.parse_compile_command(
+            "Wrote p.c\nCompile: cc p.c runtime.c -o p_bin -lm\nDone\n"
+        )
+        self.assertEqual(command[0], "cc")
+        self.assertIn("-o", command)
+
+    def test_a_missing_compile_line_is_loud_plumbing(self) -> None:
+        with self.assertRaisesRegex(oracle.OracleFailure, "no `Compile:` line"):
+            oracle.parse_compile_command("Wrote p.c\nDone\n")
+
+    def test_a_compile_line_without_output_is_loud_plumbing(self) -> None:
+        with self.assertRaisesRegex(oracle.OracleFailure, "names no `-o`"):
+            oracle.parse_compile_command("Compile: cc p.c runtime.c -lm\n")
+
+    def test_rendered_bit_classification_both_directions(self) -> None:
+        self.assertEqual(
+            oracle.classify_rendered_bits(["0.1", "0.1"], "f64", "0.1"), "exact"
+        )
+        self.assertEqual(
+            oracle.classify_rendered_bits(["0.1", "0.2"], "f64", "0.1"),
+            "wrong-bits",
+        )
+        self.assertEqual(
+            oracle.classify_rendered_bits(["garbage"], "f64", "0.1"), "wrong-bits"
+        )
+        # The f32 comparison reconciles an f64-image spelling against the
+        # narrowed width.
+        self.assertEqual(
+            oracle.classify_rendered_bits(
+                ["0.10000000149011612"], "f32", "0.1"
+            ),
+            "exact",
+        )
+
+    def test_rendered_values_parse_every_exit_shape(self) -> None:
+        stdout = (
+            "tensor(shape=[1], data=[5e-324])\n"
+            "[5e-324]\n"
+            "lroot = [5e-324]\n"
+            "shown = ()\n"
+        )
+        self.assertEqual(
+            oracle.c_rendered_values(stdout), ["5e-324", "5e-324", "5e-324"]
+        )
+        self.assertEqual(oracle.c_rendered_values("no renders here\n"), [])
+
+
+class KnownRedCellRunTests(unittest.TestCase):
+    """PR #962 round-4 F3: the known-red leg's failure paths are executed
+    by the unit suite through an injected runner - the gone-green branch
+    shipped a NameError because nothing ran it."""
+
+    class _Completed:
+        def __init__(self, returncode: int, stdout: str) -> None:
+            self.returncode = returncode
+            self.stdout = stdout
+            self.stderr = ""
+
+    def test_all_cells_red_on_their_fragments_passes(self) -> None:
+        def runner(_command, **_kwargs):
+            name = _command[-1]
+            cell = next(c for c in oracle.KNOWN_RED_CELLS if c.name == name)
+            return self._Completed(101, f"running 1 test\n{cell.fragment}\nFAILED")
+
+        oracle.run_known_red_cells({}, runner=runner)
+
+    def test_a_gone_green_cell_raises_the_shrink_protocol(self) -> None:
+        def runner(_command, **_kwargs):
+            return self._Completed(0, "running 1 test\nok")
+
+        with self.assertRaisesRegex(oracle.OracleFailure, "Un-ignore"):
+            oracle.run_known_red_cells({}, runner=runner)
+
+    def test_a_wrong_reason_cell_raises_with_the_fragment(self) -> None:
+        def runner(_command, **_kwargs):
+            return self._Completed(101, "running 1 test\nsome unrelated panic")
+
+        with self.assertRaisesRegex(oracle.OracleFailure, "NOT on its declared"):
+            oracle.run_known_red_cells({}, runner=runner)
+
+
 class RuleManifestTests(unittest.TestCase):
     def _doc(self) -> str:
         return (oracle.REPO_ROOT / oracle.DESIGN_DOC).read_text(encoding="utf-8")

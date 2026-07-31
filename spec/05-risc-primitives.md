@@ -1398,9 +1398,8 @@ a permanently skipped test or a stale conformance sentence behind. The
 same oracle independently recompiles/runs every executable declared C
 corpus exclusion and compares intended bits; comment/string-only source
 fingerprints cannot preserve an exclusion after exact behavior returns.
-Atom
-IDs are
-stable, and the current blockquote authorities remain normative until selected
+Atom IDs are stable, and the current blockquote authorities remain
+normative until selected
 for chelis#733 Phase 1 migration. Full revisions are attached and checked
 through the pinned Buoy shell-side integration. The delivery plan and full
 elaboration is `spec/design/faithful_observation.md` (meta chelis#728).

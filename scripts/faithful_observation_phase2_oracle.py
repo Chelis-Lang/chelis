@@ -83,16 +83,19 @@ The obligations, in execution order:
    every named instrument must exist, and - checked at the END of the
    run - every callable instrument must have produced a RUNTIME
    invocation receipt AND a centrally consumed-result receipt (the
-   `@instrument` decorator records execution; `consume_findings` records
-   only after extending a verdict sink; suite legs record both on
-   success). Source-text scanning was demonstrated to certify an
-   `if False:` branch, and entry-only receipts were demonstrated to
-   certify a non-empty result discarded by its caller (PR #962 round-2
-   M2 and exact-head F2). Review-rule entries need a substantive
-   justification. The manifest binds names, execution, and verdict
-   consumption - per-instrument mutation tests in
-   test_faithful_observation_phase2_oracle.py are for, one per failure
-   mode.
+   `@instrument` decorator records execution; `consume_findings` refuses
+   any list that is not THE active verdict sink and records only after
+   extending it, and `verdict_sink` itself - not the leg's caller -
+   raises from that same list). Source-text scanning was demonstrated to
+   certify an `if False:` branch; entry-only receipts were demonstrated
+   to certify a non-empty result discarded by its caller; a scratch list
+   was demonstrated to impersonate the sink (PR #962 round-2 M2,
+   exact-head F2, round-4 F2). The receipts bind detector -> active sink
+   -> helper-owned raise; they cannot prove this oracle's own code was
+   not edited to tamper with the sink in between - self-tampering is the
+   review rule's residue. Review-rule entries need a substantive
+   justification; per-instrument mutation tests live in
+   test_faithful_observation_phase2_oracle.py, one per failure mode.
 
 Scope, stated rather than assumed (the harness's own no-silent-caps rule):
 the set-equality obligation in (4) covers the OBSERVATION HARNESS only -
@@ -112,6 +115,7 @@ host C toolchain: most obligations build, link, and run generated C.
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import math
 import os
@@ -444,6 +448,7 @@ PERMITTED_RUST_FORMAT_NARROWING_PATHS: frozenset[str] = frozenset(
         "crates/chelis-ir/src/lower.rs",
         "crates/chelis-prove/src/bin/certify_erf_envelope.rs",
         "crates/chelis-prove/src/bin/certify_special_fn_envelope.rs",
+        "crates/chelis-prove/src/erf_envelope.rs",
         "crates/chelis-prove/src/opaque.rs",
         "crates/chelis-runtime/src/format_shortest.rs",
         "crates/chelis-types/src/infer.rs",
@@ -550,6 +555,37 @@ class OracleFailure(RuntimeError):
 INVOKED_INSTRUMENTS: set[str] = set()
 CONSUMED_INSTRUMENTS: set[str] = set()
 
+# The one active verdict sink (round-4 F2: `consume_findings` previously
+# accepted ANY list, so a caller could hand it a scratch list and still
+# mint a consumed receipt). `verdict_sink` registers the list it hands
+# out AND owns the raise from it, so a leg's caller can neither divert
+# findings to a scratch list nor skip the failure. What this cannot
+# stop - stated as the mechanism's limit, not hidden - is in-process
+# tampering with the oracle's own code between the extend and the exit
+# (e.g. mutating the sink in place); the oracle cannot police edits to
+# itself, and that residue is the review rule (§B2.8).
+_ACTIVE_VERDICT_SINK: list[str] | None = None
+
+
+@contextlib.contextmanager
+def verdict_sink(banner: str):
+    """Yield THE verdict sink for one oracle leg and raise from it."""
+
+    global _ACTIVE_VERDICT_SINK
+    if _ACTIVE_VERDICT_SINK is not None:
+        raise OracleFailure(
+            "nested verdict sinks: an oracle leg opened a sink while "
+            "another was active - the legs are sequential by design."
+        )
+    sink: list[str] = []
+    _ACTIVE_VERDICT_SINK = sink
+    try:
+        yield sink
+    finally:
+        _ACTIVE_VERDICT_SINK = None
+    if sink:
+        raise OracleFailure(f"{banner}:\n" + "\n".join(sink))
+
 
 def instrument(fn):
     """Record fn's execution in INVOKED_INSTRUMENTS when it runs."""
@@ -566,10 +602,17 @@ def consume_findings(sink: list[str], fn, *args) -> None:
     """Run one list-valued instrument and connect every result to verdict.
 
     The consumed receipt is written only after this helper extends the
-    caller's verdict sink. Calling a decorated detector directly can prove
-    entry, but cannot forge result consumption.
+    ACTIVE verdict sink - a scratch list raises instead of minting a
+    receipt (round-4 F2), and the sink's own context raises from the
+    same list, so the receipt binds detector -> sink -> failure.
     """
 
+    if sink is not _ACTIVE_VERDICT_SINK:
+        raise OracleFailure(
+            f"consume_findings({fn.__name__}): the supplied list is not the "
+            "active verdict sink - a scratch-list receipt forgery (round-4 "
+            "F2)."
+        )
     findings = fn(*args)
     sink.extend(findings)
     CONSUMED_INSTRUMENTS.add(fn.__name__)
@@ -578,6 +621,12 @@ def consume_findings(sink: list[str], fn, *args) -> None:
 def consume_optional_finding(sink: list[str], fn, *args) -> None:
     """Consume an instrument returning either one violation or ``None``."""
 
+    if sink is not _ACTIVE_VERDICT_SINK:
+        raise OracleFailure(
+            f"consume_optional_finding({fn.__name__}): the supplied list is "
+            "not the active verdict sink - a scratch-list receipt forgery "
+            "(round-4 F2)."
+        )
     finding = fn(*args)
     if finding is not None:
         sink.append(finding)
@@ -1563,7 +1612,6 @@ def read_sources() -> dict[Path, str]:
 
 
 def run_structural_scan(sources: dict[Path, str]) -> None:
-    violations: list[str] = []
     checks = (
         (unignored_violations, (sources,)),
         (retired_lock_violations, (sources,)),
@@ -1581,10 +1629,9 @@ def run_structural_scan(sources: dict[Path, str]) -> None:
         (doc_citation_violations, (sources[TRIPWIRE_SOURCE],)),
         (b2_manifest_violations, (sources[DESIGN_DOC],)),
     )
-    for check, args in checks:
-        consume_findings(violations, check, *args)
-    if violations:
-        raise OracleFailure("structural scan failed:\n" + "\n".join(violations))
+    with verdict_sink("structural scan failed") as violations:
+        for check, args in checks:
+            consume_findings(violations, check, *args)
     probe_count = sum(len(probes) for _, _, probes, _ in DECLARED_EXCLUSIONS)
     print(
         "+ structural scan: un-ignored oracle rows present, interim locks "
@@ -1616,7 +1663,11 @@ def run_green_suites(env: dict[str, str]) -> None:
 
 
 def run_exclusion_probes(env: dict[str, str]) -> None:
-    violations: list[str] = []
+    with verdict_sink("exclusion probe receipts failed") as violations:
+        run_exclusion_probes_into(violations, env)
+
+
+def run_exclusion_probes_into(violations: list[str], env: dict[str, str]) -> None:
     for const_name, _owner, probes, rows in DECLARED_EXCLUSIONS:
         probe_runs: list[tuple[str, Sequence[str], int, str]] = []
         for probe, expected in probes:
@@ -1651,12 +1702,16 @@ def run_exclusion_probes(env: dict[str, str]) -> None:
                 f"({len(exclusion_labels(rows))} labels across {len(probes)} probe(s))",
                 flush=True,
             )
-    if violations:
-        raise OracleFailure("exclusion probe receipts failed:\n" + "\n".join(violations))
 
 
 def c_code_without_comments_or_literals(c_source: str) -> str:
-    """Mask C comments plus string/character literals, preserving positions."""
+    """Mask C comments plus string/character literals, preserving positions.
+
+    NOT preprocessor-aware (round-4 F7, recorded): a fingerprint inside
+    an `#if 0` region still counts. That errs conservative - it can keep
+    an exclusion looking earned, never mint a false repair - and the
+    behavioral leg decides the verdict regardless.
+    """
 
     out = list(c_source)
     index = 0
@@ -1894,14 +1949,14 @@ def c_rendered_values(stdout: str) -> list[str]:
     return values
 
 
-def run_generated_c_ground_truth(
-    build_stdout: str,
-    out_dir: Path,
-    dtype: str,
-    intended_text: str,
-    env: dict[str, str],
-) -> str:
-    """Compile/run the CLI's emitted command and compare rendered bits."""
+def parse_compile_command(build_stdout: str) -> list[str]:
+    """The native compile command a `chelis build` run advertised.
+
+    Driver PLUMBING failures raise instead of degrading to a native
+    status (round-4 F4: any plumbing breakage previously returned
+    'run-failed', which the classifier accepts as 'still broken', so a
+    broken driver silently reverted the leg to fingerprint-only).
+    """
 
     compile_line = next(
         (
@@ -1912,38 +1967,25 @@ def run_generated_c_ground_truth(
         None,
     )
     if compile_line is None:
-        return "run-failed"
+        raise OracleFailure(
+            "C ground truth driver: the build output carried no `Compile:` "
+            "line - the CLI contract or this parser drifted; the executable "
+            "leg cannot run (round-4 F4: plumbing failures are loud, never "
+            "a native status)."
+        )
     command = shlex.split(compile_line)
-    compiled = subprocess.run(
-        command,
-        cwd=out_dir,
-        env=env,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if compiled.returncode != 0:
-        return "compile-failed"
-    try:
-        output_index = command.index("-o") + 1
-        binary = Path(command[output_index])
-    except (ValueError, IndexError):
-        return "run-failed"
-    if not binary.is_absolute():
-        binary = out_dir / binary
-    ran = subprocess.run(
-        (str(binary),),
-        cwd=out_dir,
-        env=env,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if ran.returncode != 0:
-        return "run-failed"
-    rendered = c_rendered_values(ran.stdout)
-    if not rendered:
-        return "run-failed"
+    if "-o" not in command or command.index("-o") + 1 >= len(command):
+        raise OracleFailure(
+            "C ground truth driver: the advertised compile command names no "
+            "`-o` output - the leg cannot locate the binary (plumbing, not "
+            "a native outcome)."
+        )
+    return command
+
+
+def classify_rendered_bits(rendered: Sequence[str], dtype: str, intended_text: str) -> str:
+    """'exact' iff every rendered element carries the intended bits."""
+
     intended = float(intended_text)
     intended_bits = f32_bits(intended) if dtype == "f32" else f64_bits(intended)
     try:
@@ -1960,13 +2002,70 @@ def run_generated_c_ground_truth(
     )
 
 
+def run_generated_c_ground_truth(
+    build_stdout: str,
+    out_dir: Path,
+    dtype: str,
+    intended_text: str,
+    env: dict[str, str],
+) -> str:
+    """Compile/run the CLI's emitted command and compare rendered bits.
+
+    Returns a NATIVE status only ('compile-failed', 'run-failed',
+    'wrong-bits', 'exact'); driver plumbing raises OracleFailure.
+    """
+
+    command = parse_compile_command(build_stdout)
+    compiled = subprocess.run(
+        command,
+        cwd=out_dir,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if compiled.returncode != 0:
+        return "compile-failed"
+    binary = Path(command[command.index("-o") + 1])
+    if not binary.is_absolute():
+        binary = out_dir / binary
+    ran = subprocess.run(
+        (str(binary),),
+        cwd=out_dir,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if ran.returncode != 0:
+        return "run-failed"
+    rendered = c_rendered_values(ran.stdout)
+    if not rendered:
+        raise OracleFailure(
+            "C ground truth driver: the compiled program ran successfully "
+            "but no exit render was parsed from its stdout - the render "
+            "parser or the program shape drifted (plumbing, not a native "
+            "outcome)."
+        )
+    return classify_rendered_bits(rendered, dtype, intended_text)
+
+
 def run_exclusion_ground_truth(env: dict[str, str]) -> None:
     """§B2.9 leg 2's INDEPENDENT half: the oracle re-executes every
     excluded behavior itself - it writes the programs, runs the
     toolchain, drives native C behavior, and re-derives each fingerprint
     - so a forged probe receipt changes nothing here."""
 
-    violations: list[str] = []
+    with verdict_sink("independent exclusion re-execution failed") as violations:
+        run_exclusion_ground_truth_into(violations, env)
+    print(
+        "+ independent exclusion re-execution: every declared label's "
+        "fingerprint and executable C behavior re-derived by the oracle itself",
+        flush=True,
+    )
+
+
+def run_exclusion_ground_truth_into(violations: list[str], env: dict[str, str]) -> None:
     exclusions = {name: rows for name, _o, _p, rows in DECLARED_EXCLUSIONS}
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -2055,56 +2154,47 @@ def run_exclusion_ground_truth(env: dict[str, str]) -> None:
             )
         consume_findings(violations, c_exclusion_ground_truth_violations, entries)
 
-    if violations:
-        raise OracleFailure(
-            "independent exclusion re-execution failed:\n" + "\n".join(violations)
-        )
-    print(
-        "+ independent exclusion re-execution: every declared label's "
-        "fingerprint and executable C behavior re-derived by the oracle itself",
-        flush=True,
-    )
 
+def run_known_red_cells(env: dict[str, str], runner=subprocess.run) -> None:
+    """Re-run each known-red cell; `runner` is injectable so the unit
+    suite can exercise this leg's classification and failure paths
+    without cargo (round-4 F3: the gone-green branch shipped a
+    `NameError` because nothing executed it)."""
 
-def run_known_red_cells(env: dict[str, str]) -> None:
-    violations: list[str] = []
-    for cell in KNOWN_RED_CELLS:
-        command = (
-            "cargo",
-            "test",
-            "-p",
-            "chelis-cli",
-            "--test",
-            "observation_roundtrip_harness",
-            "--",
-            "--ignored",
-            "--exact",
-            cell.name,
-        )
-        print(f"+ {command_text(command)}", flush=True)
-        completed = subprocess.run(
-            command,
-            cwd=REPO_ROOT,
-            env=env,
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        output = completed.stdout + completed.stderr
-        before = len(violations)
-        consume_optional_finding(
-            violations, classify_red_run, cell, completed.returncode, output
-        )
-        if len(violations) == before:
-            print(
-                f"  known-red as declared: {cell.name} ({cell.issue}, "
-                f"repair owned by {cell.owner})",
-                flush=True,
+    with verdict_sink("known-red ledger failed") as violations:
+        for cell in KNOWN_RED_CELLS:
+            command = (
+                "cargo",
+                "test",
+                "-p",
+                "chelis-cli",
+                "--test",
+                "observation_roundtrip_harness",
+                "--",
+                "--ignored",
+                "--exact",
+                cell.name,
             )
-        else:
-            violations.append(violation)
-    if violations:
-        raise OracleFailure("known-red ledger failed:\n" + "\n".join(violations))
+            print(f"+ {command_text(command)}", flush=True)
+            completed = runner(
+                command,
+                cwd=REPO_ROOT,
+                env=env,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            output = completed.stdout + completed.stderr
+            before = len(violations)
+            consume_optional_finding(
+                violations, classify_red_run, cell, completed.returncode, output
+            )
+            if len(violations) == before:
+                print(
+                    f"  known-red as declared: {cell.name} ({cell.issue}, "
+                    f"repair owned by {cell.owner})",
+                    flush=True,
+                )
 
 
 def main() -> int:

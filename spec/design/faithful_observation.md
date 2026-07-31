@@ -376,17 +376,21 @@ For every dtype and every storable value:
    Phase 2), `rust-format-narrowing` (interpolations whose format spec
    pins a decimal precision - `.N`, argument-supplied `.*`, named
    `.prec$`, in any combination with fill/alignment/sign/width, so
-   `{value:8.2}` and `{v:0>8.2}` count alongside `{x:.N}`; all crate
-   src, comment lines excluded - widened from the bare token per PR
-   #962 red-team F3), and `rust-debug-numeric-format` (interpolations
-   whose spec selects the Debug trait, i.e. ends in `?` - `{v:?}`,
-   `{x:#?}`, `{value:8?}`, `{v:x?}` - over the declared
+   `{value:8.2}` and `{v:0>8.2}` count alongside `{x:.N}` - or selects
+   the exponential trait grammar (`{v:e}`/`{v:E}` render 0.5 as `5e-1`,
+   a float grammar the normative form never produces; round-4 F5); all
+   crate src, comment lines excluded), and `rust-debug-numeric-format`
+   (interpolations whose spec selects the Debug trait, i.e. ends in `?`
+   - `{v:?}`, `{x:#?}`, `{value:8?}`, `{v:x?}` - over the declared
    `OBSERVATION_EXIT_SURFACES`: directory prefixes deliberately, so a
    NEW file inside a declared surface is covered from its first line at
-   baseline zero; capture arguments are parsed with Rust's Unicode XID
-   rules, so valid identifiers such as `值` cannot evade either Rust
-   class; creating an exit surface anywhere else obliges adding
-   its prefix in the same change set). Both Rust classes scan LOGICAL
+   baseline zero; BOTH identifier positions - the capture argument and
+   the named dynamic precision `.ident$` - are parsed with Rust's
+   Unicode XID rules, so `{值:.2}` and `{v:.精度$}` both count
+   (round-4 F1: upgrading only the capture position left the
+   dynamic-precision position evadable); creating an exit surface
+   anywhere else obliges adding its prefix in the same change set).
+   Both Rust classes scan LOGICAL
    lines - string continuations (`\` at end of line) are joined first,
    so a format spec split across physical lines is the single spec the
    compiler sees (round-2 F3's executed evasion, closed). The
@@ -400,7 +404,13 @@ For every dtype and every storable value:
    value; today's diagnostic carriers are annotated in the tripwire
    baseline, retired by [#729]'s dtype-carrying payload plus the review
    rule), bare `{}` Display / `.to_string()` of a numeric payload (the
-   review rule; too common to token-scan), exits born outside the
+   review rule; too common to token-scan), ALTERNATE INTEGER/POINTER
+   grammars (`{v:x}`/`{v:X}`/`{v:o}`/`{v:b}`/`{v:p}` - legitimately
+   common for addresses, ids, and bitmasks, so a token scan would drown
+   in benign hits; the review rule), an exp selector behind a non-ASCII
+   fill or dynamic width (the grammar-only-prefix rule that keeps prose
+   brace-groups from counting also skips those; review rule), exits
+   born outside the
    declared surfaces (the review rule), and MACRO-COMPOSED format
    strings (`concat!`/`format_args!` indirection assembles a spec that
    never appears whole in source; the scanner joins string
@@ -445,13 +455,22 @@ For every dtype and every storable value:
    exist, and every callable or suite instrument must have produced both
    a RUNTIME invocation receipt and a centrally consumed-result receipt
    by the end of the run (the `@instrument` decorator records entry;
-   `consume_findings` records consumption only after the result extends
-   the verdict sink; suites record both on success). The first
+   `consume_findings` refuses any list that is not THE active verdict
+   sink and records consumption only after extending it, and the sink's
+   own context - not the leg's caller - raises from that same list;
+   suites record both on success). The first
    cut checked invocation by scanning the oracle's own source, which
    round-2 M2 refuted with an `if False:` branch - only a receipt
    written by the running code counts. The exact-head review then showed
    that entry alone is insufficient: a manifest detector returned a
-   non-empty violation which its caller discarded. A detector named in
+   non-empty violation which its caller discarded; round-4 F2 showed a
+   scratch list could impersonate the sink, so sink identity is now
+   asserted and the raise is helper-owned. Stated as the mechanism's
+   limit rather than hidden: a receipt proves detector -> active sink ->
+   helper-owned raise; it cannot prove the oracle's own code was not
+   edited to tamper with the sink between extend and exit - an oracle
+   cannot police modifications to itself, and that residue is the
+   review rule. A detector named in
    the manifest but absent from result consumption now fails the final
    check. The oracle
    further requires every tripwire pattern whose `doc()` cites this
