@@ -54,11 +54,18 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   `compile()` API (chelis-python) fails as loudly as `chelis build`.
 - **Compiled C runtime writes f64 pad data at f64 (chelis#891 review).**
   `chelis_pad_sequences`/`chelis_pad_sequences_to` hardcoded `as f32`
-  stores while the eval lane keys the tensor at the pad's actual dtype;
-  the emitter now threads the static pad dtype and the runtime allocates
-  and writes genuinely f64 tensors. Empty rows/lists no longer mis-tag
-  F32 against the checker's f64 (the checker-known precision is threaded
-  as a hint) and no longer trip the pad homogeneity check.
+  stores while the eval lane keys the tensor at the pad's actual dtype.
+  The f64 lane ships as **additive** exports `chelis_pad_sequences_f64` /
+  `chelis_pad_sequences_to_f64` -- dtype in the symbol name, selected
+  statically by the emitter -- and the published two-argument
+  `chelis_pad_sequences`/`chelis_pad_sequences_to` declarations are
+  **byte-identical to the pre-#891 ABI** (an earlier revision of this
+  branch appended a raw `int pad_dtype` parameter to the published
+  signatures; that was an ABI break inside the v0.18 "mechanical for
+  shells" window and exactly the `(value, int dtype)` seam the capacity
+  tripwire flags -- reverted per review). Empty rows/lists no longer
+  mis-tag F32 against the checker's f64 and no longer trip the pad
+  homogeneity check.
 
 - **`to_tensor` and `pad_sequences`/`pad_sequences_to` tag float lists and
   pads at the element's actual dtype (chelis#890).** The runtime previously

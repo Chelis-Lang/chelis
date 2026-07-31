@@ -2353,11 +2353,34 @@ pub unsafe extern "C" fn chelis_list_from_tensor(tensor: *const chelis_tensor) -
     Box::into_raw(Box::new(chelis_list { refcount: 1, items }))
 }
 
+/// The published, pre-chelis#891 ABI: float pads produce an F32 tensor,
+/// exactly as every linking shell already expects. The f64 lane is the
+/// ADDITIVE `chelis_pad_sequences_f64` export below -- dtype in the symbol
+/// name, per the #949-review shape, NOT a raw `(value, int dtype)`
+/// parameter pair, which is the seam the #956 capacity tripwire flags and
+/// the chelis#893/#894 payload work would have to unwind.
 #[no_mangle]
 pub unsafe extern "C" fn chelis_pad_sequences(
     sequences: *const chelis_list,
     pad_value: chelis_value,
-    pad_dtype: c_int,
+) -> *mut chelis_tensor {
+    pad_sequences_impl(sequences, pad_value, RuntimeDType::F32)
+}
+
+/// Additive f64 lane (chelis#891): identical semantics at F64 float
+/// storage. New symbol, no signature change to the published one.
+#[no_mangle]
+pub unsafe extern "C" fn chelis_pad_sequences_f64(
+    sequences: *const chelis_list,
+    pad_value: chelis_value,
+) -> *mut chelis_tensor {
+    pad_sequences_impl(sequences, pad_value, RuntimeDType::F64)
+}
+
+unsafe fn pad_sequences_impl(
+    sequences: *const chelis_list,
+    pad_value: chelis_value,
+    float_dtype: RuntimeDType,
 ) -> *mut chelis_tensor {
     let batch = chelis_list_len(sequences) as usize;
     let mut width = 0usize;
@@ -2370,18 +2393,15 @@ pub unsafe extern "C" fn chelis_pad_sequences(
         }
     }
     let shape = [batch as c_int, width as c_int];
-    // Float pads carry their STATIC dtype from the emitter (`pad_dtype`,
-    // chelis#891 review finding 2): the boxed value union has no f32/f64
-    // distinction, and hardcoding F32 silently truncated f64 pad data
-    // while the eval lane (host_ops) keys the tensor at the pad's actual
-    // dtype -- a silent build-vs-eval divergence. Integer pads keep the
-    // historical I32 tag (the chelis#713 class, tracked separately).
+    // The float storage dtype is fixed per entry point (F32 for the
+    // published symbol, F64 for `_f64`) -- no runtime dtype parameter and
+    // therefore no fallback arm to default silently (the section C4.3
+    // class this replaced). Integer pads keep the historical I32 tag
+    // (the chelis#713 class, tracked separately).
     let dtype = if pad_value.tag == chelis_value_tag::CHELIS_VALUE_INT64 {
         RuntimeDType::I32
-    } else if pad_dtype == CHELIS_F64 {
-        RuntimeDType::F64
     } else {
-        RuntimeDType::F32
+        float_dtype
     };
     let out = chelis_alloc(2, shape.as_ptr(), dtype.id());
     let pad = if pad_value.tag == chelis_value_tag::CHELIS_VALUE_INT64 {
@@ -2428,12 +2448,31 @@ pub unsafe extern "C" fn chelis_pad_sequences(
     out
 }
 
+/// Published pre-chelis#891 ABI; see `chelis_pad_sequences`.
 #[no_mangle]
 pub unsafe extern "C" fn chelis_pad_sequences_to(
     sequences: *const chelis_list,
     width: i64,
     pad_value: chelis_value,
-    pad_dtype: c_int,
+) -> *mut chelis_tensor {
+    pad_sequences_to_impl(sequences, width, pad_value, RuntimeDType::F32)
+}
+
+/// Additive f64 lane (chelis#891); see `chelis_pad_sequences_f64`.
+#[no_mangle]
+pub unsafe extern "C" fn chelis_pad_sequences_to_f64(
+    sequences: *const chelis_list,
+    width: i64,
+    pad_value: chelis_value,
+) -> *mut chelis_tensor {
+    pad_sequences_to_impl(sequences, width, pad_value, RuntimeDType::F64)
+}
+
+unsafe fn pad_sequences_to_impl(
+    sequences: *const chelis_list,
+    width: i64,
+    pad_value: chelis_value,
+    float_dtype: RuntimeDType,
 ) -> *mut chelis_tensor {
     if width < 0 {
         runtime_fail!("pad_sequences_to requires non-negative width");
@@ -2441,18 +2480,12 @@ pub unsafe extern "C" fn chelis_pad_sequences_to(
     let batch = chelis_list_len(sequences) as usize;
     let width = width as usize;
     let shape = [batch as c_int, width as c_int];
-    // Float pads carry their STATIC dtype from the emitter (`pad_dtype`,
-    // chelis#891 review finding 2): the boxed value union has no f32/f64
-    // distinction, and hardcoding F32 silently truncated f64 pad data
-    // while the eval lane (host_ops) keys the tensor at the pad's actual
-    // dtype -- a silent build-vs-eval divergence. Integer pads keep the
-    // historical I32 tag (the chelis#713 class, tracked separately).
+    // Fixed per entry point; no runtime dtype parameter, no silent
+    // fallback arm (section C4.3). See pad_sequences_impl.
     let dtype = if pad_value.tag == chelis_value_tag::CHELIS_VALUE_INT64 {
         RuntimeDType::I32
-    } else if pad_dtype == CHELIS_F64 {
-        RuntimeDType::F64
     } else {
-        RuntimeDType::F32
+        float_dtype
     };
     let out = chelis_alloc(2, shape.as_ptr(), dtype.id());
     let pad = if pad_value.tag == chelis_value_tag::CHELIS_VALUE_INT64 {

@@ -325,7 +325,7 @@ number) are loud eval errors — no silent defaults.
 | `jlist` | `(items: List[Json]) -> Json` | |
 | `jdict` | `(entries: List[(string, Json)]) -> Json` | insertion order; duplicate keys upsert |
 | `json_set` | `(j: Json, path: string, v: Json) -> Json` | returns updated value; missing intermediate dict keys auto-create nested dicts (output assembly); list segments replace existing elements only; path segments and the built result respect the 512 depth cap |
-| `round_to` | `(x: float, places: int) -> float` | decimal rounding, **ties-to-even** on the exact binary value (= Python `round`): `round_to(2.5, 0) = 2.0`, `round_to(2.675, 2) = 2.67`; `places` in 0..=100; non-finite passes through; precision-preserving return |
+| `round_to` | `(x: f64, places: int) -> f64` | decimal rounding, **ties-to-even** on the exact binary value (= Python `round`): `round_to(2.5, 0) = 2.0`, `round_to(2.675, 2) = 2.67`; `places` in 0..=100; non-finite passes through. **f64-only** until its per-dtype semantics are authored in spec/05 (chelis#891 review: the widen/round/re-narrow path at f32 computes at other than the declared width, non-conforming under [04-NUM-8]) |
 
 Composes with §3.5: `read_file |> parse_json`, accessors + tensor builtins
 for compute, `jdict`/`json_set`/`to_json` + `write_file` for nested output.

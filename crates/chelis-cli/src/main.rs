@@ -8267,11 +8267,20 @@ fn reject_eval_only_builtins_host(
     program: &chelis_ir::host::ConcreteHostProgram,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(builtin) = chelis_ir::host::find_eval_only_host_builtin(program) {
-        return Err(format!(
-            "{builtin} is an eval/test-only builtin; not available in compiled \
-                targets. Run the program with `chelis eval` or `chelis test` instead, \
-                or remove the {builtin} call before building."
+        // Branded through `Unsupported` (chelis#891 review): this rejection
+        // predates the section C2 contract and shipped unbranded while it
+        // covered one name (`process_run`); widening the list to the JSON/
+        // CSV builtin families made it a 21-name unbranded site invisible
+        // to both the kind-based and brand-based #730 sweeps. The sibling
+        // gate directly above (`compiled_host_only_builtin`) is the shape.
+        return Err(chelis_types::unsupported::Unsupported::new(
+            chelis_types::unsupported::UnsupportedKind::Builtin(builtin.to_string()),
+            "compiled targets (the host interpreter's eval/test lanes only)",
+            chelis_types::unsupported::Stage::Codegen("c"),
+            "run the program with `chelis eval` or `chelis test`, or remove the \
+             call before building (spec/05-risc-primitives.md §3.6)",
         )
+        .to_string()
         .into());
     }
     Ok(())

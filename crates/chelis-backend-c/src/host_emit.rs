@@ -2557,22 +2557,22 @@ impl<'a> HostEmitter<'a> {
             }
             "pad_sequences" => {
                 self.lines.push(format!(
-                    "{}{target} = chelis_pad_sequences({}, {}, {});",
+                    "{}{target} = {}({}, {});",
                     self.indent,
+                    pad_sequences_symbol("chelis_pad_sequences", ty),
                     arg_vars[0].0,
                     self.box_value_expr(&arg_vars[1].0, &arg_vars[1].1)?,
-                    pad_result_dtype_macro(ty)
                 ));
                 return Ok(());
             }
             "pad_sequences_to" => {
                 self.lines.push(format!(
-                    "{}{target} = chelis_pad_sequences_to({}, {}, {}, {});",
+                    "{}{target} = {}({}, {}, {});",
                     self.indent,
+                    pad_sequences_symbol("chelis_pad_sequences_to", ty),
                     arg_vars[0].0,
                     arg_vars[1].0,
                     self.box_value_expr(&arg_vars[2].0, &arg_vars[2].1)?,
-                    pad_result_dtype_macro(ty)
                 ));
                 return Ok(());
             }
@@ -5921,13 +5921,28 @@ fn sparse_symbol_expr(
 /// dtype, matching the eval lane's pad-dtype keying. Integer pads keep
 /// the historical tag-keyed I32 selection in the runtime (the chelis#713
 /// class); the macro is passed for uniformity and ignored there.
-fn pad_result_dtype_macro(ty: &HostType) -> &'static str {
-    if let HostType::Tensor(t) = ty
-        && let Ok(dtype) = t.precision.runtime_dtype()
-    {
-        return dtype.c_macro();
+/// Select the pad-sequences runtime symbol from the STATIC result dtype.
+/// F64 routes to the additive `_f64` export; everything else keeps the
+/// published symbol (F32 float storage, I32 integer pads -- the pre-#891
+/// behavior). There is deliberately no fallback arm that picks F32 for a
+/// type this function cannot read (the section C4.3 "no default may
+/// select f32" class): an unreadable result type is a compiler invariant
+/// break and panics naming the guarantee.
+fn pad_sequences_symbol(base: &str, ty: &HostType) -> String {
+    let HostType::Tensor(t) = ty else {
+        unreachable!(
+            "pad_sequences result must be tensor-typed by check time; \
+             emitter asked to emit `{base}` at non-tensor host type {ty:?}"
+        )
+    };
+    match t.precision.runtime_dtype() {
+        Ok(chelis_vocab::RuntimeDType::F64) => format!("{base}_f64"),
+        Ok(_) => base.to_string(),
+        Err(error) => unreachable!(
+            "pad_sequences result dtype must be concrete by emit time \
+             (guaranteed by the checker's tensor-precision validation): {error}"
+        ),
     }
-    chelis_vocab::RuntimeDType::F32.c_macro()
 }
 
 #[cfg(test)]

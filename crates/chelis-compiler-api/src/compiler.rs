@@ -2331,14 +2331,19 @@ fn reject_host_only_builtins_before_host_lowering(
 /// lives in `chelis_ir::host` and is shared with the CLI's build gate.
 fn reject_eval_only_builtins(program: &chelis_ir::host::ConcreteHostProgram) -> Result<()> {
     if let Some(name) = chelis_ir::host::find_eval_only_host_builtin(program) {
-        return Err(stage_error(
-            "compile",
-            format!(
-                "{name} is an eval/test-only builtin; not available in compiled \
-                    targets. Run the program with `chelis eval` or `chelis test` instead, \
-                    or remove the {name} call before building."
+        // Branded through `Unsupported` (chelis#891 review): the kind was
+        // already right, but the message carried no section C2 `unsupported:`
+        // prefix, so the brand-based #730 sweep could not see it -- and the
+        // CLI's twin gate now brands identically, keeping the two lanes
+        // byte-compatible for shells that match the prefix.
+        return Err(unsupported_stage_error(
+            chelis_types::unsupported::Unsupported::new(
+                chelis_types::unsupported::UnsupportedKind::Builtin(name.to_string()),
+                "compiled targets (the host interpreter's eval/test lanes only)",
+                chelis_types::unsupported::Stage::Codegen("c"),
+                "run the program with `chelis eval` or `chelis test`, or remove the \
+                 call before building (spec/05-risc-primitives.md §3.6)",
             ),
-            "unsupported_feature",
         ));
     }
     Ok(())
@@ -4874,8 +4879,8 @@ value = json_f64(doc, "a")
         .expect_err("compile must reject eval-only builtins");
         let message = &err.errors[0].message;
         assert!(
-            message.contains("is an eval/test-only builtin"),
-            "unexpected message: {message}"
+            message.starts_with("unsupported:") && message.contains("builtin"),
+            "must carry the section C2 brand, got: {message}"
         );
         assert!(
             message.contains("chelis eval"),

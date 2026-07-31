@@ -185,7 +185,7 @@ fn build_rejects_process_run_program_with_clear_message() {
         .clone();
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("process_run is an eval/test-only builtin"),
+        stderr.contains("unsupported: builtin `process_run`"),
         "build must reject process_run with the eval/test-only message, got stderr={stderr}"
     );
     assert!(

@@ -189,5 +189,5 @@ fn json_io_builtins_are_rejected_by_build() {
         ])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("eval/test-only builtin"));
+        .stderr(predicate::str::contains("unsupported: builtin"));
 }
