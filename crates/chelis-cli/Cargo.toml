@@ -44,6 +44,10 @@ tempfile = "3"
 walkdir = "2"
 
 [features]
+# The shared property/obligation runner is part of every normal CLI build.
+# `smt` only adds cvc5; a default build still runs the identical Tier-C engine
+# that Tide uses, so solver availability cannot fork fuzz semantics.
+default = ["chelis-prove"]
 smt = ["chelis-prove/smt", "chelis-tide/smt"]
 
 [dev-dependencies]

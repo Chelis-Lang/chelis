@@ -1605,3 +1605,142 @@ def broken(x: f32) -> f32 = to_tensor([x])
         "a type-broken deep module surfaces a stage:\"check\" error record: {structured}"
     );
 }
+
+#[test]
+fn issue_977_tide_and_cli_match_full_constraint_sampling_evidence() {
+    let source = "module Risk.Guards
+@property confidence_tail_order forall(alpha1: f32, alpha2: f32)
+where (alpha1 > 0.99), (alpha1 < alpha2), (alpha2 < 1.0):
+  ((1.0 - alpha2) < (1.0 - alpha1))
+";
+    let response = handle_message(&json!({
+        "jsonrpc":"2.0",
+        "id":977,
+        "method":"tools/call",
+        "params":{"name":"chelis_prove","arguments":{
+            "source_kind":"surf", "source": source, "tier":"fuzz-only",
+            "samples":8, "seed":42
+        }}
+    }))
+    .expect("prove response");
+    let tide = response["result"]["structuredContent"]["properties"][0].clone();
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("risk.ch");
+    std::fs::write(&path, source).expect("write fixture");
+    let output = assert_cmd::Command::cargo_bin("chelis")
+        .expect("chelis binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "prove",
+            path.to_str().expect("utf-8 path"),
+            "--json",
+            "--tier",
+            "fuzz-only",
+            "--samples",
+            "8",
+            "--seed",
+            "42",
+        ])
+        .output()
+        .expect("run CLI prove");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let cli = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .find(|record| record["kind"] == "property")
+        .expect("CLI property record");
+
+    for key in [
+        "name",
+        "status",
+        "composite_verdict",
+        "qualifiers",
+        "proof_tier",
+        "samples",
+        "seed",
+        "sampling_method",
+        "accepted_samples",
+        "attempted_samples",
+        "rejected_samples",
+        "assumptions",
+    ] {
+        assert_eq!(tide[key], cli[key], "field `{key}` differs");
+    }
+    assert_eq!(
+        tide["assumptions"][0]["non_vacuity"]["evidence"]["sampling_method"],
+        "constraint_directed"
+    );
+}
+
+#[test]
+fn issue_977_tide_and_cli_match_exhausted_sampling_evidence() {
+    let source = "module Risk.Guards\n@property narrow forall(x: f32)\nwhere (x > 0.99), (x < 1.0):\n  (x == x)\n";
+    let response = handle_message(&json!({
+        "jsonrpc":"2.0",
+        "id":978,
+        "method":"tools/call",
+        "params":{"name":"chelis_prove","arguments":{
+            "source_kind":"surf", "source": source, "tier":"fuzz-only",
+            "samples":8, "max_attempts":3, "seed":42
+        }}
+    }))
+    .expect("prove response");
+    let tide = response["result"]["structuredContent"]["properties"][0].clone();
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("risk.ch");
+    std::fs::write(&path, source).expect("write fixture");
+    let output = assert_cmd::Command::cargo_bin("chelis")
+        .expect("chelis binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "prove",
+            path.to_str().expect("utf-8 path"),
+            "--json",
+            "--tier",
+            "fuzz-only",
+            "--samples",
+            "8",
+            "--max-attempts",
+            "3",
+            "--seed",
+            "42",
+        ])
+        .output()
+        .expect("run CLI prove");
+    assert_eq!(output.status.code(), Some(3));
+    let cli = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .find(|record| record["kind"] == "property")
+        .expect("CLI property record");
+
+    for key in [
+        "name",
+        "status",
+        "composite_verdict",
+        "qualifiers",
+        "proof_tier",
+        "samples",
+        "seed",
+        "sampling_method",
+        "accepted_samples",
+        "attempted_samples",
+        "rejected_samples",
+        "assumptions",
+        "reason",
+        "goal",
+    ] {
+        assert_eq!(tide[key], cli[key], "field `{key}` differs");
+    }
+    assert_eq!(cli["proof_tier"], "none");
+    assert_eq!(cli["accepted_samples"], 3);
+    assert_eq!(cli["attempted_samples"], 3);
+    assert_eq!(cli["rejected_samples"], 0);
+    assert_eq!(cli["samples"], 0);
+}

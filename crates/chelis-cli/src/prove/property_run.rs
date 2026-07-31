@@ -247,8 +247,14 @@ fn emit(
         if let Some(goal) = &outcome.goal {
             value["goal"] = json!(goal);
         }
-        if outcome.proof_tier != PropertyTier::None {
-            value["proof_tier"] = json!(outcome.proof_tier.as_str());
+        // Machine records always carry an explicit tier. Terminal outcomes
+        // use `none`, matching Tide, so consumers never reconstruct absence.
+        value["proof_tier"] = json!(outcome.proof_tier.as_str());
+        if let Some(method) = &outcome.sampling_method {
+            value["sampling_method"] = json!(method);
+            value["accepted_samples"] = json!(outcome.accepted_samples);
+            value["attempted_samples"] = json!(outcome.attempted_samples);
+            value["rejected_samples"] = json!(outcome.rejected_samples);
         }
         if outcome.proof_tier == PropertyTier::Smt {
             value["arith_model"] = json!("real");

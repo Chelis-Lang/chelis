@@ -17,7 +17,10 @@
 //! shares the derived-obligation run across the two surfaces.
 
 use chelis_deep::DeepTag;
-use std::{cell::RefCell, collections::BTreeMap};
+use std::{
+    cell::RefCell,
+    collections::{BTreeMap, BTreeSet},
+};
 
 use chelis_compiler_api::schema::{EvalRequest, ExecutionValue, SourceKind, TensorValue};
 use chelis_deep::ast::{Atom as DeepAtom, Expr as DeepExpr, List as DeepList, MetaMap};
@@ -100,6 +103,15 @@ pub struct PropertyOutcome {
     /// error that never reached a property body); a real verification outcome
     /// always carries its goal.
     pub goal: Option<String>,
+    /// Additive machine evidence for a Tier-C run. `None` for deductive
+    /// outcomes and declaration failures that never selected a sampler.
+    pub sampling_method: Option<String>,
+    pub attempted_samples: usize,
+    /// Samples that satisfied every guard and reached the property body. This
+    /// is distinct from `samples`, which is zero on terminal error/unsupported
+    /// outcomes even when useful sampling work preceded the terminal state.
+    pub accepted_samples: usize,
+    pub rejected_samples: usize,
 }
 
 impl PropertyOutcome {
@@ -169,6 +181,10 @@ impl PropertyOutcome {
             base_discharge,
             composite_verdict,
             goal: None,
+            sampling_method: None,
+            attempted_samples: 0,
+            accepted_samples: 0,
+            rejected_samples: 0,
         }
     }
 
@@ -182,6 +198,19 @@ impl PropertyOutcome {
     /// Surf/Deep formatter, so the goal travels with the record.
     pub(super) fn with_goal(mut self, goal: impl Into<String>) -> Self {
         self.goal = Some(goal.into());
+        self
+    }
+
+    fn with_sampling(
+        mut self,
+        method: impl Into<String>,
+        attempted_samples: usize,
+        accepted_samples: usize,
+    ) -> Self {
+        self.sampling_method = Some(method.into());
+        self.attempted_samples = attempted_samples;
+        self.accepted_samples = accepted_samples;
+        self.rejected_samples = attempted_samples.saturating_sub(accepted_samples);
         self
     }
 
@@ -1192,6 +1221,423 @@ fn property_assumption_records(
     }
 }
 
+const CONSTRAINT_SAMPLING_METHOD: &str = "constraint_directed";
+const REJECTION_SAMPLING_METHOD: &str = "uniform_rejection";
+
+#[derive(Debug, Clone, Copy)]
+struct ScalarBound {
+    value: f64,
+    strict: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ScalarDomain {
+    lower: ScalarBound,
+    upper: ScalarBound,
+}
+
+#[derive(Debug, Clone)]
+struct OrderEdge {
+    lower: String,
+    upper: String,
+    strict: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FloatKind {
+    F32,
+    F64,
+}
+
+impl FloatKind {
+    fn from_type_name(name: &str) -> Self {
+        match name {
+            "f32" => Self::F32,
+            "f64" => Self::F64,
+            _ => unreachable!("constraint plans only admit f32/f64 binders"),
+        }
+    }
+
+    fn lower_value(self, value: f64, strict: bool) -> f64 {
+        match self {
+            Self::F64 => {
+                if strict {
+                    value.next_up()
+                } else {
+                    value
+                }
+            }
+            Self::F32 => {
+                let rounded = value as f32;
+                if strict {
+                    rounded.next_up() as f64
+                } else {
+                    rounded as f64
+                }
+            }
+        }
+    }
+
+    fn upper_value(self, value: f64, strict: bool) -> f64 {
+        match self {
+            Self::F64 => {
+                if strict {
+                    value.next_down()
+                } else {
+                    value
+                }
+            }
+            Self::F32 => {
+                let rounded = value as f32;
+                if strict {
+                    rounded.next_down() as f64
+                } else {
+                    rounded as f64
+                }
+            }
+        }
+    }
+
+    fn next_up(self, value: f64) -> f64 {
+        match self {
+            Self::F32 => (value as f32).next_up() as f64,
+            Self::F64 => value.next_up(),
+        }
+    }
+
+    fn next_down(self, value: f64) -> f64 {
+        match self {
+            Self::F32 => (value as f32).next_down() as f64,
+            Self::F64 => value.next_down(),
+        }
+    }
+
+    fn max_finite(self) -> f64 {
+        match self {
+            Self::F32 => f32::MAX as f64,
+            Self::F64 => f64::MAX,
+        }
+    }
+
+    fn round_into_domain(self, value: f64, lower: f64, upper: f64) -> Option<f64> {
+        let mut rounded = match self {
+            Self::F32 => (value as f32) as f64,
+            Self::F64 => value,
+        };
+        if rounded < lower {
+            rounded = self.next_up(rounded);
+        } else if rounded > upper {
+            rounded = self.next_down(rounded);
+        }
+        (rounded.is_finite() && lower <= rounded && rounded <= upper).then_some(rounded)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ConstraintSamplingPlan {
+    domains: BTreeMap<String, ScalarDomain>,
+    kinds: BTreeMap<String, FloatKind>,
+    incoming: BTreeMap<String, Vec<(String, bool)>>,
+    topo: Vec<String>,
+    reserve_depth: BTreeMap<String, usize>,
+}
+
+impl ConstraintSamplingPlan {
+    fn derive(
+        variables: impl IntoIterator<Item = (String, FloatKind)>,
+        preconditions: &[crate::solver::SmtExpr],
+    ) -> Result<Self, String> {
+        let kinds = variables.into_iter().collect::<BTreeMap<_, _>>();
+        let names = kinds.keys().cloned().collect::<BTreeSet<_>>();
+        let default = ScalarDomain {
+            lower: ScalarBound {
+                value: f64::NEG_INFINITY,
+                strict: false,
+            },
+            upper: ScalarBound {
+                value: f64::INFINITY,
+                strict: false,
+            },
+        };
+        let mut domains = names
+            .iter()
+            .cloned()
+            .map(|name| (name, default))
+            .collect::<BTreeMap<_, _>>();
+        let mut edges = Vec::new();
+        for precondition in preconditions {
+            collect_scalar_constraints(precondition, &names, &mut domains, &mut edges)?;
+        }
+
+        // Propagate constant bounds through the order graph. This is enough
+        // to turn `0.99 < alpha1 < alpha2 < 1.0` into two narrow domains
+        // before any random draw occurs.
+        for _ in 0..names.len().saturating_mul(2).max(1) {
+            let mut changed = false;
+            for edge in &edges {
+                let lower = domains[&edge.lower];
+                let upper = domains[&edge.upper];
+                changed |= tighten_upper(
+                    domains.get_mut(&edge.lower).expect("known lower"),
+                    ScalarBound {
+                        value: upper.upper.value,
+                        strict: upper.upper.strict || edge.strict,
+                    },
+                );
+                changed |= tighten_lower(
+                    domains.get_mut(&edge.upper).expect("known upper"),
+                    ScalarBound {
+                        value: lower.lower.value,
+                        strict: lower.lower.strict || edge.strict,
+                    },
+                );
+            }
+            if !changed {
+                break;
+            }
+        }
+        for (name, domain) in &domains {
+            if domain.lower.value > domain.upper.value
+                || (domain.lower.value == domain.upper.value
+                    && (domain.lower.strict || domain.upper.strict))
+            {
+                return Err(format!(
+                    "inconsistent scalar guards leave `{name}` with an empty interval"
+                ));
+            }
+        }
+
+        // A missing side is a generator choice, not a hidden semantic bound.
+        // Keep the historical width only as a finite sampling window anchored
+        // at the user's actual guard; never intersect an explicit domain with
+        // the old uniform [-10, 10] range.
+        for (name, domain) in &mut domains {
+            let max_finite = kinds[name].max_finite();
+            match (
+                domain.lower.value.is_finite(),
+                domain.upper.value.is_finite(),
+            ) {
+                (false, false) => {
+                    domain.lower.value = -10.0;
+                    domain.upper.value = 10.0;
+                }
+                (true, false) => {
+                    let width = (domain.lower.value.abs() * 0.1).max(20.0);
+                    domain.upper.value = (domain.lower.value + width).min(max_finite);
+                }
+                (false, true) => {
+                    let width = (domain.upper.value.abs() * 0.1).max(20.0);
+                    domain.lower.value = (domain.upper.value - width).max(-max_finite);
+                }
+                (true, true) => {}
+            }
+            if !domain.lower.value.is_finite() || !domain.upper.value.is_finite() {
+                return Err("scalar guard bounds exceed the finite sampling range".to_string());
+            }
+        }
+
+        let mut incoming_count = names
+            .iter()
+            .cloned()
+            .map(|name| (name, 0usize))
+            .collect::<BTreeMap<_, _>>();
+        let mut outgoing = BTreeMap::<String, Vec<(String, bool)>>::new();
+        let mut incoming = BTreeMap::<String, Vec<(String, bool)>>::new();
+        for edge in &edges {
+            outgoing
+                .entry(edge.lower.clone())
+                .or_default()
+                .push((edge.upper.clone(), edge.strict));
+            incoming
+                .entry(edge.upper.clone())
+                .or_default()
+                .push((edge.lower.clone(), edge.strict));
+            *incoming_count.get_mut(&edge.upper).expect("known variable") += 1;
+        }
+        let mut ready = incoming_count
+            .iter()
+            .filter_map(|(name, count)| (*count == 0).then_some(name.clone()))
+            .collect::<BTreeSet<_>>();
+        let mut topo = Vec::with_capacity(names.len());
+        while let Some(name) = ready.pop_first() {
+            topo.push(name.clone());
+            for (successor, _) in outgoing.get(&name).into_iter().flatten() {
+                let count = incoming_count.get_mut(successor).expect("known successor");
+                *count -= 1;
+                if *count == 0 {
+                    ready.insert(successor.clone());
+                }
+            }
+        }
+        if topo.len() != names.len() {
+            return Err(
+                "inconsistent or cyclic scalar ordering guards are not sampleable".to_string(),
+            );
+        }
+
+        let mut reserve_depth = names
+            .iter()
+            .cloned()
+            .map(|name| (name, 0usize))
+            .collect::<BTreeMap<_, _>>();
+        for name in topo.iter().rev() {
+            let depth = outgoing
+                .get(name)
+                .into_iter()
+                .flatten()
+                .map(|(successor, strict)| reserve_depth[successor] + usize::from(*strict))
+                .max()
+                .unwrap_or(0);
+            reserve_depth.insert(name.clone(), depth);
+        }
+        Ok(Self {
+            domains,
+            kinds,
+            incoming,
+            topo,
+            reserve_depth,
+        })
+    }
+
+    fn sample(&self, rng: &mut Lcg) -> Result<BTreeMap<String, f64>, String> {
+        let mut values = BTreeMap::new();
+        for name in &self.topo {
+            let domain = self.domains[name];
+            let kind = self.kinds[name];
+            let mut lower = kind.lower_value(domain.lower.value, domain.lower.strict);
+            for (predecessor, strict) in self.incoming.get(name).into_iter().flatten() {
+                let predecessor_value = values[predecessor];
+                lower = lower.max(if *strict {
+                    kind.next_up(predecessor_value)
+                } else {
+                    predecessor_value
+                });
+            }
+            let mut upper = kind.upper_value(domain.upper.value, domain.upper.strict);
+            for _ in 0..self.reserve_depth[name] {
+                upper = kind.next_down(upper);
+            }
+            if !lower.is_finite() || !upper.is_finite() || lower > upper {
+                return Err(format!(
+                    "inconsistent scalar guards leave `{name}` with no representable sample"
+                ));
+            }
+            let draw = if lower == upper {
+                lower
+            } else {
+                rng.next_f64(lower, upper)
+            };
+            let value = kind.round_into_domain(draw, lower, upper).ok_or_else(|| {
+                format!("inconsistent scalar guards leave `{name}` with no representable sample")
+            })?;
+            values.insert(name.clone(), value);
+        }
+        Ok(values)
+    }
+}
+
+fn tighten_lower(domain: &mut ScalarDomain, candidate: ScalarBound) -> bool {
+    if candidate.value > domain.lower.value
+        || (candidate.value == domain.lower.value && candidate.strict && !domain.lower.strict)
+    {
+        domain.lower = candidate;
+        true
+    } else {
+        false
+    }
+}
+
+fn tighten_upper(domain: &mut ScalarDomain, candidate: ScalarBound) -> bool {
+    if candidate.value < domain.upper.value
+        || (candidate.value == domain.upper.value && candidate.strict && !domain.upper.strict)
+    {
+        domain.upper = candidate;
+        true
+    } else {
+        false
+    }
+}
+
+fn collect_scalar_constraints(
+    expr: &crate::solver::SmtExpr,
+    names: &BTreeSet<String>,
+    domains: &mut BTreeMap<String, ScalarDomain>,
+    edges: &mut Vec<OrderEdge>,
+) -> Result<(), String> {
+    use crate::solver::{BoolOp, CmpOp, SmtExpr};
+    if let SmtExpr::Bool(BoolOp::And, terms) = expr {
+        for term in terms {
+            collect_scalar_constraints(term, names, domains, edges)?;
+        }
+        return Ok(());
+    }
+    let SmtExpr::Cmp(op @ (CmpOp::Lt | CmpOp::Le | CmpOp::Gt | CmpOp::Ge), left, right) = expr
+    else {
+        return Err(
+            "unsupported scalar guard: expected a conjunction of <, <=, >, or >= comparisons"
+                .to_string(),
+        );
+    };
+    let (left, right, strict) = match op {
+        CmpOp::Lt => (left.as_ref(), right.as_ref(), true),
+        CmpOp::Le => (left.as_ref(), right.as_ref(), false),
+        CmpOp::Gt => (right.as_ref(), left.as_ref(), true),
+        CmpOp::Ge => (right.as_ref(), left.as_ref(), false),
+        _ => unreachable!(),
+    };
+    match (left, right) {
+        (literal, SmtExpr::Var(name))
+            if names.contains(name) && scalar_guard_literal(literal).is_some() =>
+        {
+            tighten_lower(
+                domains.get_mut(name).expect("known variable"),
+                ScalarBound {
+                    value: scalar_guard_literal(literal).expect("guarded above"),
+                    strict,
+                },
+            );
+        }
+        (SmtExpr::Var(name), literal)
+            if names.contains(name) && scalar_guard_literal(literal).is_some() =>
+        {
+            tighten_upper(
+                domains.get_mut(name).expect("known variable"),
+                ScalarBound {
+                    value: scalar_guard_literal(literal).expect("guarded above"),
+                    strict,
+                },
+            );
+        }
+        (SmtExpr::Var(lower), SmtExpr::Var(upper))
+            if names.contains(lower) && names.contains(upper) =>
+        {
+            edges.push(OrderEdge {
+                lower: lower.clone(),
+                upper: upper.clone(),
+                strict,
+            });
+        }
+        _ => {
+            return Err(
+                "unsupported scalar guard: comparison operands must be scalar binders or literals"
+                    .to_string(),
+            );
+        }
+    }
+    Ok(())
+}
+
+fn scalar_guard_literal(expr: &crate::solver::SmtExpr) -> Option<f64> {
+    match expr {
+        crate::solver::SmtExpr::RealLit(value) => Some(*value),
+        crate::solver::SmtExpr::IntLit(value) => Some(*value as f64),
+        crate::solver::SmtExpr::Arith(crate::solver::ArithOp::Neg, inner, _) => {
+            scalar_guard_literal(inner).map(|value| -value)
+        }
+        _ => None,
+    }
+}
+
 fn prove_surf_property_fuzz(
     decls: &[Decl],
     property: &Property,
@@ -1212,19 +1658,53 @@ fn prove_surf_property_fuzz(
         return unsupported(&property.name, seed, reason);
     }
 
+    let constraint_plan = match surf_constraint_sampling_plan(decls, property) {
+        Ok(plan) => plan,
+        Err(reason) => {
+            return unsupported(&property.name, seed, reason).with_sampling(
+                CONSTRAINT_SAMPLING_METHOD,
+                0,
+                0,
+            );
+        }
+    };
+    let sampling_method = if constraint_plan.is_some() {
+        CONSTRAINT_SAMPLING_METHOD
+    } else if property.preconditions.is_empty() {
+        "uniform"
+    } else {
+        REJECTION_SAMPLING_METHOD
+    };
+
     let mut accepted = 0usize;
     let mut attempts = 0usize;
     while accepted < samples_needed && attempts < max_attempts {
         attempts += 1;
-        let sample = match sample_property(property, &mut rng) {
+        let sample = match &constraint_plan {
+            Some(plan) => sample_property_with_constraints(property, plan, &mut rng),
+            None => sample_property(property, &mut rng),
+        };
+        let sample = match sample {
             Ok(sample) => sample,
-            Err(reason) => return unsupported(&property.name, seed, reason),
+            Err(reason) => {
+                return unsupported(&property.name, seed, reason).with_sampling(
+                    sampling_method,
+                    attempts,
+                    accepted,
+                );
+            }
         };
         if !property.preconditions.is_empty() {
             match eval_surf_sample(decls, property, &sample, true) {
                 Ok(false) => continue,
                 Ok(true) => {}
-                Err(err) => return error(&property.name, seed, err),
+                Err(err) => {
+                    return error(&property.name, seed, err).with_sampling(
+                        sampling_method,
+                        attempts,
+                        accepted,
+                    );
+                }
             }
         }
         accepted += 1;
@@ -1243,9 +1723,16 @@ fn prove_surf_property_fuzz(
                     false,
                     Vec::new(),
                 )
-                .with_shrink_steps(shrink_steps);
+                .with_shrink_steps(shrink_steps)
+                .with_sampling(sampling_method, attempts, accepted);
             }
-            Err(err) => return error(&property.name, seed, err),
+            Err(err) => {
+                return error(&property.name, seed, err).with_sampling(
+                    sampling_method,
+                    attempts,
+                    accepted,
+                );
+            }
         }
     }
 
@@ -1256,7 +1743,8 @@ fn prove_surf_property_fuzz(
             format!(
                 "generator exhausted after {attempts} attempts before collecting {samples_needed} valid samples"
             ),
-        );
+        )
+        .with_sampling(sampling_method, attempts, accepted);
     }
 
     PropertyOutcome::new(
@@ -1268,8 +1756,16 @@ fn prove_surf_property_fuzz(
         None,
         None,
         false,
-        fuzz_precondition_assumptions(&property.name, property.preconditions.len(), accepted, seed),
+        fuzz_precondition_assumptions(
+            &property.name,
+            property.preconditions.len(),
+            accepted,
+            attempts,
+            sampling_method,
+            seed,
+        ),
     )
+    .with_sampling(sampling_method, attempts, accepted)
 }
 
 fn unsupported(name: &str, seed: u64, reason: String) -> PropertyOutcome {
@@ -1304,6 +1800,8 @@ fn fuzz_precondition_assumptions(
     property_name: &str,
     precondition_count: usize,
     samples: usize,
+    attempts: usize,
+    sampling_method: &str,
     seed: u64,
 ) -> Vec<AssumptionRecord> {
     if precondition_count == 0 {
@@ -1319,6 +1817,9 @@ fn fuzz_precondition_assumptions(
                     "status": "validated",
                     "property": property_name,
                     "samples": samples,
+                    "attempted_samples": attempts,
+                    "rejected_samples": attempts.saturating_sub(samples),
+                    "sampling_method": sampling_method,
                     "seed": seed,
                     "tolerance": FUZZ_TOLERANCE,
                 }),
@@ -1327,6 +1828,9 @@ fn fuzz_precondition_assumptions(
                 "method": "fuzz",
                 "result": "sat",
                 "accepted_samples": samples,
+                "attempted_samples": attempts,
+                "rejected_samples": attempts.saturating_sub(samples),
+                "sampling_method": sampling_method,
                 "seed": seed,
             }))),
         )
@@ -1408,6 +1912,65 @@ fn sample_property(property: &Property, rng: &mut Lcg) -> Result<Sample, String>
     Ok(Sample { values })
 }
 
+fn surf_constraint_sampling_plan(
+    decls: &[Decl],
+    property: &Property,
+) -> Result<Option<ConstraintSamplingPlan>, String> {
+    if property.preconditions.is_empty()
+        || !property.params.iter().all(|param| {
+            matches!(param.ty.as_ref(), Some(TypeExpr::Named(name, _)) if name == "f32" || name == "f64")
+        })
+    {
+        return Ok(None);
+    }
+    let ctx = InlineCtx {
+        decls,
+        depth: 0,
+        max_depth: 3,
+        call_stack: vec![],
+        contracts: None,
+        grad_diagnostic: None,
+    };
+    let preconditions = property
+        .preconditions
+        .iter()
+        .map(|precondition| {
+            surf_expr_to_smt(precondition, &ctx).ok_or_else(|| {
+                "unsupported scalar guard: guard does not lower to a scalar comparison".to_string()
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    ConstraintSamplingPlan::derive(
+        property.params.iter().map(|param| {
+            let TypeExpr::Named(type_name, _) = param.ty.as_ref().expect("typed float binder")
+            else {
+                unreachable!("constraint plan requires scalar float binders")
+            };
+            (param.name.clone(), FloatKind::from_type_name(type_name))
+        }),
+        &preconditions,
+    )
+    .map(Some)
+}
+
+fn sample_property_with_constraints(
+    property: &Property,
+    plan: &ConstraintSamplingPlan,
+    rng: &mut Lcg,
+) -> Result<Sample, String> {
+    let values = plan.sample(rng)?;
+    let mut sampled = Vec::with_capacity(property.params.len());
+    for param in &property.params {
+        let TypeExpr::Named(type_name, _) = param.ty.as_ref().expect("plan requires typed params")
+        else {
+            unreachable!("plan requires scalar params")
+        };
+        let value = values[&param.name];
+        sampled.push(directed_float_sample(&param.name, type_name, value));
+    }
+    Ok(Sample { values: sampled })
+}
+
 fn sample_value(name: &str, ty: &TypeExpr, rng: &mut Lcg) -> Result<SampleValue, String> {
     let sp = chelis_deep::Span::new(0, 0);
     match ty {
@@ -1448,22 +2011,7 @@ fn sample_value(name: &str, ty: &TypeExpr, rng: &mut Lcg) -> Result<SampleValue,
         }
         TypeExpr::Named(type_name, _) if type_name == "f32" || type_name == "f64" => {
             let value = rng.next_f64(-10.0, 10.0);
-            let lit = Expr::Lit(Literal::Float(value), sp);
-            if type_name == "f64" {
-                Ok(scalar_sample(
-                    name,
-                    cast_expr(lit, "f64"),
-                    deep_lit(deep_float(value), "f64"),
-                    serde_json::json!(value),
-                ))
-            } else {
-                Ok(scalar_sample(
-                    name,
-                    lit,
-                    deep_lit(deep_float(value), "f32"),
-                    serde_json::json!(value),
-                ))
-            }
+            Ok(float_sample(name, type_name, value))
         }
         TypeExpr::Named(type_name, _) if type_name == "string" => {
             let value = format!("s{}", rng.next_u64() % 1000);
@@ -1492,6 +2040,15 @@ fn scalar_sample(
         json,
         tensor_binding: None,
     }
+}
+
+fn directed_float_sample(name: &str, type_name: &str, value: f64) -> SampleValue {
+    let machine_value = if type_name == "f32" {
+        (value as f32) as f64
+    } else {
+        value
+    };
+    float_sample(name, type_name, machine_value)
 }
 
 fn sample_tensor_value(
@@ -2215,19 +2772,53 @@ fn prove_deep_property(
         return unsupported(&property.name, seed, reason);
     }
 
+    let constraint_plan = match deep_constraint_sampling_plan(exprs, property) {
+        Ok(plan) => plan,
+        Err(reason) => {
+            return unsupported(&property.name, seed, reason).with_sampling(
+                CONSTRAINT_SAMPLING_METHOD,
+                0,
+                0,
+            );
+        }
+    };
+    let sampling_method = if constraint_plan.is_some() {
+        CONSTRAINT_SAMPLING_METHOD
+    } else if property.preconditions.is_empty() {
+        "uniform"
+    } else {
+        REJECTION_SAMPLING_METHOD
+    };
+
     let mut accepted = 0usize;
     let mut attempts = 0usize;
     while accepted < samples_needed && attempts < max_attempts {
         attempts += 1;
-        let sample = match sample_deep_property(property, &mut rng) {
+        let sample = match &constraint_plan {
+            Some(plan) => sample_deep_property_with_constraints(property, plan, &mut rng),
+            None => sample_deep_property(property, &mut rng),
+        };
+        let sample = match sample {
             Ok(sample) => sample,
-            Err(reason) => return unsupported(&property.name, seed, reason),
+            Err(reason) => {
+                return unsupported(&property.name, seed, reason).with_sampling(
+                    sampling_method,
+                    attempts,
+                    accepted,
+                );
+            }
         };
         if !property.preconditions.is_empty() {
             match eval_deep_sample(exprs, property, &sample, true) {
                 Ok(false) => continue,
                 Ok(true) => {}
-                Err(err) => return error(&property.name, seed, err),
+                Err(err) => {
+                    return error(&property.name, seed, err).with_sampling(
+                        sampling_method,
+                        attempts,
+                        accepted,
+                    );
+                }
             }
         }
         accepted += 1;
@@ -2246,9 +2837,16 @@ fn prove_deep_property(
                     false,
                     Vec::new(),
                 )
-                .with_shrink_steps(shrink_steps);
+                .with_shrink_steps(shrink_steps)
+                .with_sampling(sampling_method, attempts, accepted);
             }
-            Err(err) => return error(&property.name, seed, err),
+            Err(err) => {
+                return error(&property.name, seed, err).with_sampling(
+                    sampling_method,
+                    attempts,
+                    accepted,
+                );
+            }
         }
     }
 
@@ -2259,7 +2857,8 @@ fn prove_deep_property(
             format!(
                 "generator exhausted after {attempts} attempts before collecting {samples_needed} valid samples"
             ),
-        );
+        )
+        .with_sampling(sampling_method, attempts, accepted);
     }
 
     PropertyOutcome::new(
@@ -2271,8 +2870,16 @@ fn prove_deep_property(
         None,
         None,
         false,
-        fuzz_precondition_assumptions(&property.name, property.preconditions.len(), accepted, seed),
+        fuzz_precondition_assumptions(
+            &property.name,
+            property.preconditions.len(),
+            accepted,
+            attempts,
+            sampling_method,
+            seed,
+        ),
     )
+    .with_sampling(sampling_method, attempts, accepted)
 }
 
 fn try_deep_tier_b(
@@ -2457,6 +3064,66 @@ fn sample_deep_property(property: &DeepProperty, rng: &mut Lcg) -> Result<Sample
         values.push(sample_value(&param.name, ty, rng)?);
     }
     Ok(Sample { values })
+}
+
+fn deep_constraint_sampling_plan(
+    exprs: &[DeepExpr],
+    property: &DeepProperty,
+) -> Result<Option<ConstraintSamplingPlan>, String> {
+    if property.preconditions.is_empty()
+        || !property.params.iter().all(|param| {
+            matches!(param.ty.as_ref(), Some(TypeExpr::Named(name, _)) if name == "f32" || name == "f64")
+        })
+    {
+        return Ok(None);
+    }
+    let ctx = DeepInlineCtx {
+        exprs,
+        depth: 0,
+        max_depth: 3,
+        call_stack: vec![],
+    };
+    let preconditions = property
+        .preconditions
+        .iter()
+        .map(|precondition| {
+            deep_expr_to_smt(precondition, &ctx).ok_or_else(|| {
+                "unsupported scalar guard: guard does not lower to a scalar comparison".to_string()
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    ConstraintSamplingPlan::derive(
+        property.params.iter().map(|param| {
+            let TypeExpr::Named(type_name, _) = param.ty.as_ref().expect("typed float binder")
+            else {
+                unreachable!("constraint plan requires scalar float binders")
+            };
+            (param.name.clone(), FloatKind::from_type_name(type_name))
+        }),
+        &preconditions,
+    )
+    .map(Some)
+}
+
+fn sample_deep_property_with_constraints(
+    property: &DeepProperty,
+    plan: &ConstraintSamplingPlan,
+    rng: &mut Lcg,
+) -> Result<Sample, String> {
+    let values = plan.sample(rng)?;
+    let mut sampled = Vec::with_capacity(property.params.len());
+    for param in &property.params {
+        let TypeExpr::Named(type_name, _) = param.ty.as_ref().expect("plan requires typed params")
+        else {
+            unreachable!("plan requires scalar params")
+        };
+        sampled.push(directed_float_sample(
+            &param.name,
+            type_name,
+            values[&param.name],
+        ));
+    }
+    Ok(Sample { values: sampled })
 }
 
 fn eval_deep_sample(
@@ -2863,7 +3530,10 @@ impl Lcg {
     }
     fn next_f64(&mut self, min: f64, max: f64) -> f64 {
         let unit = (self.next_u64() >> 11) as f64 / ((1u64 << 53) as f64);
-        min + (max - min) * unit
+        // Convex interpolation avoids overflowing `max - min` for a valid
+        // finite interval such as [-1e308, 1e308]. Each weighted endpoint is
+        // finite and their mathematical sum remains inside [min, max].
+        min * (1.0 - unit) + max * unit
     }
 }
 
