@@ -793,28 +793,61 @@ class GroundTruthTests(unittest.TestCase):
         bare = giant.replace(".0", "")
         self.assertFalse(oracle.c_has_bare_giant_integer_literal(giant))
         self.assertTrue(oracle.c_has_bare_giant_integer_literal(bare))
-        entries = [("f64-max", True, bare)]
+        entries = [
+            oracle.CExclusionGroundTruth("f64-max", True, bare, "wrong-bits")
+        ]
         self.assertEqual(oracle.c_exclusion_ground_truth_violations(entries), [])
         violations = oracle.c_exclusion_ground_truth_violations(
-            [("f64-max", True, giant)]
+            [oracle.CExclusionGroundTruth("f64-max", True, giant, "exact")]
         )
         self.assertTrue(any("repair landed" in v for v in violations), violations)
         violations = oracle.c_exclusion_ground_truth_violations(
-            [("f64-max", False, "")]
+            [oracle.CExclusionGroundTruth("f64-max", False, "", "not-run")]
         )
         self.assertTrue(any("build" in v.lower() for v in violations), violations)
+
+    def test_c_fingerprint_ignores_comments_and_strings(self) -> None:
+        giant = "12345678901234567890"
+        self.assertTrue(oracle.c_has_bare_giant_integer_literal(f"double x = {giant};"))
+        self.assertFalse(
+            oracle.c_has_bare_giant_integer_literal(
+                f'double x = 1e20; // stale {giant}\n'
+                f'const char *s = "{giant}"; char c = \'0\'; /* stale {giant} */'
+            )
+        )
+
+    def test_exact_native_behavior_forces_shrink_even_with_a_fingerprint(self) -> None:
+        violations = oracle.c_exclusion_ground_truth_violations(
+            [
+                oracle.CExclusionGroundTruth(
+                    "f64-max",
+                    True,
+                    "double x = 12345678901234567890;",
+                    "exact",
+                )
+            ]
+        )
+        self.assertTrue(any("repair landed" in v for v in violations), violations)
 
     def test_neg_zero_emission_legs(self) -> None:
         self.assertEqual(
             oracle.c_exclusion_ground_truth_violations(
-                [("f64-neg-zero", True, "double c = -0;")]
+                [
+                    oracle.CExclusionGroundTruth(
+                        "f64-neg-zero", True, "double c = -0;", "wrong-bits"
+                    )
+                ]
             ),
             [],
         )
         violations = oracle.c_exclusion_ground_truth_violations(
-            [("f64-neg-zero", True, "double c = -0.0;")]
+            [
+                oracle.CExclusionGroundTruth(
+                    "f64-neg-zero", True, "double c = -0.0;", "exact"
+                )
+            ]
         )
-        self.assertTrue(any("sign-preserving" in v for v in violations), violations)
+        self.assertTrue(any("repair landed" in v for v in violations), violations)
 
 
 class RuleManifestTests(unittest.TestCase):
@@ -891,6 +924,24 @@ class RuleManifestTests(unittest.TestCase):
         oracle.INVOKED_INSTRUMENTS.discard("classify_probe_outputs")
         oracle.classify_probe_outputs("C", [])
         self.assertIn("classify_probe_outputs", oracle.INVOKED_INSTRUMENTS)
+
+    def test_an_invoked_but_unconsumed_result_is_a_violation(self) -> None:
+        invoked = {
+            entry
+            for _n, _f, instruments in oracle.B2_RULE_INSTRUMENTS
+            for entry in instruments
+            if not entry.startswith("review-rule")
+        }
+        consumed = set(invoked)
+        consumed.discard("b2_manifest_violations")
+        violations = oracle.instrument_result_violations(invoked, consumed)
+        self.assertTrue(
+            any(
+                "b2_manifest_violations" in v and "result was not consumed" in v
+                for v in violations
+            ),
+            violations,
+        )
 
     def test_suite_receipts_are_manifest_checkable(self) -> None:
         """Suite instruments are satisfied only by their runtime receipt

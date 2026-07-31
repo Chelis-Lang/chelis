@@ -383,7 +383,9 @@ For every dtype and every storable value:
    `{x:#?}`, `{value:8?}`, `{v:x?}` - over the declared
    `OBSERVATION_EXIT_SURFACES`: directory prefixes deliberately, so a
    NEW file inside a declared surface is covered from its first line at
-   baseline zero; creating an exit surface anywhere else obliges adding
+   baseline zero; capture arguments are parsed with Rust's Unicode XID
+   rules, so valid identifiers such as `值` cannot evade either Rust
+   class; creating an exit surface anywhere else obliges adding
    its prefix in the same change set). Both Rust classes scan LOGICAL
    lines - string continuations (`\` at end of line) are joined first,
    so a format spec split across physical lines is the single spec the
@@ -440,12 +442,18 @@ For every dtype and every storable value:
    item list must equal the manifest (a new rule lands only with a
    deliberate instrument decision, which may be the literal review-rule
    entry with a substantive justification), every named instrument must
-   exist, and every callable or suite instrument must have produced a
-   RUNTIME invocation receipt by the end of the run (the `@instrument`
-   decorator records execution; suites record on success). The first
+   exist, and every callable or suite instrument must have produced both
+   a RUNTIME invocation receipt and a centrally consumed-result receipt
+   by the end of the run (the `@instrument` decorator records entry;
+   `consume_findings` records consumption only after the result extends
+   the verdict sink; suites record both on success). The first
    cut checked invocation by scanning the oracle's own source, which
    round-2 M2 refuted with an `if False:` branch - only a receipt
-   written by the running code counts. The oracle
+   written by the running code counts. The exact-head review then showed
+   that entry alone is insufficient: a manifest detector returned a
+   non-empty violation which its caller discarded. A detector named in
+   the manifest but absent from result consumption now fails the final
+   check. The oracle
    further requires every tripwire pattern whose `doc()` cites this
    document to carry an oracle coverage row (its per-class permitted
    baseline paths), closing the review's second finding one layer up.
@@ -489,16 +497,19 @@ For every dtype and every storable value:
    Receipts are probe-authored text, so a probe could forge them -
    which is why the INDEPENDENT leg is
    `run_exclusion_ground_truth`: the oracle itself writes the
-   per-label programs, runs eval and the C emitter, and re-derives
-   each exclusion's fingerprint from its own observations, trusting no
+   per-label programs, runs eval and the C emitter, then compiles and runs
+   every executable C exclusion and compares the rendered bits; it
+   re-derives each exclusion's fingerprint from its own observations,
+   trusting no
    probe output. The fingerprints: the chelis#717 F32-tag narrowing;
-   the chelis#751 bare-integer-literal EMISSION (the native-stage
-   outcome is a per-toolchain SYMPTOM only - Clang rejects the literal,
-   GCC warns and may corrupt the value or, for 128-bit-constant
-   toolchains on the 20-digit constant, even reproduce it exactly - so
-   the lexical fingerprint decides, and the shrink protocol fires only
-   when the fingerprint is gone AND the program renders exact bits end
-   to end); the dropped -0.0 sign. Every gone-green failure names
+   the chelis#751 bare-integer-literal EMISSION (the lexical scanner
+   ignores C line/block comments and string/character literals, so a
+   stale expected token in non-code cannot earn the exclusion; the
+   native-stage result is always driven, and exact rendered bits fire
+   the shrink protocol even if an active-code fingerprint remains;
+   fingerprint presence discriminates the reason for a still-broken
+   result but never suppresses behavioral verification); the dropped
+   -0.0 sign. Every gone-green failure names
    `DECLARED_EXCLUSIONS` and the shrink protocol. Scope notes: corpus
    FLOORS (the §C2.3 byte-identity floor) assert coverage, not
    breakage - they owe legs 1 and 2 only, since unexpected green is
@@ -636,8 +647,9 @@ attributes, list-constant-driven bodies, and per-probe ORDERED
 receipts compared with multiplicity, all oracle-checked while the
 probes run as ordinary suite members in CI), and - independently -
 `run_exclusion_ground_truth`, where the oracle writes each excluded
-label's program itself, runs eval and the C emitter, and re-derives
-every exclusion fingerprint from its own observations, so no
+label's program itself, runs eval and the C emitter, compiles/runs every
+executable C exclusion, compares intended bits, and re-derives every
+exclusion fingerprint from comment/string-aware code tokens, so no
 probe-authored output is trusted for the re-execution claim. The
 probes' first execution shrank `EVAL_F64_LIST_EXCLUDED` by one row
 (`f64-tenth` rendered text-coincident since Phase 1's own-width
@@ -652,8 +664,10 @@ document to be a `FORMAT_CLASS_TABLE` key (§B2.8's doc-citation
 parity), checks this document's §B2 item list against its
 `B2_RULE_INSTRUMENTS` manifest (§B2.8: a rule lands only with a
 deliberate instrument decision), and finishes by verifying every
-manifest instrument's RUNTIME invocation receipt (round-2 M2: an
-instrument that never executed fails the run's final check).
+manifest instrument's RUNTIME invocation and centrally consumed-result
+receipts (round-2 M2 plus exact-head F2: an instrument that never
+executed, or whose returned violation was discarded, fails the final
+check).
 
 Scope, stated rather than assumed: the ignore-inventory equality covers
 the observation harness, this plan's own instrument. The sibling matrix

@@ -800,10 +800,11 @@ fn logical_lines(content: &str) -> Vec<String> {
 }
 
 /// The format specs of every `{arg:spec}`-shaped interpolation on one
-/// source line. An interpolation is `{`, an optional `[A-Za-z0-9_]*`
-/// argument (named or positional), `:`, then spec characters up to the
-/// closing `}` on the same line (real format strings do not wrap a spec
-/// across lines). PR #962 red-team F3: the original scanners matched only
+/// source line. An interpolation is `{`, an optional Rust identifier or
+/// positional integer argument, `:`, then spec characters up to the closing
+/// `}`. Rust identifiers use Unicode XID rules: ASCII-only parsing would let
+/// valid captures such as `{值:.2}` and `{值:?}` evade the scanner. PR #962
+/// red-team F3: the original scanners matched only
 /// the bare `:.N`/`:?}` token shapes, so valid combined forms -
 /// `{value:8.2}`, `{value:8?}`, fill/align like `{v:0>8.2}`, dynamic
 /// precision `{v:.prec$}`/`{:.*}` - were invisible. Parsing the
@@ -820,9 +821,21 @@ fn format_specs(line: &str) -> Vec<&str> {
             i += 1;
             continue;
         }
-        let mut j = i + 1;
-        while j < bytes.len() && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_') {
-            j += 1;
+        let arg_start = i + 1;
+        let mut j = arg_start;
+        if bytes.get(j).is_some_and(u8::is_ascii_digit) {
+            while bytes.get(j).is_some_and(u8::is_ascii_digit) {
+                j += 1;
+            }
+        } else if let Some(first) = line[arg_start..].chars().next()
+            && (first == '_' || unicode_ident::is_xid_start(first))
+        {
+            j += first.len_utf8();
+            while let Some(next) = line[j..].chars().next()
+                && (next == '_' || unicode_ident::is_xid_continue(next))
+            {
+                j += next.len_utf8();
+            }
         }
         if j >= bytes.len() || bytes[j] != b':' {
             i += 1;
@@ -1147,6 +1160,12 @@ fn every_pattern_trips_on_its_own_sample() {
         );
         let (rel, content) = pat.sample();
         assert!(
+            pat.count(content) > 0,
+            "pattern `{}` does not count its own sample; another pattern's \
+             violation must not satisfy applicability",
+            pat.id()
+        );
+        assert!(
             pat.scopes().iter().any(|scope| rel.starts_with(scope)),
             "pattern `{}`'s sample path {rel} sits outside its own scopes",
             pat.id()
@@ -1159,6 +1178,20 @@ fn every_pattern_trips_on_its_own_sample() {
         assert!(
             got.iter().any(|v| v.contains(pat.id())),
             "pattern `{}` did not trip on its own sample; got: {got:?}",
+            pat.id()
+        );
+    }
+}
+
+/// Pattern IDs are machine-facing evidence keys. If two variants share an
+/// ID, a global violation from one can be misattributed to the other.
+#[test]
+fn pattern_ids_are_unique() {
+    let mut ids = std::collections::BTreeSet::new();
+    for &pat in ALL_PATS {
+        assert!(
+            ids.insert(pat.id()),
+            "duplicate pattern id `{}` lets one pattern borrow another's evidence",
             pat.id()
         );
     }
@@ -1216,6 +1249,7 @@ fn count_precision_format_specs_counts_narrowing_spellings() {
     );
     assert_eq!(count_precision_format_specs("format!(\"{v:.prec$}\")"), 1);
     assert_eq!(count_precision_format_specs("format!(\"{v:08.2}\")"), 1);
+    assert_eq!(count_precision_format_specs("format!(\"{值:.2}\")"), 1);
 }
 
 /// Negative parity for the precision scanner: non-precision format specs
@@ -1259,6 +1293,16 @@ fn count_debug_format_tokens_counts_debug_forms() {
     assert_eq!(count_debug_format_tokens("format!(\"{v:x?}\")"), 1);
     assert_eq!(count_debug_format_tokens("format!(\"{dur:.3?}\")"), 1);
     assert_eq!(count_precision_format_specs("format!(\"{dur:.3?}\")"), 1);
+    assert_eq!(count_debug_format_tokens("format!(\"{值:?}\")"), 1);
+}
+
+/// Unicode named captures are valid Rust identifiers, while arbitrary
+/// non-identifier Unicode must not be accepted as a capture argument.
+#[test]
+fn format_specs_follow_rust_unicode_identifier_rules() {
+    assert_eq!(format_specs("format!(\"{值:.2}\")"), vec![".2"]);
+    assert_eq!(format_specs("format!(\"{值:?}\")"), vec!["?"]);
+    assert!(format_specs("format!(\"{💥:.2}\")").is_empty());
 }
 
 /// The chelis#732 B2.4 new-file guarantee (the PR #891 shape, executed):

@@ -906,21 +906,95 @@ fn c_print_red_rows(r: &FRow) -> bool {
 fn has_bare_giant_integer_literal(c_source: &str) -> bool {
     let bytes = c_source.as_bytes();
     let mut i = 0usize;
+    #[derive(Clone, Copy)]
+    enum State {
+        Code,
+        LineComment,
+        BlockComment,
+        String,
+        Char,
+    }
+    let mut state = State::Code;
     while i < bytes.len() {
-        if bytes[i].is_ascii_digit() {
-            let start = i;
-            while i < bytes.len() && bytes[i].is_ascii_digit() {
+        let byte = bytes[i];
+        let next = bytes.get(i + 1).copied();
+        match state {
+            State::Code if byte == b'/' && next == Some(b'/') => {
+                state = State::LineComment;
+                i += 2;
+            }
+            State::Code if byte == b'/' && next == Some(b'*') => {
+                state = State::BlockComment;
+                i += 2;
+            }
+            State::Code if byte == b'"' => {
+                state = State::String;
                 i += 1;
             }
-            let next = bytes.get(i).copied();
-            if i - start > 19 && next != Some(b'.') && next != Some(b'e') && next != Some(b'E') {
-                return true;
+            State::Code if byte == b'\'' => {
+                state = State::Char;
+                i += 1;
             }
-        } else {
-            i += 1;
+            State::Code if byte.is_ascii_digit() => {
+                let start = i;
+                while i < bytes.len() && bytes[i].is_ascii_digit() {
+                    i += 1;
+                }
+                let following = bytes.get(i).copied();
+                if i - start > 19
+                    && following != Some(b'.')
+                    && following != Some(b'e')
+                    && following != Some(b'E')
+                {
+                    return true;
+                }
+            }
+            State::Code => i += 1,
+            State::LineComment if byte == b'\n' => {
+                state = State::Code;
+                i += 1;
+            }
+            State::LineComment => i += 1,
+            State::BlockComment if byte == b'*' && next == Some(b'/') => {
+                state = State::Code;
+                i += 2;
+            }
+            State::BlockComment => i += 1,
+            State::String | State::Char if byte == b'\\' && next.is_some() => {
+                i += 2;
+            }
+            State::String if byte == b'"' => {
+                state = State::Code;
+                i += 1;
+            }
+            State::Char if byte == b'\'' => {
+                state = State::Code;
+                i += 1;
+            }
+            State::String | State::Char => i += 1,
         }
     }
     false
+}
+
+#[test]
+fn giant_integer_fingerprint_ignores_c_comments_and_literals() {
+    let giant = "12345678901234567890";
+    assert!(has_bare_giant_integer_literal(&format!(
+        "double x = {giant};"
+    )));
+    assert!(!has_bare_giant_integer_literal(&format!(
+        "double x = 1e20; // stale {giant}"
+    )));
+    assert!(!has_bare_giant_integer_literal(&format!(
+        "double x = 1e20; /* stale {giant} */"
+    )));
+    assert!(!has_bare_giant_integer_literal(&format!(
+        "const char *s = \"{giant}\"; double x = 1e20;"
+    )));
+    assert!(!has_bare_giant_integer_literal(&format!(
+        "char c = '0'; /* {giant} */ double x = 1e20;"
+    )));
 }
 
 /// §B2.9 leg 2+3 for `EVAL_F64_LIST_EXCLUDED`: every excluded label still
@@ -1020,14 +1094,11 @@ fn run_and_decode_elements(bin: &std::path::Path, w: Width) -> Result<Vec<u64>, 
 /// (chelis#751) is an EMISSION defect - the generated C carries a bare
 /// integer literal too wide for any C integer constant - so the lexical
 /// fingerprint is the toolchain-independent defect check. The NATIVE
-/// outcome is a per-toolchain SYMPTOM, corroborated but never load
-/// bearing for the verdict (PR #962 red-team F1: Clang rejects the
-/// literal outright, while GCC diagnoses it as a warning and produces a
-/// binary - and for the 20-digit e19 constant a 128-bit-constant
-/// toolchain can even reproduce the exact value, so neither "it linked"
-/// nor "it ran correctly" implies the repair landed). GOOD NEWS - the
-/// shrink protocol - fires only when the fingerprint is GONE and the
-/// program builds, links, runs, and renders the exact bits end to end.
+/// outcome is the independent behavioral verdict: compilation failure or
+/// wrong bits corroborate the declared defect, while a successful exact
+/// run ALWAYS fires the shrink protocol. The fingerprint is comment/string
+/// aware and discriminates the reason for a non-exact outcome; it cannot
+/// suppress a repaired exact run (PR #962 exact-head red team F1).
 #[test]
 fn c_lane_excluded_labels_still_fail_at_ingress() {
     if !c_toolchain_available() {
@@ -1082,64 +1153,33 @@ fn c_lane_excluded_labels_still_fail_at_ingress() {
             std::fs::read_to_string(out_dir.join(format!("{name}.c"))).expect("generated C source");
         let fingerprint = has_bare_giant_integer_literal(&c_source);
         let link_ok = common::link_generated(&out_dir, &format!("{name}.c"), &name).success();
-
-        if !fingerprint {
-            // The emission changed. Only a clean end-to-end run is the
-            // repair; anything else is a new, different defect.
-            let end_to_end = if link_ok {
-                run_and_decode_elements(&out_dir.join(&name), w)
-            } else {
-                Err("native stage failed".into())
-            };
-            match end_to_end {
-                Ok(bits) if bits.iter().all(|b| *b == value_bits_at(row.value, w)) => {
-                    panic!(
-                        "[probe/{label}] GOOD NEWS: the chelis#751 \
-                         bare-integer-literal fingerprint is gone and the \
-                         program builds, links, runs, and renders the exact \
-                         bits - the ingress repair landed for this constant. \
-                         Remove `{label}` from C_LANE_EXCLUDED and from \
-                         DECLARED_EXCLUSIONS in \
-                         scripts/faithful_observation_phase2_oracle.py in \
-                         this change set, so the row rejoins the \
-                         compiled-lane corpus."
-                    );
-                }
-                other => {
-                    panic!(
-                        "[probe/{label}] the generated C no longer carries \
-                         the chelis#751 fingerprint, but the native outcome \
-                         is still broken ({other:?}). That is a DIFFERENT \
-                         defect: file it per faithful_observation.md B2.5 \
-                         before touching the exclusion."
-                    );
-                }
-            }
+        let end_to_end = if link_ok {
+            run_and_decode_elements(&out_dir.join(&name), w)
+        } else {
+            Err("native stage failed".into())
+        };
+        if matches!(
+            &end_to_end,
+            Ok(bits) if bits.iter().all(|b| *b == value_bits_at(row.value, w))
+        ) {
+            panic!(
+                "[probe/{label}] GOOD NEWS: the generated program builds, \
+                 links, runs, and renders the exact intended bits - the \
+                 ingress behavior is repaired (source fingerprint present: \
+                 {fingerprint}). Remove `{label}` from C_LANE_EXCLUDED and \
+                 from DECLARED_EXCLUSIONS in \
+                 scripts/faithful_observation_phase2_oracle.py in this \
+                 change set, so the row rejoins the compiled-lane corpus."
+            );
         }
-
-        // Fingerprint present: the chelis#751 emission defect stands and
-        // the exclusion is earned. Corroborate the per-toolchain symptom
-        // without letting it decide the verdict.
-        if link_ok {
-            match run_and_decode_elements(&out_dir.join(&name), w) {
-                Ok(bits) if bits.iter().all(|b| *b == value_bits_at(row.value, w)) => {
-                    eprintln!(
-                        "[probe/{label}] note: this toolchain accepts the \
-                         giant literal and reproduces the exact value (a \
-                         128-bit-constant extension); the exclusion stands \
-                         on the non-portable chelis#751 emission, which is \
-                         still present."
-                    );
-                }
-                Ok(_) => {
-                    // The GCC-family symptom: accepted with a warning,
-                    // value corrupted by truncation/pinning.
-                }
-                Err(_) => {
-                    // Accepted but the binary fails to run or render - a
-                    // harsher spelling of the same corruption symptom.
-                }
-            }
+        if !fingerprint {
+            panic!(
+                "[probe/{label}] the generated C no longer carries the \
+                 chelis#751 fingerprint, but the native outcome is still \
+                 broken ({end_to_end:?}). That is a DIFFERENT defect: file \
+                 it per faithful_observation.md B2.5 before touching the \
+                 exclusion."
+            );
         }
         visited.push(label);
     }

@@ -650,7 +650,11 @@ the [#732] plan's three no-third-formatter classes per its Phase 0 item
 `c-format-narrowing` (the original `%.16g`/`%.1f` row),
 `rust-format-narrowing` (Rust precision-spec forms, subsuming the old
 `{value:.1}` token), and `rust-debug-numeric-format` (Debug tokens at
-the declared observation exit surfaces) - every hosted class's new-site
+the declared observation exit surfaces). The Rust format-capture parser
+uses Unicode XID rules, so valid non-ASCII capture identifiers are in
+scope. Pattern IDs are unique and every pattern must directly count its
+own compiler-forced sample; global evidence from another pattern cannot
+satisfy applicability. Every hosted class's new-site
 message points at `faithful_observation.md` §B2.4, and that plan's
 Phase 2 oracle cross-checks each class's baseline paths against its own
 permitted sets).

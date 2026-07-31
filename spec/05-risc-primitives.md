@@ -1394,7 +1394,11 @@ and none of them is a silent skip: the phase oracle
 the complete ledger, requires the harness's ignore inventory to equal
 it, re-executes each cell, and FAILS if one is red for an undeclared
 reason or has gone green - so an upstream chelis#729 repair cannot leave
-a permanently skipped test or a stale conformance sentence behind. Atom
+a permanently skipped test or a stale conformance sentence behind. The
+same oracle independently recompiles/runs every executable declared C
+corpus exclusion and compares intended bits; comment/string-only source
+fingerprints cannot preserve an exclusion after exact behavior returns.
+Atom
 IDs are
 stable, and the current blockquote authorities remain normative until selected
 for chelis#733 Phase 1 migration. Full revisions are attached and checked

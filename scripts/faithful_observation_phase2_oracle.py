@@ -82,13 +82,15 @@ The obligations, in execution order:
    item list must equal `B2_RULE_INSTRUMENTS` (numbers and titles),
    every named instrument must exist, and - checked at the END of the
    run - every callable instrument must have produced a RUNTIME
-   invocation receipt (the `@instrument` decorator records execution;
-   suite legs record on success). Source-text scanning was demonstrated
-   to certify an `if False:` branch as an invocation (PR #962 round-2
-   M2), so only receipts written by the running code count. Review-rule
-   entries need a substantive justification. The manifest binds names
-   and execution - it does not prove an instrument's checks are
-   non-vacuous, which is what the mutation tests in
+   invocation receipt AND a centrally consumed-result receipt (the
+   `@instrument` decorator records execution; `consume_findings` records
+   only after extending a verdict sink; suite legs record both on
+   success). Source-text scanning was demonstrated to certify an
+   `if False:` branch, and entry-only receipts were demonstrated to
+   certify a non-empty result discarded by its caller (PR #962 round-2
+   M2 and exact-head F2). Review-rule entries need a substantive
+   justification. The manifest binds names, execution, and verdict
+   consumption - per-instrument mutation tests in
    test_faithful_observation_phase2_oracle.py are for, one per failure
    mode.
 
@@ -115,6 +117,7 @@ import math
 import os
 from pathlib import Path
 import re
+import shlex
 import struct
 import subprocess
 import sys
@@ -196,8 +199,9 @@ RETIRED_LOCKS: tuple[str, ...] = (
 # - the `rows`: per-label ground truth (dtype, the constructing Chelis
 #   element expression, the exact intended value) that
 #   `run_exclusion_ground_truth` re-executes ITSELF - the oracle builds
-#   the programs, runs the toolchain, and re-derives each exclusion's
-#   fingerprint without trusting any probe output. That leg is the
+#   the programs, runs the toolchain, compiles/runs executable C rows,
+#   compares intended bits, and re-derives each exclusion's fingerprint
+#   without trusting any probe output. That leg is the
 #   independently observable re-execution §B2.9 requires.
 #
 # A list may not exist here without probes and rows (§B2.9: a boundary
@@ -540,13 +544,11 @@ class OracleFailure(RuntimeError):
     """A failed Phase 2 oracle obligation."""
 
 
-# Runtime invocation receipts (PR #962 round-2 M2): every manifest
-# instrument records its own execution here when it actually runs. The
-# end-of-run verification consumes this set - source-text scanning was
-# demonstrated to certify an `if False:` branch, a comment, or a string
-# as an invocation, so only a receipt written BY the running function
-# counts.
+# Runtime entry and result-consumption receipts. Entry alone is insufficient:
+# exact-head F2 demonstrated a detector returning a violation that its caller
+# discarded. The final check requires both sets.
 INVOKED_INSTRUMENTS: set[str] = set()
+CONSUMED_INSTRUMENTS: set[str] = set()
 
 
 def instrument(fn):
@@ -558,6 +560,28 @@ def instrument(fn):
         return fn(*args, **kwargs)
 
     return wrapper
+
+
+def consume_findings(sink: list[str], fn, *args) -> None:
+    """Run one list-valued instrument and connect every result to verdict.
+
+    The consumed receipt is written only after this helper extends the
+    caller's verdict sink. Calling a decorated detector directly can prove
+    entry, but cannot forge result consumption.
+    """
+
+    findings = fn(*args)
+    sink.extend(findings)
+    CONSUMED_INSTRUMENTS.add(fn.__name__)
+
+
+def consume_optional_finding(sink: list[str], fn, *args) -> None:
+    """Consume an instrument returning either one violation or ``None``."""
+
+    finding = fn(*args)
+    if finding is not None:
+        sink.append(finding)
+    CONSUMED_INSTRUMENTS.add(fn.__name__)
 
 
 def f64_bits(value: float) -> int:
@@ -1369,14 +1393,18 @@ def b2_manifest_violations(doc: str) -> list[str]:
     return violations
 
 
-def instrument_invocation_violations(invoked: set[str]) -> list[str]:
-    """PR #962 round-2 M2: 'invoked' is decided by RUNTIME receipts -
-    every callable manifest instrument records its own execution via the
-    `@instrument` decorator, suite legs record `suite:<label>` when they
-    pass, and this check runs at the END of the oracle after every leg.
-    The prior source-text scan certified an `if False:` branch, a
-    comment, and a string as invocations; a set entry can only be
-    written by the function actually running."""
+def instrument_result_violations(
+    invoked: set[str], consumed: set[str]
+) -> list[str]:
+    """Require both runtime entry and a centrally consumed detector result.
+
+    A receipt written on function entry proves only that code ran. PR #962's
+    exact-head review demonstrated a non-empty detector result discarded by
+    its caller while every entry receipt remained green. Callable instruments
+    therefore owe two independent facts: the decorator's runtime receipt and
+    a receipt written only by ``consume_findings`` after the result reaches a
+    verdict sink. Suite receipts are both invoked and consumed on success.
+    """
 
     violations: list[str] = []
     for number, _fragment, instruments in B2_RULE_INSTRUMENTS:
@@ -1389,7 +1417,19 @@ def instrument_invocation_violations(invoked: set[str]) -> list[str]:
                     "invocation receipt during this oracle run - it is named "
                     "but never executed (manifest theater)."
                 )
+            elif entry not in consumed:
+                violations.append(
+                    f"§B2.{number}: instrument `{entry}` executed, but its "
+                    "result was not consumed by the oracle verdict "
+                    "(discarded-result detector theater)."
+                )
     return violations
+
+
+def instrument_invocation_violations(invoked: set[str]) -> list[str]:
+    """Compatibility unit seam: treat every supplied invocation as consumed."""
+
+    return instrument_result_violations(invoked, invoked)
 
 
 _RECEIPT = re.compile(r"^exclusion probe (\w+) visited: (.*)$", re.M)
@@ -1524,20 +1564,25 @@ def read_sources() -> dict[Path, str]:
 
 def run_structural_scan(sources: dict[Path, str]) -> None:
     violations: list[str] = []
-    violations.extend(unignored_violations(sources))
-    violations.extend(retired_lock_violations(sources))
-    violations.extend(ledger_violations(sources[HARNESS_SOURCE], KNOWN_RED_CELLS))
-    violations.extend(exclusion_violations(sources[HARNESS_SOURCE]))
-    violations.extend(exclusion_probe_violations(sources[HARNESS_SOURCE]))
-    violations.extend(probe_attribute_violations(sources[HARNESS_SOURCE]))
-    violations.extend(cross_lane_corpus_violations(sources[HARNESS_SOURCE]))
-    violations.extend(observation_decode_violations(sources[RUNTIME_SOURCE]))
-    violations.extend(
-        dead_export_violations(sources[RUNTIME_SRC_DIR], sources[RUNTIME_HEADER])
+    checks = (
+        (unignored_violations, (sources,)),
+        (retired_lock_violations, (sources,)),
+        (ledger_violations, (sources[HARNESS_SOURCE], KNOWN_RED_CELLS)),
+        (exclusion_violations, (sources[HARNESS_SOURCE],)),
+        (exclusion_probe_violations, (sources[HARNESS_SOURCE],)),
+        (probe_attribute_violations, (sources[HARNESS_SOURCE],)),
+        (cross_lane_corpus_violations, (sources[HARNESS_SOURCE],)),
+        (observation_decode_violations, (sources[RUNTIME_SOURCE],)),
+        (
+            dead_export_violations,
+            (sources[RUNTIME_SRC_DIR], sources[RUNTIME_HEADER]),
+        ),
+        (format_narrowing_violations, (sources[TRIPWIRE_SOURCE],)),
+        (doc_citation_violations, (sources[TRIPWIRE_SOURCE],)),
+        (b2_manifest_violations, (sources[DESIGN_DOC],)),
     )
-    violations.extend(format_narrowing_violations(sources[TRIPWIRE_SOURCE]))
-    violations.extend(doc_citation_violations(sources[TRIPWIRE_SOURCE]))
-    violations.extend(b2_manifest_violations(sources[DESIGN_DOC]))
+    for check, args in checks:
+        consume_findings(violations, check, *args)
     if violations:
         raise OracleFailure("structural scan failed:\n" + "\n".join(violations))
     probe_count = sum(len(probes) for _, _, probes, _ in DECLARED_EXCLUSIONS)
@@ -1567,6 +1612,7 @@ def run_green_suites(env: dict[str, str]) -> None:
             )
         # The suite's runtime invocation receipt for the manifest.
         INVOKED_INSTRUMENTS.add(f"suite:{label}")
+        CONSUMED_INSTRUMENTS.add(f"suite:{label}")
 
 
 def run_exclusion_probes(env: dict[str, str]) -> None:
@@ -1598,8 +1644,7 @@ def run_exclusion_probes(env: dict[str, str]) -> None:
             probe_runs.append(
                 (probe, expected, completed.returncode, completed.stdout + completed.stderr)
             )
-        for violation in classify_probe_outputs(const_name, probe_runs):
-            violations.append(violation)
+        consume_findings(violations, classify_probe_outputs, const_name, probe_runs)
         if not violations:
             print(
                 f"  probe receipts exact: {const_name} "
@@ -1610,20 +1655,82 @@ def run_exclusion_probes(env: dict[str, str]) -> None:
         raise OracleFailure("exclusion probe receipts failed:\n" + "\n".join(violations))
 
 
+def c_code_without_comments_or_literals(c_source: str) -> str:
+    """Mask C comments plus string/character literals, preserving positions."""
+
+    out = list(c_source)
+    index = 0
+    state = "code"
+    while index < len(c_source):
+        char = c_source[index]
+        following = c_source[index + 1] if index + 1 < len(c_source) else ""
+        if state == "code":
+            if char == "/" and following == "/":
+                out[index] = out[index + 1] = " "
+                index += 2
+                state = "line-comment"
+                continue
+            if char == "/" and following == "*":
+                out[index] = out[index + 1] = " "
+                index += 2
+                state = "block-comment"
+                continue
+            if char == '"':
+                out[index] = " "
+                index += 1
+                state = "string"
+                continue
+            if char == "'":
+                out[index] = " "
+                index += 1
+                state = "char"
+                continue
+        elif state == "line-comment":
+            if char == "\n":
+                state = "code"
+            else:
+                out[index] = " "
+            index += 1
+            continue
+        elif state == "block-comment":
+            out[index] = " "
+            if char == "*" and following == "/":
+                out[index + 1] = " "
+                index += 2
+                state = "code"
+                continue
+            index += 1
+            continue
+        else:
+            out[index] = " "
+            if char == "\\" and following:
+                out[index + 1] = " "
+                index += 2
+                continue
+            delimiter = '"' if state == "string" else "'"
+            if char == delimiter:
+                state = "code"
+            index += 1
+            continue
+        index += 1
+    return "".join(out)
+
+
 def c_has_bare_giant_integer_literal(c_source: str) -> bool:
     """Python replica of the harness's chelis#751 fingerprint: a digit
     run longer than i64::MAX's 19 digits, not followed by a decimal
     point or exponent - no legitimate C integer constant has that shape."""
 
+    code = c_code_without_comments_or_literals(c_source)
     index = 0
-    length = len(c_source)
+    length = len(code)
     digits = set("0123456789")
     while index < length:
-        if c_source[index] in digits:
+        if code[index] in digits:
             start = index
-            while index < length and c_source[index] in digits:
+            while index < length and code[index] in digits:
                 index += 1
-            following = c_source[index] if index < length else ""
+            following = code[index] if index < length else ""
             if index - start > 19 and following not in (".", "e", "E"):
                 return True
         else:
@@ -1676,19 +1783,28 @@ def eval_exclusion_ground_truth_violations(
     return violations
 
 
+class CExclusionGroundTruth:
+    """One oracle-owned C emission plus its independently observed behavior."""
+
+    def __init__(
+        self, label: str, build_ok: bool, c_source: str, native_status: str
+    ) -> None:
+        self.label = label
+        self.build_ok = build_ok
+        self.c_source = c_source
+        self.native_status = native_status
+
+
 @instrument
 def c_exclusion_ground_truth_violations(
-    entries: Sequence[tuple[str, bool, str]],
+    entries: Sequence[CExclusionGroundTruth],
 ) -> list[str]:
-    """The chelis#751 fingerprint, re-derived by the ORACLE from C it
-    generated itself: each giant-constant label's build must succeed and
-    its emitted source must carry the bare-integer-literal shape;
-    `f64-neg-zero`'s emission must still lack a sign-preserving `-0.0`
-    spelling. Entries are (label, build_ok, c_source)."""
+    """Judge C exclusions from source reason AND independently run behavior."""
 
     violations: list[str] = []
-    for label, build_ok, c_source in entries:
-        if not build_ok:
+    for entry in entries:
+        label = entry.label
+        if not entry.build_ok:
             violations.append(
                 f"C ground truth [{label}]: `chelis build` failed - the "
                 "exclusion declares a successful build with defective "
@@ -1696,23 +1812,37 @@ def c_exclusion_ground_truth_violations(
                 "behavior. Re-adjudicate per B2.5."
             )
             continue
+        if entry.native_status == "exact":
+            violations.append(
+                f"C ground truth [{label}]: generated C compiles, runs, and "
+                "renders the exact intended bits - the chelis#751 repair "
+                "landed. Shrink C_LANE_EXCLUDED and DECLARED_EXCLUSIONS in "
+                "one change set."
+            )
+            continue
         if label == "f64-neg-zero":
-            if "-0.0" in c_source:
+            if entry.native_status != "wrong-bits":
                 violations.append(
-                    "C ground truth [f64-neg-zero]: the generated C now "
-                    "carries a sign-preserving `-0.0` spelling. Run the "
-                    "behavioral probe; if it renders -0.0, the repair landed "
-                    "- shrink C_LANE_EXCLUDED and DECLARED_EXCLUSIONS in one "
-                    "change set."
+                    "C ground truth [f64-neg-zero]: native execution did not "
+                    "reproduce the declared dropped-sign behavior; this is a "
+                    "different defect or incomplete repair. Re-adjudicate "
+                    "under B2.5."
                 )
             continue
-        if not c_has_bare_giant_integer_literal(c_source):
+        fingerprint = c_has_bare_giant_integer_literal(entry.c_source)
+        if entry.native_status not in ("compile-failed", "wrong-bits", "run-failed"):
+            violations.append(
+                f"C ground truth [{label}]: unknown native observation "
+                f"{entry.native_status!r}; the executable boundary is not "
+                "proved."
+            )
+        elif not fingerprint:
             violations.append(
                 f"C ground truth [{label}]: the generated C no longer "
-                "carries the chelis#751 bare-integer-literal fingerprint. If "
-                "the constant now emits as a well-formed float, the repair "
-                "landed - shrink C_LANE_EXCLUDED and DECLARED_EXCLUSIONS in "
-                "one change set."
+                "carries the chelis#751 bare-integer-literal fingerprint, but "
+                "native execution is not exact. The old defect is gone and a "
+                "different defect remains; file it under B2.5 before "
+                "touching the exclusion."
             )
     return violations
 
@@ -1741,11 +1871,100 @@ def run_chelis(args: Sequence[str], env: dict[str, str]) -> subprocess.Completed
     )
 
 
+def c_rendered_values(stdout: str) -> list[str]:
+    """Numeric element spellings from generated tensor/list exit lines."""
+
+    values: list[str] = []
+    for line in stdout.splitlines():
+        data = re.search(r"data=\[([^\]]*)\]", line)
+        if data is not None:
+            values.extend(
+                item.strip() for item in data.group(1).split(",") if item.strip()
+            )
+            continue
+        payload = line.strip()
+        if " = [" in payload:
+            payload = payload.split(" = ", 1)[1]
+        if payload.startswith("[") and payload.endswith("]"):
+            values.extend(
+                item.strip()
+                for item in payload.removeprefix("[").removesuffix("]").split(",")
+                if item.strip()
+            )
+    return values
+
+
+def run_generated_c_ground_truth(
+    build_stdout: str,
+    out_dir: Path,
+    dtype: str,
+    intended_text: str,
+    env: dict[str, str],
+) -> str:
+    """Compile/run the CLI's emitted command and compare rendered bits."""
+
+    compile_line = next(
+        (
+            line.removeprefix("Compile: ")
+            for line in build_stdout.splitlines()
+            if line.startswith("Compile: ")
+        ),
+        None,
+    )
+    if compile_line is None:
+        return "run-failed"
+    command = shlex.split(compile_line)
+    compiled = subprocess.run(
+        command,
+        cwd=out_dir,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if compiled.returncode != 0:
+        return "compile-failed"
+    try:
+        output_index = command.index("-o") + 1
+        binary = Path(command[output_index])
+    except (ValueError, IndexError):
+        return "run-failed"
+    if not binary.is_absolute():
+        binary = out_dir / binary
+    ran = subprocess.run(
+        (str(binary),),
+        cwd=out_dir,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if ran.returncode != 0:
+        return "run-failed"
+    rendered = c_rendered_values(ran.stdout)
+    if not rendered:
+        return "run-failed"
+    intended = float(intended_text)
+    intended_bits = f32_bits(intended) if dtype == "f32" else f64_bits(intended)
+    try:
+        rendered_bits = [
+            f32_bits(float(text)) if dtype == "f32" else f64_bits(float(text))
+            for text in rendered
+        ]
+    except ValueError:
+        return "wrong-bits"
+    return (
+        "exact"
+        if all(bits == intended_bits for bits in rendered_bits)
+        else "wrong-bits"
+    )
+
+
 def run_exclusion_ground_truth(env: dict[str, str]) -> None:
     """§B2.9 leg 2's INDEPENDENT half: the oracle re-executes every
     excluded behavior itself - it writes the programs, runs the
-    toolchain, and re-derives each fingerprint - so a forged probe
-    receipt changes nothing here (PR #962 round-2 M1)."""
+    toolchain, drives native C behavior, and re-derives each fingerprint
+    - so a forged probe receipt changes nothing here."""
 
     violations: list[str] = []
     exclusions = {name: rows for name, _o, _p, rows in DECLARED_EXCLUSIONS}
@@ -1793,12 +2012,15 @@ def run_exclusion_ground_truth(env: dict[str, str]) -> None:
                     for t in line.removeprefix("[").rstrip("]").split(",")
                     if t.strip()
                 ]
-                violations.extend(
-                    eval_exclusion_ground_truth_violations(texts, eval_rows)
+                consume_findings(
+                    violations,
+                    eval_exclusion_ground_truth_violations,
+                    texts,
+                    eval_rows,
                 )
 
-        entries: list[tuple[str, bool, str]] = []
-        for label, dt, elem, _value in exclusions["C_LANE_EXCLUDED"]:
+        entries: list[CExclusionGroundTruth] = []
+        for label, dt, elem, value_text in exclusions["C_LANE_EXCLUDED"]:
             name = f"gt_{label.replace('-', '_')}"
             program = (
                 "module M.Main\n"
@@ -1819,8 +2041,19 @@ def run_exclusion_ground_truth(env: dict[str, str]) -> None:
             c_source = (
                 c_file.read_text(encoding="utf-8") if c_file.is_file() else ""
             )
-            entries.append((label, completed.returncode == 0, c_source))
-        violations.extend(c_exclusion_ground_truth_violations(entries))
+            native_status = (
+                run_generated_c_ground_truth(
+                    completed.stdout, out_dir, dt, value_text, env
+                )
+                if completed.returncode == 0
+                else "not-run"
+            )
+            entries.append(
+                CExclusionGroundTruth(
+                    label, completed.returncode == 0, c_source, native_status
+                )
+            )
+        consume_findings(violations, c_exclusion_ground_truth_violations, entries)
 
     if violations:
         raise OracleFailure(
@@ -1828,7 +2061,7 @@ def run_exclusion_ground_truth(env: dict[str, str]) -> None:
         )
     print(
         "+ independent exclusion re-execution: every declared label's "
-        "fingerprint re-derived by the oracle itself",
+        "fingerprint and executable C behavior re-derived by the oracle itself",
         flush=True,
     )
 
@@ -1858,8 +2091,11 @@ def run_known_red_cells(env: dict[str, str]) -> None:
             text=True,
         )
         output = completed.stdout + completed.stderr
-        violation = classify_red_run(cell, completed.returncode, output)
-        if violation is None:
+        before = len(violations)
+        consume_optional_finding(
+            violations, classify_red_run, cell, completed.returncode, output
+        )
+        if len(violations) == before:
             print(
                 f"  known-red as declared: {cell.name} ({cell.issue}, "
                 f"repair owned by {cell.owner})",
@@ -1880,14 +2116,17 @@ def main() -> int:
         run_exclusion_probes(env)
         run_exclusion_ground_truth(env)
         run_known_red_cells(env)
-        receipts = instrument_invocation_violations(INVOKED_INSTRUMENTS)
+        receipts = instrument_result_violations(
+            INVOKED_INSTRUMENTS, CONSUMED_INSTRUMENTS
+        )
         if receipts:
             raise OracleFailure(
-                "instrument invocation receipts failed:\n" + "\n".join(receipts)
+                "instrument result receipts failed:\n" + "\n".join(receipts)
             )
         print(
-            f"+ runtime invocation receipts: all manifest instruments executed "
-            f"({len(INVOKED_INSTRUMENTS)} receipts)",
+            "+ runtime result receipts: all manifest instruments executed "
+            "and their results reached the verdict "
+            f"({len(CONSUMED_INSTRUMENTS)} consumed receipts)",
             flush=True,
         )
     except OracleFailure as error:
