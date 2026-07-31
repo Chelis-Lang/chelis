@@ -905,8 +905,7 @@ Deliverables, with phase homes:
 2. **Phase 1**: the census re-derivation defines §C3's atomic set (the
    §C3 amendment above); the tripwire baseline regenerates in the same
    change set.
-3. **Phases 2-3, coordinated with chelis#893** (and PR #894's `Repr`
-   groundwork): the families with typed end states per the table above
+3. **Phases 2-3, coordinated with chelis#893** (and PR #964's merged `Repr` vocabulary (2026-07-31; chelis#894 is the tracking issue)): the families with typed end states per the table above
    become types; each tripwire row retires by citation as its seam
    unwinds. The known `(double, int)` seams are the kill-list,
    starting with `chelis_format_shortest`'s pair
