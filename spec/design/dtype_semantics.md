@@ -680,10 +680,16 @@ Deliverables, with phase homes:
      channels.
    - **The published header set is derived, not declared.** `HEADER_ROOTS`
      survives as a record of WHY each root is published, but it is not
-     trusted: the preprocessed closure must equal the `.h` files actually
+     trusted: the roots' INCLUDE closure must equal the `.h` files actually
      present in the published include directory, so a header dropped in
      and reachable from no root fails loudly instead of contributing
      nothing (`a_published_header_reachable_from_no_root_fails`).
+     Reachability is asked of the include graph rather than of the
+     preprocessed buckets because whether a header emits a locally
+     attributed bucket at all is a preprocessor detail: `chelis_blas.h`
+     yields one under Apple clang and none under Linux gcc, since its body
+     is entirely include and conditional directives
+     (`a_declaration_free_root_is_still_reached`).
    - **Non-function ABI is inventoried too.** A published header's
      numeric surface is not only its callables. `extern <type> <name>;`
      data declarations are inventoried as `header-data` rows and
