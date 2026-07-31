@@ -23,7 +23,10 @@ mod builtins;
 #[cfg(test)]
 mod source_arch;
 
-pub use builtins::{BUILTIN_NAMES, ShapeClass, builtin_env, shape_class};
+pub use builtins::{
+    BUILTINS, BUILTIN_NAMES, BuiltinDecl, Realizability, ShapeClass, builtin_decl, builtin_env,
+    realizability, shape_class,
+};
 pub use chelis_vocab::EffectKind;
 pub use context::TypeEnv;
 pub use fitness::{
