@@ -6,6 +6,93 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.18.0] — 2026-07-31
+
+### Added
+
+- **`compile_and_load` executes f64 elementwise programs end to end
+  (chelis#919, chelis#920).** `emit_fused_elem` is parameterized on the
+  IR-pinned dtype instead of being f32-hardcoded behind a `panic!`, so
+  `sigmoid`, `tanh`, `gelu`, and composite elementwise expressions such as
+  `exp(x) * x` lower and run at f64: data pointers, step variables, and the
+  libm symbols all follow the dtype, with an explicit reinterpreting cast
+  where the emitted C indexes `chelis_runtime.h`'s `float *data`. The Sleef
+  AVX2 path stays f32-only, so f64 chains take the scalar OMP SIMD loop.
+  f32 emission is byte-identical.
+
+  `supported_execution_dtypes(target)` is now the single admit list every
+  dtype-dependent site in `chelis-python` derives from. The C target admits
+  f32 and f64; HIP stays f32-only and rejects explicitly, because its
+  kernels remain f32-hardcoded. Reduced floats and integers reject through
+  the `Result` channel as branded `unsupported:` diagnostics instead of
+  crossing the pyo3 boundary as a `PanicException`.
+
+  `emit_fused_reduce` is not widened: an f64 fused reduction, reachable
+  from ordinary Surf as `sum(exp(x), 0)`, still rejects as a diagnostic.
+  That surviving half is tracked as chelis#951.
+
+### Changed
+
+- **`chelis-types` type inference is split into modules.** The single
+  25k-line `crates/chelis-types/src/infer.rs` becomes an `infer/` module
+  tree (declarations, expressions, application, shape, and annotation
+  lanes) with `infer/mod.rs` preserving the existing public paths.
+  Behavior is unchanged; `ARCHITECTURE.md` records the new layout.
+
+### Fixed
+
+- **A compiled kernel no longer writes through its caller's buffer
+  (chelis#933).** Fused in-place reuse treated `reusable_input` — a
+  linearity fact about a value being dead after the op — as permission to
+  write through storage the caller owns. Calling a compiled model
+  overwrote its own NumPy argument, made repeat calls on one array
+  non-idempotent, and wrote to arrays marked `writeable=False` without
+  error. `MemoryPlan::borrows_caller_storage` now reports whether a node's
+  bytes are the caller's, following metadata-view sources to their root so
+  a `reshape` of an input is still recognized as a window onto the same
+  bytes, and `fused_in_place_spec` refuses in-place reuse when they are.
+  Chains reading an owned intermediate keep the optimization. The fix
+  lands in the backend, so `chelis build` whole programs are covered on
+  the same terms as the bindings, and both dtype lanes at one site.
+- **The compiled output's dtype comes from the runtime tag (chelis#920).**
+  `NativeTensor::dtype` returned the literal `"float32"` and the DLPack
+  capsule hardcoded `bits: 32`. Both were accidentally correct only while
+  the artifact gate rejected every non-f32 artifact one layer earlier;
+  widening it by one dtype turned them into silent corruption, with a
+  numerically correct f64 buffer described as float32 and read at a 4-byte
+  stride. `spec_dtype_mapping`, `numpy_dtype_name`, and `dlpack_bits` no
+  longer have a default arm, and decode through `RuntimeDType::decode_id`
+  rather than dispatching on a raw `i32`.
+- **Unloading an executed compiled artifact no longer aborts the process
+  (chelis#963).** On Linux, dropping a `NativeCompiledModel` whose kernel
+  had run took the interpreter down with SIGSEGV after returning correct
+  results: emitted elementwise loops carry `#pragma omp parallel for simd`,
+  and executing one starts libgomp's thread pool, which registers
+  thread-local destructors pointing into the artifact's code segment that
+  `dlclose` then unmaps. Compiled artifacts are opened with
+  `RTLD_NODELETE`, so the drop is a refcount decrement and the mapping
+  stays resident; `RTLD_NOW` makes an unresolved symbol a load error
+  rather than a crash on first call.
+- **Pure host-lane arrow-form value roots surface in `chelis eval --file
+  --json` (chelis#947).** An arrow-form value def `def name -> T = body`
+  desugars to a nullary thunk, which the host runtime's eager
+  value-binding order skips while still listing it as a display root, so
+  such roots reported `{"roots":[]}`. A surfacing pass applies the
+  zero-arg host-lane thunk and records its value. The pass is gated to
+  effect-free roots read from the checker's effect annotation, so no
+  effect runs at display time; already-bound roots keep their existing
+  binding, tensor-lane roots continue to surface through the DAG, and a
+  failed application stays unsurfaced.
+- **A reserved word heading a value binding is named in the diagnostic
+  (chelis#915).** `sig = 0.2f64` failed with `expected identifier, found
+  Eq at byte 4`, naming neither the reserved word nor its position:
+  `sig` is a valid declaration head, so the parser consumed it and failed
+  one token later at the `=`. A shared guard at the three declaration
+  heads that are plausible value names (`sig`, `type`, `dim`) keys on the
+  next token being `=` and points the offset at the keyword.
+  Diagnostic-only: no grammar change and no token reclassification, so
+  every program that parsed before still parses.
+
 ## [0.17.5] — 2026-07-31
 
 ### Added
