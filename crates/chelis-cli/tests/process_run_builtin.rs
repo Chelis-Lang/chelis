@@ -189,9 +189,9 @@ fn build_rejects_process_run_program_with_clear_message() {
         "build must reject process_run with the eval/test-only message, got stderr={stderr}"
     );
     assert!(
-        stderr.contains("not available in compiled targets"),
-        "build rejection must explain process_run is unavailable in compiled targets, \
-         got stderr={stderr}"
+        stderr.contains("on compiled targets") && stderr.contains("chelis eval"),
+        "build rejection must explain process_run is unavailable in compiled targets \
+         and name the eval-lane remediation, got stderr={stderr}"
     );
     // The rejection must fire BEFORE any C artifact is written.
     assert!(
