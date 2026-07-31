@@ -410,6 +410,7 @@ fn coverage_manifest() -> CoverageManifest {
                 mutations: vec![
                     "reviewer_preprocessor_capacity_seam_is_visible".to_string(),
                     "c_identity_is_token_canonical_across_preprocessor_whitespace".to_string(),
+                    "c_identity_is_stable_across_bool_preprocessor_spellings".to_string(),
                 ],
             },
             CoveredLeg {
@@ -1142,7 +1143,14 @@ fn canonical_c_tokens(s: &str) -> String {
                 token.push(chars[i]);
                 i += 1;
             }
-            tokens.push(token);
+            // C23 makes `bool` a keyword; older preprocessors expand the
+            // <stdbool.h> macro to `_Bool`. They are the same ABI type and
+            // must not produce platform-dependent census identities.
+            tokens.push(if token == "bool" {
+                "_Bool".to_string()
+            } else {
+                token
+            });
             continue;
         }
         if i + 2 < chars.len() && chars[i..i + 3] == ['.', '.', '.'] {
@@ -2692,6 +2700,22 @@ fn c_identity_is_token_canonical_across_preprocessor_whitespace() {
     assert_eq!(
         apple, linux,
         "C token identity must not depend on a preprocessor's whitespace rendering"
+    );
+}
+
+#[test]
+fn c_identity_is_stable_across_bool_preprocessor_spellings() {
+    let c23 = header_rows_local(
+        "planted.h",
+        "chelis_value chelis_value_from_bool(bool value);\n",
+    );
+    let legacy = header_rows_local(
+        "planted.h",
+        "chelis_value chelis_value_from_bool(_Bool value);\n",
+    );
+    assert_eq!(
+        c23, legacy,
+        "C23 `bool` and legacy `_Bool` must have one census identity"
     );
 }
 

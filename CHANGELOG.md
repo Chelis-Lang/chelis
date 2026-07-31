@@ -6,6 +6,8 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.17.5] — 2026-07-31
+
 ### Added
 
 - **`chelis-vocab` defines a closed vocabulary for the physical representations of runtime elements.**
@@ -33,6 +35,26 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **Root-scoped eval ignores dead symbolic inputs from unrelated dependency
+  modules (chelis#991).** Symbolic-dimension discovery now follows the live
+  evaluation slice, so importing a calculation from a package with unrelated
+  generic declarations no longer invents external inputs. Live shape-only
+  dependencies remain required and continue to fail closed when absent.
+- **Risk-guard fuzzing is constraint-directed and non-vacuous (chelis#977).**
+  The prover derives candidate inputs from guard constraints, records observed
+  in-domain coverage, and preserves evaluator/backend parity instead of
+  accepting a property from samples that never enter its guarded domain.
+- **The undispatched Tier-D induction scaffold fails closed (chelis#978).**
+  Its placeholder base and step helpers no longer return `Proved` with
+  `ASSUMED` evidence; unsupported induction obligations remain unsupported.
+  A sound dispatched general-induction lane remains open under chelis#978.
+- **Quantile monotonicity contracts bind to the real linked Nautilus surface
+  (chelis#979).** Tier-B Reef proofs recognize only the dependency-owned linker
+  declaration for `Nautilus.Stats.quantile_vec`, preserve compiler AST identity
+  for the tensor operand, and couple levels only for calls over the same
+  dataset. Spoofs, missing trusted calls, different datasets, and unbridged
+  range/boundary contracts fail closed as unsupported.
+
 - **The runtime and generated C now decode native int32 storage through signed 32-bit pointers.**
   Runtime comparison, `where`, scatter-add, `cumsum`, `trace`, `clamp`, and `einsum` now use native `i32` access.
   Generated C uses `int32_t` for int32 element access and keeps `float` for F32 and the current Bool payload.
@@ -43,14 +65,6 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
-- **Quantile monotonicity contracts now bind to the real linked Nautilus
-  surface (chelis#979).** Tier-B Reef proofs recognize only the
-  dependency-owned linker declaration for `Nautilus.Stats.quantile_vec`, keep
-  the tensor operand as compiler AST identity, and couple scalar quantile
-  levels only for calls over the same dataset. Proof records name the consumed
-  Nautilus implementation. Local/linker-shaped spoofs, missing trusted calls,
-  different datasets, and the not-yet-bridged range/boundary contracts fail
-  closed as unsupported.
 - **Bare file diagnostics now drive native expected-failure suites
   (chelis#967).** `chelis test --expect neg|blocked` preserves file-level
   compile and check failures even when a probe declares no `test_*` function,

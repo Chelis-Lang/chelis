@@ -565,6 +565,13 @@ from computation on existing tensors.
 
 `const` is not differentiable (it produces a constant — gradient is zero). `load` is not differentiable.
 
+Root-scoped evaluation resolves external loads and symbolic dimensions only
+for nodes that can affect the selected roots. Generic declarations from
+unrelated dependency modules are dead and cannot create top-level input
+requirements (chelis#991). A load that is outside the value-dependency slice
+but supplies a symbolic extent to a live node remains a required shape
+dependency and fails closed when its input is absent (chelis#351).
+
 #### 2.5.1 Shape query (`shape`)
 
 | Name | Signature | Semantics |
