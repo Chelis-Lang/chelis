@@ -78,7 +78,11 @@ fn parse_scalar(stdout: &str) -> f64 {
         .trim()
         .lines()
         .last()
-        .and_then(|l| l.trim().parse::<f64>().ok())
+        .and_then(|l| {
+            let trimmed = l.trim();
+            let value_str = trimmed.split(" = ").last().unwrap_or(trimmed);
+            value_str.parse::<f64>().ok()
+        })
         .unwrap_or_else(|| panic!("no scalar in eval output: {stdout}"))
 }
 

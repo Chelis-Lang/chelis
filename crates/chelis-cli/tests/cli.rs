@@ -843,7 +843,8 @@ fn eval_surfaces_debug_transcript() {
         .args(["eval", r#"debug("trace")"#])
         .assert()
         .success()
-        .stdout(predicate::str::contains("trace\ntrace"));
+        // Issue #912 [05-OBS-6]: single roots are now labelled.
+        .stdout(predicate::str::contains("trace\neval_result = trace"));
 }
 
 /// Run `chelis eval --json EXPR` and parse stdout as JSON. Asserts the
@@ -1013,7 +1014,8 @@ fn eval_text_mode_output_unchanged_alongside_json_flag() {
         .args(["eval", "mod(cast(17, int64), cast(5, int64))"])
         .assert()
         .success()
-        .stdout("2\n");
+        // Issue #912 [05-OBS-6]: single roots are now labelled.
+        .stdout("eval_result = 2\n");
 }
 
 #[test]
@@ -1417,7 +1419,8 @@ fn build_c_runs_top_level_tensor_add_and_matches_eval_output() {
     );
     let expected_value = String::from_utf8(eval_stdout).expect("eval stdout utf8");
     let actual = String::from_utf8(run_output.stdout).expect("run stdout utf8");
-    assert_eq!(actual, format!("result = {expected_value}"));
+    // Issue #912 [05-OBS-6]: both lanes now label roots, so compare directly.
+    assert_eq!(actual, expected_value);
 }
 
 #[test]
@@ -8321,10 +8324,10 @@ fn build_c_to_tensor_2d_nested_literal_matches_eval_output() {
     // Eval prints `<tensor>\n`, the compiled binary prints
     // `<binding-name> = <tensor>\n`. Match the existing
     // `build_c_runs_top_level_tensor_add_and_matches_eval_output`
-    // convention.
+    // Issue #912 [05-OBS-6]: both lanes now label, compare directly.
     assert_eq!(
         run_text,
-        format!("result = {eval_text}"),
+        eval_text,
         "compiled C binary stdout must equal eval stdout for nested-list to_tensor",
     );
 }

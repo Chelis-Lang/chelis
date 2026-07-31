@@ -146,11 +146,12 @@ fn rank2_sig_form() -> String {
 
 const RANK2_GRAD: [f64; 6] = [1.0, 0.0, 1.0, 0.0, 1.0, 0.0];
 
-/// Parse the evaluator's bare `tensor(shape=[..], data=[..])` print.
+/// Parse the evaluator's `name = tensor(shape=[..], data=[..])` print.
+/// Issue #912 [05-OBS-6]: single roots are now labelled.
 fn parse_eval_tensor_data(stdout: &str) -> Vec<f64> {
     let line = stdout
         .lines()
-        .find(|l| l.trim_start().starts_with("tensor("))
+        .find(|l| l.contains("tensor("))
         .unwrap_or_else(|| panic!("eval output has no tensor(...) line:\n{stdout}"));
     let data_marker = "data=[";
     let start = line

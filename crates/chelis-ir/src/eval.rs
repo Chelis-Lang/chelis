@@ -256,24 +256,11 @@ fn verify_bound_movement_bounds(dag: &Dag, live: Option<&[bool]>) -> Result<(), 
     Ok(())
 }
 
-#[allow(dead_code)] // Kept as stable internal API; delegates to filtered variant.
 fn infer_symbolic_bindings_from_inputs(
     dag: &Dag,
     inputs: &HashMap<String, TensorValue>,
     required_symbols: &HashSet<String>,
     live: Option<&[bool]>,
-) -> Result<HashMap<String, usize>, String> {
-    infer_symbolic_bindings_filtered(dag, inputs, None)
-}
-
-/// Issue #912: filtered variant that only demands inputs the manifest declares.
-/// When `required` is Some, skip symbolic bindings whose canonical Load label
-/// is not in the required set — those are dead library nodes that don't feed
-/// any live root.
-pub fn infer_symbolic_bindings_filtered(
-    dag: &Dag,
-    inputs: &HashMap<String, TensorValue>,
-    required: Option<&std::collections::BTreeSet<String>>,
 ) -> Result<HashMap<String, usize>, String> {
     let mut bindings = HashMap::new();
     let mut load_types = HashMap::<String, TensorType>::new();
@@ -368,14 +355,6 @@ pub fn infer_symbolic_bindings_filtered(
         else {
             continue;
         };
-        // Issue #912: skip symbolic bindings whose canonical Load is not
-        // in the required set. These are dead library nodes that don't
-        // feed any live root the caller is evaluating.
-        if let Some(req) = required {
-            if !req.contains(canonical_label.as_str()) {
-                continue;
-            }
-        }
         let canonical_value = inputs.get(canonical_label).ok_or_else(|| {
             format!(
                 "missing required input `{canonical_label}` for symbolic dimension `{}`",
@@ -1463,7 +1442,6 @@ fn eval_tensor_internal<F>(
     dag: &Dag,
     live: Option<&[bool]>,
     strict_loads: bool,
-    required_inputs: Option<&std::collections::BTreeSet<String>>,
     mut load_input: F,
 ) -> Result<HashMap<NodeId, TensorValue>, String>
 where
@@ -2060,7 +2038,7 @@ pub fn eval_tensor_with<F>(dag: &Dag, load_input: F) -> Result<HashMap<NodeId, T
 where
     F: FnMut(&str) -> Option<TensorValue>,
 {
-    eval_tensor_internal(dag, None, false, None, load_input)
+    eval_tensor_internal(dag, None, false, load_input)
 }
 
 pub fn eval_tensor_with_strict<F>(
@@ -2070,7 +2048,7 @@ pub fn eval_tensor_with_strict<F>(
 where
     F: FnMut(&str) -> Option<TensorValue>,
 {
-    eval_tensor_internal(dag, None, true, None, load_input)
+    eval_tensor_internal(dag, None, true, load_input)
 }
 
 pub fn eval_tensor_roots_with<F>(
@@ -2082,11 +2060,11 @@ where
     F: FnMut(&str) -> Option<TensorValue>,
 {
     if roots.is_empty() {
-        return eval_tensor_internal(dag, None, false, None, load_input);
+        return eval_tensor_internal(dag, None, false, load_input);
     }
     reject_drop_roots(dag, roots)?;
     let live = live_mask_for_roots(dag, roots);
-    eval_tensor_internal(dag, Some(&live), false, None, load_input)
+    eval_tensor_internal(dag, Some(&live), false, load_input)
 }
 
 pub fn eval_tensor_roots_with_strict<F>(
@@ -2098,11 +2076,11 @@ where
     F: FnMut(&str) -> Option<TensorValue>,
 {
     if roots.is_empty() {
-        return eval_tensor_internal(dag, None, true, None, load_input);
+        return eval_tensor_internal(dag, None, true, load_input);
     }
     reject_drop_roots(dag, roots)?;
     let live = live_mask_for_roots(dag, roots);
-    eval_tensor_internal(dag, Some(&live), true, None, load_input)
+    eval_tensor_internal(dag, Some(&live), true, load_input)
 }
 
 fn reject_drop_roots(dag: &Dag, roots: &[NodeId]) -> Result<(), String> {

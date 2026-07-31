@@ -448,13 +448,22 @@ out = loss(to_tensor([{literal}]))\n"
             .trim()
             .lines()
             .last()
-            .and_then(|l| l.trim().parse().ok())
+            .and_then(|l| {
+                let trimmed = l.trim();
+                // [05-OBS-6]: strip `name = ` prefix if present.
+                let value_str = trimmed.split(" = ").last().unwrap_or(trimmed);
+                value_str.parse().ok()
+            })
             .expect("scalar loss");
         let lm: f64 = eval_ok(&loss_source(&xm), "symoraclefd")
             .trim()
             .lines()
             .last()
-            .and_then(|l| l.trim().parse().ok())
+            .and_then(|l| {
+                let trimmed = l.trim();
+                let value_str = trimmed.split(" = ").last().unwrap_or(trimmed);
+                value_str.parse().ok()
+            })
             .expect("scalar loss");
         let fd = (lp - lm) / (2.0 * h);
         assert!(

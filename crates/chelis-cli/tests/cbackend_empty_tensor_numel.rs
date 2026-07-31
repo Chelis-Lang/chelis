@@ -184,9 +184,10 @@ fn cbackend_numel_empty_tensor_matches_eval() {
     let (build_dir, kernel_c) = chelis_build_c(source, name);
     let c_out = gcc_compile_and_run(build_dir.path(), &kernel_c, name);
 
+    // Issue #912 [05-OBS-6]: eval now labels single roots too.
     assert_eq!(
         eval_out.trim(),
-        "0",
+        "result = 0",
         "eval stdout for numel(empty) must be 0 not 1 (Runtime-EmptyTensorNumel-F1); got {eval_out}"
     );
     assert_eq!(
