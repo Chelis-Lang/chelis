@@ -50,6 +50,14 @@ would require a `chelis-types` edit outside the named file set).
 
 ## L1 — #208 §4.7.5: error message direction is inverted from spec
 
+> **Superseded 2026-08-03 (PR #1000):** the §4.7.5 narrative this diagnosis
+> produced has been replaced. The intra-list unification mechanism described
+> below is real, but it is not what rejects an all-`int32` list — the slot
+> itself demands `List<int64>` (`unify` against `List<Int64>` in
+> `infer/app_shape.rs`), so `reshape(x, [2, 2])` errors with no `int64`
+> element present. chelis#916 tracks the inverted diagnostic; kept as the
+> historical record of #208.
+
 The spec narrative at `spec/04-type-system.md:706-715` describes
 `reshape`'s shape list as `List<Int64>` and says the bare
 `shape(x, k)` returns `int32`, "so a runtime axis size MUST be cast

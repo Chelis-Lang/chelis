@@ -53,8 +53,8 @@ type Expr =
   | EWhere(Expr, Expr, Expr)
   | EConcat(List[Expr], int64)
   | EReshape(Expr, List[Dim])      -- Deep `(app {} (var {} reshape) tensor shape-list)`
-  | EPermute(Expr, List[int64])    -- Deep `(app {} (var {} permute) tensor axis0 axis1 ...)`; full permutation
-  | EExpand(Expr, int64, Dim)      -- Deep `(app {} (var {} expand) tensor axis size)`; the shipped `expand` is a (tensor, axis, size) triop, not a shape-list op. `axis` is a position index (int64); `size` is the new dimension (`Dim`: literal size is `DLit`, symbolic-dim-name size is `DName`)
+  | EPermute(Expr, List[int64])    -- Deep `(app {} (var {} permute) tensor axis0 axis1 ...)`; full permutation. NOTE: spec/05 [05-DIM-1] (2026-08-03) classifies permutation entries as axis-domain int32; this int64 encoding disagrees and needs reconciling when hull is built.
+  | EExpand(Expr, int64, Dim)      -- Deep `(app {} (var {} expand) tensor axis size)`; the shipped `expand` is a (tensor, axis, size) triop, not a shape-list op. `axis` is a position index (int64 here; spec/05 [05-DIM-1] classifies rank indices as int32 — same reconciliation as EPermute); `size` is the new dimension (`Dim`: literal size is `DLit`, symbolic-dim-name size is `DName`)
   | ECumsum(Expr, int64)
   | ESort(Expr, int64)
   | EGrad(Expr)
