@@ -8785,11 +8785,13 @@ mod tests {
     }
 
     /// Which field, if any, of a lock's recorded chelis-std bundle hashes has
-    /// drifted from the on-disk `dist/` bytes. `NoBundledDep` means the lock
-    /// records no bundled chelis-std dependency at all (out of scope).
+    /// drifted from the on-disk `dist/` bytes. `DifferentCompiler` means the
+    /// lock intentionally belongs to a different released toolchain and is
+    /// therefore not a claim about this binary's embedded bundle.
     #[derive(Debug, PartialEq, Eq)]
     enum BundleHashDrift {
         NoBundledDep,
+        DifferentCompiler,
         ArchiveDrift,
         ShellDrift,
         InSync,
@@ -8801,6 +8803,7 @@ mod tests {
     /// `crates/chelis-std-bundle/dist/` bytes (see [`disk_bundle_hashes`]).
     fn bundled_std_lock_hash_drift(
         lock: &ReefLock,
+        compiler_version: &str,
         disk_archive_sha: &str,
         disk_shell_sha: &str,
     ) -> BundleHashDrift {
@@ -8809,6 +8812,9 @@ mod tests {
         }) else {
             return BundleHashDrift::NoBundledDep;
         };
+        if dep.compiler != format!("={compiler_version}") {
+            return BundleHashDrift::DifferentCompiler;
+        }
         if dep.archive_sha256 != disk_archive_sha {
             return BundleHashDrift::ArchiveDrift;
         }
@@ -8856,9 +8862,12 @@ mod tests {
         locks
     }
 
-    /// Every committed `reef.lock` that records the bundled chelis-std
-    /// dependency must pin the `archive_sha256` / `shell_sha256` of the
-    /// embedded bundle bytes shipped in `crates/chelis-std-bundle/dist/`.
+    /// Every committed `reef.lock` for THIS compiler that records the bundled
+    /// chelis-std dependency must pin the `archive_sha256` / `shell_sha256` of
+    /// the embedded bundle bytes shipped in `crates/chelis-std-bundle/dist/`.
+    /// Historical executable examples may intentionally remain locked to the
+    /// preceding released compiler during a compiler-first cascade; comparing
+    /// those locks with this binary's bundle is a category error.
     ///
     /// The hashes are recomputed by reading the dist files **from disk** at
     /// test time, deliberately NOT via `chelis_std_bundle::archive_sha256()`.
@@ -8908,8 +8917,13 @@ mod tests {
             });
             let lock: ReefLock = toml::from_str(&text)
                 .unwrap_or_else(|e| panic!("{} must parse: {e}", lock_path.display()));
-            match bundled_std_lock_hash_drift(&lock, &disk_archive_sha, &disk_shell_sha) {
-                BundleHashDrift::InSync => {}
+            match bundled_std_lock_hash_drift(
+                &lock,
+                env!("CARGO_PKG_VERSION"),
+                &disk_archive_sha,
+                &disk_shell_sha,
+            ) {
+                BundleHashDrift::InSync | BundleHashDrift::DifferentCompiler => {}
                 BundleHashDrift::ArchiveDrift => panic!(
                     "{} archive_sha256 is stale vs the embedded bundle; \
                      regenerate the lock with `chelis reef build` (or \
@@ -9026,6 +9040,7 @@ compiler_version = "{ver}"
         assert_eq!(
             bundled_std_lock_hash_drift(
                 &synth_bundled_std_lock(&real_archive, &real_shell),
+                env!("CARGO_PKG_VERSION"),
                 &real_archive,
                 &real_shell
             ),
@@ -9037,6 +9052,7 @@ compiler_version = "{ver}"
         assert_eq!(
             bundled_std_lock_hash_drift(
                 &synth_bundled_std_lock(&drifted_archive, &real_shell),
+                env!("CARGO_PKG_VERSION"),
                 &real_archive,
                 &real_shell
             ),
@@ -9049,11 +9065,23 @@ compiler_version = "{ver}"
         assert_eq!(
             bundled_std_lock_hash_drift(
                 &synth_bundled_std_lock(&real_archive, &drifted_shell),
+                env!("CARGO_PKG_VERSION"),
                 &real_archive,
                 &real_shell
             ),
             BundleHashDrift::ShellDrift,
             "guard failed to detect a drifted shell_sha256"
+        );
+
+        assert_eq!(
+            bundled_std_lock_hash_drift(
+                &synth_bundled_std_lock(&drifted_archive, &drifted_shell),
+                "0.0.0-different-toolchain",
+                &real_archive,
+                &real_shell,
+            ),
+            BundleHashDrift::DifferentCompiler,
+            "a historical lock must not be compared with a different compiler's embedded bundle"
         );
     }
 
