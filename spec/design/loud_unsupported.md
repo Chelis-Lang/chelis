@@ -119,7 +119,7 @@ The remediation plans share types and call sites but own different decisions:
 
 | decision | authority |
 |---|---|
-| closed compiler/runtime identity and stable ABI spelling | this contract: `EffectKind` and `RuntimeDType` in `chelis-vocab` |
+| closed compiler/runtime representation identity and stable ABI spelling | this contract: `EffectKind`, `RuntimeDType`, and `Repr` in `chelis-vocab` |
 | dtype rounding, overflow, storage, casts, and operation semantics | `dtype_semantics.md` ([#729]) |
 | target-independent operation acceptance | capability Table A ([#729] Phase 4) |
 | per-backend implementation status | capability Table B ([#729] Phase 4) |
@@ -128,12 +128,15 @@ The remediation plans share types and call sites but own different decisions:
 | value observation and formatting | `faithful_observation.md` ([#732]) |
 | atom/issue authority for capability decisions | `spec_provenance.md` ([#733]) |
 
-`RuntimeDType` owns representation identity only: stable numeric IDs,
-canonical names, generated C macro names, and byte widths. It SHALL NOT own
-numeric finalization, value domains, cast behavior, operation legality, or
-kernel availability. `HostTypeTerm` and `ConcreteHostType` preserve checked
-logical identity; they SHALL NOT form a second checker or dtype-semantics
-layer.
+`RuntimeDType` and `Repr` own representation identity only. `RuntimeDType`
+owns stable numeric IDs, canonical names, generated C macro names, and the
+mapping to `Repr`. `Repr` names each active physical encoding and owns its byte
+width. These declarations describe the current encodings. They do not approve
+or select a storage format. `dtype_semantics.md` §C3 owns storage decisions.
+They SHALL NOT own numeric finalization, value domains, cast behavior,
+operation legality, or kernel availability. `HostTypeTerm` and
+`ConcreteHostType` preserve checked logical identity; they SHALL NOT form a
+second checker or dtype-semantics layer.
 
 ## Vocabulary
 
@@ -327,17 +330,19 @@ The primary mechanisms are typed and exhaustive. A lexical rule may detect a
 known spelling, but it SHALL NOT be cited as proof that a substitution cannot
 be represented.
 
-1. **One dependency-bottom vocabulary owner.** `chelis-vocab` has no Chelis
-   dependencies and owns `EffectKind` and `RuntimeDType`. Each vocabulary is
-   declared once with its canonical external spelling or integer ID. It has no
-   `Unknown` variant, implements no `Default`, and exposes only `Result`
-   decoders. Effect metadata decoding distinguishes `Missing`, `Malformed`,
-   and `Unknown { symbol }`; runtime dtype decoding preserves the invalid raw
-   ID. `chelis-types` is not the owner: it depends on `chelis-deep` and
-   `chelis-pred`, while the runtime must consume the same dtype vocabulary
-   without depending on the checker. This bottom placement also leaves a
-   cycle-free placement for the `Prim` and `BuiltinId` identities required by
-   the capability table. Semantic behavior remains in `dtype_semantics.md`.
+1. **One dependency-bottom vocabulary owner.** `chelis-vocab` has no
+   dependencies, standard library, allocation, or unsafe code. It owns
+   `EffectKind`, `RuntimeDType`, and `Repr`. These identity declarations are
+   closed and have no unknown, custom, or fallback variant. `EffectKind` and `RuntimeDType`
+   implement no `Default` and expose only `Result` decoders. Effect metadata
+   decoding distinguishes `Missing`, `Malformed`, and
+   `Unknown { symbol: &'a str }`. The unknown case borrows the input symbol.
+   Runtime dtype decoding preserves the invalid raw ID. `chelis-types` is not
+   the owner: it depends on `chelis-deep` and `chelis-pred`, while the runtime
+   must consume the same dtype vocabulary without depending on the checker.
+   This bottom placement also leaves a cycle-free placement for the `Prim` and
+   `BuiltinId` identities required by the capability table. Semantic behavior
+   and storage decisions remain in `dtype_semantics.md`.
 2. **Decode once, then exhaust.** Raw strings and raw dtype integers exist
    only at serialization/FFI boundaries. `chelis-deep` adapts metadata shape
    into the bottom crate's effect decoder; every checker, effects, lowering,
@@ -346,12 +351,15 @@ be represented.
    reading helpers accept `RuntimeDType`, never `c_int`. Matches over these
    enums have no wildcard arm. Adding a variant is therefore a compile-error
    work-list at every semantic consumer.
-3. **Generated Rust/C dtype agreement.** The `RuntimeDType` declaration is
-   the sole source for Rust IDs, canonical names, C macro names, and byte
-   widths. It generates a checked-in C header fragment consumed by the host,
-   HIP, and Metal runtime headers. A byte-for-byte regeneration test and a
-   Rust round-trip table test lock agreement. Every generated C size switch
-   has an aborting `default` that prints the raw ID; no default may select f32.
+3. **Generated Rust/C dtype agreement.** The `RuntimeDType` declaration and
+   its `Repr` mapping are the sole source for Rust IDs, canonical names, C macro
+   names, and physical encodings. Byte widths derive from `Repr`.
+   `chelis-runtime` owns the C-header renderer and the checked-in runtime
+   artifact. The renderer reads the vocabulary declarations, and the host,
+   HIP, and Metal runtime headers consume the checked-in fragment. A
+   byte-for-byte regeneration test and a Rust round-trip table test lock
+   agreement. Every generated C size switch has an aborting `default` that
+   prints the raw ID; no default may select f32.
 4. **Structured emission.** Open-set builtin dispatch returns
    `Result<EmittedExpr, Unsupported>`. `EmittedExpr` is a private C AST with
    typed builders and no general raw-string construction path.
@@ -481,7 +489,7 @@ The effect consumer set is exhaustive for the current tree:
 
 | boundary/consumer | required typed behavior |
 |---|---|
-| `chelis-vocab::{EffectKind, EffectKindInput, EffectKindDecodeError}` | single declaration; `decode -> Result`; distinct missing/malformed/unknown errors; canonical `symbol()` inverse |
+| `chelis-vocab::{EffectKind, EffectKindInput, EffectKindDecodeError<'a>}` | single declaration; `decode -> Result`; distinct missing/malformed/unknown errors; `Unknown { symbol: &'a str }` borrows the decoder input; canonical `symbol()` inverse |
 | `chelis-deep` effect-metadata adapter | map absent key, non-symbol value, and unknown symbol without collapsing them |
 | `chelis-types::infer::infer_handle_effect` | consume the adapter result; exhaust `EffectKind`; map each decode error to a checker diagnostic |
 | `chelis-effects::infer_handle_effects` | exhaustively remove the handled kind; decode failures enter `EffectError` |
@@ -503,15 +511,17 @@ outside that rustc oracle; it is not itself the exhaustiveness mechanism.
 ### C6.2 Runtime dtype boundaries and consumers
 
 `RuntimeDType` owns the stable ABI IDs `F32=0`, `F64=1`, `I32=2`, `Bool=3`,
-`I64=4`, `Bf16=5`, `F16=6`, `I8=7`, and `I16=8`, together with canonical
-language spellings, C macro spellings, and byte widths. These are
-representation facts, not dtype semantics. `chelis_tensor.dtype` and the C
-ABI arguments remain `int`; that is the wire representation, not the
-internal type.
+`I64=4`, `Bf16=5`, `F16=6`, `I8=7`, and `I16=8`. It also owns the canonical
+language spellings, C macro spellings, and mapping to `Repr`. `Repr` names the
+active physical encodings and owns their byte widths. `RuntimeDType` derives
+its byte width from `Repr`. These are current representation facts, not dtype
+semantics or storage decisions. `dtype_semantics.md` §C3 owns the storage
+decision. `chelis_tensor.dtype` and the C ABI arguments remain `int`; that is
+the wire representation, not the internal type.
 
 | boundary/consumer | required typed behavior |
 |---|---|
-| `chelis-runtime/include/chelis_runtime.h` and HIP/Metal runtime headers | include a generated dtype fragment from the vocab declaration; remove handwritten ID/size copies |
+| `chelis_runtime::dtype_header` and the runtime headers | render the checked-in C fragment from the vocab declarations; include it in the C, HIP, and Metal headers; remove handwritten ID/size copies |
 | `chelis-runtime::{CHELIS_*}` | compatibility constants derive from `RuntimeDType::id()`, never literal integers |
 | `TensorElement::DTYPE` / `DtypeMismatch` | carry `RuntimeDType`; decode the tensor field before comparing or accessing |
 | `chelis_alloc`, `chelis_alloc_view`, `chelis_dtype_size`, `chelis_tensor_from_value_list_typed` | decode the inbound `c_int` immediately; invalid IDs abort with the raw ID before allocation, sizing, or element access |
@@ -803,8 +813,8 @@ tripwire proving it.
 **You deliver:**
 
 1. The dependency-free `chelis-vocab` crate and its single declarations for
-   `EffectKind` and `RuntimeDType`, with Result-only decoders and the positive
-   and negative tests in §C4.1.
+   `EffectKind`, `RuntimeDType`, and `Repr`, with Result-only decoders and the
+   positive and negative tests in §C4.1.
 2. The end-to-end `EffectKind` migration in §C6.1. No semantic consumer may
    compare the metadata string. The added-variant mutation must fail every
    named consumer until it explicitly handles the new kind.
@@ -912,8 +922,10 @@ boundary, pinned:
   *computed*. The intermediate rejected state is an improvement and is
   expected to persist for a while.
 - **Identity is not semantics.** `RuntimeDType` supplies stable ABI identity,
-  spelling, and width. [#729] supplies finalization, storage, operation
-  semantics, and kernel behavior. Neither layer may duplicate the other.
+  spelling, and the mapping to `Repr`. `Repr` describes the current physical
+  encoding and supplies its byte width. [#729] supplies the storage decision,
+  finalization, operation semantics, and kernel behavior. Neither layer may
+  duplicate the other.
 - **Existing exact integer ABIs are not reclassified as unsupported.** C
   already has `int8_t` and `int16_t`, and the checked in-range controls use
   them without type erasure. Phase 2 therefore selects those exact

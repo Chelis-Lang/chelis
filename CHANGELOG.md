@@ -4,6 +4,33 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **`chelis-vocab` defines a closed vocabulary for the physical representations of runtime elements.**
+  `RuntimeDType::repr()` maps each dtype to one `Repr` value.
+  `RuntimeDType::byte_width()` derives its value from that representation.
+  The current bool representation remains a four-byte binary32 payload.
+  `chelis-vocab` now uses `no_std` and declares no dependencies.
+  The crate uses no allocation or unsafe code.
+
+  An executable C probe compares every valid dtype tag with the Rust width.
+  An invalid tag causes an unsuccessful process exit.
+
+### Changed
+
+- **The Rust APIs for effect errors and C-header output changed.**
+  `EffectKindDecodeError<'a>` now borrows an unknown symbol from the input.
+  `render_runtime_dtype_c_header()` moved from `chelis-vocab` to `chelis-runtime::dtype_header`.
+  This change breaks Rust code that imports the old path or names `EffectKindDecodeError` without a lifetime.
+  The C ABI values and generated header bytes did not change.
+
+  For source migration:
+
+  - Replace `chelis_vocab::render_runtime_dtype_c_header` with `chelis_runtime::dtype_header::render_runtime_dtype_c_header`.
+  - Add an explicit lifetime to each `EffectKindDecodeError` type.
+
 ## [0.17.4] — 2026-07-30
 
 ### Fixed

@@ -678,10 +678,12 @@ lane's arm for a Supported cell must fail the BUILD, not just the tests.
 The plans share representation identities and backend call sites but own
 different decisions:
 
-- `RuntimeDType` in `chelis-vocab` owns stable ABI identity, external
-  spelling, and byte width. It does not define finalization, value domains,
-  storage, cast behavior, operation legality, or kernel behavior; those remain
-  owned by this document.
+- `RuntimeDType` and `Repr` in `chelis-vocab` own stable ABI representation
+  identity. `RuntimeDType` owns numeric IDs, external spelling, and the mapping
+  to `Repr`. `Repr` describes each current physical encoding, and byte width
+  derives from it. `Repr` does not select a storage format. This document owns
+  finalization, value domains, the §C3 storage decision, cast behavior,
+  operation legality, and kernel behavior.
 - `loud_unsupported.md` defines how every negative decision reaches the user.
   This document defines correct behavior for supported cells. A cell may move
   from silently wrong to loudly rejected under [#730], then to correctly

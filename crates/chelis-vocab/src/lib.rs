@@ -1,16 +1,19 @@
-//! Dependency-bottom closed vocabularies shared across Chelis stages.
+//! Dependency-bottom vocabularies that Chelis stages share.
 //!
-//! This crate deliberately has no dependencies and no fallback vocabulary
-//! variants.  It is the single authority for identifiers that cross compiler,
+//! This crate has no dependencies, standard library, allocation, unsafe code,
+//! or fallback vocabulary variants. It defines identifiers that cross compiler,
 //! runtime, and generated-code boundaries.
+//!
+//! Source renderers belong to their artifact owners. The runtime dtype renderer
+//! is in `chelis-runtime::dtype_header`.
 
+#![no_std]
 #![forbid(unsafe_code)]
 
-use std::error::Error;
-use std::fmt;
+use core::error::Error;
+use core::fmt;
 
-/// The structurally distinct ways a Deep effect-kind annotation can arrive at
-/// the vocabulary decoder.
+/// The input forms that the effect-kind decoder accepts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EffectKindInput<'a> {
     Missing,
@@ -18,7 +21,7 @@ pub enum EffectKindInput<'a> {
     Symbol(&'a str),
 }
 
-/// A closed effect vocabulary shared by every semantic consumer.
+/// A closed effect vocabulary for all semantic consumers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EffectKind {
     Random,
@@ -35,27 +38,29 @@ impl EffectKind {
         }
     }
 
-    pub fn decode(input: EffectKindInput<'_>) -> Result<Self, EffectKindDecodeError> {
+    pub fn decode<'a>(input: EffectKindInput<'a>) -> Result<Self, EffectKindDecodeError<'a>> {
         match input {
             EffectKindInput::Missing => Err(EffectKindDecodeError::Missing),
             EffectKindInput::Malformed => Err(EffectKindDecodeError::Malformed),
             EffectKindInput::Symbol("random") => Ok(Self::Random),
             EffectKindInput::Symbol("resource") => Ok(Self::Resource),
-            EffectKindInput::Symbol(symbol) => Err(EffectKindDecodeError::Unknown {
-                symbol: symbol.to_owned(),
-            }),
+            EffectKindInput::Symbol(symbol) => Err(EffectKindDecodeError::Unknown { symbol }),
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum EffectKindDecodeError {
+/// An effect-kind decode error.
+///
+/// The unknown-symbol case borrows the input symbol. The decode path does not
+/// allocate an error string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EffectKindDecodeError<'a> {
     Missing,
     Malformed,
-    Unknown { symbol: String },
+    Unknown { symbol: &'a str },
 }
 
-impl fmt::Display for EffectKindDecodeError {
+impl fmt::Display for EffectKindDecodeError<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Missing => f.write_str("missing effect kind"),
@@ -65,7 +70,67 @@ impl fmt::Display for EffectKindDecodeError {
     }
 }
 
-impl Error for EffectKindDecodeError {}
+impl Error for EffectKindDecodeError<'_> {}
+
+/// The physical encoding of one runtime element.
+///
+/// A byte width is a property of a representation, but width does not identify
+/// the representation. Equal-width encodings can have different bit meanings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Repr {
+    Ieee754Binary16,
+    Ieee754Binary32,
+    Ieee754Binary64,
+    Bfloat16,
+    TwosComplement8,
+    TwosComplement16,
+    TwosComplement32,
+    TwosComplement64,
+    /// A boolean in an IEEE binary32 payload.
+    ///
+    /// The payload uses `0.0` for false and `1.0` for true. This variant names
+    /// the current four-byte ABI debt without approval of that design.
+    BoolInBinary32,
+}
+
+impl Repr {
+    pub const ALL: [Self; 9] = [
+        Self::Ieee754Binary16,
+        Self::Ieee754Binary32,
+        Self::Ieee754Binary64,
+        Self::Bfloat16,
+        Self::TwosComplement8,
+        Self::TwosComplement16,
+        Self::TwosComplement32,
+        Self::TwosComplement64,
+        Self::BoolInBinary32,
+    ];
+
+    pub const fn byte_width(self) -> usize {
+        match self {
+            Self::TwosComplement8 => 1,
+            Self::Ieee754Binary16 | Self::Bfloat16 | Self::TwosComplement16 => 2,
+            Self::Ieee754Binary32 | Self::TwosComplement32 | Self::BoolInBinary32 => 4,
+            Self::Ieee754Binary64 | Self::TwosComplement64 => 8,
+        }
+    }
+
+    /// Reports whether the encoding carries a logical value in another
+    /// representation.
+    pub const fn is_payload_encoded(self) -> bool {
+        match self {
+            Self::BoolInBinary32 => true,
+            Self::Ieee754Binary16
+            | Self::Ieee754Binary32
+            | Self::Ieee754Binary64
+            | Self::Bfloat16
+            | Self::TwosComplement8
+            | Self::TwosComplement16
+            | Self::TwosComplement32
+            | Self::TwosComplement64 => false,
+        }
+    }
+}
 
 /// Dtypes that the C-compatible runtime ABI can store.
 #[repr(i32)]
@@ -127,13 +192,24 @@ impl RuntimeDType {
         }
     }
 
-    pub const fn byte_width(self) -> usize {
+    /// Returns the physical encoding of one element.
+    pub const fn repr(self) -> Repr {
         match self {
-            Self::F32 | Self::I32 | Self::Bool => 4,
-            Self::F64 | Self::I64 => 8,
-            Self::Bf16 | Self::F16 | Self::I16 => 2,
-            Self::I8 => 1,
+            Self::F32 => Repr::Ieee754Binary32,
+            Self::F64 => Repr::Ieee754Binary64,
+            Self::I32 => Repr::TwosComplement32,
+            Self::Bool => Repr::BoolInBinary32,
+            Self::I64 => Repr::TwosComplement64,
+            Self::Bf16 => Repr::Bfloat16,
+            Self::F16 => Repr::Ieee754Binary16,
+            Self::I8 => Repr::TwosComplement8,
+            Self::I16 => Repr::TwosComplement16,
         }
+    }
+
+    /// Returns the width from the physical representation.
+    pub const fn byte_width(self) -> usize {
+        self.repr().byte_width()
     }
 
     pub const fn decode_id(id: i32) -> Result<Self, RuntimeDTypeDecodeError> {
@@ -167,29 +243,16 @@ impl fmt::Display for RuntimeDTypeDecodeError {
 
 impl Error for RuntimeDTypeDecodeError {}
 
-/// Render the checked-in C ABI fragment from the Rust vocabulary.
-///
-/// The C decoder terminates on invalid input.  C callers cannot accidentally
-/// reinterpret an unknown ABI tag as `f32`.
-pub fn render_runtime_dtype_c_header() -> String {
-    let mut header = String::from(
-        "#ifndef CHELIS_RUNTIME_DTYPE_H\n#define CHELIS_RUNTIME_DTYPE_H\n\n#include <stddef.h>\n#include <stdio.h>\n#include <stdlib.h>\n\n",
-    );
-    for dtype in RuntimeDType::ALL {
-        header.push_str(&format!("#define {} {}\n", dtype.c_macro(), dtype.id()));
-    }
-    header.push_str(
-        "\nstatic inline size_t chelis_runtime_dtype_size_checked(int dtype) {\n    switch (dtype) {\n",
-    );
-    for dtype in RuntimeDType::ALL {
-        header.push_str(&format!(
-            "        case {}: return {};\n",
-            dtype.c_macro(),
-            dtype.byte_width()
-        ));
-    }
-    header.push_str(
-        "        default:\n            fprintf(stderr, \"invalid Chelis runtime dtype id: %d\\n\", dtype);\n            abort();\n    }\n}\n\n#endif\n",
-    );
-    header
-}
+const _: () = assert!(core::mem::size_of::<RuntimeDType>() == 4);
+
+const _: () = {
+    assert!(RuntimeDType::F32.id() == 0);
+    assert!(RuntimeDType::F64.id() == 1);
+    assert!(RuntimeDType::I32.id() == 2);
+    assert!(RuntimeDType::Bool.id() == 3);
+    assert!(RuntimeDType::I64.id() == 4);
+    assert!(RuntimeDType::Bf16.id() == 5);
+    assert!(RuntimeDType::F16.id() == 6);
+    assert!(RuntimeDType::I8.id() == 7);
+    assert!(RuntimeDType::I16.id() == 8);
+};
