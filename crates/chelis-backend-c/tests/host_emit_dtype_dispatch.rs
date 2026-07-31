@@ -28,6 +28,9 @@
 //! Spec lock: `docs/design/compiler_cleanup_0_7_8_spec_lock.md` Contract 2.
 //! §5 entry: `docs/gap_synthesis.md` `CRuntime-F32Coupling`.
 
+use std::fs;
+use std::process::Command;
+
 use chelis_backend_c::host_emit::emit_host_program;
 use chelis_ir::ConcreteHostType as HostType;
 use chelis_ir::dag::{DimInfo, TensorType};
@@ -115,6 +118,86 @@ fn make_unary_program(op_name: &str, prim: Prim) -> HostProgram {
     }
 }
 
+fn generated_dtype_arm<'a>(source: &'a str, dtype_macro: &str) -> &'a str {
+    let marker = format!("case {dtype_macro}: {{");
+    let (_, rest) = source
+        .split_once(&marker)
+        .unwrap_or_else(|| panic!("generated C contains no `{marker}` arm:\n{source}"));
+    let end = rest
+        .find("case CHELIS_")
+        .or_else(|| rest.find("default:"))
+        .unwrap_or(rest.len());
+    &rest[..end]
+}
+
+fn compile_generated_i32_binary_assignment(op_name: &str, lhs: i32, rhs: i32) -> i32 {
+    let program = make_binary_program(op_name, Prim::Int32);
+    let source = emit_host_program(&program, &format!("{op_name}_i32_exact")).unwrap();
+    let arm = generated_dtype_arm(&source, "CHELIS_I32");
+    let assignment = arm
+        .lines()
+        .find(|line| line.contains("__target_data[i] ="))
+        .unwrap_or_else(|| panic!("the int32 arm contains no assignment:\n{arm}"))
+        .trim();
+
+    let c_source = format!(
+        r#"#include <inttypes.h>
+#include <math.h>
+#include <stdint.h>
+#include <stdio.h>
+
+int main(void) {{
+    int32_t target_storage[1] = {{0}};
+    const int32_t lhs_storage[1] = {{{lhs}}};
+    const int32_t rhs_storage[1] = {{{rhs}}};
+    int32_t *__target_data = target_storage;
+    const int32_t *__lhs_data = lhs_storage;
+    const int32_t *__rhs_data = rhs_storage;
+    int i = 0;
+    int idx_lhs = 0;
+    int idx_rhs = 0;
+    {assignment}
+    printf("%" PRId32 "\n", __target_data[0]);
+    return 0;
+}}
+"#
+    );
+
+    let temp_dir =
+        std::env::temp_dir().join(format!("chelis_host_emit_{op_name}_{}", std::process::id()));
+    fs::create_dir_all(&temp_dir).unwrap();
+    let source_path = temp_dir.join("probe.c");
+    let binary_path = temp_dir.join("probe");
+    fs::write(&source_path, c_source).unwrap();
+
+    let compile = Command::new("gcc")
+        .args(["-std=c11", "-O0"])
+        .arg(&source_path)
+        .args(["-lm", "-o"])
+        .arg(&binary_path)
+        .output()
+        .unwrap_or_else(|error| panic!("failed to run gcc: {error}"));
+    assert!(
+        compile.status.success(),
+        "generated int32 assignment failed to compile:\n{}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+
+    let output = Command::new(&binary_path).output().unwrap();
+    assert!(
+        output.status.success(),
+        "generated int32 assignment failed to run:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value = String::from_utf8(output.stdout)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let _ = fs::remove_dir_all(temp_dir);
+    value
+}
+
 // ---- L1587 binary operator ---------------------------------------------
 
 #[test]
@@ -169,6 +252,49 @@ fn binary_elementwise_emits_dtype_switch_at_i64() {
     );
 }
 
+#[test]
+fn binary_elementwise_int32_arm_uses_int32_t_pointers() {
+    let program = make_binary_program("add", Prim::Int32);
+    let src = emit_host_program(&program, "binop_i32").unwrap();
+    let arm = generated_dtype_arm(&src, "CHELIS_I32");
+
+    assert!(
+        arm.contains("int32_t *__target_data = (int32_t*)"),
+        "the int32 target pointer must use int32_t; arm:\n{arm}"
+    );
+    assert!(
+        arm.contains("const int32_t *__lhs_data = (const int32_t*)")
+            && arm.contains("const int32_t *__rhs_data = (const int32_t*)"),
+        "the int32 input pointers must use int32_t; arm:\n{arm}"
+    );
+}
+
+#[test]
+fn binary_elementwise_int32_arm_contains_no_float_pointer() {
+    let program = make_binary_program("add", Prim::Int32);
+    let src = emit_host_program(&program, "binop_i32_no_float").unwrap();
+    let arm = generated_dtype_arm(&src, "CHELIS_I32");
+
+    assert!(
+        !arm.contains("float"),
+        "the int32 arm must not use an IEEE binary32 pointer; arm:\n{arm}"
+    );
+}
+
+#[test]
+fn binary_elementwise_f32_arm_keeps_float_pointers() {
+    let program = make_binary_program("add", Prim::F32);
+    let src = emit_host_program(&program, "binop_f32_control").unwrap();
+    let arm = generated_dtype_arm(&src, "CHELIS_F32");
+
+    assert!(
+        arm.contains("float *__target_data = (float*)")
+            && arm.contains("const float *__lhs_data = (const float*)")
+            && arm.contains("const float *__rhs_data = (const float*)"),
+        "the f32 arm must keep float pointers; arm:\n{arm}"
+    );
+}
+
 // ---- L1623 binary func -------------------------------------------------
 
 #[test]
@@ -189,6 +315,34 @@ fn binary_func_elementwise_emits_typed_pointer_access() {
             && !l.contains("(double*)")
             && !l.contains("(int64_t*)")),
         "binary func elementwise must not emit bare `->data[i] = fmaxf(...)`; got:\n{src}"
+    );
+}
+
+#[test]
+fn binary_func_f32_max_keeps_fmaxf() {
+    let program = make_binary_program("max_elem", Prim::F32);
+    let src = emit_host_program(&program, "binfunc_f32_max").unwrap();
+    let arm = generated_dtype_arm(&src, "CHELIS_F32");
+
+    assert!(
+        arm.contains("fmaxf(__lhs_data[idx_lhs], __rhs_data[idx_rhs])"),
+        "the f32 max arm must keep fmaxf; arm:\n{arm}"
+    );
+}
+
+#[test]
+fn binary_func_int32_max_preserves_values_above_f32_exact_range() {
+    assert_eq!(
+        compile_generated_i32_binary_assignment("max_elem", 16_777_217, 0),
+        16_777_217
+    );
+}
+
+#[test]
+fn binary_func_int32_min_preserves_values_below_f32_exact_range() {
+    assert_eq!(
+        compile_generated_i32_binary_assignment("min_elem", -16_777_217, 0),
+        -16_777_217
     );
 }
 
@@ -236,12 +390,25 @@ fn unary_func_elementwise_emits_typed_pointer_access() {
     let src = emit_host_program(&program, "unfunc_f32").unwrap();
     assert!(
         src.contains("(float*)") || src.contains("(const float*)"),
-        "unary func elementwise must cast `->data` to typed pointer; got:\n{src}"
+        "binary32 unary functions must use float pointers; got:\n{src}"
+    );
+}
+
+#[test]
+fn unary_func_int32_arm_aborts_without_binary32_conversion() {
+    let program = make_unary_program("exp", Prim::Int32);
+    let src = emit_host_program(&program, "unfunc_i32_reject").unwrap();
+    let arm = generated_dtype_arm(&src, "CHELIS_I32");
+
+    assert!(
+        arm.contains("abort();"),
+        "the int32 arm must abort; arm:\n{arm}"
     );
     assert!(
-        !src.lines()
-            .any(|l| l.contains("->data[i] = expf") && !l.contains("(float*)")),
-        "unary func elementwise must not emit bare `->data[i] = expf(...)`; got:\n{src}"
+        !arm.contains("__target_data")
+            && !arm.contains("(float*)")
+            && !arm.contains("(const float*)"),
+        "the int32 arm must not convert through binary32; arm:\n{arm}"
     );
 }
 

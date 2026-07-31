@@ -2132,7 +2132,7 @@ impl<'a> HostEmitter<'a> {
                         target,
                         &arg_vars[0].0,
                         &arg_vars[1].0,
-                        "fmaxf",
+                        BinaryElementwiseFunc::Max,
                     );
                     return Ok(());
                 }
@@ -2146,7 +2146,7 @@ impl<'a> HostEmitter<'a> {
                         target,
                         &arg_vars[0].0,
                         &arg_vars[1].0,
-                        "fminf",
+                        BinaryElementwiseFunc::Min,
                     );
                     return Ok(());
                 }
@@ -3002,11 +3002,9 @@ impl<'a> HostEmitter<'a> {
     //
     // Per `docs/design/compiler_cleanup_0_7_8_spec_lock.md` Contract
     // 2 the supported precisions are f32, f64, i32, i64, and bool.
-    // CHELIS_I32 and CHELIS_BOOL storage is 4-byte f32-encoded today
-    // (see `crates/chelis-runtime/src/lib.rs` `chelis_alloc` and the
-    // f32-routed runtime accessors at L2178-L2192 / L2222-L2223);
-    // their arms route through `(float*)t->data` to match the
-    // runtime convention.  CHELIS_F64 uses `(double*)` and
+    // Each arm selects an element type that matches its representation.
+    // CHELIS_F32 and the current CHELIS_BOOL payload use `(float*)`.
+    // CHELIS_I32 uses `(int32_t*)`, CHELIS_F64 uses `(double*)`, and
     // CHELIS_I64 uses `(int64_t*)`.
     //
     // The four helpers split into two pairs:
@@ -3017,20 +3015,14 @@ impl<'a> HostEmitter<'a> {
     //     for every supported dtype arm.  All arms are semantically
     //     well-defined for the supported operators.
     //
-    //   * `assign_tensor_binary_func_elementwise` /
-    //     `assign_tensor_unary_func_elementwise` take a libm-style
-    //     function name (`fmaxf`, `expf`, `chelis_host_relu_f32`,
-    //     ...).  Today these helper names are all f32-only.  Calling
-    //     them on f64 data through a `(double*)` cast would
-    //     auto-convert at the call site but introduces precision
-    //     loss; calling them on `(int64_t*)` is meaningless.  The
-    //     dtype switch therefore routes f32 / i32 / bool through
-    //     `(float*)t->data` (the existing semantics) and emits a
-    //     `runtime_fail`-style abort for f64 and i64.  A future PR
-    //     can lift the precision domain into the IR layer and emit
-    //     `fmax` / `exp` / per-precision custom helpers in the
-    //     f64 / i64 arms; until that lands the abort is the
-    //     correct-by-construction surface.
+    //   * `assign_tensor_binary_func_elementwise` emits f32 libm calls
+    //     for F32 and the current Bool payload. Its I32 arm emits an exact
+    //     integer comparison for max and min. F64 and I64 abort.
+    //
+    //   * `assign_tensor_unary_func_elementwise` takes an f32-only helper
+    //     name (`expf`, `chelis_host_relu_f32`, ...). It accepts F32 and
+    //     the current Bool payload. I32, F64, and I64 abort rather than
+    //     convert through binary32 and lose precision.
     fn assign_tensor_binary_elementwise(&mut self, target: &str, lhs: &str, rhs: &str, op: &str) {
         self.lines.push(format!(
             "{}{target} = chelis_alloc({lhs}->ndim, {lhs}->shape, {lhs}->dtype);",
@@ -3050,7 +3042,7 @@ impl<'a> HostEmitter<'a> {
         target: &str,
         lhs: &str,
         rhs: &str,
-        func: &str,
+        func: BinaryElementwiseFunc,
     ) {
         self.lines.push(format!(
             "{}{target} = chelis_alloc({lhs}->ndim, {lhs}->shape, {lhs}->dtype);",
@@ -3058,18 +3050,17 @@ impl<'a> HostEmitter<'a> {
         ));
         self.lines
             .push(format!("{}switch ({target}->dtype) {{", self.indent));
-        for arm in DtypeArm::all_f32_only_func_arms() {
+        for arm in DtypeArm::f32_payload_func_arms() {
             self.emit_binary_func_elementwise_arm(target, lhs, rhs, func, *arm);
         }
-        // CHELIS_F64 and CHELIS_I64 abort: the func names threaded
-        // through this helper are all f32-only today.
+        self.emit_binary_func_elementwise_arm(target, lhs, rhs, func, DtypeArm::I32);
         self.emit_dtype_fail_arms(
             &[DtypeArm::F64, DtypeArm::I64],
-            &format!("binary func elementwise ({func})"),
+            &format!("binary func elementwise ({})", func.f32_name()),
         );
         self.emit_default_runtime_fail_arm_for(
             target,
-            &format!("binary func elementwise ({func})"),
+            &format!("binary func elementwise ({})", func.f32_name()),
         );
         self.lines.push(format!("{}}}", self.indent));
     }
@@ -3095,11 +3086,11 @@ impl<'a> HostEmitter<'a> {
         ));
         self.lines
             .push(format!("{}switch ({target}->dtype) {{", self.indent));
-        for arm in DtypeArm::all_f32_only_func_arms() {
+        for arm in DtypeArm::f32_payload_func_arms() {
             self.emit_unary_func_elementwise_arm(target, input, func, *arm);
         }
         self.emit_dtype_fail_arms(
-            &[DtypeArm::F64, DtypeArm::I64],
+            &[DtypeArm::F64, DtypeArm::I32, DtypeArm::I64],
             &format!("unary func elementwise ({func})"),
         );
         self.emit_default_runtime_fail_arm_for(target, &format!("unary func elementwise ({func})"));
@@ -3156,7 +3147,7 @@ impl<'a> HostEmitter<'a> {
         target: &str,
         lhs: &str,
         rhs: &str,
-        func: &str,
+        func: BinaryElementwiseFunc,
         arm: DtypeArm,
     ) {
         let ind = &self.indent;
@@ -3186,9 +3177,21 @@ impl<'a> HostEmitter<'a> {
         self.lines.push(format!(
             "{ind}            int idx_rhs = chelis_indices_to_flat(indices, {rhs}->strides, {rhs}->ndim);"
         ));
-        self.lines.push(format!(
-            "{ind}            __target_data[i] = {func}(__lhs_data[idx_lhs], __rhs_data[idx_rhs]);"
-        ));
+        let expression = match arm {
+            DtypeArm::F32 | DtypeArm::Bool => format!(
+                "{}(__lhs_data[idx_lhs], __rhs_data[idx_rhs])",
+                func.f32_name()
+            ),
+            DtypeArm::I32 => format!(
+                "__lhs_data[idx_lhs] {} __rhs_data[idx_rhs] ? __lhs_data[idx_lhs] : __rhs_data[idx_rhs]",
+                func.i32_comparison()
+            ),
+            DtypeArm::F64 | DtypeArm::I64 => {
+                unreachable!("binary func arm must reject F64 and I64 before emission")
+            }
+        };
+        self.lines
+            .push(format!("{ind}            __target_data[i] = {expression};"));
         self.lines.push(format!("{ind}        }}"));
         self.lines.push(format!("{ind}        break;"));
         self.lines.push(format!("{ind}    }}"));
@@ -5780,20 +5783,34 @@ fn sparse_dtype_macro(prim: Prim) -> &'static str {
         .c_macro()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BinaryElementwiseFunc {
+    Max,
+    Min,
+}
+
+impl BinaryElementwiseFunc {
+    fn f32_name(self) -> &'static str {
+        match self {
+            Self::Max => "fmaxf",
+            Self::Min => "fminf",
+        }
+    }
+
+    fn i32_comparison(self) -> &'static str {
+        match self {
+            Self::Max => ">=",
+            Self::Min => "<=",
+        }
+    }
+}
+
 /// One arm of the runtime-dtype dispatch emitted by the elementwise
-/// host-emit helpers (`assign_tensor_*_elementwise`).  Each arm
-/// names a `CHELIS_*` constant and the C element type used to read
-/// and write the tensor's `data` buffer through a typed pointer.
+/// host-emit helpers (`assign_tensor_*_elementwise`). Each arm names a
+/// `CHELIS_*` constant and the C element type for tensor buffer access.
 ///
-/// The `Int32` and `Bool` arms reuse `float` as the element type
-/// because CHELIS_I32 and CHELIS_BOOL tensor storage today is
-/// 4-byte f32-encoded (see `crates/chelis-runtime/src/lib.rs`
-/// `chelis_alloc` and the f32-routed runtime accessors at
-/// L2178-L2192 / L2222-L2223 plus
-/// `docs/investigations/c_runtime_dtype_accessors_diagnosis.md`).
-/// `i32::data_ptr_unchecked` exists for future storage migration
-/// but reading the current f32-encoded buffer through it would be
-/// the wrong decode.
+/// Equal byte widths do not permit a shared element type. Native int32
+/// storage uses `int32_t`. F32 and the current Bool payload use `float`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DtypeArm {
     F32,
@@ -5820,19 +5837,16 @@ impl DtypeArm {
 
     fn elem_t(self) -> &'static str {
         match self {
-            // f32 / int32 / bool storage is 4-byte f32-encoded
-            // today.  Reading through `float*` matches the runtime
-            // accessor convention; see the type doc-comment above.
-            DtypeArm::F32 | DtypeArm::I32 | DtypeArm::Bool => "float",
+            DtypeArm::F32 | DtypeArm::Bool => "float",
             DtypeArm::F64 => "double",
+            DtypeArm::I32 => "int32_t",
             DtypeArm::I64 => "int64_t",
         }
     }
 
     /// Every supported precision the operator-form elementwise
-    /// helpers emit a typed arm for.  Maps the runtime's currently-
-    /// allocated dtypes onto the four C element types used by the
-    /// runtime accessor pattern.
+    /// helpers emit a typed arm for. Maps each runtime dtype to a C element
+    /// type that is compatible with its physical representation.
     fn all_operator_arms() -> &'static [DtypeArm] {
         &[
             DtypeArm::F32,
@@ -5843,14 +5857,10 @@ impl DtypeArm {
         ]
     }
 
-    /// Subset of the operator arms covered by the libm-f32 func
-    /// form (`expf`, `sinf`, `fmaxf`, `chelis_host_relu_f32`, ...).
-    /// CHELIS_F64 and CHELIS_I64 cannot be covered by these names
-    /// without precision loss or type-mismatch; those arms emit a
-    /// `runtime_fail`-style `abort()` until per-precision helper
-    /// names land in a future PR.
-    fn all_f32_only_func_arms() -> &'static [DtypeArm] {
-        &[DtypeArm::F32, DtypeArm::I32, DtypeArm::Bool]
+    /// Representations that can use f32-only helper functions directly.
+    /// I32 is excluded because conversion to binary32 loses integer precision.
+    fn f32_payload_func_arms() -> &'static [DtypeArm] {
+        &[DtypeArm::F32, DtypeArm::Bool]
     }
 }
 

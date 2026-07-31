@@ -48,11 +48,8 @@ const CHELIS_MAX_DIM: usize = 8;
 // or through `<T>::data_ptr` when the dtype is not yet verified.
 //
 // See `docs/design/compiler_cleanup_0_7_8_spec_lock.md` Contract 2
-// for the locked surface and
-// `docs/investigations/c_runtime_dtype_accessors_diagnosis.md` for
-// the migration-site inventory and routing convention for bool / i32
-// (today both 4-byte f32-encoded; trait impls exist but sites route
-// through `f32::data_ptr` to match the actual storage).
+// for the locked surface. Each implementation uses the element type
+// that matches its `RuntimeDType::repr()` value.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DtypeMismatch {
@@ -145,56 +142,45 @@ unsafe impl TensorElement for i64 {
 
 /// Typed access to a tensor's buffer as `*mut f32`.
 ///
-/// **STALE-DOC WARNING (chelis#694).** The paragraph below is the
-/// historical text and its `CHELIS_I32` half is FALSE. int32 storage is
-/// native two's complement at every writer and every reader; this
-/// helper's claim that `i32::data_ptr_unchecked` "is the wrong decode"
-/// is the enabler chelis#894 identified behind nine sites that decoded
-/// int32 through an f32 view, and every one of those arms cited it. Do
-/// not route an `CHELIS_I32` arm through here. `CHELIS_BOOL` genuinely
-/// is 4-byte f32-encoded today and moves with chelis#894's
-/// `Repr::Bool8`; chelis#893 removes the ability to choose a view at the
-/// call site at all. The historical text is kept rather than deleted so
-/// the citation trail from the wrong arms stays readable, and is
-/// rewritten wholesale when chelis#894 lands.
+/// This helper remains for F32 and for
+/// `Repr::BoolInBinary32`, the current bool payload representation.
 ///
-/// PR 1 introduced this as a transition shim for the 31 access
-/// sites it did not migrate.  PR 2 migrated those sites to the
-/// `TensorElement` dispatch pattern; the helper survives because
-/// `CHELIS_I32` and `CHELIS_BOOL` tensors still store data as
-/// 4-byte f32 bit patterns.  Migrated dispatch arms for those two
-/// dtype tags route through this helper rather than
-/// `<i32 / bool>::data_ptr_unchecked` (the trait impl for `i32`
-/// exists but reads i32 bytes, which is the wrong decode for the
-/// current f32-encoded storage convention; `bool` has no trait
-/// impl at all).
-///
-/// A future §5 follow-on migrates `CHELIS_I32` and `CHELIS_BOOL`
-/// storage to their genuine byte representations and drops this
-/// helper at the same time.  See
-/// `docs/investigations/c_runtime_dtype_accessors_diagnosis.md`
-/// section "I32 storage encoding" for the routing convention.
-///
-/// Accepts `*mut chelis_tensor` only; for read-side `*const
-/// chelis_tensor` access, callers cast through `tensor as *mut
-/// chelis_tensor` at the call site.
+/// Do not use equal byte width as an access rule. `CHELIS_I32` also uses four
+/// bytes, but `Repr::TwosComplement32` requires an `i32` pointer.
 ///
 /// # Safety
 ///
-/// `tensor` must point to a live `chelis_tensor`.
+/// `tensor` must point to a live F32 or current Bool tensor.
 #[inline]
 pub unsafe fn data_as_f32(tensor: *mut chelis_tensor) -> *mut f32 {
+    #[cfg(debug_assertions)]
+    {
+        let dtype = unsafe { tensor_dtype(tensor, "data_as_f32") };
+        debug_assert!(
+            matches!(dtype, RuntimeDType::F32 | RuntimeDType::Bool),
+            "data_as_f32 requires an IEEE binary32-compatible representation, got {}",
+            dtype.name()
+        );
+    }
     unsafe { (*tensor).data as *mut f32 }
 }
 
-/// Const-pointer variant of `data_as_f32` for read-side accesses
-/// on `*const chelis_tensor`.
+/// Const-pointer variant of [`data_as_f32`] for read-side access.
 ///
 /// # Safety
 ///
-/// `tensor` must point to a live `chelis_tensor`.
+/// `tensor` must point to a live F32 or current Bool tensor.
 #[inline]
 pub unsafe fn data_as_f32_const(tensor: *const chelis_tensor) -> *mut f32 {
+    #[cfg(debug_assertions)]
+    {
+        let dtype = unsafe { tensor_dtype(tensor, "data_as_f32_const") };
+        debug_assert!(
+            matches!(dtype, RuntimeDType::F32 | RuntimeDType::Bool),
+            "data_as_f32_const requires an IEEE binary32-compatible representation, got {}",
+            dtype.name()
+        );
+    }
     unsafe { (*tensor).data as *mut f32 }
 }
 
@@ -2701,9 +2687,9 @@ pub unsafe extern "C" fn chelis_tensor_cmplt(
         RuntimeDType::F32 => cmp_loop::<f32>(lm, rm, out_buf, size),
         RuntimeDType::F64 => cmp_loop::<f64>(lm, rm, out_buf, size),
         RuntimeDType::I64 => cmp_loop::<i64>(lm, rm, out_buf, size),
-        // I32 and BOOL storage stays f32-encoded; the f32-strided read
-        // is correct for both today.
-        RuntimeDType::I32 | RuntimeDType::Bool => {
+        RuntimeDType::I32 => cmp_loop::<i32>(lm, rm, out_buf, size),
+        // Bool keeps its binary32 payload view until a separate migration.
+        RuntimeDType::Bool => {
             let lp = data_as_f32_const(lhs);
             let rp = data_as_f32_const(rhs);
             for i in 0..size {
@@ -2798,8 +2784,7 @@ pub unsafe extern "C" fn chelis_tensor_scatter(
             let src = ((*updates).data as *const u8).add(linear as usize * elem_size);
             ptr::copy_nonoverlapping(src, dst, elem_size);
         } else {
-            // Add mode requires typed addition.  Dispatch on dtype;
-            // I32 / BOOL stay on f32-encoded storage.
+            // Add mode requires typed addition. Dispatch on the physical type.
             match dtype {
                 RuntimeDType::F32 => {
                     let op = f32::data_ptr_unchecked(out);
@@ -2818,11 +2803,10 @@ pub unsafe extern "C" fn chelis_tensor_scatter(
                         (*op.add(out_linear)).wrapping_add(*up.add(linear as usize));
                 }
                 RuntimeDType::I32 => {
-                    // f32-encoded i32: read both as f32, add as f32,
-                    // re-encode.  Matches pre-migration behavior.
-                    let op = data_as_f32(out);
-                    let up = data_as_f32_const(updates);
-                    *op.add(out_linear) += *up.add(linear as usize);
+                    let op = i32::data_ptr_unchecked(out);
+                    let up = i32::data_ptr_unchecked(updates as *mut chelis_tensor);
+                    *op.add(out_linear) =
+                        (*op.add(out_linear)).wrapping_add(*up.add(linear as usize));
                 }
                 RuntimeDType::Bool => {
                     runtime_fail!("scatter add-mode is undefined for bool tensors");
@@ -2888,10 +2872,16 @@ pub unsafe extern "C" fn chelis_tensor_where(
         }
     }
     match cond_dtype {
-        RuntimeDType::F32 | RuntimeDType::I32 | RuntimeDType::Bool => {
+        RuntimeDType::F32 | RuntimeDType::Bool => {
             let p = data_as_f32_const(cond);
             where_copy(out, then_tensor, else_tensor, elem_size, size, |i| {
                 *p.add(i) != 0.0
+            });
+        }
+        RuntimeDType::I32 => {
+            let p = i32::data_ptr_unchecked(cond as *mut chelis_tensor);
+            where_copy(out, then_tensor, else_tensor, elem_size, size, |i| {
+                *p.add(i) != 0
             });
         }
         RuntimeDType::F64 => {
@@ -2956,21 +2946,7 @@ pub unsafe extern "C" fn chelis_tensor_cumsum(
         RuntimeDType::F32 => cumsum_loop::<f32>(out, outer, axis_size, inner),
         RuntimeDType::F64 => cumsum_loop::<f64>(out, outer, axis_size, inner),
         RuntimeDType::I64 => cumsum_loop::<i64>(out, outer, axis_size, inner),
-        RuntimeDType::I32 => {
-            // f32-encoded i32 storage: accumulate as f32, matching
-            // pre-migration behavior.
-            let p = data_as_f32(out);
-            for outer_idx in 0..outer {
-                for inner_idx in 0..inner {
-                    let mut running = 0.0f32;
-                    for axis_idx in 0..axis_size {
-                        let linear = (outer_idx * axis_size + axis_idx) * inner + inner_idx;
-                        running += *p.add(linear);
-                        *p.add(linear) = running;
-                    }
-                }
-            }
-        }
+        RuntimeDType::I32 => cumsum_loop::<i32>(out, outer, axis_size, inner),
         RuntimeDType::Bool => runtime_fail!("cumsum is undefined for bool tensors"),
         RuntimeDType::Bf16 | RuntimeDType::F16 | RuntimeDType::I8 | RuntimeDType::I16 => {
             runtime_fail!("cumsum unsupported dtype {}", dtype.name())
@@ -3213,21 +3189,7 @@ pub unsafe extern "C" fn chelis_tensor_trace(
         RuntimeDType::F32 => trace_cascade::<f32>(diag, out, outer, axis_size, inner),
         RuntimeDType::F64 => trace_cascade::<f64>(diag, out, outer, axis_size, inner),
         RuntimeDType::I64 => trace_loop::<i64>(diag, out, outer, axis_size, inner),
-        RuntimeDType::I32 => {
-            // f32-encoded i32: accumulate as f32 (pre-migration semantics).
-            let dp = data_as_f32(diag);
-            let op = data_as_f32(out);
-            for outer_idx in 0..outer {
-                for inner_idx in 0..inner {
-                    let mut sum = 0.0f32;
-                    for axis_idx in 0..axis_size {
-                        let linear = (outer_idx * axis_size + axis_idx) * inner + inner_idx;
-                        sum += *dp.add(linear);
-                    }
-                    *op.add(outer_idx * inner + inner_idx) = sum;
-                }
-            }
-        }
+        RuntimeDType::I32 => trace_loop::<i32>(diag, out, outer, axis_size, inner),
         RuntimeDType::Bool => {
             chelis_free(diag);
             runtime_fail!("trace is undefined for bool tensors");
@@ -3300,21 +3262,7 @@ pub unsafe extern "C" fn chelis_tensor_clamp(
         RuntimeDType::F32 => clamp_loop::<f32>(tensor, lo, hi, out, size, lo_scalar, hi_scalar),
         RuntimeDType::F64 => clamp_loop::<f64>(tensor, lo, hi, out, size, lo_scalar, hi_scalar),
         RuntimeDType::I64 => clamp_loop::<i64>(tensor, lo, hi, out, size, lo_scalar, hi_scalar),
-        RuntimeDType::I32 => {
-            // f32-encoded i32: compute clamp as f32 (matches
-            // pre-migration semantics).
-            let tp = data_as_f32_const(tensor);
-            let lp = data_as_f32_const(lo);
-            let hp = data_as_f32_const(hi);
-            let op = data_as_f32(out);
-            for i in 0..size {
-                let low = if lo_scalar { *lp } else { *lp.add(i) };
-                let high = if hi_scalar { *hp } else { *hp.add(i) };
-                let mut value = *tp.add(i);
-                value = value.max(low).min(high);
-                *op.add(i) = value;
-            }
-        }
+        RuntimeDType::I32 => clamp_loop::<i32>(tensor, lo, hi, out, size, lo_scalar, hi_scalar),
         RuntimeDType::Bool => runtime_fail!("clamp is undefined for bool tensors"),
         RuntimeDType::Bf16 | RuntimeDType::F16 | RuntimeDType::I8 | RuntimeDType::I16 => {
             runtime_fail!("clamp unsupported dtype {}", dtype.name())
@@ -3518,61 +3466,20 @@ pub unsafe extern "C" fn chelis_tensor_einsum(
             reduction_total,
             &mut label_values,
         ),
-        RuntimeDType::I32 => {
-            // f32-encoded i32 storage: multiply-add as f32 (matches
-            // pre-migration semantics for I32 inputs).
-            let lp = data_as_f32_const(lhs);
-            let rp = data_as_f32_const(rhs);
-            let op = data_as_f32(out);
-            let mut out_index = [0; CHELIS_MAX_DIM];
-            let mut reduction_index = [0; CHELIS_MAX_DIM];
-            let mut lhs_index = [0; CHELIS_MAX_DIM];
-            let mut rhs_index = [0; CHELIS_MAX_DIM];
-            for out_linear in 0..out_size {
-                if !out_labels.is_empty() {
-                    chelis_flat_to_indices(
-                        out_linear as c_int,
-                        out_shape.as_ptr(),
-                        out_labels.len() as c_int,
-                        out_index.as_mut_ptr(),
-                    );
-                }
-                for (i, &label) in out_labels.iter().enumerate() {
-                    label_values[label as usize] = out_index[i];
-                }
-                let mut acc = 0.0f32;
-                for reduction_linear in 0..reduction_total {
-                    if !reduction_labels.is_empty() {
-                        chelis_flat_to_indices(
-                            reduction_linear as c_int,
-                            reduction_shape.as_ptr(),
-                            reduction_shape.len() as c_int,
-                            reduction_index.as_mut_ptr(),
-                        );
-                    }
-                    for (i, &label) in reduction_labels.iter().enumerate() {
-                        label_values[label as usize] = reduction_index[i];
-                    }
-                    for (i, &label) in lhs_chars.iter().enumerate() {
-                        lhs_index[i] = label_values[label as usize];
-                    }
-                    for (i, &label) in rhs_chars.iter().enumerate() {
-                        rhs_index[i] = label_values[label as usize];
-                    }
-                    acc += *lp.add(chelis_indices_to_flat(
-                        lhs_index.as_ptr(),
-                        (*lhs).strides.as_ptr(),
-                        lhs_chars.len() as c_int,
-                    ) as usize)
-                        * *rp.add(chelis_indices_to_flat(
-                            rhs_index.as_ptr(),
-                            (*rhs).strides.as_ptr(),
-                            rhs_chars.len() as c_int,
-                        ) as usize);
-                }
-                *op.add(out_linear) = acc;
-            }
-        }
+        RuntimeDType::I32 => einsum_loop::<i32>(
+            lhs,
+            rhs,
+            out,
+            out_size,
+            &out_labels,
+            &lhs_chars,
+            &rhs_chars,
+            &reduction_labels,
+            &out_shape,
+            &reduction_shape,
+            reduction_total,
+            &mut label_values,
+        ),
         RuntimeDType::Bool => runtime_fail!("einsum is undefined for bool tensors"),
         RuntimeDType::Bf16 | RuntimeDType::F16 | RuntimeDType::I8 | RuntimeDType::I16 => {
             runtime_fail!("einsum unsupported dtype {}", dtype.name())
@@ -3853,20 +3760,9 @@ unsafe fn adt_to_string(adt: *const chelis_adt) -> String {
 /// shortest-round-trip at THEIR width through the same routine the
 /// generated C print helper calls.
 ///
-/// Each arm decodes at its own dtype's REPRESENTATION, through that
-/// type's `TensorElement` accessor. An earlier revision of THIS comment
-/// said I32 and BOOL both "stay on the f32-encoded convention this site
-/// always used" - false for I32, whose storage is native two's
-/// complement at every writer (`to_tensor`,
-/// `chelis_scalar_tensor_from_i64`) and every sibling reader
-/// (`read_index_slot`, `chelis_list_from_tensor`). Reading it through
-/// the f32 view rendered `5i32` as 7.006492321624085e-45 while
-/// `to_list` returned `5` from the same tensor. BOOL genuinely is
-/// f32-encoded today and moves with chelis#894's `Repr::Bool8`. The two
-/// halves are stated separately because one shared sentence is what
-/// carried the defect - see `data_as_f32`'s own stale rustdoc
-/// (chelis#694), which chelis#894 identified as the enabler every wrong
-/// arm cited.
+/// Each arm uses an element type that is compatible with the dtype's physical
+/// representation. Int32 uses native `i32` access. Bool uses its current
+/// binary32 payload access until a separate bool-storage change.
 ///
 /// The arm-to-accessor mapping is declared and enforced in
 /// `scripts/faithful_observation_phase2_oracle.py`
@@ -3886,29 +3782,11 @@ unsafe fn tensor_elem_to_string(t: *const chelis_tensor, dtype: RuntimeDType, i:
             format_shortest(v, RuntimeDType::F64)
         }
         RuntimeDType::I64 => (*i64::data_ptr_unchecked(tm).add(i)).to_string(),
-        // NATIVE two's-complement storage, decoded through the typed
-        // accessor. `to_tensor` and `chelis_scalar_tensor_from_i64` both
-        // write through `(int32_t*)`, and `chelis_list_from_tensor` /
-        // `read_index_slot` both decode that way; reading it through the
-        // f32 view rendered `5i32` as 7.006492321624085e-45, `i32::MAX`
-        // as NaN, and `i32::MIN` as a plausible-looking `0`, while
-        // `to_list` of the SAME tensor returned the right integers - a
-        // section C2.2 intra-lane exit split and a section C2.3 cross-lane
-        // divergence on identical stored bits. No tag-vs-bits branch
-        // belongs here (spec/05 section 8.1): every 32-bit pattern IS a
-        // valid int32, so the "outside the tag's value set" case the old
-        // arm hedged for cannot arise. chelis#894 carries the eight
-        // sibling misdecodes and makes REPRESENTATION (not width) the ABI
-        // primitive; chelis#893 seals the `data` pointer that lets any
-        // site pick its own view.
+        // Repr::TwosComplement32 requires native i32 access.
         RuntimeDType::I32 => (*i32::data_ptr_unchecked(tm).add(i)).to_string(),
         RuntimeDType::Bool => {
-            // Bool IS f32-encoded today - `read_index_slot` keeps
-            // `F32 | Bool` on the same view, so this half of the old
-            // shared comment was correct. chelis#894 migrates bool to a
-            // native byte (`Repr::Bool8`); this arm moves WITH that
-            // change, never before it, because a 1-byte read against
-            // 4-byte writers is a misdecode in the other direction.
+            // Repr::BoolInBinary32 requires the current f32 payload access.
+            // A separate bool-storage change must update its writers and readers.
             let raw = *data_as_f32_const(t).add(i);
             if raw != 0.0 { "true" } else { "false" }.to_string()
         }

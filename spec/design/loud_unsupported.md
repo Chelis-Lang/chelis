@@ -517,7 +517,9 @@ active physical encodings and owns their byte widths. `RuntimeDType` derives
 its byte width from `Repr`. These are current representation facts, not dtype
 semantics or storage decisions. `dtype_semantics.md` §C3 owns the storage
 decision. `chelis_tensor.dtype` and the C ABI arguments remain `int`; that is
-the wire representation, not the internal type.
+the wire representation, not the internal type. Each element consumer must
+use a pointer or value type that is compatible with `RuntimeDType::repr()`.
+Equal byte widths do not permit one shared element view.
 
 | boundary/consumer | required typed behavior |
 |---|---|
@@ -526,9 +528,11 @@ the wire representation, not the internal type.
 | `TensorElement::DTYPE` / `DtypeMismatch` | carry `RuntimeDType`; decode the tensor field before comparing or accessing |
 | `chelis_alloc`, `chelis_alloc_view`, `chelis_dtype_size`, `chelis_tensor_from_value_list_typed` | decode the inbound `c_int` immediately; invalid IDs abort with the raw ID before allocation, sizing, or element access |
 | `tensor_elem_size` | signature is `fn(RuntimeDType) -> usize`; exhaustive, no fallback |
-| `read_index_slot`, `chelis_tensor_to_f64`, list-from-tensor, comparison/where/cumsum/sort/trace/clamp/einsum, and tensor formatting | decode once, pass `RuntimeDType` into typed read helpers, and match exhaustively |
+| `read_index_slot`, `chelis_tensor_to_f64`, list-from-tensor, comparison/where/cumsum/sort/trace/clamp/einsum, and tensor formatting | decode once, pass `RuntimeDType` into typed helpers, and select an element type that matches `repr()` |
+| `data_as_f32` and `data_as_f32_const` | accept F32 and the current `BoolInBinary32` payload. Reject I32 with a debug assertion before access |
 | clone/concat/split/gather/scatter/diagonal/contiguous byte-copy paths | decode before byte-width calculation; pass `RuntimeDType` to sizing; raw integers may be copied back only into the ABI field via `id()` |
 | C/HIP/Metal `dtype_macro` and sparse/dtype-arm helpers | return `RuntimeDType` first and obtain the C spelling from the vocab declaration; no repeated `Prim -> "CHELIS_*"` tables |
+| generated C element access | use `int32_t` for `TwosComplement32`. Keep `float` for `Ieee754Binary32` and the current `BoolInBinary32` payload |
 | `chelis-python` tensor construction | use `RuntimeDType::F32.id()`; remove the local numeric constant |
 
 The negative suite covers `-1`, the first unused ID (`9` for this frozen
