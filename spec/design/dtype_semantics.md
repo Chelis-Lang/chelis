@@ -450,10 +450,14 @@ classification escapes, and this paragraph freezes its exact strength:
 
 - `closure_conditional_macro_taint` propagates every macro defined under a
   non-include-guard conditional across the whole connected component of
-  QUOTED local includes already in the header closure. A public declaration
+  local includes in the header closure. A public declaration
   consuming any such token is rejected even when the definition and use are
   in different headers
-  (`conditional_macro_taint_across_include_closure_is_rejected`).
+  (`conditional_macro_taint_across_include_closure_is_rejected`). The
+  component follows BOTH include spellings - `6ddf1a72` scoped it to
+  quoted includes, and the round-3 angle-include closure below widened it,
+  since `cc -E -I` resolves `<x>` and `"x"` identically inside the include
+  directory.
 - Numeric-callable classification treats every non-boolean, non-character
   built-in arithmetic value type conservatively as `numeric-op`: `double`,
   `float`, `int`, `short`, `long`, `signed`, `unsigned`, `size_t`,
@@ -474,9 +478,10 @@ classification escapes, and this paragraph freezes its exact strength:
   `GRANDFATHER_SEAM_IDS`; `integer_plumbing_exemptions_are_exact_and_closed`
   locks the count, membership, and same-shaped-neighbor behavior. A name,
   parameter spelling, substring, or newly added identity cannot inherit the
-  exemption. The quoted-include boundary above is deliberate scope
-  calibration, not a claim that this follow-up added an angle-include
-  configuration matrix.
+  exemption. Neither this follow-up nor the round-3 closure adds a
+  configuration MATRIX: the policy remains that published ABI has exactly
+  one preprocessing context, and both changes only widen what the guard can
+  see.
 
 The architecture is this plan's own move applied one layer up: three
 chokepoints, each total over a DISCOVERED surface, never a

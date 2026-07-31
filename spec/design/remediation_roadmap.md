@@ -129,7 +129,7 @@ implemented and green (`capacity_census_wire` and
 DAG edges below, not editable coverage metadata (PR #950 red teams P2-4
 and re-P1). The exact PR #956 follow-up
 `6ddf1a72d6dea6770a330d5c2ef3b8fa7d023c43` is part of that entry gate:
-conditional macro definitions taint their connected quoted-local-include
+conditional macro definitions taint their connected local-include
 component, bare and pointer-sized integer C callables classify
 conservatively as `numeric-op`, and only the three byte-frozen
 pre-ratchet plumbing declarations named in [#729] §C6 are exempt.

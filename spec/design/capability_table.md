@@ -179,7 +179,8 @@ pre-ratchet plumbing identities to remove that flag - `chelis_alloc`,
 complete canonical declarations frozen verbatim in
 `dtype_semantics.md` §C6. A callable name, parameter name, or substring is
 never an exemption. Conditional macro definitions are propagated across
-their connected quoted-local-include component before classification, so a
+their connected local-include component (either include spelling) before
+classification, so a
 cross-file type alias cannot make a configuration-varying numeric callable
 disappear from this obligation.
 Positive controls bind a discovered callable to the exact atom that

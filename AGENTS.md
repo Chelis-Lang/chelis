@@ -202,8 +202,8 @@ numeric data, whether or not you have read that document:
   exactly three pre-ratchet canonical declarations in
   `NON_NUMERIC_INTEGER_PLUMBING_EXPORTS`; each must also remain in the frozen seam
   identity set. Conditional macro definitions likewise taint their whole connected
-  quoted-local-include component: a public declaration consuming a tainted token is
-  rejected even when the definition lives in another header. These two rules are
+  local-include component, by either include spelling: a public declaration consuming
+  a tainted token is rejected even when the definition lives in another header. These two rules are
   locked by PR #956 commit
   `6ddf1a72d6dea6770a330d5c2ef3b8fa7d023c43`; widening either exception requires
   changing this contract and the negative controls together.
