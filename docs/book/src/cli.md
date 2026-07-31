@@ -276,6 +276,12 @@ records additionally disclose `sampling_method` plus accepted, attempted, and
 rejected sample counts; guarded records repeat this evidence in the
 precondition non-vacuity record.
 
+Structural induction is not currently a dispatched proof tier. Its internal
+Tier D scaffold fails closed until both a concrete base obligation and a
+symbolic step obligation are discharged through an existing sound tier;
+`ASSUMED` case evidence is never reported as a proof. General-size claims must
+therefore remain fixed-size or explicitly deferred in this release.
+
 Exit codes are stable for CI: `0` pass, `1` counterexample, `2` selected
 property unsupported by the v1 generator, and `3` setup/input/config error.
 `--json` emits NDJSON property records followed by one summary record.
