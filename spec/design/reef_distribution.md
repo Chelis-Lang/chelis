@@ -579,12 +579,13 @@ explain the scope of the shipped Phase A change set.
   of artifacts (publisher key, signature verification on install)
   is tracked separately under the trust-stack expansion's Item 5
   and is demand-driven; not in this round.
-- **Bit-reproducible artifact comparison across machines.** The
-  install path verifies bytes received against bytes pinned in the
-  lockfile, but does not verify that two independent rebuilds from
-  source would produce bit-identical bytes. That is a separate
-  workstream contingent on auditing the C emitter for non-
-  determinism.
+- **Cross-machine reproducibility certification.** The build contract above
+  canonicalizes package inputs, archive metadata, and the epoch, and its
+  executable oracle compares repeated builds on one runner. A release matrix
+  that compares independent rebuilds across operating systems, filesystems,
+  and compression-library implementations is not yet present. Until that
+  matrix exists, claim the deterministic build contract and same-runner byte
+  oracle, not empirical cross-machine certification.
 
 ---
 
