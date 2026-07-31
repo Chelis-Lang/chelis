@@ -127,7 +127,7 @@ impl AdtRegistry {
         }
 
         let name = match &children[0] {
-            deep::Expr::Atom(deep::Atom::Symbol(s), _) => s.clone(),
+            deep::Expr::Atom(deep::Atom::Name(s), _) => s.clone(),
             _ => return Ok(vec![]),
         };
 
@@ -145,7 +145,7 @@ impl AdtRegistry {
                         } else {
                             // Type params list: elements are symbols
                             for el in &list.elements {
-                                if let deep::Expr::Atom(deep::Atom::Symbol(s), _) = el {
+                                if let deep::Expr::Atom(deep::Atom::Name(s), _) = el {
                                     type_params.push(s.clone());
                                 }
                             }
@@ -154,7 +154,7 @@ impl AdtRegistry {
                     } else {
                         // Elements might be bare symbols for type params
                         for el in &list.elements {
-                            if let deep::Expr::Atom(deep::Atom::Symbol(s), _) = el {
+                            if let deep::Expr::Atom(deep::Atom::Name(s), _) = el {
                                 type_params.push(s.clone());
                             }
                         }
@@ -196,7 +196,7 @@ impl AdtRegistry {
                 }
 
                 let vname = match &vchildren[0] {
-                    deep::Expr::Atom(deep::Atom::Symbol(s), _) => s.clone(),
+                    deep::Expr::Atom(deep::Atom::Name(s), _) => s.clone(),
                     _ => continue,
                 };
 
@@ -214,7 +214,7 @@ impl AdtRegistry {
                             let fchildren = list_children(flist);
                             if fchildren.len() >= 2 {
                                 let fname = match &fchildren[0] {
-                                    deep::Expr::Atom(deep::Atom::Symbol(s), _) => s.clone(),
+                                    deep::Expr::Atom(deep::Atom::Name(s), _) => s.clone(),
                                     _ => continue,
                                 };
                                 let ftype = self

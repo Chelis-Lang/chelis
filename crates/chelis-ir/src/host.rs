@@ -2725,7 +2725,7 @@ fn synthesize_callable_application(
                 elements: vec![
                     Expr::Atom(Atom::Tag(DeepTag::Var), span),
                     Expr::Map(var_meta, span),
-                    Expr::Atom(Atom::Symbol(param.name.clone()), span),
+                    Expr::Atom(Atom::Name(param.name.clone()), span),
                 ],
             },
             span,
@@ -4072,7 +4072,7 @@ fn lower_host_expr_kind(
                     {
                         children(tlist).first().and_then(symbol_name)
                     }
-                    Some(Expr::Atom(Atom::Symbol(name), _))
+                    Some(Expr::Atom(Atom::Name(name), _))
                         if chelis_types::types::Prim::parse_name(name).is_none() =>
                     {
                         Some(name.as_str())
@@ -6046,7 +6046,7 @@ fn grad_wrt_param_names(grad_list: &List, param_names: &[String]) -> Option<Vec<
 
 fn collect_wrt_names(expr: &Expr, out: &mut Vec<String>) -> Option<()> {
     match expr {
-        Expr::Atom(Atom::Symbol(name), _) => {
+        Expr::Atom(Atom::Name(name), _) => {
             out.push(name.clone());
             Some(())
         }
@@ -7182,7 +7182,7 @@ fn inline_local_callable_lets(expr: &Expr) -> Expr {
     rebuilt_pairs.reverse();
     let mut rebuilt_bind = vec![bind_list.elements[0].clone(), bind_list.elements[1].clone()];
     for (name, value) in rebuilt_pairs {
-        rebuilt_bind.push(Expr::Atom(Atom::Symbol(name), *span));
+        rebuilt_bind.push(Expr::Atom(Atom::Name(name), *span));
         rebuilt_bind.push(value);
     }
     Expr::List(
@@ -7469,7 +7469,7 @@ fn hoist_host_lane_tensor_bindings(
                             },
                             *span,
                         ),
-                        Expr::Atom(Atom::Symbol(name), *span),
+                        Expr::Atom(Atom::Name(name), *span),
                     ],
                 },
                 *span,
@@ -10475,7 +10475,7 @@ fn as_list(expr: &Expr) -> Option<&List> {
 
 fn symbol_name(expr: &Expr) -> Option<&str> {
     match expr {
-        Expr::Atom(Atom::Symbol(name), _) => Some(name.as_str()),
+        Expr::Atom(Atom::Name(name), _) => Some(name.as_str()),
         _ => None,
     }
 }
@@ -10509,7 +10509,7 @@ fn collect_deep_var_names(expr: &Expr, out: &mut HashSet<String>) {
 
 fn param_name(expr: &Expr) -> Option<String> {
     match expr {
-        Expr::Atom(Atom::Symbol(name), _) => Some(name.clone()),
+        Expr::Atom(Atom::Name(name), _) => Some(name.clone()),
         Expr::MetaExpr(meta, _) => param_name(&meta.expr),
         Expr::List(list, _) => list
             .elements

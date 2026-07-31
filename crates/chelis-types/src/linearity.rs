@@ -1362,7 +1362,7 @@ fn children(list: &List) -> &[Expr] {
 
 fn symbol_name(expr: &Expr) -> Option<&str> {
     match expr {
-        Expr::Atom(Atom::Symbol(name), _) => Some(name.as_str()),
+        Expr::Atom(Atom::Name(name), _) => Some(name.as_str()),
         _ => None,
     }
 }
@@ -1418,7 +1418,7 @@ fn param_names(expr: &Expr) -> Vec<String> {
     children(list)
         .iter()
         .filter_map(|param| match param {
-            Expr::Atom(Atom::Symbol(name), _) => Some(name.clone()),
+            Expr::Atom(Atom::Name(name), _) => Some(name.clone()),
             Expr::List(param_list, _) => param_list
                 .elements
                 .first()
@@ -1741,7 +1741,7 @@ fn span_metadata_id(expr: &Expr) -> Option<&str> {
 
 fn param_name_and_type(param: &Expr) -> Option<(&str, Option<&Expr>)> {
     match param {
-        Expr::Atom(Atom::Symbol(name), _) => Some((name.as_str(), None)),
+        Expr::Atom(Atom::Name(name), _) => Some((name.as_str(), None)),
         Expr::List(param_list, _) => Some((
             param_list.elements.first().and_then(symbol_name)?,
             get_meta(param_list)
@@ -1759,7 +1759,7 @@ fn param_name_and_type(param: &Expr) -> Option<(&str, Option<&Expr>)> {
         // spurious "borrowed arguments must be tensor or tensor-carrying
         // values". Mirrors infer.rs `extract_params`'s MetaExpr arm.
         Expr::MetaExpr(meta, _) => {
-            let Expr::Atom(Atom::Symbol(name), _) = meta.expr.as_ref() else {
+            let Expr::Atom(Atom::Name(name), _) = meta.expr.as_ref() else {
                 return None;
             };
             Some((
@@ -2143,7 +2143,7 @@ mod tests {
     }
 
     fn sym(name: &str) -> Expr {
-        Expr::Atom(Atom::Symbol(name.to_string()), span())
+        Expr::Atom(Atom::Name(name.to_string()), span())
     }
 
     fn meta(entries: Vec<(&str, Expr)>) -> Expr {

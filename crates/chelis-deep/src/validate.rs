@@ -9,7 +9,7 @@ pub const VALID_TAGS: &[&str] = &DeepTag::ALL_STRS;
 
 /// Decode-once invariant walker (chelis#731 Phase 3, PERMANENT): return
 /// the first location where a list's element 0 carries a closed-vocabulary
-/// tag as a raw `Atom::Symbol` string instead of a stamped `Atom::Tag`.
+/// tag as a raw `Atom::Name` string instead of a stamped `Atom::Tag`.
 /// After the parser's stamping pass (and the typed producer constructors),
 /// no parsed or desugared tree may contain one; a `Some` here means a
 /// producer bypassed decode-once and its node would silently miss every
@@ -229,16 +229,16 @@ fn validate_tag_shape(
         }
         DeepTag::Params => {
             let all_names = list.elements.iter().skip(2).all(|child| match child {
-                Expr::Atom(crate::ast::Atom::Symbol(_), _) => true,
+                Expr::Atom(crate::ast::Atom::Name(_), _) => true,
                 Expr::MetaExpr(meta, _) => matches!(
                     meta.expr.as_ref(),
-                    Expr::Atom(crate::ast::Atom::Symbol(_), _)
+                    Expr::Atom(crate::ast::Atom::Name(_), _)
                 ),
                 Expr::List(inner, _) => {
                     inner.elements.len() == 2
                         && matches!(
                             inner.elements.first(),
-                            Some(Expr::Atom(crate::ast::Atom::Symbol(_), _))
+                            Some(Expr::Atom(crate::ast::Atom::Name(_), _))
                         )
                         && matches!(inner.elements.get(1), Some(Expr::Map(_, _)))
                 }
@@ -264,7 +264,7 @@ fn validate_tag_shape(
         }
         DeepTag::Effects => {
             let all_entries = list.elements.iter().skip(2).all(|child| {
-                matches!(child, Expr::Atom(crate::ast::Atom::Symbol(_), _))
+                matches!(child, Expr::Atom(crate::ast::Atom::Name(_), _))
                     || matches!(
                         child,
                         Expr::List(inner, _)
@@ -470,7 +470,7 @@ fn is_predicate_fn_shape(expr: &Expr) -> bool {
         && params.elements.len() == 3
         && matches!(
             params.elements.get(2),
-            Some(Expr::Atom(crate::ast::Atom::Symbol(_), _))
+            Some(Expr::Atom(crate::ast::Atom::Name(_), _))
         )
 }
 
@@ -491,7 +491,7 @@ mod tests {
     const ZERO: Span = Span { offset: 0, len: 0 };
 
     fn sym(s: &str) -> Expr {
-        Expr::Atom(Atom::Symbol(s.to_string()), ZERO)
+        Expr::Atom(Atom::Name(s.to_string()), ZERO)
     }
 
     fn empty_map() -> Expr {
@@ -508,7 +508,7 @@ mod tests {
 
     /// PERMANENT decode-once invariant (chelis#731 Phase 3): a parsed
     /// tree never carries a vocabulary tag as a raw element-0 string, so
-    /// a stale `Atom::Symbol` tag match can never half-work again.
+    /// a stale `Atom::Name` tag match can never half-work again.
     #[test]
     fn parsed_trees_carry_no_raw_vocabulary_tag_strings() {
         let source = "(module {} m\n  (defsig {} f (t-fn {} (t-prim {} f32) (t-prim {} f32)))\n  (deftype {opaque: true, invariant: (fn {} (params {} p) (app {} (var {} gte) (access {} (var {} p) value) (lit {type: (t-prim {} f32)} 0.0)))} T () (variant {} T (field {} value (t-prim {} f32))))\n  (def {} f (fn {} (params {} (x {type: (t-prim {} f32)})) (handle-effect {effect: random} (lit {type: (t-prim {} int64)} 42) (var {} x)))))";

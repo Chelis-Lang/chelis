@@ -174,7 +174,7 @@ fn children(expr: &Expr) -> &[Expr] {
 
 fn symbol_text(expr: &Expr) -> Option<&str> {
     match expr {
-        Expr::Atom(Atom::Symbol(s), _) => Some(s.as_str()),
+        Expr::Atom(Atom::Name(s), _) => Some(s.as_str()),
         _ => None,
     }
 }
@@ -394,7 +394,7 @@ fn predicate_binder(fn_node: &Expr) -> Option<String> {
     }
     // A typed-param list `(p {type: ...})`: head symbol is the name.
     if let Expr::List(list, _) = first
-        && let Some(Expr::Atom(Atom::Symbol(s), _)) = list.elements.first()
+        && let Some(Expr::Atom(Atom::Name(s), _)) = list.elements.first()
     {
         return Some(s.clone());
     }
@@ -1367,7 +1367,7 @@ fn sample_field_into(
 /// ...)` from a flattened env.
 fn record_value_expr(inv: &OpaqueInvariant, env: &BTreeMap<String, f64>) -> Expr {
     let mut children = vec![Expr::Atom(
-        Atom::Symbol(inv.ctor_name.clone()),
+        Atom::Name(inv.ctor_name.clone()),
         chelis_deep::Span::new(0, 0),
     )];
     for (name, fty) in &inv.fields {
@@ -1402,7 +1402,7 @@ fn field_value_expr(path: &str, fty: &FieldType, env: &BTreeMap<String, f64>) ->
             // bare record with field kvs (the evaluator resolves the
             // single-variant ctor by field set).
             let mut children = vec![Expr::Atom(
-                Atom::Symbol("__nested".to_string()),
+                Atom::Name("__nested".to_string()),
                 chelis_deep::Span::new(0, 0),
             )];
             for (n, f) in inner {
@@ -1699,7 +1699,7 @@ fn span0() -> chelis_deep::Span {
     chelis_deep::Span::new(0, 0)
 }
 fn sym(s: &str) -> Expr {
-    Expr::Atom(Atom::Symbol(s.to_string()), span0())
+    Expr::Atom(Atom::Name(s.to_string()), span0())
 }
 fn node(tag: &str, kids: Vec<Expr>) -> Expr {
     let mut elements = vec![sym(tag), Expr::Map(Default::default(), span0())];

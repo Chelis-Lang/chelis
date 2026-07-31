@@ -95,7 +95,7 @@ fn prune_preserves_module_head_and_import() {
         "the module tag is first"
     );
     assert!(
-        matches!(list.elements.get(2), Some(DeepExpr::Atom(DeepAtom::Symbol(n), _)) if n == "demo.pricer"),
+        matches!(list.elements.get(2), Some(DeepExpr::Atom(DeepAtom::Name(n), _)) if n == "demo.pricer"),
         "the module-name atom is retained at index 2"
     );
     let has_import = list

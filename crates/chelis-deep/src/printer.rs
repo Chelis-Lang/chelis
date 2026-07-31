@@ -92,7 +92,7 @@ impl Printer {
 
     fn fmt_atom(atom: &Atom) -> String {
         match atom {
-            Atom::Symbol(s) => s.clone(),
+            Atom::Name(s) => s.clone(),
             Atom::Tag(tag) => tag.as_str().to_string(),
             Atom::Int(n) => n.to_string(),
             Atom::Float(f) => {
@@ -341,7 +341,7 @@ mod tests {
     }
 
     fn sym(name: &str) -> Expr {
-        atom_expr(Atom::Symbol(name.to_string()))
+        atom_expr(Atom::Name(name.to_string()))
     }
 
     fn map_expr(entries: Vec<(&str, Expr)>) -> Expr {
@@ -555,7 +555,7 @@ mod tests {
                 ("z-key", atom_expr(Atom::Int(1))),
                 ("a-key", atom_expr(Atom::Int(2))),
             ],
-            atom_expr(Atom::Symbol("body".into())),
+            atom_expr(Atom::Name("body".into())),
         );
         assert_eq!(print_expr(&expr), "^{:a-key 2 :z-key 1} body");
     }

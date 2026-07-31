@@ -445,7 +445,7 @@ fn children(expr: &Expr) -> &[Expr] {
 
 fn sym_str(expr: &Expr) -> Option<&str> {
     match expr {
-        Expr::Atom(Atom::Symbol(s), _) => Some(s.as_str()),
+        Expr::Atom(Atom::Name(s), _) => Some(s.as_str()),
         _ => None,
     }
 }

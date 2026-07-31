@@ -1124,7 +1124,7 @@ fn deep_span() -> chelis_deep::Span {
 }
 
 fn deep_symbol(value: &str) -> DeepExpr {
-    DeepExpr::Atom(DeepAtom::Symbol(value.to_string()), deep_span())
+    DeepExpr::Atom(DeepAtom::Name(value.to_string()), deep_span())
 }
 
 fn deep_int(value: i64) -> DeepExpr {
@@ -1984,7 +1984,7 @@ fn count_invariant_opaque_deep(exprs: &[DeepExpr]) -> usize {
     fn scan(expr: &DeepExpr, acc: &mut usize) {
         if let DeepExpr::List(list, _) = expr {
             let tag = list.elements.first().and_then(|head| match head {
-                DeepExpr::Atom(DeepAtom::Symbol(sym), _) => Some(sym.as_str()),
+                DeepExpr::Atom(DeepAtom::Name(sym), _) => Some(sym.as_str()),
                 _ => None,
             });
             if tag == Some("deftype")
@@ -2526,7 +2526,7 @@ fn list_tag_from_list(list: &DeepList) -> Option<DeepTag> {
 
 fn symbol_text(expr: &DeepExpr) -> Option<&str> {
     match expr {
-        DeepExpr::Atom(DeepAtom::Symbol(value), _) => Some(value),
+        DeepExpr::Atom(DeepAtom::Name(value), _) => Some(value),
         _ => None,
     }
 }

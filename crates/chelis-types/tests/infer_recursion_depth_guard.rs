@@ -38,7 +38,7 @@ use chelis_deep::span::Span;
 use chelis_types::check_ir_program;
 
 fn sym(s: &str) -> Expr {
-    Expr::Atom(Atom::Symbol(s.to_string()), Span::new(0, 0))
+    Expr::Atom(Atom::Name(s.to_string()), Span::new(0, 0))
 }
 
 fn empty_meta() -> Expr {

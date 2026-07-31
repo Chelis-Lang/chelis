@@ -26,7 +26,7 @@ pub fn decode_effect_kind(list: &List) -> Result<EffectKind, EffectKindDecodeErr
         return EffectKind::decode(EffectKindInput::Malformed);
     }
     match value {
-        Expr::Atom(Atom::Symbol(symbol), _) => EffectKind::decode(EffectKindInput::Symbol(symbol)),
+        Expr::Atom(Atom::Name(symbol), _) => EffectKind::decode(EffectKindInput::Symbol(symbol)),
         _ => EffectKind::decode(EffectKindInput::Malformed),
     }
 }

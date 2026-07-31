@@ -1952,7 +1952,7 @@ fn list_tag(list: &chelis_deep::List) -> Option<DeepTag> {
 
 fn symbol_name(expr: &DeepExpr) -> Option<&str> {
     match expr {
-        DeepExpr::Atom(chelis_deep::Atom::Symbol(name), _) => Some(name.as_str()),
+        DeepExpr::Atom(chelis_deep::Atom::Name(name), _) => Some(name.as_str()),
         _ => None,
     }
 }
@@ -3355,7 +3355,7 @@ fn wire_deep_expr(expr: &DeepExpr) -> WireDeepExpr {
         DeepExpr::Atom(atom, s) => WireDeepExpr {
             kind: WireDeepExprKind::Atom {
                 atom: match atom {
-                    chelis_deep::Atom::Symbol(value) => WireDeepAtom::Symbol {
+                    chelis_deep::Atom::Name(value) => WireDeepAtom::Symbol {
                         value: value.clone(),
                     },
                     // Serialization boundary (decode-once, chelis#731 Phase

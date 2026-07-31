@@ -56,7 +56,7 @@ fn children(expr: &Expr) -> &[Expr] {
 
 fn symbol_text(expr: &Expr) -> Option<&str> {
     match expr {
-        Expr::Atom(Atom::Symbol(s), _) => Some(s.as_str()),
+        Expr::Atom(Atom::Name(s), _) => Some(s.as_str()),
         _ => None,
     }
 }
@@ -100,7 +100,7 @@ fn lookup_producer<'a>(exprs: &'a [Expr], name: &str) -> Option<ProducerBody<'a>
                     if let Some(n) = symbol_text(p) {
                         params.push(n.to_string());
                     } else if let Expr::List(list, _) = p
-                        && let Some(Expr::Atom(Atom::Symbol(s), _)) = list.elements.first()
+                        && let Some(Expr::Atom(Atom::Name(s), _)) = list.elements.first()
                     {
                         params.push(s.clone());
                     }
@@ -275,7 +275,7 @@ fn make_var(name: &str) -> Expr {
             elements: vec![
                 Expr::Atom(Atom::Tag(DeepTag::Var), Span::new(0, 0)),
                 Expr::Map(Default::default(), Span::new(0, 0)),
-                Expr::Atom(Atom::Symbol(name.to_string()), Span::new(0, 0)),
+                Expr::Atom(Atom::Name(name.to_string()), Span::new(0, 0)),
             ],
         },
         Span::new(0, 0),
@@ -553,7 +553,7 @@ fn int_lit_node(value: i64, int_ty: &str) -> Expr {
             elements: vec![
                 Expr::Atom(Atom::Tag(DeepTag::TPrim), Span::new(0, 0)),
                 Expr::Map(MetaMap::default(), Span::new(0, 0)),
-                Expr::Atom(Atom::Symbol(int_ty.to_string()), Span::new(0, 0)),
+                Expr::Atom(Atom::Name(int_ty.to_string()), Span::new(0, 0)),
             ],
         },
         Span::new(0, 0),
@@ -582,7 +582,7 @@ fn float_lit_node(value: f64) -> Expr {
             elements: vec![
                 Expr::Atom(Atom::Tag(DeepTag::TPrim), Span::new(0, 0)),
                 Expr::Map(MetaMap::default(), Span::new(0, 0)),
-                Expr::Atom(Atom::Symbol("f32".to_string()), Span::new(0, 0)),
+                Expr::Atom(Atom::Name("f32".to_string()), Span::new(0, 0)),
             ],
         },
         Span::new(0, 0),
@@ -608,7 +608,7 @@ fn rebuild(template: &Expr, new_children: Vec<Expr>) -> Expr {
         Expr::List(list, _) => list.elements.first().cloned(),
         _ => None,
     }
-    .unwrap_or_else(|| Expr::Atom(Atom::Symbol("?".to_string()), Span::new(0, 0)));
+    .unwrap_or_else(|| Expr::Atom(Atom::Name("?".to_string()), Span::new(0, 0)));
     let mut elements = vec![tag_sym, Expr::Map(Default::default(), Span::new(0, 0))];
     elements.extend(new_children);
     Expr::List(List { elements }, Span::new(0, 0))

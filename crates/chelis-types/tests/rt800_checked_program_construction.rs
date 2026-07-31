@@ -45,7 +45,7 @@ fn find_list_mut<'a>(expr: &'a mut Expr, tag: &str) -> Option<&'a mut List> {
 
 fn replace_symbol(expr: &mut Expr, from: &str, to: &str) -> bool {
     match expr {
-        Expr::Atom(Atom::Symbol(name), _) if name == from => {
+        Expr::Atom(Atom::Name(name), _) if name == from => {
             *name = to.to_string();
             true
         }
@@ -134,7 +134,7 @@ fn mutate_eff_metadata(exprs: &mut [Expr]) {
     };
     meta.entries.push((
         "eff".to_string(),
-        Expr::Atom(Atom::Symbol("forged".to_string()), Span::new(0, 0)),
+        Expr::Atom(Atom::Name("forged".to_string()), Span::new(0, 0)),
     ));
 }
 

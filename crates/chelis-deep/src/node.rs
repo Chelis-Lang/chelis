@@ -75,7 +75,7 @@ pub enum ChildRef<'a> {
 
 /// A stamped vocabulary node with private fields.
 ///
-/// Invariant: no `Atom::Symbol` or `Atom::Tag` at a `RuntimeExpr` child
+/// Invariant: no `Atom::Name` or `Atom::Tag` at a `RuntimeExpr` child
 /// position. Enforced at construction (both `try_new` and `new`
 /// validate in all build modes).
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -132,7 +132,7 @@ impl Node {
         for (index, child) in children.iter().enumerate() {
             let role = child_stamp_role(tag, index, n);
             if role == ChildStampRole::RuntimeExpr {
-                if let Expr::Atom(Atom::Symbol(s), _) = child {
+                if let Expr::Atom(Atom::Name(s), _) = child {
                     return Err(NodeError::NameAtExprSlot {
                         tag,
                         index,
@@ -203,7 +203,7 @@ impl Node {
         self.children.iter().enumerate().filter_map(move |(i, child)| {
             if child_stamp_role(tag, i, arity) == ChildStampRole::Binder {
                 match child {
-                    Expr::Atom(Atom::Symbol(s), _) => Some(s.as_str()),
+                    Expr::Atom(Atom::Name(s), _) => Some(s.as_str()),
                     _ => None,
                 }
             } else {
@@ -222,7 +222,7 @@ impl Node {
             self.tag.as_str()
         );
         match &self.children[index] {
-            Expr::Atom(Atom::Symbol(s), _) => s.as_str(),
+            Expr::Atom(Atom::Name(s), _) => s.as_str(),
             other => panic!(
                 "binder_name({index}) on `{}`: child is {other:?}, not Name",
                 self.tag.as_str()
@@ -251,11 +251,11 @@ impl Node {
             match child_stamp_role(tag, i, arity) {
                 ChildStampRole::RuntimeExpr => ChildRef::Expr(child),
                 ChildStampRole::Binder => match child {
-                    Expr::Atom(Atom::Symbol(s), _) => ChildRef::Binder(s.as_str()),
+                    Expr::Atom(Atom::Name(s), _) => ChildRef::Binder(s.as_str()),
                     _ => ChildRef::Bypass(child),
                 },
                 ChildStampRole::Selector => match child {
-                    Expr::Atom(Atom::Symbol(s), _) => ChildRef::Selector(s.as_str()),
+                    Expr::Atom(Atom::Name(s), _) => ChildRef::Selector(s.as_str()),
                     _ => ChildRef::Bypass(child),
                 },
                 ChildStampRole::Syntax => ChildRef::Syntax(child),
@@ -297,7 +297,7 @@ mod tests {
     }
 
     fn name(s: &str) -> Expr {
-        Expr::Atom(Atom::Symbol(s.to_string()), sp())
+        Expr::Atom(Atom::Name(s.to_string()), sp())
     }
 
     fn int(n: i64) -> Expr {

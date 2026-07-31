@@ -526,7 +526,7 @@ fn span0() -> Span {
     Span::new(0, 0)
 }
 fn sym(s: &str) -> Expr {
-    Expr::Atom(Atom::Symbol(s.to_string()), span0())
+    Expr::Atom(Atom::Name(s.to_string()), span0())
 }
 fn node(tag: &str, kids: Vec<Expr>) -> Expr {
     let mut elements = vec![sym(tag), Expr::Map(MetaMap::default(), span0())];
@@ -587,7 +587,7 @@ fn list_tag(expr: &Expr) -> Option<DeepTag> {
 fn child0_sym(expr: &Expr) -> Option<&str> {
     match expr {
         Expr::List(l, _) if l.elements.len() >= 3 => match &l.elements[2] {
-            Expr::Atom(Atom::Symbol(s), _) => Some(s.as_str()),
+            Expr::Atom(Atom::Name(s), _) => Some(s.as_str()),
             _ => None,
         },
         _ => None,

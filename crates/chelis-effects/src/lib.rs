@@ -970,7 +970,7 @@ fn validate_build_target_expr(expr: &Expr, target: &str, errors: &mut Vec<Effect
 ///
 /// `chelis_surf::desugar::desugar_effect_set` builds the SAME node shape and
 /// was migrated to the typed constructors; this is its post-check twin and
-/// now matches it exactly. The effect NAMES stay `Atom::Symbol` deliberately:
+/// now matches it exactly. The effect NAMES stay `Atom::Name` deliberately:
 /// `random`, `accum`, `io` and `test` are payload, not vocabulary tags.
 fn effect_set_expr(effects: &EffectSet) -> Expr {
     let mut children = Vec::new();
@@ -1027,7 +1027,7 @@ fn children(list: &List) -> &[Expr] {
 
 fn symbol_name(expr: &Expr) -> Option<&str> {
     match expr {
-        Expr::Atom(Atom::Symbol(name), _) => Some(name.as_str()),
+        Expr::Atom(Atom::Name(name), _) => Some(name.as_str()),
         _ => None,
     }
 }
@@ -1059,7 +1059,7 @@ fn string_literal(expr: &Expr) -> Option<&str> {
 }
 
 fn symbol(name: &str) -> Expr {
-    Expr::Atom(Atom::Symbol(name.to_string()), zero_span())
+    Expr::Atom(Atom::Name(name.to_string()), zero_span())
 }
 
 fn zero_span() -> Span {

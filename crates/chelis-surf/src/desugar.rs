@@ -112,7 +112,7 @@ fn sp() -> Span {
 }
 
 fn sym(s: &str) -> deep::Expr {
-    deep::Expr::Atom(deep::Atom::Symbol(s.to_string()), sp())
+    deep::Expr::Atom(deep::Atom::Name(s.to_string()), sp())
 }
 
 fn int(n: i64) -> deep::Expr {

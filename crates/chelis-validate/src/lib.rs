@@ -131,7 +131,7 @@ fn first_forged_linker_name(exprs: &[chelis_deep::ast::Expr]) -> Option<String> 
             return None;
         }
         match list.elements.get(2) {
-            Some(chelis_deep::ast::Expr::Atom(chelis_deep::ast::Atom::Symbol(name), _)) => {
+            Some(chelis_deep::ast::Expr::Atom(chelis_deep::ast::Atom::Name(name), _)) => {
                 Some(name.as_str())
             }
             _ => None,
@@ -171,7 +171,7 @@ fn first_reopened_module(exprs: &[chelis_deep::ast::Expr]) -> Option<String> {
             return None;
         }
         match list.elements.get(2) {
-            Some(chelis_deep::ast::Expr::Atom(chelis_deep::ast::Atom::Symbol(name), _)) => {
+            Some(chelis_deep::ast::Expr::Atom(chelis_deep::ast::Atom::Name(name), _)) => {
                 Some(name.as_str())
             }
             _ => None,
@@ -220,7 +220,7 @@ fn first_duplicate_defsig(exprs: &[chelis_deep::ast::Expr]) -> Option<String> {
 
     fn symbol_child(list: &chelis_deep::ast::List, index: usize) -> Option<&str> {
         match list.elements.get(index) {
-            Some(chelis_deep::ast::Expr::Atom(chelis_deep::ast::Atom::Symbol(name), _)) => {
+            Some(chelis_deep::ast::Expr::Atom(chelis_deep::ast::Atom::Name(name), _)) => {
                 Some(name.as_str())
             }
             _ => None,

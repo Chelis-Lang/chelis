@@ -159,7 +159,7 @@ impl<'a> Parser<'a> {
         let tok = self.advance().ok_or(ParseError::UnexpectedEof { offset })?;
         let span = tok.span;
         let atom = match &tok.kind {
-            TokenKind::Symbol(s) => Atom::Symbol(s.clone()),
+            TokenKind::Symbol(s) => Atom::Name(s.clone()),
             TokenKind::Int(n) => Atom::Int(*n),
             TokenKind::Float(f) => Atom::Float(*f),
             // Typed-suffix literals (spec/03-deep-syntax.md §6.4.1): the
@@ -428,7 +428,7 @@ fn collapse_typed_literal_lit(list: List, span: crate::Span) -> Result<List, Par
     }
     let is_outer_lit = matches!(
         &list.elements[0],
-        Expr::Atom(Atom::Symbol(s), _) if s == "lit"
+        Expr::Atom(Atom::Name(s), _) if s == "lit"
     );
     if !is_outer_lit {
         return Ok(list);
@@ -446,7 +446,7 @@ fn collapse_typed_literal_lit(list: List, span: crate::Span) -> Result<List, Par
     }
     let inner_is_lit = matches!(
         &inner_list.elements[0],
-        Expr::Atom(Atom::Symbol(s), _) if s == "lit"
+        Expr::Atom(Atom::Name(s), _) if s == "lit"
     );
     if !inner_is_lit {
         return Ok(list);
@@ -468,7 +468,7 @@ fn collapse_typed_literal_lit(list: List, span: crate::Span) -> Result<List, Par
             if t_prim_list.elements.len() == 3
                 && matches!(
                     &t_prim_list.elements[0],
-                    Expr::Atom(Atom::Symbol(s), _) if s == "t-prim"
+                    Expr::Atom(Atom::Name(s), _) if s == "t-prim"
                 )
     );
     if !inner_type_ok {
@@ -556,9 +556,9 @@ fn typed_literal_lit_expr(value: Atom, suffix: lexer::LiteralSuffix, span: crate
     let t_prim = Expr::List(
         List {
             elements: vec![
-                Expr::Atom(Atom::Symbol("t-prim".to_string()), span),
+                Expr::Atom(Atom::Name("t-prim".to_string()), span),
                 Expr::Map(MetaMap::default(), span),
-                Expr::Atom(Atom::Symbol(prim_name.to_string()), span),
+                Expr::Atom(Atom::Name(prim_name.to_string()), span),
             ],
         },
         span,
@@ -573,7 +573,7 @@ fn typed_literal_lit_expr(value: Atom, suffix: lexer::LiteralSuffix, span: crate
     Expr::List(
         List {
             elements: vec![
-                Expr::Atom(Atom::Symbol("lit".to_string()), span),
+                Expr::Atom(Atom::Name("lit".to_string()), span),
                 meta,
                 Expr::Atom(value, span),
             ],
@@ -656,7 +656,7 @@ fn normalize_typed_literals_in_expr(expr: &mut Expr) -> Result<(), ParseError> {
             let needs_collapse = list.elements.len() == 3
                 && matches!(
                     &list.elements[0],
-                    Expr::Atom(Atom::Symbol(s), _) if s == "lit"
+                    Expr::Atom(Atom::Name(s), _) if s == "lit"
                 );
             if needs_collapse {
                 let span_copy = *span;
@@ -693,7 +693,7 @@ pub fn parse(tokens: &[Token]) -> Result<Vec<Expr>, ParseError> {
 /// converted. After this pass the tag string does not exist in the
 /// in-memory tree; `chelis_deep::printer` regenerates it via
 /// `DeepTag::as_str` at the serialization boundary. Symbols that do not
-/// decode (lenient-parsed unknown tags, spec/03 §8.3) stay `Atom::Symbol`
+/// decode (lenient-parsed unknown tags, spec/03 §8.3) stay `Atom::Name`
 /// and flow to consumers' loud raw-string-boundary arms.
 pub fn stamp_tags(exprs: &mut [Expr]) {
     for expr in exprs.iter_mut() {
@@ -705,7 +705,7 @@ fn stamp_tags_expr(expr: &mut Expr) {
     match expr {
         Expr::List(list, _) => {
             if let Some(Expr::Atom(atom, _)) = list.elements.first_mut()
-                && let Atom::Symbol(symbol) = &*atom
+                && let Atom::Name(symbol) = &*atom
                 && let Some(tag) = crate::tag::DeepTag::parse(symbol)
             {
                 *atom = Atom::Tag(tag);
@@ -796,7 +796,7 @@ mod tests {
     fn parse_symbol() {
         let exprs = p("foo");
         match &exprs[0] {
-            Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "foo"),
+            Expr::Atom(Atom::Name(s), _) => assert_eq!(s, "foo"),
             other => panic!("expected Symbol, got {:?}", other),
         }
     }
@@ -834,7 +834,7 @@ mod tests {
             Expr::List(list, _) => {
                 assert_eq!(list.elements.len(), 3);
                 match &list.elements[0] {
-                    Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "add"),
+                    Expr::Atom(Atom::Name(s), _) => assert_eq!(s, "add"),
                     other => panic!("expected Symbol(add), got {:?}", other),
                 }
                 match &list.elements[1] {
@@ -858,7 +858,7 @@ mod tests {
             Expr::List(list, _) => {
                 assert_eq!(list.elements.len(), 1);
                 match &list.elements[0] {
-                    Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "nop"),
+                    Expr::Atom(Atom::Name(s), _) => assert_eq!(s, "nop"),
                     other => panic!("expected Symbol(nop), got {:?}", other),
                 }
             }
@@ -885,7 +885,7 @@ mod tests {
                     other => panic!("expected empty Map, got {:?}", other),
                 }
                 match &list.elements[2] {
-                    Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "f"),
+                    Expr::Atom(Atom::Name(s), _) => assert_eq!(s, "f"),
                     other => panic!("expected Symbol(f), got {:?}", other),
                 }
                 match &list.elements[3] {
@@ -911,11 +911,11 @@ mod tests {
                 assert_eq!(meta.entries.len(), 1);
                 assert_eq!(meta.entries[0].0, "type");
                 match &meta.entries[0].1 {
-                    Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "f32"),
+                    Expr::Atom(Atom::Name(s), _) => assert_eq!(s, "f32"),
                     other => panic!("expected Symbol(f32), got {:?}", other),
                 }
                 match meta.expr.as_ref() {
-                    Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "x"),
+                    Expr::Atom(Atom::Name(s), _) => assert_eq!(s, "x"),
                     other => panic!("expected Symbol(x), got {:?}", other),
                 }
             }
@@ -934,7 +934,7 @@ mod tests {
                 assert_eq!(meta.entries[1].0, "pure");
                 match meta.expr.as_ref() {
                     Expr::List(list, _) => match &list.elements[0] {
-                        Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "add"),
+                        Expr::Atom(Atom::Name(s), _) => assert_eq!(s, "add"),
                         other => panic!("expected Symbol(add), got {:?}", other),
                     },
                     other => panic!("expected List, got {:?}", other),
@@ -956,13 +956,13 @@ mod tests {
         }
         match &exprs[1] {
             Expr::List(list, _) => match &list.elements[0] {
-                Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "add"),
+                Expr::Atom(Atom::Name(s), _) => assert_eq!(s, "add"),
                 other => panic!("expected Symbol(add), got {:?}", other),
             },
             other => panic!("expected List, got {:?}", other),
         }
         match &exprs[2] {
-            Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "foo"),
+            Expr::Atom(Atom::Name(s), _) => assert_eq!(s, "foo"),
             other => panic!("expected Symbol(foo), got {:?}", other),
         }
     }

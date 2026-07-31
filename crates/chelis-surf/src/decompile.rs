@@ -135,7 +135,7 @@ fn extract_grad_wrt_name(expr: &Expr) -> Option<String> {
         Expr::List(list, _) if tag(list) == Some(DeepTag::Var) => {
             children(list).first().and_then(sym_str).map(str::to_string)
         }
-        Expr::Atom(Atom::Symbol(name), _) => Some(name.clone()),
+        Expr::Atom(Atom::Name(name), _) => Some(name.clone()),
         _ => None,
     }
 }
@@ -153,14 +153,14 @@ fn format_grad_expr(target: Option<String>, wrt: Option<Vec<String>>) -> String 
 
 fn sym_str(expr: &Expr) -> Option<&str> {
     match expr {
-        Expr::Atom(Atom::Symbol(s), _) => Some(s.as_str()),
+        Expr::Atom(Atom::Name(s), _) => Some(s.as_str()),
         _ => None,
     }
 }
 
 fn brief(expr: &Expr) -> String {
     match expr {
-        Expr::Atom(Atom::Symbol(s), _) => s.clone(),
+        Expr::Atom(Atom::Name(s), _) => s.clone(),
         Expr::Atom(Atom::Tag(t), _) => t.as_str().to_string(),
         Expr::Atom(Atom::Int(n), _) => n.to_string(),
         Expr::Atom(Atom::Float(f), _) => format_float(*f),
@@ -376,7 +376,7 @@ impl<'a> IdiomaticDecompiler<'a> {
 
     fn render_param(&self, expr: &Expr, fallback_ty: Option<&Expr>) -> String {
         match expr {
-            Expr::Atom(Atom::Symbol(name), _) => {
+            Expr::Atom(Atom::Name(name), _) => {
                 if let Some(ty) = fallback_ty {
                     format!("{name}: {}", decompile_type_expr(ty))
                 } else {
@@ -594,7 +594,7 @@ impl<'a> IdiomaticDecompiler<'a> {
 
     fn decompile_expr(&self, expr: &Expr) -> String {
         match expr {
-            Expr::Atom(Atom::Symbol(s), _) => s.clone(),
+            Expr::Atom(Atom::Name(s), _) => s.clone(),
             Expr::Atom(Atom::Tag(t), _) => t.as_str().to_string(),
             Expr::Atom(Atom::Int(n), _) => n.to_string(),
             Expr::Atom(Atom::Float(f), _) => format_float(*f),
@@ -1547,7 +1547,7 @@ fn decompile_defdim(list: &List) -> String {
 
 fn decompile_expr(expr: &Expr) -> String {
     match expr {
-        Expr::Atom(Atom::Symbol(s), _) => s.clone(),
+        Expr::Atom(Atom::Name(s), _) => s.clone(),
         Expr::Atom(Atom::Tag(t), _) => t.as_str().to_string(),
         Expr::Atom(Atom::Int(n), _) => n.to_string(),
         Expr::Atom(Atom::Float(f), _) => format_float(*f),
@@ -1818,7 +1818,7 @@ fn decompile_params(expr: &Expr) -> String {
         let params: Vec<String> = kids
             .iter()
             .map(|p| match p {
-                Expr::Atom(Atom::Symbol(s), _) => s.clone(),
+                Expr::Atom(Atom::Name(s), _) => s.clone(),
                 Expr::MetaExpr(meta, _) => {
                     let pname = sym_str(&meta.expr).unwrap_or("_");
                     if let Some(ty) = extract_type_meta(p) {
@@ -2167,7 +2167,7 @@ fn decompile_effect_set_expr(expr: &Expr) -> String {
 
 fn decompile_effect_expr(expr: &Expr) -> Option<String> {
     match expr {
-        Expr::Atom(Atom::Symbol(name), _) => Some(match name.as_str() {
+        Expr::Atom(Atom::Name(name), _) => Some(match name.as_str() {
             "diff" => "Diff".to_string(),
             "random" => "Random".to_string(),
             "accum" => "Accum".to_string(),

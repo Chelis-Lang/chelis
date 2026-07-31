@@ -152,7 +152,7 @@ fn children(expr: &Expr) -> &[Expr] {
 fn var_name(expr: &Expr) -> Option<&str> {
     if tag(expr) == Some(DeepTag::Var) {
         let kids = children(expr);
-        if let Some(Expr::Atom(Atom::Symbol(s), _)) = kids.first() {
+        if let Some(Expr::Atom(Atom::Name(s), _)) = kids.first() {
             return Some(s.as_str());
         }
     }
@@ -205,14 +205,14 @@ fn fn_parts(fn_node: &Expr) -> Option<(String, &Expr)> {
 /// the name symbol.
 fn binder_name(expr: &Expr) -> Option<String> {
     match expr {
-        Expr::Atom(Atom::Symbol(s), _) => Some(s.clone()),
+        Expr::Atom(Atom::Name(s), _) => Some(s.clone()),
         _ => {
             if let Some(name) = var_name(expr) {
                 return Some(name.to_string());
             }
             if let Expr::List(list, _) = expr
                 && list.tag().is_none()
-                && let Some(Expr::Atom(Atom::Symbol(s), _)) = list.elements.first()
+                && let Some(Expr::Atom(Atom::Name(s), _)) = list.elements.first()
             {
                 // typed-param list `(name {type: ...})`; a stamped
                 // vocabulary head (var/params/...) is never a binder name.
@@ -373,7 +373,7 @@ fn check_app_in_grammar(expr: &Expr) -> Result<(), PredGrammarError> {
 
 fn node_desc(expr: &Expr) -> String {
     match expr {
-        Expr::Atom(Atom::Symbol(s), _) => format!("symbol `{s}`"),
+        Expr::Atom(Atom::Name(s), _) => format!("symbol `{s}`"),
         Expr::Atom(_, _) => "literal".to_string(),
         Expr::Map(_, _) => "map".to_string(),
         Expr::MetaExpr(_, _) => "meta-expr".to_string(),

@@ -62,7 +62,7 @@ fn var_name(expr: &Expr) -> Option<&str> {
         return None;
     }
     match list.elements.get(2) {
-        Some(Expr::Atom(Atom::Symbol(name), _)) => Some(name.as_str()),
+        Some(Expr::Atom(Atom::Name(name), _)) => Some(name.as_str()),
         _ => None,
     }
 }

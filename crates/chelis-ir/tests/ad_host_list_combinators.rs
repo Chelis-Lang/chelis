@@ -46,7 +46,7 @@ fn def_name_and_body(expr: &Expr) -> Option<(String, Expr)> {
     }
     let kids = children(list);
     let name = match kids.first()? {
-        Expr::Atom(Atom::Symbol(name), _) => name.clone(),
+        Expr::Atom(Atom::Name(name), _) => name.clone(),
         _ => return None,
     };
     Some((name, kids.get(1)?.clone()))

@@ -90,7 +90,7 @@ impl Expr {
 /// An atomic (leaf) value in the AST.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Atom {
-    Symbol(String),
+    Name(String),
     /// A decoded closed-vocabulary Deep tag at a node's tag position
     /// (element 0). Stamped once by the parser or a typed constructor
     /// (decode-once, chelis#731 Phase 3): after parsing, the tag string
@@ -135,7 +135,7 @@ impl List {
     /// used to dispatch on the closed vocabulary by string.
     pub fn unknown_tag_symbol(&self) -> Option<&str> {
         match self.elements.first() {
-            Some(Expr::Atom(Atom::Symbol(symbol), _)) => Some(symbol.as_str()),
+            Some(Expr::Atom(Atom::Name(symbol), _)) => Some(symbol.as_str()),
             _ => None,
         }
     }

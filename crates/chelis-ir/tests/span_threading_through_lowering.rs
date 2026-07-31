@@ -332,7 +332,7 @@ fn atom_const_inherits_parent_span() {
 // spec/design/chelis_span_survival.md §2.3 rule (b), N→1 lowering
 // collapses must append the parent's span to the existing node's
 // `merged_spans` (lex-sorted, deduped). The same rule applies to the
-// `Atom::Symbol` branch of `lower_atom`, reachable when a bare atom is
+// `Atom::Name` branch of `lower_atom`, reachable when a bare atom is
 // referenced from a span-bearing context.
 
 /// MEDIUM oracle: a span-bearing `(var ...)` reference to a let-bound
@@ -481,7 +481,7 @@ fn var_ref_inherits_enclosing_apps_span_via_current_span_id() {
     );
 }
 
-/// MEDIUM oracle, sibling site: `lower_atom`'s `Atom::Symbol` cache hit
+/// MEDIUM oracle, sibling site: `lower_atom`'s `Atom::Name` cache hit
 /// (reachable via `MetaExpr`-wrapped bare-atom references) must also
 /// honor the N→1 collapse rule. Construct a `MetaExpr` form on a bare
 /// symbol and assert the parent metadata's span survives onto the
@@ -489,19 +489,19 @@ fn var_ref_inherits_enclosing_apps_span_via_current_span_id() {
 #[test]
 fn atom_symbol_ref_to_let_bound_name_records_span_on_cached_node() {
     // `^{span "atom_use"} a` is the legacy MetaExpr form: `Expr::MetaExpr`
-    // wraps a bare `Atom::Symbol("a")`. `lower_expr` does NOT pull a
+    // wraps a bare `Atom::Name("a")`. `lower_expr` does NOT pull a
     // span from a MetaExpr (only from `Expr::List` via `span_id()`), so
     // the parent app's span threads through `current_span_id` to the
     // bare-atom lowering. We exercise that path indirectly with a
     // span-bearing parent expr that contains a bare-symbol child.
     //
     // The greppable difference from the var-ref test is the lowering
-    // path: the `Atom::Symbol` branch of `lower_atom` (not `lower_var`)
+    // path: the `Atom::Name` branch of `lower_atom` (not `lower_var`)
     // hits the binding cache when the parser routes a bare symbol
     // through `Expr::Atom`. We construct that shape via a `(realize ...)`
     // over a MetaExpr-wrapped atom — `realize` is a tag whose children
-    // are lowered as exprs, so the bare `Atom::Symbol` child does take
-    // the `lower_atom::Atom::Symbol` path.
+    // are lowered as exprs, so the bare `Atom::Name` child does take
+    // the `lower_atom::Atom::Name` path.
     //
     // The test fixture is intentionally constructed: the canonical
     // Octant emit shape is `(var ...)` so the bare-atom path is rare in
@@ -516,7 +516,7 @@ fn atom_symbol_ref_to_let_bound_name_records_span_on_cached_node() {
 
     // Under canonical Deep, the body is `(var {span: "atom_use"} a)`,
     // which routes through `lower_var` (already covered above). The
-    // distinct-path coverage for `lower_atom`'s `Atom::Symbol` cache
+    // distinct-path coverage for `lower_atom`'s `Atom::Name` cache
     // hit comes from `current_span_id` being already set when a parent
     // expr lowers a bare atom child. We assert at minimum the audit
     // invariant holds end-to-end on this fixture.

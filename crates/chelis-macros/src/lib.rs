@@ -421,7 +421,7 @@ fn replace_placeholder_vars(expr: &Expr, replacements: &HashMap<String, Expr>) -
 
 fn collect_symbols(expr: &Expr, out: &mut HashSet<String>) {
     match expr {
-        Expr::Atom(Atom::Symbol(name), _) => {
+        Expr::Atom(Atom::Name(name), _) => {
             out.insert(name.clone());
         }
         Expr::Atom(_, _) | Expr::Map(_, _) => {}
@@ -664,7 +664,7 @@ fn hygienize_expr(expr: &Expr, counter: &mut usize, env: &HashMap<String, String
                 && let Some(renamed) = env.get(name)
             {
                 let mut elements = list.elements.clone();
-                elements[2] = Expr::Atom(Atom::Symbol(renamed.clone()), children(list)[0].span());
+                elements[2] = Expr::Atom(Atom::Name(renamed.clone()), children(list)[0].span());
                 return Expr::List(List { elements }, *span);
             }
             match get_tag(list) {
@@ -722,7 +722,7 @@ fn hygienize_let(
         while i + 1 < bind_kids.len() {
             let name = symbol_name(&bind_kids[i]).unwrap_or("_");
             let fresh = fresh_name(name, counter);
-            new_bind_children.push(Expr::Atom(Atom::Symbol(fresh.clone()), bind_kids[i].span()));
+            new_bind_children.push(Expr::Atom(Atom::Name(fresh.clone()), bind_kids[i].span()));
             new_bind_children.push(hygienize_expr(&bind_kids[i + 1], counter, &scope_env));
             scope_env.insert(name.to_string(), fresh);
             i += 2;
@@ -794,10 +794,10 @@ fn hygienize_params_expr(
     let mut elements = vec![list.elements[0].clone(), list.elements[1].clone()];
     for param in children(list) {
         match param {
-            Expr::Atom(Atom::Symbol(name), span) => {
+            Expr::Atom(Atom::Name(name), span) => {
                 let fresh = fresh_name(name, counter);
                 next_env.insert(name.clone(), fresh.clone());
-                elements.push(Expr::Atom(Atom::Symbol(fresh), *span));
+                elements.push(Expr::Atom(Atom::Name(fresh), *span));
             }
             Expr::List(param_list, param_span) if param_list.elements.len() == 2 => {
                 let Some(name) = symbol_name(&param_list.elements[0]) else {
@@ -809,7 +809,7 @@ fn hygienize_params_expr(
                 elements.push(Expr::List(
                     List {
                         elements: vec![
-                            Expr::Atom(Atom::Symbol(fresh), param_list.elements[0].span()),
+                            Expr::Atom(Atom::Name(fresh), param_list.elements[0].span()),
                             param_list.elements[1].clone(),
                         ],
                     },
@@ -845,7 +845,7 @@ fn hygienize_pattern(
                 node_with_meta(
                     DeepTag::PatVar,
                     list.elements[1].clone(),
-                    vec![Expr::Atom(Atom::Symbol(fresh), children(list)[0].span())],
+                    vec![Expr::Atom(Atom::Name(fresh), children(list)[0].span())],
                     *span,
                 ),
                 next_env,
@@ -866,7 +866,7 @@ fn hygienize_pattern(
                 node_with_meta(
                     DeepTag::PatAs,
                     list.elements[1].clone(),
-                    vec![Expr::Atom(Atom::Symbol(fresh), kids[0].span()), inner],
+                    vec![Expr::Atom(Atom::Name(fresh), kids[0].span()), inner],
                     *span,
                 ),
                 inner_env,
@@ -969,7 +969,7 @@ fn params_blockers(expr: &Expr) -> Vec<String> {
         Expr::List(list, _) if get_tag(list) == Some(DeepTag::Params) => children(list)
             .iter()
             .filter_map(|param| match param {
-                Expr::Atom(Atom::Symbol(name), _) => Some(name.clone()),
+                Expr::Atom(Atom::Name(name), _) => Some(name.clone()),
                 Expr::List(param_list, _) if param_list.elements.len() == 2 => {
                     symbol_name(&param_list.elements[0]).map(|name| name.to_string())
                 }
@@ -1030,7 +1030,7 @@ fn collect_pattern_binders(expr: &Expr, out: &mut Vec<String>) {
 }
 
 fn macro_source(name: &str, args: &[Expr]) -> Expr {
-    let mut elements = vec![Expr::Atom(Atom::Symbol(name.to_string()), zero_span())];
+    let mut elements = vec![Expr::Atom(Atom::Name(name.to_string()), zero_span())];
     elements.extend(args.iter().cloned());
     Expr::List(List { elements }, zero_span())
 }
@@ -1070,7 +1070,7 @@ fn children(list: &List) -> &[Expr] {
 
 fn symbol_name(expr: &Expr) -> Option<&str> {
     match expr {
-        Expr::Atom(Atom::Symbol(name), _) => Some(name.as_str()),
+        Expr::Atom(Atom::Name(name), _) => Some(name.as_str()),
         _ => None,
     }
 }
@@ -1172,7 +1172,7 @@ fn app_expr(func: Expr, args: Vec<Expr>) -> Expr {
 fn var(name: &str) -> Expr {
     node(
         DeepTag::Var,
-        vec![Expr::Atom(Atom::Symbol(name.to_string()), zero_span())],
+        vec![Expr::Atom(Atom::Name(name.to_string()), zero_span())],
     )
 }
 
@@ -1185,7 +1185,7 @@ fn int32_lit(value: i64) -> Expr {
                     "type".to_string(),
                     node(
                         DeepTag::TPrim,
-                        vec![Expr::Atom(Atom::Symbol("int32".to_string()), zero_span())],
+                        vec![Expr::Atom(Atom::Name("int32".to_string()), zero_span())],
                     ),
                 )],
             },

@@ -466,7 +466,7 @@ fn decode_precision(expr: &Expr) -> Result<HostPrecisionTerm, HostTypeDecodeErro
 }
 
 fn decode_shape_slot(expr: &Expr) -> Result<HostShapeSlot, HostTypeDecodeError> {
-    if let Expr::Atom(Atom::Symbol(name), _) = expr {
+    if let Expr::Atom(Atom::Name(name), _) = expr {
         return Ok(HostShapeSlot::Dim(DimInfo::Named(name.clone(), None)));
     }
     if let Expr::Atom(Atom::Int(value), _) = expr {
@@ -542,7 +542,7 @@ fn list_children(list: &List) -> Result<&[Expr], HostTypeDecodeError> {
 
 fn symbol_name(expr: &Expr) -> Option<&str> {
     match expr {
-        Expr::Atom(Atom::Symbol(name), _) => Some(name),
+        Expr::Atom(Atom::Name(name), _) => Some(name),
         _ => None,
     }
 }

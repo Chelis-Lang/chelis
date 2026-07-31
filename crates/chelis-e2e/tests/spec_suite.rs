@@ -139,7 +139,7 @@ fn spec_deep_3tuple_format() {
                 if list.elements.len() >= 2
                     && matches!(
                         list.elements.first(),
-                        Some(Expr::Atom(Atom::Symbol(_) | Atom::Tag(_), _))
+                        Some(Expr::Atom(Atom::Name(_) | Atom::Tag(_), _))
                     )
                 {
                     // Second element must be a map (metadata).

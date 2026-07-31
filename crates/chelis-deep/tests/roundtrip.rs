@@ -65,7 +65,7 @@ fn post_sprint_def_ast_structure() {
             }
             // element 2: name "square"
             match &list.elements[2] {
-                Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "square"),
+                Expr::Atom(Atom::Name(s), _) => assert_eq!(s, "square"),
                 other => panic!("expected Symbol(square), got {:?}", other),
             }
             // element 3: fn node
@@ -189,7 +189,7 @@ fn spec_colon_as_list_head_parser_leniency() {
         Expr::List(list, _) => {
             assert_eq!(list.elements.len(), 3);
             match &list.elements[0] {
-                Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, ":"),
+                Expr::Atom(Atom::Name(s), _) => assert_eq!(s, ":"),
                 other => panic!("expected Symbol(:), got {:?}", other),
             }
         }
