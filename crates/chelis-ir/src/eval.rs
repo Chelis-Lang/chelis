@@ -260,6 +260,7 @@ fn infer_symbolic_bindings_from_inputs(
     dag: &Dag,
     inputs: &HashMap<String, TensorValue>,
     required_symbols: &HashSet<String>,
+    live: Option<&[bool]>,
 ) -> Result<HashMap<String, usize>, String> {
     let mut bindings = HashMap::new();
     let mut load_types = HashMap::<String, TensorType>::new();
@@ -278,17 +279,74 @@ fn infer_symbolic_bindings_from_inputs(
         }
     }
 
+    let live_loads = dag
+        .nodes()
+        .iter()
+        .filter(|node| live.is_none_or(|mask| mask[node.id.0]))
+        .filter_map(|node| match &node.op {
+            RiscOp::Load { name } => Some(name.as_str()),
+            _ => None,
+        })
+        .collect::<HashSet<_>>();
+
     for binding in symbolic_bindings(dag)
         .into_iter()
         .filter(|binding| required_symbols.contains(&binding.name))
     {
-        // chelis#616: an op-declared dim (node-valued movement output
-        // extent) has no input to infer from; the evaluator resolves it
-        // from actual values when the owning op evaluates.
-        let SymbolicDimSource::Load {
-            input_label: canonical_label,
-            axis: canonical_axis,
-        } = &binding.canonical.source
+        let mut occurrences = std::iter::once(&binding.canonical)
+            .chain(binding.others.iter())
+            .collect::<Vec<_>>();
+        let has_live_op_declaration = occurrences.iter().any(|occurrence| {
+            matches!(
+                occurrence.source,
+                SymbolicDimSource::OpDeclared { node, .. }
+                    if live.is_none_or(|mask| mask[node.0])
+            )
+        });
+        let live_load_occurrences = occurrences
+            .iter()
+            .copied()
+            .filter(|occurrence| {
+                matches!(
+                    &occurrence.source,
+                    SymbolicDimSource::Load { input_label, .. }
+                        if live_loads.contains(input_label.as_str())
+                )
+            })
+            .collect::<Vec<_>>();
+        if !live_load_occurrences.is_empty() {
+            occurrences = live_load_occurrences;
+        } else if has_live_op_declaration {
+            // chelis#616: a live op-declared dim has no external input;
+            // the evaluator resolves it from the owning op's actual values.
+            continue;
+        } else {
+            // chelis#351: a shape-only dependency Load can be outside the
+            // value-live mask. Select only sources the caller supplied;
+            // unrelated dead generic declarations remain irrelevant.
+            let supplied = occurrences
+                .iter()
+                .copied()
+                .filter(|occurrence| {
+                    matches!(
+                        &occurrence.source,
+                        SymbolicDimSource::Load { input_label, .. }
+                            if inputs.contains_key(input_label)
+                    )
+                })
+                .collect::<Vec<_>>();
+            if !supplied.is_empty() {
+                occurrences = supplied;
+            }
+        }
+
+        let Some((canonical_label, canonical_axis)) =
+            occurrences
+                .iter()
+                .find_map(|occurrence| match &occurrence.source {
+                    SymbolicDimSource::Load { input_label, axis } => Some((input_label, axis)),
+                    SymbolicDimSource::OpDeclared { .. } => None,
+                })
         else {
             continue;
         };
@@ -307,7 +365,7 @@ fn infer_symbolic_bindings_from_inputs(
         })?;
         bindings.insert(binding.name.clone(), value);
 
-        for occurrence in &binding.others {
+        for occurrence in occurrences.into_iter().skip(1) {
             // Op-declared guard sites are checked at run time by the C
             // backend and from actual values by the evaluator, not here.
             let SymbolicDimSource::Load { input_label, axis } = &occurrence.source else {
@@ -1446,7 +1504,7 @@ where
     let mut prebound_dims: HashMap<String, usize> = HashMap::new();
     let bound_dag = if needs_symbolic_binding {
         let mut bindings =
-            infer_symbolic_bindings_from_inputs(dag, &resolved_inputs, &required_symbols)?;
+            infer_symbolic_bindings_from_inputs(dag, &resolved_inputs, &required_symbols, live)?;
         // `bind_symbolic_dims` rebuilds the complete DAG to preserve node ids.
         // Dead named dimensions therefore need a harmless placeholder even
         // though their nodes cannot execute under this root mask. Live names
@@ -2584,6 +2642,31 @@ mod tests {
         let values = eval_tensor_roots_with_strict(&dag, &[live], |_| None)
             .expect("dead generic dependency input must not escape into root-scoped eval");
         assert_eq!(values[&live], TensorValue::scalar(7.0));
+    }
+
+    #[test]
+    fn eval_root_scoped_ignores_dead_canonical_source_with_live_same_named_dim() {
+        let mut dag = Dag::new();
+        let symbolic = TensorType {
+            dims: vec![DimInfo::Named("k".to_string(), None)],
+            precision: Prim::F32,
+        };
+        let _dead = dag.add_node(
+            RiscOp::Load { name: "a".into() },
+            vec![],
+            symbolic.clone(),
+            None,
+        );
+        let live = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], symbolic, None);
+
+        let values = eval_tensor_roots_with_strict(&dag, &[live], |name| {
+            (name == "x").then(|| TensorValue {
+                shape: vec![2],
+                data: vec![3.0, 4.0],
+            })
+        })
+        .expect("dead same-named symbolic source must not override the live input");
+        assert_eq!(values[&live].data, vec![3.0, 4.0]);
     }
 
     /// chelis#351: a Load can be DEAD under the roots' live mask while a
