@@ -37,6 +37,9 @@ not designed in this round.
   `--no-auto-fetch` is passed. It type-checks, lowers, and emits
   `dist/<name>-<version>.{chb,tar.zst}` plus a `reef.lock` recording the resolved
   dependency tuples.
+- `chelis check <package-source>` and `chelis build <package-source>` use the same
+  resolved package graph and MUST repair a missing or malformed `reef.lock`, including
+  when the prepared graph itself came from a warm cache (chelis#971).
 - `chelis reef publish` runs build, then copies artifacts into
   `$CHELIS_REEF_HOME/packages/<name>/<version>/` and updates
   `$CHELIS_REEF_HOME/index.json`.

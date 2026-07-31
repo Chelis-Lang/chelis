@@ -1913,6 +1913,14 @@ pub fn prepare_program_for_file(file: &Path) -> Result<Option<PreparedProgram>, 
         }
         Err(error) => return Err(error),
     };
+    // chelis#971: a prepared-graph cache hit can succeed without consulting
+    // the package lockfile. `prepare_program_for_file` is the source-file
+    // check/build path and historically owns lockfile repair, so persist the
+    // resolved graph even when the cache supplied it. Otherwise a warm cache
+    // makes a successful package build silently omit `reef.lock`.
+    if !lock_path.exists() || read_lockfile(&lock_path).is_err() {
+        write_lockfile(&lock_path, &build_lockfile(&graph.graph))?;
+    }
     let entry_module = module_name_for_input(&root, file, &graph.graph.root_package)?;
     let root_package = graph
         .graph

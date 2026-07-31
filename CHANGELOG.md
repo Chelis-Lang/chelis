@@ -16,6 +16,11 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   plain and NDJSON reporting; genuinely clean testless files remain
   fail-closed configuration errors. Ordinary non-`--expect` testless files
   retain their legacy zero-record behavior. Exact regressions lock both modes.
+- **Package-owned source-file checks and builds repair a missing or malformed
+  `reef.lock` even on a warm prepared-graph cache hit (chelis#971).** A
+  successful `chelis check <package-source>` or `chelis build
+  <package-source>` can no longer omit the resolved lockfile merely because
+  graph preparation came from cache.
 - **Imported rank-generic functions instantiate independently at every call
   site (chelis#968).** Environment free-variable analysis now protects a
   scheme's quantified type, dimension, and rank variables from unrelated
