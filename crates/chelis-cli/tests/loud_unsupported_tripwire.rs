@@ -11,7 +11,8 @@
 //!
 //! Also hosted here on behalf of the chelis#732 plan (Phase 0 item 3:
 //! "coordinate, do not duplicate", per the roadmap's Wave 0 handshake;
-//! widened to the Rust lane per its B2.4/B2.8 instrument list): the three
+//! widened to the Rust lane per faithful_observation.md B2.4/B2.8's
+//! instrument list): the three
 //! no-third-formatter classes - `c-format-narrowing` (C printf tokens),
 //! `rust-format-narrowing` (Rust precision-spec forms, all crate src), and
 //! `rust-debug-numeric-format` (Debug-format tokens at the declared

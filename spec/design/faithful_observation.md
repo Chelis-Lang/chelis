@@ -390,6 +390,12 @@ For every dtype and every storable value:
    (round-4 F1: upgrading only the capture position left the
    dynamic-precision position evadable); creating an exit surface
    anywhere else obliges adding its prefix in the same change set).
+   Interlock with the host doc (bidirectional, recorded in its §C5):
+   `loud_unsupported.md`'s own §B2.8 requires DERIVED universes for its
+   own tripwire classes; a hosted class's scope is instead declared by
+   the owning plan's §B2 rule with residue declared per this doc's
+   §B2.8, and `OBSERVATION_EXIT_SURFACES` is revisited when [#730]
+   Phase 4's §C7.1 derived-universe rewrite lands.
    Both Rust classes scan LOGICAL
    lines - string continuations (`\` at end of line) are joined first,
    so a format spec split across physical lines is the single spec the

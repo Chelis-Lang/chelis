@@ -646,7 +646,8 @@ converts both arms at Phase 1 regardless. New named executables live in
 baseline is frozen in
 `crates/chelis-cli/tests/loud_unsupported_tripwire.rs` (which also hosts
 the [#732] plan's three no-third-formatter classes per its Phase 0 item
-3, the roadmap's Wave 0 handshake, and its §B2.4/§B2.8 instrument list:
+3, the roadmap's Wave 0 handshake, and `faithful_observation.md`
+§B2.4/§B2.8's instrument list:
 `c-format-narrowing` (the original `%.16g`/`%.1f` row),
 `rust-format-narrowing` (Rust precision-spec forms, subsuming the old
 `{value:.1}` token), and `rust-debug-numeric-format` (Debug tokens at
@@ -660,7 +661,13 @@ own compiler-forced sample; global evidence from another pattern cannot
 satisfy applicability. Every hosted class's new-site
 message points at `faithful_observation.md` §B2.4, and that plan's
 Phase 2 oracle cross-checks each class's baseline paths against its own
-permitted sets).
+permitted sets. Hosted-class scopes - such as
+`OBSERVATION_EXIT_SURFACES` - are declared by the OWNING plan's §B2
+rule with residue declared per `faithful_observation.md` §B2.8, not by
+this doc's §B2.8 derived-universe requirement, which governs this
+plan's own classes; the hosted scopes are revisited when Phase 4's
+§C7.1 derived-universe rewrite lands - an interlock recorded in both
+docs).
 
 Phase 0 freezes this table into the tripwire; additions after that are
 either new work (filed + censused) or regressions (red gate). Once
