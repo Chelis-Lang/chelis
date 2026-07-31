@@ -735,6 +735,7 @@ fn open_compiled_library(path: &Path) -> Result<Library, libloading::Error> {
     {
         unsafe { Library::new(path) }
     }
+}
 
 /// Best-effort rendering of a panic payload, which is `&str` for
 /// `panic!("literal")` and `String` for a formatted panic.
