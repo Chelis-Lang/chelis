@@ -834,13 +834,14 @@ fn main() {
             target,
         }) => {
             // Parse target for realizability inference (issue #912).
-            // Default: Target::Eval. Wired to manifest pipeline at Task 7.
-            let _target = parse_eval_target(target.as_deref());
+            let parsed_target = parse_eval_target(target.as_deref());
             cmd_eval(
                 file.as_deref(),
                 expr.as_deref(),
                 json,
                 allow_style_violations,
+                parsed_target,
+                target.is_some(), // whether user explicitly passed --target
             )
         }
         Some(Command::Check {
@@ -1128,6 +1129,8 @@ fn cmd_eval(
     expr: Option<&str>,
     json: bool,
     allow_style_violations: bool,
+    target: chelis_types::types::Target,
+    explicit_target: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // The style gate runs only on the `--file` form (a real on-disk
     // source). The `--expr` form is a synthetic one-line snippet
@@ -1222,11 +1225,20 @@ fn cmd_eval(
                 }
             }
             if json {
-                run_eval_json_emit(try_eval_result(
-                    SourceKind::Surf,
-                    &source,
-                    Some(&selected_roots),
-                ))
+                // Issue #912: include manifest lane assignments only when --target is explicit.
+                if explicit_target {
+                    let manifest_json = compute_manifest_json(&checked, target);
+                    run_eval_json_emit_with_manifest(
+                        try_eval_result(SourceKind::Surf, &source, Some(&selected_roots)),
+                        manifest_json,
+                    )
+                } else {
+                    run_eval_json_emit(try_eval_result(
+                        SourceKind::Surf,
+                        &source,
+                        Some(&selected_roots),
+                    ))
+                }
             } else {
                 run_eval_emit(try_eval(SourceKind::Surf, &source, Some(&selected_roots)))
             }
@@ -1374,6 +1386,49 @@ fn run_eval_json_emit(
         }
         Err(e) => Err(e.into()),
     }
+}
+
+/// Issue #912: emit JSON with manifest lane assignments included.
+fn run_eval_json_emit_with_manifest(
+    outcome: Result<chelis_compiler_api::schema::EvalResult, String>,
+    manifest_json: serde_json::Value,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match outcome {
+        Ok(result) => {
+            let mut json = serde_json::to_value(&result)?;
+            if let serde_json::Value::Object(ref mut map) = json {
+                map.insert("manifest".to_string(), manifest_json);
+            }
+            println!("{}", serde_json::to_string(&json)?);
+            Ok(())
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Issue #912: compute manifest and serialize to JSON.
+fn compute_manifest_json(
+    checked: &chelis_types::CheckedProgram,
+    target: chelis_types::types::Target,
+) -> serde_json::Value {
+    let target_prims = chelis_compiler_api::target_capability::tensor_capable_prims(target);
+    let realizability = chelis_effects::realizability::infer_realizability(checked, target_prims);
+    let manifest = chelis_effects::realizability::compute_root_manifest(checked, &realizability);
+    let entries: Vec<serde_json::Value> = manifest
+        .entries
+        .iter()
+        .map(|entry| {
+            serde_json::json!({
+                "name": entry.name,
+                "lane": format!("{:?}", entry.lane),
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "target": format!("{:?}", target),
+        "entries": entries,
+        "requires_main": manifest.requires_main(),
+    })
 }
 
 // G7 CLI sub-bug: when `chelis eval --file <foo.ch>` is handed a Surf
@@ -2693,7 +2748,7 @@ fn cmd_build(
                 reject_symbolic_windowed_reduce_host(host_program, "c")?;
                 reject_unsupported_reduce_window_precision_host(host_program, "c")?;
                 let result = chelis_backend_c::codegen_host_program(host_program, func_name)?;
-                cmd_build_c_result(result, func_name, output, &symbolic_dims)
+                cmd_build_c_result(result, func_name, output, &symbolic_dims, None)
             } else {
                 reject_unsupported_effect_ops(&dag, "c")?;
                 reject_unsupported_c_precisions(&dag)?;
@@ -2945,7 +3000,7 @@ fn cmd_build_deep(
                 reject_symbolic_windowed_reduce_host(host_program, "c")?;
                 reject_unsupported_reduce_window_precision_host(host_program, "c")?;
                 let result = chelis_backend_c::codegen_host_program(host_program, func_name)?;
-                cmd_build_c_result(result, func_name, output, &symbolic_dims)
+                cmd_build_c_result(result, func_name, output, &symbolic_dims, None)
             } else {
                 reject_unsupported_effect_ops(&dag, "c")?;
                 reject_unsupported_c_precisions(&dag)?;
@@ -8687,7 +8742,7 @@ fn cmd_build_c(
         },
     )?;
     let symbolic_dims = fallback_symbolic_dims(dag, &result.symbolic_dims, symbolic_dims_hint);
-    cmd_build_c_result(result, func_name, output, &symbolic_dims)
+    cmd_build_c_result(result, func_name, output, &symbolic_dims, None)
 }
 
 fn cmd_build_c_result(
@@ -8695,6 +8750,7 @@ fn cmd_build_c_result(
     func_name: &str,
     output: Option<&std::path::Path>,
     symbolic_dims: &[String],
+    requires_main: Option<bool>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let out_dir = output
         .map(|p| p.to_path_buf())
@@ -8726,7 +8782,9 @@ fn cmd_build_c_result(
         println!("Symbolic dims: {}", symbolic_dims.join(", "));
     }
     let toolchain = chelis_backend_c::toolchain::runtime_toolchain(result.requirements);
-    if result.c_source.contains("int main(") {
+    // Issue #912: use manifest's requires_main when available; fall back to string search.
+    let has_main = requires_main.unwrap_or_else(|| result.c_source.contains("int main("));
+    if has_main {
         println!(
             "Compile: {} -O2 {} {} -L{} -lchelis_runtime {} -o {}",
             toolchain.compiler,
