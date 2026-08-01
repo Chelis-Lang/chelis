@@ -1,6 +1,7 @@
 # Faithful Observation: one dtype-true formatter for every exit, both lanes
 
-**Status:** Phases 0-2 LANDED. Phase 0 (the round-trip harness and the
+**Status:** Phases 0-2 LANDED; Phase 3 is DELIVERED in this revision.
+Phase 0 (the round-trip harness and the
 exit census) landed 2026-07-17 (PR #752, tightened by PR #774). Phase 1
 (the formatter, eval adoption, and the eval-side §B2.1 migration) landed
 2026-07-20: `format_element` lives at `chelis-types::observation`, every
@@ -31,10 +32,14 @@ list/tuple boxing - faithful parse-back, not own-width shortest
 label discrepancy [#862] is now authored by [05-OBS-6] and its prefix
 has landed; complete manifest-backed root availability and artifact
 acceptance remain under [#912]/[#1023], not this formatter class. Phase 3
-remains. Tracking issue: [#732].
+authors the [05-OBS-3] table, moves both value harnesses and the rejected-cell
+corpus onto `chelis_types::agreement`, and supplies one executable acceptance
+oracle. Its implementation is complete here; merge/CI acceptance is recorded
+on the carrying PR rather than claimed by this source revision. Tracking
+issue: [#732].
 **Owning specs:** `spec/05-risc-primitives.md` (its §8 carries this
 plan's ratified contract as current blockquote authorities [05-OBS-1..6]; the
-per-op tolerance table lands into the same section at Phase 3, while
+per-op tolerance table is authored in the same section by Phase 3, while
 chelis#733 later migrates authority form and revisions through the pinned Buoy
 shell-side integration), `spec/04-type-system.md` (dtype value-set
 definitions, shared with `spec/design/dtype_semantics.md` §C1), and the audit
@@ -331,15 +336,22 @@ For every dtype and every storable value:
    [#716]'s cells, green after Phase 2, and permanent thereafter.
 2. **The per-op value-tolerance table** is a MACHINE artifact first
    (2026-07 review integration): its authoritative form is `const` Rust
-   beside the capability table (the same no-second-parser resolution as
-   that doc's open question 1), consumed directly by the [#687] oracle
+   at `chelis_types::agreement::OP_TOLERANCES`, beside the future
+   capability table (the same no-second-parser resolution as that doc's
+   open question 1), consumed directly by the [#687] oracle
    and by [#754]'s shell-facing gate; the `spec/05-risc-primitives.md`
    §8 rendering is generated from or tripwire-checked against it, so
    prose and data cannot drift. Content: for each transcendental, the
    documented cross-lane bound (default: 1 ulp at the computed width;
    `sqrt`: 0 - correctly rounded per IEEE; [#719] is FIXED (PR #760,
-   merged 2026-07-17), so the row may be authored when Phase 3 arrives;
-   add/sub/mul/div/comparisons: 0). The [#687] oracle
+   merged 2026-07-17), so the row is authored by Phase 3;
+   add/sub/mul/div/comparisons: 0 by absence). A row is eligible only
+   after both lanes establish [04-NUM-8] arithmetic-width conformance;
+   in particular, [#897]'s current eval float path may not use the table
+   to launder a mismatch. For f16/bf16, a rendered mismatch also requires
+   both pre-final f32 bit patterns and proof that they round to the two
+   observed stored values; the finalized strings alone cannot establish
+   an f32 ULP distance. The [#687] oracle
    consults ONLY this table when values differ; formatting differences
    are never tolerated (they are bugs here).
 3. **The oracle handshake**: with §C1-§C3 landed, [#687]'s exact-string
@@ -806,7 +818,7 @@ visible as exactly themselves.
    fix-precedes-the-row gate on `sqrt = 0` is SATISFIED: [#719] was
    fixed by PR #760 (merged 2026-07-17; contiguous f32 sqrt now takes
    the correctly-rounded scalar path, layout-independent, and the
-   scalar loop measured ~1.6x FASTER than vvsqrtf). The row may be
+   scalar loop measured ~1.6x FASTER than vvsqrtf). The row is now
    authored; the table is never authored with a known-false row.
 2. Jointly with [#687]: `parity.rs` and `eval_agreement.rs` replaced by /
    rebuilt on the byte-equal-or-table-bounded rule (§C4.3). (The silent
@@ -823,10 +835,21 @@ visible as exactly themselves.
 still disagree on VALUES - those are [#729]-tracked cells, now perfectly
 visible.
 
-**Oracle:** the [#687] oracle suite running in CI on the full corpus:
-byte-exact everywhere except table-listed ops within bounds; any
-remaining value divergence appears as a named, issue-linked ignore -
-never as tolerance.
+**Oracle:** one command -
+`.venv/bin/python scripts/faithful_observation_phase3_oracle.py`, accepted at
+exit 0 with the final line `PHASE 3 ORACLE: PASS`. It runs the shared policy
+and numbered-spec tripwire, the full current `parity.rs` plus rejected-cell
+corpus, and `eval_agreement.rs`; it also freezes each suite's test inventory,
+comparator adoption, forbidden legacy f64/epsilon paths, and ignore ledger.
+The sole allowed ignore is
+`parity_transformer_block_library_only`, whose exact reason is the
+environmental system-CBLAS prerequisite. There are no value-divergence
+ignores. The individual Rust suites run continuously under workspace
+nextest, while `scripts/test_faithful_observation_phase3_oracle.py` runs in
+CI's script-unit stage and mutation-checks the oracle's structural guards.
+Run the composite command before phase acceptance; byte-exact output is the
+default, table-listed operations may differ only within their authored bound,
+and every remaining value divergence is a failure rather than tolerance.
 
 ---
 

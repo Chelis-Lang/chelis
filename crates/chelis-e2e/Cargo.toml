@@ -23,6 +23,7 @@ chelis-ir = { path = "../chelis-ir" }
 chelis-runtime.workspace = true
 chelis-backend-c = { path = "../chelis-backend-c" }
 chelis-backend-hip = { path = "../chelis-backend-hip" }
+half.workspace = true
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tempfile = "3"

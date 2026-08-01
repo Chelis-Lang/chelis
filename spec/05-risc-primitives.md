@@ -1233,9 +1233,10 @@ accumulator defaults. (This paragraph formerly read "These C implementations
 are the ground truth", which had already gone stale against §2.3's cascade;
 corrected 2026-07-28.)
 
-The GPU backend must produce numerically identical results within floating-point
-tolerance (1e-6 for f32, 1e-12 for f64) pending the per-op tolerance table of
-[05-OBS-3], which supersedes these two blanket numbers when it is authored.
+The GPU backend must satisfy [05-OBS-3]'s per-operation, per-arithmetic-width
+agreement table. The former blanket `1e-6` (f32) / `1e-12` (f64) bounds were
+superseded when that table was authored; they are not a conforming cross-lane
+oracle.
 
 ---
 
@@ -1407,6 +1408,16 @@ a permanently skipped test or a stale conformance sentence behind. The
 same oracle independently recompiles/runs every executable declared C
 corpus exclusion and compares intended bits; comment/string-only source
 fingerprints cannot preserve an exclusion after exact behavior returns.
+Phase 3 is DELIVERED in the source revision carrying this text: the
+[05-OBS-3] table below is mirrored from
+`chelis_types::agreement::OP_TOLERANCES`, `parity.rs`,
+`eval_agreement.rs`, and the chelis#687 rejected-cell corpus use that one
+comparator, and
+`.venv/bin/python scripts/faithful_observation_phase3_oracle.py` is the
+authoritative composite acceptance command (exit 0 with final line
+`PHASE 3 ORACLE: PASS`). The current eval float lane is explicitly
+ineligible for tolerance while chelis#897 records its [04-NUM-8] width
+violation; byte-identical results still pass, but a mismatch stays visible.
 Atom IDs are stable, and the current blockquote authorities remain
 normative until selected
 for chelis#733 Phase 1 migration. Full revisions are attached and checked
@@ -1457,20 +1468,49 @@ own-width form until the box learns element widths (chelis#865, the
 chelis#729/#686 capacity family).)*
 
 > **[05-OBS-3]** Cross-lane VALUE differences are permitted only for the
-> ops listed in the per-op tolerance table (to be authored into THIS
-> section, §8, by chelis#732 Phase 3), within the listed bound; `sqrt`
+> ops listed in the per-op tolerance table below, within the listed bound;
+> `sqrt`
 > SHALL be correctly rounded (bound zero, per chelis#719). Formatting
 > differences are never within tolerance.
 
-*(The table is pending; #719's fix (PR #760) precedes its sqrt row. This
-section, spec/05 §8, is its single authored address: `dtype_semantics.md`
-§C4 item 5 and `faithful_observation.md` Phase 3 point here and do not
-host it. Scope note, 2026-07-28: with arithmetic width fixed per dtype by
-[04-NUM-8], the table covers only genuine implementation variance at a
-single width - one lane's libm or SLEEF or vForce against another's for
-the transcendentals - and never a structural precision mismatch between
-lanes computing at different widths. Rows for add/sub/mul/div and the
-comparisons are bound zero by construction, not by measurement.)*
+The authoritative machine form is
+`chelis_types::agreement::OP_TOLERANCES`; the following block is
+tripwire-checked byte-for-byte against its generated rendering.
+
+<!-- BEGIN GENERATED OBSERVATION TOLERANCE TABLE -->
+| operation | maximum cross-lane value difference | authority |
+|---|---:|---|
+| `atan` | 1 ULP at [04-NUM-8]'s arithmetic width | [05-OBS-3] |
+| `cos` | 1 ULP at [04-NUM-8]'s arithmetic width | [05-OBS-3] |
+| `exp` | 1 ULP at [04-NUM-8]'s arithmetic width | [05-OBS-3] |
+| `log` | 1 ULP at [04-NUM-8]'s arithmetic width | [05-OBS-3] |
+| `sin` | 1 ULP at [04-NUM-8]'s arithmetic width | [05-OBS-3] |
+| `sqrt` | 0 ULP at [04-NUM-8]'s arithmetic width | [05-OBS-3] |
+| `tan` | 1 ULP at [04-NUM-8]'s arithmetic width | [05-OBS-3] |
+<!-- END GENERATED OBSERVATION TOLERANCE TABLE -->
+
+Operations absent from the table have a zero-ULP bound. In particular,
+add, subtract, multiply, divide, comparisons, reductions, and compound
+builtins are exact-by-default; a new or misspelled operation identity
+cannot inherit a float fallback. A table row is eligible only when both
+lanes compute at [04-NUM-8]'s declared arithmetic width. A known width
+violation must remain an issue-linked oracle exclusion and may not be
+laundered through the table. For f16 and bf16, which compute at f32 and
+round once into narrower storage, differing final strings do not by
+themselves prove a distance at the f32 arithmetic width: a conforming
+oracle SHALL compare the lanes' pre-final f32 bit patterns and verify
+that each rounds to its observed f16/bf16 result. Missing or inconsistent
+pre-final evidence is a failed comparison, never an existential
+rounding-bin acceptance. Non-finite and signed-zero mismatches are never
+toleranced. Byte-different strings which denote identical stored bits are
+formatting violations under [05-OBS-2], not value differences.
+
+*(#719's fix (PR #760) preceded the zero-bound `sqrt` row. This section,
+spec/05 §8, is the table's single authored address:
+`dtype_semantics.md` §C4 item 5 and `faithful_observation.md` Phase 3
+point here and do not host a second copy. The table covers only genuine
+implementation variance at a single width - one lane's libm or SLEEF or
+vForce against another's - and never a structural precision mismatch.)*
 
 > **[05-OBS-4]** A scalar-typed value SHALL render as the bare scalar at
 > every exit in both lanes, including as a top-level labeled root

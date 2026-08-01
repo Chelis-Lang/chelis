@@ -353,9 +353,15 @@ identical bytes):
    dump the same tensor through all exits in both lanes and diff bytes.
 5. **The transcendental tolerance table.** Where lanes legitimately differ
    in VALUE (libm vs SLEEF vs vForce, > 0.5 ulp ops), the per-op bound is
-   recorded in `spec/05-risc-primitives.md` next to the op, and the [#687]
-   oracle consults it; `sqrt` is required correctly rounded ([#719]) and has
-   no tolerance row. Formatting itself never has tolerance.
+   authored in `spec/05-risc-primitives.md` §8 and represented by
+   `chelis_types::agreement::OP_TOLERANCES`; the [#687] oracle consults that
+   machine form. `sqrt` is required correctly rounded ([#719]) and therefore
+   has an explicit zero-bound row. A row is eligible only when both lanes
+   compute at [04-NUM-8]'s declared arithmetic width; [#897]'s current eval
+   float path is not eligible. A differing f16/bf16 result additionally
+   requires both pre-final f32 bit patterns and evidence that each rounds to
+   its observed stored value; finalized strings alone do not prove an f32 ULP
+   distance. Formatting itself never has tolerance.
 6. **Containers and scalar roots** (decided with [#732] Phase 1, identical
    to its §C1.5; ratified as [05-OBS-4]/[05-OBS-5]): a scalar-typed value
    renders as the BARE scalar at every exit in both lanes, including as a
