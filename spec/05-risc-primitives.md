@@ -1,6 +1,5 @@
 # spec/05-risc-primitives.md — Chelis RISC Primitive Semantics
 
-**Status:** v0.2 (post design sprint)
 **Scope:** The ~12 irreducible tensor operations. Their types, semantics, AD adjoint rules, and how standard ML operations decompose into them.
 
 ---
@@ -24,7 +23,7 @@ RISC primitives are built-in functions in the compiler's scope, not syntax tags.
 Read-only tensor primitive parameters are typed as `&tensor[...]` at the type-system
 surface. Owned tensor arguments auto-borrow at ordinary call sites and pipe stages.
 Outputs remain owned tensors. The borrow distinction is erased before IR and backend
-lowering, so primitive DAG nodes and backend kernels keep their existing value model.
+lowering, so primitive DAG nodes and backend kernels use the same value model.
 Consuming operations such as `realize` and explicit `drop` keep owned parameters.
 
 The same observational rule covers the read-only `List` / `Dict` queries `len` and
@@ -45,12 +44,12 @@ owned argument; writing the container query as `len(&xs)` is not a supported sur
 
 Together, the two tiers define everything the compiler has special knowledge of. Anything that can be expressed as a Chelis program composing these primitives — without requiring custom AD adjoints, backend fusion rules, or compiler-recognized names — belongs in the standard library (`Std.*`) or in external packages, not in the core. See `spec/design/chelis_canonical_reference.md` §8.5 for the full scope boundary taxonomy.
 
-Phase `3h` expands the practical primitive surface beyond this initial minimal set with
+The primitive surface includes
 `einsum`, `concat` / `split`, `gather` / `scatter`, `where`, `cumsum`, `sort`,
-`diagonal` / `trace`, and `clamp`. `School.Nn.Embedding` (moved to the `school` library
-in chelis-std 0.4.0) remains the named library surface over `gather`.
+`diagonal` / `trace`, and `clamp`. `School.Nn.Embedding` is the named library
+surface over `gather`.
 
-For the `3h` additions, Chelis now rejects deterministic literal-driven value errors
+Chelis rejects deterministic literal-driven value errors
 at check time when enough information is concrete in source (for example, statically
 inconsistent `einsum` extents or duplicate indices in `scatter(..., "replace")`).
 When those constraints depend on runtime values instead, the evaluator and generated C
@@ -72,27 +71,17 @@ runtime reject them during execution; compiled C exits non-zero rather than abor
 | `cmplt` | `(&tensor[D,p], &tensor[D,p]) -> tensor[D,bool]` | Element-wise less-than comparison | Non-differentiable (zero gradient) |
 | `max_elem` | `(&tensor[D,p], &tensor[D,p]) -> tensor[D,p]` | Element-wise maximum | `(g * (x >= y), g * (x < y))` — gradient flows to the max input |
 
-**`div` semantics (float-only since chelis#178).** `div(a, b)`
+**`div` semantics.** `div(a, b)`
 is **restricted to float operands** (f32, f64, f16, bf16) and
 lowers to the target's native floating `/` operator with IEEE-754
 semantics. Corner cases follow IEEE: `1/0 = +inf`, `1/-0 = -inf`,
 `0/0 = NaN`, `1/-1 = -1`, `(any non-NaN) / -2.0` yields the
-algebraic value. A historical `mul(a, exp(neg(log(b))))`
-decomposition returned NaN for any `b ≤ 0` because `log(b)` is
-undefined there; that decomposition is not reachable from any
-Tier 2 op.
+algebraic value.
 
 `div(int_tensor, int_tensor)` is a **type error** (the `/`
 operator on integer operands is likewise rejected, because `/`
 desugars to `div`). The diagnostic cites this section and points
-at `floor_div` / `trunc_div`. This is a deliberate breaking change
-from the pre-chelis#178 behavior, where `div` on integer operands
-performed C/Rust truncating division. The single-op-two-semantics
-overload (`div(7, 2) == 3` for ints, `== 3.5` for floats) was a
-footgun and matched none of torch / JAX / numpy: their default
-`divide` upcasts integers to float, and their integer division op
-is `floor_divide` (round toward −∞), which the old C-truncating
-behavior also did not match. Integer division now has two explicit,
+at `floor_div` / `trunc_div`. Integer division uses the two explicit,
 named primitives below.
 
 **`floor_div` semantics.** `floor_div(a, b)` computes
@@ -226,11 +215,9 @@ In short:
 - `int32` operands → `int32` accumulator → `int32` result
 - `int64` operands → `int64` accumulator → `int64` result
 
-(The `bf16`/`f16` rows formerly read "→ `f32` result" here, contradicting the
-authoritative table's operand-precision result column; corrected 2026-07-28.
-The `f32` accumulator is consumed inside the op and downcast on output, so the
-caller sees a uniform-precision result tensor. Only the narrow INTEGER rows
-widen their result, and they do so for overflow safety.)
+The `f32` accumulator for `bf16`/`f16` is consumed inside the op and downcast
+on output, so the caller sees a uniform-precision result tensor. Only the
+narrow integer rows widen their result, for overflow safety.
 
 There is no implicit precision promotion: omitting the parameter resolves to
 the documented default before lowering. The IR `RiscOp::ReduceSum` node
@@ -251,27 +238,20 @@ type matches the operand element type.
 | `reduce_window_sum` | `(&tensor[..., d1, ..., dn, p], window_shape: List[int32], strides: List[int32]) -> tensor[..., d1', ..., dn', p]` | Strided windowed sum over the last `n` axes | Each window-source position receives the owning window's `g` (overlap-add over windows covering it) |
 | `reduce_window_mean` | `(&tensor[..., d1, ..., dn, p], window_shape: List[int32], strides: List[int32]) -> tensor[..., d1', ..., dn', p]` | Strided windowed mean over the last `n` axes | As `sum`, with each contribution scaled by `1 / window_volume` |
 
-**Design rationale: four primitives, not one with a Reducer enum.** The
-issue text (Chelis-Lang/chelis#254) proposed a `Reducer` enum argument
-(`Sum | Max | Min | Mean`). The shipped surface follows the same pattern as
-the existing reductions — `max_reduce`, `min_reduce`, `prod_reduce`,
-`argmax_reduce`, `argmin_reduce` are already four siblings, not one
-parameterized op — so adding four siblings keeps the builtin set
-consistent and avoids introducing a string-keyed or ADT-keyed argument that
-would have to be resolved at check time. The IR carries a single
+**Four primitives, one IR family.** The public surface follows the same
+pattern as `max_reduce`, `min_reduce`, `prod_reduce`, `argmax_reduce`, and
+`argmin_reduce`: reducer choice is encoded in the function name, not a runtime
+argument. The IR carries a single
 `RiscOp::ReduceWindow { reducer, window_shape, strides }` node whose
 `reducer` field selects `Max` / `Min` / `Sum` / `Mean`; the four Surf
 builtins differ only in which `ReduceWindowKind` they emit.
 
-**Padding mode: Valid only.** The shipped surface implements
-`Valid`-padding only. Output spatial extent per windowed axis is
+**Padding mode: Valid only.** Output spatial extent per windowed axis is
 `floor((input_dim - window) / stride) + 1`. `Same`-padding (with
 `ceil(input_dim / stride)` output and zero / `-inf` fill at the
-boundary) is **deferred** to a follow-up; users who need that
+boundary) is not part of these primitives; programs that need that
 behavior should pad explicitly with `pad(x, ..., fill)` before
-calling `reduce_window_*`. The four-arg signature in the original
-issue text proposed `(x, window_shape, strides, reducer)` with no
-explicit mode; this matches `Valid` as the implicit default.
+calling `reduce_window_*`.
 
 **Shape contract.**
 
@@ -289,11 +269,9 @@ explicit mode; this matches `Valid` as the implicit default.
   `Valid` padding).
 
 **Lowering.** The IR `RiscOp::ReduceWindow` carries the full
-`{reducer, window_shape, strides}` triple. The IR evaluator, the host
-runtime, and the C backend each implement it as a direct windowed loop
-nest — `Mean` is implemented as windowed `Sum` divided by the window
-volume, computed inline rather than as a separate `Div` op. (HIP
-codegen is deferred; see **Backend status** below.) There is no Tier-2
+`{reducer, window_shape, strides}` triple. Every execution lane lowers it
+as a direct windowed loop nest; `Mean` is windowed `Sum` divided by the window
+volume, computed inline rather than as a separate `Div` op. There is no Tier-2
 to Tier-1 decomposition: `reduce_window_*` is a Tier-1 primitive in its
 own right. The Surf `reduce_window_*` names are the public surface;
 the IR node and backends share the single `ReduceWindow` lowering
@@ -306,27 +284,15 @@ lane: `f32` operands accumulate in `f32`, `f64` in `f64`, `f16`/`bf16` at
 accumulator parameter, so §5.7's widening does not apply to it and there
 is no other authorized widening.
 
-For integer operands that is a decided consequence, not an oversight
-(recorded 2026-07-30): a window sum that leaves the operand dtype's
+For integer operands, a window sum that leaves the operand dtype's
 range traps per [04-NUM-3] - with occurrence governed by [04-NUM-12] -
 where the GLOBAL reduction's §5.7.1 default would have widened, because
 there is no parameter to request a wider window accumulator. If windowed
 reductions over narrow integers become a real need, the resolution is
 authoring an accumulator parameter for `reduce_window_*` on §5.7's
-pattern, never silent widening. No shipped behavior turns on this yet:
-the compiled lane's precision gate
-(`reject_unsupported_reduce_window_precision`) restricts
-`reduce_window_*` to `f32` before codegen today.
+pattern, never silent widening.
 
-*(Not honored today: the IR evaluator and host runtime accumulate each
-window in `f64` while the C backend accumulates `sum` / `mean` in an
-`f32` lane (`float acc`) - the two lanes disagree by construction for
-`f32` operands, which is precisely the divergence [04-NUM-8] forbids. The
-C lane is the conforming one. For the small windows the parity gate
-exercises (2×2, 3×3) the two agree inside the `1e-5` compile-run
-tolerance, which is why the divergence went unnoticed; a large `f32`
-window drifts past it. Fixing the eval side rides chelis#729 Phase 2's
-kernel split with the elementwise and global-reduction paths.)*
+*(Not fully implemented; see chelis#729.)*
 
 `reduce_window_sum` deliberately does **not** widen its RESULT precision
 the way the global `sum` reduction does; the output element type matches
@@ -348,91 +314,22 @@ input cotangent `din` (shape `S_in`). The adjoints, accumulated over the
   `min_reduce` `eq`-mask subgradient, so ties distribute the full `g`
   (not a `1/k` share). `x` is read to locate the extreme.
 
-Like the forward op, `ReduceWindowGrad` is implemented directly by the IR
-evaluator, the host runtime, and the C backend (the C adjoint is emitted
-serially, since overlapping windows scatter-add into shared `din`
-positions); HIP codegen is deferred and rejected before codegen (see
-**Backend status**). Second-order AD through the adjoint itself is not
-defined. The adjoints are validated against central
-finite differences for all four reducers over overlapping and strided
-windows (`chelis-ir::eval` unit tests), and the C backend is checked for
-evaluator parity (`chelis-backend-c::exec_compile::exec_reduce_window_grad_*`).
+Like the forward op, `ReduceWindowGrad` lowers directly in every execution
+lane. Overlapping windows scatter-add into shared `din` positions. Second-order
+AD through the adjoint itself is not defined.
 
-**Output-dim formula vs. issue #254.** The admitting issue text
-sketched the `Valid` output extent as `(input_dim - window + 1) /
-stride`. That informal form only agrees with the standard pooling
-formula at `stride == 1`; for `stride > 1` it under-counts (e.g.
+**Output-dim formula.** For `stride > 1`,
+`(input_dim - window + 1) / stride` under-counts (e.g.
 `input=8, window=2, stride=2` gives `3` instead of the correct `4`
-non-overlapping windows at positions `0, 2, 4, 6`). The shipped
-formula `floor((input_dim - window) / stride) + 1` matches
-`jax.lax.reduce_window` / PyTorch pool kernels and is the normative
-contract above.
+non-overlapping windows at positions `0, 2, 4, 6`). The normative formula
+is `floor((input_dim - window) / stride) + 1`.
 
-**Backend status (initial admission).** The C backend is the
-canonical lowering and is exercised by a gcc compile-and-run
-evaluator-parity gate. The HIP backend codegen for `ReduceWindow` (and
-its `ReduceWindowGrad` adjoint) is **deferred**: `chelis build --target
-hip` on a program containing `reduce_window_*` is **rejected** at compile
-time with a clean `unsupported_feature` error
-(`reject_unsupported_hip_ops`, compiler-api + CLI mirror) rather than
-emitting a GPU kernel. The HIP launch-emit arm retains a deferred-feature
-`todo!` as a defensive backstop (matching the `Pad` / `Shrink` HIP stubs),
-reached only if some path bypasses the guard. Use the default C target
-until GPU windowed reductions land.
-
-**Statically-known windowed extents required on the build path.** The
-build/backend path needs each *windowed* axis extent to be known at
-compile time (a literal `tensor[..., 8, 8, p]` dim, or a named dim with
-a bound size). A windowed axis whose extent is only known at runtime
-(e.g. a `pad_sequences` result, whose dims are bound from input
-metadata) cannot be lowered to a correct static output shape under the
-current `DimInfo` model: the windowed output extent
-`floor((d - window) / stride) + 1` is strictly smaller than the input
-extent `d` and is not representable as a `DimExpr` (no subtraction /
-floor), so the backend's symbolic-dim binding would tie the windowed
-output axis to the *input* extent — silently mis-allocating the output
-tensor and emitting an out-of-bounds window read. To prevent that, the C
-build **rejects** such a program at compile time with an
-`unsupported_feature` error
-(`chelis_compiler_api::compiler::reject_symbolic_windowed_reduce` and the
-CLI's mirror, with a defensive backstop in the C emitter); it does not
-emit a kernel. Window over a statically-sized axis, or pad the input to a
-concrete extent first. (The HIP target is unaffected by this specific
-check: it defers `reduce_window_*` codegen entirely — see **Backend
-status** above — so it never reaches the mis-allocation.) The leading
-pass-through axes may remain symbolic. The IR evaluator and host runtime
-always recompute from the concrete runtime shape and so handle
-runtime-only extents correctly; only the ahead-of-time C/HIP build path
-carries this restriction.
-
-Separately, the C `reduce_window_*` emitter is **f32-only** (no bf16/f16
-convert-load path yet). A bf16/f16 windowed reduction is rejected before
-codegen with an `unsupported_feature` error
-(`reject_unsupported_reduce_window_precision`, compiler-api + CLI mirror,
-with the C emitter `panic!` as a defensive backstop), so it surfaces as a
-clean diagnostic rather than an emitter crash. Cast to `f32` before the
-windowed reduction; bf16/f16 widening is follow-on work.
-
-**Acceptance oracle.** The authoritative completion oracle for this
-primitive is the standard per-PR gate, `python3 scripts/gate.py`, which
-runs (among the broader suite): the type-checker shape-contract tests
-(`chelis-types::issue_254_reduce_window_signatures`), the IR
-evaluator + adjoint-lowering tests (`chelis-ir::issue_254_reduce_window`)
-plus the finite-difference adjoint checks
-(`chelis-ir::eval::tests::reduce_window_grad_*`), the host-runtime
-evaluator tests
-(`chelis-compiler-api::issue_254_reduce_window_host_runtime`), the C
-emit structural tests (`chelis-backend-c::issue_254_reduce_window_emit`)
-plus the gcc compile-and-run evaluator-parity tests for both the forward
-op and its adjoint
-(`chelis-backend-c::exec_compile::exec_reduce_window_*`), the
-build-path rejection of runtime-symbolic windowed axes
-(`chelis-compiler-api::compiler::tests::*reduce_window*` and
-`chelis-cli::cli::build_c_rejects_reduce_window_over_runtime_symbolic_axis`),
-and the end-to-end build-vs-eval parity over the executable example
-(`chelis-cli::cli::build_c_runs_tensor_structural_ops_and_matches_eval_output`).
-No `#[ignore]`d or HIP manual gate is required for this primitive,
-because HIP codegen (forward and adjoint) is deferred.
+**Runtime-derived extents.** Windowed output extents are computed from the
+concrete runtime input shape using the normative formula above. Ahead-of-time
+lowering must preserve that dimension expression and allocate the computed
+output extent; it must never reuse the input extent or silently mis-size the
+result. A backend that cannot represent the expression rejects the program
+under [05-UNS-1..6] without narrowing the primitive's dtype or shape contract.
 
 **Reduction order (`sum` only).** `sum` evaluates the reduction with a
 **stride-4 ILP cascade** — four independent accumulator lanes loaded
@@ -444,17 +341,13 @@ with `torch.sum(...)` for `n ≤ 16` on the reduced axis. NumPy's
 blocks — structurally different from the stride-4 cascade — so the
 two coincide only by accident on specific inputs; chelis `sum` is
 **not** in general bit-exact with `numpy.sum`. For `n > 16` the
-result may differ from torch by up to ~1 ULP until the multi-level
-cascade lands as a follow-up. The order is purely positional so the
+result may differ from torch by up to ~1 ULP. The order is purely positional so the
 algorithm is deterministic across runs and hosts; `#pragma omp
 parallel for` is applied to the outer (output-element) loop only,
 never the inner reduction.
 
-This change is observable for floating-point operands — the prior
-strict left-fold could diverge from torch by ~1 ULP at unfavorable
-seeds and forced parity-oracle carve-outs in downstream harnesses
-(issue Chelis-Lang/chelis#163). Integer reductions are unchanged in
-VALUE (integer addition is associative), but under [04-NUM-3]'s traps,
+Integer reductions are order-independent in VALUE when they complete, but
+under [04-NUM-3]'s traps,
 whether an intermediate leaves the accumulator's range is
 order-dependent at range edges - `spec/04-type-system.md` [04-NUM-12]
 defines trap occurrence relative to each lane's documented order,
@@ -463,14 +356,9 @@ above is orthogonal to the reduction order: the lane type is the
 accumulator type, and the final combine happens in the same
 precision.
 
-**GPU caveat.** The HIP and Metal backends keep their existing
-device reduction kernels (single-accumulator per-thread + tree
-combine for Metal; single-accumulator for HIP). Bit-exact GPU
-parity with torch's CPU `row_sum` is out of scope for this change
-— torch itself uses a different kernel (`cub::DeviceReduce`) on
-GPU. CPU eval, `chelis eval`, and the C backend all match
-`row_sum`; the HIP and Metal backends may differ from each other
-and from CPU at the ~1 ULP level on f32.
+**Device reduction order.** A device backend may use a documented parallel tree
+order. Cross-lane float differences are permitted only by [05-OBS-3]'s per-op
+tolerance table; integer trap occurrence follows [04-NUM-12].
 
 ### 2.4 Movement
 
@@ -525,17 +413,15 @@ is computed by the op at run time is an *op-declared* symbolic dim: the C
 backend declares it inline at the owning op (`int name = <extent>;`) and the
 evaluator binds it from the actual value mid-evaluation; a second site
 computing a different value for the same symbol aborts/errs loudly (the
-over-unification guard). Since chelis#631/#632 the guard no longer fires on
-a direct-return `shrink -> stride` chain under one sig symbol — anonymous
-dims are not substitution keys, so the sig symbol attaches positionally to
-the FINAL op only and each inner movement op declares its own extent (full
-eval-vs-C parity). The checker's movement typing matches: symbolic-dim
+over-unification guard). Anonymous dims are not substitution keys, so a
+signature symbol attaches positionally to the final op and each inner movement
+op declares its own extent. The checker's movement typing matches: symbolic-dim
 pass-through is identity-only (stride step 1 / zero pad; see
 spec/04-type-system.md §4.7), so a non-identity movement axis types a
 fresh runtime-guarded extent rather than repeating the input's symbol.
 The guard remains the soundness floor for a genuinely CLAIMED symbol
 equality (e.g. an explicit `-> tensor[n]` over `stride(x, 2)`) and for
-any future checker imprecision.
+checker imprecision.
 
 The movement adjoints are runtime-capable on the same representation: the
 `shrink` adjoint pads with `after = shape(x, axis) - end`, the `pad` adjoint
@@ -545,12 +431,13 @@ upsample cascade reads `m_a = shape(g, axis)` and trims to
 node-valued bounds over fresh `Shape`/arithmetic scalars. Bound scalars are a
 **stop-gradient boundary**: they are index math, carry no cotangent, and do
 not pull their producers (e.g. a window-count `floor_div`) into the
-differentiability check. A runtime (node-valued) stride STEP has no
-structural adjoint yet and fails loud.
+differentiability check. A runtime (node-valued) stride step uses the same
+scatter-to-selected-positions adjoint as a static step and fills skipped
+positions with zero.
 
-Runtime movement bounds and reshape targets are canonical on the eval and C
-lanes; `--target hip` and `--target metal` reject them with a clean
-diagnostic naming `--target c` (chelis#616).
+Runtime movement bounds and reshape targets have identical semantics in every
+execution lane. A backend unable to represent them rejects the program under
+[05-UNS-1..6].
 
 ### 2.5 Memory
 
@@ -578,72 +465,43 @@ dependency and fails closed when its input is absent (chelis#351).
 |---|---|---|
 | `shape` | `(&tensor[d1,...,dn,p], axis: int32) -> int` | Runtime extent of the input along `axis`, as a rank-0 integer scalar. |
 
-The Surf `shape(tensor, axis)` builtin types this read as an `int32` scalar
-(the hydronnx ONNX translator constructs the equivalent DAG node as `int64`
-per chelis#558). Two lowering shapes exist, and they are distinct:
+The Surf `shape(tensor, axis)` builtin types this read as an `int32` scalar.
+Two lowering shapes exist, and they are distinct:
 
 - **As an extent argument** to `expand` / `reshape`, a `shape()` read is folded
-  into the movement node's `DimExpr` (the output dim), not materialized as a
-  value node. This is the pre-existing size-recovery path (chelis#318/#369).
+  into the movement node's runtime extent expression (the output dim), not
+  materialized as a value node.
 - **As a scalar VALUE** (used in arithmetic, a `mean` divisor, or any other
   value position), a `shape()` read lowers to a dedicated `RiscOp::Shape { axis }`
   node — a rank-0 integer scalar equal to the input's runtime extent along a
-  compile-time-constant `axis`. Before chelis#513 there was no such node and a
-  scalar shape read fell through to a bogus `Load { name: "shape" }` placeholder,
-  which was silently wrong in the eval lane (resolved to the missing-input
-  default) and a hard missing-input error in the C backend.
+  compile-time-constant `axis`.
 
 `shape` reads only the input's shape metadata, never its element values, so it
 is a trivial constant with respect to those values: its reverse-mode adjoint
 contributes a **zero cotangent** to the input (like `const` / `load`, it does
 not block AD — a loss that reads a runtime dim differentiates correctly, with
-the shape factor contributing nothing). The C backend emits the read directly
-(`t{input}->shape[axis]`), so a symbolic input axis is resolved from the actual
-runtime input tensor rather than baked at codegen time. Under `--target hip` a
-`grad` export host-falls-back to the C emitter (the scalar read is a host-side
-metadata op); a `Shape` node reaching the HIP device-kernel path is rejected
-loudly (`reject_unsupported_hip_ops`) and the Metal lane rejects it via its
-emit-time `unsupported`-op arm. eval and C are the mandatory lanes.
+the shape factor contributing nothing). Every backend resolves a symbolic input
+axis from the actual runtime tensor metadata rather than baking it at codegen
+time. Device builds execute this host-side metadata operation at the host boundary.
 
 A `shape()` read whose `axis` is not a compile-time literal (a data- or
 metadata-derived runtime axis) is not DAG-representable, because `RiscOp::Shape`
-carries a compile-time `axis`. The **forward host evaluator** still resolves
-such a read at runtime. Any path that forces DAG construction — notably
-`grad` — fails **loud** with a clean, source-located lowering diagnostic
-(`shape(tensor, axis)` requires a compile-time-constant `axis`, citing
-chelis#616), rather than the pre-fix silent `Load { name: "shape" }`
-fabrication (which produced a wrong/fabricated gradient in the eval lane and a
-missing-input error in the C backend). Using the extent as a runtime
+carries a compile-time `axis`. A path that forces DAG construction — notably
+`grad` — fails **loudly** with a clean, source-located diagnostic that
+`shape(tensor, axis)` requires a compile-time-constant `axis`. Using the extent as a runtime
 **movement-op bound** or **reshape target** (a `shrink`/`stride`/`pad` bound
 or window count derived from a `shape()` value, and the integer arithmetic
-feeding it) is the chelis#616 node-valued `RtDim` capability built on this
-node; see §2.4.1.
+feeding it) uses the node-valued `RtDim` representation in §2.4.1.
 
 ### 2.6 Effectful Primitive
 
 | Name | Signature | Semantics | AD / effect note |
 |---|---|---|---|
-| `dropout` | `(&tensor[D, f32], f32) -> tensor[D, f32]` | Zero elements according to a pseudorandom mask determined by the active `with seed(...)` handler and the dropout rate | Introduces `Random`. In the shipped evaluator/AD path, the mask is treated as fixed with respect to the handled seed so the backward pass reuses the same seeded dropout pattern. |
-| `uniform_like` | `(&tensor[D, f32], f32, f32) -> tensor[D, f32]` | Create a tensor matching the input shape, filled from a deterministic uniform distribution under the active `with seed(...)` handler | Introduces `Random`. C backend codegen supports direct DAG lowering and generated host functions that call random stdlib/user helpers. |
-| `process_run` | `(String, List[String]) -> (Int64, String, String)` | Run an external program with the given argv and capture `(exit_code, stdout, stderr)`. Arguments are passed straight to the OS as argv (no shell, no interpolation), so a value in the args list cannot inject extra shell commands. A process killed by a signal reports exit code `-1`. | Introduces `Io`. Eval/test-only: implemented by the IR evaluator (`chelis eval` / `chelis test`); rejected by the C/HIP/Metal build backends with a clean diagnostic rather than a silent fallthrough. |
-
-Operational note: the evaluator and lowering path implement seeded `dropout`, but
-`chelis build` does not yet codegen it for the `c` or `hip` backend targets.
-
-Operational note: `process_run` is an eval/test-only subprocess-exec primitive
-(Hull subprocess support). It carries the `Io` effect and runs under the IR
-evaluator. The compiled backends (`c`, `hip`, `metal`) deliberately reject any
-program that applies `process_run` because a compiled artifact has no host
-interpreter to reach the subprocess-exec path; the rejection is a build error,
-not a silent zero. Full backend support (host-side `host_emit` lowering plus a
-sandboxed runtime exec helper) is tracked in Chelis-Lang/chelis#267.
+| `dropout` | `(&tensor[D, f32], f32) -> tensor[D, f32]` | Zero elements according to a pseudorandom mask determined by the active `with seed(...)` handler and the dropout rate | Introduces `Random`. The mask is fixed with respect to the handled seed, so the backward pass reuses the same seeded pattern. |
+| `uniform_like` | `(&tensor[D, f32], f32, f32) -> tensor[D, f32]` | Create a tensor matching the input shape, filled from a deterministic uniform distribution under the active `with seed(...)` handler | Introduces `Random`. |
+| `process_run` | `(String, List[String]) -> (Int64, String, String)` | Run an external program with the given argv and capture `(exit_code, stdout, stderr)`. Arguments are passed straight to the OS as argv (no shell, no interpolation), so a value in the args list cannot inject extra shell commands. A process killed by a signal reports exit code `-1`. | Introduces `Io`. Compiled artifacts execute it through a sandboxed host-runtime boundary. |
 
 #### Seed determinism atom
-
-Transitional blockquote authority per `spec/design/spec_provenance.md` §C1,
-matching the §7/§8 atoms of this file. The block remains normative until it is
-selected for fixture-proven migration through the pinned Buoy shell-side
-integration in chelis#733 Phase 1; no semantic revision is embedded here.
 
 > **[05-RNG-1]** For a fixed compiler version and target, evaluating a
 > `with seed(N)` program twice SHALL yield byte-identical output, and two
@@ -651,16 +509,6 @@ integration in chelis#733 Phase 1; no semantic revision is embedded here.
 > RNG is not cryptographic: streams are decorrelated only up to the
 > SplitMix64 mixing - in particular the per-call counter and per-element
 > index enter the hash symmetrically.
-
-*(Measured true with no exceptions in the eval and compiled-C host lanes -
-byte-identical run-to-run and across separate programs, distinct seeds
-diverge - by the chelis#735 cross-lane seed sweep and its re-sweep. This atom
-is the unconditional per-lane determinism-at-rest guarantee only. Cross-lane
-stream identity - eval and the compiled-C host lane producing the same draw
-sequence - is a separate, still-parked atom, held behind chelis#731 Phase 1's
-out-of-range/unsuffixed seed-literal diagnostic; the GPU/kernel lanes are the
-chelis#736 follow-on. See chelis#735 for the sweep evidence and the decided
-contract.)*
 
 ---
 
@@ -674,11 +522,8 @@ These are convenience functions emitted by the desugarer. The compiler lowers th
 |---|---|
 | `sub(a, b)` | `add(a, neg(b))` |
 
-Note: `div` and `neg` are Tier 1 RISC primitives (see §2.1, §2.2),
-not Tier 2 derived built-ins. `recip` is also a Tier 1 primitive
-(§2.2). The historically `div(a, b) = mul(a,
-exp(neg(log(b))))` lowering — which returned NaN for `b ≤ 0` — is
-no longer reachable from any Tier2 op.
+Note: `div`, `neg`, and `recip` are Tier 1 RISC primitives (see §2.1, §2.2),
+not Tier 2 derived built-ins.
 
 ### 3.2 Comparison
 
@@ -710,20 +555,12 @@ Note: `or(a, b)` on bools is `max_elem(a, b)`. `and(a, b)` on bools is `mul(a, b
 | `cross_entropy(logits, labels)` | See §4.3 |
 | `min_elem(a, b)` | `neg(max_elem(neg(a), neg(b)))` |
 
-**Current implementation note:** the type checker currently also accepts a
-`normalize(x)` convenience name.
-It is **not** part of the stable Tier 2 surface yet because its lowering semantics are
-not specified here and there is no corresponding IR check lowering rule.
-Do not treat `normalize` as a stable specified built-in until this document and the IR
-lowering are aligned.
-
-### 3.5 Lowering Helpers And Sparse Implementation Nodes
+### 3.5 Lowering Helpers And Sparse Nodes
 
 The following names appear in lowering narratives (§4) as pseudocode or
 pattern-matched operations. Most decompose into Tier 1 primitives.
-(`cos` was formerly listed here as `sin(add(x, const(π/2)))`; it is now a
-first-class unary primitive `RiscOp::Cos` — see §2.2 — alongside `tan`,
-`atan`, `abs`, `floor`, and `ceil`, none of which decompose.)
+`cos` is a first-class unary primitive `RiscOp::Cos` — see §2.2 — alongside `tan`,
+`atan`, `abs`, `floor`, and `ceil`, none of which decompose.
 
 | Helper | Decomposes to |
 |---|---|
@@ -732,19 +569,15 @@ first-class unary primitive `RiscOp::Cos` — see §2.2 — alongside `tan`,
 | `im2col(x, kh, kw, ...)` | `stride`, `pad`, `reshape`, `permute` |
 | `where(cond, a, b)` | `add(mul(cond, a), mul(neg(cond), b))` assuming bool 0/1 |
 
-Implementation note: the compiler now also has first-class specialized sparse
-IR nodes `RiscOp::Gather { axis }`, `RiscOp::ScatterAdd { axis }`,
-`RiscOp::Scatter { axis }`, and `RiscOp::ScatterElements { axis }` (the
-element-wise ONNX `ScatterElements`, §3.5.1), with evaluator, verifier, AD,
-C/HIP backend, and wire-schema support. Tensor-lane Surf `gather(values, indices, axis)` lowers
-directly to `RiscOp::Gather` in the current implementation, avoiding the host
-runtime call and the dense one-hot materialization. The tensor-lane Surf
-builtin `scatter_replace(base, indices, updates, axis)` lowers directly to
-`RiscOp::Scatter` for the last-write-wins case. The shared specialization pass
-also recognizes the internal `RiscOp::OneHot { vocab } + Expand + Mul + Sum`
-gather tree and collapses it before DCE/codegen. Arbitrary historical const/eq
-one-hot encodings are not recognized because they do not preserve the original
-index operand.
+Sparse operations use the distinct IR nodes `RiscOp::Gather { axis }`,
+`RiscOp::ScatterAdd { axis }`, `RiscOp::Scatter { axis }`, and
+`RiscOp::ScatterElements { axis }` (the element-wise ONNX operation in
+§3.5.1). Every evaluator, verifier, AD pass, backend, and wire representation
+must preserve their typed semantics. Tensor-lane `gather` and
+`scatter_replace` lower directly to their corresponding nodes. A
+specialization pass may recognize and replace the internal
+`OneHot + Expand + Mul + Sum` gather composition only when it preserves the
+original index operand.
 
 #### Replace-scatter vs scatter-add
 
@@ -767,26 +600,16 @@ ascending flat-index order, the write
 `target[..., indices[idx_pos(i)], ...] = updates[i]` occurs at step
 `i`. When two updates target the same cell, the write with the
 larger flat index in `updates` is the final value at that cell.
-Every backend (interpreter, C, HIP) must observe this rule:
-
-- The IR evaluator (`chelis_ir::eval::scatter_replace`) iterates the
-  updates tensor sequentially in row-major flat order.
-- The C backend emits a single-threaded sequential loop (no
-  `#pragma omp parallel for`) — parallelizing would race on
-  duplicate indices and break determinism.
-- The HIP backend emits a `<<<1, 1>>>` single-thread serial kernel
-  for the same reason. Atomic ops do not provide ordered
-  last-write-wins semantics; introducing a parallel implementation
-  would require an explicit tie-breaker that picks the maximum
-  flat-index writer per target cell. That optimization is
-  permitted only when it preserves exactly this rule.
+Every backend must observe this rule. Sequential execution is conforming; a
+parallel realization must use a deterministic tie-breaker that selects the
+maximum flat-index writer for each target cell.
 
 **AD policy for `Scatter`:** reverse-mode AD is structurally
 rejected. The forward result depends on iteration order at
 duplicate indices, so distributing a single output gradient across
 the colliding updates would require an arbitrary policy that does
 not derive from the forward semantics. The rejection is returned
-through the new structured error type `chelis_ir::grad::AdError`:
+through the structured error type `chelis_ir::grad::AdError`:
 
 ```rust
 AdError::NotSupported {
@@ -874,130 +697,27 @@ state through the tensor-lane primitives in §2.
 precision equals the dtype of `initial`. The iteration order is the
 positional integer sequence `0, 1, ..., n - 1`.
 
-Precision caveat: the host-runtime interpreter stores every scalar — the
-running accumulator included, not only the emitted tensor elements — as
-an `f64` (`crates/chelis-compiler-api/src/runtime.rs`
-`ScalarBits::as_f64`), so a `T = int64` accumulator is exact only up to
-2^53; integer magnitudes beyond that lose their low bits, matching
-IEEE-754 double semantics and the behavior of every other host-runtime
-tensor builder. This is not specific to `tensor_scan`. Because the
-*accumulator itself* is f64-backed, the loss is not confined to the
-final stored elements: if `fn` drives the accumulator above 2^53 at any
-step, that step rounds and every subsequent step folds the rounded value
-forward, so a scan whose values transiently exceed 2^53 is wrong even
-where the final element lands back inside the exact range. Concretely,
-three `+1` steps from 2^53 yield `[2^53, 2^53, 2^53]` rather than
-`[2^53+1, 2^53+2, 2^53+3]`, because 2^53+1 is unrepresentable and the
-rounded accumulator carries forward. The init-style use cases that
-motivate the helper (LCG-driven Glorot weights bounded by the modulus,
-positional/index sequences, learned-schedule precompute) all stay within
-2^53 at every step, so the caveat is documented rather than guarded.
+The accumulator and every emitted element obey the declared dtype's value and
+arithmetic-width semantics from `spec/04-type-system.md` §9; an implementation
+must not route them through `f64` or another untagged carrier. The host loop uses
+constant stack space in `n`. Compiled artifacts execute the helper through their
+host-runtime boundary.
 
-`tensor_scan` exists because the host-runtime interpreter has no
-tail-call optimization: right-recursive Surf list builds of more than
-~10000 elements overflow the worker stack (Chelis-Lang/chelis#257),
-and the chunked / fold workaround patterns hit an O(n²) `concat`
-wall well below the 30k–40k-element regime that init-style use cases
-(LCG-driven Glorot weights, positional embedding precompute, learned
-schedule precompute) need. `tensor_scan` runs the loop on the host
-in Rust, so the worker stack is constant in `n`.
+A non-callable second argument, a wrong-arity call, a negative `n`, or a
+callback that returns a different dtype than `initial` is rejected with a
+`tensor_scan`-tagged diagnostic. `tensor_scan` has no AD adjoint and is not
+vectorizable; `grad` and `vmap` reject it when it is reachable from the
+transformation target. Unrelated definitions do not block a transformation.
 
-The builtin is **not** wired into `chelis build` for the `c` or `hip`
-backend target. A program that calls `tensor_scan` at top-level, inside
-a higher-order callback body (`map`/`fold`/`filter`/`scan`/`partition`/
-`flat_map`), or inside any top-level function — *whether or not that
-function is reachable from the build entry* — is rejected at compile
-time with a `tensor_scan`-tagged `unsupported_feature` diagnostic that
-points back to this section. The rejection is enforced in
-`crates/chelis-compiler-api/src/compiler.rs::reject_host_only_builtins`,
-which walks every top-level binding value, every function body, and
-every inline callback body, so the C/HIP emitters never see a
-`tensor_scan` call; previously the C host emitter silently produced
-`__binding_0_value = /* unsupported builtin tensor_scan */ 0` and the
-compiled program returned garbage. Programs that need a compiled scan
-over a tensor must compose `expand` + the tensor-lane primitives
-directly.
-
-This build-time walk is intentionally **whole-program**, in contrast to
-the *reachability-scoped* AD/`vmap` rejection below. The asymmetry is
-deliberate and tracks each backend's emission scope: the C/HIP host
-emitter (`chelis_backend_c::host_emit`) emits *every* top-level function
-unconditionally with no dead-code pruning, so a `tensor_scan` call inside
-an otherwise-unreferenced helper still reaches the emitter and would
-produce the silent stub above. Narrowing the build guard to the entry's
-reachable call graph while the emitter still emits the whole program
-would let that broken stub ship in a build the user believes succeeded.
-The AD/`vmap` guard can scope to the transform target because the AD
-lowering only ever touches that target's subgraph. If backend
-dead-function pruning is added later, the build guard can be narrowed to
-the emitted set in lockstep.
-
-A future Tier 1 primitive can replace this host-only helper once the
-RISC DAG admits higher-order tensor primitives. Until that lands,
-`tensor_scan` is the recommended path for building per-index tensor
-data at `chelis test` / `chelis eval` time without paying the
-right-recursive list cost.
-
-**Negative parity for `tensor_scan`**: a non-callable second argument,
-a wrong-arity call, a negative `n`, or a callback that returns a
-different dtype than the initial value's dtype are rejected with
-`tensor_scan`-tagged diagnostics (the first three at type-check
-time, the dtype-mismatch as a belt-and-suspenders runtime guard).
-A `chelis build --target c` or `--target hip` of a program that
-calls `tensor_scan` is rejected at compile time, and `grad(...)`
-/ `vmap(...)` over a function whose body reaches `tensor_scan` is
-rejected at the host-runtime transform boundary with a tagged error
-referencing this section (the diagnostic verb is transform-specific:
-`grad` reports it cannot *differentiate through* the builtin, `vmap`
-that it cannot *vectorize over* it). The AD-boundary rejection is
-*reachability*-scoped: it fires only when `tensor_scan` is reachable
-from the transform target (the applied function and the def bodies it
-calls), so an unrelated top-level binding that happens to call
-`tensor_scan` does not falsely block a differentiable transform. The
-acceptance tests in
-`crates/chelis-compiler-api/tests/issue_257_tensor_scan_host_runtime.rs`
-pin each of these — the reachability-scoping case, separate `grad` and
-`vmap` rejections, the higher-order-callback build rejection, and the
-whole-program build rejection of a `tensor_scan` call in an
-entry-unreachable helper — alongside the positive 8/20000/40000-element
-cases.
-
-### 3.6.1 The `test_*` assertion family (host-only)
+### 3.6.1 The `test_*` Assertion Family
 
 The `Test`-effect assertion builtins — `test_assert`, `test_assert_eq_f32`,
 `test_assert_eq_int`, `test_assert_eq_bool`, `test_assert_eq_string`,
 `test_assert_close_tensor`, and `test_assert_eq_tensor_int64` — are
-**host-only**. They run inside the `chelis test` / `chelis eval` interpreter,
-where an assertion evaluates its condition and aborts the run with a branded
-label on failure. They have **no compiled-lane emission arm**.
-
-Their build rejection is enforced *differently* from `tensor_scan`'s. They
-are **not** in the whole-program pre-codegen host-only gate
-(`reject_host_only_builtins`; `HOST_ONLY_BUILTINS = ["tensor_scan"]`).
-Instead the rejection is the C host emitter's unsupported-builtin catch-all
-(`chelis_backend_c::host_emit`): a `test_*` call in a function the emitter
-emits is a build error with a branded `unsupported` diagnostic (chelis#703
-class), never a silently-inert assertion. That makes it **liveness-scoped** —
-the opposite of `tensor_scan`'s whole-program gate. A `test_*` in a function
-reachable from the build entry, or in *any* function of an entry-less
-object-mode module such as `Std.Test` itself (where every function is live),
-is rejected at `chelis build`; a `test_*` in an entry-unreachable helper is
-emitted as an abort stub and the build succeeds (the stub aborts only if
-reached). Before the loud-unsupported sweep the emitter compiled every such
-call to a `/* unsupported builtin test_assert */ 0` stub, so a compiled test
-asserted nothing; that silent stub is gone.
-
-Consequently the `Test`-effect wrappers in `Std.Test` (`assert_true`,
-`assert_eq`, `assert_close`, `assert_shape`, `fail`, … — each a thin
-`test_assert*` call) are eval/check-only: `chelis check` and `chelis test`
-accept them, and `chelis build` of the module rejects them (it is
-object-mode, so every wrapper is live). The compiled-lane arm — a compiled
-binary that can *fail its own assertions* — requires real C assertion helpers
-(compare + branded abort on mismatch) and is tracked by chelis#796.
-(Separately, promoting `test_*` into the pre-codegen host-only gate would only
-make the build reject them *whole-program* like `tensor_scan`, not make them
-assertable — a rejection-cleanliness change, not the compiled-lane arm.)
-Until the compiled-lane helpers land, assertions are an eval-lane contract.
+`Test`-effect host operations. Every execution lane evaluates the assertion
+and terminates the run with its branded label on failure. Device builds keep
+the assertion at the host-runtime boundary. An assertion may never compile to
+a no-op, zero value, or unreachable stub.
 
 ---
 
@@ -1040,7 +760,7 @@ carries a populated accumulator-precision field. The full default table and
 rationale are in `spec/04-type-system.md` §5.7.1.
 
 Integer matmul (operands of `int8` / `int16` / `int32` / `int64`) is not
-admitted in the active matmul signature; see `spec/04-type-system.md` §5.7.2
+admitted in the matmul signature; see `spec/04-type-system.md` §5.7.2
 for rationale. Use `reduce_sum` over an explicit `expand`+`mul` lowering for
 integer inner products.
 
@@ -1155,19 +875,19 @@ Every RISC primitive has a defined adjoint rule (§2). This means `grad` can dif
 **Non-differentiable primitives:** `cmplt`, `const`, `load` have zero gradient.
 `floor`, `ceil`, and `round` are piecewise constant and `grad` rejects them with an
 `AdRejectionReason::PiecewiseConstant` error rather than silently returning a zero
-gradient. The type system (Phase 2, via the `Diff` effect) will detect when `grad` is
+gradient. The type system detects through the `Diff` capability when `grad` is
 applied to a function containing non-differentiable operations and report which
 operations are the problem.
 
 **Almost-everywhere differentiable:** `max_elem` (gradient is zero at the boundary where inputs are equal), `relu` via `max_elem(x, 0)` (gradient is zero at x=0). These are valid targets for `grad` — the subgradient convention (pick one side) is standard in ML.
 
-**Second-order derivatives:** `grad(grad(f))` works if all operations in `f` have defined second-order adjoints. For Phase 0, second-order AD is tested but not optimized.
+**Second-order derivatives:** `grad(grad(f))` works if all operations in `f` have defined second-order adjoints.
 
 ---
 
 ## 6. Reference Implementations
 
-For each RISC primitive, a reference implementation in pseudocode for the C backend (Phase 0f). These are the "obviously correct" naive implementations used as the test oracle.
+For each RISC primitive, this section gives illustrative C-like pseudocode.
 
 ```c
 // add: element-wise
@@ -1229,58 +949,26 @@ authority. Where one of them and a normative section disagree, the normative
 section wins and the pseudocode has a bug: §2.3 owns reduction order and
 accumulator type, `spec/04-type-system.md` [04-NUM-8] owns the arithmetic
 width every `acc` and every temporary is computed at, and §5.7.1 owns the
-accumulator defaults. (This paragraph formerly read "These C implementations
-are the ground truth", which had already gone stale against §2.3's cascade;
-corrected 2026-07-28.)
+accumulator defaults.
 
-The GPU backend must produce numerically identical results within floating-point
-tolerance (1e-6 for f32, 1e-12 for f64) pending the per-op tolerance table of
-[05-OBS-3], which supersedes these two blanket numbers when it is authored.
+Cross-lane numeric agreement is governed exclusively by [05-OBS-3].
 
 ---
 
-## 7. The Unsupported-Case Response Contract (Decided 2026-07; Implementation Tracked As chelis#730)
-
-**Status banner - read before citing.** RATIFIED and enforced for the
-censused live sites by chelis#730 Phase 1. Phase 2 is complete and ACCEPTED
-(PR #799, merged 2026-07-24): dependency-bottom `EffectKind`/`RuntimeDType`
-identities, Result-only boundary decoders, exhaustive consumers, immediate
-invalid-ID rejection, generated Rust/C dtype agreement, the staged
-host-type/ABI boundary, and the structured C-expression AST, with the
-authoritative oracle green (`PHASE 2 ORACLE: PASS`) and the fresh
-adversarial review run and dispositioned
-(`docs/investigations/pr799_returned_function_values_redteam.md`). Count
-baselines and the token tripwire are supporting checks, not the authority.
-Atoms [05-UNS-5..6] below were DECIDED 2026-07-30 and are not yet
-enforced; each carries its own status note.
-
-The implementation was explicitly re-planned on 2026-07-22 after execution
-showed that the initial source lint was neither complete nor false-positive
-free. That lint moved to PR #815; it is not part of this atom's proof. The
-final enforcement is the typed construction boundary described below.
+## 7. The Unsupported-Case Response Contract
 
 The HostType contract consumes checked type metadata, preserves named
 polymorphism, inference identity, bottom, and exact dtype, and permits only a
 resolved `ConcreteHostType` plus an authoritative target capability decision
 to produce `HostAbiType`. Codegen accepts only the ABI vocabulary. This
 contract owns failure representation; grounded dtype semantics and Table A/B
-policy remain owned by chelis#729. The current C decision selects exact
-`int8_t`/`int16_t` ABI variants because those representations already exist,
-while f16/bf16 scalar values reject at selection until chelis#729 supplies
-exact storage and rounding; an accidentally-green widened value is not a
-supported ABI cell.
+policy remain owned by `spec/04-type-system.md`. A target selects only exact
+ABI representations; an accidentally widened value is not a supported cell.
 Typed C callback parameters and direct statically-known callback arguments
 cross a private callback-declarator path; general function values do not.
 Function results, stored function values, and dynamically selected callables
 return `Unsupported` before emission, and no function type maps to `void *`,
 zero, or a raw call target.
-Residuals are per-atom noted below; [05-UNS-4]'s gate demotion is that
-plan's Phase 3. The delivery plan and full elaboration (the failure
-channel, the census, the typed ratchets) is
-`spec/design/loud_unsupported.md`. Atom IDs are stable, and the current
-blockquote authorities remain normative until selected for chelis#733 Phase 1
-migration. Full revisions are attached and checked through the pinned Buoy
-shell-side integration, not a Chelis provenance lint.
 
 > **[05-UNS-1]** When any stage encounters a case it does not support -
 > an op, builtin, dtype, kernel, construct, or parameter shape - it
@@ -1294,14 +982,6 @@ all semantic matches are exhaustive and wildcard-free. An unknown runtime
 dtype ID must fail before sizing or buffer access. A source-text scanner or
 count allowlist is supporting evidence only and cannot satisfy [05-UNS-1].
 
-*(Enforced since chelis#730 Phase 1 for the censused sites: the
-formerly substituting encounters of chelis#682/#689/#699/#714/#715/
-#725/#734 now fail loudly. Residual: chelis#716's narrow-float tensor
-boundary cells abort loudly at run time - the print helper's dtype-id
-abort is interim per chelis#728 - and the eval-lane value cells of
-chelis#717 are observation/semantics work owned by chelis#728/#729/
-#732, not substitution.)*
-
 > **[05-UNS-2]** The diagnostic SHALL surface at the earliest competent
 > stage - the checker for type-answerable questions, the build for
 > target- or lowering-decided ones, the runtime only for genuinely
@@ -1309,29 +989,15 @@ chelis#717 are observation/semantics work owned by chelis#728/#729/
 > prefix, name what was encountered and at which stage, and carry a
 > span where one exists and the supported alternative where one exists.
 
-*(Calibration examples that already conform in substance: the HIP
-narrow-float rejection, the Metal f64 rejection, the runtime `to_tensor`
-dtype abort.)*
-
 > **[05-UNS-3]** A panic or assertion failure reachable from `.ch` or
 > `.dp` source input is a defect; internal panics are reserved for
 > compiler invariants whose upstream guarantee is named at the panic
 > site.
 
-*(Enforced since chelis#730 Phase 1: the chelis#692 reduce-family
-panics and chelis#725's emitter assertions are section C2 diagnostics
-through the Result channel.)*
-
 > **[05-UNS-4]** A pre-codegen gate MAY make an unsupported diagnostic
 > earlier or more specific; it SHALL NOT be the sole defense against an
 > unsupported case reaching emission, and a gate/emitter disagreement is
 > a defect in the gate.
-
-*(Partially honored: since chelis#730 Phase 1 the emitter channel
-speaks even where a gate is missing or permissive, so no gate is the
-sole defense against a SILENT wrong binary any more; the gate
-dedup/demotion itself - chelis#697/#698/#705's gate halves - is that
-plan's Phase 3.)*
 
 > **[05-UNS-5]** An unsupported diagnostic SHALL carry the authority
 > for its rejection: a deliberately unsupported case cites the spec
@@ -1339,17 +1005,7 @@ plan's Phase 3.)*
 > tracking issue. The two SHALL be distinguishable at the diagnostic
 > surface, and a rejection carrying neither citation is a defect.
 
-*(Decided 2026-07-30; NOT yet enforced. Today the citation is a prose
-convention on the diagnostic's hint field - 31 of 33 production sites
-conform and two do not (chelis#959). chelis#730's amended Phase 3
-makes the distinction structural through a validated authority type
-(design doc §C2.1); the capability table (chelis#729 Phase 4) later
-populates the deliberate-versus-unimplemented decision per cell. The
-validator proves citation identity and last-verified issue kind/open
-state, not that a cited issue actually tracks the rejected
-site/capability: that relevance judgment remains a required review
-step, with an open-but-unrelated issue as the negative review control.
-The design doc implements; this atom decides.)*
+*(Not fully implemented; see chelis#959.)*
 
 > **[05-UNS-6]** The machine-facing kind of a diagnostic is drawn from
 > a closed vocabulary with stable spellings; the build surface's
@@ -1359,59 +1015,11 @@ The design doc implements; this atom decides.)*
 > this kind for anything other than a typed unsupported rejection, or
 > a different kind for one, is a defect.
 
-*(Decided 2026-07-30; NOT yet enforced. Today kinds are free strings
-chosen independently at each producing site, plus a Debug-format leak
-and message-substring dispatch (chelis#959; PR #822 shipped a
-mislabel). chelis#730's amended Phase 3 delivers the closed
-`DiagnosticKind` vocabulary, the sealed producer chokepoint, and the
-wire-spelling lock test (design doc §C2.2). The structured `check`
-payload remains separately gated per that doc's §C2 STATUS relaxation
-(chelis#871); this atom governs the kind spelling, not the payload
-schema.)*
+*(Not fully implemented; see chelis#959.)*
 
 ---
 
-## 8. Observation And Formatting Contract (Payload Ratified At chelis#732 Phase 1; Root-Envelope Acceptance Pending chelis#1023)
-
-**Status banner:** atoms [05-OBS-1..5] were RATIFIED at chelis#732
-Phase 1 (2026-07-20), which landed `format_element` (the single
-renderer, `chelis-types::observation`) and routed every EVAL-lane exit
-through it. [05-OBS-6] was added for chelis#912 on 2026-07-31; its
-always-labelled prefix is live, while its manifested root-order and
-unavailable-root acceptance remain under chelis#1023. chelis#732 Phase 2
-(2026-07-24) brought the compiled C lane
-onto the same grammar: the emitted print helper is GENERATED from an
-exhaustive `Prim` match, every compiled float exit routes through the
-runtime's `chelis_format_shortest` (byte-locked against
-`format_element`), `to_list` reads every dtype (chelis#716, #723,
-#726's C half, #748, #749 fixed; close on the PR #863 merge), and
-cross-lane byte equality holds for identical stored bits at matching
-rendered widths. Annexed deviations, each issue-linked (chelis#864 and
-chelis#865 carry ignored red cells in the observation harness): the
-deliberate eval tensor width
-note in section 8.1 (chelis#729's metadata repair); eval's LABELED-ROOT
-render of cast-constructed f64 tensors, which the stale F32 precision
-tag narrows below the stored width (chelis#864, the chelis#717 family -
-an [05-OBS-1] violation in the eval lane); the compiled lane's untagged
-f64 value box, which renders narrower float elements (f32 as well as
-f16/bf16) at f64-image width through `to_list` and list/tuple boxing -
-faithful parse-back, not the own-width shortest form (chelis#865, the
-chelis#729/#686 capacity family). Every remaining annexed cell carries
-an `#[ignore]`d red test naming its owning issue,
-and none of them is a silent skip: the phase oracle
-(`.venv/bin/python scripts/faithful_observation_phase2_oracle.py`) holds
-the complete ledger, requires the harness's ignore inventory to equal
-it, re-executes each cell, and FAILS if one is red for an undeclared
-reason or has gone green - so an upstream chelis#729 repair cannot leave
-a permanently skipped test or a stale conformance sentence behind. The
-same oracle independently recompiles/runs every executable declared C
-corpus exclusion and compares intended bits; comment/string-only source
-fingerprints cannot preserve an exclusion after exact behavior returns.
-Atom IDs are stable, and the current blockquote authorities remain
-normative until selected
-for chelis#733 Phase 1 migration. Full revisions are attached and checked
-through the pinned Buoy shell-side integration. The delivery plan and full
-elaboration is `spec/design/faithful_observation.md` (meta chelis#728).
+## 8. Observation And Formatting Contract
 
 > **[05-OBS-1]** Every exit that renders a stored numeric value as text -
 > `print`, `to_list`, diagnostics, the wire schema's rendering - SHALL
@@ -1419,21 +1027,7 @@ elaboration is `spec/design/faithful_observation.md` (meta chelis#728).
 > own dtype width, and all exits within a lane SHALL agree with each
 > other and with the stored bits.
 
-*(Conformant in both lanes since chelis#732 Phase 2 EXCEPT the two
-annexed value-layer cells named here, which remain issue-linked red
-tests re-executed by the phase oracle - one deliberate width note is
-also recorded in §8.1. The exceptions: an
-int64 SCALAR ROOT above 2^53 renders the f64-collapsed stored value at
-the labeled root while `print`/`to_string` of the same def are exact -
-the interpreter's rank-0 realization collapses the value BEFORE the
-renderer sees it (chelis#684, [#729]'s value layer; surfaced by PR
-#792's red team); and the eval LABELED ROOT of a `cast(<tensor>, f64)`
-result renders through the stale F32 precision tag - text that no
-longer parses back to the stored bits at the declared width - while
-`print` of the same tensor shows the stored f64 bits (chelis#864, the
-chelis#717 family; surfaced by PR #863's red team). Both return with
-chelis#729. The C lane's former violations (chelis#716, #723, #748,
-#749) went green at Phase 2 by un-ignoring their red cells.)*
+*(Not fully implemented; see chelis#729 and chelis#864.)*
 
 > **[05-OBS-2]** Integer dtypes SHALL print as integers with all digits
 > exact; floats SHALL print the shortest string that round-trips at
@@ -1441,36 +1035,13 @@ chelis#729. The C lane's former violations (chelis#716, #723, #748,
 > number grammar (digit selection, exponent form, special-value
 > spellings) SHALL be identical across lanes and is pinned in §8.1.
 
-*(Conformant in both lanes since chelis#732 Phase 2 EXCEPT the annexed
-own-width cell named at the end of this note, which remains an
-issue-linked red test re-executed by the phase oracle. Eval adopted the
-grammar at Phase 1 (integers lost the `.0`, bool tensors print
-`true`/`false`, scalars render at own width) and Phase 2's generated
-helper brought the compiled lane onto the identical grammar - exact
-integer printf at width (chelis#723 fixed), `chelis_format_shortest`
-replacing the `%.1f`/`%.16g` split (chelis#748 fixed). One annexed
-own-width deviation: the compiled lane's untagged f64 value box renders
-narrower float elements (f32/f16/bf16 reached through `to_list` or
-list/tuple boxing) at their exact f64-image width - the text parses
-back to the stored bits at the element's width, but is not the shortest
-own-width form until the box learns element widths (chelis#865, the
-chelis#729/#686 capacity family).)*
+*(Not fully implemented; see chelis#865.)*
 
-> **[05-OBS-3]** Cross-lane VALUE differences are permitted only for the
-> ops listed in the per-op tolerance table (to be authored into THIS
-> section, §8, by chelis#732 Phase 3), within the listed bound; `sqrt`
-> SHALL be correctly rounded (bound zero, per chelis#719). Formatting
+> **[05-OBS-3]** Cross-lane VALUE differences are permitted only when the
+> operation's normative definition states an explicit tolerance, and only
+> within that bound. An operation with no stated tolerance has bound zero.
+> `sqrt` SHALL be correctly rounded and has bound zero. Formatting
 > differences are never within tolerance.
-
-*(The table is pending; #719's fix (PR #760) precedes its sqrt row. This
-section, spec/05 §8, is its single authored address: `dtype_semantics.md`
-§C4 item 5 and `faithful_observation.md` Phase 3 point here and do not
-host it. Scope note, 2026-07-28: with arithmetic width fixed per dtype by
-[04-NUM-8], the table covers only genuine implementation variance at a
-single width - one lane's libm or SLEEF or vForce against another's for
-the transcendentals - and never a structural precision mismatch between
-lanes computing at different widths. Rows for add/sub/mul/div and the
-comparisons are bound zero by construction, not by measurement.)*
 
 > **[05-OBS-4]** A scalar-typed value SHALL render as the bare scalar at
 > every exit in both lanes, including as a top-level labeled root
@@ -1481,54 +1052,30 @@ comparisons are bound zero by construction, not by measurement.)*
 > internally; that realization SHALL NOT leak into the observation
 > channel.
 
-*(The chelis#775 decision, authored 2026-07-20. Rationale: `print` of a
-scalar already rendered bare in BOTH lanes and the compiled lane's
-labeled roots did too, so the bare form is the only choice consistent
-with [05-OBS-1]'s intra-lane exit agreement; the rank-0 wrapper was an
-eval-interpreter storage artifact. Conformant in both lanes for the
-locked repro; general C-lane digit grammar is Phase 2. The bare-scalar
-rendering inherits [05-OBS-1]'s annexed chelis#684 exception: an int64
-scalar root above 2^53 renders bare but carries the f64-collapsed
-stored value until chelis#729 repairs the realization's storage.)*
+*(Not fully implemented; see chelis#729.)*
 
 > **[05-OBS-5]** Every exit in both lanes SHALL truncate tensor element
 > rendering after 32 elements, marking the cut with `, ...` inside the
 > `data=[..]` brackets. `to_list` and the wire schema never truncate:
 > full-element fidelity is theirs.
 
-*(Decided 2026-07-17, faithful_observation.md open question 4; the
-threshold is one documented constant, `TENSOR_RENDER_LIMIT`. Eval lane
-conformant since chelis#732 Phase 1 - the formerly unlimited transcript
-and the labeled root's former `+ ...` marker both moved in the §B2.1
-migration. The C lane's nested-in-list renderer (formerly a 10-element
-cut with NO marker, chelis#749) adopted the same rule at Phase 2.)*
-
 > **[05-OBS-6]** Every root SHALL render with a `name = value` label at
 > every exit in both lanes. The bare-when-single form is removed. Render
 > order is manifest entry order. A lane that cannot produce a root it
 > owes SHALL emit [05-UNS-1] naming that root, the lane, and the reason.
 
-*(Decided 2026-07-31, chelis#912. The bare form cost cross-lane byte
-identity and line-count parity, which are the two properties #687 and
-#763 are built on. The always-labelled prefix has landed in both lanes.
-Full conformance remains pending under chelis#1023 until the manifest is
-the production observation/build boundary, every owed dotted root is
-enumerated, and an unavailable root exercises the required [05-UNS-1]
-diagnostic with root, lane, and reason.)*
+*(Not fully implemented; see chelis#1023.)*
 
-### 8.1 The Number Grammar (Normative Constants, Frozen At chelis#732 Phase 1)
+### 8.1 The Number Grammar
 
-The grammar is Rust `{:?}` (`Debug`) float formatting, normatively
-(`faithful_observation.md` §C1.3; `Display` is NOT this grammar - it
-never emits e-notation):
+The grammar is Rust `{:?}` (`Debug`) float formatting, normatively; `Display`
+is not this grammar because it never emits e-notation:
 
 - shortest round-trip digits at the value's own width;
 - decimal form exactly when the RENDERED magnitude - the value the
   chosen shortest digits denote - is zero or satisfies
   `1e-4 <= |v| < 1e16` (the normative threshold constants
-  `DECIMAL_LOWER_BOUND` / `DECIMAL_UPPER_BOUND` in
-  `chelis-types::observation`, captured empirically from rustc and
-  locked by unit tests so a rustc formatting change breaks loudly).
+  `DECIMAL_LOWER_BOUND` / `DECIMAL_UPPER_BOUND`).
   The rule follows the digits actually printed, not the stored
   magnitude: when a width's ulp straddles a threshold, the shortest
   rendering can sit on the other side of it - the bf16 whose image is
@@ -1536,8 +1083,7 @@ never emits e-notation):
   9.9999997e-5 renders `0.0001` (decimal). This is rustc's observed
   `{:?}` behavior, which compares against the constants at the value's
   own width - equivalent to the rendered-magnitude rule at every
-  representable boundary (ratified at PR #792 after its red team's F2
-  finding; the exhaustive half-format tests lock the boundary cases);
+  representable boundary;
 - decimal renderings of integral values keep one fractional digit
   (`2048.0`, never `2048`);
 - e-notation is `<mantissa>e<exp>`: lowercase `e`, no `+`, no zero
@@ -1546,26 +1092,9 @@ never emits e-notation):
   level: exit text carries no payload); `-0.0` prints with its sign;
 - `f16`/`bf16` print the shortest decimal whose parse-back (`strtod` to
   f64, then one correctly-rounded narrowing to the half width - safe by
-  [04-NUM-1]'s single-rounding argument) yields the stored bits,
-  verified exhaustively over all 65536 bit patterns per format; their
+  [04-NUM-1]'s single-rounding argument) yields the stored bits; their
   decimal/e-notation decision applies the same rendered-magnitude rule
   to the chosen digits, and a same-length candidate tie breaks to the
   numerically closest, then the even mantissa;
 - integer dtypes print exact base-10 digits (i64 formatting, never
   through double).
-
-**Eval width note (deliberate, chelis#732 Phase 1):** eval TENSOR float
-elements render at the stored f64 width, because the eval tensor store
-is f64-backed and its runtime precision tag is unreliable for float
-width (chelis#717); narrowing at render time would launder stored bits,
-which [05-OBS-1] forbids. Scalar exits render at their own width. Own-
-width tensor digits arrive when chelis#729 repairs the value metadata -
-a value-layer fix, not a grammar change.
-
-**Tag-vs-bits disagreements print the bits:** when an integer- or
-bool-tagged tensor slot stores a value outside the tag's value set (the
-live example: `mean` of an int64 tensor stores 187.5 - chelis#724
-domain territory), the element renders as the stored f64, so the value
-bug stays visible at the exit instead of being truncated into a
-well-formed lie. Rendering never repairs, rounds, or rejects stored
-values.

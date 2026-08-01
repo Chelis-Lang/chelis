@@ -109,8 +109,8 @@ intermediate values, not allocator artifacts. **Planned closure:**
 Kerrent Phase K6 (`spec/design/kerrent.md` §Milestone 6) is the
 committed-scope path — a FlashAttention-shaped fused attention kernel
 authored in Kerrent and called from tensor-level Chelis, replacing the
-current attention decomposition. See `spec/12-roadmap.md` §Kerrent for
-the phase ledger.
+current attention decomposition. See `spec/design/chelis_project_plan.md`
+§Kerrent Track for the delivery sequence.
 
 ### Cross-function specialization (Gap 5)
 

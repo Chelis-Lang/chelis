@@ -584,8 +584,8 @@ crates/chelis-cli/src/main.rs       -- add --target metal arm + cmd_build_metal 
                                        extend copy_runtime_artifacts
 crates/chelis-effects/src/lib.rs    -- validate_build_target arm for "metal"
 
-spec/08-backends.md                 -- new "Phase M: Metal Backend" top-level section
-spec/12-roadmap.md                  -- add Phase M row
+spec/08-backends.md                 -- define Metal backend semantics
+spec/design/chelis_project_plan.md  -- add Metal delivery sequence
 docs/manual_gates.md                -- register M6 manual oracle
 docs/phase_oracles.md               -- register M1-M7 phase oracles
 .github/workflows/ci.yml            -- append metal compile/link step to macos-smoke job
@@ -636,7 +636,7 @@ M0: Spec sync (no code)
 ├── Rewrite §3.3 to drop the metal-rs Rust runtime and use the
 │   [MTLDevice newLibraryWithSource:] runtime-compilation path instead
 ├── Add "Phase M" section to spec/08-backends.md
-├── Add roadmap row, manual-gate entry, phase-oracle registration
+├── Add project-plan sequence, manual-gate entry, phase-oracle registration
 └── Oracle: grep -F "[MTLDevice newLibraryWithSource:]" finds at least one hit
 
 M1: Scaffolding + CLI dispatch (default-gate)

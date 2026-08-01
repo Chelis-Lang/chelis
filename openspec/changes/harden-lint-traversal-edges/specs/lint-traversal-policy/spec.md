@@ -27,18 +27,18 @@ A file or directory explicitly supplied as a lint root SHALL override a policy e
 
 #### Scenario: Discovered inadmissible entries stay silent
 - **WHEN** a socket, FIFO, escaping symlink, or other inadmissible entry is discovered below an admitted lint root rather than named explicitly
-- **THEN** the entry is omitted without failing the invocation, unchanged from prior behavior
+- **THEN** the entry is omitted without failing the invocation
 
 ### Requirement: Traversal exclusions come from structured policy
-`chelis-lint` SHALL obtain traversal exclusions from versioned TOML policy artifacts rather than path-name literals in `walker.rs`. A shipped baseline policy SHALL provide cross-repository infrastructure exclusions, and the nearest ancestor `chelis-lint.toml` SHALL add repository-specific exclusions. Nearest-ancestor discovery MUST be performed on the lint target resolved against the current working directory, so a relative target spelled from any cwd inside a policy root discovers the same repository policy as the equivalent absolute target. Discovery MUST NOT depend on how the target path was spelled.
+`chelis-lint` SHALL obtain traversal exclusions from versioned TOML policy artifacts rather than path-name literals in `walker.rs`. A built-in baseline policy SHALL provide cross-repository infrastructure exclusions, and the nearest ancestor `chelis-lint.toml` SHALL add repository-specific exclusions. Nearest-ancestor discovery MUST be performed on the lint target resolved against the current working directory, so a relative target spelled from any cwd inside a policy root discovers the same repository policy as the equivalent absolute target. Discovery MUST NOT depend on how the target path was spelled.
 
-#### Scenario: Repository policy extends shipped defaults
+#### Scenario: Repository policy extends built-in defaults
 - **WHEN** a lint target has an ancestor `chelis-lint.toml`
-- **THEN** the canonical walker applies both the shipped baseline exclusions and that nearest repository policy
+- **THEN** the canonical walker applies both the built-in baseline exclusions and that nearest repository policy
 
 #### Scenario: Loose target uses deterministic defaults
 - **WHEN** a lint target has no `chelis-lint.toml` ancestor after cwd resolution
-- **THEN** the canonical walker applies only the shipped baseline policy without consulting Git or machine-local files
+- **THEN** the canonical walker applies only the built-in baseline policy without consulting Git or machine-local files
 
 #### Scenario: Relative target from a subdirectory cwd discovers repository policy
 - **WHEN** lint is invoked with a relative target such as `.` from a working directory below a repository policy root

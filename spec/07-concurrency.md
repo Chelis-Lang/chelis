@@ -1,33 +1,31 @@
 # Concurrency
 
-**Status:** Outline with settled Phase 0 / Phase 1 direction.
-Detailed semantics can expand as the implementation matures.
-
 ## 1. Tier 1: Implicit DAG Parallelism
 
 Chelis is pure by default and lowers to a DAG.
 Independent branches of that DAG are eligible for parallel execution without explicit
 programmer annotation.
 
-This is the default concurrency story for v1.
+This is the default concurrency model.
 
 ## 2. Explicit Parallelism: `par`
 
 Chelis reserves `par` for cases where the programmer wants to express explicit fork/join
 structure that the compiler cannot recover automatically.
 
-Phase 0 does not require a sophisticated runtime interpretation of `par`.
-The language-level construct is settled before backend-specific scheduling is.
+The semantics of `par` do not require a particular scheduler. A conforming
+implementation may execute it sequentially or in parallel, but observable results must
+be identical.
 
 ## 3. Backend Mapping
 
 - the C backend uses OpenMP-parallel loops where appropriate
 - BLAS-backed dense linear algebra uses library-managed parallelism
-- the planned GPU backend maps parallel work onto HIP kernels
+- GPU backends map parallel work onto kernels
 
 These backend details do not change the language-level semantics.
 
-## 4. Non-Goals for v1
+## 4. Non-Goals
 
 The following are not part of the initial concurrency story:
 
@@ -41,5 +39,5 @@ The following are not part of the initial concurrency story:
 Concurrency interacts with:
 
 - `vmap`, which expresses structured data parallelism
-- future linear types, which will clarify safe buffer reuse
+- linear types, which clarify safe buffer reuse
 - backend scheduling and fusion passes

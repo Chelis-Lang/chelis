@@ -1,68 +1,64 @@
 # Foreign Function Interface
 
-**Status:** Outline for later phases.
-Chelis does not depend on FFI work for Phase 0 completion, but the expected direction is
-already clear enough to record.
+## 1. Python Compiler API
 
-## 1. Python Interop
+Python bindings expose compiler-facing entry points through the shared
+`chelis-compiler-api` boundary. They:
 
-The Phase 3 Python path is split into two cuts:
+- install as the `chelis` Python package;
+- accept CPU tensor interchange through DLPack;
+- provide safetensors round-trip helpers;
+- release the GIL during compiler, evaluator, build, and native-execution work; and
+- use explicit Python wire models rather than exposing Rust implementation types.
 
-### Phase 3b: Interop Core
+`ChelisError` represents compiler, build, and Chelis runtime failures. Invalid Python
+arguments, incompatible tensor devices, unsupported Python dtypes, and malformed
+interchange objects raise `ValueError`.
 
-- PyO3 bindings for compiler-facing entry points through a shared
-  `chelis-compiler-api` crate
-- install surface: `uv pip install ./bindings/python`
-- CPU-only DLPack interop with PyTorch as the tested guarantee
-- safetensors read/write helpers that round-trip with PyTorch
-- GIL release during compiler/evaluator work
-- `ChelisError` is reserved for compiler/build/runtime failures
-- Python-side data mismatches such as unsupported GPU tensors in this cut are surfaced as
-  `ValueError`
-- `chelis.eval(...)` may copy Python tensor inputs into the evaluator's internal
-  `Vec<f64>` representation in this cut
-- GPU tensors are rejected as Python-side `ValueError`s and deferred to `3b-ii`
+The evaluator may copy a Python tensor into its internal representation, but that copy
+must preserve the source dtype's value semantics. It may not funnel integer or
+wide-floating data through an untagged `f64` or `f32` carrier.
 
-### Phase 3b-ii: Direct Execution + NumPy Guarantee
+## 2. Compiled Python Execution
 
-- `chelis.compile_and_load("model.ch")` as the product path for compiled execution
-- `chelis.load("model.so")` as the advanced loader for an existing artifact
-- sidecar manifest (`model.json`) recording source path + content hash, with a warning on
-  `load()` if the source has changed since compilation
-- direct loading/calling of compiled Chelis artifacts from Python
-- CPU direct execution verified for PyTorch CPU tensors and NumPy arrays
-- HIP device ABI emitted for direct GPU execution, with the Python GPU bridge layered on
-  that ABI
-- GIL release during native compile/build and compiled host/device execution
-- NumPy DLPack guarantee as a documented/tested promise
-- compiled execution currently limited to fully concrete `f32` / `f64` tensors on the C
-  target, and to fully concrete `f32` tensors on the HIP target (chelis#919, chelis#920).
-  The per-target admit-list is `supported_execution_dtypes` in `chelis-python`; the
-  marshalling layer derives the NumPy dtype and the DLPack element width from it rather
-  than assuming f32, and rejects any dtype it cannot describe
+`chelis.compile_and_load("model.ch")` is the product path for compilation and direct
+execution. `chelis.load("model.so")` is the advanced artifact loader.
 
-### Phase 5a
+A sidecar manifest records the source path and content hash. Loading an artifact whose
+source hash has changed emits a stale-source warning.
 
-- JAX DLPack guarantee alongside the StableHLO backend
+NumPy and CPU PyTorch arrays use DLPack-compatible typed marshalling. The accepted dtype
+set is derived from the selected backend's declared capability; the binding must derive
+element width and NumPy/DLPack dtype from the tagged Chelis dtype. It must never assume
+that compiled tensors are `f32`.
 
-This is a Phase 3 interoperability feature, not a Phase 0 requirement.
+Concrete-shape requirements are validated before entering native code. A rejected
+shape, dtype, or device produces a Python-side error rather than truncation, implicit
+copy to an incompatible device, or an ABI mismatch.
 
-## 2. C Interop
+JAX interchange uses the same typed DLPack principles when paired with the StableHLO
+integration target.
 
-Generated C headers and runtime support should make it possible to call compiled Chelis
-artifacts from C or C++.
-That interoperability follows naturally from the reference backend and does not require a
-separate host-language embedding model first.
-After Phase `3m`, that C-facing surface is expected to come from `chelis_runtime.h`
-plus the shipped Rust static runtime library rather than a generated `chelis_runtime.c`
-implementation file.
-When object-mode host emission needs to export a source-level `def main(...)`, the
-generated C symbol should be renamed to a file-stem-derived helper such as
-`<program>__main` so downstream C or C++ drivers can still define their own
-process entry `main(void)`.
+## 3. C And C++ Interop
 
-## 3. Embedding the Compiler
+Generated headers and the Chelis static runtime make compiled artifacts callable from C
+and C++. The public runtime surface comes from `chelis_runtime.h` plus the static
+runtime library; generated programs do not publish a separate handwritten runtime
+implementation.
 
-Longer term, the Rust crates should remain usable as libraries so Tide, editor tooling,
-and external integrations can embed compiler functionality directly rather than shelling
-out to the CLI.
+The exported function ABI is the backend ABI in `spec/08-backends.md`. Public
+declarations are configuration-invariant and every numeric value crosses the boundary
+through an attributable tagged representation.
+
+When object-mode host emission exports a source-level `def main(...)`, its generated C
+symbol is renamed to a file-stem-derived helper such as `<program>__main`. This allows
+the C or C++ driver to define its own process entry `main(void)`.
+
+## 4. Rust Embedding
+
+Compiler crates remain usable as libraries. Tide, editor tooling, Python bindings, and
+external integrations embed these crates directly rather than shelling out to the CLI.
+
+Every embedding surface observes the same parse, check, lower, compile, diagnostic,
+numeric, and unsupported-case contracts as the CLI. An embedding API must not bypass a
+validation or rejection boundary merely because it avoids command-line dispatch.

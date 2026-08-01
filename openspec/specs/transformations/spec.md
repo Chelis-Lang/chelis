@@ -8,7 +8,7 @@ non-differentiable handling, symbolic-dimension adjoint construction, higher-ord
 derivatives, static `match`/`if` and field-wise ADT gradients; vectorization (`vmap`);
 just-in-time compilation (`jit`); the semantics-preserving DAG optimization passes; the
 transformation composition, commutativity, and ordering rules; and the transform error
-contract. This is the current truth of how Chelis transforms and optimizes RISC DAGs.
+contract.
 
 **Source:** captured from [`spec/06-transformations.md`](../../../spec/06-transformations.md).
 
@@ -104,19 +104,20 @@ type SHALL be differentiable.
 Adjoint construction SHALL run before symbolic dimensions are bound and SHALL classify each
 case: structural adjoints carry the symbolic dim as a `DimExpr` or full-axis sentinel; runtime
 node-valued extents build the extent as a rank-0 integer scalar node; and value-dependent
-constructions (a `ProdReduce` reduced axis, a runtime stride step) SHALL fail loudly at
-construction naming the op, axis, and symbolic dim. A scalar `shape()` read SHALL be
-AD-transparent with a zero cotangent.
+structures lower against runtime extents. A `ProdReduce` adjoint SHALL multiply every other
+element on the reduced axis without division, and a runtime stride-step adjoint SHALL scatter
+cotangents to selected positions and fill skipped positions with zero. A scalar `shape()` read
+SHALL be AD-transparent with a zero cotangent.
 
 #### Scenario: Structural adjoint carries the symbolic dim
 
 - **WHEN** a `Sum`/`Expand` adjoint is built over a symbolic axis
 - **THEN** it carries the extent as a `DimExpr` without reading its runtime value
 
-#### Scenario: Value-dependent symbolic adjoint fails loudly
+#### Scenario: Value-dependent symbolic adjoint uses runtime structure
 
 - **WHEN** a `ProdReduce` adjoint or a runtime stride-step adjoint needs a value-dependent structure over a symbolic axis
-- **THEN** it fails at construction naming the op, axis, and symbolic dim rather than guessing a size
+- **THEN** it lowers the product-excluding-the-current-index or scatter-with-zero-fill construction against the runtime extent
 
 ### Requirement: Higher-order derivatives
 

@@ -15,7 +15,7 @@ For a directory lint root, `opaque-domain-construction` SHALL derive its Surf ca
 
 #### Scenario: Admitted Surf source contributes to the catalog
 - **WHEN** an admitted `.ch` file declares an opaque type and another admitted `.ch` file directly constructs that type outside its defining module
-- **THEN** the lint reports the existing `opaque-domain-construction` violation
+- **THEN** the lint reports the `opaque-domain-construction` violation
 
 ### Requirement: Catalog preparation is bounded to once per lint invocation
 `chelis_lint::lint` SHALL prepare the opaque-domain Surf catalog no more than once per invocation and SHALL reuse that immutable corpus catalog for every admitted Surf file dispatched during that invocation. Each admitted Surf catalog candidate MUST be read and parsed no more than once for catalog preparation during the invocation.
@@ -50,8 +50,8 @@ Prepared opaque-domain catalog state MUST NOT outlive or leak across `chelis_lin
 - **WHEN** one invocation catalogs an opaque declaration, that declaration is removed, and lint is invoked again
 - **THEN** the second invocation does not reuse the removed declaration
 
-### Requirement: Existing opaque-domain semantics remain unchanged
-The optimization SHALL preserve existing Surf diagnostics, per-file module-less shadowing, single-file root behavior, fail-soft handling of unreadable or unparsable corpus candidates, and Deep-source checking. Deep-source checks MUST NOT depend on the repository-wide Surf catalog.
+### Requirement: Opaque-domain semantics are invariant under catalog preparation
+Catalog preparation SHALL preserve Surf diagnostics, per-file module-less shadowing, single-file root behavior, fail-soft handling of unreadable or unparsable corpus candidates, and Deep-source checking. Deep-source checks MUST NOT depend on the repository-wide Surf catalog.
 
 #### Scenario: Defining-module construction remains allowed
 - **WHEN** a Surf module directly constructs an opaque type that it defines
@@ -59,11 +59,11 @@ The optimization SHALL preserve existing Surf diagnostics, per-file module-less 
 
 #### Scenario: Out-of-module construction remains rejected
 - **WHEN** a Surf module directly constructs an admitted opaque type defined by another module
-- **THEN** `opaque-domain-construction` reports the same violation class and message semantics as before the optimization
+- **THEN** `opaque-domain-construction` reports its specified violation class and message semantics
 
 #### Scenario: Single-file lint remains self-contained
 - **WHEN** the lint root is one `.ch` file
-- **THEN** catalog preparation uses that file and preserves the current single-file result
+- **THEN** catalog preparation uses only that file and produces the per-file result
 
 #### Scenario: Deep lint remains corpus-independent
 - **WHEN** the lint checks a Deep source file

@@ -41,8 +41,10 @@ The consumer checker SHALL perform structural validation only. It SHALL NOT enfo
 - **WHEN** a change edits `spec/**` without an OpenSpec lifecycle
 - **THEN** OpenSpec validation SHALL NOT fail or block the change on that basis
 
-### Requirement: OpenSpec stays planning evidence
-OpenSpec artifacts SHALL remain planning and authoring evidence inside the authority boundary in `spec/design/spec_provenance.md` § OpenSpec boundary. That section remains controlling.
+### Requirement: Structural validation does not decide semantic authority
+OpenSpec validation SHALL establish schema validity only. Semantic authority SHALL follow the
+subject transfer rules in the `spec-authority-migration` capability and `AGENTS.md`, independent
+of which document the validator accepts.
 
 #### Scenario: Validation authorizes only structural validity
 - **WHEN** `openspec validate` succeeds for a change

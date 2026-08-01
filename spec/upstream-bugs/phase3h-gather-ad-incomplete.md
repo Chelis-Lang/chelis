@@ -9,7 +9,7 @@
 
 ## Summary
 
-`spec/12-roadmap.md` marks Phase 3h as **shipped** ("In progress;
+`spec/design/chelis_project_plan.md` records Phase 3h as **shipped** ("In progress;
 `3a`, `3b`, `3b-ii`, `3c`, `3d`, `3e`, `3g`, `3h`, `3i`, and `3m`
 are shipped"). Phase 3h's named scope is "core numeric primitives
 such as einsum, concat / split, gather / scatter, where, cumsum,

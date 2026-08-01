@@ -249,7 +249,6 @@ spec/                  Numbered language specs and design docs
 - [Ecosystem Context](spec/design/chelis_ecosystem_context.md)
 - [Context](spec/00-context.md)
 - [Nomenclature](spec/01-nomenclature.md)
-- [Roadmap](spec/12-roadmap.md)
 - [Project Plan](spec/design/chelis_project_plan.md)
 
 ## License

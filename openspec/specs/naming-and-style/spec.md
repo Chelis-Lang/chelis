@@ -4,8 +4,7 @@
 
 Define the identifier grammar, filesystem and manifest naming, Surf/Rust/Python identifier
 conventions, module ladders, function-naming patterns, documentation and test naming, and
-the `chelis lint` enforcement contract for the Chelis ecosystem. This capability is the
-current truth of how names and style are constrained and enforced across the monorepo and
+the `chelis lint` enforcement contract for the Chelis ecosystem across the monorepo and
 downstream shells.
 
 **Source:** captured from [`spec/01-nomenclature.md`](../../../spec/01-nomenclature.md).
@@ -74,7 +73,7 @@ package `src/`, lowercasing each PascalCase component and joining with `/`. Cons
 
 Surf SHALL reserve the 23 lowercase keywords (`def sig type dim macro match with fn module
 import if then else grad vmap jit realize copy tensor cast export par true false`) plus the
-7 Phase-2 reserved words (`effect handler perform resume borrow where do`). A reserved
+7 reserved words without grammar productions (`effect handler perform resume borrow where do`). A reserved
 keyword SHALL NOT be used as a user identifier.
 
 #### Scenario: Keyword is recognized as a keyword

@@ -1,30 +1,30 @@
 ## ADDED Requirements
 
-### Requirement: Python interop core (Phase 3b)
+### Requirement: Python interop core
 
-The Phase 3b Python interop core SHALL expose compiler-facing entry points via PyO3 bindings
-through a shared `chelis-compiler-api` crate, install via `uv pip install ./bindings/python`,
-provide CPU-only DLPack interop with PyTorch and safetensors round-trip helpers, and release the
+Python interop SHALL expose compiler-facing entry points via PyO3 bindings
+through a shared `chelis-compiler-api` crate, provide typed CPU DLPack interop with PyTorch and
+safetensors round-trip helpers, and release the
 GIL during compiler/evaluator work. `ChelisError` SHALL be reserved for compiler/build/runtime
 failures while Python-side data mismatches SHALL surface as `ValueError`.
 
 #### Scenario: CPU DLPack interop with PyTorch
 
-- **WHEN** a PyTorch CPU tensor is passed through the 3b interop
-- **THEN** it interops via DLPack as the tested guarantee, releasing the GIL during compiler/evaluator work
+- **WHEN** a PyTorch CPU tensor is passed through Python interop
+- **THEN** it interops via typed DLPack, releasing the GIL during compiler/evaluator work
 
-#### Scenario: GPU tensor is a Python-side ValueError
+#### Scenario: Incompatible device is a Python-side ValueError
 
-- **WHEN** an unsupported GPU tensor is passed in the 3b cut
-- **THEN** it is rejected as a Python-side `ValueError`, deferred to 3b-ii, rather than raising `ChelisError`
+- **WHEN** a tensor on a device incompatible with the selected backend is passed in
+- **THEN** it is rejected as a Python-side `ValueError` rather than copied or reinterpreted silently
 
-### Requirement: Direct execution and NumPy guarantee (Phase 3b-ii)
+### Requirement: Direct execution and NumPy guarantee
 
-Phase 3b-ii SHALL provide `chelis.compile_and_load("model.ch")` as the compiled-execution product
+Python SHALL provide `chelis.compile_and_load("model.ch")` as the compiled-execution product
 path and `chelis.load("model.so")` as the advanced loader, with a sidecar manifest recording the
 source path and content hash. `load()` SHALL warn when the source has changed since compilation.
-The NumPy DLPack guarantee SHALL be documented and tested; compiled execution SHALL currently be
-limited to fully concrete `f32` tensors.
+The NumPy DLPack contract SHALL derive element width and dtype from the tagged Chelis dtype and
+the selected backend capability. It SHALL never assume compiled tensors are `f32`.
 
 #### Scenario: compile_and_load runs a compiled artifact
 
@@ -39,8 +39,8 @@ limited to fully concrete `f32` tensors.
 ### Requirement: C interop surface
 
 Generated C headers and runtime support SHALL make it possible to call compiled Chelis artifacts
-from C or C++. After Phase 3m the C-facing surface SHALL come from `chelis_runtime.h` plus the
-shipped Rust static runtime library rather than a generated `chelis_runtime.c`. When object-mode
+from C or C++. The C-facing surface SHALL come from `chelis_runtime.h` plus the
+Rust static runtime library rather than a generated `chelis_runtime.c`. When object-mode
 host emission exports a source-level `def main(...)`, the generated C symbol SHALL be renamed to a
 file-stem-derived helper (e.g. `<program>__main`) so a C/C++ driver can define its own
 `main(void)`.

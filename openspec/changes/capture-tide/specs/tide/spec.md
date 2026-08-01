@@ -103,18 +103,18 @@ soundness claimed.
 - **WHEN** an obligation is discharged at `proof_tier:"smt"`
 - **THEN** it carries `arith_model:"real"` and claims no float-level soundness
 
-### Requirement: Evaluator-agreement testing
+### Requirement: Cross-lane evaluator conformance
 
-Tide-related evaluation SHALL agree numerically with the production backend: the test strategy
-SHALL evaluate via the IR evaluator, evaluate via the C backend, and compare results across the
-shared spec test corpus.
+Tide evaluation and every production backend SHALL conform to the same normative numeric rules.
+Cross-lane comparison over the shared specification corpus is evidence of conformance, not
+authority for either lane to redefine a result.
 
 #### Scenario: Evaluator matches the C backend on the corpus
 
 - **WHEN** a corpus program is evaluated both via the IR evaluator and the C backend
-- **THEN** the results agree numerically
+- **THEN** both results satisfy the normative result and any operation-specific tolerance
 
 #### Scenario: A divergence is a defect
 
 - **WHEN** the IR evaluator and C backend disagree on a corpus program
-- **THEN** it is a defect, because Tide evaluation must agree with the production backend
+- **THEN** at least one lane is defective; the normative semantics decide which

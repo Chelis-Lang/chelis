@@ -1,30 +1,16 @@
 # spec/02-surf-syntax.md — Chelis Surf Syntax Specification
 
-**Status:** v0.3 (unified from design sprint, authoritative)
-
----
-
 ## 0. Notation
 
 PEG notation. `/` is ordered choice. `*` is zero-or-more. `+` is one-or-more. `?` is optional. `!` is negative lookahead. `&` is positive lookahead. Literal strings in single quotes.
 
 Deep desugaring shown as **⟹** with the target Deep s-expression.
 
-### 0.1 Executable Surface Note
+### 0.1 Authority
 
-This syntax document records the intended Surf language shape, not only the currently
-implemented evaluator/backend subset.
-
-Important Phase 3 honesty rule:
-
-- parser support or desugaring shape does not, by itself, mean a feature is already part
-  of the practical executable language
-- the remaining Phase 3 language-completeness work specifically targets the gap around
-  first-class scalar/string workflows, collections, iteration, file/data loading, and
-  tokenization
-
-Until those Phase `3c` / `3d` / `3g` items land, the parser may describe surface forms
-that are not yet the full self-sufficient AI-programming story.
+This document defines Surf syntax and desugaring independently of implementation
+coverage. Parser acceptance does not weaken or replace the type, effect, lowering, or
+backend requirements in the owning specifications.
 
 ---
 
@@ -40,7 +26,7 @@ realize  copy  par  true  false  where
 
 **Total: 26.**
 
-Reserved for Phase 2 (parse as keywords, emit "reserved for future use" error):
+Reserved but not grammatical (the parser emits a reserved-keyword error):
 ```
 effect  handler  perform  resume  borrow  where  do
 ```
@@ -70,14 +56,14 @@ No operator overloading. No infix bitwise operators. Host-side integer bitwise w
 named built-ins such as `bitand`, `bitor`, `bitxor`, `shl`, and `shr`. No exponentiation
 operator — use `pow(x, n)` from `Std.Math`.
 
-The `/` operator desugars to `div`, which since chelis#178 is **float-only**:
+The `/` operator desugars to the float-only `div` operation:
 applying `/` (or `div`) to integer operands is a type error. Integer division
 uses the named built-ins `floor_div(a, b)` (round toward −∞, matching Python `//`
 / torch / JAX / numpy `floor_divide`) and `trunc_div(a, b)` (round toward zero,
 the C `/` quotient; integer-only). There is intentionally no infix operator for
 either — integer division is explicit at the call site. See
-`spec/05-risc-primitives.md` §2.1 for the full semantics and the migration
-rationale. `%` continues to map to `mod` (integer remainder).
+`spec/05-risc-primitives.md` §2.1 for the full semantics. `%` maps to `mod`
+(integer remainder).
 
 ---
 
@@ -155,9 +141,8 @@ only when the constructor is declared in the current module **or** named in an
 **type** is not sufficient: the constructor itself must be named in the import
 list (e.g. `import Pkg.Adt (Mode, Alpha, Beta, Gamma)`). A constructor that is
 not in scope is an `unknown constructor \`X\`` error at `chelis check` that
-names the constructor — the same way an unbound value is an `unbound variable`
-(type-checker diagnostics name the offending identifier; they do not yet carry
-a source span) — and must never silently bind to a same-named constructor
+names the constructor — the same way an unbound value is an `unbound variable` — and
+must never silently bind to a same-named constructor
 declared in another module (which would defer the failure to a runtime
 non-exhaustive match). This applies to record-shaped constructors
 (`Alpha { ... }`) at both construction and match-pattern sites, and to the
@@ -180,7 +165,7 @@ export (forward, Linear)
 
 **⟹** `(export {} forward Linear)`
 
-No re-exports in v1.
+Re-exports are not part of Surf.
 
 ### P3: Dimension Declaration
 
@@ -274,7 +259,7 @@ def multi_head_attn(q, k, v, mask) = ...
 
 `sig` must precede its corresponding `def`. Arrow chain reads as: arg₁ -> arg₂ -> ... -> return. Always flat in Deep (`t-fn` with last child as return type). The arrow is right-associative, so `a -> b -> c` is the curried 3-ary `a -> (b -> c)`. A function-typed argument must be parenthesized: `(a -> b) -> c` is a distinct, 1-ary type whose single argument is itself a function, and the formatter and decompiler preserve those grouping parentheses (a bare arrow in return position keeps no redundant parens).
 
-Phase 2a effect annotations are optional suffixes on either `sig` or `def`:
+Effect annotations are optional suffixes on either `sig` or `def`:
 
 ```text
 sig predict: tensor[n, f32] -> tensor[n, f32] ! { Random }
@@ -282,17 +267,9 @@ def train(x: tensor[n, f32]) -> tensor[n, f32] ! { Random, Resource("gpu:0") } =
 ```
 
 Surf accepts the built-in names `Diff`, `Random`, `Accum`, `IO`, and
-`Resource("device")`.
-The current shipped boundary-checking surface is narrower than the syntax:
-
-- `Random` is the active user-facing boundary effect in Phase 2a
-- `Resource("...")` is the active build-boundary placement annotation in Phase 2a
-- `IO` is the shipped Phase 3 debugging/logging effect inferred from `print` and
-  `debug`; it is allowed at the program boundary
-- `Diff` is accepted as documentation / forward-compatible syntax, but `grad` remains a
-  compiler capability rather than a user-handled boundary effect
-- `Accum` is accepted as forward-compatible syntax but remains internal-only in the
-  shipped Phase 2a subset
+`Resource("device")`. Their checking and handler semantics are defined by
+`spec/04-type-system.md`. `grad` remains a compiler transformation rather than a
+user-handled `Diff` boundary.
 
 Omitting all types is valid: `def f(x, y) = add(x, y)`. The compiler emits a note recommending a `sig` for module-level definitions.
 
@@ -415,20 +392,13 @@ Style rules for human-facing Surf:
 - omit intermediate type ascriptions when inference already determines the type
 - combine short tensor operations when that improves readability
 
-Planned Phase 3 public-style target:
+Canonical public style additionally:
 
 - use block bindings exclusively: `x = expr` inside `{ ... }` and bare top-level
   bindings such as `result = expr`
 - prefer pipe-first composition for eligible linear flows
 - break long or many-stage pipes after `=` and before every `|>` using the same
   flat-first, width-threshold approach as the Deep pretty printer
-
-Planned remaining Phase 3 language-completeness additions:
-
-- practical scalar/string programming beyond tensor-only code
-- collection literals and iteration idioms
-- data-loading and tokenization helpers that remove the mandatory Python preprocessing
-  step
 
 ### P5: Blocks and Sequencing
 
@@ -462,7 +432,7 @@ No `where` clauses. Use blocks.
 
 ### P5a: Effect Handlers
 
-Phase 2a adds two `with` block forms:
+Surf defines two `with` block forms:
 
 ```text
 with seed(42i64) {
@@ -477,17 +447,15 @@ with device("gpu:0") {
 `with` handlers are expressions. They take exactly one argument in parentheses and a
 brace-delimited block body.
 
-Current shipped constraints:
-
 - `with seed(...)` requires an explicit integer literal seed carrying the `i64`
   suffix (`with seed(42i64) { ... }`); the seed is semantically int64 and an
-  unsuffixed literal is a type error naming the suffix (§P10a; chelis#731 Phase 1)
-- `with device(...)` currently requires an explicit string literal device name
-- only `seed` and `device` are valid handler names in the Phase 2a Surf parser
+  unsuffixed literal is a type error naming the suffix (§P10a)
+- `with device(...)` requires an explicit string literal device name
+- only `seed` and `device` are valid handler names
 
 ### P5b: Macros
 
-Phase 2c adds top-level macro definitions:
+Top-level macro definitions use:
 
 ```text
 macro linear_layer(x, w, b) = add(matmul(x, w), expand(b, 0, batch))
@@ -495,8 +463,6 @@ macro relu_ref(x) = max_elem(x, 0.0)
 ```
 
 Macro invocations use the ordinary call surface: `linear_layer(x, w, b)`.
-
-Current shipped macro rules:
 
 - resolution order is lexical blockers first, then user-defined top-level macros, then
   the standard macro prelude, then ordinary function call resolution
@@ -508,16 +474,17 @@ Current shipped macro rules:
 - macro expansion runs before type checking, effect inference, linearity checking, and
   lowering
 
-Current shipped prelude macros:
+The standard macro prelude contains:
 
 - `linear_layer(x, w, b)` -> `add(matmul(x, w), expand(b, 0, batch))`
 - `residual(x, f)` -> `add(x, f(x))`
 - `cross_entropy(logits, labels)` -> the standard `softmax` / `log` / `sum` / `mean`
-  composition used by the current executable corpus
+  composition
 
 ### P6: Records
 
-Braces for construction. Punning allowed. Dot-chaining for access. Functional update with `with` is reserved for Phase 1 and not part of the Phase 0 parser/desugarer.
+Braces construct records. Punning is allowed and dot-chaining accesses fields. The
+`record-update` Deep form is reserved, but Surf defines no functional-update grammar.
 
 ```
 lr = 0.01
@@ -571,7 +538,7 @@ match n with {
 
 Record patterns allow punning and ignore unmentioned fields. Field order doesn't matter.
 
-No or-patterns in v1. Write separate arms.
+Surf has no or-patterns; write separate arms.
 
 Exhaustiveness required. Every variant of the scrutinee's ADT must be covered. Non-exhaustive match is a compile error.
 
@@ -640,9 +607,7 @@ Underscore separators: `1_000_000`, `3.141_592_6`. Stripped during lexing.
 Scientific notation: `1e-5`, `3.14e10`. Canonical Deep form: `d.dE±d`.
 
 Hex integer literals are accepted (`0xFF`, `0xCAFE_BABE`); see the
-hex-suffix interaction note below. Octal and binary literals are accepted
-by the current Surf lexer (`0b...`) but their long-term spec status is
-unchanged by this section.
+hex-suffix interaction note below.
 
 **Literal default rule (authoritative):** an unsuffixed integer literal binds
 at type `int32`; an unsuffixed float literal binds at type `f32`. The lexer
@@ -702,9 +667,9 @@ either an explicit `cast` (`cast(0xFF, f32)`) or whitespace
 `0xFFi8`, `0xFFi32`. Decimal float literals carry float suffixes without
 ambiguity (`1.0f32`, `1.0e3f32`).
 
-**Deferred and out-of-scope suffixes.**
+**Reserved suffix spellings.**
 
-- `f8e4m3` is deferred per `spec/04-type-system.md` §1.1.1; the suffix
+- `f8e4m3` is reserved per `spec/04-type-system.md` §1.1.1; the suffix
   `f8e4m3` is rejected at lex time with a diagnostic pointing at §1.1.1.
 - Unsigned suffixes (`u8`, `u16`, `u32`, `u64`) are out of scope per
   `spec/04-type-system.md` §1.1.2; they are rejected at lex time with a
@@ -759,7 +724,7 @@ contextual-inference rule.
 
 ### P11: Strings
 
-Double-quoted: `"hello world"`. Escapes: `\"`, `\\`, `\n`, `\t`, `\r`, `\0`. No multiline. No interpolation. No Unicode escapes in v1.
+Double-quoted: `"hello world"`. Escapes: `\"`, `\\`, `\n`, `\t`, `\r`, `\0`. Strings are single-line and have no interpolation or Unicode-escape syntax.
 
 **⟹** `(lit {type: (t-prim {} string)} "hello world")`
 
@@ -783,7 +748,8 @@ Trailing commas allowed everywhere commas appear: parameter lists, argument list
 
 ### P14: Where Clauses
 
-Not in v1.
+General declaration `where` clauses are not part of Surf. Property
+preconditions use the dedicated property grammar.
 
 ### P15: Type Aliases
 
@@ -808,7 +774,7 @@ separate implicit-quantification rule from P4/§5.8.
 
 Parser disambiguation: after `type Name =`, if next non-whitespace is `|`, it's an ADT. Otherwise alias.
 
-Aliases are transparent — expanded during desugaring. No opaque aliases in v1.
+Aliases are transparent and expand during desugaring. Aliases cannot be opaque.
 
 ### P16: Opaque Types
 
@@ -995,8 +961,8 @@ TypeName      <- TypeIdent ('.' TypeIdent)*
 PrecType      <- 'f32' / 'f64' / 'bf16' / 'f16'
                / 'int8' / 'int16' / 'int32' / 'int64'
                / 'bool' / 'string'
-               # The deferred names of spec/04-type-system.md §1.1.1 are
-               # reserved but not active and are rejected at check time:
+               # The reserved names of spec/04-type-system.md §1.1.1 are
+               # not primitive types and are rejected at check time:
                # f8e4m3, f8e5m2, uint8/uint16/uint32/uint64, int4/uint4,
                # complex64/complex128, decimal128/decimal256. The short
                # unsigned spellings u8/u16/u32/u64 are not reserved at all.
@@ -1351,22 +1317,20 @@ After `type Name =`, the parser checks if the next non-whitespace token is `|`. 
 
 ---
 
-## 7. Deep Tag Additions
+## 7. Deep Tag Forms
 
-This spec requires two new Deep tags in addition to the post-sprint baseline, and it reserves one more for the deferred Phase 1 record-update surface:
+Surf desugaring uses the following Deep tags:
 
 | Tag | Form | Semantics |
 |-----|------|-----------|
 | `typealias` | `(typealias {} Name (params...) type-expr)` | Transparent type alias |
-| `record-update` | `(record-update {} base-expr (kv {} field expr) ...)` | Functional record update (reserved; Phase 1) |
+| `record-update` | `(record-update {} base-expr (kv {} field expr) ...)` | Reserved functional record update |
 
 Additionally, `pat-tuple` is needed for tuple destructuring patterns:
 
 | Tag | Form | Semantics |
 |-----|------|-----------|
 | `pat-tuple` | `(pat-tuple {} pat₁ pat₂ ...)` | Tuple pattern |
-
-**Revised Deep tag total: 56** (baseline + `typealias` + `record-update` + `pat-tuple`).
 
 ---
 

@@ -11,7 +11,7 @@ When updating docs, treat these as the owning sources:
 1. `spec/design/chelis_canonical_reference.md`
    Project-level decisions, naming, active backend strategy, CLI surface, and current
    phase status.
-2. `spec/00-12*.md`
+2. `spec/00-11*.md`
    Language semantics and subsystem specifications.
 3. `spec/design/chelis_project_plan.md`
    Phased execution plan and remaining design work.

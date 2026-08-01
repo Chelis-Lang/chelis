@@ -17,7 +17,7 @@ generator never decides where to attach it.
 - **WHEN** a node is written `(var x)` with no metadata map
 - **THEN** parsing fails because the metadata map must always be present as element two
 
-### Requirement: Metadata keys and active vocabulary
+### Requirement: Metadata keys and defined vocabulary
 
 Metadata keys SHALL use the identifier charset `[A-Za-z_][A-Za-z0-9_]*` (no hyphens) and
 carry compiler-relevant annotations. The `type` key SHALL be checked rather than trusted, and

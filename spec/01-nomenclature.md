@@ -11,12 +11,11 @@ The conventions documented here fall into three categories:
    or backend. Immovable; not subject to style choice.
 2. **Settled conventions** (§§2–10). Project-wide rules. Consistent
    across the ecosystem. Enforced by the `chelis lint` tool.
-3. **Resolved decisions** (§11). Architectural questions surfaced
-   during the May 2026 ecosystem naming pass and now closed. Recorded
-   with their resolution so the rationale is visible.
+3. **Shoreline rules** (§11). Architectural boundary decisions whose
+   rationale belongs beside the rule.
 
 A standalone lint tool (`chelis lint`) verifies adherence to the
-settled conventions in §§2–10. CI runs it as a gate on every PR.
+settled conventions in §§2–10.
 Blocking rule deviations are lint failures; advisory rules report
 valid-but-non-preferred source without failing the gate.
 
@@ -83,7 +82,7 @@ if then else grad vmap jit realize copy tensor cast
 export par true false
 ```
 
-Plus 7 reserved-for-Phase-2:
+Seven additional words are reserved but have no grammar production:
 
 ```
 effect handler perform resume borrow where do
@@ -118,7 +117,7 @@ rules out hyphens; Deep is the compiler IR where compound tag names
 follow a deliberate convention. User-defined Deep symbols (variable
 names, function names) originate from Surf desugaring and inherit
 Surf's no-hyphen rule by construction — there is no path by which a
-hyphenated user symbol can enter Deep today.
+hyphenated user symbol can enter Deep.
 
 The corresponding lint rule (§12) enforces the narrower invariant:
 any Deep `Symbol` that is not in the closed tag vocabulary of §1.4
@@ -223,14 +222,13 @@ coral      = { version = "0.5.0" }
 
 **Rule:** snake_case (PEP 8 throughout).
 
-Examples: `bench_phase_j.py`, `bump_compiler_pins.py`, `gen_goldens.py`,
+Examples: `bench_tensor_scan.py`, `bump_compiler_pins.py`, `gen_goldens.py`,
 `validate_book_examples.py`.
 
 ### 2.9 Shell scripts
 
 **Rule:** Don't write them. Project policy (`AGENTS.md` / `CLAUDE.md` Scripting
-Language Policy) prohibits shell scripts in favor of Python. Existing
-shell scripts must be ported.
+Language Policy) prohibits shell scripts in favor of Python.
 
 **One exception:** the chelisup bootstrap installer at
 `crates/chelisup/bootstrap/chelisup.sh` (the `curl -fsSL ... | sh`
@@ -477,9 +475,9 @@ substituted independently. The reef lockfile records it as
 supporting the C backend. Different artifact, different role.
 
 The ecosystem's other reef packages are **shells**: distributable
-libraries that build on `chelis-std`. The currently shipped shells
-are `nautilus`, `coral`, `shoals`, and `octant`. Designed but not
-yet shipped: `school`, `darwin`, `hull`, `hydrostatic`, `beacon`.
+libraries that build on `chelis-std`. Canonical shell names are `nautilus`,
+`coral`, `shoals`, `octant`, `school`, `darwin`, `hull`, `hydrostatic`, and
+`beacon`.
 
 ---
 
@@ -517,12 +515,12 @@ The rule covers both directions:
   (b) the prefix `bs_` is not the module's shorthand. The fix is
   `call_scalar`.
 - A private helper should carry the prefix uniformly. If a `Nautilus.LinAlg`
-  helper exists without the `la_` prefix, it's either a public function
-  (rule: drop "helper" status) or a violation (rule: add the prefix).
+  helper exists without the `la_` prefix, it is either public
+  (rule: classify it as public) or a violation (rule: add the prefix).
 
 The prefix is a domain shorthand, not the full module name. `Nautilus.LinAlg`
-uses `la_*`; `Coral.Frame` uses no internal prefix today (its private
-helpers, where they exist, would use `frame_*` or similar). The lint
+uses `la_*`; `Coral.Frame` uses the no-prefix convention (if it adopts a
+prefix, `frame_*` is the conforming spelling). The lint
 flags inconsistency within a module: either all internal helpers have
 the prefix or none do.
 
@@ -546,7 +544,7 @@ distinction is:
   the module name describes the domain (`Pricing`, `Stochastic`),
   not any single variant.
 
-Recognized model/algorithm sub-namespaces in the current ecosystem:
+Recognized model/algorithm sub-namespaces:
 
 | Prefix | Meaning                            | Module(s)                       |
 |--------|------------------------------------|---------------------------------|
@@ -680,10 +678,8 @@ def is_nan_col(f: Frame, name: string) -> tensor[n, bool] = ... // column varian
 def is_nan_int(f: Frame, name: string) -> tensor[n, bool] = ...
 ```
 
-The historical Coral `*_int` family (`is_nan_int`, `any_nan_int`,
-`count_nan_int`, `fill_nan_int`, `drop_nan_int`) is renamed to the
-`*_col` form per this rule. The `_int` was extraneous: column dtype
-is inferred when the column is fetched.
+Column-form variants use the `*_col` form. The column dtype is inferred when
+the column is fetched, so an `_int` dispatch suffix is invalid.
 
 #### Parser/converter idiom (allowed)
 
@@ -726,11 +722,11 @@ chelis monorepo's authoritative language-spec ordering.
 01-nomenclature.md
 02-surf-syntax.md
 ...
-12-roadmap.md
+11-ffi.md
 ```
 
-Shell repos (`nautilus`, `coral`, `shoals`, `octant`) have their own
-`spec/` directories holding per-shell phase plans and design notes.
+Shell repos have their own `spec/` directories holding implementation plans
+and design notes.
 Those follow §8.2's snake_case rule, not §8.1's numbered-spec rule.
 
 ### 8.2 Design files
@@ -738,13 +734,10 @@ Those follow §8.2's snake_case rule, not §8.1's numbered-spec rule.
 **Rule:** snake_case in `chelis/spec/design/` and in any shell repo's
 top-level `spec/` directory.
 
-Examples: `phase1a_kernel_codegen.md`, `chelis_canonical_reference.md`,
-`phase3j_pre_release.md`, `grad_eval_host_runtime.md`,
-`phase3l.md` (shell repo phase plan).
+Examples: `kernel_codegen.md`, `chelis_canonical_reference.md`,
+`pre_release.md`, `grad_eval_host_runtime.md`.
 
-The historical kebab-case minority files (`grad-eval-host-runtime.md`,
-`host-emit-hashmap-iteration-nondeterminism.md`, etc.) rename to
-snake_case.
+Kebab-case design filenames are non-conforming and rename to snake_case.
 
 ### 8.3 Per-shell `docs/`
 
@@ -772,8 +765,7 @@ BENCHMARK_FINDINGS.md
 EVAL_STARTUP_FINDINGS.md
 ```
 
-The SCREAMING_SNAKE convention is grandfathered from the existing
-nautilus/coral practice and applies project-wide for status reports.
+The SCREAMING_SNAKE convention applies project-wide for status reports.
 Single-word status-report filenames (`SKILL.md`, `STATUS.md`) follow
 the same SCREAMING_SNAKE rule and collapse visually to looking like
 PascalCase.
@@ -810,8 +802,7 @@ red_team_o4.md
 red_team_pre_v0_1_0.md
 ```
 
-The historical kebab+version style (`red-team-v0.2.0-final.md`)
-renames forward.
+Kebab-case versioned report filenames are non-conforming.
 
 ### 8.5 mdBook book chapters (deliberate exception)
 
@@ -837,11 +828,7 @@ monte-carlo.md
 The discriminator is path-based, not `book.toml`-anchored. A
 `book.toml` sitting in `docs/` (or anywhere else in the ancestor
 chain) does not retroactively promote sibling `docs/*.md` files to
-§8.5. This is the issue #190 fix: previously the rule walked ancestors
-looking for `book.toml`, which made the verdict for every `docs/*.md`
-depend on unrelated filesystem state (adding or removing one
-`book.toml` flipped every narrative doc between accepted and
-rejected). Path-based opt-in keeps each verdict local to the file.
+§8.5. Path-based opt-in keeps each verdict local to the file.
 
 Shells that want mdBook content put it under `book/` or `docs/book/`.
 This is the chelis-ecosystem convention; non-`book/` mdBook layouts
@@ -868,8 +855,7 @@ files inside an mdBook source tree are still violations of §8.5.
 
 ### 8.6 Public prose punctuation
 
-New public strings should avoid em dashes. Prefer one of these fixes
-when cleaning existing text:
+Public strings avoid em dashes. Prefer one of these forms:
 
 - split the sentence into two sentences
 - use a colon before an explanation
@@ -879,12 +865,11 @@ when cleaning existing text:
 
 The blocking `no-em-dash-in-public-strings` rule enforces this for
 Surf, Deep, Rust, and Python string literals that are likely to reach
-users as diagnostics, log messages, or public output. The v1 fixer is
+users as diagnostics, log messages, or public output. The fixer is
 deliberately narrow: `a — b` becomes `a. B`; paired parenthetical
 dashes become commas; whitespace-asymmetric cases require manual
-review. Markdown prose enforcement is queued until the active doc
-corpus is cleaned. Do not add lint exceptions merely to preserve an em
-dash in current-state docs. This rule does not prohibit syntax or
+review. Markdown prose follows the same rule. Do not add lint exceptions merely
+to preserve an em dash. This rule does not prohibit syntax or
 notation that is semantically meaningful in a spec, such as `->`, `|>`,
 section references, or mathematical symbols.
 
@@ -908,45 +893,31 @@ already outside the rule's scope; no additional carve-out is needed.
 
 ## 9. Project-cutting conventions
 
-### 9.1 Phase identifiers
+### 9.1 Branch naming
 
-**Rule:** lowercase `phase` + digit + lowercase letter.
-
-Established by historical practice (`phase3j`, `phase1a`, `phase5`).
-Phase A artifacts use the same form: `phase_a` in filenames,
-`phase-a` in branch names.
-
-```
-reef_install_from_github.rs    // Rust file (snake)
-feat/phase-a-item6-from-github  // git branch (kebab)
-phase-a-item6                   // commit scope (kebab)
-```
-
-### 9.2 Branch naming
-
-**Rule:** `{type}/{phase-id}-{item-slug-kebab}`.
+**Rule:** `{type}/{item-slug-kebab}`.
 
 Type prefixes follow conventional commits (`feat`, `fix`, `test`,
 `docs`, `style`, `chore`, `refactor`).
 
 ```
-feat/phase-a-item6-from-github
-fix/phase-a-chelis-std-runtime
+feat/install-from-github
+fix/chelis-std-runtime
 docs/spec-nomenclature-expansion
 ```
 
-### 9.3 Commit conventions
+### 9.2 Commit conventions
 
 **Rule:** Conventional commits.
 
 ```
-feat(phase-a-item9): add lockfile remote_origin
-test(phase-a-item8): bootstrap parallel install
-style(reef): rename phaseA tests to phase_a
+feat(reef): add lockfile remote_origin
+test(reef): bootstrap parallel install
+style(reef): normalize test identifiers
 docs(spec): expand nomenclature with style rules
 ```
 
-### 9.4 CI workflows
+### 9.3 CI workflows
 
 **Rule:** Three workflow files per repo, identical names across all
 five repos.
@@ -997,22 +968,12 @@ snapshot test files across the ecosystem.
 
 ---
 
-## 11. Resolved decisions
+## 11. Shoreline Rules
 
-These were open architectural questions during the May 2026 ecosystem
-naming pass. Each is now closed with the orchestrator's resolution
-recorded. The lint enforces the resolved rule.
+### 11.1 Surf and Deep Hyphens
 
-### 11.1 Surf hyphen support — resolved: keep Deep grammar; document asymmetry as intentional
-
-**Status:** closed.
-
-The original framing surfaced this as a "latent round-trip risk":
 Deep's `Symbol` lexer accepts hyphens (`[A-Za-z_][A-Za-z0-9_-]*`);
-Surf does not. A first-pass plan proposed tightening the Deep lexer
-to reject hyphens.
-
-That plan was based on incorrect facts. The Deep tag vocabulary
+Surf does not. The Deep tag vocabulary
 (§1.4) deliberately uses hyphens as the compound separator: `t-fn`,
 `t-prim`, `pat-ctor`, `pat-var`, `d-name`, `d-var`, `d-lit`. The
 hardcoded list lives in `crates/chelis-deep/src/validate.rs`; the
@@ -1020,76 +981,43 @@ printer at `crates/chelis-deep/src/printer.rs` emits these hyphenated
 forms; checked-in `.dp` fixtures depend on parsing them. Closing the
 loose side of the asymmetry would have required renaming the entire
 compound-tag vocabulary and breaking every checked-in `.dp` fixture
-plus the round-trip lexer test that explicitly asserts `x-y` lexes
-as a single Symbol.
-
-The actual resolution: **the Surf-vs-Deep hyphen asymmetry is by
-design and documented as such.** Surf is the human authoring surface
+plus any `.dp` source that uses those tags. The Surf-vs-Deep hyphen
+asymmetry is by design. Surf is the human authoring surface
 where operator ambiguity rules out hyphens. Deep is the compiler IR
 where compound tag names follow a deliberate naming convention that
 gives the closed vocabulary its visual structure. User-defined Deep
 symbols originate from Surf desugaring and inherit Surf's no-hyphen
 rule by construction; there is no path by which a hyphenated user
-symbol can enter Deep today.
+symbol enters Deep.
 
 The lint rule (§12) captures the actual narrower invariant: any Deep
 `Symbol` that is not in the closed tag vocabulary of §1.4 must
 satisfy the Surf identifier charset `[A-Za-z_][A-Za-z0-9_]*`. This
-rule fires if a future Deep emitter accidentally produces a
+rule fires if a Deep emitter produces a
 hyphenated user symbol while leaving the legitimate compound-tag use
 untouched.
 
-The three candidate resolutions considered, for historical
-visibility:
-
-- (a) Allow hyphens in Surf with mandatory whitespace around `-`.
-  Breaking parse change; rejected.
-- (b) Allow hyphens in Surf in restricted positions. Complex;
-  rejected.
-- (c) Tighten the Deep lexer to reject hyphens. Initially preferred
-  on the assumption that no hyphenated Deep symbols existed. Rejected
-  once evidence showed the entire compound-tag vocabulary uses
-  hyphens.
-- (d, chosen) Document the asymmetry as intentional structure; keep
-  both lexers as-is; rely on the user-symbol-charset lint rule.
-
-### 11.2 Rust hyphen→underscore lib name — resolved: documented shoreline crossing
-
-**Status:** closed.
+### 11.2 Rust Hyphen-to-Underscore Library Names
 
 `chelis-python` package name maps to `chelis_python` lib name per
-Rust standard hyphen→underscore coercion. The orchestrator
-resolution: **document this as a known shoreline crossing imposed
-by Rust language norms; no rename.** §2.2 records the rule;
+Rust standard hyphen-to-underscore coercion. This is a shoreline crossing
+imposed by Rust language norms. §2.2 records the rule;
 the implicit hyphen→underscore in lib symbols is the Rust
 standard, not a project-specific deviation.
 
-The two alternatives considered:
-
-- Rename the package name to `chelis_python` so package and lib
-  align (kebab → snake migration). Would have set precedent for the
-  kebab convention being violated for Rust packages. Rejected.
-- Rename the lib name to break the Rust standard (not actually
-  possible without hacks). Rejected.
-
-### 11.3 Allow vs keep semantics — resolved: distinct lint meanings
-
-**Status:** closed.
+### 11.3 Allow and Keep Semantics
 
 The Surf/Deep lint cleanup uses two different terms intentionally:
 
 - **Allow** means the construct is accepted as normal project style.
   The lint should not report it, and no migration pressure exists.
-- **Keep** means checked-in source may remain as-is for compatibility,
-  fixture coverage, or baseline preservation, but the construct is not
-  preferred style for new human-authored source. A keep decision may
-  still produce an advisory warning.
+- **Keep** means a construct is accepted for compatibility, fixture
+  coverage, or baseline preservation but remains non-preferred style. A
+  keep decision may produce an advisory warning.
 
 Keep decisions are not blocking-rule exceptions. Blocking-rule
 exceptions still require an explicit rule id and a cross-reference to a
-section of this spec. Advisory rules do not need path-glob exceptions
-for existing corpus entries unless they are promoted into the blocking
-registry later.
+section of this spec. Advisory rules do not need path-glob exceptions.
 
 Inline source directives use the language's line-comment syntax:
 `// chelis-lint: allow <rule>` or `// chelis-lint: keep <rule>` in
@@ -1117,9 +1045,8 @@ running the front-end pipeline. Violations are blocking unless
 explicitly waived in the style guide (e.g., the mdBook exception in
 §8.5).
 
-The lint is the persistent artifact: it prevents drift after a
-cleanup pass. Without the lint, fixing today's outliers does not
-prevent tomorrow's. CI invokes it directly via:
+The lint is the persistent enforcement artifact. Its repository-wide
+invocation is:
 
 ```
 chelis lint --check
@@ -1159,14 +1086,9 @@ linearity inserts equivalent IR nodes, and `chelis check` prints the
 same warnings on user-facing runs. These warnings do not make
 `chelis lint --check` fail.
 
-Existing-corpus keep policy for `redundant-linearity-call`: checked-in
-fixtures, migration examples, and baseline files may keep explicit
-`copy()` or `drop()` when the call documents compatibility, preserves a
-before/after baseline, or exercises legacy source behavior. New or
-rewritten human-facing examples should use implicit linearity unless
-the example is specifically teaching or testing the explicit forms. A
-future promotion from advisory to blocking requires a separate cleanup
-plan and updated docs before the registry changes.
+`copy()` and `drop()` remain accepted when they document compatibility,
+serve as fixtures, preserve comparative baselines, or teach the explicit
+forms. Human-facing examples otherwise use implicit linearity.
 
 `redundant-linearity-call` and `prefer-pipe-operator` do not expose
 auto-fixes until the fixer can prove the rewrite preserves semantics.
@@ -1210,7 +1132,7 @@ module-identity rules are normative in `spec/04-type-system.md` §2.5.
 The lint rule `opaque-domain-construction` is kept as
 defense-in-depth: per-file, no type context, fast editor/agent
 feedback ahead of a full check, and its fail-closed
-untyped-`record-update` arm complements the checker's deferred-target
+untyped-`record-update` arm complements the checker's postponed-target
 ledger. The lint is fast feedback; the typing judgment is the
 guarantee. The blocking lint rule rejects:
 
@@ -1286,9 +1208,9 @@ nested path is pruned before classification, rule preparation, or rule
 checks, so no rule sees it. They are permitted only for infrastructure,
 build output, dependencies, generated artifacts, or immutable inputs that
 should not be part of the editable lint corpus. They must not be added merely
-to hide current violations.
+to hide violations.
 
-`chelis-lint` composes its shipped baseline policy with the nearest ancestor
+`chelis-lint` composes its built-in baseline policy with the nearest ancestor
 `chelis-lint.toml`. Nearest-ancestor discovery resolves a relative lint
 target against the invocation working directory before walking ancestors, so
 relative and absolute spellings of the same target discover the same policy.
@@ -1312,7 +1234,7 @@ invalid patterns, missing specs, and unresolved references fail lint before
 traversal. Policy and spec paths are resolved before use: non-file or broken
 policy paths and links escaping the policy root fail closed, while links that
 remain inside the policy root are allowed. Loose targets without repository policy
-receive only the shipped baseline.
+receive only the built-in baseline.
 
 The traversal engine must not consult `.gitignore`, `.ignore`, parent or
 global Git configuration, `.git/info/exclude`, or hidden-file defaults. This
@@ -1341,7 +1263,7 @@ descendants remain effective.
 
 Traversal policy does not replace rule-specific `Exception` entries or inline
 `allow` and `keep` directives. Those mechanisms act after a path has entered
-the canonical corpus and retain their existing per-rule diagnostic or autofix
+the canonical corpus and retain their defined per-rule diagnostic or autofix
 semantics. Rule-side catalogs and ancillary metadata must derive from the same
 canonical entry set or pass a parent-aware traversal-policy admission check;
 content under an excluded directory must not change an admitted entry's
@@ -1354,25 +1276,6 @@ directory remains visible while a directory link resolving outside the policy
 root is rejected. Governance follows the ancillary link path as well as its
 resolved target: a link above the policy root remains machine-local even when
 it points to an admitted file inside the root.
-
-### 12.3 Future rule queue
-
-The following rules are intentionally queued, not currently part of
-the blocking registry:
-
-- Markdown prose punctuation: extend `no-em-dash-in-public-strings`
-  from source string literals to active docs after existing current
-  docs have been cleaned. Fixes should rewrite prose, not add path
-  exceptions.
-- `redundant-linearity-call` promotion review: decide after the
-  implicit-linearity migration corpus is stable whether advisory
-  warnings should remain permanent or become blocking for new source.
-- Pipe-stage shape checks: if future syntax or decompiler work creates
-  ambiguity around `x |> f(y)`, add coverage that preserves the
-  first-argument semantics in §3.6 rather than accepting last-argument
-  insertion.
-
----
 
 ## 13. References
 
@@ -1389,6 +1292,4 @@ the blocking registry:
   identifier case.
 - `crates/chelis-backend-c/src/emit.rs`: backend symbol emission.
 - `crates/chelis-lint/`: lint implementation.
-- `docs/archive/snapshots/ecosystem_naming_snapshot.md`: empirical snapshot of the
-  May 2026 ecosystem state and the cleanup inventory.
 - `AGENTS.md` / `CLAUDE.md` Surf Style Guide: Surf code-style guidance.

@@ -10,18 +10,18 @@ Define the deterministic, structured policy that admits filesystem entries into 
 ## Requirements
 
 ### Requirement: Traversal exclusions come from structured policy
-`chelis-lint` SHALL obtain traversal exclusions from versioned TOML policy artifacts rather than path-name literals in `walker.rs`. A shipped baseline policy SHALL provide cross-repository infrastructure exclusions, and the nearest ancestor `chelis-lint.toml` SHALL add repository-specific exclusions.
+`chelis-lint` SHALL obtain traversal exclusions from versioned TOML policy artifacts rather than path-name literals in `walker.rs`. A built-in baseline policy SHALL provide cross-repository infrastructure exclusions, and the nearest ancestor `chelis-lint.toml` SHALL add repository-specific exclusions.
 
-#### Scenario: Repository policy extends shipped defaults
+#### Scenario: Repository policy extends built-in defaults
 - **WHEN** a lint target has an ancestor `chelis-lint.toml`
-- **THEN** the canonical walker applies both the shipped baseline exclusions and that nearest repository policy
+- **THEN** the canonical walker applies both the built-in baseline exclusions and that nearest repository policy
 
 #### Scenario: Loose target uses deterministic defaults
 - **WHEN** a lint target has no `chelis-lint.toml` ancestor
-- **THEN** the canonical walker applies only the shipped baseline policy without consulting Git or machine-local files
+- **THEN** the canonical walker applies only the built-in baseline policy without consulting Git or machine-local files
 
 ### Requirement: Policy schema is fail-closed and explainable
-Each policy SHALL declare `version = 1`. Every exclusion MUST contain one gitignore-style `pattern`, one closed `class` value (`infrastructure`, `build`, `dependency`, `generated`, or `immutable`), and one `cross_ref`. Repository policy SHALL name the active spec document used to validate its cross-references. Unsupported versions, unknown fields or classes, invalid patterns, missing spec files, unresolved cross-references, non-file or broken policy paths, and policy or spec links resolving outside the policy root MUST fail the lint invocation with the policy path and reason. Symlinks whose resolved target remains inside the policy root MAY be used.
+Each policy SHALL declare `version = 1`. Every exclusion MUST contain one gitignore-style `pattern`, one closed `class` value (`infrastructure`, `build`, `dependency`, `generated`, or `immutable`), and one `cross_ref`. Repository policy SHALL name the controlling spec document used to validate its cross-references. Unsupported versions, unknown fields or classes, invalid patterns, missing spec files, unresolved cross-references, non-file or broken policy paths, and policy or spec links resolving outside the policy root MUST fail the lint invocation with the policy path and reason. Symlinks whose resolved target remains inside the policy root MAY be used.
 
 #### Scenario: Valid exclusion loads
 - **WHEN** a policy entry has a valid pattern, known class, and cross-reference resolving in its declared spec
@@ -48,7 +48,7 @@ Each policy SHALL declare `version = 1`. Every exclusion MUST contain one gitign
 - **THEN** policy loading and cross-reference validation proceed normally
 
 ### Requirement: Traversal is deterministic across machines
-The `ignore` traversal engine MUST disable hidden-file filtering, `.gitignore`, `.ignore`, parent ignore files, global Git ignores, and `.git/info/exclude`. Only shipped and repository `chelis-lint` policies may exclude descendants.
+The `ignore` traversal engine MUST disable hidden-file filtering, `.gitignore`, `.ignore`, parent ignore files, global Git ignores, and `.git/info/exclude`. Only built-in and repository `chelis-lint` policies may exclude descendants.
 
 #### Scenario: Global Git ignore cannot alter lint
 - **WHEN** a user global ignore excludes a classifiable source path that no lint policy excludes
@@ -120,7 +120,7 @@ The standalone `chelis lint` command SHALL use the canonical traversal policy an
 - **THEN** it exits nonzero and reports the policy path and validation reason
 
 ### Requirement: Traversal exclusions remain distinct from diagnostic exceptions
-A traversal exclusion SHALL prevent all rule dispatch for its matched descendants. A rule-specific `Exception`, inline `allow`, or inline `keep` SHALL NOT alter traversal and SHALL retain its existing diagnostic or autofix semantics. Ancillary files consulted by a rule MUST come from the canonical admitted entry set or pass parent-aware traversal-policy admission, so excluded content cannot change an admitted entry's verdict indirectly. When repository policy is present, its root SHALL bound workspace ancillary discovery: admitted sibling workspace manifests remain visible for subdirectory and explicit-file lint targets, while machine-local paths above that root MUST NOT influence a verdict even when they are symlinks resolving inward.
+A traversal exclusion SHALL prevent all rule dispatch for its matched descendants. A rule-specific `Exception`, inline `allow`, or inline `keep` SHALL NOT alter traversal and SHALL retain its defined diagnostic or autofix semantics. Ancillary files consulted by a rule MUST come from the canonical admitted entry set or pass parent-aware traversal-policy admission, so excluded content cannot change an admitted entry's verdict indirectly. When repository policy is present, its root SHALL bound workspace ancillary discovery: admitted sibling workspace manifests remain visible for subdirectory and explicit-file lint targets, while machine-local paths above that root MUST NOT influence a verdict even when they are symlinks resolving inward.
 
 #### Scenario: Rule exception does not prune corpus discovery
 - **WHEN** a source path has a rule-specific exception but no traversal exclusion

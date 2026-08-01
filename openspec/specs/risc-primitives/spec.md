@@ -6,9 +6,8 @@ Define the irreducible RISC tensor primitive set and its semantics: the RISC phi
 no-broadcasting rule, primitives-as-functions and borrow-typed inputs, the Tier-1 primitives
 with their AD adjoints, the Tier-2 derived built-ins, division and reduction semantics,
 windowed reductions, movement and memory ops, effectful primitives with seed determinism,
-scatter determinism and AD policy, host-only builtins, the standard ML-op lowerings, AD
-completeness and the reference oracle, and the decided unsupported-case and observation
-contracts. This is the current and decided truth of how tensor computation lowers and runs.
+scatter determinism and AD policy, host-runtime builtins, the standard ML-op lowerings, AD
+completeness and cross-lane conformance, and the unsupported-case and observation contracts.
 
 **Source:** captured from [`spec/05-risc-primitives.md`](../../../spec/05-risc-primitives.md).
 
@@ -127,18 +126,19 @@ type error.
 `reduce_window_max/min/sum/mean` SHALL implement `Valid`-padding-only strided windowed
 reductions over the trailing axes, with output extent
 `floor((input_dim - window) / stride) + 1`; a non-positive output extent SHALL be a type error.
-They SHALL be differentiable via `ReduceWindowGrad`; HIP codegen SHALL be deferred and rejected
-before codegen with an `unsupported_feature` diagnostic.
+They SHALL be differentiable via `ReduceWindowGrad` with identical semantics in every
+execution lane. A backend unable to represent the operation SHALL reject under [05-UNS-1..6]
+without narrowing the primitive's dtype or shape contract.
 
 #### Scenario: Valid-padding output extent
 
 - **WHEN** `reduce_window_max` runs with input 8, window 2, stride 2 on an axis
 - **THEN** the output extent is 4 (`floor((8-2)/2)+1`)
 
-#### Scenario: HIP target rejects windowed reduction
+#### Scenario: Windowed reduction is backend-independent
 
-- **WHEN** `chelis build --target hip` compiles a program using `reduce_window_*`
-- **THEN** it is rejected at compile time with a clean `unsupported_feature` error
+- **WHEN** the same `reduce_window_*` program runs on two backends
+- **THEN** both obey the same shape, accumulator-width, and adjoint semantics
 
 ### Requirement: Movement ops and runtime bounds
 
@@ -180,17 +180,17 @@ cotangent; a non-constant axis forced into DAG construction (e.g. via `grad`) SH
 `dropout` and `uniform_like` SHALL introduce the `Random` effect drawing from the active
 `with seed(...)` handler. `process_run` SHALL introduce `IO`, pass its argv straight to the OS
 with no shell or interpolation, report a signal-killed process as exit code `-1`, and be
-eval/test-only — rejected by the C/HIP/Metal build backends with a clean diagnostic.
+executed through the sandboxed host-runtime boundary in every compiled lane.
 
 #### Scenario: dropout introduces Random under a seed
 
 - **WHEN** `dropout(x, rate)` runs inside `with seed(42i64)`
 - **THEN** it draws its mask from the handled seed and reuses it on the backward pass
 
-#### Scenario: process_run rejected by a build backend
+#### Scenario: process_run crosses the host-runtime boundary
 
 - **WHEN** a program applying `process_run` is compiled with `--target c`
-- **THEN** it is rejected with a clean build error rather than a silent zero, because a compiled artifact has no host interpreter
+- **THEN** the artifact invokes the sandboxed host runtime with the exact argv and returns its typed result
 
 ### Requirement: Seed determinism
 
@@ -213,7 +213,7 @@ mixing.
 
 `Scatter` (last-write-wins) and `ScatterAdd` (commutative accumulation) SHALL be distinct
 primitives. `Scatter` SHALL resolve duplicate indices by updates-tensor row-major flat order on
-every backend (single-threaded on C, `<<<1,1>>>` on HIP) and SHALL structurally reject reverse-mode
+every backend and SHALL structurally reject reverse-mode
 AD via `AdError::NotSupported`; `ScatterAdd` SHALL have the `Gather` adjoint.
 
 #### Scenario: ScatterAdd is differentiable
@@ -226,22 +226,23 @@ AD via `AdError::NotSupported`; `ScatterAdd` SHALL have the `Gather` adjoint.
 - **WHEN** `grad` is applied through `Scatter`
 - **THEN** it is rejected with `AdError::NotSupported` because the forward result depends on iteration order at duplicate indices
 
-### Requirement: Host-only builtins
+### Requirement: Host-runtime builtins
 
-`tensor_scan` and the `test_*` assertion family SHALL be host-only, running inside the
-`chelis test`/`chelis eval` interpreter with no compiled-lane emission. `tensor_scan` SHALL be
-rejected whole-program at `chelis build --target c`/`hip`, and `grad`/`vmap` over a function
-reaching it SHALL be rejected at the transform boundary (reachability-scoped).
+`tensor_scan` and the `test_*` assertion family SHALL execute at the host-runtime boundary in
+every lane. `tensor_scan` SHALL preserve its scalar dtype without an untagged `f64` carrier;
+`grad` and `vmap` over a function reaching it SHALL be rejected at the transform boundary
+(reachability-scoped). Assertions SHALL execute and fail with their branded labels, never lower
+to no-op stubs.
 
 #### Scenario: tensor_scan runs under eval
 
 - **WHEN** `tensor_scan` builds a rank-1 tensor under `chelis eval`
 - **THEN** it iterates on the host with constant worker-stack usage
 
-#### Scenario: tensor_scan build is rejected
+#### Scenario: tensor_scan is callable from a compiled artifact
 
-- **WHEN** a program calling `tensor_scan` (even in an entry-unreachable helper) is built with `--target c`
-- **THEN** it is rejected at compile time with a `tensor_scan`-tagged `unsupported_feature` diagnostic
+- **WHEN** a compiled program calls `tensor_scan` with an `int64` initial value
+- **THEN** the host runtime returns an `int64` tensor without routing values through `f64`
 
 ### Requirement: Standard lowerings
 
@@ -258,24 +259,24 @@ precisions. The compiler MAY recognize these patterns and emit optimized library
 #### Scenario: Integer matmul is not admitted
 
 - **WHEN** `matmul` is applied to integer operands
-- **THEN** it is a type error because the active matmul signature does not admit integer precisions
+- **THEN** it is a type error because the matmul signature does not admit integer precisions
 
-### Requirement: AD completeness and reference oracle
+### Requirement: AD completeness and cross-lane conformance
 
 Every RISC primitive SHALL have a defined adjoint so `grad` can differentiate any composition;
-`cmplt`, `const`, and `load` SHALL have zero gradient. The naive C reference implementations
-SHALL be the correctness oracle, and GPU backends SHALL produce numerically identical results
-within floating-point tolerance (1e-6 for f32, 1e-12 for f64).
+`cmplt`, `const`, and `load` SHALL have zero gradient. Every evaluator and backend SHALL conform
+to the primitive's normative result and any operation-specific tolerance defined by [05-OBS-3].
+The C implementation is a useful comparison target but has no authority to redefine a result.
 
 #### Scenario: Composition is differentiable
 
 - **WHEN** `grad` is applied to a composition of primitives with defined adjoints
 - **THEN** it produces a gradient through the whole composition
 
-#### Scenario: GPU matches the reference within tolerance
+#### Scenario: GPU and reference implementation conform to the spec
 
 - **WHEN** a GPU backend evaluates a primitive against the C reference
-- **THEN** the results agree within 1e-6 (f32) / 1e-12 (f64)
+- **THEN** both results satisfy the primitive's normative result and [05-OBS-3] tolerance
 
 ### Requirement: Unsupported-case response contract
 

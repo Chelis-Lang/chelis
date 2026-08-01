@@ -1,10 +1,5 @@
 # Chelis Language Specification: Context and Philosophy
 
-**Version:** 0.2.0-draft
-**Status:** Authoritative specification draft
-
----
-
 ## 1. What Chelis Is
 
 Chelis is a functional programming language for AI research.
@@ -62,7 +57,7 @@ When tradeoffs appear, Chelis applies these in order:
    See `spec/design/chelis_canonical_reference.md` §8.5 for the full core/standard-library/external-library taxonomy.
 8. **Future-proof without over-building**
 
-These principles lead directly to several current rules:
+These principles determine the following rules:
 
 - Deep is canonical
 - Surf is sugar over Deep
@@ -92,19 +87,17 @@ The compiler treats Deep as the source of truth.
 
 ## 7. Type System Scope
 
-Phase 0 / v1 scope:
+The type system includes:
 
 - algebraic data types
 - Hindley-Milner inference
 - named tensor dimensions
 - explicit precision tracking
 - graded fitness scoring with repair suggestions
-
-Deferred:
-
 - algebraic effects
 - linear types and borrowing
-- richer research type features
+
+General dependent types beyond named dimensions are outside the language contract.
 
 ## 8. Computational Model
 
@@ -123,9 +116,9 @@ They are compiler transforms, not ordinary library conveniences.
 
 ## 9. Backends and Execution
 
-The current reference backend is C with BLAS and OpenMP.
-Future GPU compilation is planned around HIP, not separate CUDA and OpenCL backends.
-StableHLO and FX are later integration layers rather than replacements.
+The reference backend is C with BLAS and OpenMP.
+GPU compilation uses HIP rather than separate CUDA and OpenCL backends.
+StableHLO and FX are integration layers rather than replacements.
 
 Interactive execution uses the IR evaluator first.
 If latency later becomes a problem, the escalation order is cached C artifacts,
@@ -155,7 +148,5 @@ Use the spec in this order:
 6. `05-risc-primitives.md`
 7. `08-backends.md`
 8. `09-tide.md`
-9. `12-roadmap.md`
-
 For project-level decisions rather than language semantics, read
 `spec/design/chelis_canonical_reference.md`.

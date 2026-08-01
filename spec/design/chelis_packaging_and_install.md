@@ -351,7 +351,7 @@ build" walkthrough:
   source-crate layer (chelis#571).
 - [`shell_repo_contract.md`](shell_repo_contract.md) §2 — the toolchain/pin
   hygiene and source-crate MUSTs that this design implements.
-- `spec/12-roadmap.md` Phase A — distribution unblock.
+- `chelis_project_plan.md` Phase A — distribution unblock.
 - `chelis_trust_stack.md` / `effect_taxonomy_expansion.md` Item 4 — artifact
   signing and install-time effect manifests: adjacent future work that composes
   at the same install boundary (cross-reference only; out of scope here).

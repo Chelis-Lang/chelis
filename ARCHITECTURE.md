@@ -141,7 +141,7 @@ If you are working on the current phase, start with:
 1. `spec/design/chelis_canonical_reference.md`
 2. `spec/05-risc-primitives.md`
 3. `spec/08-backends.md`
-4. `spec/12-roadmap.md`
+4. `spec/design/chelis_project_plan.md`
 
 Then inspect:
 

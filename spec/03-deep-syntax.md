@@ -1,13 +1,10 @@
 # spec/03-deep-syntax.md — Chelis Deep Syntax Specification
 
-**Status:** v0.2 (post design sprint)
 **Scope:** The primary machine interface. Everything an AI agent or compiler needs to construct, parse, validate, and transform Deep programs.
 
-**Executable surface note:** the 62-tag vocabulary documented here remains the
-authoritative shipped Deep grammar. Future Phase `3c` / `3d` / `3g` language-
-completeness work may add new Deep forms or keep some functionality as built-in helper
-calls, but that future surface is not yet part of the active closed vocabulary unless
-this document is explicitly revised to say so.
+The 62-tag vocabulary documented here is closed. A form outside that vocabulary is not
+Deep unless the controlling specification adds it and updates the vocabulary census in
+the same change.
 
 ---
 
@@ -32,7 +29,7 @@ symbols: `[A-Za-z_][A-Za-z0-9_]*`. This admits producer-specific keys such as
 `c_earchin_role` while preserving the no-hyphen rule that keeps Deep symbols
 portable across Surf and Reef boundaries.
 
-**Active keys:**
+**Defined keys:**
 
 | Key | Value | Semantics |
 |---|---|---|
@@ -54,25 +51,23 @@ portable across Surf and Reef boundaries.
 | `invariant` | `(fn {} (params {} <binder>) <expr>)` | On an opaque `deftype`: the declared invariant predicate (see §2.2) |
 | `invariant_amenability` | string | On an invariant-carrying `deftype`: `"linear"`/`"polynomial"`/`"transcendental"`/`"opaque"`; derived data, recomputed on desugar (see §2.2) |
 
-**Reserved for later phases:**
+**Reserved metadata:**
 
 | Key | Value | Semantics |
 |---|---|---|
 | `lin` | `once` / `borrow` / `unrestricted` | Linearity |
 | `doc` | string | Documentation |
-| `span_*` | reserved | Future richer span fields (see §1.1.1) |
+| `span_*` | reserved | Span-metadata extension namespace (see §1.1.1) |
 
 **Metadata propagation through transformations.** Metadata fields are
 preserved by all spec-defined transformations and round-trip through the
-canonical form (§6). Cross-tool provenance (the `span` field in
-particular) is intended to survive the full compile pipeline once the
-in-flight span survival work lands; see
-`spec/design/chelis_span_survival.md` for the phased S0–S5 plan.
+canonical form (§6). Cross-tool provenance, including the `span` field, must
+survive the full compile pipeline.
 
 #### 1.1.1 External-source spans (`span`, `span_*` namespace)
 
 The `span` metadata key carries a string identifier issued by an external
-producer (today: Octant's LaTeX-to-Deep translator, which writes
+producer (for example, Octant's LaTeX-to-Deep translator, which writes
 `{span: "n_001"}` and ships a sidecar `<input>.spans.json` mapping each ID to
 the original LaTeX byte range). Chelis treats `span` values as opaque strings
 and preserves them end-to-end through parsing, IR lowering, optimization
@@ -88,9 +83,8 @@ rules as producer-supplied Deep spans. If a programmatic Surf AST has no real
 source byte range, the desugarer omits `span` and downstream synthesized-node
 fallbacks remain available.
 
-The `span_*` prefix is reserved for future richer span data. If a need arises
-to embed byte offsets or file identifiers directly inside Deep metadata
-(rather than indirecting through a sidecar), they MUST be added under the
+The `span_*` prefix is the extension namespace for richer span data. Embedded
+byte offsets or file identifiers (rather than sidecar references) MUST use the
 `span_*` namespace (`span_start`, `span_end`, `span_file`, …). Competing keys
 that carry span-related data outside the `span_*` namespace are forbidden so
 tooling has a stable contract.
@@ -101,7 +95,7 @@ sub-nodes from a parentless intrinsic, etc.), the canonical `span` value uses
 the form `__synthesized_<pass>__` (double-underscore wrap, lowercase pass
 name). This shape is reserved — external producers MUST NOT emit span IDs
 matching `__synthesized_*__`; chelis MUST NOT mint a synthesized marker that
-omits the wrap. Currently defined markers:
+omits the wrap. Defined markers:
 
 | Marker | Issued by |
 |---|---|
@@ -178,23 +172,22 @@ The architectural rule, applied uniformly: **every producer-supplied
 string that flows into generated source must be validated at its trust
 boundary** — at parse time when the value enters via Deep text, or at
 construction time when the value enters via direct IR construction.
-Future IR fields that admit producer-supplied strings (module names,
-type names, effect names, etc.) must follow the same pattern. The
-deferred per-emission-context defense-in-depth work (comment-context
-shared sanitizer, format-string-context sanitizer, comprehensive backend
-audit) is tracked at `spec/upstream-bugs/producer-string-sanitization.md`.
+Every IR field that admits a producer-supplied string (module names, type names,
+effect names, and similar values) follows the same pattern. Each emission context must
+apply a context-appropriate sanitizer, including separate comment and format-string
+handling.
 
-**Provenance metadata (Phase 2c).** After macro expansion, each node in the expanded
+**Provenance metadata.** After macro expansion, each node in the expanded
 form may carry a `source` key in its metadata map indicating the macro invocation it
 originated from.
 Example: `(app {source: (relu input)} (var {} max_elem) (var {} input) (lit {type: (t-prim {} f32)} 0))`.
 Provenance is informational — it does not affect parsing, type checking, or evaluation.
 The node is a standard `app` node; the `source` key is ignored by all compiler passes
 except error reporting.
-The shipped provenance format is `{source: (macro-name original-arg...)}` where the
+The provenance format is `{source: (macro-name original-arg...)}` where the
 value is a plain Deep list recording the macro name and original invocation arguments.
 
-**Macro boundary rule (Phase 2c).** LLM-facing Deep is always expanded Deep. Macro
+**Macro boundary rule.** LLM-facing Deep is always expanded Deep. Macro
 definition and invocation forms may exist as compiler-internal or pre-expansion syntax,
 but the AST surfaced to AI generation, repair, fitness scoring, decompilation
 workflows, or downstream transforms contains only ordinary Deep nodes plus optional
@@ -330,9 +323,9 @@ An opaque `deftype` may additionally carry a **declared invariant**
 | `block` | `(block {} expr₁ ... exprₙ)` | Sequenced expressions; value is last |
 | `tuple` | `(tuple {} expr₁ expr₂ ...)` | Tuple construction |
 | `tuple-get` | `(tuple-get {} expr index)` | Tuple element access |
-| `record-update` | `(record-update {} expr (kv {} k v) ...)` | Functional record update (reserved; Phase 1) |
-| `par` | `(par {} expr₁ expr₂ ...)` | Parallel evaluation (v1: sequential) |
-| `handle-effect` | `(handle-effect {effect: name} arg body)` | Phase 2a effect handler block |
+| `record-update` | `(record-update {} expr (kv {} k v) ...)` | Reserved functional record update |
+| `par` | `(par {} expr₁ expr₂ ...)` | Scheduler-independent parallel evaluation |
+| `handle-effect` | `(handle-effect {effect: name} arg body)` | Effect handler block |
 
 ### 2.4 Patterns
 
@@ -350,7 +343,7 @@ An opaque `deftype` may additionally carry a **declared invariant**
 
 | Tag | Form | Semantics |
 |---|---|---|
-| `t-prim` | `(t-prim {} f32)` | Primitive type (active set: f32, f64, bf16, f16, int8, int16, int32, int64, bool, string — see `spec/04-type-system.md` §1.1; the deferred names of §1.1.1 — `f8e4m3`, `f8e5m2`, `uint8`/`uint16`/`uint32`/`uint64`, `int4`/`uint4`, `complex64`/`complex128`, `decimal128`/`decimal256` — are reserved and rejected at check time) |
+| `t-prim` | `(t-prim {} f32)` | Primitive type (language set: f32, f64, bf16, f16, int8, int16, int32, int64, bool, string — see `spec/04-type-system.md` §1.1; the reserved names of §1.1.1 are rejected at check time) |
 | `t-fn` | `(t-fn {} arg₁ arg₂ ... ret)` | Function type; last child is return |
 | `t-tensor` | `(t-tensor {} dim₁ dim₂ ... precision)` | Tensor type; last child is precision |
 | `t-ref` | `(t-ref {} type)` | Read-only borrow type |
@@ -364,14 +357,14 @@ An opaque `deftype` may additionally carry a **declared invariant**
 Type expressions are recursively resolved before they may enter the checked
 environment or a cached compiler context. Resolution is fail-closed:
 
-- `t-prim` has exactly one symbol child and that symbol is in the active or
+- `t-prim` has exactly one symbol child and that symbol is in the language or
   explicitly-reserved primitive vocabulary owned by `spec/04-type-system.md`
   §1.1. An unknown primitive name is a type error, not an inference hole.
 - `t-adt` has a symbol head naming a precollected `deftype` or `typealias`
   header and exactly that header's declared number of type arguments. Headers
   are collected before bodies are resolved, so self-recursive and forward
   nominal references are legal; unknown names and wrong arities are errors.
-  The precollected header environment remains active for the entire check unit,
+  The precollected header environment remains in scope for the entire check unit,
   including annotations in declaration bodies. A rejected declaration body is
   not installed in the reusable ADT/alias registry, but its already-declared
   header remains visible until the failing check ends so downstream references
@@ -397,8 +390,8 @@ environment or a cached compiler context. Resolution is fail-closed:
   an invalid child, substitutes a wildcard/fresh variable for malformed
   input, or admits an unchecked nominal name.
 - A bare atom or an expression tag in a type position is malformed. The sole
-  compatibility exception is the historically accepted active primitive
-  symbol in a `cast` target (for example `(cast {} x f16)`); it resolves with
+  alternate spelling is a language primitive symbol in a `cast` target (for
+  example `(cast {} x f16)`); it resolves with
   the same meaning as `(t-prim {} f16)`. Bare forms remain non-canonical and
   are not accepted in declaration fields, aliases, signatures, or metadata.
   Both cast spellings cross this same resolver before cast semantics are
@@ -434,7 +427,7 @@ wildcard spelling); it does not allocate an inference variable.
 | `jit` | `(jit {} expr)` | Compilation trigger |
 | `realize` | `(realize {} expr)` | Force DAG evaluation |
 | `cast` | `(cast {} expr target-type)` | Precision cast |
-| `copy` | `(copy {} expr)` | Explicit tensor duplication (Phase 2: linearity) |
+| `copy` | `(copy {} expr)` | Explicit tensor duplication |
 | `borrow` | `(borrow {} expr)` | Temporary read-only tensor view for a single call site |
 
 ### 2.8 Metaprogramming
@@ -472,18 +465,12 @@ wildcard spelling); it does not allocate an inference variable.
 | Helpers | 5 | params, bind, kv, effects, resource |
 | **Total** | **62** | |
 
-### 2.11 Planned Phase 3+ Expansion Note
+### 2.11 Vocabulary Extension
 
-The remaining practical Phase 3 work is expected to stress Deep in new directions:
-
-- first-class host-language scalars and strings
-- collection values such as lists and dictionaries
-- file/data/tokenizer helper surfaces
-
-Those additions are not active Deep tags today.
-If Chelis later needs dedicated Deep tags for those features, this closed-vocabulary
-section and the tag-count summary must be revised at the same time. Until then, the
-current 62-tag count remains the authoritative shipped grammar.
+Any feature that requires a dedicated Deep form must revise this closed-vocabulary
+section, structural validation, canonical printing, and the tag-count summary in the
+same semantic change. Functionality expressed through ordinary calls does not allocate
+a new tag.
 
 ---
 
@@ -654,7 +641,7 @@ Float-typed suffixes (`f32`, `f64`, `bf16`, `f16`) attach to either an
 integer or float literal token. Integer-typed suffixes (`i8`, `i16`,
 `i32`, `i64`) attach to integer literal tokens only.
 
-No suffix exists for any deferred name of `spec/04-type-system.md` §1.1.1
+No suffix exists for any reserved name of `spec/04-type-system.md` §1.1.1
 (`f8e4m3`, `f8e5m2`, the `uint*` family, `int4`/`uint4`,
 `complex64`/`complex128`, `decimal128`/`decimal256`); each is rejected at
 lex time with a diagnostic citing §1.1.1, and a suffix is authored only
@@ -695,7 +682,7 @@ IntLit      ← '-'? [0-9]+ (FloatSuffix / IntSuffix)?
 FloatSuffix ← 'f32' / 'f64' / 'bf16' / 'f16'
 IntSuffix   ← 'i8' / 'i16' / 'i32' / 'i64'
 # Suffix must immediately follow the digit sequence (no whitespace, no comment).
-# No suffix exists for any deferred name of spec/04-type-system.md §1.1.1
+# No suffix exists for any reserved name of spec/04-type-system.md §1.1.1
 # (`f8e4m3`, `f8e5m2`, `uint*`, `int4`/`uint4`, `complex*`, `decimal*`); the
 # short unsigned spellings `u8`/`u16`/`u32`/`u64` are not reserved at all.
 # Every such sequence is rejected at lex time with a diagnostic citing §1.1.1.

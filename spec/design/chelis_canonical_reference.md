@@ -832,8 +832,8 @@ Use the docs in this order:
 
 1. `spec/design/chelis_canonical_reference.md` for project-level truth, current
    status, naming, ecosystem boundaries, and cross-doc alignment
-2. numbered specs `spec/00-12*.md` for active language, CLI, serialization, backend,
-   and roadmap contracts
+2. numbered specs `spec/00-11*.md` for language, CLI, serialization, backend,
+   and FFI contracts
 3. `spec/design/chelis_project_plan.md` and active phase plans such as
    `spec/design/chelis_phase3_plan.md` for phased execution and explicit acceptance
    oracles

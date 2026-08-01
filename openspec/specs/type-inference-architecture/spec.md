@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Define the module boundaries, source-size limit, public API parity, and behavior parity for the Chelis type-inference implementation.
+Define the module boundaries, source-size limit, public API, and semantic conformance for the Chelis type-inference implementation.
 
 ## Requirements
 
@@ -17,10 +17,10 @@ The application dispatcher SHALL separate generic call inference from numeric, t
 - **WHEN** the source architecture guard examines the type-inference implementation
 - **THEN** it finds the required role modules under `crates/chelis-types/src/infer/`
 
-#### Scenario: Legacy monolith returns
+#### Scenario: Monolithic inference path is forbidden
 
 - **WHEN** `crates/chelis-types/src/infer.rs` exists
-- **THEN** the source architecture guard fails and identifies the legacy path
+- **THEN** the source architecture guard fails and identifies the forbidden path
 
 ### Requirement: Inference source-size limit
 
@@ -36,32 +36,32 @@ Each production Rust file under `crates/chelis-types/src/infer/` SHALL contain n
 - **WHEN** an inference source file contains more than 3,000 physical lines
 - **THEN** the source architecture guard fails and identifies the file and its line count
 
-### Requirement: Public inference API parity
+### Requirement: Stable public inference API
 
-The refactor SHALL preserve every public item re-exported from `chelis_types::infer`. Each item SHALL retain its name, signature, and module path.
+Every public item re-exported from `chelis_types::infer` SHALL retain its specified name, signature, and module path unless a normative API change explicitly amends this capability.
 
-#### Scenario: Existing consumer compiles
+#### Scenario: Consumer compiles
 
-- **WHEN** an existing consumer imports the public inference items
+- **WHEN** a consumer imports the public inference items
 - **THEN** the consumer compiles without an import or signature change
 
 #### Scenario: Public path changes
 
-- **WHEN** an extraction removes or renames an existing public inference path
+- **WHEN** an implementation removes or renames a specified public inference path
 - **THEN** the public API parity test fails
 
-### Requirement: Type-inference behavior parity
+### Requirement: Type-inference behavior conforms to the language spec
 
-The refactor SHALL preserve the type-system behavior that `spec/04-type-system.md` and the `type-system` capability define. Accepted programs SHALL produce equal checked trees, metadata, and inference statistics.
+Type inference SHALL implement the behavior that `spec/04-type-system.md` and the `type-system` capability define. Repeated checks of the same accepted program SHALL produce equal checked trees, metadata, and inference statistics.
 
-Rejected programs SHALL produce equal ordered diagnostic kinds, messages, spans, and hints. The refactor SHALL NOT add, remove, or reorder a diagnostic.
+Repeated checks of the same rejected program SHALL produce equal ordered diagnostic kinds, messages, spans, and hints.
 
-#### Scenario: Accepted fixture retains its output
+#### Scenario: Accepted fixture has deterministic output
 
-- **WHEN** the refactored checker processes an accepted parity fixture
-- **THEN** its checked tree, metadata, and inference statistics equal the recorded baseline
+- **WHEN** the checker processes an accepted conformance fixture
+- **THEN** its checked tree, metadata, and inference statistics equal that fixture's normative expected result
 
-#### Scenario: Rejected fixture retains its diagnostics
+#### Scenario: Rejected fixture has deterministic diagnostics
 
-- **WHEN** the refactored checker processes a rejected parity fixture
-- **THEN** its ordered diagnostics equal the recorded baseline in kind, message, span, and hints
+- **WHEN** the checker processes a rejected conformance fixture
+- **THEN** its ordered diagnostics equal that fixture's normative expected kind, message, span, and hints

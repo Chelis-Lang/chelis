@@ -5,8 +5,7 @@
 Define the Surf language surface: keywords, operator precedence, module system,
 imports/exports, dimensions and rank variables, type signatures and effect annotations,
 blocks, effect handlers, macros, records, pattern matching, tuples, transforms,
-numeric/string literals, type aliases, and opaque types with declared invariants. This is
-the current truth of how Surf source parses and desugars to Deep.
+numeric/string literals, type aliases, and opaque types with declared invariants.
 
 **Source:** captured from [`spec/02-surf-syntax.md`](../../../spec/02-surf-syntax.md).
 
@@ -15,18 +14,18 @@ the current truth of how Surf source parses and desugars to Deep.
 ### Requirement: Reserved keywords
 
 Surf SHALL reserve its keyword set so reserved words cannot be used as identifiers. The
-Phase-2 reserved words (`effect`, `handler`, `perform`, `resume`, `borrow`, `where`, `do`)
-SHALL parse as keywords and emit a "reserved for future use" error rather than binding.
+reserved words (`effect`, `handler`, `perform`, `resume`, `borrow`, `where`, `do`)
+SHALL parse as keywords without grammar productions and be rejected rather than binding.
 
 #### Scenario: Reserved word is not an identifier
 
 - **WHEN** source attempts `def def(x) = x`
 - **THEN** parsing fails because `def` is a reserved keyword
 
-#### Scenario: Phase-2 keyword is reserved
+#### Scenario: Inactive keyword is reserved
 
 - **WHEN** source uses `perform` as an identifier
-- **THEN** the parser reports it as reserved for future use rather than accepting it as a name
+- **THEN** the parser reports it as a reserved keyword rather than accepting it as a name
 
 ### Requirement: Operator precedence and non-associativity
 
@@ -168,8 +167,8 @@ formatter and decompiler.
 
 A `sig` or `def` SHALL accept an optional `! { ... }` effect suffix drawing from the built-in
 names `Diff`, `Random`, `Accum`, `IO`, and `Resource("device")`. `Random`, `IO`, and
-`Resource(...)` SHALL be the active boundary effects in the shipped subset, while `Diff` and
-`Accum` SHALL be accepted as forward-compatible syntax.
+`Resource(...)` SHALL be boundary effects; `Diff` is a compiler capability and `Accum`
+is an internal accumulation hook.
 
 #### Scenario: Random effect annotation is accepted
 
@@ -218,7 +217,7 @@ expression statement SHALL be rejected.
 
 ### Requirement: Effect handler blocks
 
-Phase 2a SHALL provide `with seed(...)` and `with device(...)` handler expressions, each
+Surf SHALL provide `with seed(...)` and `with device(...)` handler expressions, each
 taking exactly one parenthesized argument and a brace-delimited block body. `with seed`
 SHALL require an `i64`-suffixed integer literal, `with device` a string literal, and only
 `seed` and `device` SHALL be valid handler names.
@@ -237,7 +236,7 @@ SHALL require an `i64`-suffixed integer literal, `with device` a string literal,
 
 Surf SHALL construct records with braces (with field punning), access fields with dot
 chaining, and canonicalize record `kv` pairs alphabetized by key in Deep. Functional update
-with `with` SHALL be reserved for Phase 1 and not part of the Phase 0 parser.
+with `with` SHALL remain reserved and is not part of the Surf grammar.
 
 #### Scenario: Record punning and access
 
@@ -253,7 +252,7 @@ with `with` SHALL be reserved for Phase 1 and not part of the Phase 0 parser.
 
 `match` SHALL use `=>` arms with the supported pattern forms (variable, wildcard, literal,
 constructor, nested, record, tuple, as-pattern) and optional `if` guards. Matches SHALL be
-exhaustive over the scrutinee ADT, and or-patterns SHALL NOT be supported in v1.
+exhaustive over the scrutinee ADT, and or-patterns SHALL NOT be part of Surf.
 
 #### Scenario: Guarded arms with distinct patterns
 
@@ -352,7 +351,7 @@ back to the `int32`/`f32` defaults.
 
 String literals SHALL be double-quoted with the escapes `\"`, `\\`, `\n`, `\t`, `\r`, `\0`,
 and SHALL desugar to `(lit {type: (t-prim {} string)} ...)`. Multiline strings,
-interpolation, and Unicode escapes SHALL NOT be supported in v1.
+interpolation, and Unicode escapes SHALL NOT be part of Surf.
 
 #### Scenario: String literal desugars
 
@@ -362,14 +361,14 @@ interpolation, and Unicode escapes SHALL NOT be supported in v1.
 #### Scenario: Interpolation is not supported
 
 - **WHEN** a string attempts interpolation or a multiline body
-- **THEN** it is rejected because v1 strings have no interpolation and no multiline form
+- **THEN** it is rejected because Surf strings have no interpolation and no multiline form
 
 ### Requirement: Type aliases
 
 A `type Name = <type>` without a leading `|` SHALL be a transparent type alias expanded at
 desugaring, with an optional parameter list scoping its binders by position (precision slot →
 `t-var`, dimension slot → `d-var`, unlisted dimension name → `d-name`). Opaque aliases SHALL
-NOT exist in v1.
+NOT exist in Surf.
 
 #### Scenario: Alias binder resolves by position
 

@@ -6,8 +6,7 @@ Define Deep, the primary machine interface: the universal 3-tuple node structure
 metadata contract, the span and producer-string trust boundary, the closed 62-tag
 vocabulary, module identity, type-expression and dimension resolution, built-in scope,
 function application and pipe semantics, canonical form and literal normalization, and
-structural/arity/vocabulary validation. This is the current truth of how Deep is
-constructed, parsed, validated, and printed.
+structural/arity/vocabulary validation for constructing, parsing, validating, and printing Deep.
 
 **Source:** captured from [`spec/03-deep-syntax.md`](../../../spec/03-deep-syntax.md).
 
@@ -30,7 +29,7 @@ generator never decides where to attach it.
 - **WHEN** a node is written `(var x)` with no metadata map
 - **THEN** parsing fails because the metadata map must always be present as element two
 
-### Requirement: Metadata keys and active vocabulary
+### Requirement: Metadata keys and defined vocabulary
 
 Metadata keys SHALL use the identifier charset `[A-Za-z_][A-Za-z0-9_]*` (no hyphens) and
 carry compiler-relevant annotations. The `type` key SHALL be checked rather than trusted, and

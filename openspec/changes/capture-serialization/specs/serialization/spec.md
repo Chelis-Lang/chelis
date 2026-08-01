@@ -17,26 +17,25 @@ canonical printing defined by the deep-syntax capability.
 
 ### Requirement: Binary Shell metadata artifact
 
-`.chb` SHALL be the binary Shell metadata artifact used by the Reef package system, carrying
-public package metadata, exported symbol metadata, compiler compatibility metadata, and room for
-future cached products. Its exact wire layout SHALL remain owned by the implementation and SHALL
-NOT be published as a frozen low-level guarantee while the implementation evolves.
+`.chb` SHALL be a compiler-private binary metadata artifact used by Reef, carrying package,
+exported-symbol, and compiler-compatibility metadata. It is not a language interchange format;
+its wire layout is owned by the producing compiler and consumers SHALL validate compatibility
+metadata before decoding it.
 
 #### Scenario: chb carries package and symbol metadata
 
 - **WHEN** a Reef package is built
 - **THEN** its `.chb` records public package metadata, exported symbol metadata, and compiler compatibility metadata
 
-#### Scenario: No premature wire-layout guarantee
+#### Scenario: No portable wire-layout guarantee
 
 - **WHEN** documenting `.chb`
-- **THEN** the project does not publish a frozen low-level layout guarantee while the format is still expected to evolve
+- **THEN** the project describes it as compiler-private and requires compatibility validation
 
 ### Requirement: Additive wire-schema compatibility
 
 The compiler-API JSON wire models SHALL be the machine-facing surface, with new tagged variants
-(e.g. `WireRiscOp::Gather`) being additive changes producers may emit after the owning behavior
-lands. Consumers SHOULD tolerate unknown additive variants and report a clear unsupported-variant
+(e.g. `WireRiscOp::Gather`) being additive changes. Consumers SHOULD tolerate unknown additive variants and report a clear unsupported-variant
 diagnostic; the transient `OneHot` marker SHALL NOT reach backends after specialization.
 
 #### Scenario: Consumer tolerates an unknown additive variant

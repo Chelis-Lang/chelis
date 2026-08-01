@@ -1,8 +1,9 @@
 # Reef Distribution
 
 **Status:** Current Phase A distribution contract, with historical implementation-plan
-notes preserved for context. Phase A is complete in `spec/12-roadmap.md`: the shipped
-surface includes `chelis reef install --from-github`, `--bootstrap`, default-on
+notes preserved for context. The Phase A completion record is in
+`spec/design/chelis_project_plan.md`: the shipped surface includes
+`chelis reef install --from-github`, `--bootstrap`, default-on
 auto-fetch during `chelis reef build`, lockfile `remote_origin`, and
 `chelis reef install --from-lockfile`. The public registry server remains deferred.
 
@@ -597,5 +598,5 @@ explain the scope of the shipped Phase A change set.
   the effect aggregation is available. The two designs share the
   install boundary.
 - `chelis_trust_stack.md` references this doc as the Phase A distribution surface.
-- `spec/12-roadmap.md` Phase A (distribution unblock) covers
+- `chelis_project_plan.md` Phase A (distribution unblock) covers
   Items 6-9 of this doc.

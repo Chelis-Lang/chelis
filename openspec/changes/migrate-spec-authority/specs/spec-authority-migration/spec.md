@@ -3,7 +3,7 @@
 ### Requirement: Authority transfers one chapter at a time
 Normative authority SHALL move from a numbered `spec/` chapter to its captured capability one chapter at a time, through a change that records the transfer. A chapter SHALL remain controlling for its subject until its transfer is recorded.
 
-#### Scenario: Untransferred subject keeps legacy authority
+#### Scenario: Untransferred subject keeps numbered authority
 - **WHEN** a capability and its source chapter describe the same subject and no transfer is recorded for that chapter
 - **THEN** the `spec/` chapter SHALL be controlling and the capability SHALL be reference material
 
@@ -27,7 +27,10 @@ Every capability captured from `spec/` SHALL name and link its source chapter. A
 - **THEN** the transfer SHALL be rejected
 
 ### Requirement: Known divergence is recorded before transfer
-A capture SHALL NOT be required to be lossless. Divergence known at capture time — between the chapter, the capability, and the shipped implementation — SHALL be recorded in the owning change before that chapter transfers.
+A capture SHALL NOT be required to be lossless. Divergence known at capture time between the
+chapter and capability SHALL be recorded in the owning change before that chapter transfers.
+Implementation divergence SHALL be tracked in the owning change, design document, or issue and
+SHALL NOT be copied into the normative capability or used to narrow it.
 
 #### Scenario: Recorded gap does not block transfer
 - **WHEN** a capture omits or contradicts part of its chapter and the divergence is recorded
@@ -36,6 +39,22 @@ A capture SHALL NOT be required to be lossless. Divergence known at capture time
 #### Scenario: Unrecorded known divergence blocks transfer
 - **WHEN** a divergence is known at capture time and is not recorded
 - **THEN** the transfer SHALL be rejected until it is
+
+### Requirement: Normative capabilities are timeless contracts
+Every controlling capability and normative capability delta SHALL describe the decided
+architecture, syntax, or semantics independent of delivery state. It SHALL NOT contain phase or
+milestone labels, completion claims, delivery history, release or PR inventories, acceptance
+results, temporary workarounds, or descriptions of implementation behavior. A short
+non-normative parenthetical MAY say that a requirement is not fully implemented and link its
+owning issue; it SHALL NOT describe the gap.
+
+#### Scenario: Implementation behavior cannot narrow a capability
+- **WHEN** an evaluator or backend supports only a subset of the intended dtype or operation contract
+- **THEN** the capability retains the intended contract and the divergence is tracked outside the normative text
+
+#### Scenario: Status belongs in the owning change
+- **WHEN** work is sequenced or implementation progress is reported
+- **THEN** that information belongs in proposal, design, tasks, project design documents, or issues rather than a capability spec
 
 ### Requirement: A transferred chapter is marked superseded
 When a chapter's authority transfers, that chapter SHALL be marked superseded and SHALL name the capability that supersedes it. A superseded chapter SHALL NOT receive new normative content.

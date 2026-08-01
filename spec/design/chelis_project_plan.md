@@ -1274,8 +1274,8 @@ reference type checker — the ultimate conformance oracle.
 ## Differentiable Programming Track (Phases D0–D6)
 
 Parallel committed-scope track for end-to-end differentiable programming. Detailed
-design in `spec/design/differentiable_language.md`; roadmap row in
-`spec/12-roadmap.md` §Differentiable programming.
+design in `spec/design/differentiable_language.md`; this section owns its delivery
+sequence.
 
 Scope is committed; the strategic decision on when to begin Phase D1 is separate.
 The phases are sequenced by dependency: D1 → D2 → D3 → D4 → D5, with D6 free to
@@ -1308,8 +1308,7 @@ FFI boundaries. See `spec/design/differentiable_language.md` §What's not in sco
 
 Parallel committed-scope track for Hydronnx, the Chelis shell that consumes ONNX
 model files and exposes them as typed, callable Chelis functions. Detailed
-design in `spec/design/hydronnx.md`; roadmap row in `spec/12-roadmap.md`
-§Hydronnx.
+design in `spec/design/hydronnx.md`; this section owns its delivery sequence.
 
 `Hydronnx` (PascalCase) is the module path; `hydronnx` is the crate, package,
 file, and prose form. The upstream `ONNX` interchange format is not owned by
@@ -1354,7 +1353,7 @@ round-trip export. See `spec/design/hydronnx.md` §What's not in v1 scope.
 
 Parallel committed-scope track for Kerrent, the Chelis core language feature
 for authoring GPU kernels in Chelis source code. Detailed design in
-`spec/design/kerrent.md`; roadmap row in `spec/12-roadmap.md` §Kerrent.
+`spec/design/kerrent.md`; this section owns its delivery sequence.
 
 `Kerrent` (proper noun) is the Chelis feature name. It is a core language
 feature, not a shell: it introduces a new `kernel` keyword, tile-level

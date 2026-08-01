@@ -12,8 +12,8 @@ scope:
 
 - **Kernel authoring as a first-class Chelis capability** — graduated
   2026-05-13. Now tracked as the Kerrent committed-scope work at
-  `spec/design/kerrent.md`; phase ledger in `spec/12-roadmap.md` §Kerrent
-  and `spec/design/chelis_project_plan.md` §Kerrent Track.
+  `spec/design/kerrent.md`; delivery sequence in
+  `spec/design/chelis_project_plan.md` §Kerrent Track.
 
 ## Active entries
 

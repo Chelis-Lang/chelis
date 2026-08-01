@@ -8,12 +8,11 @@ Define the closed physical representation vocabulary, derived width rules, purit
 
 `spec/design/loud_unsupported.md` §C4 controls vocabulary ownership, purity,
 and decoder totality. `spec/design/dtype_semantics.md` §C3 controls storage
-decisions. This capability records the representation mechanism. It does not
-replace either authority. `Repr` describes each current encoding. It does
-not select a future storage format.
+decisions. This capability records the representation mechanism and the
+physical encoding required for each runtime dtype.
 
 ### Requirement: Closed physical representation vocabulary
-`chelis-vocab` SHALL define one closed `Repr` variant for each active runtime element encoding. The vocabulary SHALL contain no unknown, custom, or fallback variant.
+`chelis-vocab` SHALL define one closed `Repr` variant for each runtime element encoding. The vocabulary SHALL contain no unknown, custom, compatibility, or fallback variant. Bool SHALL map to `Repr::Bool8`, a native one-byte representation; `BoolInBinary32` is not part of the vocabulary.
 
 #### Scenario: Runtime dtype maps to one representation
 - **WHEN** a caller requests the representation of any value in `RuntimeDType::ALL`
@@ -23,16 +22,16 @@ not select a future storage format.
 - **WHEN** two encodings have equal byte widths but different bit meanings
 - **THEN** the encodings have different `Repr` values
 
-#### Scenario: Current bool encoding remains explicit
-- **WHEN** a caller requests the current runtime bool representation
-- **THEN** the result names the four-byte binary32 payload encoding
+#### Scenario: Bool representation is native
+- **WHEN** a caller requests the runtime bool representation
+- **THEN** the result is `Repr::Bool8` with byte width one
 
 ### Requirement: Width derives from representation
 `RuntimeDType::byte_width()` SHALL derive its result from `RuntimeDType::repr()`. No per-dtype width table SHALL exist beside the representation table.
 
-#### Scenario: Existing widths remain stable
-- **WHEN** a caller requests the width of each value in `RuntimeDType::ALL`
-- **THEN** every width equals the value on `main` before this change
+#### Scenario: Width follows the dtype encoding
+- **WHEN** a caller requests the width of any value in `RuntimeDType::ALL`
+- **THEN** it receives that dtype's physical width, including one byte for bool
 
 #### Scenario: Distinct representations can share a width
 - **WHEN** a caller compares IEEE binary32 with two's-complement int32
@@ -102,23 +101,23 @@ This rule supplies implementation evidence for `spec/design/loud_unsupported.md`
 `Repr::TwosComplement32` SHALL use `i32` in Rust and `int32_t` in generated C.
 
 #### Scenario: Runtime int32 access uses the native element type
-- **WHEN** a corrected runtime consumer dispatches `RuntimeDType::I32`
+- **WHEN** a runtime consumer dispatches `RuntimeDType::I32`
 - **THEN** it reads and writes elements through `i32` access instead of an `f32` compatibility view
 
 #### Scenario: Equal widths keep separate views
 - **WHEN** a consumer supports both `Repr::Ieee754Binary32` and `Repr::TwosComplement32`
 - **THEN** it uses separate float and signed-integer element views although both representations use four bytes
 
-#### Scenario: Current bool payload keeps its compatibility view
-- **WHEN** a consumer dispatches the current `Repr::BoolInBinary32`
-- **THEN** it can use the `f32` compatibility view until a separate bool-storage migration changes the representation
+#### Scenario: Bool uses a native one-byte representation
+- **WHEN** a consumer dispatches a bool tensor
+- **THEN** it uses a native one-byte bool representation and never an `f32` compatibility view
 
 #### Scenario: Int32 use of the f32 boundary fails in debug builds
 - **WHEN** debug code passes an int32 tensor to `data_as_f32` or `data_as_f32_const`
 - **THEN** the compatibility boundary fails with an assertion before element access
 
-### Requirement: Affected runtime operations decode native int32 values
-The seven affected runtime operations SHALL decode each int32 operand and result as a signed two's-complement 32-bit value.
+### Requirement: Runtime operations decode native int32 values
+Every runtime operation SHALL decode each int32 operand and result as a signed two's-complement 32-bit value.
 
 For in-range inputs, each result SHALL obey [04-NUM-8] and the operation rules in `spec/05-risc-primitives.md`.
 
@@ -171,6 +170,6 @@ The C host emitter SHALL map `DtypeArm::I32` to `int32_t`. It SHALL keep the int
 - **WHEN** generated max or min code receives an int32 value above 2²⁴
 - **THEN** it compares int32 values without calling `fmaxf` or `fminf`
 
-#### Scenario: F32-only unary helpers reject int32
-- **WHEN** generated dispatch reaches an int32 arm for an f32-only unary helper
-- **THEN** it aborts instead of converting the int32 value through binary32
+#### Scenario: Float-only unary primitives reject integer operands
+- **WHEN** code generation is asked to lower an integer-typed invocation of a float-only unary primitive
+- **THEN** compilation rejects the ill-typed invocation rather than converting the integer value through binary32

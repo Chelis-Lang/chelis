@@ -1,17 +1,12 @@
 # Chelis Language Specification: DAG-to-DAG Transformations
 
-**Version:** 0.1.0-draft
-**Status:** Authoritative specification draft
-
----
-
 ## 1. Overview
 
 Transformations are functions from DAGs to DAGs. They take a function (represented as a RISC DAG, see spec/05-risc-primitives.md) and produce a new function (a new RISC DAG). The three core transformations are:
 
-1. **`grad`** -- Reverse-mode automatic differentiation (Phase 0)
-2. **`vmap`** -- Vectorized map over a named dimension (Phase 2, semantics specified now)
-3. **`jit`** -- Just-in-time compilation with caching (Phase 2, semantics specified now)
+1. **`grad`** -- Reverse-mode automatic differentiation
+2. **`vmap`** -- Vectorized map over a named dimension
+3. **`jit`** -- Just-in-time compilation with caching
 
 This document also covers the optimization passes that operate on RISC DAGs (Section 5) and the rules governing how transformations compose (Section 6).
 
@@ -34,15 +29,13 @@ where `dA` is the gradient type:
 - If `A` is a tuple `(T1, T2, ..., Tn)`, then `dA = (dT1, dT2, ..., dTn)`.
 - If `A` is an ADT/record whose fields (across every variant) are all float tensors
   or float scalars, and at least one variant carries a field, then `dA` is the same
-  constructor shape with a gradient per field (the field-wise extension of
-  `spec/design/differentiable_language.md` Decision 6; shipped as the chelis#520 D2
-  slice documented in §2.10.1, with the limits listed there).
+  constructor shape with a gradient per field.
 - If a component of `A` is otherwise non-differentiable (e.g., `bool`, `i32`, an ADT
   with a non-tensor field in any variant, or a pure enum with no fields at all),
-  then its gradient component is `unit`; the shipped D2 slice rejects such
-  arguments loudly rather than emitting a partial gradient struct.
+  then its gradient component is `unit`. An explicit `wrt` target that has no
+  differentiable component is a type error.
 
-Chelis's shipped source-level `grad` returns gradients only, not `(value, grad)`.
+Chelis's source-level `grad` returns gradients only, not `(value, grad)`.
 For a multi-parameter function, the gradient payload is flattened:
 
 ```
@@ -210,8 +203,8 @@ The compiler does **not** error on non-differentiable operations in the forward 
 ### 2.7.1 Symbolic Input Dimensions in Adjoint Construction
 
 Adjoint construction runs before symbolic dimensions are bound, so an input
-axis may be a `Named` dim with no concrete size. The rules split into two
-classes (chelis#513, gap 3 structural slice):
+axis may be a `Named` dim with no concrete size. The rules split into three
+classes:
 
 - **Structural (supported).** Where the adjoint can carry the symbolic dim
   through without reading its value, it must. `Sum`/`Expand` adjoints carry
@@ -241,47 +234,33 @@ classes (chelis#513, gap 3 structural slice):
   scalars are a stop-gradient boundary: index math carries no cotangent and
   does not pull its producers (a window-count `floor_div`) into the
   differentiability check.
-- **Value-dependent (fail-closed).** The residual constructions that need a
-  runtime LOOP or value-dependent structure, not just an extent: the reduced
-  axis of a `ProdReduce` adjoint (one slice per element of the runtime
-  axis) and a runtime (node-valued) stride STEP (a runtime-extent axis
-  insertion). These fail loudly at construction, naming the op, the axis,
-  and the symbolic dim.
+- **Value-dependent runtime structure.** An adjoint whose structure depends on
+  a runtime extent lowers that structure explicitly. A `ProdReduce` adjoint
+  computes, for each input element, the upstream cotangent times the product
+  of every other element on the reduced axis; this definition does not divide
+  and is correct when the input contains zeros. A runtime stride step scatters
+  cotangents back into the selected positions and fills skipped positions with
+  zero. Neither construction may be rejected merely because its extent or step
+  is known only at run time.
 
-Likewise at lowering, a shape()-derived arithmetic `reshape` target now
-lowers to a rank-0 scalar node referenced as a node-valued target extent
-(chelis#616), with the numel invariant enforced at run time in both lanes
-(clean eval error, C runtime abort); only a target the fold PROVES negative
-is refused at lowering (a proven-invalid program).
+Likewise at lowering, a shape()-derived arithmetic `reshape` target lowers to
+a rank-0 scalar node referenced as a node-valued target extent. Every execution
+lane enforces the numel invariant at run time; only a target the fold proves
+negative is refused at lowering as a statically invalid program.
 
-**Scalar `shape()` value reads (chelis#558 / chelis#513).** A `shape(x, axis)`
-read used as a scalar VALUE now lowers to a `RiscOp::Shape { axis }` node (a
-rank-0 integer extent; see `spec/05-risc-primitives.md` §2.5.1), replacing the
-prior bogus `Load { name: "shape" }` fallthrough. It is AD-transparent: the
+**Scalar `shape()` value reads.** A `shape(x, axis)`
+read used as a scalar VALUE lowers to a `RiscOp::Shape { axis }` node (a
+rank-0 integer extent; see `spec/05-risc-primitives.md` §2.5.1). It is
+AD-transparent: the
 node reads only shape metadata, so its adjoint routes a zero cotangent to the
 input, and a loss whose value depends on a runtime dim (for example
 `loss = sum(x) * shape(x, 0)`, whose gradient is `shape(x, 0)` at every
-element) differentiates correctly in the eval and C lanes. The node carries a
+element) differentiates correctly in every lane. The node carries a
 compile-time-constant `axis`; a `shape()` read whose axis is itself a runtime
-(data- or metadata-derived) value is not representable, so the forward host
-lane resolves it while any DAG-forcing path (notably `grad`) fails **loud** with
-a source-located "requires a compile-time-constant `axis`" diagnostic
-(chelis#616) instead of the same bogus `Load { name: "shape" }` fallthrough.
-The runtime movement-op bound and reshape-target representation built on this
-node (chelis#616) closed the former gap-2 / gap-3-value remainder: the
-runtime-symbolic-window `avgpool1d` grad
-(`issue_368_grad_concat_windows.rs::issue_368_runtime_symbolic_window_grad_is_half_everywhere`)
-is a passing analytic + finite-difference + forward-parity oracle.
-
-Executable oracles: `crates/chelis-cli/tests/issue_513_symbolic_axis_adjoints.rs`
-(finite-difference + eval-vs-C agreement per enabled path, plus the
-fail-closed negative pins), `crates/chelis-cli/tests/issue_558_shape_value_read.rs`
-(the scalar `shape()` value-read node: FD + eval-vs-C runtime-dim agreement,
-plus the runtime-axis pins — a loud grad rejection and the preserved forward
-host lane), `crates/chelis-cli/tests/issue_616_runtime_movement_c_parity.rs` /
-`issue_616_runtime_reshape_c_parity.rs` (runtime bound/target eval-vs-C value
-AND error parity, one C binary across input lengths, gradient parity for the
-runtime window), and the `chelis-ir` unit tests alongside the adjoint rules.
+(data- or metadata-derived) value is not representable; a DAG-forcing path
+fails **loudly** with a source-located "requires a compile-time-constant
+`axis`" diagnostic. Runtime movement bounds and reshape targets use the
+node-valued representation from `spec/05-risc-primitives.md` §2.4.1.
 
 ### 2.8 Higher-Order Derivatives (Composition)
 
@@ -295,27 +274,24 @@ Example: `f(x) = x^3` (using `Mul(x, Mul(x, x))`)
 The second application of `grad` differentiates the gradient payload produced by the
 first `grad`.
 
-**Implementation note:** The backward DAG may share nodes with the forward DAG (e.g., `Exp(x)` reused in its own adjoint). These shared references must be preserved as-is -- the DAG is a graph, not a tree. The second `grad` application must correctly handle these shared nodes.
+The backward DAG may share nodes with the forward DAG (e.g., `Exp(x)` reused in its own adjoint). These shared references must be preserved as-is -- the DAG is a graph, not a tree. The second `grad` application must correctly handle these shared nodes.
 
-### 2.9 Checkpointing (Phase 2)
+### 2.9 Checkpointing
 
 For memory efficiency, `grad(f, checkpoint=true)` opts into gradient checkpointing. Instead of storing all intermediate forward values for use in the backward pass, the checkpointed version recomputes them during the backward pass.
 
 **Semantics:** Identical to `grad(f)` -- the same function, the same gradients. The difference is operational: less memory, more compute.
 
-**Implementation approach:** During the backward traversal, when an adjoint rule needs a forward value (e.g., `Mul(g, Exp(x))` needs `Exp(x)`), instead of referencing the cached forward node, emit a new computation of that value from the forward inputs. The optimizer can then schedule these recomputations to minimize peak memory.
+During the backward traversal, when an adjoint rule needs a forward value (e.g.,
+`Mul(g, Exp(x))` needs `Exp(x)`), checkpointed lowering emits a recomputation
+from the forward inputs instead of referencing the cached node. The optimizer
+schedules recomputations to minimize peak memory.
 
-This is not implemented in Phase 0 but is specified here so the DAG representation can accommodate it from the start.
+### 2.10 Tensor and Host Boundaries
 
-### 2.10 Backend support: tensor lane vs host lane
-
-`grad` is fully supported on the **tensor lane** of `chelis build --target c`
-— the lane that lowers pure tensor expressions to a RISC DAG. Functions that
-live in the tensor lane have at least one tensor input and a scalar or tensor
-output; their bodies use only pure tensor ops (`add`, `mul`, `einsum`, `sum`,
-etc.). The supported pattern is encoded by the regression test
-`build_c_tensor_grad_local_wrapper_over_function_param_builds` in
-`crates/chelis-cli/tests/cli.rs`:
+`grad` applies to every pure differentiable function that satisfies §2.1,
+whether its call originates in a tensor DAG or a host-language expression.
+Both routes lower to the same RISC DAG and use the same adjoint rules:
 
 ```chelis
 def jac_row[n](
@@ -327,13 +303,10 @@ def jac_row[n](
 }
 ```
 
-`chelis eval` and the Tide host runtime apply `grad`/`vmap` by lowering the
-runtime transform application back into the RISC DAG evaluator. That path is
-not a separate host-lane AD engine: it uses the same reverse-mode rules as the
-tensor lane after rewriting a narrow set of host-list boundary idioms into
-ordinary tensor DAG structure.
+Host runtimes apply `grad`/`vmap` by lowering the transformation application
+back into the RISC DAG evaluator. That path is not a separate AD engine.
 
-The supported eval/Tide AD boundary idioms are:
+Host-list boundary idioms lower as follows:
 
 - `to_tensor(to_list(x))`, which is the identity boundary and whose adjoint is
   the identity cotangent
@@ -350,24 +323,15 @@ The supported eval/Tide AD boundary idioms are:
 These rewrites deliberately use differentiable structural primitives
 (`shrink`/`reshape`/`pad`/`add`) rather than `gather`/`scatter_add` for
 `map`, so `grad(grad(...))` through boundary+map is supported by composition
-of first-order rules. Dynamic-length list materialization remains a host value
-operation outside this AD boundary subset. In particular, differentiating a
+of first-order rules. Dynamic-length list materialization is a host value
+operation. Differentiating a
 body that observes the selected cardinality of `filter(...)` through
 `shape`/`len`/`numel` is unsupported; the supported `filter` rule is the
 constant-mask cotangent path for scalar losses over the selected values.
 
-`chelis build --target c` still rejects scalar-only host-lane AD patterns that
-do not enter the tensor DAG transform path. Adding a general scalar host AD
-engine remains tracked under Phase 5
-(`spec/design/phase5_host_scalar_ad.md`).
+### 2.10.1 `match` Bodies and ADT-Typed Arguments
 
-### 2.10.1 `match` bodies and ADT-typed arguments (chelis#520 D1/D2 slices)
-
-Two slices of the differentiable-language roadmap
-(`spec/design/differentiable_language.md` Phases 1 and 2) are shipped for
-`grad`:
-
-**D1 slice — static arm selection.** A `match` inside a differentiated body is
+**Static arm selection.** A `match` inside a differentiated body is
 resolved at lowering time when its scrutinee is a compile-time-known
 constructor value: a nullary constructor literal (`ModeA`), a positional
 constructor application, a record construction (`Box { t: e }`), or an
@@ -375,11 +339,7 @@ ADT-typed parameter of the differentiated function (whose constructor shape is
 fixed at the `grad` call boundary). Only the taken arm is lowered and
 differentiated. This is the exact gradient, not an approximation: the
 constructor tag is discrete, so perturbing tensor inputs cannot change the
-taken arm. The slice covers both the host-eval lane (`chelis eval`) and the
-compiled tensor lane (`chelis build --target c`), which share the same DAG
-lowering. Still rejected, loudly and by name: a runtime scrutinee (anything
-that lowers to a tensor node), an arm guard on the selected pattern, and
-nested destructuring beyond `pat-var`/`pat-wild` field bindings.
+taken arm. Every execution lane shares this DAG lowering.
 
 **Static condition pruning for `if` (chelis#620).** The `if` analogue of
 static arm selection: when an `if` condition const-folds at lowering time
@@ -395,8 +355,8 @@ through verbatim — a tensor, a tuple, an ADT constructor, or a list. The
 untaken branch is never lowered, so a `fail(...)` guard arm, an empty-list
 base case, or a recursive call in the other branch cannot poison the DAG.
 This is the exact gradient for the same reason as static arm selection: a
-condition the fold can resolve cannot vary under input perturbation. Both
-lanes share the path. Two consequences ship with it:
+condition the fold can resolve cannot vary under input perturbation. Two
+consequences follow:
 
 - **Bounded recursion unrolling.** A recursive function in a
   differentiated body lowers by unrolling, terminated by the static
@@ -412,15 +372,13 @@ lanes share the path. Two consequences ship with it:
   the same Pad+Add cascade as the expression-level path.
 
 Compiler-inserted linearity `copy`/`drop` over tuple and ADT values lower
-structurally (one `Copy`/`Drop` per tensor leaf), closing the issue's
-"copy input expected a single tensor value" residue on the
-single-argument-closure path. Runtime-condition `if` keeps its previous
-contract: single-tensor float branches lower via the mask blend; an ADT-
-or tuple-valued branch under a runtime condition is rejected loudly,
-citing chelis#620 (the static alternative) and chelis#618 (the
-`RiscOp::Select` blend successor).
+structurally, one `Copy`/`Drop` per tensor leaf. A runtime-condition `if`
+lowers through `RiscOp::Select`; tuple and ADT results select structurally per
+leaf. The predicate is a stop-gradient boundary, and the cotangent flows only
+through the selected branch. Runtime-scrutinee `match` follows the same
+piecewise rule after selecting the arm by constructor tag.
 
-**D2 slice — field-wise ADT gradients (eval lane).** `grad(f)(Ctor { .. })`
+**Field-wise ADT gradients.** `grad(f)(Ctor { .. })`
 over an ADT argument whose fields are all float tensors or float scalars
 returns a gradient with the same constructor shape, one gradient per field
 (the pytree contract). A field that does not influence the output receives an
@@ -428,8 +386,8 @@ explicit zero tensor of its shape, so the gradient struct always matches the
 argument's structure. For a multi-constructor sum type, the gradient
 corresponds to whichever variant was constructed.
 
-The ADT argument may appear ALONGSIDE plain tensor/scalar arguments — the
-chelis#520 closing bar `grad(model_forward, wrt=params)(x, params)`. The
+The ADT argument may appear alongside plain tensor/scalar arguments, as in
+`grad(model_forward, wrt=params)(x, params)`. The
 result is the per-target tuple, whose ADT slot is the field-wise gradient
 struct and whose tensor slots are bare tensor gradients, exactly as the
 multi-parameter tensor contract in §2.1; when `wrt` narrows to a single
@@ -442,49 +400,28 @@ slot would shift and mislabel every later gradient. Two pytree leaves whose
 gradient is the same DAG node (e.g. `sum(add(t, y))` has adjoint `1` for both)
 each keep their own root, so no tuple slot collapses.
 
-Limits, each a loud diagnostic naming the construct: mixed types (a
-non-float-tensor field in ANY variant of the argument's type) are rejected
-naming the field, even when the constructed variant itself is float-clean,
-because the checker types such a gradient as `unit` and the runtime must not
-produce a value the static type does not admit; pure enums (no fields in any
-variant) are rejected because there is no continuous payload to differentiate;
-and the compiled lane rejects `out = grad(f)` exports over ADT-typed
-parameters (the C ABI has no ADT value representation). Runtime-scrutinee
-`match` differentiation stays
-rejected and is tracked separately (chelis#618); it awaits a `RiscOp::Select`
-blend primitive per `spec/design/differentiable_language.md` Phase 1.
+Non-differentiable fields produce `unit` in the corresponding gradient field.
+A pure enum has no continuous payload; selecting it explicitly in `wrt` is a
+type error. Every execution lane preserves the resulting ADT structure.
 
-The acceptance oracle for both slices is
-`crates/chelis-cli/tests/issue_520_adt_match_grad.rs` (analytic +
-finite-difference gradients, eval-vs-C-backend agreement for D1, the
-multi-argument issue-shaped reproducer, and the negative-parity pins for
-every listed rejection). The static-condition-pruning slice's oracle is
-`crates/chelis-cli/tests/issue_620_static_if_adt_grad.rs` (guard and
-constructor pruning, the recursive-builder finite-difference witness, the
-params-loss and curried-closure shapes, eval-vs-C agreement, and the
-runtime-condition / unroll-cap negative pins).
-
-### 2.11 Interaction With Phase 2a Effects
+### 2.11 Interaction With Effects
 
 `grad` remains a compiler transform, not a user-visible effect handler.
 
 - `Diff` is treated as a capability of the AD pipeline rather than a boundary effect
-- `Accum` remains an internal design hook for backward-pass accumulation and is not yet
-  a user-facing checked effect
+- `Accum` is an internal hook for backward-pass accumulation, not a user-facing effect
 - `with seed(...)` is handled before or during lowering so seeded `dropout` enters the
   DAG as a deterministic `Dropout { rate, seed }` node
-- in the shipped evaluator/AD path, the backward pass reuses the same seeded dropout
+- the backward pass reuses the same seeded dropout
   mask rather than differentiating with respect to the seed
 
-`with device(...)` is not a DAG-to-DAG transform. In the shipped Phase 2a subset it is
+`with device(...)` is not a DAG-to-DAG transform. It is
 validated on the checked Deep/build boundary: `chelis build --target c` rejects GPU
 resource regions, and `chelis build --target hip` rejects CPU-only regions.
 
 ---
 
 ## 3. vmap -- Vectorized Map
-
-**Status:** Phase 2 shipped subset.
 
 ### 3.1 Signature
 
@@ -496,7 +433,7 @@ Then vmap(f, axis=n) : tensor[D with batch inserted at n, P]
 
 `vmap` takes a function that operates on a single example and produces a function that
 operates on a batch of examples. The new batch dimension is inserted at the requested
-integer axis position. The implementation canonicalizes nonzero axes to axis 0 with
+integer axis position. Lowering canonicalizes nonzero axes to axis 0 with
 `permute`, applies the axis-0 rewrite, then permutes outputs back.
 
 ### 3.2 Semantics
@@ -507,7 +444,8 @@ Conceptually, `vmap(f, axis=0)` is equivalent to:
 vmap(f, axis=0)(x) = stack([f(x[i]) for i in batch_dimension])
 ```
 
-But it is **not** implemented as a loop. Instead, it is a DAG rewrite that lifts every operation to operate over the additional batch dimension.
+It is a DAG rewrite that lifts every operation over the additional batch dimension,
+not a runtime loop.
 
 ### 3.3 DAG Rewrite Rules
 
@@ -547,10 +485,8 @@ If `f` takes multiple arguments, each tensor argument gains the batch dimension:
 
 ### 3.5 Composition
 
-**vmap of vmap:** repeated application adds multiple batch axes. The shipped IR rewrite
-supports nested vectorization. The executable source subset currently targets direct
-`vmap(f)(args...)` applications rather than arbitrary stored higher-order transform
-values.
+**vmap of vmap:** repeated application adds multiple batch axes. Nested
+vectorization and stored higher-order transformation values follow the same rewrite.
 
 **vmap of grad:**
 
@@ -559,15 +495,15 @@ otherwise available.
 
 Computes **per-example gradients**: each example in the batch gets its own independent gradient. This is useful for per-example gradient clipping or differential privacy.
 
-In the shipped executable subset, the direct lowering path supports both the
-single-gradient case and flat tuple-valued gradient payloads from multi-parameter
+The lowering path supports both the single-gradient case and flat tuple-valued
+gradient payloads from multi-parameter
 `grad(..., wrt=(...))`. Tuple construction and projection are resolved before the DAG
 surface, so the executable DAG still carries only ordinary tensor roots.
 
 **grad of vmap:**
 
-Direct source-level `grad(vmap(f))` remains rejected in the shipped subset unless the
-caller explicitly reduces the vmapped result back to a scalar first.
+`grad(vmap(f))` is well-typed only when the caller reduces the vmapped result
+to a scalar floating result first, as required by §2.1.
 
 These two are distinct concepts:
 - `vmap(grad(f))` returns a batch of gradient vectors (one per example).
@@ -583,8 +519,6 @@ These two are distinct concepts:
 ---
 
 ## 4. jit -- Just-In-Time Compilation
-
-**Status:** Phase 2 implementation. Semantics specified here for forward compatibility.
 
 ### 4.1 Signature
 
@@ -721,8 +655,6 @@ CSE is particularly valuable after `grad`, which often introduces duplicate sube
 
 ### 5.5 Operator Fusion
 
-**Status:** Phase 1 implementation (not Phase 0).
-
 **Rule:** Merge chains of elementwise operations into a single fused kernel. Instead of writing intermediate results to memory between each operation, compute the entire chain in registers.
 
 **Fusible pattern:** A sequence of unary and binary elementwise nodes where:
@@ -752,8 +684,6 @@ Fusion is the primary optimization for GPU backends, where memory bandwidth is t
 
 ### 5.6 Memory Planning
 
-**Status:** Phase 1 implementation.
-
 **Purpose:** Analyze the lifetimes of intermediate tensors and schedule buffer reuse to minimize peak memory usage.
 
 **Algorithm:**
@@ -770,18 +700,18 @@ Fusion is the primary optimization for GPU backends, where memory bandwidth is t
 
 ### 6.1 Valid Compositions
 
-| Expression | Meaning | Phase | Notes |
-|-----------|---------|-------|-------|
-| `grad(f)` | Reverse-mode AD | 0 | Core operation |
-| `grad(grad(f))` | Second derivatives | 0 | Nested AD |
-| `grad(f, wrt=(w))` | Gradient w.r.t. specific params | 0 | Selective differentiation |
-| `vmap(f, axis=a)` | Vectorize over integer axis `a` | 2 | Batch dimension inserted at `a` |
-| `jit(f)` | Compile and cache | 2 | Shape-specialized |
-| `jit(grad(f))` | Compile gradient function | 2 | Most common pattern |
-| `grad(jit(f))` | Differentiate through jit | 2 | Equivalent to `jit(grad(f))` |
-| `vmap(grad(f))` | Per-example gradients | 2 | Direct executable path supports flat tuple-valued gradient payloads |
-| `grad(vmap(f))` | Rejected in shipped source subset | 2 | Reduce the vmapped result to a scalar first |
-| `jit(vmap(grad(f)))` | Future compiled per-example gradients | 2 | `jit` remains non-executable today |
+| Expression | Meaning | Notes |
+|-----------|---------|-------|
+| `grad(f)` | Reverse-mode AD | Core operation |
+| `grad(grad(f))` | Second derivatives | Nested AD |
+| `grad(f, wrt=(w))` | Gradient w.r.t. specific params | Selective differentiation |
+| `vmap(f, axis=a)` | Vectorize over integer axis `a` | Batch dimension inserted at `a` |
+| `jit(f)` | Compile and cache | Shape-specialized |
+| `jit(grad(f))` | Compile gradient function | Repeated gradient execution |
+| `grad(jit(f))` | Differentiate through jit | Equivalent to `jit(grad(f))` |
+| `vmap(grad(f))` | Per-example gradients | Supports flat tuple-valued gradient payloads |
+| `grad(vmap(f))` | Gradient of a scalar reduction over a vectorized result | The vmapped result must first reduce to a scalar |
+| `jit(vmap(grad(f)))` | Compiled per-example gradients | Composition of the three transformations |
 
 ### 6.2 Commutativity Rules
 
@@ -809,10 +739,10 @@ The compiler applies transformations in the following order:
 2. **Lowering** -- Convert typed AST to RISC DAG (spec/01 pipeline).
 3. **Early optimization passes** -- Apply local simplification, CSE, and DCE that do not depend on later transform expansion.
 4. **`grad` expansion** -- Expand all `grad` nodes into backward DAGs.
-5. **`vmap` expansion** -- Expand all `vmap` nodes into batched DAGs (Phase 2).
+5. **`vmap` expansion** -- Expand all `vmap` nodes into batched DAGs.
 6. **Post-transform optimization passes** -- Re-run simplification, CSE, and DCE on the transformed DAG.
 7. **Fusion** -- Fuse eligible post-transform DAG regions for target backends that benefit from fused kernels.
-8. **`jit` boundary insertion** -- Mark compilation boundaries for jit (Phase 2).
+8. **`jit` boundary insertion** -- Mark compilation boundaries for jit.
 9. **Code generation** -- Emit target code.
 
 Steps 3 and 4 are the core "transformation" steps. After expansion, all grad and vmap constructs have been rewritten away, and the DAG consists entirely of RISC primitives.
@@ -848,20 +778,20 @@ Given a forward DAG `G = (N, E, inputs, outputs)`:
 
 ```
 function build_adjoint(G, wrt):
-    -- Phase 1: Topological sort
+    -- Step 1: Topological sort
     topo = topological_sort(N)
     reverse_topo = reverse(topo)
 
-    -- Phase 2: Initialize adjoint map
+    -- Step 2: Initialize adjoint map
     adj = new Map<Node, Node>
     for each node n in N:
         adj[n] = Const(0, type_of(n))
 
-    -- Phase 3: Seed the output
+    -- Step 3: Seed the output
     assert len(outputs) == 1    -- for scalar output
     adj[outputs[0]] = Const(1.0, type_of(outputs[0]))
 
-    -- Phase 4: Backward traversal
+    -- Step 4: Backward traversal
     for each node n in reverse_topo:
         if adj[n] is Const(0):
             continue  -- skip nodes with no gradient (optimization)
@@ -872,7 +802,7 @@ function build_adjoint(G, wrt):
         for (input_node, contribution) in zip(inputs_of(n), contributions):
             adj[input_node] = Add(adj[input_node], contribution)
 
-    -- Phase 5: Collect results
+    -- Step 5: Collect results
     grads = [adj[p] for p in wrt]
     return (outputs[0], tuple(grads))
 ```
@@ -1006,4 +936,4 @@ Every optimization pass must preserve the semantics of the DAG. Formally:
 For all inputs x: eval(optimize(G), x) = eval(G, x)
 ```
 
-where `eval(G, x)` evaluates the DAG `G` on input `x`. The compiler's test suite verifies this property for each pass using property-based testing with random DAGs and inputs.
+where `eval(G, x)` evaluates the DAG `G` on input `x`.

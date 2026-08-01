@@ -20,7 +20,7 @@ covers matmul, batched matmul, transpose, trace, outer products,
 and common contraction patterns in one primitive."* `einsum` is
 registered in the type environment as a `generic_triop` builtin
 (`crates/chelis-types/src/builtins.rs:135`), Phase 3h is marked
-shipped in `spec/12-roadmap.md`, and the project plan's perf
+shipped in `spec/design/chelis_project_plan.md`, and the project plan's perf
 boundary explicitly notes the rank-2 BLAS specialization is
 intentional (`spec/design/phase1d_flattening.md:39`).
 

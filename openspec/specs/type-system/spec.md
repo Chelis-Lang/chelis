@@ -2,13 +2,12 @@
 
 ## Purpose
 
-Define the Chelis type system: the checked-Deep contract, the active primitive dtype set
+Define the Chelis type system: the checked-Deep contract, the primitive dtype set
 and per-backend support matrix, tensor/function/ADT types, Hindley-Milner inference, the
 named-tensor-dimension algebra with no implicit broadcasting, dimension and rank
 polymorphism, opaque-type module identity and invariants, precision rules and mixed-precision
-accumulators, runtime shape semantics, fitness scoring, the Phase-2a effect subset, linearity,
-and the decided numeric-value-semantics and checker-totality atoms. This is the current and
-decided truth of how Chelis programs are type-checked.
+accumulators, runtime shape semantics, fitness scoring, effects, linearity,
+numeric-value semantics, and checker-totality atoms.
 
 **Source:** captured from [`spec/04-type-system.md`](../../../spec/04-type-system.md).
 
@@ -31,22 +30,22 @@ raw Deep, and effect inference SHALL run after HM type inference on the same ann
 - **WHEN** effect inference runs
 - **THEN** it operates on the checker's annotated tree, not the pre-check raw Deep
 
-### Requirement: Active primitive dtype set
+### Requirement: Primitive dtype set
 
-The active numeric primitive set SHALL be exactly `f32`, `f64`, `bf16`, `f16`, `int8`,
-`int16`, `int32`, `int64`, `bool`, and `string`. `f8e4m3` SHALL be deferred and rejected by
-the checker (and `cast(x, f8e4m3)`) with a diagnostic pointing at §1.1.1; unsigned integer
-types SHALL be out of scope and rejected per §1.1.2.
+The numeric primitive set SHALL be exactly `f32`, `f64`, `bf16`, `f16`, `int8`,
+`int16`, `int32`, `int64`, `bool`, and `string`. `f8e4m3` and the canonical `uint*`
+names SHALL remain reserved non-type spellings and SHALL be rejected by the checker with
+a diagnostic pointing at §1.1.1.
 
-#### Scenario: Active primitive resolves
+#### Scenario: Primitive resolves
 
 - **WHEN** a type expression is `(t-prim {} bf16)`
-- **THEN** the checker accepts it as an active dtype
+- **THEN** the checker accepts it as a dtype
 
-#### Scenario: Deferred and out-of-scope primitives rejected
+#### Scenario: Reserved spellings are rejected
 
 - **WHEN** a program uses `(t-prim {} f8e4m3)` or a `u32` type
-- **THEN** the checker rejects it, pointing at §1.1.1 (deferred) or §1.1.2 (out of scope)
+- **THEN** the checker rejects it, pointing at §1.1.1's reserved-name set
 
 ### Requirement: Per-backend dtype support matrix
 
@@ -124,7 +123,7 @@ hand-authored name matching the reserved linker format SHALL be `ReservedLinkerN
 ### Requirement: Invariant declaration well-formedness
 
 An `invariant` metadata key SHALL require `opaque: true`; the representation SHALL be one
-record-shaped variant whose fields are all in the V1 value class; the predicate SHALL be
+record-shaped variant whose fields are all in the invariant value class; the predicate SHALL be
 boolean-shaped and drawn from the whitelisted grammar; and `invariant_amenability` SHALL be
 recomputed and re-verified by the checker. The checker SHALL never evaluate the invariant.
 
@@ -226,20 +225,21 @@ name-trackable operations, rejecting positional shape-rewriters.
 ### Requirement: Runtime shape semantics
 
 `shape(x, axis)` SHALL require a concrete non-negative integer axis and return an `int32`
-runtime scalar; a negative or out-of-range axis SHALL be a `DimensionMismatch`. An `expand`
-runtime `size` SHALL be accepted only when it folds to a compile-time constant or derives from
-an in-scope tensor's shape; a sourceless runtime size SHALL be rejected identically at check,
-build, and eval.
+runtime scalar; a negative or out-of-range axis SHALL be a `DimensionMismatch`. Every
+well-typed `int32` expression SHALL be valid as an `expand` runtime size. Static positive
+values MAY fold; other values SHALL be evaluated once at runtime and remain live through
+lowering and optimization. A non-positive value SHALL fail before allocation or element
+access.
 
 #### Scenario: Shape-sourced expand preserves the symbolic dim
 
 - **WHEN** `expand(b, 0, shape(x, cast(0, int32)))` is used with a declared `tensor[n, 4, f32]` return
 - **THEN** the symbolic batch dim `n` is preserved through unification
 
-#### Scenario: Sourceless expand size is rejected
+#### Scenario: Parameter-derived expand size is materialized
 
 - **WHEN** an `expand` size is a bare runtime scalar parameter `a_dim: int32`
-- **THEN** it is rejected at check, build, and eval with the §4.7.2 sourceless-size diagnostic
+- **THEN** every execution lane evaluates `a_dim` and uses that value as the output extent
 
 ### Requirement: No implicit precision promotion
 
@@ -328,7 +328,7 @@ failed nodes with error metadata plus structured repair suggestions.
 - **WHEN** the fitness score is 1.0
 - **THEN** the error list is empty (a report cannot claim perfect success with errors present)
 
-### Requirement: Phase-2a effect subset
+### Requirement: Effects
 
 The checker SHALL infer a function's effect set as the union of its body's compiler-known
 effects, with `Random` (from `dropout`/tensor RNG), `IO` (from `print`/`debug`/file
@@ -361,7 +361,7 @@ returned, or captured; a borrow inner SHALL resolve to a tensor or tensor-carryi
 #### Scenario: Borrowing a non-tensor value is a type error
 
 - **WHEN** `&x` is applied to a scalar or non-tensor-carrying value that never resolves to a tensor
-- **THEN** it is a type error, including after deferred re-check when the variable is never pinned to a tensor
+- **THEN** it is a type error, including after postponed re-check when the variable is never pinned to a tensor
 
 ### Requirement: Type-name uniqueness and builtin shadowing
 

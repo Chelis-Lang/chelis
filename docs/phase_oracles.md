@@ -103,13 +103,13 @@ Status legend:
 ## Phase D (Differentiable Programming)
 
 Committed scope per `spec/design/differentiable_language.md` and the
-`spec/12-roadmap.md` §Differentiable programming track. D0 is the spec
+`spec/design/chelis_project_plan.md` §Differentiable Programming Track. D0 is the spec
 lock; oracles for D1–D6 are named here as aspirational until the owning
 agent dispatch picks the executable test fixture for each phase.
 
 | Phase | Oracle command | Owning spec doc | Status |
 |---|---|---|---|
-| D0 | `grep -F "spec/design/differentiable_language.md" spec/12-roadmap.md` returns at least one hit (proves the canonical doc was landed and cross-referenced from the roadmap) | `spec/design/differentiable_language.md` §Phase 0 | default gate (doc grep) |
+| D0 | `grep -F "spec/design/differentiable_language.md" spec/design/chelis_project_plan.md` returns at least one hit (proves the canonical doc was landed and cross-referenced from the project plan) | `spec/design/differentiable_language.md` §Phase 0 | default gate (doc grep) |
 | D1 | Numerical-agreement suite covering AD through `if`, `match`, `while`, `for`, and a recursive function — exact named test TBD when D1 dispatch picks the fixture | `spec/design/differentiable_language.md` §Phase 1 | aspirational |
 | D2 | Field-wise gradient suite covering struct/record gradients, ADT-tagged match gradients, and higher-order-function gradients — exact named test TBD when D2 dispatch picks the fixture | `spec/design/differentiable_language.md` §Phase 2 | aspirational |
 | D3 | Effect-aware AD suite: pathwise (Normal/Uniform/Beta), REINFORCE (Categorical/Bernoulli), `raises`/`state` composition, plus the small-Bayesian VI convergence test — exact named test TBD when D3 dispatch picks the fixture | `spec/design/differentiable_language.md` §Phase 3 | aspirational |
@@ -120,14 +120,14 @@ agent dispatch picks the executable test fixture for each phase.
 ## Phase H (Hydronnx — ONNX shell)
 
 Committed scope per `spec/design/hydronnx.md` and the
-`spec/12-roadmap.md` §Hydronnx track. `Hydronnx` is the Chelis shell;
+`spec/design/chelis_project_plan.md` §Hydronnx Shell Track. `Hydronnx` is the Chelis shell;
 `ONNX` is the upstream interchange format. H0 is the spec lock;
 oracles for H1–H5 are named here as aspirational until the owning
 agent dispatch picks the executable test fixture for each phase.
 
 | Phase | Oracle command | Owning spec doc | Status |
 |---|---|---|---|
-| H0 | `grep -F "spec/design/hydronnx.md" spec/12-roadmap.md` returns at least one hit (proves the canonical doc was landed and cross-referenced from the roadmap) | `spec/design/hydronnx.md` §Phase 0 | default gate (doc grep) |
+| H0 | `grep -F "spec/design/hydronnx.md" spec/design/chelis_project_plan.md` returns at least one hit (proves the canonical doc was landed and cross-referenced from the project plan) | `spec/design/hydronnx.md` §Phase 0 | default gate (doc grep) |
 | H1 | Parser-inventory agreement suite: a small ONNX model (MobileNet-class or linear regression) loaded through hydronnx produces the same inventory as `onnx.checker.check_model` in Python, and malformed inputs surface the documented diagnostics — exact named test TBD when H1 dispatch picks the fixture | `spec/design/hydronnx.md` §Phase 1 | aspirational |
 | H2 | Per-operator numerical-agreement suite against ONNX Runtime across the v0.1 core operator subset, plus one end-to-end model per strong-fit category — exact named test TBD when H2 dispatch picks the fixture | `spec/design/hydronnx.md` §Phase 2 | aspirational |
 | H3 | End-to-end loading suite: weights load, `load_model` produces a callable Chelis function with correct outputs, `inspect_model` matches actual model structure, `load_model_with_opts` overrides take effect, documented failure cases (custom op, unsupported opset, corrupted weights) surface the documented errors — exact named test TBD when H3 dispatch picks the fixture | `spec/design/hydronnx.md` §Phase 3 | aspirational |
@@ -137,7 +137,7 @@ agent dispatch picks the executable test fixture for each phase.
 ## Phase K (Kerrent — GPU kernel authorship)
 
 Committed scope per `spec/design/kerrent.md` and the
-`spec/12-roadmap.md` §Kerrent track. `Kerrent` is the Chelis language
+`spec/design/chelis_project_plan.md` §Kerrent Track. `Kerrent` is the Chelis language
 feature for authoring GPU kernels in Chelis source; `Triton` is the
 upstream kernel compiler Kerrent emits to. K0 is the spec lock;
 oracles for K1–K6 are named here as aspirational until the owning
@@ -147,7 +147,7 @@ Track) are post-v1 extensions and do not appear here.
 
 | Phase | Oracle command | Owning spec doc | Status |
 |---|---|---|---|
-| K0 | `grep -F "spec/design/kerrent.md" spec/12-roadmap.md` returns at least one hit (proves the canonical doc was landed and cross-referenced from the roadmap) | `spec/design/kerrent.md` (the spec lock is the doc's existence; the body enumerates Milestones 1–6 only, so K0 has no in-spec milestone anchor) | default gate (doc grep) |
+| K0 | `grep -F "spec/design/kerrent.md" spec/design/chelis_project_plan.md` returns at least one hit (proves the canonical doc was landed and cross-referenced from the project plan) | `spec/design/kerrent.md` (the spec lock is the doc's existence; the body enumerates Milestones 1–6 only, so K0 has no in-spec milestone anchor) | default gate (doc grep) |
 | K1 | Parser-correctness suite for the `kernel` annotation and the v1 tile-level primitives (`tile.load`, `tile.store`, `tile.dot`, `tile.reduce`, `tile.mask`, …); kernel-annotated functions get a distinct AST representation distinguishable from tensor-level functions — exact named test TBD when K1 dispatch picks the fixture | `spec/design/kerrent.md` §Milestone 1 | aspirational |
 | K2 | Kernel-IR-layer type-checking suite: tile-level operations are first-class IR nodes; dimension types compose through tile scope; mismatched-shape kernel bodies fail at type-check — exact named test TBD when K2 dispatch picks the fixture | `spec/design/kerrent.md` §Milestone 2 | aspirational |
 | K3 | Triton IR emission suite: each tile-level operation lowers to a defined Triton IR equivalent and the output validates against Triton's IR specification — exact named test TBD when K3 dispatch picks the fixture | `spec/design/kerrent.md` §Milestone 3 | aspirational |
