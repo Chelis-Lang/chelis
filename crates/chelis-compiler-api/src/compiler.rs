@@ -3441,13 +3441,11 @@ fn wire_deep_expr(expr: &DeepExpr) -> WireDeepExpr {
             },
             span: Some(span(*s)),
         },
-        // Transitional arms for new Expr variants (#908)
-        DeepExpr::Node(node, s) => WireDeepExpr {
-            kind: WireDeepExprKind::List {
-                elements: node.expr_children().map(wire_deep_expr).collect(),
-            },
-            span: Some(span(*s)),
-        },
+        // Bridge: reconstruct List so wire format includes tag and meta (#908)
+        DeepExpr::Node(node, s) => {
+            let bridged = DeepExpr::List(node.to_list(*s), *s);
+            wire_deep_expr(&bridged)
+        }
         DeepExpr::BareList(elems, s) => WireDeepExpr {
             kind: WireDeepExprKind::List {
                 elements: elems.iter().map(wire_deep_expr).collect(),

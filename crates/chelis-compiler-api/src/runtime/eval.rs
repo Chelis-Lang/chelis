@@ -62,8 +62,12 @@ impl<'a> EvalContext<'a> {
             Expr::Map(_, _) => Ok(RuntimeValue::Unit),
             Expr::MetaExpr(meta, _) => self.eval_expr(&meta.expr),
             Expr::List(list, _) => self.eval_list(list),
-            // Transitional arms for new Expr variants (#908)
-            Expr::Node(_, _) | Expr::BareList(_, _) | Expr::UnknownForm(_) => {
+            // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
+            Expr::Node(node, span) => {
+                let bridged = node.to_list(*span);
+                self.eval_list(&bridged)
+            }
+            Expr::BareList(_, _) | Expr::UnknownForm(_) => {
                 Err("transitional Expr variant is not evaluable".to_string())
             }
         }

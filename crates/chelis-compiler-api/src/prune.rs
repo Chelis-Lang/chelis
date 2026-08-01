@@ -193,10 +193,28 @@ fn collect_deep_referenced_vars<'a>(expr: &'a DeepExpr, out: &mut Vec<&'a str>) 
                 collect_deep_referenced_vars(child, out);
             }
         }
-        // Transitional arms for new Expr variants (#908)
+        // Direct Node handling (bridge not possible due to lifetime constraints) (#908)
         DeepExpr::Node(node, _) => {
-            for child in node.expr_children() {
-                collect_deep_referenced_vars(child, out);
+            use chelis_deep::node::ChildRef;
+            if node.tag() == DeepTag::Var {
+                for child_ref in node.children_iter() {
+                    if let ChildRef::Syntax(DeepExpr::Atom(DeepAtom::Name(name), _)) = child_ref {
+                        out.push(name.as_str());
+                    }
+                }
+            }
+            for child_ref in node.children_iter() {
+                let child_expr = match child_ref {
+                    ChildRef::Expr(e)
+                    | ChildRef::Syntax(e)
+                    | ChildRef::Type(e)
+                    | ChildRef::EffectHandler(e)
+                    | ChildRef::Bypass(e) => Some(e),
+                    ChildRef::Binder(_) | ChildRef::Selector(_) => None,
+                };
+                if let Some(child) = child_expr {
+                    collect_deep_referenced_vars(child, out);
+                }
             }
         }
         DeepExpr::BareList(elems, _) => {
