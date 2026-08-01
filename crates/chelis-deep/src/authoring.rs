@@ -9,7 +9,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::tag::DeepTag;
 use crate::{
-    Atom, DeepPath, Expr, List, PathSegment, ResolveError, function_body, printer, resolve_function,
+    Atom, DeepPath, Expr, List, PathSegment, ResolveError, Span, function_body, printer,
+    resolve_function,
 };
 
 const MODULE_DECLS_START: usize = 3;
@@ -847,7 +848,14 @@ where
         }
         Expr::List(list, _) => list,
         Expr::Atom(..) => return,
-        Expr::Node(..) | Expr::BareList(..) | Expr::UnknownForm(..) => return,
+        Expr::Node(node, span) => {
+            // Bridge: reconstruct List so scope-aware traversal works unchanged (#908)
+            let list = node.to_list(*span);
+            let bridged = Expr::List(list, *span);
+            walk_children(&bridged, scope, path, f);
+            return;
+        }
+        Expr::BareList(..) | Expr::UnknownForm(..) => return,
     };
     let tag = list_tag(list);
     if let Some(meta) = list.elements.get(1) {
@@ -903,7 +911,20 @@ where
         }
         Expr::List(list, _) => list,
         Expr::Atom(..) => return,
-        Expr::Node(..) | Expr::BareList(..) | Expr::UnknownForm(..) => return,
+        Expr::Node(..) => {
+            // Bridge: convert Node to List in place so mutable traversal works (#908).
+            // Node lacks mutable child access, so we destructure into List form.
+            let placeholder = Expr::Atom(Atom::Bool(false), Span::new(0, 0));
+            match std::mem::replace(expr, placeholder) {
+                Expr::Node(node, span) => {
+                    *expr = Expr::List(node.to_list(span), span);
+                    walk_children_mut(expr, scope, f);
+                }
+                _ => unreachable!(),
+            }
+            return;
+        }
+        Expr::BareList(..) | Expr::UnknownForm(..) => return,
     };
     let tag = list_tag(list);
     if let Some(meta) = list.elements.get_mut(1) {
