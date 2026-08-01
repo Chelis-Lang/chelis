@@ -132,6 +132,7 @@ pub enum PredGrammarError {
 fn tag(expr: &Expr) -> Option<DeepTag> {
     match expr {
         Expr::List(list, _) => list.tag(),
+        Expr::Node(node, _) => Some(node.tag()),
         _ => None,
     }
 }
@@ -139,12 +140,10 @@ fn tag(expr: &Expr) -> Option<DeepTag> {
 /// The children of a 3-tuple node `(tag {meta} children...)`, skipping
 /// the tag and the metadata map at index 1.
 fn children(expr: &Expr) -> &[Expr] {
-    if let Expr::List(list, _) = expr
-        && list.elements.len() >= 2
-    {
-        &list.elements[2..]
-    } else {
-        &[]
+    match expr {
+        Expr::Node(node, _) => node.children_slice(),
+        Expr::List(list, _) if list.elements.len() >= 2 => &list.elements[2..],
+        _ => &[],
     }
 }
 
@@ -273,6 +272,10 @@ fn collect_free_vars(expr: &Expr, binder: &str, out: &mut Vec<String>) {
     if let Expr::List(list, _) = expr {
         // Skip the tag and metadata map; recurse into children only.
         for child in list.elements.iter().skip(2) {
+            collect_free_vars(child, binder, out);
+        }
+    } else if let Expr::Node(node, _) = expr {
+        for child in node.children_slice() {
             collect_free_vars(child, binder, out);
         }
     }

@@ -703,7 +703,6 @@ pub enum WireDeepAtom {
     Int { value: i64 },
     Float { value: f64 },
     Str { value: String },
-    Keyword { value: String },
     Bool { value: bool },
 }
 

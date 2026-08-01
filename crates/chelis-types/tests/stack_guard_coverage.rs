@@ -240,6 +240,13 @@ const GUARD_EXEMPT_WALKERS: &[(&str, &str)] = &[
         "missing_shape_sensitive_app",
         "TEST-HELPER: lives in #[cfg(test)] mod tests",
     ),
+    // TRANSITIONAL (#908): non-recursive bridge that converts Node → List at
+    // the API boundary. Does not recurse into children; removed when Expr::List
+    // is deleted.
+    (
+        "normalize_node_to_list",
+        "TRANSITIONAL (#908): non-recursive Node→List bridge",
+    ),
 ];
 
 fn is_guard_exempt(name: &str) -> bool {

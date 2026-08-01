@@ -18,18 +18,79 @@ use crate::ast::*;
 
 pub fn desugar_program(decls: &[Decl]) -> Vec<deep::Expr> {
     let ctx = DesugarCtx::new(decls);
-    decls
+    let exprs: Vec<deep::Expr> = decls
         .iter()
         .flat_map(|decl| ctx.desugar_decl(decl))
-        .collect()
+        .collect();
+    // The desugar internally produces `Expr::Node` (proving structural
+    // correctness via `Node::new` validation). Normalize to `Expr::List`
+    // at the output boundary so downstream consumers work unchanged during
+    // the transition period (#908). Once all consumers handle Node
+    // directly, remove this normalization.
+    normalize_to_lists(&exprs)
 }
 
 pub fn desugar_decl_only(decl: &Decl) -> Vec<deep::Expr> {
-    DesugarCtx::default().desugar_decl(decl)
+    normalize_to_lists(&DesugarCtx::default().desugar_decl(decl))
 }
 
 pub fn desugar_expr_only(expr: &Expr) -> deep::Expr {
-    DesugarCtx::default().desugar_expr(expr)
+    normalize_single(&DesugarCtx::default().desugar_expr(expr))
+}
+
+fn normalize_to_lists(exprs: &[deep::Expr]) -> Vec<deep::Expr> {
+    exprs.iter().map(normalize_single).collect()
+}
+
+fn normalize_single(expr: &deep::Expr) -> deep::Expr {
+    match expr {
+        deep::Expr::Node(node, span) => {
+            let list = node.to_list(*span);
+            let elements = list.elements.iter().map(normalize_single).collect();
+            deep::Expr::List(deep::List { elements }, *span)
+        }
+        deep::Expr::List(list, span) => {
+            let elements = list.elements.iter().map(normalize_single).collect();
+            deep::Expr::List(deep::List { elements }, *span)
+        }
+        deep::Expr::BareList(elems, span) => {
+            let elements = elems.iter().map(normalize_single).collect();
+            deep::Expr::List(deep::List { elements }, *span)
+        }
+        deep::Expr::Map(map, span) => {
+            let entries = map
+                .entries
+                .iter()
+                .map(|(k, v)| (k.clone(), normalize_single(v)))
+                .collect();
+            deep::Expr::Map(deep::MetaMap { entries }, *span)
+        }
+        deep::Expr::MetaExpr(meta, span) => deep::Expr::MetaExpr(
+            deep::MetaExpr {
+                entries: meta
+                    .entries
+                    .iter()
+                    .map(|(k, v)| (k.clone(), normalize_single(v)))
+                    .collect(),
+                expr: Box::new(normalize_single(&meta.expr)),
+            },
+            *span,
+        ),
+        deep::Expr::UnknownForm(data) => deep::Expr::UnknownForm(Box::new(deep::UnknownFormData {
+            head: data.head.clone(),
+            meta: deep::MetaMap {
+                entries: data
+                    .meta
+                    .entries
+                    .iter()
+                    .map(|(k, v)| (k.clone(), normalize_single(v)))
+                    .collect(),
+            },
+            children: data.children.iter().map(normalize_single).collect(),
+            span: data.span,
+        })),
+        other => other.clone(),
+    }
 }
 
 #[derive(Default)]
@@ -156,11 +217,18 @@ fn meta_with_entries(entries: Vec<(String, deep::Expr)>) -> deep::Expr {
     deep::Expr::Map(deep::MetaMap { entries }, sp())
 }
 
-/// Build a 3-tuple Deep node: (tag {} children...). Decode-once
-/// (chelis#731 Phase 3): the desugarer is a typed producer, so the tag
-/// enters the tree as `Atom::Tag`, never as a string.
+/// Build a stamped Deep node. Decode-once (chelis#731 Phase 3): the
+/// desugarer is a typed producer, so the tag is validated at construction
+/// time via `Node::new`.
 fn node(tag: DeepTag, children: Vec<deep::Expr>) -> deep::Expr {
-    node_meta(tag, meta_empty(), children)
+    deep::Expr::Node(
+        Box::new(chelis_deep::node::Node::new(
+            tag,
+            deep::MetaMap::default(),
+            children,
+        )),
+        sp(),
+    )
 }
 
 /// Build a compiler-internal pre-expansion node (`defmacro` /
@@ -179,11 +247,18 @@ fn internal_node(tag: &str, children: Vec<deep::Expr>) -> deep::Expr {
     deep::Expr::List(deep::List { elements }, sp())
 }
 
-/// Build a 3-tuple Deep node with custom metadata: (tag {meta} children...)
+/// Build a stamped Deep node with custom metadata. The `meta` argument
+/// must be an `Expr::Map(MetaMap { .. }, _)` — the MetaMap is extracted
+/// and passed to `Node::new`.
 fn node_meta(tag: DeepTag, meta: deep::Expr, children: Vec<deep::Expr>) -> deep::Expr {
-    let mut elements = vec![deep::Expr::Atom(deep::Atom::Tag(tag), sp()), meta];
-    elements.extend(children);
-    deep::Expr::List(deep::List { elements }, sp())
+    let meta_map = match meta {
+        deep::Expr::Map(m, _) => m,
+        _ => panic!("node_meta: expected Expr::Map for metadata, got {meta:?}"),
+    };
+    deep::Expr::Node(
+        Box::new(chelis_deep::node::Node::new(tag, meta_map, children)),
+        sp(),
+    )
 }
 
 /// Preserve a Surf type expression's byte range in the structural Deep span
@@ -229,6 +304,12 @@ fn attach_span_metadata(expr: deep::Expr, span: Span) -> deep::Expr {
     };
 
     match expr {
+        deep::Expr::Node(mut node, node_span) => {
+            let meta = node.meta_mut();
+            meta.entries.retain(|(key, _)| key != "span");
+            meta.entries.push(entry);
+            deep::Expr::Node(node, node_span)
+        }
         deep::Expr::List(list, list_span) => {
             let mut elements = list.elements;
             if let Some(deep::Expr::Map(map, _)) = elements.get_mut(1) {
@@ -275,7 +356,7 @@ fn expr_span(expr: &Expr) -> Span {
 
 /// Build a bare list (no tag/meta) for structural helpers like params, bind
 fn bare_list(elements: Vec<deep::Expr>) -> deep::Expr {
-    deep::Expr::List(deep::List { elements }, sp())
+    deep::Expr::BareList(elements, sp())
 }
 
 fn lower_module_path(path: &str) -> String {
@@ -398,6 +479,12 @@ fn typed_param_needs_meta_wrapper(name: &str) -> bool {
 /// Inject a type annotation into the metadata of a desugared expression.
 fn inject_type_metadata(expr: deep::Expr, ty: deep::Expr) -> deep::Expr {
     match expr {
+        deep::Expr::Node(mut node, span) => {
+            let meta = node.meta_mut();
+            meta.entries.retain(|(key, _)| key != "type");
+            meta.entries.push(("type".to_string(), ty));
+            deep::Expr::Node(node, span)
+        }
         deep::Expr::List(list, span) => {
             let mut elements = list.elements;
             if elements.len() >= 2 {
@@ -442,6 +529,13 @@ fn apply_effect_metadata(ty_expr: deep::Expr, effects: &Option<Vec<EffectExpr>>)
         // An explicit `! { ... }` clause — even the empty `! {}` — must be preserved in
         // the Deep AST so the effect checker can distinguish "declared empty" from
         // "no annotation" when validating declared vs inferred effects.
+        (Some(effects), deep::Expr::Node(mut node, span)) => {
+            if node.tag() == DeepTag::TFn {
+                let meta = node.meta_mut();
+                meta.entries = vec![("eff".to_string(), desugar_effect_set(effects))];
+            }
+            deep::Expr::Node(node, span)
+        }
         (Some(effects), deep::Expr::List(list, span)) => {
             let mut elements = list.elements;
             if matches!(
@@ -2392,7 +2486,8 @@ mod tests {
         let contracts = deep
             .iter()
             .filter_map(|expr| match expr {
-                deep::Expr::List(list, _) => Some(list),
+                deep::Expr::Node(node, span) => Some(node.to_list(*span)),
+                deep::Expr::List(list, _) => Some(list.clone()),
                 _ => None,
             })
             .find(|list| list.tag() == Some(DeepTag::Def))
@@ -2401,16 +2496,33 @@ mod tests {
                     .entries
                     .iter()
                     .find(|(name, _)| name == "property_contracts")
-                    .map(|(_, value)| value),
+                    .map(|(_, value)| value.clone()),
                 _ => None,
             })
             .and_then(|value| match value {
+                deep::Expr::Node(node, span) => {
+                    let list = node.to_list(span);
+                    Some(
+                        list.elements
+                            .iter()
+                            .skip(2)
+                            .filter_map(|expr| match expr {
+                                deep::Expr::Atom(deep::Atom::Str(value), _) => {
+                                    Some(value.as_str().to_string())
+                                }
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>(),
+                    )
+                }
                 deep::Expr::List(list, _) => Some(
                     list.elements
                         .iter()
                         .skip(2)
                         .filter_map(|expr| match expr {
-                            deep::Expr::Atom(deep::Atom::Str(value), _) => Some(value.as_str()),
+                            deep::Expr::Atom(deep::Atom::Str(value), _) => {
+                                Some(value.as_str().to_string())
+                            }
                             _ => None,
                         })
                         .collect::<Vec<_>>(),
