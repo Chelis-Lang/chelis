@@ -8,6 +8,7 @@ repository.workspace = true
 
 [dependencies]
 chelis-deep.workspace = true
+chelis-effects.workspace = true
 chelis-types = { path = "../chelis-types" }
 chelis-vocab.workspace = true
 serde.workspace = true
@@ -15,7 +16,6 @@ stacker.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
-chelis-effects.workspace = true
 chelis-surf.workspace = true
 chelis-macros.workspace = true
 bincode = "1"

@@ -2139,6 +2139,20 @@ pub fn top_level_expr_is_lowered(
     top_level_expr_is_lowered_with_names(expr, type_env, &lowered_names)
 }
 
+/// Issue #912: realizability-based lowering map. Delegates to
+/// `infer_realizability` instead of the syntactic predicate.
+pub fn top_level_lowering_map_from_realizability(
+    program: &chelis_types::CheckedProgram,
+    target_prims: &[chelis_types::types::Prim],
+) -> HashMap<String, bool> {
+    let result = chelis_effects::realizability::infer_realizability(program, target_prims);
+    result
+        .lane_by_def
+        .into_iter()
+        .map(|(name, lane)| (name, lane == chelis_types::types::Lane::Tensor))
+        .collect()
+}
+
 pub fn top_level_lowering_map(
     exprs: &[Expr],
     type_env: &HashMap<String, Expr>,

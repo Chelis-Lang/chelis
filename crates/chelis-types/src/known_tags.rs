@@ -137,6 +137,85 @@ pub const KNOWN_TAGS: &[TagDecl] = &[
         tag: "adt-decl",
         lane_contribution: LaneContribution::Propagates,
     },
+    // ─── Type expression tags (never force host) ─────────────────────
+    TagDecl {
+        tag: "t-prim",
+        lane_contribution: LaneContribution::Propagates,
+    },
+    TagDecl {
+        tag: "t-fn",
+        lane_contribution: LaneContribution::Propagates,
+    },
+    TagDecl {
+        tag: "t-tensor",
+        lane_contribution: LaneContribution::Propagates,
+    },
+    TagDecl {
+        tag: "t-ref",
+        lane_contribution: LaneContribution::Propagates,
+    },
+    TagDecl {
+        tag: "t-adt",
+        lane_contribution: LaneContribution::Propagates,
+    },
+    TagDecl {
+        tag: "t-var",
+        lane_contribution: LaneContribution::Propagates,
+    },
+    TagDecl {
+        tag: "t-unit",
+        lane_contribution: LaneContribution::Propagates,
+    },
+    TagDecl {
+        tag: "t-tuple",
+        lane_contribution: LaneContribution::Propagates,
+    },
+    // ─── Dimension tags ──────────────────────────────────────────────
+    TagDecl {
+        tag: "d-name",
+        lane_contribution: LaneContribution::Propagates,
+    },
+    TagDecl {
+        tag: "d-var",
+        lane_contribution: LaneContribution::Propagates,
+    },
+    TagDecl {
+        tag: "d-lit",
+        lane_contribution: LaneContribution::Propagates,
+    },
+    TagDecl {
+        tag: "d-rank",
+        lane_contribution: LaneContribution::Propagates,
+    },
+    // ─── Other structural tags ───────────────────────────────────────
+    TagDecl {
+        tag: "defsig",
+        lane_contribution: LaneContribution::Propagates,
+    },
+    TagDecl {
+        tag: "params",
+        lane_contribution: LaneContribution::Propagates,
+    },
+    TagDecl {
+        tag: "arm",
+        lane_contribution: LaneContribution::Propagates,
+    },
+    TagDecl {
+        tag: "bind",
+        lane_contribution: LaneContribution::Propagates,
+    },
+    TagDecl {
+        tag: "effects",
+        lane_contribution: LaneContribution::Propagates,
+    },
+    TagDecl {
+        tag: "quote",
+        lane_contribution: LaneContribution::Propagates,
+    },
+    TagDecl {
+        tag: "borrow",
+        lane_contribution: LaneContribution::Propagates,
+    },
 ];
 
 /// Look up a tag's lane contribution. Returns `None` for unknown tags
