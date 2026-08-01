@@ -30,6 +30,10 @@ validation.
                            |
                     Typed Deep AST
                            |
+                    [Effect Checker]
+                           |
+                   [Linearity Checker]
+                           |
                       [Lowering]
                            |
                        RISC DAG
@@ -58,23 +62,43 @@ This split is deliberate.
 Chelis does not plan a second general-purpose JIT backend unless measured latency makes
 it necessary.
 
+### Canonical Pipeline Owner
+
+`chelis_compiler_api::pipeline` owns production front-end stage order.
+Consumers select one closed goal:
+
+- `TypeAnalysis` returns fitness and one type-inference product.
+- `FullCheck` adds effect and linearity checks.
+- `Lower` adds DAG lowering and canonical root metadata.
+
+`CheckedCompilation` exists only after all semantic checks accept the program.
+`LoweredCompilation` contains one checked compilation and its DAG products.
+A rejection does not contain a checked or lowered success product.
+
+The CLI retains style policy, Reef preparation, JSON, exit codes, target selection, and backend emission.
+Backend emitters remain final target-specific correctness boundaries.
+
+The source guard in `crates/chelis-compiler-api/src/source_arch.rs` rejects new consumer-owned semantic sequences.
+The detailed baseline is in `docs/investigations/compiler_pipeline_inventory.md`.
+
 ## Crate Dependency Graph
 
 ```text
-chelis-cli
-  ├── chelis-surf
-  │     └── chelis-deep
-  ├── chelis-types
-  │     └── chelis-deep
-  ├── chelis-ir
-  │     ├── chelis-deep
-  │     └── chelis-types
-  └── chelis-backend-c
-        └── chelis-ir
+chelis-cli ───────────────┐
+chelis-e2e ───────────────┤
+chelis-tide ──────────────┼──> chelis-compiler-api
+chelis-python ────────────┘          │
+                                     ├── chelis-surf ──> chelis-deep
+                                     ├── chelis-types ─> chelis-deep
+                                     ├── chelis-effects
+                                     ├── chelis-ir ─────> chelis-types
+                                     ├── chelis-backend-c
+                                     ├── chelis-backend-hip
+                                     └── chelis-reef
 ```
 
 The dependency graph is a strict DAG.
-`chelis-deep` is the foundation, and `chelis-cli` only orchestrates library crates.
+`chelis-deep` is the foundation. Consumer crates delegate shared compiler orchestration to `chelis-compiler-api`.
 
 ## Crates
 

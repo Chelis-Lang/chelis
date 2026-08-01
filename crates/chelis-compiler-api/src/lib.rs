@@ -4,11 +4,15 @@ pub mod context;
 pub mod decode;
 pub mod fragment;
 pub mod layered;
+pub mod pipeline;
 pub mod prune;
 pub(crate) mod runtime;
 pub mod schema;
 pub mod stdlib_cache;
 pub mod target_capability;
+
+#[cfg(test)]
+mod source_arch;
 
 pub use chelis_types::{LinkedProgramGuard, install_linked_program_guard};
 pub use compiler::{

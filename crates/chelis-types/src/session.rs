@@ -10,6 +10,26 @@ use crate::context::TypeEnv;
 use crate::errors::CheckError;
 use crate::infer::{CheckedProgram, InferResult, InferStats, SignatureInferenceMetadata};
 
+#[cfg(test)]
+thread_local! {
+    static TYPE_ANALYSIS_SESSION_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_type_analysis_session_count() {
+    TYPE_ANALYSIS_SESSION_COUNT.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn type_analysis_session_count() -> usize {
+    TYPE_ANALYSIS_SESSION_COUNT.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn record_type_analysis_session() {
+    TYPE_ANALYSIS_SESSION_COUNT.with(|count| count.set(count.get() + 1));
+}
+
 /// The sole destination accepted by witness-minting checker code.
 ///
 /// Its storage and constructor are private to this module.  The narrow
@@ -248,6 +268,8 @@ pub(crate) fn check_ir_with_signature_context(
     signature_context: &SignatureInferenceMetadata,
     exprs: &[chelis_deep::Expr],
 ) -> Result<CheckedProgram, InferResult> {
+    #[cfg(test)]
+    record_type_analysis_session();
     crate::infer::run_on_grown_stack(|| {
         run_result(|sink| {
             crate::infer::check_ir_with_signature_context_in_session(

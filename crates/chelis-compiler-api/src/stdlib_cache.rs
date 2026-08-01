@@ -310,61 +310,29 @@ pub fn build_stdlib_context(
     // mangled); accept the linker name format while building the
     // context, including via direct callers and the cache-miss path.
     let _linked = chelis_types::install_linked_program_guard();
-    let desugared = chelis_surf::desugar::desugar_program(stdlib_decls);
-    let deep_library_decls =
-        chelis_macros::expand_program(&desugared, &chelis_macros::ExpansionOptions::default())
-            .map_err(|err| CompilerError {
-                stage: "desugar".to_string(),
-                errors: vec![crate::schema::Diagnostic {
-                    kind: "macro_error".to_string(),
-                    message: err.to_string(),
-                    severity: 1.0,
-                    expected: None,
-                    got: None,
-                    suggestions: vec![],
-                    span: None,
-                    deep_path: None,
-                }],
-            })?
-            .into_exprs();
+    let prepared = crate::pipeline::prepare_surf_decls(stdlib_decls, None).map_err(|error| {
+        crate::compiler::pipeline_rejection_to_compiler_error(
+            crate::pipeline::PipelineRejection::Preparation(error),
+        )
+    })?;
+    let structural_stats = chelis_types::structural_stats(prepared.expanded_deep());
 
-    let structural_stats = chelis_types::structural_stats(&deep_library_decls);
-
-    let (type_env, checked) = chelis_types::build_compiled_library_context(&deep_library_decls)
-        .map_err(|report| CompilerError {
-            stage: "check".to_string(),
-            errors: report
-                .errors
-                .iter()
-                .map(crate::compiler::check_error_diagnostic)
-                .collect(),
-        })?;
-
-    let checked = chelis_effects::check_program(&checked).map_err(|errors| CompilerError {
-        stage: "effects".to_string(),
-        errors: errors
+    let (type_env, checked) = chelis_types::build_compiled_library_context(
+        prepared.expanded_deep(),
+    )
+    .map_err(|report| CompilerError {
+        stage: "check".to_string(),
+        errors: report
+            .errors
             .iter()
-            .map(|error| crate::schema::Diagnostic {
-                kind: "effect_error".to_string(),
-                message: error.message.clone(),
-                severity: 0.8,
-                expected: None,
-                got: None,
-                suggestions: vec![],
-                span: None,
-                deep_path: None,
-            })
+            .map(crate::compiler::check_error_diagnostic)
             .collect(),
     })?;
-
-    let library_checked =
-        chelis_types::check_linearity(&checked).map_err(|errors| CompilerError {
-            stage: "linearity".to_string(),
-            errors: errors
-                .iter()
-                .map(crate::compiler::check_error_diagnostic)
-                .collect(),
-        })?;
+    let analysis = crate::pipeline::prepared_analysis_from_checked(prepared, checked);
+    let checked =
+        crate::pipeline::complete_checks(analysis, crate::pipeline::SemanticContext::Isolated)
+            .map_err(crate::compiler::pipeline_rejection_to_compiler_error)?;
+    let (_, _, library_checked, _) = checked.into_parts();
 
     // Lower chelis-std as a standalone library, best-effort. A lowering
     // diagnostic here is NOT fatal: `check` does not use `library_dag`,
@@ -372,7 +340,7 @@ pub fn build_stdlib_context(
     // `None`. Some chelis-std defs are only lowerable once a concrete
     // caller pins a symbolic axis; the unpruned whole-library lower can
     // legitimately hit that.
-    let library_dag = chelis_ir::lower::try_lower_program_to_library(&library_checked).ok();
+    let library_dag = crate::pipeline::lower_library(&library_checked).ok();
 
     Ok(StdLibContext {
         type_env,

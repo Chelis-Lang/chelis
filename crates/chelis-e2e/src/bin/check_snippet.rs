@@ -2,9 +2,7 @@ use std::env;
 use std::io::{self, Read};
 
 use chelis_deep::validate::validate;
-use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str as parse_surf;
-use chelis_types::check_ir_fitness;
 
 fn json_escape(input: &str) -> String {
     let mut out = String::with_capacity(input.len() + 8);
@@ -56,17 +54,31 @@ fn main() {
     }
 }
 
+fn analyze_fitness(
+    prepared: chelis_compiler_api::pipeline::PreparedProgram,
+) -> chelis_types::FitnessReport {
+    let outcome = chelis_compiler_api::pipeline::run_prepared(
+        prepared,
+        chelis_compiler_api::pipeline::PipelineGoal::TypeAnalysis,
+    )
+    .expect("prepared type analysis cannot fail before the type stage");
+    let chelis_compiler_api::pipeline::PipelineOutcome::TypeAnalysis(analysis) = outcome else {
+        unreachable!("the type-analysis goal returns only a type-analysis outcome")
+    };
+    match analysis {
+        chelis_types::TypeAnalysisOutcome::Rejected { fitness }
+        | chelis_types::TypeAnalysisOutcome::Accepted { fitness, .. } => fitness,
+    }
+}
+
 fn check_surf(source: &str) {
     let parse = parse_surf(source);
     let mut json = String::new();
     match parse {
         Ok(decls) => {
-            let deep = desugar_program(&decls);
-            let deep =
-                chelis_macros::expand_program(&deep, &chelis_macros::ExpansionOptions::default())
-                    .expect("macro expansion should succeed for snippet checking")
-                    .into_exprs();
-            let report = check_ir_fitness(&deep);
+            let prepared = chelis_compiler_api::pipeline::prepare_surf_decls(&decls, None)
+                .expect("macro expansion should succeed for snippet checking");
+            let report = analyze_fitness(prepared);
             json.push('{');
             json.push_str("\"lang\":\"surf\",");
             json.push_str("\"parse_error\":null,");
@@ -106,7 +118,8 @@ fn check_deep(source: &str) {
     match strict {
         Ok(exprs) => {
             let warnings = validate(&exprs);
-            let report = check_ir_fitness(&exprs);
+            let prepared = chelis_compiler_api::pipeline::prepare_deep(exprs, None);
+            let report = analyze_fitness(prepared);
             json.push('{');
             json.push_str("\"lang\":\"deep\",");
             json.push_str("\"parse_error\":null,");

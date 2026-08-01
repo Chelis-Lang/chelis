@@ -35,7 +35,7 @@
 use chelis_deep::DeepTag;
 use chelis_ir::lower::LoweredLibrary;
 use chelis_reef::{PreparedReefGraph, SourceDigest, prepare_reef_graph_cached};
-use chelis_types::{CheckedProgram, TypeEnv, build_compiled_library_context, check_linearity};
+use chelis_types::{CheckedProgram, TypeEnv, build_compiled_library_context};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fmt;
@@ -43,8 +43,8 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-use crate::compiler::{CompilerError, check_error_diagnostic, stage_error};
-use crate::schema::{Diagnostic, Span};
+use crate::compiler::{CompilerError, check_error_diagnostic};
+use crate::schema::Diagnostic;
 
 /// 32-byte content hash of every source file that contributed to a
 /// `CompiledContext`. Phase I disk cache keys on this for invalidation.
@@ -879,18 +879,17 @@ pub fn compile_reef_context(
             // Surf → Deep desugar + macro expand of the WHOLE library.
             // `linked_library_decls` is already linked + internal-name-
             // rewritten by `prepare_reef_graph`.
-            let desugared = chelis_surf::desugar::desugar_program(&reef_state.linked_library_decls);
-            log_phase("surf_desugar", &mut t);
-            let deep_library_decls = chelis_macros::expand_program(
-                &desugared,
-                &chelis_macros::ExpansionOptions::default(),
-            )
-            .map_err(|err| stage_error("desugar", err.to_string(), "macro_error"))?
-            .into_exprs();
-            log_phase("macro_expand", &mut t);
+            let prepared =
+                crate::pipeline::prepare_surf_decls(&reef_state.linked_library_decls, None)
+                    .map_err(|error| {
+                        crate::compiler::pipeline_rejection_to_compiler_error(
+                            crate::pipeline::PipelineRejection::Preparation(error),
+                        )
+                    })?;
+            log_phase("surf_desugar_macro_expand", &mut t);
 
             if profile {
-                let (modules, decls) = library_structural_summary(&deep_library_decls);
+                let (modules, decls) = library_structural_summary(prepared.expanded_deep());
                 eprintln!(
                     "compile_reef_context: structural_summary modules={} top_level_decls={}",
                     modules, decls
@@ -898,42 +897,21 @@ pub fn compile_reef_context(
             }
 
             // Monolithic fallback: build the type-env snapshot AND the
-            // library `CheckedProgram` in a single pass. The unified helper
-            // `build_compiled_library_context` runs the per-decl HM
-            // inference + per-decl annotation ONCE and returns both the
-            // [`TypeEnv`] (for downstream `_with_context` calls) and the
-            // [`CheckedProgram`] (for effects + linearity + lowering).
-            let (type_env, checked) =
-                build_compiled_library_context(&deep_library_decls).map_err(|report| {
-                    CompilerError {
-                        stage: "check".to_string(),
-                        errors: report.errors.iter().map(check_error_diagnostic).collect(),
-                    }
+            // library `CheckedProgram` in a single inference session.
+            let (type_env, checked) = build_compiled_library_context(prepared.expanded_deep())
+                .map_err(|report| CompilerError {
+                    stage: "check".to_string(),
+                    errors: report.errors.iter().map(check_error_diagnostic).collect(),
                 })?;
             log_phase("build_compiled_library_context", &mut t);
-            let checked =
-                chelis_effects::check_program(&checked).map_err(|errors| CompilerError {
-                    stage: "effects".to_string(),
-                    errors: errors
-                        .iter()
-                        .map(|error| Diagnostic {
-                            kind: "effect_error".to_string(),
-                            message: error.message.clone(),
-                            severity: 0.8,
-                            expected: None,
-                            got: None,
-                            suggestions: vec![],
-                            span: None,
-                            deep_path: None,
-                        })
-                        .collect(),
-                })?;
-            log_phase("check_effects", &mut t);
-            let library_checked = check_linearity(&checked).map_err(|errors| CompilerError {
-                stage: "linearity".to_string(),
-                errors: errors.iter().map(check_error_diagnostic).collect(),
-            })?;
-            log_phase("check_linearity", &mut t);
+            let analysis = crate::pipeline::prepared_analysis_from_checked(prepared, checked);
+            let checked = crate::pipeline::complete_checks(
+                analysis,
+                crate::pipeline::SemanticContext::Isolated,
+            )
+            .map_err(crate::compiler::pipeline_rejection_to_compiler_error)?;
+            log_phase("semantic_checks", &mut t);
+            let (_, _, library_checked, _) = checked.into_parts();
             (type_env, library_checked)
         }
     };
@@ -944,25 +922,8 @@ pub fn compile_reef_context(
     // lowering the monolithic one (the composed program carries the same
     // chelis-std ++ package annotated bodies), so the layered path does not
     // need to reuse the cached chelis-std `library_dag` here.
-    let library_dag =
-        chelis_ir::lower::try_lower_program_to_library(&library_checked).map_err(|diagnostic| {
-            CompilerError {
-                stage: "lower".to_string(),
-                errors: vec![Diagnostic {
-                    kind: "lower_error".to_string(),
-                    message: diagnostic.to_string(),
-                    severity: 1.0,
-                    expected: None,
-                    got: None,
-                    suggestions: vec![],
-                    span: diagnostic.span.map(|span| Span {
-                        offset: span.offset,
-                        len: span.len,
-                    }),
-                    deep_path: None,
-                }],
-            }
-        })?;
+    let library_dag = crate::pipeline::lower_library(&library_checked)
+        .map_err(crate::compiler::pipeline_rejection_to_compiler_error)?;
     log_phase("lower_program_to_library", &mut t);
 
     // Package + build identity: canonical `package_root` from the
@@ -1055,51 +1016,39 @@ fn build_library_triple_layered(
     // (the package's own modules + non-stdlib path-deps). A macro-expansion
     // failure is a real front-end error the monolithic path also surfaces,
     // so hand back `None` for the byte-identical diagnostic.
-    let desugared =
-        chelis_surf::desugar::desugar_program(&reef_state.linked_non_stdlib_library_decls);
-    let non_stdlib_deep = match chelis_macros::expand_program(
-        &desugared,
-        &chelis_macros::ExpansionOptions::default(),
+    let prepared = match crate::pipeline::prepare_surf_decls(
+        &reef_state.linked_non_stdlib_library_decls,
+        None,
     ) {
-        Ok(expanded) => expanded.into_exprs(),
+        Ok(prepared) => prepared,
         Err(_) => return None,
     };
 
     // Type-check + annotate the non-chelis-std decls stacked on the cached
-    // chelis-std sub-context. Returns the union `TypeEnv` (chelis-std +
-    // package) and the package-only `CheckedProgram`. A type error =>
-    // `None` => monolithic fallback for the byte-identical error report.
+    // chelis-std sub-context. Returns the union `TypeEnv` and one type product.
     let (type_env, package_checked) = match chelis_types::build_compiled_library_context_with_base(
         &stdlib_ctx.type_env,
-        &non_stdlib_deep,
+        prepared.expanded_deep(),
     ) {
         Ok(pair) => pair,
         Err(_) => return None,
     };
-
-    // Effects + linearity over the package decls `_with_context` against
-    // the cached chelis-std library `CheckedProgram` (chelis-std's own
-    // effects + linearity were checked when the sub-context was built). Any
-    // failure => monolithic fallback.
-    let package_checked = match chelis_effects::check_effects_with_context(
-        &stdlib_ctx.library_checked,
-        &package_checked,
+    let analysis = crate::pipeline::prepared_analysis_from_checked(prepared, package_checked);
+    let package_checked = match crate::pipeline::complete_checks(
+        analysis,
+        crate::pipeline::SemanticContext::Library(&stdlib_ctx.library_checked),
     ) {
         Ok(checked) => checked,
-        Err(_) => return None,
-    };
-    let package_checked = match chelis_types::check_linearity_with_context(
-        &stdlib_ctx.library_checked,
-        &package_checked,
-    ) {
-        Ok(checked) => checked,
-        Err(_) => return None,
+        Err(crate::pipeline::PipelineRejection::Effects { .. })
+        | Err(crate::pipeline::PipelineRejection::Linearity { .. }) => return None,
+        Err(other) => unreachable!("full contextual checks cannot reject at {other}"),
     };
 
     // Compose the cached chelis-std half with the freshly-checked package
     // half into the one whole-library `CheckedProgram` the rest of
     // `compile_reef_context` (and every `_with_context` consumer) expects.
-    let library_checked = CheckedProgram::compose(&stdlib_ctx.library_checked, &package_checked);
+    let library_checked =
+        CheckedProgram::compose(&stdlib_ctx.library_checked, package_checked.program());
 
     if std::env::var_os("CHELIS_PROFILE_COMPILE_CONTEXT").map(|v| v == "1") == Some(true) {
         eprintln!(

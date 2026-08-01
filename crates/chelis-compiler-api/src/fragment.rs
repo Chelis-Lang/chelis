@@ -33,27 +33,19 @@
 //!
 //! ## The pipeline
 //!
-//! `check_body_replacement` runs the same four passes `cmd_check_one_deep` runs,
-//! in the same pinned order, over the rewritten module, returning the first
-//! failing pass as a tagged [`ReplacementError`]:
+//! `check_body_replacement` delegates to the canonical compiler-API pipeline.
+//! The pipeline runs these stages in a fixed order:
 //!
-//! 1. `chelis_types::check_ir_fitness` (whole-module structural/type fitness,
-//!    including the cross-def `detect_trivial_non_terminating_fns` and
-//!    `detect_top_level_binding_cycles` detectors) -> [`ReplacementError::Type`]
-//! 2. `chelis_types::check_typed_program` (whole-module HM inference) ->
-//!    [`ReplacementError::Type`]
-//! 3. `chelis_effects::check_program` (effects; descends into the `(module ...)`
-//!    wrapper the rewritten module carries) -> [`ReplacementError::Effect`]
-//! 4. `chelis_types::check_linearity` -> [`ReplacementError::Linearity`]
+//! 1. Combined type analysis produces fitness and one typed program.
+//! 2. The effect check returns [`ReplacementError::Effect`] on rejection.
+//! 3. The linearity check returns [`ReplacementError::Linearity`] on rejection.
 //!
-//! The rewritten module is `(module ...)`-wrapped (it comes from
-//! [`chelis_deep::splice_function_body`]), so the effect pass MUST descend into
-//! that wrapper; the whole-module effect validators do.
+//! Type analysis returns [`ReplacementError::Type`] on rejection. It also
+//! rejects unsafe recursion groups and top-level binding cycles before later
+//! stages start.
 //!
-//! `check_ir_fitness` runs first for the same reason `cmd_check_one_deep` runs
-//! it first: it rejects a base-case-free recursion group promptly, before the
-//! whole-module inference (`check_typed_program`) that can wedge on such a
-//! module, so the tool path does not hang.
+//! The rewritten module contains a `(module ...)` wrapper. The shared effect
+//! transition checks declarations inside that wrapper.
 
 use chelis_deep::Expr;
 
@@ -232,44 +224,39 @@ pub struct EditValidationReport {
 /// Run the compiler-owned whole-module validation pipeline over an edited Deep
 /// module.
 ///
-/// The pass order matches `cmd_check_one_deep`: `check_ir_fitness` ->
-/// `check_typed_program` -> `check_program` (effects) -> `check_linearity`.
-/// The first failing pass is returned as a tagged error.
+/// The shared transition runs type analysis, effects, and linearity in order.
+/// The first failed stage returns a tagged error.
 pub fn check_whole_module_edit(
     rewritten_module: Vec<Expr>,
 ) -> Result<EditValidationReport, EditValidationError> {
-    // Pass 1: structural/type fitness. Runs first because it rejects a
-    // base-case-free recursion group promptly, before the whole-module
-    // inference that can wedge on such a module.
-    let fitness = chelis_types::check_ir_fitness(&rewritten_module);
-    if !fitness.errors.is_empty() {
-        return Err(EditValidationError::Type {
-            message: join_messages(fitness.errors.iter().map(|error| error.message.as_str())),
-            location: None,
-            deep_path: None,
-        });
-    }
+    let prepared = crate::pipeline::prepare_deep(rewritten_module.clone(), None);
+    let analysis = match crate::pipeline::analyze_prepared(prepared) {
+        crate::pipeline::PreparedTypeAnalysisOutcome::Accepted(analysis) => *analysis,
+        crate::pipeline::PreparedTypeAnalysisOutcome::Rejected { fitness } => {
+            return Err(EditValidationError::Type {
+                message: join_messages(fitness.errors.iter().map(|error| error.message.as_str())),
+                location: None,
+                deep_path: None,
+            });
+        }
+    };
 
-    // Pass 2: whole-module HM type inference.
-    let typed = chelis_types::check_typed_program(&rewritten_module)
-        .map_err(|report| infer_result_to_type_error(&report))?;
-
-    // Pass 3: effects. The validators descend into the `(module ...)` wrapper,
-    // so a declared-pure body that performs `Random`/`Io` is rejected, and so
-    // is an effect that propagates to a held caller declared not to perform it.
-    let effected =
-        chelis_effects::check_program(&typed).map_err(|errors| EditValidationError::Effect {
-            message: join_messages(errors.iter().map(|error| error.message.as_str())),
-            location: None,
-            deep_path: None,
+    crate::pipeline::complete_checks(analysis, crate::pipeline::SemanticContext::Isolated)
+        .map_err(|rejection| match rejection {
+            crate::pipeline::PipelineRejection::Effects { errors } => EditValidationError::Effect {
+                message: join_messages(errors.iter().map(|error| error.message.as_str())),
+                location: None,
+                deep_path: None,
+            },
+            crate::pipeline::PipelineRejection::Linearity { errors } => {
+                EditValidationError::Linearity {
+                    message: join_messages(errors.iter().map(|error| error.message.as_str())),
+                    location: None,
+                    deep_path: None,
+                }
+            }
+            other => unreachable!("full checks cannot reject at {other}"),
         })?;
-
-    // Pass 4: linearity.
-    chelis_types::check_linearity(&effected).map_err(|errors| EditValidationError::Linearity {
-        message: join_messages(errors.iter().map(|error| error.message.as_str())),
-        location: None,
-        deep_path: None,
-    })?;
 
     Ok(EditValidationReport {
         rewritten_module,
@@ -282,11 +269,9 @@ pub fn check_whole_module_edit(
 ///
 /// This is the primary body-replacement surface. It resolves the target,
 /// splices `new_body` into the module, and runs the same whole-module pipeline
-/// `cmd_check_one_deep` runs, in the same pinned order:
-/// `check_ir_fitness` -> `check_typed_program` -> `check_program` (effects) ->
-/// `check_linearity`. On success it returns the full rewritten module; on
-/// rejection it returns a tagged [`ReplacementError`] naming the first failing
-/// pass (a fitness or type rejection is tagged `Type`).
+/// `cmd_check_one_deep` runs. On success, it returns the full rewritten module.
+/// On rejection, it returns a tagged [`ReplacementError`] for the first failed
+/// stage. A type-analysis rejection uses the `Type` tag.
 ///
 /// The verdict EQUALS full `chelis check` of the returned `rewritten_module`
 /// BY CONSTRUCTION: there is no separate scoped analysis. Closure-scoped
@@ -356,17 +341,6 @@ fn edit_error_to_replacement_error(error: EditValidationError) -> ReplacementErr
             location,
             deep_path,
         },
-    }
-}
-
-/// Map a type-check [`chelis_types::InferResult`] failure to a
-/// [`EditValidationError::Type`]. The underlying `CheckError`s carry no span
-/// today, so `location` is `None`.
-fn infer_result_to_type_error(report: &chelis_types::InferResult) -> EditValidationError {
-    EditValidationError::Type {
-        message: join_messages(report.errors.iter().map(|error| error.message.as_str())),
-        location: None,
-        deep_path: None,
     }
 }
 

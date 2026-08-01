@@ -36,8 +36,7 @@
 
 use chelis_effects::EffectError;
 use chelis_types::errors::CheckError;
-use chelis_types::fitness::FitnessComponents;
-use chelis_types::{CheckedProgram, FitnessReport, StructuralStats};
+use chelis_types::{CheckedProgram, FitnessReport, InferStats, StructuralStats};
 
 use crate::compiler::CompilerError;
 use crate::stdlib_cache::{StdLibContext, load_or_build_stdlib_context};
@@ -93,63 +92,58 @@ pub fn check_layered(
     // failure here is a real front-end error, not a clean miss — but the
     // monolithic path would surface it too, so hand back `Ok(None)` and
     // let the monolithic path produce the byte-identical diagnostic.
-    let non_stdlib_deep = match expand(non_stdlib_decls) {
-        Ok(deep) => deep,
+    let prepared = match crate::pipeline::prepare_surf_decls(non_stdlib_decls, None) {
+        Ok(prepared) => prepared,
         Err(_) => return Ok(None),
     };
 
     // Type-check the non-chelis-std decls `_with_context` against the
     // cached chelis-std sub-context. A type error => `Ok(None)` =>
     // monolithic fallback for the byte-identical error report.
-    let non_stdlib_checked = match chelis_types::check_ir_with_signature_context(
+    let analysis = match crate::pipeline::analyze_prepared_with_context(
+        prepared,
         &stdlib_ctx.type_env,
         stdlib_ctx.library_checked.signature_inference(),
-        &non_stdlib_deep,
     ) {
-        Ok(checked) => checked,
+        Ok(analysis) => analysis,
         Err(_) => return Ok(None),
     };
+    let fitness = reconstitute_clean_fitness(
+        &stdlib_ctx,
+        analysis.prepared().expanded_deep(),
+        analysis.program(),
+    );
+    let typed_program = analysis.program().clone();
 
-    // Effects + linearity, `_with_context` against the cached chelis-std
-    // library `CheckedProgram`. chelis-std's own effects + linearity
-    // were already checked when the sub-context was built.
-    let non_stdlib_effects_checked = match chelis_effects::check_effects_with_context(
-        &stdlib_ctx.library_checked,
-        &non_stdlib_checked,
+    // Effects + linearity use the canonical context-aware stage order.
+    match crate::pipeline::complete_checks(
+        analysis,
+        crate::pipeline::SemanticContext::Library(&stdlib_ctx.library_checked),
     ) {
-        Ok(checked) => checked,
-        Err(effect_errors) => {
-            // Effect errors are reported by the CLI directly (they do
-            // not block the JSON emission), so surface them rather than
-            // falling back. The fitness report itself is still clean
-            // (type inference succeeded); the CLI folds effect errors
-            // into the score exactly as the monolithic path does.
-            let fitness =
-                reconstitute_clean_fitness(&stdlib_ctx, &non_stdlib_deep, &non_stdlib_checked);
-            return Ok(Some(LayeredCheck {
-                fitness,
-                effect_errors,
-                linearity_errors: Vec::new(),
-                typed_program: pick_typed_program(&stdlib_ctx, non_stdlib_checked),
-            }));
-        }
-    };
-
-    let linearity_errors = match chelis_types::check_linearity_with_context(
-        &stdlib_ctx.library_checked,
-        &non_stdlib_effects_checked,
-    ) {
-        Ok(_) => Vec::new(),
-        Err(errors) => errors,
-    };
-
-    let fitness = reconstitute_clean_fitness(&stdlib_ctx, &non_stdlib_deep, &non_stdlib_checked);
-    Ok(Some(LayeredCheck {
-        fitness,
-        effect_errors: Vec::new(),
-        linearity_errors,
-        typed_program: pick_typed_program(&stdlib_ctx, non_stdlib_checked),
-    }))
+        Ok(_) => Ok(Some(LayeredCheck {
+            fitness,
+            effect_errors: Vec::new(),
+            linearity_errors: Vec::new(),
+            typed_program: pick_typed_program(&stdlib_ctx, typed_program),
+        })),
+        Err(crate::pipeline::PipelineRejection::Effects {
+            errors: effect_errors,
+        }) => Ok(Some(LayeredCheck {
+            fitness,
+            effect_errors,
+            linearity_errors: Vec::new(),
+            typed_program: pick_typed_program(&stdlib_ctx, typed_program),
+        })),
+        Err(crate::pipeline::PipelineRejection::Linearity {
+            errors: linearity_errors,
+        }) => Ok(Some(LayeredCheck {
+            fitness,
+            effect_errors: Vec::new(),
+            linearity_errors,
+            typed_program: pick_typed_program(&stdlib_ctx, typed_program),
+        })),
+        Err(other) => unreachable!("full contextual checks cannot reject at {other}"),
+    }
 }
 
 /// Pick the `CheckedProgram` the CLI reads for `--show-inferred`: the
@@ -181,54 +175,21 @@ fn reconstitute_clean_fitness(
     non_stdlib_deep: &[chelis_deep::Expr],
     non_stdlib_checked: &CheckedProgram,
 ) -> FitnessReport {
-    let stdlib_stats = stdlib_ctx.structural_stats;
-    let non_stdlib_stats = chelis_types::structural_stats(non_stdlib_deep);
-    let structural_total_nodes = stdlib_stats.total_nodes + non_stdlib_stats.total_nodes;
-    let invalid_nodes = stdlib_stats.invalid_nodes + non_stdlib_stats.invalid_nodes;
-
-    let structure = if structural_total_nodes == 0 {
-        1.0
-    } else {
-        let valid = structural_total_nodes.saturating_sub(invalid_nodes);
-        valid as f64 / structural_total_nodes as f64
+    let stdlib_structural = stdlib_ctx.structural_stats;
+    let non_stdlib_structural = chelis_types::structural_stats(non_stdlib_deep);
+    let structural = StructuralStats {
+        total_nodes: stdlib_structural.total_nodes + non_stdlib_structural.total_nodes,
+        invalid_nodes: stdlib_structural.invalid_nodes + non_stdlib_structural.invalid_nodes,
     };
-
-    // Mirror `chelis_types::check_ir_fitness`'s clean-path return: parse
-    // / names / types are 1.0, structure is the computed fraction, score
-    // is the weighted sum. For a clean program with structure 1.0 this
-    // is exactly `score: 1.0`, which the all-clean corpus exercises.
-    const W_PARSE: f64 = 0.1;
-    const W_STRUCTURE: f64 = 0.1;
-    const W_NAMES: f64 = 0.2;
-    const W_TYPES: f64 = 0.6;
-    let score = W_PARSE * 1.0 + W_STRUCTURE * structure + W_NAMES * 1.0 + W_TYPES * 1.0;
 
     let stdlib_infer = stdlib_ctx.library_checked.infer_stats();
     let non_stdlib_infer = non_stdlib_checked.infer_stats();
-    let typed_nodes = stdlib_infer.typed_nodes + non_stdlib_infer.typed_nodes;
-    let total_nodes = stdlib_infer.total_nodes + non_stdlib_infer.total_nodes;
+    let infer = InferStats {
+        typed_nodes: stdlib_infer.typed_nodes + non_stdlib_infer.typed_nodes,
+        total_nodes: stdlib_infer.total_nodes + non_stdlib_infer.total_nodes,
+    };
 
-    FitnessReport {
-        score,
-        components: FitnessComponents {
-            parse: 1.0,
-            structure,
-            names: 1.0,
-            types: 1.0,
-        },
-        errors: Vec::new(),
-        typed_nodes,
-        untyped_nodes: total_nodes.saturating_sub(typed_nodes),
-        total_nodes,
-        unresolved_names: Vec::new(),
-    }
-}
-
-fn expand(decls: &[chelis_surf::ast::Decl]) -> Result<Vec<chelis_deep::Expr>, String> {
-    let desugared = chelis_surf::desugar::desugar_program(decls);
-    chelis_macros::expand_program(&desugared, &chelis_macros::ExpansionOptions::default())
-        .map(|expanded| expanded.into_exprs())
-        .map_err(|err| err.to_string())
+    chelis_types::clean_fitness_from_stats(structural, infer)
 }
 
 /// The cached chelis-std structural stats — exposed so the CLI's `build`
@@ -251,8 +212,8 @@ pub fn stdlib_structural_stats(
 /// with the cached chelis-std `library_checked`.
 ///
 /// Returns:
-/// - `Ok(Some(checked))` — the whole program type-checks clean; `checked`
-///   is the composed whole-program `CheckedProgram` the caller lowers.
+/// - `Ok(Some(checked))` — the whole program passes all checks. `checked`
+///   is the composed whole-program state that the caller lowers.
 /// - `Ok(None)` — the non-chelis-std decls do NOT type-check clean (type,
 ///   effect, linearity, or macro error). The caller falls back to the
 ///   monolithic `checked_program_with_effects` so the error path stays
@@ -266,46 +227,39 @@ pub fn stdlib_structural_stats(
 pub fn check_layered_for_build(
     stdlib_decls: &[chelis_surf::ast::Decl],
     merged_non_stdlib_decls: &[chelis_surf::ast::Decl],
-) -> Result<Option<CheckedProgram>, CompilerError> {
+) -> Result<Option<crate::pipeline::CheckedCompilation>, CompilerError> {
     // RFC v5 (RT-1 F2 bypass): linked decls; accept the linker name format.
     let _linked = chelis_types::install_linked_program_guard();
     let stdlib_ctx = load_or_build_stdlib_context(stdlib_decls)?;
 
-    let non_stdlib_deep = match expand(merged_non_stdlib_decls) {
-        Ok(deep) => deep,
+    let prepared = match crate::pipeline::prepare_surf_decls(merged_non_stdlib_decls, None) {
+        Ok(prepared) => prepared,
         Err(_) => return Ok(None),
     };
 
-    let non_stdlib_checked = match chelis_types::check_ir_with_signature_context(
+    let analysis = match crate::pipeline::analyze_prepared_with_context(
+        prepared,
         &stdlib_ctx.type_env,
         stdlib_ctx.library_checked.signature_inference(),
-        &non_stdlib_deep,
     ) {
-        Ok(checked) => checked,
+        Ok(analysis) => analysis,
         Err(_) => return Ok(None),
     };
 
-    let non_stdlib_effects_checked = match chelis_effects::check_effects_with_context(
-        &stdlib_ctx.library_checked,
-        &non_stdlib_checked,
+    let checked = match crate::pipeline::complete_checks(
+        analysis,
+        crate::pipeline::SemanticContext::Library(&stdlib_ctx.library_checked),
     ) {
         Ok(checked) => checked,
-        Err(_) => return Ok(None),
+        Err(crate::pipeline::PipelineRejection::Effects { .. })
+        | Err(crate::pipeline::PipelineRejection::Linearity { .. }) => return Ok(None),
+        Err(other) => unreachable!("full contextual checks cannot reject at {other}"),
     };
 
-    let non_stdlib_linearity_checked = match chelis_types::check_linearity_with_context(
+    // Compose the cached chelis-std half with the checked non-chelis-std
+    // half. The result remains a typed pipeline state for the build lower step.
+    Ok(Some(crate::pipeline::compose_checked(
         &stdlib_ctx.library_checked,
-        &non_stdlib_effects_checked,
-    ) {
-        Ok(checked) => checked,
-        Err(_) => return Ok(None),
-    };
-
-    // Compose the cached chelis-std half with the freshly-checked
-    // non-chelis-std half into the one whole-program CheckedProgram the
-    // `build` lowering pipeline expects.
-    Ok(Some(CheckedProgram::compose(
-        &stdlib_ctx.library_checked,
-        &non_stdlib_linearity_checked,
+        checked,
     )))
 }

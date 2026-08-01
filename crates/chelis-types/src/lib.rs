@@ -32,11 +32,12 @@ pub use builtins::{
 pub use chelis_vocab::EffectKind;
 pub use context::TypeEnv;
 pub use fitness::{
-    FitnessReport, StructuralStats, check_ir_program as check_ir_fitness, check_program,
+    FitnessReport, StructuralStats, TypeAnalysisOutcome, analyze_ir_program,
+    check_ir_program as check_ir_fitness, check_program, clean_fitness_from_stats,
     structural_stats,
 };
 pub use infer::{
-    CheckedProgram, InferResult, build_compiled_library_context,
+    CheckedProgram, InferResult, InferStats, build_compiled_library_context,
     build_compiled_library_context_with_base, build_type_env_from_library, check_ir_program,
     check_ir_with_context, check_ir_with_signature_context, check_typed_program, infer_ir_program,
     infer_program, run_on_grown_stack, set_grow_segment_bytes_for_test,
