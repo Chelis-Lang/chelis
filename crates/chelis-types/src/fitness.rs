@@ -285,12 +285,8 @@ fn count_node(expr: &chelis_deep::Expr) -> usize {
                     .sum::<usize>()
         }
         // Transitional arms for new Expr variants (#908)
-        chelis_deep::Expr::Node(node, _) => {
-            1 + node.expr_children().map(count_node).sum::<usize>()
-        }
-        chelis_deep::Expr::BareList(elems, _) => {
-            1 + elems.iter().map(count_node).sum::<usize>()
-        }
+        chelis_deep::Expr::Node(node, _) => 1 + node.expr_children().map(count_node).sum::<usize>(),
+        chelis_deep::Expr::BareList(elems, _) => 1 + elems.iter().map(count_node).sum::<usize>(),
         chelis_deep::Expr::UnknownForm(data) => {
             1 + data.children.iter().map(count_node).sum::<usize>()
         }

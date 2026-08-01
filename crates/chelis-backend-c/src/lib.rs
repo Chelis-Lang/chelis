@@ -8,6 +8,20 @@ pub mod host_emit;
 pub mod memory;
 pub mod toolchain;
 
+/// Primitive types the C backend's tensor-DAG path can realize.
+/// A def whose declared return type or intermediates use a prim NOT in this
+/// set must route to the host lane. Verified by execution (issue #912 Task 1):
+/// int32/int64 DO lower through the DAG path as general tensor ops, not only
+/// as sparse indices. Only f64 is actually rejected.
+pub const TENSOR_CAPABLE_PRIMS: &[chelis_types::types::Prim] = &[
+    chelis_types::types::Prim::F32,
+    chelis_types::types::Prim::Bool,
+    chelis_types::types::Prim::Bf16,
+    chelis_types::types::Prim::F16,
+    chelis_types::types::Prim::Int32,
+    chelis_types::types::Prim::Int64,
+];
+
 #[cfg(test)]
 mod host_abi_tests;
 

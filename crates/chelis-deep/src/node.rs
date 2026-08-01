@@ -174,13 +174,16 @@ impl Node {
     pub fn expr_children(&self) -> impl Iterator<Item = &Expr> {
         let tag = self.tag;
         let arity = self.children.len();
-        self.children.iter().enumerate().filter_map(move |(i, child)| {
-            if child_stamp_role(tag, i, arity) == ChildStampRole::RuntimeExpr {
-                Some(child)
-            } else {
-                None
-            }
-        })
+        self.children
+            .iter()
+            .enumerate()
+            .filter_map(move |(i, child)| {
+                if child_stamp_role(tag, i, arity) == ChildStampRole::RuntimeExpr {
+                    Some(child)
+                } else {
+                    None
+                }
+            })
     }
 
     /// Indexed expression child. Panics if the role at `index` is not
@@ -200,16 +203,19 @@ impl Node {
     pub fn binder_names(&self) -> impl Iterator<Item = &str> {
         let tag = self.tag;
         let arity = self.children.len();
-        self.children.iter().enumerate().filter_map(move |(i, child)| {
-            if child_stamp_role(tag, i, arity) == ChildStampRole::Binder {
-                match child {
-                    Expr::Atom(Atom::Name(s), _) => Some(s.as_str()),
-                    _ => None,
+        self.children
+            .iter()
+            .enumerate()
+            .filter_map(move |(i, child)| {
+                if child_stamp_role(tag, i, arity) == ChildStampRole::Binder {
+                    match child {
+                        Expr::Atom(Atom::Name(s), _) => Some(s.as_str()),
+                        _ => None,
+                    }
+                } else {
+                    None
                 }
-            } else {
-                None
-            }
-        })
+            })
     }
 
     /// Indexed binder name. Panics on role mismatch.
@@ -234,13 +240,16 @@ impl Node {
     pub fn type_children(&self) -> impl Iterator<Item = &Expr> {
         let tag = self.tag;
         let arity = self.children.len();
-        self.children.iter().enumerate().filter_map(move |(i, child)| {
-            if child_stamp_role(tag, i, arity) == ChildStampRole::Type {
-                Some(child)
-            } else {
-                None
-            }
-        })
+        self.children
+            .iter()
+            .enumerate()
+            .filter_map(move |(i, child)| {
+                if child_stamp_role(tag, i, arity) == ChildStampRole::Type {
+                    Some(child)
+                } else {
+                    None
+                }
+            })
     }
 
     /// Total traversal yielding role-tagged references.
@@ -282,8 +291,7 @@ impl<'de> Deserialize<'de> for Node {
         }
 
         let shadow = NodeShadow::deserialize(deserializer)?;
-        Node::try_new(shadow.tag, shadow.meta, shadow.children)
-            .map_err(serde::de::Error::custom)
+        Node::try_new(shadow.tag, shadow.meta, shadow.children).map_err(serde::de::Error::custom)
     }
 }
 

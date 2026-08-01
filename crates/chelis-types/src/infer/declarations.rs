@@ -1141,20 +1141,16 @@ pub(super) fn expr_mentions_unshadowed_name(
                 .any(|child| expr_mentions_unshadowed_name(child, name, bound)),
         },
         // Transitional: recurse into expression children.
-        deep::Expr::Node(node, _) => {
-            node.expr_children()
-                .any(|child| expr_mentions_unshadowed_name(child, name, bound))
-        }
-        deep::Expr::BareList(elems, _) => {
-            elems
-                .iter()
-                .any(|child| expr_mentions_unshadowed_name(child, name, bound))
-        }
-        deep::Expr::UnknownForm(data) => {
-            data.children
-                .iter()
-                .any(|child| expr_mentions_unshadowed_name(child, name, bound))
-        }
+        deep::Expr::Node(node, _) => node
+            .expr_children()
+            .any(|child| expr_mentions_unshadowed_name(child, name, bound)),
+        deep::Expr::BareList(elems, _) => elems
+            .iter()
+            .any(|child| expr_mentions_unshadowed_name(child, name, bound)),
+        deep::Expr::UnknownForm(data) => data
+            .children
+            .iter()
+            .any(|child| expr_mentions_unshadowed_name(child, name, bound)),
     }
 }
 

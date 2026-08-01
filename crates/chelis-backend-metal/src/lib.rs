@@ -15,6 +15,19 @@
 //! See `spec/design/chelis_metal_backend_plan.md` and
 //! `spec/08-backends.md` §4 (Phase M).
 
+/// Primitive types the Metal backend's tensor-DAG path can realize.
+/// Declared from Metal hardware spec (Apple Silicon): no f64 support.
+/// Declaration-only in CI (no Metal toolchain on Linux) — verified in the
+/// field via [05-UNS-1] wiring when the backend rejection path fires.
+pub const TENSOR_CAPABLE_PRIMS: &[chelis_types::types::Prim] = &[
+    chelis_types::types::Prim::F32,
+    chelis_types::types::Prim::Bool,
+    chelis_types::types::Prim::Bf16,
+    chelis_types::types::Prim::F16,
+    chelis_types::types::Prim::Int32,
+    chelis_types::types::Prim::Int64,
+];
+
 use std::collections::HashMap;
 
 use chelis_ir::dag::DimExpr;

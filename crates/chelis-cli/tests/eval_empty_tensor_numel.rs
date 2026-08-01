@@ -77,7 +77,7 @@ fn eval_numel_empty_tensor() {
     );
     assert_eq!(
         stdout.trim(),
-        "0",
+        "result = 0",
         "numel of shape=[0] tensor must be 0, not 1 (Runtime-EmptyTensorNumel-F1); stdout={stdout}"
     );
 }
@@ -101,7 +101,7 @@ fn eval_rank_empty_tensor() {
     );
     assert_eq!(
         stdout.trim(),
-        "1",
+        "result = 1",
         "rank of an empty 1D tensor must be 1; stdout={stdout}"
     );
 }
@@ -123,7 +123,7 @@ fn eval_numel_three_element_tensor() {
     );
     assert_eq!(
         stdout.trim(),
-        "3",
+        "result = 3",
         "numel of shape=[3] must be 3; stdout={stdout}"
     );
 }
@@ -146,7 +146,7 @@ fn eval_numel_single_element_tensor() {
     );
     assert_eq!(
         stdout.trim(),
-        "1",
+        "result = 1",
         "numel of shape=[1] must be 1; stdout={stdout}"
     );
 }

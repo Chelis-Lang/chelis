@@ -833,7 +833,11 @@ impl<'a> RawParser<'a> {
                 return Ok(raw_typed_literal_lit_expr(RawAtom::Int(*n), *suffix, span));
             }
             TokenKind::TypedFloat(f, suffix) => {
-                return Ok(raw_typed_literal_lit_expr(RawAtom::Float(*f), *suffix, span));
+                return Ok(raw_typed_literal_lit_expr(
+                    RawAtom::Float(*f),
+                    *suffix,
+                    span,
+                ));
             }
             TokenKind::Str(s) => RawAtom::Str(s.clone()),
             TokenKind::Keyword(_) => {
@@ -1040,7 +1044,11 @@ impl<'a> RawParser<'a> {
 /// Build a raw typed-literal `(lit {type: (t-prim {} <prim>)} <value>)` for
 /// suffixed literal tokens, mirroring `typed_literal_lit_expr` but in the
 /// `RawExpr` domain.
-fn raw_typed_literal_lit_expr(value: RawAtom, suffix: lexer::LiteralSuffix, span: crate::Span) -> RawExpr {
+fn raw_typed_literal_lit_expr(
+    value: RawAtom,
+    suffix: lexer::LiteralSuffix,
+    span: crate::Span,
+) -> RawExpr {
     let prim_name = suffix.t_prim_name();
     let t_prim = RawExpr::List(
         vec![

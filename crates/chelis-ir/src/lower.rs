@@ -4891,13 +4891,11 @@ impl LowerCtx {
             ),
             Expr::MetaExpr(meta_expr, _) => self.lower_expr(&meta_expr.expr),
             // Transitional arms for new Expr variants (#908)
-            Expr::Node(_, _) | Expr::BareList(_, _) | Expr::UnknownForm(_) => {
-                raise_malformed_deep(
-                    "a transitional Expr variant in expression position",
-                    Some(expr.span()),
-                    self.current_span_id.clone(),
-                )
-            }
+            Expr::Node(_, _) | Expr::BareList(_, _) | Expr::UnknownForm(_) => raise_malformed_deep(
+                "a transitional Expr variant in expression position",
+                Some(expr.span()),
+                self.current_span_id.clone(),
+            ),
         };
         self.current_span_id = saved_span_id;
         result

@@ -225,6 +225,12 @@ enum Command {
         /// Emergency use only; CI must not pass this flag.
         #[arg(long, action = ArgAction::SetTrue)]
         allow_style_violations: bool,
+        /// Target backend for realizability inference. Determines which
+        /// capability set is used for lane assignment. Default: `eval`
+        /// (full capability). Use `--target c` to manifest under C
+        /// backend constraints — required for #763 cross-lane comparison.
+        #[arg(long)]
+        target: Option<String>,
     },
     /// Run front-end checks and report fitness-oriented diagnostics
     ///
@@ -825,12 +831,18 @@ fn main() {
             expr,
             json,
             allow_style_violations,
-        }) => cmd_eval(
-            file.as_deref(),
-            expr.as_deref(),
-            json,
-            allow_style_violations,
-        ),
+            target,
+        }) => {
+            // Parse target for realizability inference (issue #912).
+            // Default: Target::Eval. Wired to manifest pipeline at Task 7.
+            let _target = parse_eval_target(target.as_deref());
+            cmd_eval(
+                file.as_deref(),
+                expr.as_deref(),
+                json,
+                allow_style_violations,
+            )
+        }
         Some(Command::Check {
             file,
             show_inferred,
@@ -1089,6 +1101,26 @@ fn cmd_fmt(file: &Path, inplace: bool, check: bool) -> Result<(), Box<dyn std::e
         print!("{output}");
     }
     Ok(())
+}
+
+/// Parse the `--target` flag for `chelis eval` into a `Target` enum value.
+/// Default (None) → `Target::Eval`. Recognized values: "eval", "c", "hip", "metal".
+/// Issue #912 Task 3: argument plumbing only — wired to manifest pipeline at Task 7.
+fn parse_eval_target(target: Option<&str>) -> chelis_types::types::Target {
+    use chelis_types::types::Target;
+    match target {
+        None | Some("eval") => Target::Eval,
+        Some("c") => Target::C,
+        Some("hip") => Target::Hip,
+        Some("metal") => Target::Metal,
+        Some(other) => {
+            eprintln!(
+                "warning: unknown eval target `{other}`, using `eval`. \
+                 Valid targets: eval, c, hip, metal."
+            );
+            Target::Eval
+        }
+    }
 }
 
 fn cmd_eval(
@@ -9057,13 +9089,8 @@ fn format_eval_result(result: &chelis_compiler_api::schema::EvalResult) -> Strin
             .expect("eval roots carry display text rendered in-process by compiler-api")
     };
     let mut lines = result.transcript.clone();
-    if result.roots.len() == 1 {
-        if let Some(root) = result.roots.first() {
-            lines.push(root_display(root));
-        }
-        return lines.join("\n");
-    }
-
+    // Issue #912 [05-OBS-6]: always label, in both lanes. The bare-when-single
+    // form is removed — it cost cross-lane byte identity and line-count parity.
     lines.extend(result.roots.iter().enumerate().map(|(index, root)| {
         let name = root.name.clone().unwrap_or_else(|| format!("_{index}"));
         format!("{} = {}", display_root_name(&name), root_display(root))
@@ -9292,9 +9319,7 @@ fn deep_top_level_expr_name(expr: &DeepExpr) -> Option<&str> {
         return None;
     };
     match (list.tag(), list.elements.get(2)) {
-        (Some(DeepTag::Def), Some(DeepExpr::Atom(DeepAtom::Name(name), _))) => {
-            Some(name.as_str())
-        }
+        (Some(DeepTag::Def), Some(DeepExpr::Atom(DeepAtom::Name(name), _))) => Some(name.as_str()),
         _ => None,
     }
 }

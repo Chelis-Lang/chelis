@@ -1501,6 +1501,15 @@ and the labeled root's former `+ ...` marker both moved in the §B2.1
 migration. The C lane's nested-in-list renderer (formerly a 10-element
 cut with NO marker, chelis#749) adopted the same rule at Phase 2.)*
 
+> **[05-OBS-6]** Every root SHALL render with a `name = value` label at
+> every exit in both lanes. The bare-when-single form is removed. Render
+> order is manifest entry order. A lane that cannot produce a root it
+> owes SHALL emit [05-UNS-1] naming that root, the lane, and the reason.
+
+*(Decided 2026-07-31, chelis#912. The bare form cost cross-lane byte
+identity and line-count parity, which are the two properties #687 and
+#763 are built on. Conformant in both lanes since the #912 PR.)*
+
 ### 8.1 The Number Grammar (Normative Constants, Frozen At chelis#732 Phase 1)
 
 The grammar is Rust `{:?}` (`Debug`) float formatting, normatively

@@ -366,19 +366,17 @@ pub(super) fn infer_expr_with_type_metadata_ownership(
             last_ty
         }
         // `UnknownForm` is a list whose head didn't decode into the vocabulary.
-        deep::Expr::UnknownForm(data) => {
-            report(
-                errors,
-                CheckError::new(
-                    CheckErrorKind::UnknownForm,
-                    format!(
-                        "unknown form `{}` has no checker disposition (typed-node boundary)",
-                        data.head
-                    ),
-                    vec![],
+        deep::Expr::UnknownForm(data) => report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::UnknownForm,
+                format!(
+                    "unknown form `{}` has no checker disposition (typed-node boundary)",
+                    data.head
                 ),
-            )
-        }
+                vec![],
+            ),
+        ),
     };
 
     if !matches!(result, Type::Error(_)) {

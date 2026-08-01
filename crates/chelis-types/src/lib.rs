@@ -8,7 +8,9 @@ pub mod errors;
 pub mod fitness;
 pub mod infer;
 pub mod invariants;
+pub mod known_tags;
 pub mod linearity;
+pub mod manifest;
 pub mod observation;
 pub(crate) mod opacity;
 pub(crate) mod pipe_stage;
@@ -23,7 +25,10 @@ mod builtins;
 #[cfg(test)]
 mod source_arch;
 
-pub use builtins::{BUILTIN_NAMES, ShapeClass, builtin_env, shape_class};
+pub use builtins::{
+    BUILTIN_NAMES, BUILTINS, BuiltinDecl, Realizability, ShapeClass, builtin_decl, builtin_env,
+    realizability, shape_class,
+};
 pub use chelis_vocab::EffectKind;
 pub use context::TypeEnv;
 pub use fitness::{

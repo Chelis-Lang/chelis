@@ -7,6 +7,21 @@
 //! - [`optimize`]: Basic optimization passes (constant folding, DCE, CSE).
 //! - [`verify`]: Structural verification of DAG invariants.
 
+/// Primitive types the eval target's tensor-DAG evaluator can realize.
+/// The evaluator stores all values as `Vec<f64>` and renders at declared
+/// precision, so it can deliver any numeric prim.
+pub const EVAL_TENSOR_CAPABLE_PRIMS: &[chelis_types::types::Prim] = &[
+    chelis_types::types::Prim::F32,
+    chelis_types::types::Prim::F64,
+    chelis_types::types::Prim::Bool,
+    chelis_types::types::Prim::Bf16,
+    chelis_types::types::Prim::F16,
+    chelis_types::types::Prim::Int8,
+    chelis_types::types::Prim::Int16,
+    chelis_types::types::Prim::Int32,
+    chelis_types::types::Prim::Int64,
+];
+
 pub mod analysis;
 pub mod dag;
 pub mod eval;

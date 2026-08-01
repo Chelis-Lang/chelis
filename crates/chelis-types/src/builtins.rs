@@ -160,6 +160,775 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "clamp",
 ];
 
+/// Lane realizability declaration for a builtin. Part of `BuiltinDecl`.
+/// Determines whether the tensor-DAG path or host path realizes this op.
+///
+/// This is NOT `#[derive(Default)]` — omitting realizability on a new
+/// `BuiltinDecl` entry must be a compile error, not a silent default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Realizability {
+    /// Both lanes can realize this op (when types permit).
+    Universal,
+    /// Only the host lane can realize this op, regardless of types.
+    HostOnly,
+    /// Tensor-lane when the resolved type is tensor; host-only when scalar.
+    /// The precision-capability check (def-level, issue #912 Task 6) is
+    /// separate — it is NOT encoded here.
+    TensorAtTensorType,
+}
+
+/// A builtin's complete declaration: name, realizability, and shape class.
+/// All fields are required — adding a builtin without any field is a
+/// compile error (missing struct field). No `Default` implementation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BuiltinDecl {
+    pub name: &'static str,
+    pub realizability: Realizability,
+    pub shape_class: ShapeClass,
+}
+
+/// The consolidated builtin table. Single source of truth for builtin
+/// metadata. Each entry declares name, realizability, and shape class.
+/// Omitting any field is a compile error.
+pub const BUILTINS: &[BuiltinDecl] = &[
+    // ─── Tensor elementwise (Universal, Identity) ────────────────────
+    BuiltinDecl {
+        name: "add",
+        realizability: Realizability::TensorAtTensorType,
+        shape_class: ShapeClass::Identity,
+    },
+    BuiltinDecl {
+        name: "mul",
+        realizability: Realizability::TensorAtTensorType,
+        shape_class: ShapeClass::Identity,
+    },
+    BuiltinDecl {
+        name: "sub",
+        realizability: Realizability::TensorAtTensorType,
+        shape_class: ShapeClass::Identity,
+    },
+    BuiltinDecl {
+        name: "div",
+        realizability: Realizability::TensorAtTensorType,
+        shape_class: ShapeClass::Identity,
+    },
+    BuiltinDecl {
+        name: "floor_div",
+        realizability: Realizability::TensorAtTensorType,
+        shape_class: ShapeClass::Identity,
+    },
+    BuiltinDecl {
+        name: "trunc_div",
+        realizability: Realizability::TensorAtTensorType,
+        shape_class: ShapeClass::Identity,
+    },
+    BuiltinDecl {
+        name: "max_elem",
+        realizability: Realizability::TensorAtTensorType,
+        shape_class: ShapeClass::Identity,
+    },
+    BuiltinDecl {
+        name: "min_elem",
+        realizability: Realizability::TensorAtTensorType,
+        shape_class: ShapeClass::Identity,
+    },
+    BuiltinDecl {
+        name: "neg",
+        realizability: Realizability::TensorAtTensorType,
+        shape_class: ShapeClass::Identity,
+    },
+    BuiltinDecl {
+        name: "recip",
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Identity,
+    },
+    BuiltinDecl {
+        name: "exp",
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Identity,
+    },
+    BuiltinDecl {
+        name: "log",
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Identity,
+    },
+    BuiltinDecl {
+        name: "sin",
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Identity,
+    },
+    BuiltinDecl {
+        name: "sqrt",
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Identity,
+    },
+    BuiltinDecl {
+        name: "cos",
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Identity,
+    },
+    BuiltinDecl {
+        name: "tan",
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Identity,
+    },
+    BuiltinDecl {
+        name: "atan",
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Identity,
+    },
+    BuiltinDecl {
+        name: "abs",
+        realizability: Realizability::TensorAtTensorType,
+        shape_class: ShapeClass::Identity,
+    },
+    BuiltinDecl {
+        name: "floor",
+        realizability: Realizability::TensorAtTensorType,
+        shape_class: ShapeClass::Identity,
+    },
+    BuiltinDecl {
+        name: "ceil",
+        realizability: Realizability::TensorAtTensorType,
+        shape_class: ShapeClass::Identity,
+    },
+    BuiltinDecl {
+        name: "round",
+        realizability: Realizability::TensorAtTensorType,
+        shape_class: ShapeClass::Identity,
+    },
+    BuiltinDecl {
+        name: "relu",
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Identity,
+    },
+    BuiltinDecl {
+        name: "sigmoid",
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Identity,
+    },
+    BuiltinDecl {
+        name: "tanh",
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Identity,
+    },
+    BuiltinDecl {
+        name: "silu",
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Identity,
+    },
+    BuiltinDecl {
+        name: "gelu",
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Identity,
+    },
+    BuiltinDecl {
+        name: "uniform_like",
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Identity,
+    },
+    BuiltinDecl {
+        name: "cmplt",
+        realizability: Realizability::TensorAtTensorType,
+        shape_class: ShapeClass::Identity,
+    },
+    BuiltinDecl {
+        name: "eq",
+        realizability: Realizability::TensorAtTensorType,
+        shape_class: ShapeClass::Identity,
+    },
+    BuiltinDecl {
+        name: "neq",
+        realizability: Realizability::TensorAtTensorType,
+        shape_class: ShapeClass::Identity,
+    },
+    BuiltinDecl {
+        name: "lt",
+        realizability: Realizability::TensorAtTensorType,
+        shape_class: ShapeClass::Identity,
+    },
+    BuiltinDecl {
+        name: "gt",
+        realizability: Realizability::TensorAtTensorType,
+        shape_class: ShapeClass::Identity,
+    },
+    BuiltinDecl {
+        name: "lte",
+        realizability: Realizability::TensorAtTensorType,
+        shape_class: ShapeClass::Identity,
+    },
+    BuiltinDecl {
+        name: "gte",
+        realizability: Realizability::TensorAtTensorType,
+        shape_class: ShapeClass::Identity,
+    },
+    BuiltinDecl {
+        name: "mod",
+        realizability: Realizability::TensorAtTensorType,
+        shape_class: ShapeClass::Identity,
+    },
+    BuiltinDecl {
+        name: "bitand",
+        realizability: Realizability::TensorAtTensorType,
+        shape_class: ShapeClass::Identity,
+    },
+    BuiltinDecl {
+        name: "bitor",
+        realizability: Realizability::TensorAtTensorType,
+        shape_class: ShapeClass::Identity,
+    },
+    BuiltinDecl {
+        name: "bitxor",
+        realizability: Realizability::TensorAtTensorType,
+        shape_class: ShapeClass::Identity,
+    },
+    BuiltinDecl {
+        name: "shl",
+        realizability: Realizability::TensorAtTensorType,
+        shape_class: ShapeClass::Identity,
+    },
+    BuiltinDecl {
+        name: "shr",
+        realizability: Realizability::TensorAtTensorType,
+        shape_class: ShapeClass::Identity,
+    },
+    BuiltinDecl {
+        name: "and",
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Identity,
+    },
+    BuiltinDecl {
+        name: "or",
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Identity,
+    },
+    BuiltinDecl {
+        name: "not",
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Identity,
+    },
+    BuiltinDecl {
+        name: "where",
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Identity,
+    },
+    BuiltinDecl {
+        name: "clamp",
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Identity,
+    },
+    // ─── Reductions (Universal, NameTracked) ─────────────────────────
+    BuiltinDecl {
+        name: "softmax",
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Rewriting,
+    },
+    BuiltinDecl {
+        name: "normalize",
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Rewriting,
+    },
+    BuiltinDecl {
+        name: "mean",
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::NameTracked,
+    },
+    BuiltinDecl {
+        name: "sum",
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::NameTracked,
+    },
+    BuiltinDecl {
+        name: "max_reduce",
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::NameTracked,
+    },
+    BuiltinDecl {
+        name: "min_reduce",
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::NameTracked,
+    },
+    BuiltinDecl {
+        name: "prod_reduce",
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::NameTracked,
+    },
+    BuiltinDecl {
+        name: "argmax_reduce",
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::NameTracked,
+    },
+    BuiltinDecl {
+        name: "argmin_reduce",
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::NameTracked,
+    },
+    // ─── Windowed reductions ─────────────────────────────────────────
+    BuiltinDecl {
+        name: "reduce_window_max",
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Rewriting,
+    },
+    BuiltinDecl {
+        name: "reduce_window_min",
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Rewriting,
+    },
+    BuiltinDecl {
+        name: "reduce_window_sum",
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Rewriting,
+    },
+    BuiltinDecl {
+        name: "reduce_window_mean",
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Rewriting,
+    },
+    // ─── Shape ops (Universal, Rewriting) ────────────────────────────
+    BuiltinDecl {
+        name: "matmul",
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Rewriting,
+    },
+    BuiltinDecl {
+        name: "layer_norm",
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Rewriting,
+    },
+    BuiltinDecl {
+        name: "conv2d",
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Rewriting,
+    },
+    BuiltinDecl {
+        name: "reshape",
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Rewriting,
+    },
+    BuiltinDecl {
+        name: "permute",
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Rewriting,
+    },
+    BuiltinDecl {
+        name: "expand",
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::NameTracked,
+    },
+    BuiltinDecl {
+        name: "pad",
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Rewriting,
+    },
+    BuiltinDecl {
+        name: "shrink",
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Rewriting,
+    },
+    BuiltinDecl {
+        name: "stride",
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Rewriting,
+    },
+    BuiltinDecl {
+        name: "gather",
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Rewriting,
+    },
+    BuiltinDecl {
+        name: "scatter",
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+    },
+    BuiltinDecl {
+        name: "scatter_replace",
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Rewriting,
+    },
+    BuiltinDecl {
+        name: "scatter_elements",
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Rewriting,
+    },
+    BuiltinDecl {
+        name: "einsum",
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+    },
+    BuiltinDecl {
+        name: "split",
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+    },
+    BuiltinDecl {
+        name: "cumsum",
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+    },
+    BuiltinDecl {
+        name: "sort",
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+    },
+    BuiltinDecl {
+        name: "diagonal",
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+    },
+    BuiltinDecl {
+        name: "trace",
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+    },
+    // ─── IO / effects (HostOnly) ─────────────────────────────────────
+    BuiltinDecl {
+        name: "print",
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+    },
+    BuiltinDecl {
+        name: "fail",
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+    },
+    BuiltinDecl {
+        name: "debug",
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+    },
+    BuiltinDecl {
+        name: "read_file",
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+    },
+    BuiltinDecl {
+        name: "write_file",
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+    },
+    BuiltinDecl {
+        name: "read_lines",
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+    },
+    BuiltinDecl {
+        name: "read_bytes",
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+    },
+    BuiltinDecl {
+        name: "file_exists",
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+    },
+    BuiltinDecl {
+        name: "list_dir",
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+    },
+    BuiltinDecl {
+        name: "mmap_file",
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+    },
+    BuiltinDecl {
+        name: "mmap_read",
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+    },
+    BuiltinDecl {
+        name: "mmap_len",
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+    },
+    BuiltinDecl {
+        name: "process_run",
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+    },
+    // ─── String ops (HostOnly) ───────────────────────────────────────
+    BuiltinDecl {
+        name: "string_len",
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+    },
+    BuiltinDecl {
+        name: "string_concat",
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+    },
+    BuiltinDecl {
+        name: "string_slice",
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+    },
+    BuiltinDecl {
+        name: "string_contains",
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+    },
+    BuiltinDecl {
+        name: "string_starts_with",
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+    },
+    BuiltinDecl {
+        name: "string_ends_with",
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+    },
+    BuiltinDecl {
+        name: "string_trim",
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+    },
+    BuiltinDecl {
+        name: "to_string",
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+    },
+    BuiltinDecl {
+        name: "to_int",
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+    },
+    BuiltinDecl {
+        name: "to_float",
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+    },
+    // ─── Tensor introspection (HostOnly at scalar type) ──────────────
+    BuiltinDecl {
+        name: "rank",
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+    },
+    BuiltinDecl {
+        name: "shape",
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+    },
+    BuiltinDecl {
+        name: "numel",
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+    },
+    BuiltinDecl {
+        name: "tensor_to_scalar",
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+    },
+    BuiltinDecl {
+        name: "scalar_to_tensor",
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Rewriting,
+    },
+    // ─── List ops (HostOnly) ─────────────────────────────────────────
+    BuiltinDecl {
+        name: "len",
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+    },
+    BuiltinDecl {
+        name: "index",
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+    },
+    BuiltinDecl {
+        name: "append",
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+    },
+    BuiltinDecl {
+        name: "concat",
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+    },
+    BuiltinDecl {
+        name: "take",
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+    },
+    BuiltinDecl {
+        name: "drop",
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+    },
+    BuiltinDecl {
+        name: "chunk",
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+    },
+    BuiltinDecl {
+        name: "range",
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+    },
+    BuiltinDecl {
+        name: "map",
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+    },
+    BuiltinDecl {
+        name: "filter",
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+    },
+    BuiltinDecl {
+        name: "fold",
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+    },
+    BuiltinDecl {
+        name: "scan",
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+    },
+    BuiltinDecl {
+        name: "tensor_scan",
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+    },
+    BuiltinDecl {
+        name: "partition",
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+    },
+    BuiltinDecl {
+        name: "flat_map",
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+    },
+    BuiltinDecl {
+        name: "flatten",
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+    },
+    BuiltinDecl {
+        name: "zip",
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+    },
+    BuiltinDecl {
+        name: "enumerate",
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+    },
+    // ─── Dict ops (HostOnly) ─────────────────────────────────────────
+    BuiltinDecl {
+        name: "dict_of",
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+    },
+    BuiltinDecl {
+        name: "dict_get",
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+    },
+    BuiltinDecl {
+        name: "dict_contains",
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+    },
+    BuiltinDecl {
+        name: "dict_remove",
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+    },
+    BuiltinDecl {
+        name: "dict_insert",
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+    },
+    BuiltinDecl {
+        name: "dict_merge",
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+    },
+    BuiltinDecl {
+        name: "dict_keys",
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+    },
+    BuiltinDecl {
+        name: "dict_values",
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+    },
+    BuiltinDecl {
+        name: "dict_entries",
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+    },
+    // ─── Tensor conversion (HostOnly) ────────────────────────────────
+    BuiltinDecl {
+        name: "to_tensor",
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+    },
+    BuiltinDecl {
+        name: "to_list",
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+    },
+    BuiltinDecl {
+        name: "pad_sequences",
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+    },
+    BuiltinDecl {
+        name: "pad_sequences_to",
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+    },
+    // ─── Test builtins (HostOnly) ────────────────────────────────────
+    BuiltinDecl {
+        name: "test_assert",
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+    },
+    BuiltinDecl {
+        name: "test_assert_eq_f32",
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+    },
+    BuiltinDecl {
+        name: "test_assert_eq_int",
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+    },
+    BuiltinDecl {
+        name: "test_assert_eq_bool",
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+    },
+    BuiltinDecl {
+        name: "test_assert_eq_string",
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+    },
+    BuiltinDecl {
+        name: "test_assert_close_tensor",
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+    },
+    BuiltinDecl {
+        name: "test_assert_eq_tensor_int64",
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+    },
+];
+
+/// Look up a builtin's declaration by name. Returns `None` for non-builtins.
+pub fn builtin_decl(name: &str) -> Option<&'static BuiltinDecl> {
+    BUILTINS.iter().find(|b| b.name == name)
+}
+
+/// Look up a builtin's realizability by name.
+pub fn realizability(name: &str) -> Option<Realizability> {
+    builtin_decl(name).map(|b| b.realizability)
+}
+
 /// Shape semantics of a builtin for the Tier-2 rank-polymorphism
 /// Body-Discipline check (`spec/design/rank_polymorphism.md` §Soundness
 /// Boundary). Keyed on SHAPE SEMANTICS, **not** the HM scheme: `relu`,
@@ -1592,5 +2361,38 @@ mod tests {
 
         let mut subst = Subst::new();
         assert!(unify(&add_ty, &bad_fn, &mut subst).is_err());
+    }
+
+    /// Issue #912: BUILTINS table must contain every entry from BUILTIN_NAMES
+    /// and vice versa. This ensures the consolidated table doesn't drift.
+    #[test]
+    fn builtins_table_matches_builtin_names() {
+        use std::collections::BTreeSet;
+        let table_names: BTreeSet<&str> = super::BUILTINS.iter().map(|b| b.name).collect();
+        let array_names: BTreeSet<&str> = super::BUILTIN_NAMES.iter().copied().collect();
+
+        let in_table_not_array: Vec<&str> = table_names.difference(&array_names).copied().collect();
+        let in_array_not_table: Vec<&str> = array_names.difference(&table_names).copied().collect();
+
+        assert!(
+            in_table_not_array.is_empty() && in_array_not_table.is_empty(),
+            "BUILTINS table and BUILTIN_NAMES must contain the same names.\n\
+             In BUILTINS but not BUILTIN_NAMES: {in_table_not_array:?}\n\
+             In BUILTIN_NAMES but not BUILTINS: {in_array_not_table:?}"
+        );
+    }
+
+    /// Issue #912: every BUILTINS entry's shape_class must match the existing
+    /// shape_class() function (consistency during migration).
+    #[test]
+    fn builtins_table_shape_class_consistent() {
+        for decl in super::BUILTINS {
+            assert_eq!(
+                super::shape_class(decl.name),
+                decl.shape_class,
+                "shape_class mismatch for builtin `{}`",
+                decl.name
+            );
+        }
     }
 }

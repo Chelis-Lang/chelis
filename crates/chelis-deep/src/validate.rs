@@ -237,10 +237,9 @@ fn validate_tag_shape(
         DeepTag::Params => {
             let all_names = list.elements.iter().skip(2).all(|child| match child {
                 Expr::Atom(crate::ast::Atom::Name(_), _) => true,
-                Expr::MetaExpr(meta, _) => matches!(
-                    meta.expr.as_ref(),
-                    Expr::Atom(crate::ast::Atom::Name(_), _)
-                ),
+                Expr::MetaExpr(meta, _) => {
+                    matches!(meta.expr.as_ref(), Expr::Atom(crate::ast::Atom::Name(_), _))
+                }
                 Expr::List(inner, _) => {
                     inner.elements.len() == 2
                         && matches!(

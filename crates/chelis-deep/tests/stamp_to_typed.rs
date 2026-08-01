@@ -4,10 +4,8 @@
 //! list acceptance at binder slots, and the #858 case (misspelled Module
 //! child).
 
-use chelis_deep::{
-    parse_and_stamp, parse_raw_str, stamp_to_typed, Expr, RawExpr, StampErrorKind,
-};
 use chelis_deep::tag::DeepTag;
+use chelis_deep::{Expr, RawExpr, StampErrorKind, parse_and_stamp, parse_raw_str, stamp_to_typed};
 
 // ── Headline: (var {} x) → Expr::Node with tag Var ──────────────────
 
@@ -93,9 +91,15 @@ fn params_children_are_binder_names() {
                         "first element should be Name(\"params\")"
                     );
                     // Elements 2..5 are the param names
-                    assert!(matches!(&elems[2], Expr::Atom(chelis_deep::Atom::Name(s), _) if s == "x"));
-                    assert!(matches!(&elems[3], Expr::Atom(chelis_deep::Atom::Name(s), _) if s == "y"));
-                    assert!(matches!(&elems[4], Expr::Atom(chelis_deep::Atom::Name(s), _) if s == "z"));
+                    assert!(
+                        matches!(&elems[2], Expr::Atom(chelis_deep::Atom::Name(s), _) if s == "x")
+                    );
+                    assert!(
+                        matches!(&elems[3], Expr::Atom(chelis_deep::Atom::Name(s), _) if s == "y")
+                    );
+                    assert!(
+                        matches!(&elems[4], Expr::Atom(chelis_deep::Atom::Name(s), _) if s == "z")
+                    );
                 }
                 other => panic!("expected BareList at Fn binder slot, got: {other:?}"),
             }

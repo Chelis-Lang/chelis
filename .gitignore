@@ -56,3 +56,4 @@ const_vec.h
 chelis_runtime.h
 chelis_blas.h
 .pi/
+f32_print_912

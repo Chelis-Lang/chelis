@@ -1756,7 +1756,7 @@ fn collect_numeric_tprims(expr: &Expr, prims: &mut BTreeSet<String>) {
     match expr {
         Expr::List(list, _) => {
             if list.tag() == Some(DeepTag::TPrim)
-                && let Some(Expr::Atom(Atom::Symbol(name), _)) = list.elements.get(2)
+                && let Some(Expr::Atom(Atom::Name(name), _)) = list.elements.get(2)
                 && NUMERIC_PRIMS.contains(&name.as_str())
             {
                 prims.insert(name.clone());
@@ -1771,13 +1771,13 @@ fn collect_numeric_tprims(expr: &Expr, prims: &mut BTreeSet<String>) {
             }
         }
         Expr::MetaExpr(me, _) => collect_numeric_tprims(&me.expr, prims),
-        Expr::Atom(..) => {}
+        Expr::Atom(..) | Expr::Node(..) | Expr::BareList(..) | Expr::UnknownForm(..) => {}
     }
 }
 
 fn deftype_name(list: &List) -> String {
     for e in list.elements.iter().skip(2) {
-        if let Expr::Atom(Atom::Symbol(name), _) = e {
+        if let Expr::Atom(Atom::Name(name), _) = e {
             return name.clone();
         }
     }
@@ -1785,7 +1785,7 @@ fn deftype_name(list: &List) -> String {
 }
 
 fn symbol(expr: &Expr) -> Option<&str> {
-    if let Expr::Atom(Atom::Symbol(name), _) = expr {
+    if let Expr::Atom(Atom::Name(name), _) = expr {
         Some(name)
     } else {
         None
@@ -1909,7 +1909,7 @@ fn scan_deftypes(exprs: &[Expr], file_label: &str, rows: &mut Vec<Row>) {
                 }
             }
             Expr::MetaExpr(me, _) => walk(&me.expr, file_label, rows),
-            Expr::Atom(..) => {}
+            Expr::Atom(..) | Expr::Node(..) | Expr::BareList(..) | Expr::UnknownForm(..) => {}
         }
     }
     for e in exprs {
@@ -2352,13 +2352,13 @@ fn planted_deftype_with_f64_variant_is_detected() {
     let tprim = Expr::node(
         DeepTag::TPrim,
         Default::default(),
-        vec![Expr::Atom(Atom::Symbol("f64".to_string()), span)],
+        vec![Expr::Atom(Atom::Name("f64".to_string()), span)],
         span,
     );
     let deftype = Expr::node(
         DeepTag::Deftype,
         Default::default(),
-        vec![Expr::Atom(Atom::Symbol("Json".to_string()), span), tprim],
+        vec![Expr::Atom(Atom::Name("Json".to_string()), span), tprim],
         span,
     );
     let mut rows = Vec::new();
@@ -2902,14 +2902,14 @@ fn planted_numeric_adt(variant_name: &str) -> Expr {
     let tprim = Expr::node(
         DeepTag::TPrim,
         Default::default(),
-        vec![Expr::Atom(Atom::Symbol("f64".to_string()), span)],
+        vec![Expr::Atom(Atom::Name("f64".to_string()), span)],
         span,
     );
     let variant = Expr::node(
         DeepTag::Variant,
         Default::default(),
         vec![
-            Expr::Atom(Atom::Symbol(variant_name.to_string()), span),
+            Expr::Atom(Atom::Name(variant_name.to_string()), span),
             tprim,
         ],
         span,
@@ -2918,7 +2918,7 @@ fn planted_numeric_adt(variant_name: &str) -> Expr {
         DeepTag::Deftype,
         Default::default(),
         vec![
-            Expr::Atom(Atom::Symbol("Json".to_string()), span),
+            Expr::Atom(Atom::Name("Json".to_string()), span),
             Expr::List(List { elements: vec![] }, span),
             variant,
         ],
@@ -3265,20 +3265,20 @@ fn std_adt_integer_carrier_is_numeric_op_not_a_seam() {
     let tprim = Expr::node(
         DeepTag::TPrim,
         Default::default(),
-        vec![Expr::Atom(Atom::Symbol("int64".to_string()), span)],
+        vec![Expr::Atom(Atom::Name("int64".to_string()), span)],
         span,
     );
     let variant = Expr::node(
         DeepTag::Variant,
         Default::default(),
-        vec![Expr::Atom(Atom::Symbol("JsonInt".to_string()), span), tprim],
+        vec![Expr::Atom(Atom::Name("JsonInt".to_string()), span), tprim],
         span,
     );
     let deftype = Expr::node(
         DeepTag::Deftype,
         Default::default(),
         vec![
-            Expr::Atom(Atom::Symbol("Json".to_string()), span),
+            Expr::Atom(Atom::Name("Json".to_string()), span),
             Expr::List(List { elements: vec![] }, span),
             variant,
         ],

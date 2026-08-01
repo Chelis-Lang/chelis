@@ -123,19 +123,14 @@ fn expected_stdout(package_root: &Path, snippet: &str) -> String {
     let ctx = compile_reef_context(Path::new(""), package_root).expect("compile_reef_context");
     let result = eval_in_context(&ctx, snippet).expect("eval_in_context");
     let mut lines = result.transcript.clone();
-    if result.roots.len() == 1 {
-        if let Some(root) = result.roots.first() {
-            lines.push(root_display(root));
-        }
-    } else {
-        for (index, root) in result.roots.iter().enumerate() {
-            let name = root.name.clone().unwrap_or_else(|| format!("_{index}"));
-            lines.push(format!(
-                "{} = {}",
-                display_root_name(&name),
-                root_display(root)
-            ));
-        }
+    // Issue #912 [05-OBS-6]: always label, matching format_eval_result.
+    for (index, root) in result.roots.iter().enumerate() {
+        let name = root.name.clone().unwrap_or_else(|| format!("_{index}"));
+        lines.push(format!(
+            "{} = {}",
+            display_root_name(&name),
+            root_display(root)
+        ));
     }
     let mut out = lines.join("\n");
     if !out.is_empty() {

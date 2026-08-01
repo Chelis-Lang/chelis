@@ -55,7 +55,7 @@ fn host_eval_two_level_nested_zero_arg_i32() {
 
     // chelis#732 P1 ([05-OBS-4]/[05-OBS-2]): scalar roots render bare,
     // integers as integers.
-    eval_file(&fixture).success().stdout("42\n");
+    eval_file(&fixture).success().stdout("result = 42\n");
 }
 
 /// Three-level zero-arg chain. Each level returns f32 via the bare-def
@@ -76,7 +76,7 @@ fn host_eval_three_level_nested_zero_arg_f32() {
     // rendering (pinned value-level by the observation harness).
     eval_file(&fixture)
         .success()
-        .stdout(predicate::str::starts_with("3.14"));
+        .stdout(predicate::str::starts_with("result = 3.14"));
 }
 
 /// Zero-arg fn-call used as a subexpression inside a non-trivial app.
@@ -89,7 +89,7 @@ fn host_eval_zero_arg_in_subexpression() {
     let fixture = dir.path().join("zero_arg_in_subexpr.ch");
     write_file(&fixture, "def go -> i32 = 7\nresult = add(go(), 1)\n");
 
-    eval_file(&fixture).success().stdout("8\n");
+    eval_file(&fixture).success().stdout("result = 8\n");
 }
 
 /// Zero-arg fn-call inside another zero-arg fn body. `def go = add(helper(), 3)`
@@ -105,7 +105,7 @@ fn host_eval_zero_arg_inside_zero_arg_body() {
          result = go()\n",
     );
 
-    eval_file(&fixture).success().stdout("8\n");
+    eval_file(&fixture).success().stdout("result = 8\n");
 }
 
 /// Zero-arg fn returning bool.
@@ -115,7 +115,7 @@ fn host_eval_zero_arg_bool() {
     let fixture = dir.path().join("zero_arg_bool.ch");
     write_file(&fixture, "def go -> bool = true\nresult = go()\n");
 
-    eval_file(&fixture).success().stdout("true\n");
+    eval_file(&fixture).success().stdout("result = true\n");
 }
 
 /// Zero-arg fn returning large i64 (above f32 representable-int range).
@@ -129,5 +129,5 @@ fn host_eval_zero_arg_i64_large_value() {
 
     eval_file(&fixture)
         .success()
-        .stdout(predicate::str::contains("9999999999"));
+        .stdout(predicate::str::contains("result = 9999999999"));
 }
