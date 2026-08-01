@@ -1371,12 +1371,15 @@ schema.)*
 
 ---
 
-## 8. Observation And Formatting Contract (Ratified At chelis#732 Phase 1; Both Lanes Conformant Since Phase 2 Except The Annexed Cells Listed Below)
+## 8. Observation And Formatting Contract (Payload Ratified At chelis#732 Phase 1; Root-Envelope Acceptance Pending chelis#1023)
 
 **Status banner:** atoms [05-OBS-1..5] were RATIFIED at chelis#732
 Phase 1 (2026-07-20), which landed `format_element` (the single
 renderer, `chelis-types::observation`) and routed every EVAL-lane exit
-through it. chelis#732 Phase 2 (2026-07-24) brought the compiled C lane
+through it. [05-OBS-6] was added for chelis#912 on 2026-07-31; its
+always-labelled prefix is live, while its manifested root-order and
+unavailable-root acceptance remain under chelis#1023. chelis#732 Phase 2
+(2026-07-24) brought the compiled C lane
 onto the same grammar: the emitted print helper is GENERATED from an
 exhaustive `Prim` match, every compiled float exit routes through the
 runtime's `chelis_format_shortest` (byte-locked against
@@ -1393,9 +1396,8 @@ an [05-OBS-1] violation in the eval lane); the compiled lane's untagged
 f64 value box, which renders narrower float elements (f32 as well as
 f16/bf16) at f64-image width through `to_list` and list/tuple boxing -
 faithful parse-back, not the own-width shortest form (chelis#865, the
-chelis#729/#686 capacity family); and unit-valued single-print-root
-LABELING (chelis#862 - a root-naming issue outside these atoms). Every
-annexed cell carries an `#[ignore]`d red test naming its owning issue,
+chelis#729/#686 capacity family). Every remaining annexed cell carries
+an `#[ignore]`d red test naming its owning issue,
 and none of them is a silent skip: the phase oracle
 (`.venv/bin/python scripts/faithful_observation_phase2_oracle.py`) holds
 the complete ledger, requires the harness's ignore inventory to equal
@@ -1508,7 +1510,11 @@ cut with NO marker, chelis#749) adopted the same rule at Phase 2.)*
 
 *(Decided 2026-07-31, chelis#912. The bare form cost cross-lane byte
 identity and line-count parity, which are the two properties #687 and
-#763 are built on. Conformant in both lanes since the #912 PR.)*
+#763 are built on. The always-labelled prefix has landed in both lanes.
+Full conformance remains pending under chelis#1023 until the manifest is
+the production observation/build boundary, every owed dotted root is
+enumerated, and an unavailable root exercises the required [05-UNS-1]
+diagnostic with root, lane, and reason.)*
 
 ### 8.1 The Number Grammar (Normative Constants, Frozen At chelis#732 Phase 1)
 

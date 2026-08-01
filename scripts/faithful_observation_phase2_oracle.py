@@ -1299,10 +1299,13 @@ def doc_citation_violations(source: str) -> list[str]:
 B2_RULE_INSTRUMENTS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
     (
         1,
-        "one-time migration carve-out",
+        "bounded migration carve-outs",
         (
-            "review-rule: the migration completed at Phases 1-2; its proof "
-            "was the round-trip harness surviving both §B2.1 PRs unchanged",
+            "review-rule: the payload migrations completed at Phases 1-2, "
+            "with the round-trip harness surviving both §B2.1 PRs unchanged; "
+            "the root prefix shipped in v0.18.1, while chelis#1023 owns the "
+            "manifested root-set/order and unavailable-root acceptance this "
+            "Phase-2 oracle does not claim",
         ),
     ),
     (

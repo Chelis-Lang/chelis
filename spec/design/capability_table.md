@@ -36,6 +36,24 @@ typed boundary. In particular, f16, bf16, int8, and int16 remain known
 logical scalar types even while C-host cells are unimplemented; no target may
 substitute int64, f32, `void *`, or a default emitted value.
 
+### Pre-table root-realizability projections ([#912])
+
+The current `BuiltinDecl.realizability` declarations and target capability
+sets are pre-Phase-4 routing projections, not a third capability authority.
+Before Tables A/B exist they may remain only as exhaustive private adapters
+whose negative decisions cite the controlling atom or open implementation
+issue. At Phase 4 they derive from the exact Table-A legality and Table-B
+backend cells; adding or changing a builtin then changes the tables first and
+regenerates the projection.
+
+The root manifest may combine those generated projections with the checked
+program's root set, which is [#912]'s subject. It SHALL NOT author operation
+legality or backend support itself. Conversely, the manual `KNOWN_TAGS` table
+is not a capability-table input at all: Deep structural classification belongs
+to the typed `DeepTag` successor governed by [#908]/[#731]. Replacing that raw
+string table with exhaustive typed dispositions is a structural-AST handoff,
+not a Table-A or Table-B row expansion.
+
 ### Table A - the semantic table (target-independent; the checker's law)
 
 One row per **(builtin, surface, dtype)**:
@@ -102,6 +120,7 @@ reference lane needs conformance rows too):
 | `chelis check` reporting | A | check always reports A-`Rejected` cells because they are target-independent type facts; B-level rejections surface at build where the target is known |
 | build gates | B | generated early-UX gates per [#730] Phase 3's gate contract (earlier/more specific, never the sole defense) |
 | backend dispatch | B | macro-generated skeletons; missing arm = compile error |
+| [#912] builtin realizability and target sets | A + B | generated routing projection; target-independent legality comes from A and per-backend availability from B, with no independently authored support list |
 | conformance suite | A x B | every (`Supported`, `Implemented`) cell executed in every backend, exact agreement or [#732]'s tolerance table; every `Rejected`/`Unimplemented` cell asserts its diagnostic from every stage that renders it |
 | [#733] citations | A + B | the table schema requires controlling atom revisions; the pinned Buoy policy and Chelis shell adapter check authority, freshness, and selected-surface completeness |
 
@@ -259,4 +278,6 @@ before it lands.
 [#734]: https://github.com/Chelis-Lang/chelis/issues/734
 [#753]: https://github.com/Chelis-Lang/chelis/issues/753
 [#759]: https://github.com/Chelis-Lang/chelis/issues/759
+[#908]: https://github.com/Chelis-Lang/chelis/issues/908
+[#912]: https://github.com/Chelis-Lang/chelis/issues/912
 [#717]: https://github.com/Chelis-Lang/chelis/issues/717

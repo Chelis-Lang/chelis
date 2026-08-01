@@ -6,7 +6,10 @@ QUALIFIED PASS with findings folded, round-2 PASS); a maintainer directive
 then superseded that record with the decode-once REWORK now in the tree
 (the parser stamps `Atom::Tag`, the tag string does not exist in memory,
 and the [#858]/[#859] discoveries are fixed rather than deferred). The
-rework's fresh-context red-team round is pending. Tracking issue: [#731].
+rework's fresh-context red-team round is pending. [#908] is now replacing
+that physical carrier with private validated `Node`; the replacement is a
+successor only when it preserves the decode-once, exhaustive-disposition,
+and continuous-oracle guarantees below. Tracking issue: [#731].
 **Owning specs:** `spec/03-deep-syntax.md` (the 62-tag closed vocabulary),
 `spec/04-type-system.md` (what "checked" means per construct; its §10
 carries this plan's decided contract as current blockquote authorities
@@ -68,6 +71,16 @@ lives there); `chelis_deep::validate::VALID_TAGS` is derived from
 The serialized `.dp` form is unchanged; the in-memory `Atom` gained the
 `Tag` variant, and the typecheck cache's envelope identity check absorbs the
 representation change by invalidation.
+
+**2026-08-01 successor interlock.** The frozen Phase-3 result is the logical
+contract, not the spelling `Atom::Tag` itself: one boundary decodes the closed
+vocabulary to `DeepTag`, every semantic consumer chooses an exhaustive typed
+disposition, raw vocabulary strings are confined to pre-decode/serialization
+boundaries, and the standing oracle traverses every enforcement-relevant
+child. [#908] may replace `List + Atom::Tag` with `Node { tag: DeepTag, ... }`
+only as an at-least-as-strong successor. During the migration both carriers
+are transitional; construction of a private Node followed by normalization
+back to public List does not by itself supersede this Phase-3 contract.
 
 ## Phase 2 architecture
 
@@ -402,6 +415,18 @@ The exact Deep grammar and binder rules are normative in spec/03 §2.5.1/§2.6.
    host-lane internal spellings (`vmap-grad`, the list literal, legacy
    `ascribe`/`:`/`drop`), and the parser's own pre-stamp internals - each
    guarded by a §C1.2 loud arm or an explicit recorded check.
+
+   **Successor acceptance under [#908]/[#1023].** The physical carrier may
+   change from `Atom::Tag` to `Node::tag`, but the word "decode-once" keeps
+   its full force. Every public/compiler `.dp` ingress must return and consume
+   the stamped representation rather than validate and then reparse or
+   normalize it away; validators and the raw-tag oracle must recurse through
+   Node metadata and all enforcement-relevant children; `BareList` and
+   `UnknownForm` require explicit positive/negative-tested dispositions; and
+   `Expr::List`, `List`, `Atom::Tag`, and the bridge may be deleted only in the
+   change set that proves no active path depends on them. Until all four are
+   executable and green, the new representation is an in-progress migration,
+   not a weaker replacement for Phase 3.
 3. **The canary stays forever**: the wrapper battery is cheap, runs in the
    default suite, and is the behavioral proof the structural claims cash
    out. Every new wrapper construct SHALL add a positive and negative row in
@@ -697,6 +722,14 @@ repro joined the §C4.4 corpus with both polarities) and [#859] is fixed
 dual eval, and C host emission - with both polarities and a
 check/eval/build pipeline test; the expression dispatch split is 32/30).
 
+**Carrier transition (2026-08-01).** [#908] has landed `RawExpr`, validated
+`Node`, role-directed stamping, a consumer bridge, and several stamped CLI
+entry paths. That is useful progress, but the successor acceptance in §C4.2
+is not yet discharged: legacy List normalization and public carriers remain,
+validator/oracle coverage is incomplete, and some paths validate then consume
+a reparsed legacy tree. This paragraph records state; [#908] owns completing
+the structural cut.
+
 **Frozen at your exit:** the variant set = the vocabulary, changing only
 per B1's one-change-set rule.
 
@@ -708,7 +741,11 @@ own change set instead; see [#859].)
 **Oracle:** the build itself - the mutation test: adding a scratch
 variant to `DeepTag` must produce compile errors in `infer.rs` AND
 `lower.rs` AND the validators (verified once in the PR, recorded, then
-the scratch variant deleted); the canary and full matrix stay green.
+the scratch variant deleted); the canary and full matrix stay green. A [#908]
+successor reruns the same mutation against stamped ingress, the Node validator,
+the raw-tag walker, and every new typed disposition table. Moving the carrier
+may change the compile-error site list, but may not reduce the class of
+undecided consumers that fail closed.
 
 ---
 
@@ -727,6 +764,11 @@ the scratch variant deleted); the canary and full matrix stay green.
   capability table derives op x dtype acceptance; this plan governs
   CONSTRUCT-level totality. The two meet only in that both make `chelis
   check`'s score-1 claim honest.
+- **With [#908] (`unrepresentable_ast_domain.md`)**: this plan owns the
+  decode-once and exhaustive-consumer strength; [#908] owns making invalid AST
+  states unrepresentable by changing the carrier. `Node` is the accepted
+  successor only at §C4.2's four-part ingress/validator/disposition/deletion
+  boundary. Neither plan may declare the other complete from a bridge state.
 - **With [#721]**: none (eval ingestion, no checker code); listed so nobody
   searches for it here.
 
@@ -755,7 +797,9 @@ The checker rejects unsupported or malformed constructs loudly.
 and the always-on finalizer enforces that successful checked output contains
 neither an error type nor a missing authoritative owner stamp. Phase 3 makes a
 Deep tag without a checker disposition uncompilable through exhaustive
-`DeepTag` matching.
+`DeepTag` matching. [#908] may replace Phase 3's physical tag carrier, but its
+successor must retain the same decode-once, exhaustive-disposition, and
+continuous-oracle guarantees.
 
 [#696]: https://github.com/Chelis-Lang/chelis/pull/696
 [#703]: https://github.com/Chelis-Lang/chelis/issues/703
@@ -772,3 +816,5 @@ Deep tag without a checker disposition uncompilable through exhaustive
 [#858]: https://github.com/Chelis-Lang/chelis/issues/858
 [#859]: https://github.com/Chelis-Lang/chelis/issues/859
 [#874]: https://github.com/Chelis-Lang/chelis/issues/874
+[#908]: https://github.com/Chelis-Lang/chelis/issues/908
+[#1023]: https://github.com/Chelis-Lang/chelis/issues/1023

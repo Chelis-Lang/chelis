@@ -125,6 +125,7 @@ The remediation plans share types and call sites but own different decisions:
 | target-independent operation acceptance | capability Table A ([#729] Phase 4) |
 | per-backend implementation status | capability Table B ([#729] Phase 4) |
 | failure channel and `unsupported:` rendering | this contract |
+| root identity, manifest order, and artifact obligation | [#912] / [05-OBS-6] |
 | checker error totality | `checker_totality.md` ([#731]) |
 | value observation and formatting | `faithful_observation.md` ([#732]) |
 | atom/issue authority for capability decisions | `spec_provenance.md` ([#733]) |
@@ -1689,6 +1690,14 @@ mislabel).
 5. Deletion of gates that now only duplicate emitter rejections, with the
    cross-lane rejected-cells corpus proving the diagnostic surface
    unchanged or improved (earlier stage, same `unsupported:` content).
+6. **Root-realizability integration ([#912])**: a `HostReason` or equivalent
+   manifest reason supplies context, not authority. When an owed root cannot
+   be produced, the boundary constructs the same typed `DiagnosticKind` and
+   `RejectionAuthority` required everywhere else, naming root, lane, and
+   reason per [05-OBS-6]/[05-UNS-1]. Before Tables A/B land, the authority is
+   the validated pre-table atom/issue source; afterward it derives from the
+   deciding table cell. No free-form reason string, silent missing root, or
+   manifest-only error vocabulary becomes a parallel failure channel.
 
 **Frozen at your exit:** the gate inventory and contract; the
 `DiagnosticKind` vocabulary and wire spellings; the
@@ -1697,7 +1706,8 @@ mislabel).
 **Explicitly not yours:** the capability table itself ([#729] Phase 4);
 span threading and the check-JSON serialization mechanics
 ([#883]/[#886], §I2); lifting the §C2 STATUS relaxation (nothing gains
-`Serialize`).
+`Serialize`); deciding which roots exist, their order, or whether an artifact
+is owed ([#912]).
 
 **Oracle:** the rejected-cells corpus stable (or improved-with-updated-
 expectations in the same PR) - substring-level today by design, with
@@ -1914,6 +1924,11 @@ boundary, pinned:
   `Unimplemented` is Table A/B's decision; when Table B lands, its
   cells populate the enum through the same boundary the pre-table
   adapter uses today. This plan never authors a capability decision.
+- **[#912] consumes this failure channel; it does not fork it.** Root identity,
+  manifest order, and artifact routing remain [#912]'s decisions. A root-level
+  `HostReason` is diagnostic context. The deciding atom/issue enters through
+  `RejectionAuthority`, and `DiagnosticKind` supplies the stable machine
+  spelling; after Tables A/B land, their cell supplies that authority.
 
 ## I2. Interlocks added 2026-07-30
 
@@ -1990,6 +2005,7 @@ and never depends on predicting a path.
 [#682]: https://github.com/Chelis-Lang/chelis/issues/682
 [#687]: https://github.com/Chelis-Lang/chelis/issues/687
 [#689]: https://github.com/Chelis-Lang/chelis/issues/689
+[#691]: https://github.com/Chelis-Lang/chelis/issues/691
 [#692]: https://github.com/Chelis-Lang/chelis/issues/692
 [#696]: https://github.com/Chelis-Lang/chelis/pull/696
 [#697]: https://github.com/Chelis-Lang/chelis/issues/697
@@ -2042,3 +2058,4 @@ and never depends on predicting a path.
 [#958]: https://github.com/Chelis-Lang/chelis/issues/958
 [#959]: https://github.com/Chelis-Lang/chelis/issues/959
 [#960]: https://github.com/Chelis-Lang/chelis/issues/960
+[#912]: https://github.com/Chelis-Lang/chelis/issues/912
