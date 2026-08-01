@@ -193,8 +193,12 @@ fn collect_tree_traces(expr: &deep::Expr, path: &str, check_stamp: bool, out: &m
                 );
             }
         }
-        // #908 foundation variants: no tree traces to collect.
-        deep::Expr::Node(_, _) | deep::Expr::BareList(_, _) | deep::Expr::UnknownForm(_) => {}
+        // Bridge: reconstruct List so type-stamp checking works unchanged (#908)
+        deep::Expr::Node(node, span) => {
+            let bridged = deep::Expr::List(node.to_list(*span), *span);
+            collect_tree_traces(&bridged, path, check_stamp, out);
+        }
+        deep::Expr::BareList(_, _) | deep::Expr::UnknownForm(_) => {}
     }
 }
 

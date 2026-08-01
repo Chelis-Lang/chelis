@@ -150,7 +150,14 @@ fn expr_needs_host(
         // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
         Expr::Node(node, span) => {
             let bridged = Expr::List(node.to_list(*span), *span);
-            expr_needs_host(&bridged, lane_by_def, target_prims, type_env, reasons, inputs)
+            expr_needs_host(
+                &bridged,
+                lane_by_def,
+                target_prims,
+                type_env,
+                reasons,
+                inputs,
+            )
         }
         Expr::BareList(_, _) | Expr::UnknownForm(_) => false,
         Expr::MetaExpr(meta, _) => expr_needs_host(

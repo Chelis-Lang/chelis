@@ -1771,7 +1771,11 @@ fn collect_numeric_tprims(expr: &Expr, prims: &mut BTreeSet<String>) {
             }
         }
         Expr::MetaExpr(me, _) => collect_numeric_tprims(&me.expr, prims),
-        Expr::Atom(..) | Expr::Node(..) | Expr::BareList(..) | Expr::UnknownForm(..) => {}
+        Expr::Node(node, span) => {
+            let bridged = Expr::List(node.to_list(*span), *span);
+            collect_numeric_tprims(&bridged, prims);
+        }
+        Expr::Atom(..) | Expr::BareList(..) | Expr::UnknownForm(..) => {}
     }
 }
 
@@ -1909,7 +1913,11 @@ fn scan_deftypes(exprs: &[Expr], file_label: &str, rows: &mut Vec<Row>) {
                 }
             }
             Expr::MetaExpr(me, _) => walk(&me.expr, file_label, rows),
-            Expr::Atom(..) | Expr::Node(..) | Expr::BareList(..) | Expr::UnknownForm(..) => {}
+            Expr::Node(node, span) => {
+                let bridged = Expr::List(node.to_list(*span), *span);
+                walk(&bridged, file_label, rows);
+            }
+            Expr::Atom(..) | Expr::BareList(..) | Expr::UnknownForm(..) => {}
         }
     }
     for e in exprs {

@@ -8,9 +8,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use chelis_deep::ast::Expr;
-use chelis_deep::ast::Atom;
 use chelis_deep::Span;
+use chelis_deep::ast::Atom;
+use chelis_deep::ast::Expr;
 use chelis_types::types::Prim;
 
 use super::host_ops::render_value;
