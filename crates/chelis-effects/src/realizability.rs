@@ -39,10 +39,7 @@ pub struct RealizabilityResult {
 
 /// Infer per-def realizability for a checked program against a target's
 /// tensor-capable prims.
-pub fn infer_realizability(
-    program: &CheckedProgram,
-    target_prims: &[Prim],
-) -> RealizabilityResult {
+pub fn infer_realizability(program: &CheckedProgram, target_prims: &[Prim]) -> RealizabilityResult {
     let exprs = program.annotated_exprs();
     let type_env = program.type_env();
 
@@ -200,7 +197,9 @@ fn list_needs_host(
     let tag_str = tag.unwrap_or("");
 
     // Uppercase var references (ADT constructors) → Host.
-    if tag_str == "var" && let Some(name) = children.first().and_then(symbol_name) {
+    if tag_str == "var"
+        && let Some(name) = children.first().and_then(symbol_name)
+    {
         if name.chars().next().is_some_and(|c| c.is_uppercase()) {
             reasons.push(HostReason::StructuralForm {
                 tag: format!("var({})", name),
@@ -214,7 +213,9 @@ fn list_needs_host(
     }
 
     // App: check the callee builtin.
-    if tag_str == "app" && let Some(callee_name) = app_callee_name(list) {
+    if tag_str == "app"
+        && let Some(callee_name) = app_callee_name(list)
+    {
         // Uppercase callee (ADT constructor call) → Host.
         if callee_name.chars().next().is_some_and(|c| c.is_uppercase()) {
             reasons.push(HostReason::StructuralForm {
@@ -278,14 +279,13 @@ fn list_needs_host(
 fn get_tag(list: &List) -> Option<&str> {
     list.elements.first().and_then(|e| match e {
         Expr::Atom(Atom::Symbol(s), _) => Some(s.as_str()),
+        Expr::Atom(Atom::Tag(t), _) => Some(t.as_str()),
         _ => None,
     })
 }
 
 fn get_children(list: &List) -> &[Expr] {
-    if list.elements.len() > 2
-        && matches!(list.elements.get(1), Some(Expr::Map(_, _)))
-    {
+    if list.elements.len() > 2 && matches!(list.elements.get(1), Some(Expr::Map(_, _))) {
         &list.elements[2..]
     } else if list.elements.len() > 1 {
         &list.elements[1..]
@@ -325,7 +325,9 @@ fn app_type_is_scalar(list: &List) -> bool {
     // under the "type" key.
     if let Some(Expr::Map(meta, _)) = list.elements.get(1) {
         for (key, value) in &meta.entries {
-            if key == "type" && let Expr::List(ty_list, _) = value {
+            if key == "type"
+                && let Expr::List(ty_list, _) = value
+            {
                 return get_tag(ty_list) == Some("t-prim");
             }
         }
@@ -433,10 +435,10 @@ fn collect_manifest_entries(
     let body = children.get(1);
 
     // Skip fn-typed defs (they're callable, not roots).
-    if let Some(Expr::List(body_list, _)) = body {
-        if get_tag(body_list) == Some("fn") {
-            return;
-        }
+    if let Some(Expr::List(body_list, _)) = body
+        && get_tag(body_list) == Some("fn")
+    {
+        return;
     }
 
     let lane = realizability
@@ -459,7 +461,12 @@ fn collect_manifest_entries(
         .get(name)
         .or_else(|| body.and_then(expr_type_metadata))
         .cloned()
-        .unwrap_or_else(|| Expr::Atom(Atom::Symbol("unknown".to_string()), chelis_deep::Span::new(0, 0)));
+        .unwrap_or_else(|| {
+            Expr::Atom(
+                Atom::Symbol("unknown".to_string()),
+                chelis_deep::Span::new(0, 0),
+            )
+        });
 
     // TODO: expand tuples/ADTs into dotted names (Task 7 full implementation).
     // For now, emit a single entry per def.
@@ -475,18 +482,32 @@ fn collect_manifest_entries(
 
 fn convert_reason(r: &HostReason) -> ManifestHostReason {
     match r {
-        HostReason::HostOnlyBuiltin { name } => ManifestHostReason::HostOnlyBuiltin { name: name.clone() },
-        HostReason::ScalarTypedOp { builtin } => ManifestHostReason::ScalarTypedOp { builtin: builtin.clone() },
-        HostReason::PrecisionExceedsCapability { prim } => ManifestHostReason::PrecisionExceedsCapability { prim: *prim },
-        HostReason::StructuralForm { tag } => ManifestHostReason::StructuralForm { tag: tag.clone() },
-        HostReason::TransitiveCaller { callee } => ManifestHostReason::TransitiveCaller { callee: callee.clone() },
-        HostReason::UnrecognizedTag { tag } => ManifestHostReason::UnrecognizedTag { tag: tag.clone() },
+        HostReason::HostOnlyBuiltin { name } => {
+            ManifestHostReason::HostOnlyBuiltin { name: name.clone() }
+        }
+        HostReason::ScalarTypedOp { builtin } => ManifestHostReason::ScalarTypedOp {
+            builtin: builtin.clone(),
+        },
+        HostReason::PrecisionExceedsCapability { prim } => {
+            ManifestHostReason::PrecisionExceedsCapability { prim: *prim }
+        }
+        HostReason::StructuralForm { tag } => {
+            ManifestHostReason::StructuralForm { tag: tag.clone() }
+        }
+        HostReason::TransitiveCaller { callee } => ManifestHostReason::TransitiveCaller {
+            callee: callee.clone(),
+        },
+        HostReason::UnrecognizedTag { tag } => {
+            ManifestHostReason::UnrecognizedTag { tag: tag.clone() }
+        }
     }
 }
 
 /// Extract type metadata from an expression's metadata map.
 fn expr_type_metadata(expr: &Expr) -> Option<&Expr> {
-    let Expr::List(list, _) = expr else { return None };
+    let Expr::List(list, _) = expr else {
+        return None;
+    };
     if let Some(Expr::Map(meta, _)) = list.elements.get(1) {
         for (key, value) in &meta.entries {
             if key == "type" {
@@ -495,4 +516,85 @@ fn expr_type_metadata(expr: &Expr) -> Option<&Expr> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chelis_types::types::Prim;
+
+    fn check_program_from_source(source: &str) -> CheckedProgram {
+        let decls = chelis_surf::parser::parse_str(source).expect("parse");
+        let deep = chelis_macros::expand_program(
+            &chelis_surf::desugar::desugar_program(&decls),
+            &chelis_macros::ExpansionOptions::default(),
+        )
+        .expect("desugar")
+        .into_exprs();
+        let checked = chelis_types::check_ir_program(&deep).expect("typecheck");
+        crate::check_program(&checked).expect("effects")
+    }
+
+    const C_PRIMS: &[Prim] = &[
+        Prim::F32,
+        Prim::Bool,
+        Prim::Bf16,
+        Prim::F16,
+        Prim::Int32,
+        Prim::Int64,
+    ];
+    const EVAL_PRIMS: &[Prim] = &[
+        Prim::F32,
+        Prim::F64,
+        Prim::Bool,
+        Prim::Bf16,
+        Prim::F16,
+        Prim::Int32,
+        Prim::Int64,
+    ];
+
+    #[test]
+    fn host_only_builtin_routes_host() {
+        let checked =
+            check_program_from_source("a: List[int32] = [cast(1, int32)]\nresult = concat(a, a)\n");
+        let result = infer_realizability(&checked, C_PRIMS);
+        assert_eq!(result.lane_by_def.get("result"), Some(&Lane::Host));
+    }
+
+    #[test]
+    fn pure_tensor_def_routes_tensor() {
+        let checked =
+            check_program_from_source("x = add(to_tensor([1.0, 2.0]), to_tensor([3.0, 4.0]))\n");
+        let result = infer_realizability(&checked, C_PRIMS);
+        // to_tensor is HostOnly, so this routes Host
+        assert_eq!(result.lane_by_def.get("x"), Some(&Lane::Host));
+    }
+
+    #[test]
+    fn f64_def_routes_host_for_c_target() {
+        let checked =
+            check_program_from_source("def f(a: tensor[4, f64]) -> tensor[4, f64] = mul(a, a)\n");
+        let result = infer_realizability(&checked, C_PRIMS);
+        assert_eq!(result.lane_by_def.get("f"), Some(&Lane::Host));
+    }
+
+    #[test]
+    fn f64_def_routes_tensor_for_eval_target() {
+        let checked =
+            check_program_from_source("def f(a: tensor[4, f64]) -> tensor[4, f64] = mul(a, a)\n");
+        let result = infer_realizability(&checked, EVAL_PRIMS);
+        assert_eq!(result.lane_by_def.get("f"), Some(&Lane::Tensor));
+    }
+
+    #[test]
+    fn transitive_host_propagates() {
+        let checked = check_program_from_source(
+            "a: List[int32] = [cast(1, int32)]\nb = concat(a, a)\nc = len(b)\n",
+        );
+        let result = infer_realizability(&checked, C_PRIMS);
+        // concat is HostOnly → b is Host
+        assert_eq!(result.lane_by_def.get("b"), Some(&Lane::Host));
+        // len is also HostOnly
+        assert_eq!(result.lane_by_def.get("c"), Some(&Lane::Host));
+    }
 }

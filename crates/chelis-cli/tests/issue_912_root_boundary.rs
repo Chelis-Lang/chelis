@@ -162,8 +162,12 @@ z = print("hello")
     let (out_alone, _, _) = eval_file(source_alone);
     let (out_with, _, _) = eval_file(source_with_print_def);
     // Extract the y = ... line from each
-    let y_alone = out_alone.lines().find(|l| l.starts_with("y =") || l.contains("y ="));
-    let y_with = out_with.lines().find(|l| l.starts_with("y =") || l.contains("y ="));
+    let y_alone = out_alone
+        .lines()
+        .find(|l| l.starts_with("y =") || l.contains("y ="));
+    let y_with = out_with
+        .lines()
+        .find(|l| l.starts_with("y =") || l.contains("y ="));
     assert_eq!(
         y_alone, y_with,
         "root `y` must produce the same value regardless of cohabiting defs.\n\

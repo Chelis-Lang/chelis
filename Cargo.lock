@@ -620,6 +620,7 @@ name = "chelis-effects"
 version = "0.18.0"
 dependencies = [
  "chelis-deep",
+ "chelis-macros",
  "chelis-surf",
  "chelis-types",
  "chelis-vocab",

@@ -26,7 +26,7 @@ mod builtins;
 mod source_arch;
 
 pub use builtins::{
-    BUILTINS, BUILTIN_NAMES, BuiltinDecl, Realizability, ShapeClass, builtin_decl, builtin_env,
+    BUILTIN_NAMES, BUILTINS, BuiltinDecl, Realizability, ShapeClass, builtin_decl, builtin_env,
     realizability, shape_class,
 };
 pub use chelis_vocab::EffectKind;

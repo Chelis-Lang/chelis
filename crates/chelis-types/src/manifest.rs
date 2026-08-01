@@ -8,8 +8,8 @@ use std::collections::BTreeSet;
 
 use chelis_deep::ast::Expr;
 
-use crate::types::{Lane, Target};
 use crate::CheckedProgram;
+use crate::types::{Lane, Target};
 
 /// A single root entry in the manifest.
 #[derive(Debug, Clone)]

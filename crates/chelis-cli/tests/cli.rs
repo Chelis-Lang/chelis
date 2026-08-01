@@ -8326,8 +8326,7 @@ fn build_c_to_tensor_2d_nested_literal_matches_eval_output() {
     // `build_c_runs_top_level_tensor_add_and_matches_eval_output`
     // Issue #912 [05-OBS-6]: both lanes now label, compare directly.
     assert_eq!(
-        run_text,
-        eval_text,
+        run_text, eval_text,
         "compiled C binary stdout must equal eval stdout for nested-list to_tensor",
     );
 }

@@ -1694,10 +1694,8 @@ fn compile_source_scoped(
         &checked,
         crate::target_capability::tensor_capable_prims(chelis_types::types::Target::C),
     );
-    let _manifest = chelis_effects::realizability::compute_root_manifest(
-        &checked,
-        &realizability_result,
-    );
+    let _manifest =
+        chelis_effects::realizability::compute_root_manifest(&checked, &realizability_result);
     // Task 8 migration diff: compare manifest lane assignments against
     // the old predicate's root classification. Log disagreements.
     #[cfg(debug_assertions)]
