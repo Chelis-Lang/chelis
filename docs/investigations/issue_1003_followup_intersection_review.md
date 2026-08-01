@@ -45,9 +45,13 @@ path still has a raw-string partial tag authority, does not make the manifest
 the required observation boundary, and leaves much of its original acceptance
 surface ignored or unfinished.
 
-Current main remains red after #1026: #1019's recursive Node/List normalization
-is on the failure path for two macOS stack-safety tests. The exact-head CI run
-at `da486cad` stopped with 642 tests unexecuted behind nextest fail-fast.
+At the reconciliation base, main was red after #1026: #1019's recursive
+Node/List normalization was on the failure path for two macOS stack-safety
+tests, and the exact-head CI run at `da486cad` stopped with 642 tests
+unexecuted behind nextest fail-fast. The subsequent #1023 stabilization slice
+makes that transitional normalization iterative and records a clean 6,773-test
+workspace run without fail-fast. This repairs main without treating the bridge
+as the #908 end state.
 
 The resulting status is therefore:
 
@@ -96,7 +100,7 @@ It also recorded two roadmap handoffs outside #1003 itself:
 | [#1018](https://github.com/Chelis-Lang/chelis/pull/1018) | #912/#947 | Fixes the standalone arrow-form root instance | Does not establish manifest completeness or dotted-root behavior |
 | [#1020](https://github.com/Chelis-Lang/chelis/pull/1020) | #912/#908 interaction | Repairs false-Host results exposed by #908 and adds a realizability-based lowering-map entry point | Expands a manual raw-string table rather than replacing it with a typed total `DeepTag` classification; the old classifier remains active |
 | [#1021](https://github.com/Chelis-Lang/chelis/pull/1021) | #912 wiring | Exposes manifest data through targeted eval JSON; adds a `requires_main` parameter to the build-result seam | Every production caller passes `None`, so the build decision still searches generated C text; manifest ownership is not enforced |
-| [#1019](https://github.com/Chelis-Lang/chelis/pull/1019) | #908 producer | Runs desugar-created vocabulary nodes through validated `Node::new`; deletes `Atom::Keyword` after its parser rejection | Immediately normalizes Nodes back to Lists; introduces an unguarded recursive normalization pass and the current macOS failure path |
+| [#1019](https://github.com/Chelis-Lang/chelis/pull/1019) | #908 producer | Runs desugar-created vocabulary nodes through validated `Node::new`; deletes `Atom::Keyword` after its parser rejection | Immediately normalizes Nodes back to Lists; introduced an unguarded recursive normalization pass, subsequently made iterative by the #1023 stabilization slice; the transitional bridge itself remains |
 | [#1022](https://github.com/Chelis-Lang/chelis/pull/1022) | #908 ingress | Moves `.dp` formatting onto `parse_and_stamp_file` | Check, build, eval, cost, and compiler-api ingress remain on `parse_str_strict`; the PR documents an unresolved Binder/Syntax stamping problem |
 | [#1026](https://github.com/Chelis-Lang/chelis/pull/1026) | #908 roles and ingress | Corrects vocabulary-headed Binder/Syntax/Selector stamping; moves surf, fmt, check, build, cost, and prove CLI paths onto `parse_and_stamp_file` | Eval validates a stamped tree but then hands source to an engine that reparses it; compiler-api still uses `parse_str_strict`; validators/oracles and the legacy carrier cut remain; the controlling spec/design reconciliation is deferred to Jeff's follow-up |
 
@@ -128,7 +132,7 @@ unrepresentable throughout the public/compiler pipeline:
 - [`desugar_program`](../../crates/chelis-surf/src/desugar.rs) constructs Nodes
   internally and then normalizes the result back to Lists.
 - [`chelis-types` program entry](../../crates/chelis-types/src/infer/program.rs)
-  recursively normalizes Node, List, BareList, Map, MetaExpr, and UnknownForm
+  iteratively normalizes Node, List, BareList, Map, MetaExpr, and UnknownForm
   into another legacy tree before the main checking passes.
 - [`chelis_deep::validate`](../../crates/chelis-deep/src/validate.rs) treats
   Node, BareList, and UnknownForm as requiring no recursive validation.
@@ -143,11 +147,11 @@ unrepresentable throughout the public/compiler pipeline:
   with Jeff rather than folded into this cross-roadmap reconciliation.
 
 The remaining work is therefore not merely deletion. The stamp-role model,
-public ingestion, validators, permanent oracles, recursive stack behavior, and
-downstream representation ownership must all be corrected before the legacy
-path can be removed honestly.
+public ingestion, validators, permanent oracles, and downstream representation
+ownership must all be corrected before the legacy path can be removed
+honestly.
 
-### Current CI regression
+### Reconciliation-base CI regression and stabilization
 
 #1019 added `normalize_nodes_to_lists` and `normalize_node_to_list` to the
 checker entry path. The function recursively rebuilds existing Lists as well as
@@ -163,8 +167,19 @@ aborts these tests with signal 10:
 - `deep_app_chain_is_rejected_never_silently_passes`
 - `deep_app_chain_yields_stack_budget_diagnostic_not_sigsegv`
 
-Nextest then reports 642 tests not run because of fail-fast. Main is not green,
-and the status of those hidden tests is unknown.
+Nextest then reported 642 tests not run because of fail-fast. The #1023
+stabilization replaces that native recursion with an explicit heap worklist;
+the existing safety-net tests now return the located `stack budget exhausted`
+diagnostic, and the structural guard detector no longer needs an exemption for
+the normalizer. The full completion command then adjudicated every test:
+
+```text
+cargo nextest run --workspace --profile ci --no-fail-fast
+Summary: 6773 tests run: 6773 passed, 305 skipped
+```
+
+This closes the immediate regression and hidden-test uncertainty only. It does
+not make the Node/List bridge permanent or discharge the #908 successor work.
 
 ## #912: interpreting “all scope delivered”
 
@@ -290,10 +305,11 @@ contract migration tracked by #1023.
 
 ### Immediate stabilization
 
-1. Fix or remove #1019's unguarded recursive normalization before making any
-   further completion claim.
-2. Run the exact required main matrix and a full non-fail-fast workspace rerun
-   so the 642 hidden tests receive a result.
+1. **Done in the #1023 stabilization slice:** replace #1019's unguarded
+   recursive normalization with an explicit heap worklist.
+2. **Done locally for that exact slice:** run the full non-fail-fast workspace
+   oracle so all 6,773 tests receive a result. Required CI still gates the PR
+   head before merge.
 
 ### Complete #908 as a structural cut
 

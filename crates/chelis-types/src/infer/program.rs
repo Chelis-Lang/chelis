@@ -1197,63 +1197,202 @@ pub(super) fn collect_ir_types_with_origins<'a>(
     }
 }
 
-/// Recursively convert `Expr::Node` → `Expr::List` and `Expr::BareList` →
+/// Iteratively convert `Expr::Node` → `Expr::List` and `Expr::BareList` →
 /// `Expr::List` so the pointer-keyed type-stamp system and existing
-/// List-based inference dispatch work on a single representation. This is
-/// the transitional normalization boundary for the #908 producer switch;
-/// once all inference functions are migrated to accept Node directly, this
-/// becomes dead code.
+/// List-based inference dispatch work on a single representation. The
+/// explicit heap worklist is required because this boundary runs before the
+/// guarded inference walkers: native recursion here would abort on the same
+/// deep input those walkers must reject with a typed diagnostic. This is the
+/// transitional normalization boundary for the #908 producer switch; once
+/// all inference functions are migrated to accept Node directly, this becomes
+/// dead code.
 fn normalize_nodes_to_lists(exprs: &[deep::Expr]) -> Vec<deep::Expr> {
     exprs.iter().map(normalize_node_to_list).collect()
 }
 
 fn normalize_node_to_list(expr: &deep::Expr) -> deep::Expr {
-    match expr {
-        deep::Expr::Node(node, span) => {
-            let list = node.to_list(*span);
-            let elements = list.elements.iter().map(normalize_node_to_list).collect();
-            deep::Expr::List(deep::List { elements }, *span)
-        }
-        deep::Expr::List(list, span) => {
-            let elements = list.elements.iter().map(normalize_node_to_list).collect();
-            deep::Expr::List(deep::List { elements }, *span)
-        }
-        deep::Expr::BareList(elems, span) => {
-            let elements = elems.iter().map(normalize_node_to_list).collect();
-            deep::Expr::List(deep::List { elements }, *span)
-        }
-        deep::Expr::Map(map, span) => {
-            let entries = map
-                .entries
-                .iter()
-                .map(|(k, v)| (k.clone(), normalize_node_to_list(v)))
-                .collect();
-            deep::Expr::Map(deep::MetaMap { entries }, *span)
-        }
-        deep::Expr::MetaExpr(meta, span) => deep::Expr::MetaExpr(
-            deep::MetaExpr {
-                entries: meta
+    enum Action<'a> {
+        Visit(&'a deep::Expr),
+        FinishList {
+            element_count: usize,
+            span: Span,
+        },
+        FinishMap {
+            map: &'a deep::MetaMap,
+            span: Span,
+        },
+        FinishMetaExpr {
+            meta: &'a deep::MetaExpr,
+            span: Span,
+        },
+        FinishNode {
+            tag: DeepTag,
+            meta: &'a deep::MetaMap,
+            child_count: usize,
+            span: Span,
+        },
+        FinishUnknownForm(&'a deep::UnknownFormData),
+    }
+
+    fn split_tail(values: &mut Vec<deep::Expr>, count: usize) -> Vec<deep::Expr> {
+        let start = values
+            .len()
+            .checked_sub(count)
+            .expect("normalization action/value stacks remain balanced");
+        values.split_off(start)
+    }
+
+    let mut actions = vec![Action::Visit(expr)];
+    let mut values = Vec::new();
+
+    while let Some(action) = actions.pop() {
+        match action {
+            Action::Visit(expr) => match expr {
+                deep::Expr::Atom(atom, span) => {
+                    values.push(deep::Expr::Atom(atom.clone(), *span));
+                }
+                deep::Expr::List(list, span) => {
+                    actions.push(Action::FinishList {
+                        element_count: list.elements.len(),
+                        span: *span,
+                    });
+                    actions.extend(list.elements.iter().rev().map(Action::Visit));
+                }
+                deep::Expr::Map(map, span) => {
+                    actions.push(Action::FinishMap { map, span: *span });
+                    actions.extend(
+                        map.entries
+                            .iter()
+                            .rev()
+                            .map(|(_, value)| Action::Visit(value)),
+                    );
+                }
+                deep::Expr::MetaExpr(meta, span) => {
+                    actions.push(Action::FinishMetaExpr { meta, span: *span });
+                    actions.push(Action::Visit(&meta.expr));
+                    actions.extend(
+                        meta.entries
+                            .iter()
+                            .rev()
+                            .map(|(_, value)| Action::Visit(value)),
+                    );
+                }
+                deep::Expr::Node(node, span) => {
+                    actions.push(Action::FinishNode {
+                        tag: node.tag(),
+                        meta: node.meta(),
+                        child_count: node.child_count(),
+                        span: *span,
+                    });
+                    actions.extend(node.children_slice().iter().rev().map(Action::Visit));
+                    actions.extend(
+                        node.meta()
+                            .entries
+                            .iter()
+                            .rev()
+                            .map(|(_, value)| Action::Visit(value)),
+                    );
+                }
+                deep::Expr::BareList(elements, span) => {
+                    actions.push(Action::FinishList {
+                        element_count: elements.len(),
+                        span: *span,
+                    });
+                    actions.extend(elements.iter().rev().map(Action::Visit));
+                }
+                deep::Expr::UnknownForm(data) => {
+                    actions.push(Action::FinishUnknownForm(data));
+                    actions.extend(data.children.iter().rev().map(Action::Visit));
+                    actions.extend(
+                        data.meta
+                            .entries
+                            .iter()
+                            .rev()
+                            .map(|(_, value)| Action::Visit(value)),
+                    );
+                }
+            },
+            Action::FinishList {
+                element_count,
+                span,
+            } => {
+                let elements = split_tail(&mut values, element_count);
+                values.push(deep::Expr::List(deep::List { elements }, span));
+            }
+            Action::FinishMap { map, span } => {
+                let normalized_values = split_tail(&mut values, map.entries.len());
+                let entries = map
                     .entries
                     .iter()
-                    .map(|(k, v)| (k.clone(), normalize_node_to_list(v)))
-                    .collect(),
-                expr: Box::new(normalize_node_to_list(&meta.expr)),
-            },
-            *span,
-        ),
-        deep::Expr::UnknownForm(data) => deep::Expr::UnknownForm(Box::new(deep::UnknownFormData {
-            head: data.head.clone(),
-            meta: deep::MetaMap {
-                entries: data
+                    .zip(normalized_values)
+                    .map(|((key, _), value)| (key.clone(), value))
+                    .collect();
+                values.push(deep::Expr::Map(deep::MetaMap { entries }, span));
+            }
+            Action::FinishMetaExpr { meta, span } => {
+                let mut normalized = split_tail(&mut values, meta.entries.len() + 1);
+                let normalized_expr = normalized
+                    .pop()
+                    .expect("MetaExpr normalization visits its expression");
+                let entries = meta
+                    .entries
+                    .iter()
+                    .zip(normalized)
+                    .map(|((key, _), value)| (key.clone(), value))
+                    .collect();
+                values.push(deep::Expr::MetaExpr(
+                    deep::MetaExpr {
+                        entries,
+                        expr: Box::new(normalized_expr),
+                    },
+                    span,
+                ));
+            }
+            Action::FinishNode {
+                tag,
+                meta,
+                child_count,
+                span,
+            } => {
+                let mut normalized = split_tail(&mut values, meta.entries.len() + child_count);
+                let children = normalized.split_off(meta.entries.len());
+                let entries = meta
+                    .entries
+                    .iter()
+                    .zip(normalized)
+                    .map(|((key, _), value)| (key.clone(), value))
+                    .collect();
+                let mut elements = Vec::with_capacity(child_count + 2);
+                elements.push(deep::Expr::Atom(deep::Atom::Tag(tag), span));
+                elements.push(deep::Expr::Map(deep::MetaMap { entries }, span));
+                elements.extend(children);
+                values.push(deep::Expr::List(deep::List { elements }, span));
+            }
+            Action::FinishUnknownForm(data) => {
+                let mut normalized =
+                    split_tail(&mut values, data.meta.entries.len() + data.children.len());
+                let children = normalized.split_off(data.meta.entries.len());
+                let entries = data
                     .meta
                     .entries
                     .iter()
-                    .map(|(k, v)| (k.clone(), normalize_node_to_list(v)))
-                    .collect(),
-            },
-            children: data.children.iter().map(normalize_node_to_list).collect(),
-            span: data.span,
-        })),
-        other => other.clone(),
+                    .zip(normalized)
+                    .map(|((key, _), value)| (key.clone(), value))
+                    .collect();
+                values.push(deep::Expr::UnknownForm(Box::new(deep::UnknownFormData {
+                    head: data.head.clone(),
+                    meta: deep::MetaMap { entries },
+                    children,
+                    span: data.span,
+                })));
+            }
+        }
     }
+
+    assert_eq!(
+        values.len(),
+        1,
+        "one normalization root produces exactly one expression"
+    );
+    values.pop().expect("normalization produced its root")
 }
