@@ -15,6 +15,17 @@ pub mod observation;
 pub(crate) mod opacity;
 pub(crate) mod pipe_stage;
 pub(crate) mod session;
+#[cfg(feature = "checkpoint-compile-probe")]
+#[doc(hidden)]
+pub struct DiagnosticCheckpoint(session::DiagnosticCheckpoint);
+#[cfg(feature = "checkpoint-compile-probe")]
+#[doc(hidden)]
+pub fn checkpoint_iter_compile_probe(
+    sink: &errors::DiagnosticSink<'_>,
+    checkpoint: DiagnosticCheckpoint,
+) {
+    let _ = sink.iter_since(checkpoint.0);
+}
 pub mod types;
 pub mod unify;
 pub mod unsupported;

@@ -3483,6 +3483,65 @@ mod tests {
     use std::path::Path;
     use tempfile::TempDir;
 
+    #[test]
+    fn typed_deep_node_wire_bridge_preserves_the_complete_node_shape() {
+        let exprs =
+            chelis_deep::parse_and_stamp_file("(def {source: \"test\"} root (var {} value))")
+                .expect("typed Deep must parse and stamp");
+        assert!(matches!(exprs.first(), Some(DeepExpr::Node(_, _))));
+
+        let wire = wire_deep_expr(&exprs[0]);
+        let WireDeepExprKind::List { elements } = wire.kind else {
+            panic!("a typed node must cross the wire as its canonical list shape");
+        };
+        assert_eq!(
+            elements.len(),
+            4,
+            "def must retain tag, metadata, and children"
+        );
+        assert!(matches!(
+            &elements[0].kind,
+            WireDeepExprKind::Atom {
+                atom: WireDeepAtom::Symbol { value }
+            } if value == "def"
+        ));
+        let WireDeepExprKind::Map { entries } = &elements[1].kind else {
+            panic!("def metadata must remain at wire element 1");
+        };
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].key, "source");
+        assert!(matches!(
+            &entries[0].value.kind,
+            WireDeepExprKind::Atom {
+                atom: WireDeepAtom::Str { value }
+            } if value == "test"
+        ));
+        assert!(matches!(
+            &elements[2].kind,
+            WireDeepExprKind::Atom {
+                atom: WireDeepAtom::Symbol { value }
+            } if value == "root"
+        ));
+        let WireDeepExprKind::List {
+            elements: value_elements,
+        } = &elements[3].kind
+        else {
+            panic!("the def runtime child must remain a complete wire node");
+        };
+        assert!(matches!(
+            &value_elements[0].kind,
+            WireDeepExprKind::Atom {
+                atom: WireDeepAtom::Symbol { value }
+            } if value == "var"
+        ));
+        assert!(matches!(
+            &value_elements[2].kind,
+            WireDeepExprKind::Atom {
+                atom: WireDeepAtom::Symbol { value }
+            } if value == "value"
+        ));
+    }
+
     fn copy_drop_context_fixture() -> (TempDir, std::path::PathBuf) {
         let dir = TempDir::new().expect("tempdir");
         let root = dir.path().join("myapp");
@@ -3934,7 +3993,9 @@ def loss(x: tensor[2, 2, f32], w: tensor[2, 2, f32]) -> tensor[f32] =
         let source = "def n -> int32 = add(cast(20, int32), cast(22, int32))\n";
         let compiled = compile_source(SourceKind::Surf, source).expect("compile");
         assert!(
-            compiled.all_root_names.contains(&"n".to_string()),
+            compiled
+                .all_root_names
+                .contains(&crate::pipeline::IrName::new("n")),
             "arrow-form def `n` must be in all_root_names; got: {:?}",
             compiled.all_root_names
         );

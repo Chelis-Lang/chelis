@@ -2196,10 +2196,11 @@ fn assemble_check_json(
 /// A `.dp` is already-lowered IR by construction, so this skips the
 /// Surf desugar + macro-expand stage (`expanded_desugared_program`)
 /// that the `.ch` arm of [`cmd_check_one`] runs and parses the file
-/// directly through the strict Deep parser. Everything downstream of
-/// the parse is byte-for-byte the same pipeline the `.ch` arm uses:
-/// `check_ir_fitness` -> `check_typed_program` -> `check_program`
-/// (effects) -> `check_linearity`, then [`assemble_check_json`].
+/// directly through the strict Deep parser. Everything after the parse
+/// uses the same compiler-API pipeline as the `.ch` arm.
+///
+/// [`check_prepared_for_cli`] calls `analyze_prepared` and `complete_checks`.
+/// It then sends their typed results to [`assemble_check_json`].
 ///
 /// `parse_and_stamp_file` keeps the `.dp`
 /// check surface on the same closed-vocabulary tag gate as

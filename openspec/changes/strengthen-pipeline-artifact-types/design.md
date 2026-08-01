@@ -84,15 +84,29 @@ The CLI sites that call `tensor_names()` will use tensor-specific local names. T
 
 **Alternative:** Add different name element types for each collection. This option blocks legitimate movement of one canonical name between pipeline stages.
 
-### 3. Construct normal root bindings through exact alignment
+### 3. Construct DAG-backed root bindings through exact alignment
 
-`NamedRoots` will have one crate-owned constructor for normal DAG output. The constructor will compare the tensor-name count with the DAG-root count.
+`NamedRoots` will have one crate-owned constructor for DAG-backed output. The constructor will compare the tensor-name count with the DAG-root count.
 
 If the counts differ, the constructor returns the existing `RootCount` rejection. It will not create a partial map with `zip`.
 
-The existing empty host fallback remains explicit. That branch will call a separate empty constructor only after the current lower policy selects the fallback.
+A private root-binding enum will identify these construction causes:
 
-This split preserves host behavior and makes normal alignment fail closed. It also rejects a DAG with unnamed roots when the pipeline did not select the fallback.
+- exact DAG-backed output
+- selected successful host-backend output
+- accepted nonfatal lowering rejection
+
+Strict mode and host-only mode will use exact alignment after successful lowering. This rule includes successful empty DAGs.
+
+`AllowHostBackend` can accept a successful empty DAG after the CLI selects its host backend. The C host lane then emits the tensor-typed output without a DAG root.
+
+This host result will use the explicit empty constructor. It is not a lower rejection fallback.
+
+An accepted nonfatal lower rejection will also use the explicit empty constructor. The selected policy will accept that rejection before construction.
+
+This split preserves host behavior and makes DAG-backed alignment fail closed. It rejects unnamed DAG roots unless a typed host mode owns the result.
+
+**Alternative:** Align every successful empty DAG. This option breaks the target C host-lane build contract.
 
 **Alternative:** Put the count check in each caller. This option repeats the invariant and still permits direct `collect` calls.
 
@@ -148,7 +162,7 @@ The new types will not derive `Serialize` or `Deserialize`. Existing schema stru
 
 Compiler API adapters will convert domain types at the current wire boundary. CLI JSON and Tide JSON will remain byte-identical.
 
-No new dependency is necessary. The conversion code uses standard collection traits and explicit accessors.
+The conversion code adds no dependency. The source guard adds the existing transitive `syn` package as a direct development dependency.
 
 ### 8. Defer the remaining newtypes
 
@@ -170,11 +184,63 @@ The authoritative completion oracle remains:
 
 The script will include the new unit, integration, compile-fail, and consumer-parity tests. Its own tests will lock the command list.
 
-Compile-fail tests will cover forged `ValidatedModule`, swapped root map types, and contradictory layered outcomes. Runtime tests will cover alignment errors and diagnostic ranges.
+Compile-fail tests will cover forged `ValidatedModule`, swapped root maps, contradictory layered outcomes, and raw checkpoint offsets. Runtime tests will cover alignment errors and diagnostic ranges.
+
+The source-guard suite will include direct stage sequences, helper-composed sequences, and focused one-stage helpers. It will reject orchestration through helper calls.
 
 The existing CLI, cache, compiler API, and E2E parity tests will prove that public behavior does not change. OpenSpec validation proves artifact structure only.
 
 Local oracle results do not prove hosted CI status. The final acceptance record will list local evidence and hosted evidence separately.
+
+### 10. Propagate source stages through local helper calls
+
+The source guard will build one callable and import inventory for all guarded workspace files. It will propagate stage sets through each crate-local graph.
+
+A fixed-point calculation will handle helper chains. A production function will fail when one path reaches two or more canonical semantic stages.
+
+Each call site will remain in the path model. This rule lets two calls to one conditional helper reach different stages on one execution path.
+
+Function identities will include their crate, module, and implementation or trait owner. Canonical stages will use their module and function identity.
+
+Qualified calls will resolve local path prefixes and imported aliases. Shared final function names will not merge stage identities.
+
+Named imports, glob imports, and local function-value aliases will resolve to their original callable. Direct, typed, parenthesized, and assigned callable expressions will use one resolution path.
+
+Each execution path will retain its own alias bindings. A lexical shadow will hide the outer binding only in its lexical block.
+
+A local helper's callable parameter will contribute stages only when the helper invokes it. Higher-order calls will substitute callable arguments into the helper summary.
+
+Typed receiver bindings will resolve crate-local methods. Qualified-method calls will remove the explicit receiver before callable argument substitution.
+
+Invoked nested functions and closures will contribute their stages. Local macros will resolve direct canonical calls and canonical imports from their definition scope.
+
+The loop model will calculate a fixed point across repeated iterations. It will retain zero-iteration exits for `while` and `for`.
+
+Return, break, and continue outcomes will remain distinct. Labeled control will terminate only the path for its target loop.
+
+Pattern bindings in `if let`, `while let`, `match`, and `for` will shadow outer aliases only in their lexical scope.
+
+Uninvoked closure bodies and nested function bodies will not contribute stages to the enclosing function.
+
+Only canonical stage paths and imports from those paths will create direct stages. Full import targets will distinguish local and external aliases.
+
+A focused helper that reaches one stage will remain valid. Tests will cover cross-file helpers, imports, path-specific aliases, higher-order calls, traits, macros, and termination.
+
+**Alternative:** Reject every direct stage helper outside the owner. This option blocks valid focused consumers that need only one stage.
+
+### 11. Integrate with the current target branch before acceptance
+
+The implementation branch predates the typed Deep AST changes on `main`. The rebase will replace removed `Atom::Symbol` use with the current `Atom::Name` or typed AST accessors.
+
+The root collector will use one tagged-child view for transitional `List` values and typed `Node` values. This view preserves ordered tuple-root expansion.
+
+The CLI will retain target `.dp` ingestion through `parse_and_stamp_file`. The compiler API wire adapter will retain the `Node::to_list` bridge.
+
+The conflict in `compiler.rs` overlaps the #912 realizability manifest observation. The conflict resolution will retain that observation around the migrated pipeline path.
+
+The authoritative oracle will run only after the rebase compiles against the target branch. Evidence from the stale branch does not satisfy final acceptance.
+
+**Alternative:** Merge first and repair later. This option cannot pass the target build and can delete target-branch observation code during conflict resolution.
 
 ## Risks / Trade-offs
 
@@ -183,6 +249,15 @@ Local oracle results do not prove hosted CI status. The final acceptance record 
 - **Risk: Name conversion changes ordering.** → Preserve vector order and `BTreeMap` ordering in parity tests.
 - **Risk: The layered enum changes CLI report assembly.** → Freeze clean, effect, and linearity JSON bytes before migration.
 - **Risk: A compile-fail test does not run in CI.** → Keep compiler-API doctests in the authoritative oracle command.
+- **Risk: A successful empty DAG bypasses policy.** → Require an exact or selected host-backend root-binding mode.
+- **Risk: Helper composition bypasses the source guard.** → Test cross-file calls, path-specific aliases, higher-order calls, traits, and macros.
+- **Risk: Syntax creates false findings.** → Track path termination and exclude uninvoked callable bodies.
+- **Risk: Final-name matching merges stage identities.** → Classify each stage with its owning module and function.
+- **Risk: Receiver syntax hides a higher-order helper.** → Resolve typed local receivers and test qualified-method argument positions.
+- **Risk: A loop model loses repeated stages.** → Calculate a fixed point over iteration and labeled control outcomes.
+- **Risk: A branch pattern leaks an outer alias.** → Bind patterns before branch analysis and remove them at scope exit.
+- **Risk: A macro alias hides a stage.** → Resolve canonical imports from the macro definition scope.
+- **Risk: The stale branch loses target changes during conflict resolution.** → Preserve typed ingestion, the wire bridge, root support, and the #912 observation.
 - **Risk: `UnitInterval` expands the change.** → Complete a separate API review and proposal before code changes.
 
 ## Migration Plan
@@ -190,15 +265,24 @@ Local oracle results do not prove hosted CI status. The final acceptance record 
 This change uses one acceptance phase and one authoritative oracle.
 
 1. Add positive tests, negative tests, and compile-fail stubs for all new requirements.
-2. Add `ValidatedModule` and `SemanticRejection`. Migrate fragment and direct semantic callers.
-3. Add the root name types, root collection types, exact alignment, and `LoweredParts`.
-4. Migrate compiler API, CLI, and E2E root consumers. Keep schema conversions at their current boundaries.
-5. Add `DiagnosticCheckpoint` and migrate the body-inference diagnostic query.
-6. Replace `LayeredCheck` with exclusive variants and migrate CLI report assembly.
-7. Record the separate `UnitInterval` API review without a fitness code change.
-8. Run strict OpenSpec validation and the authoritative compiler pipeline oracle.
-9. Run a fresh-context adversarial review and correct each confirmed finding.
-10. Use hosted CI as final evidence for the full workspace and platform jobs.
+2. Add root tests for strict empty-DAG mismatch, selected host-backend success, and an accepted nonfatal fallback.
+3. Add source-guard tests for helper composition and focused one-stage helpers.
+4. Rebase onto the current target branch and preserve the #912 realizability manifest observation.
+5. Add `ValidatedModule` and `SemanticRejection`. Migrate fragment and direct semantic callers.
+6. Add the root name types, root collection types, exact alignment, and `LoweredParts`.
+7. Route every DAG-backed lower result through exact root alignment and type the selected host-backend result.
+8. Propagate source stages through the local call graph.
+9. Migrate compiler API, CLI, and E2E consumers. Keep schema conversions at their current boundaries.
+10. Add `DiagnosticCheckpoint` and migrate the body-inference diagnostic query.
+11. Replace `LayeredCheck` with exclusive variants and migrate CLI report assembly.
+12. Record the separate `UnitInterval` API review without a fitness code change.
+13. Run strict OpenSpec validation and the authoritative compiler pipeline oracle against the target branch.
+14. Run a fresh-context adversarial review and correct each confirmed finding.
+15. Add repeated-helper, qualified-helper, unrelated-receiver, typed-root, and wire-shape regression tests.
+16. Run a second fresh-context review after remediation.
+17. Add cross-file, alias, trait, macro, and executable-path source-guard tests.
+18. Run a third fresh-context review after source-guard remediation.
+19. Use hosted CI as final evidence for the full workspace and platform jobs.
 
 Each type family can revert with its consumer migration because no persistent data changes. A rollback restores the prior Rust API and does not need data repair.
 

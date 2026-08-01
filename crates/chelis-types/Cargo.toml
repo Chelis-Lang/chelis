@@ -6,6 +6,9 @@ version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+checkpoint-compile-probe = []
+
 [dependencies]
 chelis-deep.workspace = true
 chelis-pred.workspace = true

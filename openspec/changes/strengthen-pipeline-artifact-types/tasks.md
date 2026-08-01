@@ -10,6 +10,20 @@
 - [x] 1.8 Add a compile-fail doctest that rejects one layered result with both error classes.
 - [x] 1.9 Add checkpoint tests that include new diagnostics and exclude earlier diagnostics.
 - [x] 1.10 Freeze CLI and E2E parity fixtures for clean, effect, linearity, root, and host-fallback outputs.
+- [x] 1.11 Add a negative test where strict successful lowering returns an empty DAG for nonempty `TensorRootNames`.
+- [x] 1.12 Add a positive test where successful lowering aligns an empty DAG with empty `TensorRootNames`.
+- [x] 1.13 Add source-guard negative tests for helper composition and multi-level helper chains.
+- [x] 1.14 Add a source-guard positive test for a focused helper that reaches one semantic stage.
+- [x] 1.15 Add target-branch integration evidence for the typed Deep name variant and the #912 realizability manifest observation.
+- [x] 1.16 Add positive tests for selected successful host-backend output and an accepted nonfatal rejection.
+- [x] 1.17 Add repeated-helper, qualified-helper, and unrelated-receiver source-guard tests.
+- [x] 1.18 Add typed `Node` root parity and complete wire-shape tests.
+- [x] 1.19 Add a CLI test that rejects a bare runtime name during typed `.dp` formatting.
+- [x] 1.20 Add cross-file, import, alias, callable, trait, macro, and return-path source-guard tests.
+- [x] 1.21 Add typed, parenthesized, branch-assigned, higher-order, and lexical-shadow source-guard tests.
+- [x] 1.22 Add executable compile-fail evidence that rejects a raw diagnostic offset.
+- [x] 1.23 Add module-identity, typed-receiver method, qualified-method, and zero-iteration loop source-guard tests.
+- [x] 1.24 Add repeated-loop, labeled-control, pattern-shadow, and imported-macro-alias source-guard tests.
 
 ## 2. Edit Proof and Semantic Rejection
 
@@ -35,8 +49,10 @@
 - [x] 3.9 Migrate `chelis-e2e` to named lowered fields and explicit `IrName` conversion.
 - [x] 3.10 Rename CLI tensor-root locals that currently use `all_root_names`.
 - [x] 3.11 Keep raw string and integer conversion inside existing compiler API schema adapters.
+- [x] 3.12 Route every DAG-backed lower result and empty DAG through `NamedRoots::aligned`.
+- [x] 3.13 Use `NamedRoots::empty` only for a selected host-backend result or an accepted nonfatal rejection.
 
-## 4. Diagnostic and Layered States
+## 4. Diagnostic, Layered, Guard, and Target States
 
 - [x] 4.1 Add crate-private `DiagnosticCheckpoint` with a private offset.
 - [x] 4.2 Add `DiagnosticSink::checkpoint` and `DiagnosticSink::iter_since`.
@@ -45,6 +61,19 @@
 - [x] 4.5 Replace `LayeredCheck` fields with clean, effect-rejected, and linearity-rejected variants.
 - [x] 4.6 Migrate layered check and build paths to the exclusive variants.
 - [x] 4.7 Migrate CLI report assembly without a JSON or score change.
+- [x] 4.8 Extend the source guard with a local call graph and fixed-point stage propagation.
+- [x] 4.9 Rebase onto the current target branch and replace removed `Atom::Symbol` use with the current typed AST API.
+- [x] 4.10 Resolve the compiler conflict without deleting the #912 realizability manifest observation.
+- [x] 4.11 Preserve source-guard call multiplicity and resolve qualified local helper paths.
+- [x] 4.12 Restrict direct stages to known paths and imported aliases.
+- [x] 4.13 Preserve typed `.dp` ingestion and add typed `Node` root collection.
+- [x] 4.14 Preserve the complete target wire bridge for typed `Node` values.
+- [x] 4.15 Build one workspace source inventory and resolve full crate-local callable identities.
+- [x] 4.16 Track terminated paths and exclude uninvoked callable bodies from enclosing functions.
+- [x] 4.17 Resolve block imports, glob imports, nested functions, closures, and indirect callable expressions.
+- [x] 4.18 Keep alias bindings on execution paths and substitute higher-order callable arguments.
+- [x] 4.19 Classify full stage identities, resolve typed receiver methods, and preserve zero-iteration loop paths.
+- [x] 4.20 Calculate loop fixed points, track labeled control, bind branch patterns, and resolve macro imports.
 
 ## 5. Documentation and Deferred Review
 
@@ -53,6 +82,7 @@
 - [x] 5.3 Write `docs/investigations/fitness_unit_interval_api_review.md` with public construction, mutation, and wire findings.
 - [x] 5.4 Record a separate recommendation for `UnitInterval` without a fitness code change.
 - [x] 5.5 Document the Rust API migration from Boolean reports and tuple decomposition.
+- [x] 5.6 Update the inventory with these review findings and remove the obsolete no-actionable-finding claim.
 
 ## 6. Strict and Authoritative Validation
 
@@ -62,6 +92,14 @@
 - [x] 6.4 Run `openspec validate strengthen-pipeline-artifact-types --strict --no-interactive`.
 - [x] 6.5 Run `.venv/bin/python scripts/compiler_pipeline_oracle.py` as the authoritative completion oracle.
 - [x] 6.6 Keep completion claims inactive until the authoritative oracle passes.
+- [x] 6.7 Run `cargo fmt --all -- --check` and strict OpenSpec validation after review remediation.
+- [x] 6.8 Run the target-branch build and `.venv/bin/python scripts/compiler_pipeline_oracle.py` after the rebase.
+- [x] 6.9 Run `.venv/bin/python scripts/gate.py --local` as additional target-branch evidence.
+  - The gate stopped on three `infer_recursion_depth_guard` tests with signal 10.
+  - Current `origin/main` reproduced all three failures in a separate worktree.
+  - The other 1,010 `chelis-types` tests passed.
+- [x] 6.10 Add the real CLI host-backend regression test to the authoritative oracle.
+- [x] 6.11 Add the raw diagnostic-offset compile-fail fixture to the authoritative oracle.
 
 ## 7. Adversarial Validation
 
@@ -69,6 +107,22 @@
 - [x] 7.2 Add and run each missing positive or negative fixture that the red team identifies.
 - [x] 7.3 Correct each confirmed finding and record the disposition of rejected high-severity findings.
 - [x] 7.4 Run the authoritative compiler pipeline oracle again after all corrections.
+- [x] 7.5 Run a fresh local red-team agent after the rebase and review remediation.
+- [x] 7.6 Correct each confirmed finding and rerun the target-branch oracle.
+- [x] 7.7 Run a new fresh local red-team agent after the second remediation.
+- [x] 7.8 Correct the confirmed source-guard, oracle, and dependency-documentation findings.
+- [x] 7.9 Run the target-branch oracle after the third remediation.
+- [x] 7.10 Run a final fresh local red-team agent against the corrected tree.
+- [x] 7.11 Correct the path-alias, higher-order, checkpoint-test, and documentation findings.
+- [x] 7.12 Run the target-branch oracle after the fourth remediation.
+- [x] 7.13 Run a final fresh local red-team agent after the fourth remediation.
+- [x] 7.14 Correct the stage-identity, receiver-method, loop-path, and documentation findings.
+- [x] 7.15 Run the target-branch oracle after the fifth remediation.
+- [x] 7.16 Run a final fresh local red-team agent after the fifth remediation.
+- [x] 7.17 Correct the loop, control-flow, pattern-scope, macro-import, and documentation findings.
+- [x] 7.18 Rebase onto the current remote `main` after the target moved.
+- [x] 7.19 Run the authoritative oracle after the sixth remediation and target rebase.
+- [ ] 7.20 Run a final fresh local red-team agent against the exact rebased tree.
 
 ## 8. Hosted Acceptance
 

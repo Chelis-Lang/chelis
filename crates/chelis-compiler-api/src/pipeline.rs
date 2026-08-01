@@ -71,6 +71,13 @@ pub enum LoweringMode {
     AllowHostBackend,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RootBindingMode {
+    Exact,
+    SelectedHostBackend,
+    AcceptedNonfatalRejection,
+}
+
 /// A source request for the canonical pipeline.
 #[derive(Debug, Clone, Copy)]
 pub struct PipelineRequest<'a> {
@@ -293,6 +300,10 @@ impl AllRootNames {
 
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
+    }
+
+    pub fn contains(&self, name: &IrName) -> bool {
+        self.0.contains(name)
     }
 
     pub fn into_names(self) -> Vec<IrName> {
@@ -769,31 +780,33 @@ pub fn lower_checked(
     checked: CheckedCompilation,
     mode: LoweringMode,
 ) -> Result<LoweredCompilation, PipelineRejection> {
-    let (dag, host_backend_fallback) = match chelis_ir::lower::try_lower_program(checked.program())
-    {
-        Ok(dag) => {
-            let host_backend_fallback =
-                mode == LoweringMode::AllowHostBackend && dag.roots().is_empty();
-            (dag, host_backend_fallback)
+    let lower_result = chelis_ir::lower::try_lower_program(checked.program());
+    finish_isolated_lowering(checked, mode, lower_result)
+}
+
+fn finish_isolated_lowering(
+    checked: CheckedCompilation,
+    mode: LoweringMode,
+    lower_result: Result<Dag, LowerDiagnostic>,
+) -> Result<LoweredCompilation, PipelineRejection> {
+    let (dag, root_binding_mode) = match lower_result {
+        Ok(dag) if mode == LoweringMode::AllowHostBackend && dag.roots().is_empty() => {
+            (dag, RootBindingMode::SelectedHostBackend)
         }
+        Ok(dag) => (dag, RootBindingMode::Exact),
         Err(diagnostic)
             if mode == LoweringMode::AllowHostOnly
                 && !diagnostic.fatal
                 && checked.root_metadata.tensor_names.is_empty() =>
         {
-            (Dag::new(), true)
+            (Dag::new(), RootBindingMode::AcceptedNonfatalRejection)
         }
         Err(diagnostic) if mode == LoweringMode::AllowHostBackend && !diagnostic.fatal => {
-            (Dag::new(), true)
+            (Dag::new(), RootBindingMode::AcceptedNonfatalRejection)
         }
         Err(diagnostic) => return Err(PipelineRejection::Lower(diagnostic)),
     };
-    finish_lowering(
-        checked,
-        dag,
-        RootCountContext::Program,
-        host_backend_fallback,
-    )
+    finish_lowering(checked, dag, RootCountContext::Program, root_binding_mode)
 }
 
 /// Lower a checked compilation against a reusable library DAG.
@@ -810,40 +823,48 @@ pub fn lower_checked_with_context(
     checked.root_metadata = root_metadata(&checked.program, Some(&lowered_map));
     let tensor_names = checked.root_metadata.tensor_names.clone();
 
-    let mut dag = match chelis_ir::lower::try_lower_program_with_context(library, &checked.program)
-    {
-        Ok(dag) => dag,
-        Err(diagnostic)
-            if mode == LoweringMode::AllowHostOnly
-                && !diagnostic.fatal
-                && tensor_names.is_empty() =>
-        {
-            library.dag.clone()
-        }
-        Err(diagnostic) => return Err(PipelineRejection::Lower(diagnostic)),
-    };
+    let (mut dag, accepted_nonfatal_rejection) =
+        match chelis_ir::lower::try_lower_program_with_context(library, &checked.program) {
+            Ok(dag) => (dag, false),
+            Err(diagnostic)
+                if mode == LoweringMode::AllowHostOnly
+                    && !diagnostic.fatal
+                    && tensor_names.is_empty() =>
+            {
+                (library.dag.clone(), true)
+            }
+            Err(diagnostic) => return Err(PipelineRejection::Lower(diagnostic)),
+        };
 
     let library_root_count = library.dag.roots().len();
     let root_start = library_root_count.min(dag.roots().len());
     let new_roots = dag.roots()[root_start..].to_vec();
     dag.set_roots(new_roots);
-    finish_lowering(checked, dag, RootCountContext::NewCode, false)
+    let root_binding_mode = if accepted_nonfatal_rejection {
+        RootBindingMode::AcceptedNonfatalRejection
+    } else if mode == LoweringMode::AllowHostBackend && dag.roots().is_empty() {
+        RootBindingMode::SelectedHostBackend
+    } else {
+        RootBindingMode::Exact
+    };
+    finish_lowering(checked, dag, RootCountContext::NewCode, root_binding_mode)
 }
 
 fn finish_lowering(
     checked: CheckedCompilation,
     dag: Dag,
     root_context: RootCountContext,
-    allow_empty_host_fallback: bool,
+    root_binding_mode: RootBindingMode,
 ) -> Result<LoweredCompilation, PipelineRejection> {
-    let named_roots = if allow_empty_host_fallback && dag.roots().is_empty() {
-        NamedRoots::empty()
-    } else {
-        NamedRoots::aligned(
+    let named_roots = match root_binding_mode {
+        RootBindingMode::Exact => NamedRoots::aligned(
             &checked.root_metadata.tensor_names,
             dag.roots(),
             root_context,
-        )?
+        )?,
+        RootBindingMode::SelectedHostBackend | RootBindingMode::AcceptedNonfatalRejection => {
+            NamedRoots::empty()
+        }
     };
     let forward_node_index = ForwardNodeIndex::from_named_roots(&named_roots, &dag);
 
@@ -901,21 +922,21 @@ fn collect_checked_decl_names(
     lowered_names: Option<&HashMap<String, bool>>,
     output: &mut Vec<IrName>,
 ) {
-    let DeepExpr::List(list, _) = expr else {
+    let Some((tag, children)) = tagged_children(expr) else {
         return;
     };
-    match list.tag() {
-        Some(DeepTag::Module) => {
-            for child in list.elements.iter().skip(3) {
+    match tag {
+        DeepTag::Module => {
+            for child in children.iter().skip(1) {
                 collect_checked_decl_names(child, type_env, lowered_names, output);
             }
         }
-        Some(DeepTag::Def) => {
-            if let Some(name) = list.elements.get(2).and_then(symbol_name) {
+        DeepTag::Def => {
+            if let Some(name) = children.first().and_then(symbol_name) {
                 if lowered_names.is_some_and(|map| !map.get(name).copied().unwrap_or(false)) {
                     return;
                 }
-                let value = list.elements.get(3);
+                let value = children.get(1);
                 let ty = type_env
                     .get(name)
                     .or_else(|| value.and_then(expr_type_metadata));
@@ -926,30 +947,34 @@ fn collect_checked_decl_names(
     }
 }
 
+fn tagged_children(expr: &DeepExpr) -> Option<(DeepTag, &[DeepExpr])> {
+    match expr {
+        DeepExpr::List(list, _) => Some((list.tag()?, list.elements.get(2..)?)),
+        DeepExpr::Node(node, _) => Some((node.tag(), node.children_slice())),
+        _ => None,
+    }
+}
+
 fn extend_root_names(
     name: &str,
     ty: Option<&DeepExpr>,
     value: Option<&DeepExpr>,
     output: &mut Vec<IrName>,
 ) {
-    if let Some(DeepExpr::List(list, _)) = ty
-        && let Some(tag) = list.tag()
-    {
+    if let Some((tag, children)) = ty.and_then(tagged_children) {
         if tag == DeepTag::TFn {
-            extend_root_names(name, list.elements.last(), None, output);
+            extend_root_names(name, children.last(), None, output);
             return;
         }
         if tag == DeepTag::TTuple {
-            for (index, child) in list.elements.iter().skip(2).enumerate() {
+            for (index, child) in children.iter().enumerate() {
                 extend_root_names(&format!("{name}.{index}"), Some(child), None, output);
             }
             return;
         }
     }
-    if let Some(DeepExpr::List(list, _)) = value
-        && list.tag() == Some(DeepTag::Tuple)
-    {
-        for (index, child) in list.elements.iter().skip(2).enumerate() {
+    if let Some((DeepTag::Tuple, children)) = value.and_then(tagged_children) {
+        for (index, child) in children.iter().enumerate() {
             extend_root_names(
                 &format!("{name}.{index}"),
                 expr_type_metadata(child),
@@ -963,22 +988,24 @@ fn extend_root_names(
 }
 
 fn expr_type_metadata(expr: &DeepExpr) -> Option<&DeepExpr> {
-    let DeepExpr::List(list, _) = expr else {
-        return None;
+    let metadata = match expr {
+        DeepExpr::List(list, _) => match list.elements.get(1) {
+            Some(DeepExpr::Map(metadata, _)) => metadata,
+            _ => return None,
+        },
+        DeepExpr::Node(node, _) => node.meta(),
+        _ => return None,
     };
-    match list.elements.get(1) {
-        Some(DeepExpr::Map(metadata, _)) => metadata
-            .entries
-            .iter()
-            .find(|(key, _)| key == "type")
-            .map(|(_, value)| value),
-        _ => None,
-    }
+    metadata
+        .entries
+        .iter()
+        .find(|(key, _)| key == "type")
+        .map(|(_, value)| value)
 }
 
 fn symbol_name(expr: &DeepExpr) -> Option<&str> {
     match expr {
-        DeepExpr::Atom(chelis_deep::Atom::Symbol(name), _) => Some(name.as_str()),
+        DeepExpr::Atom(chelis_deep::Atom::Name(name), _) => Some(name.as_str()),
         _ => None,
     }
 }
@@ -986,6 +1013,120 @@ fn symbol_name(expr: &DeepExpr) -> Option<&str> {
 #[cfg(test)]
 mod artifact_type_tests {
     use super::*;
+
+    fn checked_compilation(source: &str) -> CheckedCompilation {
+        let prepared =
+            prepare_source(SourceKind::Surf, source, None).expect("test source must prepare");
+        let analysis = match analyze_prepared(prepared) {
+            PreparedTypeAnalysisOutcome::Accepted(analysis) => *analysis,
+            PreparedTypeAnalysisOutcome::Rejected { fitness } => {
+                panic!("test source must type-check: {:?}", fitness.errors)
+            }
+        };
+        complete_checks(analysis, SemanticContext::Isolated)
+            .expect("test source must pass semantic checks")
+    }
+
+    #[test]
+    fn strict_successful_empty_dag_rejects_nonempty_tensor_root_names() {
+        let checked =
+            checked_compilation("def identity(x: tensor[n, f32]) -> tensor[n, f32] = x\n");
+
+        let error = finish_isolated_lowering(checked, LoweringMode::Strict, Ok(Dag::new()))
+            .expect_err("strict successful lowering must use exact root alignment");
+
+        assert!(matches!(
+            error,
+            PipelineRejection::RootCount {
+                context: RootCountContext::Program,
+                expected: 1,
+                actual: 0,
+            }
+        ));
+    }
+
+    #[test]
+    fn successful_empty_dag_aligns_empty_tensor_root_names() {
+        let checked = checked_compilation("label = \"host only\"\n");
+
+        let lowered = finish_isolated_lowering(checked, LoweringMode::Strict, Ok(Dag::new()))
+            .expect("empty names and empty roots must align");
+
+        assert!(lowered.dag().roots().is_empty());
+        assert!(lowered.named_roots().is_empty());
+    }
+
+    #[test]
+    fn selected_host_backend_accepts_a_successful_empty_dag() {
+        let checked =
+            checked_compilation("def identity(x: tensor[n, f32]) -> tensor[n, f32] = x\n");
+
+        let lowered =
+            finish_isolated_lowering(checked, LoweringMode::AllowHostBackend, Ok(Dag::new()))
+                .expect("the selected host backend owns the output");
+
+        assert!(lowered.dag().roots().is_empty());
+        assert!(lowered.named_roots().is_empty());
+    }
+
+    #[test]
+    fn selected_host_backend_accepts_a_nonfatal_lower_rejection() {
+        let checked =
+            checked_compilation("def identity(x: tensor[n, f32]) -> tensor[n, f32] = x\n");
+        let diagnostic = LowerDiagnostic {
+            message: "host backend required".to_string(),
+            span: None,
+            span_id: None,
+            fatal: false,
+        };
+
+        let lowered =
+            finish_isolated_lowering(checked, LoweringMode::AllowHostBackend, Err(diagnostic))
+                .expect("the selected host backend accepts a nonfatal rejection");
+
+        assert!(lowered.dag().roots().is_empty());
+        assert!(lowered.named_roots().is_empty());
+    }
+
+    #[test]
+    fn symbol_name_reads_the_typed_deep_name_atom() {
+        let expression = DeepExpr::Atom(
+            chelis_deep::Atom::Name("root".to_string()),
+            chelis_deep::Span::new(0, 4),
+        );
+
+        assert_eq!(symbol_name(&expression), Some("root"));
+    }
+
+    #[test]
+    fn typed_node_root_collection_matches_list_root_collection() {
+        let source = "(module {} m (def {} out (tuple {} \
+            (lit {type: (t-prim {} f32)} 1.0) \
+            (lit {type: (t-prim {} f32)} 2.0))))";
+        let list_exprs = chelis_deep::parser::parse_str(source).expect("list Deep must parse");
+        let typed_exprs =
+            chelis_deep::parse_and_stamp_file(source).expect("typed Deep must parse and stamp");
+        assert!(matches!(typed_exprs.first(), Some(DeepExpr::Node(_, _))));
+
+        let expected = vec![IrName::new("out.0"), IrName::new("out.1")];
+        assert_eq!(
+            root_names_from_checked_exprs(&list_exprs, &HashMap::new(), None),
+            expected
+        );
+        assert_eq!(
+            root_names_from_checked_exprs(&typed_exprs, &HashMap::new(), None),
+            expected
+        );
+    }
+
+    #[test]
+    fn typed_node_non_root_declaration_does_not_create_a_root_name() {
+        let source = "(module {} m (defsig {} f (t-fn {} (t-prim {} f32))))";
+        let typed_exprs =
+            chelis_deep::parse_and_stamp_file(source).expect("typed Deep must parse and stamp");
+
+        assert!(root_names_from_checked_exprs(&typed_exprs, &HashMap::new(), None).is_empty());
+    }
 
     #[test]
     fn named_roots_reject_a_count_mismatch_without_a_partial_map() {

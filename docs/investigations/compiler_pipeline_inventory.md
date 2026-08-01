@@ -53,7 +53,17 @@ The source guard checks production functions in these trees:
 - `crates/chelis-cli/src`
 - `crates/chelis-e2e/src`
 
-The guard rejects a function that directly calls two or more canonical semantic stage primitives.
+The guard builds one callable inventory for all guarded files. It propagates stage sets through crate-local helpers, imports, aliases, and higher-order calls.
+
+Canonical stage identities include the owning module and function. Typed receiver bindings resolve crate-local methods without matching unrelated receiver types.
+
+Each execution path retains its alias bindings. Lexical shadows and mutually exclusive assignments remain separate.
+
+The guard calculates a fixed point across loop iterations. It tracks zero-iteration exits, returns, labeled breaks, and continues.
+
+Branch and loop patterns create lexical bindings. Local macros resolve canonical imports from their definition scope.
+
+The guard ignores uninvoked callable bodies. Mutually exclusive execution paths remain valid.
 
 ## Dependency Boundary
 
@@ -79,7 +89,9 @@ A later package-resolution split can move the remaining Reef artifact sequence b
 
 `ValidatedModule` replaces a public Boolean and a raw edited module. The proof owns the exact expressions that passed all semantic checks.
 
-The four root products use `IrName`. Normal DAG output uses one exact alignment constructor, and host-only output uses one explicit empty constructor.
+The four root products use `IrName`. Every successful DAG-backed result uses one exact alignment constructor.
+
+A selected host-backend result or nonfatal lower rejection uses one explicit empty constructor.
 
 `LoweredParts` gives names to the checked state, DAG, declared roots, and forward index. This product removes positional root-map swaps.
 
@@ -106,19 +118,108 @@ Call `IrName::as_str` or `IrName::into_string` only at an existing string bounda
 
 ## Adversarial Review
 
-A fresh local red-team reviewed the specifications, code, tests, public API, and completed oracle evidence. The review found no actionable issue.
+A fresh local red-team reviewed the specifications, code, tests, public API, and completed oracle evidence.
 
-A final coverage audit added one runtime test for all three `LayeredCheck` variants. This test passed.
+A later pull request review found three actionable defects:
 
-No high-severity finding was rejected. Thus, no rejected finding needs a separate disposition.
+- The branch did not compile against the target typed Deep AST.
+- The root path did not distinguish selected host-backend success from a nonfatal fallback.
+- Helper calls hid duplicated semantic stage sequences from the source guard.
+
+The first remediation used `Atom::Name` and retained the #912 realizability manifest observation. It also added an explicit root-binding mode and helper propagation.
+
+A second fresh red-team rejected the stale target evidence. It found these additional defects:
+
+- The branch did not include the latest typed `.dp` ingestion and wire bridge.
+- The root collector ignored typed `Node` values.
+- Repeated calls to one conditional helper lost call-site multiplicity.
+- Qualified local helper calls did not resolve.
+- An unrelated receiver method with a stage name created a false finding.
+
+The second rebase retained typed `.dp` ingestion, the complete wire bridge, and the #912 observation.
+
+The root collector now reads `List` and `Node` values through one tagged-child view. A parity test covers ordered tuple-root names.
+
+The second remediation preserved each call site and added module paths to function identities. Tests covered all supported local path qualifiers.
+
+Direct stage classification required a known stage path or imported alias. An unrelated receiver or external path did not create a stage.
+
+A secondary automated critique claimed that the host-backend and #912 positive tests were absent. This high-severity claim was rejected.
+
+The artifact tests cover typed names, selected host success, and accepted nonfatal rejection. The target CLI test also builds the host artifact.
+
+The critique also claimed that the helper graph affected root modes. This claim was rejected because the guard and lowering code share no data path.
+
+A third fresh red-team found false negatives across files, aliases, traits, and macros. It also found false reports from returns and uninvoked callable bodies.
+
+The third remediation added one workspace inventory and full import targets. It resolves named imports, glob imports, function aliases, trait defaults, and direct stage macros.
+
+The path model now terminates returned branches. Invoked nested functions and closures contribute stages, but uninvoked bodies do not.
+
+The review also found that the oracle omitted the real CLI host-backend test. The oracle now runs that test directly.
+
+A fourth fresh red-team found typed and parenthesized alias bypasses. It also found lost branch assignments and higher-order callable arguments.
+
+The same review found a stale alias after lexical shadowing. It also found missing compile-fail evidence for raw diagnostic offsets.
+
+The fourth remediation moved alias bindings onto execution paths. It now substitutes callable arguments only when a local helper invokes its parameter.
+
+The remediation also added the raw-offset compile fixture to the oracle. The CLI Deep-check documentation now names the current compiler-API pipeline.
+
+A fifth fresh red-team found three source-guard bypasses:
+
+- A shared function name merged type and effect stage identities.
+- A typed local receiver hid a higher-order method call.
+- A loop body return deleted the zero-iteration exit path.
+
+The fifth remediation classifies full stage identities and resolves methods from typed receiver bindings. Qualified-method calls preserve callable argument positions.
+
+The path model now keeps separate zero-iteration exits for `while` and `for` loops. A body return terminates only its applicable path.
+
+A sixth fresh red-team found four source-guard defect classes:
+
+- Repeated loop iterations did not compose reachable stages.
+- Break and continue did not isolate unreachable statements.
+- Branch patterns did not shadow outer aliases.
+- Imported stage aliases inside local macros did not resolve.
+
+The literal repeated-loop probes used an invariant Boolean. Those probes did not establish a real two-stage path.
+
+Equivalent probes with a varying branch condition confirmed the loop defect. Permanent tests use the corrected varying condition.
+
+The sixth remediation adds a loop fixed point and distinct flow states. It preserves labeled control targets and lexical pattern scopes.
+
+The macro inventory now resolves module and block imports from each macro definition scope. A final fresh post-remediation red-team remains pending.
 
 ## Acceptance Evidence
 
 ### Local Evidence
 
-The authoritative compiler pipeline oracle passed before and after the adversarial review. The format check and strict change validation also passed.
+The earlier oracle runs occurred before the latest target rebase. They do not satisfy final acceptance.
 
-The local gate found one timeout test failure under concurrent load. The isolated rerun passed, and the full CLI rerun passed all 1,797 tests.
+Current focused tests passed for typed roots, full stage identities, receiver methods, loop exits, aliases, higher-order calls, wire shape, and typed `.dp` rejection.
+
+The format check, strict validation, target all-target check, and authoritative oracle passed after the second remediation.
+
+The authoritative oracle passed again after the third source-guard remediation. It included the real CLI host-backend regression test.
+
+The oracle passed after the fourth remediation. It included the path-alias tests, higher-order tests, and raw-offset compile fixture.
+
+All 54 focused source-guard tests passed after the fifth remediation. The authoritative oracle also passed on that tree.
+
+All 65 focused source-guard tests passed after the sixth remediation. The authoritative oracle passed after the current target rebase.
+
+The first local gate found that blanket empty-DAG alignment broke a valid C host-backend program. The revised typed policy preserves that build.
+
+The second gate passed that test. It then found a stale canary for the target typed-parser diagnostic.
+
+The isolated canary passed after its accepted set included the target parser message. Later tests still expected pre-#912 unlabeled roots.
+
+Those tests now require the target `[05-OBS-6]` labels. The earlier local gate passed for all four changed crates.
+
+The earlier target stopped on three `infer_recursion_depth_guard` tests with signal 10. The old `origin/main` reproduced those failures.
+
+Current `main` includes the stack-safe normalization fix from #1035. All five `infer_recursion_depth_guard` tests now pass after the rebase.
 
 ### Hosted Evidence
 
