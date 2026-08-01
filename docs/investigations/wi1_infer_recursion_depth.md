@@ -202,6 +202,14 @@ net by shrinking the grown segment (test-only `set_grow_segment_bytes_for_test`
 thread-local override) so a depth-4000 chain overflows it and the guard fires
 with a located diagnostic -- proving the net still backs up the grow.
 
+Post-#1019 transition note: the #908 producer switch briefly inserted a new
+recursive Node/BareList-to-List normalization before those guarded walkers.
+On the deliberately reduced test segment, that clone could abort before the
+safety net ran. The #1023 stabilization makes the transitional normalization
+an explicit heap-worklist traversal and removes its stale recursive-walker
+exemption. This restores the covered-or-rejected contract; it does not make
+the legacy representation bridge a permanent #908 boundary.
+
 ## WI-1 guard-completeness residual (WS-5 walker scan; WS-2 red zone)
 
 WS-5's syn-based source scan of `infer.rs` (locked by the walker-coverage
