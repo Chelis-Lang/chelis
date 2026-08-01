@@ -265,6 +265,53 @@ Record field sorting should remain undecided until evaluation order is stated
 explicitly. Auto-borrow and implicit copy/drop should remain typed lint/checker
 decisions rather than token-only formatter rewrites.
 
+## Decisions approved for the v0.19 implementation
+
+The design discussion following this audit selected the following behavior for
+the implementation tracked by chelis#1024. These decisions remain evidence
+until the same rules land in the controlling numbered specifications.
+
+- The canonical parser accepts one spelling rather than accepting aliases for
+  `chelis fmt` to rewrite. Legacy v0.18 syntax is reachable only through an
+  explicit `chelis migrate surf --from 0.18` path.
+- Function definitions require a parameter list, including `()` for nullary
+  functions, and use `->` for return types. A matching `defsig` plus `def`
+  resugars as one inline typed definition; a standalone signature remains
+  `sig`.
+- Calls are flat and parenthesized. Ordinary blocks use newline separation and
+  no semicolons; `par` remains semicolon-delimited. A one-expression ordinary
+  block is rejected. Singleton tuples use `(x,)`, while unit uses `()`.
+- Effects use the formatter's canonical casing. Records use puns where the
+  field and variable match. Record fields preserve authored order, and that
+  order becomes the specified left-to-right evaluation order.
+- Transform options are named. Axis zero resugars as `vmap(f)` and other axes
+  as `vmap(f, axis=n)`. Exact first-argument pipe stages use call-stage sugar;
+  a lambda remains when the carried value occupies another position.
+- Deep `app` and `pipe` remain distinct canonical constructs. Resugaring does
+  not optimize nested calls into pipelines. At resolved ordinary builtin call
+  sites the fixed operator vocabulary resugars to infix or prefix notation;
+  builtin names remain values and pipe stages.
+- Finite `Cons`/`Nil` chains resugar as bracket lists; open-tail `Cons` remains
+  explicit. Explicit borrow and explicit copy remain distinct from the
+  checker-inserted forms.
+- Deep expression forms missing from Surf receive direct syntax: `block`
+  becomes `do { e1; e2 }`, record update becomes
+  `base with { field: value }`, and quote/unquote/splice use call-like forms.
+- One canonical decimal literal spelling is emitted. Comments retain their
+  authored text and kind. Macro source is compared after expansion because the
+  public Deep boundary is expanded Deep.
+- Narrow, validated `surf_*` metadata may preserve source distinctions that
+  Deep otherwise erases: module capitalization, dimension grouping, and exact
+  pipe-stage origin. Unknown `surf_*` keys are invalid. Semantic metadata must
+  resugar or reconstruct; derived/debug metadata may normalize away.
+- The alternate verbose Surf dialect is removed. Debug output is canonical
+  Surf followed by stable, sorted comments describing non-surface Deep
+  metadata.
+
+The v0.19 cutover is atomic: grammar rejection, migration support, repository
+corpus conversion, total resugaring, and emitter enforcement land together so
+no accepted main-branch state depends on an unavailable migration step.
+
 ## Proposed executable contract
 
 A follow-up change should add one table-driven single-grammar corpus. Each case
