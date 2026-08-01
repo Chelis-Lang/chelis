@@ -25,6 +25,12 @@
 //! exact marker locks because it is an artifact rather than one diagnostic
 //! record. The typed full-record diagnostic shape remains chelis#730 Phase 3
 //! work; exact text does not pretend to prove that pending structure.
+//!
+//! The chelis#730 Phase 3 authority migration deliberately preserves these
+//! human-rendered bytes while replacing each producer's free-form citation
+//! with a validated `RejectionAuthority`. That makes this existing corpus the
+//! same-change-set rendering lock required by section C2.1; the later
+//! `DiagnosticKind` slice adds the machine-kind assertions separately.
 
 #![allow(clippy::uninlined_format_args)]
 

@@ -215,10 +215,10 @@ pub struct Unsupported {
     /// Source span when one exists (lowering/codegen must thread it;
     /// `raise_lowering_error` already takes span + span_id).
     pub span: Option<SpanRef>,
-    /// The supported alternative, when one exists. Not optional prose:
-    /// sites without an alternative say why (deferred per spec §X, file
-    /// an issue, etc.).
-    pub hint: &'static str,
+    /// Opaque typed authority plus the supported alternative. Construction
+    /// distinguishes a numbered-spec decision from tracked implementation
+    /// work and rejects empty or unregistered citations.
+    pub authority: RejectionAuthority,
 }
 ```
 
@@ -251,8 +251,9 @@ gains a rejected-cells section asserting these strings byte-for-byte per
 lane (a rejection emitted differently per lane is lane skew, [#712]'s
 shape).
 
-**STATUS (2026-07-24): the structured `chelis check` surface above is the
-TARGET, not current behavior.** Today no stage constructs `Stage::Checker`
+**STATUS (updated 2026-08-01): the structured `chelis check` surface above is
+still the TARGET, not current behavior.** The `Unsupported` object now carries
+the §C2.1 opaque typed authority, but no stage constructs `Stage::Checker`
 (`chelis check` never reaches lowering or codegen, so no `Unsupported` can
 arrive there), no type on the `Unsupported` path derives `Serialize`, and
 the build surface renders the branded string into a flat
@@ -284,20 +285,21 @@ oracles come out together and the bullet above stands as written ([#871]).
 **Authored versus unimplemented:** a deliberately unsupported case cites the
 spec atom that decides it (the [#733] linkage); a
 not-yet-implemented case cites its issue. The capability table makes
-the distinction structural - `Rejected(atom)` vs `Unimplemented
-{ issue }` - and this contract's `hint` carries the same citation at
-the diagnostic surface, so "unsupported by decision" and "unsupported
-because nobody built it yet" are never conflated again.
+the same distinction at the capability layer - `Rejected(atom)` vs
+`Unimplemented { issue }` - and `RejectionAuthority` already makes it
+structural on this diagnostic surface. The frozen human rendering still
+uses the authority's hint as its fourth clause.
 
 ### C2.1 Typed rejection authority (added 2026-07-30; lands at Phase 3)
 
 **Deciding atom: [05-UNS-5]** (spec/05 §7, authored in the same change
 as this section - the numbered spec decides the user-visible rule;
-this section implements it). The rule is convention today: `hint` is a
-bare `&'static str`, 31 of 33 production sites cite an atom or issue
-by discipline, and two do not (the `reduce_window` "f32-only today"
-hints, [#959]) - the accidental-unsupported shape [05-UNS-5] forbids,
-with nothing enforcing it.
+this section implements it). **Delivery status (2026-08-01): the typed
+authority slice is implemented.** `Unsupported` no longer accepts a bare
+hint; every current production constructor supplies an opaque validated
+authority. The two formerly uncited `reduce_window` hints now cite [#959].
+The remaining Phase 3 work is the §C2.2 diagnostic-kind pipeline and the gate
+contract; this slice does not claim Phase 3 completion.
 
 The amended Phase 3 replaces the bare `hint` field on `Unsupported`
 with an OPAQUE `RejectionAuthority` type. Two things are NOT the
@@ -325,14 +327,15 @@ REGISTRIES of what actually exists:
   2026-07-30 addendum's countermodel: after a same-PR edit, a closed
   issue, a PR number, and a 404 all "validate"). So manifest
   ADDITIONS receive blocking LIVE validation: the manifest file is in
-  the §C7.5 change-gated job's path filter, and that job verifies
+  the `Rejection Authority Liveness` job's path filter, and that job verifies
   every added or modified row against the live tracker (exists, is an
-  issue, is open) before the PR can merge. The scheduled job
-  re-verifies the STANDING manifest for drift, so a cited issue
-  closing later makes the stale citation red - the shell contract's
-  "probe flips green, remove the citation" rule, pointed inward.
-  Membership answers the compile-time question; the two jobs answer
-  the truth question, at the two times it can change.
+  issue, is open) before the PR can merge. Phase 4's §C7.5 scheduled job
+  will re-verify the STANDING manifest for drift, so a cited issue closing
+  later makes the stale citation red - the shell contract's "probe flips
+  green, remove the citation" rule, pointed inward. Until that Phase 4 job
+  lands, standing-state drift remains a named pending control rather than an
+  implied continuous guarantee. Membership answers the compile-time question;
+  the change-gated job answers the truth question when authority inputs change.
 - Hints are validated non-empty; direct struct-literal construction
   from outside the owning module is a privacy error, locked by
   `compile_fail` doctests (the `host_abi.rs` pattern).

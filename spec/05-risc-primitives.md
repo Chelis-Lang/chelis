@@ -1525,11 +1525,12 @@ plan's Phase 3.)*
 > tracking issue. The two SHALL be distinguishable at the diagnostic
 > surface, and a rejection carrying neither citation is a defect.
 
-*(Decided 2026-07-30; NOT yet enforced. Today the citation is a prose
-convention on the diagnostic's hint field - 31 of 33 production sites
-conform and two do not (chelis#959). chelis#730's amended Phase 3
-makes the distinction structural through a validated authority type
-(design doc §C2.1); the capability table (chelis#729 Phase 4) later
+*(Decided 2026-07-30; enforced on the shared `Unsupported` channel since
+2026-08-01. Every current production constructor supplies an opaque,
+registry-validated `RejectionAuthority`; the two formerly uncited
+`reduce_window` sites now cite chelis#959. chelis#730's remaining Phase 3
+work carries that distinction through the closed diagnostic-kind pipeline
+(design doc §C2.1-C2.2); the capability table (chelis#729 Phase 4) later
 populates the deliberate-versus-unimplemented decision per cell. The
 validator proves citation identity and last-verified issue kind/open
 state, not that a cited issue actually tracks the rejected

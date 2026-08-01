@@ -3709,10 +3709,13 @@ impl HipEmitter {
                     UnsupportedKind::Dtype(ty.precision.name().to_string()),
                     "a HIP kernel family with f32/f64 variants only",
                     Stage::Codegen("hip"),
-                    "this op has no typed HIP kernel for the operand dtype; the former \
-                     silent F32 fallback emitted a corrupting kernel (chelis#689). \
-                     Cast to f32/f64, or use the ops with typed templates \
-                     (add/mul/div and the i8/i16 promoted sum)",
+                    chelis_types::unimplemented_rejection!(
+                        689,
+                        "this op has no typed HIP kernel for the operand dtype; the former \
+                         silent F32 fallback emitted a corrupting kernel (chelis#689). \
+                         Cast to f32/f64, or use the ops with typed templates \
+                         (add/mul/div and the i8/i16 promoted sum)"
+                    ),
                 ));
             }
         })

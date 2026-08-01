@@ -3862,7 +3862,10 @@ fn host_expr_lowering_error(
         chelis_types::unsupported::UnsupportedKind::Construct(construct),
         format!("host expression lowering: {}", detail.into()),
         chelis_types::unsupported::Stage::Lowering,
-        "the checked expression must lower to an explicit HostExpr variant; unhandled or malformed forms cannot become Unit or another value ([05-UNS-1]; chelis#730)",
+        chelis_types::deliberate_rejection!(
+            "[05-UNS-1]",
+            "the checked expression must lower to an explicit HostExpr variant; unhandled or malformed forms cannot become Unit or another value ([05-UNS-1]; chelis#730)"
+        ),
     );
     crate::lower::LowerDiagnostic::new(
         unsupported.to_string(),
@@ -4226,10 +4229,13 @@ fn lower_host_expr_kind(
                     chelis_types::unsupported::UnsupportedKind::Dtype(bogus.to_string()),
                     "a `cast` target in host lowering",
                     chelis_types::unsupported::Stage::Lowering,
-                    "the cast target must name an active primitive type \
-                     (spec/04-type-system.md section 1.1); a bogus target previously \
-                     lowered as the operand type silently in the build lane \
-                     (chelis#744, chelis#730 census row 13)",
+                    chelis_types::deliberate_rejection!(
+                        "[05-UNS-1]",
+                        "the cast target must name an active primitive type \
+                         (spec/04-type-system.md section 1.1); a bogus target previously \
+                         lowered as the operand type silently in the build lane \
+                         (chelis#744, chelis#730 census row 13)"
+                    ),
                 );
                 crate::lower::raise_fatal_lowering_diagnostic(crate::lower::LowerDiagnostic {
                     message: unsupported.to_string(),
@@ -4303,9 +4309,12 @@ fn lower_host_expr_kind(
                     chelis_types::unsupported::UnsupportedKind::EffectKind(error.to_string()),
                     "a `handle-effect` form in host lowering",
                     chelis_types::unsupported::Stage::Lowering,
-                    "known effect kinds are `random` and `resource` \
-                     (spec/03-deep-syntax.md); an unknown kind previously dropped its \
-                     handler silently (chelis#730 census rows 9/20)",
+                    chelis_types::deliberate_rejection!(
+                        "[05-UNS-1]",
+                        "known effect kinds are `random` and `resource` \
+                         (spec/03-deep-syntax.md); an unknown kind previously dropped its \
+                         handler silently (chelis#730 census rows 9/20)"
+                    ),
                 );
                 crate::lower::LowerDiagnostic {
                     message: unsupported.to_string(),

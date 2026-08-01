@@ -1445,9 +1445,12 @@ impl Emitter {
                     UnsupportedKind::Dtype(prec.name().to_string()),
                     "a Metal pad-fill host scalar literal",
                     Stage::Codegen("metal"),
-                    "the Metal backend rejects f64 (no FP64 ALUs) and the deferred \
-                     dtypes before emission; reaching this arm means the gate was \
-                     bypassed (chelis#745, chelis#730 census row 19)",
+                    chelis_types::deliberate_rejection!(
+                        "[05-UNS-1]",
+                        "the Metal backend rejects f64 (no FP64 ALUs) and the deferred \
+                         dtypes before emission; reaching this arm means the gate was \
+                         bypassed (chelis#745, chelis#730 census row 19)"
+                    ),
                 )
                 .to_string());
             }
