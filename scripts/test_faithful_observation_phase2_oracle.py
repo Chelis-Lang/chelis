@@ -988,6 +988,14 @@ class RuleManifestTests(unittest.TestCase):
     def test_the_shipped_doc_matches_the_manifest(self) -> None:
         self.assertEqual(oracle.b2_manifest_violations(self._doc()), [])
 
+    def test_bounded_migration_rule_records_both_contract_handoffs(self) -> None:
+        row = next(row for row in oracle.B2_RULE_INSTRUMENTS if row[0] == 1)
+        _number, fragment, instruments = row
+        rationale = " ".join(instruments)
+        self.assertEqual(fragment, "bounded migration carve-outs")
+        self.assertIn("v0.18.1", rationale)
+        self.assertIn("chelis#1023", rationale)
+
     def test_the_shipped_doc_parses_non_trivially(self) -> None:
         items = oracle.b2_rule_items(self._doc())
         self.assertIsNotNone(items)
