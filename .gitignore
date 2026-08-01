@@ -7,6 +7,9 @@
 # No path named `target` is tracked anywhere in the repo, so matching at any
 # depth costs nothing.
 target/
+# Node dependency trees are generated artifacts. OpenSpec tooling is supplied
+# by CI and must not install packages into the repository checkout.
+node_modules/
 # WI-13 Option B: the no-sudo local prefix where the dep-setup script builds
 # Sollya + fplll from source. A build artifact, never committed (the committed
 # proof bundle under crates/chelis-prove/data is the source of truth).
