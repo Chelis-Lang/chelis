@@ -2259,16 +2259,36 @@ fn ty_expr_to_deep(ty: &TensorType) -> Expr {
     // into the in-memory tree, and the typed readers below (`list.tag()`)
     // then took their untagged policy for them instead of the `TPrim` /
     // `TTensor` arms.
-    let prim_node = Expr::node(
-        DeepTag::TPrim,
-        MetaMap::default(),
-        vec![Expr::Atom(Atom::Name(prim.into()), span)],
+    //
+    // #908 compatibility: `type_is_never_lowerable` and related functions
+    // match on `Expr::List`. `Expr::node()` now produces `Expr::Node`,
+    // which those functions don't handle. Construct as `Expr::List`
+    // directly so the lowering classifier continues to work.
+    #[allow(deprecated)]
+    let prim_node = Expr::List(
+        List {
+            elements: vec![
+                Expr::Atom(Atom::Tag(DeepTag::TPrim), span),
+                Expr::Map(MetaMap::default(), span),
+                Expr::Atom(Atom::Name(prim.into()), span),
+            ],
+        },
         span,
     );
     if ty.dims.is_empty() {
         prim_node
     } else {
-        Expr::node(DeepTag::TTensor, MetaMap::default(), vec![prim_node], span)
+        #[allow(deprecated)]
+        Expr::List(
+            List {
+                elements: vec![
+                    Expr::Atom(Atom::Tag(DeepTag::TTensor), span),
+                    Expr::Map(MetaMap::default(), span),
+                    prim_node,
+                ],
+            },
+            span,
+        )
     }
 }
 

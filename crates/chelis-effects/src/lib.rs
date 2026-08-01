@@ -1031,6 +1031,12 @@ fn validate_build_target_expr(expr: &Expr, target: &str, errors: &mut Vec<Effect
 /// was migrated to the typed constructors; this is its post-check twin and
 /// now matches it exactly. The effect NAMES stay `Atom::Name` deliberately:
 /// `random`, `accum`, `io` and `test` are payload, not vocabulary tags.
+///
+/// #908 compatibility: `carries_effect_row` in the runtime matches on
+/// `Expr::List`. `Expr::node()` now produces `Expr::Node` which that
+/// function doesn't detect. Construct as `Expr::List` directly so the
+/// effect-free guard continues to work.
+#[allow(deprecated)]
 fn effect_set_expr(effects: &EffectSet) -> Expr {
     let mut children = Vec::new();
     for effect in effects.iter() {
@@ -1039,15 +1045,23 @@ fn effect_set_expr(effects: &EffectSet) -> Expr {
             Effect::Accum => symbol("accum"),
             Effect::Io => symbol("io"),
             Effect::Test => symbol("test"),
-            Effect::Resource(device) => Expr::node(
-                DeepTag::Resource,
-                MetaMap::default(),
-                vec![Expr::Atom(Atom::Str(device.clone()), zero_span())],
+            Effect::Resource(device) => Expr::List(
+                List {
+                    elements: vec![
+                        Expr::Atom(Atom::Tag(DeepTag::Resource), zero_span()),
+                        Expr::Map(MetaMap::default(), zero_span()),
+                        Expr::Atom(Atom::Str(device.clone()), zero_span()),
+                    ],
+                },
                 zero_span(),
             ),
         });
     }
-    Expr::node(DeepTag::Effects, MetaMap::default(), children, zero_span())
+    let mut elements = Vec::with_capacity(children.len() + 2);
+    elements.push(Expr::Atom(Atom::Tag(DeepTag::Effects), zero_span()));
+    elements.push(Expr::Map(MetaMap::default(), zero_span()));
+    elements.extend(children);
+    Expr::List(List { elements }, zero_span())
 }
 
 fn upsert_meta(meta: &mut MetaMap, key: &str, value: Expr) {
