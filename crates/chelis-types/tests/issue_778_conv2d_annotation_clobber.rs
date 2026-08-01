@@ -90,6 +90,35 @@ fn visit<'a>(expr: &'a Expr, f: &mut dyn FnMut(&'a Expr)) {
             }
             visit(&meta.expr, f);
         }
+        Expr::Node(node, _) => {
+            for (_, value) in &node.meta().entries {
+                visit(value, f);
+            }
+            for child in node.children_iter() {
+                match child {
+                    chelis_deep::node::ChildRef::Expr(expr)
+                    | chelis_deep::node::ChildRef::Syntax(expr)
+                    | chelis_deep::node::ChildRef::Type(expr)
+                    | chelis_deep::node::ChildRef::EffectHandler(expr)
+                    | chelis_deep::node::ChildRef::Bypass(expr) => visit(expr, f),
+                    chelis_deep::node::ChildRef::Binder(_)
+                    | chelis_deep::node::ChildRef::Selector(_) => {}
+                }
+            }
+        }
+        Expr::BareList(elements, _) => {
+            for child in elements {
+                visit(child, f);
+            }
+        }
+        Expr::UnknownForm(data) => {
+            for (_, value) in &data.meta.entries {
+                visit(value, f);
+            }
+            for child in &data.children {
+                visit(child, f);
+            }
+        }
         Expr::Atom(_, _) => {}
     }
 }

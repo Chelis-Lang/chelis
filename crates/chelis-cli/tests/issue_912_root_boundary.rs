@@ -63,7 +63,7 @@ result = mul(x, x)
     let (stdout, stderr, success) = eval_file(source);
     assert!(
         success,
-        "eval should succeed — dead library symbolic dims must not block.\n\
+        "eval should succeed: dead library symbolic dims must not block.\n\
          stdout: {stdout}\nstderr: {stderr}"
     );
     assert!(
@@ -187,9 +187,9 @@ fn manifest_completeness_eval_lane() {
     todo!("implement once RootManifest is available via --json or similar");
 }
 
-/// For every entry in the root manifest, the C lane's output (build stderr
-/// + artifact stdout) must contain either a rendered value or a [05-UNS-1]
-/// diagnostic naming that root.
+/// For every entry in the root manifest, the C lane's combined output (build
+/// stderr and artifact stdout) must contain either a rendered value or a
+/// [05-UNS-1] diagnostic naming that root.
 #[test]
 #[ignore] // TODO: enable once manifest exists and C lane iterates it
 fn manifest_completeness_c_lane() {

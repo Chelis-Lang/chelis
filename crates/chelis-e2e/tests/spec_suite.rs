@@ -164,6 +164,35 @@ fn spec_deep_3tuple_format() {
                     check_3tuple(v);
                 }
             }
+            Expr::Node(node, _) => {
+                for (_, value) in &node.meta().entries {
+                    check_3tuple(value);
+                }
+                for child in node.children_iter() {
+                    match child {
+                        chelis_deep::node::ChildRef::Expr(expr)
+                        | chelis_deep::node::ChildRef::Syntax(expr)
+                        | chelis_deep::node::ChildRef::Type(expr)
+                        | chelis_deep::node::ChildRef::EffectHandler(expr)
+                        | chelis_deep::node::ChildRef::Bypass(expr) => check_3tuple(expr),
+                        chelis_deep::node::ChildRef::Binder(_)
+                        | chelis_deep::node::ChildRef::Selector(_) => {}
+                    }
+                }
+            }
+            Expr::BareList(elements, _) => {
+                for child in elements {
+                    check_3tuple(child);
+                }
+            }
+            Expr::UnknownForm(data) => {
+                for (_, value) in &data.meta.entries {
+                    check_3tuple(value);
+                }
+                for child in &data.children {
+                    check_3tuple(child);
+                }
+            }
             Expr::Atom(_, _) => {}
         }
     }
