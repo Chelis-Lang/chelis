@@ -748,9 +748,13 @@ recognizes its two deliberately out-of-vocabulary internal forms after syntax
 stamping. Checker-totality mutations that deliberately bypass the constructor
 now do so through an explicitly test-only raw-to-legacy adapter; ordinary
 positive coverage continues through the production stamped parser. The legacy
-`List` variant, consumer bridge, and mutating authoring normalization remain
-active; stacked follow-up work owns the read-only authoring API cut. The transitional checker
-normalization uses an explicit heap worklist before its guarded walkers, and
+`List` variant and consumer bridge remain active. The stacked read-only
+follow-up routes outline, references, and call-graph APIs through stamped
+ingress and makes their traversal consume borrowed `Node` views directly,
+including metadata and scope-bearing children; it does not reconstruct a
+`List`. Mutating authoring normalization remains active and must migrate with
+its producer/consumer cut. The transitional checker normalization uses an
+explicit heap worklist before its guarded walkers, and
 the depth-oracle harness tears down its owned deep fixture on a fresh
 production-sized grown segment. The WI-1 covered-or-rejected tests therefore
 remain active on macOS and require the typed depth diagnostic instead of

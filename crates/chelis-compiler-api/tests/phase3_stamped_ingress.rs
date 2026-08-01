@@ -5,7 +5,10 @@
 //! legacy tree that reaches a downstream checker or authoring helper.
 
 use chelis_compiler_api::compiler;
-use chelis_compiler_api::schema::{CheckRequest, ParseRequest, SourceKind};
+use chelis_compiler_api::schema::{
+    CheckRequest, DeepCallGraphRequest, DeepOutlineRequest, DeepReferencesRequest, ParseRequest,
+    SourceKind,
+};
 
 const VALID_MODULE: &str =
     "(module {} phase3.ingress (def {} f (lit {type: (t-prim {} int64)} 1)))";
@@ -64,4 +67,40 @@ fn generic_parse_wire_preserves_unknown_form_head_and_metadata() {
         "metadata key was lost: {wire}"
     );
     assert!(wire.contains("keep-me"), "metadata value was lost: {wire}");
+}
+
+#[test]
+fn read_only_authoring_ingresses_use_the_stamp_gate() {
+    let outline_error = compiler::deep_outline(DeepOutlineRequest {
+        module: BARE_NAME_BODY_MODULE.to_string(),
+    })
+    .expect_err("outline must reject a bare RuntimeExpr name at stamping");
+    assert_stamp_error(outline_error, "deep-outline");
+
+    let references_error = compiler::deep_references(DeepReferencesRequest {
+        module: BARE_NAME_BODY_MODULE.to_string(),
+        symbol: "f".to_string(),
+    })
+    .expect_err("references must reject a bare RuntimeExpr name at stamping");
+    assert_stamp_error(references_error, "deep-references");
+
+    let graph_error = compiler::deep_call_graph(DeepCallGraphRequest {
+        module: BARE_NAME_BODY_MODULE.to_string(),
+    })
+    .expect_err("call graph must reject a bare RuntimeExpr name at stamping");
+    assert_stamp_error(graph_error, "deep-call-graph");
+
+    compiler::deep_outline(DeepOutlineRequest {
+        module: VALID_MODULE.to_string(),
+    })
+    .expect("well-formed stamped module still outlines");
+    compiler::deep_references(DeepReferencesRequest {
+        module: VALID_MODULE.to_string(),
+        symbol: "f".to_string(),
+    })
+    .expect("well-formed stamped module still supports references");
+    compiler::deep_call_graph(DeepCallGraphRequest {
+        module: VALID_MODULE.to_string(),
+    })
+    .expect("well-formed stamped module still supports call graph");
 }

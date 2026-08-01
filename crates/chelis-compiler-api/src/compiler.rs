@@ -229,7 +229,7 @@ pub fn add_function(request: AddFunctionRequest) -> Result<AddFunctionResult> {
 }
 
 pub fn deep_outline(request: DeepOutlineRequest) -> Result<DeepOutlineResult> {
-    let module = parse_deep_authoring("deep-outline", &request.module)?;
+    let module = parse_deep_authoring_stamped("deep-outline", &request.module)?;
     let outline = chelis_deep::authoring::outline(&module)
         .map_err(|err| authoring_error_to_compiler_error("deep-outline", err))?;
     Ok(DeepOutlineResult {
@@ -256,7 +256,7 @@ pub fn deep_outline(request: DeepOutlineRequest) -> Result<DeepOutlineResult> {
 }
 
 pub fn deep_references(request: DeepReferencesRequest) -> Result<DeepReferencesResult> {
-    let module = parse_deep_authoring("deep-references", &request.module)?;
+    let module = parse_deep_authoring_stamped("deep-references", &request.module)?;
     let refs = chelis_deep::authoring::references(&module, &request.symbol)
         .map_err(|err| authoring_error_to_compiler_error("deep-references", err))?;
     Ok(DeepReferencesResult {
@@ -270,7 +270,7 @@ pub fn deep_references(request: DeepReferencesRequest) -> Result<DeepReferencesR
 }
 
 pub fn deep_call_graph(request: DeepCallGraphRequest) -> Result<DeepCallGraphResult> {
-    let module = parse_deep_authoring("deep-call-graph", &request.module)?;
+    let module = parse_deep_authoring_stamped("deep-call-graph", &request.module)?;
     let graph = chelis_deep::authoring::call_graph(&module)
         .map_err(|err| authoring_error_to_compiler_error("deep-call-graph", err))?;
     Ok(DeepCallGraphResult {
@@ -390,6 +390,23 @@ fn parse_deep_authoring(stage: &str, source: &str) -> Result<Vec<DeepExpr>> {
             parse_error_span_deep(&err),
         )
     })
+}
+
+fn parse_deep_authoring_stamped(stage: &str, source: &str) -> Result<Vec<DeepExpr>> {
+    let exprs = chelis_deep::parse_and_stamp_file(source)
+        .map_err(|error| deep_ingress_error(stage, error))?;
+    if let Some(warning) = chelis_deep::validate::validate(&exprs).into_iter().next() {
+        return Err(stage_error_with_span(
+            stage,
+            warning.message,
+            "deep_parse_error",
+            Some(Span {
+                offset: warning.offset,
+                len: 0,
+            }),
+        ));
+    }
+    Ok(exprs)
 }
 
 fn parse_one_deep_authoring(stage: &str, field: &str, source: &str) -> Result<DeepExpr> {
