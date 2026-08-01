@@ -199,7 +199,7 @@ class LocalCommandListTests(unittest.TestCase):
                 "cargo fmt --all -- --check",
                 "cargo run -p chelis-cli --bin chelis --quiet -- "
                 "lint --check .",
-                "cargo test -p chelis-types --doc",
+                "cargo test -p chelis-types -p chelis-compiler-api --doc",
             ],
         )
 

@@ -43,8 +43,8 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-use crate::compiler::{CompilerError, check_error_diagnostic, stage_error};
-use crate::schema::{Diagnostic, Span};
+use crate::compiler::{CompilerError, check_error_diagnostic};
+use crate::schema::{Diagnostic, GeneralKind, Span, stage_error};
 
 /// 32-byte content hash of every source file that contributed to a
 /// `CompiledContext`. Phase I disk cache keys on this for invalidation.
@@ -885,7 +885,7 @@ pub fn compile_reef_context(
                 &desugared,
                 &chelis_macros::ExpansionOptions::default(),
             )
-            .map_err(|err| stage_error("desugar", err.to_string(), "macro_error"))?
+            .map_err(|err| stage_error("desugar", err.to_string(), GeneralKind::MacroError))?
             .into_exprs();
             log_phase("macro_expand", &mut t);
 
@@ -916,15 +916,12 @@ pub fn compile_reef_context(
                     stage: "effects".to_string(),
                     errors: errors
                         .iter()
-                        .map(|error| Diagnostic {
-                            kind: "effect_error".to_string(),
-                            message: error.message.clone(),
-                            severity: 0.8,
-                            expected: None,
-                            got: None,
-                            suggestions: vec![],
-                            span: None,
-                            deep_path: None,
+                        .map(|error| {
+                            Diagnostic::general(
+                                GeneralKind::EffectError,
+                                error.message.clone(),
+                                0.8,
+                            )
                         })
                         .collect(),
                 })?;
@@ -946,21 +943,15 @@ pub fn compile_reef_context(
     // need to reuse the cached chelis-std `library_dag` here.
     let library_dag =
         chelis_ir::lower::try_lower_program_to_library(&library_checked).map_err(|diagnostic| {
+            let mut error =
+                Diagnostic::general(GeneralKind::LowerError, diagnostic.to_string(), 1.0);
+            error.span = diagnostic.span.map(|span| Span {
+                offset: span.offset,
+                len: span.len,
+            });
             CompilerError {
                 stage: "lower".to_string(),
-                errors: vec![Diagnostic {
-                    kind: "lower_error".to_string(),
-                    message: diagnostic.to_string(),
-                    severity: 1.0,
-                    expected: None,
-                    got: None,
-                    suggestions: vec![],
-                    span: diagnostic.span.map(|span| Span {
-                        offset: span.offset,
-                        len: span.len,
-                    }),
-                    deep_path: None,
-                }],
+                errors: vec![error],
             }
         })?;
     log_phase("lower_program_to_library", &mut t);
@@ -1150,41 +1141,16 @@ fn library_structural_summary(exprs: &[chelis_deep::ast::Expr]) -> (usize, usize
 }
 
 fn reef_error(msg: &str) -> CompilerError {
-    let kind = if msg.contains("reef.toml") {
-        "package_not_found"
-    } else if msg.contains("lockfile") {
-        "lockfile_error"
-    } else {
-        "reef_error"
-    };
     CompilerError {
         stage: "compile_reef_context".to_string(),
-        errors: vec![Diagnostic {
-            kind: kind.to_string(),
-            message: msg.to_string(),
-            severity: 0.8,
-            expected: None,
-            got: None,
-            suggestions: vec![],
-            span: None,
-            deep_path: None,
-        }],
+        errors: vec![Diagnostic::general(GeneralKind::ReefError, msg, 0.8)],
     }
 }
 
 fn hash_error(msg: &str) -> CompilerError {
     CompilerError {
         stage: "compile_reef_context".to_string(),
-        errors: vec![Diagnostic {
-            kind: "hash_error".to_string(),
-            message: msg.to_string(),
-            severity: 0.8,
-            expected: None,
-            got: None,
-            suggestions: vec![],
-            span: None,
-            deep_path: None,
-        }],
+        errors: vec![Diagnostic::general(GeneralKind::HashError, msg, 0.8)],
     }
 }
 
@@ -1293,5 +1259,21 @@ mod tests {
             ctx.reef_state.package_root,
             restored.reef_state.package_root
         );
+    }
+
+    #[test]
+    fn reef_diagnostic_kind_does_not_depend_on_message_substrings() {
+        for message in [
+            "missing reef.toml",
+            "malformed lockfile",
+            "ordinary graph preparation failure",
+        ] {
+            let error = reef_error(message);
+            assert_eq!(error.errors.len(), 1);
+            assert_eq!(
+                error.errors[0].kind(),
+                chelis_vocab::DiagnosticKind::ReefError
+            );
+        }
     }
 }

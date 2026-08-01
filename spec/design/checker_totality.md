@@ -619,7 +619,8 @@ The witness doctests are `crates/chelis-types/src/errors.rs`'s eight
 ` ```compile_fail ` blocks. `cargo nextest` does not execute doctests, so
 until chelis#875 they ran in no continuous job and this paragraph claimed
 supporting evidence the repo was not producing. They are now driven by the
-`cargo test -p chelis-types --doc` stage in `scripts/gate.py`, which is in
+`cargo test -p chelis-types -p chelis-compiler-api --doc` stage in
+`scripts/gate.py`, which is in
 both the `--local` subset and CI's `lint-and-unit` job.
 
 Scope of the guarantee, so this section does not read stronger than the

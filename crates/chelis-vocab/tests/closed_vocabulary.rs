@@ -1,6 +1,150 @@
 use chelis_vocab::{
-    EffectKind, EffectKindDecodeError, EffectKindInput, Repr, RuntimeDType, RuntimeDTypeDecodeError,
+    DiagnosticKind, DiagnosticKindDecodeError, EffectKind, EffectKindDecodeError, EffectKindInput,
+    Repr, RuntimeDType, RuntimeDTypeDecodeError,
 };
+
+#[test]
+fn diagnostic_kind_wire_spellings_are_closed_and_stable() {
+    let expected = [
+        (DiagnosticKind::SurfParseError, "surf_parse_error"),
+        (DiagnosticKind::DeepParseError, "deep_parse_error"),
+        (DiagnosticKind::MacroError, "macro_error"),
+        (DiagnosticKind::NameResolutionError, "name_resolution_error"),
+        (DiagnosticKind::DeepDeclError, "deep_decl_error"),
+        (DiagnosticKind::DuplicateName, "duplicate_name"),
+        (DiagnosticKind::PreimageMismatch, "preimage_mismatch"),
+        (DiagnosticKind::CascadeIncomplete, "cascade_incomplete"),
+        (DiagnosticKind::TypeError, "type_error"),
+        (DiagnosticKind::EffectError, "effect_error"),
+        (DiagnosticKind::LinearityError, "linearity_error"),
+        (DiagnosticKind::LowerError, "lower_error"),
+        (DiagnosticKind::ReefError, "reef_error"),
+        (DiagnosticKind::EvalError, "eval_error"),
+        (DiagnosticKind::GradError, "grad_error"),
+        (DiagnosticKind::ValidationError, "validation_error"),
+        (DiagnosticKind::UnknownName, "unknown_name"),
+        (
+            DiagnosticKind::UnknownSchemaVersion,
+            "unknown_schema_version",
+        ),
+        (DiagnosticKind::HashError, "hash_error"),
+        (DiagnosticKind::InvalidRequest, "invalid_request"),
+        (DiagnosticKind::CompileError, "compile_error"),
+        (DiagnosticKind::GeneralOther, "other"),
+        (DiagnosticKind::UnsupportedFeature, "unsupported_feature"),
+        (DiagnosticKind::TypeMismatch, "TypeMismatch"),
+        (DiagnosticKind::PrecisionMismatch, "PrecisionMismatch"),
+        (DiagnosticKind::DimensionMismatch, "DimensionMismatch"),
+        (DiagnosticKind::ArityMismatch, "ArityMismatch"),
+        (DiagnosticKind::UnboundVariable, "UnboundVariable"),
+        (DiagnosticKind::UnknownConstructor, "UnknownConstructor"),
+        (DiagnosticKind::NotAFunction, "NotAFunction"),
+        (DiagnosticKind::NonExhaustiveMatch, "NonExhaustiveMatch"),
+        (DiagnosticKind::OccursCheck, "OccursCheck"),
+        (DiagnosticKind::CastNonTensor, "CastNonTensor"),
+        (
+            DiagnosticKind::TupleIndexOutOfBounds,
+            "TupleIndexOutOfBounds",
+        ),
+        (DiagnosticKind::UseAfterConsume, "UseAfterConsume"),
+        (DiagnosticKind::UnconsumedLinear, "UnconsumedLinear"),
+        (DiagnosticKind::InvalidBorrow, "InvalidBorrow"),
+        (DiagnosticKind::CycleDetected, "CycleDetected"),
+        (
+            DiagnosticKind::UnsupportedTensorPrecision,
+            "UnsupportedTensorPrecision",
+        ),
+        (DiagnosticKind::DuplicateDefinition, "DuplicateDefinition"),
+        (DiagnosticKind::DuplicateModule, "DuplicateModule"),
+        (DiagnosticKind::OpaqueTypeViolation, "OpaqueTypeViolation"),
+        (DiagnosticKind::ReservedLinkerName, "ReservedLinkerName"),
+        (DiagnosticKind::BuiltinShadowing, "BuiltinShadowing"),
+        (DiagnosticKind::UnknownForm, "UnknownForm"),
+        (DiagnosticKind::MalformedForm, "MalformedForm"),
+        (DiagnosticKind::CheckOther, "Other"),
+    ];
+    assert_eq!(DiagnosticKind::ALL, expected.map(|(kind, _)| kind));
+
+    for (kind, spelling) in expected {
+        assert_eq!(kind.as_str(), spelling);
+        assert_eq!(DiagnosticKind::decode(spelling), Ok(kind));
+    }
+}
+
+#[test]
+fn diagnostic_kind_unknown_spelling_is_an_error_not_a_default() {
+    let input = String::from("unsupported");
+    let error = DiagnosticKind::decode(&input).expect_err("unknown diagnostic kind");
+    assert_eq!(
+        error,
+        DiagnosticKindDecodeError::Unknown { spelling: &input }
+    );
+    let DiagnosticKindDecodeError::Unknown { spelling } = error;
+    assert_eq!(
+        spelling.as_ptr(),
+        input.as_ptr(),
+        "the error must borrow input"
+    );
+}
+
+#[test]
+fn diagnostic_kind_consumer_match_is_a_compile_time_ratchet() {
+    fn classify(kind: DiagnosticKind) -> &'static str {
+        match kind {
+            DiagnosticKind::UnsupportedFeature => "unsupported",
+            DiagnosticKind::SurfParseError
+            | DiagnosticKind::DeepParseError
+            | DiagnosticKind::MacroError
+            | DiagnosticKind::NameResolutionError
+            | DiagnosticKind::DeepDeclError
+            | DiagnosticKind::DuplicateName
+            | DiagnosticKind::PreimageMismatch
+            | DiagnosticKind::CascadeIncomplete
+            | DiagnosticKind::TypeError
+            | DiagnosticKind::EffectError
+            | DiagnosticKind::LinearityError
+            | DiagnosticKind::LowerError
+            | DiagnosticKind::ReefError
+            | DiagnosticKind::EvalError
+            | DiagnosticKind::GradError
+            | DiagnosticKind::ValidationError
+            | DiagnosticKind::UnknownName
+            | DiagnosticKind::UnknownSchemaVersion
+            | DiagnosticKind::HashError
+            | DiagnosticKind::InvalidRequest
+            | DiagnosticKind::CompileError
+            | DiagnosticKind::GeneralOther
+            | DiagnosticKind::TypeMismatch
+            | DiagnosticKind::PrecisionMismatch
+            | DiagnosticKind::DimensionMismatch
+            | DiagnosticKind::ArityMismatch
+            | DiagnosticKind::UnboundVariable
+            | DiagnosticKind::UnknownConstructor
+            | DiagnosticKind::NotAFunction
+            | DiagnosticKind::NonExhaustiveMatch
+            | DiagnosticKind::OccursCheck
+            | DiagnosticKind::CastNonTensor
+            | DiagnosticKind::TupleIndexOutOfBounds
+            | DiagnosticKind::UseAfterConsume
+            | DiagnosticKind::UnconsumedLinear
+            | DiagnosticKind::InvalidBorrow
+            | DiagnosticKind::CycleDetected
+            | DiagnosticKind::UnsupportedTensorPrecision
+            | DiagnosticKind::DuplicateDefinition
+            | DiagnosticKind::DuplicateModule
+            | DiagnosticKind::OpaqueTypeViolation
+            | DiagnosticKind::ReservedLinkerName
+            | DiagnosticKind::BuiltinShadowing
+            | DiagnosticKind::UnknownForm
+            | DiagnosticKind::MalformedForm
+            | DiagnosticKind::CheckOther => "general",
+        }
+    }
+
+    for kind in DiagnosticKind::ALL {
+        assert!(!classify(kind).is_empty());
+    }
+}
 
 #[test]
 fn effect_kind_canonical_symbols_round_trip() {

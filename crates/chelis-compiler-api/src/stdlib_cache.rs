@@ -59,6 +59,7 @@ use std::path::{Path, PathBuf};
 
 use crate::cache_envelope;
 use crate::compiler::CompilerError;
+use crate::schema::{Diagnostic, GeneralKind};
 
 /// Internal struct-format version. Bumped when [`StdLibContext`]'s shape
 /// changes so a stale on-disk entry is a clean miss, not a bad decode.
@@ -315,16 +316,11 @@ pub fn build_stdlib_context(
         chelis_macros::expand_program(&desugared, &chelis_macros::ExpansionOptions::default())
             .map_err(|err| CompilerError {
                 stage: "desugar".to_string(),
-                errors: vec![crate::schema::Diagnostic {
-                    kind: "macro_error".to_string(),
-                    message: err.to_string(),
-                    severity: 1.0,
-                    expected: None,
-                    got: None,
-                    suggestions: vec![],
-                    span: None,
-                    deep_path: None,
-                }],
+                errors: vec![Diagnostic::general(
+                    GeneralKind::MacroError,
+                    err.to_string(),
+                    1.0,
+                )],
             })?
             .into_exprs();
 
@@ -344,16 +340,7 @@ pub fn build_stdlib_context(
         stage: "effects".to_string(),
         errors: errors
             .iter()
-            .map(|error| crate::schema::Diagnostic {
-                kind: "effect_error".to_string(),
-                message: error.message.clone(),
-                severity: 0.8,
-                expected: None,
-                got: None,
-                suggestions: vec![],
-                span: None,
-                deep_path: None,
-            })
+            .map(|error| Diagnostic::general(GeneralKind::EffectError, error.message.clone(), 0.8))
             .collect(),
     })?;
 

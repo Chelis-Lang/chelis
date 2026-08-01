@@ -99,17 +99,27 @@ NEXTEST_WORKSPACE: list[str] = [
 # of docs/agent_quality_architecture.md's ladder with nothing driving it.
 #
 # NARROWING, stated so a future widening is a conscious act: this is
-# scoped to `-p chelis-types`, not `--workspace --doc`. It buys the
-# oracles that motivated the issue at ~0.5s; a workspace-wide doctest
-# stage is a larger change (every crate's doc examples become gating) and
-# should be argued on its own merits rather than smuggled in here.
+# scoped to the two crates that own compile-fail oracles, not
+# `--workspace --doc`. It buys the chelis-types oracles plus the
+# chelis-compiler-api diagnostic producer privacy oracles; a workspace-wide
+# doctest stage is a larger change (every crate's doc examples become gating)
+# and should be argued on its own merits rather than smuggled in here.
 #
-# Doctests run in exactly two places in this repo: this stage, and the
+# Doctests run in exactly two places in this repo: this stage (for these two
+# packages), and the
 # C-backend CI job's unfiltered `cargo test -p chelis-backend-c` (which
 # picks up that crate's privacy compile-fail doctests as a side effect of
 # having no `--lib`/`--test` filter). A `compile_fail` oracle added to any
 # OTHER crate runs nowhere until one of those two is extended.
-DOCTEST_TYPES: list[str] = ["cargo", "test", "-p", "chelis-types", "--doc"]
+DOCTEST_ORACLES: list[str] = [
+    "cargo",
+    "test",
+    "-p",
+    "chelis-types",
+    "-p",
+    "chelis-compiler-api",
+    "--doc",
+]
 
 STAGES: dict[str, list[list[str]]] = {
     "lint-and-unit": [
@@ -117,7 +127,7 @@ STAGES: dict[str, list[list[str]]] = {
         CLIPPY_WORKSPACE,
         FMT_CHECK,
         CHELIS_LINT_CHECK,
-        DOCTEST_TYPES,
+        DOCTEST_ORACLES,
     ],
     "integration": [
         NEXTEST_WORKSPACE,
@@ -136,7 +146,7 @@ LOCAL_STATIC_COMMANDS: list[list[str]] = [
     CLIPPY_WORKSPACE,
     FMT_CHECK,
     CHELIS_LINT_CHECK,
-    DOCTEST_TYPES,
+    DOCTEST_ORACLES,
 ]
 
 LOCAL_ANNOTATION = "local + ci"

@@ -203,10 +203,13 @@ class ListOutputTests(unittest.TestCase):
 
     def test_doctest_stage_is_in_the_local_subset(self):
         # The doctest stage costs well under a second and catches a broken
-        # oracle before push rather than in CI, so it belongs in `--local`
-        # too (chelis#875).
+        # oracles before push rather than in CI, so they belong in `--local`
+        # too (chelis#875 and chelis#959).
         rendered = [gate.render(c) for c in gate.LOCAL_STATIC_COMMANDS]
-        self.assertIn("cargo test -p chelis-types --doc", rendered)
+        self.assertIn(
+            "cargo test -p chelis-types -p chelis-compiler-api --doc",
+            rendered,
+        )
 
     def test_list_uses_nextest_not_cargo_test(self):
         # Regression guard: the historical `AGENTS.md` gate said
