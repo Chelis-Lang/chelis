@@ -1888,11 +1888,10 @@ fn collect_body_precision_var_names(expr: &Expr, out: &mut HashSet<String>) {
             collect_body_precision_var_names(&meta.expr, out);
         }
         Expr::Atom(_, _) => {}
-        // Transitional arms for new Expr variants (#908)
-        Expr::Node(node, _) => {
-            for child in node.expr_children() {
-                collect_body_precision_var_names(child, out);
-            }
+        // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
+        Expr::Node(node, span) => {
+            let bridged = Expr::List(node.to_list(*span), *span);
+            collect_body_precision_var_names(&bridged, out);
         }
         Expr::BareList(elems, _) => {
             for elem in elems {
@@ -2625,10 +2624,11 @@ fn expr_requires_host_runtime_with_ctx(expr: &Expr, exempt_to_tensor_literal: bo
                     expr_requires_host_runtime_with_ctx(child, exempt_to_tensor_literal)
                 })
         }
-        // Transitional arms for new Expr variants (#908)
-        Expr::Node(node, _) => node
-            .expr_children()
-            .any(|child| expr_requires_host_runtime_with_ctx(child, exempt_to_tensor_literal)),
+        // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
+        Expr::Node(node, span) => {
+            let bridged = Expr::List(node.to_list(*span), *span);
+            expr_requires_host_runtime_with_ctx(&bridged, exempt_to_tensor_literal)
+        }
         Expr::BareList(elems, _) => elems
             .iter()
             .any(|elem| expr_requires_host_runtime_with_ctx(elem, exempt_to_tensor_literal)),
@@ -3040,10 +3040,11 @@ fn expr_depends_on_nonlowerable_name(
                 )
             })
         }
-        // Transitional arms for new Expr variants (#908)
-        Expr::Node(node, _) => node.expr_children().any(|child| {
+        // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
+        Expr::Node(node, span) => {
+            let bridged = Expr::List(node.to_list(*span), *span);
             expr_depends_on_nonlowerable_name(
-                child,
+                &bridged,
                 top_level_defs,
                 top_level_sigs,
                 type_env,
@@ -3051,7 +3052,7 @@ fn expr_depends_on_nonlowerable_name(
                 visiting,
                 bound_names,
             )
-        }),
+        }
         Expr::BareList(elems, _) => elems.iter().any(|child| {
             expr_depends_on_nonlowerable_name(
                 child,
@@ -3088,8 +3089,12 @@ fn collect_param_bound_names(param: &Expr, out: &mut HashSet<String>) {
             }
         }
         Expr::Map(_, _) | Expr::MetaExpr(_, _) | Expr::Atom(_, _) => {}
-        // Transitional arms for new Expr variants (#908)
-        Expr::Node(_, _) | Expr::BareList(_, _) | Expr::UnknownForm(_) => {}
+        // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
+        Expr::Node(node, span) => {
+            let bridged = Expr::List(node.to_list(*span), *span);
+            collect_param_bound_names(&bridged, out);
+        }
+        Expr::BareList(_, _) | Expr::UnknownForm(_) => {}
     }
 }
 
@@ -3108,11 +3113,10 @@ fn collect_pattern_bound_names(pattern: &Expr, out: &mut HashSet<String>) {
                 collect_pattern_bound_names(child, out);
             }
         }
-        // Transitional arms for new Expr variants (#908)
-        Expr::Node(node, _) => {
-            for child in node.expr_children() {
-                collect_pattern_bound_names(child, out);
-            }
+        // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
+        Expr::Node(node, span) => {
+            let bridged = Expr::List(node.to_list(*span), *span);
+            collect_pattern_bound_names(&bridged, out);
         }
         Expr::BareList(elems, _) => {
             for elem in elems {
@@ -3216,11 +3220,10 @@ fn assert_ir_lowerable(expr: &Expr) {
             assert_ir_lowerable(&inner.expr);
         }
         Expr::Atom(_, _) => {}
-        // Transitional arms for new Expr variants (#908)
-        Expr::Node(node, _) => {
-            for child in node.expr_children() {
-                assert_ir_lowerable(child);
-            }
+        // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
+        Expr::Node(node, span) => {
+            let bridged = Expr::List(node.to_list(*span), *span);
+            assert_ir_lowerable(&bridged);
         }
         Expr::BareList(elems, _) => {
             for elem in elems {
@@ -3281,11 +3284,10 @@ fn assert_ir_typed(expr: &Expr) {
             assert_ir_typed(&inner.expr);
         }
         Expr::Atom(_, _) => {}
-        // Transitional arms for new Expr variants (#908)
-        Expr::Node(node, _) => {
-            for child in node.expr_children() {
-                assert_ir_typed(child);
-            }
+        // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
+        Expr::Node(node, span) => {
+            let bridged = Expr::List(node.to_list(*span), *span);
+            assert_ir_typed(&bridged);
         }
         Expr::BareList(elems, _) => {
             for elem in elems {
@@ -4890,8 +4892,12 @@ impl LowerCtx {
                 self.current_span_id.clone(),
             ),
             Expr::MetaExpr(meta_expr, _) => self.lower_expr(&meta_expr.expr),
-            // Transitional arms for new Expr variants (#908)
-            Expr::Node(_, _) | Expr::BareList(_, _) | Expr::UnknownForm(_) => raise_malformed_deep(
+            // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
+            Expr::Node(node, span) => {
+                let bridged = Expr::List(node.to_list(*span), *span);
+                self.lower_expr(&bridged)
+            }
+            Expr::BareList(_, _) | Expr::UnknownForm(_) => raise_malformed_deep(
                 "a transitional Expr variant in expression position",
                 Some(expr.span()),
                 self.current_span_id.clone(),
