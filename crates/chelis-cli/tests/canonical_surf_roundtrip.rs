@@ -167,3 +167,29 @@ fn checked_deep_resugars_without_losing_expression_types() {
         )
     );
 }
+
+#[test]
+fn surf_command_preserves_checked_standalone_binding_types_and_unit() {
+    let directory = tempdir().expect("tempdir");
+    let authored = directory.path().join("checked_bindings.ch");
+    fs::write(&authored, "answer = 42\nunit_value = ()\n").expect("write fixture");
+
+    let checked_deep = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["deep", "--annotate"])
+        .arg(&authored)
+        .output()
+        .expect("run checked desugar");
+    assert!(checked_deep.status.success());
+    let deep_path = directory.path().join("checked.dp");
+    fs::write(&deep_path, &checked_deep.stdout).expect("write checked Deep");
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["surf"])
+        .arg(&deep_path)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("answer: int32 = 42"))
+        .stdout(predicate::str::contains("unit_value: () = ()"));
+}

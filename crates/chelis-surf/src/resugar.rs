@@ -118,10 +118,11 @@ pub fn normalize_deep_for_surface_roundtrip(exprs: &[DeepExpr]) -> Vec<DeepExpr>
 }
 
 fn normalize_declaration_sequence_roundtrip(exprs: Vec<DeepExpr>) -> Vec<DeepExpr> {
-    let mut exprs = exprs
+    let exprs = exprs
         .into_iter()
         .map(normalize_nested_declaration_sequence)
         .collect::<Vec<_>>();
+    let mut exprs = materialize_standalone_definition_signatures(exprs);
 
     for index in 0..exprs.len().saturating_sub(1) {
         let signature = exprs[index].clone();
@@ -131,6 +132,51 @@ fn normalize_declaration_sequence_roundtrip(exprs: Vec<DeepExpr>) -> Vec<DeepExp
         }
     }
     exprs
+}
+
+fn materialize_standalone_definition_signatures(exprs: Vec<DeepExpr>) -> Vec<DeepExpr> {
+    let mut normalized = Vec::with_capacity(exprs.len());
+    for definition_expr in exprs {
+        let Ok(definition) = node_ref(&definition_expr) else {
+            normalized.push(definition_expr);
+            continue;
+        };
+        let Some(definition_type) = (definition.tag == DeepTag::Def)
+            .then(|| meta_value(definition.meta, "type"))
+            .flatten()
+        else {
+            normalized.push(definition_expr);
+            continue;
+        };
+        let Some(name) = definition.children.first().and_then(atom_name) else {
+            normalized.push(definition_expr);
+            continue;
+        };
+        let already_paired = normalized.last().is_some_and(|candidate| {
+            node_ref(candidate).is_ok_and(|signature| {
+                signature.tag == DeepTag::Defsig
+                    && signature.children.first().and_then(atom_name) == Some(name)
+            })
+        });
+        if already_paired {
+            normalized.push(definition_expr);
+            continue;
+        }
+
+        let signature = DeepExpr::Node(
+            Box::new(chelis_deep::node::Node::new(
+                DeepTag::Defsig,
+                MetaMap::default(),
+                vec![definition.children[0].clone(), definition_type.clone()],
+            )),
+            definition.span,
+        );
+        let definition = strip_redundant_definition_types(&signature, &definition_expr)
+            .unwrap_or(definition_expr);
+        normalized.push(signature);
+        normalized.push(definition);
+    }
+    normalized
 }
 
 fn normalize_nested_declaration_sequence(expr: DeepExpr) -> DeepExpr {
@@ -366,6 +412,83 @@ fn rebuild_node_like(
 }
 
 fn normalize_roundtrip_expr(expr: &DeepExpr) -> DeepExpr {
+    if let Ok(node) = node_ref(expr) {
+        if node.tag == DeepTag::Lit
+            && node.children.len() == 1
+            && let Some(value) = node.children.first()
+        {
+            let suffix = literal_suffix(node.meta).ok().flatten();
+            if let DeepExpr::Atom(Atom::Int(value), span) = value {
+                if suffix.is_some_and(|suffix| suffix.is_float()) {
+                    let converted = DeepExpr::Node(
+                        Box::new(chelis_deep::node::Node::new(
+                            DeepTag::Lit,
+                            normalize_roundtrip_meta(node.meta),
+                            vec![DeepExpr::Atom(Atom::Float(*value as f64), *span)],
+                        )),
+                        node.span,
+                    );
+                    return normalize_roundtrip_expr(&converted);
+                }
+                if *value < 0 {
+                    return normalize_negative_integer_literal(node, *value, suffix);
+                }
+            }
+            if let DeepExpr::Atom(Atom::Float(value), span) = value
+                && value.is_sign_negative()
+            {
+                return normalized_unary_neg_literal(
+                    node,
+                    DeepExpr::Atom(Atom::Float(-*value), *span),
+                );
+            }
+        }
+        if node.tag == DeepTag::Tuple && node.children.is_empty() {
+            let unit_type = DeepExpr::Node(
+                Box::new(chelis_deep::node::Node::new(
+                    DeepTag::TUnit,
+                    MetaMap::default(),
+                    Vec::new(),
+                )),
+                node.span,
+            );
+            let mut meta = normalize_roundtrip_meta(node.meta);
+            meta.entries.retain(|(key, _)| key != "type");
+            meta.entries.push(("type".to_string(), unit_type));
+            return DeepExpr::Node(
+                Box::new(chelis_deep::node::Node::new(
+                    DeepTag::Lit,
+                    meta,
+                    vec![DeepExpr::BareList(Vec::new(), node.span)],
+                )),
+                node.span,
+            );
+        }
+        if node.tag == DeepTag::TTuple && node.children.is_empty() {
+            return DeepExpr::Node(
+                Box::new(chelis_deep::node::Node::new(
+                    DeepTag::TUnit,
+                    normalize_roundtrip_meta(node.meta),
+                    Vec::new(),
+                )),
+                node.span,
+            );
+        }
+        if node.tag == DeepTag::App
+            && node.children.len() == 1
+            && variable_name(&node.children[0]).is_some_and(starts_uppercase)
+        {
+            let name = variable_name(&node.children[0]).expect("checked above");
+            return DeepExpr::Node(
+                Box::new(chelis_deep::node::Node::new(
+                    DeepTag::Var,
+                    normalize_roundtrip_meta(node.meta),
+                    vec![DeepExpr::Atom(Atom::Name(name.to_string()), node.span)],
+                )),
+                node.span,
+            );
+        }
+    }
     match expr {
         DeepExpr::Atom(..) => expr.clone(),
         DeepExpr::Node(node, span) => DeepExpr::Node(
@@ -410,6 +533,66 @@ fn normalize_roundtrip_expr(expr: &DeepExpr) -> DeepExpr {
             }))
         }
     }
+}
+
+fn normalize_negative_integer_literal(
+    node: NodeRef<'_>,
+    value: i64,
+    suffix: Option<LiteralSuffix>,
+) -> DeepExpr {
+    let value_span = match &node.children[0] {
+        DeepExpr::Atom(_, span) => *span,
+        _ => node.span,
+    };
+    if integer_minimum(suffix) == Some(value) {
+        let maximum = -(value + 1);
+        let negative_maximum =
+            normalized_unary_neg_literal(node, DeepExpr::Atom(Atom::Int(maximum), value_span));
+        let one = normalized_literal_like(node, DeepExpr::Atom(Atom::Int(1), value_span));
+        return normalized_application("sub", vec![negative_maximum, one], node.span);
+    }
+    normalized_unary_neg_literal(node, DeepExpr::Atom(Atom::Int(-value), value_span))
+}
+
+fn normalized_literal_like(node: NodeRef<'_>, value: DeepExpr) -> DeepExpr {
+    DeepExpr::Node(
+        Box::new(chelis_deep::node::Node::new(
+            DeepTag::Lit,
+            normalize_roundtrip_meta(node.meta),
+            vec![value],
+        )),
+        node.span,
+    )
+}
+
+fn normalized_unary_neg_literal(node: NodeRef<'_>, positive: DeepExpr) -> DeepExpr {
+    normalized_application(
+        "neg",
+        vec![normalized_literal_like(node, positive)],
+        node.span,
+    )
+}
+
+fn normalized_application(name: &str, arguments: Vec<DeepExpr>, span: Span) -> DeepExpr {
+    let function = DeepExpr::Node(
+        Box::new(chelis_deep::node::Node::new(
+            DeepTag::Var,
+            MetaMap::default(),
+            vec![DeepExpr::Atom(Atom::Name(name.to_string()), span)],
+        )),
+        span,
+    );
+    let mut children = Vec::with_capacity(arguments.len() + 1);
+    children.push(function);
+    children.extend(arguments);
+    DeepExpr::Node(
+        Box::new(chelis_deep::node::Node::new(
+            DeepTag::App,
+            MetaMap::default(),
+            children,
+        )),
+        span,
+    )
 }
 
 fn normalize_roundtrip_meta(meta: &MetaMap) -> MetaMap {
@@ -547,6 +730,18 @@ fn resugar_definition(
 ) -> Result<Decl, ResugarError> {
     exact(&definition, 2)?;
     let name = name_child(&definition, 0)?.to_string();
+    let signature_type = signature.map(|signature| &signature.children[1]);
+    let definition_type = meta_value(definition.meta, "type");
+    if let (Some(signature_type), Some(definition_type)) = (signature_type, definition_type)
+        && !same_deep_shape(signature_type, definition_type)
+    {
+        return Err(ResugarError::InvalidChild {
+            tag: definition.tag.as_str(),
+            index: 1,
+            expected: "`type` metadata matching the adjacent `defsig`",
+        });
+    }
+    let declared_type = signature_type.or(definition_type);
 
     if meta_string(definition.meta, "chelis_role") == Some("property") {
         return resugar_property(signature, definition, name);
@@ -560,11 +755,11 @@ fn resugar_definition(
         let mut ret_ty = None;
         let mut effects = None;
         let mut dim_params = Vec::new();
-        if let Some(signature) = signature {
-            let type_node = node_ref(&signature.children[1])?;
+        if let Some(declared_type) = declared_type {
+            let type_node = node_ref(declared_type)?;
             if type_node.tag != DeepTag::TFn || type_node.children.is_empty() {
                 return Err(ResugarError::InvalidChild {
-                    tag: signature.tag.as_str(),
+                    tag: definition.tag.as_str(),
                     index: 1,
                     expected: "a non-empty `(t-fn ...)` type for a function definition",
                 });
@@ -572,7 +767,7 @@ fn resugar_definition(
             let param_count = params.len();
             if type_node.children.len() != param_count + 1 {
                 return Err(ResugarError::InvalidChild {
-                    tag: signature.tag.as_str(),
+                    tag: definition.tag.as_str(),
                     index: 1,
                     expected: "a function type matching the definition parameter count",
                 });
@@ -583,8 +778,8 @@ fn resugar_definition(
             }
             let result = resugar_type(type_node.children.last().expect("nonempty checked"))?;
             ret_ty = (!is_infer_type(&result)).then_some(result);
-            effects = resugar_effect_metadata(&signature.children[1])?;
-            collect_quantified_variables(&signature.children[1], &mut dim_params)?;
+            effects = resugar_effect_metadata(declared_type)?;
+            collect_quantified_variables(declared_type, &mut dim_params)?;
         }
         return Ok(Decl::FunDef {
             name,
@@ -599,9 +794,7 @@ fn resugar_definition(
 
     Ok(Decl::LetDef {
         name,
-        ty: signature
-            .map(|signature| resugar_type(&signature.children[1]))
-            .transpose()?,
+        ty: declared_type.map(resugar_type).transpose()?,
         value: resugar_expression(&definition.children[1])?,
         span: definition.span,
     })
@@ -1004,6 +1197,9 @@ fn resugar_node(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
                 return Ok(operator);
             }
             let function = resugar_expression(&node.children[0])?;
+            if node.children.len() == 1 && matches!(function, Expr::Constructor(..)) {
+                return Ok(function);
+            }
             let arguments = node.children[1..]
                 .iter()
                 .map(resugar_expression)
@@ -1018,8 +1214,16 @@ fn resugar_node(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
                     index: 1,
                     expected: "a `(t-prim {} precision)` node",
                 })?;
+            let operand = if let Ok(literal) = node_ref(&node.children[0])
+                && literal.tag == DeepTag::Lit
+                && default_literal_suffix_is_semantic_in_cast(&literal, precision)?
+            {
+                resugar_literal_with_default_suffix(literal)?
+            } else {
+                resugar_expression(&node.children[0])?
+            };
             Ok(Expr::Cast(
-                Box::new(resugar_expression(&node.children[0])?),
+                Box::new(operand),
                 precision.to_string(),
                 node.span,
             ))
@@ -1225,15 +1429,52 @@ fn decode_effect_kind(node: NodeRef<'_>) -> Result<EffectKind, ResugarError> {
 }
 
 fn resugar_literal(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
+    resugar_literal_impl(node, false)
+}
+
+fn resugar_literal_with_default_suffix(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
+    resugar_literal_impl(node, true)
+}
+
+fn resugar_literal_impl(
+    node: NodeRef<'_>,
+    preserve_default_suffix: bool,
+) -> Result<Expr, ResugarError> {
     exact(&node, 1)?;
     validate_literal_type(&node)?;
     reject_non_finite_float(&node.children[0])?;
     let suffix = literal_suffix(node.meta)?;
+    if let DeepExpr::Atom(Atom::Int(value), _) = &node.children[0]
+        && integer_minimum(suffix) == Some(*value)
+    {
+        let maximum = -(value + 1);
+        let literal = |value| Expr::Lit(surface_integer_literal(value, suffix), node.span);
+        return Ok(Expr::Binary(
+            BinOp::Sub,
+            Box::new(Expr::Unary(
+                UnaryOp::Neg,
+                Box::new(literal(maximum)),
+                node.span,
+            )),
+            Box::new(literal(1)),
+            node.span,
+        ));
+    }
     let literal = match (&node.children[0], suffix) {
+        (DeepExpr::Atom(Atom::Int(value), _), Some(LiteralSuffix::I32))
+            if preserve_default_suffix =>
+        {
+            Literal::TypedInt(*value, LiteralSuffix::I32)
+        }
         (DeepExpr::Atom(Atom::Int(value), _), None | Some(LiteralSuffix::I32)) => {
             Literal::Int(*value)
         }
         (DeepExpr::Atom(Atom::Int(value), _), Some(suffix)) => Literal::TypedInt(*value, suffix),
+        (DeepExpr::Atom(Atom::Float(value), _), Some(LiteralSuffix::F32))
+            if preserve_default_suffix =>
+        {
+            Literal::TypedFloat(*value, LiteralSuffix::F32)
+        }
         (DeepExpr::Atom(Atom::Float(value), _), None | Some(LiteralSuffix::F32)) => {
             Literal::Float(*value)
         }
@@ -1259,6 +1500,43 @@ fn resugar_literal(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
     Ok(Expr::Lit(literal, node.span))
 }
 
+fn surface_integer_literal(value: i64, suffix: Option<LiteralSuffix>) -> Literal {
+    match suffix {
+        None | Some(LiteralSuffix::I32) => Literal::Int(value),
+        Some(suffix) => Literal::TypedInt(value, suffix),
+    }
+}
+
+fn integer_minimum(suffix: Option<LiteralSuffix>) -> Option<i64> {
+    match suffix {
+        None | Some(LiteralSuffix::I32) => Some(i32::MIN as i64),
+        Some(LiteralSuffix::I8) => Some(i8::MIN as i64),
+        Some(LiteralSuffix::I16) => Some(i16::MIN as i64),
+        Some(LiteralSuffix::I64) => Some(i64::MIN),
+        Some(_) => None,
+    }
+}
+
+fn default_literal_suffix_is_semantic_in_cast(
+    node: &NodeRef<'_>,
+    precision: &str,
+) -> Result<bool, ResugarError> {
+    let suffix = literal_suffix(node.meta)?;
+    let numeric_target = matches!(
+        precision,
+        "f32" | "f64" | "bf16" | "f16" | "int8" | "int16" | "int32" | "int64"
+    );
+    Ok(match (&node.children[0], suffix) {
+        (DeepExpr::Atom(Atom::Float(_), _), Some(LiteralSuffix::F32)) => {
+            matches!(precision, "f64" | "bf16" | "f16")
+        }
+        (DeepExpr::Atom(Atom::Int(_), _), Some(LiteralSuffix::I32)) => {
+            numeric_target && precision != "int32"
+        }
+        _ => false,
+    })
+}
+
 fn validate_literal_type(node: &NodeRef<'_>) -> Result<(), ResugarError> {
     let Some(ty) = meta_value(node.meta, "type") else {
         return Ok(());
@@ -1275,8 +1553,14 @@ fn validate_literal_type(node: &NodeRef<'_>) -> Result<(), ResugarError> {
         (DeepExpr::Atom(Atom::Str(_), _), DeepTag::TPrim) => {
             primitive_type_name(ty) == Some("string")
         }
-        (DeepExpr::Atom(Atom::Int(_), _), DeepTag::TPrim) => primitive_type_name(ty)
-            .is_some_and(|name| matches!(name, "int8" | "int16" | "int32" | "int64")),
+        (DeepExpr::Atom(Atom::Int(_), _), DeepTag::TPrim) => {
+            primitive_type_name(ty).is_some_and(|name| {
+                matches!(
+                    name,
+                    "int8" | "int16" | "int32" | "int64" | "f16" | "bf16" | "f32" | "f64"
+                )
+            })
+        }
         (DeepExpr::Atom(Atom::Float(_), _), DeepTag::TPrim) => primitive_type_name(ty)
             .is_some_and(|name| matches!(name, "f16" | "bf16" | "f32" | "f64")),
         (DeepExpr::BareList(items, _), DeepTag::TUnit) => items.is_empty(),
@@ -1318,23 +1602,41 @@ fn resugar_let(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
             expected: "a `(bind ...)` node",
         });
     }
-    exact(&binding_node, 2)?;
-    let name = name_child(&binding_node, 0)?.to_string();
-    let binding = LetBinding {
-        pattern: LetPattern::Var(name, binding_node.span),
-        ty: type_metadata(&binding_node.children[1]).transpose()?,
-        // A let binding's declared type is encoded on its value node. The
-        // binding field above consumes that outer annotation; nested child
-        // annotations still resugar normally.
-        value: resugar_node(node_ref(&binding_node.children[1])?)?,
-    };
+    at_least(&binding_node, 2)?;
+    if !binding_node.children.len().is_multiple_of(2) {
+        return Err(ResugarError::InvalidChild {
+            tag: binding_node.tag.as_str(),
+            index: binding_node.children.len() - 1,
+            expected: "complete name/expression binding pairs",
+        });
+    }
+    let mut bindings = Vec::with_capacity(binding_node.children.len() / 2);
+    for pair in binding_node.children.chunks_exact(2) {
+        bindings.push(LetBinding {
+            pattern: LetPattern::Var(
+                atom_name(&pair[0])
+                    .ok_or(ResugarError::InvalidChild {
+                        tag: binding_node.tag.as_str(),
+                        index: bindings.len() * 2,
+                        expected: "a binding name",
+                    })?
+                    .to_string(),
+                binding_node.span,
+            ),
+            ty: type_metadata(&pair[1]).transpose()?,
+            // A let binding's declared type is encoded on its value node. The
+            // binding field above consumes that outer annotation; nested child
+            // annotations still resugar normally.
+            value: resugar_node(node_ref(&pair[1])?)?,
+        });
+    }
     let body = resugar_expression(&node.children[1])?;
     match body {
-        Expr::Block(mut bindings, body, span) => {
-            bindings.insert(0, binding);
+        Expr::Block(body_bindings, body, span) => {
+            bindings.extend(body_bindings);
             Ok(Expr::Block(bindings, body, node.span.merge(span)))
         }
-        body => Ok(Expr::Block(vec![binding], Box::new(body), node.span)),
+        body => Ok(Expr::Block(bindings, Box::new(body), node.span)),
     }
 }
 
@@ -2156,6 +2458,9 @@ fn literal_suffix(meta: &MetaMap) -> Result<Option<LiteralSuffix>, ResugarError>
     else {
         return Ok(None);
     };
+    if node_ref(value).is_ok_and(|node| node.tag == DeepTag::TUnit) {
+        return Ok(None);
+    }
     let Some(name) = primitive_type_name(value) else {
         return Err(ResugarError::InvalidChild {
             tag: DeepTag::Lit.as_str(),

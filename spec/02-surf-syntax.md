@@ -37,12 +37,15 @@ The canonical forms are:
 
 - every function definition has a parameter list, including `()` for a
   nullary function, and an annotated result uses `->`;
-- calls and constructor applications are flat and parenthesized (`f(x, y)`),
-  never juxtaposed or chained application aliases;
+- calls and non-nullary constructor applications are flat and parenthesized
+  (`f(x, y)`, `Some(x)`), while a nullary constructor is bare (`None`);
+  application is never juxtaposed or chained;
 - ordinary binding blocks use newlines as separators, contain at least one
   binding and one tail expression, and contain no semicolons; `par` and direct
   Deep sequencing use their distinct semicolon-delimited forms;
 - the unit value and type are `()`; a singleton tuple is `(x,)`;
+- comma- and semicolon-delimited forms have no trailing separator; the comma
+  in a singleton tuple or singleton tuple pattern is the sole exception;
 - built-in effects are spelled `Diff`, `Random`, `Accum`, `IO`, `Test`, and
   `Resource(...)` with exactly that casing;
 - record fields preserve source order and evaluate left-to-right; a field
@@ -50,7 +53,7 @@ The canonical forms are:
 - non-primary transform arguments are named: `grad(f, wrt=x)` and
   `vmap(f, axis=n)`. Axis zero is written `vmap(f)`;
 - literal source must equal the canonical literal printer's spelling for its
-  decoded value and suffix. That spelling is decimal, has no digit separators
+  decoded value and suffix. The spelling is decimal, has no digit separators
   or redundant leading/trailing zeroes, and uses the shortest round-trippable
   float form with a decimal point or canonical exponent when required.
 
@@ -625,6 +628,7 @@ match expr with {
 | Nested | `Some(Some(x))` | `(pat-ctor {} Some (pat-ctor {} Some (pat-var {} x)))` |
 | Record | `Adam { lr, eps }` | `(pat-record {} Adam (kv {} lr (pat-var {} lr)) ...)` |
 | Tuple | `(a, b, c)` | `(pat-tuple {} (pat-var {} a) ...)` |
+| Unit/empty tuple | `()` | `(pat-tuple {})` |
 | As-pattern | `x @ Some(_)` | `(pat-as {} x (pat-ctor {} Some (pat-wild {})))` |
 
 **Guards:** `if` after pattern, before `=>`. Guard fills the guard slot in `(arm {} pattern guard body)`:
@@ -762,9 +766,13 @@ narrowing. The closed suffix set is:
 | `i32` | `int32` | `42i32` | Integer-typed |
 | `i64` | `int64` | `42i64` | Integer-typed |
 
-The legacy lexer can decode a float suffix attached to integer-looking digits,
-but canonical validation requires the printed float body: `42.0f32`, not
-`42f32`. Integer-typed suffixes attach to integer literal tokens only;
+Default-type suffixes are semantic commitments, not syntax-safe aliases. In
+particular, `cast(1.1f32, f64)` widens a value first bound at `f32`, whereas
+`cast(1.1, f64)` contextually binds the literal at `f64` under P10b. Both are
+therefore canonical. A float suffix attached to integer-looking digits is
+accepted by the v0.18 migration lexer, but canonical validation requires the
+printed float body: `42.0f32`, not `42f32`. Integer-typed suffixes attach to
+integer literal tokens only;
 `1.0i8` is a parse error.
 
 **Adjacency rule.** A suffix is part of the literal token only if it
@@ -852,7 +860,10 @@ x
 
 The one qualification is at separator boundaries in a sequencing context (block bindings, block tail, declaration bodies): there, a top-level newline acts as a `Sep` and ends the current expression unless the next line begins `|>` or the break is inside `()`/`[]`/`{}`. This is the same boundary rule that binding values and declaration bodies already follow (see P5 and `BlockBody`); it is what makes a bare non-tail statement a rejected juxtaposition rather than a silent application (chelis#706). The leading-`|>` continuation above is exactly the escape hatch that keeps a multi-line pipeline as one expression.
 
-Trailing commas allowed everywhere commas appear: parameter lists, argument lists, record fields, import lists, tuples. Parser ignores trailing comma before closing delimiter.
+Canonical Surf rejects trailing commas and semicolons. The only trailing-looking
+separator is the grammar-significant comma in a singleton tuple or tuple pattern:
+`(x,)`. The v0.18 migration parser accepts legacy trailing separators and removes
+them.
 
 ### P13: Modulo
 
@@ -968,17 +979,17 @@ ModulePath    <- TypeIdent ('.' TypeIdent)*
 ImportDecl    <- 'import' S ModulePath S ImportSpec?
 ImportSpec    <- '(' S ImportNames S ')'
 ImportNames   <- '..'
-               / IdentOrType (S ',' S IdentOrType)* (S ',')?
+               / IdentOrType (S ',' S IdentOrType)*
 IdentOrType   <- TypeIdent / Ident
 
 ExportDecl    <- 'export' S '(' S IdentOrType
-                  (S ',' S IdentOrType)* (S ',')? S ')'
+                  (S ',' S IdentOrType)* S ')'
 
 # ═══════════════════════════════════════════════════
 #  DIMENSIONS
 # ═══════════════════════════════════════════════════
 
-DimDecl       <- 'dim' S Ident (S ',' S Ident)* (S ',')?
+DimDecl       <- 'dim' S Ident (S ',' S Ident)*
 
 # ═══════════════════════════════════════════════════
 #  TYPE DECLARATIONS
@@ -990,14 +1001,12 @@ TypeDecl      <- 'type' S TypeIdent TypeParams? S '='
                   S '|' S Variant (S '|' S Variant)*
 TypeAlias     <- 'type' S TypeIdent TypeParams? S '='
                   S !('|') TypeExpr
-TypeParams    <- '[' S Ident (S ',' S Ident)* (S ',')? S ']'
+TypeParams    <- '[' S Ident (S ',' S Ident)* S ']'
 
 Variant       <- TypeIdent RecordFields?
                / TypeIdent TupleFields?
-RecordFields  <- '{' S FieldDecl (S ',' S FieldDecl)*
-                  (S ',')? S '}'
-TupleFields   <- '(' S TypeExpr (S ',' S TypeExpr)*
-                  (S ',')? S ')'
+RecordFields  <- '{' S FieldDecl (S ',' S FieldDecl)* S '}'
+TupleFields   <- '(' S TypeExpr (S ',' S TypeExpr)* S ')'
 FieldDecl     <- Ident S ':' S TypeExpr
 
 # ═══════════════════════════════════════════════════
@@ -1041,17 +1050,17 @@ proof. The source bridges for `std.quantile.range` and
 FunDecl       <- 'def' S Ident DimParams? Params
                   ReturnType? EffectClause? S '=' S Expr
 
-DimParams     <- '[' S Ident (S ',' S Ident)* (S ',')? S ']'
-Params        <- '(' S (Param (S ',' S Param)* (S ',')?)? S ')'
+DimParams     <- '[' S Ident (S ',' S Ident)* S ']'
+Params        <- '(' S (Param (S ',' S Param)*)? S ')'
 Param         <- Ident (S ':' S TypeExpr)?
 ReturnType    <- S '->' S TypeExpr
 EffectClause  <- S '!' S '{' S (EffectExpr (S ',' S EffectExpr)*)?
-                  (S ',')? S '}'
+                  S '}'
 EffectExpr    <- 'Diff' / 'Random' / 'Accum' / 'IO' / 'Test'
                / 'Resource' S '(' S StringLit S ')'
 
 MacroDecl     <- 'macro' S Ident MacroParams S '=' S Expr
-MacroParams   <- '(' S (Ident (S ',' S Ident)*)? (S ',')? S ')'
+MacroParams   <- '(' S (Ident (S ',' S Ident)*)? S ')'
 BindingDecl   <- ValueIdent (S ':' S TypeExpr)? S '=' S Expr
 ValueIdent    <- Ident / [A-Z] ![a-zA-Z0-9_]
 
@@ -1065,13 +1074,13 @@ TypeAtom      <- 'tensor' '[' S DimList S ',' S PrecType S ']'
                / PrecType
                / '&' S TypeAtom
                / '(' S ')'
-               / '(' S TypeExpr S ','
-                  (S TypeExpr (S ',' S TypeExpr)*)? (S ',')? S ')'
+               / '(' S TypeExpr S ',' S ')'
+               / '(' S TypeExpr S ',' S TypeExpr
+                  (S ',' S TypeExpr)* S ')'
                / '(' S TypeExpr S ')'
                / TypeName TypeArgs?
 
-TypeArgs      <- '[' S (TypeExpr (S ',' S TypeExpr)*)?
-                  (S ',')? S ']'
+TypeArgs      <- '[' S (TypeExpr (S ',' S TypeExpr)*)? S ']'
 
 # Bare or module-qualified type name (`Mode`, `Demo.Dropout.Mode`).
 TypeName      <- TypeIdent ('.' TypeIdent)*
@@ -1095,7 +1104,8 @@ DimExpr       <- IntLit / Ident / '*' / '..' Ident
 Expr          <- MatchExpr / IfExpr / FnExpr / WithHandler
                / PipeExpr
 
-LetPattern    <- '(' S Ident (S ',' S Ident)+ (S ',')? S ')'
+LetPattern    <- '(' S ')' / '(' S Ident S ',' S ')'
+               / '(' S Ident S ',' S Ident (S ',' S Ident)* S ')'
                / Ident (S ':' S TypeExpr)?
 
 MatchExpr     <- 'match' S Expr S 'with' S '{' S MatchArms S '}'
@@ -1123,15 +1133,15 @@ AnnotExpr     <- AccessExpr (S ':' S TypeExpr)?
 AccessExpr    <- AppExpr AccessStep*
 AccessStep    <- '.' IntLit                              # tuple index
                / '.' (Ident / TypeIdent) CallArgs?        # field / module path, optionally applied
-CallArgs      <- '(' S (Expr (S ',' S Expr)* (S ',')?)? S ')'
+CallArgs      <- '(' S (Expr (S ',' S Expr)*)? S ')'
 AppExpr       <- AtomExpr CallArgs?
                / TransformExpr CallArgs?
 
 # ── Atoms ──
 
 AtomExpr      <- '(' S ')'
-               / '(' S Expr S ',' S Expr
-                  (S ',' S Expr)* (S ',')? S ')'
+               / '(' S Expr S ',' S ')'
+               / '(' S Expr S ',' S Expr (S ',' S Expr)* S ')'
                / '(' S Expr S ')'
                / BlockExpr
                / DoExpr
@@ -1148,8 +1158,7 @@ BlockExpr     <- '{' S BlockBody S '}'
 BlockBody     <- (BlockBinding Newline)+ Expr
 BlockBinding  <- LetPattern S '=' S Expr
 DoExpr        <- 'do' S '{' S Expr (S ';' S Expr)* S '}'
-ParExpr       <- 'par' S '{' S Expr (S ';' S Expr)*
-                  (S ';')? S '}'
+ParExpr       <- 'par' S '{' S Expr (S ';' S Expr)* S '}'
 WithHandler   <- 'with' S ('seed' / 'device') S '(' S Expr S ')'
                   S HandlerBlock
 HandlerBlock  <- '{' S (Expr / BlockBody) S '}'
@@ -1160,7 +1169,7 @@ HandlerBlock  <- '{' S (Expr / BlockBody) S '}'
 # — bind it with `_ = <expr>` or move it to tail position (chelis#706).
 
 TransformExpr <- TransformKw S '(' S Expr
-                  (S ',' S TransformArg)? (S ',')? S ')'
+                  (S ',' S TransformArg)? S ')'
                / 'realize' / 'copy'
 TransformKw   <- 'grad' / 'vmap' / 'jit' / 'realize'
                / 'cast' / 'copy'
@@ -1168,11 +1177,11 @@ TransformArg  <- PrecType / ('wrt' / 'axis') S '=' S Expr
 
 RecordExpr    <- CtorName S RecordBody
 RecordBody    <- '{' S RecordField
-                  (S ',' S RecordField)* (S ',')? S '}'
+                  (S ',' S RecordField)* S '}'
 RecordField   <- Ident S ':' S Expr / Ident
 
 QuoteExpr     <- ('quote' / 'unquote' / 'splice') S '(' S Expr S ')'
-ListExpr      <- '[' S (Expr (S ',' S Expr)*)? (S ',')? S ']'
+ListExpr      <- '[' S (Expr (S ',' S Expr)*)? S ']'
 
 # ═══════════════════════════════════════════════════
 #  PATTERNS
@@ -1180,13 +1189,14 @@ ListExpr      <- '[' S (Expr (S ',' S Expr)*)? (S ',')? S ']'
 
 Pattern       <- Ident S '@' S Pattern / PatAtom
 
-PatAtom       <- '(' S Pattern S ','
-                  (S Pattern (S ',' S Pattern)*)? (S ',')? S ')'
+PatAtom       <- '(' S ')'
+               / '(' S Pattern S ',' S ')'
+               / '(' S Pattern S ',' S Pattern (S ',' S Pattern)* S ')'
                / '(' S Pattern S ')'
                / CtorName S '{' S RecordPatField
-                  (S ',' S RecordPatField)* (S ',')? S '}'
+                  (S ',' S RecordPatField)* S '}'
                / CtorName S '(' S Pattern
-                  (S ',' S Pattern)* (S ',')? S ')'
+                  (S ',' S Pattern)* S ')'
                / CtorName
                / Literal
                / '_'

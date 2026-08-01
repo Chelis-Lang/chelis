@@ -295,6 +295,13 @@ Every structurally valid public Deep tag SHALL have a canonical Surf AST represe
 Deep-to-Surf emitters SHALL construct that shared AST and use the canonical Surf printer;
 they SHALL NOT maintain a second handwritten source dialect. Desugaring the result SHALL
 recover Deep modulo only the derived metadata normalization named by the numbered source spec.
+That normalization SHALL materialize a checked standalone `def` type as a `defsig`, map empty
+`tuple`/`t-tuple` to unit, and map zero-argument uppercase-constructor `app` to the bare
+constructor without erasing semantic type data. Multi-pair `bind` nodes SHALL resugar in
+their written sequential order; empty `pat-tuple` SHALL resugar directly as `()`.
+Negative Deep literals SHALL normalize to Surf's unary-minus application shape, including a
+non-overflowing decomposition for a signed minimum; float-typed integer atoms SHALL normalize
+to the equivalent float atom.
 
 #### Scenario: Direct Deep forms remain distinct
 

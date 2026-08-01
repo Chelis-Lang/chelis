@@ -227,11 +227,19 @@
         "required": true,
         "types": [
           {
-            "type": "field_expression",
+            "type": "callable_access_expression",
             "named": true
           },
           {
-            "type": "primary_expression",
+            "type": "identifier",
+            "named": true
+          },
+          {
+            "type": "parenthesized_expression",
+            "named": true
+          },
+          {
+            "type": "qualified_type_name",
             "named": true
           },
           {
@@ -255,6 +263,46 @@
         },
         {
           "type": "call_arguments",
+          "named": true
+        },
+        {
+          "type": "nonempty_call_arguments",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "callable_access_expression",
+    "named": true,
+    "fields": {
+      "field": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      },
+      "value": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "primary_expression",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "access_step",
           "named": true
         }
       ]
@@ -1053,7 +1101,7 @@
     "fields": {},
     "children": {
       "multiple": true,
-      "required": true,
+      "required": false,
       "types": [
         {
           "type": "let_pattern",
@@ -1348,6 +1396,21 @@
     }
   },
   {
+    "type": "nonempty_call_arguments",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "expression",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
     "type": "opaque_type_declaration",
     "named": true,
     "fields": {
@@ -1516,6 +1579,10 @@
         },
         {
           "type": "tuple_pattern",
+          "named": true
+        },
+        {
+          "type": "unit_pattern",
           "named": true
         },
         {
@@ -2268,6 +2335,11 @@
   },
   {
     "type": "unit_expression",
+    "named": true,
+    "fields": {}
+  },
+  {
+    "type": "unit_pattern",
     "named": true,
     "fields": {}
   },

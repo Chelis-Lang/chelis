@@ -34,21 +34,28 @@ mod tests {
 
     #[test]
     fn surf_v019_tree_sitter_accepts_the_canonical_surface() {
-        let source = concat!(
+        for source in [
             "module Canonical.Syntax\n",
             "type Point = | Point { x: f32, y: f32 }\n",
-            "def choose(x: f32) -> f32 ! { IO } = {\n",
-            "  y = f(x)\n",
-            "  y\n",
-            "}\n",
+            "def choose(x: f32) -> f32 ! { IO } = { y = f(x)\n y }\n",
             "sequence = do { f(x); g(y) }\n",
-            "parallel = par { f(x); g(y); }\n",
+            "parallel = par { f(x); g(y) }\n",
             "updated = point with { x: next_x, y }\n",
             "syntax = quote(f(x))\n",
             "singleton = (x,)\n",
-        );
-
-        assert!(!surf_has_error(source));
+            "unit_match = match x with { | () => 0 }\n",
+            "nullary_function = f()\n",
+            "nullary_constructor = None\n",
+            "wide_int = 42i64\n",
+            "wide_float = 1.0f64\n",
+            "default_int_commitment = 42i32\n",
+            "default_float_commitment = 1.0f32\n",
+        ] {
+            assert!(
+                !surf_has_error(source),
+                "canonical Surf parsed with an error: {source}"
+            );
+        }
     }
 
     #[test]
@@ -61,6 +68,26 @@ mod tests {
             "result = vmap(f, 1)\n",
             "result = vmap(f, axis=0)\n",
             "result = 0x10\n",
+            "result = 42f64\n",
+            "result = f(x,)\n",
+            "result = [x,]\n",
+            "result = Point { x, }\n",
+            "result = (x, y,)\n",
+            "result = Some(x,)\n",
+            "result = None()\n",
+            "result = match x with { | Some(v,) => v }\n",
+            "result = par { f(x); g(y); }\n",
+            "result = do { f(x); g(y); }\n",
+            "def f[a,](x) = x\n",
+            "def f() ! { IO, } = ()\n",
+            "result = grad(f,)\n",
+            "result = vmap(f, axis=1,)\n",
+            "result = cast(x, f64,)\n",
+            "result = with seed(1,) { x }\n",
+            "def resource() ! { Resource(\"gpu:0\",) } = ()\n",
+            "type Boxed = | Boxed(int32,)\n",
+            "import Demo (value,)\n",
+            "export (value,)\n",
         ] {
             assert!(
                 surf_has_error(source),

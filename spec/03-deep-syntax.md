@@ -617,7 +617,14 @@ syntax; an open-tail `Cons` remains an explicit call. Explicit `borrow` and
 Deep `block` uses `do { e1; e2; ... }`, `record-update` uses
 `base with { field: value, ... }`, and `quote`, `unquote`, and `splice` use
 same-named call-like forms. A matching `defsig` and `def` resugar as one inline
-typed Surf definition; a standalone `defsig` remains `sig`.
+typed Surf definition; a standalone `defsig` remains `sig`. A checked standalone
+`def` carrying semantic `type` metadata resugars as a typed Surf declaration;
+normalization materializes the equivalent `defsig` rather than erasing the type.
+All ordered pairs in one `bind` become ordered Surf block bindings. Empty
+`tuple` and `t-tuple` nodes normalize to the language's unit value and type;
+empty `pat-tuple` is written `()` directly. A zero-argument `app` of an uppercase
+constructor normalizes to the bare nullary constructor, while a lowercase
+zero-argument function call remains `f()`.
 
 The normal and debug emitters share this AST-backed resugarer and Surf printer.
 Debug output may append stable `-- deep-debug: ...` comments; it is not a
@@ -630,7 +637,16 @@ expansion, inferred `effects`, and `invariant_amenability` because those values
 are informational or deterministically recomputed. It may also erase
 matching `type` entries on a `def`, its `fn` value, and its function parameters
 when an adjacent matching `defsig` already carries the exact same types; a
-disagreement is never erased. It may
+disagreement is never erased. For a standalone checked `def`, normalization may
+materialize that metadata as an adjacent `defsig` and then apply the same exact
+redundancy rule. Empty `tuple`/`t-tuple` normalize to `lit`/`t-unit`, and a
+zero-argument uppercase-constructor `app` normalizes to its bare `var`; these are
+the unique Surf encodings of those language values. Because Surf negative
+numerals are unary minus rather than signed tokens, a negative Deep `lit`
+normalizes to the equivalent `neg` application; the minimum signed value uses
+`sub(neg(max), 1)` so its positive magnitude never overflows the literal width.
+An integer atom carrying a float primitive type normalizes to the equivalent
+float atom before that sign rule. It may
 not erase or rewrite any other declared `type` or `eff` data, handler effects,
 `wrt`, `opaque`, `invariant`, property semantics, or a validated `surf_*`
 value. Implementations compare macro-authored Surf after expansion. Any other

@@ -121,6 +121,11 @@ fn validate_canonical_literal_spellings(source: &str, tokens: &[Token]) -> Resul
         let expected = match &token.kind {
             TokenKind::Int(value) => Some(value.to_string()),
             TokenKind::Float(value) => Some(crate::format::canonical_float(*value)),
+            TokenKind::TypedInt(value, suffix) if suffix.is_float() => Some(format!(
+                "{}{}",
+                crate::format::canonical_float(*value as f64),
+                suffix.as_str()
+            )),
             TokenKind::TypedInt(value, suffix) => Some(format!("{value}{}", suffix.as_str())),
             TokenKind::TypedFloat(value, suffix) => Some(format!(
                 "{}{}",
@@ -688,13 +693,44 @@ impl Parser {
         names.push(name);
         while *self.peek() == TokenKind::Comma {
             self.advance();
-            if *self.peek() == terminator {
+            if self.comma_terminates_list(&terminator, names.len(), false)? {
                 break;
             }
             let (name, _) = self.expect_ident_or_type_ident()?;
             names.push(name);
         }
         Ok(names)
+    }
+
+    fn comma_terminates_list(
+        &self,
+        terminator: &TokenKind,
+        item_count: usize,
+        singleton_tuple: bool,
+    ) -> Result<bool, ParseError> {
+        if self.peek() != terminator {
+            return Ok(false);
+        }
+        if self.mode == ParseMode::LegacyV018 || (singleton_tuple && item_count == 1) {
+            return Ok(true);
+        }
+        Err(ParseError::Expected {
+            expected: "another item after `,`; canonical Surf has no trailing separators".into(),
+            found: format!("{terminator:?}"),
+            offset: self.current_offset(),
+        })
+    }
+
+    fn consume_legacy_trailing_comma_before(&mut self, terminator: &TokenKind) -> bool {
+        if self.mode == ParseMode::LegacyV018
+            && *self.peek() == TokenKind::Comma
+            && self.peek_significant_after(1) == Some(terminator)
+        {
+            self.advance();
+            true
+        } else {
+            false
+        }
     }
 
     fn parse_name_bracket_list(&mut self) -> Result<Vec<String>, ParseError> {
@@ -1291,7 +1327,7 @@ impl Parser {
                 fields.push(self.parse_record_field()?);
                 while *self.peek() == TokenKind::Comma {
                     self.advance();
-                    if *self.peek() == TokenKind::RBrace {
+                    if self.comma_terminates_list(&TokenKind::RBrace, fields.len(), false)? {
                         break;
                     }
                     fields.push(self.parse_record_field()?);
@@ -1310,13 +1346,20 @@ impl Parser {
                 fields.push(self.parse_type()?);
                 while *self.peek() == TokenKind::Comma {
                     self.advance();
-                    if *self.peek() == TokenKind::RParen {
+                    if self.comma_terminates_list(&TokenKind::RParen, fields.len(), false)? {
                         break;
                     }
                     fields.push(self.parse_type()?);
                 }
             }
             let end = self.expect(&TokenKind::RParen)?;
+            if self.mode == ParseMode::Canonical && fields.is_empty() {
+                return Err(ParseError::Expected {
+                    expected: format!("bare zero-argument constructor `{name}`"),
+                    found: format!("`{name}()`"),
+                    offset: start.offset,
+                });
+            }
             Ok(Variant {
                 name,
                 fields: VariantFields::Positional(fields),
@@ -1412,11 +1455,12 @@ impl Parser {
                     break;
                 }
                 self.advance();
-                match self.peek().clone() {
+                let final_segment_is_constructor = match self.peek().clone() {
                     TokenKind::Ident(field) => {
                         let tok = self.advance();
                         let start = expr_span(&lhs);
                         lhs = Expr::Access(Box::new(lhs), field, start.merge(tok.span));
+                        false
                     }
                     // A PascalCase segment after `.` is a module/type path
                     // component, never a record field (fields are snake_case,
@@ -1433,6 +1477,7 @@ impl Parser {
                         let tok = self.advance();
                         let start = expr_span(&lhs);
                         lhs = Expr::Access(Box::new(lhs), segment, start.merge(tok.span));
+                        true
                     }
                     TokenKind::Int(index) => {
                         let tok = self.advance();
@@ -1447,7 +1492,7 @@ impl Parser {
                             offset: self.current_offset(),
                         });
                     }
-                }
+                };
                 // A dotted path may be applied: `Demo.Dropout.use(m)` or the
                 // qualified constructor call `Demo.List.Cons(x, xs)`. The
                 // prefix-position juxtaposition handler only runs on the head
@@ -1461,6 +1506,16 @@ impl Parser {
                     self.advance();
                     let args = self.parse_expr_list(TokenKind::RParen)?;
                     let end = self.expect(&TokenKind::RParen)?;
+                    if self.mode == ParseMode::Canonical
+                        && final_segment_is_constructor
+                        && args.is_empty()
+                    {
+                        return Err(ParseError::Expected {
+                            expected: "bare zero-argument constructor".into(),
+                            found: "zero-argument constructor call".into(),
+                            offset: start.offset,
+                        });
+                    }
                     lhs = Expr::Apply(Box::new(lhs), args, start.merge(end.span));
                     if self.mode == ParseMode::Canonical {
                         break;
@@ -1811,7 +1866,7 @@ impl Parser {
                         let mut elems = vec![first];
                         while *self.peek() == TokenKind::Comma {
                             self.advance();
-                            if *self.peek() == TokenKind::RParen {
+                            if self.comma_terminates_list(&TokenKind::RParen, elems.len(), true)? {
                                 break;
                             }
                             elems.push(self.parse_expr(0)?);
@@ -1882,9 +1937,22 @@ impl Parser {
         if self.mode == ParseMode::Canonical {
             if *self.peek() == TokenKind::LParen {
                 let start = expr_span(&expr);
+                let constructor_name = match &expr {
+                    Expr::Constructor(name, _) => Some(name.clone()),
+                    _ => None,
+                };
                 self.advance();
                 let args = self.parse_expr_list(TokenKind::RParen)?;
                 let end = self.expect(&TokenKind::RParen)?;
+                if args.is_empty()
+                    && let Some(name) = constructor_name
+                {
+                    return Err(ParseError::Expected {
+                        expected: format!("bare zero-argument constructor `{name}`"),
+                        found: format!("`{name}()`"),
+                        offset: start.offset,
+                    });
+                }
                 expr = Expr::Apply(Box::new(expr), args, start.merge(end.span));
             }
             return Ok(expr);
@@ -1981,7 +2049,7 @@ impl Parser {
                     let mut elems = vec![first];
                     while *self.peek() == TokenKind::Comma {
                         self.advance();
-                        if *self.peek() == TokenKind::RParen {
+                        if self.comma_terminates_list(&TokenKind::RParen, elems.len(), true)? {
                             break;
                         }
                         elems.push(self.parse_expr(0)?);
@@ -2023,7 +2091,7 @@ impl Parser {
         exprs.push(self.parse_expr(0)?);
         while *self.peek() == TokenKind::Comma {
             self.advance();
-            if *self.peek() == terminator {
+            if self.comma_terminates_list(&terminator, exprs.len(), false)? {
                 break;
             }
             exprs.push(self.parse_expr(0)?);
@@ -2123,6 +2191,7 @@ impl Parser {
         let expr = self.parse_expr(0)?;
         self.expect(&TokenKind::Comma)?;
         let (precision, _) = self.expect_ident()?;
+        self.consume_legacy_trailing_comma_before(&TokenKind::RParen);
         let end = self.expect(&TokenKind::RParen)?;
         Ok(Expr::Cast(Box::new(expr), precision, start.merge(end.span)))
     }
@@ -2131,7 +2200,9 @@ impl Parser {
         let start = self.advance().span; // consume Grad
         self.expect(&TokenKind::LParen)?;
         let expr = self.parse_expr(0)?;
-        let wrt = if *self.peek() == TokenKind::Comma {
+        let wrt = if self.consume_legacy_trailing_comma_before(&TokenKind::RParen) {
+            None
+        } else if *self.peek() == TokenKind::Comma {
             self.advance();
             let (kw, kw_span) = self.expect_ident()?;
             if kw != "wrt" {
@@ -2142,7 +2213,9 @@ impl Parser {
                 });
             }
             self.expect(&TokenKind::Eq)?;
-            Some(self.parse_grad_wrt_targets()?)
+            let targets = self.parse_grad_wrt_targets()?;
+            self.consume_legacy_trailing_comma_before(&TokenKind::RParen);
+            Some(targets)
         } else {
             None
         };
@@ -2158,6 +2231,9 @@ impl Parser {
                 let (name, _) = self.expect_ident()?;
                 names.push(name);
                 if *self.peek() == TokenKind::Comma {
+                    if self.consume_legacy_trailing_comma_before(&TokenKind::RParen) {
+                        break;
+                    }
                     self.advance();
                     continue;
                 }
@@ -2182,7 +2258,9 @@ impl Parser {
         let start = self.advance().span; // consume Vmap
         self.expect(&TokenKind::LParen)?;
         let expr = self.parse_expr(0)?;
-        let axis = if *self.peek() == TokenKind::Comma {
+        let axis = if self.consume_legacy_trailing_comma_before(&TokenKind::RParen) {
+            None
+        } else if *self.peek() == TokenKind::Comma {
             self.advance();
             match self.peek().clone() {
                 TokenKind::Ident(kw) if kw == "axis" => {
@@ -2231,6 +2309,7 @@ impl Parser {
         } else {
             None
         };
+        self.consume_legacy_trailing_comma_before(&TokenKind::RParen);
         let end = self.expect(&TokenKind::RParen)?;
         Ok(Expr::Vmap(Box::new(expr), axis, start.merge(end.span)))
     }
@@ -2239,6 +2318,7 @@ impl Parser {
         let start = self.advance().span; // consume Jit
         self.expect(&TokenKind::LParen)?;
         let expr = self.parse_expr(0)?;
+        self.consume_legacy_trailing_comma_before(&TokenKind::RParen);
         let end = self.expect(&TokenKind::RParen)?;
         Ok(Expr::Jit(Box::new(expr), start.merge(end.span)))
     }
@@ -2256,6 +2336,7 @@ impl Parser {
         }
         self.expect(&TokenKind::LParen)?;
         let expr = self.parse_expr(0)?;
+        self.consume_legacy_trailing_comma_before(&TokenKind::RParen);
         let end = self.expect(&TokenKind::RParen)?;
         Ok(Expr::Realize(Box::new(expr), start.merge(end.span)))
     }
@@ -2268,6 +2349,7 @@ impl Parser {
         }
         self.expect(&TokenKind::LParen)?;
         let expr = self.parse_expr(0)?;
+        self.consume_legacy_trailing_comma_before(&TokenKind::RParen);
         let end = self.expect(&TokenKind::RParen)?;
         Ok(Expr::Copy(Box::new(expr), start.merge(end.span)))
     }
@@ -2295,6 +2377,7 @@ impl Parser {
         let (handler_name, _) = self.expect_ident()?;
         self.expect(&TokenKind::LParen)?;
         let arg = self.parse_expr(0)?;
+        self.consume_legacy_trailing_comma_before(&TokenKind::RParen);
         self.expect(&TokenKind::RParen)?;
         let body = self.parse_block_inner(true)?;
         let span = start.merge(expr_span(&body));
@@ -2348,7 +2431,15 @@ impl Parser {
                 self.advance_raw();
             }
             if *self.peek() == TokenKind::RBrace {
-                break;
+                if self.mode == ParseMode::LegacyV018 {
+                    break;
+                }
+                return Err(ParseError::Expected {
+                    expected: "expression after `;`; canonical `par` has no trailing separator"
+                        .into(),
+                    found: "RBrace".into(),
+                    offset: self.current_offset(),
+                });
             }
             exprs.push(self.parse_expr_until_block_separator()?);
         }
@@ -2398,6 +2489,7 @@ impl Parser {
         let start = self.advance().span;
         self.expect(&TokenKind::LParen)?;
         let value = self.parse_expr(0)?;
+        self.consume_legacy_trailing_comma_before(&TokenKind::RParen);
         let end = self.expect(&TokenKind::RParen)?;
         let span = start.merge(end.span);
         Ok(match form {
@@ -2518,6 +2610,10 @@ impl Parser {
             }
             TokenKind::LParen => {
                 let start = self.advance().span;
+                if *self.peek() == TokenKind::RParen {
+                    let end = self.advance().span;
+                    return Ok(LetPattern::Tuple(Vec::new(), start.merge(end)));
+                }
                 let first = self.parse_let_pattern()?;
                 if *self.peek() != TokenKind::Comma {
                     return Err(ParseError::Expected {
@@ -2529,7 +2625,7 @@ impl Parser {
                 let mut pats = vec![first];
                 while *self.peek() == TokenKind::Comma {
                     self.advance();
-                    if *self.peek() == TokenKind::RParen {
+                    if self.comma_terminates_list(&TokenKind::RParen, pats.len(), true)? {
                         break;
                     }
                     pats.push(self.parse_let_pattern()?);
@@ -2579,7 +2675,7 @@ impl Parser {
                     break;
                 }
                 self.advance();
-                if *self.peek() == TokenKind::RBrace {
+                if self.comma_terminates_list(&TokenKind::RBrace, fields.len(), false)? {
                     break;
                 }
             }
@@ -2660,7 +2756,11 @@ impl Parser {
                         args.push(self.parse_type()?);
                         while *self.peek() == TokenKind::Comma {
                             self.advance();
-                            if *self.peek() == TokenKind::RBracket {
+                            if self.comma_terminates_list(
+                                &TokenKind::RBracket,
+                                args.len(),
+                                false,
+                            )? {
                                 break;
                             }
                             args.push(self.parse_type()?);
@@ -2751,7 +2851,7 @@ impl Parser {
                     let mut types = vec![first];
                     while *self.peek() == TokenKind::Comma {
                         self.advance();
-                        if *self.peek() == TokenKind::RParen {
+                        if self.comma_terminates_list(&TokenKind::RParen, types.len(), true)? {
                             break;
                         }
                         types.push(self.parse_type()?);
@@ -2887,6 +2987,13 @@ impl Parser {
                         fields.push((field_name, field_pat));
                         if *self.peek() == TokenKind::Comma {
                             self.advance();
+                            if self.comma_terminates_list(
+                                &TokenKind::RBrace,
+                                fields.len(),
+                                false,
+                            )? {
+                                break;
+                            }
                         } else {
                             break;
                         }
@@ -2900,7 +3007,11 @@ impl Parser {
                         sub_pats.push(self.parse_pattern()?);
                         while *self.peek() == TokenKind::Comma {
                             self.advance();
-                            if *self.peek() == TokenKind::RParen {
+                            if self.comma_terminates_list(
+                                &TokenKind::RParen,
+                                sub_pats.len(),
+                                false,
+                            )? {
                                 break;
                             }
                             sub_pats.push(self.parse_pattern()?);
@@ -2937,12 +3048,16 @@ impl Parser {
             }
             TokenKind::LParen => {
                 let start = self.advance().span;
+                if *self.peek() == TokenKind::RParen {
+                    let end = self.advance().span;
+                    return Ok(Pattern::Tuple(Vec::new(), start.merge(end)));
+                }
                 let first = self.parse_pattern()?;
                 if *self.peek() == TokenKind::Comma {
                     let mut pats = vec![first];
                     while *self.peek() == TokenKind::Comma {
                         self.advance();
-                        if *self.peek() == TokenKind::RParen {
+                        if self.comma_terminates_list(&TokenKind::RParen, pats.len(), true)? {
                             break;
                         }
                         pats.push(self.parse_pattern()?);
@@ -3003,12 +3118,16 @@ impl Parser {
             }
             TokenKind::LParen => {
                 let start = self.advance().span;
+                if *self.peek() == TokenKind::RParen {
+                    let end = self.advance().span;
+                    return Ok(Pattern::Tuple(Vec::new(), start.merge(end)));
+                }
                 let first = self.parse_pattern()?;
                 if *self.peek() == TokenKind::Comma {
                     let mut pats = vec![first];
                     while *self.peek() == TokenKind::Comma {
                         self.advance();
-                        if *self.peek() == TokenKind::RParen {
+                        if self.comma_terminates_list(&TokenKind::RParen, pats.len(), true)? {
                             break;
                         }
                         pats.push(self.parse_pattern()?);
@@ -3055,7 +3174,7 @@ impl Parser {
             effects.push(self.parse_effect_expr()?);
             while *self.peek() == TokenKind::Comma {
                 self.advance();
-                if *self.peek() == TokenKind::RBrace {
+                if self.comma_terminates_list(&TokenKind::RBrace, effects.len(), false)? {
                     break;
                 }
                 effects.push(self.parse_effect_expr()?);
@@ -3109,6 +3228,7 @@ impl Parser {
                                 });
                             }
                         };
+                        self.consume_legacy_trailing_comma_before(&TokenKind::RParen);
                         let end = self.expect(&TokenKind::RParen)?;
                         Ok(EffectExpr::Resource(device, tok.span.merge(end.span)))
                     }

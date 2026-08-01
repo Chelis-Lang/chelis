@@ -24,6 +24,7 @@ module.exports = grammar({
     [$.tuple_expression, $.parenthesized_expression],
     [$.tuple_type, $.parenthesized_type],
     [$.unit_expression, $.unit_type],
+    [$.let_pattern, $.unit_expression],
     [$.tuple_pattern, $.parenthesized_pattern],
     [$.record_expression, $.block_expression],
     [$.record_update_expression, $.with_handler_expression],
@@ -270,10 +271,11 @@ module.exports = grammar({
       choice(
         $.value_identifier,
         $.wildcard,
+        seq("(", ")"),
         seq("(", $.let_pattern, ",", optional(commaSep1($.let_pattern)), ")"),
       ),
 
-    par_expression: ($) => seq("par", "{", semicolonSep1($.expression), optional(";"), "}"),
+    par_expression: ($) => seq("par", "{", semicolonSep1($.expression), "}"),
     do_expression: ($) => seq("do", "{", semicolonSep1($.expression), "}"),
 
     record_update_expression: ($) =>
@@ -320,18 +322,46 @@ module.exports = grammar({
       ),
 
     call_expression: ($) =>
-      prec.left(
-        PREC.call,
-        seq(
-          field(
-            "function",
-            choice($.primary_expression, $.field_expression, $.transform_expression, $.quote_expression),
+      choice(
+        prec.left(
+          PREC.call,
+          seq(
+            field(
+              "function",
+              choice(
+                $.identifier,
+                $.callable_access_expression,
+                $.transform_expression,
+                $.quote_expression,
+                $.parenthesized_expression,
+              ),
+            ),
+            $.call_arguments,
+            repeat($.access_step),
           ),
-          $.call_arguments,
-          repeat($.access_step),
+        ),
+        prec.left(
+          PREC.call,
+          seq(
+            field("function", $.qualified_type_name),
+            $.nonempty_call_arguments,
+            repeat($.access_step),
+          ),
         ),
       ),
     call_arguments: ($) => seq(token.immediate("("), commaSep($.expression), ")"),
+    nonempty_call_arguments: ($) =>
+      seq(token.immediate("("), commaSep1($.expression), ")"),
+    callable_access_expression: ($) =>
+      prec.left(
+        PREC.field,
+        seq(
+          field("value", $.primary_expression),
+          repeat($.access_step),
+          ".",
+          field("field", $.identifier),
+        ),
+      ),
     field_expression: ($) =>
       prec.left(
         PREC.field,
@@ -415,6 +445,7 @@ module.exports = grammar({
         $.string,
         $.boolean,
         $.constructor_pattern,
+        $.unit_pattern,
         $.tuple_pattern,
         $.parenthesized_pattern,
         $.record_pattern,
@@ -424,6 +455,7 @@ module.exports = grammar({
         field("name", $.qualified_type_name),
         seq(field("name", $.qualified_type_name), "(", commaSep1($.pattern), ")"),
       ),
+    unit_pattern: () => seq("(", ")"),
     tuple_pattern: ($) => seq("(", $.pattern, ",", optional(commaSep1($.pattern)), ")"),
     parenthesized_pattern: ($) => seq("(", $.pattern, ")"),
     record_pattern: ($) =>
@@ -472,14 +504,12 @@ module.exports = grammar({
     nonzero_axis_integer: () => token(/[1-9][0-9]*/),
     number: () =>
       token(
-        seq(
-          choice(
-            /0/,
-            /[1-9][0-9]*/,
-            /(?:0|[1-9][0-9]*)\.[0-9]+(?:e-?[1-9][0-9]*)?/,
-            /[1-9](?:\.[0-9]+)?e-?[1-9][0-9]*/,
-          ),
-          optional(choice("f32", "f64", "bf16", "f16", "i8", "i16", "i32", "i64")),
+        choice(
+          /(?:0|[1-9][0-9]*)/,
+          /(?:(?:0|[1-9][0-9]*)\.[0-9]+(?:e-?[1-9][0-9]*)?|[1-9](?:\.[0-9]+)?e-?[1-9][0-9]*)(?:f32|f64|bf16|f16)/,
+          /(?:0|[1-9][0-9]*)(?:i8|i16|i32|i64)/,
+          /(?:0|[1-9][0-9]*)\.[0-9]+(?:e-?[1-9][0-9]*)?/,
+          /[1-9](?:\.[0-9]+)?e-?[1-9][0-9]*/,
         ),
       ),
     string: () => token(seq('"', repeat(choice(/[^"\\\n\r]+/, /\\[nrt0"\\]/)), '"')),
@@ -496,7 +526,7 @@ function commaSep(rule) {
 }
 
 function commaSep1(rule) {
-  return seq(rule, repeat(seq(",", rule)), optional(","));
+  return seq(rule, repeat(seq(",", rule)));
 }
 
 function semicolonSep1(rule) {

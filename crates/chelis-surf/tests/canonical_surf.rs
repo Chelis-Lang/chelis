@@ -40,6 +40,10 @@ fn canonical_declaration_and_expression_spellings_parse() {
         "result = vmap(f, axis=1)",
         "result = grad(f, wrt=x)",
         "result = (x,)",
+        "result = 42i64",
+        "result = 1.0f64",
+        "result = 42i32",
+        "result = 1.0f32",
         "tiny = 5e-324",
         "huge = 1.7976931348623157e308",
     ];
@@ -86,6 +90,39 @@ fn legacy_syntax_safe_aliases_are_rejected() {
         "result = 0b1010",
         "result = 1_000",
         "result = 1e3",
+        "result = 42f32",
+        "result = f(x,)",
+        "result = [x,]",
+        "result = Point { x, }",
+        "result = (x, y,)",
+        "def trailing_dim[a,](x) = x",
+        "def trailing_effect() ! { IO, } = ()",
+        "result = par { f(x); g(y); }",
+        "result = do { f(x); g(y); }",
+        "result = None()",
+        "result = Some(x,)",
+        "result = match x with { | Some(v,) => v }",
+        "sig trailing_type: Option[int32,]",
+        "type Trailing[a,] = | Trailing(a,)",
+        "type Trailing = | Trailing(int32,)",
+        "type TrailingRecord = | TrailingRecord { value: int32, }",
+        "type EmptyAlias = | EmptyAlias()",
+        "import Demo (value,)",
+        "export (value,)",
+        "result = grad(f,)",
+        "result = grad(f, wrt=x,)",
+        "result = grad(f, wrt=(x, y,))",
+        "result = vmap(f,)",
+        "result = vmap(f, axis=1,)",
+        "result = cast(x, f64,)",
+        "result = jit(f,)",
+        "result = realize(x,)",
+        "result = copy(x,)",
+        "result = quote(x,)",
+        "result = unquote(x,)",
+        "result = splice(xs,)",
+        "result = with seed(1,) { x }",
+        "def resource() ! { Resource(\"gpu:0\",) } = ()",
     ];
 
     for source in aliases {
@@ -193,6 +230,120 @@ fn every_public_deep_expression_family_has_direct_canonical_surf() {
 }
 
 #[test]
+fn unit_and_empty_tuple_pattern_have_direct_canonical_surface_forms() {
+    assert_eq!(
+        resugar_one("(lit {type: (t-unit {})} ())"),
+        "()",
+        "unit literal metadata must not be mistaken for primitive metadata"
+    );
+    assert_eq!(
+        resugar_one("(match {} (var {} x) (arm {} (pat-tuple {}) () (lit {} 0)))"),
+        "match x with {\n  | () => 0\n}"
+    );
+    parses("result = match x with { | () => 0 }");
+}
+
+#[test]
+fn nullary_constructors_are_bare_but_nullary_function_calls_keep_parentheses() {
+    assert_eq!(resugar_one("(app {} (var {} None))"), "None");
+    assert_eq!(resugar_one("(app {} (var {} f))"), "f()");
+
+    let constructor_call = parse_deep("(app {} (var {} None))").expect("Deep app parses");
+    let bare_constructor = parse_deep("(var {} None)").expect("Deep var parses");
+    assert_eq!(
+        print_canonical(&normalize_deep_for_surface_roundtrip(&constructor_call)),
+        print_canonical(&normalize_deep_for_surface_roundtrip(&bare_constructor))
+    );
+}
+
+#[test]
+fn default_type_suffixes_are_preserved_when_contextual_adoption_changes_meaning() {
+    assert_eq!(
+        resugar_one("(cast {} (lit {type: (t-prim {} f32)} 1.1) (t-prim {} f64))"),
+        "cast(1.1f32, f64)"
+    );
+    assert_eq!(
+        resugar_one("(cast {} (lit {type: (t-prim {} int32)} 42) (t-prim {} int64))"),
+        "cast(42i32, int64)"
+    );
+
+    let source = "direct = cast(1.1, f64)\nwidened = cast(1.1f32, f64)\n";
+    let deep = print_canonical(&desugar_program(
+        &parse_str(source).expect("both forms parse"),
+    ));
+    assert!(deep.contains("(t-prim {} f64)"));
+    assert!(deep.contains("(t-prim {} f32)"));
+}
+
+#[test]
+fn multi_pair_deep_bind_resugars_as_ordered_surf_bindings() {
+    assert_eq!(
+        resugar_one(
+            "(let {} (bind {} x (lit {} 1) y (lit {} 2)) (app {} (var {} f) (var {} x) (var {} y)))"
+        ),
+        "{\n  x = 1\n  y = 2\n  f(x, y)\n}"
+    );
+}
+
+#[test]
+fn empty_expression_and_type_tuples_normalize_to_unit_without_erasure() {
+    let deep = parse_deep(concat!(
+        "(defsig {} value (t-tuple {}))\n",
+        "(def {} value (tuple {}))\n",
+    ))
+    .expect("empty Deep tuple forms parse");
+    let surf = format_program(&resugar_program(&deep).expect("empty tuples resugar"));
+    assert_eq!(surf, "value: () = ()\n");
+    let redesugared = desugar_program(&parse_str(&surf).expect("unit Surf reparses"));
+    assert_eq!(
+        print_canonical(&normalize_deep_for_surface_roundtrip(&deep)),
+        print_canonical(&normalize_deep_for_surface_roundtrip(&redesugared))
+    );
+}
+
+#[test]
+fn deep_negative_literals_normalize_to_surfs_unary_minus_shape() {
+    for deep_source in [
+        "(lit {type: (t-prim {} int32)} -42)",
+        "(lit {type: (t-prim {} int8)} -128)",
+        "(lit {type: (t-prim {} int64)} -9223372036854775808)",
+        "(lit {type: (t-prim {} f32)} -1.5)",
+        "(lit {type: (t-prim {} f64)} 42)",
+        "(lit {type: (t-prim {} f64)} -42)",
+        "(lit {type: (t-prim {} f64)} -0.0)",
+        "(cast {} (lit {type: (t-prim {} f32)} -1.5) (t-prim {} f64))",
+    ] {
+        let deep = parse_deep(deep_source).expect("negative Deep literal parses");
+        let surf = format_expression(
+            &resugar_expression(&deep[0]).expect("negative Deep literal resugars"),
+        );
+        let wrapped = format!("value = {surf}\n");
+        let redesugared = desugar_program(&parse_str(&wrapped).expect("resugared Surf reparses"));
+        let original = parse_deep(&format!("(def {{}} value {deep_source})"))
+            .expect("negative fixture wraps as a definition");
+        assert_eq!(
+            print_canonical(&normalize_deep_for_surface_roundtrip(&original)),
+            print_canonical(&normalize_deep_for_surface_roundtrip(&redesugared)),
+            "Deep fixture: {deep_source}; Surf: {surf}"
+        );
+    }
+}
+
+#[test]
+fn standalone_checked_definition_type_becomes_a_real_surf_signature() {
+    let deep =
+        parse_deep("(def {type: (t-prim {} int32)} value (lit {type: (t-prim {} int32)} 42))")
+            .expect("checked standalone definition parses");
+    let surf = format_program(&resugar_program(&deep).expect("checked definition resugars"));
+    assert_eq!(surf, "value: int32 = 42\n");
+    let redesugared = desugar_program(&parse_str(&surf).expect("typed binding reparses"));
+    assert_eq!(
+        print_canonical(&normalize_deep_for_surface_roundtrip(&deep)),
+        print_canonical(&normalize_deep_for_surface_roundtrip(&redesugared))
+    );
+}
+
+#[test]
 fn operators_and_finite_lists_resugar_to_their_canonical_surface_forms() {
     let cases = [
         ("(app {} (var {} add) (var {} x) (var {} y))", "(x + y)"),
@@ -285,6 +436,7 @@ fn explicit_v018_migration_rewrites_aliases_and_preserves_comments() {
         "mapped_zero = vmap(f, axis=0)(xs)\n",
         "def unit_value(): unit = ()\n",
         "legacy_number = 0x10\n",
+        "legacy_float = 42f32\n",
         "-- source footer\n",
     );
     let expected = concat!(
@@ -297,6 +449,7 @@ fn explicit_v018_migration_rewrites_aliases_and_preserves_comments() {
         "mapped_zero = vmap(f)(xs)\n",
         "def unit_value() -> () = ()\n",
         "legacy_number = 16\n",
+        "legacy_float = 42.0f32\n",
         "-- source footer\n",
     );
 
@@ -305,6 +458,42 @@ fn explicit_v018_migration_rewrites_aliases_and_preserves_comments() {
     assert_eq!(migrated, expected);
     parse_str(&migrated).expect("migration emits only canonical Surf");
     assert_eq!(format_source(&migrated).unwrap(), migrated);
+}
+
+#[test]
+fn explicit_v018_migration_removes_trailing_separators_from_special_forms() {
+    let legacy = concat!(
+        "g0 = grad(f,)\n",
+        "g1 = grad(f, wrt=(x, y,),)\n",
+        "v0 = vmap(f,)\n",
+        "v1 = vmap(f, axis=1,)\n",
+        "c = cast(x, f64,)\n",
+        "j = jit(f,)\n",
+        "r = realize(x,)\n",
+        "copied = copy(x,)\n",
+        "q = quote(x,)\n",
+        "u = unquote(x,)\n",
+        "s = splice(xs,)\n",
+        "seeded = with seed(1,) { x }\n",
+        "def effectful() ! { Resource(\"gpu:0\",), } = ()\n",
+    );
+    let expected = concat!(
+        "g0 = grad(f)\n",
+        "g1 = grad(f, wrt=(x, y))\n",
+        "v0 = vmap(f)\n",
+        "v1 = vmap(f, axis=1)\n",
+        "c = cast(x, f64)\n",
+        "j = jit(f)\n",
+        "r = realize(x)\n",
+        "copied = copy(x)\n",
+        "q = quote(x)\n",
+        "u = unquote(x)\n",
+        "s = splice(xs)\n",
+        "seeded = with seed(1) { x }\n",
+        "def effectful() ! { Resource(\"gpu:0\") } = ()\n",
+    );
+
+    assert_eq!(migrate_source_v018(legacy).unwrap(), expected);
 }
 
 #[test]

@@ -89,3 +89,18 @@ fn migrate_surf_rejects_unknown_source_versions() {
         .failure()
         .stderr(predicate::str::contains("expected `--from 0.18`"));
 }
+
+#[test]
+fn migrate_surf_roundtrips_legacy_unit_through_deep_preflight() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("unit.ch");
+    fs::write(&path, "def unit_value(): unit = ()\n").expect("write fixture");
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["migrate", "surf", "--from", "0.18"])
+        .arg(&path)
+        .assert()
+        .success()
+        .stdout("def unit_value() -> () = ()\n");
+}

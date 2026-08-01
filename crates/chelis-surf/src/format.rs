@@ -773,6 +773,9 @@ fn format_lit(lit: &Literal) -> String {
         // Typed-suffix literals (spec/02-surf-syntax.md §P10a): the
         // canonical formatter preserves the suffix on the literal token
         // since dropping it would change the program's typing.
+        Literal::TypedInt(value, suffix) if suffix.is_float() => {
+            format!("{}{}", canonical_float(*value as f64), suffix.as_str())
+        }
         Literal::TypedInt(value, suffix) => format!("{value}{}", suffix.as_str()),
         Literal::TypedFloat(value, suffix) => {
             format!("{}{}", canonical_float(*value), suffix.as_str())
@@ -870,14 +873,18 @@ fn format_let_pattern(pattern: &LetPattern) -> String {
     match pattern {
         LetPattern::Var(name, _) => name.clone(),
         LetPattern::Wildcard(_) => "_".to_string(),
-        LetPattern::Tuple(parts, _) => format!(
-            "({})",
-            parts
+        LetPattern::Tuple(parts, _) => {
+            let body = parts
                 .iter()
                 .map(format_let_pattern)
                 .collect::<Vec<_>>()
-                .join(", ")
-        ),
+                .join(", ");
+            if parts.len() == 1 {
+                format!("({body},)")
+            } else {
+                format!("({body})")
+            }
+        }
     }
 }
 

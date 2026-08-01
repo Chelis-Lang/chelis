@@ -224,6 +224,10 @@ Braces SHALL define binding blocks whose bindings are newline-separated, with at
 binding and exactly one tail expression; all bindings SHALL collapse into a single Deep
 `let`. Semicolons and one-expression binding blocks SHALL be rejected. Direct sequential
 Deep `block` nodes SHALL use `do { e1; e2 }`; parallel tasks SHALL use `par { e1; e2 }`.
+Canonical comma- and semicolon-delimited forms SHALL reject a separator before the closing
+delimiter. The only exception is the grammar-significant comma in a singleton tuple or
+singleton tuple pattern. The v0.18 migration parser MAY accept and remove legacy trailing
+separators.
 
 #### Scenario: Sequential bindings collapse to one let
 
@@ -289,7 +293,8 @@ exhaustive over the scrutinee ADT, and or-patterns SHALL NOT be supported in v1.
 
 Tuples SHALL be constructed with commas (`(a, b, c)`), where `(a)` is grouping and `(a,)`
 is a one-tuple, and accessed with dot-integer syntax. `()` SHALL be both the unit value and
-unit type.
+unit type and the empty tuple pattern. Nullary constructors SHALL be bare (`None`), while
+non-nullary constructors use parentheses and an ordinary nullary function call remains `f()`.
 
 #### Scenario: Tuple access by index
 
@@ -340,6 +345,8 @@ value-equivalent noncanonical exponents. `-42` SHALL parse as unary minus applie
 
 Numeric literals MAY carry a closed set of precision suffixes (`f32`, `f64`, `bf16`, `f16`,
 `i8`, `i16`, `i32`, `i64`) that bind the literal at exactly that precision with no inference.
+Default-type suffixes SHALL remain accepted because contextual literal adoption can make
+them semantically distinct from an unsuffixed literal.
 A suffix SHALL be part of the token only if it immediately follows the digits; integer-typed
 suffixes attach to integer literals only.
 
