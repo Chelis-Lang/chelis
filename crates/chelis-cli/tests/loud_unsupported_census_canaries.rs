@@ -377,17 +377,14 @@ fn canary_unknown_deep_tag_is_rejected() {
 }
 
 /// **Canary (guard 2 of 3):** a bare keyword atom in expression position is
-/// a clean runtime error, not the `Const 0.0` placeholder (audit-backlog
-/// item 4 refutation, re-executed).
+/// a clean parse error, not the `Const 0.0` placeholder (audit-backlog item 4
+/// refutation, re-executed).
 ///
-/// chelis#873 moved the first rejection upstream. `infer_atom` used to type a
-/// bare `Symbol`/`Keyword` as `Type::Unit` and had no sink to report from, so
-/// `chelis check` scored these programs 1.0 and the eval lane's own bare-atom
-/// guard was the first thing to fire. Check now reports the atom directly, so
-/// the eval lane surfaces the check diagnostic instead. Both rungs are
-/// asserted: the score must fall below 1.0 (chelis#710 form 4), and the eval
-/// lane must still refuse to produce a value with a bare-atom diagnostic
-/// whichever guard reaches it first.
+/// chelis#908 moved the first rejection to the earliest competent stage:
+/// `:keyword` is metadata-key syntax and is not representable as a parsed Deep
+/// expression. Both CLI rungs are asserted: the check score must fall below
+/// 1.0 (chelis#710 form 4), and eval must refuse to produce a value with the
+/// same parse diagnostic.
 #[test]
 fn canary_bare_keyword_atom_fails_cleanly() {
     let dp = deep_of("module M.Main\nout = print(1.5)\n");
@@ -396,17 +393,16 @@ fn canary_bare_keyword_atom_fails_cleanly() {
     let (score, output) = check_score_and_output(&dp, ".dp");
     assert!(
         score < 1.0,
-        "chelis#873 / census row 16: a bare keyword atom must not score 1.0 at \
-         check; a clean score means the checker guard moved. Output: {output}"
+        "chelis#908 / census row 16: a bare keyword token must not score 1.0 at \
+         check; a clean score means the parser guard moved. Output: {output}"
     );
 
     let err = eval_first_line(&dp, ".dp")
-        .expect_err("census row 16: a bare keyword atom must not evaluate to a value");
+        .expect_err("census row 16: a bare keyword token must not evaluate to a value");
     assert!(
-        err.contains("bare atom")
-            || err.contains("bare keyword atom")
-            || err.contains("not a runtime expression"),
-        "the rejection must be the clean bare-atom diagnostic; got: {err}"
+        err.contains("expected expression")
+            && err.contains("bare :keyword is valid only as a metadata map key"),
+        "the rejection must be the clean bare-keyword parse diagnostic; got: {err}"
     );
 }
 

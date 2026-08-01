@@ -1198,10 +1198,11 @@ mod tests {
 
     #[test]
     fn parse_bare_keyword_is_error() {
-        let result = parse_str(":axis");
-        assert!(
-            result.is_err(),
-            "bare :keyword outside metadata map must be a parse error"
+        let err = parse_str(":axis")
+            .expect_err("bare :keyword outside metadata map must be a parse error");
+        assert_eq!(
+            err.to_string(),
+            "expected expression (bare :keyword is valid only as a metadata map key), found Keyword(\"axis\") at byte 0"
         );
     }
 
