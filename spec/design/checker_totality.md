@@ -730,12 +730,18 @@ the gated carrier, rejects raw vocabulary forms recursively at public `Node`
 construction, recurses the validator and raw-tag oracle through `Node`
 metadata/children plus `BareList` and `UnknownForm`, and routes the generic
 compiler API Deep source path through `parse_and_stamp_file`. Its expanded
-executable oracle locks those repairs and their positive controls. The
-authoring-specific compiler APIs still parse into the legacy carrier, however,
-and legacy List normalization/public carriers remain active. This paragraph
-records state; [#908] owns completing the structural cut, and Phase 3 MUST NOT
-be called successor-accepted until the remaining ingress and deletion clauses
-in §C4.2 are executable and green.
+executable oracle locks those repairs and their positive controls. The parser
+and typed producer now emit the gated carrier, while the legacy `List` variant,
+consumer bridge, and mutating authoring normalization remain active; stacked
+follow-up work owns the read-only authoring API cut. The transitional checker
+normalization uses an explicit heap worklist before its guarded walkers, and
+the depth-oracle harness tears down its owned deep fixture on a fresh
+production-sized grown segment. The WI-1 covered-or-rejected tests therefore
+remain active on macOS and require the typed depth diagnostic instead of
+accepting an abort or an ignored test. This paragraph records state; [#908]
+owns completing the structural cut, and Phase 3 MUST NOT be called
+successor-accepted until the remaining ingress and deletion clauses in §C4.2
+are executable and green.
 
 **Frozen at your exit:** the variant set = the vocabulary, changing only
 per B1's one-change-set rule.
