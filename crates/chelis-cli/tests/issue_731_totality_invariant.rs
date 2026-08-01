@@ -512,18 +512,25 @@ fn totality_holds_for_with_device_body() {
 /// Type::Error, so the malformed def is reported.
 #[test]
 fn totality_holds_for_dp_def_missing_body() {
-    assert_totality(
-        "dp_def_missing_body",
-        &dp_to_deep("(module {} m.main (def {} orphan))"),
+    // #908: wrong-arity Deep now fails at the stamp pass (arity validation),
+    // not at the checker. The invariant still holds: the malformed form cannot
+    // produce a vacuous pass.
+    let result = chelis_deep::parser::parse_str_strict("(module {} m.main (def {} orphan))");
+    assert!(
+        result.is_err(),
+        "a def with missing body must fail at the stamp pass (arity violation)"
     );
 }
 
 /// chelis#710 hole 2 (closed by chelis#731 Phase 1): `(cast {} expr)` with no
-/// target type - the infer_cast arity guard now pushes `MalformedForm`.
+/// target type - now caught at the stamp pass arity check.
 #[test]
 fn totality_holds_for_dp_cast_missing_target() {
-    assert_totality(
-        "dp_cast_missing_target",
-        &dp_to_deep("(module {} m.main (def {} out (cast {} (lit {type: (t-prim {} f32)} 42.0))))"),
+    let result = chelis_deep::parser::parse_str_strict(
+        "(module {} m.main (def {} out (cast {} (lit {type: (t-prim {} f32)} 42.0))))",
+    );
+    assert!(
+        result.is_err(),
+        "a cast with missing target type must fail at the stamp pass (arity violation)"
     );
 }
