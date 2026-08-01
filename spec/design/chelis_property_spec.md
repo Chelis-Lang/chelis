@@ -63,6 +63,31 @@ The chelis#979 acceptance oracle is:
 cargo test -p chelis-cli --features smt --test issue_979_nautilus_quantile
 ```
 
+### General-n structural induction
+
+`--tier induction-only` is a Surf-only, fail-closed deductive lane. The prover
+selects an `int*` induction binder from the checked compiler AST, never from a
+caller classification. The v1 accepted shape has an explicit `n >= 0` domain,
+one scalar model call in the proposition, and one directly recursive model:
+`if n <= 0 then base else step`, where `step` contains exactly one
+`f(n - 1, unchanged_args...)` call. Contract abstractions, mutual or
+non-structural recursion, multiple model calls, uninterpreted residual calls,
+and other shapes are `unsupported`; this lane never falls through to sampling.
+
+The prover constructs a concrete `P(0)` obligation from a full one-step model
+unfolding and a symbolic `P(k) => P(k + 1)` obligation whose induction
+hypothesis replaces only the exact `f(k, unchanged_args...)` subproblem. Both
+goals, including their branch conditions and non-vacuity checks, are dispatched
+separately to the existing SMT engine. A green result requires both discharges.
+Machine records use `proof_tier:"induction"`, `arith_model:"real"`, and
+`induction:{variable,base:{status,arith_model},step:{status,arith_model}}`.
+`ASSUMED`, missing, sampled, unknown, timed-out, or vacuous cases cannot produce
+a pass. The executable acceptance oracle is:
+
+```sh
+cargo test -p chelis-cli --features smt --test issue_978_induction
+```
+
 ### Scalar gradient goals in Tier B
 
 Tier B lowers an applied scalar gradient into the same real-arithmetic

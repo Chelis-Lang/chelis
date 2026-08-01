@@ -4,6 +4,8 @@ use serde_json::json;
 mod replace_fixtures;
 
 const HELLO_TENSOR: &str = include_str!("../../../examples/hello_tensor.ch");
+#[cfg(feature = "smt")]
+const INDUCTION_BOND: &str = include_str!("../../../examples/induction_bond.ch");
 const MATMUL_PROGRAM: &str = r#"a = (a : tensor[2, 3, f32])
 b = (b : tensor[3, 4, f32])
 out = (matmul(a, b) : tensor[2, 4, f32])
@@ -1243,6 +1245,38 @@ def square(x: f32) -> f32 = x * x
             "same display status per property across surfaces"
         );
     }
+}
+
+#[cfg(feature = "smt")]
+#[test]
+fn issue_978_tide_discloses_the_same_induction_obligations() {
+    let response = handle_message(&json!({
+        "jsonrpc":"2.0",
+        "id":978,
+        "method":"tools/call",
+        "params":{"name":"chelis_prove","arguments":{
+            "source_kind":"surf", "source": INDUCTION_BOND,
+            "tier":"induction-only", "seed":0
+        }}
+    }))
+    .expect("prove response");
+    let structured = &response["result"]["structuredContent"];
+    let props = structured["properties"]
+        .as_array()
+        .unwrap_or_else(|| panic!("missing properties: {structured}"));
+    assert_eq!(props.len(), 1, "{structured}");
+    assert_eq!(props[0]["status"], "passed", "{structured}");
+    assert_eq!(props[0]["proof_tier"], "induction", "{structured}");
+    assert_eq!(props[0]["arith_model"], "real", "{structured}");
+    assert_eq!(
+        props[0]["induction"]["base"]["status"], "proved",
+        "{structured}"
+    );
+    assert_eq!(
+        props[0]["induction"]["step"]["status"], "proved",
+        "{structured}"
+    );
+    assert_eq!(structured["ok"], true, "{structured}");
 }
 
 /// F8 (review 4): a zero-sample `@property` (a vacuous fuzz pass, NOT a

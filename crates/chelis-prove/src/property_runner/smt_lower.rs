@@ -1396,7 +1396,7 @@ fn scalar_dual(
     }
 }
 
-fn surf_arith(expr: &Expr, ctx: &InlineCtx) -> Option<crate::solver::SmtExpr> {
+pub(super) fn surf_arith(expr: &Expr, ctx: &InlineCtx) -> Option<crate::solver::SmtExpr> {
     use crate::solver::{ArithOp as SA, SmtExpr};
     match expr {
         Expr::Var(name, _) => Some(SmtExpr::Var(name.clone())),

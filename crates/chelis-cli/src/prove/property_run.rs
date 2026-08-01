@@ -256,8 +256,14 @@ fn emit(
             value["attempted_samples"] = json!(outcome.attempted_samples);
             value["rejected_samples"] = json!(outcome.rejected_samples);
         }
-        if outcome.proof_tier == PropertyTier::Smt {
+        if matches!(
+            outcome.proof_tier,
+            PropertyTier::Smt | PropertyTier::Induction
+        ) {
             value["arith_model"] = json!("real");
+        }
+        if let Some(evidence) = &outcome.induction_evidence {
+            value["induction"] = json!(evidence);
         }
         if let Some(cx) = &outcome.counterexample {
             value["counterexample"] = cx.clone();
@@ -275,10 +281,17 @@ fn emit(
         match status {
             "passed" => {
                 let suffix = if outcome.injected { " (injected)" } else { "" };
-                println!(
-                    "property: {} -- {}/{} passed{suffix}",
-                    outcome.name, outcome.samples, outcome.samples
-                )
+                if outcome.proof_tier == PropertyTier::Induction {
+                    println!(
+                        "property: {} -- proved (induction: base + step){suffix}",
+                        outcome.name
+                    )
+                } else {
+                    println!(
+                        "property: {} -- {}/{} passed{suffix}",
+                        outcome.name, outcome.samples, outcome.samples
+                    )
+                }
             }
             "failed" => println!(
                 "property failure: {}\n  --> {}",
