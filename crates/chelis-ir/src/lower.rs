@@ -2264,7 +2264,6 @@ fn ty_expr_to_deep(ty: &TensorType) -> Expr {
     // match on `Expr::List`. `Expr::node()` now produces `Expr::Node`,
     // which those functions don't handle. Construct as `Expr::List`
     // directly so the lowering classifier continues to work.
-    #[allow(deprecated)]
     let prim_node = Expr::List(
         List {
             elements: vec![
@@ -2278,7 +2277,6 @@ fn ty_expr_to_deep(ty: &TensorType) -> Expr {
     if ty.dims.is_empty() {
         prim_node
     } else {
-        #[allow(deprecated)]
         Expr::List(
             List {
                 elements: vec![

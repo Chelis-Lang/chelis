@@ -14,7 +14,8 @@ pub enum Expr {
     /// produce `Expr::Node`, `Expr::BareList`, or `Expr::UnknownForm`.
     /// The match arms on this variant are dead code awaiting removal.
     /// See chelis#1028.
-    #[deprecated = "Expr::List is dead code — no producer creates it. Use Expr::Node."]
+    /// Legacy list representation — no producer creates this variant.
+    /// Retained during migration; will be deleted when all consumers are migrated.
     List(List, Span),
     /// An inline metadata map `{key: value, ...}` or `{}`.
     Map(MetaMap, Span),
@@ -55,7 +56,6 @@ impl Expr {
 
     /// The decoded tag when this expression is a stamped vocabulary node.
     pub fn tag(&self) -> Option<DeepTag> {
-        #[allow(deprecated)]
         match self {
             Expr::List(list, _) => list.tag(),
             Expr::Node(node, _) => Some(node.tag()),
@@ -64,7 +64,6 @@ impl Expr {
     }
 
     pub fn span(&self) -> Span {
-        #[allow(deprecated)]
         match self {
             Expr::Atom(_, s)
             | Expr::List(_, s)
@@ -99,7 +98,6 @@ impl Expr {
     /// are not string literals (those are shape errors callers handle
     /// separately, not a missing span).
     pub fn span_id(&self) -> Option<&str> {
-        #[allow(deprecated)]
         let meta = match self {
             Expr::List(list, _) => match list.elements.get(1)? {
                 Expr::Map(m, _) => m,
@@ -189,7 +187,6 @@ pub struct MetaExpr {
 /// internal span annotations. The 3-tuple shape is preserved (the metadata map
 /// stays present at index 1, just empty), so the result re-parses.
 pub fn strip_metadata(expr: &Expr) -> Expr {
-    #[allow(deprecated)]
     match expr {
         Expr::Atom(..) => expr.clone(),
         Expr::Map(_, span) => Expr::Map(MetaMap::default(), *span),
@@ -207,10 +204,7 @@ pub fn strip_metadata(expr: &Expr) -> Expr {
                     }
                 })
                 .collect();
-            #[allow(deprecated)]
-            {
-                Expr::List(List { elements }, *span)
-            }
+            Expr::List(List { elements }, *span)
         }
         Expr::Node(node, span) => {
             use crate::node::Node;

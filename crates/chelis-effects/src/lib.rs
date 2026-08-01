@@ -1036,7 +1036,6 @@ fn validate_build_target_expr(expr: &Expr, target: &str, errors: &mut Vec<Effect
 /// `Expr::List`. `Expr::node()` now produces `Expr::Node` which that
 /// function doesn't detect. Construct as `Expr::List` directly so the
 /// effect-free guard continues to work.
-#[allow(deprecated)]
 fn effect_set_expr(effects: &EffectSet) -> Expr {
     let mut children = Vec::new();
     for effect in effects.iter() {

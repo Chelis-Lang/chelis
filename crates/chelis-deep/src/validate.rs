@@ -64,11 +64,11 @@ pub fn validate(exprs: &[Expr]) -> Vec<ValidationWarning> {
         // an untagged list like `((var {} f) (var {} x))`, a rejection-
         // parity divergence on exactly the input class whose checker-side
         // silent skip motivated the issue.
-        #[allow(deprecated)]
         match expr {
-            Expr::List(list, span) if !list.elements.is_empty()
-                && list.tag().is_none()
-                && list.unknown_tag_symbol().is_none() =>
+            Expr::List(list, span)
+                if !list.elements.is_empty()
+                    && list.tag().is_none()
+                    && list.unknown_tag_symbol().is_none() =>
             {
                 warnings.push(ValidationWarning {
                     kind: WarningKind::Structural,
@@ -77,8 +77,12 @@ pub fn validate(exprs: &[Expr]) -> Vec<ValidationWarning> {
                         .to_string(),
                 });
             }
-            Expr::BareList(elems, span) if !elems.is_empty()
-                && !matches!(elems.first(), Some(Expr::Atom(crate::ast::Atom::Name(_), _))) =>
+            Expr::BareList(elems, span)
+                if !elems.is_empty()
+                    && !matches!(
+                        elems.first(),
+                        Some(Expr::Atom(crate::ast::Atom::Name(_), _))
+                    ) =>
             {
                 warnings.push(ValidationWarning {
                     kind: WarningKind::Structural,
@@ -516,7 +520,6 @@ fn validate_deftype_invariant_metadata(
 /// <body>)`: a `fn` node whose first child is a `params` node holding
 /// exactly one bare-symbol binder, and which has a body child.
 fn is_predicate_fn_shape(expr: &Expr) -> bool {
-    #[allow(deprecated)]
     match expr {
         Expr::List(fn_list, _) => {
             let is_fn = fn_list.tag() == Some(DeepTag::Fn)
@@ -585,7 +588,6 @@ fn is_canonical_amenability(expr: &Expr) -> bool {
 }
 
 /// Node-form: validate property def metadata (mirrors validate_property_def_metadata).
-#[allow(deprecated)]
 fn validate_property_def_metadata_from_node(
     node: &crate::node::Node,
     offset: usize,

@@ -420,7 +420,6 @@ fn resolved_def<'a>(module: &'a [Expr], qualified_name: &str) -> &'a Expr {
 
 fn def_node(module: &[Expr], decl_index: usize) -> &Expr {
     match &module[0] {
-        #[allow(deprecated)]
         Expr::List(module_list, _) => {
             let node = &module_list.elements[MODULE_DECLS_START + decl_index];
             assert_is_def(node);
@@ -438,10 +437,7 @@ fn def_node(module: &[Expr], decl_index: usize) -> &Expr {
 
 fn def_node_mut(module: &mut [Expr], decl_index: usize) -> &mut Expr {
     match &mut module[0] {
-        #[allow(deprecated)]
-        Expr::List(module_list, _) => {
-            &mut module_list.elements[MODULE_DECLS_START + decl_index]
-        }
+        Expr::List(module_list, _) => &mut module_list.elements[MODULE_DECLS_START + decl_index],
         Expr::Node(node, _) if node.tag() == DeepTag::Module => {
             &mut node.children_slice_mut()[1 + decl_index]
         }
@@ -451,7 +447,6 @@ fn def_node_mut(module: &mut [Expr], decl_index: usize) -> &mut Expr {
 
 fn assert_is_def(node: &Expr) {
     match node {
-        #[allow(deprecated)]
         Expr::List(list, _) => {
             assert!(
                 matches!(list.elements.first(), Some(Expr::Atom(Atom::Tag(t), _)) if *t == DeepTag::Def),
@@ -467,7 +462,6 @@ fn assert_is_def(node: &Expr) {
 
 fn def_elements(def: &Expr) -> Vec<Expr> {
     match def {
-        #[allow(deprecated)]
         Expr::List(list, _) => list.elements.clone(),
         Expr::Node(node, span) => {
             // Reconstruct the canonical List form: [tag, meta, children...]
@@ -480,7 +474,6 @@ fn def_elements(def: &Expr) -> Vec<Expr> {
 /// Assert that two `(fn {} (params {} ...) BODY)` nodes are identical
 /// everywhere except the body slot.
 fn assert_fn_differs_only_in_body(orig_fn: &Expr, spliced_fn: &Expr) {
-    #[allow(deprecated)]
     match (orig_fn, spliced_fn) {
         (Expr::List(orig, _), Expr::List(spliced, _)) => {
             assert_eq!(orig.elements.len(), spliced.elements.len());
@@ -498,11 +491,13 @@ fn assert_fn_differs_only_in_body(orig_fn: &Expr, spliced_fn: &Expr) {
             assert_eq!(orig.child_count(), spliced.child_count());
             // children[0] = params, children[1] = body
             assert_eq!(
-                orig.children_slice()[0], spliced.children_slice()[0],
+                orig.children_slice()[0],
+                spliced.children_slice()[0],
                 "params changed"
             );
             assert_ne!(
-                orig.children_slice()[1], spliced.children_slice()[1],
+                orig.children_slice()[1],
+                spliced.children_slice()[1],
                 "body slot did not change"
             );
         }

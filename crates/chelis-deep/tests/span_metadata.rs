@@ -27,7 +27,6 @@ fn collect_span_ids_one(expr: &Expr, acc: &mut Vec<String>) {
     if let Some(id) = expr.span_id() {
         acc.push(id.to_string());
     }
-    #[allow(deprecated)]
     match expr {
         Expr::List(list, _) => {
             for child in &list.elements {

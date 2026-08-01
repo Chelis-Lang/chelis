@@ -21,12 +21,10 @@ const FN_PARAMS_INDEX: usize = 2;
 /// Recursively convert all `Expr::Node` and `Expr::BareList` in a tree to
 /// the `Expr::List` form that the authoring module's internal helpers expect.
 /// This is a boundary normalization applied at each public entry point.
-#[allow(deprecated)]
 fn normalize_to_list(exprs: &[Expr]) -> Vec<Expr> {
     exprs.iter().map(normalize_expr).collect()
 }
 
-#[allow(deprecated)]
 fn normalize_expr(expr: &Expr) -> Expr {
     match expr {
         Expr::Node(node, span) => {
@@ -69,15 +67,19 @@ fn normalize_expr(expr: &Expr) -> Expr {
             Expr::List(
                 List {
                     elements: {
-                        let mut elems =
-                            vec![Expr::Atom(Atom::Name(data.head.clone()), data.span)];
+                        let mut elems = vec![Expr::Atom(Atom::Name(data.head.clone()), data.span)];
                         let meta_entries = data
                             .meta
                             .entries
                             .iter()
                             .map(|(key, value)| (key.clone(), normalize_expr(value)))
                             .collect();
-                        elems.push(Expr::Map(MetaMap { entries: meta_entries }, data.span));
+                        elems.push(Expr::Map(
+                            MetaMap {
+                                entries: meta_entries,
+                            },
+                            data.span,
+                        ));
                         elems.extend(children);
                         elems
                     },

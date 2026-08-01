@@ -431,11 +431,9 @@ pub fn parse(tokens: &[Token]) -> Result<Vec<Expr>, ParseError> {
 /// **DEPRECATED**: Only needed by test code that manually constructs
 /// `Expr::List`. New test code should use `Expr::node()` or parse via
 /// `parse_str()` instead.
-#[allow(deprecated)]
 pub fn stamp_tags(exprs: &mut [Expr]) {
-    use crate::ast::{Atom, MetaMap};
+    use crate::ast::Atom;
     fn stamp(expr: &mut Expr) {
-        #[allow(deprecated)]
         match expr {
             Expr::List(list, _) => {
                 if let Some(Expr::Atom(atom, _)) = list.elements.first_mut()
