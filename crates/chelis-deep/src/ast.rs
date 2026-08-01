@@ -236,7 +236,10 @@ pub fn strip_metadata(expr: &Expr) -> Expr {
                     }
                 })
                 .collect();
-            Expr::Node(Box::new(Node::new(node.tag(), MetaMap::default(), children)), *span)
+            Expr::Node(
+                Box::new(Node::new(node.tag(), MetaMap::default(), children)),
+                *span,
+            )
         }
         Expr::BareList(elems, span) => {
             let stripped = elems.iter().map(strip_metadata).collect();

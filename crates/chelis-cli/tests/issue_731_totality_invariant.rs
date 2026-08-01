@@ -193,6 +193,8 @@ fn collect_tree_traces(expr: &deep::Expr, path: &str, check_stamp: bool, out: &m
                 );
             }
         }
+        // #908 foundation variants: no tree traces to collect.
+        deep::Expr::Node(_, _) | deep::Expr::BareList(_, _) | deep::Expr::UnknownForm(_) => {}
     }
 }
 

@@ -1951,9 +1951,7 @@ pub fn find_direct_builtin_call(program: &CheckedProgram, builtins: &[&str]) -> 
             // Transitional arms for new Expr variants (#908)
             Expr::Node(node, _) => node.expr_children().find_map(|child| find(child, builtins)),
             Expr::BareList(elems, _) => elems.iter().find_map(|elem| find(elem, builtins)),
-            Expr::UnknownForm(data) => {
-                data.children.iter().find_map(|child| find(child, builtins))
-            }
+            Expr::UnknownForm(data) => data.children.iter().find_map(|child| find(child, builtins)),
         }
     }
 

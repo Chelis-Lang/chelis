@@ -9319,9 +9319,7 @@ fn deep_top_level_expr_name(expr: &DeepExpr) -> Option<&str> {
         return None;
     };
     match (list.tag(), list.elements.get(2)) {
-        (Some(DeepTag::Def), Some(DeepExpr::Atom(DeepAtom::Name(name), _))) => {
-            Some(name.as_str())
-        }
+        (Some(DeepTag::Def), Some(DeepExpr::Atom(DeepAtom::Name(name), _))) => Some(name.as_str()),
         _ => None,
     }
 }

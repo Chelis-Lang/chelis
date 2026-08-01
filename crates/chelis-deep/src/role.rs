@@ -64,23 +64,43 @@ pub fn child_stamp_role(tag: DeepTag, index: usize, _arity: usize) -> ChildStamp
 
     match tag {
         DeepTag::Module => {
-            if index == 0 { Binder } else { ExplicitInferenceBypass }
+            if index == 0 {
+                Binder
+            } else {
+                ExplicitInferenceBypass
+            }
         }
         DeepTag::Import | DeepTag::ImportAll | DeepTag::Export => Syntax,
 
         DeepTag::Def => {
-            if index == 0 { Binder } else { RuntimeExpr }
+            if index == 0 {
+                Binder
+            } else {
+                RuntimeExpr
+            }
         }
         DeepTag::Defsig => {
-            if index == 0 { Binder } else { Type }
+            if index == 0 {
+                Binder
+            } else {
+                Type
+            }
         }
         DeepTag::Deftype | DeepTag::Typealias | DeepTag::Variant | DeepTag::Field => {
-            if index == 0 { Binder } else { Type }
+            if index == 0 {
+                Binder
+            } else {
+                Type
+            }
         }
         DeepTag::Defdim => Binder,
 
         DeepTag::Fn => {
-            if index == 0 { Binder } else { RuntimeExpr }
+            if index == 0 {
+                Binder
+            } else {
+                RuntimeExpr
+            }
         }
         DeepTag::App
         | DeepTag::If
@@ -95,43 +115,87 @@ pub fn child_stamp_role(tag: DeepTag, index: usize, _arity: usize) -> ChildStamp
         | DeepTag::Splice => RuntimeExpr,
 
         DeepTag::HandleEffect => {
-            if index == 0 { EffectHandler } else { RuntimeExpr }
+            if index == 0 {
+                EffectHandler
+            } else {
+                RuntimeExpr
+            }
         }
         DeepTag::Let => {
-            if index == 0 { ExplicitInferenceBypass } else { RuntimeExpr }
+            if index == 0 {
+                ExplicitInferenceBypass
+            } else {
+                RuntimeExpr
+            }
         }
         DeepTag::Match => {
-            if index == 0 { RuntimeExpr } else { ExplicitInferenceBypass }
+            if index == 0 {
+                RuntimeExpr
+            } else {
+                ExplicitInferenceBypass
+            }
         }
         DeepTag::Arm => {
-            if index == 0 { ExplicitInferenceBypass } else { RuntimeExpr }
+            if index == 0 {
+                ExplicitInferenceBypass
+            } else {
+                RuntimeExpr
+            }
         }
         DeepTag::Var | DeepTag::Lit => Syntax,
         DeepTag::Record => {
-            if index == 0 { Type } else { ExplicitInferenceBypass }
+            if index == 0 {
+                Type
+            } else {
+                ExplicitInferenceBypass
+            }
         }
         DeepTag::Access => {
-            if index == 0 { RuntimeExpr } else { Selector }
+            if index == 0 {
+                RuntimeExpr
+            } else {
+                Selector
+            }
         }
         DeepTag::Pipe => {
-            if index == 0 { RuntimeExpr } else { ExplicitInferenceBypass }
+            if index == 0 {
+                RuntimeExpr
+            } else {
+                ExplicitInferenceBypass
+            }
         }
         DeepTag::TupleGet => {
-            if index == 0 { RuntimeExpr } else { Selector }
+            if index == 0 {
+                RuntimeExpr
+            } else {
+                Selector
+            }
         }
         DeepTag::RecordUpdate => {
-            if index == 0 { RuntimeExpr } else { ExplicitInferenceBypass }
+            if index == 0 {
+                RuntimeExpr
+            } else {
+                ExplicitInferenceBypass
+            }
         }
 
         DeepTag::PatVar => Binder,
         DeepTag::PatLit => Syntax,
         DeepTag::PatCtor | DeepTag::PatRecord => {
-            if index == 0 { Selector } else { ExplicitInferenceBypass }
+            if index == 0 {
+                Selector
+            } else {
+                ExplicitInferenceBypass
+            }
         }
         DeepTag::PatTuple => ExplicitInferenceBypass,
         DeepTag::PatWild => Syntax,
         DeepTag::PatAs => {
-            if index == 0 { Binder } else { ExplicitInferenceBypass }
+            if index == 0 {
+                Binder
+            } else {
+                ExplicitInferenceBypass
+            }
         }
 
         DeepTag::TPrim
@@ -148,20 +212,36 @@ pub fn child_stamp_role(tag: DeepTag, index: usize, _arity: usize) -> ChildStamp
         | DeepTag::DRank => Type,
 
         DeepTag::Grad | DeepTag::Vmap => {
-            if index == 0 { RuntimeExpr } else { Selector }
+            if index == 0 {
+                RuntimeExpr
+            } else {
+                Selector
+            }
         }
         DeepTag::Cast => {
-            if index == 0 { RuntimeExpr } else { Type }
+            if index == 0 {
+                RuntimeExpr
+            } else {
+                Type
+            }
         }
 
         DeepTag::Quote | DeepTag::Effects | DeepTag::Resource => Syntax,
 
         DeepTag::Params => Binder,
         DeepTag::Bind => {
-            if index % 2 == 0 { Binder } else { RuntimeExpr }
+            if index % 2 == 0 {
+                Binder
+            } else {
+                RuntimeExpr
+            }
         }
         DeepTag::Kv => {
-            if index == 0 { Selector } else { ExplicitInferenceBypass }
+            if index == 0 {
+                Selector
+            } else {
+                ExplicitInferenceBypass
+            }
         }
     }
 }
@@ -172,18 +252,18 @@ pub fn child_stamp_role(tag: DeepTag, index: usize, _arity: usize) -> ChildStamp
 pub fn arity_contract(tag: DeepTag) -> AritySpec {
     use AritySpec::*;
     match tag {
-        DeepTag::Module => AtLeast(1),       // name + declarations
-        DeepTag::Import => Fixed(2),         // module-path, name-list
-        DeepTag::ImportAll => Fixed(1),      // module-path
-        DeepTag::Export => AtLeast(1),       // names
+        DeepTag::Module => AtLeast(1),  // name + declarations
+        DeepTag::Import => Fixed(2),    // module-path, name-list
+        DeepTag::ImportAll => Fixed(1), // module-path
+        DeepTag::Export => AtLeast(1),  // names
 
-        DeepTag::Def => Fixed(2),            // name, body
-        DeepTag::Defsig => Fixed(2),         // name, type
-        DeepTag::Deftype => AtLeast(1),      // name [+ variants]
-        DeepTag::Typealias => Fixed(2),      // name, type
-        DeepTag::Variant => AtLeast(1),      // name [+ fields]
-        DeepTag::Field => Fixed(2),          // name, type
-        DeepTag::Defdim => Fixed(1),         // name
+        DeepTag::Def => Fixed(2),       // name, body
+        DeepTag::Defsig => Fixed(2),    // name, type
+        DeepTag::Deftype => AtLeast(1), // name [+ variants]
+        DeepTag::Typealias => Fixed(2), // name, type
+        DeepTag::Variant => AtLeast(1), // name [+ fields]
+        DeepTag::Field => Fixed(2),     // name, type
+        DeepTag::Defdim => Fixed(1),    // name
 
         DeepTag::Fn => Fixed(2),             // params, body
         DeepTag::App => AtLeast(1),          // callee + args
@@ -204,44 +284,44 @@ pub fn arity_contract(tag: DeepTag) -> AritySpec {
         DeepTag::HandleEffect => Fixed(2),   // handler-expr, body
         DeepTag::Borrow => Fixed(1),         // expr
 
-        DeepTag::PatVar => Fixed(1),         // name
-        DeepTag::PatLit => Fixed(1),         // value
-        DeepTag::PatCtor => AtLeast(1),      // name [+ sub-patterns]
-        DeepTag::PatTuple => AtLeast(0),     // sub-patterns
-        DeepTag::PatRecord => AtLeast(1),    // name [+ field patterns]
-        DeepTag::PatWild => Fixed(0),        // no children
-        DeepTag::PatAs => Fixed(2),          // name, sub-pattern
+        DeepTag::PatVar => Fixed(1),      // name
+        DeepTag::PatLit => Fixed(1),      // value
+        DeepTag::PatCtor => AtLeast(1),   // name [+ sub-patterns]
+        DeepTag::PatTuple => AtLeast(0),  // sub-patterns
+        DeepTag::PatRecord => AtLeast(1), // name [+ field patterns]
+        DeepTag::PatWild => Fixed(0),     // no children
+        DeepTag::PatAs => Fixed(2),       // name, sub-pattern
 
-        DeepTag::TPrim => Fixed(1),          // name
-        DeepTag::TFn => AtLeast(2),          // arg-types + return-type
-        DeepTag::TTensor => AtLeast(1),      // dtype + dims
-        DeepTag::TRef => Fixed(1),           // inner type
-        DeepTag::TAdt => AtLeast(1),         // name [+ type-params]
-        DeepTag::TVar => Fixed(1),           // name
-        DeepTag::TUnit => Fixed(0),          // no children
-        DeepTag::TTuple => AtLeast(0),       // element types
+        DeepTag::TPrim => Fixed(1),     // name
+        DeepTag::TFn => AtLeast(2),     // arg-types + return-type
+        DeepTag::TTensor => AtLeast(1), // dtype + dims
+        DeepTag::TRef => Fixed(1),      // inner type
+        DeepTag::TAdt => AtLeast(1),    // name [+ type-params]
+        DeepTag::TVar => Fixed(1),      // name
+        DeepTag::TUnit => Fixed(0),     // no children
+        DeepTag::TTuple => AtLeast(0),  // element types
 
-        DeepTag::DName => Fixed(1),          // name
-        DeepTag::DVar => Fixed(1),           // name
-        DeepTag::DLit => Fixed(1),           // value
-        DeepTag::DRank => Fixed(1),          // rank-expr
+        DeepTag::DName => Fixed(1), // name
+        DeepTag::DVar => Fixed(1),  // name
+        DeepTag::DLit => Fixed(1),  // value
+        DeepTag::DRank => Fixed(1), // rank-expr
 
-        DeepTag::Grad => AtLeast(1),         // expr [+ selectors]
-        DeepTag::Vmap => AtLeast(1),         // expr [+ selectors]
-        DeepTag::Jit => Fixed(1),            // expr
-        DeepTag::Realize => Fixed(1),        // expr
-        DeepTag::Cast => Fixed(2),           // expr, type
-        DeepTag::Copy => Fixed(1),           // expr
+        DeepTag::Grad => AtLeast(1),  // expr [+ selectors]
+        DeepTag::Vmap => AtLeast(1),  // expr [+ selectors]
+        DeepTag::Jit => Fixed(1),     // expr
+        DeepTag::Realize => Fixed(1), // expr
+        DeepTag::Cast => Fixed(2),    // expr, type
+        DeepTag::Copy => Fixed(1),    // expr
 
-        DeepTag::Quote => Fixed(1),          // expr
-        DeepTag::Unquote => Fixed(1),        // expr
-        DeepTag::Splice => Fixed(1),         // expr
+        DeepTag::Quote => Fixed(1),   // expr
+        DeepTag::Unquote => Fixed(1), // expr
+        DeepTag::Splice => Fixed(1),  // expr
 
-        DeepTag::Params => AtLeast(0),       // param names
-        DeepTag::Bind => AtLeast(2),         // name-value pairs (even count)
-        DeepTag::Kv => Fixed(2),             // key, value
-        DeepTag::Effects => AtLeast(0),      // effect names
-        DeepTag::Resource => Fixed(1),       // device name
+        DeepTag::Params => AtLeast(0),  // param names
+        DeepTag::Bind => AtLeast(2),    // name-value pairs (even count)
+        DeepTag::Kv => Fixed(2),        // key, value
+        DeepTag::Effects => AtLeast(0), // effect names
+        DeepTag::Resource => Fixed(1),  // device name
     }
 }
 

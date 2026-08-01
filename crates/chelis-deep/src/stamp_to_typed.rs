@@ -45,7 +45,10 @@ impl std::fmt::Display for StampError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.kind {
             StampErrorKind::NameAtExprSlot { name } => {
-                write!(f, "bare name `{name}` at expression slot; use `(var {{}} {name})`")
+                write!(
+                    f,
+                    "bare name `{name}` at expression slot; use `(var {{}} {name})`"
+                )
             }
             StampErrorKind::UndecodableTypeHead { head } => {
                 write!(f, "undecodable type head `{head}`")
@@ -81,7 +84,12 @@ pub fn stamp_to_typed(raw_exprs: Vec<RawExpr>) -> Result<Vec<Expr>, StampError> 
 }
 
 /// Stamp a raw expression in a specific role context.
-fn stamp_in_role(raw: RawExpr, role: ChildStampRole, parent_tag: DeepTag, index: usize) -> Result<Expr, StampError> {
+fn stamp_in_role(
+    raw: RawExpr,
+    role: ChildStampRole,
+    parent_tag: DeepTag,
+    index: usize,
+) -> Result<Expr, StampError> {
     match role {
         ChildStampRole::RuntimeExpr => stamp_runtime_expr(raw),
         ChildStampRole::Type => stamp_type(raw),
@@ -107,7 +115,11 @@ fn stamp_runtime_expr(raw: RawExpr) -> Result<Expr, StampError> {
         RawExpr::Atom(atom, span) => Ok(Expr::Atom(convert_atom(atom), span)),
         RawExpr::List(elements, span) => stamp_list_as_node_or_unknown(elements, span),
         RawExpr::Map(entries, span) => stamp_map(entries, span),
-        RawExpr::MetaExpr { entries, expr, span } => stamp_meta_expr(entries, *expr, span),
+        RawExpr::MetaExpr {
+            entries,
+            expr,
+            span,
+        } => stamp_meta_expr(entries, *expr, span),
     }
 }
 
@@ -127,7 +139,11 @@ fn stamp_type(raw: RawExpr) -> Result<Expr, StampError> {
             }
         }
         RawExpr::Map(entries, span) => stamp_map(entries, span),
-        RawExpr::MetaExpr { entries, expr, span } => stamp_meta_expr(entries, *expr, span),
+        RawExpr::MetaExpr {
+            entries,
+            expr,
+            span,
+        } => stamp_meta_expr(entries, *expr, span),
     }
 }
 
@@ -144,7 +160,11 @@ fn stamp_bare(raw: RawExpr) -> Result<Expr, StampError> {
             Ok(Expr::BareList(out, span))
         }
         RawExpr::Map(entries, span) => stamp_map(entries, span),
-        RawExpr::MetaExpr { entries, expr, span } => stamp_meta_expr(entries, *expr, span),
+        RawExpr::MetaExpr {
+            entries,
+            expr,
+            span,
+        } => stamp_meta_expr(entries, *expr, span),
     }
 }
 
@@ -155,7 +175,11 @@ fn stamp_effect_handler(raw: RawExpr) -> Result<Expr, StampError> {
         RawExpr::Atom(atom, span) => Ok(Expr::Atom(convert_atom(atom), span)),
         RawExpr::List(elements, span) => stamp_list_as_node_or_unknown(elements, span),
         RawExpr::Map(entries, span) => stamp_map(entries, span),
-        RawExpr::MetaExpr { entries, expr, span } => stamp_meta_expr(entries, *expr, span),
+        RawExpr::MetaExpr {
+            entries,
+            expr,
+            span,
+        } => stamp_meta_expr(entries, *expr, span),
     }
 }
 
@@ -253,13 +277,20 @@ fn stamp_form_expecting(raw: RawExpr) -> Result<Expr, StampError> {
         RawExpr::Atom(atom, span) => Ok(Expr::Atom(convert_atom(atom), span)),
         RawExpr::List(elements, span) => stamp_list_as_node_or_unknown(elements, span),
         RawExpr::Map(entries, span) => stamp_map(entries, span),
-        RawExpr::MetaExpr { entries, expr, span } => stamp_meta_expr(entries, *expr, span),
+        RawExpr::MetaExpr {
+            entries,
+            expr,
+            span,
+        } => stamp_meta_expr(entries, *expr, span),
     }
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
-fn decode_list_head(elements: &[RawExpr], span: Span) -> Result<(String, Option<DeepTag>), StampError> {
+fn decode_list_head(
+    elements: &[RawExpr],
+    span: Span,
+) -> Result<(String, Option<DeepTag>), StampError> {
     let Some(first) = elements.first() else {
         return Err(StampError {
             kind: StampErrorKind::EmptyList,
@@ -347,10 +378,7 @@ fn stamp_meta_expr(
     ))
 }
 
-fn stamp_list_as_node_or_unknown(
-    elements: Vec<RawExpr>,
-    span: Span,
-) -> Result<Expr, StampError> {
+fn stamp_list_as_node_or_unknown(elements: Vec<RawExpr>, span: Span) -> Result<Expr, StampError> {
     let (head_str, tag_opt) = decode_list_head(&elements, span)?;
     match tag_opt {
         Some(tag) => build_node(tag, elements, span),
@@ -419,10 +447,7 @@ mod tests {
 
     /// A well-formed def: `(def {} name body)`
     fn raw_def(name: &str, body: RawExpr) -> RawExpr {
-        RawExpr::List(
-            vec![raw_sym("def"), empty_map(), raw_sym(name), body],
-            sp(),
-        )
+        RawExpr::List(vec![raw_sym("def"), empty_map(), raw_sym(name), body], sp())
     }
 
     #[test]
@@ -474,7 +499,10 @@ mod tests {
         let result = stamp_to_typed(input);
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(matches!(err.kind, StampErrorKind::UndecodableTypeHead { .. }));
+        assert!(matches!(
+            err.kind,
+            StampErrorKind::UndecodableTypeHead { .. }
+        ));
     }
 
     #[test]
@@ -493,13 +521,20 @@ mod tests {
     fn top_level_non_declaration_is_error() {
         // (app {} (lit {} 1)) — app is not a declaration
         let input = vec![RawExpr::List(
-            vec![raw_sym("app"), empty_map(), RawExpr::List(vec![raw_sym("lit"), empty_map(), raw_int(1)], sp())],
+            vec![
+                raw_sym("app"),
+                empty_map(),
+                RawExpr::List(vec![raw_sym("lit"), empty_map(), raw_int(1)], sp()),
+            ],
             sp(),
         )];
         let result = stamp_to_typed(input);
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(matches!(err.kind, StampErrorKind::RequiresDeclaration { .. }));
+        assert!(matches!(
+            err.kind,
+            StampErrorKind::RequiresDeclaration { .. }
+        ));
     }
 
     #[test]
@@ -515,11 +550,18 @@ mod tests {
     fn missing_meta_map_is_error() {
         // (def x (lit {} 0)) — missing {} after tag
         let input = vec![RawExpr::List(
-            vec![raw_sym("def"), raw_sym("x"), RawExpr::List(vec![raw_sym("lit"), empty_map(), raw_int(0)], sp())],
+            vec![
+                raw_sym("def"),
+                raw_sym("x"),
+                RawExpr::List(vec![raw_sym("lit"), empty_map(), raw_int(0)], sp()),
+            ],
             sp(),
         )];
         let result = stamp_to_typed(input);
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err().kind, StampErrorKind::MissingMetaMap));
+        assert!(matches!(
+            result.unwrap_err().kind,
+            StampErrorKind::MissingMetaMap
+        ));
     }
 }

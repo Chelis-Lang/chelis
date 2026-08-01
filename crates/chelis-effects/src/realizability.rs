@@ -147,6 +147,8 @@ fn expr_needs_host(
             true
         }
         Expr::Atom(_, _) | Expr::Map(_, _) => false,
+        // #908 foundation variants: treat as propagating (walk if they contain children).
+        Expr::Node(_, _) | Expr::BareList(_, _) | Expr::UnknownForm(_) => false,
         Expr::MetaExpr(meta, _) => expr_needs_host(
             &meta.expr,
             lane_by_def,
@@ -278,7 +280,7 @@ fn list_needs_host(
 
 fn get_tag(list: &List) -> Option<&str> {
     list.elements.first().and_then(|e| match e {
-        Expr::Atom(Atom::Symbol(s), _) => Some(s.as_str()),
+        Expr::Atom(Atom::Name(s), _) => Some(s.as_str()),
         Expr::Atom(Atom::Tag(t), _) => Some(t.as_str()),
         _ => None,
     })
@@ -296,7 +298,7 @@ fn get_children(list: &List) -> &[Expr] {
 
 fn symbol_name(expr: &Expr) -> Option<&str> {
     match expr {
-        Expr::Atom(Atom::Symbol(s), _) => Some(s.as_str()),
+        Expr::Atom(Atom::Name(s), _) => Some(s.as_str()),
         _ => None,
     }
 }
@@ -368,7 +370,7 @@ fn extract_prims_from_type_expr(expr: &Expr) -> Vec<Prim> {
 
 fn extract_prims_recursive(expr: &Expr, out: &mut Vec<Prim>) {
     match expr {
-        Expr::Atom(Atom::Symbol(s), _) => {
+        Expr::Atom(Atom::Name(s), _) => {
             if let Some(prim) = Prim::parse_name(s) {
                 out.push(prim);
             }
@@ -463,7 +465,7 @@ fn collect_manifest_entries(
         .cloned()
         .unwrap_or_else(|| {
             Expr::Atom(
-                Atom::Symbol("unknown".to_string()),
+                Atom::Name("unknown".to_string()),
                 chelis_deep::Span::new(0, 0),
             )
         });
