@@ -11,6 +11,7 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 - **Locked Nix packages expose the Chelis compiler, C runtime, and `chelisup`.**
   The root flake supports `x86_64-linux` and `aarch64-darwin` with native checks.
   Pinned `crate2nix` crate derivations share dependency outputs across the product packages.
+  Nix generates the graph through import from derivation, so Cargo changes require no checked-in graph refresh.
   It also provides `chelis` and `chelisup` applications for `nix run`.
   The Nix `chelisup` launcher roots its closure before it installs release shims.
   The launcher remains installed and owns Nix root cleanup. The generic installer remains independent of Nix.

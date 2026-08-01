@@ -21,6 +21,7 @@ let
   crate2nixVersion =
     assert crate2nixManifest.package.version == "0.15.0";
     crate2nixManifest.package.version;
+  crate2nixTools = pkgs.callPackage (crate2nix + "/tools.nix") { };
   toolchain = pkgs.rust-bin.fromRustupToolchainFile (source + "/rust-toolchain.toml");
   buildRustCrateForPkgs =
     cratePkgs:
@@ -54,12 +55,25 @@ let
         };
       };
     };
-  cargoGraph =
+  generatedCargoNix =
     assert crate2nixVersion == "0.15.0";
-    import (root + "/Cargo.nix") {
-      inherit buildRustCrateForPkgs pkgs;
-      rootFeatures = [ ];
-    };
+    (crate2nixTools.generatedCargoNix {
+      name = "chelis";
+      src = source;
+      cargo = toolchain;
+      additionalCargoNixArgs = [
+        "--no-default-features"
+        "--features"
+        "chelis-cli/smt"
+      ];
+    }).overrideAttrs
+      (_: {
+        CARGO_NET_OFFLINE = "true";
+      });
+  cargoGraph = import generatedCargoNix {
+    inherit buildRustCrateForPkgs pkgs;
+    rootFeatures = [ ];
+  };
   compilerCrate = cargoGraph.workspaceMembers."chelis-cli".build.override {
     features = [ "smt" ];
   };
@@ -229,6 +243,7 @@ in
     compiler
     compilerCrate
     crate2nixVersion
+    generatedCargoNix
     runtime
     runtimeCrate
     source

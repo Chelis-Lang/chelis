@@ -161,15 +161,8 @@ def parse_git_hook_catalog(text: str) -> GitHookCatalog:
     if inactive_custom:
         raise ValueError(f"custom Git hooks must remain active: {inactive_custom!r}")
 
-    nixfmt = re.search(
-        (
-            r'(?ms)^    nixfmt = \{\n.*?^      excludes = \[ '
-            r'"\^Cargo\\\\\.nix\$" \];$.*?^    \};$'
-        ),
-        body,
-    )
-    if nixfmt is None:
-        raise ValueError("the inactive nixfmt hook must exclude Cargo.nix")
+    if "Cargo.nix" in body:
+        raise ValueError("the Git hook catalog must not reference Cargo.nix")
     rustfmt = re.search(
         r"(?ms)^    rustfmt = \{\n.*?^      settings\.check = true;$.*?^    \};$",
         body,
@@ -467,6 +460,15 @@ class DevenvVersionTests(unittest.TestCase):
             "    actionlint.enable = true;",
         )
         with self.assertRaisesRegex(ValueError, "must remain inactive"):
+            parse_git_hook_catalog(mutated)
+
+    def test_cargo_nix_hook_reference_fails_at_the_parse_boundary(self) -> None:
+        config = GIT_HOOKS_MODULE.read_text(encoding="utf-8")
+        mutated = config.replace(
+            "    nixfmt.enable = false;",
+            '    nixfmt = {\n      enable = false;\n      excludes = [ "Cargo.nix" ];\n    };',
+        )
+        with self.assertRaisesRegex(ValueError, "must not reference Cargo.nix"):
             parse_git_hook_catalog(mutated)
 
     def test_missing_git_hook_fails_at_the_parse_boundary(self) -> None:

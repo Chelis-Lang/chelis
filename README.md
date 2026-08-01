@@ -282,18 +282,17 @@ Nix is an additive source-build channel. It does not create the version store th
 
 The flake does not export internal crates, the Python extension, `chelis-std`, or documentation as separate packages.
 
-The Rust packages use a checked-in graph from `crate2nix` 0.15.0. The graph gives each Rust crate a separate Nix derivation.
+The Rust packages use an automatic graph from crate2nix 0.15.0. The graph gives each Rust crate a separate Nix derivation.
 
-If `Cargo.lock` or a workspace manifest changes, regenerate the graph:
+Nix generates the graph from the Cargo workspace through import from derivation. Nix fetchers prepare dependencies before Cargo runs in offline mode.
 
-```sh
-nix run github:nix-community/crate2nix/0.15.0 -- \
-  generate --no-default-features --features chelis-cli/smt --output Cargo.nix
-.venv/bin/python scripts/check_crate2nix_sync.py --write
-.venv/bin/python scripts/check_crate2nix_sync.py
-```
+The repository does not track `Cargo.nix`.
 
-The repository check rejects `Cargo.nix` when its recorded input digest is stale.
+A Cargo input change gives the generator a new derivation identity. No graph refresh command is necessary.
+
+The first evaluation builds the pinned generator before Nix schedules crate builds. Later evaluations can reuse the generated graph from the Nix store.
+
+Each native CI job evaluates its matching graph. A foreign-system package evaluation requires a compatible remote builder.
 
 To bump the shared Nix pins, pick a `cachix/devenv-nixpkgs` revision and read its locked inner `NixOS/nixpkgs` revision. Set that inner revision in `flake.nix` and the outer revision in `devenv.yaml`. Keep the `rust-overlay` revision identical in both files.
 

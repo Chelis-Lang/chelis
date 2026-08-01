@@ -114,7 +114,7 @@ The repository MUST declare this Git hook catalog in `devenv/git-hooks.nix`:
 
 Each listed catalog entry MUST set `enable = false`. Devenv MUST NOT install or run a listed catalog hook by default.
 
-The `nixfmt` entry MUST exclude generated `Cargo.nix`. The `rustfmt` entry MUST use check mode.
+The `nixfmt` entry MUST remain inactive. The `rustfmt` entry MUST use check mode.
 
 The `shellcheck` entry MUST select only `crates/chelisup/bootstrap/chelisup.sh`. The whitespace entry MUST preserve Markdown line breaks.
 

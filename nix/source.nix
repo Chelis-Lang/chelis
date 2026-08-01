@@ -5,14 +5,14 @@
 }:
 let
   rootString = toString root;
-  # Build-facing subset only: prose edits must not invalidate package
-  # derivations. Crate builds use per-crate sources from Cargo.nix; this
-  # source feeds the manifest import, the toolchain file, the runtime
-  # headers, and the CLI behavior fixtures.
+  # Build-facing subset only: prose edits must not invalidate packages.
+  # This source feeds automatic graph generation and package behavior checks.
   defaultRoots = [
+    "Cargo.lock"
     "Cargo.toml"
     "crates"
     "rust-toolchain.toml"
+    "tree-sitter-chelis"
   ];
   allowedRoots = if includeRoots == null then defaultRoots else includeRoots;
   rejectedNames = [

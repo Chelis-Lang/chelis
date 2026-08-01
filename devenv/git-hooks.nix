@@ -22,10 +22,7 @@ in
     forbid-new-submodules.enable = false;
     mixed-line-endings.enable = false;
 
-    nixfmt = {
-      enable = false;
-      excludes = [ "^Cargo\\.nix$" ];
-    };
+    nixfmt.enable = false;
 
     rustfmt = {
       enable = false;
