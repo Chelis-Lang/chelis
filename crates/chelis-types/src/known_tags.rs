@@ -204,4 +204,49 @@ mod tests {
     fn unknown_tag_returns_none() {
         assert_eq!(tag_lane_contribution("nonexistent_tag_xyz"), None);
     }
+
+    /// Drift test: every expression-level DeepTag that can appear in a def body
+    /// must be declared in KNOWN_TAGS. Type tags, pattern tags, and declaration-
+    /// only tags are excluded (they don't participate in realizability).
+    #[test]
+    fn known_tags_covers_expression_level_deeptags() {
+        use chelis_deep::DeepTag;
+
+        let expression_tags: &[DeepTag] = &[
+            DeepTag::App,
+            DeepTag::Var,
+            DeepTag::Lit,
+            DeepTag::Fn,
+            DeepTag::Let,
+            DeepTag::Match,
+            DeepTag::If,
+            DeepTag::Record,
+            DeepTag::Access,
+            DeepTag::Pipe,
+            DeepTag::Tuple,
+            DeepTag::TupleGet,
+            DeepTag::Par,
+            DeepTag::HandleEffect,
+            DeepTag::Grad,
+            DeepTag::Vmap,
+            DeepTag::Jit,
+            DeepTag::Realize,
+            DeepTag::Cast,
+            DeepTag::Copy,
+            DeepTag::Def,
+            DeepTag::Module,
+            DeepTag::Import,
+        ];
+
+        for tag in expression_tags {
+            assert!(
+                tag_lane_contribution(tag.as_str()).is_some(),
+                "DeepTag::{:?} (as_str={:?}) is an expression-level tag \
+                 but is NOT in KNOWN_TAGS. Add it with the appropriate \
+                 LaneContribution.",
+                tag,
+                tag.as_str()
+            );
+        }
+    }
 }

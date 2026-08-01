@@ -180,6 +180,18 @@ pub enum Realizability {
 /// A builtin's complete declaration: name, realizability, and shape class.
 /// All fields are required — adding a builtin without any field is a
 /// compile error (missing struct field). No `Default` implementation.
+///
+/// ```compile_fail
+/// // Omitting `realizability` must fail to compile.
+/// use chelis_types::{BuiltinDecl, ShapeClass};
+/// let _ = BuiltinDecl { name: "x", shape_class: ShapeClass::Rewriting };
+/// ```
+///
+/// ```compile_fail
+/// // Omitting `shape_class` must fail to compile.
+/// use chelis_types::{BuiltinDecl, Realizability};
+/// let _ = BuiltinDecl { name: "x", realizability: Realizability::Universal };
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BuiltinDecl {
     pub name: &'static str,
