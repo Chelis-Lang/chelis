@@ -135,6 +135,8 @@ same sound SMT engine used by the CLI. Tide reports `proof_tier:"induction"`,
 missing, vacuous, timed-out, sampled, or `ASSUMED` evidence cannot become a
 proof. The legacy caller-classified Tier-D scaffold remains disconnected and
 fail-closed.
+Deep input under `tier:"induction-only"` is `unsupported` with zero samples;
+Tide must not reinterpret the request as a fuzz run.
 
 ### `chelis tide lsp`
 

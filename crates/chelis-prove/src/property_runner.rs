@@ -3737,6 +3737,28 @@ fn prove_deep_property(
 ) -> PropertyOutcome {
     let seed = options.effective_seed(property.seed);
 
+    // chelis#978's production induction classifier consumes checked Surf AST.
+    // Deep has no equivalent structural-recursion ownership record yet. An
+    // explicit induction request is therefore terminal on Deep: never let the
+    // generic tail below reinterpret it as fuzz-only and launder samples into
+    // a pass.
+    if options.tier == "induction-only" {
+        return PropertyOutcome::new(
+            property.name.clone(),
+            PropertyStatus::Unsupported,
+            PropertyTier::Induction,
+            0,
+            seed,
+            None,
+            Some(
+                "induction-only is unavailable for Deep properties: no compiler-AST structural recursion attribution (chelis#978)"
+                    .to_string(),
+            ),
+            false,
+            Vec::new(),
+        );
+    }
+
     if options.tier == "auto" || options.tier == "smt-only" {
         if let Some(outcome) = try_deep_tier_b(exprs, property, options, seed) {
             return outcome;

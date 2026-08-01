@@ -1279,6 +1279,26 @@ fn issue_978_tide_discloses_the_same_induction_obligations() {
     assert_eq!(structured["ok"], true, "{structured}");
 }
 
+#[test]
+fn issue_978_tide_deep_induction_is_terminal_without_fuzz_laundering() {
+    let response = handle_message(&json!({
+        "jsonrpc":"2.0", "id":979, "method":"tools/call",
+        "params":{"name":"chelis_prove","arguments":{
+            "source_kind":"deep", "source": DEEP_PROPERTY_MODULE,
+            "tier":"induction-only", "samples":32, "seed":0
+        }}
+    }))
+    .expect("prove response");
+    let structured = &response["result"]["structuredContent"];
+    let props = structured["properties"].as_array().expect("properties");
+    assert_eq!(props.len(), 1, "{structured}");
+    assert_eq!(props[0]["status"], "unsupported", "{structured}");
+    assert_eq!(props[0]["proof_tier"], "induction", "{structured}");
+    assert_eq!(props[0]["samples"], 0, "{structured}");
+    assert!(props[0].get("sampling_method").is_none(), "{structured}");
+    assert_eq!(structured["ok"], false, "{structured}");
+}
+
 /// F8 (review 4): a zero-sample `@property` (a vacuous fuzz pass, NOT a
 /// genuine pass) must report status "unsupported" through tide -- matching
 /// the CLI's is_pass-bucketed render -- and lower `ok`. The tide render

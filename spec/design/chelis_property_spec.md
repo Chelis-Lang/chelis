@@ -70,9 +70,19 @@ selects an `int*` induction binder from the checked compiler AST, never from a
 caller classification. The v1 accepted shape has an explicit `n >= 0` domain,
 one scalar model call in the proposition, and one directly recursive model:
 `if n <= 0 then base else step`, where `step` contains exactly one
-`f(n - 1, unchanged_args...)` call. Contract abstractions, mutual or
-non-structural recursion, multiple model calls, uninterpreted residual calls,
-and other shapes are `unsupported`; this lane never falls through to sampling.
+`f(n - 1, unchanged_args...)` call. Contract abstractions, non-transparent
+mutual or non-structural recursion, multiple model calls, uninterpreted
+residual calls, and other shapes are `unsupported`; this lane never falls
+through to sampling.
+
+“Direct” is measured after the compiler's ordinary bounded helper inlining, so
+a type-checked transparent alias may expose the same exact recurrence. This is
+intentional: argument substitution and symbol ownership come from the compiler
+AST, and the resulting base/step goals are identical to the unaliased form.
+A syntactically exact decreasing call under a literal-dead branch is also
+accepted. The classifier does not erase that branch: the full `if` remains in
+the dispatched goal, so the solver proves its unreachability and no dead call
+can manufacture an induction hypothesis or a green case.
 
 The prover constructs a concrete `P(0)` obligation from a full one-step model
 unfolding and a symbolic `P(k) => P(k + 1)` obligation whose induction

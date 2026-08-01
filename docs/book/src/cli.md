@@ -285,6 +285,11 @@ uses `proof_tier:"induction"` and discloses both statuses under `induction`.
 Unsupported recursion is terminal and never falls back to fuzz. Proofs retain
 the `real_arithmetic` qualifier. The old caller-classified Tier-D scaffold is
 still disconnected and fail-closed, and `ASSUMED` is never proof evidence.
+Compiler-inlined transparent aliases are accepted when they expose that exact
+recurrence. Literal-dead branches are retained in the solver goal rather than
+discarded by the classifier. Deep properties have no structural-recursion
+ownership record yet, so `induction-only` on Deep is terminal `unsupported`
+with zero samples on both CLI and Tide.
 
 Exit codes are stable for CI: `0` pass, `1` counterexample, `2` selected
 property unsupported by the v1 generator, and `3` setup/input/config error.
