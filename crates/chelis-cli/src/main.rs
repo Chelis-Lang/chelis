@@ -1204,7 +1204,23 @@ fn cmd_eval(
             let deep_exprs = expanded_desugared_program(&decls).map_err(boxed_string_error)?;
             let checked = checked_program_with_effects(&deep_exprs).map_err(boxed_string_error)?;
             let source = chelis_surf::format::format_program(&decls);
-            let selected_roots = root_names_from_decls(&entry_decls, checked.type_env());
+            let mut selected_roots = root_names_from_decls(&entry_decls, checked.type_env());
+            // Issue #947: if no value roots were found but the program has
+            // zero-arg fn defs (arrow-form `def n -> T = body`), include
+            // them so the host_root_values path can surface them.
+            if selected_roots.is_empty() {
+                for decl in &entry_decls {
+                    if let Some(name) = decl_name(decl) {
+                        if checked
+                            .type_env()
+                            .get(name)
+                            .is_some_and(|ty| type_expr_is_zero_arg_fn(ty))
+                        {
+                            selected_roots.push(name.to_string());
+                        }
+                    }
+                }
+            }
             if json {
                 run_eval_json_emit(try_eval_result(
                     SourceKind::Surf,
@@ -9522,6 +9538,44 @@ fn display_root_name(name: &str) -> String {
 
 fn type_expr_is_function(expr: &DeepExpr) -> bool {
     matches!(expr, DeepExpr::List(list, _) if (list.tag() == Some(DeepTag::TFn)))
+}
+
+/// Issue #947: extract the name from a Surf Decl (for the zero-arg fn fallback).
+fn decl_name(decl: &Decl) -> Option<&str> {
+    match decl {
+        Decl::FunDef { name, .. } | Decl::LetDef { name, .. } => Some(name),
+        _ => None,
+    }
+}
+
+/// Issue #947: is this a zero-argument function type `(t-fn {} ret-type)`?
+/// A t-fn with no argument types (only the return type as the last element)
+/// is a nullary thunk.
+fn type_expr_is_zero_arg_fn(expr: &DeepExpr) -> bool {
+    let DeepExpr::List(list, _) = expr else {
+        return false;
+    };
+    if list.tag() != Some(DeepTag::TFn) {
+        return false;
+    }
+    // t-fn structure: (t-fn {meta} arg-types... ret-type)
+    // Elements: [tag, meta, ...args, ret]. Zero-arg = only tag+meta+ret = 3 elements.
+    list.elements.len() == 3
+}
+
+/// For a zero-arg fn type `(t-fn {} ret-type)`, return the return type.
+fn unwrap_zero_arg_fn_return(expr: &DeepExpr) -> Option<&DeepExpr> {
+    let DeepExpr::List(list, _) = expr else {
+        return None;
+    };
+    if list.tag() != Some(DeepTag::TFn) {
+        return None;
+    }
+    if list.elements.len() == 3 {
+        list.elements.last()
+    } else {
+        None
+    }
 }
 
 fn collect_symbolic_dims_from_deep(exprs: &[chelis_deep::ast::Expr]) -> Vec<String> {
