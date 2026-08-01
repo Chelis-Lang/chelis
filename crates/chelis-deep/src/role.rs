@@ -252,7 +252,7 @@ pub fn child_stamp_role(tag: DeepTag, index: usize, _arity: usize) -> ChildStamp
 pub fn arity_contract(tag: DeepTag) -> AritySpec {
     use AritySpec::*;
     match tag {
-        DeepTag::Module => AtLeast(1),  // name + declarations
+        DeepTag::Module => AtLeast(0),  // [name] + declarations
         DeepTag::Import => Fixed(2),    // module-path, name-list
         DeepTag::ImportAll => Fixed(1), // module-path
         DeepTag::Export => AtLeast(1),  // names
@@ -476,7 +476,8 @@ pub fn bypass_child_expectation(tag: DeepTag, index: usize) -> BypassExpectation
         DeepTag::Let => RequiresTag(DeepTag::Bind),
         DeepTag::Pipe => FormExpecting,
         DeepTag::Arm => RequiresPattern,
-        DeepTag::PatCtor | DeepTag::PatRecord => RequiresPattern,
+        DeepTag::PatCtor => RequiresPattern,
+        DeepTag::PatRecord => RequiresTag(DeepTag::Kv),
         DeepTag::PatTuple => RequiresPattern,
         DeepTag::PatAs => RequiresPattern,
         DeepTag::Kv => FormExpecting,

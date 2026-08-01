@@ -85,30 +85,27 @@ pub fn stamp_to_typed(raw_exprs: Vec<RawExpr>) -> Result<Vec<Expr>, StampError> 
 
 /// Stamp a `.dp` file's raw expressions into typed AST.
 ///
-/// This handles two conventions for `.dp` files:
-/// 1. A single top-level `(module ...)` wrapper (produced by `chelis deep`)
-/// 2. Bare declarations at top level (hand-written `.dp`)
+/// `.dp` files may contain:
+/// - A single or multiple top-level `(module ...)` wrappers
+/// - Bare declarations at top level (hand-written `.dp`)
+/// - A mix of modules and bare declarations
 ///
-/// In case 1, the module is stamped as a Node with its children as
-/// declarations. In case 2, each top-level form is stamped as a declaration
-/// via `stamp_to_typed`.
+/// Each top-level form is stamped as either a module Node (if headed by
+/// `module`) or a declaration Node (via `stamp_as_bypass_declaration`).
 pub fn stamp_deep_file(raw_exprs: Vec<RawExpr>) -> Result<Vec<Expr>, StampError> {
-    // If there is exactly one top-level list whose head is `module`, stamp
-    // it as a module node (which internally expects declaration children).
-    if raw_exprs.len() == 1
-        && let Some(tag) = top_level_tag(&raw_exprs[0])
-        && tag == DeepTag::Module
-    {
-        let raw = raw_exprs.into_iter().next().unwrap();
-        let span = raw.span();
-        let RawExpr::List(elements, _) = raw else {
-            unreachable!()
-        };
-        let stamped = build_node(DeepTag::Module, elements, span)?;
-        return Ok(vec![stamped]);
+    let mut out = Vec::with_capacity(raw_exprs.len());
+    for raw in raw_exprs {
+        if top_level_tag(&raw) == Some(DeepTag::Module) {
+            let span = raw.span();
+            let RawExpr::List(elements, _) = raw else {
+                unreachable!()
+            };
+            out.push(build_node(DeepTag::Module, elements, span)?);
+        } else {
+            out.push(stamp_as_bypass_declaration(raw)?);
+        }
     }
-    // Otherwise, treat as bare declarations.
-    stamp_to_typed(raw_exprs)
+    Ok(out)
 }
 
 /// Peek at the tag of a top-level raw list expression.
@@ -151,7 +148,13 @@ fn stamp_runtime_expr(raw: RawExpr) -> Result<Expr, StampError> {
             span,
         }),
         RawExpr::Atom(atom, span) => Ok(Expr::Atom(convert_atom(atom), span)),
-        RawExpr::List(elements, span) => stamp_list_as_node_or_unknown(elements, span),
+        RawExpr::List(elements, span) => {
+            if elements.is_empty() {
+                // Empty list `()` at expression position (e.g., no-guard in arm).
+                return Ok(Expr::BareList(vec![], span));
+            }
+            stamp_list_as_node_or_unknown(elements, span)
+        }
         RawExpr::Map(entries, span) => stamp_map(entries, span),
         RawExpr::MetaExpr {
             entries,
@@ -167,6 +170,10 @@ fn stamp_type(raw: RawExpr) -> Result<Expr, StampError> {
     match raw {
         RawExpr::Atom(atom, span) => Ok(Expr::Atom(convert_atom(atom), span)),
         RawExpr::List(elements, span) => {
+            if elements.is_empty() {
+                // Empty list at type position (e.g. empty type-params `()`).
+                return Ok(Expr::BareList(vec![], span));
+            }
             let (head_str, tag_opt) = decode_list_head(&elements, span)?;
             match tag_opt {
                 Some(tag) => build_node(tag, elements, span),
@@ -185,18 +192,12 @@ fn stamp_type(raw: RawExpr) -> Result<Expr, StampError> {
     }
 }
 
-// ── Syntax/Binder/Selector → BareList ────────────────────────────────
+// ── Syntax/Binder/Selector → Node (if vocabulary head) or BareList ───
 
 fn stamp_bare(raw: RawExpr) -> Result<Expr, StampError> {
     match raw {
         RawExpr::Atom(atom, span) => Ok(Expr::Atom(convert_atom(atom), span)),
-        RawExpr::List(elements, span) => {
-            let mut out = Vec::with_capacity(elements.len());
-            for elem in elements {
-                out.push(stamp_bare(elem)?);
-            }
-            Ok(Expr::BareList(out, span))
-        }
+        RawExpr::List(elements, span) => stamp_bare_list(elements, span),
         RawExpr::Map(entries, span) => stamp_map(entries, span),
         RawExpr::MetaExpr {
             entries,
@@ -206,12 +207,39 @@ fn stamp_bare(raw: RawExpr) -> Result<Expr, StampError> {
     }
 }
 
+/// A list at a Binder/Syntax/Selector position: attempt vocabulary decode
+/// first. If the head is a known tag AND element 1 is a metadata map, stamp
+/// as a Node (so `(params {} x)` becomes Node(Params)). Otherwise fall
+/// through to BareList (so `(x y z)` becomes BareList).
+fn stamp_bare_list(elements: Vec<RawExpr>, span: Span) -> Result<Expr, StampError> {
+    // Try vocabulary decode: head must be a known DeepTag symbol AND the
+    // list must have at least 2 elements with a map at index 1.
+    if elements.len() >= 2
+        && let Some(RawExpr::Atom(RawAtom::Symbol(head_str), _)) = elements.first()
+        && let Some(tag) = DeepTag::parse(head_str)
+        && matches!(elements.get(1), Some(RawExpr::Map(..)))
+    {
+        return build_node(tag, elements, span);
+    }
+    // Not a vocabulary-headed node — produce BareList.
+    let mut out = Vec::with_capacity(elements.len());
+    for elem in elements {
+        out.push(stamp_bare(elem)?);
+    }
+    Ok(Expr::BareList(out, span))
+}
+
 // ── EffectHandler ────────────────────────────────────────────────────
 
 fn stamp_effect_handler(raw: RawExpr) -> Result<Expr, StampError> {
     match raw {
         RawExpr::Atom(atom, span) => Ok(Expr::Atom(convert_atom(atom), span)),
-        RawExpr::List(elements, span) => stamp_list_as_node_or_unknown(elements, span),
+        RawExpr::List(elements, span) => {
+            if elements.is_empty() {
+                return Ok(Expr::BareList(vec![], span));
+            }
+            stamp_list_as_node_or_unknown(elements, span)
+        }
         RawExpr::Map(entries, span) => stamp_map(entries, span),
         RawExpr::MetaExpr {
             entries,
@@ -313,7 +341,12 @@ fn stamp_form_expecting(raw: RawExpr) -> Result<Expr, StampError> {
             span,
         }),
         RawExpr::Atom(atom, span) => Ok(Expr::Atom(convert_atom(atom), span)),
-        RawExpr::List(elements, span) => stamp_list_as_node_or_unknown(elements, span),
+        RawExpr::List(elements, span) => {
+            if elements.is_empty() {
+                return Ok(Expr::BareList(vec![], span));
+            }
+            stamp_list_as_node_or_unknown(elements, span)
+        }
         RawExpr::Map(entries, span) => stamp_map(entries, span),
         RawExpr::MetaExpr {
             entries,

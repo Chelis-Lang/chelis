@@ -50,14 +50,15 @@ fn var_node_has_correct_tag_inside_def() {
     }
 }
 
-// ── Params list at binder slot → BareList ───────────────────────────
+// ── Params list at binder slot → Node(Params) ──────────────────────
 
 #[test]
 fn params_children_are_binder_names() {
     // (def {} f (fn {} (params {} x y z) (lit {} 1)))
-    // Fn child 0 is Binder role. In stamp_bare (the Binder handler),
-    // a list becomes a BareList — even if the head is a known tag like
-    // "params". The tag is NOT decoded at Binder slots.
+    // Fn child 0 is Binder role. A vocabulary-headed list at a Binder
+    // slot (like `(params {} x y z)`) is decoded as a Node — the tag is
+    // recognized because the list has a valid vocabulary head + metadata
+    // map. Non-vocabulary-headed lists still become BareList.
     let source = "(def {} f (fn {} (params {} x y z) (lit {} 1)))";
     let raw = parse_raw_str(source).unwrap();
     let typed = stamp_to_typed(raw).unwrap();
@@ -75,37 +76,23 @@ fn params_children_are_binder_names() {
     };
     assert_eq!(fn_node.tag(), DeepTag::Fn);
 
-    // Fn child 0 is Binder role. A list there stamps as BareList via
-    // stamp_bare — the tag "params" is not decoded, it stays as a Name
-    // atom inside the BareList.
+    // Fn child 0 is Binder role. A vocabulary-headed list there stamps
+    // as a Node(Params) via stamp_bare's vocabulary decode path.
     let first_child = fn_node.children_iter().next().unwrap();
     match first_child {
         chelis_deep::node::ChildRef::Bypass(expr) => {
             match expr {
-                Expr::BareList(elems, _) => {
-                    // BareList contains: [Name("params"), Map({}), Name("x"), Name("y"), Name("z")]
-                    assert_eq!(elems.len(), 5, "expected 5 elements in params BareList");
-                    // First element is the "params" symbol (undecoded)
-                    assert!(
-                        matches!(&elems[0], Expr::Atom(chelis_deep::Atom::Name(s), _) if s == "params"),
-                        "first element should be Name(\"params\")"
-                    );
-                    // Elements 2..5 are the param names
-                    assert!(
-                        matches!(&elems[2], Expr::Atom(chelis_deep::Atom::Name(s), _) if s == "x")
-                    );
-                    assert!(
-                        matches!(&elems[3], Expr::Atom(chelis_deep::Atom::Name(s), _) if s == "y")
-                    );
-                    assert!(
-                        matches!(&elems[4], Expr::Atom(chelis_deep::Atom::Name(s), _) if s == "z")
-                    );
+                Expr::Node(params_node, _) => {
+                    assert_eq!(params_node.tag(), DeepTag::Params);
+                    // Params children are the binder names
+                    let names: Vec<&str> = params_node.binder_names().collect();
+                    assert_eq!(names, vec!["x", "y", "z"]);
                 }
-                other => panic!("expected BareList at Fn binder slot, got: {other:?}"),
+                other => panic!("expected Node(Params) at Fn binder slot, got: {other:?}"),
             }
         }
         chelis_deep::node::ChildRef::Binder(_) => {
-            panic!("expected Bypass (BareList), not a bare Binder name");
+            panic!("expected Bypass (Node), not a bare Binder name");
         }
         other => panic!("unexpected child ref: {other:?}"),
     }
