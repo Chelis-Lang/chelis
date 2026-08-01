@@ -29,6 +29,9 @@ class TestFixtureInventory(unittest.TestCase):
     def test_keyword_fixtures_non_empty(self) -> None:
         self.assertGreater(len(oracle.KEYWORD_IN_EXPR_FIXTURES), 0)
 
+    def test_bare_name_fixtures_non_empty(self) -> None:
+        self.assertGreater(len(oracle.BARE_NAME_IN_EXPR_FIXTURES), 0)
+
     def test_keyword_fixtures_have_names_and_sources(self) -> None:
         for name, source in oracle.KEYWORD_IN_EXPR_FIXTURES:
             self.assertIsInstance(name, str)
@@ -164,8 +167,43 @@ class TestKeywordRejection(unittest.TestCase):
             oracle.check_keyword_in_expr_rejected()
 
 
+class TestBareNameRejection(unittest.TestCase):
+    """The CLI must expose the stamped RuntimeExpr ingress."""
+
+    @patch("unrepresentable_domain_oracle.run_chelis_check")
+    def test_bare_name_stamp_error_passes(self, mock_check: MagicMock) -> None:
+        report = {
+            "score": 0,
+            "errors": [
+                {
+                    "kind": "Other",
+                    "message": "stamp error: bare name `x` at expression slot",
+                    "severity": 1.0,
+                }
+            ],
+        }
+        mock_check.return_value = subprocess.CompletedProcess(
+            args=["chelis", "check", "x.dp"],
+            returncode=2,
+            stdout=json.dumps(report),
+            stderr="",
+        )
+        oracle.check_bare_name_in_expr_rejected()
+
+    @patch("unrepresentable_domain_oracle.run_chelis_check")
+    def test_legacy_acceptance_fails(self, mock_check: MagicMock) -> None:
+        mock_check.return_value = subprocess.CompletedProcess(
+            args=["chelis", "check", "x.dp"],
+            returncode=0,
+            stdout='{"score": 1, "errors": []}',
+            stderr="",
+        )
+        with self.assertRaises(oracle.OracleFailure):
+            oracle.check_bare_name_in_expr_rejected()
+
+
 class TestScoreOneControl(unittest.TestCase):
-    """Test obligation 2 logic with mocked subprocess."""
+    """Test obligation 3 logic with mocked subprocess."""
 
     def _mock_score_one(self, fixture_path: Path) -> subprocess.CompletedProcess[str]:
         report = {
@@ -216,29 +254,29 @@ class TestScoreOneControl(unittest.TestCase):
             oracle.check_score_one_controls()
 
 
-class TestStampPassObligation(unittest.TestCase):
-    """Test obligation 3 logic with mocked subprocess."""
+class TestSuccessorSuiteObligation(unittest.TestCase):
+    """Test the stamped-ingress and successor-carrier suite command."""
 
     @patch("subprocess.run")
     def test_stamp_tests_green_passes(self, mock_run: MagicMock) -> None:
         mock_run.return_value = subprocess.CompletedProcess(
-            args=list(oracle.STAMP_NEXTEST_COMMAND),
+            args=list(oracle.SUCCESSOR_NEXTEST_COMMAND),
             returncode=0,
             stdout="12 tests run: 12 passed, 0 failed\n",
             stderr="",
         )
-        oracle.check_stamp_pass_integration_tests()
+        oracle.check_successor_integration_tests()
 
     @patch("subprocess.run")
     def test_stamp_tests_red_fails(self, mock_run: MagicMock) -> None:
         mock_run.return_value = subprocess.CompletedProcess(
-            args=list(oracle.STAMP_NEXTEST_COMMAND),
+            args=list(oracle.SUCCESSOR_NEXTEST_COMMAND),
             returncode=1,
             stdout="",
             stderr="test failed",
         )
         with self.assertRaises(oracle.OracleFailure):
-            oracle.check_stamp_pass_integration_tests()
+            oracle.check_successor_integration_tests()
 
 
 class TestChelisCheckCommand(unittest.TestCase):

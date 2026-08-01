@@ -31,6 +31,8 @@ pub enum NodeError {
         expected: AritySpec,
         actual: usize,
     },
+    /// A closed-vocabulary tag survived as a raw string below the gate.
+    RawVocabularyTag { container: DeepTag, raw_tag: String },
 }
 
 impl std::fmt::Display for NodeError {
@@ -55,6 +57,11 @@ impl std::fmt::Display for NodeError {
                     tag.as_str()
                 )
             }
+            NodeError::RawVocabularyTag { container, raw_tag } => write!(
+                f,
+                "raw closed-vocabulary tag `{raw_tag}` below stamped `{}` node",
+                container.as_str()
+            ),
         }
     }
 }
@@ -90,7 +97,7 @@ impl Node {
     /// Boundary constructor — returns `Err` when the user wrote
     /// something wrong (Name at RuntimeExpr slot, wrong arity).
     pub fn try_new(tag: DeepTag, meta: MetaMap, children: Vec<Expr>) -> Result<Self, NodeError> {
-        Self::validate(tag, &children)?;
+        Self::validate(tag, &meta, &children)?;
         Ok(Node {
             tag,
             meta,
@@ -102,7 +109,7 @@ impl Node {
     /// violation would indicate a compiler bug (rewriting
     /// already-validated trees).
     pub fn new(tag: DeepTag, meta: MetaMap, children: Vec<Expr>) -> Self {
-        if let Err(e) = Self::validate(tag, &children) {
+        if let Err(e) = Self::validate(tag, &meta, &children) {
             panic!("Node::new invariant violation (compiler bug): {e}");
         }
         Node {
@@ -112,7 +119,7 @@ impl Node {
         }
     }
 
-    fn validate(tag: DeepTag, children: &[Expr]) -> Result<(), NodeError> {
+    fn validate(tag: DeepTag, meta: &MetaMap, children: &[Expr]) -> Result<(), NodeError> {
         // Arity check.
         let spec = arity_contract(tag);
         let n = children.len();
@@ -141,6 +148,23 @@ impl Node {
                     name: s.clone(),
                 });
             }
+        }
+
+        // Decode-once is recursive: a public caller cannot smuggle an old
+        // raw-string vocabulary node through a metadata value or child of the
+        // new gated carrier (chelis#731 Phase 3 successor acceptance).
+        let raw_tag = meta
+            .entries
+            .iter()
+            .find_map(|(_, value)| {
+                crate::validate::find_raw_vocabulary_tag(std::slice::from_ref(value))
+            })
+            .or_else(|| crate::validate::find_raw_vocabulary_tag(children));
+        if let Some(raw_tag) = raw_tag {
+            return Err(NodeError::RawVocabularyTag {
+                container: tag,
+                raw_tag,
+            });
         }
 
         Ok(())

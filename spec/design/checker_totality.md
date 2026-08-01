@@ -725,10 +725,17 @@ check/eval/build pipeline test; the expression dispatch split is 32/30).
 **Carrier transition (2026-08-01).** [#908] has landed `RawExpr`, validated
 `Node`, role-directed stamping, a consumer bridge, and several stamped CLI
 entry paths. That is useful progress, but the successor acceptance in §C4.2
-is not yet discharged: legacy List normalization and public carriers remain,
-validator/oracle coverage is incomplete, and some paths validate then consume
-a reparsed legacy tree. This paragraph records state; [#908] owns completing
-the structural cut.
+is not yet discharged. The first follow-up hardening makes `Expr::node` produce
+the gated carrier, rejects raw vocabulary forms recursively at public `Node`
+construction, recurses the validator and raw-tag oracle through `Node`
+metadata/children plus `BareList` and `UnknownForm`, and routes the generic
+compiler API Deep source path through `parse_and_stamp_file`. Its expanded
+executable oracle locks those repairs and their positive controls. The
+authoring-specific compiler APIs still parse into the legacy carrier, however,
+and legacy List normalization/public carriers remain active. This paragraph
+records state; [#908] owns completing the structural cut, and Phase 3 MUST NOT
+be called successor-accepted until the remaining ingress and deletion clauses
+in §C4.2 are executable and green.
 
 **Frozen at your exit:** the variant set = the vocabulary, changing only
 per B1's one-change-set rule.

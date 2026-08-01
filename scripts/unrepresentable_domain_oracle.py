@@ -1,24 +1,20 @@
 #!/usr/bin/env python3
 """Unrepresentable-domain oracle for chelis#908.
 
-This oracle verifies the CLI-observable surface of the unrepresentable-domain
-contract. The headline criterion — bare Name at a RuntimeExpr slot produces a
-StampError — is enforced by the stamp pass integration tests in
-`crates/chelis-deep/tests/stamp_to_typed.rs` (12 tests), not by this script.
-The stamp path is not yet wired into `chelis check`'s Deep ingestion
-(`cmd_check_one_deep` uses `parse_str_strict`, not `parse_and_stamp`), so
-this oracle tests the subset visible through the CLI:
+This oracle verifies the CLI-observable and carrier-internal surfaces of the
+unrepresentable-domain contract, including the chelis#731 Phase 3 successor
+obligations introduced by the gated `Node` representation:
 
 1. Bare `:keyword` in expression position → parse error (exit 2, non-empty
    errors array).
-2. Valid Deep programs with Names at structural positions (binder slots,
+2. A bare Name in a RuntimeExpr position → stamp error through `chelis check`.
+3. Valid Deep programs with Names at structural positions (binder slots,
    metadata map keys) score exactly 1.0 — the over-application control
    ensuring that rejecting bare names at RuntimeExpr slots does not
    accidentally break programs that legitimately use names at structural
    positions.
-3. The stamp pass integration tests exist and cover the headline criterion
-   (verified by running `cargo nextest run -p chelis-deep --test
-   stamp_to_typed`).
+4. The stamp pass, recursive successor-carrier validator, public Node gate,
+   and compiler API stamped-ingress suites all execute and pass.
 
 Usage:
 
@@ -49,6 +45,18 @@ KEYWORD_IN_EXPR_FIXTURES: list[tuple[str, str]] = [
     ("bare keyword as app argument", "(def {} f (app {} (var {} g) :arg))"),
 ]
 
+BARE_NAME_IN_EXPR_FIXTURES: list[tuple[str, str]] = [
+    ("bare name as def body", "(def {} f unwrapped_name)"),
+    (
+        "bare name inside fn body",
+        "(def {} f (fn {} (params {} x) unwrapped_name))",
+    ),
+    (
+        "bare name as app argument",
+        "(def {} f (app {} (var {} g) unwrapped_name))",
+    ),
+]
+
 # Valid programs with Names at structural positions that MUST score 1.0.
 # These exercise the over-application control: the domain restriction on
 # RuntimeExpr must not accidentally reject names where they belong
@@ -66,9 +74,9 @@ SCORE_ONE_CONTROL_FIXTURES: list[tuple[str, str]] = [
     ),
 ]
 
-# ── Stamp pass integration tests (Rust-side oracle) ──────────────────
+# ── Successor-carrier integration tests (Rust-side oracle) ───────────
 
-STAMP_NEXTEST_COMMAND: tuple[str, ...] = (
+SUCCESSOR_NEXTEST_COMMAND: tuple[str, ...] = (
     "cargo",
     "nextest",
     "run",
@@ -76,6 +84,12 @@ STAMP_NEXTEST_COMMAND: tuple[str, ...] = (
     "chelis-deep",
     "--test",
     "stamp_to_typed",
+    "--test",
+    "phase3_successor_validation",
+    "-p",
+    "chelis-compiler-api",
+    "--test",
+    "phase3_stamped_ingress",
 )
 
 
@@ -170,9 +184,39 @@ def check_keyword_in_expr_rejected() -> None:
             fixture.unlink(missing_ok=True)
 
 
+def check_bare_name_in_expr_rejected() -> None:
+    """Obligation 2: bare Name in RuntimeExpr position → stamp error."""
+    print("── Obligation 2: bare RuntimeExpr Name → stamp error ──")
+    for name, source in BARE_NAME_IN_EXPR_FIXTURES:
+        fixture = write_fixture(source)
+        try:
+            result = run_chelis_check(fixture)
+            if result.returncode == 0:
+                raise OracleFailure(
+                    f"[{name}] expected non-zero exit, got 0.\n"
+                    f"Source: {source}\nStdout: {result.stdout}"
+                )
+            report = parse_check_json(result.stdout)
+            errors = report.get("errors", [])
+            if not errors:
+                raise OracleFailure(
+                    f"[{name}] exit was non-zero but errors array is empty.\n"
+                    f"Source: {source}\nReport: {report}"
+                )
+            error_text = json.dumps(errors).lower()
+            if "bare name" not in error_text and "stamp error" not in error_text:
+                raise OracleFailure(
+                    f"[{name}] rejection was not the stamped-name invariant.\n"
+                    f"Errors: {errors}"
+                )
+            print(f"  PASS: {name}")
+        finally:
+            fixture.unlink(missing_ok=True)
+
+
 def check_score_one_controls() -> None:
-    """Obligation 2: valid programs with Names at structural slots score 1.0."""
-    print("── Obligation 2: structural-name programs score 1.0 ──")
+    """Obligation 3: valid programs with Names at structural slots score 1.0."""
+    print("── Obligation 3: structural-name programs score 1.0 ──")
     for name, source in SCORE_ONE_CONTROL_FIXTURES:
         fixture = write_fixture(source)
         try:
@@ -201,33 +245,25 @@ def check_score_one_controls() -> None:
             fixture.unlink(missing_ok=True)
 
 
-def check_stamp_pass_integration_tests() -> None:
-    """Obligation 3: stamp pass integration tests exist and pass.
-
-    The headline criterion (Name at RuntimeExpr slot → StampError) is
-    enforced by the Rust integration tests in
-    `crates/chelis-deep/tests/stamp_to_typed.rs`. This obligation
-    verifies they still exist and pass.
-    """
-    print("── Obligation 3: stamp pass integration tests green ──")
-    cmd = STAMP_NEXTEST_COMMAND
+def check_successor_integration_tests() -> None:
+    """Obligation 4: all stamped-carrier ingress suites exist and pass."""
+    print("── Obligation 4: stamped successor integration suites green ──")
+    cmd = SUCCESSOR_NEXTEST_COMMAND
     print(f"  + {' '.join(cmd)}")
     result = subprocess.run(
         cmd,
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
-        timeout=120,
+        timeout=180,
     )
     if result.returncode != 0:
         raise OracleFailure(
-            f"Stamp pass integration tests failed (exit {result.returncode}).\n"
+            f"Stamped successor integration tests failed (exit {result.returncode}).\n"
             f"Stderr: {result.stderr}\nStdout: {result.stdout}"
         )
-    # Verify the test count is at least 12 (the known count).
-    # nextest output contains "N tests run" or similar.
     combined = result.stdout + result.stderr
-    print(f"  PASS: stamp_to_typed tests green")
+    print("  PASS: stamped successor integration suites green")
     # Print a summary line from nextest if available.
     for line in combined.splitlines():
         if "pass" in line.lower() and ("test" in line.lower() or "run" in line.lower()):
@@ -243,19 +279,14 @@ def main() -> int:
     print("Unrepresentable-domain oracle (chelis#908)")
     print("=" * 60)
     print()
-    print(
-        "NOTE: The headline criterion (Name at RuntimeExpr → StampError)\n"
-        "is enforced by the stamp pass integration tests, not the CLI.\n"
-        "`chelis check` uses `parse_str_strict` (old path) for .dp files.\n"
-        "The stamp pass wiring into the CLI is tracked separately.\n"
-    )
-
     try:
         check_keyword_in_expr_rejected()
         print()
+        check_bare_name_in_expr_rejected()
+        print()
         check_score_one_controls()
         print()
-        check_stamp_pass_integration_tests()
+        check_successor_integration_tests()
         print()
         print("=" * 60)
         print("ORACLE: PASS")

@@ -1,4 +1,5 @@
 use crate::ast::Expr;
+use crate::node::ChildRef;
 use crate::tag::DeepTag;
 
 /// Canonical closed Deep tag vocabulary (`spec/03-deep-syntax.md` §2),
@@ -31,10 +32,32 @@ pub fn find_raw_vocabulary_tag(exprs: &[Expr]) -> Option<String> {
                 walk(&meta.expr).or_else(|| meta.entries.iter().find_map(|(_, value)| walk(value)))
             }
             Expr::Atom(_, _) => None,
-            // Stamped variants: Node children are already validated;
-            // BareList/UnknownForm don't carry raw vocabulary tags by
-            // construction.
-            Expr::Node(_, _) | Expr::BareList(_, _) | Expr::UnknownForm(..) => None,
+            Expr::Node(node, _) => node
+                .meta()
+                .entries
+                .iter()
+                .find_map(|(_, value)| walk(value))
+                .or_else(|| {
+                    node.children_iter().find_map(|child| match child {
+                        ChildRef::Expr(expr)
+                        | ChildRef::Syntax(expr)
+                        | ChildRef::Type(expr)
+                        | ChildRef::EffectHandler(expr)
+                        | ChildRef::Bypass(expr) => walk(expr),
+                        ChildRef::Binder(_) | ChildRef::Selector(_) => None,
+                    })
+                }),
+            Expr::BareList(elements, _) => elements.iter().find_map(walk),
+            Expr::UnknownForm(data) => {
+                if DeepTag::parse(&data.head).is_some() {
+                    return Some(data.head.clone());
+                }
+                data.meta
+                    .entries
+                    .iter()
+                    .find_map(|(_, value)| walk(value))
+                    .or_else(|| data.children.iter().find_map(walk))
+            }
         }
     }
     exprs.iter().find_map(walk)
@@ -189,6 +212,18 @@ fn validate_expr(expr: &Expr, warnings: &mut Vec<ValidationWarning>) {
             }
         }
         Expr::UnknownForm(data) => {
+            warnings.push(ValidationWarning {
+                kind: WarningKind::UnknownTag,
+                offset: data.span.offset,
+                message: format!(
+                    "unknown tag '{}'. Not in the {}-tag vocabulary",
+                    data.head,
+                    DeepTag::ALL.len()
+                ),
+            });
+            for (_, value) in &data.meta.entries {
+                validate_expr(value, warnings);
+            }
             for child in &data.children {
                 validate_expr(child, warnings);
             }

@@ -1787,14 +1787,7 @@ fn parse_surf(source: &str) -> Result<Vec<Decl>> {
 }
 
 fn parse_deep(source: &str) -> Result<Vec<DeepExpr>> {
-    chelis_deep::parser::parse_str(source).map_err(|err| {
-        stage_error_with_span(
-            "parse",
-            err.to_string(),
-            "deep_parse_error",
-            parse_error_span_deep(&err),
-        )
-    })
+    chelis_deep::parse_and_stamp_file(source).map_err(|err| deep_ingress_error("parse", err))
 }
 
 fn canonicalize_decompiled_surf(source: &str) -> Result<String> {
@@ -2866,6 +2859,22 @@ fn parse_error_span_deep(err: &chelis_deep::parser::ParseError) -> Option<Span> 
         chelis_deep::parser::ParseError::ForbiddenSpanChar { value_offset, .. } => *value_offset,
     };
     Some(Span { offset, len: 0 })
+}
+
+fn deep_ingress_error(stage: &str, error: chelis_deep::StampOrParseError) -> CompilerError {
+    let (kind, diagnostic_span) = match &error {
+        chelis_deep::StampOrParseError::Parse(parse_error) => {
+            ("deep_parse_error", parse_error_span_deep(parse_error))
+        }
+        chelis_deep::StampOrParseError::Stamp(stamp_error) => (
+            "deep_stamp_error",
+            Some(Span {
+                offset: stamp_error.span.offset,
+                len: stamp_error.span.len,
+            }),
+        ),
+    };
+    stage_error_with_span(stage, error.to_string(), kind, diagnostic_span)
 }
 
 pub(crate) fn check_error_diagnostic(error: &CheckError) -> Diagnostic {
