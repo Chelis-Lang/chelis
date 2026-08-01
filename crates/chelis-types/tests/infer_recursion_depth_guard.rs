@@ -119,7 +119,7 @@ fn check_deep_on_bounded_stack(
     stack_mib: usize,
     grow_segment_bytes: Option<usize>,
 ) -> Vec<String> {
-    let handle = std::thread::Builder::new()
+    std::thread::Builder::new()
         .name("infer-depth-guard-test".to_string())
         .stack_size(stack_mib * 1024 * 1024)
         .spawn(move || {
@@ -135,16 +135,9 @@ fn check_deep_on_bounded_stack(
                     .collect::<Vec<_>>(),
             }
         })
-        .expect("spawn checker worker thread");
-    // On macOS, a stack overflow hits the guard page and delivers SIGBUS
-    // (SIG 10), aborting the thread rather than returning an Err. This is
-    // valid: it means the recursion DID overflow. Treat a thread abort as
-    // "the recursion was rejected" (non-empty error list) rather than
-    // panicking the test harness.
-    match handle.join() {
-        Ok(messages) => messages,
-        Err(_) => vec!["thread aborted (stack overflow on bounded stack)".to_string()],
-    }
+        .expect("spawn checker worker thread")
+        .join()
+        .expect("checker worker thread aborted (stack overflow?) instead of returning")
 }
 
 /// A grown-segment size small enough that a depth-4000 `app` chain exhausts the
@@ -168,7 +161,6 @@ const SAFETY_NET_SEGMENT_BYTES: usize = 8 * 1024 * 1024;
 /// it. This proves the guard still backs up the grow for input deeper than a
 /// segment can hold.
 #[test]
-#[cfg_attr(target_os = "macos", ignore = "macOS SIGBUS kills the process on stack overflow (chelis#356)")]
 fn deep_app_chain_yields_stack_budget_diagnostic_not_sigsegv() {
     let messages = check_deep_on_bounded_stack(
         program_with_body(deep_app_chain(4000)),
@@ -208,7 +200,6 @@ fn stack_budget_diagnostic_names_the_walker_site() {
 /// the soundness property: a stack bail can never be swallowed into a green
 /// check.
 #[test]
-#[cfg_attr(target_os = "macos", ignore = "macOS SIGBUS kills the process on stack overflow (chelis#356)")]
 fn deep_app_chain_is_rejected_never_silently_passes() {
     let program = program_with_body(deep_app_chain(4000));
     let messages = check_deep_on_bounded_stack(program, 8, Some(SAFETY_NET_SEGMENT_BYTES));
