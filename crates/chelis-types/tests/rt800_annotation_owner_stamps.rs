@@ -60,6 +60,37 @@ fn collect_tag_stamp_state(expr: &Expr, wanted: &str, out: &mut Vec<bool>) {
                 collect_tag_stamp_state(value, wanted, out);
             }
         }
+        Expr::Node(node, _) => {
+            for (_, value) in &node.meta().entries {
+                collect_tag_stamp_state(value, wanted, out);
+            }
+            for child in node.children_iter() {
+                match child {
+                    chelis_deep::node::ChildRef::Expr(expr)
+                    | chelis_deep::node::ChildRef::Syntax(expr)
+                    | chelis_deep::node::ChildRef::Type(expr)
+                    | chelis_deep::node::ChildRef::EffectHandler(expr)
+                    | chelis_deep::node::ChildRef::Bypass(expr) => {
+                        collect_tag_stamp_state(expr, wanted, out);
+                    }
+                    chelis_deep::node::ChildRef::Binder(_)
+                    | chelis_deep::node::ChildRef::Selector(_) => {}
+                }
+            }
+        }
+        Expr::BareList(elements, _) => {
+            for child in elements {
+                collect_tag_stamp_state(child, wanted, out);
+            }
+        }
+        Expr::UnknownForm(data) => {
+            for (_, value) in &data.meta.entries {
+                collect_tag_stamp_state(value, wanted, out);
+            }
+            for child in &data.children {
+                collect_tag_stamp_state(child, wanted, out);
+            }
+        }
     }
 }
 

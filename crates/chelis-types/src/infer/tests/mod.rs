@@ -288,6 +288,35 @@ fn missing_shape_sensitive_app(expr: &deep::Expr) -> Option<String> {
                 .iter()
                 .find_map(|(_, value)| missing_shape_sensitive_app(value))
         }),
+        deep::Expr::Node(node, _) => {
+            for (_, value) in &node.meta().entries {
+                if let Some(missing) = missing_shape_sensitive_app(value) {
+                    return Some(missing);
+                }
+            }
+            for child in node.children_iter() {
+                let child = match child {
+                    chelis_deep::node::ChildRef::Expr(expr)
+                    | chelis_deep::node::ChildRef::Syntax(expr)
+                    | chelis_deep::node::ChildRef::Type(expr)
+                    | chelis_deep::node::ChildRef::EffectHandler(expr)
+                    | chelis_deep::node::ChildRef::Bypass(expr) => expr,
+                    chelis_deep::node::ChildRef::Binder(_)
+                    | chelis_deep::node::ChildRef::Selector(_) => continue,
+                };
+                if let Some(missing) = missing_shape_sensitive_app(child) {
+                    return Some(missing);
+                }
+            }
+            None
+        }
+        deep::Expr::BareList(elements, _) => elements.iter().find_map(missing_shape_sensitive_app),
+        deep::Expr::UnknownForm(data) => data
+            .meta
+            .entries
+            .iter()
+            .find_map(|(_, value)| missing_shape_sensitive_app(value))
+            .or_else(|| data.children.iter().find_map(missing_shape_sensitive_app)),
         deep::Expr::Atom(_, _) => None,
     }
 }

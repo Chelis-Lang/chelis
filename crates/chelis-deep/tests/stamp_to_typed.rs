@@ -302,7 +302,7 @@ fn parse_raw_produces_raw_list_for_known_tags() {
     assert!(
         matches!(&raw[0], RawExpr::List(..)),
         "parse_raw should produce List, got: {:?}",
-        &raw[0]
+        raw[0]
     );
 }
 
@@ -316,7 +316,7 @@ fn parse_raw_preserves_empty_map() {
         assert!(
             matches!(&elements[1], RawExpr::Map(entries, _) if entries.is_empty()),
             "expected empty map at position 1, got: {:?}",
-            &elements[1]
+            elements[1]
         );
     } else {
         panic!("expected List");

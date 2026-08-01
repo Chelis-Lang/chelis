@@ -131,14 +131,14 @@ impl Node {
         // Per-child role check: reject Name at RuntimeExpr positions.
         for (index, child) in children.iter().enumerate() {
             let role = child_stamp_role(tag, index, n);
-            if role == ChildStampRole::RuntimeExpr {
-                if let Expr::Atom(Atom::Name(s), _) = child {
-                    return Err(NodeError::NameAtExprSlot {
-                        tag,
-                        index,
-                        name: s.clone(),
-                    });
-                }
+            if role == ChildStampRole::RuntimeExpr
+                && let Expr::Atom(Atom::Name(s), _) = child
+            {
+                return Err(NodeError::NameAtExprSlot {
+                    tag,
+                    index,
+                    name: s.clone(),
+                });
             }
         }
 

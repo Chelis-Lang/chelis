@@ -39,6 +39,9 @@ fn find_list_mut<'a>(expr: &'a mut Expr, tag: &str) -> Option<&'a mut List> {
             None
         }
         Expr::MetaExpr(meta, _) => find_list_mut(&mut meta.expr, tag),
+        Expr::Node(_, _) | Expr::BareList(_, _) | Expr::UnknownForm(_) => {
+            panic!("rt800 list mutation helper requires the legacy checked-AST representation")
+        }
         Expr::Atom(_, _) => None,
     }
 }
@@ -63,6 +66,9 @@ fn replace_symbol(expr: &mut Expr, from: &str, to: &str) -> bool {
                     .entries
                     .iter_mut()
                     .any(|(_, value)| replace_symbol(value, from, to))
+        }
+        Expr::Node(_, _) | Expr::BareList(_, _) | Expr::UnknownForm(_) => {
+            panic!("rt800 symbol mutation helper requires the legacy checked-AST representation")
         }
         Expr::Atom(_, _) => false,
     }
@@ -91,6 +97,9 @@ fn remove_first_metadata_key(expr: &mut Expr, key: &str) -> bool {
                     .entries
                     .iter_mut()
                     .any(|(_, value)| remove_first_metadata_key(value, key))
+        }
+        Expr::Node(_, _) | Expr::BareList(_, _) | Expr::UnknownForm(_) => {
+            panic!("rt800 metadata mutation helper requires the legacy checked-AST representation")
         }
         Expr::Atom(_, _) => false,
     }

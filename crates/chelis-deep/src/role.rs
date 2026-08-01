@@ -230,7 +230,7 @@ pub fn child_stamp_role(tag: DeepTag, index: usize, _arity: usize) -> ChildStamp
 
         DeepTag::Params => Binder,
         DeepTag::Bind => {
-            if index % 2 == 0 {
+            if index.is_multiple_of(2) {
                 Binder
             } else {
                 RuntimeExpr
