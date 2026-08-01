@@ -1067,6 +1067,11 @@ impl DesugarCtx {
                 Some(ty) => desugar_type_with_scope(ty, &dim_set, &tvar_set),
                 None => node(DeepTag::TVar, vec![sym("_")]),
             });
+            // TFn requires AtLeast(2) children. Zero-param functions get a
+            // leading TUnit arg so the node satisfies the arity contract.
+            if type_parts.len() < 2 {
+                type_parts.insert(0, node(DeepTag::TUnit, vec![]));
+            }
             let sig = node(
                 DeepTag::Defsig,
                 vec![

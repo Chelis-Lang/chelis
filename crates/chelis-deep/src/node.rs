@@ -168,6 +168,21 @@ impl Node {
         self.children.len()
     }
 
+    /// Positional child access regardless of role. Use when the consumer
+    /// needs to inspect a child at a known structural position (e.g.,
+    /// effect handler payloads, binding lists) without asserting a
+    /// specific role.
+    pub fn child_at(&self, index: usize) -> &Expr {
+        &self.children[index]
+    }
+
+    /// All children as a slice (role-agnostic). Prefer role-typed
+    /// accessors when possible; this exists for consumers that need
+    /// positional traversal (effect annotation, printer).
+    pub fn children_slice(&self) -> &[Expr] {
+        &self.children
+    }
+
     // === Role-typed accessors ===
 
     /// Iterator over children at RuntimeExpr positions only.

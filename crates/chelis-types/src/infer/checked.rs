@@ -1161,6 +1161,31 @@ pub(super) fn effects_only_expr_matches(before: &deep::Expr, after: &deep::Expr)
                         effects_only_expr_matches(before_element, after_element)
                     })
         }
+        // Node-based matching: metadata may gain an "effects" key, children must match
+        (deep::Expr::Node(before_node, before_span), deep::Expr::Node(after_node, after_span)) => {
+            before_span == after_span
+                && before_node.tag() == after_node.tag()
+                && before_node.child_count() == after_node.child_count()
+                && metadata_entries_match(
+                    &before_node.meta().entries,
+                    &after_node.meta().entries,
+                    true,
+                )
+                && (0..before_node.child_count()).all(|i| {
+                    effects_only_expr_matches(before_node.child_at(i), after_node.child_at(i))
+                })
+        }
+        (deep::Expr::BareList(before_elems, before_span), deep::Expr::BareList(after_elems, after_span)) => {
+            before_span == after_span
+                && before_elems.len() == after_elems.len()
+                && before_elems.iter().zip(after_elems).all(|(b, a)| effects_only_expr_matches(b, a))
+        }
+        (deep::Expr::UnknownForm(before_data), deep::Expr::UnknownForm(after_data)) => {
+            before_data.head == after_data.head
+                && before_data.span == after_data.span
+                && before_data.children.len() == after_data.children.len()
+                && before_data.children.iter().zip(&after_data.children).all(|(b, a)| effects_only_expr_matches(b, a))
+        }
         _ => false,
     }
 }
@@ -1218,8 +1243,15 @@ pub(super) fn effect_metadata_is_singular(expr: &deep::Expr) -> bool {
             };
             singular_here && list.elements.iter().all(effect_metadata_is_singular)
         }
-        // Transitional: Node children are expression-only, recurse.
-        deep::Expr::Node(node, _) => node.expr_children().all(effect_metadata_is_singular),
+        // Node: check both the node's own metadata and all children
+        deep::Expr::Node(node, _) => {
+            let singular_here = node.meta().entries
+                .iter()
+                .filter(|(key, _)| key == "effects")
+                .count() <= 1;
+            singular_here
+                && (0..node.child_count()).all(|i| effect_metadata_is_singular(node.child_at(i)))
+        }
         deep::Expr::BareList(elems, _) => elems.iter().all(effect_metadata_is_singular),
         deep::Expr::UnknownForm(data) => data.children.iter().all(effect_metadata_is_singular),
     }

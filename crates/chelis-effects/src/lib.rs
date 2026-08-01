@@ -2,7 +2,8 @@ use chelis_deep::DeepTag;
 use std::collections::{HashMap, HashSet};
 
 use chelis_deep::ast::{Atom, Expr, List, MetaMap};
-use chelis_deep::{Span, decode_effect_kind};
+use chelis_deep::node::Node;
+use chelis_deep::{Span, decode_effect_kind, decode_effect_kind_from_meta};
 use chelis_types::types::{Effect, EffectSet};
 use chelis_types::{CheckedProgram, InferResult};
 use chelis_vocab::EffectKind;
@@ -250,14 +251,21 @@ fn infer_program_effects_with_context(
 /// build/eval path. Descends nested wrappers to any depth.
 fn flattened_top_level(exprs: &[Expr]) -> Vec<&Expr> {
     fn push<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
-        if let Expr::List(list, _) = expr
-            && get_tag(list) == Some(DeepTag::Module)
-        {
-            // `(module {} name children...)`: skip tag, meta, name.
-            for child in list.elements.iter().skip(3) {
-                push(child, out);
+        match expr {
+            Expr::Node(node, _) if node.tag() == DeepTag::Module => {
+                // `(module {} name children...)`: skip name (child 0), descend rest.
+                for i in 1..node.child_count() {
+                    push(node.child_at(i), out);
+                }
+                return;
             }
-            return;
+            Expr::List(list, _) if get_tag(list) == Some(DeepTag::Module) => {
+                for child in list.elements.iter().skip(3) {
+                    push(child, out);
+                }
+                return;
+            }
+            _ => {}
         }
         out.push(expr);
     }
@@ -271,15 +279,22 @@ fn flattened_top_level(exprs: &[Expr]) -> Vec<&Expr> {
 fn top_level_def_bodies(exprs: &[Expr]) -> HashMap<String, Expr> {
     let mut defs = HashMap::new();
     for expr in flattened_top_level(exprs) {
-        if let Expr::List(list, _) = expr
-            && get_tag(list) == Some(DeepTag::Def)
-        {
-            let kids = children(list);
-            if kids.len() >= 2
-                && let Some(name) = symbol_name(&kids[0])
-            {
-                defs.insert(name.to_string(), kids[1].clone());
+        match expr {
+            Expr::Node(node, _) if node.tag() == DeepTag::Def => {
+                // Def: child 0 is Binder (name), child 1 is RuntimeExpr (body)
+                let name = node.binder_name(0);
+                let body = node.child_at(1);
+                defs.insert(name.to_string(), body.clone());
             }
+            Expr::List(list, _) if get_tag(list) == Some(DeepTag::Def) => {
+                let kids = children(list);
+                if kids.len() >= 2
+                    && let Some(name) = symbol_name(&kids[0])
+                {
+                    defs.insert(name.to_string(), kids[1].clone());
+                }
+            }
+            _ => {}
         }
     }
     defs
@@ -289,6 +304,7 @@ fn top_level_callable_names(bodies: &HashMap<String, Expr>) -> HashSet<String> {
     bodies
         .iter()
         .filter_map(|(name, body)| match body {
+            Expr::Node(node, _) if node.tag() == DeepTag::Fn => Some(name.clone()),
             Expr::List(list, _) if get_tag(list) == Some(DeepTag::Fn) => Some(name.clone()),
             _ => None,
         })
@@ -305,6 +321,79 @@ fn infer_expr_effects(
         Expr::Atom(_, _) | Expr::Map(_, _) => EffectSet::new(),
         Expr::MetaExpr(meta, _) => {
             infer_expr_effects(&meta.expr, top_level_effects, top_level_callables, locals)
+        }
+        Expr::Node(node, _) => {
+            let tag = node.tag();
+            match tag {
+                DeepTag::Var => {
+                    // Var child 0 is Syntax (the name)
+                    symbol_name(node.child_at(0))
+                        .and_then(|name| {
+                            locals.get(name).cloned().or_else(|| {
+                                top_level_callables
+                                    .contains(name)
+                                    .then(|| top_level_effects.get(name).cloned())
+                                    .flatten()
+                            })
+                        })
+                        .unwrap_or_default()
+                }
+                DeepTag::App => {
+                    infer_app_effects_node(node, top_level_effects, top_level_callables, locals)
+                }
+                DeepTag::Fn => {
+                    // Fn: child 0 is params (Binder), child 1 is body (RuntimeExpr)
+                    if node.child_count() >= 2 {
+                        infer_expr_effects(node.child_at(1), top_level_effects, top_level_callables, locals)
+                    } else {
+                        EffectSet::new()
+                    }
+                }
+                DeepTag::Let => {
+                    infer_let_effects_node(node, top_level_effects, top_level_callables, locals)
+                }
+                DeepTag::If
+                | DeepTag::Tuple
+                | DeepTag::Pipe
+                | DeepTag::Par
+                | DeepTag::Record
+                | DeepTag::Access
+                | DeepTag::TupleGet
+                | DeepTag::Cast
+                | DeepTag::Copy
+                | DeepTag::Realize
+                | DeepTag::Jit
+                | DeepTag::Match
+                | DeepTag::Def => node
+                    .expr_children()
+                    .map(|kid| {
+                        infer_expr_effects(kid, top_level_effects, top_level_callables, locals)
+                    })
+                    .fold(EffectSet::new(), |mut acc, set| {
+                        acc.extend(&set);
+                        acc
+                    }),
+                DeepTag::Grad | DeepTag::Vmap => {
+                    // child 0 is RuntimeExpr (the function)
+                    if node.child_count() >= 1 {
+                        infer_expr_effects(node.child_at(0), top_level_effects, top_level_callables, locals)
+                    } else {
+                        EffectSet::new()
+                    }
+                }
+                DeepTag::HandleEffect => {
+                    infer_handle_effects_node(node, top_level_effects, top_level_callables, locals)
+                }
+                _ => node
+                    .expr_children()
+                    .map(|kid| {
+                        infer_expr_effects(kid, top_level_effects, top_level_callables, locals)
+                    })
+                    .fold(EffectSet::new(), |mut acc, set| {
+                        acc.extend(&set);
+                        acc
+                    }),
+            }
         }
         Expr::List(list, _) => {
             let Some(tag) = get_tag(list) else {
@@ -394,14 +483,6 @@ fn infer_expr_effects(
                     }),
             }
         }
-        // Transitional arms for new Expr variants (#908)
-        Expr::Node(node, _) => node
-            .expr_children()
-            .map(|child| infer_expr_effects(child, top_level_effects, top_level_callables, locals))
-            .fold(EffectSet::new(), |mut acc, set| {
-                acc.extend(&set);
-                acc
-            }),
         Expr::BareList(elems, _) => elems
             .iter()
             .map(|elem| infer_expr_effects(elem, top_level_effects, top_level_callables, locals))
@@ -476,6 +557,61 @@ fn infer_app_effects(
     effects
 }
 
+fn infer_app_effects_node(
+    node: &Node,
+    top_level_effects: &HashMap<String, EffectSet>,
+    top_level_callables: &HashSet<String>,
+    locals: &HashMap<String, EffectSet>,
+) -> EffectSet {
+    let mut effects = EffectSet::new();
+    for i in 0..node.child_count() {
+        effects.extend(&infer_expr_effects(
+            node.child_at(i),
+            top_level_effects,
+            top_level_callables,
+            locals,
+        ));
+    }
+
+    let builtin_name = var_name(node.child_at(0));
+    if matches!(builtin_name, Some("dropout" | "uniform_like")) {
+        effects.insert(Effect::Random);
+    }
+    if matches!(
+        builtin_name,
+        Some(
+            "print"
+                | "debug"
+                | "read_file"
+                | "write_file"
+                | "read_lines"
+                | "read_bytes"
+                | "file_exists"
+                | "list_dir"
+                | "mmap_file"
+                | "process_run"
+        )
+    ) {
+        effects.insert(Effect::Io);
+    }
+    if matches!(
+        builtin_name,
+        Some(
+            "test_assert"
+                | "test_assert_eq_f32"
+                | "test_assert_eq_int"
+                | "test_assert_eq_bool"
+                | "test_assert_eq_string"
+                | "test_assert_close_tensor"
+                | "test_assert_eq_tensor_int64"
+        )
+    ) {
+        effects.insert(Effect::Test);
+    }
+
+    effects
+}
+
 fn infer_let_effects(
     list: &List,
     top_level_effects: &HashMap<String, EffectSet>,
@@ -503,6 +639,32 @@ fn infer_let_effects(
                     Expr::List(value_list, _) if get_tag(value_list) == Some(DeepTag::Fn) => {
                         value_effects
                     }
+                    Expr::Node(value_node, _) if value_node.tag() == DeepTag::Fn => {
+                        value_effects
+                    }
+                    _ => EffectSet::new(),
+                };
+                local_scope.insert(name.to_string(), binding_effects);
+            }
+            i += 2;
+        }
+    } else if let Expr::Node(bind_node, _) = &kids[0] {
+        // Bind node: children are alternating name/value pairs
+        let count = bind_node.child_count();
+        let mut i = 0;
+        while i + 1 < count {
+            let value = bind_node.child_at(i + 1);
+            let value_effects =
+                infer_expr_effects(value, top_level_effects, top_level_callables, &local_scope);
+            effects.extend(&value_effects);
+            if let Some(name) = symbol_name(bind_node.child_at(i)) {
+                let binding_effects = match value {
+                    Expr::List(value_list, _) if get_tag(value_list) == Some(DeepTag::Fn) => {
+                        value_effects
+                    }
+                    Expr::Node(value_node, _) if value_node.tag() == DeepTag::Fn => {
+                        value_effects
+                    }
                     _ => EffectSet::new(),
                 };
                 local_scope.insert(name.to_string(), binding_effects);
@@ -513,6 +675,103 @@ fn infer_let_effects(
 
     effects.extend(&infer_expr_effects(
         &kids[1],
+        top_level_effects,
+        top_level_callables,
+        &local_scope,
+    ));
+    effects
+}
+
+fn infer_let_effects_node(
+    node: &Node,
+    top_level_effects: &HashMap<String, EffectSet>,
+    top_level_callables: &HashSet<String>,
+    locals: &HashMap<String, EffectSet>,
+) -> EffectSet {
+    // Let: child 0 is ExplicitInferenceBypass (bindings), child 1 is RuntimeExpr (body)
+    if node.child_count() < 2 {
+        return EffectSet::new();
+    }
+
+    let mut local_scope = locals.clone();
+    let mut effects = EffectSet::new();
+
+    let bindings = node.child_at(0);
+    match bindings {
+        Expr::Node(bind_node, _) => {
+            let count = bind_node.child_count();
+            let mut i = 0;
+            while i + 1 < count {
+                let value = bind_node.child_at(i + 1);
+                let value_effects =
+                    infer_expr_effects(value, top_level_effects, top_level_callables, &local_scope);
+                effects.extend(&value_effects);
+                if let Some(name) = symbol_name(bind_node.child_at(i)) {
+                    let binding_effects = match value {
+                        Expr::Node(value_node, _) if value_node.tag() == DeepTag::Fn => {
+                            value_effects
+                        }
+                        Expr::List(value_list, _) if get_tag(value_list) == Some(DeepTag::Fn) => {
+                            value_effects
+                        }
+                        _ => EffectSet::new(),
+                    };
+                    local_scope.insert(name.to_string(), binding_effects);
+                }
+                i += 2;
+            }
+        }
+        Expr::List(bind_list, _) => {
+            let bind_kids = children(bind_list);
+            let mut i = 0;
+            while i + 1 < bind_kids.len() {
+                let value = &bind_kids[i + 1];
+                let value_effects =
+                    infer_expr_effects(value, top_level_effects, top_level_callables, &local_scope);
+                effects.extend(&value_effects);
+                if let Some(name) = symbol_name(&bind_kids[i]) {
+                    let binding_effects = match value {
+                        Expr::Node(value_node, _) if value_node.tag() == DeepTag::Fn => {
+                            value_effects
+                        }
+                        Expr::List(value_list, _) if get_tag(value_list) == Some(DeepTag::Fn) => {
+                            value_effects
+                        }
+                        _ => EffectSet::new(),
+                    };
+                    local_scope.insert(name.to_string(), binding_effects);
+                }
+                i += 2;
+            }
+        }
+        Expr::BareList(elems, _) => {
+            // BareList form of bindings (from stamp pass)
+            let mut i = 0;
+            while i + 1 < elems.len() {
+                let value = &elems[i + 1];
+                let value_effects =
+                    infer_expr_effects(value, top_level_effects, top_level_callables, &local_scope);
+                effects.extend(&value_effects);
+                if let Some(name) = symbol_name(&elems[i]) {
+                    let binding_effects = match value {
+                        Expr::Node(value_node, _) if value_node.tag() == DeepTag::Fn => {
+                            value_effects
+                        }
+                        Expr::List(value_list, _) if get_tag(value_list) == Some(DeepTag::Fn) => {
+                            value_effects
+                        }
+                        _ => EffectSet::new(),
+                    };
+                    local_scope.insert(name.to_string(), binding_effects);
+                }
+                i += 2;
+            }
+        }
+        _ => {}
+    }
+
+    effects.extend(&infer_expr_effects(
+        node.child_at(1),
         top_level_effects,
         top_level_callables,
         &local_scope,
@@ -538,6 +797,28 @@ fn infer_handle_effects(
         Ok(EffectKind::Resource) => {}
         // Validation reports the structural decode error. Inference leaves the
         // body's effects unhandled instead of substituting a known kind.
+        Err(_) => {}
+    }
+    effects.extend(&body_effects);
+    effects
+}
+
+fn infer_handle_effects_node(
+    node: &Node,
+    top_level_effects: &HashMap<String, EffectSet>,
+    top_level_callables: &HashSet<String>,
+    locals: &HashMap<String, EffectSet>,
+) -> EffectSet {
+    // HandleEffect: child 0 is EffectHandler, child 1 is RuntimeExpr (body)
+    if node.child_count() < 2 {
+        return EffectSet::new();
+    }
+    let mut effects = infer_expr_effects(node.child_at(0), top_level_effects, top_level_callables, locals);
+    let mut body_effects =
+        infer_expr_effects(node.child_at(1), top_level_effects, top_level_callables, locals);
+    match decode_effect_kind_from_meta(node.meta()) {
+        Ok(EffectKind::Random) => body_effects.remove(&Effect::Random),
+        Ok(EffectKind::Resource) => {}
         Err(_) => {}
     }
     effects.extend(&body_effects);
@@ -689,8 +970,125 @@ fn annotate_effects(
                 )
             }
         }
-        // Transitional arms for new Expr variants (#908)
-        Expr::Node(_, _) | Expr::BareList(_, _) | Expr::UnknownForm(_) => expr.clone(),
+        // Node-based annotation: recurse into children and attach effect metadata
+        Expr::Node(node, span) => {
+            let tag = node.tag();
+            // For Fn nodes, attach effect metadata
+            if tag == DeepTag::Fn {
+                let effects = infer_expr_effects(expr, top_level_effects, top_level_callables, locals);
+                let mut new_meta = node.meta().clone();
+                if !effects.is_empty() {
+                    upsert_meta(&mut new_meta, "effects", effect_set_expr(&effects));
+                }
+                // Rebuild Fn: child 0 (params/binder) unchanged, child 1 (body) annotated
+                let mut new_children = Vec::with_capacity(node.child_count());
+                new_children.push(node.child_at(0).clone());
+                if node.child_count() >= 2 {
+                    new_children.push(annotate_effects(
+                        node.child_at(1),
+                        top_level_effects,
+                        top_level_callables,
+                        locals,
+                    ));
+                }
+                Expr::Node(
+                    Box::new(Node::new(tag, new_meta, new_children)),
+                    *span,
+                )
+            } else if tag == DeepTag::Let && node.child_count() >= 2 {
+                // Let: annotate bindings and body with proper local scope
+                let mut local_scope = locals.clone();
+                let bindings = node.child_at(0);
+                let annotated_bindings = match bindings {
+                    Expr::Node(bind_node, bind_span) => {
+                        let count = bind_node.child_count();
+                        let mut new_bind_children = Vec::with_capacity(count);
+                        let mut i = 0;
+                        while i + 1 < count {
+                            new_bind_children.push(bind_node.child_at(i).clone());
+                            let value = annotate_effects(
+                                bind_node.child_at(i + 1),
+                                top_level_effects,
+                                top_level_callables,
+                                &local_scope,
+                            );
+                            let value_effects = infer_expr_effects(
+                                bind_node.child_at(i + 1),
+                                top_level_effects,
+                                top_level_callables,
+                                &local_scope,
+                            );
+                            if let Some(name) = symbol_name(bind_node.child_at(i)) {
+                                let binding_effects = match bind_node.child_at(i + 1) {
+                                    Expr::Node(vn, _) if vn.tag() == DeepTag::Fn => value_effects,
+                                    Expr::List(vl, _) if get_tag(vl) == Some(DeepTag::Fn) => value_effects,
+                                    _ => EffectSet::new(),
+                                };
+                                local_scope.insert(name.to_string(), binding_effects);
+                            }
+                            new_bind_children.push(value);
+                            i += 2;
+                        }
+                        Expr::Node(
+                            Box::new(Node::new(bind_node.tag(), bind_node.meta().clone(), new_bind_children)),
+                            *bind_span,
+                        )
+                    }
+                    _ => annotate_effects(bindings, top_level_effects, top_level_callables, &local_scope),
+                };
+                let annotated_body = annotate_effects(
+                    node.child_at(1),
+                    top_level_effects,
+                    top_level_callables,
+                    &local_scope,
+                );
+                Expr::Node(
+                    Box::new(Node::new(tag, node.meta().clone(), vec![annotated_bindings, annotated_body])),
+                    *span,
+                )
+            } else {
+                // Generic: only recurse into RuntimeExpr-role children, leave others unchanged
+                use chelis_deep::role::{child_stamp_role, ChildStampRole};
+                let count = node.child_count();
+                let mut new_children = Vec::with_capacity(count);
+                for i in 0..count {
+                    let role = child_stamp_role(tag, i, count);
+                    if role == ChildStampRole::RuntimeExpr {
+                        new_children.push(annotate_effects(
+                            node.child_at(i),
+                            top_level_effects,
+                            top_level_callables,
+                            locals,
+                        ));
+                    } else {
+                        new_children.push(node.child_at(i).clone());
+                    }
+                }
+                Expr::Node(
+                    Box::new(Node::new(tag, node.meta().clone(), new_children)),
+                    *span,
+                )
+            }
+        }
+        Expr::BareList(elems, span) => {
+            let annotated: Vec<Expr> = elems
+                .iter()
+                .map(|elem| annotate_effects(elem, top_level_effects, top_level_callables, locals))
+                .collect();
+            Expr::BareList(annotated, *span)
+        }
+        Expr::UnknownForm(data) => {
+            let annotated_children: Vec<Expr> = data.children
+                .iter()
+                .map(|child| annotate_effects(child, top_level_effects, top_level_callables, locals))
+                .collect();
+            Expr::UnknownForm(Box::new(chelis_deep::ast::UnknownFormData {
+                head: data.head.clone(),
+                meta: data.meta.clone(),
+                children: annotated_children,
+                span: data.span,
+            }))
+        }
     }
 }
 
@@ -778,10 +1176,44 @@ fn validate_handler_expr(expr: &Expr, errors: &mut Vec<EffectError>) {
             }
         }
         Expr::Atom(_, _) => {}
-        // Transitional arms for new Expr variants (#908)
         Expr::Node(node, _) => {
-            for child in node.expr_children() {
-                validate_handler_expr(child, errors);
+            if node.tag() == DeepTag::HandleEffect {
+                match decode_effect_kind_from_meta(node.meta()) {
+                    Ok(EffectKind::Random) if int_literal(node.child_at(0)).is_none() => {
+                        errors.push(EffectError {
+                            kind: EffectErrorKind::InvalidHandler,
+                            message: "with seed(...) currently requires an int literal seed"
+                                .to_string(),
+                            suggestions: vec![
+                                "Use `with seed(42i64) { ... }` with an explicit int64-suffixed integer seed"
+                                    .to_string(),
+                            ],
+                        });
+                    }
+                    Ok(EffectKind::Resource) if string_literal(node.child_at(0)).is_none() => {
+                        errors.push(EffectError {
+                            kind: EffectErrorKind::InvalidHandler,
+                            message:
+                                "with device(...) currently requires a string literal device"
+                                    .to_string(),
+                            suggestions: vec![
+                                "Use `with device(\"gpu:0\") { ... }` with an explicit device literal"
+                                    .to_string(),
+                            ],
+                        });
+                    }
+                    Ok(EffectKind::Random) | Ok(EffectKind::Resource) => {}
+                    Err(error) => errors.push(EffectError {
+                        kind: EffectErrorKind::InvalidHandler,
+                        message: format!("{error} in `handle-effect`"),
+                        suggestions: vec![
+                            "Use one of the closed effect kinds `random` or `resource`".to_string(),
+                        ],
+                    }),
+                }
+            }
+            for i in 0..node.child_count() {
+                validate_handler_expr(node.child_at(i), errors);
             }
         }
         Expr::BareList(elems, _) => {
@@ -803,83 +1235,144 @@ fn validate_unhandled_random_roots(
     errors: &mut Vec<EffectError>,
 ) {
     for expr in flattened_top_level(exprs) {
-        if let Expr::List(list, _) = expr
-            && get_tag(list) == Some(DeepTag::Def)
+        let (name, body) = match expr {
+            Expr::Node(node, _) if node.tag() == DeepTag::Def => {
+                let name = node.binder_name(0);
+                let body = node.child_at(1);
+                (name, body)
+            }
+            Expr::List(list, _) if get_tag(list) == Some(DeepTag::Def) => {
+                let kids = children(list);
+                if kids.len() < 2 {
+                    continue;
+                }
+                let Some(name) = symbol_name(&kids[0]) else {
+                    continue;
+                };
+                (name, &kids[1])
+            }
+            _ => continue,
+        };
+        // Skip if body is a Fn (those are callable, not value roots)
+        match body {
+            Expr::Node(body_node, _) if body_node.tag() == DeepTag::Fn => continue,
+            Expr::List(body_list, _) if get_tag(body_list) == Some(DeepTag::Fn) => continue,
+            _ => {}
+        }
+        if effects_by_def
+            .get(name)
+            .is_some_and(|effects| effects.contains(&Effect::Random))
         {
-            let kids = children(list);
-            if kids.len() < 2 {
-                continue;
-            }
-            let Some(name) = symbol_name(&kids[0]) else {
-                continue;
-            };
-            if matches!(&kids[1], Expr::List(body, _) if get_tag(body) == Some(DeepTag::Fn)) {
-                continue;
-            }
-            if effects_by_def
-                .get(name)
-                .is_some_and(|effects| effects.contains(&Effect::Random))
-            {
-                errors.push(EffectError {
-                    kind: EffectErrorKind::UnhandledEffect,
-                    message: format!(
-                        "Function `{name}` has unhandled effect `Random`; `dropout` requires `with seed(...)`"
-                    ),
-                    suggestions: vec![
-                        "Wrap the stochastic region with `with seed(42i64) { ... }`".to_string(),
-                    ],
-                });
-            }
+            errors.push(EffectError {
+                kind: EffectErrorKind::UnhandledEffect,
+                message: format!(
+                    "Function `{name}` has unhandled effect `Random`; `dropout` requires `with seed(...)`"
+                ),
+                suggestions: vec![
+                    "Wrap the stochastic region with `with seed(42i64) { ... }`".to_string(),
+                ],
+            });
         }
     }
 }
 
 /// Extract the effect set declared on a `(defsig name t-fn-with-eff-meta)` expression.
 /// Returns `None` when there is no explicit effect annotation (i.e., inference-only mode).
-fn declared_effects_from_defsig(list: &List) -> Option<EffectSet> {
-    // defsig has form: (defsig {} name t-fn-expr)
-    let kids = children(list);
-    let t_fn = kids.get(1)?;
-    let Expr::List(t_fn_list, _) = t_fn else {
-        return None;
+fn declared_effects_from_defsig(expr: &Expr) -> Option<EffectSet> {
+    // Get the t-fn type expression (child 1 of defsig)
+    let t_fn = match expr {
+        Expr::Node(node, _) if node.tag() == DeepTag::Defsig => {
+            node.child_at(1)
+        }
+        Expr::List(list, _) if get_tag(list) == Some(DeepTag::Defsig) => {
+            let kids = children(list);
+            kids.get(1)?
+        }
+        _ => return None,
     };
-    if get_tag(t_fn_list) != Some(DeepTag::TFn) {
-        return None;
-    }
-    // t-fn metadata is element [1] (the meta map).
-    let Expr::Map(meta, _) = t_fn_list.elements.get(1)? else {
-        return None;
+
+    // t-fn must be a TFn node/list
+    let meta = match t_fn {
+        Expr::Node(t_fn_node, _) if t_fn_node.tag() == DeepTag::TFn => {
+            t_fn_node.meta()
+        }
+        Expr::List(t_fn_list, _) if get_tag(t_fn_list) == Some(DeepTag::TFn) => {
+            let Expr::Map(meta, _) = t_fn_list.elements.get(1)? else {
+                return None;
+            };
+            meta
+        }
+        _ => return None,
     };
+
     let (_, eff_expr) = meta.entries.iter().find(|(key, _)| key == "eff")?;
     // eff_expr is (effects {} sym sym ...)
-    let Expr::List(eff_list, _) = eff_expr else {
-        return None;
-    };
-    if get_tag(eff_list) != Some(DeepTag::Effects) {
-        return None;
-    }
-    let mut declared = EffectSet::new();
-    for child in children(eff_list) {
-        if let Some(name) = symbol_name(child) {
-            match name {
-                "random" => declared.insert(Effect::Random),
-                "accum" => declared.insert(Effect::Accum),
-                "io" => declared.insert(Effect::Io),
-                "test" => declared.insert(Effect::Test),
-                // "diff" is currently tracked separately and does not appear in inferred sets.
-                _ => {}
+    match eff_expr {
+        Expr::Node(eff_node, _) if eff_node.tag() == DeepTag::Effects => {
+            let mut declared = EffectSet::new();
+            for i in 0..eff_node.child_count() {
+                let child = eff_node.child_at(i);
+                if let Some(name) = symbol_name(child) {
+                    match name {
+                        "random" => declared.insert(Effect::Random),
+                        "accum" => declared.insert(Effect::Accum),
+                        "io" => declared.insert(Effect::Io),
+                        "test" => declared.insert(Effect::Test),
+                        _ => {}
+                    }
+                } else if let Expr::Node(inner, _) = child
+                    && inner.tag() == DeepTag::Resource
+                    && let Some(device) = inner.children_slice().first().and_then(|expr| match expr {
+                        Expr::Atom(Atom::Str(value), _) => Some(value.clone()),
+                        _ => None,
+                    })
+                {
+                    declared.insert(Effect::Resource(device));
+                } else if let Expr::List(inner, _) = child
+                    && get_tag(inner) == Some(DeepTag::Resource)
+                    && let Some(device) = children(inner).first().and_then(|expr| match expr {
+                        Expr::Atom(Atom::Str(value), _) => Some(value.clone()),
+                        _ => None,
+                    })
+                {
+                    declared.insert(Effect::Resource(device));
+                }
             }
-        } else if let Expr::List(inner, _) = child
-            && get_tag(inner) == Some(DeepTag::Resource)
-            && let Some(device) = children(inner).first().and_then(|expr| match expr {
-                Expr::Atom(Atom::Str(value), _) => Some(value.clone()),
-                _ => None,
-            })
-        {
-            declared.insert(Effect::Resource(device));
+            Some(declared)
         }
+        Expr::List(eff_list, _) if get_tag(eff_list) == Some(DeepTag::Effects) => {
+            let mut declared = EffectSet::new();
+            for child in children(eff_list) {
+                if let Some(name) = symbol_name(child) {
+                    match name {
+                        "random" => declared.insert(Effect::Random),
+                        "accum" => declared.insert(Effect::Accum),
+                        "io" => declared.insert(Effect::Io),
+                        "test" => declared.insert(Effect::Test),
+                        _ => {}
+                    }
+                } else if let Expr::List(inner, _) = child
+                    && get_tag(inner) == Some(DeepTag::Resource)
+                    && let Some(device) = children(inner).first().and_then(|expr| match expr {
+                        Expr::Atom(Atom::Str(value), _) => Some(value.clone()),
+                        _ => None,
+                    })
+                {
+                    declared.insert(Effect::Resource(device));
+                } else if let Expr::Node(inner, _) = child
+                    && inner.tag() == DeepTag::Resource
+                    && let Some(device) = inner.children_slice().first().and_then(|expr| match expr {
+                        Expr::Atom(Atom::Str(value), _) => Some(value.clone()),
+                        _ => None,
+                    })
+                {
+                    declared.insert(Effect::Resource(device));
+                }
+            }
+            Some(declared)
+        }
+        _ => None,
     }
-    Some(declared)
 }
 
 /// Reject `def f` whose inferred effects exceed the effects declared on its `defsig`.
@@ -894,16 +1387,23 @@ fn validate_declared_vs_inferred(
 ) {
     let mut declared_by_name: HashMap<String, EffectSet> = HashMap::new();
     for expr in flattened_top_level(exprs) {
-        if let Expr::List(list, _) = expr
-            && get_tag(list) == Some(DeepTag::Defsig)
-        {
-            let kids = children(list);
-            let Some(name) = kids.first().and_then(symbol_name) else {
-                continue;
-            };
-            if let Some(declared) = declared_effects_from_defsig(list) {
-                declared_by_name.insert(name.to_string(), declared);
+        match expr {
+            Expr::Node(node, _) if node.tag() == DeepTag::Defsig => {
+                let name = node.binder_name(0);
+                if let Some(declared) = declared_effects_from_defsig(expr) {
+                    declared_by_name.insert(name.to_string(), declared);
+                }
             }
+            Expr::List(list, _) if get_tag(list) == Some(DeepTag::Defsig) => {
+                let kids = children(list);
+                let Some(name) = kids.first().and_then(symbol_name) else {
+                    continue;
+                };
+                if let Some(declared) = declared_effects_from_defsig(expr) {
+                    declared_by_name.insert(name.to_string(), declared);
+                }
+            }
+            _ => continue,
         }
     }
 
@@ -998,10 +1498,43 @@ fn validate_build_target_expr(expr: &Expr, target: &str, errors: &mut Vec<Effect
             }
         }
         Expr::Atom(_, _) => {}
-        // Transitional arms for new Expr variants (#908)
         Expr::Node(node, _) => {
-            for child in node.expr_children() {
-                validate_build_target_expr(child, target, errors);
+            if node.tag() == DeepTag::HandleEffect {
+                match decode_effect_kind_from_meta(node.meta()) {
+                    Ok(EffectKind::Random) => {}
+                    Ok(EffectKind::Resource) => {
+                        if let Some(device) = string_literal(node.child_at(0)) {
+                            let ok = match target {
+                                "c" => !device.starts_with("gpu"),
+                                "hip" | "metal" => device.starts_with("gpu"),
+                                _ => true,
+                            };
+                            if !ok {
+                                errors.push(EffectError {
+                                    kind: EffectErrorKind::BuildTargetMismatch,
+                                    message: format!(
+                                        "`chelis build --target {target}` cannot satisfy resource region `{device}`"
+                                    ),
+                                    suggestions: match target {
+                                        "c" => vec![
+                                            "Use `with device(\"cpu\") { ... }` or build with `--target hip` or `--target metal`"
+                                                .to_string(),
+                                        ],
+                                        "hip" | "metal" => vec![
+                                            "Use a GPU device such as `with device(\"gpu:0\") { ... }`"
+                                                .to_string(),
+                                        ],
+                                        _ => vec![],
+                                    },
+                                });
+                            }
+                        }
+                    }
+                    Err(_) => {}
+                }
+            }
+            for i in 0..node.child_count() {
+                validate_build_target_expr(node.child_at(i), target, errors);
             }
         }
         Expr::BareList(elems, _) => {
@@ -1062,13 +1595,15 @@ fn upsert_meta(meta: &mut MetaMap, key: &str, value: Expr) {
 }
 
 fn var_name(expr: &Expr) -> Option<&str> {
-    let Expr::List(list, _) = expr else {
-        return None;
-    };
-    if get_tag(list) != Some(DeepTag::Var) {
-        return None;
+    match expr {
+        Expr::Node(node, _) if node.tag() == DeepTag::Var => {
+            symbol_name(node.child_at(0))
+        }
+        Expr::List(list, _) if get_tag(list) == Some(DeepTag::Var) => {
+            children(list).first().and_then(symbol_name)
+        }
+        _ => None,
     }
-    children(list).first().and_then(symbol_name)
 }
 
 fn get_tag(list: &List) -> Option<DeepTag> {
@@ -1093,6 +1628,12 @@ fn symbol_name(expr: &Expr) -> Option<&str> {
 fn int_literal(expr: &Expr) -> Option<i64> {
     match expr {
         Expr::Atom(Atom::Int(value), _) => Some(*value),
+        Expr::Node(node, _) if node.tag() == DeepTag::Lit => {
+            match node.child_at(0) {
+                Expr::Atom(Atom::Int(value), _) => Some(*value),
+                _ => None,
+            }
+        }
         Expr::List(list, _) if get_tag(list) == Some(DeepTag::Lit) => {
             match children(list).first() {
                 Some(Expr::Atom(Atom::Int(value), _)) => Some(*value),
@@ -1106,6 +1647,12 @@ fn int_literal(expr: &Expr) -> Option<i64> {
 fn string_literal(expr: &Expr) -> Option<&str> {
     match expr {
         Expr::Atom(Atom::Str(value), _) => Some(value.as_str()),
+        Expr::Node(node, _) if node.tag() == DeepTag::Lit => {
+            match node.child_at(0) {
+                Expr::Atom(Atom::Str(value), _) => Some(value.as_str()),
+                _ => None,
+            }
+        }
         Expr::List(list, _) if get_tag(list) == Some(DeepTag::Lit) => {
             match children(list).first() {
                 Some(Expr::Atom(Atom::Str(value), _)) => Some(value.as_str()),

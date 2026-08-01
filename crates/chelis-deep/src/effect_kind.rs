@@ -31,6 +31,26 @@ pub fn decode_effect_kind(list: &List) -> Result<EffectKind, EffectKindDecodeErr
     }
 }
 
+/// Decode the `effect:` metadata from a `MetaMap` directly. This is the
+/// `Node`-compatible counterpart to [`decode_effect_kind`] (which takes
+/// `&List`). Used by consumers that have already matched `Expr::Node`.
+pub fn decode_effect_kind_from_meta(meta: &crate::ast::MetaMap) -> Result<EffectKind, EffectKindDecodeError<'_>> {
+    let mut effect_values = meta
+        .entries
+        .iter()
+        .filter_map(|(key, value)| (key == "effect").then_some(value));
+    let Some(value) = effect_values.next() else {
+        return EffectKind::decode(EffectKindInput::Missing);
+    };
+    if effect_values.next().is_some() {
+        return EffectKind::decode(EffectKindInput::Malformed);
+    }
+    match value {
+        Expr::Atom(Atom::Name(symbol), _) => EffectKind::decode(EffectKindInput::Symbol(symbol)),
+        _ => EffectKind::decode(EffectKindInput::Malformed),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

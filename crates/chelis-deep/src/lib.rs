@@ -20,7 +20,7 @@ pub mod tag;
 pub mod validate;
 
 pub use ast::{Atom, Expr, List, MetaExpr, MetaMap, UnknownFormData};
-pub use effect_kind::decode_effect_kind;
+pub use effect_kind::{decode_effect_kind, decode_effect_kind_from_meta};
 pub use lexer::LiteralSuffix;
 pub use parser::{StampOrParseError, parse_and_stamp, parse_raw_str};
 pub use raw::{RawAtom, RawExpr};
