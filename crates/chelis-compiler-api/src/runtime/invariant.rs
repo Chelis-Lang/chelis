@@ -9,6 +9,8 @@
 use std::collections::{HashMap, HashSet};
 
 use chelis_deep::ast::Expr;
+use chelis_deep::ast::Atom;
+use chelis_deep::Span;
 use chelis_types::types::Prim;
 
 use super::host_ops::render_value;
@@ -562,8 +564,18 @@ fn strip_span_meta(expr: &mut Expr) {
             strip_span_meta(&mut meta.expr);
         }
         Expr::Atom(_, _) => {}
-        // Transitional arms for new Expr variants (#908)
-        Expr::Node(_, _) | Expr::BareList(_, _) | Expr::UnknownForm(_) => {}
+        Expr::Node(..) => {
+            // Bridge: convert Node to List in place so mutable meta stripping works (#908).
+            let placeholder = Expr::Atom(Atom::Bool(false), Span::new(0, 0));
+            match std::mem::replace(expr, placeholder) {
+                Expr::Node(node, span) => {
+                    *expr = Expr::List(node.to_list(span), span);
+                    strip_span_meta(expr);
+                }
+                _ => unreachable!(),
+            }
+        }
+        Expr::BareList(_, _) | Expr::UnknownForm(_) => {}
     }
 }
 
