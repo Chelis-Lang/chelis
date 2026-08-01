@@ -205,6 +205,8 @@ class LockRegenerationWiringTests(unittest.TestCase):
         names = {p.name for p in bump_mod.PINNED_REAL_LOCK_DIRS}
         self.assertIn("chelis-std", names)
         self.assertIn("release_pipe_stage", names)
+        self.assertIn("nautilus_quantile_contract", names)
+        self.assertIn("nautilus", names)
         # Every recorded lock dir must currently ship a reef.lock so the
         # regeneration target is real, not aspirational.
         for pkg_dir in bump_mod.PINNED_REAL_LOCK_DIRS:
@@ -212,6 +214,20 @@ class LockRegenerationWiringTests(unittest.TestCase):
                 (pkg_dir / "reef.lock").is_file(),
                 f"{pkg_dir} must ship a reef.lock to regenerate",
             )
+
+    def test_pinned_toml_inventory_covers_executable_package_examples(self):
+        relative = {
+            path.relative_to(bump_mod.REPO_ROOT).as_posix()
+            for path in bump_mod.PINNED_REAL_TOML_FILES
+        }
+        self.assertIn(
+            "examples/nautilus_quantile_contract/reef.toml",
+            relative,
+        )
+        self.assertIn(
+            "examples/nautilus_quantile_contract/fixtures/nautilus/reef.toml",
+            relative,
+        )
 
 
 if __name__ == "__main__":

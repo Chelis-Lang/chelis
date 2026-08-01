@@ -13,7 +13,9 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 - **Sound structural induction for supported recursive integer models
   (chelis#978).** `chelis prove` now dispatches eligible structurally recursive
   properties through explicit base and step obligations. Unsupported recursion
-  remains fail-closed with no sampling or `ASSUMED` fallback, and Tide exposes
+  remains fail-closed with no sampling or `ASSUMED` fallback. The default
+  `--tier auto` selects this terminal lane before ordinary SMT/fuzz dispatch
+  whenever the checked property reaches a recursive model, and Tide exposes
   the same honest result. The executable `induction_bond.ch` example and its
   three-runtime parity test demonstrate a general-size bond recurrence.
 - **Target-aware root realizability manifests (chelis#912).** Root

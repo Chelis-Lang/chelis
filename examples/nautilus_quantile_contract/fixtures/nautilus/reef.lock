@@ -1,6 +1,6 @@
 [package]
-name = "nautilus-quantile-contract"
-version = "0.1.0"
+name = "nautilus"
+version = "0.7.36"
 
 [[dependencies]]
 name = "chelis-std"
@@ -13,13 +13,3 @@ shell_sha256 = "8dff40bcd4a2310878b490618784e97da39146efd8659344d3fe55735a9a035a
 kind = "bundled"
 compiler_version = "0.18.1"
 
-[[dependencies]]
-name = "nautilus"
-version = "0.7.36"
-compiler = "=0.18.1"
-archive_sha256 = ""
-shell_sha256 = ""
-
-[dependencies.source]
-kind = "path"
-path = "fixtures/nautilus"
