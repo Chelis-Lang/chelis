@@ -68,6 +68,43 @@ fn false_general_bond_induction_is_rejected_by_step_obligation() {
 
 #[cfg(feature = "smt")]
 #[test]
+fn auto_dispatches_eligible_induction_before_recursive_tier_b_lowering() {
+    let outcomes = run_surf(GENERAL_BOND_INDUCTION, "auto");
+    assert_eq!(outcomes.len(), 1);
+    let outcome = &outcomes[0];
+    assert_eq!(outcome.status, PropertyStatus::Passed, "{outcome:#?}");
+    assert_eq!(outcome.proof_tier, PropertyTier::Induction);
+    assert_eq!(outcome.samples, 0);
+    assert!(outcome.induction_evidence.is_some());
+}
+
+#[cfg(feature = "smt")]
+#[test]
+fn auto_keeps_failed_induction_terminal_instead_of_fuzz_laundering() {
+    let source = GENERAL_BOND_INDUCTION.replace(
+        "coupon + discount * bond_value(n - 1, coupon, discount)",
+        "coupon - cast(1.0, f64) + discount * bond_value(n - 1, coupon, discount)",
+    );
+    let outcome = &run_surf(&source, "auto")[0];
+    assert_eq!(outcome.status, PropertyStatus::Failed, "{outcome:#?}");
+    assert_eq!(outcome.proof_tier, PropertyTier::Induction);
+    assert_eq!(outcome.samples, 0);
+    assert!(!outcome.is_pass());
+}
+
+#[cfg(feature = "smt")]
+#[test]
+fn auto_fails_closed_on_recursive_but_unsupported_induction_shape() {
+    let source = GENERAL_BOND_INDUCTION.replace("n - 1", "n + 1");
+    let outcome = &run_surf(&source, "auto")[0];
+    assert_eq!(outcome.status, PropertyStatus::Unsupported, "{outcome:#?}");
+    assert_eq!(outcome.proof_tier, PropertyTier::Induction);
+    assert_eq!(outcome.samples, 0);
+    assert!(outcome.induction_evidence.is_none());
+}
+
+#[cfg(feature = "smt")]
+#[test]
 fn induction_rejects_non_structural_recursion_instead_of_assuming_it() {
     let source = GENERAL_BOND_INDUCTION.replace("n - 1", "n + 1");
     let outcomes = run_surf(&source, "induction-only");

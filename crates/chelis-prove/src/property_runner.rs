@@ -688,11 +688,14 @@ fn prove_surf_property(
         }
     };
 
-    // chelis#978: induction is an explicit, fail-closed lane. It never falls
-    // through to fuzz and it does not consume the old caller-trusted Tier-D
-    // scaffold. The classifier below reads the checked compiler AST and emits
-    // two independent SMT goals.
-    if options.tier == "induction-only" {
+    // chelis#978: induction is a fail-closed lane. An explicit request always
+    // enters it. Default auto enters it before ordinary Tier B when the checked
+    // AST says the property reaches a recursive model. Both accepted plans and
+    // unsupported recursive structures are terminal: neither can trail into a
+    // finite fuzz sample (or recursively overflow the concrete evaluator).
+    let auto_recursive =
+        options.tier == "auto" && property_reaches_recursive_model(decls, property);
+    if options.tier == "induction-only" || auto_recursive {
         let deep = chelis_surf::desugar::desugar_program(decls);
         if let Err(infer) = chelis_types::check_typed_program(&deep) {
             return PropertyOutcome::new(
@@ -768,6 +771,88 @@ fn prove_surf_property(
     let mut outcome = prove_surf_property_fuzz(decls, property, options, seed);
     outcome.append_assumptions(contract_assumptions);
     outcome
+}
+
+/// Conservatively decide whether a property's compiler AST reaches a recursive
+/// function. Auto uses this only as a lane-selection guard: a positive result
+/// still has to pass the exact induction classifier, while a negative result
+/// preserves the established Tier-B-then-C ordering for ordinary properties.
+fn property_reaches_recursive_model(decls: &[Decl], property: &Property) -> bool {
+    let function_names: std::collections::BTreeSet<String> = decls
+        .iter()
+        .filter_map(|decl| match decl {
+            Decl::FunDef { name, .. } => Some(name.clone()),
+            _ => None,
+        })
+        .collect();
+    let mut graph: BTreeMap<String, std::collections::BTreeSet<String>> = BTreeMap::new();
+    for decl in decls {
+        let Decl::FunDef {
+            name, params, body, ..
+        } = decl
+        else {
+            continue;
+        };
+        let param_names = params.iter().map(|param| param.name.as_str()).collect();
+        let mut refs = std::collections::BTreeSet::new();
+        collect_expr_refs(body, &param_names, &function_names, &mut refs);
+        graph.insert(name.clone(), refs);
+    }
+
+    let property_params = property
+        .params
+        .iter()
+        .map(|param| param.name.as_str())
+        .collect();
+    let mut roots = std::collections::BTreeSet::new();
+    collect_expr_refs(
+        &property.body,
+        &property_params,
+        &function_names,
+        &mut roots,
+    );
+    for precondition in &property.preconditions {
+        collect_expr_refs(precondition, &property_params, &function_names, &mut roots);
+    }
+
+    roots.iter().any(|root| {
+        let mut reachable = BTreeSet::new();
+        collect_reachable_functions(root, &graph, &mut reachable);
+        reachable.iter().any(|candidate| {
+            function_reaches_itself(candidate, candidate, &graph, &mut BTreeSet::new())
+        })
+    })
+}
+
+fn collect_reachable_functions(
+    current: &str,
+    graph: &BTreeMap<String, std::collections::BTreeSet<String>>,
+    reachable: &mut BTreeSet<String>,
+) {
+    if !reachable.insert(current.to_string()) {
+        return;
+    }
+    if let Some(successors) = graph.get(current) {
+        for successor in successors {
+            collect_reachable_functions(successor, graph, reachable);
+        }
+    }
+}
+
+fn function_reaches_itself(
+    origin: &str,
+    current: &str,
+    graph: &BTreeMap<String, std::collections::BTreeSet<String>>,
+    visited: &mut BTreeSet<String>,
+) -> bool {
+    if !visited.insert(current.to_string()) {
+        return false;
+    }
+    graph.get(current).is_some_and(|successors| {
+        successors.iter().any(|successor| {
+            successor == origin || function_reaches_itself(origin, successor, graph, visited)
+        })
+    })
 }
 
 fn contract_assumptions(property: &Property) -> Result<Vec<AssumptionRecord>, String> {

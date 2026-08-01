@@ -5,21 +5,22 @@ version = "0.1.0"
 [[dependencies]]
 name = "chelis-std"
 version = "0.4.0"
-compiler = "=0.17.4"
-archive_sha256 = "309abbf4c87355294538da4c90d65a86ec36119fc890ee998c282d8e9f9859c5"
-shell_sha256 = "f414ca7b624f97ec3ade5106f3b8bd16da756bd0611f40474569fdaef637e021"
+compiler = "=0.18.1"
+archive_sha256 = "845a5c4b54c57ed166a5456e54ba6793bee04dbb4d2799ad6fffc03300f15bbc"
+shell_sha256 = "8dff40bcd4a2310878b490618784e97da39146efd8659344d3fe55735a9a035a"
 
 [dependencies.source]
 kind = "bundled"
-compiler_version = "0.17.4"
+compiler_version = "0.18.1"
 
 [[dependencies]]
 name = "nautilus"
 version = "0.7.36"
-compiler = "=0.17.4"
-archive_sha256 = "412e24ec26f1828db394f6bed6ef8f4a9c93a7b104e020a457c93ec0a5b96572"
-shell_sha256 = "2db566d8b381fd4d49acef62f875420a59c397961954a7c27cb02b79cb3f12e4"
+compiler = "=0.18.1"
+archive_sha256 = ""
+shell_sha256 = ""
 
 [dependencies.source]
-kind = "local_registry"
-remote_origin = "github://Chelis-Lang/nautilus@v0.7.36"
+kind = "path"
+path = "fixtures/nautilus"
+

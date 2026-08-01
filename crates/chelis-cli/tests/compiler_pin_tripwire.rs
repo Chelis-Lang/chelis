@@ -41,6 +41,8 @@ fn pinned_real_toml_files() -> Vec<PathBuf> {
         root.join("crates/chelis-cli/tests/fixtures/pseudo_nautilus/reef.toml"),
         root.join("crates/chelis-cli/tests/fixtures/release_pipe_stage/reef.toml"),
         root.join("examples/illustrative/phase3g_text_pipeline/reef.toml"),
+        root.join("examples/nautilus_quantile_contract/reef.toml"),
+        root.join("examples/nautilus_quantile_contract/fixtures/nautilus/reef.toml"),
     ]
 }
 
@@ -61,6 +63,8 @@ fn pinned_real_lock_files() -> Vec<PathBuf> {
     vec![
         root.join("packages/chelis-std/reef.lock"),
         root.join("crates/chelis-cli/tests/fixtures/release_pipe_stage/reef.lock"),
+        root.join("examples/nautilus_quantile_contract/reef.lock"),
+        root.join("examples/nautilus_quantile_contract/fixtures/nautilus/reef.lock"),
     ]
 }
 

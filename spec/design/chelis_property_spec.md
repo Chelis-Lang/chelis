@@ -98,6 +98,17 @@ a pass. The executable acceptance oracle is:
 cargo test -p chelis-cli --features smt --test issue_978_induction
 ```
 
+The default `--tier auto` ordering is induction, then the existing Tier B SMT
+and Tier C fuzz lanes. Auto enters induction only when the checked Surf AST
+shows that the property reaches a recursive model. An accepted induction plan
+is terminal whether its base/step proves, disproves, times out, or errors; an
+unsupported recursive structure is likewise terminal and reports
+`proof_tier:"induction"` with zero samples. This prevents recursive general-n
+claims from reaching finite sampling or overflowing the evaluator stack.
+Properties that do not reach a recursive model retain the existing Tier B then
+Tier C behavior. No auto-induction result may contain `ASSUMED` evidence or a
+sampling record.
+
 ### Scalar gradient goals in Tier B
 
 Tier B lowers an applied scalar gradient into the same real-arithmetic

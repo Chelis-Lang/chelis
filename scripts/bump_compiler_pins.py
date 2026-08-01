@@ -81,6 +81,8 @@ PINNED_REAL_TOML_FILES: list[Path] = [
     REPO_ROOT / "crates/chelis-cli/tests/fixtures/pseudo_nautilus/reef.toml",
     REPO_ROOT / "crates/chelis-cli/tests/fixtures/release_pipe_stage/reef.toml",
     REPO_ROOT / "examples/illustrative/phase3g_text_pipeline/reef.toml",
+    REPO_ROOT / "examples/nautilus_quantile_contract/reef.toml",
+    REPO_ROOT / "examples/nautilus_quantile_contract/fixtures/nautilus/reef.toml",
 ]
 
 WORKSPACE_CARGO_TOML = REPO_ROOT / "Cargo.toml"
@@ -109,6 +111,8 @@ HULL_MANIFEST = REPO_ROOT / "tests/conformance/hull/manifest.json"
 PINNED_REAL_LOCK_DIRS: list[Path] = [
     CHELIS_STD_DIR,
     REPO_ROOT / "crates/chelis-cli/tests/fixtures/release_pipe_stage",
+    REPO_ROOT / "examples/nautilus_quantile_contract",
+    REPO_ROOT / "examples/nautilus_quantile_contract/fixtures/nautilus",
 ]
 
 
