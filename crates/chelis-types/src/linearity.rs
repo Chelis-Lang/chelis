@@ -605,6 +605,22 @@ impl Checker {
                     }
                 }
             },
+            // Transitional arms for new Expr variants (#908)
+            Expr::Node(node, _) => {
+                for child in node.expr_children() {
+                    self.check_expr(child, scope);
+                }
+            }
+            Expr::BareList(elems, _) => {
+                for elem in elems {
+                    self.check_expr(elem, scope);
+                }
+            }
+            Expr::UnknownForm(data) => {
+                for child in &data.children {
+                    self.check_expr(child, scope);
+                }
+            }
         }
     }
 
@@ -1362,7 +1378,7 @@ fn children(list: &List) -> &[Expr] {
 
 fn symbol_name(expr: &Expr) -> Option<&str> {
     match expr {
-        Expr::Atom(Atom::Symbol(name), _) => Some(name.as_str()),
+        Expr::Atom(Atom::Name(name), _) => Some(name.as_str()),
         _ => None,
     }
 }
@@ -1418,7 +1434,7 @@ fn param_names(expr: &Expr) -> Vec<String> {
     children(list)
         .iter()
         .filter_map(|param| match param {
-            Expr::Atom(Atom::Symbol(name), _) => Some(name.clone()),
+            Expr::Atom(Atom::Name(name), _) => Some(name.clone()),
             Expr::List(param_list, _) => param_list
                 .elements
                 .first()
@@ -1582,6 +1598,22 @@ fn collect_free_vars(expr: &Expr, bound: &mut Vec<HashSet<String>>, free: &mut H
                 }
             }
         },
+        // Transitional arms for new Expr variants (#908)
+        Expr::Node(node, _) => {
+            for child in node.expr_children() {
+                collect_free_vars(child, bound, free);
+            }
+        }
+        Expr::BareList(elems, _) => {
+            for elem in elems {
+                collect_free_vars(elem, bound, free);
+            }
+        }
+        Expr::UnknownForm(data) => {
+            for child in &data.children {
+                collect_free_vars(child, bound, free);
+            }
+        }
     }
 }
 
@@ -1741,7 +1773,7 @@ fn span_metadata_id(expr: &Expr) -> Option<&str> {
 
 fn param_name_and_type(param: &Expr) -> Option<(&str, Option<&Expr>)> {
     match param {
-        Expr::Atom(Atom::Symbol(name), _) => Some((name.as_str(), None)),
+        Expr::Atom(Atom::Name(name), _) => Some((name.as_str(), None)),
         Expr::List(param_list, _) => Some((
             param_list.elements.first().and_then(symbol_name)?,
             get_meta(param_list)
@@ -1759,7 +1791,7 @@ fn param_name_and_type(param: &Expr) -> Option<(&str, Option<&Expr>)> {
         // spurious "borrowed arguments must be tensor or tensor-carrying
         // values". Mirrors infer.rs `extract_params`'s MetaExpr arm.
         Expr::MetaExpr(meta, _) => {
-            let Expr::Atom(Atom::Symbol(name), _) = meta.expr.as_ref() else {
+            let Expr::Atom(Atom::Name(name), _) = meta.expr.as_ref() else {
                 return None;
             };
             Some((
@@ -2143,7 +2175,7 @@ mod tests {
     }
 
     fn sym(name: &str) -> Expr {
-        Expr::Atom(Atom::Symbol(name.to_string()), span())
+        Expr::Atom(Atom::Name(name.to_string()), span())
     }
 
     fn meta(entries: Vec<(&str, Expr)>) -> Expr {

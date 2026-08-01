@@ -932,7 +932,7 @@ fn deep_list(expr: &DeepExpr) -> Option<&DeepList> {
 
 fn deep_symbol_text(expr: &DeepExpr) -> Option<&str> {
     match expr {
-        DeepExpr::Atom(DeepAtom::Symbol(value), _) => Some(value.as_str()),
+        DeepExpr::Atom(DeepAtom::Name(value), _) => Some(value.as_str()),
         _ => None,
     }
 }

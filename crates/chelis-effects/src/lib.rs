@@ -394,6 +394,29 @@ fn infer_expr_effects(
                     }),
             }
         }
+        // Transitional arms for new Expr variants (#908)
+        Expr::Node(node, _) => node
+            .expr_children()
+            .map(|child| infer_expr_effects(child, top_level_effects, top_level_callables, locals))
+            .fold(EffectSet::new(), |mut acc, set| {
+                acc.extend(&set);
+                acc
+            }),
+        Expr::BareList(elems, _) => elems
+            .iter()
+            .map(|elem| infer_expr_effects(elem, top_level_effects, top_level_callables, locals))
+            .fold(EffectSet::new(), |mut acc, set| {
+                acc.extend(&set);
+                acc
+            }),
+        Expr::UnknownForm(data) => data
+            .children
+            .iter()
+            .map(|child| infer_expr_effects(child, top_level_effects, top_level_callables, locals))
+            .fold(EffectSet::new(), |mut acc, set| {
+                acc.extend(&set);
+                acc
+            }),
     }
 }
 
@@ -665,6 +688,8 @@ fn annotate_effects(
                 )
             }
         }
+        // Transitional arms for new Expr variants (#908)
+        Expr::Node(_, _) | Expr::BareList(_, _) | Expr::UnknownForm(_) => expr.clone(),
     }
 }
 
@@ -752,6 +777,22 @@ fn validate_handler_expr(expr: &Expr, errors: &mut Vec<EffectError>) {
             }
         }
         Expr::Atom(_, _) => {}
+        // Transitional arms for new Expr variants (#908)
+        Expr::Node(node, _) => {
+            for child in node.expr_children() {
+                validate_handler_expr(child, errors);
+            }
+        }
+        Expr::BareList(elems, _) => {
+            for elem in elems {
+                validate_handler_expr(elem, errors);
+            }
+        }
+        Expr::UnknownForm(data) => {
+            for child in &data.children {
+                validate_handler_expr(child, errors);
+            }
+        }
     }
 }
 
@@ -956,6 +997,22 @@ fn validate_build_target_expr(expr: &Expr, target: &str, errors: &mut Vec<Effect
             }
         }
         Expr::Atom(_, _) => {}
+        // Transitional arms for new Expr variants (#908)
+        Expr::Node(node, _) => {
+            for child in node.expr_children() {
+                validate_build_target_expr(child, target, errors);
+            }
+        }
+        Expr::BareList(elems, _) => {
+            for elem in elems {
+                validate_build_target_expr(elem, target, errors);
+            }
+        }
+        Expr::UnknownForm(data) => {
+            for child in &data.children {
+                validate_build_target_expr(child, target, errors);
+            }
+        }
     }
 }
 
@@ -970,7 +1027,7 @@ fn validate_build_target_expr(expr: &Expr, target: &str, errors: &mut Vec<Effect
 ///
 /// `chelis_surf::desugar::desugar_effect_set` builds the SAME node shape and
 /// was migrated to the typed constructors; this is its post-check twin and
-/// now matches it exactly. The effect NAMES stay `Atom::Symbol` deliberately:
+/// now matches it exactly. The effect NAMES stay `Atom::Name` deliberately:
 /// `random`, `accum`, `io` and `test` are payload, not vocabulary tags.
 fn effect_set_expr(effects: &EffectSet) -> Expr {
     let mut children = Vec::new();
@@ -1027,7 +1084,7 @@ fn children(list: &List) -> &[Expr] {
 
 fn symbol_name(expr: &Expr) -> Option<&str> {
     match expr {
-        Expr::Atom(Atom::Symbol(name), _) => Some(name.as_str()),
+        Expr::Atom(Atom::Name(name), _) => Some(name.as_str()),
         _ => None,
     }
 }
@@ -1059,7 +1116,7 @@ fn string_literal(expr: &Expr) -> Option<&str> {
 }
 
 fn symbol(name: &str) -> Expr {
-    Expr::Atom(Atom::Symbol(name.to_string()), zero_span())
+    Expr::Atom(Atom::Name(name.to_string()), zero_span())
 }
 
 fn zero_span() -> Span {

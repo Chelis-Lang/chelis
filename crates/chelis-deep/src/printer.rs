@@ -4,6 +4,7 @@
 //! files and `chelis deep`.
 
 use crate::ast::{Atom, Expr, List, MetaExpr, MetaMap};
+use crate::span::Span;
 use crate::tag::DeepTag;
 
 const MAX_LINE: usize = 80;
@@ -78,6 +79,21 @@ impl Printer {
             Expr::Map(map, _) => self.fmt_map(map, indent),
             Expr::MetaExpr(meta, _) => self.fmt_meta_expr(meta, indent),
             Expr::List(list, _) => self.fmt_list(list, indent),
+            Expr::Node(node, _) => {
+                // Render a stamped Node back as its canonical list form.
+                let list = node_to_list(node.as_ref());
+                self.fmt_list(&list, indent)
+            }
+            Expr::BareList(elems, _) => {
+                let list = List {
+                    elements: elems.clone(),
+                };
+                self.fmt_list(&list, indent)
+            }
+            Expr::UnknownForm(data) => {
+                let list = unknown_form_to_list(&data.head, &data.meta, &data.children);
+                self.fmt_list(&list, indent)
+            }
         }
     }
 
@@ -87,12 +103,26 @@ impl Printer {
             Expr::Map(map, _) => Self::fmt_map_flat(map),
             Expr::MetaExpr(meta, _) => self.fmt_meta_expr_flat(meta),
             Expr::List(list, _) => self.fmt_list_flat(list),
+            Expr::Node(node, _) => {
+                let list = node_to_list(node.as_ref());
+                self.fmt_list_flat(&list)
+            }
+            Expr::BareList(elems, _) => {
+                let list = List {
+                    elements: elems.clone(),
+                };
+                self.fmt_list_flat(&list)
+            }
+            Expr::UnknownForm(data) => {
+                let list = unknown_form_to_list(&data.head, &data.meta, &data.children);
+                self.fmt_list_flat(&list)
+            }
         }
     }
 
     fn fmt_atom(atom: &Atom) -> String {
         match atom {
-            Atom::Symbol(s) => s.clone(),
+            Atom::Name(s) => s.clone(),
             Atom::Tag(tag) => tag.as_str().to_string(),
             Atom::Int(n) => n.to_string(),
             Atom::Float(f) => {
@@ -326,6 +356,41 @@ fn canonical_node_parts(list: &List) -> Option<(DeepTag, &MetaMap, &[Expr])> {
     }
 }
 
+/// Reconstruct a canonical `List` from a stamped `Node` for printing.
+fn node_to_list(node: &crate::node::Node) -> List {
+    use crate::node::ChildRef;
+    let span = Span::new(0, 0);
+    let mut elements = Vec::with_capacity(node.child_count() + 2);
+    elements.push(Expr::Atom(Atom::Tag(node.tag()), span));
+    elements.push(Expr::Map(node.meta().clone(), span));
+    for child_ref in node.children_iter() {
+        match child_ref {
+            ChildRef::Expr(e)
+            | ChildRef::Syntax(e)
+            | ChildRef::Type(e)
+            | ChildRef::EffectHandler(e)
+            | ChildRef::Bypass(e) => elements.push(e.clone()),
+            ChildRef::Binder(s) => {
+                elements.push(Expr::Atom(Atom::Name(s.to_string()), span));
+            }
+            ChildRef::Selector(s) => {
+                elements.push(Expr::Atom(Atom::Name(s.to_string()), span));
+            }
+        }
+    }
+    List { elements }
+}
+
+/// Reconstruct a `List` from an `UnknownForm` for printing.
+fn unknown_form_to_list(head: &str, meta: &MetaMap, children: &[Expr]) -> List {
+    let span = Span::new(0, 0);
+    let mut elements = Vec::with_capacity(children.len() + 2);
+    elements.push(Expr::Atom(Atom::Name(head.to_string()), span));
+    elements.push(Expr::Map(meta.clone(), span));
+    elements.extend(children.iter().cloned());
+    List { elements }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -341,7 +406,7 @@ mod tests {
     }
 
     fn sym(name: &str) -> Expr {
-        atom_expr(Atom::Symbol(name.to_string()))
+        atom_expr(Atom::Name(name.to_string()))
     }
 
     fn map_expr(entries: Vec<(&str, Expr)>) -> Expr {
@@ -555,7 +620,7 @@ mod tests {
                 ("z-key", atom_expr(Atom::Int(1))),
                 ("a-key", atom_expr(Atom::Int(2))),
             ],
-            atom_expr(Atom::Symbol("body".into())),
+            atom_expr(Atom::Name("body".into())),
         );
         assert_eq!(print_expr(&expr), "^{:a-key 2 :z-key 1} body");
     }

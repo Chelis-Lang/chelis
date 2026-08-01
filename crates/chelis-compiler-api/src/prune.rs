@@ -146,7 +146,7 @@ pub fn deep_def_name(expr: &DeepExpr) -> Option<&str> {
         return None;
     };
     match (list.tag(), list.elements.get(2)) {
-        (Some(DeepTag::Def), Some(DeepExpr::Atom(DeepAtom::Symbol(name), _))) => {
+        (Some(DeepTag::Def), Some(DeepExpr::Atom(DeepAtom::Name(name), _))) => {
             Some(name.as_str())
         }
         _ => None,
@@ -161,7 +161,7 @@ pub fn deep_named_decl_name(expr: &DeepExpr) -> Option<&str> {
         return None;
     };
     match (list.tag(), list.elements.get(2)) {
-        (Some(DeepTag::Def | DeepTag::Defsig), Some(DeepExpr::Atom(DeepAtom::Symbol(name), _))) => {
+        (Some(DeepTag::Def | DeepTag::Defsig), Some(DeepExpr::Atom(DeepAtom::Name(name), _))) => {
             Some(name.as_str())
         }
         _ => None,
@@ -186,12 +186,28 @@ fn collect_deep_referenced_vars<'a>(expr: &'a DeepExpr, out: &mut Vec<&'a str>) 
             }
         }
         DeepExpr::List(list, _) => {
-            if let (Some(DeepTag::Var), Some(DeepExpr::Atom(DeepAtom::Symbol(name), _))) =
+            if let (Some(DeepTag::Var), Some(DeepExpr::Atom(DeepAtom::Name(name), _))) =
                 (list.tag(), list.elements.get(2))
             {
                 out.push(name.as_str());
             }
             for child in &list.elements {
+                collect_deep_referenced_vars(child, out);
+            }
+        }
+        // Transitional arms for new Expr variants (#908)
+        DeepExpr::Node(node, _) => {
+            for child in node.expr_children() {
+                collect_deep_referenced_vars(child, out);
+            }
+        }
+        DeepExpr::BareList(elems, _) => {
+            for elem in elems {
+                collect_deep_referenced_vars(elem, out);
+            }
+        }
+        DeepExpr::UnknownForm(data) => {
+            for child in &data.children {
                 collect_deep_referenced_vars(child, out);
             }
         }

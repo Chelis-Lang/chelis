@@ -159,7 +159,7 @@ impl<'a> Parser<'a> {
         let tok = self.advance().ok_or(ParseError::UnexpectedEof { offset })?;
         let span = tok.span;
         let atom = match &tok.kind {
-            TokenKind::Symbol(s) => Atom::Symbol(s.clone()),
+            TokenKind::Symbol(s) => Atom::Name(s.clone()),
             TokenKind::Int(n) => Atom::Int(*n),
             TokenKind::Float(f) => Atom::Float(*f),
             // Typed-suffix literals (spec/03-deep-syntax.md §6.4.1): the
@@ -175,7 +175,14 @@ impl<'a> Parser<'a> {
                 return Ok(typed_literal_lit_expr(Atom::Float(*f), *suffix, span));
             }
             TokenKind::Str(s) => Atom::Str(s.clone()),
-            TokenKind::Keyword(k) => Atom::Keyword(k.clone()),
+            TokenKind::Keyword(_) => {
+                return Err(ParseError::Expected {
+                    expected: "expression (bare :keyword is valid only as a metadata map key)"
+                        .to_string(),
+                    found: format!("{:?}", tok.kind),
+                    offset: span.offset,
+                });
+            }
             TokenKind::Bool(b) => Atom::Bool(*b),
             other => {
                 return Err(ParseError::Expected {
@@ -421,7 +428,7 @@ fn collapse_typed_literal_lit(list: List, span: crate::Span) -> Result<List, Par
     }
     let is_outer_lit = matches!(
         &list.elements[0],
-        Expr::Atom(Atom::Symbol(s), _) if s == "lit"
+        Expr::Atom(Atom::Name(s), _) if s == "lit"
     );
     if !is_outer_lit {
         return Ok(list);
@@ -439,7 +446,7 @@ fn collapse_typed_literal_lit(list: List, span: crate::Span) -> Result<List, Par
     }
     let inner_is_lit = matches!(
         &inner_list.elements[0],
-        Expr::Atom(Atom::Symbol(s), _) if s == "lit"
+        Expr::Atom(Atom::Name(s), _) if s == "lit"
     );
     if !inner_is_lit {
         return Ok(list);
@@ -461,7 +468,7 @@ fn collapse_typed_literal_lit(list: List, span: crate::Span) -> Result<List, Par
             if t_prim_list.elements.len() == 3
                 && matches!(
                     &t_prim_list.elements[0],
-                    Expr::Atom(Atom::Symbol(s), _) if s == "t-prim"
+                    Expr::Atom(Atom::Name(s), _) if s == "t-prim"
                 )
     );
     if !inner_type_ok {
@@ -549,9 +556,9 @@ fn typed_literal_lit_expr(value: Atom, suffix: lexer::LiteralSuffix, span: crate
     let t_prim = Expr::List(
         List {
             elements: vec![
-                Expr::Atom(Atom::Symbol("t-prim".to_string()), span),
+                Expr::Atom(Atom::Name("t-prim".to_string()), span),
                 Expr::Map(MetaMap::default(), span),
-                Expr::Atom(Atom::Symbol(prim_name.to_string()), span),
+                Expr::Atom(Atom::Name(prim_name.to_string()), span),
             ],
         },
         span,
@@ -566,7 +573,7 @@ fn typed_literal_lit_expr(value: Atom, suffix: lexer::LiteralSuffix, span: crate
     Expr::List(
         List {
             elements: vec![
-                Expr::Atom(Atom::Symbol("lit".to_string()), span),
+                Expr::Atom(Atom::Name("lit".to_string()), span),
                 meta,
                 Expr::Atom(value, span),
             ],
@@ -642,6 +649,7 @@ fn normalize_typed_literals_in_expr(expr: &mut Expr) -> Result<(), ParseError> {
                     }
                 }
                 Expr::Atom(_, _) => {}
+                Expr::Node(..) | Expr::BareList(..) | Expr::UnknownForm(..) => {}
             }
         } else if let Expr::List(list, span) = node {
             // All descendants already normalized. Check shape and
@@ -649,7 +657,7 @@ fn normalize_typed_literals_in_expr(expr: &mut Expr) -> Result<(), ParseError> {
             let needs_collapse = list.elements.len() == 3
                 && matches!(
                     &list.elements[0],
-                    Expr::Atom(Atom::Symbol(s), _) if s == "lit"
+                    Expr::Atom(Atom::Name(s), _) if s == "lit"
                 );
             if needs_collapse {
                 let span_copy = *span;
@@ -686,7 +694,7 @@ pub fn parse(tokens: &[Token]) -> Result<Vec<Expr>, ParseError> {
 /// converted. After this pass the tag string does not exist in the
 /// in-memory tree; `chelis_deep::printer` regenerates it via
 /// `DeepTag::as_str` at the serialization boundary. Symbols that do not
-/// decode (lenient-parsed unknown tags, spec/03 §8.3) stay `Atom::Symbol`
+/// decode (lenient-parsed unknown tags, spec/03 §8.3) stay `Atom::Name`
 /// and flow to consumers' loud raw-string-boundary arms.
 pub fn stamp_tags(exprs: &mut [Expr]) {
     for expr in exprs.iter_mut() {
@@ -698,7 +706,7 @@ fn stamp_tags_expr(expr: &mut Expr) {
     match expr {
         Expr::List(list, _) => {
             if let Some(Expr::Atom(atom, _)) = list.elements.first_mut()
-                && let Atom::Symbol(symbol) = &*atom
+                && let Atom::Name(symbol) = &*atom
                 && let Some(tag) = crate::tag::DeepTag::parse(symbol)
             {
                 *atom = Atom::Tag(tag);
@@ -719,7 +727,393 @@ fn stamp_tags_expr(expr: &mut Expr) {
             }
         }
         Expr::Atom(_, _) => {}
+        Expr::Node(..) | Expr::BareList(..) | Expr::UnknownForm(..) => {}
     }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Raw parser: emits RawExpr (untyped, no tag decode, no role gate)
+// ═══════════════════════════════════════════════════════════════════
+
+use crate::raw::{RawAtom, RawExpr};
+
+struct RawParser<'a> {
+    tokens: &'a [Token],
+    pos: usize,
+}
+
+impl<'a> RawParser<'a> {
+    fn new(tokens: &'a [Token]) -> Self {
+        Self { tokens, pos: 0 }
+    }
+
+    fn peek(&self) -> Option<&Token> {
+        self.tokens.get(self.pos)
+    }
+
+    fn advance(&mut self) -> Option<&Token> {
+        let tok = self.tokens.get(self.pos);
+        if tok.is_some() {
+            self.pos += 1;
+        }
+        tok
+    }
+
+    fn current_offset(&self) -> usize {
+        if let Some(tok) = self.tokens.get(self.pos) {
+            tok.span.offset
+        } else if let Some(last) = self.tokens.last() {
+            last.span.end()
+        } else {
+            0
+        }
+    }
+
+    fn expect(&mut self, expected_kind: &TokenKind) -> Result<&Token, ParseError> {
+        let offset = self.current_offset();
+        match self.peek() {
+            Some(tok)
+                if std::mem::discriminant(&tok.kind) == std::mem::discriminant(expected_kind) =>
+            {
+                Ok(&self.tokens[{
+                    let i = self.pos;
+                    self.pos += 1;
+                    i
+                }])
+            }
+            Some(tok) => Err(ParseError::Expected {
+                expected: format!("{:?}", expected_kind),
+                found: format!("{:?}", tok.kind),
+                offset: tok.span.offset,
+            }),
+            None => Err(ParseError::UnexpectedEof { offset }),
+        }
+    }
+
+    fn parse_exprs(&mut self) -> Result<Vec<RawExpr>, ParseError> {
+        let mut exprs = Vec::new();
+        while self.peek().is_some() {
+            exprs.push(self.parse_expr()?);
+        }
+        Ok(exprs)
+    }
+
+    fn parse_expr(&mut self) -> Result<RawExpr, ParseError> {
+        let tok = self.peek().ok_or(ParseError::UnexpectedEof {
+            offset: self.current_offset(),
+        })?;
+
+        match &tok.kind {
+            TokenKind::LParen => self.parse_list(),
+            TokenKind::LBrace => self.parse_map(),
+            TokenKind::Caret => self.parse_meta_expr(),
+            TokenKind::RParen => Err(ParseError::Expected {
+                expected: "expression".to_string(),
+                found: ")".to_string(),
+                offset: tok.span.offset,
+            }),
+            TokenKind::RBrace => Err(ParseError::Expected {
+                expected: "expression".to_string(),
+                found: "}".to_string(),
+                offset: tok.span.offset,
+            }),
+            _ => self.parse_atom(),
+        }
+    }
+
+    fn parse_atom(&mut self) -> Result<RawExpr, ParseError> {
+        let offset = self.current_offset();
+        let tok = self.advance().ok_or(ParseError::UnexpectedEof { offset })?;
+        let span = tok.span;
+        let atom = match &tok.kind {
+            TokenKind::Symbol(s) => RawAtom::Symbol(s.clone()),
+            TokenKind::Int(n) => RawAtom::Int(*n),
+            TokenKind::Float(f) => RawAtom::Float(*f),
+            TokenKind::TypedInt(n, suffix) => {
+                return Ok(raw_typed_literal_lit_expr(RawAtom::Int(*n), *suffix, span));
+            }
+            TokenKind::TypedFloat(f, suffix) => {
+                return Ok(raw_typed_literal_lit_expr(RawAtom::Float(*f), *suffix, span));
+            }
+            TokenKind::Str(s) => RawAtom::Str(s.clone()),
+            TokenKind::Keyword(_) => {
+                return Err(ParseError::Expected {
+                    expected: "expression (bare :keyword is valid only as a metadata map key)"
+                        .to_string(),
+                    found: format!("{:?}", tok.kind),
+                    offset: span.offset,
+                });
+            }
+            TokenKind::Bool(b) => RawAtom::Bool(*b),
+            other => {
+                return Err(ParseError::Expected {
+                    expected: "atom".to_string(),
+                    found: format!("{:?}", other),
+                    offset: span.offset,
+                });
+            }
+        };
+        Ok(RawExpr::Atom(atom, span))
+    }
+
+    fn parse_list(&mut self) -> Result<RawExpr, ParseError> {
+        let lparen = self.advance().unwrap();
+        let start_span = lparen.span;
+
+        if let Some(tok) = self.peek() {
+            if tok.kind == TokenKind::RParen {
+                let end_span = tok.span;
+                self.advance();
+                return Ok(RawExpr::List(Vec::new(), start_span.merge(end_span)));
+            }
+        } else {
+            return Err(ParseError::UnexpectedEof {
+                offset: self.current_offset(),
+            });
+        }
+
+        let mut elements = Vec::new();
+        loop {
+            let tok = self.peek().ok_or(ParseError::UnexpectedEof {
+                offset: self.current_offset(),
+            })?;
+            if tok.kind == TokenKind::RParen {
+                let end_span = tok.span;
+                self.advance();
+                let full_span = start_span.merge(end_span);
+                return Ok(RawExpr::List(elements, full_span));
+            }
+            elements.push(self.parse_expr()?);
+        }
+    }
+
+    fn parse_meta_expr(&mut self) -> Result<RawExpr, ParseError> {
+        let caret = self.advance().unwrap();
+        let start_span = caret.span;
+
+        self.expect(&TokenKind::LBrace)?;
+
+        let mut entries = Vec::new();
+        loop {
+            let tok = self.peek().ok_or(ParseError::UnexpectedEof {
+                offset: self.current_offset(),
+            })?;
+            if tok.kind == TokenKind::RBrace {
+                self.advance();
+                break;
+            }
+
+            let key_offset = self.current_offset();
+            let key_tok = self
+                .advance()
+                .ok_or(ParseError::UnexpectedEof { offset: key_offset })?;
+            let key = match &key_tok.kind {
+                TokenKind::Keyword(k) => k.clone(),
+                other => {
+                    return Err(ParseError::Expected {
+                        expected: "keyword".to_string(),
+                        found: format!("{:?}", other),
+                        offset: key_tok.span.offset,
+                    });
+                }
+            };
+
+            let value = self.parse_expr()?;
+
+            // Span-charset enforcement (spec §1.1.1)
+            if key == "span"
+                && let RawExpr::Atom(RawAtom::Str(s), value_span) = &value
+                && let Some((idx, b)) = s
+                    .as_bytes()
+                    .iter()
+                    .copied()
+                    .enumerate()
+                    .find(|(_, b)| is_forbidden_span_byte(*b))
+            {
+                return Err(ParseError::ForbiddenSpanChar {
+                    value_offset: value_span.offset,
+                    byte_in_value: idx,
+                    code_point: u32::from(b),
+                    repr: forbidden_byte_repr(b),
+                });
+            }
+
+            entries.push((key, value));
+        }
+
+        let expr = self.parse_expr()?;
+        let end_span = expr.span();
+        let full_span = start_span.merge(end_span);
+
+        Ok(RawExpr::MetaExpr {
+            entries,
+            expr: Box::new(expr),
+            span: full_span,
+        })
+    }
+
+    fn parse_map(&mut self) -> Result<RawExpr, ParseError> {
+        let lbrace = self.advance().unwrap();
+        let start_span = lbrace.span;
+
+        if let Some(tok) = self.peek()
+            && tok.kind == TokenKind::RBrace
+        {
+            let end_span = tok.span;
+            self.advance();
+            return Ok(RawExpr::Map(Vec::new(), start_span.merge(end_span)));
+        }
+
+        let mut entries = Vec::new();
+        loop {
+            let tok = self.peek().ok_or(ParseError::UnexpectedEof {
+                offset: self.current_offset(),
+            })?;
+            if tok.kind == TokenKind::RBrace {
+                let end_span = tok.span;
+                self.advance();
+                return Ok(RawExpr::Map(entries, start_span.merge(end_span)));
+            }
+
+            let key_offset = self.current_offset();
+            let key_tok = self
+                .advance()
+                .ok_or(ParseError::UnexpectedEof { offset: key_offset })?;
+            let key = match &key_tok.kind {
+                TokenKind::Symbol(s) => s.clone(),
+                other => {
+                    return Err(ParseError::Expected {
+                        expected: "map key (symbol)".to_string(),
+                        found: format!("{:?}", other),
+                        offset: key_tok.span.offset,
+                    });
+                }
+            };
+
+            let colon_tok = self.peek().ok_or(ParseError::UnexpectedEof {
+                offset: self.current_offset(),
+            })?;
+            match &colon_tok.kind {
+                TokenKind::Symbol(s) if s == ":" => {
+                    self.advance();
+                }
+                other => {
+                    return Err(ParseError::Expected {
+                        expected: ":".to_string(),
+                        found: format!("{:?}", other),
+                        offset: colon_tok.span.offset,
+                    });
+                }
+            }
+
+            let value = self.parse_expr()?;
+
+            // Span-charset enforcement (spec §1.1.1)
+            if key == "span"
+                && let RawExpr::Atom(RawAtom::Str(s), value_span) = &value
+                && let Some((idx, b)) = s
+                    .as_bytes()
+                    .iter()
+                    .copied()
+                    .enumerate()
+                    .find(|(_, b)| is_forbidden_span_byte(*b))
+            {
+                return Err(ParseError::ForbiddenSpanChar {
+                    value_offset: value_span.offset,
+                    byte_in_value: idx,
+                    code_point: u32::from(b),
+                    repr: forbidden_byte_repr(b),
+                });
+            }
+
+            entries.push((key, value));
+
+            if let Some(tok) = self.peek()
+                && tok.kind == TokenKind::Comma
+            {
+                self.advance();
+            }
+        }
+    }
+}
+
+/// Build a raw typed-literal `(lit {type: (t-prim {} <prim>)} <value>)` for
+/// suffixed literal tokens, mirroring `typed_literal_lit_expr` but in the
+/// `RawExpr` domain.
+fn raw_typed_literal_lit_expr(value: RawAtom, suffix: lexer::LiteralSuffix, span: crate::Span) -> RawExpr {
+    let prim_name = suffix.t_prim_name();
+    let t_prim = RawExpr::List(
+        vec![
+            RawExpr::Atom(RawAtom::Symbol("t-prim".to_string()), span),
+            RawExpr::Map(vec![], span),
+            RawExpr::Atom(RawAtom::Symbol(prim_name.to_string()), span),
+        ],
+        span,
+    );
+    let meta = RawExpr::Map(vec![("type".to_string(), t_prim)], span);
+    RawExpr::List(
+        vec![
+            RawExpr::Atom(RawAtom::Symbol("lit".to_string()), span),
+            meta,
+            RawExpr::Atom(value, span),
+        ],
+        span,
+    )
+}
+
+/// Parse a token stream into raw (untyped) expressions.
+///
+/// The raw parser mirrors the typed parser but constructs `RawExpr`/`RawAtom`
+/// instead of `Expr`/`Atom`. No tag stamping, no typed-literal collapse.
+pub fn parse_raw(tokens: &[Token]) -> Result<Vec<RawExpr>, ParseError> {
+    let mut parser = RawParser::new(tokens);
+    parser.parse_exprs()
+}
+
+/// Parse a source string into raw expressions (lex + parse_raw).
+pub fn parse_raw_str(source: &str) -> Result<Vec<RawExpr>, ParseError> {
+    let tokens = lexer::lex(source)?;
+    parse_raw(&tokens)
+}
+
+/// Error from `parse_and_stamp` — wraps both parse errors and stamp errors.
+#[derive(Debug)]
+pub enum StampOrParseError {
+    Parse(ParseError),
+    Stamp(crate::stamp_to_typed::StampError),
+}
+
+impl std::fmt::Display for StampOrParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            StampOrParseError::Parse(e) => write!(f, "parse error: {e}"),
+            StampOrParseError::Stamp(e) => write!(f, "stamp error: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for StampOrParseError {}
+
+impl From<ParseError> for StampOrParseError {
+    fn from(e: ParseError) -> Self {
+        StampOrParseError::Parse(e)
+    }
+}
+
+impl From<crate::stamp_to_typed::StampError> for StampOrParseError {
+    fn from(e: crate::stamp_to_typed::StampError) -> Self {
+        StampOrParseError::Stamp(e)
+    }
+}
+
+/// Lex, parse to `RawExpr`, then stamp via `stamp_to_typed` to produce
+/// typed `Expr` nodes. This is the preferred entry point for new code
+/// that wants the role-directed AST.
+pub fn parse_and_stamp(source: &str) -> Result<Vec<Expr>, StampOrParseError> {
+    let tokens = lexer::lex(source).map_err(ParseError::from)?;
+    let raw_exprs = parse_raw(&tokens)?;
+    let typed = crate::stamp_to_typed::stamp_to_typed(raw_exprs)?;
+    Ok(typed)
 }
 
 /// Convenience: lex and parse a source string in one step.
@@ -789,18 +1183,18 @@ mod tests {
     fn parse_symbol() {
         let exprs = p("foo");
         match &exprs[0] {
-            Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "foo"),
+            Expr::Atom(Atom::Name(s), _) => assert_eq!(s, "foo"),
             other => panic!("expected Symbol, got {:?}", other),
         }
     }
 
     #[test]
-    fn parse_keyword() {
-        let exprs = p(":axis");
-        match &exprs[0] {
-            Expr::Atom(Atom::Keyword(k), _) => assert_eq!(k, "axis"),
-            other => panic!("expected Keyword, got {:?}", other),
-        }
+    fn parse_bare_keyword_is_error() {
+        let result = parse_str(":axis");
+        assert!(
+            result.is_err(),
+            "bare :keyword outside metadata map must be a parse error"
+        );
     }
 
     #[test]
@@ -827,7 +1221,7 @@ mod tests {
             Expr::List(list, _) => {
                 assert_eq!(list.elements.len(), 3);
                 match &list.elements[0] {
-                    Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "add"),
+                    Expr::Atom(Atom::Name(s), _) => assert_eq!(s, "add"),
                     other => panic!("expected Symbol(add), got {:?}", other),
                 }
                 match &list.elements[1] {
@@ -851,7 +1245,7 @@ mod tests {
             Expr::List(list, _) => {
                 assert_eq!(list.elements.len(), 1);
                 match &list.elements[0] {
-                    Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "nop"),
+                    Expr::Atom(Atom::Name(s), _) => assert_eq!(s, "nop"),
                     other => panic!("expected Symbol(nop), got {:?}", other),
                 }
             }
@@ -878,7 +1272,7 @@ mod tests {
                     other => panic!("expected empty Map, got {:?}", other),
                 }
                 match &list.elements[2] {
-                    Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "f"),
+                    Expr::Atom(Atom::Name(s), _) => assert_eq!(s, "f"),
                     other => panic!("expected Symbol(f), got {:?}", other),
                 }
                 match &list.elements[3] {
@@ -904,11 +1298,11 @@ mod tests {
                 assert_eq!(meta.entries.len(), 1);
                 assert_eq!(meta.entries[0].0, "type");
                 match &meta.entries[0].1 {
-                    Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "f32"),
+                    Expr::Atom(Atom::Name(s), _) => assert_eq!(s, "f32"),
                     other => panic!("expected Symbol(f32), got {:?}", other),
                 }
                 match meta.expr.as_ref() {
-                    Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "x"),
+                    Expr::Atom(Atom::Name(s), _) => assert_eq!(s, "x"),
                     other => panic!("expected Symbol(x), got {:?}", other),
                 }
             }
@@ -927,7 +1321,7 @@ mod tests {
                 assert_eq!(meta.entries[1].0, "pure");
                 match meta.expr.as_ref() {
                     Expr::List(list, _) => match &list.elements[0] {
-                        Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "add"),
+                        Expr::Atom(Atom::Name(s), _) => assert_eq!(s, "add"),
                         other => panic!("expected Symbol(add), got {:?}", other),
                     },
                     other => panic!("expected List, got {:?}", other),
@@ -949,13 +1343,13 @@ mod tests {
         }
         match &exprs[1] {
             Expr::List(list, _) => match &list.elements[0] {
-                Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "add"),
+                Expr::Atom(Atom::Name(s), _) => assert_eq!(s, "add"),
                 other => panic!("expected Symbol(add), got {:?}", other),
             },
             other => panic!("expected List, got {:?}", other),
         }
         match &exprs[2] {
-            Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "foo"),
+            Expr::Atom(Atom::Name(s), _) => assert_eq!(s, "foo"),
             other => panic!("expected Symbol(foo), got {:?}", other),
         }
     }

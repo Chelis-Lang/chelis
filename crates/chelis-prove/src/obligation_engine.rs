@@ -2000,7 +2000,7 @@ fn producer_param_names(exprs: &[Expr], producer: &str) -> Vec<String> {
                     if let Some(n) = sym_text(p) {
                         out.push(n.to_string());
                     } else if let Expr::List(l, _) = p
-                        && let Some(Expr::Atom(Atom::Symbol(s), _)) = l.elements.first()
+                        && let Some(Expr::Atom(Atom::Name(s), _)) = l.elements.first()
                     {
                         out.push(s.clone());
                     }
@@ -2040,7 +2040,7 @@ fn sample_scalar(kind: &str, rng: &mut Lcg) -> f64 {
 // --- Deep builders ---
 
 fn deep_sym(s: &str) -> Expr {
-    Expr::Atom(Atom::Symbol(s.to_string()), Span::new(0, 0))
+    Expr::Atom(Atom::Name(s.to_string()), Span::new(0, 0))
 }
 fn deep_node(tag: &str, children: Vec<Expr>) -> Expr {
     let mut elements = vec![
@@ -2097,7 +2097,7 @@ fn node_children(expr: &Expr) -> &[Expr] {
 }
 fn sym_text(expr: &Expr) -> Option<&str> {
     match expr {
-        Expr::Atom(Atom::Symbol(s), _) => Some(s.as_str()),
+        Expr::Atom(Atom::Name(s), _) => Some(s.as_str()),
         _ => None,
     }
 }

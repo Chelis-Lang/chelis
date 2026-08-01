@@ -80,7 +80,7 @@ fn literal_seed_read_at_full_i64_width() {
     let sp = Span::new(0, 0);
     let node = |tag: &str, children: Vec<Expr>| {
         let mut elements = vec![
-            Expr::Atom(Atom::Symbol(tag.to_string()), sp),
+            Expr::Atom(Atom::Name(tag.to_string()), sp),
             Expr::Map(MetaMap::default(), sp),
         ];
         elements.extend(children);
@@ -91,7 +91,7 @@ fn literal_seed_read_at_full_i64_width() {
     let int32_seed_lit = |n: i64| {
         let t_int32 = node(
             "t-prim",
-            vec![Expr::Atom(Atom::Symbol("int32".to_string()), sp)],
+            vec![Expr::Atom(Atom::Name("int32".to_string()), sp)],
         );
         Expr::List(
             List {
@@ -131,7 +131,7 @@ fn literal_seed_read_at_full_i64_width() {
     );
     // Non-literal seed expressions return None, so the caller keeps the
     // dtype-narrowing `eval_expr` fallback for computed seeds.
-    let var_seed = node("var", vec![Expr::Atom(Atom::Symbol("s".to_string()), sp)]);
+    let var_seed = node("var", vec![Expr::Atom(Atom::Name("s".to_string()), sp)]);
     assert_eq!(literal_seed_i64(&var_seed), None);
 }
 

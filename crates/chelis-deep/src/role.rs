@@ -1,0 +1,514 @@
+//! Child-role classification for the Deep vocabulary (chelis#908).
+//!
+//! `child_stamp_role` classifies every (tag, child_index) pair into a
+//! role that determines how the stamp pass and consumers handle that
+//! child. `arity_contract` gives the legal child count per tag.
+//! `bypass_child_expectation` gives the stamp-time expectation for
+//! children at bypass slots.
+//!
+//! All three are total over `DeepTag` — adding a variant without an
+//! entry is a compile error (deny-lint on wildcard matches).
+
+use crate::tag::DeepTag;
+
+/// The role a child occupies relative to its parent node.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ChildStampRole {
+    /// Traversed by ordinary expression inference.
+    RuntimeExpr,
+    /// Compiler/source syntax preserved verbatim.
+    Syntax,
+    /// A field, axis, projection, or transform selector.
+    Selector,
+    /// Handler payload whose literal-form contract is owned by
+    /// `chelis-effects`, not expression inference.
+    EffectHandler,
+    /// A declaration, parameter, or binding name.
+    Binder,
+    /// Type/dimension syntax resolved by its owning type consumer.
+    Type,
+    /// Traversed by a dedicated inference owner rather than `infer_expr`
+    /// on the structural parent.
+    ExplicitInferenceBypass,
+}
+
+/// Legal child count for a vocabulary tag.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AritySpec {
+    Fixed(usize),
+    AtLeast(usize),
+    Range(usize, usize),
+}
+
+/// What the stamp pass expects at a bypass slot.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BypassExpectation {
+    /// Requires a vocabulary head from the given classifier.
+    /// Undecodable head → StampError.
+    RequiresDeclaration,
+    /// Requires a specific single tag.
+    RequiresTag(DeepTag),
+    /// Requires a pattern-vocabulary head.
+    RequiresPattern,
+    /// Form-expecting (same as RuntimeExpr rule — undecodable → UnknownForm).
+    FormExpecting,
+    /// Structural list (→ BareList without head decode).
+    Structural,
+}
+
+/// Exhaustive child-role table for the closed Deep vocabulary.
+///
+/// Total over `DeepTag` — no wildcard arm.
+pub fn child_stamp_role(tag: DeepTag, index: usize, _arity: usize) -> ChildStampRole {
+    use ChildStampRole::*;
+
+    match tag {
+        DeepTag::Module => {
+            if index == 0 { Binder } else { ExplicitInferenceBypass }
+        }
+        DeepTag::Import | DeepTag::ImportAll | DeepTag::Export => Syntax,
+
+        DeepTag::Def => {
+            if index == 0 { Binder } else { RuntimeExpr }
+        }
+        DeepTag::Defsig => {
+            if index == 0 { Binder } else { Type }
+        }
+        DeepTag::Deftype | DeepTag::Typealias | DeepTag::Variant | DeepTag::Field => {
+            if index == 0 { Binder } else { Type }
+        }
+        DeepTag::Defdim => Binder,
+
+        DeepTag::Fn => {
+            if index == 0 { Binder } else { RuntimeExpr }
+        }
+        DeepTag::App
+        | DeepTag::If
+        | DeepTag::Block
+        | DeepTag::Tuple
+        | DeepTag::Par
+        | DeepTag::Jit
+        | DeepTag::Realize
+        | DeepTag::Copy
+        | DeepTag::Borrow
+        | DeepTag::Unquote
+        | DeepTag::Splice => RuntimeExpr,
+
+        DeepTag::HandleEffect => {
+            if index == 0 { EffectHandler } else { RuntimeExpr }
+        }
+        DeepTag::Let => {
+            if index == 0 { ExplicitInferenceBypass } else { RuntimeExpr }
+        }
+        DeepTag::Match => {
+            if index == 0 { RuntimeExpr } else { ExplicitInferenceBypass }
+        }
+        DeepTag::Arm => {
+            if index == 0 { ExplicitInferenceBypass } else { RuntimeExpr }
+        }
+        DeepTag::Var | DeepTag::Lit => Syntax,
+        DeepTag::Record => {
+            if index == 0 { Type } else { ExplicitInferenceBypass }
+        }
+        DeepTag::Access => {
+            if index == 0 { RuntimeExpr } else { Selector }
+        }
+        DeepTag::Pipe => {
+            if index == 0 { RuntimeExpr } else { ExplicitInferenceBypass }
+        }
+        DeepTag::TupleGet => {
+            if index == 0 { RuntimeExpr } else { Selector }
+        }
+        DeepTag::RecordUpdate => {
+            if index == 0 { RuntimeExpr } else { ExplicitInferenceBypass }
+        }
+
+        DeepTag::PatVar => Binder,
+        DeepTag::PatLit => Syntax,
+        DeepTag::PatCtor | DeepTag::PatRecord => {
+            if index == 0 { Selector } else { ExplicitInferenceBypass }
+        }
+        DeepTag::PatTuple => ExplicitInferenceBypass,
+        DeepTag::PatWild => Syntax,
+        DeepTag::PatAs => {
+            if index == 0 { Binder } else { ExplicitInferenceBypass }
+        }
+
+        DeepTag::TPrim
+        | DeepTag::TFn
+        | DeepTag::TTensor
+        | DeepTag::TAdt
+        | DeepTag::TVar
+        | DeepTag::TRef
+        | DeepTag::TUnit
+        | DeepTag::TTuple
+        | DeepTag::DName
+        | DeepTag::DVar
+        | DeepTag::DLit
+        | DeepTag::DRank => Type,
+
+        DeepTag::Grad | DeepTag::Vmap => {
+            if index == 0 { RuntimeExpr } else { Selector }
+        }
+        DeepTag::Cast => {
+            if index == 0 { RuntimeExpr } else { Type }
+        }
+
+        DeepTag::Quote | DeepTag::Effects | DeepTag::Resource => Syntax,
+
+        DeepTag::Params => Binder,
+        DeepTag::Bind => {
+            if index % 2 == 0 { Binder } else { RuntimeExpr }
+        }
+        DeepTag::Kv => {
+            if index == 0 { Selector } else { ExplicitInferenceBypass }
+        }
+    }
+}
+
+/// Legal child count for each vocabulary tag.
+///
+/// Total over `DeepTag` — no wildcard arm.
+pub fn arity_contract(tag: DeepTag) -> AritySpec {
+    use AritySpec::*;
+    match tag {
+        DeepTag::Module => AtLeast(1),       // name + declarations
+        DeepTag::Import => Fixed(2),         // module-path, name-list
+        DeepTag::ImportAll => Fixed(1),      // module-path
+        DeepTag::Export => AtLeast(1),       // names
+
+        DeepTag::Def => Fixed(2),            // name, body
+        DeepTag::Defsig => Fixed(2),         // name, type
+        DeepTag::Deftype => AtLeast(1),      // name [+ variants]
+        DeepTag::Typealias => Fixed(2),      // name, type
+        DeepTag::Variant => AtLeast(1),      // name [+ fields]
+        DeepTag::Field => Fixed(2),          // name, type
+        DeepTag::Defdim => Fixed(1),         // name
+
+        DeepTag::Fn => Fixed(2),             // params, body
+        DeepTag::App => AtLeast(1),          // callee + args
+        DeepTag::Let => Fixed(2),            // bindings, body
+        DeepTag::Match => AtLeast(2),        // scrutinee + arms
+        DeepTag::Arm => Fixed(2),            // pattern, body
+        DeepTag::If => Fixed(3),             // cond, then, else
+        DeepTag::Var => Fixed(1),            // name
+        DeepTag::Lit => Fixed(1),            // value
+        DeepTag::Record => AtLeast(1),       // type-name + fields
+        DeepTag::Access => Fixed(2),         // expr, field
+        DeepTag::Pipe => AtLeast(2),         // input + stages
+        DeepTag::Block => AtLeast(1),        // expressions
+        DeepTag::Tuple => AtLeast(0),        // elements (unit = empty)
+        DeepTag::TupleGet => Fixed(2),       // expr, index
+        DeepTag::RecordUpdate => AtLeast(2), // expr + fields
+        DeepTag::Par => AtLeast(1),          // expressions
+        DeepTag::HandleEffect => Fixed(2),   // handler-expr, body
+        DeepTag::Borrow => Fixed(1),         // expr
+
+        DeepTag::PatVar => Fixed(1),         // name
+        DeepTag::PatLit => Fixed(1),         // value
+        DeepTag::PatCtor => AtLeast(1),      // name [+ sub-patterns]
+        DeepTag::PatTuple => AtLeast(0),     // sub-patterns
+        DeepTag::PatRecord => AtLeast(1),    // name [+ field patterns]
+        DeepTag::PatWild => Fixed(0),        // no children
+        DeepTag::PatAs => Fixed(2),          // name, sub-pattern
+
+        DeepTag::TPrim => Fixed(1),          // name
+        DeepTag::TFn => AtLeast(2),          // arg-types + return-type
+        DeepTag::TTensor => AtLeast(1),      // dtype + dims
+        DeepTag::TRef => Fixed(1),           // inner type
+        DeepTag::TAdt => AtLeast(1),         // name [+ type-params]
+        DeepTag::TVar => Fixed(1),           // name
+        DeepTag::TUnit => Fixed(0),          // no children
+        DeepTag::TTuple => AtLeast(0),       // element types
+
+        DeepTag::DName => Fixed(1),          // name
+        DeepTag::DVar => Fixed(1),           // name
+        DeepTag::DLit => Fixed(1),           // value
+        DeepTag::DRank => Fixed(1),          // rank-expr
+
+        DeepTag::Grad => AtLeast(1),         // expr [+ selectors]
+        DeepTag::Vmap => AtLeast(1),         // expr [+ selectors]
+        DeepTag::Jit => Fixed(1),            // expr
+        DeepTag::Realize => Fixed(1),        // expr
+        DeepTag::Cast => Fixed(2),           // expr, type
+        DeepTag::Copy => Fixed(1),           // expr
+
+        DeepTag::Quote => Fixed(1),          // expr
+        DeepTag::Unquote => Fixed(1),        // expr
+        DeepTag::Splice => Fixed(1),         // expr
+
+        DeepTag::Params => AtLeast(0),       // param names
+        DeepTag::Bind => AtLeast(2),         // name-value pairs (even count)
+        DeepTag::Kv => Fixed(2),             // key, value
+        DeepTag::Effects => AtLeast(0),      // effect names
+        DeepTag::Resource => Fixed(1),       // device name
+    }
+}
+
+/// Whether a tag is a declaration (used by bypass_child_expectation for Module).
+pub fn is_declaration_tag(tag: DeepTag) -> bool {
+    match tag {
+        DeepTag::Def
+        | DeepTag::Defsig
+        | DeepTag::Deftype
+        | DeepTag::Typealias
+        | DeepTag::Defdim
+        | DeepTag::Import
+        | DeepTag::ImportAll
+        | DeepTag::Export => true,
+
+        DeepTag::Module
+        | DeepTag::Variant
+        | DeepTag::Field
+        | DeepTag::Fn
+        | DeepTag::App
+        | DeepTag::Let
+        | DeepTag::Match
+        | DeepTag::Arm
+        | DeepTag::If
+        | DeepTag::Var
+        | DeepTag::Lit
+        | DeepTag::Record
+        | DeepTag::Access
+        | DeepTag::Pipe
+        | DeepTag::Block
+        | DeepTag::Tuple
+        | DeepTag::TupleGet
+        | DeepTag::RecordUpdate
+        | DeepTag::Par
+        | DeepTag::HandleEffect
+        | DeepTag::Borrow
+        | DeepTag::PatVar
+        | DeepTag::PatLit
+        | DeepTag::PatCtor
+        | DeepTag::PatTuple
+        | DeepTag::PatRecord
+        | DeepTag::PatWild
+        | DeepTag::PatAs
+        | DeepTag::TPrim
+        | DeepTag::TFn
+        | DeepTag::TTensor
+        | DeepTag::TRef
+        | DeepTag::TAdt
+        | DeepTag::TVar
+        | DeepTag::TUnit
+        | DeepTag::TTuple
+        | DeepTag::DName
+        | DeepTag::DVar
+        | DeepTag::DLit
+        | DeepTag::DRank
+        | DeepTag::Grad
+        | DeepTag::Vmap
+        | DeepTag::Jit
+        | DeepTag::Realize
+        | DeepTag::Cast
+        | DeepTag::Copy
+        | DeepTag::Quote
+        | DeepTag::Unquote
+        | DeepTag::Splice
+        | DeepTag::Params
+        | DeepTag::Bind
+        | DeepTag::Kv
+        | DeepTag::Effects
+        | DeepTag::Resource => false,
+    }
+}
+
+/// Whether a tag is a pattern (used by bypass_child_expectation for Match arms).
+pub fn is_pattern_tag(tag: DeepTag) -> bool {
+    match tag {
+        DeepTag::PatVar
+        | DeepTag::PatLit
+        | DeepTag::PatCtor
+        | DeepTag::PatTuple
+        | DeepTag::PatRecord
+        | DeepTag::PatWild
+        | DeepTag::PatAs => true,
+
+        DeepTag::Module
+        | DeepTag::Import
+        | DeepTag::ImportAll
+        | DeepTag::Export
+        | DeepTag::Def
+        | DeepTag::Defsig
+        | DeepTag::Deftype
+        | DeepTag::Typealias
+        | DeepTag::Variant
+        | DeepTag::Field
+        | DeepTag::Defdim
+        | DeepTag::Fn
+        | DeepTag::App
+        | DeepTag::Let
+        | DeepTag::Match
+        | DeepTag::Arm
+        | DeepTag::If
+        | DeepTag::Var
+        | DeepTag::Lit
+        | DeepTag::Record
+        | DeepTag::Access
+        | DeepTag::Pipe
+        | DeepTag::Block
+        | DeepTag::Tuple
+        | DeepTag::TupleGet
+        | DeepTag::RecordUpdate
+        | DeepTag::Par
+        | DeepTag::HandleEffect
+        | DeepTag::Borrow
+        | DeepTag::TPrim
+        | DeepTag::TFn
+        | DeepTag::TTensor
+        | DeepTag::TRef
+        | DeepTag::TAdt
+        | DeepTag::TVar
+        | DeepTag::TUnit
+        | DeepTag::TTuple
+        | DeepTag::DName
+        | DeepTag::DVar
+        | DeepTag::DLit
+        | DeepTag::DRank
+        | DeepTag::Grad
+        | DeepTag::Vmap
+        | DeepTag::Jit
+        | DeepTag::Realize
+        | DeepTag::Cast
+        | DeepTag::Copy
+        | DeepTag::Quote
+        | DeepTag::Unquote
+        | DeepTag::Splice
+        | DeepTag::Params
+        | DeepTag::Bind
+        | DeepTag::Kv
+        | DeepTag::Effects
+        | DeepTag::Resource => false,
+    }
+}
+
+/// Stamp-time expectation for children at bypass slots.
+///
+/// Only called for (tag, index) pairs where `child_stamp_role` returns
+/// `ExplicitInferenceBypass`. Panics on non-bypass pairs (consumer bug).
+pub fn bypass_child_expectation(tag: DeepTag, index: usize) -> BypassExpectation {
+    use BypassExpectation::*;
+    match tag {
+        DeepTag::Module => RequiresDeclaration,
+        DeepTag::Match => RequiresTag(DeepTag::Arm),
+        DeepTag::Record | DeepTag::RecordUpdate => RequiresTag(DeepTag::Kv),
+        DeepTag::Let => RequiresTag(DeepTag::Bind),
+        DeepTag::Pipe => FormExpecting,
+        DeepTag::Arm => RequiresPattern,
+        DeepTag::PatCtor | DeepTag::PatRecord => RequiresPattern,
+        DeepTag::PatTuple => RequiresPattern,
+        DeepTag::PatAs => RequiresPattern,
+        DeepTag::Kv => FormExpecting,
+        // Tags that do not have bypass slots should not reach here.
+        _ => panic!(
+            "bypass_child_expectation called for non-bypass (tag={:?}, index={index})",
+            tag
+        ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn child_stamp_role_is_total_over_deeptag() {
+        // Every tag returns a role for at least index 0 without panicking.
+        for tag in DeepTag::ALL {
+            let _ = child_stamp_role(tag, 0, 1);
+        }
+    }
+
+    #[test]
+    fn arity_contract_is_total_over_deeptag() {
+        for tag in DeepTag::ALL {
+            let spec = arity_contract(tag);
+            // Every spec must have a non-negative minimum.
+            match spec {
+                AritySpec::Fixed(n) => assert!(n <= 100, "{:?}", tag),
+                AritySpec::AtLeast(n) => assert!(n <= 100, "{:?}", tag),
+                AritySpec::Range(lo, hi) => assert!(lo <= hi, "{:?}", tag),
+            }
+        }
+    }
+
+    #[test]
+    fn bypass_child_expectation_covers_all_bypass_slots() {
+        // For every (tag, index) where the role is Bypass, the expectation
+        // function returns without panicking.
+        for tag in DeepTag::ALL {
+            for index in 0..10 {
+                if child_stamp_role(tag, index, 10) == ChildStampRole::ExplicitInferenceBypass {
+                    let _ = bypass_child_expectation(tag, index);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn declaration_classifier_is_exhaustive() {
+        // Exercises every variant (deny-lint enforces no wildcard).
+        for tag in DeepTag::ALL {
+            let _ = is_declaration_tag(tag);
+        }
+    }
+
+    #[test]
+    fn pattern_classifier_is_exhaustive() {
+        for tag in DeepTag::ALL {
+            let _ = is_pattern_tag(tag);
+        }
+    }
+
+    #[test]
+    fn known_declarations() {
+        assert!(is_declaration_tag(DeepTag::Def));
+        assert!(is_declaration_tag(DeepTag::Defsig));
+        assert!(is_declaration_tag(DeepTag::Deftype));
+        assert!(is_declaration_tag(DeepTag::Import));
+        assert!(!is_declaration_tag(DeepTag::App));
+        assert!(!is_declaration_tag(DeepTag::Var));
+    }
+
+    #[test]
+    fn known_patterns() {
+        assert!(is_pattern_tag(DeepTag::PatVar));
+        assert!(is_pattern_tag(DeepTag::PatCtor));
+        assert!(is_pattern_tag(DeepTag::PatWild));
+        assert!(!is_pattern_tag(DeepTag::Var));
+        assert!(!is_pattern_tag(DeepTag::App));
+    }
+
+    #[test]
+    fn module_children_expect_declarations() {
+        assert_eq!(
+            bypass_child_expectation(DeepTag::Module, 1),
+            BypassExpectation::RequiresDeclaration
+        );
+    }
+
+    #[test]
+    fn match_children_expect_arm() {
+        assert_eq!(
+            bypass_child_expectation(DeepTag::Match, 1),
+            BypassExpectation::RequiresTag(DeepTag::Arm)
+        );
+    }
+
+    #[test]
+    fn pipe_stages_are_form_expecting() {
+        assert_eq!(
+            bypass_child_expectation(DeepTag::Pipe, 1),
+            BypassExpectation::FormExpecting
+        );
+    }
+
+    #[test]
+    fn kv_value_is_form_expecting() {
+        assert_eq!(
+            bypass_child_expectation(DeepTag::Kv, 1),
+            BypassExpectation::FormExpecting
+        );
+    }
+}

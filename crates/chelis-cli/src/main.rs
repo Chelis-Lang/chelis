@@ -9292,7 +9292,7 @@ fn deep_top_level_expr_name(expr: &DeepExpr) -> Option<&str> {
         return None;
     };
     match (list.tag(), list.elements.get(2)) {
-        (Some(DeepTag::Def), Some(DeepExpr::Atom(DeepAtom::Symbol(name), _))) => {
+        (Some(DeepTag::Def), Some(DeepExpr::Atom(DeepAtom::Name(name), _))) => {
             Some(name.as_str())
         }
         _ => None,
@@ -9304,7 +9304,7 @@ fn deep_named_decl_name(expr: &DeepExpr) -> Option<&str> {
         return None;
     };
     match (list.tag(), list.elements.get(2)) {
-        (Some(DeepTag::Def | DeepTag::Defsig), Some(DeepExpr::Atom(DeepAtom::Symbol(name), _))) => {
+        (Some(DeepTag::Def | DeepTag::Defsig), Some(DeepExpr::Atom(DeepAtom::Name(name), _))) => {
             Some(name.as_str())
         }
         _ => None,
@@ -9513,7 +9513,7 @@ fn collect_symbolic_dims_expr(expr: &chelis_deep::ast::Expr, dims: &mut Vec<Stri
     match expr {
         chelis_deep::ast::Expr::List(list, _) => {
             if list.tag() == Some(DeepTag::DName)
-                && let Some(chelis_deep::ast::Expr::Atom(chelis_deep::ast::Atom::Symbol(name), _)) =
+                && let Some(chelis_deep::ast::Expr::Atom(chelis_deep::ast::Atom::Name(name), _)) =
                     list.elements.get(2)
                 && name != "*"
             {
@@ -9535,6 +9535,22 @@ fn collect_symbolic_dims_expr(expr: &chelis_deep::ast::Expr, dims: &mut Vec<Stri
             }
         }
         chelis_deep::ast::Expr::Atom(_, _) => {}
+        // Transitional arms for new Expr variants (#908)
+        chelis_deep::ast::Expr::Node(node, _) => {
+            for child in node.expr_children() {
+                collect_symbolic_dims_expr(child, dims);
+            }
+        }
+        chelis_deep::ast::Expr::BareList(elems, _) => {
+            for elem in elems {
+                collect_symbolic_dims_expr(elem, dims);
+            }
+        }
+        chelis_deep::ast::Expr::UnknownForm(data) => {
+            for child in &data.children {
+                collect_symbolic_dims_expr(child, dims);
+            }
+        }
     }
 }
 

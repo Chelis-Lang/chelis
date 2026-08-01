@@ -718,7 +718,7 @@ fn children(list: &deep::List) -> &[deep::Expr] {
 
 fn sym_str(expr: &deep::Expr) -> Option<&str> {
     match expr {
-        deep::Expr::Atom(deep::Atom::Symbol(value), _) => Some(value.as_str()),
+        deep::Expr::Atom(deep::Atom::Name(value), _) => Some(value.as_str()),
         _ => None,
     }
 }

@@ -14,6 +14,27 @@ pub enum Expr {
     Map(MetaMap, Span),
     /// A metadata-annotated expression `^{k1 v1 ...} expr` (legacy, kept for compat).
     MetaExpr(MetaExpr, Span),
+    /// A stamped vocabulary node produced by `stamp_to_typed`. The `Node`
+    /// is role-gated: construction validates arity and rejects Name atoms
+    /// at RuntimeExpr positions.
+    Node(Box<crate::node::Node>, Span),
+    /// A structural bare list (no vocabulary head decode). Produced at
+    /// Syntax/Binder/Selector positions by `stamp_to_typed`.
+    BareList(Vec<Expr>, Span),
+    /// A list whose head symbol did not decode into the closed vocabulary
+    /// at a position where decode was attempted. Preserves the head
+    /// string, metadata, and recursively stamped children for downstream
+    /// diagnostics.
+    UnknownForm(Box<UnknownFormData>),
+}
+
+/// Data for an `Expr::UnknownForm` — boxed to keep the `Expr` enum small.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UnknownFormData {
+    pub head: String,
+    pub meta: MetaMap,
+    pub children: Vec<Expr>,
+    pub span: Span,
 }
 
 impl Expr {
@@ -34,13 +55,20 @@ impl Expr {
     pub fn tag(&self) -> Option<DeepTag> {
         match self {
             Expr::List(list, _) => list.tag(),
+            Expr::Node(node, _) => Some(node.tag()),
             _ => None,
         }
     }
 
     pub fn span(&self) -> Span {
         match self {
-            Expr::Atom(_, s) | Expr::List(_, s) | Expr::Map(_, s) | Expr::MetaExpr(_, s) => *s,
+            Expr::Atom(_, s)
+            | Expr::List(_, s)
+            | Expr::Map(_, s)
+            | Expr::MetaExpr(_, s)
+            | Expr::Node(_, s)
+            | Expr::BareList(_, s) => *s,
+            Expr::UnknownForm(data) => data.span,
         }
     }
 
@@ -90,7 +118,7 @@ impl Expr {
 /// An atomic (leaf) value in the AST.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Atom {
-    Symbol(String),
+    Name(String),
     /// A decoded closed-vocabulary Deep tag at a node's tag position
     /// (element 0). Stamped once by the parser or a typed constructor
     /// (decode-once, chelis#731 Phase 3): after parsing, the tag string
@@ -135,7 +163,7 @@ impl List {
     /// used to dispatch on the closed vocabulary by string.
     pub fn unknown_tag_symbol(&self) -> Option<&str> {
         match self.elements.first() {
-            Some(Expr::Atom(Atom::Symbol(symbol), _)) => Some(symbol.as_str()),
+            Some(Expr::Atom(Atom::Name(symbol), _)) => Some(symbol.as_str()),
             _ => None,
         }
     }
@@ -190,6 +218,36 @@ pub fn strip_metadata(expr: &Expr) -> Expr {
                 .collect();
             Expr::List(List { elements }, *span)
         }
+        Expr::Node(node, span) => {
+            use crate::node::Node;
+            let children: Vec<Expr> = node
+                .children_iter()
+                .map(|child_ref| match child_ref {
+                    crate::node::ChildRef::Expr(e)
+                    | crate::node::ChildRef::Syntax(e)
+                    | crate::node::ChildRef::Type(e)
+                    | crate::node::ChildRef::EffectHandler(e)
+                    | crate::node::ChildRef::Bypass(e) => strip_metadata(e),
+                    crate::node::ChildRef::Binder(s) => {
+                        Expr::Atom(Atom::Name(s.to_string()), *span)
+                    }
+                    crate::node::ChildRef::Selector(s) => {
+                        Expr::Atom(Atom::Name(s.to_string()), *span)
+                    }
+                })
+                .collect();
+            Expr::Node(Box::new(Node::new(node.tag(), MetaMap::default(), children)), *span)
+        }
+        Expr::BareList(elems, span) => {
+            let stripped = elems.iter().map(strip_metadata).collect();
+            Expr::BareList(stripped, *span)
+        }
+        Expr::UnknownForm(data) => Expr::UnknownForm(Box::new(UnknownFormData {
+            head: data.head.clone(),
+            meta: MetaMap::default(),
+            children: data.children.iter().map(strip_metadata).collect(),
+            span: data.span,
+        })),
     }
 }
 

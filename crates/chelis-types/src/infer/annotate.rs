@@ -154,6 +154,28 @@ pub(super) fn annotate_expr_with_scope(
             elements.extend(annotated_children);
             deep::Expr::List(deep::List { elements }, *span)
         }
+        // Transitional arms for the new typed-node variants (post-rebase).
+        deep::Expr::Node(node, span) => {
+            // Recurse into expression children, preserve the Node wrapper.
+            let annotated_children: Vec<deep::Expr> = node
+                .expr_children()
+                .map(|child| annotate_expr_with_scope(child, product, annotation_context, errors))
+                .collect();
+            // For now, return the expr unchanged (annotation is best-effort).
+            let _ = annotated_children;
+            deep::Expr::Node(node.clone(), *span)
+        }
+        deep::Expr::BareList(elems, span) => {
+            let annotated: Vec<deep::Expr> = elems
+                .iter()
+                .map(|child| annotate_expr_with_scope(child, product, annotation_context, errors))
+                .collect();
+            deep::Expr::BareList(annotated, *span)
+        }
+        deep::Expr::UnknownForm(data) => {
+            // Preserve unknown forms unchanged — downstream diagnostics handle them.
+            deep::Expr::UnknownForm(data.clone())
+        }
     }
 }
 
@@ -247,7 +269,7 @@ pub(super) fn annotate_params_node(
     let mut elements = vec![list.elements[0].clone(), list.elements[1].clone()];
     for (index, param) in children(list).iter().enumerate() {
         match param {
-            deep::Expr::Atom(deep::Atom::Symbol(name), atom_span) => {
+            deep::Expr::Atom(deep::Atom::Name(name), atom_span) => {
                 // A synthesized sig from `desugar_fun_def` uses
                 // `(t-var _)` as the placeholder for a parameter with
                 // no declared type. That is not a real declared type:
@@ -261,7 +283,7 @@ pub(super) fn annotate_params_node(
                         elements.push(deep::Expr::List(
                             deep::List {
                                 elements: vec![
-                                    deep::Expr::Atom(deep::Atom::Symbol(name.clone()), *atom_span),
+                                    deep::Expr::Atom(deep::Atom::Name(name.clone()), *atom_span),
                                     deep::Expr::Map(
                                         deep::MetaMap {
                                             entries: vec![("type".to_string(), type_expr.clone())],

@@ -648,6 +648,22 @@ pub(super) fn collect_top_level_calls(
                 }
             }
         },
+        // Transitional: recurse into Node's expression children.
+        deep::Expr::Node(node, _) => {
+            for child in node.expr_children() {
+                collect_top_level_calls(child, def_names, bound, calls);
+            }
+        }
+        deep::Expr::BareList(elems, _) => {
+            for child in elems {
+                collect_top_level_calls(child, def_names, bound, calls);
+            }
+        }
+        deep::Expr::UnknownForm(data) => {
+            for child in &data.children {
+                collect_top_level_calls(child, def_names, bound, calls);
+            }
+        }
     }
 }
 
@@ -885,6 +901,40 @@ pub(super) fn param_has_consuming_use_inner(
                 )
             }),
         },
+        // Transitional: recurse into Node's expression children.
+        deep::Expr::Node(node, _) => node.expr_children().any(|child| {
+            param_has_consuming_use_inner(
+                child,
+                param,
+                bound,
+                available_signatures,
+                type_env,
+                type_headers,
+                errors,
+            )
+        }),
+        deep::Expr::BareList(elems, _) => elems.iter().any(|child| {
+            param_has_consuming_use_inner(
+                child,
+                param,
+                bound,
+                available_signatures,
+                type_env,
+                type_headers,
+                errors,
+            )
+        }),
+        deep::Expr::UnknownForm(data) => data.children.iter().any(|child| {
+            param_has_consuming_use_inner(
+                child,
+                param,
+                bound,
+                available_signatures,
+                type_env,
+                type_headers,
+                errors,
+            )
+        }),
     }
 }
 
@@ -1090,6 +1140,21 @@ pub(super) fn expr_mentions_unshadowed_name(
                 .iter()
                 .any(|child| expr_mentions_unshadowed_name(child, name, bound)),
         },
+        // Transitional: recurse into expression children.
+        deep::Expr::Node(node, _) => {
+            node.expr_children()
+                .any(|child| expr_mentions_unshadowed_name(child, name, bound))
+        }
+        deep::Expr::BareList(elems, _) => {
+            elems
+                .iter()
+                .any(|child| expr_mentions_unshadowed_name(child, name, bound))
+        }
+        deep::Expr::UnknownForm(data) => {
+            data.children
+                .iter()
+                .any(|child| expr_mentions_unshadowed_name(child, name, bound))
+        }
     }
 }
 
@@ -1320,9 +1385,9 @@ pub(super) fn param_source_infos(expr: &deep::Expr) -> Vec<(String, bool)> {
     children(list)
         .iter()
         .filter_map(|param| match param {
-            deep::Expr::Atom(deep::Atom::Symbol(name), _) => Some((name.clone(), false)),
+            deep::Expr::Atom(deep::Atom::Name(name), _) => Some((name.clone(), false)),
             deep::Expr::MetaExpr(meta, _) => {
-                let deep::Expr::Atom(deep::Atom::Symbol(name), _) = meta.expr.as_ref() else {
+                let deep::Expr::Atom(deep::Atom::Name(name), _) = meta.expr.as_ref() else {
                     return None;
                 };
                 Some((
@@ -1706,7 +1771,7 @@ pub(super) fn detect_top_level_binding_cycles(
 pub(super) fn param_name_for_refs(param: &deep::Expr) -> Option<String> {
     stack_guard!("param_name_for_refs", param, None);
     match param {
-        deep::Expr::Atom(deep::Atom::Symbol(name), _) => Some(name.clone()),
+        deep::Expr::Atom(deep::Atom::Name(name), _) => Some(name.clone()),
         deep::Expr::MetaExpr(meta, _) => param_name_for_refs(&meta.expr),
         // A Deep param is `(name {type: ...})` — a List with the name as
         // the FIRST element and the meta map as the second. `children()`
@@ -1825,5 +1890,21 @@ pub(super) fn collect_eager_refs(
             collect_eager_refs(&meta.expr, bound, refs, applied);
         }
         deep::Expr::Atom(_, _) => {}
+        // Transitional: recurse into expression children.
+        deep::Expr::Node(node, _) => {
+            for child in node.expr_children() {
+                collect_eager_refs(child, bound, refs, applied);
+            }
+        }
+        deep::Expr::BareList(elems, _) => {
+            for child in elems {
+                collect_eager_refs(child, bound, refs, applied);
+            }
+        }
+        deep::Expr::UnknownForm(data) => {
+            for child in &data.children {
+                collect_eager_refs(child, bound, refs, applied);
+            }
+        }
     }
 }

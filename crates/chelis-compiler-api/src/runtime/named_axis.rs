@@ -165,7 +165,7 @@ impl<'a> EvalContext<'a> {
                     elements: vec![
                         Expr::Atom(Atom::Tag(DeepTag::Var), span),
                         Expr::Map(MetaMap::default(), span),
-                        Expr::Atom(Atom::Symbol(reduce_name.to_string()), span),
+                        Expr::Atom(Atom::Name(reduce_name.to_string()), span),
                     ],
                 },
                 span,
@@ -215,7 +215,7 @@ impl<'a> EvalContext<'a> {
                 elements: vec![
                     Expr::Atom(Atom::Tag(DeepTag::Var), span),
                     Expr::Map(MetaMap::default(), span),
-                    Expr::Atom(Atom::Symbol(resolved_name.to_string()), span),
+                    Expr::Atom(Atom::Name(resolved_name.to_string()), span),
                 ],
             },
             span,

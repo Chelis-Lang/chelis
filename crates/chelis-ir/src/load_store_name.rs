@@ -126,7 +126,7 @@ impl LoadStoreName {
     /// Panics with the validation error if the input is invalid.
     ///
     /// Use this when the name is a literal or comes from a source that
-    /// is itself parser-validated (e.g., an `Atom::Symbol` or a
+    /// is itself parser-validated (e.g., an `Atom::Name` or a
     /// `tuple-flatten` prefix). Do NOT use this for producer-supplied
     /// strings where validation could legitimately fail at runtime —
     /// for those, propagate the `Result` from [`LoadStoreName::new`].

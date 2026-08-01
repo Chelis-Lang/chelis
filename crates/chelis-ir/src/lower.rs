@@ -296,7 +296,7 @@ fn bare_var_name(expr: &Expr) -> Option<String> {
         return None;
     }
     let third = list.elements.get(2)?;
-    let Expr::Atom(Atom::Symbol(name), _) = third else {
+    let Expr::Atom(Atom::Name(name), _) = third else {
         return None;
     };
     Some(name.clone())
@@ -322,7 +322,7 @@ fn synth_unary_app(fname: &str, acc_name: &str, app_span: Span) -> Expr {
             elements: vec![
                 Expr::Atom(Atom::Tag(DeepTag::Var), zero_span),
                 Expr::Map(MetaMap::default(), zero_span),
-                Expr::Atom(Atom::Symbol(fname.to_string()), zero_span),
+                Expr::Atom(Atom::Name(fname.to_string()), zero_span),
             ],
         },
         zero_span,
@@ -332,7 +332,7 @@ fn synth_unary_app(fname: &str, acc_name: &str, app_span: Span) -> Expr {
             elements: vec![
                 Expr::Atom(Atom::Tag(DeepTag::Var), zero_span),
                 Expr::Map(MetaMap::default(), zero_span),
-                Expr::Atom(Atom::Symbol(acc_name.to_string()), zero_span),
+                Expr::Atom(Atom::Name(acc_name.to_string()), zero_span),
             ],
         },
         zero_span,
@@ -362,7 +362,7 @@ fn synth_reduction_app(fname: &str, operand: Expr, axis: Expr, app_span: Span) -
             elements: vec![
                 Expr::Atom(Atom::Tag(DeepTag::Var), zero_span),
                 Expr::Map(MetaMap::default(), zero_span),
-                Expr::Atom(Atom::Symbol(fname.to_string()), zero_span),
+                Expr::Atom(Atom::Name(fname.to_string()), zero_span),
             ],
         },
         zero_span,
@@ -653,7 +653,7 @@ fn assert_decode_once_at_boundary(site: &str, exprs: &[Expr]) {
         panic!(
             "decode-once violated at the lowering boundary: `{site}` carries the raw \
              vocabulary tag string `{tag}` at a node head. A programmatic producer built \
-             that node with `Atom::Symbol` instead of a typed constructor (`Expr::node`), \
+             that node with `Atom::Name` instead of a typed constructor (`Expr::node`), \
              so every typed reader takes its untagged policy for it \
              (spec/design/checker_totality.md section C4.2; chelis#731, chelis#887)."
         );
@@ -1364,7 +1364,7 @@ fn tensor_formal_dim_slots(expr: &Expr) -> Option<Vec<DimSlot>> {
                     return DimSlot::Other;
                 };
                 let payload = match dl.elements.get(2) {
-                    Some(Expr::Atom(Atom::Symbol(s), _)) => Some(s.clone()),
+                    Some(Expr::Atom(Atom::Name(s), _)) => Some(s.clone()),
                     _ => None,
                 };
                 match (dtag, payload) {
@@ -1658,7 +1658,7 @@ fn extract_precision_var_name(expr: &Expr) -> Option<String> {
     if prec_list.tag() != Some(DeepTag::TVar) {
         return None;
     }
-    if let Expr::Atom(Atom::Symbol(name), _) = &prec_list.elements[2] {
+    if let Expr::Atom(Atom::Name(name), _) = &prec_list.elements[2] {
         Some(name.clone())
     } else {
         None
@@ -1698,7 +1698,7 @@ fn formal_param_type_var_name(expr: &Expr) -> Option<String> {
     if let Expr::List(list, _) = stripped
         && list.elements.len() >= 3
         && list.tag() == Some(DeepTag::TVar)
-        && let Expr::Atom(Atom::Symbol(name), _) = &list.elements[2]
+        && let Expr::Atom(Atom::Name(name), _) = &list.elements[2]
     {
         return Some(name.clone());
     }
@@ -1888,6 +1888,22 @@ fn collect_body_precision_var_names(expr: &Expr, out: &mut HashSet<String>) {
             collect_body_precision_var_names(&meta.expr, out);
         }
         Expr::Atom(_, _) => {}
+        // Transitional arms for new Expr variants (#908)
+        Expr::Node(node, _) => {
+            for child in node.expr_children() {
+                collect_body_precision_var_names(child, out);
+            }
+        }
+        Expr::BareList(elems, _) => {
+            for elem in elems {
+                collect_body_precision_var_names(elem, out);
+            }
+        }
+        Expr::UnknownForm(data) => {
+            for child in &data.children {
+                collect_body_precision_var_names(child, out);
+            }
+        }
     }
 }
 
@@ -2226,14 +2242,14 @@ fn ty_expr_to_deep(ty: &TensorType) -> Expr {
     // running in the lowerer, downstream of both `parser::stamp_tags` and
     // the desugarer, so nothing upstream will stamp element 0 for it. It
     // must therefore construct through the typed node constructor. Spelling
-    // these heads as `Atom::Symbol("t-prim")` put raw vocabulary strings
+    // these heads as `Atom::Name("t-prim")` put raw vocabulary strings
     // into the in-memory tree, and the typed readers below (`list.tag()`)
     // then took their untagged policy for them instead of the `TPrim` /
     // `TTensor` arms.
     let prim_node = Expr::node(
         DeepTag::TPrim,
         MetaMap::default(),
-        vec![Expr::Atom(Atom::Symbol(prim.into()), span)],
+        vec![Expr::Atom(Atom::Name(prim.into()), span)],
         span,
     );
     if ty.dims.is_empty() {
@@ -2382,7 +2398,7 @@ fn callable_ref_name(expr: &Expr) -> Option<String> {
 
 fn symbol_name(expr: &Expr) -> Option<&str> {
     match expr {
-        Expr::Atom(Atom::Symbol(name), _) => Some(name.as_str()),
+        Expr::Atom(Atom::Name(name), _) => Some(name.as_str()),
         _ => None,
     }
 }
@@ -2609,6 +2625,17 @@ fn expr_requires_host_runtime_with_ctx(expr: &Expr, exempt_to_tensor_literal: bo
                     expr_requires_host_runtime_with_ctx(child, exempt_to_tensor_literal)
                 })
         }
+        // Transitional arms for new Expr variants (#908)
+        Expr::Node(node, _) => node
+            .expr_children()
+            .any(|child| expr_requires_host_runtime_with_ctx(child, exempt_to_tensor_literal)),
+        Expr::BareList(elems, _) => elems
+            .iter()
+            .any(|elem| expr_requires_host_runtime_with_ctx(elem, exempt_to_tensor_literal)),
+        Expr::UnknownForm(data) => data
+            .children
+            .iter()
+            .any(|child| expr_requires_host_runtime_with_ctx(child, exempt_to_tensor_literal)),
     }
 }
 
@@ -3013,12 +3040,46 @@ fn expr_depends_on_nonlowerable_name(
                 )
             })
         }
+        // Transitional arms for new Expr variants (#908)
+        Expr::Node(node, _) => node.expr_children().any(|child| {
+            expr_depends_on_nonlowerable_name(
+                child,
+                top_level_defs,
+                top_level_sigs,
+                type_env,
+                cache,
+                visiting,
+                bound_names,
+            )
+        }),
+        Expr::BareList(elems, _) => elems.iter().any(|child| {
+            expr_depends_on_nonlowerable_name(
+                child,
+                top_level_defs,
+                top_level_sigs,
+                type_env,
+                cache,
+                visiting,
+                bound_names,
+            )
+        }),
+        Expr::UnknownForm(data) => data.children.iter().any(|child| {
+            expr_depends_on_nonlowerable_name(
+                child,
+                top_level_defs,
+                top_level_sigs,
+                type_env,
+                cache,
+                visiting,
+                bound_names,
+            )
+        }),
     }
 }
 
 fn collect_param_bound_names(param: &Expr, out: &mut HashSet<String>) {
     match param {
-        Expr::Atom(Atom::Symbol(name), _) => {
+        Expr::Atom(Atom::Name(name), _) => {
             out.insert(name.clone());
         }
         Expr::List(list, _) => {
@@ -3027,6 +3088,8 @@ fn collect_param_bound_names(param: &Expr, out: &mut HashSet<String>) {
             }
         }
         Expr::Map(_, _) | Expr::MetaExpr(_, _) | Expr::Atom(_, _) => {}
+        // Transitional arms for new Expr variants (#908)
+        Expr::Node(_, _) | Expr::BareList(_, _) | Expr::UnknownForm(_) => {}
     }
 }
 
@@ -3042,6 +3105,22 @@ fn collect_pattern_bound_names(pattern: &Expr, out: &mut HashSet<String>) {
                 return;
             }
             for child in children(list) {
+                collect_pattern_bound_names(child, out);
+            }
+        }
+        // Transitional arms for new Expr variants (#908)
+        Expr::Node(node, _) => {
+            for child in node.expr_children() {
+                collect_pattern_bound_names(child, out);
+            }
+        }
+        Expr::BareList(elems, _) => {
+            for elem in elems {
+                collect_pattern_bound_names(elem, out);
+            }
+        }
+        Expr::UnknownForm(data) => {
+            for child in &data.children {
                 collect_pattern_bound_names(child, out);
             }
         }
@@ -3137,6 +3216,22 @@ fn assert_ir_lowerable(expr: &Expr) {
             assert_ir_lowerable(&inner.expr);
         }
         Expr::Atom(_, _) => {}
+        // Transitional arms for new Expr variants (#908)
+        Expr::Node(node, _) => {
+            for child in node.expr_children() {
+                assert_ir_lowerable(child);
+            }
+        }
+        Expr::BareList(elems, _) => {
+            for elem in elems {
+                assert_ir_lowerable(elem);
+            }
+        }
+        Expr::UnknownForm(data) => {
+            for child in &data.children {
+                assert_ir_lowerable(child);
+            }
+        }
     }
 }
 
@@ -3186,6 +3281,22 @@ fn assert_ir_typed(expr: &Expr) {
             assert_ir_typed(&inner.expr);
         }
         Expr::Atom(_, _) => {}
+        // Transitional arms for new Expr variants (#908)
+        Expr::Node(node, _) => {
+            for child in node.expr_children() {
+                assert_ir_typed(child);
+            }
+        }
+        Expr::BareList(elems, _) => {
+            for elem in elems {
+                assert_ir_typed(elem);
+            }
+        }
+        Expr::UnknownForm(data) => {
+            for child in &data.children {
+                assert_ir_typed(child);
+            }
+        }
     }
 }
 
@@ -3196,7 +3307,7 @@ fn has_type_metadata(list: &List) -> bool {
 fn is_shape_sensitive_builtin_app(list: &List) -> bool {
     let func_name = match list.elements.get(2) {
         Some(Expr::List(func_list, _)) => match (func_list.tag(), func_list.elements.get(2)) {
-            (Some(DeepTag::Var), Some(Expr::Atom(Atom::Symbol(name), _))) => Some(name.as_str()),
+            (Some(DeepTag::Var), Some(Expr::Atom(Atom::Name(name), _))) => Some(name.as_str()),
             _ => None,
         },
         _ => None,
@@ -3258,7 +3369,7 @@ fn app_var_name_and_args(expr: &Expr) -> Option<(&str, &[Expr])> {
         return None;
     }
     let name = children(func_list).first().and_then(|expr| match expr {
-        Expr::Atom(Atom::Symbol(name), _) => Some(name.as_str()),
+        Expr::Atom(Atom::Name(name), _) => Some(name.as_str()),
         _ => None,
     })?;
     Some((name, &kids[1..]))
@@ -3289,7 +3400,7 @@ fn is_app_of_builtin(expr: &Expr, expected: &str) -> bool {
     }
     matches!(
         children(list).first(),
-        Some(Expr::Atom(Atom::Symbol(name), _)) if name == expected
+        Some(Expr::Atom(Atom::Name(name), _)) if name == expected
     )
 }
 
@@ -3346,7 +3457,7 @@ fn cons_two_int_pair(expr: &Expr) -> Option<(usize, usize)> {
         return None;
     }
     let nil_name = match children(nil_list).first() {
-        Some(Expr::Atom(Atom::Symbol(s), _)) => s.as_str(),
+        Some(Expr::Atom(Atom::Name(s), _)) => s.as_str(),
         _ => return None,
     };
     if nil_name != "Nil" {
@@ -3371,7 +3482,7 @@ fn cons_chain_pair_list(expr: &Expr) -> Option<Vec<(usize, usize)>> {
         match get_tag(outer)? {
             DeepTag::Var => {
                 let name = match children(outer).first() {
-                    Some(Expr::Atom(Atom::Symbol(s), _)) => s.as_str(),
+                    Some(Expr::Atom(Atom::Name(s), _)) => s.as_str(),
                     _ => return None,
                 };
                 if name == "Nil" {
@@ -3409,7 +3520,7 @@ fn collect_cons_chain(expr: &Expr) -> Option<Vec<&Expr>> {
         match get_tag(list)? {
             DeepTag::Var => {
                 let name = match children(list).first() {
-                    Some(Expr::Atom(Atom::Symbol(s), _)) => s.as_str(),
+                    Some(Expr::Atom(Atom::Name(s), _)) => s.as_str(),
                     _ => return None,
                 };
                 if name == "Nil" {
@@ -4002,9 +4113,9 @@ fn extract_param_type(expr: &Expr, index: usize) -> Option<&Expr> {
 
 fn param_name_and_type_expr(param: &Expr) -> Option<(String, Option<&Expr>)> {
     match param {
-        Expr::Atom(Atom::Symbol(name), _) => Some((name.clone(), None)),
+        Expr::Atom(Atom::Name(name), _) => Some((name.clone(), None)),
         Expr::MetaExpr(meta, _) => {
-            let Expr::Atom(Atom::Symbol(name), _) = meta.expr.as_ref() else {
+            let Expr::Atom(Atom::Name(name), _) = meta.expr.as_ref() else {
                 return None;
             };
             let ty_expr = meta
@@ -4015,7 +4126,7 @@ fn param_name_and_type_expr(param: &Expr) -> Option<(String, Option<&Expr>)> {
             Some((name.clone(), ty_expr))
         }
         Expr::List(param_list, _) => {
-            let Expr::Atom(Atom::Symbol(name), _) = param_list.elements.first()? else {
+            let Expr::Atom(Atom::Name(name), _) = param_list.elements.first()? else {
                 return None;
             };
             let ty_expr = if let Some(Expr::Map(meta, _)) = param_list.elements.get(1) {
@@ -4525,7 +4636,7 @@ impl LowerCtx {
         if let Expr::List(list, _) = expr
             && list.elements.len() >= 3
             && list.tag() == Some(DeepTag::TPrim)
-            && let Expr::Atom(Atom::Symbol(name), _) = &list.elements[2]
+            && let Expr::Atom(Atom::Name(name), _) = &list.elements[2]
         {
             return Prim::parse_name(name);
         }
@@ -4577,7 +4688,7 @@ impl LowerCtx {
                 && prec_list.tag() == Some(DeepTag::TVar)
             {
                 let var_name = match &prec_list.elements[2] {
-                    Expr::Atom(Atom::Symbol(name), _) => name.clone(),
+                    Expr::Atom(Atom::Name(name), _) => name.clone(),
                     _ => "?".to_string(),
                 };
                 if let Some(prim) = prec_subst.get(&var_name).copied() {
@@ -4619,7 +4730,7 @@ impl LowerCtx {
                     && dl.tag() == Some(DeepTag::DRank)
                 {
                     let rank_name = match dl.elements.get(2) {
-                        Some(Expr::Atom(Atom::Symbol(name), _)) => name.clone(),
+                        Some(Expr::Atom(Atom::Name(name), _)) => name.clone(),
                         _ => "?".to_string(),
                     };
                     if let Some(concrete_dims) = rank_subst.get(&rank_name) {
@@ -4664,7 +4775,7 @@ impl LowerCtx {
         {
             match tag {
                 DeepTag::DName | DeepTag::DVar => {
-                    if let Expr::Atom(Atom::Symbol(name), _) = &list.elements[2] {
+                    if let Expr::Atom(Atom::Name(name), _) = &list.elements[2] {
                         return Some(DimInfo::Named(name.clone(), None));
                     }
                 }
@@ -4678,7 +4789,7 @@ impl LowerCtx {
         }
         // Also handle bare symbols/ints for backward compat.
         match expr {
-            Expr::Atom(Atom::Symbol(name), _) => Some(DimInfo::Named(name.clone(), None)),
+            Expr::Atom(Atom::Name(name), _) => Some(DimInfo::Named(name.clone(), None)),
             Expr::Atom(Atom::Int(n), _) => Some(DimInfo::Lit(*n as usize)),
             _ => None,
         }
@@ -4735,7 +4846,7 @@ impl LowerCtx {
         if let Expr::List(list, _) = expr
             && get_tag(list) == Some(DeepTag::Def)
             && let Some(name) = children(list).first().and_then(|expr| match expr {
-                Expr::Atom(Atom::Symbol(name), _) => Some(name.as_str()),
+                Expr::Atom(Atom::Name(name), _) => Some(name.as_str()),
                 _ => None,
             })
         {
@@ -4779,6 +4890,14 @@ impl LowerCtx {
                 self.current_span_id.clone(),
             ),
             Expr::MetaExpr(meta_expr, _) => self.lower_expr(&meta_expr.expr),
+            // Transitional arms for new Expr variants (#908)
+            Expr::Node(_, _) | Expr::BareList(_, _) | Expr::UnknownForm(_) => {
+                raise_malformed_deep(
+                    "a transitional Expr variant in expression position",
+                    Some(expr.span()),
+                    self.current_span_id.clone(),
+                )
+            }
         };
         self.current_span_id = saved_span_id;
         result
@@ -4878,13 +4997,13 @@ impl LowerCtx {
 
     fn lower_atom(&mut self, atom: &Atom) -> LoweredValue {
         match atom {
-            Atom::Symbol(name) => {
+            Atom::Name(name) => {
                 if let Some(value) = self.bindings.get(name) {
                     let cached = value.clone();
                     // N→1 lowering collapse per
                     // spec/design/chelis_span_survival.md §2.3 rule (b):
                     // returning a cached `LoweredValue` for a span-bearing
-                    // parent expr (e.g. an `Atom::Symbol` whose enclosing
+                    // parent expr (e.g. an `Atom::Name` whose enclosing
                     // node carries a `span:` meta) must still record the
                     // parent's span on the existing node so the audit
                     // chain doesn't drop it.
@@ -5133,7 +5252,7 @@ impl LowerCtx {
             );
         }
         let name = match &elems[2] {
-            Expr::Atom(Atom::Symbol(s), _) => s.clone(),
+            Expr::Atom(Atom::Name(s), _) => s.clone(),
             _ => String::new(),
         };
         let body_id = self.lower_expr(&elems[3]);
@@ -5145,7 +5264,7 @@ impl LowerCtx {
             if let Some(callable) = self.callable_binding_expr(&elems[3]) {
                 self.local_callables.insert(
                     match &elems[2] {
-                        Expr::Atom(Atom::Symbol(s), _) => s.clone(),
+                        Expr::Atom(Atom::Name(s), _) => s.clone(),
                         _ => String::new(),
                     },
                     callable,
@@ -5177,7 +5296,7 @@ impl LowerCtx {
             let bind_kids = &bind_list.elements[2..];
             let mut i = 0;
             while i + 1 < bind_kids.len() {
-                if let Expr::Atom(Atom::Symbol(name), _) = &bind_kids[i] {
+                if let Expr::Atom(Atom::Name(name), _) = &bind_kids[i] {
                     // Same shadowing rationale as
                     // `lower_plain_callable_app`: drop any outer-scope
                     // `fn_typed_params[name]` so a let-shadowed name
@@ -5288,7 +5407,7 @@ impl LowerCtx {
             Self::default_type()
         };
 
-        if let Some(Expr::Atom(Atom::Symbol(name), _)) = elems.get(2) {
+        if let Some(Expr::Atom(Atom::Name(name), _)) = elems.get(2) {
             if let Some(id) = self.bindings.get(name) {
                 let cached = id.clone();
                 // N→1 lowering collapse per
@@ -5387,7 +5506,7 @@ impl LowerCtx {
         // Check if func is a known built-in: (var {} name).
         if let Expr::List(func_list, _) = &elems[2]
             && func_list.tag() == Some(DeepTag::Var)
-            && let Some(Expr::Atom(Atom::Symbol(func_name), _)) = func_list.elements.get(2)
+            && let Some(Expr::Atom(Atom::Name(func_name), _)) = func_list.elements.get(2)
             && !self.program_defs.contains_key(func_name)
             && !self.local_callables.contains_key(func_name)
         {
@@ -5509,7 +5628,7 @@ impl LowerCtx {
             Some(DeepTag::Fn) => Some(CallableExpr::Plain(expr.clone())),
             Some(DeepTag::Var) => {
                 let name = children(list).first().and_then(|expr| match expr {
-                    Expr::Atom(Atom::Symbol(name), _) => Some(name.clone()),
+                    Expr::Atom(Atom::Name(name), _) => Some(name.clone()),
                     _ => None,
                 })?;
                 // `visited` protects THIS resolution walk from alias cycles
@@ -9608,9 +9727,9 @@ impl LowerCtx {
         }
 
         match expr {
-            Expr::Atom(Atom::Symbol(name), _) => Some(self.resolve_dim_expr_symbol(name)),
+            Expr::Atom(Atom::Name(name), _) => Some(self.resolve_dim_expr_symbol(name)),
             Expr::List(list, _) => match (list.tag(), list.elements.get(2)) {
-                (Some(DeepTag::Var), Some(Expr::Atom(Atom::Symbol(name), _))) => {
+                (Some(DeepTag::Var), Some(Expr::Atom(Atom::Name(name), _))) => {
                     Some(self.resolve_dim_expr_symbol(name))
                 }
                 _ => None,
@@ -10357,7 +10476,7 @@ impl LowerCtx {
             // bindings then materialised as `()`/Unit in generated C.
             let unary_builtin_name = if let Expr::List(func_list, _) = func_expr
                 && func_list.tag() == Some(DeepTag::Var)
-                && let Some(Expr::Atom(Atom::Symbol(fname), _)) = func_list.elements.get(2)
+                && let Some(Expr::Atom(Atom::Name(fname), _)) = func_list.elements.get(2)
             {
                 Some(fname.as_str())
             } else {
@@ -10388,7 +10507,7 @@ impl LowerCtx {
             if is_known_unary_builtin
                 && let Expr::List(func_list, _) = func_expr
                 && func_list.tag() == Some(DeepTag::Var)
-                && let Some(Expr::Atom(Atom::Symbol(fname), _)) = func_list.elements.get(2)
+                && let Some(Expr::Atom(Atom::Name(fname), _)) = func_list.elements.get(2)
             {
                 let current_node = current.expect_node("pipe stage");
                 let ty = self
@@ -10639,7 +10758,7 @@ impl LowerCtx {
         let new_precision = if let Some(prim) = Self::try_extract_prim(&elems[3]) {
             // Handle (t-prim {} name) form.
             prim
-        } else if let Expr::Atom(Atom::Symbol(pname), _) = &elems[3] {
+        } else if let Expr::Atom(Atom::Name(pname), _) = &elems[3] {
             // Bare-symbol spelling (backward compat): parse or raise.
             match Prim::parse_name(pname) {
                 Some(prim) => prim,
@@ -10648,7 +10767,7 @@ impl LowerCtx {
         } else if let Expr::List(list, _) = &elems[3]
             && list.elements.len() >= 3
             && list.tag() == Some(DeepTag::TPrim)
-            && let Expr::Atom(Atom::Symbol(pname), _) = &list.elements[2]
+            && let Expr::Atom(Atom::Name(pname), _) = &list.elements[2]
         {
             // `(t-prim {} <name>)` whose name is not a recognized
             // primitive (the chelis#744 repro spelling).
@@ -11370,11 +11489,11 @@ mod tests {
     #[should_panic(expected = "decode-once violated at the lowering boundary")]
     fn boundary_guard_fires_on_a_raw_vocabulary_head() {
         // What a pre-decode-once programmatic producer builds: a vocabulary
-        // tag spelled `Atom::Symbol` at element 0.
+        // tag spelled `Atom::Name` at element 0.
         let raw = Expr::List(
             chelis_deep::ast::List {
                 elements: vec![
-                    Expr::Atom(Atom::Symbol("t-prim".into()), Span::new(0, 0)),
+                    Expr::Atom(Atom::Name("t-prim".into()), Span::new(0, 0)),
                     Expr::Map(chelis_deep::ast::MetaMap::default(), Span::new(0, 0)),
                 ],
             },
@@ -11404,7 +11523,7 @@ mod tests {
         let raw = Expr::List(
             chelis_deep::ast::List {
                 elements: vec![
-                    Expr::Atom(Atom::Symbol("effects".into()), Span::new(0, 0)),
+                    Expr::Atom(Atom::Name("effects".into()), Span::new(0, 0)),
                     Expr::Map(chelis_deep::ast::MetaMap::default(), Span::new(0, 0)),
                 ],
             },
@@ -13872,7 +13991,7 @@ mod regression_tests {
     /// rt-c2e7c23d F3: `ty_expr_to_deep` is a programmatic producer running
     /// INSIDE the lowerer, downstream of both `parser::stamp_tags` and the
     /// desugarer, so nothing upstream will stamp element 0 on its output. It
-    /// spelled `t-prim` / `t-tensor` as `Atom::Symbol`, which put raw
+    /// spelled `t-prim` / `t-tensor` as `Atom::Name`, which put raw
     /// vocabulary strings back into the in-memory tree and made the typed
     /// readers below take their untagged policy for these nodes.
     ///

@@ -1,6 +1,6 @@
 //! Issue Chelis-Lang/chelis#220: `extract_dim_list` in
 //! `crates/chelis-ir/src/lower.rs` walked `list.elements` directly and
-//! matched any `Atom::Symbol` as a dim name. Surface syntax like
+//! matched any `Atom::Name` as a dim name. Surface syntax like
 //! `[cast(2, int64), cast(3, int64)]` desugars to a Cons-chain
 //! `(app (var Cons) (cast ...) (app (var Cons) (cast ...) (var Nil)))`.
 //! Element 0 of that outer `(app ...)` is the literal tag symbol

@@ -333,7 +333,7 @@ fn bare_atom_expression_position_scores_below_one() {
 ///
 /// `Symbol` atoms are how every Deep form carries its names. A `var`'s name,
 /// a `record`'s constructor head, a `kv` key, an `access` field name, a
-/// `deftype` / `defsig` / `def` / `export` name are all `Atom::Symbol`, and
+/// `deftype` / `defsig` / `def` / `export` name are all `Atom::Name`, and
 /// their owning forms consume them with `symbol_name` rather than routing
 /// them through expression inference. Only an atom that actually reaches
 /// `infer_atom` is in expression position. If a future refactor routes a

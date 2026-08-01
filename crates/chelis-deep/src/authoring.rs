@@ -847,6 +847,7 @@ where
         }
         Expr::List(list, _) => list,
         Expr::Atom(..) => return,
+        Expr::Node(..) | Expr::BareList(..) | Expr::UnknownForm(..) => return,
     };
     let tag = list_tag(list);
     if let Some(meta) = list.elements.get(1) {
@@ -902,6 +903,7 @@ where
         }
         Expr::List(list, _) => list,
         Expr::Atom(..) => return,
+        Expr::Node(..) | Expr::BareList(..) | Expr::UnknownForm(..) => return,
     };
     let tag = list_tag(list);
     if let Some(meta) = list.elements.get_mut(1) {
@@ -1191,7 +1193,7 @@ fn rename_export_symbol(expr: &mut Expr, old_name: &str, new_name: &str) {
         return;
     };
     for element in list.elements.iter_mut().skip(2) {
-        if let Expr::Atom(Atom::Symbol(name), _) = element
+        if let Expr::Atom(Atom::Name(name), _) = element
             && name == old_name
         {
             *name = new_name.to_string();
@@ -1288,7 +1290,7 @@ fn var_name(expr: &Expr) -> Option<&str> {
 fn var_name_mut(expr: &mut Expr) -> Option<&mut String> {
     let list = tagged_list_mut(expr, DeepTag::Var)?;
     match list.elements.get_mut(2)? {
-        Expr::Atom(Atom::Symbol(name), _) => Some(name),
+        Expr::Atom(Atom::Name(name), _) => Some(name),
         _ => None,
     }
 }
@@ -1363,7 +1365,7 @@ fn decl_name(list: &List) -> Option<&str> {
 }
 
 fn set_decl_name(list: &mut List, new_name: &str) {
-    if let Some(Expr::Atom(Atom::Symbol(name), _)) = list.elements.get_mut(DEF_NAME_INDEX) {
+    if let Some(Expr::Atom(Atom::Name(name), _)) = list.elements.get_mut(DEF_NAME_INDEX) {
         *name = new_name.to_string();
     }
 }
@@ -1377,7 +1379,7 @@ fn def_is_function(list: &List) -> bool {
 
 fn symbol(expr: &Expr) -> Option<&str> {
     match expr {
-        Expr::Atom(Atom::Symbol(value), _) => Some(value.as_str()),
+        Expr::Atom(Atom::Name(value), _) => Some(value.as_str()),
         _ => None,
     }
 }

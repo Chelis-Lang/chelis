@@ -118,7 +118,7 @@ const NON_TYPE_STAMPED_TAGS: &[&str] = &[
 
 fn tag_of(list: &deep::List) -> Option<&str> {
     match list.elements.first() {
-        Some(deep::Expr::Atom(deep::Atom::Symbol(s), _)) => Some(s.as_str()),
+        Some(deep::Expr::Atom(deep::Atom::Name(s), _)) => Some(s.as_str()),
         _ => None,
     }
 }
@@ -131,7 +131,7 @@ fn is_error_type_stamp(expr: &deep::Expr) -> bool {
     tag_of(list) == Some("t-var")
         && matches!(
             list.elements.get(2),
-            Some(deep::Expr::Atom(deep::Atom::Symbol(s), _)) if s == "_"
+            Some(deep::Expr::Atom(deep::Atom::Name(s), _)) if s == "_"
         )
 }
 

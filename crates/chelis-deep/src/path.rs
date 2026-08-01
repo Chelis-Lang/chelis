@@ -679,7 +679,7 @@ fn count_modules(exprs: &[Expr]) -> usize {
 fn module_name(module: &Expr) -> Option<String> {
     let list = as_tagged_list(module, DeepTag::Module)?;
     match list.elements.get(MODULE_NAME_INDEX) {
-        Some(Expr::Atom(Atom::Symbol(name), _)) => Some(name.clone()),
+        Some(Expr::Atom(Atom::Name(name), _)) => Some(name.clone()),
         _ => None,
     }
 }
@@ -698,7 +698,7 @@ fn decls(module: &Expr) -> &[Expr] {
 /// The bare name of a `(def {meta} <name> ...)` node at `elements[2]`.
 fn def_name(def: &List) -> Option<&str> {
     match def.elements.get(2) {
-        Some(Expr::Atom(Atom::Symbol(name), _)) => Some(name.as_str()),
+        Some(Expr::Atom(Atom::Name(name), _)) => Some(name.as_str()),
         _ => None,
     }
 }
@@ -845,7 +845,7 @@ mod tests {
                 };
                 let decl_tag = tag(list)?.as_str().to_string();
                 let name = match list.elements.get(2) {
-                    Some(Expr::Atom(Atom::Symbol(s), _)) => Some(s.clone()),
+                    Some(Expr::Atom(Atom::Name(s), _)) => Some(s.clone()),
                     _ => None,
                 };
                 Some((decl_tag, name))
@@ -919,7 +919,7 @@ mod tests {
         if let Expr::List(orig, _) = orig_body {
             assert_eq!(tag(orig), Some(DeepTag::Var));
             assert!(
-                matches!(orig.elements.get(2), Some(Expr::Atom(Atom::Symbol(s), _)) if s == "x"),
+                matches!(orig.elements.get(2), Some(Expr::Atom(Atom::Name(s), _)) if s == "x"),
                 "original body var should still name `x`, got {:?}",
                 orig.elements.get(2),
             );

@@ -687,7 +687,7 @@ pub(super) fn synthesized_unary_lambda_param(
     // surface as `MetaExpr` or a nested `List`, and the user-written
     // annotation takes precedence over the upstream pipe value's type.
     match &param_kids[0] {
-        deep::Expr::Atom(deep::Atom::Symbol(name), _) => Some(name.to_string()),
+        deep::Expr::Atom(deep::Atom::Name(name), _) => Some(name.to_string()),
         _ => None,
     }
 }

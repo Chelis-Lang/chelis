@@ -345,6 +345,40 @@ pub(super) fn infer_expr_with_type_metadata_ownership(
         deep::Expr::MetaExpr(meta, _) => {
             infer_expr(&meta.expr, env, vg, subst, adt_reg, errors, product)
         }
+        // Transitional arms for the new typed-node variants (post-rebase).
+        // `Node` is a stamped vocabulary node — dispatch like `List` using its tag.
+        deep::Expr::Node(node, _span) => {
+            // Delegate to the same tag-based dispatch by reconstructing a
+            // temporary List view. For now, recurse into children and return
+            // the type of the last expression child (conservative).
+            let mut last_ty = Type::Unit;
+            for child in node.expr_children() {
+                last_ty = infer_expr(child, env, vg, subst, adt_reg, errors, product);
+            }
+            last_ty
+        }
+        // `BareList` is an untagged structural list — no vocabulary head.
+        deep::Expr::BareList(elems, _span) => {
+            let mut last_ty = Type::Unit;
+            for child in elems {
+                last_ty = infer_expr(child, env, vg, subst, adt_reg, errors, product);
+            }
+            last_ty
+        }
+        // `UnknownForm` is a list whose head didn't decode into the vocabulary.
+        deep::Expr::UnknownForm(data) => {
+            report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::UnknownForm,
+                    format!(
+                        "unknown form `{}` has no checker disposition (typed-node boundary)",
+                        data.head
+                    ),
+                    vec![],
+                ),
+            )
+        }
     };
 
     if !matches!(result, Type::Error(_)) {
@@ -599,7 +633,7 @@ pub(super) fn infer_atom(atom: &deep::Atom, errors: &mut DiagnosticSink<'_>) -> 
         deep::Atom::Float(_) => Type::Prim(Prim::F32),
         deep::Atom::Bool(_) => Type::Prim(Prim::Bool),
         deep::Atom::Str(_) => Type::Prim(Prim::String),
-        deep::Atom::Symbol(name) => report(
+        deep::Atom::Name(name) => report(
             errors,
             CheckError::new(
                 CheckErrorKind::MalformedForm,

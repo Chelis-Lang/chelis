@@ -1025,7 +1025,7 @@ fn children(list: &List) -> &[Expr] {
 
 fn symbol_name(expr: &Expr) -> Option<&str> {
     match expr {
-        Expr::Atom(Atom::Symbol(name), _) => Some(name.as_str()),
+        Expr::Atom(Atom::Name(name), _) => Some(name.as_str()),
         _ => None,
     }
 }

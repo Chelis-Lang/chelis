@@ -112,7 +112,7 @@ fn sp() -> Span {
 }
 
 fn sym(s: &str) -> deep::Expr {
-    deep::Expr::Atom(deep::Atom::Symbol(s.to_string()), sp())
+    deep::Expr::Atom(deep::Atom::Name(s.to_string()), sp())
 }
 
 fn int(n: i64) -> deep::Expr {
@@ -195,6 +195,14 @@ fn with_structural_span(expr: deep::Expr, span: Span) -> deep::Expr {
         deep::Expr::List(list, _) => deep::Expr::List(list, span),
         deep::Expr::Map(map, _) => deep::Expr::Map(map, span),
         deep::Expr::MetaExpr(meta, _) => deep::Expr::MetaExpr(meta, span),
+        // Transitional arms for new Expr variants (#908)
+        deep::Expr::Node(node, _) => deep::Expr::Node(node, span),
+        deep::Expr::BareList(elems, _) => deep::Expr::BareList(elems, span),
+        deep::Expr::UnknownForm(data) => {
+            let mut d = *data;
+            d.span = span;
+            deep::Expr::UnknownForm(Box::new(d))
+        }
     }
 }
 
