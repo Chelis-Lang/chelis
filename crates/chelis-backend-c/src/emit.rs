@@ -3016,10 +3016,13 @@ impl CEmitter {
                     ty.precision.name()
                 ),
                 Stage::Codegen("c"),
-                "the fused elementwise kernel emits float or double step variables \
-                 and libm math symbols; it supports f32 and f64 only. Cast to f32 \
-                 or f64 before the fused chain. Widening to the reduced-float and \
-                 integer dtypes is follow-on work (chelis#691)",
+                chelis_types::unimplemented_rejection!(
+                    691,
+                    "the fused elementwise kernel emits float or double step variables \
+                     and libm math symbols; it supports f32 and f64 only. Cast to f32 \
+                     or f64 before the fused chain. Widening to the reduced-float and \
+                     integer dtypes is follow-on work (chelis#691)"
+                ),
             ));
         }
         // Element type and math-symbol precision come from the same
@@ -4372,8 +4375,11 @@ impl CEmitter {
                     input_node.output_type.precision.name()
                 ),
                 Stage::Codegen("c"),
-                "the C reduce kernels are f32-hardcoded today (WS-A1/F1); cast to f32 \
-                 before the reduction. Non-f32 widening is follow-on work (chelis#692)",
+                chelis_types::unimplemented_rejection!(
+                    692,
+                    "the C reduce kernels are f32-hardcoded today (WS-A1/F1); cast to f32 \
+                     before the reduction. Non-f32 widening is follow-on work (chelis#692)"
+                ),
             ));
         }
         self.emit_slot_wrapper(id, ty);
@@ -4544,8 +4550,11 @@ impl CEmitter {
                     input_node.output_type.precision.name()
                 ),
                 Stage::Codegen("c"),
-                "the C reduce kernels are f32-hardcoded today (WS-A1/F1); cast to f32 \
-                 before the reduction. Non-f32 widening is follow-on work (chelis#692)",
+                chelis_types::unimplemented_rejection!(
+                    692,
+                    "the C reduce kernels are f32-hardcoded today (WS-A1/F1); cast to f32 \
+                     before the reduction. Non-f32 widening is follow-on work (chelis#692)"
+                ),
             ));
         }
         self.emit_slot_wrapper(id, ty);
@@ -4646,9 +4655,12 @@ impl CEmitter {
                     input_node.output_type.precision.name()
                 ),
                 Stage::Codegen("c"),
-                "the C windowed-reduction emitter is f32-only today; cast to f32 \
-                 before the windowed reduction (spec/05-risc-primitives.md \
-                 section 2.3.1)",
+                chelis_types::unimplemented_rejection!(
+                    959,
+                    "the C windowed-reduction emitter is f32-only today; cast to f32 \
+                     before the windowed reduction (spec/05-risc-primitives.md \
+                     section 2.3.1; chelis#959)"
+                ),
             ));
         }
         // chelis#730 Phase 1 (census row 12, chelis#725's assertion half):
@@ -4665,8 +4677,11 @@ impl CEmitter {
                 )),
                 format!("the C DAG emitter (node {id})"),
                 Stage::Codegen("c"),
-                "internal desync: lowering guarantees equal-length literal window and \
-                 stride lists (chelis#725; chelis#730 census rows 8/12)",
+                chelis_types::deliberate_rejection!(
+                    "[05-UNS-1]",
+                    "internal desync: lowering guarantees equal-length literal window and \
+                     stride lists (chelis#725; chelis#730 census rows 8/12)"
+                ),
             ));
         }
         let n = window_shape.len();
@@ -4679,8 +4694,11 @@ impl CEmitter {
                 )),
                 format!("the C DAG emitter (node {id})"),
                 Stage::Codegen("c"),
-                "internal desync: the checker guarantees window arity <= input rank \
-                 (chelis#730 census row 12)",
+                chelis_types::deliberate_rejection!(
+                    "[05-UNS-1]",
+                    "internal desync: the checker guarantees window arity <= input rank \
+                     (chelis#730 census row 12)"
+                ),
             ));
         }
         let leading = in_rank - n;
@@ -4704,9 +4722,12 @@ impl CEmitter {
                     )),
                     format!("the C DAG emitter (node {id})"),
                     Stage::Codegen("c"),
-                    "the windowed output extent floor((d - window) / stride) + 1 is \
-                     not statically representable; bind the axis to a concrete size \
-                     (spec/05-risc-primitives.md section 2.3.1)",
+                    chelis_types::unimplemented_rejection!(
+                        959,
+                        "the windowed output extent floor((d - window) / stride) + 1 is \
+                         not statically representable; bind the axis to a concrete size \
+                         (spec/05-risc-primitives.md section 2.3.1; chelis#959)"
+                    ),
                 ));
             }
         }
@@ -4963,8 +4984,11 @@ impl CEmitter {
                     input_node.output_type.precision.name()
                 ),
                 Stage::Codegen("c"),
-                "the C argmax/argmin kernels read f32 inputs only today (WS-A1/F1); \
-                 cast to f32 before the reduction (chelis#692)",
+                chelis_types::unimplemented_rejection!(
+                    692,
+                    "the C argmax/argmin kernels read f32 inputs only today (WS-A1/F1); \
+                     cast to f32 before the reduction (chelis#692)"
+                ),
             ));
         }
         let init = if is_argmax { "-INFINITY" } else { "INFINITY" };
@@ -5098,11 +5122,14 @@ impl CEmitter {
                     out_ty.precision.name()
                 ),
                 Stage::Codegen("c"),
-                "the fused reduction kernel is f32-hardcoded (WS-A1/F1): \
-                 `chelis_fill_f32` zero, a `float` accumulator cascade, and `fmaxf`. \
-                 Cast to f32 before the reduction, or keep the elementwise chain out \
-                 of the reduction so the unfused f64 reduce path runs. Widening is \
-                 follow-on work (chelis#951)",
+                chelis_types::unimplemented_rejection!(
+                    951,
+                    "the fused reduction kernel is f32-hardcoded (WS-A1/F1): \
+                     `chelis_fill_f32` zero, a `float` accumulator cascade, and `fmaxf`. \
+                     Cast to f32 before the reduction, or keep the elementwise chain out \
+                     of the reduction so the unfused f64 reduce path runs. Widening is \
+                     follow-on work (chelis#951)"
+                ),
             ));
         }
         let axis_size = Self::emit_dim_info(&fused_input_type.dims[axis]);

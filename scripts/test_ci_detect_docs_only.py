@@ -96,6 +96,28 @@ class IsDocsOnlyTests(unittest.TestCase):
         self.assertFalse(m.is_docs_only(["Cargo.toml"]))
 
 
+class RejectionAuthorityChangeTests(unittest.TestCase):
+    def test_manifest_and_validator_changes_require_live_validation(self):
+        for path in (
+            "spec/design/loud_unsupported_issue_manifest.json",
+            "scripts/validate_rejection_issue_manifest.py",
+            "scripts/generate_rejection_registries.py",
+            "crates/chelis-types/src/rejection_registry_generated.rs",
+            ".github/workflows/ci.yml",
+        ):
+            self.assertTrue(m.rejection_authority_changed([path]), path)
+
+    def test_unrelated_paths_do_not_require_live_validation(self):
+        self.assertFalse(
+            m.rejection_authority_changed(
+                ["README.md", "crates/chelis-ir/src/lower.rs"]
+            )
+        )
+
+    def test_empty_change_set_fails_safe(self):
+        self.assertTrue(m.rejection_authority_changed([]))
+
+
 class EmitTests(unittest.TestCase):
     def test_emit_writes_github_output_and_stdout(self):
         with tempfile.TemporaryDirectory() as d:
@@ -105,10 +127,16 @@ class EmitTests(unittest.TestCase):
             try:
                 buf = io.StringIO()
                 with redirect_stdout(buf):
-                    m._emit(True)
-                self.assertEqual(buf.getvalue().strip(), "docs_only=true")
+                    m._emit(True, False)
+                self.assertEqual(
+                    buf.getvalue().splitlines(),
+                    ["docs_only=true", "rejection_authority_changed=false"],
+                )
                 with open(out_path, encoding="utf-8") as fh:
-                    self.assertIn("docs_only=true", fh.read())
+                    self.assertEqual(
+                        fh.read().splitlines(),
+                        ["docs_only=true", "rejection_authority_changed=false"],
+                    )
             finally:
                 if old is None:
                     os.environ.pop("GITHUB_OUTPUT", None)
@@ -120,8 +148,11 @@ class EmitTests(unittest.TestCase):
         try:
             buf = io.StringIO()
             with redirect_stdout(buf):
-                m._emit(False)
-            self.assertEqual(buf.getvalue().strip(), "docs_only=false")
+                m._emit(False, True)
+            self.assertEqual(
+                buf.getvalue().splitlines(),
+                ["docs_only=false", "rejection_authority_changed=true"],
+            )
         finally:
             if old is not None:
                 os.environ["GITHUB_OUTPUT"] = old
@@ -137,7 +168,10 @@ class MainTests(unittest.TestCase):
             with redirect_stdout(buf):
                 rc = m.main([])
             self.assertEqual(rc, 0)
-            self.assertEqual(buf.getvalue().strip(), "docs_only=true")
+            self.assertEqual(
+                buf.getvalue().splitlines(),
+                ["docs_only=true", "rejection_authority_changed=false"],
+            )
         finally:
             sys.stdin = old_stdin
             if old_out is not None:

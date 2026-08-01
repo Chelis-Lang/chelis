@@ -56,6 +56,10 @@ NON_GATE_JOBS = {
     # runs scripts/ci_detect_docs_only.py, no cargo/chelis command, so it
     # is out of gate.py scope by design.
     "changes",
+    # Rule-id: GATE-SCOPE-REJECTION-AUTHORITY -- the network-backed
+    # [05-UNS-5] manifest liveness check is CI-owned and deliberately absent
+    # from the offline developer gate.
+    "rejection-authority-liveness",
     # Rule-id: GATE-SCOPE-SMT -- the smt-build job is the required fast
     # cvc5-backed `smt` feature smoke. It is out of gate.py scope by
     # design, like backend-sanitizers; the full prove corpus lives in
@@ -71,6 +75,16 @@ NON_GATE_JOBS = {
     "smt-build-glibc231",
     "smt-build-darwin-arm64",
 }
+
+
+class RejectionAuthorityLivenessJobTests(unittest.TestCase):
+    def test_job_is_change_gated_and_has_issue_read_access(self):
+        block = _ci_job_block("rejection-authority-liveness")
+        self.assertIn("needs: [changes]", block)
+        self.assertIn("needs.changes.outputs.rejection_authority_changed", block)
+        self.assertIn("issues: read", block)
+        self.assertIn("contents: read", block)
+        self.assertIn("scripts/validate_rejection_issue_manifest.py", block)
 
 # Whole WORKFLOW FILES that are out-of-scope-by-design for the per-PR developer
 # `gate.py` quartet (like the backend-sanitizers / macos-smoke jobs in ci.yml,
@@ -577,6 +591,9 @@ class DocsOnlySkipTests(unittest.TestCase):
         "backend-sanitizers",
         "smt-build",
     }
+    # Jobs that use the same always-present `changes` job but key on a
+    # narrower contract input rather than on the docs-only classification.
+    CHANGE_GATED_JOBS = {"rejection-authority-liveness"}
     # Jobs that must ALWAYS run (never gated on docs_only).
     # smt-build-glibc231 / smt-build-darwin-arm64 were added by chelis#422
     # (ship-smt) without a docs_only `if`, so today they run unconditionally
@@ -668,7 +685,11 @@ class DocsOnlySkipTests(unittest.TestCase):
         # forces a deliberate classification (mirrors the workflow-file
         # scope test).
         attrs = _parse_job_attrs()
-        classified = self.HEAVY_GATED_JOBS | self.ALWAYS_RUN_JOBS
+        classified = (
+            self.HEAVY_GATED_JOBS
+            | self.CHANGE_GATED_JOBS
+            | self.ALWAYS_RUN_JOBS
+        )
         unclassified = set(attrs) - classified
         self.assertEqual(
             unclassified,

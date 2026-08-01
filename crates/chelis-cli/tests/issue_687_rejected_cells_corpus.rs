@@ -23,6 +23,12 @@
 //! build / eval / compiled binary) arrives with the chelis#732 handshake at
 //! its Phase 3; this stub is deliberately substring-level, matching the
 //! originals it mirrors.
+//!
+//! The chelis#730 Phase 3 authority migration deliberately preserves these
+//! human-rendered bytes while replacing each producer's free-form citation
+//! with a validated `RejectionAuthority`. That makes this existing corpus the
+//! same-change-set rendering lock required by section C2.1; the later
+//! `DiagnosticKind` slice adds the machine-kind assertions separately.
 
 #![allow(clippy::uninlined_format_args)]
 

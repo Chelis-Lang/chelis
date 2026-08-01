@@ -74,6 +74,290 @@
 //! ```
 
 use std::fmt;
+use std::num::NonZeroU32;
+
+use crate::rejection_registry_generated::{REGISTERED_OPEN_ISSUES, REGISTERED_SPEC_ATOMS};
+
+/// A registered numbered-spec atom.
+///
+/// Construction validates both the `[NN-GROUP-N]` grammar and membership in
+/// the registry generated from normative blockquote atoms in `spec/00-12`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SpecAtomRef(&'static str);
+
+impl SpecAtomRef {
+    pub const fn new(atom: &'static str) -> Result<Self, AuthorityConstructionError> {
+        if !valid_atom_grammar(atom) {
+            return Err(AuthorityConstructionError::MalformedAtom);
+        }
+        if !registered_atom(atom) {
+            return Err(AuthorityConstructionError::UnknownAtom);
+        }
+        Ok(Self(atom))
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        self.0
+    }
+
+    /// The generated registry, exposed read-only for byte-agreement tooling.
+    pub const fn registry() -> &'static [&'static str] {
+        REGISTERED_SPEC_ATOMS
+    }
+}
+
+/// A nonzero member of the checked-in, live-validated issue manifest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct IssueRef(NonZeroU32);
+
+impl IssueRef {
+    pub const fn new(number: u32) -> Result<Self, AuthorityConstructionError> {
+        let Some(number) = NonZeroU32::new(number) else {
+            return Err(AuthorityConstructionError::ZeroIssue);
+        };
+        if !registered_issue(number.get()) {
+            return Err(AuthorityConstructionError::UnknownIssue);
+        }
+        Ok(Self(number))
+    }
+
+    pub const fn number(self) -> u32 {
+        self.0.get()
+    }
+
+    /// The generated membership set, exposed read-only for agreement tooling.
+    pub const fn registry() -> &'static [u32] {
+        REGISTERED_OPEN_ISSUES
+    }
+}
+
+/// The machine-readable distinction required by [05-UNS-5].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RejectionAuthorityKind {
+    Deliberate,
+    Unimplemented,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum RejectionCitation {
+    Atom(SpecAtomRef),
+    Issue(IssueRef),
+}
+
+/// Opaque, validated authority for an unsupported diagnostic.
+///
+/// The fields are intentionally private. External code cannot manufacture a
+/// citation-bearing value with an empty or unregistered identity:
+///
+/// ```compile_fail
+/// use chelis_types::unsupported::RejectionAuthority;
+/// let valid = chelis_types::deliberate_rejection!(
+///     "[05-UNS-1]",
+///     "reject instead of substituting",
+/// );
+/// let _ = RejectionAuthority { hint: "forged", ..valid };
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RejectionAuthority {
+    citation: RejectionCitation,
+    hint: &'static str,
+}
+
+impl RejectionAuthority {
+    pub const fn deliberate(
+        atom: SpecAtomRef,
+        hint: &'static str,
+    ) -> Result<Self, AuthorityConstructionError> {
+        if hint.is_empty() {
+            return Err(AuthorityConstructionError::EmptyHint);
+        }
+        Ok(Self {
+            citation: RejectionCitation::Atom(atom),
+            hint,
+        })
+    }
+
+    pub const fn unimplemented(
+        issue: IssueRef,
+        hint: &'static str,
+    ) -> Result<Self, AuthorityConstructionError> {
+        if hint.is_empty() {
+            return Err(AuthorityConstructionError::EmptyHint);
+        }
+        Ok(Self {
+            citation: RejectionCitation::Issue(issue),
+            hint,
+        })
+    }
+
+    pub const fn kind(self) -> RejectionAuthorityKind {
+        match self.citation {
+            RejectionCitation::Atom(_) => RejectionAuthorityKind::Deliberate,
+            RejectionCitation::Issue(_) => RejectionAuthorityKind::Unimplemented,
+        }
+    }
+
+    pub const fn atom(self) -> Option<SpecAtomRef> {
+        match self.citation {
+            RejectionCitation::Atom(atom) => Some(atom),
+            RejectionCitation::Issue(_) => None,
+        }
+    }
+
+    pub const fn issue(self) -> Option<IssueRef> {
+        match self.citation {
+            RejectionCitation::Issue(issue) => Some(issue),
+            RejectionCitation::Atom(_) => None,
+        }
+    }
+
+    pub const fn hint(self) -> &'static str {
+        self.hint
+    }
+
+    pub fn citation(self) -> String {
+        match self.citation {
+            RejectionCitation::Atom(atom) => atom.as_str().to_owned(),
+            RejectionCitation::Issue(issue) => format!("chelis#{}", issue.number()),
+        }
+    }
+}
+
+/// Failure to construct a typed rejection authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthorityConstructionError {
+    MalformedAtom,
+    UnknownAtom,
+    ZeroIssue,
+    UnknownIssue,
+    EmptyHint,
+}
+
+impl fmt::Display for AuthorityConstructionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let message = match self {
+            Self::MalformedAtom => "malformed spec atom reference",
+            Self::UnknownAtom => "spec atom is absent from the generated registry",
+            Self::ZeroIssue => "issue reference must be nonzero",
+            Self::UnknownIssue => "issue is absent from the live-validated manifest",
+            Self::EmptyHint => "rejection hint must not be empty",
+        };
+        f.write_str(message)
+    }
+}
+
+impl std::error::Error for AuthorityConstructionError {}
+
+const fn valid_atom_grammar(atom: &str) -> bool {
+    let bytes = atom.as_bytes();
+    if bytes.len() < 9
+        || bytes[0] != b'['
+        || bytes[1] < b'0'
+        || bytes[1] > b'9'
+        || bytes[2] < b'0'
+        || bytes[2] > b'9'
+        || bytes[3] != b'-'
+        || bytes[bytes.len() - 1] != b']'
+    {
+        return false;
+    }
+    let mut index = 4;
+    let group_start = index;
+    while index < bytes.len() - 1 && bytes[index] >= b'A' && bytes[index] <= b'Z' {
+        index += 1;
+    }
+    if index == group_start || index >= bytes.len() - 2 || bytes[index] != b'-' {
+        return false;
+    }
+    index += 1;
+    if bytes[index] < b'1' || bytes[index] > b'9' {
+        return false;
+    }
+    index += 1;
+    while index < bytes.len() - 1 {
+        if bytes[index] < b'0' || bytes[index] > b'9' {
+            return false;
+        }
+        index += 1;
+    }
+    true
+}
+
+const fn registered_atom(atom: &str) -> bool {
+    let mut index = 0;
+    while index < REGISTERED_SPEC_ATOMS.len() {
+        if const_str_eq(atom, REGISTERED_SPEC_ATOMS[index]) {
+            return true;
+        }
+        index += 1;
+    }
+    false
+}
+
+const fn const_str_eq(left: &str, right: &str) -> bool {
+    let left = left.as_bytes();
+    let right = right.as_bytes();
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut index = 0;
+    while index < left.len() {
+        if left[index] != right[index] {
+            return false;
+        }
+        index += 1;
+    }
+    true
+}
+
+const fn registered_issue(number: u32) -> bool {
+    let mut index = 0;
+    while index < REGISTERED_OPEN_ISSUES.len() {
+        if number == REGISTERED_OPEN_ISSUES[index] {
+            return true;
+        }
+        index += 1;
+    }
+    false
+}
+
+/// Build a deliberate authority in a const context. Invalid or unregistered
+/// literals are compile errors instead of runtime fallbacks.
+#[macro_export]
+macro_rules! deliberate_rejection {
+    ($atom:literal, $hint:expr $(,)?) => {{
+        const ATOM: $crate::unsupported::SpecAtomRef =
+            match $crate::unsupported::SpecAtomRef::new($atom) {
+                Ok(atom) => atom,
+                Err(_) => panic!("invalid or unregistered rejection atom"),
+            };
+        const AUTHORITY: $crate::unsupported::RejectionAuthority =
+            match $crate::unsupported::RejectionAuthority::deliberate(ATOM, $hint) {
+                Ok(authority) => authority,
+                Err(_) => panic!("invalid deliberate rejection authority"),
+            };
+        AUTHORITY
+    }};
+}
+
+/// Build an unimplemented authority in a const context. Invalid or
+/// unregistered issue literals are compile errors instead of runtime fallbacks.
+#[macro_export]
+macro_rules! unimplemented_rejection {
+    ($issue:literal, $hint:expr $(,)?) => {{
+        const ISSUE: $crate::unsupported::IssueRef =
+            match $crate::unsupported::IssueRef::new($issue) {
+                Ok(issue) => issue,
+                Err(_) => panic!("invalid or unregistered rejection issue"),
+            };
+        const AUTHORITY: $crate::unsupported::RejectionAuthority =
+            match $crate::unsupported::RejectionAuthority::unimplemented(ISSUE, $hint) {
+                Ok(authority) => authority,
+                Err(_) => panic!("invalid unimplemented rejection authority"),
+            };
+        AUTHORITY
+    }};
+}
 
 /// What was encountered: a closed enum plus payload, not a bare string.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -169,10 +453,8 @@ pub struct Unsupported {
     /// paths (clippy::result_large_err); the section C2 shape is
     /// unchanged - the box is a representation detail.
     pub span: Option<Box<SpanRef>>,
-    /// The supported alternative, when one exists. Not optional prose:
-    /// sites without an alternative say why (deferred per a cited spec
-    /// atom, or the tracking issue for the unbuilt support).
-    pub hint: &'static str,
+    /// Typed atom-or-issue authority plus the supported alternative.
+    pub authority: RejectionAuthority,
 }
 
 impl Unsupported {
@@ -180,14 +462,14 @@ impl Unsupported {
         what: UnsupportedKind,
         context: impl Into<String>,
         stage: Stage,
-        hint: &'static str,
+        authority: RejectionAuthority,
     ) -> Self {
         Self {
             what,
             context: context.into(),
             stage,
             span: None,
-            hint,
+            authority,
         }
     }
 
@@ -201,7 +483,10 @@ impl Unsupported {
             UnsupportedKind::Builtin(name.into()),
             format!("`chelis build --target {target}` host emission"),
             Stage::Codegen(target),
-            "host-only builtin; run it under `chelis eval` or `chelis test`, or rewrite the caller to use tensor-lane primitives (spec/05-risc-primitives.md §3.6; chelis#705)",
+            crate::unimplemented_rejection!(
+                705,
+                "host-only builtin; run it under `chelis eval` or `chelis test`, or rewrite the caller to use tensor-lane primitives (spec/05-risc-primitives.md §3.6; chelis#705)"
+            ),
         )
     }
 
@@ -220,7 +505,10 @@ impl fmt::Display for Unsupported {
         write!(
             f,
             "unsupported: {} on {} ({}); {}",
-            self.what, self.context, self.stage, self.hint
+            self.what,
+            self.context,
+            self.stage,
+            self.authority.hint()
         )
     }
 }
@@ -239,7 +527,10 @@ mod tests {
             UnsupportedKind::Builtin("tensor_scan".to_string()),
             "`chelis build --target c` host emission",
             Stage::Codegen("c"),
-            "host-only builtin; run it under `chelis eval` (chelis#705)",
+            crate::unimplemented_rejection!(
+                705,
+                "host-only builtin; run it under `chelis eval` (chelis#705)"
+            ),
         );
         assert_eq!(
             err.to_string(),
@@ -262,9 +553,13 @@ mod tests {
             UnsupportedKind::HostAbi("function value `increment`".into()),
         ];
         for kind in kinds {
-            let rendered =
-                Unsupported::new(kind.clone(), "test context", Stage::Lowering, "hint text")
-                    .to_string();
+            let rendered = Unsupported::new(
+                kind.clone(),
+                "test context",
+                Stage::Lowering,
+                crate::deliberate_rejection!("[05-UNS-1]", "hint text"),
+            )
+            .to_string();
             assert!(
                 rendered.starts_with("unsupported: "),
                 "kind {kind:?} must render with the literal brand; got {rendered}"

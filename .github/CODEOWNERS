@@ -7,3 +7,13 @@
 /crates/chelis-cli/tests/capacity_census_tripwire.rs @rlronan
 /scripts/capacity_census_liveness.py @rlronan
 /scripts/test_capacity_census_liveness.py @rlronan
+
+# Guard artifacts of the chelis#730 [05-UNS-5] rejection-authority ratchet.
+# Registry and validator edits are review-routed in addition to their
+# executable byte-agreement and live-state controls.
+/spec/design/loud_unsupported_issue_manifest.json @rlronan
+/crates/chelis-types/src/rejection_registry_generated.rs @rlronan
+/scripts/generate_rejection_registries.py @rlronan
+/scripts/test_generate_rejection_registries.py @rlronan
+/scripts/validate_rejection_issue_manifest.py @rlronan
+/scripts/test_validate_rejection_issue_manifest.py @rlronan
