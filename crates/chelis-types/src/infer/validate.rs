@@ -553,11 +553,10 @@ pub(super) fn walk_for_tensor_precision(
             walk_for_tensor_precision(&meta.expr, errors, seen, def_context);
         }
         deep::Expr::Atom(_, _) => {}
-        // Transitional: recurse into expression children.
-        deep::Expr::Node(node, _) => {
-            for child in node.expr_children() {
-                walk_for_tensor_precision(child, errors, seen, def_context);
-            }
+        // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
+        deep::Expr::Node(node, span) => {
+            let bridged = deep::Expr::List(node.to_list(*span), *span);
+            walk_for_tensor_precision(&bridged, errors, seen, def_context);
         }
         deep::Expr::BareList(elems, _) => {
             for child in elems {
@@ -821,11 +820,10 @@ pub(super) fn walk_for_poly_op_constraint_violations(
             }
         }
         deep::Expr::Atom(_, _) => {}
-        // Transitional: recurse into expression children.
-        deep::Expr::Node(node, _) => {
-            for child in node.expr_children() {
-                walk_for_poly_op_constraint_violations(child, defs, type_env, scope, errors);
-            }
+        // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
+        deep::Expr::Node(node, span) => {
+            let bridged = deep::Expr::List(node.to_list(*span), *span);
+            walk_for_poly_op_constraint_violations(&bridged, defs, type_env, scope, errors);
         }
         deep::Expr::BareList(elems, _) => {
             for child in elems {
@@ -1540,13 +1538,10 @@ pub(super) fn validate_ir_expr(
             validate_ir_expr(&meta.expr, type_env, static_env, failed_let_names, errors)
         }
         deep::Expr::Atom(_, _) => literal_static_value(expr),
-        // Transitional: recurse into expression children, return Unknown.
-        deep::Expr::Node(node, _) => {
-            let mut last = StaticValue::Unknown;
-            for child in node.expr_children() {
-                last = validate_ir_expr(child, type_env, static_env, failed_let_names, errors);
-            }
-            last
+        // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
+        deep::Expr::Node(node, span) => {
+            let bridged = deep::Expr::List(node.to_list(*span), *span);
+            validate_ir_expr(&bridged, type_env, static_env, failed_let_names, errors)
         }
         deep::Expr::BareList(elems, _) => {
             let mut last = StaticValue::Unknown;
@@ -2758,11 +2753,10 @@ pub(super) fn annotated_totality_invariant_traces(exprs: &[deep::Expr]) -> Vec<S
                     }
                 }
             }
-            // Transitional: recurse into expression children.
-            deep::Expr::Node(node, _) => {
-                for child in node.expr_children() {
-                    walk(child, traces);
-                }
+            // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
+            deep::Expr::Node(node, span) => {
+                let bridged = deep::Expr::List(node.to_list(*span), *span);
+                walk(&bridged, traces);
             }
             deep::Expr::BareList(elems, _) => {
                 for child in elems {

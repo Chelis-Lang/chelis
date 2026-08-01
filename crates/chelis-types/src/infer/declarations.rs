@@ -648,11 +648,10 @@ pub(super) fn collect_top_level_calls(
                 }
             }
         },
-        // Transitional: recurse into Node's expression children.
-        deep::Expr::Node(node, _) => {
-            for child in node.expr_children() {
-                collect_top_level_calls(child, def_names, bound, calls);
-            }
+        // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
+        deep::Expr::Node(node, span) => {
+            let bridged = deep::Expr::List(node.to_list(*span), *span);
+            collect_top_level_calls(&bridged, def_names, bound, calls);
         }
         deep::Expr::BareList(elems, _) => {
             for child in elems {
@@ -901,10 +900,11 @@ pub(super) fn param_has_consuming_use_inner(
                 )
             }),
         },
-        // Transitional: recurse into Node's expression children.
-        deep::Expr::Node(node, _) => node.expr_children().any(|child| {
+        // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
+        deep::Expr::Node(node, span) => {
+            let bridged = deep::Expr::List(node.to_list(*span), *span);
             param_has_consuming_use_inner(
-                child,
+                &bridged,
                 param,
                 bound,
                 available_signatures,
@@ -912,7 +912,7 @@ pub(super) fn param_has_consuming_use_inner(
                 type_headers,
                 errors,
             )
-        }),
+        }
         deep::Expr::BareList(elems, _) => elems.iter().any(|child| {
             param_has_consuming_use_inner(
                 child,
@@ -1140,10 +1140,11 @@ pub(super) fn expr_mentions_unshadowed_name(
                 .iter()
                 .any(|child| expr_mentions_unshadowed_name(child, name, bound)),
         },
-        // Transitional: recurse into expression children.
-        deep::Expr::Node(node, _) => node
-            .expr_children()
-            .any(|child| expr_mentions_unshadowed_name(child, name, bound)),
+        // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
+        deep::Expr::Node(node, span) => {
+            let bridged = deep::Expr::List(node.to_list(*span), *span);
+            expr_mentions_unshadowed_name(&bridged, name, bound)
+        }
         deep::Expr::BareList(elems, _) => elems
             .iter()
             .any(|child| expr_mentions_unshadowed_name(child, name, bound)),
@@ -1886,11 +1887,10 @@ pub(super) fn collect_eager_refs(
             collect_eager_refs(&meta.expr, bound, refs, applied);
         }
         deep::Expr::Atom(_, _) => {}
-        // Transitional: recurse into expression children.
-        deep::Expr::Node(node, _) => {
-            for child in node.expr_children() {
-                collect_eager_refs(child, bound, refs, applied);
-            }
+        // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
+        deep::Expr::Node(node, span) => {
+            let bridged = deep::Expr::List(node.to_list(*span), *span);
+            collect_eager_refs(&bridged, bound, refs, applied);
         }
         deep::Expr::BareList(elems, _) => {
             for child in elems {
