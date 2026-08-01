@@ -433,7 +433,7 @@ pub fn parse(tokens: &[Token]) -> Result<Vec<Expr>, ParseError> {
 /// `parse_str()` instead.
 #[allow(deprecated)]
 pub fn stamp_tags(exprs: &mut [Expr]) {
-    use crate::ast::{Atom, List, MetaMap};
+    use crate::ast::{Atom, MetaMap};
     fn stamp(expr: &mut Expr) {
         #[allow(deprecated)]
         match expr {
@@ -631,41 +631,42 @@ mod tests {
 
     #[test]
     fn parse_simple_list() {
+        // `add` is not in the closed vocabulary, so this becomes a BareList.
         let exprs = p("(add 1 2)");
         assert_eq!(exprs.len(), 1);
         match &exprs[0] {
-            Expr::List(list, _) => {
-                assert_eq!(list.elements.len(), 3);
-                match &list.elements[0] {
+            Expr::BareList(elems, _) => {
+                assert_eq!(elems.len(), 3);
+                match &elems[0] {
                     Expr::Atom(Atom::Name(s), _) => assert_eq!(s, "add"),
                     other => panic!("expected Symbol(add), got {:?}", other),
                 }
-                match &list.elements[1] {
+                match &elems[1] {
                     Expr::Atom(Atom::Int(1), _) => {}
                     other => panic!("expected Int(1), got {:?}", other),
                 }
-                match &list.elements[2] {
+                match &elems[2] {
                     Expr::Atom(Atom::Int(2), _) => {}
                     other => panic!("expected Int(2), got {:?}", other),
                 }
             }
-            other => panic!("expected List, got {:?}", other),
+            other => panic!("expected BareList, got {:?}", other),
         }
     }
 
     #[test]
     fn parse_list_no_children() {
-        // A list with just a tag and no children is valid.
+        // `nop` is not in the closed vocabulary, so a single-element list becomes BareList.
         let exprs = p("(nop)");
         match &exprs[0] {
-            Expr::List(list, _) => {
-                assert_eq!(list.elements.len(), 1);
-                match &list.elements[0] {
+            Expr::BareList(elems, _) => {
+                assert_eq!(elems.len(), 1);
+                match &elems[0] {
                     Expr::Atom(Atom::Name(s), _) => assert_eq!(s, "nop"),
                     other => panic!("expected Symbol(nop), got {:?}", other),
                 }
             }
-            other => panic!("expected List, got {:?}", other),
+            other => panic!("expected BareList, got {:?}", other),
         }
     }
 
@@ -675,31 +676,23 @@ mod tests {
         let exprs = p("(def {} f (fn {} (params {} x) (var {} x)))");
         assert_eq!(exprs.len(), 1);
         match &exprs[0] {
-            Expr::List(list, _) => {
-                assert_eq!(list.elements.len(), 4); // def, {}, f, (fn ...)
-                match &list.elements[0] {
-                    Expr::Atom(Atom::Tag(t), _) => {
-                        assert_eq!(*t, crate::tag::DeepTag::Def)
-                    }
-                    other => panic!("expected Tag(Def), got {:?}", other),
-                }
-                match &list.elements[1] {
-                    Expr::Map(m, _) => assert!(m.entries.is_empty()),
-                    other => panic!("expected empty Map, got {:?}", other),
-                }
-                match &list.elements[2] {
+            Expr::Node(node, _) => {
+                assert_eq!(node.tag(), crate::tag::DeepTag::Def);
+                assert!(node.meta().entries.is_empty());
+                // Def has 2 children: the name binder and the (fn ...) node
+                assert_eq!(node.child_count(), 2);
+                match &node.children_slice()[0] {
                     Expr::Atom(Atom::Name(s), _) => assert_eq!(s, "f"),
                     other => panic!("expected Symbol(f), got {:?}", other),
                 }
-                match &list.elements[3] {
-                    Expr::List(func, _) => match &func.elements[0] {
-                        Expr::Atom(Atom::Tag(t), _) => assert_eq!(*t, crate::tag::DeepTag::Fn),
-                        other => panic!("expected Symbol(fn), got {:?}", other),
-                    },
-                    other => panic!("expected fn list, got {:?}", other),
+                match &node.children_slice()[1] {
+                    Expr::Node(fn_node, _) => {
+                        assert_eq!(fn_node.tag(), crate::tag::DeepTag::Fn);
+                    }
+                    other => panic!("expected fn Node, got {:?}", other),
                 }
             }
-            other => panic!("expected List, got {:?}", other),
+            other => panic!("expected Node, got {:?}", other),
         }
     }
 
@@ -736,11 +729,11 @@ mod tests {
                 assert_eq!(meta.entries[0].0, "type");
                 assert_eq!(meta.entries[1].0, "pure");
                 match meta.expr.as_ref() {
-                    Expr::List(list, _) => match &list.elements[0] {
+                    Expr::BareList(elems, _) => match &elems[0] {
                         Expr::Atom(Atom::Name(s), _) => assert_eq!(s, "add"),
                         other => panic!("expected Symbol(add), got {:?}", other),
                     },
-                    other => panic!("expected List, got {:?}", other),
+                    other => panic!("expected BareList, got {:?}", other),
                 }
             }
             other => panic!("expected MetaExpr, got {:?}", other),
@@ -758,11 +751,11 @@ mod tests {
             other => panic!("expected Int(42), got {:?}", other),
         }
         match &exprs[1] {
-            Expr::List(list, _) => match &list.elements[0] {
+            Expr::BareList(elems, _) => match &elems[0] {
                 Expr::Atom(Atom::Name(s), _) => assert_eq!(s, "add"),
                 other => panic!("expected Symbol(add), got {:?}", other),
             },
-            other => panic!("expected List, got {:?}", other),
+            other => panic!("expected BareList, got {:?}", other),
         }
         match &exprs[2] {
             Expr::Atom(Atom::Name(s), _) => assert_eq!(s, "foo"),
@@ -802,8 +795,8 @@ mod tests {
         let exprs = parse_str("()").unwrap();
         assert_eq!(exprs.len(), 1);
         match &exprs[0] {
-            Expr::List(list, _) => assert!(list.elements.is_empty()),
-            other => panic!("expected empty list, got: {:?}", other),
+            Expr::BareList(elems, _) => assert!(elems.is_empty()),
+            other => panic!("expected empty BareList, got: {:?}", other),
         }
     }
 
@@ -813,14 +806,14 @@ mod tests {
         let exprs = p("(42 a b)");
         assert_eq!(exprs.len(), 1);
         match &exprs[0] {
-            Expr::List(list, _) => {
-                assert_eq!(list.elements.len(), 3);
-                match &list.elements[0] {
+            Expr::BareList(elems, _) => {
+                assert_eq!(elems.len(), 3);
+                match &elems[0] {
                     Expr::Atom(Atom::Int(42), _) => {}
                     other => panic!("expected Int(42), got {:?}", other),
                 }
             }
-            other => panic!("expected List, got {:?}", other),
+            other => panic!("expected BareList, got {:?}", other),
         }
     }
 

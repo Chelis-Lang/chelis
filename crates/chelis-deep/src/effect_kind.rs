@@ -35,6 +35,7 @@ pub fn decode_effect_kind(list: &List) -> Result<EffectKind, EffectKindDecodeErr
 mod tests {
     use super::*;
     use crate::parser::parse_str;
+    use crate::span::Span;
 
     fn list(source: &str) -> List {
         let expr = parse_str(source)
@@ -42,10 +43,12 @@ mod tests {
             .into_iter()
             .next()
             .expect("one expression");
-        let Expr::List(list, _) = expr else {
-            panic!("expected list")
-        };
-        list
+        match expr {
+            Expr::Node(node, span) => node.to_list(span),
+            #[allow(deprecated)]
+            Expr::List(list, _) => list,
+            other => panic!("expected Node or List, got {:?}", other),
+        }
     }
 
     #[test]

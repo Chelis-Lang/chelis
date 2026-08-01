@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::tag::DeepTag;
 use crate::{
-    Atom, DeepPath, Expr, List, PathSegment, ResolveError, Span, function_body, printer,
+    Atom, DeepPath, Expr, List, MetaMap, PathSegment, ResolveError, Span, function_body, printer,
     resolve_function,
 };
 
@@ -17,6 +17,77 @@ const MODULE_DECLS_START: usize = 3;
 const DEF_NAME_INDEX: usize = 2;
 const DEF_VALUE_INDEX: usize = 3;
 const FN_PARAMS_INDEX: usize = 2;
+
+/// Recursively convert all `Expr::Node` and `Expr::BareList` in a tree to
+/// the `Expr::List` form that the authoring module's internal helpers expect.
+/// This is a boundary normalization applied at each public entry point.
+#[allow(deprecated)]
+fn normalize_to_list(exprs: &[Expr]) -> Vec<Expr> {
+    exprs.iter().map(normalize_expr).collect()
+}
+
+#[allow(deprecated)]
+fn normalize_expr(expr: &Expr) -> Expr {
+    match expr {
+        Expr::Node(node, span) => {
+            let list = node.to_list(*span);
+            let elements = list.elements.iter().map(normalize_expr).collect();
+            Expr::List(List { elements }, *span)
+        }
+        Expr::BareList(elems, span) => {
+            let elements = elems.iter().map(normalize_expr).collect();
+            Expr::List(List { elements }, *span)
+        }
+        Expr::List(list, span) => {
+            let elements = list.elements.iter().map(normalize_expr).collect();
+            Expr::List(List { elements }, *span)
+        }
+        Expr::Map(map, span) => {
+            let entries = map
+                .entries
+                .iter()
+                .map(|(key, value)| (key.clone(), normalize_expr(value)))
+                .collect();
+            Expr::Map(MetaMap { entries }, *span)
+        }
+        Expr::MetaExpr(meta, span) => {
+            let entries = meta
+                .entries
+                .iter()
+                .map(|(key, value)| (key.clone(), normalize_expr(value)))
+                .collect();
+            Expr::MetaExpr(
+                crate::ast::MetaExpr {
+                    entries,
+                    expr: Box::new(normalize_expr(&meta.expr)),
+                },
+                *span,
+            )
+        }
+        Expr::UnknownForm(data) => {
+            let children: Vec<Expr> = data.children.iter().map(normalize_expr).collect();
+            Expr::List(
+                List {
+                    elements: {
+                        let mut elems =
+                            vec![Expr::Atom(Atom::Name(data.head.clone()), data.span)];
+                        let meta_entries = data
+                            .meta
+                            .entries
+                            .iter()
+                            .map(|(key, value)| (key.clone(), normalize_expr(value)))
+                            .collect();
+                        elems.push(Expr::Map(MetaMap { entries: meta_entries }, data.span));
+                        elems.extend(children);
+                        elems
+                    },
+                },
+                data.span,
+            )
+        }
+        Expr::Atom(..) => expr.clone(),
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModuleOutline {
@@ -102,7 +173,8 @@ pub enum AuthoringError {
 }
 
 pub fn outline(module_exprs: &[Expr]) -> Result<ModuleOutline, AuthoringError> {
-    let module = single_module(module_exprs)?;
+    let module_exprs = normalize_to_list(module_exprs);
+    let module = single_module(&module_exprs)?;
     let module_name = module_name(module).unwrap_or_default().to_string();
     let exports = module
         .elements
@@ -144,7 +216,8 @@ pub fn outline(module_exprs: &[Expr]) -> Result<ModuleOutline, AuthoringError> {
 }
 
 pub fn references(module_exprs: &[Expr], symbol: &str) -> Result<References, AuthoringError> {
-    let module = single_module(module_exprs)?;
+    let module_exprs = normalize_to_list(module_exprs);
+    let module = single_module(&module_exprs)?;
     let module_name = module_name(module).unwrap_or_default().to_string();
     let bare = bare_name(symbol);
     let top_level_names = top_level_function_names(module);
@@ -194,7 +267,8 @@ pub fn references(module_exprs: &[Expr], symbol: &str) -> Result<References, Aut
 }
 
 pub fn call_graph(module_exprs: &[Expr]) -> Result<CallGraph, AuthoringError> {
-    let module = single_module(module_exprs)?;
+    let module_exprs = normalize_to_list(module_exprs);
+    let module = single_module(&module_exprs)?;
     let module_name = module_name(module).unwrap_or_default().to_string();
     let top_level_names = top_level_function_names(module);
     let mut edges = Vec::new();
@@ -244,16 +318,17 @@ pub fn rename_function(
     function_name: &str,
     new_name: &str,
 ) -> Result<RenameReport, AuthoringError> {
-    let resolved = resolve_function(module_exprs, function_name)?;
+    let module_exprs = normalize_to_list(module_exprs);
+    let resolved = resolve_function(&module_exprs, function_name)?;
     validate_new_symbol(new_name)?;
     let old_name = bare_name(&resolved.qualified_name).to_string();
-    let module = single_module(module_exprs)?;
+    let module = single_module(&module_exprs)?;
     if top_level_function_names(module).contains(new_name) {
         return Err(AuthoringError::DuplicateFunction {
             name: new_name.to_string(),
         });
     }
-    let expected = references(module_exprs, &old_name)?.references.len();
+    let expected = references(&module_exprs, &old_name)?.references.len();
     let old_top_level_names = top_level_function_names(module);
 
     let mut rewritten = module_exprs.to_vec();
@@ -324,9 +399,11 @@ pub fn replace_function(
     function_name: &str,
     new_decls: &[Expr],
 ) -> Result<ReplaceFunctionReport, AuthoringError> {
-    let resolved = resolve_function(module_exprs, function_name)?;
+    let module_exprs = normalize_to_list(module_exprs);
+    let new_decls = normalize_to_list(new_decls);
+    let resolved = resolve_function(&module_exprs, function_name)?;
     let old_name = bare_name(&resolved.qualified_name).to_string();
-    let parsed = parse_function_bundle(new_decls, Some(&old_name))?;
+    let parsed = parse_function_bundle(&new_decls, Some(&old_name))?;
 
     let mut rewritten = module_exprs.to_vec();
     let module = single_module_mut(&mut rewritten)?;
@@ -380,14 +457,17 @@ pub fn change_signature(
     argument_order: &[String],
     param_renames: &[(String, String)],
 ) -> Result<ChangeSignatureReport, AuthoringError> {
-    let resolved = resolve_function(module_exprs, function_name)?;
+    let module_exprs = normalize_to_list(module_exprs);
+    let new_defsig = &normalize_expr(new_defsig);
+    let new_params = &normalize_expr(new_params);
+    let resolved = resolve_function(&module_exprs, function_name)?;
     let target_name = bare_name(&resolved.qualified_name).to_string();
     validate_new_defsig(new_defsig, &target_name)?;
     validate_params_node(new_params)?;
-    let old_params = function_params(module_exprs, function_name)?;
+    let old_params = function_params(&module_exprs, function_name)?;
     let old_param_set: BTreeSet<String> = old_params.iter().cloned().collect();
     validate_argument_order(argument_order, &old_param_set)?;
-    let expected_calls = references(module_exprs, &target_name)?.references.len();
+    let expected_calls = references(&module_exprs, &target_name)?.references.len();
     let rename_map: BTreeMap<String, String> = param_renames.iter().cloned().collect();
 
     let mut rewritten = module_exprs.to_vec();
@@ -489,8 +569,9 @@ pub fn function_params(
     module_exprs: &[Expr],
     function_name: &str,
 ) -> Result<Vec<String>, AuthoringError> {
-    let resolved = resolve_function(module_exprs, function_name)?;
-    let module = single_module(module_exprs)?;
+    let module_exprs = normalize_to_list(module_exprs);
+    let resolved = resolve_function(&module_exprs, function_name)?;
+    let module = single_module(&module_exprs)?;
     let def = module
         .elements
         .get(MODULE_DECLS_START + resolved.decl_index)
