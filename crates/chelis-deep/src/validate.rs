@@ -344,6 +344,14 @@ fn validate_tag_shape(
                         )
                         && matches!(inner.elements.get(1), Some(Expr::Map(_, _)))
                 }
+                Expr::BareList(elements, _) => {
+                    elements.len() == 2
+                        && matches!(
+                            elements.first(),
+                            Some(Expr::Atom(crate::ast::Atom::Name(_), _))
+                        )
+                        && matches!(elements.get(1), Some(Expr::Map(_, _)))
+                }
                 _ => false,
             });
             if !all_names {
@@ -367,11 +375,7 @@ fn validate_tag_shape(
         DeepTag::Effects => {
             let all_entries = list.elements.iter().skip(2).all(|child| {
                 matches!(child, Expr::Atom(crate::ast::Atom::Name(_), _))
-                    || matches!(
-                        child,
-                        Expr::List(inner, _)
-                            if inner.tag() == Some(DeepTag::Resource)
-                    )
+                    || child.tag() == Some(DeepTag::Resource)
             });
             if !all_entries {
                 warnings.push(ValidationWarning {
@@ -463,28 +467,15 @@ fn validate_property_def_metadata(
         key == "property_source_kind" && matches!(value, Expr::Atom(crate::ast::Atom::Str(_), _))
     });
     let has_quantifiers = meta.entries.iter().any(|(key, value)| {
-        key == "property_quantifiers"
-            && matches!(
-                value,
-                Expr::List(params, _)
-                    if params.tag() == Some(DeepTag::Params)
-                        && matches!(params.elements.get(1), Some(Expr::Map(_, _)))
-            )
+        key == "property_quantifiers" && tagged_children(value, DeepTag::Params).is_some()
     });
     let has_preconditions = meta.entries.iter().any(|(key, value)| {
-        key == "property_preconditions"
-            && matches!(
-                value,
-                Expr::List(tuple, _)
-                    if tuple.tag() == Some(DeepTag::Tuple)
-                        && matches!(tuple.elements.get(1), Some(Expr::Map(_, _)))
-            )
+        key == "property_preconditions" && tagged_children(value, DeepTag::Tuple).is_some()
     });
-    let body_is_fn = matches!(
-        list.elements.get(3),
-        Some(Expr::List(body, _))
-            if body.tag() == Some(DeepTag::Fn)
-    );
+    let body_is_fn = list
+        .elements
+        .get(3)
+        .is_some_and(|body| body.tag() == Some(DeepTag::Fn));
     for (ok, message) in [
         (
             has_source_kind,
@@ -555,62 +546,31 @@ fn validate_deftype_invariant_metadata(
 /// <body>)`: a `fn` node whose first child is a `params` node holding
 /// exactly one bare-symbol binder, and which has a body child.
 fn is_predicate_fn_shape(expr: &Expr) -> bool {
+    let Some(fn_children) = tagged_children(expr, DeepTag::Fn) else {
+        return false;
+    };
+    if fn_children.len() != 2 {
+        return false;
+    }
+    // params node with exactly one bare-symbol binder.
+    let Some(params_children) = fn_children
+        .first()
+        .and_then(|params| tagged_children(params, DeepTag::Params))
+    else {
+        return false;
+    };
+    params_children.len() == 1
+        && matches!(
+            params_children.first(),
+            Some(Expr::Atom(crate::ast::Atom::Name(_), _))
+        )
+}
+
+fn tagged_children(expr: &Expr, expected: DeepTag) -> Option<&[Expr]> {
     match expr {
-        Expr::List(fn_list, _) => {
-            let is_fn = fn_list.tag() == Some(DeepTag::Fn)
-                && matches!(fn_list.elements.get(1), Some(Expr::Map(_, _)));
-            if !is_fn || fn_list.elements.len() != 4 {
-                return false;
-            }
-            // params node with exactly one bare-symbol binder.
-            match fn_list.elements.get(2) {
-                Some(Expr::List(params, _)) => {
-                    params.tag() == Some(DeepTag::Params)
-                        && matches!(params.elements.get(1), Some(Expr::Map(_, _)))
-                        && params.elements.len() == 3
-                        && matches!(
-                            params.elements.get(2),
-                            Some(Expr::Atom(crate::ast::Atom::Name(_), _))
-                        )
-                }
-                Some(Expr::Node(params_node, _)) => {
-                    params_node.tag() == DeepTag::Params
-                        && params_node.child_count() == 1
-                        && matches!(
-                            params_node.children_slice().first(),
-                            Some(Expr::Atom(crate::ast::Atom::Name(_), _))
-                        )
-                }
-                _ => false,
-            }
-        }
-        Expr::Node(fn_node, _) => {
-            if fn_node.tag() != DeepTag::Fn || fn_node.child_count() != 2 {
-                return false;
-            }
-            // params node with exactly one bare-symbol binder.
-            match fn_node.children_slice().first() {
-                Some(Expr::Node(params_node, _)) => {
-                    params_node.tag() == DeepTag::Params
-                        && params_node.child_count() == 1
-                        && matches!(
-                            params_node.children_slice().first(),
-                            Some(Expr::Atom(crate::ast::Atom::Name(_), _))
-                        )
-                }
-                Some(Expr::List(params, _)) => {
-                    params.tag() == Some(DeepTag::Params)
-                        && matches!(params.elements.get(1), Some(Expr::Map(_, _)))
-                        && params.elements.len() == 3
-                        && matches!(
-                            params.elements.get(2),
-                            Some(Expr::Atom(crate::ast::Atom::Name(_), _))
-                        )
-                }
-                _ => false,
-            }
-        }
-        _ => false,
+        Expr::Node(node, _) if node.tag() == expected => Some(node.children_slice()),
+        Expr::List(list, _) if list.tag() == Some(expected) => list.elements.get(2..),
+        _ => None,
     }
 }
 
