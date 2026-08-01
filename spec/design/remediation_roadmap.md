@@ -96,7 +96,13 @@ accepted at exit 0 with final line `PHASE 2 ORACLE: PASS` - it carries
 the known-red ledger that keeps every annexed [#729]-family cell
 re-executed rather than silently skipped, and fails when one goes
 green, so the upstream repair's landing forces the un-ignore in the
-same change set. It ran in parallel with [#731] Phases 2-3 (the
+same change set. That protocol has now retired the [#864] cell: current
+execution showed its root metadata was already F64, while the static
+`to_tensor` lowering shortcut skipped f32 literal-ingress finalization
+before the widening cast; the construction fix, original assertion,
+oracle-ledger shrink, and annex correction land together. This is a
+narrow [#717]/[#729]-family value repair and does not claim the atomic
+per-dtype-storage Phase 1 migration. It ran in parallel with [#731] Phases 2-3 (the
 witness token + DeepTag). [#730] Phase 2 is COMPLETE AND
 ACCEPTED (PR [#799], merged 2026-07-24): closed vocabularies, staged
 HostType/ABI separation, and structured emission, with the authoritative

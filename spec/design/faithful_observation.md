@@ -17,21 +17,21 @@ Phase 2 (the generated C side and the C-side §B2.1 migration) landed
 generated from an exhaustive `Prim` match, `to_list`'s F16/BF16 arms,
 and §C2.3 cross-lane byte equality locked for identical stored bits -
 [#716]/[#723]/[#726]-C/[#748]/[#749] fixed by un-ignoring their red
-cells (close the issues on the PR #863 merge). Four recorded
-boundaries, each issue-linked ([#864] and [#865] with ignored red
-cells in the harness): eval TENSOR float elements still render at the stored
+cells (close the issues on the PR #863 merge). The remaining recorded
+boundaries are issue-linked: eval TENSOR float elements still render at the stored
 f64 width (the deliberate §8.1 width note, [#729]'s metadata repair),
 so non-dyadic narrow-float tensor cells stay width-divergent across
-lanes until then; eval's LABELED ROOT of a cast-constructed f64 tensor
-narrows through the stale F32 tag ([#864], the [#717] family - an
-[05-OBS-1] violation inside eval, surfaced by PR #863's red team); the
-compiled lane's untagged f64 value box renders narrower float elements
+lanes until then; the compiled lane's untagged f64 value box renders narrower float elements
 (f32 as well as f16/bf16) at f64-image width through `to_list` and
 list/tuple boxing - faithful parse-back, not own-width shortest
 ([#865], the [#729]/[#686] capacity family). The former single-root
 label discrepancy [#862] is now authored by [05-OBS-6] and its prefix
 has landed; complete manifest-backed root availability and artifact
-acceptance remain under [#912]/[#1023], not this formatter class. Phase 3
+acceptance remain under [#912]/[#1023], not this formatter class. The
+cast-constructed f64 root cell [#864], surfaced by PR #863, is repaired
+and un-ignored after a post-Phase-3 re-diagnosis: the root tag was already
+F64, but the static `to_tensor` DAG shortcut widened lexical decimals
+without first materializing its F32 source values. Phase 3
 authors the [05-OBS-3] table, moves both value harnesses and the rejected-cell
 corpus onto `chelis_types::agreement`, and supplies one executable acceptance
 oracle. Its implementation is complete here; merge/CI acceptance is recorded
@@ -783,23 +783,29 @@ and the [#862] unit-root labeling discovery is filed, not absorbed.
 (4) PR #863's fresh-context red team (round 1) surfaced two further
 width-annex gaps, filed per §B2.5 and annexed at spec/05 §8 with
 ignored red cells: [#864] (eval's labeled-root render of
-`cast(<tensor>, f64)` results narrows through the stale F32 tag - an
-eval-lane [05-OBS-1] violation the harness's `via_cast=false` F64 table
+`cast(<tensor>, f64)` disagreed with the print transcript - an eval-lane
+[05-OBS-1] violation the harness's `via_cast=false` F64 table
 structurally never constructed) and [#865] (the compiled lane's
 untagged f64 value box renders f32 - not only f16/bf16 - elements at
 f64-image width through `to_list`/boxing; faithful but not own-width
 shortest). Both are [#729]-family value/capacity repairs; rendering is
-not the fix site for either.
+not the fix site for either. The chelis#864 follow-up re-diagnosed its
+current exact cause: the root tag was already F64, while static
+`to_tensor` lowering retained lexical f64 decimals in an F32 source node
+and widened the wrong stored value. Finalizing that F32 literal ingress
+repaired the cell, so it is now un-ignored and absent from the ledger;
+[#865] remains annexed.
 (5) The phase's oracle became a script rather than a prose conjunction,
 after PR #863's exact-head red team (F3) observed that the default
 harness run reported "30 passed, 3 skipped" while nothing asserted what
 the three skips were, that they still failed for their stated reasons,
-or that none had gone green. Three annexed cells is a defensible
-boundary; three cells nobody re-executes is not, and the difference is
+or that none had gone green. Three annexed cells was a defensible
+boundary; three cells nobody re-executed was not, and the difference is
 not visible from a green suite. The ledger makes the boundary
 executable, and its unexpectedly-green leg turns each cell into
-[#729]'s exit-criteria instrument: the day the tag repair or the box
-width lands, this oracle fails until the cell is un-ignored. The
+[#729]'s exit-criteria instrument: the day a value or box-width repair
+lands, this oracle fails until the cell is un-ignored. That transition
+has now occurred for [#864]; its row and ignore left together. The
 accompanying status texts here and at spec/05 §8 were narrowed in the
 same change set to say "conformant except the enumerated annexed cells"
 rather than leading with an unqualified conformance claim.
@@ -904,8 +910,9 @@ and every remaining value divergence is a failure rather than tolerance.
   and CAPACITY change, not a rendering one. Three separations remain
   open on that side and each already has its named cell: the runtime
   box's single `CHELIS_VALUE_FLOAT64` tag and `f64_` slot ([#865]),
-  eval's separable `Vec<f64>` plus `precision: Prim` fields ([#864],
-  [#717]), and the wire's `Vec<f64>` tensor data plus lone `Float64`
+  eval's separable `Vec<f64>` plus `precision: Prim` fields ([#717];
+  [#864]'s narrower static-literal ingress instance is repaired), and the
+  wire's `Vec<f64>` tensor data plus lone `Float64`
   scalar variant ([#686]).
   **Phase 2's FORMATTING is forward-compatible with that payload by
   construction; its DECODING was not, and that distinction matters**

@@ -37,7 +37,6 @@
 //! | cell | issue |
 //! |---|---|
 //! | eval int64 SCALAR ROOT above 2^53 (rank-0 f64 realization collapses the value before the renderer) | chelis#684 ([#729] value layer; PR #792 red-team F1) |
-//! | eval LABELED ROOT of a cast-constructed f64 tensor (the stale F32 tag narrows the root render while print shows the stored bits) | chelis#864 (chelis#717 family, [#729] value layer; PR #863 red-team F1) |
 //! | compiled boxed renders of f32 elements (the untagged f64 box carries f64-image digits, not the own-width shortest form) | chelis#865 ([#729]/[#686] capacity family; PR #863 red-team F2) |
 //!
 //! The six C-side cells went green at chelis#732 Phase 2 (un-ignored per
@@ -47,7 +46,7 @@
 //! cross-lane byte equality is locked below for agreeing bits
 //! (`cross_lane_stdout_is_byte_identical_where_bits_agree`).
 //!
-//! Those three cells are NOT skipped silently. The phase's authoritative
+//! Those two cells are NOT skipped silently. The phase's authoritative
 //! oracle (`.venv/bin/python scripts/faithful_observation_phase2_oracle.py`)
 //! holds the same table as a ledger keyed by issue, requires this file's
 //! `#[ignore]` inventory to EQUAL it (an undeclared ignore is a silently
@@ -1388,21 +1387,15 @@ fn eval_int64_scalar_root_above_2p53_renders_exact() {
     );
 }
 
-/// RED (chelis#864; chelis#717's stale-tag family, [#729] value layer;
-/// PR #863 red-team F1): eval's LABELED ROOT renders a cast-constructed
-/// f64 tensor through the stale F32 precision tag while the print
-/// transcript renders the stored f64 bits - [05-OBS-1]'s intra-lane exit
-/// agreement broken inside eval, and the root text no longer parses back
-/// to the stored bits at the declared f64 width. The compiled lane
-/// renders all exits identically (the correct behavior). The trigger is
-/// `cast(<tensor>, f64)` leaving the runtime tag at F32; the frozen F64
-/// table never constructs that shape (`via_cast=false`), which is how
-/// the cell hid from the corpus. Un-ignore when [#729] repairs the tag.
+/// GREEN regression (chelis#864; PR #863 red-team F1): eval's transcript
+/// and labeled-root exits agree for a cast-constructed f64 tensor. The
+/// post-Phase-3 diagnosis established that the root tag was already F64;
+/// the static `to_tensor` DAG shortcut had retained lexical f64 decimals
+/// in its F32 source node, so widening produced different stored values
+/// from the host path. Finalizing that shortcut's f32 ingress before the
+/// cast repairs the value, and this original red assertion stays as the
+/// [05-OBS-1] regression lock.
 #[test]
-#[ignore = "chelis#864 (chelis#717 stale-tag family, [#729] value layer): eval's labeled \
-            root renders a cast-constructed f64 tensor at the F32 tag width while print \
-            renders the stored f64 bits. Un-ignore when the tag repair lands. Run with \
-            `cargo test -p chelis-cli --test observation_roundtrip_harness -- --ignored`."]
 fn eval_f64_cast_tensor_root_renders_stored_width() {
     let program = "module M.Main\n\
          def mk() -> tensor[2, f64] = cast(to_tensor([0.1, 0.3]), f64)\n\
@@ -1417,9 +1410,10 @@ fn eval_f64_cast_tensor_root_renders_stored_width() {
         tlines[0], "tensor(shape=[2], data=[0.10000000149011612, 0.30000001192092896])",
         "the print transcript must keep rendering the stored bits"
     );
-    // Red half: the labeled root must agree with the transcript
-    // ([05-OBS-1] intra-lane exit agreement). Today it renders `0.1, 0.3`
-    // through the stale F32 tag - text that parses to DIFFERENT f64 bits.
+    // The labeled root must agree with the transcript ([05-OBS-1]
+    // intra-lane exit agreement). Before chelis#864 it rendered `0.1,
+    // 0.3`: the static DAG shortcut widened the unfinalized lexical
+    // decimals instead of the host path's stored f32 values.
     assert_eq!(
         tlines[1],
         format!("troot = {}", tlines[0]),

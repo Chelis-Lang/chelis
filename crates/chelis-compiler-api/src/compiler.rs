@@ -5065,6 +5065,101 @@ def loss(x: tensor[2, 2, f32], w: tensor[2, 2, f32]) -> tensor[f32] =
         );
     }
 
+    /// chelis#864 / [05-OBS-1]: a nullary tensor function whose body
+    /// changes dtype must carry the same stored source value through each
+    /// inlined call root. The transcript evaluates `mk()` in the host lane,
+    /// while the labeled `troot` is read from the lowered DAG. The F64 root
+    /// assertion below is an explicit diagnosis control: the issue was not a
+    /// stale root tag, but an F32 static-literal source that had never been
+    /// materialized at f32 width before the widening cast.
+    #[test]
+    fn issue_864_cast_constructed_f64_root_agrees_with_host_value() {
+        let source = "module M.Main\n\
+            def mk() -> tensor[2, f64] = cast(to_tensor([0.1, 0.3]), f64)\n\
+            shown = print(mk())\n\
+            troot = mk()\n";
+
+        let compiled = compile_source(SourceKind::Surf, source).expect("compile");
+        let root_id = compiled.named_roots["troot"];
+        let root = compiled.dag.get(root_id).expect("troot DAG node");
+        assert_eq!(
+            root.output_type.precision,
+            chelis_types::types::Prim::F64,
+            "the lowered call root must carry mk's declared f64 return dtype"
+        );
+
+        let result = eval(EvalRequest {
+            source_kind: SourceKind::Surf,
+            source: source.to_string(),
+            bindings: BTreeMap::new(),
+        })
+        .expect("eval");
+        assert_eq!(
+            result.transcript,
+            vec!["tensor(shape=[2], data=[0.10000000149011612, 0.30000001192092896])"]
+        );
+        let troot = result
+            .roots
+            .iter()
+            .find(|root| root.name.as_deref() == Some("troot"))
+            .expect("troot result");
+        assert_eq!(
+            troot.display.as_deref(),
+            result.transcript.first().map(String::as_str),
+            "labeled-root and transcript exits must render the same stored f64 bits"
+        );
+    }
+
+    /// Negative-parity control for chelis#864: finalizing f32 literal
+    /// ingress must not promote a genuinely f32 cast root.
+    #[test]
+    fn issue_864_f32_cast_root_keeps_f32_dtype() {
+        let source = "module M.Main\n\
+            def mk() -> tensor[2, f32] = cast(to_tensor([0.1, 0.3]), f32)\n\
+            troot = mk()\n";
+        let compiled = compile_source(SourceKind::Surf, source).expect("compile");
+        let root = compiled
+            .dag
+            .get(compiled.named_roots["troot"])
+            .expect("troot DAG node");
+        assert_eq!(
+            root.output_type.precision,
+            chelis_types::types::Prim::F32,
+            "the dtype handoff must preserve a real f32 return"
+        );
+    }
+
+    /// Negative-parity control for chelis#864: the F32 ingress repair is
+    /// not a blanket f64-to-f32 narrowing. A direct f64 static literal
+    /// tensor keeps the lexical f64 values in both eval exits.
+    #[test]
+    fn issue_864_direct_f64_literal_root_is_not_narrowed() {
+        let source = "module M.Main\n\
+            def mk() -> tensor[2, f64] = to_tensor([cast(0.1, f64), cast(0.3, f64)])\n\
+            shown = print(mk())\n\
+            troot = mk()\n";
+        let result = eval(EvalRequest {
+            source_kind: SourceKind::Surf,
+            source: source.to_string(),
+            bindings: BTreeMap::new(),
+        })
+        .expect("eval");
+        assert_eq!(
+            result.transcript,
+            vec!["tensor(shape=[2], data=[0.1, 0.3])"],
+            "a direct f64 literal tensor must not be narrowed to f32 ingress"
+        );
+        let troot = result
+            .roots
+            .iter()
+            .find(|root| root.name.as_deref() == Some("troot"))
+            .expect("troot result");
+        assert_eq!(
+            troot.display.as_deref(),
+            result.transcript.first().map(String::as_str)
+        );
+    }
+
     #[test]
     fn compile_source_excludes_host_only_roots_from_lowered_root_map() {
         let source = r#"
