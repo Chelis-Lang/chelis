@@ -1,0 +1,93 @@
+{
+  "version": 1,
+  "citation": "pre-Phase-1 registered-PyO3 baseline; chelis#729",
+  "rows": [
+    {
+      "flags": [],
+      "id": "chelis_python::check_json(py: Python<'_>, source: &str, source_kind: &str) -> PyResult<String>",
+      "kind": "binding-pyfunction"
+    },
+    {
+      "flags": [],
+      "id": "chelis_python::compile_and_load(py: Python<'_>, source_path: &str, target: &str, source_kind: &str, entry_name: Option<String>, artifact_dir: Option<&str>) -> PyResult<NativeCompiledModel>",
+      "kind": "binding-pyfunction"
+    },
+    {
+      "flags": [],
+      "id": "chelis_python::compile_json(py: Python<'_>, source: &str, target: &str, source_kind: &str, entry_name: Option<String>) -> PyResult<String>",
+      "kind": "binding-pyfunction"
+    },
+    {
+      "flags": [],
+      "id": "chelis_python::decompile_json(py: Python<'_>, source: &str) -> PyResult<String>",
+      "kind": "binding-pyfunction"
+    },
+    {
+      "flags": [],
+      "id": "chelis_python::desugar_json(py: Python<'_>, source: &str) -> PyResult<String>",
+      "kind": "binding-pyfunction"
+    },
+    {
+      "flags": [],
+      "id": "chelis_python::eval_json(py: Python<'_>, source: &str, bindings_json: &str, source_kind: &str) -> PyResult<String>",
+      "kind": "binding-pyfunction"
+    },
+    {
+      "flags": [],
+      "id": "chelis_python::load(py: Python<'_>, path: &str) -> PyResult<NativeCompiledModel>",
+      "kind": "binding-pyfunction"
+    },
+    {
+      "flags": [],
+      "id": "chelis_python::validate_json(py: Python<'_>, source: &str, mode: &str) -> PyResult<String>",
+      "kind": "binding-pyfunction"
+    },
+    {
+      "flags": [],
+      "id": "chelis_python::CompiledModel::__call__(self: &Self, py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<PyObject>",
+      "kind": "binding-pymethod"
+    },
+    {
+      "flags": [],
+      "id": "chelis_python::CompiledModel::input_names(self: &Self) -> Vec<String>",
+      "kind": "binding-pymethod"
+    },
+    {
+      "flags": [],
+      "id": "chelis_python::CompiledModel::output_names(self: &Self) -> Vec<String>",
+      "kind": "binding-pymethod"
+    },
+    {
+      "flags": [],
+      "id": "chelis_python::CompiledModel::path(self: &Self) -> String",
+      "kind": "binding-pymethod"
+    },
+    {
+      "flags": [],
+      "id": "chelis_python::CompiledModel::target(self: &Self) -> String",
+      "kind": "binding-pymethod"
+    },
+    {
+      "flags": [
+        "numeric-param"
+      ],
+      "id": "chelis_python::NativeTensor::__dlpack__(self: &Self, py: Python<'_>, stream: Option<usize>, max_version: Option<&Bound<'_, PyAny>>, dl_device: Option<&Bound<'_, PyAny>>, copy: Option<bool>) -> PyResult<PyObject>",
+      "kind": "binding-pymethod"
+    },
+    {
+      "flags": [],
+      "id": "chelis_python::NativeTensor::__dlpack_device__(self: &Self) -> (i32, i32)",
+      "kind": "binding-pymethod"
+    },
+    {
+      "flags": [],
+      "id": "chelis_python::NativeTensor::dtype(self: &Self) -> PyResult<&'static str>",
+      "kind": "binding-pymethod"
+    },
+    {
+      "flags": [],
+      "id": "chelis_python::NativeTensor::shape(self: &Self) -> Vec<usize>",
+      "kind": "binding-pymethod"
+    }
+  ]
+}
