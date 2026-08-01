@@ -3728,8 +3728,13 @@ fn host_expr_lowering_error(
         Expr::Atom(_, _) => "raw Deep atom expression".to_string(),
         Expr::Map(_, _) => "raw Deep metadata map expression".to_string(),
         Expr::MetaExpr(_, _) => "wrapped Deep expression".to_string(),
-        // Transitional arms for new Expr variants (#908)
-        Expr::Node(node, _) => format!("stamped Node `{}`", node.tag().as_str()),
+        Expr::Node(node, _) => {
+            if node.tag() == DeepTag::Fn {
+                "anonymous function value `fn`".to_string()
+            } else {
+                format!("Deep expression `{}`", node.tag().as_str())
+            }
+        }
         Expr::BareList(_, _) => "bare list expression".to_string(),
         Expr::UnknownForm(data) => format!("unknown form `{}`", data.head),
     };
