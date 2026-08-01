@@ -6,7 +6,7 @@ exit census) landed 2026-07-17 (PR #752, tightened by PR #774). Phase 1
 2026-07-20: `format_element` lives at `chelis-types::observation`, every
 eval exit routes through it, §C1 and the number grammar are FROZEN (B1),
 and the contract is ratified as `spec/05-risc-primitives.md` §8 atoms
-[05-OBS-1..5] (the chelis#775 scalar-root decision is [05-OBS-4]). One
+[05-OBS-1..6] (the chelis#775 scalar-root decision is [05-OBS-4]). One
 annexed value-layer exception, surfaced by PR #792's red team: int64
 scalar roots above 2^53 render the f64-collapsed stored value at the
 labeled root ([#684]'s rank-0 realization, repaired by [#729]; the
@@ -27,11 +27,13 @@ narrows through the stale F32 tag ([#864], the [#717] family - an
 compiled lane's untagged f64 value box renders narrower float elements
 (f32 as well as f16/bf16) at f64-image width through `to_list` and
 list/tuple boxing - faithful parse-back, not own-width shortest
-([#865], the [#729]/[#686] capacity family); and unit-valued
-single-print-root labeling diverges ([#862], a root-labeling discovery
-outside the [05-OBS] atoms). Phase 3 remains. Tracking issue: [#732].
+([#865], the [#729]/[#686] capacity family). The former single-root
+label discrepancy [#862] is now authored by [05-OBS-6] and its prefix
+has landed; complete manifest-backed root availability and artifact
+acceptance remain under [#912]/[#1023], not this formatter class. Phase 3
+remains. Tracking issue: [#732].
 **Owning specs:** `spec/05-risc-primitives.md` (its §8 carries this
-plan's ratified contract as current blockquote authorities [05-OBS-1..5]; the
+plan's ratified contract as current blockquote authorities [05-OBS-1..6]; the
 per-op tolerance table lands into the same section at Phase 3, while
 chelis#733 later migrates authority form and revisions through the pinned Buoy
 shell-side integration), `spec/04-type-system.md` (dtype value-set
@@ -194,6 +196,21 @@ Per-dtype rules:
    `format_element` for the embedded value - a diagnostic must not
    launder what it reports.
 
+### C1.1 Root envelope addendum ([05-OBS-6])
+
+Each emitted root is rendered as `name = value` at every exit in both lanes;
+when an exit emits multiple roots, their order is manifest entry order. The
+`value` half obeys §C1 unchanged; the prefix is an envelope around that
+payload, not a new numeric formatter or container shape. The root set, its
+order, and whether `build` owes a runnable artifact belong to [#912]. A lane
+that cannot produce an owed root uses [#730]'s typed failure channel to emit
+[05-UNS-1] with the root, lane, and reason.
+
+This addendum records the numbered-spec decision without absorbing the #912
+class into #732. In particular, a labelled line does not prove that the
+manifest is complete or that production observation consumed it. Those
+acceptance obligations remain explicit in [#1023].
+
 ## C2. The agreement contract
 
 For every dtype and every storable value:
@@ -347,18 +364,22 @@ For every dtype and every storable value:
 | §C1 rules + number grammar | Phase 1 (FROZEN 2026-07-20; ratified as spec/05 §8/§8.1) | this doc + dtype_semantics.md §C4 + the migration corpus, one change set |
 | §C2 agreement contract | Phase 1 (intra-lane; FROZEN for eval 2026-07-20), Phase 2 (cross-lane byte equality) | same protocol |
 | §C3.3 C formatting routine behavior AND its C ABI signature | Phase 2 (the signature settled at the R2 review, before the 0.18 tag) | this doc; must stay grammar-identical to Rust `{:?}` (§C1.3 - an earlier revision of this row said `Display`, which §C1.3 explicitly rules out). The signature is frozen for the same reason the render is: after 0.18 ships, changing it breaks every shell that links the runtime |
+| §C1.1 root envelope | [05-OBS-6] authored 2026-07-31; full implementation acceptance pending [#1023] | spec/05 [05-OBS-6] + this doc + dtype_semantics.md §C4 + the release roadmap + the root-boundary corpus, one change set |
 | §C4 tolerance table (authored into spec/05 §8 per [05-OBS-3]) | Phase 3 | spec/05 edit + [#687] corpus, one change set |
 
 ## B2. Invariants that hold across every boundary
 
-1. **The one-time migration carve-out.** The sibling plans' "controls
-   never move" rule has exactly one sanctioned exception, here: printed
-   STRING expectations across the existing suite move ONCE, in the
-   Phase 1/2 adoption PRs, mechanically, with the round-trip invariant
-   proving that only the rendering changed (same bits, new text). The
-   migration is a dedicated change set per lane - never mixed with a
-   value-semantics change, so a diff in a migration PR that alters a
-   parsed VALUE is by definition a bug.
+1. **The bounded migration carve-outs.** The sibling plans' "controls
+   never move" rule has two separately authored string-only migrations.
+   First, payload expectations moved once per lane in the Phase 1/2
+   adoption PRs, with the round-trip invariant proving that only rendering
+   changed. Second, [05-OBS-6]'s root `name = ` prefix shipped once in both
+   lanes in v0.18.1; it may not change payload digits or value shape. Each
+   migration is isolated from value-semantics work, so a diff that alters a
+   parsed VALUE is by definition a bug. That shipped prefix is not proof of
+   full [05-OBS-6] conformance: [#1023]'s root-boundary corpus and manifested
+   production path still owe the complete root set, order, and unavailable-root
+   behavior.
 2. **Bits before text.** Any test updated by the migration asserts (or
    is accompanied by) the value at the bit level where exactness
    matters, so future formatting work can never again mask a value
@@ -939,3 +960,5 @@ guaranteed to be a real value bug wearing its own name.
 [#893]: https://github.com/Chelis-Lang/chelis/issues/893
 [#894]: https://github.com/Chelis-Lang/chelis/issues/894
 [#964]: https://github.com/Chelis-Lang/chelis/pull/964
+[#912]: https://github.com/Chelis-Lang/chelis/issues/912
+[#1023]: https://github.com/Chelis-Lang/chelis/issues/1023

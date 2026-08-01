@@ -42,7 +42,7 @@ issue that took it:
 | [#730] makes callable rejections loud and explicitly non-goals making them WORK ("that is [#729]'s or an op-owner's work"), so a C-host function-value ABI has no owner anywhere in the five | [#909] ([#866], [#867], [#879]). [#868] keeps its [#730] parent - span threading IS section C2's contract |
 | [#729] seals numeric construction behind private Rust constructors. It has no reach into the C runtime, where `chelis_tensor.data` is a `pub` untyped `*mut u8`; Phases 0-4 never touch it | [#893] ([#899], [#889]). [#892]'s bool storage still rides [#729]'s v0.19 cut |
 | [#730] section C2 declares the diagnostic span normative and [#731] owns checker diagnostics, but neither has a phase that threads one: `Unsupported::with_span` and `CheckError::with_span_id` both have zero call sites | [#883] ([#868], [#886] keep their [#730] parent) |
-| [05-OBS-1..5] are each conditioned on a stored numeric value reaching an exit, so three of the four questions about what a top-level ROOT is - does it exist, is it named, must `build` emit a `main` - are outside every observation atom ([#732]) and outside any authored text ([#733]) | [#912] ([#820], [#862]). [#775]'s shape half IS authored ([05-OBS-4]); only its C residue remains under [#732] |
+| [05-OBS-1..5] were each conditioned on a stored numeric value reaching an exit, so root existence, naming, order, and the `build` artifact obligation were outside [#732]. [05-OBS-6] now authors the always-labelled manifest-order envelope and the unavailable-root [05-UNS-1] requirement; complete manifested observation/build consumption is still not delivered by the formatter plan | [#912] ([#820], [#862]), with the post-[#1003] integration/acceptance residue tracked at [#1023]. [#775]'s shape half remains [05-OBS-4] under [#732] |
 | no numeric plan touches `chelis reef conform`'s audit surface, which the four bump waves below keep regenerating gaps in | [#788] ([#814], [#825], [#845]) |
 
 None carries a wave assignment; they are not sequenced against the waves.
@@ -313,12 +313,14 @@ once is cheap; a break they make and later unmake is the expensive kind. Like
 the sequencing above, this ordering is advice, not law; a cut may move if a
 cell becomes urgent.
 
-Baseline (2026-07): the shipped release is **v0.16.1**; everything merged since
-- the Phase 1s (PRs #791/#792/#793) and the ordinary work alongside them - sits
-on `main` unreleased. Step zero is to cut it as v0.17.0. A cut's migration note
-is the **breaking-change summary**, not the full release contents: most of what
-a cut carries is ordinary work, and only the deltas called out below force a
-downstream change.
+Current baseline (2026-08-01): **v0.18.1 is shipped**. The v0.17 and v0.18 rows
+below are therefore historical records, while v0.19 and v0.20 remain planned
+cuts. v0.18.1 already shipped [05-OBS-6]'s `name = ` prefix in both lanes. It
+did not deliver the manifested root set/order, unavailable-root behavior, or
+artifact boundary; that remaining root-topology migration rides the next
+source-migration cut (v0.19). A cut's migration note is the **breaking-change
+summary**, not the full release contents: most of what a cut carries is ordinary
+work, and only the deltas called out below force a downstream change.
 
 ### What actually forces a downstream change
 
@@ -327,7 +329,9 @@ downstream change.
 | A - syntax migration | `with seed(42)` -> `42i64` ([#731] P1) | one-time, final |
 | B - loud rejection of silently-wrong code | [#730]/[#731]/[#729] loud paths, [#730] P2 host-type | shells fix a real bug; permanent |
 | C - wire / binding break | [#729] §C3 per-dtype storage (schema + Python payload) | one-time; **must be atomic** (§C3 forbids partial adoption) |
-| D - rendering change | [#732] printed-output strings | churn ONLY if one lane changes twice |
+| D1 - payload rendering change | [#732] element/container strings | payload churn ONLY if one lane changes twice |
+| D2a - root label prefix | [05-OBS-6] `name = value` | SHIPPED once in v0.18.1; frozen; does not reopen D1 |
+| D2b - manifested root topology | [#912]/[#1023] complete root set/order, dotted expansion, unavailable-root diagnostics, and artifact routing | one coordinated post-v0.18.1 migration in both lanes; may not alter D1 or D2a |
 | E - reject-now-support-later | [#730] loud reject -> [#729] kernel lands | the add-then-remove-workaround trap |
 
 The class-E anti-churn tool is the capability *decision* itself: whether a cell
@@ -342,33 +346,40 @@ decisions 0.19 already made, so it is behavior-preserving by construction.
 
 | cut | carries | shell impact | notes |
 |---|---|---|---|
-| **v0.17.0 - loud checking + canonical eval rendering** (ship now) | [#730] P1 + [#731] P1 + [#732] P1, and everything else merged since 0.16.1 | **source migration** (wave 1) | breaking deltas only: loud rejections (incl. the new loud compiled-lane `test_*` assert, [#796] - the old inert-`0` stub is gone, so anything leaning on it fails heavily in E2E), `with seed(n)` -> `42i64` ([#731] P1 - the Shoals / Whale / hello-chelis HEAD canaries fail on unsuffixed seeds), and dtype-faithful eval rendering. Seed form frozen ([#735] changes only meaning); eval render frozen (C matches it at 0.18) |
-| **v0.18.0 - checker totality, DeepTag, host-type/ABI boundary, compiled rendering** | [#731] P2 (PR #800) + [#731] P3 (DeepTag) + [#730] P2 (PR #799 vocab + host-type/ABI state) + [#732] P2 (compiled render) | **mechanical** for shells | no wire break ([#730] P2 preserves the `CHELIS_*` ids); the added loudness lands on already-broken code, so no *expected* source migration. Completes byte-identical rendering. Release-hygiene gate: the tarball must now ship `chelis_runtime_dtype.h` - PR 799's public `chelis_runtime.h` `#include`s it, but the release workflow currently copies only `chelis_runtime.h` |
-| **v0.19.0 - grounded dtype storage/wire break + every behavior-changing capability decision** | [#729] P1-P3 landed atomic per §C3, **plus every capability decision that changes behavior** - integer-overflow traps and each supported-vs-`Unimplemented` disposition (int `mean` [#724], bool arithmetic [#726], the [#715] rows, the HIP/Metal/C reject cells) - plus the prelude JSON/CSV integer-capacity decision (a `JInt`-shaped variant and integer accessors) for any prelude numeric channel this cut admits - invariant 7 HOLDS such channels out of every earlier release unless they land integer-capable from the start ([#729] §C3's amended census) - and any published-ABI signature change deferred here by anti-churn invariant 7 | **source migration** (wave 2) | the one wire break, isolated from the checker-loudness cuts; class E resolves here, not at the 0.20 table. Bindings adapt to the per-dtype payload once; capability behavior is final |
+| **v0.17.0 - loud checking + canonical eval rendering** (SHIPPED) | [#730] P1 + [#731] P1 + [#732] P1, and everything else merged since 0.16.1 | **source migration** (wave 1) | breaking deltas only: loud rejections (incl. the new loud compiled-lane `test_*` assert, [#796] - the old inert-`0` stub is gone, so anything leaning on it fails heavily in E2E), `with seed(n)` -> `42i64` ([#731] P1 - the Shoals / Whale / hello-chelis HEAD canaries fail on unsuffixed seeds), and dtype-faithful eval rendering. Seed form frozen ([#735] changes only meaning); eval payload render frozen (C matches it at 0.18) |
+| **v0.18.0 - checker totality, DeepTag, host-type/ABI boundary, compiled rendering** (SHIPPED) | [#731] P2 (PR #800) + [#731] P3 (DeepTag) + [#730] P2 (PR #799 vocab + host-type/ABI state) + [#732] P2 (compiled render) | **mechanical** for shells | no wire break ([#730] P2 preserves the `CHELIS_*` ids); the added loudness lands on already-broken code, so no *expected* source migration. Completes byte-identical payload rendering. The release-hygiene requirement is that the tarball ships `chelis_runtime_dtype.h`, which public `chelis_runtime.h` includes |
+| **v0.18.1 - always-labelled root prefix** (SHIPPED) | [05-OBS-6]'s `name = value` prefix from #994, with the stale repo expectations synchronized in #1011 | **exact-output migration** | shipped the prefix once without changing payload digits or value shape; it did not prove manifest completeness, dotted expansion/order, unavailable-root diagnostics, or artifact routing |
+| **v0.19.0 - grounded dtype storage/wire break + every behavior-changing capability decision + manifested root completion** | [#729] P1-P3 landed atomic per §C3, **plus every capability decision that changes behavior** - integer-overflow traps and each supported-vs-`Unimplemented` disposition (int `mean` [#724], bool arithmetic [#726], the [#715] rows, the HIP/Metal/C reject cells) - plus the prelude JSON/CSV integer-capacity decision (a `JInt`-shaped variant and integer accessors) for any prelude numeric channel this cut admits - invariant 7 HOLDS such channels out of every earlier release unless they land integer-capable from the start ([#729] §C3's amended census) - any published-ABI signature change deferred here by anti-churn invariant 7, and [#912]/[#1023]'s complete manifested root boundary | **source migration** (wave 2) | the one wire break and one root-topology expectation migration are coordinated here; class E resolves here, not at the 0.20 table. Bindings adapt to the per-dtype payload once; capability behavior and root topology are final; the v0.18.1 prefix does not move again |
 | **v0.20.0 - behavior-preserving permanent guards** | [#729] P4 (the capability *table*, mechanizing 0.19's decisions) + [#730] P3 (gates -> UX) + [#732] P3 (tolerance / cross-lane oracle) + [#733] P3 (first blocking provenance ratchet) | **mechanical** for shells | guaranteed behavior-preserving: no decision, rejection, or rendered byte changes here - 0.19 shipped them all. [#733] P0 lands independently before this cut, while its P1-P2 advisory integration is a prerequisite rather than v0.20 release payload. `tests_blocked/` probes are re-adjudicated against the now-standing table |
 
-Net downstream shape: there are **four mechanical `conform` bump waves** - one
-per cut, each a pin bump plus a probe re-run and an inventory refresh - but only
-**two expected source-migration waves**: **v0.17** (seed suffix + fixing
-loud-rejected code) and **v0.19** (the wire break + capability behavior). At
-v0.18 and v0.20 shells bump the pin and change no source. In none of the four
-does a shell make a change it later reverses.
+Net downstream shape: the original four-cut `conform` model remains one bump,
+probe re-run, and inventory refresh per minor cut. Actual history inserted one
+additional shipped contract patch: **v0.18.1** changed exact root-output
+expectations by adding the [05-OBS-6] prefix. The source-visible waves are now
+shipped **v0.17** (seed suffix + fixing loud-rejected code), shipped
+**v0.18.1** (root label prefix), and planned **v0.19** (wire/capability behavior
++ manifested root topology). v0.20 remains mechanical. No later wave may undo
+or restyle an earlier one.
 
 Cadence for non-contract work: an **internal-only** change (a refactor, a
 checker-internal fix, doc-only work) normally **rides the next planned cut**
 rather than getting its own release; only an **urgent downstream bug fix** - a
 shell blocked on a real defect - justifies an out-of-band patch release. PR
-#819's `compile_and_load` metadata fix qualifies for a patch only if a shell
-needs it now; otherwise it rides 0.18.
+#819's `compile_and_load` metadata fix did not ship in 0.18; it now rides the
+next compatible planned cut unless a current shell blocker justifies a separate
+patch.
 
 ### The anti-churn invariants
 
 1. **Atomic wire break.** [#729] §C3 is all-layers-or-nothing; never split the
    storage decision across releases or binding consumers adapt N times.
-2. **Per-lane-render-once.** [#732] freezes the eval render at P1 and the C
-   render at P2; a given lane never changes shape twice. Keep P1/P2 in
-   different cuts but tell cross-lane shells P1 is "eval-final, C follows at
-   0.18".
+2. **Payload-render-once; root-prefix-once; root-topology-once.** [#732] froze
+   numeric payload digits and container/scalar shape for eval at P1 and C at
+   P2. [05-OBS-6] later authored a separate envelope around those frozen
+   payloads; its `name = ` prefix shipped once in both lanes at v0.18.1. The
+   remaining manifested root set/order, unavailable-root, and artifact cut
+   rides v0.19 once. Neither later step may reopen [#732]'s formatter decisions
+   or restyle the shipped prefix.
 3. **Frozen seed form.** [#731] P1's `i64` suffix is the final syntax; [#735]
    authors only meaning. Safe to ship to shells at 0.17.
 4. **Decisions before tables.** Every behavior-changing capability decision
@@ -401,9 +412,10 @@ needs it now; otherwise it rides 0.18.
 
 ### Per-cut conform checklist
 
-Every cut gets a mechanical `conform bump` PR wave across the shells; the two
-source-migration cuts (0.17, 0.19) additionally carry real source edits. Each
-wave carries:
+Every minor cut gets a mechanical `conform bump` PR wave across the shells;
+the 0.17 and 0.19 source-migration cuts additionally carry real source edits.
+The shipped v0.18.1 patch was an extra exact-output expectation migration and
+therefore owed the same probe and inventory refresh. Each wave carries:
 
 - a migration note as the **breaking-change summary** (the delta below), the
   `chelis#NNN` refs it closes, and the exact surface that changed - not the full
@@ -426,7 +438,7 @@ Migration-note stubs (the breaking delta per cut):
   (`seed(42i64)`); eval output is dtype-faithful (integers print as integers).
   Known HEAD-canary casualties: Shoals, Whale, hello-chelis (unsuffixed seeds),
   plus any E2E leaning on the old assert stub."
-- **0.18** (mechanical) - "pin bump only: more previously-silent errors are
+- **0.18.0** (mechanical) - "pin bump only: more previously-silent errors are
   caught (bogus casts, non-record field access, malformed host types) but on
   already-broken code; compiled and eval output now render byte-identically; the
   runtime tarball gains `chelis_runtime_dtype.h`. The public runtime header
@@ -442,16 +454,24 @@ Migration-note stubs (the breaking delta per cut):
   completing [#730] §C6.2 is 0.18 payload. Two C-ABI deltas in one header do
   not justify merging two cuts; the storage decision is all-layers-or-nothing
   and the header is only one of its layers.
+- **0.18.1** (exact-output migration, shipped) - "every emitted root now uses
+  the `name = value` prefix in both lanes. Update exact stdout expectations;
+  payload digits and value shape are unchanged. This does not yet promise the
+  complete manifested root set/order or unavailable-root diagnostics."
 - **0.19** (source migration) - "dtype semantics are grounded: integer overflow
   traps instead of wrapping, per-dtype tensor storage (wire-format v2, Python
   payload shape changed), narrow dtypes preserved end-to-end; every op x dtype
-  capability decision is now fixed (supported, or a cited stable rejection)."
+  capability decision is now fixed (supported, or a cited stable rejection).
+  The v0.18.1 root prefix is unchanged; the complete manifested root set now
+  appears in manifest order in both lanes. Update expectations for added or
+  reordered dotted roots, and treat an unavailable owed root as a named
+  diagnostic rather than a missing line or missing `main`."
 - **0.20** (mechanical) - "pin bump only: the capability table, gates-as-UX,
   [#733] Phase 3 blocking provenance ratchet, and the cross-lane oracle land;
   Phase 0 landed independently and Phases 1-2 were advisory prerequisites. All
   encoding decisions already shipped in 0.19 - no behavior change."
 
-### Tag gate and the 0.17 sequence
+### Historical tag gate and the 0.17 sequence
 
 A source-migration cut separates two kinds of breakage, handled differently:
 
@@ -463,7 +483,7 @@ A source-migration cut separates two kinds of breakage, handled differently:
   unsuffixed seeds). Their `conform` bump fixes are **prepared before the tag**
   so shells migrate promptly once it lands.
 
-The 0.17 sequence, concretely:
+The planned 0.17 sequence was:
 
 1. Merge the corrected release-slicing change (this PR).
 2. Once the repo-owned `test_*` E2E is green, make the short-lived 0.17 release
@@ -692,7 +712,9 @@ formal target, per its §C1.5) and [#730] makes unknown KINDS loud;
 [#888]: https://github.com/Chelis-Lang/chelis/issues/888
 [#889]: https://github.com/Chelis-Lang/chelis/issues/889
 [#893]: https://github.com/Chelis-Lang/chelis/issues/893
+[#1003]: https://github.com/Chelis-Lang/chelis/pull/1003
 [#912]: https://github.com/Chelis-Lang/chelis/issues/912
+[#1023]: https://github.com/Chelis-Lang/chelis/issues/1023
 [#788]: https://github.com/Chelis-Lang/chelis/issues/788
 [#814]: https://github.com/Chelis-Lang/chelis/issues/814
 [#820]: https://github.com/Chelis-Lang/chelis/issues/820

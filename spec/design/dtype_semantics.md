@@ -364,6 +364,14 @@ identical bytes):
    decision). Tensor element rendering truncates after 32 elements with
    the `, ...` marker at every exit in both lanes; `to_list` and the wire
    never truncate.
+7. **The root envelope is governed by [05-OBS-6].** Each emitted root renders
+   as `name = value` in both lanes; when an exit emits multiple roots, their
+   order is manifest entry order. The `value` half still obeys rules 1-6; this
+   prefix neither reopens the frozen number grammar nor changes the
+   scalar/rank-0/container decision. [#912] owns the root set and artifact
+   obligation. An unavailable owed root enters [#730]'s typed failure channel
+   with root, lane, and reason rather than disappearing. Full manifested-path
+   acceptance is tracked by [#1023].
 
 ## C5. Kernels and the consumer map
 
@@ -1032,7 +1040,8 @@ numeric form is type-unrepresentable.
 | §C1 semantics table + spec/04 section | Phase 1 | spec change + this doc + re-run of the full matrix |
 | §C3 public API + storage layout + wire schema | Phase 1 | versioned schema bump, all four layers together |
 | §C2 trap kinds + exact message strings | Phase 2 | this doc + [#687] corpus update in the same PR |
-| §C4 formatting rules 1-4 | Phase 1 (Rust) / Phase 3 (C parity) | this doc + [#687] corpus update |
+| §C4 element-formatting rules 1-4 and 6 | Phase 1 (Rust) / Phase 3 (C parity) | this doc + [#687] corpus update |
+| §C4 root envelope rule 7 | [05-OBS-6] authored 2026-07-31; full implementation acceptance pending [#1023] | spec/05 [05-OBS-6] + `faithful_observation.md` + this doc + the release roadmap + root-boundary corpus, one change set |
 | §C5 kernel signatures | Phase 2 | this doc |
 | §C6 covered-family census + tripwire | at PR #956 landing: canonical row identities, complete derived classifications, stdlib ADT shapes AND their capacity flags, callable-to-`[05-OP-N]` registrations, public-header context invariance, and BOTH grandfathered identity sets (seam and plain) all freeze; unflagged rows append by live ISSUE citation, new numeric callables also author/register a new OP atom, and FLAGGED rows are shrink-only (a shape-validated maintainer override is the sole human exception) | this doc + the executable tripwire/registry artifacts and their positive/negative controls, same change set |
 | §C6 deferred wire/PyO3 leg state | before Phase 1 entry, only when each named enumerator and mutation command below is green; an editable baseline field cannot change coverage | this doc + the typed leg manifest + owning enumerator/oracle in the same change set |
@@ -1306,6 +1315,10 @@ before this phase; its seed-decision list is this phase's work-list.
    `Rejected` cell asserting the same diagnostic from every lane. This
    suite REPLACES the hand-written matrix files as the standing guard;
    the audit files remain as regression archaeology.
+5. The pre-table [#912] `BuiltinDecl.realizability` declarations and target
+   capability sets become generated projections of Tables A/B. The root
+   manifest may consume those projections and the checked root set, but it
+   cannot remain an independently authored builtin/backend authority.
 
 **Frozen at your exit:** the table schema and the rule that lanes derive
 from it. After this phase, "add a builtin" without deciding every lane is
@@ -1346,6 +1359,13 @@ different decisions:
   target-independent. Table B `Unimplemented` and `RejectedByDesign` cells are
   reported by build/lowering where the target is known, using [#730]'s
   diagnostic contract.
+- [#912]'s root manifest owns root identity, order, and artifact routing, not
+  operation legality. Its pre-table builtin realizability and target sets are
+  exhaustive adapters; Phase 4 replaces their hand-authored decisions with
+  generated Table-A/Table-B projections.
+- `KNOWN_TAGS` is deliberately outside this interlock. It classifies Deep
+  syntax and must become an exhaustive typed `DeepTag` disposition under
+  [#908]/[#731], rather than being generated from numeric capability rows.
 
 Neither plan may duplicate the other's authority. Any change to this boundary
 updates this section, `loud_unsupported.md` §I1, and
@@ -1384,6 +1404,7 @@ substitute fixes (needed for [#722]'s C half regardless of this plan).
 
 [#387]: https://github.com/Chelis-Lang/chelis/issues/387
 [#680]: https://github.com/Chelis-Lang/chelis/issues/680
+[#682]: https://github.com/Chelis-Lang/chelis/issues/682
 [#684]: https://github.com/Chelis-Lang/chelis/issues/684
 [#685]: https://github.com/Chelis-Lang/chelis/issues/685
 [#686]: https://github.com/Chelis-Lang/chelis/issues/686
@@ -1392,12 +1413,14 @@ substitute fixes (needed for [#722]'s C half regardless of this plan).
 [#737]: https://github.com/Chelis-Lang/chelis/issues/737
 [#753]: https://github.com/Chelis-Lang/chelis/issues/753
 [#759]: https://github.com/Chelis-Lang/chelis/issues/759
+[#775]: https://github.com/Chelis-Lang/chelis/issues/775
 [#688]: https://github.com/Chelis-Lang/chelis/issues/688
 [#692]: https://github.com/Chelis-Lang/chelis/issues/692
 [#695]: https://github.com/Chelis-Lang/chelis/issues/695
 [#696]: https://github.com/Chelis-Lang/chelis/pull/696
 [#699]: https://github.com/Chelis-Lang/chelis/issues/699
 [#703]: https://github.com/Chelis-Lang/chelis/issues/703
+[#705]: https://github.com/Chelis-Lang/chelis/issues/705
 [#709]: https://github.com/Chelis-Lang/chelis/issues/709
 [#711]: https://github.com/Chelis-Lang/chelis/issues/711
 [#712]: https://github.com/Chelis-Lang/chelis/issues/712
@@ -1419,3 +1442,6 @@ substitute fixes (needed for [#722]'s C half regardless of this plan).
 [#730]: https://github.com/Chelis-Lang/chelis/issues/730
 [#731]: https://github.com/Chelis-Lang/chelis/issues/731
 [#732]: https://github.com/Chelis-Lang/chelis/issues/732
+[#908]: https://github.com/Chelis-Lang/chelis/issues/908
+[#912]: https://github.com/Chelis-Lang/chelis/issues/912
+[#1023]: https://github.com/Chelis-Lang/chelis/issues/1023
