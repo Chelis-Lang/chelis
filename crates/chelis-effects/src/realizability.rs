@@ -11,21 +11,11 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use chelis_deep::ast::{Atom, Expr, List};
 use chelis_types::known_tags::{LaneContribution, tag_lane_contribution};
+use chelis_types::manifest::HostReason;
 use chelis_types::types::{Lane, Prim};
 use chelis_types::{CheckedProgram, Realizability, builtin_decl};
 
 // ─── Public types ────────────────────────────────────────────────────────────
-
-/// Why a def routes to the host lane.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum HostReason {
-    HostOnlyBuiltin { name: String },
-    ScalarTypedOp { builtin: String },
-    PrecisionExceedsCapability { prim: Prim },
-    StructuralForm { tag: String },
-    TransitiveCaller { callee: String },
-    UnrecognizedTag { tag: String },
-}
 
 /// Result of realizability inference.
 #[derive(Debug, Clone)]
@@ -390,7 +380,7 @@ fn extract_prims_recursive(expr: &Expr, out: &mut Vec<Prim>) {
 
 // ─── Manifest computation ────────────────────────────────────────────────────
 
-use chelis_types::manifest::{HostReason as ManifestHostReason, RootEntry, RootManifest};
+use chelis_types::manifest::{RootEntry, RootManifest};
 
 /// Compute the root manifest from a checked program and its realizability result.
 /// This walks top-level non-fn defs, expands tuples/ADTs into dotted names,
@@ -453,10 +443,10 @@ fn collect_manifest_entries(
         .get(name)
         .cloned()
         .unwrap_or_default();
-    let reasons: Vec<ManifestHostReason> = realizability
+    let reasons: Vec<HostReason> = realizability
         .reasons_by_def
         .get(name)
-        .map(|rs| rs.iter().map(convert_reason).collect())
+        .cloned()
         .unwrap_or_default();
 
     let ty = type_env
@@ -480,29 +470,6 @@ fn collect_manifest_entries(
         required_inputs,
         reasons,
     });
-}
-
-fn convert_reason(r: &HostReason) -> ManifestHostReason {
-    match r {
-        HostReason::HostOnlyBuiltin { name } => {
-            ManifestHostReason::HostOnlyBuiltin { name: name.clone() }
-        }
-        HostReason::ScalarTypedOp { builtin } => ManifestHostReason::ScalarTypedOp {
-            builtin: builtin.clone(),
-        },
-        HostReason::PrecisionExceedsCapability { prim } => {
-            ManifestHostReason::PrecisionExceedsCapability { prim: *prim }
-        }
-        HostReason::StructuralForm { tag } => {
-            ManifestHostReason::StructuralForm { tag: tag.clone() }
-        }
-        HostReason::TransitiveCaller { callee } => ManifestHostReason::TransitiveCaller {
-            callee: callee.clone(),
-        },
-        HostReason::UnrecognizedTag { tag } => {
-            ManifestHostReason::UnrecognizedTag { tag: tag.clone() }
-        }
-    }
 }
 
 /// Extract type metadata from an expression's metadata map.
