@@ -396,14 +396,11 @@ fn infer_expr_effects(
                     }),
             }
         }
-        // Transitional arms for new Expr variants (#908)
-        Expr::Node(node, _) => node
-            .expr_children()
-            .map(|child| infer_expr_effects(child, top_level_effects, top_level_callables, locals))
-            .fold(EffectSet::new(), |mut acc, set| {
-                acc.extend(&set);
-                acc
-            }),
+        // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
+        Expr::Node(node, span) => {
+            let bridged = Expr::List(node.to_list(*span), *span);
+            infer_expr_effects(&bridged, top_level_effects, top_level_callables, locals)
+        }
         Expr::BareList(elems, _) => elems
             .iter()
             .map(|elem| infer_expr_effects(elem, top_level_effects, top_level_callables, locals))
@@ -690,8 +687,13 @@ fn annotate_effects(
                 )
             }
         }
-        // Transitional arms for new Expr variants (#908)
-        Expr::Node(_, _) | Expr::BareList(_, _) | Expr::UnknownForm(_) => expr.clone(),
+        // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
+        // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
+        Expr::Node(node, span) => {
+            let bridged = Expr::List(node.to_list(*span), *span);
+            annotate_effects(&bridged, top_level_effects, top_level_callables, locals)
+        }
+        Expr::BareList(_, _) | Expr::UnknownForm(_) => expr.clone(),
     }
 }
 
@@ -779,11 +781,10 @@ fn validate_handler_expr(expr: &Expr, errors: &mut Vec<EffectError>) {
             }
         }
         Expr::Atom(_, _) => {}
-        // Transitional arms for new Expr variants (#908)
-        Expr::Node(node, _) => {
-            for child in node.expr_children() {
-                validate_handler_expr(child, errors);
-            }
+        // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
+        Expr::Node(node, span) => {
+            let bridged = Expr::List(node.to_list(*span), *span);
+            validate_handler_expr(&bridged, errors);
         }
         Expr::BareList(elems, _) => {
             for elem in elems {
@@ -999,11 +1000,10 @@ fn validate_build_target_expr(expr: &Expr, target: &str, errors: &mut Vec<Effect
             }
         }
         Expr::Atom(_, _) => {}
-        // Transitional arms for new Expr variants (#908)
-        Expr::Node(node, _) => {
-            for child in node.expr_children() {
-                validate_build_target_expr(child, target, errors);
-            }
+        // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
+        Expr::Node(node, span) => {
+            let bridged = Expr::List(node.to_list(*span), *span);
+            validate_build_target_expr(&bridged, target, errors);
         }
         Expr::BareList(elems, _) => {
             for elem in elems {
