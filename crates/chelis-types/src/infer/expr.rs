@@ -345,7 +345,7 @@ pub(super) fn infer_expr_with_type_metadata_ownership(
         deep::Expr::MetaExpr(meta, _) => {
             infer_expr(&meta.expr, env, vg, subst, adt_reg, errors, product)
         }
-        // Transitional arms for the new typed-node variants (post-rebase).
+        // Bridge: reconstruct List so tag-dispatch functions work unchanged (#908)
         // `Node` is a stamped vocabulary node — dispatch like `List` using its tag.
         deep::Expr::Node(node, span) => {
             // Transitional bridge (chelis#998 → consumer migration):
