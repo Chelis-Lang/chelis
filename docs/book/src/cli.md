@@ -276,11 +276,20 @@ records additionally disclose `sampling_method` plus accepted, attempted, and
 rejected sample counts; guarded records repeat this evidence in the
 precondition non-vacuity record.
 
-Structural induction is not currently a dispatched proof tier. Its internal
-Tier D scaffold fails closed until both a concrete base obligation and a
-symbolic step obligation are discharged through an existing sound tier;
-`ASSUMED` case evidence is never reported as a proof. General-size claims must
-therefore remain fixed-size or explicitly deferred in this release.
+`--tier induction-only` proves a conservative class of general-size Surf
+properties by separately dispatching a concrete base and symbolic step to SMT.
+The compiler AST must show one `int*` binder with `n >= 0`, one scalar model
+call, and an exact `if n <= 0 ... else ... f(n - 1, unchanged_args...)`
+recurrence. Both cases and their non-vacuity checks must pass; the JSON record
+uses `proof_tier:"induction"` and discloses both statuses under `induction`.
+Unsupported recursion is terminal and never falls back to fuzz. Proofs retain
+the `real_arithmetic` qualifier. The old caller-classified Tier-D scaffold is
+still disconnected and fail-closed, and `ASSUMED` is never proof evidence.
+Compiler-inlined transparent aliases are accepted when they expose that exact
+recurrence. Literal-dead branches are retained in the solver goal rather than
+discarded by the classifier. Deep properties have no structural-recursion
+ownership record yet, so `induction-only` on Deep is terminal `unsupported`
+with zero samples on both CLI and Tide.
 
 Exit codes are stable for CI: `0` pass, `1` counterexample, `2` selected
 property unsupported by the v1 generator, and `3` setup/input/config error.

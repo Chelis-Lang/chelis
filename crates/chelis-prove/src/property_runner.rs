@@ -30,7 +30,7 @@ use chelis_surf::ast::{
 
 mod smt_lower;
 use smt_lower::{
-    ContractAbstraction, DeepInlineCtx, InlineCtx, deep_expr_to_smt, surf_expr_to_smt,
+    ContractAbstraction, DeepInlineCtx, InlineCtx, deep_expr_to_smt, surf_arith, surf_expr_to_smt,
 };
 
 mod injection;
@@ -58,6 +58,8 @@ pub enum PropertyStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PropertyTier {
     Smt,
+    /// Mathematical induction with separately dispatched base and step SMT goals.
+    Induction,
     Fuzz,
     /// No tier ran (a sampling/declaration error).
     None,
@@ -67,10 +69,32 @@ impl PropertyTier {
     pub fn as_str(self) -> &'static str {
         match self {
             PropertyTier::Smt => "smt",
+            PropertyTier::Induction => "induction",
             PropertyTier::Fuzz => "fuzz",
             PropertyTier::None => "none",
         }
     }
+}
+
+/// One solver-dispatched induction obligation. These records are additive
+/// machine evidence; neither an assertion nor a caller-supplied classification
+/// can manufacture a green induction result (chelis#978).
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct InductionCaseEvidence {
+    pub status: String,
+    pub arith_model: String,
+    pub goal: crate::tier_b::SmtProperty,
+    pub soundness: crate::discharge::Soundness,
+    pub qualifiers: QualifierSet,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub non_vacuity: Option<NonVacuityRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct InductionEvidence {
+    pub variable: String,
+    pub base: InductionCaseEvidence,
+    pub step: InductionCaseEvidence,
 }
 
 /// The verification outcome of one user property.
@@ -112,6 +136,9 @@ pub struct PropertyOutcome {
     /// outcomes even when useful sampling work preceded the terminal state.
     pub accepted_samples: usize,
     pub rejected_samples: usize,
+    /// Present only after the induction classifier constructed and dispatched
+    /// real base and step obligations.
+    pub induction_evidence: Option<InductionEvidence>,
 }
 
 impl PropertyOutcome {
@@ -185,6 +212,7 @@ impl PropertyOutcome {
             attempted_samples: 0,
             accepted_samples: 0,
             rejected_samples: 0,
+            induction_evidence: None,
         }
     }
 
@@ -223,7 +251,7 @@ impl PropertyOutcome {
             return None;
         }
         match self.proof_tier {
-            PropertyTier::Smt => self.base_discharge.clone(),
+            PropertyTier::Smt | PropertyTier::Induction => self.base_discharge.clone(),
             PropertyTier::Fuzz if self.samples > 0 => Some((
                 crate::discharge::Soundness::Empirical,
                 QualifierSet::from_iter_kinds([crate::discharge::Qualifier::FuzzBase]),
@@ -286,7 +314,8 @@ impl PropertyOutcome {
             return false;
         }
         self.status == PropertyStatus::Passed
-            && (self.proof_tier == PropertyTier::Smt || self.samples > 0)
+            && (matches!(self.proof_tier, PropertyTier::Smt | PropertyTier::Induction)
+                || self.samples > 0)
     }
 
     /// The display status label, bucketed through [`is_pass`] so a
@@ -352,7 +381,7 @@ fn base_verdict(
             // Beacon interval discharge reads `sound_approximate`. A green base
             // MUST carry its discharge; a missing one is a covered-or-rejected
             // `Unsupported`, never a silent proof.
-            PropertyTier::Smt => match base_discharge {
+            PropertyTier::Smt | PropertyTier::Induction => match base_discharge {
                 Some((soundness, qualifiers)) => {
                     base_verdict_from_discharge(*soundness, qualifiers)
                 }
@@ -406,7 +435,7 @@ pub struct PropertyRunOptions {
     pub seed: u64,
     pub samples: usize,
     pub smt_timeout_ms: u64,
-    /// `"auto"` (Tier B then C), `"smt-only"`, `"fuzz-only"`.
+    /// `"auto"` (Tier B then C), `"smt-only"`, `"induction-only"`, `"fuzz-only"`.
     pub tier: String,
     /// Property-name selector (`--only`); `None` runs all.
     pub only: Option<String>,
@@ -659,6 +688,38 @@ fn prove_surf_property(
         }
     };
 
+    // chelis#978: induction is an explicit, fail-closed lane. It never falls
+    // through to fuzz and it does not consume the old caller-trusted Tier-D
+    // scaffold. The classifier below reads the checked compiler AST and emits
+    // two independent SMT goals.
+    if options.tier == "induction-only" {
+        let deep = chelis_surf::desugar::desugar_program(decls);
+        if let Err(infer) = chelis_types::check_typed_program(&deep) {
+            return PropertyOutcome::new(
+                property.name.clone(),
+                PropertyStatus::Error,
+                PropertyTier::Induction,
+                0,
+                seed,
+                None,
+                Some(format!(
+                    "induction requires a type-checked compiler AST: {}",
+                    infer
+                        .errors
+                        .iter()
+                        .map(|error| error.message.as_str())
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                )),
+                false,
+                Vec::new(),
+            );
+        }
+        let mut outcome = try_surf_induction(decls, property, options, seed);
+        outcome.append_assumptions(contract_assumptions);
+        return outcome;
+    }
+
     // Assumption injection (RFC D-INJECT): a property with an
     // invariant-carrying opaque binder is verified ONLY over
     // invariant-satisfying binder values; the injection path owns it.
@@ -856,6 +917,894 @@ fn try_envelope_lane(
         assumptions,
         base_discharge,
     ))
+}
+
+fn induction_unsupported(
+    property: &Property,
+    seed: u64,
+    reason: impl Into<String>,
+) -> PropertyOutcome {
+    PropertyOutcome::new(
+        property.name.clone(),
+        PropertyStatus::Unsupported,
+        PropertyTier::Induction,
+        0,
+        seed,
+        None,
+        Some(format!(
+            "induction unsupported: {} (chelis#978)",
+            reason.into()
+        )),
+        false,
+        Vec::new(),
+    )
+}
+
+/// A compiler-AST-derived induction plan. The accepted v1 shape is purposely
+/// small: one `int*` induction binder, an explicit `n >= 0` domain, one direct
+/// scalar model call in the proposition, and one exact `f(n - 1, unchanged...)`
+/// recursive call behind `if n <= 0`. Everything else is covered-or-rejected.
+struct SurfInductionPlan {
+    variable: String,
+    variables: Vec<(String, crate::solver::SmtSort)>,
+    preconditions: Vec<crate::solver::SmtExpr>,
+    proposition: crate::solver::SmtExpr,
+    outer_call: crate::solver::SmtExpr,
+    model_params: Vec<String>,
+    model_return_sort: crate::solver::SmtSort,
+    condition: crate::solver::SmtExpr,
+    base_expr: crate::solver::SmtExpr,
+    step_expr: crate::solver::SmtExpr,
+    recursive_call: crate::solver::SmtExpr,
+}
+
+fn try_surf_induction(
+    decls: &[Decl],
+    property: &Property,
+    options: &PropertyRunOptions,
+    seed: u64,
+) -> PropertyOutcome {
+    if !property.contracts.is_empty() {
+        return induction_unsupported(
+            property,
+            seed,
+            "contract abstractions are not in the induction lane",
+        );
+    }
+    let plan = match classify_surf_induction(decls, property) {
+        Ok(plan) => plan,
+        Err(reason) => return induction_unsupported(property, seed, reason),
+    };
+    let k_name = "__chelis_induction_k";
+    let value_name = "__chelis_induction_value";
+    let base_recursive_name = "__chelis_induction_base_recursive";
+    if plan
+        .variables
+        .iter()
+        .any(|(name, _)| name == k_name || name == value_name || name == base_recursive_name)
+    {
+        return induction_unsupported(property, seed, "reserved induction symbol collision");
+    }
+
+    use crate::solver::{ArithOp, SmtExpr};
+    let zero = SmtExpr::IntLit(0);
+    let k = SmtExpr::Var(k_name.to_string());
+    let successor = SmtExpr::Arith(
+        ArithOp::Add,
+        Box::new(k.clone()),
+        Box::new(SmtExpr::IntLit(1)),
+    );
+    let induction_value = SmtExpr::Var(value_name.to_string());
+    let base_recursive_value = SmtExpr::Var(base_recursive_name.to_string());
+
+    let base_var_subst = BTreeMap::from([(plan.variable.clone(), zero.clone())]);
+    let base_outer = substitute_smt_vars(&plan.outer_call, &base_var_subst);
+    let mut base_model_subst = BTreeMap::new();
+    let outer_args = smt_apply_args(&plan.outer_call).expect("classified call");
+    for (param, arg) in plan.model_params.iter().zip(outer_args) {
+        base_model_subst.insert(param.clone(), substitute_smt_vars(arg, &base_var_subst));
+    }
+    let base_recursive_call = substitute_smt_vars(&plan.recursive_call, &base_model_subst);
+    let base_step = replace_smt_exact(
+        &substitute_smt_vars(&plan.step_expr, &base_model_subst),
+        &base_recursive_call,
+        &base_recursive_value,
+    );
+    let base_value = SmtExpr::Ite(
+        Box::new(substitute_smt_vars(&plan.condition, &base_model_subst)),
+        Box::new(substitute_smt_vars(&plan.base_expr, &base_model_subst)),
+        Box::new(base_step),
+    );
+    let base_post = replace_smt_exact(
+        &substitute_smt_vars(&plan.proposition, &base_var_subst),
+        &base_outer,
+        &base_value,
+    );
+    let base_pre: Vec<_> = plan
+        .preconditions
+        .iter()
+        .map(|pre| substitute_smt_vars(pre, &base_var_subst))
+        .collect();
+    let base_goal = crate::tier_b::SmtProperty {
+        variables: {
+            let mut variables: Vec<_> = plan
+                .variables
+                .iter()
+                .filter(|(name, _)| name != &plan.variable)
+                .cloned()
+                .collect();
+            variables.push((base_recursive_name.to_string(), plan.model_return_sort));
+            variables
+        },
+        preconditions: base_pre,
+        postcondition: base_post,
+    };
+
+    let step_var_subst = BTreeMap::from([(plan.variable.clone(), k.clone())]);
+    let succ_var_subst = BTreeMap::from([(plan.variable.clone(), successor.clone())]);
+    let ih_outer = substitute_smt_vars(&plan.outer_call, &step_var_subst);
+    let ih = replace_smt_exact(
+        &substitute_smt_vars(&plan.proposition, &step_var_subst),
+        &ih_outer,
+        &induction_value,
+    );
+    let successor_outer = substitute_smt_vars(&plan.outer_call, &succ_var_subst);
+    let mut step_model_subst = BTreeMap::new();
+    for (param, arg) in plan.model_params.iter().zip(outer_args) {
+        step_model_subst.insert(param.clone(), substitute_smt_vars(arg, &succ_var_subst));
+    }
+    let recursive_at_k = substitute_smt_vars(&plan.recursive_call, &step_model_subst);
+    // The recursive call after one-step unfolding is syntactically
+    // `f((k + 1) - 1, ...)`; normalize that integer successor/predecessor pair
+    // and require it to be EXACTLY the IH call `f(k, ...)`. This comparison is
+    // the ownership check that prevents applying the hypothesis to a nearby or
+    // reconstructed subproblem.
+    if normalize_successor_predecessor(&recursive_at_k) != ih_outer {
+        return induction_unsupported(
+            property,
+            seed,
+            "the unfolded recursive call is not the exact induction-hypothesis subproblem",
+        );
+    }
+    let step_branch = replace_smt_exact(
+        &substitute_smt_vars(&plan.step_expr, &step_model_subst),
+        &recursive_at_k,
+        &induction_value,
+    );
+    let step_value = SmtExpr::Ite(
+        Box::new(substitute_smt_vars(&plan.condition, &step_model_subst)),
+        Box::new(substitute_smt_vars(&plan.base_expr, &step_model_subst)),
+        Box::new(step_branch),
+    );
+    let conclusion = replace_smt_exact(
+        &substitute_smt_vars(&plan.proposition, &succ_var_subst),
+        &successor_outer,
+        &step_value,
+    );
+    let mut step_pre: Vec<_> = plan
+        .preconditions
+        .iter()
+        .map(|pre| substitute_smt_vars(pre, &step_var_subst))
+        .collect();
+    step_pre.push(ih);
+    let mut step_variables: Vec<_> = plan
+        .variables
+        .iter()
+        .map(|(name, sort)| {
+            if name == &plan.variable {
+                (k_name.to_string(), *sort)
+            } else {
+                (name.clone(), *sort)
+            }
+        })
+        .collect();
+    step_variables.push((value_name.to_string(), plan.model_return_sort));
+    let step_goal = crate::tier_b::SmtProperty {
+        variables: step_variables,
+        preconditions: step_pre,
+        postcondition: conclusion,
+    };
+
+    if smt_apply_count(&base_goal.postcondition) != 0
+        || base_goal
+            .preconditions
+            .iter()
+            .any(|pre| smt_apply_count(pre) != 0)
+        || smt_apply_count(&step_goal.postcondition) != 0
+        || step_goal
+            .preconditions
+            .iter()
+            .any(|pre| smt_apply_count(pre) != 0)
+    {
+        return induction_unsupported(
+            property,
+            seed,
+            "an uninterpreted call remained after exact one-step unfolding",
+        );
+    }
+
+    dispatch_induction_goals(
+        property,
+        &plan.variable,
+        base_goal,
+        step_goal,
+        options,
+        seed,
+    )
+}
+
+fn dispatch_induction_goals(
+    property: &Property,
+    variable: &str,
+    base_goal: crate::tier_b::SmtProperty,
+    step_goal: crate::tier_b::SmtProperty,
+    options: &PropertyRunOptions,
+    seed: u64,
+) -> PropertyOutcome {
+    use crate::tier_b::TierBResult;
+    let registry = crate::engine_registry::DischargeRegistry::with_builtin_engines();
+    let base = registry.dispatch(
+        &crate::discharge::Goal::smt(base_goal.clone()),
+        options.smt_timeout_ms,
+    );
+    let base_soundness = base.soundness();
+    let base_qualifiers = base.qualifier_set().clone();
+    let base_discharge = Some((base_soundness, base_qualifiers.clone()));
+    let base_result = base.into_result();
+    let base_status = induction_result_status(&base_result);
+    if !matches!(base_result, TierBResult::Proved) {
+        let counterexample = match &base_result {
+            TierBResult::Disproved(model) => Some(model.clone()),
+            _ => None,
+        };
+        let reason = induction_terminal_reason("base", &base_result);
+        let mut outcome = PropertyOutcome::with_base_discharge(
+            property.name.clone(),
+            if counterexample.is_some() {
+                PropertyStatus::Failed
+            } else {
+                PropertyStatus::Unsupported
+            },
+            PropertyTier::Induction,
+            0,
+            seed,
+            counterexample,
+            reason,
+            false,
+            Vec::new(),
+            base_discharge,
+        );
+        outcome.induction_evidence = Some(InductionEvidence {
+            variable: variable.to_string(),
+            base: InductionCaseEvidence {
+                status: base_status,
+                arith_model: "real".to_string(),
+                goal: base_goal,
+                soundness: base_soundness,
+                qualifiers: base_qualifiers,
+                non_vacuity: None,
+            },
+            step: InductionCaseEvidence {
+                status: "not_run".to_string(),
+                arith_model: "real".to_string(),
+                goal: step_goal,
+                soundness: crate::discharge::Soundness::Untrusted,
+                qualifiers: QualifierSet::new(),
+                non_vacuity: None,
+            },
+        });
+        return outcome;
+    }
+    let base_nv = smt_non_vacuity_record(&base_goal, options.smt_timeout_ms);
+    if base_nv.status != NonVacuityStatus::Established {
+        let reason = base_nv
+            .reason
+            .clone()
+            .unwrap_or_else(|| "base obligation is vacuous".to_string());
+        let mut outcome = induction_unsupported(property, seed, reason);
+        outcome.induction_evidence = Some(InductionEvidence {
+            variable: variable.to_string(),
+            base: InductionCaseEvidence {
+                status: "proved".to_string(),
+                arith_model: "real".to_string(),
+                goal: base_goal,
+                soundness: base_soundness,
+                qualifiers: base_qualifiers,
+                non_vacuity: Some(base_nv),
+            },
+            step: InductionCaseEvidence {
+                status: "not_run".to_string(),
+                arith_model: "real".to_string(),
+                goal: step_goal,
+                soundness: crate::discharge::Soundness::Untrusted,
+                qualifiers: QualifierSet::new(),
+                non_vacuity: None,
+            },
+        });
+        return outcome;
+    }
+
+    let step = registry.dispatch(
+        &crate::discharge::Goal::smt(step_goal.clone()),
+        options.smt_timeout_ms,
+    );
+    let step_soundness = step.soundness();
+    let step_qualifiers = step.qualifier_set().clone();
+    let step_discharge = Some((step_soundness, step_qualifiers.clone()));
+    let step_result = step.into_result();
+    let step_status = induction_result_status(&step_result);
+    if !matches!(step_result, TierBResult::Proved) {
+        let counterexample = match &step_result {
+            TierBResult::Disproved(model) => Some(model.clone()),
+            _ => None,
+        };
+        let reason = induction_terminal_reason("step", &step_result);
+        let mut outcome = PropertyOutcome::with_base_discharge(
+            property.name.clone(),
+            if counterexample.is_some() {
+                PropertyStatus::Failed
+            } else {
+                PropertyStatus::Unsupported
+            },
+            PropertyTier::Induction,
+            0,
+            seed,
+            counterexample,
+            reason,
+            false,
+            Vec::new(),
+            step_discharge,
+        );
+        outcome.induction_evidence = Some(InductionEvidence {
+            variable: variable.to_string(),
+            base: InductionCaseEvidence {
+                status: "proved".to_string(),
+                arith_model: "real".to_string(),
+                goal: base_goal,
+                soundness: base_soundness,
+                qualifiers: base_qualifiers,
+                non_vacuity: Some(base_nv),
+            },
+            step: InductionCaseEvidence {
+                status: step_status,
+                arith_model: "real".to_string(),
+                goal: step_goal,
+                soundness: step_soundness,
+                qualifiers: step_qualifiers,
+                non_vacuity: None,
+            },
+        });
+        return outcome;
+    }
+    let step_nv = smt_non_vacuity_record(&step_goal, options.smt_timeout_ms);
+    if step_nv.status != NonVacuityStatus::Established {
+        let reason = step_nv
+            .reason
+            .clone()
+            .unwrap_or_else(|| "step obligation is vacuous".to_string());
+        let mut outcome = induction_unsupported(property, seed, reason);
+        outcome.induction_evidence = Some(InductionEvidence {
+            variable: variable.to_string(),
+            base: InductionCaseEvidence {
+                status: "proved".to_string(),
+                arith_model: "real".to_string(),
+                goal: base_goal,
+                soundness: base_soundness,
+                qualifiers: base_qualifiers,
+                non_vacuity: Some(base_nv),
+            },
+            step: InductionCaseEvidence {
+                status: "proved".to_string(),
+                arith_model: "real".to_string(),
+                goal: step_goal,
+                soundness: step_soundness,
+                qualifiers: step_qualifiers,
+                non_vacuity: Some(step_nv),
+            },
+        });
+        return outcome;
+    }
+    let mut outcome = PropertyOutcome::with_base_discharge(
+        property.name.clone(),
+        PropertyStatus::Passed,
+        PropertyTier::Induction,
+        0,
+        seed,
+        None,
+        None,
+        false,
+        Vec::new(),
+        step_discharge,
+    );
+    outcome.induction_evidence = Some(InductionEvidence {
+        variable: variable.to_string(),
+        base: InductionCaseEvidence {
+            status: "proved".to_string(),
+            arith_model: "real".to_string(),
+            goal: base_goal,
+            soundness: base_soundness,
+            qualifiers: base_qualifiers,
+            non_vacuity: Some(base_nv),
+        },
+        step: InductionCaseEvidence {
+            status: "proved".to_string(),
+            arith_model: "real".to_string(),
+            goal: step_goal,
+            soundness: step_soundness,
+            qualifiers: step_qualifiers,
+            non_vacuity: Some(step_nv),
+        },
+    });
+    outcome
+}
+
+fn induction_result_status(result: &crate::tier_b::TierBResult) -> String {
+    use crate::tier_b::TierBResult;
+    match result {
+        TierBResult::Proved => "proved",
+        TierBResult::Disproved(_) => "disproved",
+        TierBResult::Timeout => "timeout",
+        TierBResult::Unknown => "unknown",
+        TierBResult::Error(_) => "error",
+    }
+    .to_string()
+}
+
+fn induction_terminal_reason(case: &str, result: &crate::tier_b::TierBResult) -> Option<String> {
+    use crate::tier_b::TierBResult;
+    match result {
+        TierBResult::Disproved(_) => None,
+        TierBResult::Timeout => Some(format!("induction {case} obligation timed out")),
+        TierBResult::Unknown => Some(format!("induction {case} obligation was unknown")),
+        TierBResult::Error(reason) => Some(format!("induction {case} obligation error: {reason}")),
+        TierBResult::Proved => None,
+    }
+}
+
+fn classify_surf_induction(
+    decls: &[Decl],
+    property: &Property,
+) -> Result<SurfInductionPlan, String> {
+    use crate::solver::{ArithOp, CmpOp, SmtExpr, SmtSort};
+    let variables: Vec<(String, SmtSort)> = property
+        .params
+        .iter()
+        .map(|param| {
+            let TypeExpr::Named(name, _) = param
+                .ty
+                .as_ref()
+                .ok_or_else(|| "every binder needs an explicit scalar type".to_string())?
+            else {
+                return Err("only scalar binders are supported".to_string());
+            };
+            if !(matches!(name.as_str(), "f32" | "f64" | "bool")
+                || crate::opaque::is_int_width(name))
+            {
+                return Err(format!(
+                    "binder `{}` has unsupported type `{name}`",
+                    param.name
+                ));
+            }
+            Ok((param.name.clone(), crate::opaque::prim_to_smt_sort(name)))
+        })
+        .collect::<Result<_, _>>()?;
+
+    for decl in decls {
+        let Decl::FunDef {
+            name,
+            params,
+            ret_ty,
+            body,
+            ..
+        } = decl
+        else {
+            continue;
+        };
+        if params.is_empty() {
+            continue;
+        }
+        let Some(TypeExpr::Named(first_ty, _)) = params[0].ty.as_ref() else {
+            continue;
+        };
+        if !crate::opaque::is_int_width(first_ty) {
+            continue;
+        }
+        let Some(TypeExpr::Named(ret_name, _)) = ret_ty.as_ref() else {
+            continue;
+        };
+        let model_return_sort = match ret_name.as_str() {
+            "f32" | "f64" => SmtSort::Real,
+            integer if crate::opaque::is_int_width(integer) => {
+                crate::opaque::prim_to_smt_sort(integer)
+            }
+            _ => continue,
+        };
+        let without_model: Vec<Decl> = decls
+            .iter()
+            .filter(|candidate| !matches!(candidate, Decl::FunDef { name: candidate_name, .. } if candidate_name == name))
+            .cloned()
+            .collect();
+        let ctx = InlineCtx {
+            decls: &without_model,
+            depth: 0,
+            max_depth: 3,
+            call_stack: vec![],
+            contracts: None,
+            grad_diagnostic: None,
+        };
+        let Some(proposition) = surf_expr_to_smt(&property.body, &ctx) else {
+            continue;
+        };
+        let mut outer_calls = Vec::new();
+        collect_named_smt_applies(&proposition, name, &mut outer_calls);
+        if outer_calls.len() != 1 || smt_apply_count(&proposition) != 1 {
+            continue;
+        }
+        let outer_call = outer_calls.pop().expect("one call");
+        let Some(outer_args) = smt_apply_args(&outer_call) else {
+            continue;
+        };
+        if outer_args.len() != params.len() {
+            continue;
+        }
+        let SmtExpr::Var(induction_var) = &outer_args[0] else {
+            continue;
+        };
+        let Some((_, variable_sort)) = variables
+            .iter()
+            .find(|(candidate, _)| candidate == induction_var)
+        else {
+            continue;
+        };
+        if !matches!(variable_sort, SmtSort::Int) {
+            continue;
+        }
+        if outer_args.iter().any(|arg| !matches!(arg, SmtExpr::Var(_))) {
+            continue;
+        }
+
+        let preconditions: Vec<SmtExpr> = property
+            .preconditions
+            .iter()
+            .map(|expr| {
+                surf_expr_to_smt(expr, &ctx)
+                    .ok_or_else(|| "a domain precondition does not lower to SMT".to_string())
+            })
+            .collect::<Result<_, _>>()?;
+        let domain_guards = preconditions
+            .iter()
+            .filter(|pre| smt_contains_var(pre, induction_var))
+            .count();
+        if domain_guards != 1
+            || !preconditions
+                .iter()
+                .any(|pre| is_zero_lower_bound(pre, induction_var))
+        {
+            continue;
+        }
+
+        let Some(model_body) = surf_arith(body, &ctx) else {
+            continue;
+        };
+        let SmtExpr::Ite(condition, base_expr, step_expr) = model_body else {
+            continue;
+        };
+        let model_n = &params[0].name;
+        if !matches!(condition.as_ref(),
+            SmtExpr::Cmp(CmpOp::Le, left, right)
+                if matches!(left.as_ref(), SmtExpr::Var(var) if var == model_n)
+                    && matches!(right.as_ref(), SmtExpr::IntLit(0)))
+        {
+            continue;
+        }
+        if smt_apply_count(&base_expr) != 0 || smt_apply_count(&step_expr) != 1 {
+            continue;
+        }
+        let mut recursive_calls = Vec::new();
+        collect_named_smt_applies(&step_expr, name, &mut recursive_calls);
+        if recursive_calls.len() != 1 {
+            continue;
+        }
+        let recursive_call = recursive_calls.pop().expect("one recursive call");
+        let Some(recursive_args) = smt_apply_args(&recursive_call) else {
+            continue;
+        };
+        if recursive_args.len() != params.len() {
+            continue;
+        }
+        let exact_decrement = matches!(&recursive_args[0],
+            SmtExpr::Arith(ArithOp::Sub, left, right)
+                if matches!(left.as_ref(), SmtExpr::Var(var) if var == model_n)
+                    && matches!(right.as_ref(), SmtExpr::IntLit(1)));
+        let unchanged_tail = params
+            .iter()
+            .skip(1)
+            .zip(recursive_args.iter().skip(1))
+            .all(|(param, arg)| matches!(arg, SmtExpr::Var(var) if var == &param.name));
+        if !exact_decrement || !unchanged_tail {
+            continue;
+        }
+
+        return Ok(SurfInductionPlan {
+            variable: induction_var.clone(),
+            variables,
+            preconditions,
+            proposition,
+            outer_call,
+            model_params: params.iter().map(|param| param.name.clone()).collect(),
+            model_return_sort,
+            condition: *condition,
+            base_expr: *base_expr,
+            step_expr: *step_expr,
+            recursive_call,
+        });
+    }
+    Err("no compiler-AST model matched the exact f(0)/f(n-1) induction shape".to_string())
+}
+
+fn smt_apply_args(expr: &crate::solver::SmtExpr) -> Option<&[crate::solver::SmtExpr]> {
+    match expr {
+        crate::solver::SmtExpr::Apply(_, args) => Some(args),
+        _ => None,
+    }
+}
+
+fn smt_apply_count(expr: &crate::solver::SmtExpr) -> usize {
+    use crate::solver::SmtExpr;
+    match expr {
+        SmtExpr::Apply(_, args) => 1 + args.iter().map(smt_apply_count).sum::<usize>(),
+        SmtExpr::Arith(_, left, right) | SmtExpr::Cmp(_, left, right) => {
+            smt_apply_count(left) + smt_apply_count(right)
+        }
+        SmtExpr::Bool(_, children) => children.iter().map(smt_apply_count).sum(),
+        SmtExpr::Not(inner) | SmtExpr::Forall(_, inner) | SmtExpr::Exists(_, inner) => {
+            smt_apply_count(inner)
+        }
+        SmtExpr::Ite(cond, yes, no) => {
+            smt_apply_count(cond) + smt_apply_count(yes) + smt_apply_count(no)
+        }
+        SmtExpr::Var(_) | SmtExpr::RealLit(_) | SmtExpr::IntLit(_) | SmtExpr::BoolLit(_) => 0,
+    }
+}
+
+fn collect_named_smt_applies(
+    expr: &crate::solver::SmtExpr,
+    name: &str,
+    out: &mut Vec<crate::solver::SmtExpr>,
+) {
+    use crate::solver::SmtExpr;
+    match expr {
+        SmtExpr::Apply(candidate, args) => {
+            if candidate == name {
+                out.push(expr.clone());
+            }
+            for arg in args {
+                collect_named_smt_applies(arg, name, out);
+            }
+        }
+        SmtExpr::Arith(_, left, right) | SmtExpr::Cmp(_, left, right) => {
+            collect_named_smt_applies(left, name, out);
+            collect_named_smt_applies(right, name, out);
+        }
+        SmtExpr::Bool(_, children) => {
+            for child in children {
+                collect_named_smt_applies(child, name, out);
+            }
+        }
+        SmtExpr::Not(inner) | SmtExpr::Forall(_, inner) | SmtExpr::Exists(_, inner) => {
+            collect_named_smt_applies(inner, name, out)
+        }
+        SmtExpr::Ite(cond, yes, no) => {
+            collect_named_smt_applies(cond, name, out);
+            collect_named_smt_applies(yes, name, out);
+            collect_named_smt_applies(no, name, out);
+        }
+        SmtExpr::Var(_) | SmtExpr::RealLit(_) | SmtExpr::IntLit(_) | SmtExpr::BoolLit(_) => {}
+    }
+}
+
+fn smt_contains_var(expr: &crate::solver::SmtExpr, name: &str) -> bool {
+    use crate::solver::SmtExpr;
+    match expr {
+        SmtExpr::Var(candidate) => candidate == name,
+        SmtExpr::Arith(_, left, right) | SmtExpr::Cmp(_, left, right) => {
+            smt_contains_var(left, name) || smt_contains_var(right, name)
+        }
+        SmtExpr::Bool(_, children) | SmtExpr::Apply(_, children) => {
+            children.iter().any(|child| smt_contains_var(child, name))
+        }
+        SmtExpr::Not(inner) => smt_contains_var(inner, name),
+        SmtExpr::Forall(vars, inner) | SmtExpr::Exists(vars, inner) => {
+            !vars.iter().any(|(var, _)| var == name) && smt_contains_var(inner, name)
+        }
+        SmtExpr::Ite(cond, yes, no) => {
+            smt_contains_var(cond, name)
+                || smt_contains_var(yes, name)
+                || smt_contains_var(no, name)
+        }
+        SmtExpr::RealLit(_) | SmtExpr::IntLit(_) | SmtExpr::BoolLit(_) => false,
+    }
+}
+
+fn is_zero_lower_bound(expr: &crate::solver::SmtExpr, name: &str) -> bool {
+    use crate::solver::{CmpOp, SmtExpr};
+    matches!(expr,
+        SmtExpr::Cmp(CmpOp::Ge, left, right)
+            if matches!(left.as_ref(), SmtExpr::Var(var) if var == name)
+                && matches!(right.as_ref(), SmtExpr::IntLit(0)))
+        || matches!(expr,
+            SmtExpr::Cmp(CmpOp::Le, left, right)
+                if matches!(left.as_ref(), SmtExpr::IntLit(0))
+                    && matches!(right.as_ref(), SmtExpr::Var(var) if var == name))
+}
+
+fn substitute_smt_vars(
+    expr: &crate::solver::SmtExpr,
+    substitutions: &BTreeMap<String, crate::solver::SmtExpr>,
+) -> crate::solver::SmtExpr {
+    use crate::solver::SmtExpr;
+    match expr {
+        SmtExpr::Var(name) => substitutions
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| expr.clone()),
+        SmtExpr::Arith(op, left, right) => SmtExpr::Arith(
+            *op,
+            Box::new(substitute_smt_vars(left, substitutions)),
+            Box::new(substitute_smt_vars(right, substitutions)),
+        ),
+        SmtExpr::Cmp(op, left, right) => SmtExpr::Cmp(
+            *op,
+            Box::new(substitute_smt_vars(left, substitutions)),
+            Box::new(substitute_smt_vars(right, substitutions)),
+        ),
+        SmtExpr::Bool(op, children) => SmtExpr::Bool(
+            *op,
+            children
+                .iter()
+                .map(|child| substitute_smt_vars(child, substitutions))
+                .collect(),
+        ),
+        SmtExpr::Not(inner) => SmtExpr::Not(Box::new(substitute_smt_vars(inner, substitutions))),
+        SmtExpr::Apply(name, args) => SmtExpr::Apply(
+            name.clone(),
+            args.iter()
+                .map(|arg| substitute_smt_vars(arg, substitutions))
+                .collect(),
+        ),
+        SmtExpr::Ite(cond, yes, no) => SmtExpr::Ite(
+            Box::new(substitute_smt_vars(cond, substitutions)),
+            Box::new(substitute_smt_vars(yes, substitutions)),
+            Box::new(substitute_smt_vars(no, substitutions)),
+        ),
+        SmtExpr::Forall(vars, inner) | SmtExpr::Exists(vars, inner) => {
+            let filtered: BTreeMap<_, _> = substitutions
+                .iter()
+                .filter(|(name, _)| !vars.iter().any(|(bound, _)| bound == *name))
+                .map(|(name, value)| (name.clone(), value.clone()))
+                .collect();
+            let body = Box::new(substitute_smt_vars(inner, &filtered));
+            if matches!(expr, SmtExpr::Forall(_, _)) {
+                SmtExpr::Forall(vars.clone(), body)
+            } else {
+                SmtExpr::Exists(vars.clone(), body)
+            }
+        }
+        SmtExpr::RealLit(_) | SmtExpr::IntLit(_) | SmtExpr::BoolLit(_) => expr.clone(),
+    }
+}
+
+fn replace_smt_exact(
+    expr: &crate::solver::SmtExpr,
+    target: &crate::solver::SmtExpr,
+    replacement: &crate::solver::SmtExpr,
+) -> crate::solver::SmtExpr {
+    if expr == target {
+        return replacement.clone();
+    }
+    use crate::solver::SmtExpr;
+    match expr {
+        SmtExpr::Arith(op, left, right) => SmtExpr::Arith(
+            *op,
+            Box::new(replace_smt_exact(left, target, replacement)),
+            Box::new(replace_smt_exact(right, target, replacement)),
+        ),
+        SmtExpr::Cmp(op, left, right) => SmtExpr::Cmp(
+            *op,
+            Box::new(replace_smt_exact(left, target, replacement)),
+            Box::new(replace_smt_exact(right, target, replacement)),
+        ),
+        SmtExpr::Bool(op, children) => SmtExpr::Bool(
+            *op,
+            children
+                .iter()
+                .map(|child| replace_smt_exact(child, target, replacement))
+                .collect(),
+        ),
+        SmtExpr::Not(inner) => {
+            SmtExpr::Not(Box::new(replace_smt_exact(inner, target, replacement)))
+        }
+        SmtExpr::Apply(name, args) => SmtExpr::Apply(
+            name.clone(),
+            args.iter()
+                .map(|arg| replace_smt_exact(arg, target, replacement))
+                .collect(),
+        ),
+        SmtExpr::Ite(cond, yes, no) => SmtExpr::Ite(
+            Box::new(replace_smt_exact(cond, target, replacement)),
+            Box::new(replace_smt_exact(yes, target, replacement)),
+            Box::new(replace_smt_exact(no, target, replacement)),
+        ),
+        SmtExpr::Forall(vars, inner) => SmtExpr::Forall(
+            vars.clone(),
+            Box::new(replace_smt_exact(inner, target, replacement)),
+        ),
+        SmtExpr::Exists(vars, inner) => SmtExpr::Exists(
+            vars.clone(),
+            Box::new(replace_smt_exact(inner, target, replacement)),
+        ),
+        SmtExpr::Var(_) | SmtExpr::RealLit(_) | SmtExpr::IntLit(_) | SmtExpr::BoolLit(_) => {
+            expr.clone()
+        }
+    }
+}
+
+fn normalize_successor_predecessor(expr: &crate::solver::SmtExpr) -> crate::solver::SmtExpr {
+    use crate::solver::{ArithOp, SmtExpr};
+    let normalized = match expr {
+        SmtExpr::Arith(op, left, right) => SmtExpr::Arith(
+            *op,
+            Box::new(normalize_successor_predecessor(left)),
+            Box::new(normalize_successor_predecessor(right)),
+        ),
+        SmtExpr::Cmp(op, left, right) => SmtExpr::Cmp(
+            *op,
+            Box::new(normalize_successor_predecessor(left)),
+            Box::new(normalize_successor_predecessor(right)),
+        ),
+        SmtExpr::Bool(op, children) => SmtExpr::Bool(
+            *op,
+            children
+                .iter()
+                .map(normalize_successor_predecessor)
+                .collect(),
+        ),
+        SmtExpr::Not(inner) => SmtExpr::Not(Box::new(normalize_successor_predecessor(inner))),
+        SmtExpr::Apply(name, args) => SmtExpr::Apply(
+            name.clone(),
+            args.iter().map(normalize_successor_predecessor).collect(),
+        ),
+        SmtExpr::Ite(cond, yes, no) => SmtExpr::Ite(
+            Box::new(normalize_successor_predecessor(cond)),
+            Box::new(normalize_successor_predecessor(yes)),
+            Box::new(normalize_successor_predecessor(no)),
+        ),
+        SmtExpr::Forall(vars, inner) => SmtExpr::Forall(
+            vars.clone(),
+            Box::new(normalize_successor_predecessor(inner)),
+        ),
+        SmtExpr::Exists(vars, inner) => SmtExpr::Exists(
+            vars.clone(),
+            Box::new(normalize_successor_predecessor(inner)),
+        ),
+        SmtExpr::Var(_) | SmtExpr::RealLit(_) | SmtExpr::IntLit(_) | SmtExpr::BoolLit(_) => {
+            expr.clone()
+        }
+    };
+    match &normalized {
+        SmtExpr::Arith(ArithOp::Sub, left, right)
+            if matches!(right.as_ref(), SmtExpr::IntLit(1))
+                && matches!(left.as_ref(),
+                    SmtExpr::Arith(ArithOp::Add, _, addend)
+                        if matches!(addend.as_ref(), SmtExpr::IntLit(1))) =>
+        {
+            let SmtExpr::Arith(_, base, _) = left.as_ref() else {
+                unreachable!()
+            };
+            base.as_ref().clone()
+        }
+        _ => normalized,
+    }
 }
 
 /// Try Tier B (SMT) for a surf property. Returns `Some(outcome)` for a
@@ -2787,6 +3736,28 @@ fn prove_deep_property(
     options: &PropertyRunOptions,
 ) -> PropertyOutcome {
     let seed = options.effective_seed(property.seed);
+
+    // chelis#978's production induction classifier consumes checked Surf AST.
+    // Deep has no equivalent structural-recursion ownership record yet. An
+    // explicit induction request is therefore terminal on Deep: never let the
+    // generic tail below reinterpret it as fuzz-only and launder samples into
+    // a pass.
+    if options.tier == "induction-only" {
+        return PropertyOutcome::new(
+            property.name.clone(),
+            PropertyStatus::Unsupported,
+            PropertyTier::Induction,
+            0,
+            seed,
+            None,
+            Some(
+                "induction-only is unavailable for Deep properties: no compiler-AST structural recursion attribution (chelis#978)"
+                    .to_string(),
+            ),
+            false,
+            Vec::new(),
+        );
+    }
 
     if options.tier == "auto" || options.tier == "smt-only" {
         if let Some(outcome) = try_deep_tier_b(exprs, property, options, seed) {

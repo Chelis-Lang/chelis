@@ -470,7 +470,7 @@ the transform boundary (reachability-scoped).
 | `cost` | Report lowered-IR copy cost (`--json`) | no |
 | `deep` | Desugar Surf → Deep s-expr (`--annotate`) | no |
 | `surf` | Decompile Deep → Surf (best-effort) | no |
-| `prove` | `@property` checker (`--tier {auto\|fuzz-only\|smt-only\|type-only}`, `--samples`, `--seed`, `--smt-timeout`) | no |
+| `prove` | `@property` checker (`--tier {auto\|fuzz-only\|smt-only\|induction-only\|type-only}`, `--samples`, `--seed`, `--smt-timeout`) | no |
 | `test` | Run `tests/` Chelis-native tests (`--filter`, `--json`, `--jobs`) | no |
 | `tide` | REPL / HTTP API / MCP / LSP server (`serve`, `mcp`, `lsp`) | no |
 | `cove` | Terminal UI (`--file`) | no |

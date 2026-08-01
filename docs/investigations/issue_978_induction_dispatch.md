@@ -2,7 +2,7 @@
 
 Issue: [chelis#978](https://github.com/Chelis-Lang/chelis/issues/978)
 
-## Result
+## Result (completed narrow production lane)
 
 The existing `tier_d` module is not a proof tier. It has no production call
 site, does not parse or check the supplied property source, trusts an explicit
@@ -11,8 +11,12 @@ base and step evidence was `ASSUMED`. This change removes that unsound result:
 until real obligations are dispatched, both cases fail closed and no CLI or
 Tide surface may classify them as proof evidence.
 
-This is a safety correction, not completion of structural induction. General-n
-bond and lattice claims remain fixed-size downstream.
+The safety correction remains in place for the legacy scaffold. The production
+property runner now also has a separate `induction-only` lane for the exact
+compiler-AST-classified recurrence described below. It constructs and
+dispatches real base and step obligations, proves the general-n bond example,
+and rejects an adversarial recurrence at the step. Broader lattice, mutual,
+multi-call, and non-structural recursion remains deferred under chelis#978.
 
 ## Two-cycle evidence
 
@@ -56,13 +60,13 @@ That is the correct outcome. Sampling a finite subset would not establish a
 general-n theorem, and the SMT lowerer deliberately stops when inlining reaches
 the recursive call.
 
-## Missing sound substrate
+## Implemented sound substrate
 
-A real Tier D dispatch requires all of the following in one reviewed language
-and artifact contract:
+The production lane now supplies the following in one language and artifact
+contract:
 
-1. A source-visible way to identify the induction variable and the property,
-   base, and step obligations. Naming conventions are not provenance.
+1. The checked compiler AST identifies the induction variable, model call, and
+   recurrence; source text and caller classification are not provenance.
 2. Compiler-AST classification of a structurally decreasing recursive call;
    the caller-supplied `size_parameter` hint is not evidence.
 3. One-step unfolding that preserves parameter substitution and introduces the
@@ -77,9 +81,10 @@ and artifact contract:
 Adding only a new enum value, trusting a named function, bounded fuzzing over
 `n`, or unrolling to a fixed depth would recreate the false-completion bug.
 
-## Deferral boundary
+## Remaining deferral boundary
 
-The fail-closed safety correction is ready independently. Full induction stays
-open under chelis#978 until the proof-object and one-step-unfolding substrate
-above is implemented. Shoals and C Note must continue to label their existing
-`n=5` bond/CRR properties as fixed-size and may not promote them to general-n.
+Only the exact direct scalar recurrence is promoted. Shoals and C Note may use
+the general-n bond example after consuming a release containing this lane, but
+their broader lattice/CRR claims remain fixed-size until their compiler AST
+fits a reviewed induction classifier. Unsupported shapes stay cited to
+chelis#978 and cannot silently sample.

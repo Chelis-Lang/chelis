@@ -298,7 +298,7 @@ fn prove_tool_schema() -> Value {
             "properties": {
                 "source_kind": { "type": "string", "enum": ["surf", "deep"] },
                 "source": { "type": "string", "description": "Chelis source containing @property declarations" },
-                "tier": { "type": "string", "enum": ["auto", "fuzz-only", "smt-only", "type-only"], "default": "auto" },
+                "tier": { "type": "string", "enum": ["auto", "fuzz-only", "smt-only", "induction-only", "type-only"], "default": "auto" },
                 "amenability": { "type": "string", "enum": ["linear", "polynomial", "transcendental", "opaque"], "description": "SMT amenability classification" },
                 "smt_timeout": { "type": "integer", "description": "SMT timeout in ms (default 5000)", "default": 5000 },
                 "samples": { "type": "integer", "description": "Fuzz samples per property (default 100)", "default": 100 },
@@ -342,7 +342,10 @@ fn handle_prove_tool(args: &Value) -> Value {
     // Validate the tier and source_kind up front (the `amenability` arg is
     // accepted for schema compatibility but no longer drives dispatch -- the
     // shared property runner classifies amenability internally).
-    if !matches!(tier, "auto" | "fuzz-only" | "smt-only" | "type-only") {
+    if !matches!(
+        tier,
+        "auto" | "fuzz-only" | "smt-only" | "induction-only" | "type-only"
+    ) {
         return json!({
             "ok": false,
             "stage": "mcp",
@@ -413,7 +416,7 @@ fn handle_prove_tool(args: &Value) -> Value {
                 // status -- Disproved/Failed, Unsupported, Error, AND a
                 // Passed-with-zero-samples sentinel -- is a non-pass (U4).
                 if o.is_pass() {
-                    if o.proof_tier == PropertyTier::Smt {
+                    if matches!(o.proof_tier, PropertyTier::Smt | PropertyTier::Induction) {
                         prop_proved += 1;
                     }
                 } else {
@@ -563,6 +566,16 @@ fn property_to_json(o: &chelis_prove::property_runner::PropertyOutcome) -> Value
         value["accepted_samples"] = json!(o.accepted_samples);
         value["attempted_samples"] = json!(o.attempted_samples);
         value["rejected_samples"] = json!(o.rejected_samples);
+    }
+    if matches!(
+        o.proof_tier,
+        chelis_prove::property_runner::PropertyTier::Smt
+            | chelis_prove::property_runner::PropertyTier::Induction
+    ) {
+        value["arith_model"] = json!("real");
+    }
+    if let Some(evidence) = &o.induction_evidence {
+        value["induction"] = json!(evidence);
     }
     if let Some(cx) = &o.counterexample {
         value["counterexample"] = cx.clone();

@@ -12,6 +12,134 @@ fn run_surf(source: &str, tier: &str) -> Vec<PropertyOutcome> {
     o
 }
 
+#[cfg(feature = "smt")]
+const GENERAL_BOND_INDUCTION: &str = "module M
+def bond_value(n: int32, coupon: f64, discount: f64) -> f64 =
+  if (n <= 0) then cast(1.0, f64)
+  else coupon + discount * bond_value(n - 1, coupon, discount)
+@property bond_value_nonnegative forall(n: int32, coupon: f64, discount: f64)
+where (n >= 0), (coupon >= cast(0.0, f64)), (discount >= cast(0.0, f64)):
+  (bond_value(n, coupon, discount) >= cast(0.0, f64))
+";
+
+#[cfg(feature = "smt")]
+#[test]
+fn general_bond_induction_disposes_real_base_and_step_obligations() {
+    let outcomes = run_surf(GENERAL_BOND_INDUCTION, "induction-only");
+    assert_eq!(outcomes.len(), 1);
+    let outcome = &outcomes[0];
+    assert_eq!(outcome.status, PropertyStatus::Passed, "{outcome:#?}");
+    assert_eq!(outcome.proof_tier, PropertyTier::Induction);
+    assert!(outcome.is_pass());
+    let evidence = outcome
+        .induction_evidence
+        .as_ref()
+        .expect("a green induction must disclose both obligations");
+    assert_eq!(evidence.base.status, "proved");
+    assert_eq!(evidence.step.status, "proved");
+    assert!(
+        outcome
+            .assumptions
+            .iter()
+            .all(|record| !format!("{record:?}").contains("ASSUMED")),
+        "caller assertions must never become proof: {outcome:#?}"
+    );
+}
+
+#[cfg(feature = "smt")]
+#[test]
+fn false_general_bond_induction_is_rejected_by_step_obligation() {
+    let source = GENERAL_BOND_INDUCTION.replace(
+        "coupon + discount * bond_value(n - 1, coupon, discount)",
+        "coupon - cast(1.0, f64) + discount * bond_value(n - 1, coupon, discount)",
+    );
+    let outcomes = run_surf(&source, "induction-only");
+    assert_eq!(outcomes.len(), 1);
+    let outcome = &outcomes[0];
+    assert_eq!(outcome.status, PropertyStatus::Failed, "{outcome:#?}");
+    assert!(!outcome.is_pass());
+    let evidence = outcome
+        .induction_evidence
+        .as_ref()
+        .expect("the failed step must remain visible");
+    assert_eq!(evidence.base.status, "proved");
+    assert_eq!(evidence.step.status, "disproved");
+}
+
+#[cfg(feature = "smt")]
+#[test]
+fn induction_rejects_non_structural_recursion_instead_of_assuming_it() {
+    let source = GENERAL_BOND_INDUCTION.replace("n - 1", "n + 1");
+    let outcomes = run_surf(&source, "induction-only");
+    assert_eq!(outcomes.len(), 1);
+    let outcome = &outcomes[0];
+    assert_eq!(outcome.status, PropertyStatus::Unsupported, "{outcome:#?}");
+    assert_eq!(outcome.proof_tier, PropertyTier::Induction);
+    assert!(!outcome.is_pass());
+    assert!(outcome.induction_evidence.is_none());
+}
+
+#[cfg(feature = "smt")]
+#[test]
+fn induction_never_dispatches_an_unchecked_parser_ast() {
+    let source = GENERAL_BOND_INDUCTION.replace(
+        "discount * bond_value(n - 1, coupon, discount)",
+        "true * bond_value(n - 1, coupon, discount)",
+    );
+    let outcomes = run_surf(&source, "induction-only");
+    assert_eq!(outcomes.len(), 1);
+    assert_eq!(outcomes[0].status, PropertyStatus::Error, "{outcomes:#?}");
+    assert!(
+        outcomes[0]
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("type-checked compiler AST"))
+    );
+    assert!(outcomes[0].induction_evidence.is_none());
+}
+
+#[cfg(feature = "smt")]
+#[test]
+fn induction_accepts_compiler_inlined_alias_recursion_soundly() {
+    let source = "module M
+def recur_alias(n: int32, coupon: f64, discount: f64) -> f64 =
+  bond_value(n, coupon, discount)
+def bond_value(n: int32, coupon: f64, discount: f64) -> f64 =
+  if (n <= 0) then cast(1.0, f64)
+  else coupon + discount * recur_alias(n - 1, coupon, discount)
+@property bond_value_nonnegative forall(n: int32, coupon: f64, discount: f64)
+where (n >= 0), (coupon >= cast(0.0, f64)), (discount >= cast(0.0, f64)):
+  (bond_value(n, coupon, discount) >= cast(0.0, f64))
+";
+    let outcomes = run_surf(source, "induction-only");
+    assert_eq!(outcomes.len(), 1);
+    let outcome = &outcomes[0];
+    assert_eq!(outcome.status, PropertyStatus::Passed, "{outcome:#?}");
+    let evidence = outcome.induction_evidence.as_ref().expect("evidence");
+    assert_eq!(evidence.base.status, "proved");
+    assert_eq!(evidence.step.status, "proved");
+}
+
+#[cfg(feature = "smt")]
+#[test]
+fn literal_dead_exact_recursion_keeps_its_branch_in_the_solver_goal() {
+    let source = GENERAL_BOND_INDUCTION.replace(
+        "coupon + discount * bond_value(n - 1, coupon, discount)",
+        "if true then coupon else coupon + discount * bond_value(n - 1, coupon, discount)",
+    );
+    let outcomes = run_surf(&source, "induction-only");
+    assert_eq!(outcomes.len(), 1);
+    let outcome = &outcomes[0];
+    assert_eq!(outcome.status, PropertyStatus::Passed, "{outcome:#?}");
+    let evidence = outcome.induction_evidence.as_ref().expect("evidence");
+    assert_eq!(evidence.base.status, "proved");
+    assert_eq!(evidence.step.status, "proved");
+    assert!(
+        format!("{:?}", evidence.step.goal.postcondition).contains("BoolLit(true)"),
+        "literal branch must remain in the dispatched goal: {evidence:#?}"
+    );
+}
+
 const NAMED_PROPERTY: &str = "module M
 def double(x: f32) -> f32 = x + x
 @property double_is_even forall(x: f32):
@@ -609,6 +737,20 @@ fn f7_deep_fuzz_only_runs_the_fuzz_loop() {
     );
     assert!(outcomes[0].samples > 0, "fuzz-only collected samples");
     assert_eq!(outcomes[0].proof_tier, PropertyTier::Fuzz);
+}
+
+#[test]
+fn issue_978_deep_induction_only_is_terminal_without_sampling() {
+    let outcomes = run_deep(DEEP_TRUE_PROPERTY, "induction-only");
+    assert_eq!(outcomes.len(), 1);
+    let outcome = &outcomes[0];
+    assert_eq!(outcome.status, PropertyStatus::Unsupported, "{outcome:#?}");
+    assert_eq!(outcome.proof_tier, PropertyTier::Induction);
+    assert_eq!(outcome.samples, 0);
+    assert_eq!(outcome.attempted_samples, 0);
+    assert_eq!(outcome.accepted_samples, 0);
+    assert!(outcome.sampling_method.is_none());
+    assert!(!outcome.is_pass());
 }
 
 #[test]
