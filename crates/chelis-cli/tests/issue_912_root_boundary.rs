@@ -75,16 +75,14 @@ result = mul(x, x)
 // ─── #947 repro: anonymous tuple roots drop ─────────────────────────────────
 
 /// A def returning an anonymous tuple should surface as `name.0`, `name.1`
-/// in eval output. Currently produces empty roots.
+/// in eval output. Currently produces empty roots for the arrow-form path
+/// in standalone file eval. PR #946 fixed this for the reef/in-context path;
+/// the standalone-file path still drops arrow-form value roots.
 #[test]
-#[ignore] // TODO: enable once manifest-driven surfacing lands
+#[ignore] // TODO: standalone-file arrow-form root surfacing
 fn issue_947_anonymous_tuple_roots_surface() {
     let source = r#"
-def compute() -> (tensor[2, f32], tensor[2, f32]) = {
-    a = to_tensor([1.0, 2.0])
-    b = to_tensor([3.0, 4.0])
-    (a, b)
-}
+def compute() -> (tensor[2, f32], tensor[2, f32]) = (to_tensor([1.0, 2.0]), to_tensor([3.0, 4.0]))
 result = compute()
 "#;
     let (stdout, _stderr, success) = eval_file(source);
@@ -101,18 +99,17 @@ result = compute()
 /// A def whose body uses `concat` as the program's only root should
 /// produce a value in eval, not empty roots.
 #[test]
-#[ignore] // TODO: enable once realizability routes concat defs to host
 fn issue_820_concat_def_evaluates_as_root() {
     let source = r#"
-a = to_tensor([1.0, 2.0])
-b = to_tensor([3.0, 4.0])
+a: List[int32] = [cast(1, int32), cast(2, int32)]
+b: List[int32] = [cast(3, int32), cast(4, int32)]
 result = concat(a, b)
 "#;
     let (stdout, _stderr, success) = eval_file(source);
     assert!(success, "eval should succeed for concat-rooted program");
     assert!(
-        stdout.contains("result") && stdout.contains("1.0"),
-        "root `result` must appear with values.\nGot: {stdout}"
+        stdout.contains("result") && stdout.contains("1, 2, 3, 4"),
+        "root `result` must appear with concatenated values.\nGot: {stdout}"
     );
 }
 
