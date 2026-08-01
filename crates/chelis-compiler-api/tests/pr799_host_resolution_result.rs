@@ -8,6 +8,7 @@
 
 use chelis_compiler_api::compiler::{CompilerError, compile, compile_for_execution};
 use chelis_compiler_api::schema::{CompileRequest, CompileTarget, SourceKind};
+use chelis_vocab::DiagnosticKind;
 
 fn c_request(source: &str) -> CompileRequest {
     CompileRequest {
@@ -27,7 +28,7 @@ fn assert_unresolved_host_type<T: std::fmt::Debug>(result: Result<T, CompilerErr
         "unexpected error envelope: {error:?}"
     );
     let diagnostic = &error.errors[0];
-    assert_eq!(diagnostic.kind, "lower_error");
+    assert_eq!(diagnostic.kind(), DiagnosticKind::LowerError);
     assert!(
         diagnostic
             .message
@@ -51,7 +52,7 @@ fn assert_unrepresentable_function_value(result: Result<impl std::fmt::Debug, Co
     assert_eq!(error.stage, "lower", "{error:?}");
     assert_eq!(error.errors.len(), 1, "{error:?}");
     let diagnostic = &error.errors[0];
-    assert_eq!(diagnostic.kind, "lower_error");
+    assert_eq!(diagnostic.kind(), DiagnosticKind::LowerError);
     assert!(
         diagnostic.message.contains("unsupported:")
             && diagnostic.message.contains("anonymous function value `fn`")
@@ -73,7 +74,11 @@ fn assert_named_function_value_has_no_c_abi(result: Result<impl std::fmt::Debug,
     assert_eq!(error.stage, "compile", "{error:?}");
     assert_eq!(error.errors.len(), 1, "{error:?}");
     let diagnostic = &error.errors[0];
-    assert_eq!(diagnostic.kind, "unsupported_feature", "{diagnostic:?}");
+    assert_eq!(
+        diagnostic.kind(),
+        DiagnosticKind::UnsupportedFeature,
+        "{diagnostic:?}"
+    );
     assert!(
         diagnostic.message.contains("unsupported:")
             && diagnostic.message.contains("function value")
@@ -139,7 +144,7 @@ fn generic_adt_bf16_specialization_reaches_structured_abi_rejection() {
         "unexpected error envelope: {error:?}"
     );
     let diagnostic = &error.errors[0];
-    assert_eq!(diagnostic.kind, "unsupported_feature");
+    assert_eq!(diagnostic.kind(), DiagnosticKind::UnsupportedFeature);
     for expected in [
         "unsupported:",
         "dtype `bf16`",
@@ -170,7 +175,7 @@ fn bf16_callback_reaches_structured_abi_rejection_without_placeholder() {
         "unexpected error envelope: {error:?}"
     );
     let diagnostic = &error.errors[0];
-    assert_eq!(diagnostic.kind, "unsupported_feature");
+    assert_eq!(diagnostic.kind(), DiagnosticKind::UnsupportedFeature);
     assert!(
         diagnostic.message.contains("unsupported:")
             && diagnostic.message.contains("dtype `bf16`")
@@ -325,7 +330,7 @@ fn nested_generic_adt_access_preserves_bf16_until_abi_rejection() {
         .expect_err("nested generic bf16 must reach target selection");
     assert_eq!(error.stage, "compile", "{error:?}");
     let diagnostic = error.errors.first().expect("one diagnostic");
-    assert_eq!(diagnostic.kind, "unsupported_feature");
+    assert_eq!(diagnostic.kind(), DiagnosticKind::UnsupportedFeature);
     assert!(
         diagnostic.message.contains("dtype `bf16`")
             && diagnostic.message.contains("C host ABI selection")

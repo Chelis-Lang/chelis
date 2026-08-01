@@ -12,9 +12,9 @@ use crate::compiler;
 use crate::schema::{
     AddFunctionRequest, AddPropertyRequest, ApiEnvelope, BatchRequestEnvelope, BatchResultEnvelope,
     ChangeSignatureRequest, CheckRequest, CompileRequest, DecompileRequest, DeepCallGraphRequest,
-    DeepOutlineRequest, DeepReferencesRequest, DesugarRequest, Diagnostic, EvalRequest,
-    GradRequest, LowerRequest, ParseRequest, RenameRequest, ReplaceFunctionBodyRequest,
-    ReplaceFunctionRequest, ValidateRequest,
+    DeepOutlineRequest, DeepReferencesRequest, DesugarRequest, EvalRequest, GradRequest,
+    LowerRequest, ParseRequest, RenameRequest, ReplaceFunctionBodyRequest, ReplaceFunctionRequest,
+    ValidateRequest,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -234,19 +234,7 @@ where
 }
 
 fn invalid_http_request<T>(message: String) -> ApiEnvelope<T> {
-    ApiEnvelope::failure(
-        "http",
-        vec![Diagnostic {
-            kind: "invalid_request".to_string(),
-            message,
-            severity: 1.0,
-            expected: None,
-            got: None,
-            suggestions: Vec::new(),
-            span: None,
-            deep_path: None,
-        }],
-    )
+    ApiEnvelope::invalid_request(message)
 }
 
 async fn batch(

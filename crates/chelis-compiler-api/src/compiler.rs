@@ -10,7 +10,10 @@ use chelis_surf::ast::{
     BinOp, Decl, Expr, ImportKind, LetBinding, LetPattern, Literal, MatchArm, Param, Pattern,
     TypeExpr, UnaryOp, Variant, VariantFields,
 };
-use chelis_types::{CheckedProgram, errors::CheckError};
+use chelis_types::{
+    CheckedProgram,
+    errors::{CheckError, CheckErrorKind},
+};
 use sha2::{Digest, Sha256};
 
 use crate::runtime::{
@@ -25,16 +28,17 @@ use crate::schema::{
     DeepCallGraphRequest, DeepCallGraphResult, DeepFunctionOutline, DeepOutlineRequest,
     DeepOutlineResult, DeepReference, DeepReferencesRequest, DeepReferencesResult, DesugarRequest,
     DesugarResult, Diagnostic, EvalRequest, EvalResult, EvaluatedRoot, FitnessComponents,
-    GeneratedFile, GradRequest, GradResult, LowerRequest, LowerResult, ParseRequest, ParseResult,
-    RenameRequest, RenameResult, ReplaceFunctionRequest, ReplaceFunctionResult, SourceKind, Span,
-    ValidateMode, ValidateRequest, ValidateResult, WireBinOp, WireDag, WireDagNode,
-    WireDagSchemaError, WireDeepAtom, WireDeepExpr, WireDeepExprKind, WireDimExpr, WireDimInfo,
-    WireFusedInput, WireFusedStep, WireFusedStepOp, WireImportKind, WireLetBinding, WireLetPattern,
-    WireLiteral, WireMatchArm, WireMetaEntry, WireParam, WirePattern, WirePropertyOption,
-    WireRecordExprField, WireRecordPatternField, WireRecordTypeField, WireRiscOp, WireRtDim,
-    WireSurfDecl, WireSurfExpr, WireSurfTypeExpr, WireTensorType, WireTypeInvariant, WireUnaryOp,
-    WireVariant, WireVariantFields,
+    GeneralKind, GeneratedFile, GradRequest, GradResult, LowerRequest, LowerResult, ParseRequest,
+    ParseResult, RenameRequest, RenameResult, ReplaceFunctionRequest, ReplaceFunctionResult,
+    SourceKind, Span, ValidateMode, ValidateRequest, ValidateResult, WireBinOp, WireDag,
+    WireDagNode, WireDagSchemaError, WireDeepAtom, WireDeepExpr, WireDeepExprKind, WireDimExpr,
+    WireDimInfo, WireFusedInput, WireFusedStep, WireFusedStepOp, WireImportKind, WireLetBinding,
+    WireLetPattern, WireLiteral, WireMatchArm, WireMetaEntry, WireParam, WirePattern,
+    WirePropertyOption, WireRecordExprField, WireRecordPatternField, WireRecordTypeField,
+    WireRiscOp, WireRtDim, WireSurfDecl, WireSurfExpr, WireSurfTypeExpr, WireTensorType,
+    WireTypeInvariant, WireUnaryOp, WireVariant, WireVariantFields,
 };
+use crate::schema::{stage_error, stage_error_with_span, unsupported_stage_error};
 
 const RUNTIME_H: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -105,10 +109,10 @@ pub struct CompilerError {
 /// `Diagnostic::kind` for an evaluation abandoned via a cancellation token
 /// (chelis#914), as opposed to one that failed on its own merits.
 ///
-/// `Diagnostic::kind` is an open string, so this is purely additive: existing
-/// consumers that do not know the value simply see an unfamiliar kind, and the
-/// serialized shape is unchanged.
-pub const EVAL_CANCELLED_KIND: &str = "cancelled";
+/// The spelling is read off the sealed vocabulary rather than restated, so an
+/// embedder comparing against this constant and a producer constructing
+/// [`GeneralKind::Cancelled`] cannot drift apart.
+pub const EVAL_CANCELLED_KIND: &str = chelis_vocab::DiagnosticKind::Cancelled.as_str();
 
 impl CompilerError {
     /// Whether this error is a cancellation rather than a genuine failure.
@@ -119,7 +123,7 @@ impl CompilerError {
     pub fn is_cancellation(&self) -> bool {
         self.errors
             .iter()
-            .any(|diagnostic| diagnostic.kind == EVAL_CANCELLED_KIND)
+            .any(|diagnostic| diagnostic.kind() == chelis_vocab::DiagnosticKind::Cancelled)
     }
 }
 
@@ -132,7 +136,11 @@ impl CompilerError {
 /// message carries the sentinel only for the CLI's `--timeout` boundary, which
 /// sees flattened text rather than the typed error.
 pub(crate) fn cancelled_stage_error(stage: &str) -> CompilerError {
-    stage_error(stage, chelis_types::EVAL_CANCELLED_MSG, EVAL_CANCELLED_KIND)
+    stage_error(
+        stage,
+        chelis_types::EVAL_CANCELLED_MSG,
+        GeneralKind::Cancelled,
+    )
 }
 
 /// Front-end phase boundary (chelis#930): abandon the compile if cancellation
@@ -216,7 +224,7 @@ pub fn replace_function_body(
             stage_error_with_span(
                 "replace",
                 err.to_string(),
-                "deep_parse_error",
+                GeneralKind::DeepParseError,
                 parse_error_span_deep(&err),
             )
         })?;
@@ -229,7 +237,7 @@ pub fn replace_function_body(
                     "`new_body` must be exactly one Deep expression, got {}",
                     other.len()
                 ),
-                "deep_parse_error",
+                GeneralKind::DeepParseError,
             ));
         }
     };
@@ -239,7 +247,7 @@ pub fn replace_function_body(
         stage_error_with_span(
             "replace",
             err.to_string(),
-            "deep_parse_error",
+            GeneralKind::DeepParseError,
             parse_error_span_deep(&err),
         )
     })?;
@@ -254,7 +262,9 @@ pub fn replace_function_body(
     // returns just the one `(def ...)` node; print it on its own line.
     let changed_def =
         chelis_deep::spliced_function_def(&module, &request.function_name, new_body.clone())
-            .map_err(|err| stage_error("replace", err.to_string(), "name_resolution_error"))?;
+            .map_err(|err| {
+                stage_error("replace", err.to_string(), GeneralKind::NameResolutionError)
+            })?;
 
     Ok(crate::schema::ReplaceFunctionBodyResult {
         changed_def_deep: chelis_deep::printer::print_expr(&changed_def),
@@ -275,7 +285,7 @@ pub fn add_function(request: AddFunctionRequest) -> Result<AddFunctionResult> {
         stage_error_with_span(
             "add-function",
             err.to_string(),
-            "deep_parse_error",
+            GeneralKind::DeepParseError,
             parse_error_span_deep(&err),
         )
     })?;
@@ -285,7 +295,7 @@ pub fn add_function(request: AddFunctionRequest) -> Result<AddFunctionResult> {
             stage_error_with_span(
                 "add-function",
                 err.to_string(),
-                "deep_parse_error",
+                GeneralKind::DeepParseError,
                 parse_error_span_deep(&err),
             )
         })?;
@@ -443,7 +453,7 @@ pub fn add_property(request: AddPropertyRequest) -> Result<AddPropertyResult> {
         return Err(stage_error(
             "add-property",
             "`new_decls` def must carry `chelis_role: \"property\"`",
-            "deep_decl_error",
+            GeneralKind::DeepDeclError,
         ));
     }
     let rewritten = chelis_deep::insert_function_decls(
@@ -466,7 +476,7 @@ fn parse_deep_authoring(stage: &str, source: &str) -> Result<Vec<DeepExpr>> {
         stage_error_with_span(
             stage,
             err.to_string(),
-            "deep_parse_error",
+            GeneralKind::DeepParseError,
             parse_error_span_deep(&err),
         )
     })
@@ -482,7 +492,7 @@ fn parse_one_deep_authoring(stage: &str, field: &str, source: &str) -> Result<De
                 "`{field}` must be exactly one Deep expression, got {}",
                 other.len()
             ),
-            "deep_parse_error",
+            GeneralKind::DeepParseError,
         )),
     }
 }
@@ -508,7 +518,7 @@ fn check_preimage(module: &[DeepExpr], function_name: &str, expected: Option<&st
             format!(
                 "preimage hash mismatch for `{function_name}`: expected {expected}, got {actual}"
             ),
-            "preimage_mismatch",
+            GeneralKind::PreimageMismatch,
         ))
     }
 }
@@ -524,7 +534,7 @@ fn target_preimage_sha256(module: &[DeepExpr], function_name: &str) -> Result<St
             stage_error(
                 "name-resolution",
                 format!("function `{function_name}` not found"),
-                "name_resolution_error",
+                GeneralKind::NameResolutionError,
             )
         })?;
     Ok(sha256_hex(function.def_deep.as_bytes()))
@@ -546,23 +556,27 @@ fn authoring_error_to_compiler_error(
 ) -> CompilerError {
     use chelis_deep::authoring::AuthoringError;
     match error {
-        AuthoringError::Resolve(err) => {
-            stage_error("name-resolution", err.to_string(), "name_resolution_error")
-        }
+        AuthoringError::Resolve(err) => stage_error(
+            "name-resolution",
+            err.to_string(),
+            GeneralKind::NameResolutionError,
+        ),
         AuthoringError::NoModule | AuthoringError::MultipleModules { .. } => {
-            stage_error(default_stage, error.to_string(), "deep_decl_error")
+            stage_error(default_stage, error.to_string(), GeneralKind::DeepDeclError)
         }
         AuthoringError::InvalidDecl(message) => {
-            stage_error(default_stage, message, "deep_decl_error")
+            stage_error(default_stage, message, GeneralKind::DeepDeclError)
         }
-        AuthoringError::DuplicateFunction { .. } => {
-            stage_error("name-resolution", error.to_string(), "duplicate_name")
-        }
+        AuthoringError::DuplicateFunction { .. } => stage_error(
+            "name-resolution",
+            error.to_string(),
+            GeneralKind::DuplicateName,
+        ),
         AuthoringError::PreimageMismatch { .. } => {
-            stage_error("preimage", error.to_string(), "preimage_mismatch")
+            stage_error("preimage", error.to_string(), GeneralKind::PreimageMismatch)
         }
         AuthoringError::CascadeIncomplete { .. } => {
-            stage_error("cascade", error.to_string(), "cascade_incomplete")
+            stage_error("cascade", error.to_string(), GeneralKind::CascadeIncomplete)
         }
     }
 }
@@ -581,7 +595,7 @@ fn parse_add_function_decls(exprs: Vec<DeepExpr>) -> Result<ParsedAddFunctionDec
                 "`new_decls` must contain exactly one `(def ...)` and an optional matching `(defsig ...)`, got {} top-level expressions",
                 exprs.len()
             ),
-            "deep_decl_error",
+            GeneralKind::DeepDeclError,
         ));
     }
 
@@ -656,7 +670,7 @@ fn parse_add_function_decls(exprs: Vec<DeepExpr>) -> Result<ParsedAddFunctionDec
 }
 
 fn add_function_decl_error(message: impl Into<String>) -> CompilerError {
-    stage_error("add-function", message, "deep_decl_error")
+    stage_error("add-function", message, GeneralKind::DeepDeclError)
 }
 
 fn add_function_insert_error_to_compiler_error(
@@ -664,13 +678,15 @@ fn add_function_insert_error_to_compiler_error(
 ) -> CompilerError {
     use chelis_deep::InsertFunctionError;
     match error {
-        InsertFunctionError::InsertionTarget(err) => {
-            stage_error("name-resolution", err.to_string(), "name_resolution_error")
-        }
+        InsertFunctionError::InsertionTarget(err) => stage_error(
+            "name-resolution",
+            err.to_string(),
+            GeneralKind::NameResolutionError,
+        ),
         InsertFunctionError::NoModule
         | InsertFunctionError::MultipleModules { .. }
         | InsertFunctionError::InvalidStampedRewrite { .. } => {
-            stage_error("add-function", error.to_string(), "deep_decl_error")
+            stage_error("add-function", error.to_string(), GeneralKind::DeepDeclError)
         }
     }
 }
@@ -684,30 +700,24 @@ fn edit_validation_error_to_compiler_error(
             location,
             deep_path,
             ..
-        } => ("type_error", *location, deep_path.clone()),
+        } => (GeneralKind::TypeError, *location, deep_path.clone()),
         EditValidationError::Effect {
             location,
             deep_path,
             ..
-        } => ("effect_error", *location, deep_path.clone()),
+        } => (GeneralKind::EffectError, *location, deep_path.clone()),
         EditValidationError::Linearity {
             location,
             deep_path,
             ..
-        } => ("linearity_error", *location, deep_path.clone()),
+        } => (GeneralKind::LinearityError, *location, deep_path.clone()),
     };
+    let mut diagnostic = Diagnostic::general(kind, error.message(), 1.0);
+    diagnostic.span = location;
+    diagnostic.deep_path = deep_path.map(wire_deep_error_path);
     CompilerError {
         stage: error.stage().to_string(),
-        errors: vec![Diagnostic {
-            kind: kind.to_string(),
-            message: error.message().to_string(),
-            severity: 1.0,
-            expected: None,
-            got: None,
-            suggestions: Vec::new(),
-            span: location,
-            deep_path: deep_path.map(wire_deep_error_path),
-        }],
+        errors: vec![diagnostic],
     }
 }
 
@@ -719,36 +729,30 @@ fn replacement_error_to_compiler_error(error: crate::fragment::ReplacementError)
     use crate::fragment::ReplacementError;
     let (kind, location, deep_path) = match &error {
         ReplacementError::NameResolution { location, .. } => {
-            ("name_resolution_error", *location, None)
+            (GeneralKind::NameResolutionError, *location, None)
         }
         ReplacementError::Type {
             location,
             deep_path,
             ..
-        } => ("type_error", *location, deep_path.clone()),
+        } => (GeneralKind::TypeError, *location, deep_path.clone()),
         ReplacementError::Effect {
             location,
             deep_path,
             ..
-        } => ("effect_error", *location, deep_path.clone()),
+        } => (GeneralKind::EffectError, *location, deep_path.clone()),
         ReplacementError::Linearity {
             location,
             deep_path,
             ..
-        } => ("linearity_error", *location, deep_path.clone()),
+        } => (GeneralKind::LinearityError, *location, deep_path.clone()),
     };
+    let mut diagnostic = Diagnostic::general(kind, error.message(), 1.0);
+    diagnostic.span = location;
+    diagnostic.deep_path = deep_path.map(wire_deep_error_path);
     CompilerError {
         stage: error.stage().to_string(),
-        errors: vec![Diagnostic {
-            kind: kind.to_string(),
-            message: error.message().to_string(),
-            severity: 1.0,
-            expected: None,
-            got: None,
-            suggestions: Vec::new(),
-            span: location,
-            deep_path: deep_path.map(wire_deep_error_path),
-        }],
+        errors: vec![diagnostic],
     }
 }
 
@@ -1022,7 +1026,7 @@ fn resolve_execution_entry<'a>(
                         "unknown entry_name `{name}`; this program's entry defs are: \
                          {available}. Pass one of these as entry_name."
                     ),
-                    "compile_error",
+                    GeneralKind::CompileError,
                 ))
             }
         }
@@ -1055,7 +1059,7 @@ fn resolve_execution_entry<'a>(
                              ({}) and none named `main`. Pass entry_name to select one.",
                             candidates.join(", ")
                         ),
-                        "compile_error",
+                        GeneralKind::CompileError,
                     ))
                 }
             }
@@ -1134,7 +1138,7 @@ fn strict_entry_decline_error(reason: EntryLaneDecline) -> CompilerError {
              merge every def's params and outputs into the manifest (the chelis#817 class). \
              Move the bindings into the entry def, or run the program through `eval`, which \
              supports top-level bindings.",
-            "compile_error",
+            GeneralKind::CompileError,
         ),
         EntryLaneDecline::GradLike { entry } => {
             unsupported_stage_error(chelis_types::unsupported::Unsupported::new(
@@ -1172,7 +1176,7 @@ fn strict_entry_decline_error(reason: EntryLaneDecline) -> CompilerError {
                  `eval` to run the program, or restructure the entry to a plain \
                  tensor-in/tensor-out def."
             ),
-            "compile_error",
+            GeneralKind::CompileError,
         ),
     }
 }
@@ -1422,7 +1426,7 @@ fn resolve_in_context_entry<'a>(
                          {}. Pass one of these as entry_name.",
                         list_entries()
                     ),
-                    "compile_error",
+                    GeneralKind::CompileError,
                 ));
             }
         }
@@ -1445,7 +1449,7 @@ fn resolve_in_context_entry<'a>(
                                  and none named `main`. Pass entry_name to select one.",
                                 list_entries()
                             ),
-                            "compile_error",
+                            GeneralKind::CompileError,
                         ));
                     }
                 }
@@ -1459,7 +1463,7 @@ fn resolve_in_context_entry<'a>(
                 "internal: in-context tensor entry `{selected}` has no node in the \
                  pipeline's named-root map; please report it."
             ),
-            "compile_error",
+            GeneralKind::CompileError,
         )
     })?;
     let mut scoped = compiled.dag.clone();
@@ -1516,7 +1520,7 @@ fn execution_artifact_from_compiled(
             stage_error_with_span(
                 "lower",
                 diagnostic.to_string(),
-                "lower_error",
+                GeneralKind::LowerError,
                 deep_span_to_schema(diagnostic.span),
             )
         })?;
@@ -1640,7 +1644,7 @@ fn execution_artifact_from_compiled(
                                  root's inputs (#817). This indicates a root-scoping vs DCE \
                                  mismatch; please report it."
                             ),
-                            "compile_error",
+                            GeneralKind::CompileError,
                         ));
                     }
                     resolved => resolved,
@@ -1723,7 +1727,7 @@ fn execution_artifact_from_compiled(
                          wrapping scalars as rank-1 tensors (`tensor[1, f32]`), or use `eval` to \
                          run it (`eval` supports scalar and host-only programs)."
                     ),
-                    "compile_error",
+                    GeneralKind::CompileError,
                 ));
             }
 
@@ -2011,7 +2015,7 @@ fn compile_new_source_in_context(
     let flat_decls = flatten_module_decls(&raw_new_decls);
     let rewritten =
         chelis_reef::rewrite_entry_decls_with_reef_graph(&context.reef_state, &flat_decls)
-            .map_err(|err| stage_error("reef", err, "reef_error"))?;
+            .map_err(|err| stage_error("reef", err, GeneralKind::ReefError))?;
     bail_if_cancelled("desugar")?;
     let prepared = crate::pipeline::prepare_surf_decls(&rewritten, None).map_err(|error| {
         pipeline_rejection_to_compiler_error(crate::pipeline::PipelineRejection::Preparation(error))
@@ -2216,7 +2220,7 @@ fn eval_compiled(
         return Err(stage_error(
             "eval",
             "program produced no evaluable roots",
-            "other",
+            GeneralKind::Other,
         ));
     }
 
@@ -2224,7 +2228,7 @@ fn eval_compiled(
         .into_iter()
         .map(|(name, value)| {
             let tensor = crate::decode::wire_tensor_to_ir(&value).map_err(|message| {
-                stage_error("eval", format!("binding `{name}`: {message}"), "eval_error")
+                stage_error("eval", format!("binding `{name}`: {message}"), GeneralKind::EvalError)
             })?;
             Ok((name, tensor))
         })
@@ -2268,7 +2272,7 @@ fn eval_compiled(
             stage_error(
                 "eval",
                 format!("missing tensor root `{name}`"),
-                "eval_error",
+                GeneralKind::EvalError,
             )
         })?;
         let precision = compiled
@@ -2276,7 +2280,11 @@ fn eval_compiled(
             .get(*node_id)
             .map(|node| node.output_type.precision)
             .ok_or_else(|| {
-                stage_error("eval", format!("missing node {}", node_id.0), "eval_error")
+                stage_error(
+                    "eval",
+                    format!("missing node {}", node_id.0),
+                    GeneralKind::EvalError,
+                )
             })?;
         debug_assert_eq!(
             value.prim(),
@@ -2400,7 +2408,7 @@ pub fn grad(request: GradRequest) -> Result<GradResult> {
     } else {
         chelis_ir::grad::grad_dag_checked(&compiled.dag, output, &wrt_nodes)
     }
-    .map_err(|ad_err| stage_error("grad", ad_err.to_string(), "grad_error"))?;
+    .map_err(|ad_err| stage_error("grad", ad_err.to_string(), GeneralKind::GradError))?;
 
     let grad_nodes_by_name = request
         .wrt_names
@@ -2438,7 +2446,7 @@ pub fn validate(request: ValidateRequest) -> Result<ValidateResult> {
         ValidateMode::Desugar => chelis_validate::validate_desugared(&request.source),
     };
 
-    result.map_err(|err| stage_error("validate", err.to_string(), "validation_error"))?;
+    result.map_err(|err| stage_error("validate", err.to_string(), GeneralKind::ValidationError))?;
 
     Ok(ValidateResult {
         mode: request.mode,
@@ -2488,7 +2496,7 @@ pub(crate) fn pipeline_rejection_to_compiler_error(
             stage_error_with_span(
                 "parse",
                 error.to_string(),
-                "surf_parse_error",
+                GeneralKind::SurfParseError,
                 parse_error_span_surf(&source, &error),
             )
         }
@@ -2496,12 +2504,12 @@ pub(crate) fn pipeline_rejection_to_compiler_error(
             stage_error_with_span(
                 "parse",
                 error.to_string(),
-                "deep_parse_error",
+                GeneralKind::DeepParseError,
                 parse_error_span_deep(&error),
             )
         }
         PipelineRejection::Preparation(PreparationError::Expansion(error)) => {
-            stage_error("desugar", error.to_string(), "macro_error")
+            stage_error("desugar", error.to_string(), GeneralKind::MacroError)
         }
         PipelineRejection::Type { fitness } => CompilerError {
             stage: "check".to_string(),
@@ -2530,7 +2538,7 @@ pub(crate) fn pipeline_rejection_to_compiler_error(
         PipelineRejection::Lower(diagnostic) => stage_error_with_span(
             "lower",
             diagnostic.to_string(),
-            "lower_error",
+            GeneralKind::LowerError,
             deep_span_to_schema(diagnostic.span),
         ),
         PipelineRejection::RootCount {
@@ -2547,7 +2555,7 @@ pub(crate) fn pipeline_rejection_to_compiler_error(
                 format!(
                     "lowered {subject} count mismatch: expected {expected} named roots, got {actual}"
                 ),
-                "lower_error",
+                GeneralKind::LowerError,
             )
         }
     }
@@ -2703,7 +2711,7 @@ fn parse_surf(source: &str) -> Result<Vec<Decl>> {
         stage_error_with_span(
             "parse",
             err.to_string(),
-            "surf_parse_error",
+            GeneralKind::SurfParseError,
             parse_error_span_surf(source, &err),
         )
     })
@@ -2714,7 +2722,7 @@ fn parse_deep(source: &str) -> Result<Vec<DeepExpr>> {
         stage_error_with_span(
             "parse",
             err.to_string(),
-            "deep_parse_error",
+            GeneralKind::DeepParseError,
             parse_error_span_deep(&err),
         )
     })
@@ -2725,7 +2733,7 @@ fn canonicalize_decompiled_surf(source: &str) -> Result<String> {
         stage_error_with_span(
             "decompile",
             format!("decompiler emitted Surf that the parser rejected: {err}"),
-            "surf_parse_error",
+            GeneralKind::SurfParseError,
             parse_error_span_surf(source, &err),
         )
     })?;
@@ -2924,7 +2932,7 @@ fn execution_input_specs(dag: &Dag, labels: &[String]) -> Result<Vec<ExecutionTe
                 stage_error(
                     "compile",
                     format!("generated code referenced input `{label}`, but the lowered IR has no matching load"),
-                    "compile_error",
+                    GeneralKind::CompileError,
                 )
             })?;
             Ok(execution_tensor_spec(label.clone(), ty))
@@ -2947,7 +2955,7 @@ fn execution_output_specs(dag: &Dag, labels: &[String]) -> Result<Vec<ExecutionT
                             "generated code referenced output node {}, but the lowered IR has no matching node",
                             node_id.0
                         ),
-                        "compile_error",
+                        GeneralKind::CompileError,
                     )
                 })?
                 .output_type;
@@ -3011,17 +3019,16 @@ fn execution_tensor_spec(name: String, ty: &TensorType) -> ExecutionTensorSpec {
     }
 }
 
-fn reject_unsized_named_dims(dag: &Dag, target: &str) -> Result<()> {
+fn reject_unsized_named_dims(dag: &Dag, target: &'static str) -> Result<()> {
     for node in dag.nodes() {
         for dim in &node.output_type.dims {
             if let DimInfo::Named(name, None) = dim {
-                return Err(stage_error(
-                    "compile",
+                return Err(unsupported_gate_error(
                     format!(
                         "`chelis build --target {target}` does not yet support unresolved named dimensions; node {} uses symbolic dimension `{name}`",
                         node.id.0
                     ),
-                    "unsupported_feature",
+                    target,
                 ));
             }
         }
@@ -3049,7 +3056,7 @@ fn reject_unsized_named_dims(dag: &Dag, target: &str) -> Result<()> {
 /// pass-through axes may remain symbolic and bind correctly. The IR
 /// evaluator and host runtime are unaffected and handle runtime-only
 /// extents.
-fn reject_symbolic_windowed_reduce(dag: &Dag, target: &str) -> Result<()> {
+fn reject_symbolic_windowed_reduce(dag: &Dag, target: &'static str) -> Result<()> {
     for node in dag.nodes() {
         let RiscOp::ReduceWindow { window_shape, .. } = &node.op else {
             continue;
@@ -3058,8 +3065,7 @@ fn reject_symbolic_windowed_reduce(dag: &Dag, target: &str) -> Result<()> {
         let leading = dims.len().saturating_sub(window_shape.len());
         for (offset, dim) in dims.iter().enumerate().skip(leading) {
             if let DimInfo::Named(name, None) = dim {
-                return Err(stage_error(
-                    "compile",
+                return Err(unsupported_gate_error(
                     format!(
                         "`chelis build --target {target}` requires statically-known \
                          windowed-axis extents for `reduce_window_*`; node {} windowed axis \
@@ -3071,7 +3077,7 @@ fn reject_symbolic_windowed_reduce(dag: &Dag, target: &str) -> Result<()> {
                          §2.3.1.",
                         node.id.0
                     ),
-                    "unsupported_feature",
+                    target,
                 ));
             }
         }
@@ -3089,7 +3095,7 @@ fn reject_symbolic_windowed_reduce(dag: &Dag, target: &str) -> Result<()> {
 /// diagnostic. Reject at compile time with an `unsupported_feature` error;
 /// the emitter `panic!` stays as a defensive backstop. bf16/f16 widening is
 /// follow-on work — see spec/05-risc-primitives.md §2.3.1.
-fn reject_unsupported_reduce_window_precision(dag: &Dag, target: &str) -> Result<()> {
+fn reject_unsupported_reduce_window_precision(dag: &Dag, target: &'static str) -> Result<()> {
     for node in dag.nodes() {
         let (op_label, reducer) = match &node.op {
             RiscOp::ReduceWindow { reducer, .. } => ("reduce_window_*", reducer),
@@ -3098,8 +3104,7 @@ fn reject_unsupported_reduce_window_precision(dag: &Dag, target: &str) -> Result
         };
         let prec = node.output_type.precision;
         if prec != chelis_types::types::Prim::F32 {
-            return Err(stage_error(
-                "compile",
+            return Err(unsupported_gate_error(
                 format!(
                     "`chelis build --target {target}` supports `{op_label}` (`{}`) on f32 \
                      tensors only; node {} carries precision `{}`. bf16/f16 windowed \
@@ -3109,7 +3114,7 @@ fn reject_unsupported_reduce_window_precision(dag: &Dag, target: &str) -> Result
                     node.id.0,
                     prec.name(),
                 ),
-                "unsupported_feature",
+                target,
             ));
         }
     }
@@ -3129,7 +3134,19 @@ fn host_only_builtin_error(name: &str, target: CompileTarget) -> CompilerError {
     };
     let unsupported =
         chelis_types::unsupported::Unsupported::compiled_host_only_builtin(name, target_label);
-    stage_error("compile", unsupported.to_string(), "unsupported_feature")
+    unsupported_stage_error(unsupported)
+}
+
+fn unsupported_gate_error(message: impl Into<String>, target: &'static str) -> CompilerError {
+    unsupported_stage_error(chelis_types::unsupported::Unsupported::new(
+        chelis_types::unsupported::UnsupportedKind::Construct(message.into()),
+        format!("`chelis build --target {target}` early capability gate"),
+        chelis_types::unsupported::Stage::Codegen(target),
+        chelis_types::unimplemented_rejection!(
+            959,
+            "the typed gate inventory tracks this capability rejection (chelis#959)"
+        ),
+    ))
 }
 
 /// Reject direct host-runtime-only calls on checked Deep before host lowering
@@ -3378,97 +3395,89 @@ fn reject_unsupported_hip_ops(dag: &Dag) -> Result<()> {
             // `todo!`, which would abort the build with an `internal error`
             // panic. The C backend is canonical; use `--target c`.
             RiscOp::ReduceWindow { .. } => {
-                return Err(stage_error(
-                    "compile",
+                return Err(unsupported_gate_error(
                     format!(
                         "`chelis build --target hip` does not yet support `reduce_window_*`; \
                          lowered node {} requires it. HIP windowed-reduction codegen is deferred \
                          (spec/05-risc-primitives.md §2.3.1); use `--target c`.",
                         node.id.0
                     ),
-                    "unsupported_feature",
+                    "hip",
                 ));
             }
             RiscOp::ReduceWindowGrad { .. } => {
-                return Err(stage_error(
-                    "compile",
+                return Err(unsupported_gate_error(
                     format!(
                         "`chelis build --target hip` does not yet support the `reduce_window_*` \
                          adjoint; lowered node {} requires it. HIP windowed-reduction codegen is \
                          deferred (spec/05-risc-primitives.md §2.3.1); use `--target c`.",
                         node.id.0
                     ),
-                    "unsupported_feature",
+                    "hip",
                 ));
             }
             RiscOp::OneHot { .. } => {
-                return Err(stage_error(
-                    "compile",
+                return Err(unsupported_gate_error(
                     format!(
                         "`chelis build --target hip` cannot compile internal one_hot node {}: \
                          the sparse gather recognizer must consume OneHot before backend emission",
                         node.id.0
                     ),
-                    "unsupported_feature",
+                    "hip",
                 ));
             }
             RiscOp::Shape { .. } => {
-                return Err(stage_error(
-                    "compile",
+                return Err(unsupported_gate_error(
                     format!(
                         "`chelis build --target hip` does not yet support the runtime `shape` \
                          value read; lowered node {} requires it. The C backend is canonical \
                          for runtime-dim reads (chelis#513/#558); use `--target c`.",
                         node.id.0
                     ),
-                    "unsupported_feature",
+                    "hip",
                 ));
             }
             // chelis#616: node-valued (runtime) movement bounds are C-only.
             RiscOp::Shrink { bounds } if bounds.iter().any(pair_has_node_bound) => {
-                return Err(stage_error(
-                    "compile",
+                return Err(unsupported_gate_error(
                     format!(
                         "`chelis build --target hip` does not yet support a runtime (node-valued) \
                          `shrink` bound; lowered node {} requires it. The C backend is canonical \
                          for runtime movement bounds (chelis#616); use `--target c`.",
                         node.id.0
                     ),
-                    "unsupported_feature",
+                    "hip",
                 ));
             }
             RiscOp::Pad { padding, .. } if padding.iter().any(pair_has_node_bound) => {
-                return Err(stage_error(
-                    "compile",
+                return Err(unsupported_gate_error(
                     format!(
                         "`chelis build --target hip` does not yet support a runtime (node-valued) \
                          `pad` bound; lowered node {} requires it. Use `--target c` (chelis#616).",
                         node.id.0
                     ),
-                    "unsupported_feature",
+                    "hip",
                 ));
             }
             RiscOp::Stride { strides } if strides.iter().any(|s| s.node_input().is_some()) => {
-                return Err(stage_error(
-                    "compile",
+                return Err(unsupported_gate_error(
                     format!(
                         "`chelis build --target hip` does not yet support a runtime (node-valued) \
                          `stride` step; lowered node {} requires it. Use `--target c` (chelis#616).",
                         node.id.0
                     ),
-                    "unsupported_feature",
+                    "hip",
                 ));
             }
             RiscOp::Reshape { new_shape } if new_shape.iter().any(|d| d.node_input().is_some()) => {
-                return Err(stage_error(
-                    "compile",
+                return Err(unsupported_gate_error(
                     format!(
                         "`chelis build --target hip` does not yet support a runtime (node-valued) \
                          `reshape` target extent; lowered node {} requires it. \
                          Use `--target c` (chelis#616).",
                         node.id.0
                     ),
-                    "unsupported_feature",
+                    "hip",
                 ));
             }
             RiscOp::Gather { .. } => {
@@ -3478,8 +3487,7 @@ fn reject_unsupported_hip_ops(dag: &Dag) -> Result<()> {
                 if values.precision != chelis_types::types::Prim::F32
                     || node.output_type.precision != chelis_types::types::Prim::F32
                 {
-                    return Err(stage_error(
-                        "compile",
+                    return Err(unsupported_gate_error(
                         format!(
                             "`chelis build --target hip` sparse gather supports f32 payloads only; \
                              node {} carries payload precision `{}` and output precision `{}`",
@@ -3487,34 +3495,32 @@ fn reject_unsupported_hip_ops(dag: &Dag) -> Result<()> {
                             values.precision.name(),
                             node.output_type.precision.name()
                         ),
-                        "unsupported_feature",
+                        "hip",
                     ));
                 }
                 if !matches!(
                     indices.precision,
                     chelis_types::types::Prim::Int32 | chelis_types::types::Prim::Int64
                 ) {
-                    return Err(stage_error(
-                        "compile",
+                    return Err(unsupported_gate_error(
                         format!(
                             "`chelis build --target hip` sparse gather requires int32/int64 indices; \
                              node {} uses `{}`",
                             node.id.0,
                             indices.precision.name()
                         ),
-                        "unsupported_feature",
+                        "hip",
                     ));
                 }
                 if !matches!(index_node.op, RiscOp::Load { .. }) {
-                    return Err(stage_error(
-                        "compile",
+                    return Err(unsupported_gate_error(
                         format!(
                             "`chelis build --target hip` sparse gather requires indices to be loaded input tensors in this milestone; \
                              node {} uses indices produced by {:?}. \
                              Non-load integer index producers need integer HIP codegen before they can feed sparse kernels safely.",
                             node.id.0, index_node.op
                         ),
-                        "unsupported_feature",
+                        "hip",
                     ));
                 }
             }
@@ -3555,8 +3561,7 @@ fn reject_unsupported_hip_ops(dag: &Dag) -> Result<()> {
                     || updates.precision != chelis_types::types::Prim::F32
                     || node.output_type.precision != chelis_types::types::Prim::F32
                 {
-                    return Err(stage_error(
-                        "compile",
+                    return Err(unsupported_gate_error(
                         format!(
                             "`chelis build --target hip` sparse {label} supports f32 payloads only; \
                              node {} carries target `{}`, updates `{}`, output `{}`. \
@@ -3566,34 +3571,32 @@ fn reject_unsupported_hip_ops(dag: &Dag) -> Result<()> {
                             updates.precision.name(),
                             node.output_type.precision.name()
                         ),
-                        "unsupported_feature",
+                        "hip",
                     ));
                 }
                 if !matches!(
                     indices.precision,
                     chelis_types::types::Prim::Int32 | chelis_types::types::Prim::Int64
                 ) {
-                    return Err(stage_error(
-                        "compile",
+                    return Err(unsupported_gate_error(
                         format!(
                             "`chelis build --target hip` sparse {label} requires int32/int64 indices; \
                              node {} uses `{}`",
                             node.id.0,
                             indices.precision.name()
                         ),
-                        "unsupported_feature",
+                        "hip",
                     ));
                 }
                 if !matches!(index_node.op, RiscOp::Load { .. }) {
-                    return Err(stage_error(
-                        "compile",
+                    return Err(unsupported_gate_error(
                         format!(
                             "`chelis build --target hip` sparse {label} requires indices to be loaded input tensors in this milestone; \
                              node {} uses indices produced by {:?}. \
                              Non-load integer index producers need integer HIP codegen before they can feed sparse kernels safely.",
                             node.id.0, index_node.op
                         ),
-                        "unsupported_feature",
+                        "hip",
                     ));
                 }
             }
@@ -3607,8 +3610,7 @@ fn reject_unsupported_hip_ops(dag: &Dag) -> Result<()> {
                 if sparse_index_nodes.contains(&node.id)
                     && matches!(node.op, RiscOp::Load { .. }) => {}
             other => {
-                return Err(stage_error(
-                    "compile",
+                return Err(unsupported_gate_error(
                     format!(
                         "`chelis build --target hip` DAG path only supports f32/bool tensors, \
                          plus loaded int32/int64 tensors when they are consumed as sparse indices; \
@@ -3617,7 +3619,7 @@ fn reject_unsupported_hip_ops(dag: &Dag) -> Result<()> {
                         node.id.0,
                         other.name()
                     ),
-                    "unsupported_feature",
+                    "hip",
                 ));
             }
         }
@@ -3629,21 +3631,8 @@ fn unknown_name_error(stage: &str, field: &str, name: &str) -> CompilerError {
     stage_error(
         stage,
         format!("unknown name `{name}` in `{field}`"),
-        "unknown_name",
+        GeneralKind::UnknownName,
     )
-}
-
-/// Map a backend [`chelis_types::unsupported::Unsupported`] rejection into
-/// the compile-stage error envelope (chelis#730 section C2 surfacing: the
-/// branded rendering is the message; the kind is `unsupported_feature`).
-pub(crate) fn unsupported_stage_error(
-    err: chelis_types::unsupported::Unsupported,
-) -> CompilerError {
-    stage_error("compile", err.to_string(), "unsupported_feature")
-}
-
-pub(crate) fn stage_error(stage: &str, message: impl Into<String>, kind: &str) -> CompilerError {
-    stage_error_with_span(stage, message, kind, None)
 }
 
 /// Lift an eval-lane failure message into a `CompilerError` at the one
@@ -3652,9 +3641,9 @@ pub(crate) fn stage_error(stage: &str, message: impl Into<String>, kind: &str) -
 /// the recovery suggestions attached by their owning diagnostic rules.
 fn eval_stage_error(message: String) -> CompilerError {
     let kind = if chelis_types::is_cancellation(&message) {
-        EVAL_CANCELLED_KIND
+        GeneralKind::Cancelled
     } else {
-        "eval_error"
+        GeneralKind::EvalError
     };
     let cast_domain = message.contains("numeric trap: domain in cast at");
     let mut error = stage_error("eval", message, kind);
@@ -3669,6 +3658,7 @@ fn eval_stage_error(message: String) -> CompilerError {
     error
 }
 
+
 /// Lift a [`WireDagSchemaError`] from validating a `WireDag` at a
 /// process boundary into a typed `schema`-stage [`CompilerError`] (WI-2).
 /// An unsupported schema version is rejected here -- surfaced to the client
@@ -3679,7 +3669,7 @@ pub(crate) fn schema_stage_check(
 ) -> Result<()> {
     result.map_err(|err| {
         let WireDagSchemaError::UnknownSchemaVersion { found, supported } = err;
-        let mut error = stage_error("schema", err.to_string(), "unknown_schema_version");
+        let mut error = stage_error("schema", err.to_string(), GeneralKind::UnknownSchemaVersion);
         if let Some(diagnostic) = error.errors.first_mut() {
             diagnostic.expected = Some(format!("schema_version <= {supported}"));
             diagnostic.got = Some(found.to_string());
@@ -3693,27 +3683,6 @@ fn deep_span_to_schema(span: Option<chelis_deep::Span>) -> Option<Span> {
         offset: span.offset,
         len: span.len,
     })
-}
-
-fn stage_error_with_span(
-    stage: &str,
-    message: impl Into<String>,
-    kind: &str,
-    diagnostic_span: Option<Span>,
-) -> CompilerError {
-    CompilerError {
-        stage: stage.to_string(),
-        errors: vec![Diagnostic {
-            kind: kind.to_string(),
-            message: message.into(),
-            severity: 1.0,
-            expected: None,
-            got: None,
-            suggestions: Vec::new(),
-            span: diagnostic_span,
-            deep_path: None,
-        }],
-    }
 }
 
 fn parse_error_span_surf(source: &str, err: &chelis_surf::parser::ParseError) -> Option<Span> {
@@ -3740,16 +3709,37 @@ fn parse_error_span_deep(err: &chelis_deep::parser::ParseError) -> Option<Span> 
 }
 
 pub(crate) fn check_error_diagnostic(error: &CheckError) -> Diagnostic {
-    Diagnostic {
-        kind: format!("{:?}", error.kind),
-        message: error.message.clone(),
-        severity: error.severity,
-        expected: error.expected.clone(),
-        got: error.got.clone(),
-        suggestions: error.suggestions.clone(),
-        span: None,
-        deep_path: None,
-    }
+    let kind = match error.kind {
+        CheckErrorKind::TypeMismatch => GeneralKind::TypeMismatch,
+        CheckErrorKind::PrecisionMismatch => GeneralKind::PrecisionMismatch,
+        CheckErrorKind::DimensionMismatch => GeneralKind::DimensionMismatch,
+        CheckErrorKind::ArityMismatch => GeneralKind::ArityMismatch,
+        CheckErrorKind::UnboundVariable => GeneralKind::UnboundVariable,
+        CheckErrorKind::UnknownConstructor => GeneralKind::UnknownConstructor,
+        CheckErrorKind::NotAFunction => GeneralKind::NotAFunction,
+        CheckErrorKind::NonExhaustiveMatch => GeneralKind::NonExhaustiveMatch,
+        CheckErrorKind::OccursCheck => GeneralKind::OccursCheck,
+        CheckErrorKind::CastNonTensor => GeneralKind::CastNonTensor,
+        CheckErrorKind::TupleIndexOutOfBounds => GeneralKind::TupleIndexOutOfBounds,
+        CheckErrorKind::UseAfterConsume => GeneralKind::UseAfterConsume,
+        CheckErrorKind::UnconsumedLinear => GeneralKind::UnconsumedLinear,
+        CheckErrorKind::InvalidBorrow => GeneralKind::InvalidBorrow,
+        CheckErrorKind::CycleDetected => GeneralKind::CycleDetected,
+        CheckErrorKind::UnsupportedTensorPrecision => GeneralKind::UnsupportedTensorPrecision,
+        CheckErrorKind::DuplicateDefinition => GeneralKind::DuplicateDefinition,
+        CheckErrorKind::DuplicateModule => GeneralKind::DuplicateModule,
+        CheckErrorKind::OpaqueTypeViolation => GeneralKind::OpaqueTypeViolation,
+        CheckErrorKind::ReservedLinkerName => GeneralKind::ReservedLinkerName,
+        CheckErrorKind::BuiltinShadowing => GeneralKind::BuiltinShadowing,
+        CheckErrorKind::UnknownForm => GeneralKind::UnknownForm,
+        CheckErrorKind::MalformedForm => GeneralKind::MalformedForm,
+        CheckErrorKind::Other => GeneralKind::CheckOther,
+    };
+    let mut diagnostic = Diagnostic::general(kind, error.message.clone(), error.severity);
+    diagnostic.expected = error.expected.clone();
+    diagnostic.got = error.got.clone();
+    diagnostic.suggestions = error.suggestions.clone();
+    diagnostic
 }
 
 fn span(span: chelis_deep::Span) -> Span {
@@ -4933,7 +4923,10 @@ windowed = reduce_window_max(padded, [2], [1])
             message.contains("f32") && message.contains("reduce_window"),
             "unexpected message: {message}"
         );
-        assert_eq!(err.errors[0].kind, "unsupported_feature");
+        assert_eq!(
+            err.errors[0].kind(),
+            chelis_vocab::DiagnosticKind::UnsupportedFeature
+        );
 
         // f16 is rejected the same way; f32 is allowed.
         let f16 = reduce_window_dag_with_precision(chelis_types::types::Prim::F16);
@@ -4959,7 +4952,10 @@ windowed = reduce_window_max(padded, [2], [1])
             message.contains("reduce_window") && message.contains("--target hip"),
             "unexpected message: {message}"
         );
-        assert_eq!(err.errors[0].kind, "unsupported_feature");
+        assert_eq!(
+            err.errors[0].kind(),
+            chelis_vocab::DiagnosticKind::UnsupportedFeature
+        );
     }
 
     /// chelis#616: a runtime (node-valued) reshape target extent is C-only;
@@ -4997,7 +4993,10 @@ windowed = reduce_window_max(padded, [2], [1])
             message.contains("reshape") && message.contains("--target c"),
             "unexpected message: {message}"
         );
-        assert_eq!(err.errors[0].kind, "unsupported_feature");
+        assert_eq!(
+            err.errors[0].kind(),
+            chelis_vocab::DiagnosticKind::UnsupportedFeature
+        );
     }
 
     #[test]
@@ -6008,10 +6007,9 @@ b: tensor[2, f32] = b
             .expect_err("b should fail because input `b` was not provided");
         assert_eq!(b_err.stage, "eval");
         assert!(
-            b_err
-                .errors
-                .iter()
-                .any(|diag| diag.message.contains('b') || diag.kind == "eval_error"),
+            b_err.errors.iter().any(|diag| {
+                diag.message.contains('b') || diag.kind() == chelis_vocab::DiagnosticKind::EvalError
+            }),
             "expected eval error mentioning `b`, got {:?}",
             b_err.errors
         );
@@ -6154,7 +6152,10 @@ bad = shape(scalar_to_tensor(cast(3, int64)), axis)
         );
         assert_eq!(error.errors.len(), 1, "exactly one diagnostic: {error:?}");
         let diagnostic = &error.errors[0];
-        assert_eq!(diagnostic.kind, "unknown_schema_version");
+        assert_eq!(
+            diagnostic.kind(),
+            chelis_vocab::DiagnosticKind::UnknownSchemaVersion
+        );
         assert_eq!(
             diagnostic.got.as_deref(),
             Some(future.to_string().as_str()),

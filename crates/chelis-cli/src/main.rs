@@ -11,6 +11,7 @@ use chelis_deep::DeepTag;
 use chelis_deep::ast::{Atom as DeepAtom, Expr as DeepExpr};
 use chelis_surf::ast::Decl;
 use chelis_types::types::{Dim, Effect, EffectSet, TensorPrec, Type};
+use chelis_vocab::DiagnosticKind;
 use clap::{ArgAction, ArgGroup, Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -5760,7 +5761,8 @@ fn compiler_error_messages(err: &chelis_compiler_api::compiler::CompilerError) -
 
 fn is_local_registry_hash_unsupported(err: &chelis_compiler_api::compiler::CompilerError) -> bool {
     err.errors.iter().any(|diagnostic| {
-        diagnostic.kind == "hash_error" && diagnostic.message.contains("LocalRegistry")
+        diagnostic.kind() == DiagnosticKind::HashError
+            && diagnostic.message.contains("LocalRegistry")
     })
 }
 

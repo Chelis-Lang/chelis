@@ -6,8 +6,10 @@ authoritative oracle green - `PHASE 2 ORACLE: PASS` - and a fresh-context
 execution red team, PASS WITH FINDINGS, every finding dispositioned:
 `docs/investigations/pr799_returned_function_values_redteam.md`). Count
 baselines and the token tripwire remain supporting checks, not completion
-evidence. Phase 3 is pending, amended 2026-07-30 to absorb the typed
-diagnostic-kind and rejection-authority work (§C2.1-C2.2). Phase 4
+evidence. Phase 3 is in progress: its typed rejection-authority (§C2.1)
+and sealed diagnostic-kind (§C2.2) slices are implemented; the gate
+inventory/contract, deduplication, and full phase oracle remain. Phase 3 was
+amended 2026-07-30 to absorb those typed slices. Phase 4
 (ratchet totality, §C7) was added 2026-07-30 after the nine-PR
 class-coverage review recorded on [#730] found four holes in this plan's
 own detection mechanisms; §C7's opening paragraph states the finding.
@@ -281,7 +283,8 @@ permission is given an expiry that fires on its own: the `compile_fail`
 doctest oracles in `crates/chelis-types/src/unsupported.rs`, one per type
 on the `Unsupported` path, go red the day any of the four gains
 `Serialize`, which is exactly the moment this note stops being true. They
-run in CI through the `cargo test -p chelis-types --doc` gate stage
+run in CI through the
+`cargo test -p chelis-types -p chelis-compiler-api --doc` gate stage
 ([#875]). When both prerequisites land, this STATUS block and those
 oracles come out together and the bullet above stands as written ([#871]).
 
@@ -307,8 +310,8 @@ authority. The windowed-reduction dtype gap cites its implementation owner
 [#1058], compiled tensor/list `to_string` cites [#1059], and host-runtime-only
 builders cite the deliberate [05-HOST-1] contract; remediation instances
 [#705], [#725], [#734], and [#959] are not capability owners.
-The remaining Phase 3 work is the §C2.2 diagnostic-kind pipeline and the gate
-contract; this slice does not claim Phase 3 completion.
+The remaining Phase 3 work is the gate inventory/contract, deduplication, and
+the full phase oracle; these focused slices do not claim Phase 3 completion.
 
 The amended Phase 3 replaces the bare `hint` field on `Unsupported`
 with an OPAQUE `RejectionAuthority` type. Two things are NOT the
@@ -394,14 +397,14 @@ capability decision (§I1).
 
 ### C2.2 The closed kind vocabulary (added 2026-07-30; lands at Phase 3)
 
-The machine-facing diagnostic `kind` is today a bare `String` chosen
-three unpoliced ways: hand-typed literals (~23 sites spell
+Before this slice, the machine-facing diagnostic `kind` was a bare `String`
+chosen three unpoliced ways: hand-typed literals (~23 sites spelled
 `"unsupported_feature"` themselves; `unsupported_stage_error`, the only
 typed `Unsupported -> Diagnostic` path, has 4 call sites), a
 `format!("{:?}", error.kind)` of a foreign enum (an enum rename
 silently rewrites the wire), and message-substring dispatch. A
-capability rejection can be mislabeled `"compile_error"` and every test
-stays green. Inventory and instances: [#959].
+capability rejection could be mislabeled `"compile_error"` and every test
+stayed green. Inventory and instances: [#959].
 
 **Deciding atom: [05-UNS-6]** (spec/05 §7, authored in the same change
 as this section; the stable kind spellings are a user-visible machine
@@ -409,6 +412,17 @@ contract and live in the numbered spec, not here). The amended Phase 3
 implements it with the plan's own §C4.1 move plus a sealed producer -
 a public closed enum alone is NOT the seal, because a public variant
 remains directly constructible:
+
+**Delivery status (2026-08-01): implemented as a focused Phase 3 slice.**
+`DiagnosticKind`, the sealed producer/wire split, the typed general-kind
+projection, the compile-fail controls, the two same-crate planted privacy
+mutations, and the added-kind exhaustiveness mutation now execute through
+`scripts/diagnostic_kind_oracle.py`. That runner is the C2.2 component oracle,
+not a claim that Phase 3's gate work is complete.
+The old Reef message classifier had no typed cause to justify its
+`package_not_found` / `lockfile_error` guesses, so those substring-invented
+spellings collapse to the honest `reef_error` kind rather than entering the
+closed vocabulary as false precision.
 
 - **Identity**: `DiagnosticKind` joins `chelis-vocab` (stable wire
   spellings via `as_str()`, `Result`-only `decode`, no serde

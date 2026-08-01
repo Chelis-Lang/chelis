@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
 
+use chelis_types::unsupported::Unsupported;
+use chelis_vocab::DiagnosticKind;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -31,14 +33,14 @@ pub struct ApiSuccess<T> {
     pub result: T,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct ApiFailure {
     pub ok: bool,
     pub stage: String,
     pub errors: Vec<Diagnostic>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(untagged)]
 pub enum ApiEnvelope<T> {
     Success(ApiSuccess<T>),
@@ -50,6 +52,26 @@ impl<T> ApiEnvelope<T> {
         Self::Success(ApiSuccess { ok: true, result })
     }
 
+    /// Assemble a failure from producer diagnostics only.
+    ///
+    /// A free kind string is not a producer diagnostic:
+    ///
+    /// ```compile_fail
+    /// use chelis_compiler_api::schema::ApiEnvelope;
+    /// let _: ApiEnvelope<()> = ApiEnvelope::failure("compile", vec!["compile_error"]);
+    /// ```
+    ///
+    /// Nor may the public unsupported variant be handed directly to this
+    /// general envelope API; it must arrive through a typed `Unsupported`:
+    ///
+    /// ```compile_fail
+    /// use chelis_compiler_api::schema::ApiEnvelope;
+    /// use chelis_vocab::DiagnosticKind;
+    /// let _: ApiEnvelope<()> = ApiEnvelope::failure(
+    ///     "compile",
+    ///     vec![DiagnosticKind::UnsupportedFeature],
+    /// );
+    /// ```
     pub fn failure(stage: impl Into<String>, errors: Vec<Diagnostic>) -> Self {
         Self::Failure(ApiFailure {
             ok: false,
@@ -57,11 +79,62 @@ impl<T> ApiEnvelope<T> {
             errors,
         })
     }
+
+    /// Build the HTTP request-decoding failure without exposing diagnostic
+    /// construction to the transport crate.
+    pub fn invalid_request(message: impl Into<String>) -> Self {
+        Self::failure(
+            "http",
+            vec![Diagnostic::general(
+                GeneralKind::InvalidRequest,
+                message,
+                1.0,
+            )],
+        )
+    }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+/// A compiler-produced diagnostic.
+///
+/// `kind` is private and this type intentionally implements `Serialize` but
+/// not `Deserialize`. Every producer therefore crosses the typed constructor
+/// boundary below. Reading wire JSON uses [`WireDiagnostic`] instead.
+///
+/// A foreign crate cannot forge a diagnostic with a struct literal:
+///
+/// ```compile_fail
+/// use chelis_compiler_api::schema::Diagnostic;
+/// let _ = Diagnostic {
+///     kind: "unsupported_feature".to_owned(),
+///     message: "forged".to_owned(),
+///     severity: 1.0,
+///     expected: None,
+///     got: None,
+///     suggestions: vec![],
+///     span: None,
+///     deep_path: None,
+/// };
+/// ```
+///
+/// Nor can wire input deserialize into the producer type:
+///
+/// ```compile_fail
+/// use chelis_compiler_api::schema::Diagnostic;
+/// let _: Diagnostic = serde_json::from_str(r#"{"kind":"unsupported_feature"}"#).unwrap();
+/// ```
+///
+/// A deserialized consumer value cannot enter an envelope producer API:
+///
+/// ```compile_fail
+/// use chelis_compiler_api::schema::{ApiEnvelope, WireDiagnostic};
+/// let wire: WireDiagnostic = serde_json::from_str(
+///     r#"{"kind":"unsupported_feature","message":"forged","severity":1.0}"#,
+/// ).unwrap();
+/// let _: ApiEnvelope<()> = ApiEnvelope::failure("compile", vec![wire]);
+/// ```
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct Diagnostic {
-    pub kind: String,
+    kind: String,
     pub message: String,
     pub severity: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -81,6 +154,244 @@ pub struct Diagnostic {
     /// byte-identical.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deep_path: Option<WireDeepErrorPath>,
+}
+
+impl Diagnostic {
+    pub fn kind(&self) -> DiagnosticKind {
+        DiagnosticKind::decode(&self.kind)
+            .expect("producer diagnostics are constructed from DiagnosticKind")
+    }
+
+    pub(crate) fn general(kind: GeneralKind, message: impl Into<String>, severity: f64) -> Self {
+        let diagnostic_kind = kind.diagnostic_kind();
+        debug_assert_eq!(GeneralKind::project(diagnostic_kind), Some(kind));
+        Self::new(diagnostic_kind, message, severity)
+    }
+
+    fn unsupported(error: Unsupported) -> Self {
+        Self::new(DiagnosticKind::UnsupportedFeature, error.to_string(), 1.0)
+    }
+
+    fn new(kind: DiagnosticKind, message: impl Into<String>, severity: f64) -> Self {
+        Self {
+            kind: kind.as_str().to_owned(),
+            message: message.into(),
+            severity,
+            expected: None,
+            got: None,
+            suggestions: Vec::new(),
+            span: None,
+            deep_path: None,
+        }
+    }
+}
+
+/// Consumer-only representation of a diagnostic read from JSON.
+///
+/// This type deliberately has no conversion into [`Diagnostic`]. Callers may
+/// inspect and validate the string, but cannot feed it back into a producer
+/// envelope.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct WireDiagnostic {
+    pub kind: String,
+    pub message: String,
+    pub severity: f64,
+    pub expected: Option<String>,
+    pub got: Option<String>,
+    #[serde(default)]
+    pub suggestions: Vec<String>,
+    pub span: Option<Span>,
+    pub deep_path: Option<WireDeepErrorPath>,
+}
+
+/// The producer projection of [`DiagnosticKind`]. It intentionally has no
+/// `UnsupportedFeature` variant: a general producer cannot spell an
+/// unsupported rejection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GeneralKind {
+    SurfParseError,
+    DeepParseError,
+    MacroError,
+    NameResolutionError,
+    DeepDeclError,
+    DuplicateName,
+    PreimageMismatch,
+    CascadeIncomplete,
+    TypeError,
+    EffectError,
+    LinearityError,
+    LowerError,
+    ReefError,
+    EvalError,
+    Cancelled,
+    GradError,
+    ValidationError,
+    UnknownName,
+    UnknownSchemaVersion,
+    HashError,
+    InvalidRequest,
+    CompileError,
+    Other,
+    TypeMismatch,
+    PrecisionMismatch,
+    DimensionMismatch,
+    ArityMismatch,
+    UnboundVariable,
+    UnknownConstructor,
+    NotAFunction,
+    NonExhaustiveMatch,
+    OccursCheck,
+    CastNonTensor,
+    TupleIndexOutOfBounds,
+    UseAfterConsume,
+    UnconsumedLinear,
+    InvalidBorrow,
+    CycleDetected,
+    UnsupportedTensorPrecision,
+    DuplicateDefinition,
+    DuplicateModule,
+    OpaqueTypeViolation,
+    ReservedLinkerName,
+    BuiltinShadowing,
+    UnknownForm,
+    MalformedForm,
+    CheckOther,
+}
+
+impl GeneralKind {
+    const fn project(kind: DiagnosticKind) -> Option<Self> {
+        match kind {
+            DiagnosticKind::UnsupportedFeature => None,
+            DiagnosticKind::SurfParseError => Some(Self::SurfParseError),
+            DiagnosticKind::DeepParseError => Some(Self::DeepParseError),
+            DiagnosticKind::MacroError => Some(Self::MacroError),
+            DiagnosticKind::NameResolutionError => Some(Self::NameResolutionError),
+            DiagnosticKind::DeepDeclError => Some(Self::DeepDeclError),
+            DiagnosticKind::DuplicateName => Some(Self::DuplicateName),
+            DiagnosticKind::PreimageMismatch => Some(Self::PreimageMismatch),
+            DiagnosticKind::CascadeIncomplete => Some(Self::CascadeIncomplete),
+            DiagnosticKind::TypeError => Some(Self::TypeError),
+            DiagnosticKind::EffectError => Some(Self::EffectError),
+            DiagnosticKind::LinearityError => Some(Self::LinearityError),
+            DiagnosticKind::LowerError => Some(Self::LowerError),
+            DiagnosticKind::ReefError => Some(Self::ReefError),
+            DiagnosticKind::EvalError => Some(Self::EvalError),
+            DiagnosticKind::Cancelled => Some(Self::Cancelled),
+            DiagnosticKind::GradError => Some(Self::GradError),
+            DiagnosticKind::ValidationError => Some(Self::ValidationError),
+            DiagnosticKind::UnknownName => Some(Self::UnknownName),
+            DiagnosticKind::UnknownSchemaVersion => Some(Self::UnknownSchemaVersion),
+            DiagnosticKind::HashError => Some(Self::HashError),
+            DiagnosticKind::InvalidRequest => Some(Self::InvalidRequest),
+            DiagnosticKind::CompileError => Some(Self::CompileError),
+            DiagnosticKind::GeneralOther => Some(Self::Other),
+            DiagnosticKind::TypeMismatch => Some(Self::TypeMismatch),
+            DiagnosticKind::PrecisionMismatch => Some(Self::PrecisionMismatch),
+            DiagnosticKind::DimensionMismatch => Some(Self::DimensionMismatch),
+            DiagnosticKind::ArityMismatch => Some(Self::ArityMismatch),
+            DiagnosticKind::UnboundVariable => Some(Self::UnboundVariable),
+            DiagnosticKind::UnknownConstructor => Some(Self::UnknownConstructor),
+            DiagnosticKind::NotAFunction => Some(Self::NotAFunction),
+            DiagnosticKind::NonExhaustiveMatch => Some(Self::NonExhaustiveMatch),
+            DiagnosticKind::OccursCheck => Some(Self::OccursCheck),
+            DiagnosticKind::CastNonTensor => Some(Self::CastNonTensor),
+            DiagnosticKind::TupleIndexOutOfBounds => Some(Self::TupleIndexOutOfBounds),
+            DiagnosticKind::UseAfterConsume => Some(Self::UseAfterConsume),
+            DiagnosticKind::UnconsumedLinear => Some(Self::UnconsumedLinear),
+            DiagnosticKind::InvalidBorrow => Some(Self::InvalidBorrow),
+            DiagnosticKind::CycleDetected => Some(Self::CycleDetected),
+            DiagnosticKind::UnsupportedTensorPrecision => Some(Self::UnsupportedTensorPrecision),
+            DiagnosticKind::DuplicateDefinition => Some(Self::DuplicateDefinition),
+            DiagnosticKind::DuplicateModule => Some(Self::DuplicateModule),
+            DiagnosticKind::OpaqueTypeViolation => Some(Self::OpaqueTypeViolation),
+            DiagnosticKind::ReservedLinkerName => Some(Self::ReservedLinkerName),
+            DiagnosticKind::BuiltinShadowing => Some(Self::BuiltinShadowing),
+            DiagnosticKind::UnknownForm => Some(Self::UnknownForm),
+            DiagnosticKind::MalformedForm => Some(Self::MalformedForm),
+            DiagnosticKind::CheckOther => Some(Self::CheckOther),
+        }
+    }
+
+    const fn diagnostic_kind(self) -> DiagnosticKind {
+        match self {
+            Self::SurfParseError => DiagnosticKind::SurfParseError,
+            Self::DeepParseError => DiagnosticKind::DeepParseError,
+            Self::MacroError => DiagnosticKind::MacroError,
+            Self::NameResolutionError => DiagnosticKind::NameResolutionError,
+            Self::DeepDeclError => DiagnosticKind::DeepDeclError,
+            Self::DuplicateName => DiagnosticKind::DuplicateName,
+            Self::PreimageMismatch => DiagnosticKind::PreimageMismatch,
+            Self::CascadeIncomplete => DiagnosticKind::CascadeIncomplete,
+            Self::TypeError => DiagnosticKind::TypeError,
+            Self::EffectError => DiagnosticKind::EffectError,
+            Self::LinearityError => DiagnosticKind::LinearityError,
+            Self::LowerError => DiagnosticKind::LowerError,
+            Self::ReefError => DiagnosticKind::ReefError,
+            Self::EvalError => DiagnosticKind::EvalError,
+            Self::Cancelled => DiagnosticKind::Cancelled,
+            Self::GradError => DiagnosticKind::GradError,
+            Self::ValidationError => DiagnosticKind::ValidationError,
+            Self::UnknownName => DiagnosticKind::UnknownName,
+            Self::UnknownSchemaVersion => DiagnosticKind::UnknownSchemaVersion,
+            Self::HashError => DiagnosticKind::HashError,
+            Self::InvalidRequest => DiagnosticKind::InvalidRequest,
+            Self::CompileError => DiagnosticKind::CompileError,
+            Self::Other => DiagnosticKind::GeneralOther,
+            Self::TypeMismatch => DiagnosticKind::TypeMismatch,
+            Self::PrecisionMismatch => DiagnosticKind::PrecisionMismatch,
+            Self::DimensionMismatch => DiagnosticKind::DimensionMismatch,
+            Self::ArityMismatch => DiagnosticKind::ArityMismatch,
+            Self::UnboundVariable => DiagnosticKind::UnboundVariable,
+            Self::UnknownConstructor => DiagnosticKind::UnknownConstructor,
+            Self::NotAFunction => DiagnosticKind::NotAFunction,
+            Self::NonExhaustiveMatch => DiagnosticKind::NonExhaustiveMatch,
+            Self::OccursCheck => DiagnosticKind::OccursCheck,
+            Self::CastNonTensor => DiagnosticKind::CastNonTensor,
+            Self::TupleIndexOutOfBounds => DiagnosticKind::TupleIndexOutOfBounds,
+            Self::UseAfterConsume => DiagnosticKind::UseAfterConsume,
+            Self::UnconsumedLinear => DiagnosticKind::UnconsumedLinear,
+            Self::InvalidBorrow => DiagnosticKind::InvalidBorrow,
+            Self::CycleDetected => DiagnosticKind::CycleDetected,
+            Self::UnsupportedTensorPrecision => DiagnosticKind::UnsupportedTensorPrecision,
+            Self::DuplicateDefinition => DiagnosticKind::DuplicateDefinition,
+            Self::DuplicateModule => DiagnosticKind::DuplicateModule,
+            Self::OpaqueTypeViolation => DiagnosticKind::OpaqueTypeViolation,
+            Self::ReservedLinkerName => DiagnosticKind::ReservedLinkerName,
+            Self::BuiltinShadowing => DiagnosticKind::BuiltinShadowing,
+            Self::UnknownForm => DiagnosticKind::UnknownForm,
+            Self::MalformedForm => DiagnosticKind::MalformedForm,
+            Self::CheckOther => DiagnosticKind::CheckOther,
+        }
+    }
+}
+
+pub(crate) fn stage_error(
+    stage: &str,
+    message: impl Into<String>,
+    kind: GeneralKind,
+) -> crate::compiler::CompilerError {
+    stage_error_with_span(stage, message, kind, None)
+}
+
+pub(crate) fn stage_error_with_span(
+    stage: &str,
+    message: impl Into<String>,
+    kind: GeneralKind,
+    span: Option<Span>,
+) -> crate::compiler::CompilerError {
+    let mut diagnostic = Diagnostic::general(kind, message, 1.0);
+    diagnostic.span = span;
+    crate::compiler::CompilerError {
+        stage: stage.to_owned(),
+        errors: vec![diagnostic],
+    }
+}
+
+pub(crate) fn unsupported_stage_error(error: Unsupported) -> crate::compiler::CompilerError {
+    crate::compiler::CompilerError {
+        stage: "compile".to_owned(),
+        errors: vec![Diagnostic::unsupported(error)],
+    }
 }
 
 /// Wire form of `chelis_compiler_api::fragment::DeepErrorPath`: the Deep
@@ -545,7 +856,7 @@ pub struct FitnessComponents {
     pub types: f64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct CheckResult {
     pub score: f64,
     pub components: FitnessComponents,
@@ -554,6 +865,18 @@ pub struct CheckResult {
     pub total_nodes: usize,
     pub unresolved_names: Vec<String>,
     pub errors: Vec<Diagnostic>,
+}
+
+/// Consumer-side shape for `chelis check --json` output.
+#[derive(Debug, Clone, Deserialize)]
+pub struct WireCheckResult {
+    pub score: f64,
+    pub components: FitnessComponents,
+    pub typed_nodes: usize,
+    pub untyped_nodes: usize,
+    pub total_nodes: usize,
+    pub unresolved_names: Vec<String>,
+    pub errors: Vec<WireDiagnostic>,
 }
 
 /// Structured, machine-readable inferred-type tree for one inferred
@@ -814,7 +1137,7 @@ pub struct BatchRequestEnvelope {
     pub requests: Vec<BatchRequest>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum BatchResult {
     Parse(ApiEnvelope<ParseResult>),
@@ -828,7 +1151,7 @@ pub enum BatchResult {
     Decompile(ApiEnvelope<DecompileResult>),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct BatchResultEnvelope {
     pub results: Vec<BatchResult>,
 }
@@ -1738,6 +2061,21 @@ fn default_true() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn general_kind_projection_excludes_exactly_unsupported_feature() {
+        for kind in DiagnosticKind::ALL {
+            let projected = GeneralKind::project(kind);
+            assert_eq!(
+                projected.is_none(),
+                kind == DiagnosticKind::UnsupportedFeature,
+                "unexpected projection decision for {kind:?}"
+            );
+            if let Some(general) = projected {
+                assert_eq!(general.diagnostic_kind(), kind);
+            }
+        }
+    }
 
     fn empty_wire_dag() -> WireDag {
         WireDag {

@@ -13,6 +13,190 @@
 use core::error::Error;
 use core::fmt;
 
+/// Stable machine-facing identities for compiler diagnostics.
+///
+/// The enum governs producer construction while [`Self::as_str`] preserves
+/// the existing JSON spelling. It deliberately has no serde dependency: wire
+/// producers render through `as_str`, and wire consumers decode explicitly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DiagnosticKind {
+    SurfParseError,
+    DeepParseError,
+    MacroError,
+    NameResolutionError,
+    DeepDeclError,
+    DuplicateName,
+    PreimageMismatch,
+    CascadeIncomplete,
+    TypeError,
+    EffectError,
+    LinearityError,
+    LowerError,
+    ReefError,
+    EvalError,
+    Cancelled,
+    GradError,
+    ValidationError,
+    UnknownName,
+    UnknownSchemaVersion,
+    HashError,
+    InvalidRequest,
+    CompileError,
+    GeneralOther,
+    UnsupportedFeature,
+    TypeMismatch,
+    PrecisionMismatch,
+    DimensionMismatch,
+    ArityMismatch,
+    UnboundVariable,
+    UnknownConstructor,
+    NotAFunction,
+    NonExhaustiveMatch,
+    OccursCheck,
+    CastNonTensor,
+    TupleIndexOutOfBounds,
+    UseAfterConsume,
+    UnconsumedLinear,
+    InvalidBorrow,
+    CycleDetected,
+    UnsupportedTensorPrecision,
+    DuplicateDefinition,
+    DuplicateModule,
+    OpaqueTypeViolation,
+    ReservedLinkerName,
+    BuiltinShadowing,
+    UnknownForm,
+    MalformedForm,
+    CheckOther,
+}
+
+impl DiagnosticKind {
+    pub const ALL: [Self; 48] = [
+        Self::SurfParseError,
+        Self::DeepParseError,
+        Self::MacroError,
+        Self::NameResolutionError,
+        Self::DeepDeclError,
+        Self::DuplicateName,
+        Self::PreimageMismatch,
+        Self::CascadeIncomplete,
+        Self::TypeError,
+        Self::EffectError,
+        Self::LinearityError,
+        Self::LowerError,
+        Self::ReefError,
+        Self::EvalError,
+        Self::Cancelled,
+        Self::GradError,
+        Self::ValidationError,
+        Self::UnknownName,
+        Self::UnknownSchemaVersion,
+        Self::HashError,
+        Self::InvalidRequest,
+        Self::CompileError,
+        Self::GeneralOther,
+        Self::UnsupportedFeature,
+        Self::TypeMismatch,
+        Self::PrecisionMismatch,
+        Self::DimensionMismatch,
+        Self::ArityMismatch,
+        Self::UnboundVariable,
+        Self::UnknownConstructor,
+        Self::NotAFunction,
+        Self::NonExhaustiveMatch,
+        Self::OccursCheck,
+        Self::CastNonTensor,
+        Self::TupleIndexOutOfBounds,
+        Self::UseAfterConsume,
+        Self::UnconsumedLinear,
+        Self::InvalidBorrow,
+        Self::CycleDetected,
+        Self::UnsupportedTensorPrecision,
+        Self::DuplicateDefinition,
+        Self::DuplicateModule,
+        Self::OpaqueTypeViolation,
+        Self::ReservedLinkerName,
+        Self::BuiltinShadowing,
+        Self::UnknownForm,
+        Self::MalformedForm,
+        Self::CheckOther,
+    ];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SurfParseError => "surf_parse_error",
+            Self::DeepParseError => "deep_parse_error",
+            Self::MacroError => "macro_error",
+            Self::NameResolutionError => "name_resolution_error",
+            Self::DeepDeclError => "deep_decl_error",
+            Self::DuplicateName => "duplicate_name",
+            Self::PreimageMismatch => "preimage_mismatch",
+            Self::CascadeIncomplete => "cascade_incomplete",
+            Self::TypeError => "type_error",
+            Self::EffectError => "effect_error",
+            Self::LinearityError => "linearity_error",
+            Self::LowerError => "lower_error",
+            Self::ReefError => "reef_error",
+            Self::EvalError => "eval_error",
+            Self::Cancelled => "cancelled",
+            Self::GradError => "grad_error",
+            Self::ValidationError => "validation_error",
+            Self::UnknownName => "unknown_name",
+            Self::UnknownSchemaVersion => "unknown_schema_version",
+            Self::HashError => "hash_error",
+            Self::InvalidRequest => "invalid_request",
+            Self::CompileError => "compile_error",
+            Self::GeneralOther => "other",
+            Self::UnsupportedFeature => "unsupported_feature",
+            Self::TypeMismatch => "TypeMismatch",
+            Self::PrecisionMismatch => "PrecisionMismatch",
+            Self::DimensionMismatch => "DimensionMismatch",
+            Self::ArityMismatch => "ArityMismatch",
+            Self::UnboundVariable => "UnboundVariable",
+            Self::UnknownConstructor => "UnknownConstructor",
+            Self::NotAFunction => "NotAFunction",
+            Self::NonExhaustiveMatch => "NonExhaustiveMatch",
+            Self::OccursCheck => "OccursCheck",
+            Self::CastNonTensor => "CastNonTensor",
+            Self::TupleIndexOutOfBounds => "TupleIndexOutOfBounds",
+            Self::UseAfterConsume => "UseAfterConsume",
+            Self::UnconsumedLinear => "UnconsumedLinear",
+            Self::InvalidBorrow => "InvalidBorrow",
+            Self::CycleDetected => "CycleDetected",
+            Self::UnsupportedTensorPrecision => "UnsupportedTensorPrecision",
+            Self::DuplicateDefinition => "DuplicateDefinition",
+            Self::DuplicateModule => "DuplicateModule",
+            Self::OpaqueTypeViolation => "OpaqueTypeViolation",
+            Self::ReservedLinkerName => "ReservedLinkerName",
+            Self::BuiltinShadowing => "BuiltinShadowing",
+            Self::UnknownForm => "UnknownForm",
+            Self::MalformedForm => "MalformedForm",
+            Self::CheckOther => "Other",
+        }
+    }
+
+    pub fn decode(spelling: &str) -> Result<Self, DiagnosticKindDecodeError<'_>> {
+        Self::ALL
+            .into_iter()
+            .find(|kind| kind.as_str() == spelling)
+            .ok_or(DiagnosticKindDecodeError::Unknown { spelling })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiagnosticKindDecodeError<'a> {
+    Unknown { spelling: &'a str },
+}
+
+impl fmt::Display for DiagnosticKindDecodeError<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Self::Unknown { spelling } = self;
+        write!(f, "unknown diagnostic kind `{spelling}`")
+    }
+}
+
+impl Error for DiagnosticKindDecodeError<'_> {}
+
 /// The input forms that the effect-kind decoder accepts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EffectKindInput<'a> {

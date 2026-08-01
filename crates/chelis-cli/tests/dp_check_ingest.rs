@@ -352,7 +352,7 @@ fn check_show_inferred_dp_emits_wire_inferred_signatures() {
     );
 }
 
-// ── ROUND-TRIP: .dp check JSON deserializes into schema::CheckResult ───
+// ── ROUND-TRIP: .dp check JSON deserializes into the consumer schema ───
 
 #[test]
 fn check_dp_json_round_trips_through_schema() {
@@ -360,12 +360,15 @@ fn check_dp_json_round_trips_through_schema() {
     let path = write_fixture(dir.path(), "negate.dp", WELL_TYPED_DP);
     let (_code, stdout) = run_check(&path, false);
     // The hand-built emitter must produce exactly the
-    // chelis_compiler_api::schema::CheckResult field set. Deserializing
-    // into that struct locks the hand-built-vs-struct alignment.
-    let parsed: Result<chelis_compiler_api::schema::CheckResult, _> = serde_json::from_str(&stdout);
+    // chelis_compiler_api::schema::WireCheckResult field set. The producer
+    // CheckResult is intentionally Serialize-only; deserializing through the
+    // consumer type locks the hand-built-vs-wire alignment without opening a
+    // diagnostic-forgery path back into producer envelopes.
+    let parsed: Result<chelis_compiler_api::schema::WireCheckResult, _> =
+        serde_json::from_str(&stdout);
     assert!(
         parsed.is_ok(),
-        ".dp check JSON must deserialize into schema::CheckResult; err={:?}\nstdout={stdout}",
+        ".dp check JSON must deserialize into schema::WireCheckResult; err={:?}\nstdout={stdout}",
         parsed.err()
     );
 }

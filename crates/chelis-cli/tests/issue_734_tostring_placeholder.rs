@@ -23,6 +23,7 @@
 use assert_cmd::Command;
 use chelis_compiler_api::compiler::compile;
 use chelis_compiler_api::schema::{CompileRequest, CompileTarget, SourceKind};
+use chelis_vocab::DiagnosticKind;
 use tempfile::tempdir;
 
 #[path = "common/mod.rs"]
@@ -185,7 +186,11 @@ fn to_string_reduced_float_scalars_reject_before_artifact_emission() {
         assert_eq!(error.stage, "compile", "{dtype}: {error:?}");
         assert_eq!(error.errors.len(), 1, "{dtype}: {error:?}");
         let diagnostic = &error.errors[0];
-        assert_eq!(diagnostic.kind, "unsupported_feature", "{dtype}");
+        assert_eq!(
+            diagnostic.kind(),
+            DiagnosticKind::UnsupportedFeature,
+            "{dtype}"
+        );
         for expected in [
             "unsupported:",
             &format!("dtype `{dtype}`"),

@@ -517,6 +517,7 @@ dependencies = [
  "chelis-tide",
  "chelis-types",
  "chelis-validate",
+ "chelis-vocab",
  "chelisup",
  "clap",
  "flate2",
