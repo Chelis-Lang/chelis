@@ -75,7 +75,7 @@ pub enum ChildRef<'a> {
 
 /// A stamped vocabulary node with private fields.
 ///
-/// Invariant: no `Atom::Name` or `Atom::Tag` at a `RuntimeExpr` child
+/// Invariant: no `Atom::Name` at a `RuntimeExpr` child
 /// position. Enforced at construction (both `try_new` and `new`
 /// validate in all build modes).
 #[derive(Debug, Clone, PartialEq, Serialize)]

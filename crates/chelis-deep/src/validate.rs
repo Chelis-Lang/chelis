@@ -9,7 +9,7 @@ pub const VALID_TAGS: &[&str] = &DeepTag::ALL_STRS;
 
 /// Decode-once invariant walker (chelis#731 Phase 3, PERMANENT): return
 /// the first location where a list's element 0 carries a closed-vocabulary
-/// tag as a raw `Atom::Name` string instead of a stamped `Atom::Tag`.
+/// tag as a raw `Atom::Name` string instead of a stamped `List.tag`.
 /// After the parser's stamping pass (and the typed producer constructors),
 /// no parsed or desugared tree may contain one; a `Some` here means a
 /// producer bypassed decode-once and its node would silently miss every
@@ -90,7 +90,7 @@ fn validate_expr(expr: &Expr, warnings: &mut Vec<ValidationWarning>) {
             }
 
             // Decode-once (chelis#731 Phase 3): the parser already stamped
-            // vocabulary tags as `Atom::Tag`, so tag identity is read from
+            // vocabulary tags as `List.tag`, so tag identity is read from
             // the typed accessor; the element-0 symbol survives only for
             // non-vocabulary heads (unknown tags, typed-name helpers, bare
             // structural lists).
@@ -506,7 +506,7 @@ mod tests {
     }
 
     fn make_list(elements: Vec<Expr>) -> Expr {
-        let mut expr = Expr::List(List { elements }, ZERO);
+        let mut expr = Expr::List(List { tag: None, elements }, ZERO);
         // Mirror the parser's decode-once stamping so these hand-built
         // trees match what every real consumer sees.
         crate::parser::stamp_tags(std::slice::from_mut(&mut expr));
@@ -528,6 +528,7 @@ mod tests {
         // Negative control: an unstamped hand-built tree IS caught.
         let raw = Expr::List(
             List {
+                tag: None,
                 elements: vec![sym("var"), empty_map(), sym("x")],
             },
             ZERO,

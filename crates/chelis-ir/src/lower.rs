@@ -319,8 +319,9 @@ fn synth_unary_app(fname: &str, acc_name: &str, app_span: Span) -> Expr {
     let zero_span = Span::new(0, 0);
     let callee = Expr::List(
         List {
+            tag: None,
             elements: vec![
-                Expr::Atom(Atom::Tag(DeepTag::Var), zero_span),
+                Expr::Atom(Atom::Name("var".to_string()), zero_span),
                 Expr::Map(MetaMap::default(), zero_span),
                 Expr::Atom(Atom::Name(fname.to_string()), zero_span),
             ],
@@ -329,8 +330,9 @@ fn synth_unary_app(fname: &str, acc_name: &str, app_span: Span) -> Expr {
     );
     let arg = Expr::List(
         List {
+            tag: None,
             elements: vec![
-                Expr::Atom(Atom::Tag(DeepTag::Var), zero_span),
+                Expr::Atom(Atom::Name("var".to_string()), zero_span),
                 Expr::Map(MetaMap::default(), zero_span),
                 Expr::Atom(Atom::Name(acc_name.to_string()), zero_span),
             ],
@@ -339,8 +341,9 @@ fn synth_unary_app(fname: &str, acc_name: &str, app_span: Span) -> Expr {
     );
     Expr::List(
         List {
+            tag: None,
             elements: vec![
-                Expr::Atom(Atom::Tag(DeepTag::App), zero_span),
+                Expr::Atom(Atom::Name("app".to_string()), zero_span),
                 Expr::Map(MetaMap::default(), zero_span),
                 callee,
                 arg,
@@ -359,8 +362,9 @@ fn synth_reduction_app(fname: &str, operand: Expr, axis: Expr, app_span: Span) -
     let zero_span = Span::new(0, 0);
     let callee = Expr::List(
         List {
+            tag: None,
             elements: vec![
-                Expr::Atom(Atom::Tag(DeepTag::Var), zero_span),
+                Expr::Atom(Atom::Name("var".to_string()), zero_span),
                 Expr::Map(MetaMap::default(), zero_span),
                 Expr::Atom(Atom::Name(fname.to_string()), zero_span),
             ],
@@ -369,8 +373,9 @@ fn synth_reduction_app(fname: &str, operand: Expr, axis: Expr, app_span: Span) -
     );
     Expr::List(
         List {
+            tag: None,
             elements: vec![
-                Expr::Atom(Atom::Tag(DeepTag::App), zero_span),
+                Expr::Atom(Atom::Name("app".to_string()), zero_span),
                 Expr::Map(MetaMap::default(), zero_span),
                 callee,
                 operand,
@@ -5046,16 +5051,6 @@ impl LowerCtx {
                 None,
                 self.current_span_id.clone(),
             ),
-            Atom::Keyword(_) => raise_malformed_deep(
-                "a bare keyword atom in expression position",
-                None,
-                self.current_span_id.clone(),
-            ),
-            Atom::Tag(_) => raise_malformed_deep(
-                "a bare Deep tag atom in expression position",
-                None,
-                self.current_span_id.clone(),
-            ),
         }
     }
 
@@ -5074,7 +5069,7 @@ impl LowerCtx {
         }
 
         // chelis#731 Phase 3 (checker_totality.md §C4.2, decode-once): the
-        // parser stamped vocabulary tags as `Atom::Tag`; the raw symbol
+        // parser stamps vocabulary tags into `List.tag`; the raw symbol
         // survives only for non-vocabulary heads. The match is exhaustive
         // with no `_` arm, so a 63rd `DeepTag` variant fails to compile
         // until this dispatch chooses its lowering disposition.
@@ -11492,6 +11487,7 @@ mod tests {
         // tag spelled `Atom::Name` at element 0.
         let raw = Expr::List(
             chelis_deep::ast::List {
+                tag: None,
                 elements: vec![
                     Expr::Atom(Atom::Name("t-prim".into()), Span::new(0, 0)),
                     Expr::Map(chelis_deep::ast::MetaMap::default(), Span::new(0, 0)),
@@ -11522,6 +11518,7 @@ mod tests {
     fn boundary_guard_fires_inside_a_name_keyed_env() {
         let raw = Expr::List(
             chelis_deep::ast::List {
+                tag: None,
                 elements: vec![
                     Expr::Atom(Atom::Name("effects".into()), Span::new(0, 0)),
                     Expr::Map(chelis_deep::ast::MetaMap::default(), Span::new(0, 0)),

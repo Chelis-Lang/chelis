@@ -158,12 +158,13 @@ impl<'a> EvalContext<'a> {
         let span = Span::new(0, 0);
         let placeholder = "__chelis_named_axis_operand";
         let mut app_elements = vec![
-            Expr::Atom(Atom::Tag(DeepTag::App), span),
+            Expr::Atom(Atom::Name("app".to_string()), span),
             Expr::Map(MetaMap::default(), span),
             Expr::List(
                 List {
+                    tag: None,
                     elements: vec![
-                        Expr::Atom(Atom::Tag(DeepTag::Var), span),
+                        Expr::Atom(Atom::Name("var".to_string()), span),
                         Expr::Map(MetaMap::default(), span),
                         Expr::Atom(Atom::Name(reduce_name.to_string()), span),
                     ],
@@ -175,6 +176,7 @@ impl<'a> EvalContext<'a> {
         app_elements.extend(kids[2..].iter().cloned());
         let app_expr = Expr::List(
             List {
+                tag: None,
                 elements: app_elements,
             },
             span,
@@ -208,12 +210,13 @@ impl<'a> EvalContext<'a> {
         let mut scoped: HashMap<String, TensorType> = HashMap::with_capacity(args.len());
         let mut staged: HashMap<String, IrTensorValue> = HashMap::with_capacity(args.len());
         let mut app_elements: Vec<Expr> = Vec::with_capacity(3 + args.len());
-        app_elements.push(Expr::Atom(Atom::Tag(DeepTag::App), span));
+        app_elements.push(Expr::Atom(Atom::Name("app".to_string()), span));
         app_elements.push(Expr::Map(MetaMap::default(), span));
         app_elements.push(Expr::List(
             List {
+                tag: None,
                 elements: vec![
-                    Expr::Atom(Atom::Tag(DeepTag::Var), span),
+                    Expr::Atom(Atom::Name("var".to_string()), span),
                     Expr::Map(MetaMap::default(), span),
                     Expr::Atom(Atom::Name(resolved_name.to_string()), span),
                 ],
@@ -254,6 +257,7 @@ impl<'a> EvalContext<'a> {
         }
         let app_expr = Expr::List(
             List {
+                tag: None,
                 elements: app_elements,
             },
             span,

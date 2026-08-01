@@ -158,7 +158,7 @@ fn meta_with_entries(entries: Vec<(String, deep::Expr)>) -> deep::Expr {
 
 /// Build a 3-tuple Deep node: (tag {} children...). Decode-once
 /// (chelis#731 Phase 3): the desugarer is a typed producer, so the tag
-/// enters the tree as `Atom::Tag`, never as a string.
+/// enters the tree as `List.tag`, never as a string.
 fn node(tag: DeepTag, children: Vec<deep::Expr>) -> deep::Expr {
     node_meta(tag, meta_empty(), children)
 }
@@ -176,14 +176,14 @@ fn internal_node(tag: &str, children: Vec<deep::Expr>) -> deep::Expr {
     );
     let mut elements = vec![sym(tag), meta_empty()];
     elements.extend(children);
-    deep::Expr::List(deep::List { elements }, sp())
+    deep::Expr::List(deep::List { tag: None, elements }, sp())
 }
 
 /// Build a 3-tuple Deep node with custom metadata: (tag {meta} children...)
 fn node_meta(tag: DeepTag, meta: deep::Expr, children: Vec<deep::Expr>) -> deep::Expr {
-    let mut elements = vec![deep::Expr::Atom(deep::Atom::Tag(tag), sp()), meta];
+    let mut elements = vec![deep::Expr::Atom(deep::Atom::Name(tag.as_str().to_string()), sp()), meta];
     elements.extend(children);
-    deep::Expr::List(deep::List { elements }, sp())
+    deep::Expr::List(deep::List { tag: Some(tag), elements }, sp())
 }
 
 /// Preserve a Surf type expression's byte range in the structural Deep span
@@ -236,7 +236,7 @@ fn attach_span_metadata(expr: deep::Expr, span: Span) -> deep::Expr {
                 map.entries.retain(|(key, _)| key != "span");
                 map.entries.push(entry);
             }
-            deep::Expr::List(deep::List { elements }, list_span)
+            deep::Expr::List(deep::List { tag: None, elements }, list_span)
         }
         other => other,
     }
@@ -276,7 +276,7 @@ fn expr_span(expr: &Expr) -> Span {
 
 /// Build a bare list (no tag/meta) for structural helpers like params, bind
 fn bare_list(elements: Vec<deep::Expr>) -> deep::Expr {
-    deep::Expr::List(deep::List { elements }, sp())
+    deep::Expr::List(deep::List { tag: None, elements }, sp())
 }
 
 fn lower_module_path(path: &str) -> String {
@@ -318,6 +318,7 @@ fn desugar_param_with_scope(
         ),
         Some(ty) => deep::Expr::List(
             deep::List {
+                tag: None,
                 elements: vec![
                     sym(&param.name),
                     meta_with_type(desugar_type_with_scope(ty, dim_vars, tvar_set)),
@@ -413,7 +414,7 @@ fn inject_type_metadata(expr: deep::Expr, ty: deep::Expr) -> deep::Expr {
                 entries.push(("type".to_string(), ty));
                 elements.insert(1, meta_with_entries(entries));
             }
-            deep::Expr::List(deep::List { elements }, span)
+            deep::Expr::List(deep::List { tag: None, elements }, span)
         }
         // For atoms, wrap in an annotated var node
         other => node_meta(DeepTag::Var, meta_with_type(ty), vec![other]),
@@ -445,14 +446,11 @@ fn apply_effect_metadata(ty_expr: deep::Expr, effects: &Option<Vec<EffectExpr>>)
         // "no annotation" when validating declared vs inferred effects.
         (Some(effects), deep::Expr::List(list, span)) => {
             let mut elements = list.elements;
-            if matches!(
-                elements.first(),
-                Some(deep::Expr::Atom(deep::Atom::Tag(DeepTag::TFn), _))
-            ) {
+            if list.tag == Some(DeepTag::TFn) {
                 elements[1] =
                     meta_with_entries(vec![("eff".to_string(), desugar_effect_set(effects))]);
             }
-            deep::Expr::List(deep::List { elements }, span)
+            deep::Expr::List(deep::List { tag: list.tag, elements }, span)
         }
         (_, other) => other,
     }

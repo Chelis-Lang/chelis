@@ -61,7 +61,7 @@ pub fn prune_to_entry(exprs: Vec<DeepExpr>, entry: &str) -> Vec<DeepExpr> {
         let DeepExpr::List(module, meta) = exprs.into_iter().next().expect("len-1 slice") else {
             unreachable!("matched List above");
         };
-        let chelis_deep::List { mut elements } = module;
+        let chelis_deep::List { tag: _, mut elements } = module;
         // Keep the fixed head (tag, metadata map, module-name atom) verbatim
         // and prune the tail. `import` / `export` live in the tail (after the
         // name atom) but are non-decl elements, so the tail pruner keeps them
@@ -71,7 +71,7 @@ pub fn prune_to_entry(exprs: Vec<DeepExpr>, entry: &str) -> Vec<DeepExpr> {
         let decls = elements.split_off(split);
         let pruned_decls = prune_top_level_to_reachable_defs(decls, entry);
         elements.extend(pruned_decls);
-        return vec![DeepExpr::List(chelis_deep::List { elements }, meta)];
+        return vec![DeepExpr::List(chelis_deep::List { tag: None, elements }, meta)];
     }
     prune_top_level_to_reachable_defs(exprs, entry)
 }

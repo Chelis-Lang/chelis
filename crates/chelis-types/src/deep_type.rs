@@ -528,8 +528,7 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
         list: &'b deep::List,
     ) -> Result<(Option<DeepTag>, &'b str, &'b [deep::Expr]), ErrorWitness> {
         let (tag, tag_str) = match list.elements.first() {
-            Some(deep::Expr::Atom(deep::Atom::Tag(tag), _)) => (Some(*tag), tag.as_str()),
-            Some(deep::Expr::Atom(deep::Atom::Name(name), _)) => (None, name.as_str()),
+            Some(deep::Expr::Atom(deep::Atom::Name(name), _)) => (list.tag, name.as_str()),
             _ => {
                 return Err(self.malformed(format!(
                     "malformed Deep type form in {}: expected a tag symbol",

@@ -2706,7 +2706,7 @@ fn synthesize_callable_application(
 ) -> Expr {
     let span = body.span();
     let mut elements = vec![
-        Expr::Atom(Atom::Tag(DeepTag::App), span),
+        Expr::Atom(Atom::Name("app".to_string()), span),
         Expr::Map(
             chelis_deep::ast::MetaMap {
                 entries: ret_type_expr
@@ -2728,8 +2728,9 @@ fn synthesize_callable_application(
         };
         elements.push(Expr::List(
             List {
+                tag: None,
                 elements: vec![
-                    Expr::Atom(Atom::Tag(DeepTag::Var), span),
+                    Expr::Atom(Atom::Name("var".to_string()), span),
                     Expr::Map(var_meta, span),
                     Expr::Atom(Atom::Name(param.name.clone()), span),
                 ],
@@ -2737,7 +2738,7 @@ fn synthesize_callable_application(
             span,
         ));
     }
-    Expr::List(List { elements }, span)
+    Expr::List(List { tag: None, elements }, span)
 }
 
 /// Force-lower an expression through the tensor-helper path using an
@@ -3791,12 +3792,12 @@ fn beta_reduce_pipe_stage(stage: &Expr, acc: Expr) -> Expr {
         }
     }
     let elements = vec![
-        Expr::Atom(Atom::Tag(DeepTag::App), span),
+        Expr::Atom(Atom::Name("app".to_string()), span),
         Expr::Map(MetaMap::default(), span),
         stage.clone(),
         acc,
     ];
-    Expr::List(List { elements }, span)
+    Expr::List(List { tag: None, elements }, span)
 }
 
 /// Substitute every `(var {} name)` reference in `expr` with
@@ -3832,7 +3833,7 @@ fn substitute_var(expr: &Expr, name: &str, replacement: &Expr) -> Expr {
             for el in &list.elements {
                 elements.push(substitute_var(el, name, replacement));
             }
-            Expr::List(chelis_deep::ast::List { elements }, *span)
+            Expr::List(chelis_deep::ast::List { tag: None, elements }, *span)
         }
         Expr::MetaExpr(meta, span) => {
             let inner = substitute_var(&meta.expr, name, replacement);
@@ -7053,7 +7054,7 @@ fn substitute_expr(
             if let Some(body) = kids.get(1) {
                 elements.push(substitute_expr(body, substitutions, &next_shadowed));
             }
-            Expr::List(List { elements }, *span)
+            Expr::List(List { tag: None, elements }, *span)
         }
         Expr::List(list, span) if tag(list) == Some(DeepTag::Let) => {
             let kids = children(list);
@@ -7077,13 +7078,14 @@ fn substitute_expr(
                 let mut rebuilt = list.elements.clone();
                 rebuilt[2] = substitute_expr(&list.elements[2], substitutions, shadowed);
                 rebuilt[3] = substitute_expr(&list.elements[3], substitutions, &next_shadowed);
-                Expr::List(List { elements: rebuilt }, *span)
+                Expr::List(List { tag: list.tag, elements: rebuilt }, *span)
             } else {
-                Expr::List(List { elements }, *span)
+                Expr::List(List { tag: list.tag, elements }, *span)
             }
         }
         Expr::List(list, span) => Expr::List(
             List {
+                tag: list.tag,
                 elements: list
                     .elements
                     .iter()
@@ -7127,6 +7129,7 @@ fn inline_local_callable_lets(expr: &Expr) -> Expr {
     if tag(list) != Some(DeepTag::Let) {
         return Expr::List(
             List {
+                tag: None,
                 elements: list
                     .elements
                     .iter()
@@ -7153,6 +7156,7 @@ fn inline_local_callable_lets(expr: &Expr) -> Expr {
         .unwrap_or_else(|| {
             Expr::List(
                 List {
+                    tag: None,
                     elements: Vec::new(),
                 },
                 *span,
@@ -7199,11 +7203,13 @@ fn inline_local_callable_lets(expr: &Expr) -> Expr {
     }
     Expr::List(
         List {
+            tag: None,
             elements: vec![
                 list.elements[0].clone(),
                 list.elements[1].clone(),
                 Expr::List(
                     List {
+                        tag: None,
                         elements: rebuilt_bind,
                     },
                     *span,
@@ -7473,8 +7479,9 @@ fn hoist_host_lane_tensor_bindings(
             scoped.insert(name.clone(), ty);
             new_elements.push(Expr::List(
                 List {
+                    tag: None,
                     elements: vec![
-                        Expr::Atom(Atom::Tag(DeepTag::Var), *span),
+                        Expr::Atom(Atom::Name("var".to_string()), *span),
                         Expr::Map(
                             chelis_deep::ast::MetaMap {
                                 entries: Vec::new(),
@@ -7494,6 +7501,7 @@ fn hoist_host_lane_tensor_bindings(
     Ok((
         Expr::List(
             List {
+                tag: None,
                 elements: new_elements,
             },
             *span,

@@ -84,7 +84,7 @@ fn literal_seed_read_at_full_i64_width() {
             Expr::Map(MetaMap::default(), sp),
         ];
         elements.extend(children);
-        Expr::List(List { elements }, sp)
+        Expr::List(List { tag: None, elements }, sp)
     };
     // (lit {type: (t-prim {} int32)} 4294967295) — the exact shape desugar
     // emits for `seed(4294967295)`.
@@ -95,8 +95,9 @@ fn literal_seed_read_at_full_i64_width() {
         );
         Expr::List(
             List {
+                tag: None,
                 elements: vec![
-                    Expr::Atom(Atom::Tag(DeepTag::Lit), sp),
+                    Expr::Atom(Atom::Name("lit".to_string()), sp),
                     Expr::Map(
                         MetaMap {
                             entries: vec![("type".to_string(), t_int32)],

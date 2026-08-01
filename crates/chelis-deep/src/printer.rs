@@ -86,6 +86,7 @@ impl Printer {
             }
             Expr::BareList(elems, _) => {
                 let list = List {
+                    tag: None,
                     elements: elems.clone(),
                 };
                 self.fmt_list(&list, indent)
@@ -109,6 +110,7 @@ impl Printer {
             }
             Expr::BareList(elems, _) => {
                 let list = List {
+                    tag: None,
                     elements: elems.clone(),
                 };
                 self.fmt_list_flat(&list)
@@ -123,7 +125,6 @@ impl Printer {
     fn fmt_atom(atom: &Atom) -> String {
         match atom {
             Atom::Name(s) => s.clone(),
-            Atom::Tag(tag) => tag.as_str().to_string(),
             Atom::Int(n) => n.to_string(),
             Atom::Float(f) => {
                 let s = f.to_string();
@@ -146,7 +147,6 @@ impl Printer {
                 out.push('"');
                 out
             }
-            Atom::Keyword(k) => format!(":{k}"),
             Atom::Bool(b) => if *b { "true" } else { "false" }.to_string(),
         }
     }
@@ -346,12 +346,11 @@ impl Printer {
 }
 
 fn canonical_node_parts(list: &List) -> Option<(DeepTag, &MetaMap, &[Expr])> {
-    match list.elements.as_slice() {
-        [
-            Expr::Atom(Atom::Tag(tag), _),
-            Expr::Map(meta, _),
-            children @ ..,
-        ] => Some((*tag, meta, children)),
+    let tag = list.tag?;
+    // elements[0] is the tag name (Atom::Name), elements[1] is the meta map,
+    // elements[2..] are children.
+    match list.elements.get(1..) {
+        Some([Expr::Map(meta, _), children @ ..]) => Some((tag, meta, children)),
         _ => None,
     }
 }
@@ -361,7 +360,7 @@ fn node_to_list(node: &crate::node::Node) -> List {
     use crate::node::ChildRef;
     let span = Span::new(0, 0);
     let mut elements = Vec::with_capacity(node.child_count() + 2);
-    elements.push(Expr::Atom(Atom::Tag(node.tag()), span));
+    elements.push(Expr::Atom(Atom::Name(node.tag().as_str().to_string()), span));
     elements.push(Expr::Map(node.meta().clone(), span));
     for child_ref in node.children_iter() {
         match child_ref {
@@ -378,7 +377,7 @@ fn node_to_list(node: &crate::node::Node) -> List {
             }
         }
     }
-    List { elements }
+    List { tag: Some(node.tag()), elements }
 }
 
 /// Reconstruct a `List` from an `UnknownForm` for printing.
@@ -388,7 +387,7 @@ fn unknown_form_to_list(head: &str, meta: &MetaMap, children: &[Expr]) -> List {
     elements.push(Expr::Atom(Atom::Name(head.to_string()), span));
     elements.push(Expr::Map(meta.clone(), span));
     elements.extend(children.iter().cloned());
-    List { elements }
+    List { tag: None, elements }
 }
 
 #[cfg(test)]
@@ -424,7 +423,7 @@ mod tests {
     fn node(tag: &str, meta: Vec<(&str, Expr)>, children: Vec<Expr>) -> Expr {
         let mut elements = vec![sym(tag), map_expr(meta)];
         elements.extend(children);
-        let mut expr = Expr::List(List { elements }, sp());
+        let mut expr = Expr::List(List { tag: None, elements }, sp());
         // Mirror the parser's decode-once stamping so these hand-built
         // trees match what every real consumer sees.
         crate::parser::stamp_tags(std::slice::from_mut(&mut expr));
@@ -432,7 +431,7 @@ mod tests {
     }
 
     fn generic_list(elements: Vec<Expr>) -> Expr {
-        Expr::List(List { elements }, sp())
+        Expr::List(List { tag: None, elements }, sp())
     }
 
     fn meta_expr(entries: Vec<(&str, Expr)>, expr: Expr) -> Expr {

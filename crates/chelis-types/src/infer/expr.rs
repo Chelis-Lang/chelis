@@ -645,50 +645,6 @@ pub(super) fn infer_atom(atom: &deep::Atom, errors: &mut DiagnosticSink<'_>) -> 
                 vec![format!("to reference a binding, write `(var {{}} {name})`")],
             ),
         ),
-        deep::Atom::Keyword(name) => report(
-            errors,
-            CheckError::new(
-                CheckErrorKind::MalformedForm,
-                format!(
-                    "a bare keyword atom `:{name}` in expression position cannot be typed or \
-                     lowered to the executable IR (spec/design/loud_unsupported.md section \
-                     C1.4; chelis#710 form 4)"
-                ),
-                vec!["keywords are metadata and form keys, not runtime expressions".to_string()],
-            ),
-        ),
-        // Decode-once's third structural token takes the SAME disposition
-        // as its two siblings, not the `Type::Unit` this arm carried while
-        // `Symbol`/`Keyword` still returned one. chelis#873 executed that
-        // fix for them; inheriting the pre-fix line for `Tag` would be
-        // choosing the behaviour #873 was filed against, for a third
-        // variant, after it was executed for the other two.
-        //
-        // Stamping is positional (element 0) and `children()` skips
-        // elements 0-1, so a `Tag` should not reach expression position.
-        // That belief is not a licence to return a value from a dead path:
-        // loud_unsupported.md section C1 rule 4 is raise-or-prove, and a
-        // raise costs nothing on a dead path. `infer_atom_*` in this
-        // module's tests drives all three structural arms directly, so the
-        // arm is proven as well as raised.
-        deep::Atom::Tag(tag) => report(
-            errors,
-            CheckError::new(
-                CheckErrorKind::MalformedForm,
-                format!(
-                    "a decoded tag atom `{}` outside a list's tag position is structural \
-                     syntax, not an expression, and cannot be typed or lowered to the \
-                     executable IR (spec/design/loud_unsupported.md section C1.4; \
-                     chelis#710 form 4)",
-                    tag.as_str()
-                ),
-                vec![format!(
-                    "`{}` names a form; write `({} {{}} ...)` to use it as one",
-                    tag.as_str(),
-                    tag.as_str()
-                )],
-            ),
-        ),
     }
 }
 

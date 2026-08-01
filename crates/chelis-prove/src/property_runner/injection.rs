@@ -531,7 +531,7 @@ fn sym(s: &str) -> Expr {
 fn node(tag: &str, kids: Vec<Expr>) -> Expr {
     let mut elements = vec![sym(tag), Expr::Map(MetaMap::default(), span0())];
     elements.extend(kids);
-    Expr::List(List { elements }, span0())
+    Expr::List(List { tag: None, elements }, span0())
 }
 fn var_node(name: &str) -> Expr {
     node("var", vec![sym(name)])
@@ -543,6 +543,7 @@ fn typed_lit(prim: &str, value: Expr) -> Expr {
         .push(("type".to_string(), node("t-prim", vec![sym(prim)])));
     Expr::List(
         List {
+            tag: None,
             elements: vec![sym("lit"), Expr::Map(entries, span0()), value],
         },
         span0(),
@@ -615,7 +616,7 @@ fn inject_into_module(exprs: &[Expr], type_name: &str, def: Expr) -> Vec<Expr> {
         {
             let mut elements = l.elements.clone();
             elements.push(def.clone());
-            out.push(Expr::List(List { elements }, *span));
+            out.push(Expr::List(List { tag: None, elements }, *span));
             injected = true;
         } else {
             out.push(expr.clone());
@@ -646,7 +647,7 @@ fn strip_invariant_meta(expr: &Expr) -> Expr {
                     .collect();
                 elements[1] = Expr::Map(MetaMap { entries: kept }, *mspan);
             }
-            Expr::List(List { elements }, *span)
+            Expr::List(List { tag: None, elements }, *span)
         }
         other => other.clone(),
     }

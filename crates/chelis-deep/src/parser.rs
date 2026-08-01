@@ -206,6 +206,7 @@ impl<'a> Parser<'a> {
                 self.advance();
                 return Ok(Expr::List(
                     List {
+                        tag: None,
                         elements: Vec::new(),
                     },
                     start_span.merge(end_span),
@@ -227,7 +228,7 @@ impl<'a> Parser<'a> {
                 let end_span = tok.span;
                 self.advance(); // consume ')'
                 let full_span = start_span.merge(end_span);
-                return Ok(Expr::List(List { elements }, full_span));
+                return Ok(Expr::List(List { tag: None, elements }, full_span));
             }
             elements.push(self.parse_expr()?);
         }
@@ -525,6 +526,7 @@ fn collapse_typed_literal_lit(list: List, span: crate::Span) -> Result<List, Par
         }
         // Outer already has a matching type entry; just unwrap.
         return Ok(List {
+            tag: None,
             elements: vec![outer_tag, Expr::Map(outer_meta, span), inner_value],
         });
     }
@@ -532,6 +534,7 @@ fn collapse_typed_literal_lit(list: List, span: crate::Span) -> Result<List, Par
     let mut merged_entries = outer_meta.entries;
     merged_entries.push(("type".to_string(), inner_type_owned));
     Ok(List {
+        tag: None,
         elements: vec![
             outer_tag,
             Expr::Map(
@@ -555,6 +558,7 @@ fn typed_literal_lit_expr(value: Atom, suffix: lexer::LiteralSuffix, span: crate
     // (t-prim {} <prim_name>)
     let t_prim = Expr::List(
         List {
+            tag: None,
             elements: vec![
                 Expr::Atom(Atom::Name("t-prim".to_string()), span),
                 Expr::Map(MetaMap::default(), span),
@@ -572,6 +576,7 @@ fn typed_literal_lit_expr(value: Atom, suffix: lexer::LiteralSuffix, span: crate
     // (lit {type: (t-prim {} <prim_name>)} <value>)
     Expr::List(
         List {
+            tag: None,
             elements: vec![
                 Expr::Atom(Atom::Name("lit".to_string()), span),
                 meta,
@@ -664,6 +669,7 @@ fn normalize_typed_literals_in_expr(expr: &mut Expr) -> Result<(), ParseError> {
                 let taken = std::mem::replace(
                     list,
                     List {
+                        tag: None,
                         elements: Vec::new(),
                     },
                 );
@@ -687,15 +693,16 @@ pub fn parse(tokens: &[Token]) -> Result<Vec<Expr>, ParseError> {
 
 /// Decode-once stamping (chelis#731 Phase 3): convert every list's
 /// element-0 symbol that spells a closed-vocabulary tag into
-/// `Atom::Tag`, recursively, including metadata map values (canonical
-/// type syntax lives there). Positional and shape-blind on purpose:
-/// only element 0 is a tag position, and a vocabulary word appearing as
-/// a child (a parameter or binding name, a bare symbol) is never
-/// converted. After this pass the tag string does not exist in the
-/// in-memory tree; `chelis_deep::printer` regenerates it via
-/// `DeepTag::as_str` at the serialization boundary. Symbols that do not
-/// decode (lenient-parsed unknown tags, spec/03 §8.3) stay `Atom::Name`
-/// and flow to consumers' loud raw-string-boundary arms.
+/// `List.tag = Some(DeepTag)`, recursively, including metadata map
+/// values (canonical type syntax lives there). Positional and
+/// shape-blind on purpose: only element 0 is a tag position, and a
+/// vocabulary word appearing as a child (a parameter or binding name,
+/// a bare symbol) is never converted. After this pass the tag is
+/// decoded into the struct field; `chelis_deep::printer` regenerates
+/// the string via `DeepTag::as_str` at the serialization boundary.
+/// Symbols that do not decode (lenient-parsed unknown tags, spec/03
+/// §8.3) stay `Atom::Name` and flow to consumers' loud
+/// raw-string-boundary arms.
 pub fn stamp_tags(exprs: &mut [Expr]) {
     for expr in exprs.iter_mut() {
         stamp_tags_expr(expr);
@@ -705,11 +712,12 @@ pub fn stamp_tags(exprs: &mut [Expr]) {
 fn stamp_tags_expr(expr: &mut Expr) {
     match expr {
         Expr::List(list, _) => {
-            if let Some(Expr::Atom(atom, _)) = list.elements.first_mut()
-                && let Atom::Name(symbol) = &*atom
-                && let Some(tag) = crate::tag::DeepTag::parse(symbol)
-            {
-                *atom = Atom::Tag(tag);
+            if list.tag.is_none() {
+                if let Some(Expr::Atom(Atom::Name(symbol), _)) = list.elements.first()
+                    && let Some(tag) = crate::tag::DeepTag::parse(symbol)
+                {
+                    list.tag = Some(tag);
+                }
             }
             for child in list.elements.iter_mut() {
                 stamp_tags_expr(child);
@@ -1261,12 +1269,7 @@ mod tests {
         match &exprs[0] {
             Expr::List(list, _) => {
                 assert_eq!(list.elements.len(), 4); // def, {}, f, (fn ...)
-                match &list.elements[0] {
-                    Expr::Atom(Atom::Tag(t), _) => {
-                        assert_eq!(*t, crate::tag::DeepTag::Def)
-                    }
-                    other => panic!("expected Tag(Def), got {:?}", other),
-                }
+                assert_eq!(list.tag, Some(crate::tag::DeepTag::Def));
                 match &list.elements[1] {
                     Expr::Map(m, _) => assert!(m.entries.is_empty()),
                     other => panic!("expected empty Map, got {:?}", other),
@@ -1276,10 +1279,7 @@ mod tests {
                     other => panic!("expected Symbol(f), got {:?}", other),
                 }
                 match &list.elements[3] {
-                    Expr::List(func, _) => match &func.elements[0] {
-                        Expr::Atom(Atom::Tag(t), _) => assert_eq!(*t, crate::tag::DeepTag::Fn),
-                        other => panic!("expected Symbol(fn), got {:?}", other),
-                    },
+                    Expr::List(func, _) => assert_eq!(func.tag, Some(crate::tag::DeepTag::Fn)),
                     other => panic!("expected fn list, got {:?}", other),
                 }
             }

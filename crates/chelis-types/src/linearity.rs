@@ -2192,13 +2192,11 @@ mod tests {
 
     /// Build `(tag {meta} children...)`.
     fn node(tag: &str, meta_entries: Vec<(&str, Expr)>, children: Vec<Expr>) -> Expr {
-        let head = match DeepTag::parse(tag) {
-            Some(tag) => Expr::Atom(Atom::Tag(tag), span()),
-            None => sym(tag),
-        };
+        let decoded = DeepTag::parse(tag);
+        let head = sym(tag);
         let mut elements = vec![head, meta(meta_entries)];
         elements.extend(children);
-        Expr::List(List { elements }, span())
+        Expr::List(List { tag: decoded, elements }, span())
     }
 
     /// Build a synthetic `(t-tensor {} (d-lit 4) (t-prim f32))` so the

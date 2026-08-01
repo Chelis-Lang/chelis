@@ -41,6 +41,7 @@ fn empty_meta() -> Expr {
 fn var(name: &str) -> Expr {
     Expr::List(
         List {
+            tag: None,
             elements: vec![sym("var"), empty_meta(), sym(name)],
         },
         Span::new(0, 0),
@@ -51,6 +52,7 @@ fn var(name: &str) -> Expr {
 fn app(func: Expr, arg: Expr) -> Expr {
     Expr::List(
         List {
+            tag: None,
             elements: vec![sym("app"), empty_meta(), func, arg],
         },
         Span::new(0, 0),
@@ -75,18 +77,21 @@ fn deep_app_chain(depth: usize) -> Expr {
 fn library_with_body(body: Expr) -> Vec<Expr> {
     let params = Expr::List(
         List {
+            tag: None,
             elements: vec![sym("params"), empty_meta()],
         },
         Span::new(0, 0),
     );
     let func = Expr::List(
         List {
+            tag: None,
             elements: vec![sym("fn"), empty_meta(), params, body],
         },
         Span::new(0, 0),
     );
     let def = Expr::List(
         List {
+            tag: None,
             elements: vec![sym("def"), empty_meta(), sym("lib_main"), func],
         },
         Span::new(0, 0),

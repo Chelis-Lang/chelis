@@ -1594,7 +1594,7 @@ fn inject_const_probe(exprs: &[Expr], def: Expr) -> Vec<Expr> {
         {
             let mut elements = l.elements.clone();
             elements.push(def.clone());
-            out.push(Expr::List(List { elements }, *span));
+            out.push(Expr::List(List { tag: None, elements }, *span));
             injected = true;
         } else {
             out.push(expr.clone());
@@ -1654,7 +1654,7 @@ fn inject_into_defining_module(exprs: &[Expr], type_name: &str, new_defs: Vec<Ex
         {
             let mut elements = l.elements.clone();
             elements.extend(new_defs.clone());
-            out.push(Expr::List(List { elements }, *span));
+            out.push(Expr::List(List { tag: None, elements }, *span));
             injected = true;
         } else {
             out.push(expr.clone());
@@ -1963,7 +1963,7 @@ fn strip_invariant_meta(expr: &Expr) -> Expr {
                     .collect();
                 elements[1] = Expr::Map(MetaMap { entries: kept }, *mspan);
             }
-            Expr::List(List { elements }, *span)
+            Expr::List(List { tag: None, elements }, *span)
         }
         other => other.clone(),
     }
@@ -2048,7 +2048,7 @@ fn deep_node(tag: &str, children: Vec<Expr>) -> Expr {
         Expr::Map(MetaMap::default(), Span::new(0, 0)),
     ];
     elements.extend(children);
-    Expr::List(List { elements }, Span::new(0, 0))
+    Expr::List(List { tag: None, elements }, Span::new(0, 0))
 }
 fn deep_var(name: &str) -> Expr {
     deep_node("var", vec![deep_sym(name)])
@@ -2061,6 +2061,7 @@ fn deep_typed_lit(type_prim: &str, value: Expr) -> Expr {
     ));
     Expr::List(
         List {
+            tag: None,
             elements: vec![deep_sym("lit"), Expr::Map(entries, Span::new(0, 0)), value],
         },
         Span::new(0, 0),

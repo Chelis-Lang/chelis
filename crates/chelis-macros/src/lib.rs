@@ -146,6 +146,7 @@ impl Expander {
                 let Some(tag) = get_tag(list) else {
                     return Ok(Expr::List(
                         List {
+                            tag: None,
                             elements: list
                                 .elements
                                 .iter()
@@ -163,6 +164,7 @@ impl Expander {
                     DeepTag::Match => self.expand_match(list, macros, scope, *span),
                     _ => Ok(Expr::List(
                         List {
+                            tag: None,
                             elements: list
                                 .elements
                                 .iter()
@@ -193,7 +195,7 @@ impl Expander {
         ];
         let body = self.expand_sequence(&kids[1..], macros)?;
         expanded.extend(body);
-        Ok(Expr::List(List { elements: expanded }, span))
+        Ok(Expr::List(List { tag: None, elements: expanded }, span))
     }
 
     fn expand_fn(
@@ -206,7 +208,7 @@ impl Expander {
         let mut elements = list.elements.clone();
         let kids = children(list);
         if kids.len() < 2 {
-            return Ok(Expr::List(List { elements }, span));
+            return Ok(Expr::List(List { tag: None, elements }, span));
         }
 
         let params_expr = kids[0].clone();
@@ -214,7 +216,7 @@ impl Expander {
         let fn_scope = scope.with_blockers(&blocker_names);
         elements[2] = params_expr;
         elements[3] = self.expand_expr(&kids[1], macros, &fn_scope)?;
-        Ok(Expr::List(List { elements }, span))
+        Ok(Expr::List(List { tag: None, elements }, span))
     }
 
     fn expand_let(
@@ -252,7 +254,7 @@ impl Expander {
             );
             elements[3] = self.expand_expr(&kids[1], macros, &scope_for_values)?;
         }
-        Ok(Expr::List(List { elements }, span))
+        Ok(Expr::List(List { tag: None, elements }, span))
     }
 
     fn expand_match(
@@ -285,6 +287,7 @@ impl Expander {
                     }
                     elements.push(Expr::List(
                         List {
+                            tag: None,
                             elements: arm_elements,
                         },
                         *arm_span,
@@ -294,7 +297,7 @@ impl Expander {
             }
             elements.push(self.expand_expr(arm, macros, scope)?);
         }
-        Ok(Expr::List(List { elements }, span))
+        Ok(Expr::List(List { tag: None, elements }, span))
     }
 
     fn try_expand_macro_call(
@@ -409,6 +412,7 @@ fn replace_placeholder_vars(expr: &Expr, replacements: &HashMap<String, Expr>) -
             }
             Expr::List(
                 List {
+                    tag: None,
                     elements: list
                         .elements
                         .iter()
@@ -538,6 +542,7 @@ fn substitute_expr(
                 Some(DeepTag::Match) => substitute_match(list, params, shadowed, *span),
                 _ => Expr::List(
                     List {
+                        tag: None,
                         elements: list
                             .elements
                             .iter()
@@ -560,14 +565,14 @@ fn substitute_fn(
     let mut elements = list.elements.clone();
     let kids = children(list);
     if kids.len() < 2 {
-        return Expr::List(List { elements }, span);
+        return Expr::List(List { tag: None, elements }, span);
     }
     let mut child_shadowed = shadowed.clone();
     for blocker in params_blockers(&kids[0]) {
         child_shadowed.insert(blocker);
     }
     elements[3] = substitute_expr(&kids[1], params, &child_shadowed);
-    Expr::List(List { elements }, span)
+    Expr::List(List { tag: None, elements }, span)
 }
 
 fn substitute_let(
@@ -579,7 +584,7 @@ fn substitute_let(
     let mut elements = list.elements.clone();
     let kids = children(list);
     if kids.len() < 2 {
-        return Expr::List(List { elements }, span);
+        return Expr::List(List { tag: None, elements }, span);
     }
     let mut scope_for_values = shadowed.clone();
     if let Expr::List(bind_list, bind_span) = &kids[0] {
@@ -606,7 +611,7 @@ fn substitute_let(
         );
     }
     elements[3] = substitute_expr(&kids[1], params, &scope_for_values);
-    Expr::List(List { elements }, span)
+    Expr::List(List { tag: None, elements }, span)
 }
 
 fn substitute_match(
@@ -620,7 +625,7 @@ fn substitute_match(
     elements.push(list.elements[1].clone());
     let kids = children(list);
     if kids.is_empty() {
-        return Expr::List(List { elements }, span);
+        return Expr::List(List { tag: None, elements }, span);
     }
     elements.push(substitute_expr(&kids[0], params, shadowed));
     for arm in &kids[1..] {
@@ -638,6 +643,7 @@ fn substitute_match(
                 arm_elements[4] = substitute_expr(&arm_kids[2], params, &arm_shadowed);
                 elements.push(Expr::List(
                     List {
+                        tag: None,
                         elements: arm_elements,
                     },
                     *arm_span,
@@ -647,7 +653,7 @@ fn substitute_match(
         }
         elements.push(substitute_expr(arm, params, shadowed));
     }
-    Expr::List(List { elements }, span)
+    Expr::List(List { tag: None, elements }, span)
 }
 
 fn hygienize_expr(expr: &Expr, counter: &mut usize, env: &HashMap<String, String>) -> Expr {
@@ -667,7 +673,7 @@ fn hygienize_expr(expr: &Expr, counter: &mut usize, env: &HashMap<String, String
             {
                 let mut elements = list.elements.clone();
                 elements[2] = Expr::Atom(Atom::Name(renamed.clone()), children(list)[0].span());
-                return Expr::List(List { elements }, *span);
+                return Expr::List(List { tag: None, elements }, *span);
             }
             match get_tag(list) {
                 Some(DeepTag::Fn) => hygienize_fn(list, counter, env, *span),
@@ -675,6 +681,7 @@ fn hygienize_expr(expr: &Expr, counter: &mut usize, env: &HashMap<String, String
                 Some(DeepTag::Match) => hygienize_match(list, counter, env, *span),
                 _ => Expr::List(
                     List {
+                        tag: None,
                         elements: list
                             .elements
                             .iter()
@@ -697,12 +704,12 @@ fn hygienize_fn(
     let mut elements = list.elements.clone();
     let kids = children(list);
     if kids.len() < 2 {
-        return Expr::List(List { elements }, span);
+        return Expr::List(List { tag: None, elements }, span);
     }
     let (params_expr, next_env) = hygienize_params_expr(&kids[0], counter, env);
     elements[2] = params_expr;
     elements[3] = hygienize_expr(&kids[1], counter, &next_env);
-    Expr::List(List { elements }, span)
+    Expr::List(List { tag: None, elements }, span)
 }
 
 fn hygienize_let(
@@ -714,7 +721,7 @@ fn hygienize_let(
     let mut elements = list.elements.clone();
     let kids = children(list);
     if kids.len() < 2 {
-        return Expr::List(List { elements }, span);
+        return Expr::List(List { tag: None, elements }, span);
     }
     let mut scope_env = env.clone();
     if let Expr::List(bind_list, bind_span) = &kids[0] {
@@ -737,7 +744,7 @@ fn hygienize_let(
         );
     }
     elements[3] = hygienize_expr(&kids[1], counter, &scope_env);
-    Expr::List(List { elements }, span)
+    Expr::List(List { tag: None, elements }, span)
 }
 
 fn hygienize_match(
@@ -751,7 +758,7 @@ fn hygienize_match(
     elements.push(list.elements[0].clone());
     elements.push(list.elements[1].clone());
     if kids.is_empty() {
-        return Expr::List(List { elements }, span);
+        return Expr::List(List { tag: None, elements }, span);
     }
     elements.push(hygienize_expr(&kids[0], counter, env));
     for arm in &kids[1..] {
@@ -769,6 +776,7 @@ fn hygienize_match(
                 arm_elements[4] = hygienize_expr(&arm_kids[2], counter, &arm_env);
                 elements.push(Expr::List(
                     List {
+                        tag: None,
                         elements: arm_elements,
                     },
                     *arm_span,
@@ -778,7 +786,7 @@ fn hygienize_match(
         }
         elements.push(hygienize_expr(arm, counter, env));
     }
-    Expr::List(List { elements }, span)
+    Expr::List(List { tag: None, elements }, span)
 }
 
 fn hygienize_params_expr(
@@ -810,6 +818,7 @@ fn hygienize_params_expr(
                 next_env.insert(name.to_string(), fresh.clone());
                 elements.push(Expr::List(
                     List {
+                        tag: None,
                         elements: vec![
                             Expr::Atom(Atom::Name(fresh), param_list.elements[0].span()),
                             param_list.elements[1].clone(),
@@ -821,7 +830,7 @@ fn hygienize_params_expr(
             _ => elements.push(param.clone()),
         }
     }
-    (Expr::List(List { elements }, *span), next_env)
+    (Expr::List(List { tag: None, elements }, *span), next_env)
 }
 
 fn hygienize_pattern(
@@ -961,7 +970,7 @@ fn annotate_source_expr(expr: &Expr, invocation: &Expr) -> Expr {
             for child in elements.iter_mut().skip(2) {
                 *child = annotate_source_expr(child, invocation);
             }
-            Expr::List(List { elements }, *span)
+            Expr::List(List { tag: None, elements }, *span)
         }
     }
 }
@@ -1034,7 +1043,7 @@ fn collect_pattern_binders(expr: &Expr, out: &mut Vec<String>) {
 fn macro_source(name: &str, args: &[Expr]) -> Expr {
     let mut elements = vec![Expr::Atom(Atom::Name(name.to_string()), zero_span())];
     elements.extend(args.iter().cloned());
-    Expr::List(List { elements }, zero_span())
+    Expr::List(List { tag: None, elements }, zero_span())
 }
 
 fn standard_prelude_macros() -> Result<HashMap<String, MacroDef>, ExpansionError> {
@@ -1088,13 +1097,13 @@ fn var_name(expr: &Expr) -> Option<&str> {
 }
 
 fn is_unit_list(expr: &Expr) -> bool {
-    matches!(expr, Expr::List(List { elements }, _) if elements.is_empty())
+    matches!(expr, Expr::List(List { tag: None, elements }, _) if elements.is_empty())
 }
 
 fn node_with_meta(tag: DeepTag, meta: Expr, children: Vec<Expr>, span: Span) -> Expr {
-    let mut elements = vec![Expr::Atom(Atom::Tag(tag), span), meta];
+    let mut elements = vec![Expr::Atom(Atom::Name(tag.as_str().to_string()), span), meta];
     elements.extend(children);
-    Expr::List(List { elements }, span)
+    Expr::List(List { tag: Some(tag), elements }, span)
 }
 
 fn zero_span() -> Span {

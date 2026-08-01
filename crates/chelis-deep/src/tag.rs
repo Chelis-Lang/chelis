@@ -7,7 +7,7 @@
 //! its leading symbol string. The IN-MEMORY form is decode-once
 //! (`spec/design/checker_totality.md` §C4 item 2, executing [#730]'s
 //! §C4.2 doctrine that raw strings exist only at serialization
-//! boundaries). The parser stamps the tag as `Atom::Tag(DeepTag)` at
+//! boundaries). The parser stamps the tag as `List.tag = Some(DeepTag)` at
 //! element 0, so after parsing the tag string does not exist in the tree
 //! and a consumer cannot dispatch on it. [`List::tag`] is the only
 //! dispatch accessor; printers and serializers regenerate the string
@@ -37,7 +37,7 @@
 
 /// One tag of the closed Deep vocabulary (`spec/03-deep-syntax.md` §2.10).
 ///
-/// Serde note: the enum appears inside `Atom::Tag`, which the typecheck
+/// Serde note: the enum appears inside `List.tag`, which the typecheck
 /// cache serializes as part of `Expr`; the cache envelope's format/build
 /// identity check invalidates old entries across representation changes,
 /// so no cross-version decode path exists or is wanted.

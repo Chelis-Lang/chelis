@@ -49,6 +49,7 @@ pub(super) fn annotate_expr_with_scope(
             if !matches!(list.elements.get(1), Some(deep::Expr::Map(_, _))) {
                 return deep::Expr::List(
                     deep::List {
+                        tag: None,
                         elements: list
                             .elements
                             .iter()
@@ -124,7 +125,7 @@ pub(super) fn annotate_expr_with_scope(
                                     ),
                                 ];
                                 elements.extend(fn_kids);
-                                deep::Expr::List(deep::List { elements }, *fn_span)
+                                deep::Expr::List(deep::List { tag: fn_list.tag, elements }, *fn_span)
                             } else {
                                 annotate_child_for_role(
                                     DeepTag::Def,
@@ -152,7 +153,7 @@ pub(super) fn annotate_expr_with_scope(
                 annotated_meta_map_with_override(list, expr, product, fn_ty_override, errors),
             ];
             elements.extend(annotated_children);
-            deep::Expr::List(deep::List { elements }, *span)
+            deep::Expr::List(deep::List { tag: list.tag, elements }, *span)
         }
         // Transitional arms for the new typed-node variants (post-rebase).
         deep::Expr::Node(node, span) => {
@@ -282,6 +283,7 @@ pub(super) fn annotate_params_node(
                     Some(type_expr) => {
                         elements.push(deep::Expr::List(
                             deep::List {
+                                tag: None,
                                 elements: vec![
                                     deep::Expr::Atom(deep::Atom::Name(name.clone()), *atom_span),
                                     deep::Expr::Map(
@@ -302,7 +304,7 @@ pub(super) fn annotate_params_node(
             _ => elements.push(param.clone()),
         }
     }
-    deep::Expr::List(deep::List { elements }, *span)
+    deep::Expr::List(deep::List { tag: list.tag, elements }, *span)
 }
 
 /// Annotate the children of a `(fn ...)` node.

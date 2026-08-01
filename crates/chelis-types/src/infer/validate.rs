@@ -1617,11 +1617,11 @@ pub(super) fn dim_to_deep_expr(dim: &Dim) -> deep::Expr {
 
 pub(super) fn node_expr(tag: DeepTag, children: Vec<deep::Expr>) -> deep::Expr {
     let mut elements = vec![
-        deep::Expr::Atom(deep::Atom::Tag(tag), zero_span()),
+        deep::Expr::Atom(deep::Atom::Name(tag.as_str().to_string()), zero_span()),
         deep::Expr::Map(deep::MetaMap::default(), zero_span()),
     ];
     elements.extend(children);
-    deep::Expr::List(deep::List { elements }, zero_span())
+    deep::Expr::List(deep::List { tag: Some(tag), elements }, zero_span())
 }
 
 pub(super) fn symbol_expr(name: &str) -> deep::Expr {
@@ -2541,8 +2541,9 @@ pub(super) fn build_tensor_type_expr_with_batch(
     let make_d_lit = |v: i64| {
         deep::Expr::List(
             deep::List {
+                tag: Some(DeepTag::DLit),
                 elements: vec![
-                    deep::Expr::Atom(deep::Atom::Tag(DeepTag::DLit), zero),
+                    deep::Expr::Atom(deep::Atom::Name("d-lit".to_string()), zero),
                     deep::Expr::Map(empty_meta(), zero),
                     deep::Expr::Atom(deep::Atom::Int(v), zero),
                 ],
@@ -2551,7 +2552,7 @@ pub(super) fn build_tensor_type_expr_with_batch(
         )
     };
     let mut elements = vec![
-        deep::Expr::Atom(deep::Atom::Tag(DeepTag::TTensor), zero),
+        deep::Expr::Atom(deep::Atom::Name("t-tensor".to_string()), zero),
         deep::Expr::Map(empty_meta(), zero),
     ];
     elements.push(batch_dim);
@@ -2559,7 +2560,7 @@ pub(super) fn build_tensor_type_expr_with_batch(
         elements.push(make_d_lit(d));
     }
     elements.push(prec);
-    deep::Expr::List(deep::List { elements }, zero)
+    deep::Expr::List(deep::List { tag: Some(DeepTag::TTensor), elements }, zero)
 }
 
 /// Look up positional arg `idx` of a `conv2d` call, attempt to

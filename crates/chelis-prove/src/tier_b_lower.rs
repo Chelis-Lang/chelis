@@ -248,7 +248,7 @@ fn rewrite_opaque_field_access(
                 .iter()
                 .map(|e| rewrite_opaque_field_access(e, opaque_params))
                 .collect();
-            Expr::List(chelis_deep::ast::List { elements }, *span)
+            Expr::List(chelis_deep::ast::List { tag: None, elements }, *span)
         }
         other => other.clone(),
     }
@@ -272,8 +272,9 @@ fn make_var(name: &str) -> Expr {
     use chelis_deep::ast::List;
     Expr::List(
         List {
+            tag: None,
             elements: vec![
-                Expr::Atom(Atom::Tag(DeepTag::Var), Span::new(0, 0)),
+                Expr::Atom(Atom::Name("var".to_string()), Span::new(0, 0)),
                 Expr::Map(Default::default(), Span::new(0, 0)),
                 Expr::Atom(Atom::Name(name.to_string()), Span::new(0, 0)),
             ],
@@ -500,8 +501,9 @@ fn reduce(
                 let val = reduce(kkids.get(1)?, subst, consts, exprs, depth)?;
                 new_children.push(Expr::List(
                     List {
+                        tag: None,
                         elements: vec![
-                            Expr::Atom(Atom::Tag(DeepTag::Kv), Span::new(0, 0)),
+                            Expr::Atom(Atom::Name("kv".to_string()), Span::new(0, 0)),
                             Expr::Map(Default::default(), Span::new(0, 0)),
                             field,
                             val,
@@ -550,8 +552,9 @@ fn int_lit_node(value: i64, int_ty: &str) -> Expr {
     use chelis_deep::ast::{List, MetaMap};
     let type_node = Expr::List(
         List {
+            tag: None,
             elements: vec![
-                Expr::Atom(Atom::Tag(DeepTag::TPrim), Span::new(0, 0)),
+                Expr::Atom(Atom::Name("t-prim".to_string()), Span::new(0, 0)),
                 Expr::Map(MetaMap::default(), Span::new(0, 0)),
                 Expr::Atom(Atom::Name(int_ty.to_string()), Span::new(0, 0)),
             ],
@@ -562,8 +565,9 @@ fn int_lit_node(value: i64, int_ty: &str) -> Expr {
     meta.entries.push(("type".to_string(), type_node));
     Expr::List(
         List {
+            tag: None,
             elements: vec![
-                Expr::Atom(Atom::Tag(DeepTag::Lit), Span::new(0, 0)),
+                Expr::Atom(Atom::Name("lit".to_string()), Span::new(0, 0)),
                 Expr::Map(meta, Span::new(0, 0)),
                 Expr::Atom(Atom::Int(value), Span::new(0, 0)),
             ],
@@ -579,8 +583,9 @@ fn float_lit_node(value: f64) -> Expr {
     use chelis_deep::ast::{List, MetaMap};
     let type_node = Expr::List(
         List {
+            tag: None,
             elements: vec![
-                Expr::Atom(Atom::Tag(DeepTag::TPrim), Span::new(0, 0)),
+                Expr::Atom(Atom::Name("t-prim".to_string()), Span::new(0, 0)),
                 Expr::Map(MetaMap::default(), Span::new(0, 0)),
                 Expr::Atom(Atom::Name("f32".to_string()), Span::new(0, 0)),
             ],
@@ -591,8 +596,9 @@ fn float_lit_node(value: f64) -> Expr {
     meta.entries.push(("type".to_string(), type_node));
     Expr::List(
         List {
+            tag: None,
             elements: vec![
-                Expr::Atom(Atom::Tag(DeepTag::Lit), Span::new(0, 0)),
+                Expr::Atom(Atom::Name("lit".to_string()), Span::new(0, 0)),
                 Expr::Map(meta, Span::new(0, 0)),
                 Expr::Atom(Atom::Float(value), Span::new(0, 0)),
             ],
@@ -611,19 +617,19 @@ fn rebuild(template: &Expr, new_children: Vec<Expr>) -> Expr {
     .unwrap_or_else(|| Expr::Atom(Atom::Name("?".to_string()), Span::new(0, 0)));
     let mut elements = vec![tag_sym, Expr::Map(Default::default(), Span::new(0, 0))];
     elements.extend(new_children);
-    Expr::List(List { elements }, Span::new(0, 0))
+    Expr::List(List { tag: None, elements }, Span::new(0, 0))
 }
 
 fn rebuild_app(callee: &str, args: Vec<Expr>) -> Expr {
     use chelis_deep::Span;
     use chelis_deep::ast::List;
     let mut elements = vec![
-        Expr::Atom(Atom::Tag(DeepTag::App), Span::new(0, 0)),
+        Expr::Atom(Atom::Name("app".to_string()), Span::new(0, 0)),
         Expr::Map(Default::default(), Span::new(0, 0)),
         make_var(callee),
     ];
     elements.extend(args);
-    Expr::List(List { elements }, Span::new(0, 0))
+    Expr::List(List { tag: None, elements }, Span::new(0, 0))
 }
 
 // ===========================================================================

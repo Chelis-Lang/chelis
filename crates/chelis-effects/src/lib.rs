@@ -627,7 +627,7 @@ fn annotate_effects(
                             elements.push(value);
                             i += 2;
                         }
-                        Expr::List(chelis_deep::ast::List { elements }, *bind_span)
+                        Expr::List(chelis_deep::ast::List { tag: bind_list.tag, elements }, *bind_span)
                     } else {
                         annotate_effects(
                             &kids[0],
@@ -667,10 +667,11 @@ fn annotate_effects(
                         locals,
                     );
                 }
-                Expr::List(chelis_deep::ast::List { elements }, *span)
+                Expr::List(chelis_deep::ast::List { tag: list.tag, elements }, *span)
             } else {
                 Expr::List(
                     chelis_deep::ast::List {
+                        tag: list.tag,
                         elements: list
                             .elements
                             .iter()

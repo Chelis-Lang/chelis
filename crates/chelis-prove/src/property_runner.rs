@@ -3487,7 +3487,7 @@ fn deep_map(entries: Vec<(String, DeepExpr)>) -> DeepExpr {
     DeepExpr::Map(MetaMap { entries }, deep_span())
 }
 fn deep_list(elements: Vec<DeepExpr>) -> DeepExpr {
-    DeepExpr::List(DeepList { elements }, deep_span())
+    DeepExpr::List(DeepList { tag: None, elements }, deep_span())
 }
 fn deep_node(tag: &str, children: Vec<DeepExpr>) -> DeepExpr {
     let mut elements = vec![deep_symbol(tag), deep_map(Vec::new())];

@@ -3358,18 +3358,9 @@ fn wire_deep_expr(expr: &DeepExpr) -> WireDeepExpr {
                     chelis_deep::Atom::Name(value) => WireDeepAtom::Symbol {
                         value: value.clone(),
                     },
-                    // Serialization boundary (decode-once, chelis#731 Phase
-                    // 3): a decoded tag crosses the wire as its canonical
-                    // string spelling, keeping the wire schema unchanged.
-                    chelis_deep::Atom::Tag(tag) => WireDeepAtom::Symbol {
-                        value: tag.as_str().to_string(),
-                    },
                     chelis_deep::Atom::Int(value) => WireDeepAtom::Int { value: *value },
                     chelis_deep::Atom::Float(value) => WireDeepAtom::Float { value: *value },
                     chelis_deep::Atom::Str(value) => WireDeepAtom::Str {
-                        value: value.clone(),
-                    },
-                    chelis_deep::Atom::Keyword(value) => WireDeepAtom::Keyword {
                         value: value.clone(),
                     },
                     chelis_deep::Atom::Bool(value) => WireDeepAtom::Bool { value: *value },

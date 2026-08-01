@@ -161,14 +161,12 @@ fn sym_str(expr: &Expr) -> Option<&str> {
 fn brief(expr: &Expr) -> String {
     match expr {
         Expr::Atom(Atom::Name(s), _) => s.clone(),
-        Expr::Atom(Atom::Tag(t), _) => t.as_str().to_string(),
         Expr::Atom(Atom::Int(n), _) => n.to_string(),
         Expr::Atom(Atom::Float(f), _) => format_float(*f),
         Expr::Atom(Atom::Bool(b), _) => b.to_string(),
         Expr::Atom(Atom::Str(s), _) => {
             format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
         }
-        Expr::Atom(Atom::Keyword(k), _) => format!(":{k}"),
         _ => "<expr>".to_string(),
     }
 }
@@ -595,14 +593,12 @@ impl<'a> IdiomaticDecompiler<'a> {
     fn decompile_expr(&self, expr: &Expr) -> String {
         match expr {
             Expr::Atom(Atom::Name(s), _) => s.clone(),
-            Expr::Atom(Atom::Tag(t), _) => t.as_str().to_string(),
             Expr::Atom(Atom::Int(n), _) => n.to_string(),
             Expr::Atom(Atom::Float(f), _) => format_float(*f),
             Expr::Atom(Atom::Bool(b), _) => b.to_string(),
             Expr::Atom(Atom::Str(s), _) => {
                 format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
             }
-            Expr::Atom(Atom::Keyword(k), _) => format!(":{k}"),
             Expr::Map(_, _) => "()".to_string(),
             Expr::MetaExpr(meta, _) => self.decompile_expr(&meta.expr),
             Expr::List(list, _) => self.decompile_list_expr(list),
@@ -1568,14 +1564,12 @@ fn decompile_defdim(list: &List) -> String {
 fn decompile_expr(expr: &Expr) -> String {
     match expr {
         Expr::Atom(Atom::Name(s), _) => s.clone(),
-        Expr::Atom(Atom::Tag(t), _) => t.as_str().to_string(),
         Expr::Atom(Atom::Int(n), _) => n.to_string(),
         Expr::Atom(Atom::Float(f), _) => format_float(*f),
         Expr::Atom(Atom::Bool(b), _) => b.to_string(),
         Expr::Atom(Atom::Str(s), _) => {
             format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
         }
-        Expr::Atom(Atom::Keyword(k), _) => format!(":{k}"),
         Expr::Map(_, _) => "()".to_string(),
         Expr::MetaExpr(meta, _) => {
             let inner = decompile_expr(&meta.expr);

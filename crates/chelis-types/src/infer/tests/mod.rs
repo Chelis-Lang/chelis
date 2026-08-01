@@ -54,40 +54,12 @@ fn structural_child_stamp_roles_match_owner_positions() {
     }
 }
 
-/// chelis#873 / loud_unsupported.md section C1 rule 4, for decode-once's
-/// third structural token. Stamping is positional and `children()` skips
-/// elements 0-1, so no SOURCE program can put an `Atom::Tag` in
-/// expression position - which is exactly why the arm needs a canary
-/// rather than a comment. Built programmatically, the way the rule says
-/// to prove a path you believe is dead.
-///
-/// The sibling arms (`Symbol`, `Keyword`) are covered from source by
-/// `bare_atom_expression_position_scores_below_one` in the CLI corpus;
-/// this is the one arm that cannot be reached that way.
-#[test]
-fn tag_atom_in_expression_position_is_a_loud_malformed_form() {
-    let program = vec![node_expr(
-        DeepTag::Def,
-        vec![
-            symbol_expr("x"),
-            deep::Expr::Atom(deep::Atom::Tag(DeepTag::App), zero_span()),
-        ],
-    )];
-    let result = infer_program(&program);
-    assert!(
-        result.errors.iter().any(|error| {
-            matches!(error.kind, CheckErrorKind::MalformedForm)
-                && error.message.contains("a decoded tag atom `app`")
-                && error.message.contains("outside a list's tag position")
-        }),
-        "a tag atom in expression position must raise, not type as a value; got: {:?}",
-        result.errors
-    );
-}
+/// chelis#873 / loud_unsupported.md section C1 rule 4: `Atom::Tag` variant
+/// has been deleted (chelis#908 migration). The error arm it exercised no
+/// longer exists. The positive counterpart below remains valid.
 
-/// Negative parity: the same tag in its OWN position is ordinary
-/// structure and must not trip the arm above. Without this, the canary
-/// could pass for an over-broad reason.
+/// Negative parity: a stamped tag in its own position (element 0) is
+/// ordinary structure and must not produce malformed-form errors.
 #[test]
 fn tag_atom_in_tag_position_is_not_a_malformed_form() {
     let program = vec![node_expr(DeepTag::App, vec![])];
@@ -332,6 +304,7 @@ fn deep_app_chain_node(depth: usize) -> deep::Expr {
     let var = |n: &str| {
         deep::Expr::List(
             deep::List {
+                tag: None,
                 elements: vec![sym("var"), meta(), sym(n)],
             },
             Span::new(0, 0),
@@ -341,6 +314,7 @@ fn deep_app_chain_node(depth: usize) -> deep::Expr {
     for i in 1..=depth {
         e = deep::Expr::List(
             deep::List {
+                tag: None,
                 elements: vec![sym("app"), meta(), e, var(&format!("f{i}"))],
             },
             Span::new(0, 0),

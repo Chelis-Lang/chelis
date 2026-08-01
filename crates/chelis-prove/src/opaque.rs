@@ -1704,7 +1704,7 @@ fn sym(s: &str) -> Expr {
 fn node(tag: &str, kids: Vec<Expr>) -> Expr {
     let mut elements = vec![sym(tag), Expr::Map(Default::default(), span0())];
     elements.extend(kids);
-    Expr::List(chelis_deep::ast::List { elements }, span0())
+    Expr::List(chelis_deep::ast::List { tag: None, elements }, span0())
 }
 fn record_node(children_after_tag: Vec<Expr>) -> Expr {
     node("record", children_after_tag)
@@ -1728,6 +1728,7 @@ fn typed_lit(prim: &str, value: Expr) -> Expr {
         .push(("type".to_string(), node("t-prim", vec![sym(prim)])));
     Expr::List(
         chelis_deep::ast::List {
+            tag: None,
             elements: vec![sym("lit"), Expr::Map(entries, span0()), value],
         },
         span0(),
@@ -1807,7 +1808,7 @@ fn match_some_else(scrut: Expr, bind: &str, some_body: Expr, else_body: Expr) ->
                         "pat-ctor",
                         vec![sym("Some"), node("pat-var", vec![sym(bind)])],
                     ),
-                    Expr::List(chelis_deep::ast::List { elements: vec![] }, span0()),
+                    Expr::List(chelis_deep::ast::List { tag: None, elements: vec![] }, span0()),
                     some_body,
                 ],
             ),
@@ -1815,7 +1816,7 @@ fn match_some_else(scrut: Expr, bind: &str, some_body: Expr, else_body: Expr) ->
                 "arm",
                 vec![
                     node("pat-wild", vec![]),
-                    Expr::List(chelis_deep::ast::List { elements: vec![] }, span0()),
+                    Expr::List(chelis_deep::ast::List { tag: None, elements: vec![] }, span0()),
                     else_body,
                 ],
             ),
@@ -1895,7 +1896,7 @@ fn inject_into_module_with_source(exprs: &[Expr], type_name: &str, def: Expr) ->
         {
             let mut elements = l.elements.clone();
             elements.push(def.clone());
-            out.push(Expr::List(chelis_deep::ast::List { elements }, *span));
+            out.push(Expr::List(chelis_deep::ast::List { tag: None, elements }, *span));
             injected = true;
         } else {
             out.push(stripped);
@@ -1925,7 +1926,7 @@ fn strip_invariant_metadata(expr: &Expr) -> Expr {
                     .collect();
                 elements[1] = Expr::Map(chelis_deep::ast::MetaMap { entries: kept }, *mspan);
             }
-            Expr::List(chelis_deep::ast::List { elements }, *span)
+            Expr::List(chelis_deep::ast::List { tag: None, elements }, *span)
         }
         other => other.clone(),
     }

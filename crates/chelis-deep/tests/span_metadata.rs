@@ -178,6 +178,20 @@ fn span_id_large_2kb_preserved_through_roundtrip() {
 
 #[test]
 fn span_id_thousand_nested_spans_complete_in_under_a_minute() {
+    // Spawn with a larger stack because the `List.tag` field increases frame
+    // sizes enough that 1000-deep recursion overflows the default 8 MiB stack
+    // in unoptimized debug builds.
+    let result = std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(span_id_thousand_nested_spans_inner)
+        .unwrap()
+        .join();
+    if let Err(e) = result {
+        std::panic::resume_unwind(e);
+    }
+}
+
+fn span_id_thousand_nested_spans_inner() {
     // Build a deeply nested app chain with 1000 spans. Catches accidental
     // O(n^2) behavior in metadata handling: parse, reprint, re-parse, then
     // assert all 1000 IDs survive both reprints. Runtime budgeted well
