@@ -13,11 +13,6 @@ fn eval_int64_scalar_root_above_2p53_renders_exact() {
 }
 
 #[test]
-#[ignore = "chelis#864 (chelis#717 stale-tag family): eval's labeled root."]
-fn eval_f64_cast_tensor_root_renders_stored_width() {
-}
-
-#[test]
 #[ignore = "chelis#865 ([#729]/[#686] capacity family): the untagged f64 box."]
 fn c_boxed_f32_renders_at_own_width() {
 }
@@ -47,7 +42,6 @@ class IgnoreInventoryTests(unittest.TestCase):
             set(cells),
             {
                 "eval_int64_scalar_root_above_2p53_renders_exact",
-                "eval_f64_cast_tensor_root_renders_stored_width",
                 "c_boxed_f32_renders_at_own_width",
             },
         )
@@ -97,10 +91,10 @@ class LedgerTests(unittest.TestCase):
         )
 
     def test_an_ignore_that_drops_its_issue_citation_is_a_violation(self) -> None:
-        source = HARNESS_FIXTURE.replace("chelis#864", "some other reason")
+        source = HARNESS_FIXTURE.replace("chelis#865", "some other reason")
         violations = oracle.ledger_violations(source, oracle.KNOWN_RED_CELLS)
         self.assertTrue(
-            any("chelis#864" in violation for violation in violations), violations
+            any("chelis#865" in violation for violation in violations), violations
         )
 
     def test_every_ledger_row_names_a_repair_owner_outside_this_plan(self) -> None:

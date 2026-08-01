@@ -8604,20 +8604,43 @@ impl LowerCtx {
     fn emit_literal_tensor(&mut self, literal: &LiteralToTensor, ty: &TensorType) -> NodeId {
         let shape: Vec<DimInfo> = literal.shape.iter().map(|n| DimInfo::Lit(*n)).collect();
         let precision = ty.precision;
+        // chelis#864: `extract_numeric_leaf` necessarily reads Surf decimal
+        // literals into f64, but the host `to_tensor` path first constructs
+        // each checker-typed f32 scalar at f32 width.  Preserve that source
+        // value when this static lowering shortcut replaces the host path:
+        // otherwise `cast(to_tensor([0.1]), f64)` widens lexical f64 `0.1`
+        // instead of the stored f32 value `0.10000000149011612`, and the DAG
+        // root disagrees with `print` before rendering even begins.
+        //
+        // This is deliberately the f32 literal-ingress repair only.  The
+        // dtype-semantics Phase 1 per-dtype storage change owns f16/bf16 and
+        // exact integer construction as one atomic cross-layer migration;
+        // do not emulate that representation piecemeal in this f64-backed
+        // `LiteralToTensor` carrier.
+        let stored_data = literal
+            .data
+            .iter()
+            .map(|value| {
+                if precision == Prim::F32 {
+                    (*value as f32) as f64
+                } else {
+                    *value
+                }
+            })
+            .collect::<Vec<_>>();
         let tensor_ty = TensorType {
             dims: shape.clone(),
             precision,
         };
 
         // Uniform-value fast path.
-        if literal
-            .data
+        if stored_data
             .windows(2)
             .all(|pair| pair[0].to_bits() == pair[1].to_bits())
         {
             return self.dag.add_node(
                 RiscOp::Const {
-                    value: literal.data.first().copied().unwrap_or(0.0),
+                    value: stored_data.first().copied().unwrap_or(0.0),
                 },
                 vec![],
                 tensor_ty,
@@ -8627,9 +8650,7 @@ impl LowerCtx {
 
         // Non-uniform: emit a single ConstTensor node.
         self.dag.add_node(
-            RiscOp::ConstTensor {
-                data: literal.data.clone(),
-            },
+            RiscOp::ConstTensor { data: stored_data },
             vec![],
             tensor_ty,
             self.current_span_id.clone(),

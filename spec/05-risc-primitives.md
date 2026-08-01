@@ -1386,13 +1386,9 @@ runtime's `chelis_format_shortest` (byte-locked against
 `format_element`), `to_list` reads every dtype (chelis#716, #723,
 #726's C half, #748, #749 fixed; close on the PR #863 merge), and
 cross-lane byte equality holds for identical stored bits at matching
-rendered widths. Annexed deviations, each issue-linked (chelis#864 and
-chelis#865 carry ignored red cells in the observation harness): the
-deliberate eval tensor width
-note in section 8.1 (chelis#729's metadata repair); eval's LABELED-ROOT
-render of cast-constructed f64 tensors, which the stale F32 precision
-tag narrows below the stored width (chelis#864, the chelis#717 family -
-an [05-OBS-1] violation in the eval lane); the compiled lane's untagged
+rendered widths. Remaining annexed deviations are issue-linked: the
+deliberate eval tensor width note in section 8.1 (chelis#729's metadata
+repair), and the compiled lane's untagged
 f64 value box, which renders narrower float elements (f32 as well as
 f16/bf16) at f64-image width through `to_list` and list/tuple boxing -
 faithful parse-back, not the own-width shortest form (chelis#865, the
@@ -1419,21 +1415,20 @@ elaboration is `spec/design/faithful_observation.md` (meta chelis#728).
 > own dtype width, and all exits within a lane SHALL agree with each
 > other and with the stored bits.
 
-*(Conformant in both lanes since chelis#732 Phase 2 EXCEPT the two
-annexed value-layer cells named here, which remain issue-linked red
-tests re-executed by the phase oracle - one deliberate width note is
-also recorded in §8.1. The exceptions: an
+*(Conformant in both lanes since chelis#732 Phase 2 EXCEPT the annexed
+value-layer cell named here, which remains an issue-linked red test
+re-executed by the phase oracle - one deliberate width note is also
+recorded in §8.1. The exception: an
 int64 SCALAR ROOT above 2^53 renders the f64-collapsed stored value at
 the labeled root while `print`/`to_string` of the same def are exact -
 the interpreter's rank-0 realization collapses the value BEFORE the
 renderer sees it (chelis#684, [#729]'s value layer; surfaced by PR
-#792's red team); and the eval LABELED ROOT of a `cast(<tensor>, f64)`
-result renders through the stale F32 precision tag - text that no
-longer parses back to the stored bits at the declared width - while
-`print` of the same tensor shows the stored f64 bits (chelis#864, the
-chelis#717 family; surfaced by PR #863's red team). Both return with
-chelis#729. The C lane's former violations (chelis#716, #723, #748,
-#749) went green at Phase 2 by un-ignoring their red cells.)*
+#792's red team). The former cast-constructed f64 tensor divergence
+(chelis#864, surfaced by PR #863's red team) is repaired and un-ignored:
+the root metadata was already F64, while the static `to_tensor` DAG
+shortcut had skipped f32 literal-ingress finalization before widening.
+The C lane's former violations (chelis#716, #723, #748, #749) went green
+at Phase 2 by un-ignoring their red cells.)*
 
 > **[05-OBS-2]** Integer dtypes SHALL print as integers with all digits
 > exact; floats SHALL print the shortest string that round-trips at

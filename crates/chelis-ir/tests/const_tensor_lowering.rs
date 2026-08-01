@@ -173,10 +173,9 @@ def main() -> tensor[4, f32] =
     assert_eq!(result.data, vec![-1.0, 0.0, -3.5, 2.5]);
 }
 
-/// Verify ConstTensor data is preserved exactly (bit-for-bit) through
-/// the lowering for values that have tricky floating-point representations.
+/// Verify default f32 tensor literals are materialized at their declared width.
 #[test]
-fn const_tensor_preserves_exact_values() {
+fn const_tensor_materializes_f32_values_at_f32_width() {
     let source = r#"
 def main() -> tensor[3, f32] =
   to_tensor([0.1, 0.2, 0.3])
@@ -188,11 +187,31 @@ def main() -> tensor[3, f32] =
 
     let result = &values[&roots[0]];
     assert_eq!(result.shape, vec![3]);
-    // These values can't be represented exactly in f32, but the f64 pipeline
-    // should preserve them at f64 precision before backend truncation.
-    assert!((result.data[0] - 0.1).abs() < 1e-15, "first element");
-    assert!((result.data[1] - 0.2).abs() < 1e-15, "second element");
-    assert!((result.data[2] - 0.3).abs() < 1e-15, "third element");
+    assert_eq!(
+        result.data,
+        vec![
+            (0.1_f64 as f32) as f64,
+            (0.2_f64 as f32) as f64,
+            (0.3_f64 as f32) as f64,
+        ]
+    );
+}
+
+/// Verify explicitly f64 tensor literals retain f64 lexical precision.
+#[test]
+fn const_tensor_preserves_explicit_f64_values() {
+    let source = r#"
+def main() -> tensor[3, f64] =
+  to_tensor([cast(0.1, f64), cast(0.2, f64), cast(0.3, f64)])
+"#;
+    let dag = surf_to_dag(source).expect("pipeline succeeds");
+
+    let roots: Vec<NodeId> = dag.roots().to_vec();
+    let values = eval_tensor_roots_with(&dag, &roots, |_name| None).expect("eval succeeds");
+
+    let result = &values[&roots[0]];
+    assert_eq!(result.shape, vec![3]);
+    assert_eq!(result.data, vec![0.1, 0.2, 0.3]);
 }
 
 /// Verify a 2D tensor literal with non-uniform rows lowers to ConstTensor.

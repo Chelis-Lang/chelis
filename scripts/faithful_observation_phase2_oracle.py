@@ -164,12 +164,6 @@ KNOWN_RED_CELLS: tuple[RedCell, ...] = (
         owner="chelis#729 value layer (rank-0 realization collapses the value)",
     ),
     RedCell(
-        name="eval_f64_cast_tensor_root_renders_stored_width",
-        issue="chelis#864",
-        fragment="the labeled root must render the same stored bits as print",
-        owner="chelis#729 value layer (chelis#717 stale precision tag)",
-    ),
-    RedCell(
         name="c_boxed_f32_renders_at_own_width",
         issue="chelis#865",
         fragment="boxed f32 elements must render shortest at their own width",
