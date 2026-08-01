@@ -4138,6 +4138,19 @@ def loss(x: tensor[2, 2, f32], w: tensor[2, 2, f32]) -> tensor[f32] =
     }
 
     #[test]
+    fn compile_source_arrow_form_def_appears_in_all_root_names() {
+        // Issue #947: arrow-form `def n -> T = body` must appear in
+        // all_root_names so eval_compiled can surface it.
+        let source = "def n -> int32 = add(cast(20, int32), cast(22, int32))\n";
+        let compiled = compile_source(SourceKind::Surf, source).expect("compile");
+        assert!(
+            compiled.all_root_names.contains(&"n".to_string()),
+            "arrow-form def `n` must be in all_root_names; got: {:?}",
+            compiled.all_root_names
+        );
+    }
+
+    #[test]
     fn compile_source_excludes_host_only_roots_from_lowered_root_map() {
         let source = r#"
 label = "mnist"
