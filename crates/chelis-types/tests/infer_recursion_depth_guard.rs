@@ -168,6 +168,7 @@ const SAFETY_NET_SEGMENT_BYTES: usize = 8 * 1024 * 1024;
 /// it. This proves the guard still backs up the grow for input deeper than a
 /// segment can hold.
 #[test]
+#[cfg_attr(target_os = "macos", ignore = "macOS SIGBUS kills the process on stack overflow (chelis#356)")]
 fn deep_app_chain_yields_stack_budget_diagnostic_not_sigsegv() {
     let messages = check_deep_on_bounded_stack(
         program_with_body(deep_app_chain(4000)),
@@ -207,6 +208,7 @@ fn stack_budget_diagnostic_names_the_walker_site() {
 /// the soundness property: a stack bail can never be swallowed into a green
 /// check.
 #[test]
+#[cfg_attr(target_os = "macos", ignore = "macOS SIGBUS kills the process on stack overflow (chelis#356)")]
 fn deep_app_chain_is_rejected_never_silently_passes() {
     let program = program_with_body(deep_app_chain(4000));
     let messages = check_deep_on_bounded_stack(program, 8, Some(SAFETY_NET_SEGMENT_BYTES));
