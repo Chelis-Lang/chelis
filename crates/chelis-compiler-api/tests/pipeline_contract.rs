@@ -1,5 +1,7 @@
 use chelis_compiler_api::pipeline::{
-    LoweringMode, PipelineGoal, PipelineOutcome, PipelineRejection, PipelineRequest, run_source,
+    IrName, LoweringMode, PipelineGoal, PipelineOutcome, PipelineRejection, PipelineRequest,
+    PreparedTypeAnalysis, PreparedTypeAnalysisOutcome, SemanticContext, SemanticRejection,
+    analyze_prepared, complete_checks, prepare_source, run_source,
 };
 use chelis_compiler_api::schema::SourceKind;
 use chelis_types::TypeAnalysisOutcome;
@@ -11,6 +13,20 @@ fn request(source: &str, goal: PipelineGoal) -> PipelineRequest<'_> {
         entry: None,
         goal,
     }
+}
+
+fn accepted_analysis(source: &str) -> PreparedTypeAnalysis {
+    let prepared = prepare_source(SourceKind::Surf, source, None).expect("source must prepare");
+    match analyze_prepared(prepared) {
+        PreparedTypeAnalysisOutcome::Accepted(analysis) => *analysis,
+        PreparedTypeAnalysisOutcome::Rejected { fitness } => {
+            panic!("source must pass type analysis: {:?}", fitness.errors)
+        }
+    }
+}
+
+fn root_name_text<'a>(names: impl Iterator<Item = &'a IrName>) -> Vec<&'a str> {
+    names.map(IrName::as_str).collect()
 }
 
 #[test]
@@ -41,7 +57,10 @@ fn full_check_goal_returns_a_fully_checked_state() {
         panic!("the full-check goal must return CheckedCompilation");
     };
     assert!(checked.fitness().errors.is_empty());
-    assert_eq!(checked.root_metadata().all_names(), &["identity"]);
+    assert_eq!(
+        root_name_text(checked.root_metadata().all_names().iter()),
+        ["identity"]
+    );
 }
 
 #[test]
@@ -54,11 +73,51 @@ fn lower_goal_returns_checked_state_dag_and_canonical_tuple_roots() {
         panic!("the lower goal must return LoweredCompilation");
     };
     assert_eq!(
-        lowered.checked().root_metadata().tensor_names(),
-        &["pair.0", "pair.1"]
+        root_name_text(lowered.checked().root_metadata().tensor_names().iter()),
+        ["pair.0", "pair.1"]
     );
     assert_eq!(lowered.named_roots().len(), 2);
     assert_eq!(lowered.dag().roots().len(), 2);
+
+    let parts = lowered.into_parts();
+    assert_eq!(parts.named_roots.len(), 2);
+    assert_eq!(parts.forward_node_index.len(), 3);
+    assert_eq!(parts.dag.roots().len(), 2);
+    assert!(parts.checked.fitness().errors.is_empty());
+}
+
+#[test]
+fn declared_roots_and_forward_load_aliases_have_distinct_lookups() {
+    let outcome = run_source(request(
+        "def out(input: tensor[n, f32]) -> tensor[n, f32] = relu(input)\n",
+        PipelineGoal::Lower(LoweringMode::Strict),
+    ))
+    .expect("valid source must lower");
+    let PipelineOutcome::Lowered(lowered) = outcome else {
+        panic!("the lower goal must return LoweredCompilation");
+    };
+
+    let output_name = IrName::new("out");
+    let input_name = IrName::new("input");
+    assert!(lowered.named_roots().get(&output_name).is_some());
+    assert!(lowered.named_roots().get(&input_name).is_none());
+    assert!(lowered.forward_node_index().get(&output_name).is_some());
+    assert!(lowered.forward_node_index().get(&input_name).is_some());
+}
+
+#[test]
+fn host_only_output_keeps_the_explicit_empty_root_product() {
+    let outcome = run_source(request(
+        "label = \"host only\"\n",
+        PipelineGoal::Lower(LoweringMode::AllowHostOnly),
+    ))
+    .expect("host-only source must preserve the empty DAG fallback");
+    let PipelineOutcome::Lowered(lowered) = outcome else {
+        panic!("the lower goal must return LoweredCompilation");
+    };
+
+    assert!(lowered.dag().roots().is_empty());
+    assert!(lowered.named_roots().is_empty());
 }
 
 #[test]
@@ -82,23 +141,41 @@ fn type_rejection_has_no_checked_or_lowered_product() {
 }
 
 #[test]
-fn effect_rejection_retains_its_native_error_stage() {
-    let rejection = run_source(request(
-        "def noisy(x: tensor[4, f32]) -> tensor[4, f32] ! { } = dropout(x, 0.5)\n",
-        PipelineGoal::FullCheck,
-    ))
-    .expect_err("a pure declaration cannot perform Random");
-    assert!(matches!(rejection, PipelineRejection::Effects { .. }));
+fn complete_checks_returns_a_clean_checked_product() {
+    let checked = complete_checks(
+        accepted_analysis("def identity(x: tensor[n, f32]) -> tensor[n, f32] = x\n"),
+        SemanticContext::Isolated,
+    )
+    .expect("clean semantics must return the checked product");
+    assert!(checked.fitness().errors.is_empty());
 }
 
 #[test]
-fn linearity_rejection_retains_its_native_error_stage() {
-    let rejection = run_source(request(
-        "def broken(x: tensor[4, f32]) -> tensor[4, f32] = { y = realize(x); add(x, y) }\n",
-        PipelineGoal::FullCheck,
-    ))
-    .expect_err("a consumed tensor cannot be used again");
-    assert!(matches!(rejection, PipelineRejection::Linearity { .. }));
+fn effect_rejection_uses_the_narrow_semantic_error() {
+    let source = "def noisy(x: tensor[4, f32]) -> tensor[4, f32] ! { } = dropout(x, 0.5)\n";
+    let rejection = complete_checks(accepted_analysis(source), SemanticContext::Isolated)
+        .expect_err("a pure declaration cannot perform Random");
+    assert!(matches!(rejection, SemanticRejection::Effects { .. }));
+
+    let full_rejection = run_source(request(source, PipelineGoal::FullCheck))
+        .expect_err("the full pipeline must retain the effect stage");
+    assert!(matches!(full_rejection, PipelineRejection::Effects { .. }));
+}
+
+#[test]
+fn linearity_rejection_uses_the_narrow_semantic_error() {
+    let source =
+        "def broken(x: tensor[4, f32]) -> tensor[4, f32] = { y = realize(x); add(x, y) }\n";
+    let rejection = complete_checks(accepted_analysis(source), SemanticContext::Isolated)
+        .expect_err("a consumed tensor cannot be used again");
+    assert!(matches!(rejection, SemanticRejection::Linearity { .. }));
+
+    let full_rejection = run_source(request(source, PipelineGoal::FullCheck))
+        .expect_err("the full pipeline must retain the linearity stage");
+    assert!(matches!(
+        full_rejection,
+        PipelineRejection::Linearity { .. }
+    ));
 }
 
 #[test]

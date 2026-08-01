@@ -1399,7 +1399,7 @@ pub(super) fn infer_top_level(
                 .map(|metadata| &metadata.binders),
         );
 
-        let errors_before_body = errors.len();
+        let body_diagnostic_checkpoint = errors.checkpoint();
         // WS-A7: when the body is a bare-arg `(fn (params) body)` and the
         // declared signature gives concrete param types, seed the body's
         // params with the declared types BEFORE inferring the body. Without
@@ -1450,7 +1450,7 @@ pub(super) fn infer_top_level(
         // type-checker gaps (record construction, region effects) which
         // the permissive unify rule was implicitly tolerating.
         let body_has_unbound_diagnostic = errors
-            .iter_from(errors_before_body)
+            .iter_since(body_diagnostic_checkpoint)
             .any(|e| matches!(e.kind, CheckErrorKind::UnboundVariable));
 
         // Enforce defsig: body must match declared signature.

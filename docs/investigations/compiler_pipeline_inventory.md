@@ -62,3 +62,64 @@ The guard rejects a function that directly calls two or more canonical semantic 
 This change does not invert that dependency. The guard treats Reef linking and package artifact construction as the lower preparation boundary.
 
 A later package-resolution split can move the remaining Reef artifact sequence behind the compiler API. That work is outside this change.
+
+## Final Artifact Boundaries
+
+| Artifact | Constructor owner | Consumers |
+|---|---|---|
+| `ValidatedModule` | `check_whole_module_edit` | Edit tools and compiler API schema adapters |
+| `AllRootNames` | Compiler pipeline root analysis | Compiler API evaluation and host output adapters |
+| `TensorRootNames` | Compiler pipeline root analysis | Lower policy, CLI root selection, and compiler API evaluation |
+| `NamedRoots` | Exact name-to-DAG alignment | Compiler API schema adapters, evaluation, and E2E tools |
+| `ForwardNodeIndex` | `NamedRoots` plus DAG load aliases | Compiler API gradient adapters |
+| `LoweredParts` | `LoweredCompilation::into_parts` | Compiler API and E2E consumers |
+| `SemanticRejection` | `complete_checks` | Full pipeline adapters, edit validation, layered checks, and CLI checks |
+| `DiagnosticCheckpoint` | `DiagnosticSink::checkpoint` | Body inference in `chelis-types` |
+| `LayeredCheck` | Layered compiler checks | CLI report assembly and linked proof checks |
+
+`ValidatedModule` replaces a public Boolean and a raw edited module. The proof owns the exact expressions that passed all semantic checks.
+
+The four root products use `IrName`. Normal DAG output uses one exact alignment constructor, and host-only output uses one explicit empty constructor.
+
+`LoweredParts` gives names to the checked state, DAG, declared roots, and forward index. This product removes positional root-map swaps.
+
+`SemanticRejection` contains only effect and linearity failures. Full pipeline owners convert it to `PipelineRejection` at their error boundary.
+
+`LayeredCheck` uses exclusive variants. A value cannot contain effect errors and linearity errors at the same time.
+
+## Rust API Migration
+
+| Old API | New API |
+|---|---|
+| `report.checks_clean` | Successful construction of `ValidatedModule` |
+| `report.rewritten_module` | `report.validated_module.as_exprs()` |
+| `check_whole_module_edit(...).rewritten_module` | `check_whole_module_edit(...).as_exprs()` |
+| `RootMetadata::all_names() -> &[String]` | `RootMetadata::all_names() -> &AllRootNames` |
+| `RootMetadata::tensor_names() -> &[String]` | `RootMetadata::tensor_names() -> &TensorRootNames` |
+| Raw root maps | `NamedRoots` and `ForwardNodeIndex` |
+| Four-element lowered tuple | `LoweredParts` with named fields |
+| `complete_checks -> PipelineRejection` | `complete_checks -> SemanticRejection` |
+| Parallel layered error vectors | Exclusive `LayeredCheck` variants |
+| `iter_from(usize)` | `iter_since(DiagnosticCheckpoint)` |
+
+Call `IrName::as_str` or `IrName::into_string` only at an existing string boundary. Keep schema maps and JSON fields unchanged.
+
+## Adversarial Review
+
+A fresh local red-team reviewed the specifications, code, tests, public API, and completed oracle evidence. The review found no actionable issue.
+
+A final coverage audit added one runtime test for all three `LayeredCheck` variants. This test passed.
+
+No high-severity finding was rejected. Thus, no rejected finding needs a separate disposition.
+
+## Acceptance Evidence
+
+### Local Evidence
+
+The authoritative compiler pipeline oracle passed before and after the adversarial review. The format check and strict change validation also passed.
+
+The local gate found one timeout test failure under concurrent load. The isolated rerun passed, and the full CLI rerun passed all 1,797 tests.
+
+### Hosted Evidence
+
+Hosted CI evidence is pending. Local results do not replace macOS Smoke, Docs, or the changed-crate jobs.

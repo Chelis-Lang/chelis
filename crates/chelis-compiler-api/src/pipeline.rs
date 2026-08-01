@@ -23,6 +23,17 @@
 //! fn require_serialize<T: serde::Serialize>() {}
 //! require_serialize::<chelis_compiler_api::pipeline::CheckedCompilation>();
 //! ```
+//!
+//! Declared roots and the forward node index are different products:
+//!
+//! ```compile_fail
+//! use chelis_compiler_api::pipeline::{LoweredParts, NamedRoots};
+//!
+//! fn consume_declared_roots(_: NamedRoots) {}
+//!
+//! let parts: LoweredParts = todo!();
+//! consume_declared_roots(parts.forward_node_index);
+//! ```
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
@@ -124,7 +135,33 @@ pub enum RootCountContext {
     NewCode,
 }
 
-/// Native typed failures from canonical semantic and lowering stages.
+/// A rejection from the semantic suffix after type analysis accepts.
+#[derive(Debug)]
+pub enum SemanticRejection {
+    Effects {
+        errors: Vec<chelis_effects::EffectError>,
+    },
+    Linearity {
+        errors: Vec<chelis_types::errors::CheckError>,
+    },
+}
+
+impl fmt::Display for SemanticRejection {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Effects { errors } => {
+                write_joined_messages(formatter, errors.iter().map(|error| error.message.as_str()))
+            }
+            Self::Linearity { errors } => {
+                write_joined_messages(formatter, errors.iter().map(|error| error.message.as_str()))
+            }
+        }
+    }
+}
+
+impl std::error::Error for SemanticRejection {}
+
+/// Native typed failures from canonical preparation, semantic, and lowering stages.
 #[derive(Debug)]
 pub enum PipelineRejection {
     Preparation(PreparationError),
@@ -143,6 +180,15 @@ pub enum PipelineRejection {
         expected: usize,
         actual: usize,
     },
+}
+
+impl From<SemanticRejection> for PipelineRejection {
+    fn from(rejection: SemanticRejection) -> Self {
+        match rejection {
+            SemanticRejection::Effects { errors } => Self::Effects { errors },
+            SemanticRejection::Linearity { errors } => Self::Linearity { errors },
+        }
+    }
 }
 
 impl fmt::Display for PipelineRejection {
@@ -190,19 +236,199 @@ fn write_joined_messages<'a>(
     Ok(())
 }
 
+/// A canonical name in the compiler IR namespace.
+///
+/// This type records the namespace. It does not restrict internal aliases or dotted names.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct IrName(String);
+
+impl IrName {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self(name.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
+
+impl fmt::Display for IrName {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl From<String> for IrName {
+    fn from(name: String) -> Self {
+        Self(name)
+    }
+}
+
+impl From<&str> for IrName {
+    fn from(name: &str) -> Self {
+        Self(name.to_string())
+    }
+}
+
+/// All canonical output names. This collection also contains host outputs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AllRootNames(Vec<IrName>);
+
+impl AllRootNames {
+    pub fn as_slice(&self) -> &[IrName] {
+        &self.0
+    }
+
+    pub fn iter(&self) -> std::slice::Iter<'_, IrName> {
+        self.0.iter()
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn into_names(self) -> Vec<IrName> {
+        self.0
+    }
+}
+
+/// Canonical names for outputs that lower to DAG roots.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TensorRootNames(Vec<IrName>);
+
+impl TensorRootNames {
+    pub fn as_slice(&self) -> &[IrName] {
+        &self.0
+    }
+
+    pub fn iter(&self) -> std::slice::Iter<'_, IrName> {
+        self.0.iter()
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn into_names(self) -> Vec<IrName> {
+        self.0
+    }
+}
+
+/// Declared tensor outputs aligned with DAG roots.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NamedRoots(BTreeMap<IrName, NodeId>);
+
+impl NamedRoots {
+    fn aligned(
+        names: &TensorRootNames,
+        roots: &[NodeId],
+        context: RootCountContext,
+    ) -> Result<Self, PipelineRejection> {
+        let expected = names.len();
+        let actual = roots.len();
+        if expected != actual {
+            return Err(PipelineRejection::RootCount {
+                context,
+                expected,
+                actual,
+            });
+        }
+
+        Ok(Self(
+            names.iter().cloned().zip(roots.iter().copied()).collect(),
+        ))
+    }
+
+    fn empty() -> Self {
+        Self(BTreeMap::new())
+    }
+
+    pub fn get(&self, name: &IrName) -> Option<&NodeId> {
+        self.0.get(name)
+    }
+
+    pub fn iter(&self) -> std::collections::btree_map::Iter<'_, IrName, NodeId> {
+        self.0.iter()
+    }
+
+    pub fn keys(&self) -> std::collections::btree_map::Keys<'_, IrName, NodeId> {
+        self.0.keys()
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn into_entries(self) -> std::collections::btree_map::IntoIter<IrName, NodeId> {
+        self.0.into_iter()
+    }
+}
+
+/// Declared roots plus internal load aliases for forward graph lookup.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForwardNodeIndex(BTreeMap<IrName, NodeId>);
+
+impl ForwardNodeIndex {
+    fn from_named_roots(named_roots: &NamedRoots, dag: &Dag) -> Self {
+        let mut nodes = named_roots.0.clone();
+        for node in dag.nodes() {
+            if let RiscOp::Load { name } = &node.op {
+                nodes.entry(IrName::new(name.as_str())).or_insert(node.id);
+            }
+        }
+        Self(nodes)
+    }
+
+    pub fn get(&self, name: &IrName) -> Option<&NodeId> {
+        self.0.get(name)
+    }
+
+    pub fn iter(&self) -> std::collections::btree_map::Iter<'_, IrName, NodeId> {
+        self.0.iter()
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn into_entries(self) -> std::collections::btree_map::IntoIter<IrName, NodeId> {
+        self.0.into_iter()
+    }
+}
+
 /// Canonical root names before and after tensor-root filtering.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RootMetadata {
-    all_names: Vec<String>,
-    tensor_names: Vec<String>,
+    all_names: AllRootNames,
+    tensor_names: TensorRootNames,
 }
 
 impl RootMetadata {
-    pub fn all_names(&self) -> &[String] {
+    pub fn all_names(&self) -> &AllRootNames {
         &self.all_names
     }
 
-    pub fn tensor_names(&self) -> &[String] {
+    pub fn tensor_names(&self) -> &TensorRootNames {
         &self.tensor_names
     }
 }
@@ -272,13 +498,23 @@ impl CheckedCompilation {
     }
 }
 
+/// The named products owned by a lowered compilation.
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct LoweredParts {
+    pub checked: CheckedCompilation,
+    pub dag: Dag,
+    pub named_roots: NamedRoots,
+    pub forward_node_index: ForwardNodeIndex,
+}
+
 /// A checked program and its lowered DAG products.
 #[derive(Debug)]
 pub struct LoweredCompilation {
     checked: CheckedCompilation,
     dag: Dag,
-    named_roots: BTreeMap<String, NodeId>,
-    forward_nodes_by_name: BTreeMap<String, NodeId>,
+    named_roots: NamedRoots,
+    forward_node_index: ForwardNodeIndex,
 }
 
 impl LoweredCompilation {
@@ -294,28 +530,21 @@ impl LoweredCompilation {
         self.dag
     }
 
-    pub fn named_roots(&self) -> &BTreeMap<String, NodeId> {
+    pub fn named_roots(&self) -> &NamedRoots {
         &self.named_roots
     }
 
-    pub fn forward_nodes_by_name(&self) -> &BTreeMap<String, NodeId> {
-        &self.forward_nodes_by_name
+    pub fn forward_node_index(&self) -> &ForwardNodeIndex {
+        &self.forward_node_index
     }
 
-    pub fn into_parts(
-        self,
-    ) -> (
-        CheckedCompilation,
-        Dag,
-        BTreeMap<String, NodeId>,
-        BTreeMap<String, NodeId>,
-    ) {
-        (
-            self.checked,
-            self.dag,
-            self.named_roots,
-            self.forward_nodes_by_name,
-        )
+    pub fn into_parts(self) -> LoweredParts {
+        LoweredParts {
+            checked: self.checked,
+            dag: self.dag,
+            named_roots: self.named_roots,
+            forward_node_index: self.forward_node_index,
+        }
     }
 }
 
@@ -363,7 +592,9 @@ pub fn run_prepared(
         )),
         PipelineGoal::FullCheck => {
             let analysis = require_accepted_analysis(prepared)?;
-            complete_checks(analysis, SemanticContext::Isolated).map(PipelineOutcome::Checked)
+            complete_checks(analysis, SemanticContext::Isolated)
+                .map(PipelineOutcome::Checked)
+                .map_err(PipelineRejection::from)
         }
         PipelineGoal::Lower(mode) => {
             let analysis = require_accepted_analysis(prepared)?;
@@ -480,14 +711,14 @@ pub fn prepared_analysis_from_checked(
 pub fn complete_checks(
     analysis: PreparedTypeAnalysis,
     context: SemanticContext<'_>,
-) -> Result<CheckedCompilation, PipelineRejection> {
+) -> Result<CheckedCompilation, SemanticRejection> {
     let effected = match context {
         SemanticContext::Isolated => chelis_effects::check_program(&analysis.program),
         SemanticContext::Library(library) => {
             chelis_effects::check_effects_with_context(library, &analysis.program)
         }
     }
-    .map_err(|errors| PipelineRejection::Effects { errors })?;
+    .map_err(|errors| SemanticRejection::Effects { errors })?;
 
     let program = match context {
         SemanticContext::Isolated => chelis_types::check_linearity(&effected),
@@ -495,7 +726,7 @@ pub fn complete_checks(
             chelis_types::check_linearity_with_context(library, &effected)
         }
     }
-    .map_err(|errors| PipelineRejection::Linearity { errors })?;
+    .map_err(|errors| SemanticRejection::Linearity { errors })?;
 
     let root_metadata = root_metadata(&program, None);
     Ok(CheckedCompilation {
@@ -605,37 +836,22 @@ fn finish_lowering(
     root_context: RootCountContext,
     allow_empty_host_fallback: bool,
 ) -> Result<LoweredCompilation, PipelineRejection> {
-    let expected = checked.root_metadata.tensor_names.len();
-    let actual = dag.roots().len();
-    if !(allow_empty_host_fallback && actual == 0) && expected != 0 && expected != actual {
-        return Err(PipelineRejection::RootCount {
-            context: root_context,
-            expected,
-            actual,
-        });
-    }
-
-    let named_roots = checked
-        .root_metadata
-        .tensor_names
-        .iter()
-        .cloned()
-        .zip(dag.roots().iter().copied())
-        .collect::<BTreeMap<_, _>>();
-    let mut forward_nodes_by_name = named_roots.clone();
-    for node in dag.nodes() {
-        if let RiscOp::Load { name } = &node.op {
-            forward_nodes_by_name
-                .entry(name.as_str().to_string())
-                .or_insert(node.id);
-        }
-    }
+    let named_roots = if allow_empty_host_fallback && dag.roots().is_empty() {
+        NamedRoots::empty()
+    } else {
+        NamedRoots::aligned(
+            &checked.root_metadata.tensor_names,
+            dag.roots(),
+            root_context,
+        )?
+    };
+    let forward_node_index = ForwardNodeIndex::from_named_roots(&named_roots, &dag);
 
     Ok(LoweredCompilation {
         checked,
         dag,
         named_roots,
-        forward_nodes_by_name,
+        forward_node_index,
     })
 }
 
@@ -643,7 +859,11 @@ fn root_metadata(
     program: &CheckedProgram,
     lowered_names: Option<&HashMap<String, bool>>,
 ) -> RootMetadata {
-    let all_names = root_names_from_checked_exprs(program.exprs(), program.type_env(), None);
+    let all_names = AllRootNames(root_names_from_checked_exprs(
+        program.exprs(),
+        program.type_env(),
+        None,
+    ));
     let owned_lowered_names;
     let lowered_names = match lowered_names {
         Some(map) => Some(map),
@@ -652,8 +872,11 @@ fn root_metadata(
             Some(&owned_lowered_names)
         }
     };
-    let tensor_names =
-        root_names_from_checked_exprs(program.exprs(), program.type_env(), lowered_names);
+    let tensor_names = TensorRootNames(root_names_from_checked_exprs(
+        program.exprs(),
+        program.type_env(),
+        lowered_names,
+    ));
     RootMetadata {
         all_names,
         tensor_names,
@@ -664,7 +887,7 @@ fn root_names_from_checked_exprs(
     exprs: &[DeepExpr],
     type_env: &HashMap<String, DeepExpr>,
     lowered_names: Option<&HashMap<String, bool>>,
-) -> Vec<String> {
+) -> Vec<IrName> {
     let mut names = Vec::new();
     for expr in exprs {
         collect_checked_decl_names(expr, type_env, lowered_names, &mut names);
@@ -676,7 +899,7 @@ fn collect_checked_decl_names(
     expr: &DeepExpr,
     type_env: &HashMap<String, DeepExpr>,
     lowered_names: Option<&HashMap<String, bool>>,
-    output: &mut Vec<String>,
+    output: &mut Vec<IrName>,
 ) {
     let DeepExpr::List(list, _) = expr else {
         return;
@@ -707,7 +930,7 @@ fn extend_root_names(
     name: &str,
     ty: Option<&DeepExpr>,
     value: Option<&DeepExpr>,
-    output: &mut Vec<String>,
+    output: &mut Vec<IrName>,
 ) {
     if let Some(DeepExpr::List(list, _)) = ty
         && let Some(tag) = list.tag()
@@ -736,7 +959,7 @@ fn extend_root_names(
         }
         return;
     }
-    output.push(name.to_string());
+    output.push(IrName::new(name));
 }
 
 fn expr_type_metadata(expr: &DeepExpr) -> Option<&DeepExpr> {
@@ -757,5 +980,26 @@ fn symbol_name(expr: &DeepExpr) -> Option<&str> {
     match expr {
         DeepExpr::Atom(chelis_deep::Atom::Symbol(name), _) => Some(name.as_str()),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod artifact_type_tests {
+    use super::*;
+
+    #[test]
+    fn named_roots_reject_a_count_mismatch_without_a_partial_map() {
+        let names = TensorRootNames(vec![IrName::new("first"), IrName::new("second")]);
+        let error = NamedRoots::aligned(&names, &[NodeId(7)], RootCountContext::Program)
+            .expect_err("different counts must reject before map construction");
+
+        assert!(matches!(
+            error,
+            PipelineRejection::RootCount {
+                context: RootCountContext::Program,
+                expected: 2,
+                actual: 1,
+            }
+        ));
     }
 }

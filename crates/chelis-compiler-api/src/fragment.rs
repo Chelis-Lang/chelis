@@ -46,6 +46,14 @@
 //!
 //! The rewritten module contains a `(module ...)` wrapper. The shared effect
 //! transition checks declarations inside that wrapper.
+//!
+//! Callers cannot construct a false validation proof:
+//!
+//! ```compile_fail
+//! use chelis_compiler_api::ValidatedModule;
+//!
+//! let _ = ValidatedModule(Vec::new());
+//! ```
 
 use chelis_deep::Expr;
 
@@ -192,33 +200,27 @@ pub struct DeepErrorPath {
     pub path: chelis_deep::DeepPath,
 }
 
-/// A clean body replacement.
+/// A Deep module that passed the complete compiler-owned edit check.
 ///
-/// `rewritten_module` is the full module with the target body replaced (the
-/// same program full `chelis check` would be run on, and was run on, here).
-/// `checks_clean` is a marker that the whole-module pipeline accepted; it is
-/// always `true` on a returned `Ok` and exists so a consumer can assert the
-/// success path without inspecting the absence of an error.
+/// Only [`check_whole_module_edit`] constructs this proof. Callers can inspect
+/// or consume the checked expressions, but cannot attach proof to unchecked expressions.
 #[derive(Debug, Clone)]
-pub struct ReplacementReport {
-    /// The full rewritten module (held decls plus the spliced def), in
-    /// canonical declaration order.
-    pub rewritten_module: Vec<Expr>,
-    /// Always `true`: full `chelis check` of `rewritten_module` accepted.
-    pub checks_clean: bool,
+pub struct ValidatedModule(Vec<Expr>);
+
+impl ValidatedModule {
+    pub fn as_exprs(&self) -> &[Expr] {
+        &self.0
+    }
+
+    pub fn into_exprs(self) -> Vec<Expr> {
+        self.0
+    }
 }
 
-/// A clean whole-module edit.
-///
-/// `rewritten_module` is the exact Deep program the validation pipeline
-/// accepted. `checks_clean` is always `true` on `Ok` and exists as an explicit
-/// success marker for edit-tool callers.
+/// A clean body replacement with proof for the complete rewritten module.
 #[derive(Debug, Clone)]
-pub struct EditValidationReport {
-    /// The full rewritten module accepted by the compiler-owned pipeline.
-    pub rewritten_module: Vec<Expr>,
-    /// Always `true`: full validation of `rewritten_module` accepted.
-    pub checks_clean: bool,
+pub struct ReplacementReport {
+    pub validated_module: ValidatedModule,
 }
 
 /// Run the compiler-owned whole-module validation pipeline over an edited Deep
@@ -228,7 +230,7 @@ pub struct EditValidationReport {
 /// The first failed stage returns a tagged error.
 pub fn check_whole_module_edit(
     rewritten_module: Vec<Expr>,
-) -> Result<EditValidationReport, EditValidationError> {
+) -> Result<ValidatedModule, EditValidationError> {
     let prepared = crate::pipeline::prepare_deep(rewritten_module.clone(), None);
     let analysis = match crate::pipeline::analyze_prepared(prepared) {
         crate::pipeline::PreparedTypeAnalysisOutcome::Accepted(analysis) => *analysis,
@@ -243,25 +245,21 @@ pub fn check_whole_module_edit(
 
     crate::pipeline::complete_checks(analysis, crate::pipeline::SemanticContext::Isolated)
         .map_err(|rejection| match rejection {
-            crate::pipeline::PipelineRejection::Effects { errors } => EditValidationError::Effect {
+            crate::pipeline::SemanticRejection::Effects { errors } => EditValidationError::Effect {
                 message: join_messages(errors.iter().map(|error| error.message.as_str())),
                 location: None,
                 deep_path: None,
             },
-            crate::pipeline::PipelineRejection::Linearity { errors } => {
+            crate::pipeline::SemanticRejection::Linearity { errors } => {
                 EditValidationError::Linearity {
                     message: join_messages(errors.iter().map(|error| error.message.as_str())),
                     location: None,
                     deep_path: None,
                 }
             }
-            other => unreachable!("full checks cannot reject at {other}"),
         })?;
 
-    Ok(EditValidationReport {
-        rewritten_module,
-        checks_clean: true,
-    })
+    Ok(ValidatedModule(rewritten_module))
 }
 
 /// Check replacing the body of `target_qualified_name` in `module` with
@@ -273,7 +271,7 @@ pub fn check_whole_module_edit(
 /// On rejection, it returns a tagged [`ReplacementError`] for the first failed
 /// stage. A type-analysis rejection uses the `Type` tag.
 ///
-/// The verdict EQUALS full `chelis check` of the returned `rewritten_module`
+/// The verdict EQUALS full `chelis check` of the returned validation proof
 /// BY CONSTRUCTION: there is no separate scoped analysis. Closure-scoped
 /// validation is the future optimization; see the module docs.
 pub fn check_body_replacement(
@@ -292,13 +290,10 @@ pub fn check_body_replacement(
         chelis_deep::splice_function_body(module, target_qualified_name, new_body.clone())
             .map_err(resolve_error_to_replacement_error)?;
 
-    let report =
+    let validated_module =
         check_whole_module_edit(rewritten_module).map_err(edit_error_to_replacement_error)?;
 
-    Ok(ReplacementReport {
-        rewritten_module: report.rewritten_module,
-        checks_clean: report.checks_clean,
-    })
+    Ok(ReplacementReport { validated_module })
 }
 
 /// Map a [`chelis_deep::ResolveError`] to a [`ReplacementError::NameResolution`].
@@ -392,10 +387,39 @@ mod tests {
         let module = render_deep(TWO_FN);
         let new_body = render_body("module M\ndef h(x: f32) -> f32 = mul(x, x)\n", "h");
         let report = check_body_replacement(&module, "f", &new_body).expect("accept");
-        assert!(report.checks_clean);
+        let rewritten_module = report.validated_module.as_exprs();
         // The rewritten module still resolves `f` and `g`.
-        chelis_deep::resolve_function(&report.rewritten_module, "f").expect("f present");
-        chelis_deep::resolve_function(&report.rewritten_module, "g").expect("g present");
+        chelis_deep::resolve_function(rewritten_module, "f").expect("f present");
+        chelis_deep::resolve_function(rewritten_module, "g").expect("g present");
+    }
+
+    #[test]
+    fn whole_module_accept_returns_the_checked_expressions() {
+        let rewritten_module = render_deep(TWO_FN);
+        let validated = check_whole_module_edit(rewritten_module.clone()).expect("accept");
+        assert_eq!(validated.as_exprs(), rewritten_module.as_slice());
+        assert_eq!(validated.into_exprs(), rewritten_module);
+    }
+
+    #[test]
+    fn whole_module_rejections_return_no_validation_proof() {
+        let fixtures = [
+            ("module M\ndef broken -> int32 = missing\n", "check"),
+            (
+                "module M\ndef noisy(x: tensor[4, f32]) -> tensor[4, f32] ! { } = dropout(x, 0.5)\n",
+                "effects",
+            ),
+            (
+                "module M\ndef broken(x: tensor[4, f32]) -> tensor[4, f32] = { y = realize(x); add(x, y) }\n",
+                "linearity",
+            ),
+        ];
+
+        for (source, expected_stage) in fixtures {
+            let error = check_whole_module_edit(render_deep(source))
+                .expect_err("the rejected module must not return a validation proof");
+            assert_eq!(error.stage(), expected_stage);
+        }
     }
 
     #[test]
@@ -439,7 +463,7 @@ mod tests {
         let new_body = render_body("module M\ndef h(x: f32) -> f32 = x\n", "h");
         let report = check_body_replacement(&module, "f", &new_body)
             .expect("defsig-less target checks clean under whole-module routing");
-        assert!(report.checks_clean);
+        assert!(!report.validated_module.as_exprs().is_empty());
     }
 
     #[test]
@@ -449,7 +473,7 @@ mod tests {
         let module = render_deep(TWO_FN);
         let new_body = render_body("module M\ndef h(x: f32) -> f32 = x\n", "h");
         let report = check_body_replacement(&module, "f", &new_body).expect("accept");
-        assert!(report.checks_clean);
+        assert!(!report.validated_module.as_exprs().is_empty());
     }
 
     /// A `ping`/`pong` mutually-recursive pair where `ping` holds the sole base

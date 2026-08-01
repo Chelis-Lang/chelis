@@ -185,6 +185,15 @@ def per_example_grads(
 }
 
 #[test]
+fn pipeline_preserves_the_empty_host_only_root_product() {
+    let result = compile_surf("label = \"host only\"\n").expect("host-only source must compile");
+
+    assert!(result.dag.roots().is_empty());
+    assert!(result.root_nodes.is_empty());
+    assert!(result.deep_text.contains("host only"));
+}
+
+#[test]
 fn pipeline_preserves_canonical_root_order_and_node_mapping() {
     let source = r#"
 def first(x: tensor[n, f32]) -> tensor[n, f32] = copy(x)

@@ -1939,17 +1939,43 @@ fn cmd_check_one_on_grown_stack(
 
     let (report, effect_errors, linearity_errors, inferred_signatures_json) =
         if let Some(layered) = layered {
-            let inferred = if show_inferred {
-                format_inferred_signatures_json(&layered.typed_program)
-            } else {
-                String::new()
-            };
-            (
-                layered.fitness,
-                layered.effect_errors,
-                layered.linearity_errors,
-                inferred,
-            )
+            match layered {
+                chelis_compiler_api::LayeredCheck::Clean {
+                    fitness,
+                    typed_program,
+                } => {
+                    let inferred = if show_inferred {
+                        format_inferred_signatures_json(&typed_program)
+                    } else {
+                        String::new()
+                    };
+                    (fitness, Vec::new(), Vec::new(), inferred)
+                }
+                chelis_compiler_api::LayeredCheck::EffectRejected {
+                    fitness,
+                    effect_errors,
+                    typed_program,
+                } => {
+                    let inferred = if show_inferred {
+                        format_inferred_signatures_json(&typed_program)
+                    } else {
+                        String::new()
+                    };
+                    (fitness, effect_errors, Vec::new(), inferred)
+                }
+                chelis_compiler_api::LayeredCheck::LinearityRejected {
+                    fitness,
+                    linearity_errors,
+                    typed_program,
+                } => {
+                    let inferred = if show_inferred {
+                        format_inferred_signatures_json(&typed_program)
+                    } else {
+                        String::new()
+                    };
+                    (fitness, Vec::new(), linearity_errors, inferred)
+                }
+            }
         } else {
             // Monolithic path: full inference over the whole merged
             // program. Used when the input is not inside a reef package,
@@ -2030,13 +2056,12 @@ fn check_prepared_for_cli(
         chelis_compiler_api::pipeline::SemanticContext::Isolated,
     ) {
         Ok(_) => (fitness, Vec::new(), Vec::new(), inferred),
-        Err(chelis_compiler_api::pipeline::PipelineRejection::Effects { errors }) => {
+        Err(chelis_compiler_api::pipeline::SemanticRejection::Effects { errors }) => {
             (fitness, errors, Vec::new(), inferred)
         }
-        Err(chelis_compiler_api::pipeline::PipelineRejection::Linearity { errors }) => {
+        Err(chelis_compiler_api::pipeline::SemanticRejection::Linearity { errors }) => {
             (fitness, Vec::new(), errors, inferred)
         }
-        Err(other) => unreachable!("full checks cannot reject at {other}"),
     }
 }
 
@@ -2647,7 +2672,7 @@ fn cmd_build(
     emit_summary_rejections(compiled_program.host.as_ref());
     let mut dag =
         lower_checked_for_cli(checked_compilation.clone(), compiled_program.host.as_ref())?;
-    let all_root_names = checked_compilation.root_metadata().tensor_names().to_vec();
+    let tensor_root_names = checked_compilation.root_metadata().tensor_names().clone();
     let entry_root_names =
         lowered_root_names_from_decls(&entry_decls, &deep_exprs, checked.type_env());
     let entry_display_root_names = root_names_from_decls(&entry_decls, checked.type_env())
@@ -2689,11 +2714,11 @@ fn cmd_build(
             })
             .collect();
     }
-    let selected = all_root_names
+    let selected = tensor_root_names
         .iter()
         .enumerate()
         .filter_map(|(index, name)| {
-            if entry_root_names.iter().any(|entry| entry == name) {
+            if entry_root_names.iter().any(|entry| entry == name.as_str()) {
                 dag.roots().get(index).copied()
             } else {
                 None
@@ -2928,7 +2953,7 @@ fn cmd_build_deep(
     emit_summary_rejections(compiled_program.host.as_ref());
     let mut dag =
         lower_checked_for_cli(checked_compilation.clone(), compiled_program.host.as_ref())?;
-    let all_root_names = checked_compilation.root_metadata().tensor_names().to_vec();
+    let tensor_root_names = checked_compilation.root_metadata().tensor_names().clone();
     let entry_root_names = lowered_root_names_from_exprs(&entry_deep_exprs, checked.type_env());
     let entry_display_root_names = root_names_from_exprs(&entry_deep_exprs, checked.type_env())
         .into_iter()
@@ -2963,11 +2988,11 @@ fn cmd_build_deep(
             })
             .collect();
     }
-    let selected = all_root_names
+    let selected = tensor_root_names
         .iter()
         .enumerate()
         .filter_map(|(index, name)| {
-            if entry_root_names.iter().any(|entry| entry == name) {
+            if entry_root_names.iter().any(|entry| entry == name.as_str()) {
                 dag.roots().get(index).copied()
             } else {
                 None

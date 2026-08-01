@@ -331,7 +331,9 @@ pub fn build_stdlib_context(
     let analysis = crate::pipeline::prepared_analysis_from_checked(prepared, checked);
     let checked =
         crate::pipeline::complete_checks(analysis, crate::pipeline::SemanticContext::Isolated)
-            .map_err(crate::compiler::pipeline_rejection_to_compiler_error)?;
+            .map_err(|rejection| {
+                crate::compiler::pipeline_rejection_to_compiler_error(rejection.into())
+            })?;
     let (_, _, library_checked, _) = checked.into_parts();
 
     // Lower chelis-std as a standalone library, best-effort. A lowering

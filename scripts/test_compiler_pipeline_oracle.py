@@ -30,11 +30,13 @@ class CompilerPipelineOracleTests(unittest.TestCase):
         for required in (
             "-p chelis-types --test type_analysis_outcome",
             "analysis_uses_one_type_session",
+            "diagnostic_checkpoint_tests",
             "-p chelis-compiler-api --test pipeline_contract",
             "fragment_parity",
             "compiled_context",
             "redteam_typecheck_cache",
             "test(source_arch)",
+            "test(fragment::tests) | test(artifact_type_tests) | test(artifact_outcome_tests)",
             "cargo test -p chelis-compiler-api --doc",
             "-p chelis-cli --test stdlib_typecheck_cache_oracle",
             "issue_207_check_exit_code_invariant",

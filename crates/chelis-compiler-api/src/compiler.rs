@@ -177,7 +177,7 @@ pub fn replace_function_body(
 
     Ok(crate::schema::ReplaceFunctionBodyResult {
         changed_def_deep: chelis_deep::printer::print_expr(&changed_def),
-        module_deep: chelis_deep::printer::print_canonical(&report.rewritten_module),
+        module_deep: chelis_deep::printer::print_canonical(report.validated_module.as_exprs()),
     })
 }
 
@@ -223,7 +223,7 @@ pub fn add_function(request: AddFunctionRequest) -> Result<AddFunctionResult> {
     Ok(AddFunctionResult {
         added_def_deep: chelis_deep::printer::print_expr(&parsed.def),
         added_defsig_deep: parsed.defsig.as_ref().map(chelis_deep::printer::print_expr),
-        module_deep: chelis_deep::printer::print_canonical(&report.rewritten_module),
+        module_deep: chelis_deep::printer::print_canonical(report.as_exprs()),
     })
 }
 
@@ -296,7 +296,7 @@ pub fn replace_function(request: ReplaceFunctionRequest) -> Result<ReplaceFuncti
             .replaced_defsig
             .as_ref()
             .map(chelis_deep::printer::print_expr),
-        module_deep: chelis_deep::printer::print_canonical(&report.rewritten_module),
+        module_deep: chelis_deep::printer::print_canonical(report.as_exprs()),
     })
 }
 
@@ -318,7 +318,7 @@ pub fn rename(request: RenameRequest) -> Result<RenameResult> {
             .renamed_defsig
             .as_ref()
             .map(chelis_deep::printer::print_expr),
-        module_deep: chelis_deep::printer::print_canonical(&report.rewritten_module),
+        module_deep: chelis_deep::printer::print_canonical(report.as_exprs()),
         renamed_references: edited.renamed_references,
     })
 }
@@ -349,7 +349,7 @@ pub fn change_signature(request: ChangeSignatureRequest) -> Result<ChangeSignatu
     Ok(ChangeSignatureResult {
         changed_def_deep: chelis_deep::printer::print_expr(&edited.changed_def),
         changed_defsig_deep: chelis_deep::printer::print_expr(&edited.changed_defsig),
-        module_deep: chelis_deep::printer::print_canonical(&report.rewritten_module),
+        module_deep: chelis_deep::printer::print_canonical(report.as_exprs()),
         rewritten_calls: edited.rewritten_calls,
     })
 }
@@ -376,7 +376,7 @@ pub fn add_property(request: AddPropertyRequest) -> Result<AddPropertyResult> {
     Ok(AddPropertyResult {
         added_property_def_deep: chelis_deep::printer::print_expr(&parsed.def),
         added_defsig_deep: parsed.defsig.as_ref().map(chelis_deep::printer::print_expr),
-        module_deep: chelis_deep::printer::print_canonical(&report.rewritten_module),
+        module_deep: chelis_deep::printer::print_canonical(report.as_exprs()),
     })
 }
 
@@ -739,8 +739,8 @@ pub fn lower(request: LowerRequest) -> Result<LowerResult> {
         dag,
         named_roots: compiled
             .named_roots
-            .into_iter()
-            .map(|(k, v)| (k, v.0))
+            .into_entries()
+            .map(|(name, node)| (name.into_string(), node.0))
             .collect(),
     })
 }
@@ -1073,17 +1073,17 @@ fn compile_new_source_in_context(
         analysis,
         crate::pipeline::SemanticContext::Library(&context.library_checked),
     )
-    .map_err(pipeline_rejection_to_compiler_error)?;
+    .map_err(|rejection| pipeline_rejection_to_compiler_error(rejection.into()))?;
     let lowered = crate::pipeline::lower_checked_with_context(
         checked,
         &context.library_dag,
         crate::pipeline::LoweringMode::AllowHostOnly,
     )
     .map_err(pipeline_rejection_to_compiler_error)?;
-    let (checked, dag_for_eval, named_roots, forward_nodes_by_name) = lowered.into_parts();
-    let (_, _, new_checked, root_metadata) = checked.into_parts();
-    let all_root_names = root_metadata.all_names().to_vec();
-    let new_tensor_root_names = root_metadata.tensor_names().to_vec();
+    let lowered_parts = lowered.into_parts();
+    let (_, _, new_checked, root_metadata) = lowered_parts.checked.into_parts();
+    let all_root_names = root_metadata.all_names().clone();
+    let new_tensor_root_names = root_metadata.tensor_names().clone();
 
     // Phase G' — carry the library defs + lowered classification into
     // the runtime. Without this, the host evaluator's `top_level_defs`
@@ -1101,11 +1101,11 @@ fn compile_new_source_in_context(
 
     Ok(CompiledSource {
         checked: new_checked,
-        dag: dag_for_eval,
+        dag: lowered_parts.dag,
         all_root_names,
         tensor_root_names: new_tensor_root_names,
-        named_roots,
-        forward_nodes_by_name,
+        named_roots: lowered_parts.named_roots,
+        forward_node_index: lowered_parts.forward_node_index,
         library_runtime: Some(library_runtime),
     })
 }
@@ -1258,7 +1258,10 @@ fn eval_compiled(
         .iter()
         .enumerate()
         .filter_map(|(index, name)| {
-            if selected.as_ref().is_some_and(|set| !set.contains(name)) {
+            if selected
+                .as_ref()
+                .is_some_and(|set| !set.contains(name.as_str()))
+            {
                 return None;
             }
             compiled.dag.roots().get(index).copied()
@@ -1274,8 +1277,11 @@ fn eval_compiled(
     };
 
     let mut tensor_values_by_name = HashMap::<String, RuntimeTensorValue>::new();
-    for name in &compiled.tensor_root_names {
-        if selected.as_ref().is_some_and(|set| !set.contains(name)) {
+    for name in compiled.tensor_root_names.iter() {
+        if selected
+            .as_ref()
+            .is_some_and(|set| !set.contains(name.as_str()))
+        {
             continue;
         }
         let Some(node_id) = compiled.named_roots.get(name) else {
@@ -1296,7 +1302,7 @@ fn eval_compiled(
                 stage_error("eval", format!("missing node {}", node_id.0), "eval_error")
             })?;
         tensor_values_by_name.insert(
-            name.clone(),
+            name.as_str().to_string(),
             RuntimeTensorValue {
                 value: value.clone(),
                 precision,
@@ -1337,7 +1343,11 @@ fn eval_compiled(
         .all_root_names
         .iter()
         .enumerate()
-        .filter(|(_, name)| selected.as_ref().is_none_or(|set| set.contains(*name)))
+        .filter(|(_, name)| {
+            selected
+                .as_ref()
+                .is_none_or(|set| set.contains(name.as_str()))
+        })
         .filter_map(|(index, name)| {
             // Host value bindings and tensor-lane roots first; then fall
             // back to a host-lane *zero-argument fn* root's applied value
@@ -1345,17 +1355,17 @@ fn eval_compiled(
             // but not a value binding, so it never lands in
             // `host_bindings` (chelis blocker2).
             let value = lookup_runtime_value_for_root(
-                name,
+                name.as_str(),
                 &host_outcome.host_bindings,
                 &tensor_values_by_name,
             )
-            .or_else(|| host_outcome.host_root_values.get(name).cloned())?;
+            .or_else(|| host_outcome.host_root_values.get(name.as_str()).cloned())?;
             let node_id = compiled
                 .named_roots
                 .get(name)
                 .map(|id| id.0)
                 .unwrap_or(index);
-            Some((node_id, name.clone(), value))
+            Some((node_id, name.as_str().to_string(), value))
         })
         .map(|(node_id, name, value)| {
             Ok(EvaluatedRoot {
@@ -1379,9 +1389,10 @@ fn eval_compiled(
 
 pub fn grad(request: GradRequest) -> Result<GradResult> {
     let compiled = compile_source(request.source_kind, &request.source)?;
+    let output_name = crate::pipeline::IrName::new(request.output_name.as_str());
     let output = compiled
-        .forward_nodes_by_name
-        .get(&request.output_name)
+        .forward_node_index
+        .get(&output_name)
         .copied()
         .ok_or_else(|| unknown_name_error("grad", "output_name", &request.output_name))?;
 
@@ -1389,9 +1400,10 @@ pub fn grad(request: GradRequest) -> Result<GradResult> {
         .wrt_names
         .iter()
         .map(|name| {
+            let ir_name = crate::pipeline::IrName::new(name.as_str());
             compiled
-                .forward_nodes_by_name
-                .get(name)
+                .forward_node_index
+                .get(&ir_name)
                 .copied()
                 .ok_or_else(|| unknown_name_error("grad", "wrt_names", name))
         })
@@ -1433,9 +1445,9 @@ pub fn grad(request: GradRequest) -> Result<GradResult> {
         output_node: grad_result.output_node.0,
         grad_nodes_by_name,
         forward_nodes_by_name: compiled
-            .forward_nodes_by_name
-            .into_iter()
-            .map(|(name, node)| (name, node.0))
+            .forward_node_index
+            .into_entries()
+            .map(|(name, node)| (name.into_string(), node.0))
             .collect(),
     })
 }
@@ -1571,10 +1583,10 @@ pub fn result_envelope<T>(result: Result<T>) -> crate::schema::ApiEnvelope<T> {
 struct CompiledSource {
     checked: CheckedProgram,
     dag: Dag,
-    all_root_names: Vec<String>,
-    tensor_root_names: Vec<String>,
-    named_roots: BTreeMap<String, NodeId>,
-    forward_nodes_by_name: BTreeMap<String, NodeId>,
+    all_root_names: crate::pipeline::AllRootNames,
+    tensor_root_names: crate::pipeline::TensorRootNames,
+    named_roots: crate::pipeline::NamedRoots,
+    forward_node_index: crate::pipeline::ForwardNodeIndex,
     /// Phase G' — optional library context payload threaded into the
     /// host evaluator so library `def` names resolve at runtime when
     /// new code calls them. `None` on the monolithic `compile_source`
@@ -1670,16 +1682,16 @@ fn compile_source_scoped(
         }
     }
 
-    let (checked_compilation, dag, named_roots, forward_nodes_by_name) = lowered.into_parts();
-    let (_, _, checked, root_metadata) = checked_compilation.into_parts();
+    let lowered_parts = lowered.into_parts();
+    let (_, _, checked, root_metadata) = lowered_parts.checked.into_parts();
 
     Ok(CompiledSource {
         checked,
-        dag,
-        all_root_names: root_metadata.all_names().to_vec(),
-        tensor_root_names: root_metadata.tensor_names().to_vec(),
-        named_roots,
-        forward_nodes_by_name,
+        dag: lowered_parts.dag,
+        all_root_names: root_metadata.all_names().clone(),
+        tensor_root_names: root_metadata.tensor_names().clone(),
+        named_roots: lowered_parts.named_roots,
+        forward_node_index: lowered_parts.forward_node_index,
         library_runtime: None,
     })
 }
@@ -3897,12 +3909,20 @@ def loss(x: tensor[2, 2, f32], w: tensor[2, 2, f32]) -> tensor[f32] =
         let compiled = compile_source(SourceKind::Surf, source).expect("compile");
 
         assert_eq!(
-            compiled.all_root_names,
-            vec!["logits".to_string(), "loss".to_string()]
+            compiled
+                .all_root_names
+                .iter()
+                .map(crate::pipeline::IrName::as_str)
+                .collect::<Vec<_>>(),
+            ["logits", "loss"]
         );
         assert_eq!(
-            compiled.named_roots.keys().cloned().collect::<Vec<_>>(),
-            vec!["logits".to_string(), "loss".to_string()]
+            compiled
+                .named_roots
+                .keys()
+                .map(crate::pipeline::IrName::as_str)
+                .collect::<Vec<_>>(),
+            ["logits", "loss"]
         );
         assert_eq!(compiled.dag.roots().len(), 2);
     }
@@ -3932,12 +3952,20 @@ def logits(x: tensor[2, 2, f32], w: tensor[2, 2, f32]) -> tensor[2, 2, f32] =
         let compiled = compile_source(SourceKind::Surf, source).expect("compile");
 
         assert_eq!(
-            compiled.all_root_names,
-            vec!["label".to_string(), "logits".to_string()]
+            compiled
+                .all_root_names
+                .iter()
+                .map(crate::pipeline::IrName::as_str)
+                .collect::<Vec<_>>(),
+            ["label", "logits"]
         );
         assert_eq!(
-            compiled.named_roots.keys().cloned().collect::<Vec<_>>(),
-            vec!["logits".to_string()]
+            compiled
+                .named_roots
+                .keys()
+                .map(crate::pipeline::IrName::as_str)
+                .collect::<Vec<_>>(),
+            ["logits"]
         );
         assert_eq!(compiled.dag.roots().len(), 1);
     }
@@ -3953,7 +3981,10 @@ def out(x: tensor[2, f32]) -> tensor[2, f32] = add(consume(x), consume(x))
 "#,
         )
         .expect("monolithic compile");
-        let monolithic_root = monolithic.named_roots["out"];
+        let monolithic_root = *monolithic
+            .named_roots
+            .get(&crate::pipeline::IrName::new("out"))
+            .expect("out root");
         let monolithic_summary = chelis_ir::analysis::analyze_function_copy_cost(
             &monolithic.dag,
             "out",
@@ -3969,7 +4000,10 @@ def out(x: tensor[2, f32]) -> tensor[2, f32] = add(consume(x), consume(x))
              def out(x: tensor[2, f32]) -> tensor[2, f32] = add(consume(x), consume(x))\n",
         )
         .expect("compile new source in context");
-        let context_root = compiled.named_roots["out"];
+        let context_root = *compiled
+            .named_roots
+            .get(&crate::pipeline::IrName::new("out"))
+            .expect("out root");
         let context_summary =
             chelis_ir::analysis::analyze_function_copy_cost(&compiled.dag, "out", context_root);
 
@@ -3989,17 +4023,24 @@ def out(x: tensor[2, f32]) -> tensor[2, f32] = add(consume(x), consume(x))
 
         let compiled = compile_source(SourceKind::Surf, source).expect("compile");
 
-        assert_eq!(
-            compiled.named_roots.keys().cloned().collect::<Vec<_>>(),
-            Vec::<String>::new()
-        );
-        assert!(compiled.all_root_names.iter().any(|name| name == "status"));
-        assert!(compiled.all_root_names.iter().any(|name| name == "loss"));
+        assert!(compiled.named_roots.is_empty());
         assert!(
             compiled
                 .all_root_names
                 .iter()
-                .any(|name| name == "should_stop")
+                .any(|name| name.as_str() == "status")
+        );
+        assert!(
+            compiled
+                .all_root_names
+                .iter()
+                .any(|name| name.as_str() == "loss")
+        );
+        assert!(
+            compiled
+                .all_root_names
+                .iter()
+                .any(|name| name.as_str() == "should_stop")
         );
     }
 

@@ -909,7 +909,9 @@ pub fn compile_reef_context(
                 analysis,
                 crate::pipeline::SemanticContext::Isolated,
             )
-            .map_err(crate::compiler::pipeline_rejection_to_compiler_error)?;
+            .map_err(|rejection| {
+                crate::compiler::pipeline_rejection_to_compiler_error(rejection.into())
+            })?;
             log_phase("semantic_checks", &mut t);
             let (_, _, library_checked, _) = checked.into_parts();
             (type_env, library_checked)
@@ -1039,9 +1041,8 @@ fn build_library_triple_layered(
         crate::pipeline::SemanticContext::Library(&stdlib_ctx.library_checked),
     ) {
         Ok(checked) => checked,
-        Err(crate::pipeline::PipelineRejection::Effects { .. })
-        | Err(crate::pipeline::PipelineRejection::Linearity { .. }) => return None,
-        Err(other) => unreachable!("full contextual checks cannot reject at {other}"),
+        Err(crate::pipeline::SemanticRejection::Effects { .. })
+        | Err(crate::pipeline::SemanticRejection::Linearity { .. }) => return None,
     };
 
     // Compose the cached chelis-std half with the freshly-checked package

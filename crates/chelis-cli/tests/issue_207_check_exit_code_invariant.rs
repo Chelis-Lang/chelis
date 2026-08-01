@@ -111,6 +111,70 @@ fn issue_207_check_exits_zero_on_clean_program() {
     );
 }
 
+#[test]
+fn pipeline_artifact_semantic_reports_stay_exact() {
+    let fixtures = [
+        (
+            "clean",
+            "def answer -> int32 = cast(7, int32)\n",
+            serde_json::json!({
+                "score": 1,
+                "components": { "parse": 1, "structure": 1, "names": 1, "types": 1 },
+                "typed_nodes": 2,
+                "untyped_nodes": 0,
+                "total_nodes": 2,
+                "unresolved_names": [],
+                "errors": [],
+            }),
+            Some(0),
+        ),
+        (
+            "effect",
+            "def noisy(x: tensor[4, f32]) -> tensor[4, f32] ! { } = dropout(x, 0.5)\n",
+            serde_json::json!({
+                "score": 0.8,
+                "components": { "parse": 1, "structure": 1, "names": 1, "types": 1 },
+                "typed_nodes": 4,
+                "untyped_nodes": 0,
+                "total_nodes": 4,
+                "unresolved_names": [],
+                "errors": [{
+                    "kind": "UnhandledEffect",
+                    "message": "Function `noisy` is declared with effects `{}` but its body performs effects `{Random}` that were not declared",
+                    "severity": 0.8,
+                }],
+            }),
+            Some(CHECK_ERRORS_EXIT_CODE),
+        ),
+        (
+            "linearity",
+            "def broken(x: tensor[4, f32]) -> tensor[4, f32] = { y = realize(x); add(x, y) }\n",
+            serde_json::json!({
+                "score": 0.8,
+                "components": { "parse": 1, "structure": 1, "names": 1, "types": 1 },
+                "typed_nodes": 7,
+                "untyped_nodes": 0,
+                "total_nodes": 7,
+                "unresolved_names": [],
+                "errors": [{
+                    "kind": "UseAfterConsume",
+                    "message": "variable `x` was already consumed by realize at surf:56..66; later use at surf:72..73 is invalid",
+                    "severity": 0.9,
+                }],
+            }),
+            Some(CHECK_ERRORS_EXIT_CODE),
+        ),
+    ];
+
+    for (name, source, expected, expected_code) in fixtures {
+        let file = write_tempfile(&format!("pipeline-artifact-{name}-"), source);
+        let (code, stdout) = run_check_capture(file.path());
+        let actual: Value = serde_json::from_str(&stdout).expect("check JSON");
+        assert_eq!(actual, expected, "{name} report changed");
+        assert_eq!(code, expected_code, "{name} exit code changed");
+    }
+}
+
 /// Invariant sweep across three distinct error categories. For each
 /// fixture the helper asserts `errors_non_empty <=> exit != 0`.
 ///

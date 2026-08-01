@@ -41,26 +41,35 @@ use chelis_types::{CheckedProgram, FitnessReport, InferStats, StructuralStats};
 use crate::compiler::CompilerError;
 use crate::stdlib_cache::{StdLibContext, load_or_build_stdlib_context};
 
-/// The layered-check result for a clean program: a whole-program
-/// fitness report plus the checked non-chelis-std program (used by the
-/// CLI for `--show-inferred` signature output).
-pub struct LayeredCheck {
-    /// Whole-program fitness report, reconstituted to be byte-identical
-    /// to the monolithic `check_ir_fitness` output for a clean program.
-    pub fitness: FitnessReport,
-    /// Effect-checker errors over the non-chelis-std decls
-    /// (`_with_context` against the cached chelis-std sub-context).
-    /// Empty on the clean path.
-    pub effect_errors: Vec<EffectError>,
-    /// Linearity-checker errors over the non-chelis-std decls. Empty on
-    /// the clean path.
-    pub linearity_errors: Vec<CheckError>,
-    /// The `CheckedProgram` whose `signature_inference()` the CLI reads
-    /// for `--show-inferred`. For a non-chelis-std fixture this is the
-    /// `_with_context`-checked non-chelis-std program; for a chelis-std
-    /// file (no non-chelis-std decls) it is the cached chelis-std
-    /// library `CheckedProgram`.
-    pub typed_program: CheckedProgram,
+/// The layered-check result for a clean or semantically rejected program.
+///
+/// One result cannot contain both effect and linearity errors:
+///
+/// ```compile_fail
+/// use chelis_compiler_api::LayeredCheck;
+///
+/// let _ = LayeredCheck::EffectRejected {
+///     fitness: todo!(),
+///     effect_errors: Vec::new(),
+///     linearity_errors: Vec::new(),
+///     typed_program: todo!(),
+/// };
+/// ```
+pub enum LayeredCheck {
+    Clean {
+        fitness: FitnessReport,
+        typed_program: CheckedProgram,
+    },
+    EffectRejected {
+        fitness: FitnessReport,
+        effect_errors: Vec<EffectError>,
+        typed_program: CheckedProgram,
+    },
+    LinearityRejected {
+        fitness: FitnessReport,
+        linearity_errors: Vec<CheckError>,
+        typed_program: CheckedProgram,
+    },
 }
 
 /// Run the layered `chelis check` front-end.
@@ -120,29 +129,24 @@ pub fn check_layered(
         analysis,
         crate::pipeline::SemanticContext::Library(&stdlib_ctx.library_checked),
     ) {
-        Ok(_) => Ok(Some(LayeredCheck {
+        Ok(_) => Ok(Some(LayeredCheck::Clean {
             fitness,
-            effect_errors: Vec::new(),
-            linearity_errors: Vec::new(),
             typed_program: pick_typed_program(&stdlib_ctx, typed_program),
         })),
-        Err(crate::pipeline::PipelineRejection::Effects {
+        Err(crate::pipeline::SemanticRejection::Effects {
             errors: effect_errors,
-        }) => Ok(Some(LayeredCheck {
+        }) => Ok(Some(LayeredCheck::EffectRejected {
             fitness,
             effect_errors,
-            linearity_errors: Vec::new(),
             typed_program: pick_typed_program(&stdlib_ctx, typed_program),
         })),
-        Err(crate::pipeline::PipelineRejection::Linearity {
+        Err(crate::pipeline::SemanticRejection::Linearity {
             errors: linearity_errors,
-        }) => Ok(Some(LayeredCheck {
+        }) => Ok(Some(LayeredCheck::LinearityRejected {
             fitness,
-            effect_errors: Vec::new(),
             linearity_errors,
             typed_program: pick_typed_program(&stdlib_ctx, typed_program),
         })),
-        Err(other) => unreachable!("full contextual checks cannot reject at {other}"),
     }
 }
 
@@ -251,9 +255,8 @@ pub fn check_layered_for_build(
         crate::pipeline::SemanticContext::Library(&stdlib_ctx.library_checked),
     ) {
         Ok(checked) => checked,
-        Err(crate::pipeline::PipelineRejection::Effects { .. })
-        | Err(crate::pipeline::PipelineRejection::Linearity { .. }) => return Ok(None),
-        Err(other) => unreachable!("full contextual checks cannot reject at {other}"),
+        Err(crate::pipeline::SemanticRejection::Effects { .. })
+        | Err(crate::pipeline::SemanticRejection::Linearity { .. }) => return Ok(None),
     };
 
     // Compose the cached chelis-std half with the checked non-chelis-std
@@ -262,4 +265,40 @@ pub fn check_layered_for_build(
         &stdlib_ctx.library_checked,
         checked,
     )))
+}
+
+#[cfg(test)]
+mod artifact_outcome_tests {
+    use super::*;
+
+    fn check(source: &str) -> LayeredCheck {
+        let decls = chelis_surf::parser::parse_str(source).expect("Surf parse");
+        check_layered(&[], &decls)
+            .expect("empty library context")
+            .expect("the fixture must pass type analysis")
+    }
+
+    #[test]
+    fn layered_outcomes_are_exclusive_for_each_semantic_stage() {
+        let clean = check("def identity(x: tensor[n, f32]) -> tensor[n, f32] = x\n");
+        assert!(matches!(clean, LayeredCheck::Clean { .. }));
+
+        let effect =
+            check("def noisy(x: tensor[4, f32]) -> tensor[4, f32] ! { } = dropout(x, 0.5)\n");
+        assert!(matches!(
+            effect,
+            LayeredCheck::EffectRejected { effect_errors, .. } if !effect_errors.is_empty()
+        ));
+
+        let linearity = check(
+            "def broken(x: tensor[4, f32]) -> tensor[4, f32] = { y = realize(x); add(x, y) }\n",
+        );
+        assert!(matches!(
+            linearity,
+            LayeredCheck::LinearityRejected {
+                linearity_errors,
+                ..
+            } if !linearity_errors.is_empty()
+        ));
+    }
 }

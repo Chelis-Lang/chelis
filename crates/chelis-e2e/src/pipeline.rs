@@ -23,12 +23,16 @@ pub fn compile_surf(source: &str) -> Result<PipelineResult, String> {
     let chelis_compiler_api::pipeline::PipelineOutcome::Lowered(lowered) = outcome else {
         unreachable!("the lower goal returns only a lowered outcome")
     };
-    let (checked, dag, named_roots, _) = lowered.into_parts();
-    let deep_text = chelis_deep::printer::print_canonical(checked.expanded_deep());
-    let root_nodes = named_roots.into_iter().collect();
+    let parts = lowered.into_parts();
+    let deep_text = chelis_deep::printer::print_canonical(parts.checked.expanded_deep());
+    let root_nodes = parts
+        .named_roots
+        .into_entries()
+        .map(|(name, node)| (name.into_string(), node))
+        .collect();
 
     Ok(PipelineResult {
-        dag,
+        dag: parts.dag,
         deep_text,
         root_nodes,
     })
