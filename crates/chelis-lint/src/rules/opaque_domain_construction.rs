@@ -351,6 +351,12 @@ fn check_surf_expr(
                 check_surf_expr(ctx, source, value, catalog, module, out);
             }
         }
+        surf::Expr::RecordUpdate(base, fields, _) => {
+            check_surf_expr(ctx, source, base, catalog, module, out);
+            for (_, value) in fields {
+                check_surf_expr(ctx, source, value, catalog, module, out);
+            }
+        }
         surf::Expr::Cast(inner, target, span) => {
             if is_outside_opaque_module(target, module, catalog) {
                 push_violation(
@@ -371,7 +377,10 @@ fn check_surf_expr(
                 check_surf_expr(ctx, source, arg, catalog, module, out);
             }
         }
-        surf::Expr::List(items, _) | surf::Expr::Tuple(items, _) | surf::Expr::Par(items, _) => {
+        surf::Expr::List(items, _)
+        | surf::Expr::Tuple(items, _)
+        | surf::Expr::Par(items, _)
+        | surf::Expr::Do(items, _) => {
             for item in items {
                 check_surf_expr(ctx, source, item, catalog, module, out);
             }
@@ -385,6 +394,9 @@ fn check_surf_expr(
         | surf::Expr::Realize(target, _)
         | surf::Expr::Copy(target, _)
         | surf::Expr::Borrow(target, _)
+        | surf::Expr::Quote(target, _)
+        | surf::Expr::Unquote(target, _)
+        | surf::Expr::Splice(target, _)
         | surf::Expr::Annotate(target, _, _) => {
             check_surf_expr(ctx, source, target, catalog, module, out);
         }

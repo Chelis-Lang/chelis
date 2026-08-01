@@ -91,7 +91,7 @@ fn generic_record_source(dtype: &str, literal: &str) -> String {
          def unbox(box: ReviewBox[{dtype}]) -> {dtype} = match box with {{\n\
            | ReviewBox {{ value }} => value\n\
          }}\n\
-         def out = print(unbox(ReviewBox {{ value: cast({literal}, {dtype}) }}))\n"
+         def out() = print(unbox(ReviewBox {{ value: cast({literal}, {dtype}) }}))\n"
     )
 }
 
@@ -294,7 +294,7 @@ fn generic_access_source(dtype: &str, literal: &str) -> String {
            | ReviewEnvelope {{ inner: ReviewBox[a] }}\n\
          def direct() -> {dtype} = (ReviewBox {{ value: cast({literal}, {dtype}) }}).value\n\
          def open(envelope: ReviewEnvelope[{dtype}]) -> {dtype} = envelope.inner.value\n\
-         def out = print(open(ReviewEnvelope {{\n\
+         def out() = print(open(ReviewEnvelope {{\n\
            inner: ReviewBox {{ value: cast({literal}, {dtype}) }}\n\
          }}))\n"
     )

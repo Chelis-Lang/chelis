@@ -147,13 +147,13 @@ Single agent. Implements the weight conversion and the final Chelis function emi
 import Hydronnx (load_model, inspect_model)
 
 -- Load with default settings
-def my_classifier = load_model("path/to/classifier.onnx")
+my_classifier = load_model("path/to/classifier.onnx")
 
 -- Inspect before loading
-def info = inspect_model("path/to/classifier.onnx")
+info = inspect_model("path/to/classifier.onnx")
 
 -- Load with explicit overrides
-def custom_loaded = load_model_with_opts("path/to/model.onnx", {
+custom_loaded = load_model_with_opts("path/to/model.onnx", {
   precision: f64,
   batch_dim: 32,
   ...

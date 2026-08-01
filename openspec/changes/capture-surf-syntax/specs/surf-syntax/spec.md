@@ -1,20 +1,39 @@
 ## ADDED Requirements
 
+### Requirement: One canonical Surf grammar and explicit migration
+
+Surf v0.19 SHALL accept exactly one spelling for each grammatical construct. `chelis fmt`
+SHALL be an idempotent layout printer for canonical source and SHALL NOT translate syntax
+dialects. Legacy v0.18 aliases SHALL be accepted only by
+`chelis migrate surf --from 0.18`, which SHALL emit canonical v0.19 source.
+
+#### Scenario: Canonical source is a formatter fixed point
+
+- **WHEN** canonical source is formatted twice
+- **THEN** both outputs are byte-identical and parse through the canonical parser
+
+#### Scenario: Legacy alias requires migration
+
+- **WHEN** source uses a colon result annotation or omitted nullary `()`
+- **THEN** canonical parsing rejects it and the explicit v0.18 migration command rewrites it
+
 ### Requirement: Reserved keywords
 
-Surf SHALL reserve its keyword set so reserved words cannot be used as identifiers. The
-Phase-2 reserved words (`effect`, `handler`, `perform`, `resume`, `borrow`, `where`, `do`)
-SHALL parse as keywords and emit a "reserved for future use" error rather than binding.
+Surf SHALL reserve the 28 lexical keywords listed by the numbered source spec so they cannot
+be used as identifiers. Grammar-specific words such as `where` SHALL remain contextual, and
+future words such as `effect`, `handler`, `perform`, `resume`, and `borrow` SHALL remain
+ordinary identifiers until their grammar is activated. `do`, `quote`, `unquote`, and
+`splice` SHALL be active keywords.
 
 #### Scenario: Reserved word is not an identifier
 
 - **WHEN** source attempts `def def(x) = x`
 - **THEN** parsing fails because `def` is a reserved keyword
 
-#### Scenario: Phase-2 keyword is reserved
+#### Scenario: Future word remains available
 
 - **WHEN** source uses `perform` as an identifier
-- **THEN** the parser reports it as reserved for future use rather than accepting it as a name
+- **THEN** the parser accepts it as a name because no `perform` grammar is active
 
 ### Requirement: Operator precedence and non-associativity
 
@@ -23,10 +42,10 @@ access highest), and the non-associative comparison/equality operators (BP 4 and
 reject chaining. There SHALL be no operator overloading, no infix bitwise operators, and no
 exponentiation operator.
 
-#### Scenario: Application binds tighter than addition
+#### Scenario: Flat application binds tighter than addition
 
-- **WHEN** source is `f x + y`
-- **THEN** it parses as `(f x) + y` because application (BP 9) binds tighter than `+` (BP 6)
+- **WHEN** source is `f(x) + y`
+- **THEN** it parses as `f(x) + y`, while the juxtaposition alias `f x + y` is rejected
 
 #### Scenario: Chained comparison is rejected
 
@@ -52,9 +71,9 @@ types only.
 
 ### Requirement: One module per file
 
-A Surf file SHALL declare exactly one `module Name` as its first non-comment line, with
-PascalCase components and no nesting within a file. `module Foo.Bar` SHALL live at
-`foo/bar.ch` and desugar to `(module {} foo.bar ...)`.
+A named package Surf file SHALL declare one `module Name` as its first non-comment line, with
+PascalCase components and no nesting within a file. Script/snippet source MAY omit the module
+line. `module Foo.Bar` SHALL live at `foo/bar.ch` and desugar to `(module {} foo.bar ...)`.
 
 #### Scenario: Module declaration desugars to lowercased path
 
@@ -189,10 +208,10 @@ quantified PascalCase name is a type variable.
 
 ### Requirement: Blocks and sequencing
 
-Braces SHALL define blocks whose bindings are sequential (newline or `;` separated) with
-exactly one tail expression as the block value; all bindings SHALL collapse into a single
-Deep `let`. There SHALL be no `let ... in` form and no `where` clauses; a bare non-tail
-expression statement SHALL be rejected.
+Braces SHALL define binding blocks whose bindings are newline-separated, with at least one
+binding and exactly one tail expression; all bindings SHALL collapse into a single Deep
+`let`. Semicolons and one-expression binding blocks SHALL be rejected. Direct sequential
+Deep `block` nodes SHALL use `do { e1; e2 }`; parallel tasks SHALL use `par { e1; e2 }`.
 
 #### Scenario: Sequential bindings collapse to one let
 
@@ -224,18 +243,19 @@ SHALL require an `i64`-suffixed integer literal, `with device` a string literal,
 ### Requirement: Records
 
 Surf SHALL construct records with braces (with field punning), access fields with dot
-chaining, and canonicalize record `kv` pairs alphabetized by key in Deep. Functional update
-with `with` SHALL be reserved for Phase 1 and not part of the Phase 0 parser.
+chaining, and preserve record `kv` pairs in written left-to-right order in Deep. A
+same-named field/value SHALL use pun syntax. Functional update SHALL use
+`base with { field: value }` and preserve the same order and pun rules.
 
 #### Scenario: Record punning and access
 
-- **WHEN** source is `opt = Adam { lr, eps: 1.0e-8 }` then `opt.lr`
+- **WHEN** source is `opt = Adam { lr, eps: 1e-8 }` then `opt.lr`
 - **THEN** `lr` puns to `lr: lr` and `opt.lr` desugars to `(access {} (var {} opt) lr)`
 
-#### Scenario: Record fields alphabetized in Deep
+#### Scenario: Record fields preserve written order in Deep
 
-- **WHEN** `Adam { lr, eps: 1.0e-8 }` is desugared
-- **THEN** the `kv` pairs are emitted in alphabetical key order (`eps` before `lr`)
+- **WHEN** `Adam { lr, eps: 1e-8 }` is desugared
+- **THEN** the `kv` pairs remain `lr` then `eps`, matching evaluation order
 
 ### Requirement: Pattern matching
 
@@ -255,26 +275,27 @@ exhaustive over the scrutinee ADT, and or-patterns SHALL NOT be supported in v1.
 
 ### Requirement: Tuples and unit
 
-Tuples SHALL be constructed with commas (`(a, b, c)`), where `(a)` is grouping not a
-one-tuple, and accessed with dot-integer syntax. `()` SHALL be both the unit value and unit
-type.
+Tuples SHALL be constructed with commas (`(a, b, c)`), where `(a)` is grouping and `(a,)`
+is a one-tuple, and accessed with dot-integer syntax. `()` SHALL be both the unit value and
+unit type.
 
 #### Scenario: Tuple access by index
 
 - **WHEN** source is `pair = (w_new, b_new)` then `pair.0`
 - **THEN** `pair.0` desugars to `(tuple-get {} (var {} pair) (lit ... 0))`
 
-#### Scenario: Single-element tuple does not exist
+#### Scenario: Single-element tuple requires a trailing comma
 
-- **WHEN** source is `(a)`
-- **THEN** it parses as grouping, not a one-element tuple
+- **WHEN** source is `(a,)`
+- **THEN** it parses as a one-element tuple, while `(a)` remains grouping
 
 ### Requirement: Transforms
 
-`grad`, `vmap`, `jit`, `cast`, `realize`, `copy`, and `&` SHALL be recognized as transform
-keywords emitting dedicated Deep tags rather than `app` nodes. Transforms SHALL always be
-applied; a bare transform reference SHALL be a parse error. The second argument to `cast`
-SHALL be a precision type literal.
+`grad`, `vmap`, `jit`, `cast`, `realize`, `copy`, and `&` SHALL emit dedicated Deep tags.
+`grad`, `vmap`, `jit`, and `cast` SHALL require call-like syntax; `realize` and `copy` MAY
+also appear as their canonical bare unary callable pipe stages. `vmap(f)` SHALL be the sole
+zero-axis spelling, and nonzero axes SHALL use `vmap(f, axis=n)`. The second argument to
+`cast` SHALL be a precision type literal.
 
 #### Scenario: Transform composition
 
@@ -289,8 +310,9 @@ SHALL be a precision type literal.
 ### Requirement: Numeric literal defaults
 
 An unsuffixed integer literal SHALL bind at `int32` and an unsuffixed float literal at `f32`,
-with no implicit precision promotion. Underscore separators and scientific notation SHALL be
-accepted, and `-42` SHALL always parse as unary minus applied to `42`.
+with no implicit precision promotion. Canonical source SHALL equal the literal printer's
+decimal spelling: no separators, hexadecimal/binary aliases, padding, non-finite values, or
+value-equivalent noncanonical exponents. `-42` SHALL parse as unary minus applied to `42`.
 
 #### Scenario: Defaults without promotion
 
@@ -299,8 +321,8 @@ accepted, and `-42` SHALL always parse as unary minus applied to `42`.
 
 #### Scenario: Negative literal is unary minus
 
-- **WHEN** source is `f -42`
-- **THEN** it parses as `f - 42` (infix), and a negative argument must be written `f(-42)`
+- **WHEN** source passes a negative argument as `f(-42)`
+- **THEN** the argument parses as unary minus applied to `42`; juxtaposition `f -42` is not a call
 
 ### Requirement: Literal suffixes
 
@@ -328,7 +350,7 @@ back to the `int32`/`f32` defaults.
 
 #### Scenario: Typed context adopts the element type
 
-- **WHEN** source is `let xs: tensor[3, f64] = [1.0, 2.0, 3.0]`
+- **WHEN** source is `xs: tensor[3, f64] = [1.0, 2.0, 3.0]`
 - **THEN** the literals bind at `f64`
 
 #### Scenario: Suffix disagreeing with context is a type error

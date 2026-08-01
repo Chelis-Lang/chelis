@@ -228,7 +228,7 @@ fn roundtrip_example_mlp() {
 
 #[test]
 fn dim_params_produce_d_var() {
-    let decls = surf_parse("def transpose[batch, hidden](x: tensor[batch, hidden, f32]): tensor[hidden, batch, f32] = x").unwrap();
+    let decls = surf_parse("def transpose[batch, hidden](x: tensor[batch, hidden, f32]) -> tensor[hidden, batch, f32] = x").unwrap();
     let deep = desugar_program(&decls);
     let text = print_canonical(&deep);
     // batch and hidden are declared dim params → must be d-var, not d-name
@@ -251,7 +251,7 @@ fn dim_params_produce_d_var() {
 
 #[test]
 fn wildcard_dimension_desugars_to_d_name_star() {
-    let decls = surf_parse("def f(x: tensor[*, f32]): tensor[*, f32] = x").unwrap();
+    let decls = surf_parse("def f(x: tensor[*, f32]) -> tensor[*, f32] = x").unwrap();
     let deep = desugar_program(&decls);
     let text = print_canonical(&deep);
     assert!(
@@ -264,7 +264,7 @@ fn wildcard_dimension_desugars_to_d_name_star() {
 
 #[test]
 fn typed_def_emits_defsig() {
-    let decls = surf_parse("def f(x: f32): f32 = x").unwrap();
+    let decls = surf_parse("def f(x: f32) -> f32 = x").unwrap();
     let deep = desugar_program(&decls);
     let text = print_canonical(&deep);
     assert!(text.contains("(defsig {} f"), "Missing defsig in:\n{text}");
@@ -296,7 +296,7 @@ fn annotation_in_metadata() {
 #[test]
 fn pat_lit_raw_value() {
     let decls =
-        surf_parse("type B = | T | F\ndef f(x: f32): f32 = match x with { | 0 => 1 | _ => x }")
+        surf_parse("type B = | T | F\ndef f(x: f32) -> f32 = match x with { | 0 => 1 | _ => x }")
             .unwrap();
     let deep = desugar_program(&decls);
     let text = print_canonical(&deep);
@@ -309,7 +309,7 @@ fn pat_lit_raw_value() {
 #[test]
 fn no_legacy_tags() {
     // Verify no legacy tags appear in desugared output
-    let decls = surf_parse("def f(x: f32): f32 = x + 1").unwrap();
+    let decls = surf_parse("def f(x: f32) -> f32 = x + 1").unwrap();
     let deep = desugar_program(&decls);
     let text = print_canonical(&deep);
     assert!(
@@ -759,29 +759,20 @@ fn fmt_if_as_binary_operand_is_idempotent_and_meaning_preserving() {
     );
 }
 
-/// Corpus sweep: every `.ch` file under `examples/`, `packages/chelis-std/`,
-/// and `crates/chelis-surf/tests/fixtures/` must satisfy
-/// `fmt(fmt(src)) == fmt(src)`. Locks the formatter-idempotency contract
-/// across the executable and illustrative example surfaces so a future
-/// regression in `format_block`, `format_pipe_layout`, or a sibling path
-/// cannot reintroduce Finding 3a quietly.
+/// Canonical v0.19 corpus oracle: every repository `.ch` file parses, is
+/// already a formatter fixed point, and stays fixed after another pass.
+/// Parse failures are failures, never silently skipped from the corpus.
 #[test]
 fn fmt_idempotent_on_repo_ch_corpus() {
-    use chelis_surf::format::format_program;
+    use chelis_surf::format::format_source;
     use std::path::PathBuf;
 
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("..");
 
-    let roots = [
-        repo_root.join("examples"),
-        repo_root.join("packages/chelis-std"),
-        repo_root.join("crates/chelis-surf/tests/fixtures"),
-    ];
-
     let mut files: Vec<PathBuf> = Vec::new();
-    let mut stack: Vec<PathBuf> = roots.iter().filter(|p| p.exists()).cloned().collect();
+    let mut stack = vec![repo_root];
     while let Some(dir) = stack.pop() {
         for entry in
             std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("read_dir {}: {e}", dir.display()))
@@ -789,6 +780,12 @@ fn fmt_idempotent_on_repo_ch_corpus() {
             let entry = entry.expect("dir entry");
             let path = entry.path();
             if path.is_dir() {
+                if matches!(
+                    path.file_name().and_then(|name| name.to_str()),
+                    Some(".git" | "target" | "node_modules")
+                ) {
+                    continue;
+                }
                 stack.push(path);
             } else if path.extension().and_then(|s| s.to_str()) == Some("ch") {
                 files.push(path);
@@ -804,20 +801,33 @@ fn fmt_idempotent_on_repo_ch_corpus() {
     for path in &files {
         let src = std::fs::read_to_string(path)
             .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-        let Ok(decls1) = surf_parse(&src) else {
-            // Files that do not parse today are out of scope for the
-            // formatter contract. The dedicated parser tests cover them.
-            continue;
+        let pass1 = match format_source(&src) {
+            Ok(formatted) => formatted,
+            Err(error) => {
+                failures.push(format!(
+                    "{}: canonical parse failed: {error}",
+                    path.display()
+                ));
+                continue;
+            }
         };
-        let pass1 = format_program(&decls1);
-        let Ok(decls2) = surf_parse(&pass1) else {
+        if pass1 != src {
             failures.push(format!(
-                "{}: pass-1 output failed to re-parse",
+                "{}: source is not a formatter fixed point",
                 path.display()
             ));
             continue;
+        }
+        let pass2 = match format_source(&pass1) {
+            Ok(formatted) => formatted,
+            Err(error) => {
+                failures.push(format!(
+                    "{}: pass-1 output failed to parse: {error}",
+                    path.display()
+                ));
+                continue;
+            }
         };
-        let pass2 = format_program(&decls2);
         if pass1 != pass2 {
             failures.push(format!("{}: fmt not idempotent", path.display()));
         }

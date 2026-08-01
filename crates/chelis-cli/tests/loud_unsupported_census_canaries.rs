@@ -339,7 +339,7 @@ fn canary_vmap_int64_roots_keep_integer_precision() {
         "module M.Main\n\
          def f(xs: tensor[3, 1, int64]) -> tensor[3, int64] = \
          vmap(fn (r: tensor[1, int64]) -> \
-         add(tensor_to_scalar(sum(r, 0)), cast(1, int64)), axis=0)(xs)\n\
+         add(tensor_to_scalar(sum(r, 0)), cast(1, int64)))(xs)\n\
          out = print(to_list(f(cast(to_tensor([[1.0], [2.0], [3.0]]), int64))))\n",
         ".ch",
     )

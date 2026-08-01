@@ -57,7 +57,7 @@ module_prefix = "Iso"
     );
     write_file(
         &pkg.join("src/main.ch"),
-        "module Iso.Main\n\ndef noop() -> unit = test_assert(true, \"noop\")\n",
+        "module Iso.Main\n\ndef noop() -> () = test_assert(true, \"noop\")\n",
     );
     (dir, pkg)
 }
@@ -115,7 +115,7 @@ fn worker_crash_in_one_file_does_not_kill_sibling_file() {
         &pkg.join("tests/crash.ch"),
         r#"module Iso.Tests.Crash
 
-def test_unreachable() -> unit = test_assert(true, "would have passed if worker did not crash")
+def test_unreachable() -> () = test_assert(true, "would have passed if worker did not crash")
 "#,
     );
 
@@ -126,7 +126,7 @@ def test_unreachable() -> unit = test_assert(true, "would have passed if worker 
         &pkg.join("tests/fine.ch"),
         r#"module Iso.Tests.Fine
 
-def test_ok() -> unit = test_assert(true, "sibling still runs")
+def test_ok() -> () = test_assert(true, "sibling still runs")
 "#,
     );
 
@@ -215,7 +215,7 @@ fn force_abort_env_requires_both_variables() {
         &pkg.join("tests/fine.ch"),
         r#"module Iso.Tests.GateFine
 
-def test_ok() -> unit = test_assert(true, "should still run")
+def test_ok() -> () = test_assert(true, "should still run")
 "#,
     );
 
@@ -268,14 +268,14 @@ fn worker_stack_overflow_in_one_file_does_not_kill_sibling_file() {
 
 def deep(n: int64) -> int64 = if eq(n, cast(0, int64)) then cast(0, int64) else add(cast(1, int64), deep(sub(n, cast(1, int64))))
 
-def test_overflow() -> unit = test_assert(eq(deep(cast(10000000, int64)), cast(10000000, int64)), "would survive")
+def test_overflow() -> () = test_assert(eq(deep(cast(10000000, int64)), cast(10000000, int64)), "would survive")
 "#,
     );
     write_file(
         &pkg.join("tests/fine.ch"),
         r#"module Iso.Tests.OverflowFine
 
-def test_ok() -> unit = test_assert(true, "sibling still runs")
+def test_ok() -> () = test_assert(true, "sibling still runs")
 "#,
     );
 
@@ -349,7 +349,7 @@ fn filter_active_tags_file_level_crash_row() {
         &pkg.join("tests/foo.ch"),
         r#"module Iso.Tests.Foo
 
-def test_foo() -> unit = test_assert(true, "ok")
+def test_foo() -> () = test_assert(true, "ok")
 "#,
     );
 
@@ -486,9 +486,9 @@ fn worker_streams_rows_so_pre_crash_passes_survive() {
         &pkg.join("tests/many.ch"),
         r#"module Iso.Tests.Stream
 
-def test_one() -> unit = test_assert(true, "first runs and is captured pre-abort")
-def test_two() -> unit = test_assert(true, "second runs and triggers post-row abort")
-def test_three() -> unit = test_assert(true, "third never runs because worker aborted")
+def test_one() -> () = test_assert(true, "first runs and is captured pre-abort")
+def test_two() -> () = test_assert(true, "second runs and triggers post-row abort")
+def test_three() -> () = test_assert(true, "third never runs because worker aborted")
 "#,
     );
 

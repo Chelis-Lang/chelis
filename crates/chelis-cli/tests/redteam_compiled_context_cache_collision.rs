@@ -76,13 +76,13 @@ fn write_identical_reef(parent: &Path) -> PathBuf {
     fs::write(
         pkg.join("src/main.ch"),
         "module Collide.Main\n\n\
-         def noop() -> unit = test_assert(true, \"noop\")\n",
+         def noop() -> () = test_assert(true, \"noop\")\n",
     )
     .expect("write main.ch");
     fs::write(
         pkg.join("tests/foo.ch"),
         "module Collide.Tests.Foo\n\n\
-         def test_one() -> unit = test_assert(true, \"first\")\n",
+         def test_one() -> () = test_assert(true, \"first\")\n",
     )
     .expect("write tests/foo.ch");
     pkg

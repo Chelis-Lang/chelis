@@ -204,7 +204,7 @@ fn test_failing_monolithic_vs_layered_byte_identical() {
         "module PseudoNautilus.Tests.IntentionalFail\n\
          import PseudoNautilus.Special (erf_approx)\n\
          import Std.Test (assert_close)\n\
-         def test_intentional_fail() -> unit ! { Test } = \
+         def test_intentional_fail() -> () ! { Test } = \
          assert_close(erf_approx(cast(0.0, f32)), cast(999.0, f32), cast(0.00001, f32), \"intentional\")\n",
     )
     .expect("write failing test");

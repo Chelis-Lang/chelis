@@ -158,19 +158,20 @@ NOT extend to `def`/`sig` function names.
 ### Requirement: Def arrow return-type form
 
 When a `def` carries an explicit return type it SHALL be written in the arrow form
-`def name(params) -> T = expr`. The colon form `def name(params) : T = expr` SHALL parse but
-SHALL be flagged by the `surf-def-arrow-form` lint and rewritten to arrow form by
-`chelis fmt`.
+`def name(params) -> T = expr`. The canonical parser SHALL reject the colon form
+`def name(params) : T = expr`; the raw-source `surf-def-arrow-form` lint SHALL name the
+violation, and `chelis migrate surf --from 0.18` SHALL rewrite it. `chelis fmt` SHALL NOT
+serve as a dialect migration path.
 
 #### Scenario: Arrow form passes the style gate
 
 - **WHEN** a function is written `def loss(p: f32, q: f32) -> f32 = ...`
 - **THEN** `surf-def-arrow-form` accepts it
 
-#### Scenario: Colon return-type form is flagged
+#### Scenario: Colon return-type form requires explicit migration
 
 - **WHEN** a function is written `def loss(p: f32, q: f32) : f32 = ...`
-- **THEN** `surf-def-arrow-form` flags it and `chelis fmt` rewrites it to the arrow form
+- **THEN** canonical parsing rejects it, `surf-def-arrow-form` names it, and the v0.18 migration command rewrites it to the arrow form
 
 ### Requirement: Pipe-first first-argument insertion
 

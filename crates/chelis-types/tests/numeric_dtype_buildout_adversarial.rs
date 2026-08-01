@@ -278,20 +278,20 @@ fn ws_b2_reduce_sum_int16_result_must_not_be_int16_per_spec_5_7_1() {
 }
 
 // ----------------------------------------------------------------
-// CRITICAL: spec §5.5 hex-suffix rule — integer-typed suffixes only.
+// CRITICAL: spec §5.5 canonical decimal suffix rule — integer-typed suffixes only.
 // ----------------------------------------------------------------
 
-/// §5.5: hex-literal `0xFFi8` should bind at int8. Then `0xFFi8 +
-/// 0xFFi16` is a precision mismatch per §5.4 and must error.
+/// §5.5: canonical decimal `255i8` should bind at int8. Then `255i8 +
+/// 255i16` is a precision mismatch per §5.4 and must error.
 #[test]
-fn ws_b1_hex_suffix_mixed_precision_addition_rejected_per_spec_5_4() {
-    let src = "out: int16 = 0xFFi8 + 0xFFi16";
+fn ws_b1_decimal_suffix_mixed_precision_addition_rejected_per_spec_5_4() {
+    let src = "out: int16 = 255i8 + 255i16";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     assert!(
         res.is_err(),
         "spec §5.4: arithmetic requires same precision; \
-         0xFFi8 + 0xFFi16 must error"
+         255i8 + 255i16 must error"
     );
 }
 

@@ -53,6 +53,14 @@ portable across Surf and Reef boundaries.
 | `opaque` | `true` | On a `deftype`: the type is opaque (see §2.2) |
 | `invariant` | `(fn {} (params {} <binder>) <expr>)` | On an opaque `deftype`: the declared invariant predicate (see §2.2) |
 | `invariant_amenability` | string | On an invariant-carrying `deftype`: `"linear"`/`"polynomial"`/`"transcendental"`/`"opaque"`; derived data, recomputed on desugar (see §2.2) |
+| `surf_path` | string | Exact canonical Surf module path spelling for a lowercased Deep module identity |
+| `surf_dim_group_size` | integer | Number of adjacent `defdim` declarations authored in one Surf `dim` group; present on the first member only |
+| `surf_pipe_stage` | string | Validated origin marker needed to reconstruct an exact first-argument call stage |
+
+The `surf_*` namespace is closed. A public Deep parser or programmatic
+validator MUST reject an unknown `surf_*` key. These three keys preserve only
+surface distinctions that canonical Deep otherwise erases; they do not change
+evaluation. Producers MUST NOT use the namespace for arbitrary provenance.
 
 **Reserved for later phases:**
 
@@ -62,12 +70,11 @@ portable across Surf and Reef boundaries.
 | `doc` | string | Documentation |
 | `span_*` | reserved | Future richer span fields (see §1.1.1) |
 
-**Metadata propagation through transformations.** Metadata fields are
-preserved by all spec-defined transformations and round-trip through the
-canonical form (§6). Cross-tool provenance (the `span` field in
-particular) is intended to survive the full compile pipeline once the
-in-flight span survival work lands; see
-`spec/design/chelis_span_survival.md` for the phased S0–S5 plan.
+**Metadata propagation through transformations.** Semantic metadata and the
+validated surface-fidelity keys are preserved by all spec-defined
+transformations. Derived metadata may be recomputed according to §6.3.2.
+Cross-tool provenance (the `span` field in particular) remains governed by
+the span-survival contract below.
 
 #### 1.1.1 External-source spans (`span`, `span_*` namespace)
 
@@ -589,22 +596,60 @@ Deep has exactly one textual representation per program.
 ### 6.2 Ordering
 - Module declarations: declaration order (not sorted).
 - Import names within an import: alphabetized.
-- Record `kv` pairs: alphabetized by key.
+- Record and record-update `kv` pairs: written order, which is left-to-right
+  evaluation order.
 - Match arms: declaration order (semantically meaningful).
 - Bind pairs in `let`: declaration order (sequential semantics).
 
 ### 6.3 Comments
 None in canonical Deep. Comments are Surf-only. Stripped during desugaring. Use the `doc` meta key for structured documentation.
 
+### 6.3.1 Canonical Surf resugaring
+
+Every structurally valid public Deep tag has a canonical Surf representation.
+Deep `app` resugars as a flat parenthesized call and Deep `pipe` as a pipeline;
+the resugarer does not interchange them. Resolved ordinary calls to the fixed
+operator builtins use Surf infix/prefix notation, while the same builtin name
+remains a value or pipe stage. A finite `Cons`/`Nil` chain uses bracket-list
+syntax; an open-tail `Cons` remains an explicit call. Explicit `borrow` and
+`copy` nodes remain explicit.
+
+Deep `block` uses `do { e1; e2; ... }`, `record-update` uses
+`base with { field: value, ... }`, and `quote`, `unquote`, and `splice` use
+same-named call-like forms. A matching `defsig` and `def` resugar as one inline
+typed Surf definition; a standalone `defsig` remains `sig`.
+
+The normal and debug emitters share this AST-backed resugarer and Surf printer.
+Debug output may append stable `-- deep-debug: ...` comments; it is not a
+second Surf dialect.
+
+### 6.3.2 Round-trip normalization
+
+`normalize_deep` may erase `span`, `loc`, macro `source` provenance after
+expansion, inferred `effects`, and `invariant_amenability` because those values
+are informational or deterministically recomputed. It may also erase
+matching `type` entries on a `def`, its `fn` value, and its function parameters
+when an adjacent matching `defsig` already carries the exact same types; a
+disagreement is never erased. It may
+not erase or rewrite any other declared `type` or `eff` data, handler effects,
+`wrt`, `opaque`, `invariant`, property semantics, or a validated `surf_*`
+value. Implementations compare macro-authored Surf after expansion. Any other
+metadata loss is a round-trip failure.
+
 ### 6.4 Literal Normalization
 
 | Type | Canonical | Normalizations |
 |---|---|---|
 | Integer | Decimal, no leading zeros | `07` → `7` |
-| Float | `d.d` minimum | `1.` → `1.0`, `.5` → `0.5` |
-| Float (sci) | `d.dE±d` (uppercase E, explicit sign) | `1e3` → `1.0E+3` |
+| Float | Finite, shortest round-trippable value spelling, with `.0` when otherwise integer-like | `1.` → `1.0`, `.5` → `0.5` |
+| Float (sci) | Lowercase `e`, only when selected by the shortest printer | equivalent longer spellings normalize to the printer result |
 | String | Double-quoted, standard escapes | |
 | Boolean | `true` / `false` | |
+
+Canonical Deep contains no non-finite float literal. Producers that construct
+Deep programmatically must reject NaN and infinity before serialization;
+Deep-to-Surf resugaring reports either as unrepresentable rather than emitting
+an invalid Surf token.
 
 **Literal default rule.** An unsuffixed integer literal binds at type
 `int32` (i.e. its `lit` node carries `{type: (t-prim {} int32)}`); an
@@ -661,9 +706,10 @@ lex time with a diagnostic citing §1.1.1, and a suffix is authored only
 when its dtype activates. The short unsigned spellings (`u8`, `u16`,
 `u32`, `u64`) are not reserved in any form - `uint8`/`uint16`/`uint32`/
 `uint64` are canonical per §1.1.2 - and are likewise rejected at lex time.
-Hex integer literals interact with float-typed suffixes per the
-hex-suffix rule in `spec/02-surf-syntax.md` §P10a; the same rule applies
-to Deep.
+Deep's producer-friendly lexer accepts hexadecimal integer input and
+canonical Deep printing rewrites the decoded value in decimal. Surf v0.19
+does not accept the hexadecimal spelling; its explicit v0.18 migration path
+owns that rewrite.
 
 ### 6.5 Identifier Rules
 - Variables/functions: `[a-z_][a-z0-9_]*` (snake_case)

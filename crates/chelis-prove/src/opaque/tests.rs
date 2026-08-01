@@ -62,7 +62,7 @@ fn recomputes_amenability_not_trusting_recorded_metadata() {
 @invariant(p) p.a * p.b >= 0.0
 type Poly =
   | Poly { a: f32, b: f32 }
-def make(a: f32, b: f32) -> Poly = Poly { a: a, b: b }
+def make(a: f32, b: f32) -> Poly = Poly { a, b }
 ";
     let exprs = deep_of(surf);
     let invs = collect_opaque_invariants(&exprs);

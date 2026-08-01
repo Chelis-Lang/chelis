@@ -54,7 +54,7 @@ fn cast_operand_resugars_structurally_instead_of_as_a_string_fragment() {
 
     let surf_ast = resugar_expression(&deep).expect("cast over an application resugars");
 
-    assert_eq!(format_expression(&surf_ast), "cast(add(x, 1.0), f32)");
+    assert_eq!(format_expression(&surf_ast), "cast((x + 1.0), f32)");
 }
 
 #[test]
@@ -314,15 +314,33 @@ fn empty_par_is_an_error_not_an_empty_surface_block() {
 }
 
 #[test]
-fn unimplemented_tags_fail_instead_of_falling_back_to_call_syntax() {
-    let deep = parse_one_deep("(fn {} (params {} x) (var {} x))");
+fn non_finite_deep_literals_are_explicitly_unrepresentable_in_surf() {
+    for source in [
+        "(lit {} 1e400)",
+        "(match {} (var {} x) (arm {} (pat-lit {} 1e400) () (lit {} 1)))",
+    ] {
+        let deep = parse_one_deep(source);
 
-    let error = resugar_expression(&deep).expect_err("fn is outside the foundation slice");
+        let error = resugar_expression(&deep)
+            .expect_err("non-finite Deep floats have no canonical Surf literal");
+
+        assert!(
+            error.to_string().contains("non-finite float"),
+            "diagnostic must identify the unrepresentable value for {source}: {error}"
+        );
+    }
+}
+
+#[test]
+fn declaration_tags_fail_when_requested_as_expressions() {
+    let deep = parse_one_deep("(def {} f (var {} x))");
+
+    let error = resugar_expression(&deep).expect_err("def is not an expression");
 
     assert!(
         error
             .to_string()
-            .contains("`fn` is outside the tested resugaring foundation"),
-        "unsupported tags must fail explicitly: {error}"
+            .contains("`def` does not have a Surf representation in expression position"),
+        "contextual tags must fail explicitly: {error}"
     );
 }

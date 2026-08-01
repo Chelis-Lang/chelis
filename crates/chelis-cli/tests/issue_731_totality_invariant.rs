@@ -374,7 +374,7 @@ fn dp_to_deep(source: &str) -> Vec<deep::Expr> {
 /// are PARSE-rejected Surf, so those canary rows score below 1 via the
 /// parser, not the checker. This corpus uses the spec/02 forms (block
 /// bindings, `fn (v: f32) -> body`, `List[f32]`, `match ... with`,
-/// example-style `vmap(f, axis=0)`), all verified parse-clean; the
+/// example-style `vmap(f)`), all verified parse-clean; the
 /// census records that the ill-typed variants of these corrected forms
 /// ARE caught by the checker (precision mismatch, score < 1).
 #[test]
@@ -395,7 +395,7 @@ fn control_wrapper_battery_checks_clean_and_total() {
         ),
         (
             "pipe_stage",
-            "def f() -> f32 = 1.0 |> fn (v: f32) -> add(v, cast(2.0, f32))\n".to_string(),
+            "def f() -> f32 = 1.0 |> add(cast(2.0, f32))\n".to_string(),
         ),
         (
             "tuple_elem",
@@ -418,7 +418,7 @@ fn control_wrapper_battery_checks_clean_and_total() {
         (
             "vmap_named",
             "def process(x: tensor[4, f32]) -> tensor[4, f32] = relu(x)\n\
-             def f(xs: tensor[2, 4, f32]) -> tensor[2, 4, f32] = xs |> vmap(process, axis=0)\n"
+             def f(xs: tensor[2, 4, f32]) -> tensor[2, 4, f32] = xs |> vmap(process)\n"
                 .to_string(),
         ),
         (

@@ -50,7 +50,7 @@ fn host_eval_two_level_nested_zero_arg_i32() {
     let fixture = dir.path().join("two_level_nested.ch");
     write_file(
         &fixture,
-        "def inner -> i32 = 42\ndef outer -> i32 = inner()\nresult = outer()\n",
+        "def inner() -> i32 = 42\ndef outer() -> i32 = inner()\nresult = outer()\n",
     );
 
     // chelis#732 P1 ([05-OBS-4]/[05-OBS-2]): scalar roots render bare,
@@ -66,9 +66,9 @@ fn host_eval_three_level_nested_zero_arg_f32() {
     let fixture = dir.path().join("three_level_nested.ch");
     write_file(
         &fixture,
-        "def deepest -> f32 = 3.14\n\
-         def middle -> f32 = deepest()\n\
-         def outer -> f32 = middle()\n\
+        "def deepest() -> f32 = 3.14\n\
+         def middle() -> f32 = deepest()\n\
+         def outer() -> f32 = middle()\n\
          result = outer()\n",
     );
 
@@ -87,12 +87,12 @@ fn host_eval_three_level_nested_zero_arg_f32() {
 fn host_eval_zero_arg_in_subexpression() {
     let dir = tempdir().expect("tempdir");
     let fixture = dir.path().join("zero_arg_in_subexpr.ch");
-    write_file(&fixture, "def go -> i32 = 7\nresult = add(go(), 1)\n");
+    write_file(&fixture, "def go() -> i32 = 7\nresult = add(go(), 1)\n");
 
     eval_file(&fixture).success().stdout("result = 8\n");
 }
 
-/// Zero-arg fn-call inside another zero-arg fn body. `def go = add(helper(), 3)`
+/// Zero-arg fn-call inside another zero-arg fn body. `def go() = add(helper(), 3)`
 /// nests the call through `lower_app` twice in a single decl.
 #[test]
 fn host_eval_zero_arg_inside_zero_arg_body() {
@@ -100,8 +100,8 @@ fn host_eval_zero_arg_inside_zero_arg_body() {
     let fixture = dir.path().join("zero_arg_in_body.ch");
     write_file(
         &fixture,
-        "def helper -> i32 = 5\n\
-         def go -> i32 = add(helper(), 3)\n\
+        "def helper() -> i32 = 5\n\
+         def go() -> i32 = add(helper(), 3)\n\
          result = go()\n",
     );
 
@@ -113,7 +113,7 @@ fn host_eval_zero_arg_inside_zero_arg_body() {
 fn host_eval_zero_arg_bool() {
     let dir = tempdir().expect("tempdir");
     let fixture = dir.path().join("zero_arg_bool.ch");
-    write_file(&fixture, "def go -> bool = true\nresult = go()\n");
+    write_file(&fixture, "def go() -> bool = true\nresult = go()\n");
 
     eval_file(&fixture).success().stdout("result = true\n");
 }
@@ -125,7 +125,7 @@ fn host_eval_zero_arg_bool() {
 fn host_eval_zero_arg_i64_large_value() {
     let dir = tempdir().expect("tempdir");
     let fixture = dir.path().join("zero_arg_i64_large.ch");
-    write_file(&fixture, "def go -> i64 = 9999999999i64\nresult = go()\n");
+    write_file(&fixture, "def go() -> i64 = 9999999999i64\nresult = go()\n");
 
     eval_file(&fixture)
         .success()

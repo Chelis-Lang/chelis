@@ -805,6 +805,7 @@ dependencies = [
  "chelis-vocab",
  "miette",
  "proptest",
+ "ryu",
  "serde",
  "thiserror 2.0.18",
 ]

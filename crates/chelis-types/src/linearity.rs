@@ -528,7 +528,7 @@ impl Checker {
                     self.invalid_borrow(body, "borrow cannot be returned from a function");
                     return;
                 }
-                // V2-F4: top-level `def name = x` where the body is a
+                // V2-F4: top-level `def name() = x` where the body is a
                 // bare `(var x)` of an owned-linear type is an
                 // aliasing binding consume; at the IR level
                 // `lower_var` returns the cached `bindings["x"]` node

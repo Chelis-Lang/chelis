@@ -436,35 +436,35 @@ fn copy_dir_recursive(src: &Path, dst: &Path) {
 fn write_symbolic_matmul_program(path: &Path) {
     write_file(
         path,
-        "def f(a: tensor[batch, in_dim, f32], b: tensor[in_dim, out_dim, f32]): tensor[batch, out_dim, f32] = (matmul(a, b) : tensor[batch, out_dim, f32])\n",
+        "def f(a: tensor[batch, in_dim, f32], b: tensor[in_dim, out_dim, f32]) -> tensor[batch, out_dim, f32] = (matmul(a, b) : tensor[batch, out_dim, f32])\n",
     );
 }
 
 fn write_symbolic_softmax_program(path: &Path) {
     write_file(
         path,
-        "def f(x: tensor[batch, seq, f32]): tensor[batch, seq, f32] = (softmax(x, 1) : tensor[batch, seq, f32])\n",
+        "def f(x: tensor[batch, seq, f32]) -> tensor[batch, seq, f32] = (softmax(x, 1) : tensor[batch, seq, f32])\n",
     );
 }
 
 fn write_symbolic_row_sum_program(path: &Path) {
     write_file(
         path,
-        "def f(x: tensor[batch, seq, f32]): tensor[batch, f32] = (sum(x, 1) : tensor[batch, f32])\n",
+        "def f(x: tensor[batch, seq, f32]) -> tensor[batch, f32] = (sum(x, 1) : tensor[batch, f32])\n",
     );
 }
 
 fn write_symbolic_layer_norm_program(path: &Path) {
     write_file(
         path,
-        "def f(x: tensor[batch, 128, f32], gamma: tensor[128, f32], beta: tensor[128, f32]): tensor[batch, 128, f32] = (layer_norm(x, gamma, beta) : tensor[batch, 128, f32])\n",
+        "def f(x: tensor[batch, 128, f32], gamma: tensor[128, f32], beta: tensor[128, f32]) -> tensor[batch, 128, f32] = (layer_norm(x, gamma, beta) : tensor[batch, 128, f32])\n",
     );
 }
 
 fn write_symbolic_hidden_layer_norm_program(path: &Path) {
     write_file(
         path,
-        "def f(x: tensor[batch, hidden, f32], gamma: tensor[hidden, f32], beta: tensor[hidden, f32]): tensor[batch, hidden, f32] = (layer_norm(x, gamma, beta) : tensor[batch, hidden, f32])\n",
+        "def f(x: tensor[batch, hidden, f32], gamma: tensor[hidden, f32], beta: tensor[hidden, f32]) -> tensor[batch, hidden, f32] = (layer_norm(x, gamma, beta) : tensor[batch, hidden, f32])\n",
     );
 }
 
@@ -1875,7 +1875,7 @@ fn build_c_map_tensor_grad_specializes_callback_item_type() {
         &path,
         "def loss(theta: tensor[2, f32], x: f32) -> f32 =\n\
            add(tensor_to_scalar(sum(mul(copy(theta), copy(theta)), 0)), x)\n\
-         grad_loss = grad(loss, wrt=(theta))\n\
+         grad_loss = grad(loss, wrt=theta)\n\
          xs: List[f32] = [1.0, 2.0]\n\
          rows = map(fn (x) -> grad_loss(to_tensor([1.0, 2.0]), x), xs)\n",
     );
@@ -1938,7 +1938,7 @@ fn build_c_tensor_grad_with_host_branching_dependency_builds() {
         &path,
         "def loss(theta: tensor[2, f32], x: f32) -> f32 =\n\
            if x < 0.0 then tensor_to_scalar(sum(mul(copy(theta), copy(theta)), 0)) else add(tensor_to_scalar(sum(mul(copy(theta), copy(theta)), 0)), x)\n\
-         grad_loss = grad(loss, wrt=(theta))\n\
+         grad_loss = grad(loss, wrt=theta)\n\
          xs: List[f32] = [1.0, -2.0]\n\
          rows = map(fn (x) -> grad_loss(to_tensor([1.0, 2.0]), x), xs)\n",
     );
@@ -1984,7 +1984,7 @@ fn build_c_tensor_grad_lm_style_mixed_scalar_tensor_args_builds() {
            y_hat = if lt(x, cast(0.0, f32)) then tensor_to_scalar(sum(copy(theta), 0)) else add(tensor_to_scalar(sum(copy(theta), 0)), x)\n\
            sub(y, y_hat)\n\
          }\n\
-         row = grad(residual, wrt=(theta))\n\
+         row = grad(residual, wrt=theta)\n\
          def jac[n, m](theta: tensor[n, f32], xs: tensor[m, f32], ys: tensor[m, f32]) -> List[tensor[n, f32]] = {\n\
            pairs = zip(to_list(xs), to_list(ys))\n\
            map(fn (pair: (f32, f32)) -> row(copy(theta), pair.0, pair.1), pairs)\n\
@@ -2033,7 +2033,7 @@ fn build_c_tensor_grad_local_wrapper_over_function_param_builds() {
         &path,
         "def jac_row[n](model: tensor[n, f32] -> f32 -> f32 -> f32, theta: tensor[n, f32], x: f32, y: f32) -> tensor[n, f32] = {\n\
            target = fn (theta_local: tensor[n, f32]) -> model(theta_local, x, y)\n\
-           grad(target, wrt=(theta_local))(theta)\n\
+           grad(target, wrt=theta_local)(theta)\n\
          }\n\
          def lm_model(theta: tensor[2, f32], x: f32, y: f32) -> f32 = {\n\
            y_hat = if lt(x, cast(0.0, f32)) then tensor_to_scalar(sum(copy(theta), 0)) else add(tensor_to_scalar(sum(copy(theta), 0)), x)\n\
@@ -2100,7 +2100,7 @@ fn build_c_scalar_grad_builds_and_is_numerically_correct() {
     write_file(
         &path,
         "def square(x: f32) -> f32 = mul(x, x)\n\
-         def dsquare(x: f32) -> f32 = grad(square, wrt=(x))(x)\n\
+         def dsquare(x: f32) -> f32 = grad(square, wrt=x)(x)\n\
          out = dsquare(2.0)\n",
     );
 
@@ -2336,7 +2336,7 @@ fn build_c_scalar_grad_recursive_callee_fails_closed() {
     write_file(
         &path,
         "def f(x: f32) -> f32 = mul(x, f(x))\n\
-         def df(x: f32) -> f32 = grad(f, wrt=(x))(x)\n\
+         def df(x: f32) -> f32 = grad(f, wrt=x)(x)\n\
          out = df(cast(2.0, f32))\n",
     );
 
@@ -2374,7 +2374,7 @@ fn build_c_scalar_grad_block_body_builds_and_is_numerically_correct() {
          \x20 y = mul(x, x)\n\
          \x20 add(y, x)\n\
          }\n\
-         def dh(x: f32) -> f32 = grad(h, wrt=(x))(x)\n\
+         def dh(x: f32) -> f32 = grad(h, wrt=x)(x)\n\
          out = dh(3.0)\n",
     );
     // d/dx(x^2 + x) at x = 3.0 is 2*3 + 1 = 7.0.
@@ -2401,7 +2401,7 @@ fn build_c_scalar_grad_through_user_defined_call_is_numerically_correct() {
         "scalar_grad_usercall",
         "def inner(x: f32) -> f32 = mul(x, x)\n\
          def outer(x: f32) -> f32 = add(inner(x), x)\n\
-         def douter(x: f32) -> f32 = grad(outer, wrt=(x))(x)\n\
+         def douter(x: f32) -> f32 = grad(outer, wrt=x)(x)\n\
          out = douter(3.0)\n",
     );
     assert!(
@@ -2422,7 +2422,7 @@ fn build_c_scalar_grad_through_user_defined_call_is_numerically_correct() {
 fn build_c_scalar_grad_black_scholes_greeks_are_numerically_correct() {
     const PRELUDE: &str = "def normal_cdf(x: f32) -> f32 = {\n\
          \x20 k = div(1.0, add(1.0, mul(0.2316419, x)))\n\
-         \x20 poly = mul(k, add(0.319381530, mul(k, sub(0.356563782, mul(k, add(1.781477937, mul(k, sub(-1.821255978, mul(k, 1.330274429)))))))))\n\
+         \x20 poly = mul(k, add(0.31938153, mul(k, sub(0.356563782, mul(k, add(1.781477937, mul(k, sub(-1.821255978, mul(k, 1.330274429)))))))))\n\
          \x20 pdf = mul(0.3989422804014327, exp(neg(div(mul(x, x), 2.0))))\n\
          \x20 sub(1.0, mul(pdf, poly))\n\
          }\n\
@@ -2719,7 +2719,7 @@ fn build_c_grad_locally_bound_alias_form_matches_inline_form_output() {
 }
 
 /// Regression test for the Coral UPSTREAM_BUGS.md pattern:
-/// `grad(loss, wrt=(x))(theta, x)` differentiates w.r.t. the second argument.
+/// `grad(loss, wrt=x)(theta, x)` differentiates w.r.t. the second argument.
 /// Verifies: build exits 0, generated C compiles, and grad of sum(theta*x) w.r.t. x equals theta.
 #[test]
 fn build_c_grad_named_fn_wrt_second_param_is_numerically_correct() {
@@ -2730,7 +2730,7 @@ fn build_c_grad_named_fn_wrt_second_param_is_numerically_correct() {
         &path,
         "def loss(theta: tensor[2, f32], x: tensor[2, f32]) -> tensor[f32] =\n\
            sum(mul(theta, x), 0)\n\
-         out = grad(loss, wrt=(x))(to_tensor([1.0, 2.0]), to_tensor([3.0, 4.0]))\n",
+         out = grad(loss, wrt=x)(to_tensor([1.0, 2.0]), to_tensor([3.0, 4.0]))\n",
     );
 
     Command::cargo_bin("chelis")
@@ -4368,7 +4368,7 @@ fn fmt_rejects_check_and_inplace_together() {
 }
 
 #[test]
-fn surf_default_collapses_load_program_into_typed_def() {
+fn surf_default_preserves_top_level_value_bindings() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("forward.ch");
     write_matmul_program(&path);
@@ -4379,11 +4379,11 @@ fn surf_default_collapses_load_program_into_typed_def() {
         .args(["surf", path.to_str().unwrap()])
         .assert()
         .success()
+        .stdout(predicate::str::contains("a = (a : tensor[2, 3, f32])"))
         .stdout(predicate::str::contains(
-            "def forward(a: tensor[2, 3, f32], b: tensor[3, 4, f32]) -> tensor[2, 4, f32] =",
+            "out = (matmul(a, b) : tensor[2, 4, f32])",
         ))
-        .stdout(predicate::str::contains("matmul(a, b)"))
-        .stdout(predicate::str::contains("a =").not());
+        .stdout(predicate::str::contains("def forward").not());
 }
 
 #[test]
@@ -4405,12 +4405,12 @@ fn surf_verbose_preserves_debug_style_annotations() {
 }
 
 #[test]
-fn surf_roundtrip_canonicalizes_def_return_types_to_arrow() {
+fn surf_roundtrip_preserves_canonical_def_return_types() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("typed.ch");
     write_file(
         &path,
-        "def f(x: tensor[n, f32]): tensor[n, f32] = relu(x)\n",
+        "def f(x: tensor[n, f32]) -> tensor[n, f32] = relu(x)\n",
     );
 
     Command::cargo_bin("chelis")
@@ -4420,7 +4420,7 @@ fn surf_roundtrip_canonicalizes_def_return_types_to_arrow() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "def f(x: tensor[n, f32]) -> tensor[n, f32] =",
+            "def f[n](x: tensor[n, f32]) -> tensor[n, f32] =",
         ))
         .stdout(predicate::str::contains("sig f").not());
 }
@@ -4927,7 +4927,7 @@ fn build_hip_accepts_symbolic_dims_and_binds_them_from_input_metadata() {
     let out_dir = dir.path().join("hip-out");
     write_file(
         &path,
-        "def f(xs: tensor[batch, features, f32]): tensor[batch, features, f32] = xs\n",
+        "def f(xs: tensor[batch, features, f32]) -> tensor[batch, features, f32] = xs\n",
     );
 
     Command::cargo_bin("chelis")
@@ -5430,7 +5430,7 @@ fn check_reports_linearity_errors() {
     let path = dir.path().join("linearity.ch");
     write_file(
         &path,
-        "def bad(x: tensor[4, f32]): tensor[4, f32] = {\n  y: tensor[4, f32] = realize(x)\n  add(x, y)\n}\n",
+        "def bad(x: tensor[4, f32]) -> tensor[4, f32] = {\n  y: tensor[4, f32] = realize(x)\n  add(x, y)\n}\n",
     );
 
     let json = run_json_check(&path);
@@ -5452,7 +5452,7 @@ fn check_reports_macro_provenance_for_type_errors() {
         &path,
         r#"
 macro bad_bool(x) = and(x, x)
-def bad(x: tensor[4, f32]): tensor[4, f32] = bad_bool(x)
+def bad(x: tensor[4, f32]) -> tensor[4, f32] = bad_bool(x)
 "#,
     );
 
@@ -5473,7 +5473,7 @@ fn check_reports_macro_provenance_for_linearity_errors() {
         &path,
         r#"
 macro dup_relu(x) = add(realize(x), x)
-def bad(x: tensor[4, f32]): tensor[4, f32] = dup_relu(x)
+def bad(x: tensor[4, f32]) -> tensor[4, f32] = dup_relu(x)
 "#,
     );
 
@@ -5493,7 +5493,7 @@ fn check_reports_match_linearity_without_old_ir_rejection() {
     let path = dir.path().join("match_linearity.ch");
     write_file(
         &path,
-        r#"def bad(pair: (tensor[4, f32], int32)): int32 = {
+        r#"def bad(pair: (tensor[4, f32], int32)) -> int32 = {
   n: int32 = match pair with {
     | (x, _) => 1
   }
@@ -5527,7 +5527,7 @@ fn deep_expands_macros_and_emits_provenance() {
         &path,
         r#"
 macro relu_ref(x) = max_elem(x, 0.0)
-def f(x: tensor[4, f32]): tensor[4, f32] = relu_ref(x)
+def f(x: tensor[4, f32]) -> tensor[4, f32] = relu_ref(x)
 "#,
     );
 
@@ -5555,7 +5555,7 @@ fn fmt_preserves_macro_syntax() {
         &path,
         r#"
 macro keep(x)=x
-def f(x: tensor[4, f32]): tensor[4, f32] = keep(x)
+def f(x: tensor[4, f32]) -> tensor[4, f32] = keep(x)
 "#,
     );
 
@@ -5580,7 +5580,7 @@ fn validate_desugar_accepts_macro_program() {
         &path,
         r#"
 macro relu_ref(x) = max_elem(x, 0.0)
-def f(x: tensor[4, f32]): tensor[4, f32] = relu_ref(x)
+def f(x: tensor[4, f32]) -> tensor[4, f32] = relu_ref(x)
 "#,
     );
 
@@ -5965,12 +5965,12 @@ fn validate_surf_rejects_malformed_operator_chain() {
 }
 
 #[test]
-fn validate_surf_accepts_semicolon_block_and_axis_identifier() {
+fn validate_surf_accepts_newline_block_and_axis_identifier() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("ok.ch");
     write_file(
         &path,
-        "def f(axis) = { y = axis; y }\ndef g() = par { a; b }\n",
+        "def f(axis) = {\n  y = axis\n  y\n}\ndef g() = par { a; b }\n",
     );
 
     Command::cargo_bin("chelis")
@@ -6537,7 +6537,7 @@ def relu_apply(x: tensor[5, f32]) -> tensor[5, f32] = relu(x)
 input = to_tensor([cast(1.0, f32), cast(-2.0, f32), cast(0.0, f32), cast(3.5, f32), cast(-0.5, f32)])
 actual = relu_apply(input)
 expected = to_tensor([cast(1.0, f32), cast(0.0, f32), cast(0.0, f32), cast(3.5, f32), cast(0.0, f32)])
-ok = test_assert_close_tensor(actual, expected, 0.000001, "relu pointwise")
+ok = test_assert_close_tensor(actual, expected, 1e-6, "relu pointwise")
 "#,
     );
 }
@@ -6556,7 +6556,7 @@ def relu_apply(x: tensor[3, f32]) -> tensor[3, f32] = relu(x)
 input = to_tensor([cast(1.0, f32), cast(-2.0, f32), cast(3.0, f32)])
 actual = relu_apply(input)
 wrong = to_tensor([cast(1.0, f32), cast(99.0, f32), cast(3.0, f32)])
-ok = test_assert_close_tensor(actual, wrong, 0.000001, "relu wrong")
+ok = test_assert_close_tensor(actual, wrong, 1e-6, "relu wrong")
 "#,
     );
 
@@ -6656,7 +6656,7 @@ def sqrt_apply(x: tensor[3, f32]) -> tensor[3, f32] = sqrt(x)
 input = to_tensor([cast(4.0, f32), cast(9.0, f32), cast(16.0, f32)])
 actual = sqrt_apply(input)
 expected = to_tensor([cast(2.0, f32), cast(3.0, f32), cast(4.0, f32)])
-ok = test_assert_close_tensor(actual, expected, 0.000001, "sqrt pointwise")
+ok = test_assert_close_tensor(actual, expected, 1e-6, "sqrt pointwise")
 "#,
     );
 }
@@ -8224,9 +8224,7 @@ fn build_c_mnist_loss_tail_tensor_pipeline_compiles_object() {
     let out_dir = dir.path().join("out");
     write_file(
         &src,
-        r#"def loss_tail(logits: tensor[2, 3, f32], labels: tensor[2, 3, f32]) -> tensor[f32] = {
-  softmax(logits, 1) |> log |> mul(labels) |> sum(1) |> neg |> mean(0)
-}
+        r#"def loss_tail(logits: tensor[2, 3, f32], labels: tensor[2, 3, f32]) -> tensor[f32] = softmax(logits, 1) |> log |> mul(labels) |> sum(1) |> neg |> mean(0)
 logits = to_tensor([[cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)], [cast(0.5, f32), cast(1.5, f32), cast(2.5, f32)]])
 labels = to_tensor([[cast(0.0, f32), cast(0.0, f32), cast(1.0, f32)], [cast(1.0, f32), cast(0.0, f32), cast(0.0, f32)]])
 loss_value = loss_tail(logits, labels)
@@ -8472,7 +8470,7 @@ fn build_c_polymorphic_top_level_tensor_dims_are_declared() {
     write_file(
         &path,
         "def quadratic[n](theta: tensor[n, f32]) -> tensor[f32] = sum(mul(copy(theta), theta), 0)\n\
-         g: tensor[n, f32] = grad(quadratic, wrt=(theta))(to_tensor([1.0, 2.0, 3.0]))\n",
+         g: tensor[n, f32] = grad(quadratic, wrt=theta)(to_tensor([1.0, 2.0, 3.0]))\n",
     );
 
     Command::cargo_bin("chelis")

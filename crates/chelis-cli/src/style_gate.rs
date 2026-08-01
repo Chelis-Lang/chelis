@@ -23,7 +23,7 @@ use std::process::Command;
 /// against, probing from `probe_dir`.
 ///
 /// Exception patterns in [`exceptions`] are authored workspace-root
-/// relative (e.g. `crates/chelis-surf/tests/fixtures/*.ch`), so
+/// relative (e.g. `crates/chelisup/bootstrap/chelisup.sh`), so
 /// exception matching must strip the workspace-root prefix from each
 /// violation's absolute path. The workspace root is detected with
 /// `cargo locate-project --workspace --message-format plain` run with
@@ -93,15 +93,6 @@ pub fn detect_lint_workspace_root(probe_dir: &Path) -> Result<PathBuf, String> {
 /// inside the rule itself (it short-circuits when the source declares
 /// `module Std.Test`) and does not need a path-glob entry here.
 ///
-/// `crates/chelis-surf/tests/fixtures/*.ch`: the Surf parser test
-/// corpus deliberately exercises legacy syntactic shapes — including
-/// the `def name(...) : T = ...` colon form — to verify the parser
-/// still accepts them so existing files compile after `chelis fmt`
-/// rewrites them to canonical arrow form. Renaming or rewriting
-/// these fixtures would defeat their purpose. §3.5 explicitly notes
-/// the formatter rewrites colon to arrow, which is what the parser
-/// must still accept on input.
-///
 /// `crates/chelisup/bootstrap/chelisup.sh`: the single shell carve-out
 /// to the `no-shell-scripts` rule (§2.9). The chelisup bootstrap
 /// one-liner runs on a bare machine before any chelis, cargo, or Python
@@ -109,18 +100,11 @@ pub fn detect_lint_workspace_root(probe_dir: &Path) -> Result<PathBuf, String> {
 /// shellcheck-clean, and test-covered. Every other script remains
 /// Python.
 pub fn exceptions() -> Vec<Exception> {
-    vec![
-        Exception {
-            pattern: "crates/chelis-surf/tests/fixtures/*.ch".to_string(),
-            rule_id: "surf-def-arrow-form".to_string(),
-            cross_ref: "§3.5".to_string(),
-        },
-        Exception {
-            pattern: "crates/chelisup/bootstrap/chelisup.sh".to_string(),
-            rule_id: "no-shell-scripts".to_string(),
-            cross_ref: "§2.9".to_string(),
-        },
-    ]
+    vec![Exception {
+        pattern: "crates/chelisup/bootstrap/chelisup.sh".to_string(),
+        rule_id: "no-shell-scripts".to_string(),
+        cross_ref: "§2.9".to_string(),
+    }]
 }
 
 /// Outcome of one style-gate run on one file.
@@ -288,7 +272,7 @@ fn run_lint_for_single_file(file: &Path) -> Vec<Violation> {
     // no workspace-rooted exception glob can legitimately apply. The
     // raw violations pass through unfiltered: that is the correct
     // behavior (a file outside the workspace is not, e.g.,
-    // `crates/chelis-surf/tests/fixtures/*.ch`), not a second
+    // `crates/chelisup/bootstrap/chelisup.sh`), not a second
     // detection mechanism with different semantics.
     let probe_dir = file
         .parent()

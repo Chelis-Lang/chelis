@@ -111,10 +111,10 @@ def caller(y: int64) -> int64 = emit(y)
 #[test]
 fn parity_library_test_helper_called_from_snippet() {
     let library = r#"
-def lib_check() -> unit = test_assert(true, "lib")
+def lib_check() -> () = test_assert(true, "lib")
 "#;
     let snippet = r#"
-def my_test() -> unit = lib_check()
+def my_test() -> () = lib_check()
 "#;
 
     let (typeenv, lib_checked) = build_library_pair(library);
@@ -138,10 +138,10 @@ def my_test() -> unit = lib_check()
 #[test]
 fn parity_declared_empty_eff_snippet_rejects_test_effect_from_library() {
     let library = r#"
-def lib_check() -> unit = test_assert(true, "lib")
+def lib_check() -> () = test_assert(true, "lib")
 "#;
     let snippet = r#"
-def leak() -> unit ! {} = lib_check()
+def leak() -> () ! {} = lib_check()
 "#;
 
     let (typeenv, lib_checked) = build_library_pair(library);
@@ -183,20 +183,20 @@ fn parity_random_lib_helper_under_test_context_composes_both_effects() {
 def lib_drop(x: tensor[8, f32]) -> tensor[8, f32] = dropout(x, 0.5)
 "#;
     let snippet_ok = r#"
-def use_drop(t: tensor[8, f32]) -> unit ! {Random, Test} =
+def use_drop(t: tensor[8, f32]) -> () ! {Random, Test} =
   test_assert(true, "before-drop")
 "#;
     // Note: Surf doesn't easily let me thread `lib_drop` into the body and
     // discard, so the snippet uses test_assert + a separate stmt is awkward.
     // Use a let-binding form instead.
     let snippet_ok2 = r#"
-def use_drop(t: tensor[8, f32]) -> unit ! {Random, Test} = {
+def use_drop(t: tensor[8, f32]) -> () ! {Random, Test} = {
   y = lib_drop(t)
   test_assert(true, "after-drop")
 }
 "#;
     let snippet_bad = r#"
-def use_drop(t: tensor[8, f32]) -> unit ! {Test} = {
+def use_drop(t: tensor[8, f32]) -> () ! {Test} = {
   y = lib_drop(t)
   test_assert(true, "after-drop")
 }
@@ -276,10 +276,10 @@ def my_loader(p: string) -> string ! {} = lib_load(p)
 #[test]
 fn new_code_inherits_test_via_library_wrapper() {
     let library = r#"
-def lib_assert_eq(a: int64, b: int64) -> unit = test_assert_eq_int(a, b, "lib_assert_eq")
+def lib_assert_eq(a: int64, b: int64) -> () = test_assert_eq_int(a, b, "lib_assert_eq")
 "#;
     let snippet = r#"
-def my_check(x: int64) -> unit = lib_assert_eq(x, cast(1, int64))
+def my_check(x: int64) -> () = lib_assert_eq(x, cast(1, int64))
 "#;
 
     let (typeenv, lib_checked) = build_library_pair(library);
@@ -295,7 +295,7 @@ def my_check(x: int64) -> unit = lib_assert_eq(x, cast(1, int64))
 
     // Negative parity: declaring `! {}` must reject.
     let bad_snippet = r#"
-def my_check(x: int64) -> unit ! {} = lib_assert_eq(x, cast(1, int64))
+def my_check(x: int64) -> () ! {} = lib_assert_eq(x, cast(1, int64))
 "#;
     let new_bad = build_new_code_checked(&typeenv, bad_snippet);
     let errors = check_effects_with_context(&lib_checked, &new_bad)
@@ -325,7 +325,7 @@ fn no_leak_snippet_a_effects_do_not_persist_into_snippet_b() {
 def lib_id(x: int64) -> int64 = x
 "#;
     let snippet_a = r#"
-def stamp() -> unit ! {Test} = test_assert(true, "snippet-a")
+def stamp() -> () ! {Test} = test_assert(true, "snippet-a")
 def call_a(y: int64) -> int64 = lib_id(y)
 "#;
     let snippet_b = r#"
@@ -376,7 +376,7 @@ def call_b(z: int64) -> int64 = lib_id(z)
     // coerced a value to the `unit` return type. Casting to `unit` (a
     // non-primitive) is not a spec-defined cast; on the pre-Phase-2 tree it
     // returned a SILENT `Type::Error` that unified permissively with the
-    // declared `-> unit`, so the def type-checked only via that hole. The hole
+    // declared `-> ()`, so the def type-checked only via that hole. The hole
     // is now closed (the cast is rejected at check), so this probe uses a pure,
     // validly-typed `int64` body instead -- the effect-leak isolation it
     // exercises is unchanged (a pure new-code `stamp` declared `! {}` must be
@@ -401,7 +401,7 @@ def lib_id(x: int64) -> int64 = x
     let (typeenv, lib_checked) = build_library_pair(library);
 
     let effectful_snippet = r#"
-def loud() -> unit ! {Test} = test_assert(true, "loud")
+def loud() -> () ! {Test} = test_assert(true, "loud")
 "#;
     let pure_snippet = r#"
 def quiet(z: int64) -> int64 = lib_id(z)
@@ -434,10 +434,10 @@ def quiet(z: int64) -> int64 = lib_id(z)
 #[test]
 fn error_messages_reference_new_code_names_not_library() {
     let library = r#"
-def lib_check() -> unit = test_assert(true, "lib")
+def lib_check() -> () = test_assert(true, "lib")
 "#;
     let snippet = r#"
-def leak() -> unit ! {} = lib_check()
+def leak() -> () ! {} = lib_check()
 "#;
 
     let (typeenv, lib_checked) = build_library_pair(library);
@@ -489,10 +489,10 @@ def caller(y: int64) -> int64 = emit(y)
 fn snippet_composing_two_library_helpers_picks_up_both_effects() {
     let library = r#"
 def lib_emit(x: int64) -> int64 = debug(x)
-def lib_assert(a: int64, b: int64) -> unit = test_assert_eq_int(a, b, "lib_assert")
+def lib_assert(a: int64, b: int64) -> () = test_assert_eq_int(a, b, "lib_assert")
 "#;
     let snippet = r#"
-def my_op(x: int64) -> unit ! {IO, Test} = {
+def my_op(x: int64) -> () ! {IO, Test} = {
   _y = lib_emit(x)
   lib_assert(x, x)
 }

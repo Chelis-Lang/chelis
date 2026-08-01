@@ -70,7 +70,7 @@ fn library_fixture() -> (TempDir, PathBuf) {
     fs::write(root.join("reef.toml"), app_reef_toml()).expect("write app reef.toml");
     fs::write(
         root.join("src/main.ch"),
-        "module App.Main\n\ndef placeholder -> int32 = cast(0, int32)\n",
+        "module App.Main\n\ndef placeholder() -> int32 = cast(0, int32)\n",
     )
     .expect("write main.ch");
 
@@ -107,7 +107,7 @@ fn collect_named_roots_json(roots: &[EvaluatedRoot], names: &[&str]) -> BTreeMap
 }
 
 const SNIPPET: &str =
-    "module App.Eval\nimport Mylib.Math (add)\n\ndef main_value -> int32 = add(3, 4)\n";
+    "module App.Eval\nimport Mylib.Math (add)\n\ndef main_value() -> int32 = add(3, 4)\n";
 
 // ---- (a) cold-build-then-load round-trip ----------------------------------
 
@@ -143,7 +143,7 @@ fn cold_build_then_load_round_trips_eval_result() {
         "eval_in_context on a freshly-loaded cache must match the pre-save eval"
     );
     // Strengthening: pre and post root counts must match. We can't
-    // unconditionally require non-empty roots — `def name -> int32 = ...`
+    // unconditionally require non-empty roots — `def name() -> int32 = ...`
     // is a 0-arg fn under desugar and the runtime treats it as a tensor-
     // unlowerable root in some paths (see Phase G's comment in
     // `eval_many_in_context_per_root_isolation_matches_independent_calls`)
@@ -420,7 +420,7 @@ fn library_fixture_alt() -> (TempDir, PathBuf) {
     fs::write(root.join("reef.toml"), app_reef_toml()).expect("write app reef.toml alt");
     fs::write(
         root.join("src/main.ch"),
-        "module App.Main\n\ndef placeholder_alt -> int32 = cast(1, int32)\n",
+        "module App.Main\n\ndef placeholder_alt() -> int32 = cast(1, int32)\n",
     )
     .expect("write main.ch alt");
 

@@ -381,10 +381,10 @@ module Foo.Tests.Core
 import Foo.Core (double)
 import Std.Test (assert_eq, assert_close)
 
-def test_double_zero() -> unit ! { Test } =
+def test_double_zero() -> () ! { Test } =
   assert_eq(double(cast(0.0, f32)), cast(0.0, f32), "double(0) = 0")
 
-def test_double_small() -> unit ! { Test } =
+def test_double_small() -> () ! { Test } =
   assert_close(double(cast(1.5, f32)), cast(3.0, f32), 1e-6, "double(1.5) ~ 3.0")
 ```
 

@@ -1,1 +1,1 @@
-def f(x: f32): f32 = x
+def f(x: f32) -> f32 = x

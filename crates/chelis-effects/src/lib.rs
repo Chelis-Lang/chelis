@@ -1486,7 +1486,7 @@ pure_value = add(cast(1, int64), cast(2, int64))
         // A top-level def whose body calls test_assert should acquire Effect::Test.
         let program = surf_checked(
             r#"
-def my_check() -> unit = test_assert(true, "ok")
+def my_check() -> () = test_assert(true, "ok")
 "#,
         );
         let (inferred, _) = infer_program_effects(program.annotated_exprs());
@@ -1503,7 +1503,7 @@ def my_check() -> unit = test_assert(true, "ok")
     fn test_assert_close_tensor_propagates_test_effect() {
         let program = surf_checked(
             r#"
-def close() -> unit =
+def close() -> () =
   test_assert_close_tensor(
     to_tensor([1.0, 2.0]),
     to_tensor([1.0, 2.0]),
@@ -1526,8 +1526,8 @@ def close() -> unit =
     fn test_effect_propagates_transitively_through_calls() {
         let program = surf_checked(
             r#"
-def inner() -> unit = test_assert(true, "inner")
-def outer() -> unit = inner()
+def inner() -> () = test_assert(true, "inner")
+def outer() -> () = inner()
 "#,
         );
         let (inferred, _) = infer_program_effects(program.annotated_exprs());
@@ -1545,7 +1545,7 @@ def outer() -> unit = inner()
         // `with seed(...)` must remove Random, but must NOT remove Test.
         let program = surf_checked(
             r#"
-def sealed() -> unit =
+def sealed() -> () =
   with seed(7i64) { test_assert(true, "inside-handler") }
 "#,
         );
@@ -1561,11 +1561,11 @@ def sealed() -> unit =
 
     #[test]
     fn empty_effect_sig_rejects_test_assert_caller() {
-        // `def g() -> unit ! {} = test_assert(...)` should fail: body inferred Test,
+        // `def g() -> () ! {} = test_assert(...)` should fail: body inferred Test,
         // sig declares no effects.
         let decls = parse_surf(
             r#"
-def g() -> unit ! {} = test_assert(true, "leak")
+def g() -> () ! {} = test_assert(true, "leak")
 "#,
         )
         .expect("surf parse");
@@ -1587,8 +1587,8 @@ def g() -> unit ! {} = test_assert(true, "leak")
         // The `! {}` signature on g must still reject this.
         let decls = parse_surf(
             r#"
-def f() -> unit = test_assert(true, "x")
-def g() -> unit ! {} = f()
+def f() -> () = test_assert(true, "x")
+def g() -> () ! {} = f()
 "#,
         )
         .expect("surf parse");
@@ -1611,7 +1611,7 @@ def g() -> unit ! {} = f()
         // When the caller honestly declares `! { Test }`, no error.
         let decls = parse_surf(
             r#"
-def test_ok() -> unit ! {Test} = test_assert(true, "ok")
+def test_ok() -> () ! {Test} = test_assert(true, "ok")
 "#,
         )
         .expect("surf parse");
@@ -1627,7 +1627,7 @@ def test_ok() -> unit ! {Test} = test_assert(true, "ok")
         // systems are orthogonal axes of the effect row.
         let decls = parse_surf(
             r#"
-def leak() -> unit ! {IO} = test_assert(true, "sneak")
+def leak() -> () ! {IO} = test_assert(true, "sneak")
 "#,
         )
         .expect("surf parse");

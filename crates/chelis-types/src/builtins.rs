@@ -1673,7 +1673,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         },
     );
     {
-        // test_assert_close_tensor: (tensor a, tensor a, f32, string) -> unit
+        // test_assert_close_tensor: (tensor a, tensor a, f32, string) -> ()
         let tensor_tv = vg.fresh_tvar();
         env.bind(
             "test_assert_close_tensor".to_string(),
@@ -1694,7 +1694,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         );
     }
     {
-        // test_assert_eq_tensor_int64: (tensor a, tensor a, string) -> unit
+        // test_assert_eq_tensor_int64: (tensor a, tensor a, string) -> ()
         // Bit-exact comparison; the Std.Test wrapper restricts a to int64.
         let tensor_tv = vg.fresh_tvar();
         env.bind(

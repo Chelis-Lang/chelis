@@ -81,7 +81,7 @@ fn check_clean_reef_program_yields_score_one_and_empty_errors() {
         &app_pkg.join("src/main.ch"),
         r#"module Demo.Main
 
-def answer -> int32 = cast(7, int32)
+def answer() -> int32 = cast(7, int32)
 "#,
     );
 
@@ -124,7 +124,7 @@ fn check_type_error_reef_program_yields_lower_score_and_kept_shape() {
         &app_pkg.join("src/main.ch"),
         r#"module Demo.Main
 
-def broken -> int32 = add(1, true)
+def broken() -> int32 = add(1, true)
 "#,
     );
 
@@ -179,7 +179,7 @@ fn check_effect_error_reef_program_yields_lower_score_and_kept_shape() {
 
 import Std.Test (assert_true)
 
-def broken(c: bool) -> unit ! {} = assert_true(c, "expect ok")
+def broken(c: bool) -> () ! {} = assert_true(c, "expect ok")
 "#,
     );
 
@@ -234,7 +234,7 @@ fn check_non_reef_file_uses_legacy_path_and_returns_score_one() {
     let raw = dir.path().join("raw_program.ch");
     std::fs::write(
         &raw,
-        r#"def answer -> int32 = cast(7, int32)
+        r#"def answer() -> int32 = cast(7, int32)
 "#,
     )
     .expect("write raw");

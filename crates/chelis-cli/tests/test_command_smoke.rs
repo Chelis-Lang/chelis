@@ -38,7 +38,7 @@ module_prefix = "Smoke"
     // Reef requires at least one source file to resolve a module graph.
     write_file(
         &pkg.join("src/main.ch"),
-        "module Smoke.Main\n\ndef noop() -> unit = test_assert(true, \"noop\")\n",
+        "module Smoke.Main\n\ndef noop() -> () = test_assert(true, \"noop\")\n",
     );
     (dir, pkg)
 }
@@ -50,7 +50,7 @@ fn chelis_test_passing_file_exits_zero() {
         &pkg.join("tests/pass.ch"),
         r#"module Smoke.Tests.Pass
 
-def test_ok() -> unit = test_assert(true, "ok")
+def test_ok() -> () = test_assert(true, "ok")
 "#,
     );
     Command::cargo_bin("chelis")
@@ -72,7 +72,7 @@ fn chelis_test_failing_file_exits_one_with_message() {
         &pkg.join("tests/fail.ch"),
         r#"module Smoke.Tests.Fail
 
-def test_bad() -> unit = test_assert(false, "boom")
+def test_bad() -> () = test_assert(false, "boom")
 "#,
     );
     Command::cargo_bin("chelis")
@@ -107,7 +107,7 @@ def choose(s: Sign) -> f32 = match s with {
 
 def pipe_choose(s: Sign) -> f32 = s |> choose
 
-def test_pipe_choose() -> unit = test_assert(pipe_choose(Pos) == cast(1.0, f32), "pipe choose")
+def test_pipe_choose() -> () = test_assert(pipe_choose(Pos) == cast(1.0, f32), "pipe choose")
 "#,
     );
 
@@ -132,9 +132,9 @@ fn chelis_test_filter_narrows_selection() {
         &pkg.join("tests/many.ch"),
         r#"module Smoke.Tests.Many
 
-def test_alpha() -> unit = test_assert(true, "a")
-def test_beta() -> unit = test_assert(false, "b failed")
-def test_gamma() -> unit = test_assert(true, "c")
+def test_alpha() -> () = test_assert(true, "a")
+def test_beta() -> () = test_assert(false, "b failed")
+def test_gamma() -> () = test_assert(true, "c")
 "#,
     );
 
@@ -171,8 +171,8 @@ fn chelis_test_json_emits_ndjson_records() {
         &pkg.join("tests/mixed.ch"),
         r#"module Smoke.Tests.Mixed
 
-def test_one() -> unit = test_assert(true, "one")
-def test_two() -> unit = test_assert(false, "two broken")
+def test_one() -> () = test_assert(true, "one")
+def test_two() -> () = test_assert(false, "two broken")
 "#,
     );
     let output = Command::cargo_bin("chelis")
@@ -220,14 +220,14 @@ fn chelis_test_jobs_emits_json_in_discovery_order() {
         &pkg.join("tests/a_first.ch"),
         r#"module Smoke.Tests.First
 
-def test_first() -> unit = test_assert(true, "first")
+def test_first() -> () = test_assert(true, "first")
 "#,
     );
     write_file(
         &pkg.join("tests/b_second.ch"),
         r#"module Smoke.Tests.Second
 
-def test_second() -> unit = test_assert(true, "second")
+def test_second() -> () = test_assert(true, "second")
 "#,
     );
 
@@ -262,14 +262,14 @@ fn chelis_test_auto_batch_preserves_two_file_ndjson_order() {
         &pkg.join("tests/a_first.ch"),
         r#"module Smoke.Tests.BatchFirst
 
-def test_first() -> unit = test_assert(true, "first")
+def test_first() -> () = test_assert(true, "first")
 "#,
     );
     write_file(
         &pkg.join("tests/b_second.ch"),
         r#"module Smoke.Tests.BatchSecond
 
-def test_second() -> unit = test_assert(true, "second")
+def test_second() -> () = test_assert(true, "second")
 "#,
     );
 
@@ -306,7 +306,7 @@ fn chelis_test_batch_mode_file_keeps_per_file_output_shape() {
         &pkg.join("tests/pass.ch"),
         r#"module Smoke.Tests.BatchFileMode
 
-def test_ok() -> unit = test_assert(true, "ok")
+def test_ok() -> () = test_assert(true, "ok")
 "#,
     );
 
@@ -331,14 +331,14 @@ fn chelis_test_auto_batch_compile_error_falls_back_to_file_rows() {
 
 import Missing.Module (ghost)
 
-def test_broken() -> unit = test_assert(true, "unreachable")
+def test_broken() -> () = test_assert(true, "unreachable")
 "#,
     );
     write_file(
         &pkg.join("tests/b_ok.ch"),
         r#"module Smoke.Tests.BatchOk
 
-def test_ok() -> unit = test_assert(true, "ok")
+def test_ok() -> () = test_assert(true, "ok")
 "#,
     );
 
@@ -375,14 +375,14 @@ fn chelis_test_auto_batch_name_collision_uses_file_isolation() {
         &pkg.join("tests/a_first.ch"),
         r#"module Smoke.Tests.CollisionFirst
 
-def test_same() -> unit = test_assert(true, "first")
+def test_same() -> () = test_assert(true, "first")
 "#,
     );
     write_file(
         &pkg.join("tests/b_second.ch"),
         r#"module Smoke.Tests.CollisionSecond
 
-def test_same() -> unit = test_assert(true, "second")
+def test_same() -> () = test_assert(true, "second")
 "#,
     );
 
@@ -420,14 +420,14 @@ fn chelis_test_auto_batch_skips_module_init_files() {
 
 _init_failure = test_assert(false, "module init failed in fallback")
 
-def test_one() -> unit = test_assert(true, "would pass")
+def test_one() -> () = test_assert(true, "would pass")
 "#,
     );
     write_file(
         &pkg.join("tests/ok.ch"),
         r#"module Smoke.Tests.BatchInitOk
 
-def test_ok() -> unit = test_assert(true, "ok")
+def test_ok() -> () = test_assert(true, "ok")
 "#,
     );
 
@@ -461,14 +461,14 @@ fn chelis_test_auto_batch_worker_abort_falls_back_to_file_workers() {
         &pkg.join("tests/a_first.ch"),
         r#"module Smoke.Tests.BatchAbortFirst
 
-def test_first() -> unit = test_assert(true, "first")
+def test_first() -> () = test_assert(true, "first")
 "#,
     );
     write_file(
         &pkg.join("tests/b_second.ch"),
         r#"module Smoke.Tests.BatchAbortSecond
 
-def test_second() -> unit = test_assert(true, "second")
+def test_second() -> () = test_assert(true, "second")
 "#,
     );
 
@@ -505,7 +505,7 @@ fn chelis_test_rejects_zero_jobs() {
         &pkg.join("tests/pass.ch"),
         r#"module Smoke.Tests.Pass
 
-def test_ok() -> unit = test_assert(true, "ok")
+def test_ok() -> () = test_assert(true, "ok")
 "#,
     );
 
@@ -544,7 +544,7 @@ fn chelis_test_non_reef_context_exits_two() {
     fs::create_dir_all(&tests).expect("mkdir tests");
     write_file(
         &tests.join("empty.ch"),
-        "def test_nothing() -> unit = test_assert(true, \"noop\")\n",
+        "def test_nothing() -> () = test_assert(true, \"noop\")\n",
     );
     Command::cargo_bin("chelis")
         .expect("binary")
@@ -587,7 +587,7 @@ fn chelis_test_hidden_dotfile_is_skipped() {
         &pkg.join("tests/.secret.ch"),
         r#"module Smoke.Tests.Hidden
 
-def test_should_not_run() -> unit = test_assert(false, "hidden should be skipped")
+def test_should_not_run() -> () = test_assert(false, "hidden should be skipped")
 "#,
     );
     // A real test file alongside the dotfile so we still have something to run.
@@ -595,7 +595,7 @@ def test_should_not_run() -> unit = test_assert(false, "hidden should be skipped
         &pkg.join("tests/visible.ch"),
         r#"module Smoke.Tests.Visible
 
-def test_visible() -> unit = test_assert(true, "ok")
+def test_visible() -> () = test_assert(true, "ok")
 "#,
     );
     Command::cargo_bin("chelis")
@@ -612,18 +612,18 @@ def test_visible() -> unit = test_assert(true, "ok")
 
 #[test]
 fn chelis_test_non_unit_returning_def_is_not_enumerated() {
-    // RT3 H4: `def test_x : bool = true` parses as a zero-param FunDef but
-    // is not a test — it's a typed value binding with non-unit type. The
-    // enumerator must skip it so the real `def test_real() -> unit`
+    // RT3 H4: `def test_x() -> bool = true` is a nullary function but is not
+    // a test because its result is non-unit. The
+    // enumerator must skip it so the real `def test_real() -> ()`
     // alongside it runs and passes.
     let (_dir, pkg) = make_reef_package("phase3t-smoke-non-unit");
     write_file(
         &pkg.join("tests/mixed.ch"),
         r#"module Smoke.Tests.Mixed
 
-def test_x : bool = true
+def test_x() -> bool = true
 
-def test_real() -> unit = test_assert(true, "real test runs")
+def test_real() -> () = test_assert(true, "real test runs")
 "#,
     );
     let output = Command::cargo_bin("chelis")
@@ -675,9 +675,9 @@ fn chelis_test_duplicate_test_name_is_reported_as_file_level_error() {
         &pkg.join("tests/dup.ch"),
         r#"module Smoke.Tests.Dup
 
-def test_foo() -> unit = test_assert(true, "first")
+def test_foo() -> () = test_assert(true, "first")
 
-def test_foo() -> unit = test_assert(false, "second")
+def test_foo() -> () = test_assert(false, "second")
 "#,
     );
     Command::cargo_bin("chelis")
@@ -705,9 +705,9 @@ fn chelis_test_module_level_bad_binding_cascades_briefly() {
 
 _init_failure = test_assert(false, "module init broken")
 
-def test_one() -> unit = test_assert(true, "would have passed 1")
+def test_one() -> () = test_assert(true, "would have passed 1")
 
-def test_two() -> unit = test_assert(true, "would have passed 2")
+def test_two() -> () = test_assert(true, "would have passed 2")
 "#,
     );
     let output = Command::cargo_bin("chelis")
@@ -747,9 +747,9 @@ fn chelis_test_module_init_failure_surfaces_as_module_init_row_and_cascades() {
 
 _sanity = test_assert(false, "module init fails here")
 
-def test_one() -> unit = test_assert(true, "would have passed one")
+def test_one() -> () = test_assert(true, "would have passed one")
 
-def test_two() -> unit = test_assert(true, "would have passed two")
+def test_two() -> () = test_assert(true, "would have passed two")
 "#,
     );
     let output = Command::cargo_bin("chelis")
@@ -800,9 +800,9 @@ fn chelis_test_infinite_recursion_times_out_and_suite_continues() {
 -- recursion with no base case overflows the 32 MB test-worker stack
 -- before the timeout deadline fires). 10_000_000 iterations consistently
 -- exceeds the --timeout 2 budget used below.
-def test_infinite() -> unit = test_assert(eq(fold(fn (acc: int64, x: int64) -> add(acc, x), cast(0, int64), range(cast(0, int64), cast(10000000, int64))), cast(0, int64)), "never")
+def test_infinite() -> () = test_assert(eq(fold(fn (acc: int64, x: int64) -> add(acc, x), cast(0, int64), range(cast(0, int64), cast(10000000, int64))), cast(0, int64)), "never")
 
-def test_quick() -> unit = test_assert(true, "quick")
+def test_quick() -> () = test_assert(true, "quick")
 "#,
     );
     let output = Command::cargo_bin("chelis")
@@ -851,7 +851,7 @@ fn chelis_test_missing_import_is_reported_as_file_level_error() {
 
 import Nonexistent.Module (imaginary_helper)
 
-def test_uses_ghost() -> unit = test_assert(true, "would never compile")
+def test_uses_ghost() -> () = test_assert(true, "would never compile")
 "#,
     );
     // Sibling file that is fine — runner must keep going past the broken
@@ -860,7 +860,7 @@ def test_uses_ghost() -> unit = test_assert(true, "would never compile")
         &pkg.join("tests/ok.ch"),
         r#"module Smoke.Tests.Ok
 
-def test_ok() -> unit = test_assert(true, "ok")
+def test_ok() -> () = test_assert(true, "ok")
 "#,
     );
     let output = Command::cargo_bin("chelis")
@@ -910,7 +910,7 @@ fn chelis_test_resolves_reef_root_from_target_file_path() {
         &pkg.join("tests/pass.ch"),
         r#"module Smoke.Tests.Pass
 
-def test_from_anywhere() -> unit = test_assert(true, "ok")
+def test_from_anywhere() -> () = test_assert(true, "ok")
 "#,
     );
     let test_file = pkg.join("tests/pass.ch");
@@ -941,7 +941,7 @@ fn chelis_test_errors_clearly_when_no_reef_anywhere() {
     let test_file = dir.path().join("orphan.ch");
     write_file(
         &test_file,
-        "module Orphan\n\ndef test_x() -> unit = test_assert(true, \"x\")\n",
+        "module Orphan\n\ndef test_x() -> () = test_assert(true, \"x\")\n",
     );
     let foreign_cwd = std::env::temp_dir();
     let output = Command::cargo_bin("chelis")
@@ -1009,7 +1009,7 @@ fn chelis_test_rejects_reef_mangled_name_forge() {
          \x20 p = Probability { value: x }\n\
          \x20 prob_value(p)\n\
          }\n\
-         def test_forge() -> unit = \
+         def test_forge() -> () = \
          test_assert(pkg__forgepkg__Smoke__Types__forge(0.5) >= 0.0, \"forge\")\n",
     );
     let output = Command::cargo_bin("chelis")
@@ -1044,7 +1044,7 @@ fn chelis_test_legit_opaque_package_test_still_passes() {
         "module Smoke.Tests.Use\n\
          import Smoke.Types (probability, prob_value)\n\
          def round_trip(x: f32) -> f32 = prob_value(probability(x))\n\
-         def test_round_trip() -> unit = test_assert(round_trip(0.5) >= 0.0, \"ok\")\n",
+         def test_round_trip() -> () = test_assert(round_trip(0.5) >= 0.0, \"ok\")\n",
     );
     Command::cargo_bin("chelis")
         .expect("binary")

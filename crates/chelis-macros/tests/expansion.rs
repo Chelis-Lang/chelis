@@ -22,7 +22,7 @@ fn simple_macro_expands_to_base_tags_with_source_metadata() {
     let text = expand_surf(
         r#"
 macro relu_ref(x) = max_elem(x, 0.0)
-def f(x: tensor[4, f32]): tensor[4, f32] = relu_ref(x)
+def f(x: tensor[4, f32]) -> tensor[4, f32] = relu_ref(x)
 "#,
     );
 
@@ -36,7 +36,7 @@ def f(x: tensor[4, f32]): tensor[4, f32] = relu_ref(x)
 fn lexical_binding_blocks_prelude_macro_expansion() {
     let text = expand_surf(
         r#"
-def f(residual, x: tensor[4, f32]): tensor[4, f32] = residual(x)
+def f(residual, x: tensor[4, f32]) -> tensor[4, f32] = residual(x)
 "#,
     );
 
@@ -48,8 +48,11 @@ def f(residual, x: tensor[4, f32]): tensor[4, f32] = residual(x)
 fn hygiene_renames_macro_introduced_binders_only() {
     let decls = parse_str(
         r#"
-macro capture(y) = { x = 1.0; add(x, y) }
-def f(x: f32): f32 = capture(x)
+macro capture(y) = {
+  x = 1.0
+  add(x, y)
+}
+def f(x: f32) -> f32 = capture(x)
 "#,
     )
     .expect("surf parse should succeed");
@@ -66,7 +69,10 @@ fn hygiene_preserves_call_argument_binders() {
     let text = expand_surf(
         r#"
 macro bump(x) = add(x, 1.0)
-def f(y: f32): f32 = bump({ z = y; z })
+def f(y: f32) -> f32 = bump({
+  z = y
+  z
+})
 "#,
     );
 
@@ -81,7 +87,7 @@ def f(y: f32): f32 = bump({ z = y; z })
 fn free_references_survive_hygiene() {
     let text = expand_surf(
         r#"
-def f(batch: int32, x: tensor[batch, hidden, f32], w: tensor[hidden, out_dim, f32], b: tensor[out_dim, f32]): tensor[batch, out_dim, f32] =
+def f(batch: int32, x: tensor[batch, hidden, f32], w: tensor[hidden, out_dim, f32], b: tensor[out_dim, f32]) -> tensor[batch, out_dim, f32] =
   linear_layer(x, w, b)
 "#,
     );
@@ -95,7 +101,7 @@ fn recursive_macro_hits_expansion_limit() {
     let decls = parse_str(
         r#"
 macro loop(x) = loop(x)
-def f(x: f32): f32 = loop(x)
+def f(x: f32) -> f32 = loop(x)
 "#,
     )
     .expect("surf parse should succeed");

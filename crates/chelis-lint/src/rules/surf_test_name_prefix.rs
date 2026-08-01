@@ -12,7 +12,7 @@
 //! 2. The function is **nullary** — its parameter list is empty.
 //!
 //! Helper assertion wrappers that take parameters (e.g., `def
-//! check_field(rows: ..., ...) -> unit ! { Test } = ...`) are not
+//! check_field(rows: ..., ...) -> () ! { Test } = ...`) are not
 //! candidates for `chelis test` discovery — they're internal
 //! domain-specific assertion combinators. §10.1 governs the
 //! discovery-eligible nullary form; helpers are out of scope.
@@ -159,19 +159,19 @@ mod tests {
 
     #[test]
     fn accepts_test_prefixed() {
-        let src = "def test_add() -> unit ! { Test } = assert_true(true, \"ok\")\n";
+        let src = "def test_add() -> () ! { Test } = assert_true(true, \"ok\")\n";
         assert!(run(src).is_empty());
     }
 
     #[test]
     fn accepts_example_prefixed() {
-        let src = "def example_demo() -> unit ! { Test } = assert_true(true, \"ok\")\n";
+        let src = "def example_demo() -> () ! { Test } = assert_true(true, \"ok\")\n";
         assert!(run(src).is_empty());
     }
 
     #[test]
     fn rejects_bare_name_with_test_effect() {
-        let src = "def some_thing() -> unit ! { Test } = assert_true(true, \"ok\")\n";
+        let src = "def some_thing() -> () ! { Test } = assert_true(true, \"ok\")\n";
         let v = run(src);
         assert_eq!(v.len(), 1);
         assert!(v[0].message.contains("some_thing"));
@@ -180,7 +180,7 @@ mod tests {
 
     #[test]
     fn rejects_camel_name_with_test_effect() {
-        let src = "def someThing() -> unit ! { Test } = assert_true(true, \"ok\")\n";
+        let src = "def someThing() -> () ! { Test } = assert_true(true, \"ok\")\n";
         let v = run(src);
         assert_eq!(v.len(), 1);
         assert!(v[0].message.contains("someThing"));
@@ -202,7 +202,7 @@ mod tests {
     #[test]
     fn handles_multi_capability_effect_row() {
         // `! { IO, Test }` still counts as Test-carrying.
-        let src = "def some_thing() -> unit ! { IO, Test } = assert_true(true, \"ok\")\n";
+        let src = "def some_thing() -> () ! { IO, Test } = assert_true(true, \"ok\")\n";
         let v = run(src);
         assert_eq!(v.len(), 1);
         assert!(v[0].message.contains("some_thing"));
@@ -212,7 +212,7 @@ mod tests {
     fn ignores_non_test_capability() {
         // `! { IO }` is not a test; rule does not fire even if the name
         // is unconventional.
-        let src = "def some_thing() -> unit ! { IO } = assert_true(true, \"ok\")\n";
+        let src = "def some_thing() -> () ! { IO } = assert_true(true, \"ok\")\n";
         assert!(run(src).is_empty());
     }
 
@@ -221,7 +221,7 @@ mod tests {
         // Multi-line signature where the return-type wraps across
         // lines. `def NAME` itself stays on one line. Nullary so the
         // rule still applies.
-        let src = "def some_thing()\n  -> unit ! { Test } = todo()\n";
+        let src = "def some_thing()\n  -> () ! { Test } = todo()\n";
         let v = run(src);
         assert_eq!(v.len(), 1);
         assert!(v[0].message.contains("some_thing"));
@@ -229,7 +229,7 @@ mod tests {
 
     #[test]
     fn flags_each_violation() {
-        let src = "def test_a() -> unit ! { Test } = todo()\ndef bad_b() -> unit ! { Test } = todo()\ndef example_c() -> unit ! { Test } = todo()\ndef bad_d() -> unit ! { Test } = todo()\n";
+        let src = "def test_a() -> () ! { Test } = todo()\ndef bad_b() -> () ! { Test } = todo()\ndef example_c() -> () ! { Test } = todo()\ndef bad_d() -> () ! { Test } = todo()\n";
         let v = run(src);
         assert_eq!(v.len(), 2);
         assert!(v.iter().any(|x| x.message.contains("bad_b")));
@@ -240,7 +240,7 @@ mod tests {
     fn std_test_module_is_exempt() {
         // The canonical assertion-library module introduces the `Test`
         // effect; renaming `assert_true` would defeat §10.1's intent.
-        let src = "module Std.Test\ndef assert_true(cond: bool) -> unit ! { Test } = todo()\ndef fail(msg: string) -> unit ! { Test } = todo()\n";
+        let src = "module Std.Test\ndef assert_true(cond: bool) -> () ! { Test } = todo()\ndef fail(msg: string) -> () ! { Test } = todo()\n";
         let v = run(src);
         assert!(v.is_empty(), "Std.Test module is exempt; got: {v:?}");
     }
@@ -250,14 +250,14 @@ mod tests {
         // Helper combinators that take args are not discoverable by
         // `chelis test`, so §10.1 doesn't apply. Even with the `Test`
         // effect, the rule must NOT fire.
-        let src = "def check_field(label: string, expected: i32, actual: i32) -> unit ! { Test } = todo()\n";
+        let src = "def check_field(label: string, expected: i32, actual: i32) -> () ! { Test } = todo()\n";
         assert!(run(src).is_empty());
     }
 
     #[test]
     fn rejects_nullary_test_effect_def_with_wrong_name() {
         // Nullary + Test effect + wrong prefix = real violation.
-        let src = "def my_check() -> unit ! { Test } = todo()\n";
+        let src = "def my_check() -> () ! { Test } = todo()\n";
         let v = run(src);
         assert_eq!(v.len(), 1);
         assert!(v[0].message.contains("my_check"));
@@ -267,7 +267,7 @@ mod tests {
     fn similar_module_names_are_not_exempt() {
         // `Std.TestKit`, `Std.TestRig`, etc. are not the canonical
         // assertion module; the carve-out must not silently extend.
-        let src = "module Std.TestKit\ndef helper() -> unit ! { Test } = todo()\n";
+        let src = "module Std.TestKit\ndef helper() -> () ! { Test } = todo()\n";
         let v = run(src);
         assert_eq!(v.len(), 1, "Std.TestKit must not be exempt");
         assert!(v[0].message.contains("helper"));

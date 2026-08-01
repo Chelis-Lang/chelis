@@ -389,6 +389,7 @@ fn expr_offset(expr: &Expr) -> usize {
         | Expr::Apply(_, _, s)
         | Expr::List(_, s)
         | Expr::Record(_, _, s)
+        | Expr::RecordUpdate(_, _, s)
         | Expr::Access(_, _, s)
         | Expr::TupleGet(_, _, s)
         | Expr::Binary(_, _, _, s)
@@ -408,6 +409,10 @@ fn expr_offset(expr: &Expr) -> usize {
         | Expr::WithSeed(_, _, s)
         | Expr::WithDevice(_, _, s)
         | Expr::Par(_, s)
+        | Expr::Do(_, s)
+        | Expr::Quote(_, s)
+        | Expr::Unquote(_, s)
+        | Expr::Splice(_, s)
         | Expr::Annotate(_, _, s)
         | Expr::Block(_, _, s) => s.offset,
     }
@@ -508,7 +513,10 @@ export (probability)
 type Probability =
   | Probability { value: f32 }
 def probability(x: f32) -> Probability = Probability { value: x }
-def use_it(x: f32) -> f32 = { p = probability(x); outside_sink(p) }
+def use_it(x: f32) -> f32 = {
+  p = probability(x)
+  outside_sink(p)
+}
 ";
         let v = run(src);
         assert_eq!(v.len(), 1);

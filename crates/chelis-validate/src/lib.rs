@@ -633,10 +633,10 @@ mod tests {
     }
 
     #[test]
-    fn surf_accepts_semicolon_block_and_axis_identifier() {
-        let source = "def f(axis) = { y = axis; y }\ndef g() = par { a; b }\n";
+    fn surf_accepts_newline_block_semicolon_par_and_axis_identifier() {
+        let source = "def f(axis) = {\n  y = axis\n  y\n}\ndef g() = par { a; b }\n";
         validate_surf(source)
-            .expect("validator should accept semicolon block/par and axis identifiers");
+            .expect("validator should accept canonical block/par separators and axis identifiers");
     }
 
     #[test]

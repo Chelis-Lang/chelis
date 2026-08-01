@@ -71,8 +71,8 @@ sig predict:
 ## Local bindings and blocks
 
 There is no `let` keyword. Inside a block, `name = expr` introduces a binding; bindings are
-separated by a newline or `;`, and the final bare expression is the block's value. Blocks
-are themselves expressions.
+separated by newlines, and the final bare expression is the block's value. Semicolons are
+reserved for `do` and `par`; blocks are themselves expressions.
 
 ```chelis-surf-fragment
 {
@@ -99,19 +99,24 @@ loss_fn = fn (w, b) -> mse_loss(predict(x, w, b), y)
 
 ## Literals
 
-- Integers: `42`, `1_000_000`, `0xFF`, `0xCAFE_BABE`. Default type `int32`.
-- Floats: `1.0`, `3.141_592_6`, `1e-5`, `3.14e10`. Default type `f32`.
+- Integers: canonical decimal such as `42` and `1000000`. Default type `int32`.
+- Floats: finite shortest round-trippable spellings such as `1.0`, `1e-5`, and
+  `31400000000.0`. Default type `f32`.
 - A literal can carry a precision suffix that binds it exactly: float suffixes `f32 f64
-  bf16 f16` (attach to int or float tokens, e.g. `42f32`, `1.0f64`), integer suffixes `i8
+  bf16 f16` (for example `42.0f32`, `1.0f64`), integer suffixes `i8
   i16 i32 i64` (int tokens only). The suffix must follow the digits with no space.
 - Strings: `"hello"` with escapes `\" \\ \n \t \r \0`.
 - Booleans: `true`, `false`.
 - Unit: `()` is both the unit value and the unit type.
-- Tuples: `(a, b, c)`. `(a)` is grouping, not a tuple; there is no one-element tuple.
+- Tuples: `(a, b, c)`. `(a)` is grouping; a one-element tuple is `(a,)`.
 - Bracket literals: `[1.0, 2.0, 3.0]` builds a tensor, and bracket lists also pass list
   arguments to operators, for example the window and stride lists in
   `reduce_window_max(grid, [2, 2], [1, 1])`. A negative numeral is unary minus applied to a
   literal, so write `f(-42)` to pass a negative argument.
+
+Digit separators, hexadecimal/binary integers, padded decimals, and equivalent
+non-canonical exponents are accepted only by `chelis migrate surf --from 0.18`.
+The canonical parser and `chelis fmt` reject them rather than silently changing dialect.
 
 In a position with a known element type (a tensor-typed argument, a tensor return body, or
 the first argument of `cast`), bracket-literal elements adopt that element type. So
@@ -146,15 +151,16 @@ lambda:
 
 ```chelis-surf-fragment
 hidden = matmul(x, w1)
-  |> fn (z) -> add(z, b1)
+  |> add(b1)
   |> relu
 ```
 
 ## Function application
 
 Application is `f(x, y)`. The standard call surface is positional. Two transforms take a
-named argument: `grad(f, wrt=w)` selects parameters to differentiate, and `vmap(f, axis=0)`
-selects the batch axis. There is no general keyword-argument surface beyond these.
+named argument: `grad(f, wrt=w)` selects parameters to differentiate, and `vmap(f, axis=1)`
+selects a nonzero batch axis. Axis zero uses the sole default form `vmap(f)`. There is no
+general keyword-argument surface beyond these.
 
 ## Tuples and projection
 
@@ -297,7 +303,7 @@ They must always be applied, and they compose.
 ```chelis-surf-fragment
 (dw, db) = grad(loss_fn, wrt=(w, b))(w, b)
 
-batched = vmap(process, axis=0)(xs)
+batched = vmap(process)(xs)
 ```
 
 `cast(e, p)` changes precision, and `copy(e)` produces an owned duplicate of a value. See

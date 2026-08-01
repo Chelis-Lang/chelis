@@ -409,7 +409,7 @@ mod tests {
     #[test]
     fn ignores_function_without_int_substring_match() {
         // print does NOT end in _int (no underscore boundary).
-        let src = "def print(s: string) -> unit = todo\n";
+        let src = "def print(s: string) -> () = todo\n";
         let v = run(src);
         assert!(v.is_empty());
     }

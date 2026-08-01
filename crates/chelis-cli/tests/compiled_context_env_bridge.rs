@@ -49,15 +49,15 @@ module_prefix = "Bridge"
     .expect("write reef.toml");
     fs::write(
         pkg.join("src/main.ch"),
-        "module Bridge.Main\n\ndef noop() -> unit = test_assert(true, \"noop\")\n",
+        "module Bridge.Main\n\ndef noop() -> () = test_assert(true, \"noop\")\n",
     )
     .expect("write main.ch");
     fs::write(
         pkg.join("tests/foo.ch"),
         r#"module Bridge.Tests.Foo
 
-def test_one() -> unit = test_assert(true, "first")
-def test_two() -> unit = test_assert(true, "second")
+def test_one() -> () = test_assert(true, "first")
+def test_two() -> () = test_assert(true, "second")
 "#,
     )
     .expect("write tests/foo.ch");

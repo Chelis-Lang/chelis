@@ -861,6 +861,11 @@ pub enum WireSurfExpr {
         fields: Vec<WireRecordExprField>,
         span: Span,
     },
+    RecordUpdate {
+        base: Box<WireSurfExpr>,
+        fields: Vec<WireRecordExprField>,
+        span: Span,
+    },
     Access {
         expr: Box<WireSurfExpr>,
         field: String,
@@ -951,6 +956,22 @@ pub enum WireSurfExpr {
     },
     Par {
         exprs: Vec<WireSurfExpr>,
+        span: Span,
+    },
+    Do {
+        exprs: Vec<WireSurfExpr>,
+        span: Span,
+    },
+    Quote {
+        expr: Box<WireSurfExpr>,
+        span: Span,
+    },
+    Unquote {
+        expr: Box<WireSurfExpr>,
+        span: Span,
+    },
+    Splice {
+        expr: Box<WireSurfExpr>,
         span: Span,
     },
     Annotate {

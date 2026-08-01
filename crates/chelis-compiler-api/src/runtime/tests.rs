@@ -1681,7 +1681,7 @@ fn prim_from_name_resolves_active_dtype_names() {
 #[test]
 fn type_checker_rejects_mixed_narrow_float_binop_per_spec_5_1() {
     let src = r#"
-def main -> bf16 = add(cast(1.0, bf16), cast(1.0, f16))
+def main() -> bf16 = add(cast(1.0, bf16), cast(1.0, f16))
 "#;
     let res = chelis_types::check_ir_program(&chelis_surf::desugar::desugar_program(
         &chelis_surf::parser::parse_str(src).expect("surf parse"),

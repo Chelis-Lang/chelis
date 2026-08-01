@@ -199,7 +199,7 @@ out = grad(bs_total, wrt=spots)(
   to_tensor([cast(90.0, f64), cast(100.0, f64), cast(110.0, f64)]),
   cast(100.0, f64),
   cast(0.05, f64),
-  cast(0.30, f64),
+  cast(0.3, f64),
   cast(1.25, f64)
 )
 "
@@ -220,7 +220,7 @@ out = grad(bs_total_one_delta, wrt=spots)(
   to_tensor([cast(100.0, f64)]),
   cast(100.0, f64),
   cast(0.05, f64),
-  cast(0.30, f64),
+  cast(0.3, f64),
   cast(1.25, f64)
 )
 "
@@ -242,7 +242,7 @@ out = vmap(grad(bs_total_one_batched, wrt=spots))(
   to_tensor([[cast(90.0, f64)], [cast(100.0, f64)], [cast(110.0, f64)]]),
   cast(100.0, f64),
   cast(0.05, f64),
-  cast(0.30, f64),
+  cast(0.3, f64),
   cast(1.25, f64)
 )
 "

@@ -142,41 +142,41 @@ import Nautilus.Special (erf, erfinv, gamma, lgamma, beta)
 import Std.Test (assert_close, assert_true, assert_eq)
 
 -- Known-exact values (no scipy)
-def test_erf_zero() -> unit ! { Test } =
+def test_erf_zero() -> () ! { Test } =
   assert_close(erf(cast(0.0, f32)), cast(0.0, f32), cast(1e-10, f32), "erf(0) = 0")
 
-def test_erf_large() -> unit ! { Test } =
+def test_erf_large() -> () ! { Test } =
   assert_close(erf(cast(5.0, f32)), cast(1.0, f32), cast(1e-6, f32), "erf(5) ~ 1")
 
-def test_gamma_one() -> unit ! { Test } =
+def test_gamma_one() -> () ! { Test } =
   assert_close(gamma(cast(1.0, f32)), cast(1.0, f32), cast(1e-7, f32), "gamma(1) = 1")
 
-def test_gamma_half() -> unit ! { Test } =
+def test_gamma_half() -> () ! { Test } =
   assert_close(gamma(cast(0.5, f32)), cast(1.7724539, f32), cast(1e-5, f32), "gamma(0.5) = sqrt(pi)")
 
 -- Mathematical identities
-def test_erf_symmetry() -> unit ! { Test } = {
+def test_erf_symmetry() -> () ! { Test } = {
   x = cast(0.7, f32)
   assert_close(erf(x), sub(cast(0.0, f32), erf(sub(cast(0.0, f32), x))), cast(1e-7, f32), "erf is odd")
 }
 
-def test_erf_erfinv_roundtrip() -> unit ! { Test } = {
+def test_erf_erfinv_roundtrip() -> () ! { Test } = {
   x = cast(0.3, f32)
   assert_close(erfinv(erf(x)), x, cast(1e-5, f32), "erfinv(erf(x)) = x")
 }
 
-def test_gamma_recurrence() -> unit ! { Test } = {
+def test_gamma_recurrence() -> () ! { Test } = {
   x = cast(3.5, f32)
   assert_close(gamma(add(x, cast(1.0, f32))), mul(x, gamma(x)), cast(1e-4, f32), "gamma(x+1) = x*gamma(x)")
 }
 
 -- Range / property checks
-def test_erf_bounded() -> unit ! { Test } = {
-  _ = assert_true(lt(erf(cast(0.5, f32)), cast(1.0, f32)), "erf(x) < 1 for finite x");
+def test_erf_bounded() -> () ! { Test } = {
+  _ = assert_true(lt(erf(cast(0.5, f32)), cast(1.0, f32)), "erf(x) < 1 for finite x")
   assert_true(gt(erf(cast(0.5, f32)), cast(0.0, f32)), "erf(x) > 0 for x > 0")
 }
 
-def test_gamma_positive() -> unit ! { Test } =
+def test_gamma_positive() -> () ! { Test } =
   assert_true(gt(gamma(cast(2.5, f32)), cast(0.0, f32)), "gamma positive for x > 0")
 ```
 
@@ -342,14 +342,14 @@ module Coral.Tests.Frame
 import Coral.Frame (from_pairs, FloatCol, get_float_col, filter, nrows, ncols, with_column, columns)
 import Std.Test (assert_eq_int, assert_close_tensor, assert_true)
 
-def test_construction() -> unit ! { Test } = {
+def test_construction() -> () ! { Test } = {
   prices = to_tensor([cast(100.0, f32), cast(200.0, f32), cast(300.0, f32)])
   df = from_pairs([("price", FloatCol(prices))])
-  _ = assert_eq_int(nrows(df), cast(3, int64), "nrows = 3");
+  _ = assert_eq_int(nrows(df), cast(3, int64), "nrows = 3")
   assert_eq_int(ncols(df), cast(1, int64), "ncols = 1")
 }
 
-def test_filter_by_mask() -> unit ! { Test } = {
+def test_filter_by_mask() -> () ! { Test } = {
   prices = to_tensor([cast(100.0, f32), cast(200.0, f32), cast(300.0, f32)])
   df = from_pairs([("price", FloatCol(prices))])
   mask = gt(get_float_col(df, "price"), cast(150.0, f32))
@@ -357,12 +357,12 @@ def test_filter_by_mask() -> unit ! { Test } = {
   assert_eq_int(nrows(filtered), cast(2, int64), "filter keeps 2 rows")
 }
 
-def test_with_column_preserves_existing() -> unit ! { Test } = {
+def test_with_column_preserves_existing() -> () ! { Test } = {
   prices = to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)])
   vols = to_tensor([cast(0.1, f32), cast(0.2, f32), cast(0.3, f32)])
   df = from_pairs([("price", FloatCol(prices))])
   df2 = with_column(df, "vol", FloatCol(vols))
-  _ = assert_eq_int(ncols(df2), cast(2, int64), "added column");
+  _ = assert_eq_int(ncols(df2), cast(2, int64), "added column")
   assert_close_tensor(get_float_col(df2, "price"), prices, cast(1e-10, f32), "price preserved")
 }
 ```

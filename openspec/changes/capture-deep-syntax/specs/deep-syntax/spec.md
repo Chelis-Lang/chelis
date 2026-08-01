@@ -22,7 +22,9 @@ generator never decides where to attach it.
 Metadata keys SHALL use the identifier charset `[A-Za-z_][A-Za-z0-9_]*` (no hyphens) and
 carry compiler-relevant annotations. The `type` key SHALL be checked rather than trusted, and
 metadata fields SHALL be preserved by all spec-defined transformations and round-trip through
-canonical form.
+canonical form. The `surf_*` namespace SHALL be closed to `surf_path`,
+`surf_dim_group_size`, and `surf_pipe_stage`; an unknown key in that namespace SHALL be
+rejected.
 
 #### Scenario: Producer-specific metadata key accepted
 
@@ -242,13 +244,14 @@ first SHALL be a function or lambda.
 
 Deep SHALL have exactly one textual representation per program: 2-space indent, 80-column flat
 threshold, structured multi-line `fn`/`let`/`bind`, no comments, and single trailing newline.
-Import names and record `kv` pairs SHALL be alphabetized while module declarations, match arms,
-and `let` bind pairs SHALL preserve declaration order.
+Import names SHALL be alphabetized while module declarations, record/record-update `kv`
+pairs, match arms, and `let` bind pairs SHALL preserve declaration order. Record order is
+the left-to-right evaluation order.
 
-#### Scenario: Record kv pairs alphabetized
+#### Scenario: Record kv pairs preserve written order
 
 - **WHEN** a record is written `(record {} Adam (kv {} lr ...) (kv {} eps ...))`
-- **THEN** canonical form emits `eps` before `lr`
+- **THEN** canonical form retains `lr` before `eps`
 
 #### Scenario: Match arms keep declaration order
 
@@ -257,15 +260,38 @@ and `let` bind pairs SHALL preserve declaration order.
 
 ### Requirement: Literal normalization and defaults
 
-Canonical Deep SHALL normalize literals: integers to decimal without leading zeros, floats to
-`d.d` minimum, scientific floats to `d.dE±d`. An unsuffixed integer literal SHALL bind at
-`int32` and an unsuffixed float at `f32`, overridable only by a suffix, contextual
+Canonical Deep SHALL normalize literals: integers to decimal without leading zeros and finite
+floats to the shortest round-trippable spelling, adding `.0` when otherwise integer-like and
+using lowercase `e` only when selected by that printer. An unsuffixed integer literal SHALL
+bind at `int32` and an unsuffixed float at `f32`, overridable only by a suffix, contextual
 tensor-literal inference, or an explicit `cast`. The closed suffix set SHALL match Surf's.
 
 #### Scenario: Float canonicalization
 
-- **WHEN** a literal is written `1.` or `1e3`
-- **THEN** canonical form emits `1.0` and `1.0E+3`
+- **WHEN** a producer supplies `1.` or a longer spelling of the same finite value
+- **THEN** canonical form emits the shortest representation, such as `1.0`
+
+#### Scenario: Non-finite float is not public Deep
+
+- **WHEN** a producer constructs a NaN or infinity float literal
+- **THEN** validation/resugaring rejects it because canonical Surf has no representation
+
+### Requirement: Total canonical Surf resugaring
+
+Every structurally valid public Deep tag SHALL have a canonical Surf AST representation.
+Deep-to-Surf emitters SHALL construct that shared AST and use the canonical Surf printer;
+they SHALL NOT maintain a second handwritten source dialect. Desugaring the result SHALL
+recover Deep modulo only the derived metadata normalization named by the numbered source spec.
+
+#### Scenario: Direct Deep forms remain distinct
+
+- **WHEN** Deep contains `block`, `record-update`, `quote`, `unquote`, or `splice`
+- **THEN** resugaring uses `do`, `with`, `quote`, `unquote`, or `splice` respectively
+
+#### Scenario: Unrepresentable input fails explicitly
+
+- **WHEN** malformed Deep reaches the resugaring boundary
+- **THEN** resugaring returns a structural error rather than a placeholder Surf expression
 
 #### Scenario: Unsigned suffix rejected at lex time
 

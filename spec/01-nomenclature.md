@@ -75,19 +75,18 @@ snake_case to be importable.
 
 ### 1.3 Reserved keywords
 
-23 reserved Surf keywords, all lowercase:
+28 lexically reserved Surf keywords, all lowercase:
 
 ```
-def sig type dim macro match with fn module import
-if then else grad vmap jit realize copy tensor cast
-export par true false
+def sig type dim macro match with fn module import export
+if then else grad vmap jit realize copy tensor cast par do
+quote unquote splice true false
 ```
 
-Plus 7 reserved-for-Phase-2:
-
-```
-effect handler perform resume borrow where do
-```
+Grammar-specific words such as `property`, `forall`, `where`, `opaque`, and
+`invariant` are contextual rather than globally reserved. Future words such as
+`effect`, `handler`, `perform`, `resume`, and `borrow` remain ordinary
+identifiers until their syntax is activated; explicit borrow syntax is `&`.
 
 ### 1.4 Deep tag vocabulary
 
@@ -349,13 +348,12 @@ def softmax(x: Tensor[batch, vocab, f32]) -> Tensor[batch, vocab, f32] =
 def loss(p: f32, q: f32) -> f32 = -(p * log(q))
 ```
 
-Both forms parse, but the arrow is the canonical surface choice
-ecosystem-wide: it visually pairs with parameter `:` annotations without
-overloading the colon for two unrelated jobs (parameter binding vs.
-function-result type), and it matches the Surf Style Guide bullet in
-`AGENTS.md` / `CLAUDE.md`. The lint rule `surf-def-arrow-form` enforces
-this; `chelis fmt` rewrites colon-form decls to arrow-form on next
-canonicalization.
+The arrow is the only v0.19 Surf spelling. The canonical parser rejects a
+colon in result position; the explicit v0.18 migration path rewrites legacy
+colon-form declarations. This visually pairs with parameter `:` annotations
+without overloading the colon for two unrelated jobs (parameter binding vs.
+function-result type). `chelis fmt` formats canonical Surf and does not act as
+a dialect translator.
 
 ### 3.6 Pipe-first composition and first-argument stages
 

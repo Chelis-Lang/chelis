@@ -1,7 +1,6 @@
-def process(x: tensor[features, f32]) -> tensor[features, f32] = {
+def process(x: tensor[features, f32]) -> tensor[features, f32] =
   x
   |> normalize
   |> relu
   |> softmax
-}
 def batch_process(xs: tensor[batch, features, f32]) -> tensor[batch, features, f32] = vmap(process)(xs)

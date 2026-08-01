@@ -125,7 +125,10 @@ fn sequential_let_and_generic_closure_keep_owner_stamps() {
     let checked = check_ir_program(&surf(
         r#"
 def choose[a](flag: bool, x: a) -> a = match flag with {
-  | true => { id = fn (y) -> y; id(x) }
+  | true => {
+    id = fn (y) -> y
+    id(x)
+  }
   | false => x
 }
 
@@ -395,12 +398,10 @@ module Repro.ParamsOwner
 type Params =
   | Params { w: tensor[2, f32] }
 
-def loss(p: Params, x: tensor[2, f32], y: tensor[2, f32]) -> f32 = {
-  match p with {
-    | Params { w: w } => {
-      d = sub(mul(&x, &w), y)
-      sum(mul(&d, &d), cast(0, int32)) |> tensor_to_scalar
-    }
+def loss(p: Params, x: tensor[2, f32], y: tensor[2, f32]) -> f32 = match p with {
+  | Params { w } => {
+    d = sub(mul(&x, &w), y)
+    sum(mul(&d, &d), cast(0, int32)) |> tensor_to_scalar
   }
 }
 x = to_tensor([cast(2.0, f32), cast(3.0, f32)])

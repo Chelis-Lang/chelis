@@ -323,8 +323,8 @@ fn test_assert_close_tensor_accepts_all_arithmetic_dtypes() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("assert_close_t.ch");
         let src = format!(
-            r#"sig assert_close_tensor: &tensor[n, p] -> &tensor[n, p] -> f32 -> string -> unit ! {{ Test }}
-def call(actual: &tensor[3, {dtype}], expected: &tensor[3, {dtype}]) -> unit ! {{ Test }} = assert_close_tensor(actual, expected, cast(0.001, f32), "label")
+            r#"sig assert_close_tensor: &tensor[n, p] -> &tensor[n, p] -> f32 -> string -> () ! {{ Test }}
+def call(actual: &tensor[3, {dtype}], expected: &tensor[3, {dtype}]) -> () ! {{ Test }} = assert_close_tensor(actual, expected, cast(0.001, f32), "label")
 "#
         );
         write_file(&path, &src);
@@ -339,8 +339,8 @@ fn test_assert_shape_accepts_all_arithmetic_dtypes() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("assert_shape.ch");
         let src = format!(
-            r#"sig assert_shape: &tensor[n, p] -> int64 -> string -> unit ! {{ Test }}
-def call(t: &tensor[3, {dtype}]) -> unit ! {{ Test }} = assert_shape(t, cast(3, int64), "label")
+            r#"sig assert_shape: &tensor[n, p] -> int64 -> string -> () ! {{ Test }}
+def call(t: &tensor[3, {dtype}]) -> () ! {{ Test }} = assert_shape(t, cast(3, int64), "label")
 "#
         );
         write_file(&path, &src);
@@ -447,8 +447,8 @@ fn test_assert_close_tensor_rejects_mismatched_precision() {
     let path = dir.path().join("assert_close_neg.ch");
     write_file(
         &path,
-        r#"sig assert_close_tensor: &tensor[n, p] -> &tensor[n, p] -> f32 -> string -> unit ! { Test }
-def bad(actual: &tensor[3, f32], expected: &tensor[3, bf16]) -> unit ! { Test } = assert_close_tensor(actual, expected, cast(0.001, f32), "label")
+        r#"sig assert_close_tensor: &tensor[n, p] -> &tensor[n, p] -> f32 -> string -> () ! { Test }
+def bad(actual: &tensor[3, f32], expected: &tensor[3, bf16]) -> () ! { Test } = assert_close_tensor(actual, expected, cast(0.001, f32), "label")
 "#,
     );
     let json = run_check(&path);

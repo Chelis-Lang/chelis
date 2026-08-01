@@ -539,7 +539,7 @@ batches.
 
 ### Design
 
-`vmap(f, axis=0)` takes a function
+`vmap(f)` takes a function at the default zero axis
 `f: tensor[a, b, f32] -> tensor[c, f32]` and produces
 `g: tensor[batch, a, b, f32] -> tensor[batch, c, f32]` by adding a batch dimension to
 every operation in the DAG.
@@ -576,7 +576,7 @@ has `Random` (each batch element samples independently).
 - the executable subset lowers direct `vmap(f)(args...)` and `vmap(grad(f))(args...)`
   applications away before ordinary DAG codegen
 
-**Surf syntax:** `vmap(f, axis=0)` - call-like syntax, and the resulting function can be
+**Surf syntax:** `vmap(f)` - call-like syntax at the default zero axis, and the resulting function can be
 applied as `vmap(f)(xs)`
 
 **Deep syntax:** `(vmap {} fn axis)`

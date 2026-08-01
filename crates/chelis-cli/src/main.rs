@@ -204,6 +204,11 @@ enum Command {
         #[arg(long)]
         check: bool,
     },
+    /// Explicit source migration commands; never part of normal parsing.
+    Migrate {
+        #[command(subcommand)]
+        command: MigrateCommand,
+    },
     /// Evaluate an expression or file
     ///
     /// `chelis eval --file FILE` runs the formatter and lint gates on FILE
@@ -445,6 +450,24 @@ enum Command {
         /// Per-test timeout in seconds.
         #[clap(long, default_value = "30")]
         timeout: u64,
+    },
+}
+
+#[derive(Subcommand)]
+enum MigrateCommand {
+    /// Rewrite the isolated Surf v0.18 grammar to canonical Surf v0.19.
+    Surf {
+        /// Source grammar version. The only supported legacy version is 0.18.
+        #[arg(long)]
+        from: String,
+        /// Verify that every path is already migrated without writing.
+        #[arg(long)]
+        check: bool,
+        /// Rewrite every path after the complete batch passes preflight.
+        #[arg(long)]
+        inplace: bool,
+        #[arg(required = true)]
+        paths: Vec<PathBuf>,
     },
 }
 
@@ -826,6 +849,14 @@ fn main() {
             inplace,
             check,
         }) => cmd_fmt(&file, inplace, check),
+        Some(Command::Migrate { command }) => match command {
+            MigrateCommand::Surf {
+                from,
+                check,
+                inplace,
+                paths,
+            } => cmd_migrate_surf(&from, &paths, check, inplace),
+        },
         Some(Command::Eval {
             file,
             expr,
@@ -1054,7 +1085,10 @@ fn cmd_surf(file: &Path, verbose: bool) -> Result<(), Box<dyn std::error::Error>
     } else {
         // For .ch files, round-trip through deep and back
         let decls = chelis_surf::parser::parse_str(&source)?;
-        let deep_exprs = chelis_surf::desugar::desugar_program(&decls);
+        // Public Deep is post-expansion. Resugaring the pre-expansion
+        // compiler-only `defmacro`/`macro-invoke` forms would invent a second
+        // Surf dialect and makes even a valid macro program fail here.
+        let deep_exprs = expanded_desugared_program(&decls).map_err(boxed_string_error)?;
         let surf = chelis_surf::decompile::try_decompile_program_with_context(
             &deep_exprs,
             &options,
@@ -1100,6 +1134,117 @@ fn cmd_fmt(file: &Path, inplace: bool, check: bool) -> Result<(), Box<dyn std::e
         fs::write(file, &output)?;
     } else {
         print!("{output}");
+    }
+    Ok(())
+}
+
+fn cmd_migrate_surf(
+    from: &str,
+    paths: &[PathBuf],
+    check: bool,
+    inplace: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if from != "0.18" {
+        return Err(format!(
+            "unsupported Surf migration source version `{from}`; expected `--from 0.18`"
+        )
+        .into());
+    }
+    if check && inplace {
+        return Err(
+            "`chelis migrate surf` does not allow `--check` and `--inplace` together".into(),
+        );
+    }
+    if !check && !inplace && paths.len() != 1 {
+        return Err(
+            "printing a migration requires exactly one path; use `--check` or `--inplace` for a batch"
+                .into(),
+        );
+    }
+
+    // Preflight the complete batch before the first write. Besides canonical
+    // parsing, require the public Surf -> Deep -> Surf -> Deep structural law
+    // after macro expansion; comments are intentionally outside Deep.
+    let mut migrations = Vec::with_capacity(paths.len());
+    for path in paths {
+        let source =
+            fs::read_to_string(path).map_err(|error| format!("{}: {error}", path.display()))?;
+        let migrated = chelis_surf::format::migrate_source_v018(&source)
+            .map_err(|error| format!("{}: {error}", path.display()))?;
+        let canonical = chelis_surf::format::format_source(&migrated).map_err(|error| {
+            format!(
+                "{}: migrated output is not canonical: {error}",
+                path.display()
+            )
+        })?;
+        if canonical != migrated {
+            let line = migrated
+                .lines()
+                .zip(canonical.lines())
+                .position(|(migrated, canonical)| migrated != canonical)
+                .unwrap_or_else(|| migrated.lines().count().min(canonical.lines().count()));
+            let migrated_line = migrated.lines().nth(line).unwrap_or("<end of file>");
+            let canonical_line = canonical.lines().nth(line).unwrap_or("<end of file>");
+            return Err(format!(
+                "{}: migration output was not a canonical formatter fixed point at line {}:\n  migration: {migrated_line:?}\n  formatter: {canonical_line:?}",
+                path.display(),
+                line + 1,
+            )
+            .into());
+        }
+
+        let declarations = chelis_surf::parser::parse_str(&migrated).map_err(|error| {
+            format!(
+                "{}: migrated output does not parse: {error}",
+                path.display()
+            )
+        })?;
+        let deep = expanded_desugared_program(&declarations)
+            .map_err(|error| format!("{}: macro expansion failed: {error}", path.display()))?;
+        let resugared = chelis_surf::resugar::resugar_program(&deep)
+            .map_err(|error| format!("{}: Deep resugaring failed: {error}", path.display()))?;
+        let redesugared = expanded_desugared_program(&resugared).map_err(|error| {
+            format!(
+                "{}: resugared macro expansion failed: {error}",
+                path.display()
+            )
+        })?;
+        let deep_canonical = chelis_deep::printer::print_canonical(
+            &chelis_surf::resugar::normalize_deep_for_surface_roundtrip(&deep),
+        );
+        let redesugared_canonical = chelis_deep::printer::print_canonical(
+            &chelis_surf::resugar::normalize_deep_for_surface_roundtrip(&redesugared),
+        );
+        if deep_canonical != redesugared_canonical {
+            return Err(format!(
+                "{}: migrated program failed the Surf -> Deep -> Surf -> Deep structural oracle\noriginal Deep:\n{}resugared Deep:\n{}",
+                path.display(), deep_canonical, redesugared_canonical
+            )
+            .into());
+        }
+        migrations.push((path.clone(), source, migrated));
+    }
+
+    if check {
+        let stale = migrations
+            .iter()
+            .filter(|(_, source, migrated)| source != migrated)
+            .map(|(path, _, _)| path.display().to_string())
+            .collect::<Vec<_>>();
+        if stale.is_empty() {
+            return Ok(());
+        }
+        return Err(format!("Surf v0.18 migration required: {}", stale.join(", ")).into());
+    }
+
+    if inplace {
+        for (path, source, migrated) in migrations {
+            if source != migrated {
+                fs::write(&path, migrated)?;
+            }
+        }
+    } else if let Some((_, _, migrated)) = migrations.into_iter().next() {
+        print!("{migrated}");
     }
     Ok(())
 }
@@ -1209,7 +1354,7 @@ fn cmd_eval(
             let source = chelis_surf::format::format_program(&decls);
             let mut selected_roots = root_names_from_decls(&entry_decls, checked.type_env());
             // Issue #947: if no value roots were found but the program has
-            // zero-arg fn defs (arrow-form `def n -> T = body`), include
+            // zero-arg fn defs (arrow-form `def n() -> T = body`), include
             // them so the host_root_values path can surface them.
             if selected_roots.is_empty() {
                 for decl in &entry_decls {
@@ -2730,7 +2875,7 @@ fn cmd_build(
                          can't resolve (inline `grad(f)(x)` or `g = grad(f); g(x)`). \
                          Workaround that compiles today: make the function you want to \
                          differentiate a parameter of the enclosing def, then call \
-                         `grad(local, wrt=(arg))(arg)` where `local` is a locally-bound \
+                         `grad(local, wrt=arg)(arg)` where `local` is a locally-bound \
                          fn that uses the parameter; and make sure that function uses \
                          only pure tensor ops (sum, add, mul, einsum, etc.): `grad` \
                          through host-lane `fold`/`map` is not currently supported, \
@@ -7710,7 +7855,7 @@ fn enumerate_test_fns(
         };
         // Tests must be genuinely nullary functions with a `test_<name>` prefix
         // (not `test_` alone) and must return unit — either implicitly (no
-        // annotation), via `-> unit`, or via `-> _`. Rejecting non-unit return
+        // annotation), via `-> ()`, or via `-> _`. Rejecting non-unit return
         // types is what keeps typed-value bindings like `def test_x : int64 = 42`
         // from being mis-enumerated as zero-arg tests and cascading compile
         // errors across every other test in the same file (RT3 H4).
@@ -7750,7 +7895,7 @@ fn enumerate_test_fns(
 fn is_unit_type(ty: &chelis_surf::ast::TypeExpr) -> bool {
     use chelis_surf::ast::TypeExpr;
     match ty {
-        TypeExpr::Named(name, _) => name == "unit",
+        TypeExpr::Tuple(items, _) => items.is_empty(),
         TypeExpr::Infer(_) => true,
         _ => false,
     }

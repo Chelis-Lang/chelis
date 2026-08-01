@@ -410,20 +410,20 @@ fn extract_single_op(op: WireRiscOp) -> Result<ExtractedGoal, GraphExtractError>
 
 #[test]
 fn non_finite_const_from_real_source_is_rejected_not_corrupted() {
-    // `1.0e400` overflows f64 to +inf and lowers to Const(inf). Before the
-    // guard, this produced an artifact whose bytes serialize the inf as
-    // `null` -- a self-consistent hash over UNPARSEABLE bytes (silent
-    // corruption). It must now be rejected with the typed error.
+    // `1e400` overflows f64 to +inf. Canonical Surf rejects non-finite
+    // literals before lowering, so this real-source path must fail closed
+    // without producing corrupt artifact bytes. The direct WireDag sibling
+    // above still locks GraphExtractError::NonFiniteValue at its boundary.
     let err = box_range_goal_from_source(
-        "out = (1.0e400 : tensor[f32])\n",
+        "out = (1e400 : tensor[f32])\n",
         SourceKind::Surf,
         input_box(&[("x", -1.0, 1.0)]),
         output_range("out", 0.0, 1.0),
     )
     .expect_err("a non-finite Const from real source must be rejected, not corrupted");
     assert!(
-        matches!(err, GraphExtractError::NonFiniteValue { .. }),
-        "expected NonFiniteValue, got {err:?}"
+        matches!(&err, GraphExtractError::LowerFailed(message) if message.contains("non-finite")),
+        "expected the canonical Surf non-finite rejection, got {err:?}"
     );
 }
 
@@ -432,7 +432,7 @@ fn finite_extreme_const_from_real_source_still_passes_and_hashes() {
     // The positive twin: a finite extreme (1e300) is NOT non-finite, so it
     // serializes as a real JSON number and produces a populated goal.
     let extracted = box_range_goal_from_source(
-        "out = (1.0e300 : tensor[f32])\n",
+        "out = (1e300 : tensor[f32])\n",
         SourceKind::Surf,
         input_box(&[("x", -1.0, 1.0)]),
         output_range("out", 0.0, 1.0),

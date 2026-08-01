@@ -547,7 +547,7 @@ impl fmt::Display for Type {
                 let strs: Vec<String> = ts.iter().map(|t| t.to_string()).collect();
                 write!(f, "({})", strs.join(", "))
             }
-            Type::Unit => write!(f, "unit"),
+            Type::Unit => write!(f, "()"),
             Type::Error(_) => write!(f, "<error>"),
         }
     }

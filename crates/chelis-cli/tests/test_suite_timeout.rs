@@ -35,13 +35,13 @@ module_prefix = "Deadline"
     );
     write_file(
         &pkg.join("src/main.ch"),
-        "module Deadline.Main\n\ndef noop() -> unit = test_assert(true, \"noop\")\n",
+        "module Deadline.Main\n\ndef noop() -> () = test_assert(true, \"noop\")\n",
     );
     write_file(
         &pkg.join("tests/smoke.ch"),
         r#"module Deadline.Tests.Smoke
 
-def test_ok() -> unit = test_assert(true, "ok")
+def test_ok() -> () = test_assert(true, "ok")
 "#,
     );
     (dir, pkg)
@@ -229,7 +229,7 @@ fn normal_output_forwarding_is_part_of_whole_command_deadline() {
     let mut source = String::from("module Deadline.Tests.Backpressure\n\n");
     for index in 0..100 {
         source.push_str(&format!(
-            "def test_{index}() -> unit = test_assert(true, \"ok\")\n"
+            "def test_{index}() -> () = test_assert(true, \"ok\")\n"
         ));
     }
     write_file(&pkg.join("tests/smoke.ch"), &source);
@@ -694,11 +694,11 @@ fn timeout_retains_completed_batch_rows_and_reaps_hung_descendant() {
         &pkg.join("tests/smoke.ch"),
         r#"module Deadline.Tests.Smoke
 
-def test_one() -> unit = test_assert(true, "one")
-def test_two() -> unit = test_assert(true, "two")
-def test_three() -> unit = test_assert(true, "three")
-def test_four() -> unit = test_assert(true, "four")
-def test_five() -> unit = test_assert(true, "five")
+def test_one() -> () = test_assert(true, "one")
+def test_two() -> () = test_assert(true, "two")
+def test_three() -> () = test_assert(true, "three")
+def test_four() -> () = test_assert(true, "four")
+def test_five() -> () = test_assert(true, "five")
 "#,
     );
     let pid_file = pkg.join("hung-batch.pid");

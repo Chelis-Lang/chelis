@@ -108,10 +108,12 @@ fn validate_expr(expr: &Expr, warnings: &mut Vec<ValidationWarning>) {
                 }
 
                 match (list.elements.get(1), deep_tag) {
-                    (Some(Expr::Map(_, _)), Some(deep_tag)) => {
+                    (Some(Expr::Map(meta, _)), Some(deep_tag)) => {
+                        validate_surf_metadata_namespace(meta, span.offset, warnings);
                         validate_tag_shape(deep_tag, list, span.offset, warnings);
                     }
-                    (Some(Expr::Map(_, _)), None) => {
+                    (Some(Expr::Map(meta, _)), None) => {
+                        validate_surf_metadata_namespace(meta, span.offset, warnings);
                         // The raw-string boundary (checker_totality.md
                         // §C1.2): the string never decoded into the closed
                         // vocabulary, so the loud unknown-tag arm owns it.
@@ -139,21 +141,68 @@ fn validate_expr(expr: &Expr, warnings: &mut Vec<ValidationWarning>) {
                 validate_expr(child, warnings);
             }
         }
-        Expr::MetaExpr(meta, _) => {
+        Expr::MetaExpr(meta, span) => {
+            validate_surf_metadata_entries(&meta.entries, span.offset, warnings);
             validate_expr(&meta.expr, warnings);
             for (_, v) in &meta.entries {
                 validate_expr(v, warnings);
             }
         }
-        Expr::Map(map, _) => {
+        Expr::Map(map, span) => {
+            validate_surf_metadata_namespace(map, span.offset, warnings);
             for (_, v) in &map.entries {
                 validate_expr(v, warnings);
             }
         }
+        Expr::Node(node, span) => {
+            validate_surf_metadata_namespace(node.meta(), span.offset, warnings);
+            for child in node.children_slice() {
+                validate_expr(child, warnings);
+            }
+        }
+        Expr::BareList(children, _) => {
+            for child in children {
+                validate_expr(child, warnings);
+            }
+        }
+        Expr::UnknownForm(data) => {
+            validate_surf_metadata_namespace(&data.meta, data.span.offset, warnings);
+            for child in &data.children {
+                validate_expr(child, warnings);
+            }
+        }
         Expr::Atom(_, _) => {} // Atoms are always valid
-        // Stamped variants: these are produced by stamp_to_typed and are
-        // structurally valid by construction. No further validation needed.
-        Expr::Node(_, _) | Expr::BareList(_, _) | Expr::UnknownForm(..) => {}
+    }
+}
+
+fn validate_surf_metadata_namespace(
+    meta: &crate::ast::MetaMap,
+    offset: usize,
+    warnings: &mut Vec<ValidationWarning>,
+) {
+    validate_surf_metadata_entries(&meta.entries, offset, warnings);
+}
+
+fn validate_surf_metadata_entries(
+    entries: &[(String, Expr)],
+    offset: usize,
+    warnings: &mut Vec<ValidationWarning>,
+) {
+    for (key, _) in entries {
+        if key.starts_with("surf_")
+            && !matches!(
+                key.as_str(),
+                "surf_path" | "surf_dim_group_size" | "surf_pipe_stage"
+            )
+        {
+            warnings.push(ValidationWarning {
+                kind: WarningKind::Structural,
+                offset,
+                message: format!(
+                    "unknown key `{key}` in the closed Deep `surf_*` metadata namespace"
+                ),
+            });
+        }
     }
 }
 

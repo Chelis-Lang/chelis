@@ -1214,7 +1214,7 @@ mod tests {
         .expect("write app reef.toml");
         fs::write(
             root.join("src/main.ch"),
-            "module App.Main\n\ndef main_value -> int32 = cast(7, int32)\n",
+            "module App.Main\n\ndef main_value() -> int32 = cast(7, int32)\n",
         )
         .expect("write main.ch");
         fs::write(

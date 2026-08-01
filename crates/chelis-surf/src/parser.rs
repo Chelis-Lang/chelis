@@ -34,12 +34,27 @@ pub enum ParseError {
          bind the value with `_ = <expr>` or move it to tail position (byte {offset})"
     )]
     BareStatementInBlock { offset: usize },
+    #[error("non-canonical literal `{found}` at byte {offset}; write `{expected}`")]
+    NonCanonicalLiteral {
+        found: String,
+        expected: String,
+        offset: usize,
+    },
+    #[error("non-finite numeric literal `{found}` is not representable in Surf at byte {offset}")]
+    NonFiniteLiteral { found: String, offset: usize },
 }
 
 struct Parser {
     tokens: Vec<Token>,
     pos: usize,
     module_allowed: bool,
+    mode: ParseMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ParseMode {
+    Canonical,
+    LegacyV018,
 }
 
 // ---------------------------------------------------------------------------
@@ -47,10 +62,21 @@ struct Parser {
 // ---------------------------------------------------------------------------
 
 pub fn parse(tokens: &[Token]) -> Result<Vec<Decl>, ParseError> {
+    parse_with_mode(tokens, ParseMode::Canonical)
+}
+
+/// Parse the v0.18 compatibility grammar for the explicit migration path.
+/// Normal compiler, formatter, and CLI entry points must use [`parse`].
+pub fn parse_legacy_v018(tokens: &[Token]) -> Result<Vec<Decl>, ParseError> {
+    parse_with_mode(tokens, ParseMode::LegacyV018)
+}
+
+fn parse_with_mode(tokens: &[Token], mode: ParseMode) -> Result<Vec<Decl>, ParseError> {
     let mut p = Parser {
         tokens: tokens.to_vec(),
         pos: 0,
         module_allowed: true,
+        mode,
     };
     let decls = p.parse_program()?;
     validate_property_names(&decls)?;
@@ -59,7 +85,63 @@ pub fn parse(tokens: &[Token]) -> Result<Vec<Decl>, ParseError> {
 
 pub fn parse_str(source: &str) -> Result<Vec<Decl>, ParseError> {
     let tokens = lexer::lex(source)?;
-    parse(&tokens)
+    parse_canonical_source_tokens(source, &tokens)
+}
+
+/// Parse a token stream while validating source-sensitive canonical literal
+/// spellings. Callers that already lexed for comments use this entry point so
+/// `fmt` cannot become an implicit dialect migration path.
+pub fn parse_canonical_source_tokens(
+    source: &str,
+    tokens: &[Token],
+) -> Result<Vec<Decl>, ParseError> {
+    validate_canonical_literal_spellings(source, tokens)?;
+    parse(tokens)
+}
+
+pub fn parse_str_legacy_v018(source: &str) -> Result<Vec<Decl>, ParseError> {
+    let tokens = lexer::lex(source)?;
+    parse_legacy_v018(&tokens)
+}
+
+fn validate_canonical_literal_spellings(source: &str, tokens: &[Token]) -> Result<(), ParseError> {
+    for token in tokens {
+        let found = source
+            .get(token.span.offset..token.span.end())
+            .unwrap_or_default();
+        if matches!(
+            &token.kind,
+            TokenKind::Float(value) | TokenKind::TypedFloat(value, _) if !value.is_finite()
+        ) {
+            return Err(ParseError::NonFiniteLiteral {
+                found: found.to_string(),
+                offset: token.span.offset,
+            });
+        }
+        let expected = match &token.kind {
+            TokenKind::Int(value) => Some(value.to_string()),
+            TokenKind::Float(value) => Some(crate::format::canonical_float(*value)),
+            TokenKind::TypedInt(value, suffix) => Some(format!("{value}{}", suffix.as_str())),
+            TokenKind::TypedFloat(value, suffix) => Some(format!(
+                "{}{}",
+                crate::format::canonical_float(*value),
+                suffix.as_str()
+            )),
+            TokenKind::Str(value) => Some(format!("{value:?}")),
+            _ => None,
+        };
+        let Some(expected) = expected else {
+            continue;
+        };
+        if found != expected {
+            return Err(ParseError::NonCanonicalLiteral {
+                found: found.to_string(),
+                expected,
+                offset: token.span.offset,
+            });
+        }
+    }
+    Ok(())
 }
 
 fn validate_property_names(decls: &[Decl]) -> Result<(), ParseError> {
@@ -107,6 +189,13 @@ enum BareUnaryBuiltinKind {
     Copy,
 }
 
+#[derive(Copy, Clone)]
+enum DeepSurfaceMetaForm {
+    Quote,
+    Unquote,
+    Splice,
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -135,6 +224,39 @@ impl Parser {
 
     fn at_eof(&self) -> bool {
         matches!(self.peek(), TokenKind::Eof)
+    }
+
+    /// Return the `n`th significant token after the current significant
+    /// token. Newlines are layout and do not participate in look-ahead.
+    fn peek_significant_after(&self, n: usize) -> Option<&TokenKind> {
+        self.tokens
+            .iter()
+            .skip(self.pos)
+            .filter(|token| !matches!(token.kind, TokenKind::Newline))
+            .nth(n)
+            .map(|token| &token.kind)
+    }
+
+    fn find_top_level_token(&self, wanted: TokenKind) -> Option<usize> {
+        let mut paren = 0usize;
+        let mut bracket = 0usize;
+        let mut brace = 0usize;
+        for (index, token) in self.tokens.iter().enumerate().skip(self.pos) {
+            if paren == 0 && bracket == 0 && brace == 0 && token.kind == wanted {
+                return Some(index);
+            }
+            match token.kind {
+                TokenKind::LParen => paren += 1,
+                TokenKind::RParen if paren > 0 => paren -= 1,
+                TokenKind::LBracket => bracket += 1,
+                TokenKind::RBracket if bracket > 0 => bracket -= 1,
+                TokenKind::LBrace => brace += 1,
+                TokenKind::RBrace if brace > 0 => brace -= 1,
+                TokenKind::Eof => break,
+                _ => {}
+            }
+        }
+        None
     }
 
     /// True when the next two significant tokens are `.` followed by a
@@ -195,7 +317,10 @@ impl Parser {
 
     fn consume_block_separators(&mut self) -> usize {
         let mut consumed = 0;
-        while matches!(self.raw_peek(), TokenKind::Semicolon | TokenKind::Newline) {
+        while matches!(self.raw_peek(), TokenKind::Newline)
+            || (self.mode == ParseMode::LegacyV018
+                && matches!(self.raw_peek(), TokenKind::Semicolon))
+        {
             self.advance_raw();
             consumed += 1;
         }
@@ -426,6 +551,7 @@ impl Parser {
             tokens: expr_tokens,
             pos: 0,
             module_allowed: false,
+            mode: self.mode,
         };
         let expr = nested.parse_expr(0)?;
         if !nested.at_eof() {
@@ -933,11 +1059,19 @@ impl Parser {
             let params = self.parse_params()?;
             self.expect(&TokenKind::RParen)?;
             params
+        } else if self.mode == ParseMode::Canonical {
+            return Err(ParseError::Expected {
+                expected: "function parameter list `()`".into(),
+                found: format!("{:?}", self.peek()),
+                offset: self.current_offset(),
+            });
         } else {
             Vec::new()
         };
 
-        let ret_ty = if matches!(self.peek(), TokenKind::Colon | TokenKind::Arrow) {
+        let ret_ty = if *self.peek() == TokenKind::Arrow
+            || (*self.peek() == TokenKind::Colon && self.mode == ParseMode::LegacyV018)
+        {
             self.advance();
             Some(self.parse_type()?)
         } else {
@@ -1328,7 +1462,21 @@ impl Parser {
                     let args = self.parse_expr_list(TokenKind::RParen)?;
                     let end = self.expect(&TokenKind::RParen)?;
                     lhs = Expr::Apply(Box::new(lhs), args, start.merge(end.span));
+                    if self.mode == ParseMode::Canonical {
+                        break;
+                    }
                 }
+                continue;
+            }
+
+            if *self.peek() == TokenKind::With
+                && self.peek_significant_after(1) == Some(&TokenKind::LBrace)
+            {
+                let start = expr_span(&lhs);
+                self.advance();
+                let fields = self.parse_record_fields()?;
+                let end = self.tokens[self.pos - 1].span;
+                lhs = Expr::RecordUpdate(Box::new(lhs), fields, start.merge(end));
                 continue;
             }
 
@@ -1481,7 +1629,19 @@ impl Parser {
         // `parse_realize` / `parse_copy` themselves (H1/H2 of the
         // pipe-autofix-extras workstream), so the pipe-stage path falls
         // through to `parse_prefix`.
-        self.parse_prefix()
+        let explicit_lambda = matches!(self.peek(), TokenKind::Fn);
+        let stage = self.parse_prefix()?;
+        if self.mode == ParseMode::Canonical
+            && explicit_lambda
+            && is_first_argument_pipe_lambda(&stage)
+        {
+            return Err(ParseError::Expected {
+                expected: "canonical call-stage sugar (`f(args)`, `realize`, `copy`, or `cast(type)`); explicit first-argument lambdas are a v0.18 alias".into(),
+                found: "first-argument pipe lambda".into(),
+                offset: expr_span(&stage).offset,
+            });
+        }
+        Ok(stage)
     }
 
     /// If the next four tokens are `Cast LParen Ident RParen`, return
@@ -1682,6 +1842,10 @@ impl Parser {
             TokenKind::Copy => self.parse_copy()?,
             TokenKind::With => self.parse_with_handler()?,
             TokenKind::Par => self.parse_par()?,
+            TokenKind::Do => self.parse_do()?,
+            TokenKind::Quote => self.parse_meta_form(DeepSurfaceMetaForm::Quote)?,
+            TokenKind::Unquote => self.parse_meta_form(DeepSurfaceMetaForm::Unquote)?,
+            TokenKind::Splice => self.parse_meta_form(DeepSurfaceMetaForm::Splice)?,
             TokenKind::LBrace => self.parse_block()?,
             _ => {
                 return Err(ParseError::Expected {
@@ -1715,6 +1879,17 @@ impl Parser {
     }
 
     fn parse_juxtaposition_args(&mut self, mut expr: Expr) -> Result<Expr, ParseError> {
+        if self.mode == ParseMode::Canonical {
+            if *self.peek() == TokenKind::LParen {
+                let start = expr_span(&expr);
+                self.advance();
+                let args = self.parse_expr_list(TokenKind::RParen)?;
+                let end = self.expect(&TokenKind::RParen)?;
+                expr = Expr::Apply(Box::new(expr), args, start.merge(end.span));
+            }
+            return Ok(expr);
+        }
+
         loop {
             if *self.peek() == TokenKind::LParen {
                 let start = expr_span(&expr);
@@ -1874,7 +2049,14 @@ impl Parser {
 
     fn parse_match(&mut self) -> Result<Expr, ParseError> {
         let start = self.advance().span; // consume Match
-        let scrutinee = self.parse_expr(0)?;
+        let with_pos =
+            self.find_top_level_token(TokenKind::With)
+                .ok_or_else(|| ParseError::Expected {
+                    expected: "match ... with { | pattern => expr }".into(),
+                    found: format!("{:?}", self.peek()),
+                    offset: self.current_offset(),
+                })?;
+        let scrutinee = self.parse_expr_in_range(with_pos, "`with` after match scrutinee")?;
         if *self.peek() != TokenKind::With {
             return Err(ParseError::Expected {
                 expected: "match ... with { | pattern => expr }".into(),
@@ -1982,6 +2164,13 @@ impl Parser {
                 break;
             }
             self.expect(&TokenKind::RParen)?;
+            if self.mode == ParseMode::Canonical && names.len() == 1 {
+                return Err(ParseError::Expected {
+                    expected: "bare singleton `wrt=name`".into(),
+                    found: "parenthesized singleton".into(),
+                    offset: self.current_offset(),
+                });
+            }
             Ok(names)
         } else {
             let (name, _) = self.expect_ident()?;
@@ -2001,6 +2190,13 @@ impl Parser {
                     self.expect(&TokenKind::Eq)?;
                     match self.peek().clone() {
                         TokenKind::Int(n) => {
+                            if self.mode == ParseMode::Canonical && n == 0 {
+                                return Err(ParseError::Expected {
+                                    expected: "`vmap(f)` for the default zero axis".into(),
+                                    found: "redundant `axis=0`".into(),
+                                    offset: self.current_offset(),
+                                });
+                            }
                             self.advance();
                             Some(n)
                         }
@@ -2014,6 +2210,13 @@ impl Parser {
                     }
                 }
                 TokenKind::Int(n) => {
+                    if self.mode == ParseMode::Canonical {
+                        return Err(ParseError::Expected {
+                            expected: "named axis argument `axis=<integer>`".into(),
+                            found: n.to_string(),
+                            offset: self.current_offset(),
+                        });
+                    }
                     self.advance();
                     Some(n)
                 }
@@ -2093,7 +2296,7 @@ impl Parser {
         self.expect(&TokenKind::LParen)?;
         let arg = self.parse_expr(0)?;
         self.expect(&TokenKind::RParen)?;
-        let body = self.parse_block()?;
+        let body = self.parse_block_inner(true)?;
         let span = start.merge(expr_span(&body));
         match handler_name.as_str() {
             "seed" => Ok(Expr::WithSeed(Box::new(arg), Box::new(body), span)),
@@ -2115,8 +2318,11 @@ impl Parser {
             self.advance_raw();
         }
         if *self.peek() == TokenKind::RBrace {
-            let end = self.expect(&TokenKind::RBrace)?;
-            return Ok(Expr::Par(exprs, start.merge(end.span)));
+            return Err(ParseError::Expected {
+                expected: "at least one expression in `par`".into(),
+                found: "RBrace".into(),
+                offset: self.current_offset(),
+            });
         }
         // chelis#706 family: par items are Sep-bounded, so a bare
         // `par { f(x)\n g(y) }` no longer cross-newline-juxtaposes into a
@@ -2150,7 +2356,65 @@ impl Parser {
         Ok(Expr::Par(exprs, start.merge(end.span)))
     }
 
+    fn parse_do(&mut self) -> Result<Expr, ParseError> {
+        let start = self.advance().span;
+        self.expect(&TokenKind::LBrace)?;
+        while matches!(self.raw_peek(), TokenKind::Newline) {
+            self.advance_raw();
+        }
+        if *self.peek() == TokenKind::RBrace {
+            return Err(ParseError::Expected {
+                expected: "at least one expression in `do`".into(),
+                found: "RBrace".into(),
+                offset: self.current_offset(),
+            });
+        }
+        let mut exprs = vec![self.parse_expr_until_block_separator()?];
+        loop {
+            while matches!(self.raw_peek(), TokenKind::Newline) {
+                self.advance_raw();
+            }
+            if *self.peek() == TokenKind::RBrace {
+                break;
+            }
+            self.expect(&TokenKind::Semicolon)?;
+            while matches!(self.raw_peek(), TokenKind::Newline) {
+                self.advance_raw();
+            }
+            if *self.peek() == TokenKind::RBrace {
+                return Err(ParseError::Expected {
+                    expected: "expression after `;` in `do`".into(),
+                    found: "RBrace".into(),
+                    offset: self.current_offset(),
+                });
+            }
+            exprs.push(self.parse_expr_until_block_separator()?);
+        }
+        let end = self.expect(&TokenKind::RBrace)?;
+        Ok(Expr::Do(exprs, start.merge(end.span)))
+    }
+
+    fn parse_meta_form(&mut self, form: DeepSurfaceMetaForm) -> Result<Expr, ParseError> {
+        let start = self.advance().span;
+        self.expect(&TokenKind::LParen)?;
+        let value = self.parse_expr(0)?;
+        let end = self.expect(&TokenKind::RParen)?;
+        let span = start.merge(end.span);
+        Ok(match form {
+            DeepSurfaceMetaForm::Quote => Expr::Quote(Box::new(value), span),
+            DeepSurfaceMetaForm::Unquote => Expr::Unquote(Box::new(value), span),
+            DeepSurfaceMetaForm::Splice => Expr::Splice(Box::new(value), span),
+        })
+    }
+
     fn parse_block(&mut self) -> Result<Expr, ParseError> {
+        self.parse_block_inner(false)
+    }
+
+    /// Parse a brace-delimited binding block. Effect handlers provide a
+    /// lexical scope of their own, so their body may contain one bare tail;
+    /// an ordinary `{ expr }` remains a rejected alias.
+    fn parse_block_inner(&mut self, allow_unbound_tail: bool) -> Result<Expr, ParseError> {
         let start = self.advance().span; // consume LBrace
         let mut bindings = Vec::new();
         self.consume_block_separators();
@@ -2191,6 +2455,13 @@ impl Parser {
             });
         }
         let end = self.expect(&TokenKind::RBrace)?;
+        if self.mode == ParseMode::Canonical && bindings.is_empty() && !allow_unbound_tail {
+            return Err(ParseError::Expected {
+                expected: "binding before the tail expression; use `do` for sequencing".into(),
+                found: "one-expression block".into(),
+                offset: start.offset,
+            });
+        }
         Ok(Expr::Block(bindings, Box::new(expr), start.merge(end.span)))
     }
 
@@ -2199,6 +2470,7 @@ impl Parser {
             tokens: self.tokens.clone(),
             pos: self.pos,
             module_allowed: false,
+            mode: self.mode,
         };
         let Ok(pattern) = probe.parse_let_pattern() else {
             return false;
@@ -2274,17 +2546,34 @@ impl Parser {
     }
 
     fn parse_record_expr(&mut self, name: String, start: Span) -> Result<Expr, ParseError> {
+        let fields = self.parse_record_fields()?;
+        let end = self.tokens[self.pos - 1].span;
+        Ok(Expr::Record(name, fields, start.merge(end)))
+    }
+
+    fn parse_record_fields(&mut self) -> Result<Vec<(String, Expr)>, ParseError> {
         self.expect(&TokenKind::LBrace)?;
         let mut fields = Vec::new();
         if *self.peek() != TokenKind::RBrace {
             loop {
                 let (field, field_span) = self.expect_ident()?;
-                let value = if *self.peek() == TokenKind::Colon {
+                let explicit = *self.peek() == TokenKind::Colon;
+                let value = if explicit {
                     self.advance();
                     self.parse_expr(0)?
                 } else {
                     Expr::Var(field.clone(), field_span)
                 };
+                if self.mode == ParseMode::Canonical
+                    && explicit
+                    && matches!(&value, Expr::Var(name, _) if name == &field)
+                {
+                    return Err(ParseError::Expected {
+                        expected: format!("record pun `{field}`"),
+                        found: format!("`{field}: {field}`"),
+                        offset: field_span.offset,
+                    });
+                }
                 fields.push((field, value));
                 if *self.peek() != TokenKind::Comma {
                     break;
@@ -2295,8 +2584,8 @@ impl Parser {
                 }
             }
         }
-        let end = self.expect(&TokenKind::RBrace)?;
-        Ok(Expr::Record(name, fields, start.merge(end.span)))
+        self.expect(&TokenKind::RBrace)?;
+        Ok(fields)
     }
 
     // ---------------------------------------------------------------------------
@@ -2330,6 +2619,13 @@ impl Parser {
             }
             TokenKind::Ident(name) => {
                 let tok = self.advance();
+                if self.mode == ParseMode::Canonical && name == "unit" {
+                    return Err(ParseError::Expected {
+                        expected: "unit type `()`".into(),
+                        found: "unit".into(),
+                        offset: tok.span.offset,
+                    });
+                }
                 Ok(TypeExpr::Named(name, tok.span))
             }
             TokenKind::TypeIdent(name) => {
@@ -2571,12 +2867,23 @@ impl Parser {
                                 });
                             }
                         };
-                        let field_pat = if *self.peek() == TokenKind::Colon {
+                        let explicit = *self.peek() == TokenKind::Colon;
+                        let field_pat = if explicit {
                             self.advance();
                             self.parse_pattern()?
                         } else {
                             Pattern::Var(field_name.clone(), field_span)
                         };
+                        if self.mode == ParseMode::Canonical
+                            && explicit
+                            && matches!(&field_pat, Pattern::Var(name, _) if name == &field_name)
+                        {
+                            return Err(ParseError::Expected {
+                                expected: format!("record-pattern pun `{field_name}`"),
+                                found: format!("`{field_name}: {field_name}`"),
+                                offset: field_span.offset,
+                            });
+                        }
                         fields.push((field_name, field_pat));
                         if *self.peek() == TokenKind::Comma {
                             self.advance();
@@ -2600,12 +2907,22 @@ impl Parser {
                         }
                     }
                     let end = self.expect(&TokenKind::RParen)?;
+                    if self.mode == ParseMode::Canonical && sub_pats.is_empty() {
+                        return Err(ParseError::Expected {
+                            expected: format!("bare zero-argument constructor `{name}`"),
+                            found: format!("`{name}()`"),
+                            offset: tok_span.offset,
+                        });
+                    }
                     Ok(Pattern::Constructor(
                         name,
                         sub_pats,
                         tok_span.merge(end.span),
                     ))
                 } else {
+                    if self.mode == ParseMode::Canonical {
+                        return Ok(Pattern::Constructor(name, vec![], tok_span));
+                    }
                     let mut sub_pats = Vec::new();
                     while self.is_pattern_arg_start() {
                         sub_pats.push(self.parse_pattern_atom()?);
@@ -2753,11 +3070,15 @@ impl Parser {
             TokenKind::Ident(name) => {
                 let tok = self.advance();
                 match name.as_str() {
-                    "Diff" | "diff" => Ok(EffectExpr::Diff(tok.span)),
-                    "Random" | "random" => Ok(EffectExpr::Random(tok.span)),
-                    "Accum" | "accum" => Ok(EffectExpr::Accum(tok.span)),
-                    "IO" | "io" => Ok(EffectExpr::Io(tok.span)),
-                    "Test" | "test" => Ok(EffectExpr::Test(tok.span)),
+                    "diff" if self.mode == ParseMode::LegacyV018 => Ok(EffectExpr::Diff(tok.span)),
+                    "random" if self.mode == ParseMode::LegacyV018 => {
+                        Ok(EffectExpr::Random(tok.span))
+                    }
+                    "accum" if self.mode == ParseMode::LegacyV018 => {
+                        Ok(EffectExpr::Accum(tok.span))
+                    }
+                    "io" if self.mode == ParseMode::LegacyV018 => Ok(EffectExpr::Io(tok.span)),
+                    "test" if self.mode == ParseMode::LegacyV018 => Ok(EffectExpr::Test(tok.span)),
                     _ => Err(ParseError::Expected {
                         expected: "effect name".into(),
                         found: name,
@@ -2820,6 +3141,26 @@ fn is_single_letter_upper(name: &str) -> bool {
     matches!((chars.next(), chars.next()), (Some(c), None) if c.is_ascii_uppercase())
 }
 
+fn is_first_argument_pipe_lambda(expr: &Expr) -> bool {
+    let Expr::Lambda(params, body, _) = expr else {
+        return false;
+    };
+    let [param] = params.as_slice() else {
+        return false;
+    };
+    if param.ty.is_some() {
+        return false;
+    }
+    let is_param = |expr: &Expr| matches!(expr, Expr::Var(name, _) if name == &param.name);
+    match body.as_ref() {
+        Expr::Apply(_, arguments, _) => arguments.first().is_some_and(is_param),
+        Expr::Realize(argument, _) | Expr::Copy(argument, _) | Expr::Cast(argument, _, _) => {
+            is_param(argument)
+        }
+        _ => false,
+    }
+}
+
 fn expr_span(e: &Expr) -> Span {
     match e {
         Expr::Lit(_, s) => *s,
@@ -2828,6 +3169,7 @@ fn expr_span(e: &Expr) -> Span {
         Expr::Apply(_, _, s) => *s,
         Expr::List(_, s) => *s,
         Expr::Record(_, _, s) => *s,
+        Expr::RecordUpdate(_, _, s) => *s,
         Expr::Access(_, _, s) => *s,
         Expr::TupleGet(_, _, s) => *s,
         Expr::Binary(_, _, _, s) => *s,
@@ -2847,6 +3189,10 @@ fn expr_span(e: &Expr) -> Span {
         Expr::WithSeed(_, _, s) => *s,
         Expr::WithDevice(_, _, s) => *s,
         Expr::Par(_, s) => *s,
+        Expr::Do(_, s) => *s,
+        Expr::Quote(_, s) => *s,
+        Expr::Unquote(_, s) => *s,
+        Expr::Splice(_, s) => *s,
         Expr::Annotate(_, _, s) => *s,
         Expr::Block(_, _, s) => *s,
     }
@@ -2910,11 +3256,11 @@ mod tests {
     use super::*;
 
     fn p(s: &str) -> Vec<Decl> {
-        parse_str(s).unwrap()
+        parse_str_legacy_v018(s).unwrap()
     }
 
     fn p_err(s: &str) -> ParseError {
-        parse_str(s).unwrap_err()
+        parse_str_legacy_v018(s).unwrap_err()
     }
 
     // Convenience: parse a single def, extract body expression.
@@ -2995,7 +3341,7 @@ mod tests {
 
     #[test]
     fn sig_io_effect_annotation() {
-        let decls = p("sig f: string -> unit ! {IO}");
+        let decls = p("sig f: string -> () ! {IO}");
         match &decls[0] {
             Decl::Sig { effects, .. } => {
                 let effects = effects.as_ref().expect("effects");

@@ -29,6 +29,19 @@ fn forbidden_byte_repr(b: u8) -> String {
     }
 }
 
+fn validate_surf_metadata_key(key: &str, offset: usize) -> Result<(), ParseError> {
+    if key.starts_with("surf_")
+        && !matches!(key, "surf_path" | "surf_dim_group_size" | "surf_pipe_stage")
+    {
+        return Err(ParseError::Expected {
+            expected: "a key in the closed Surf metadata namespace (`surf_path`, `surf_dim_group_size`, or `surf_pipe_stage`)".to_string(),
+            found: key.to_string(),
+            offset,
+        });
+    }
+    Ok(())
+}
+
 #[derive(Debug, Error)]
 pub enum ParseError {
     #[error("lex error: {0}")]
@@ -266,6 +279,7 @@ impl<'a> Parser<'a> {
                     });
                 }
             };
+            validate_surf_metadata_key(&key, key_tok.span.offset)?;
 
             // Value is any expression
             let value = self.parse_expr()?;
@@ -347,6 +361,7 @@ impl<'a> Parser<'a> {
                     });
                 }
             };
+            validate_surf_metadata_key(&key, key_tok.span.offset)?;
 
             // Expect ':'
             let colon_tok = self.peek().ok_or(ParseError::UnexpectedEof {
@@ -921,6 +936,7 @@ impl<'a> RawParser<'a> {
                     });
                 }
             };
+            validate_surf_metadata_key(&key, key_tok.span.offset)?;
 
             let value = self.parse_expr()?;
 
@@ -993,6 +1009,7 @@ impl<'a> RawParser<'a> {
                     });
                 }
             };
+            validate_surf_metadata_key(&key, key_tok.span.offset)?;
 
             let colon_tok = self.peek().ok_or(ParseError::UnexpectedEof {
                 offset: self.current_offset(),

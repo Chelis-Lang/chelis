@@ -959,12 +959,18 @@ fn collect_expr_type_references(expr: &Expr, out: &mut BTreeSet<String>) {
                 collect_expr_type_references(argument, out);
             }
         }
-        Expr::List(items, _) | Expr::Tuple(items, _) | Expr::Par(items, _) => {
+        Expr::List(items, _) | Expr::Tuple(items, _) | Expr::Par(items, _) | Expr::Do(items, _) => {
             for item in items {
                 collect_expr_type_references(item, out);
             }
         }
         Expr::Record(_, fields, _) => {
+            for (_, value) in fields {
+                collect_expr_type_references(value, out);
+            }
+        }
+        Expr::RecordUpdate(base, fields, _) => {
+            collect_expr_type_references(base, out);
             for (_, value) in fields {
                 collect_expr_type_references(value, out);
             }
@@ -977,7 +983,10 @@ fn collect_expr_type_references(expr: &Expr, out: &mut BTreeSet<String>) {
         | Expr::Jit(inner, _)
         | Expr::Realize(inner, _)
         | Expr::Copy(inner, _)
-        | Expr::Borrow(inner, _) => collect_expr_type_references(inner, out),
+        | Expr::Borrow(inner, _)
+        | Expr::Quote(inner, _)
+        | Expr::Unquote(inner, _)
+        | Expr::Splice(inner, _) => collect_expr_type_references(inner, out),
         Expr::Binary(_, left, right, _)
         | Expr::WithSeed(left, right, _)
         | Expr::WithDevice(left, right, _) => {
@@ -1089,6 +1098,12 @@ fn collect_expr_constructor_references(expr: &Expr, out: &mut BTreeSet<String>) 
                 collect_expr_constructor_references(value, out);
             }
         }
+        Expr::RecordUpdate(base, fields, _) => {
+            collect_expr_constructor_references(base, out);
+            for (_, value) in fields {
+                collect_expr_constructor_references(value, out);
+            }
+        }
         Expr::Lit(_, _) | Expr::Var(_, _) => {}
         Expr::Apply(callee, arguments, _) => {
             collect_expr_constructor_references(callee, out);
@@ -1096,7 +1111,7 @@ fn collect_expr_constructor_references(expr: &Expr, out: &mut BTreeSet<String>) 
                 collect_expr_constructor_references(argument, out);
             }
         }
-        Expr::List(items, _) | Expr::Tuple(items, _) | Expr::Par(items, _) => {
+        Expr::List(items, _) | Expr::Tuple(items, _) | Expr::Par(items, _) | Expr::Do(items, _) => {
             for item in items {
                 collect_expr_constructor_references(item, out);
             }
@@ -1111,7 +1126,10 @@ fn collect_expr_constructor_references(expr: &Expr, out: &mut BTreeSet<String>) 
         | Expr::Copy(inner, _)
         | Expr::Borrow(inner, _)
         | Expr::Cast(inner, _, _)
-        | Expr::Annotate(inner, _, _) => collect_expr_constructor_references(inner, out),
+        | Expr::Annotate(inner, _, _)
+        | Expr::Quote(inner, _)
+        | Expr::Unquote(inner, _)
+        | Expr::Splice(inner, _) => collect_expr_constructor_references(inner, out),
         Expr::Binary(_, left, right, _)
         | Expr::WithSeed(left, right, _)
         | Expr::WithDevice(left, right, _) => {
@@ -1293,13 +1311,19 @@ fn collect_expr_references(expr: &Expr, out: &mut BTreeSet<String>) {
                 collect_expr_references(arg, out);
             }
         }
-        Expr::List(items, _) | Expr::Tuple(items, _) | Expr::Par(items, _) => {
+        Expr::List(items, _) | Expr::Tuple(items, _) | Expr::Par(items, _) | Expr::Do(items, _) => {
             for item in items {
                 collect_expr_references(item, out);
             }
         }
         Expr::Record(name, fields, _) => {
             out.insert(name.clone());
+            for (_, value) in fields {
+                collect_expr_references(value, out);
+            }
+        }
+        Expr::RecordUpdate(base, fields, _) => {
+            collect_expr_references(base, out);
             for (_, value) in fields {
                 collect_expr_references(value, out);
             }
@@ -1312,7 +1336,10 @@ fn collect_expr_references(expr: &Expr, out: &mut BTreeSet<String>) {
         | Expr::Jit(inner, _)
         | Expr::Realize(inner, _)
         | Expr::Copy(inner, _)
-        | Expr::Borrow(inner, _) => collect_expr_references(inner, out),
+        | Expr::Borrow(inner, _)
+        | Expr::Quote(inner, _)
+        | Expr::Unquote(inner, _)
+        | Expr::Splice(inner, _) => collect_expr_references(inner, out),
         Expr::Binary(_, left, right, _)
         | Expr::WithSeed(left, right, _)
         | Expr::WithDevice(left, right, _) => {
@@ -8262,6 +8289,14 @@ fn rewrite_expr(expr: &Expr, resolver: &NameResolver, locals: &mut HashSet<Strin
                 .collect(),
             *span,
         ),
+        Expr::RecordUpdate(base, fields, span) => Expr::RecordUpdate(
+            Box::new(rewrite_expr(base, resolver, locals)),
+            fields
+                .iter()
+                .map(|(field, expr)| (field.clone(), rewrite_expr(expr, resolver, locals)))
+                .collect(),
+            *span,
+        ),
         Expr::Access(inner, field, span) => Expr::Access(
             Box::new(rewrite_expr(inner, resolver, locals)),
             field.clone(),
@@ -8365,6 +8400,22 @@ fn rewrite_expr(expr: &Expr, resolver: &NameResolver, locals: &mut HashSet<Strin
                 .collect(),
             *span,
         ),
+        Expr::Do(exprs, span) => Expr::Do(
+            exprs
+                .iter()
+                .map(|expr| rewrite_expr(expr, resolver, locals))
+                .collect(),
+            *span,
+        ),
+        Expr::Quote(expr, span) => {
+            Expr::Quote(Box::new(rewrite_expr(expr, resolver, locals)), *span)
+        }
+        Expr::Unquote(expr, span) => {
+            Expr::Unquote(Box::new(rewrite_expr(expr, resolver, locals)), *span)
+        }
+        Expr::Splice(expr, span) => {
+            Expr::Splice(Box::new(rewrite_expr(expr, resolver, locals)), *span)
+        }
         Expr::Annotate(inner, ty, span) => Expr::Annotate(
             Box::new(rewrite_expr(inner, resolver, locals)),
             rewrite_type(ty, resolver),
@@ -9708,7 +9759,7 @@ path = "./mylib"
         let eval_file = dir.path().join("probe.ch");
         write(
             &eval_file,
-            "import Mylib.Math (add)\ndef result -> int32 = add(1, 2)\n",
+            "import Mylib.Math (add)\ndef result() -> int32 = add(1, 2)\n",
         );
 
         let start = std::time::Instant::now();
@@ -9810,7 +9861,7 @@ some-registry-lib = {{ version = "0.1.0" }}
             std::env::set_var("CHELIS_REEF_TEST_DISABLE_GH_AUTH_FALLBACK", "1");
         }
         let entry_decls =
-            chelis_surf::parser::parse_str("def result -> int32 = 42").expect("parse");
+            chelis_surf::parser::parse_str("def result() -> int32 = 42").expect("parse");
         let result = prepare_program_for_eval_source(&root, &entry_decls);
         unsafe {
             std::env::remove_var("CHELIS_REEF_HOME");
@@ -9851,7 +9902,7 @@ some-registry-lib = {{ version = "0.1.0" }}
         // Write a file that has an import — would fail if resolver ran.
         write(
             &eval_file,
-            "import NonExistent.Module (something)\ndef result -> int32 = 42\n",
+            "import NonExistent.Module (something)\ndef result() -> int32 = 42\n",
         );
 
         let start = std::time::Instant::now();
@@ -10031,7 +10082,7 @@ path = "./nonexistent_dep"
 
         let start = std::time::Instant::now();
         let entry_decls =
-            chelis_surf::parser::parse_str("def result -> int32 = 42").expect("parse");
+            chelis_surf::parser::parse_str("def result() -> int32 = 42").expect("parse");
         let result = prepare_program_for_eval_source(&root, &entry_decls);
         let elapsed = start.elapsed();
 
@@ -11079,8 +11130,8 @@ version = "0.1.0"
     fn prepare_reef_graph_split_matches_single_shot_semantics() {
         let (_dir, root) = shared_graph_fixture();
 
-        let probe_source_a = "import Mylib.Math (add)\ndef result_a -> int32 = add(1, 2)\n";
-        let probe_source_b = "import Mylib.Math (add)\ndef result_b -> int32 = add(3, 4)\n";
+        let probe_source_a = "import Mylib.Math (add)\ndef result_a() -> int32 = add(1, 2)\n";
+        let probe_source_b = "import Mylib.Math (add)\ndef result_b() -> int32 = add(3, 4)\n";
         let decls_a = chelis_surf::parser::parse_str(probe_source_a).expect("parse a");
         let decls_b = chelis_surf::parser::parse_str(probe_source_b).expect("parse b");
 
@@ -11151,8 +11202,8 @@ version = "0.1.0"
     fn prepare_reef_graph_amortizes_work_across_multiple_files() {
         let (_dir, root) = shared_graph_fixture();
 
-        let probe_source_a = "import Mylib.Math (add)\ndef result_a -> int32 = add(1, 2)\n";
-        let probe_source_b = "import Mylib.Math (add)\ndef result_b -> int32 = add(3, 4)\n";
+        let probe_source_a = "import Mylib.Math (add)\ndef result_a() -> int32 = add(1, 2)\n";
+        let probe_source_b = "import Mylib.Math (add)\ndef result_b() -> int32 = add(3, 4)\n";
         let decls_a = chelis_surf::parser::parse_str(probe_source_a).expect("parse a");
         let decls_b = chelis_surf::parser::parse_str(probe_source_b).expect("parse b");
 
@@ -12207,11 +12258,11 @@ additional_sources = ["properties"]
         );
         write(
             &root.join("src/foo.ch"),
-            "module Pkg.Foo\n\nexport (one)\ndef one -> int32 = 1\n",
+            "module Pkg.Foo\n\nexport (one)\ndef one() -> int32 = 1\n",
         );
         write(
             &root.join("properties/bar.ch"),
-            "module Pkg.Properties.Bar\n\nexport (two)\ndef two -> int32 = 2\n",
+            "module Pkg.Properties.Bar\n\nexport (two)\ndef two() -> int32 = 2\n",
         );
 
         let archive_path = root.join("multi.tar.zst");
@@ -12425,7 +12476,7 @@ additional_sources = ["properties"]
         // Step 2: scaffold a tiny downstream package and publish it.
         let app_root = dir.path().join("downstream");
         let main = "module Demo.Main\n\nimport Std.Test (assert_true)\n\n\
-             def test_case() -> unit ! { Test } = assert_true(true, \"ok\")\n\n\
+             def test_case() -> () ! { Test } = assert_true(true, \"ok\")\n\n\
              ran = test_case()\n";
         fs::create_dir_all(app_root.join("src")).expect("mkdir src");
         write(
@@ -12494,7 +12545,7 @@ module_prefix = "Atomic"
         );
         write(
             &root.join("src/main.ch"),
-            "module Atomic.Main\n\nexport (one)\ndef one -> int32 = 1\n",
+            "module Atomic.Main\n\nexport (one)\ndef one() -> int32 = 1\n",
         );
         let archive_path = dir.join("atomicpkg.tar.zst");
         build_archive(&root, &archive_path).expect("build_archive");

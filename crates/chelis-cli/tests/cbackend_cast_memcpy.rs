@@ -189,9 +189,7 @@ const HARNESS_INCLUDES: &str = r#"
 #[test]
 fn cbackend_cast_tensor_f32_to_f64() {
     let build = chelis_build_c(
-        "def cast_demo(x: tensor[3, f32]) -> tensor[3, f64] = {\n  \
-         cast(x, f64)\n\
-         }\n",
+        "def cast_demo(x: tensor[3, f32]) -> tensor[3, f64] = cast(x, f64)\n",
         "cast_demo",
     );
     let kernel_c = build.path().join("cast_demo.c");
@@ -239,9 +237,7 @@ int main(void) {{
 #[test]
 fn cbackend_cast_tensor_f64_to_f32() {
     let build = chelis_build_c(
-        "def cast_demo(x: tensor[3, f64]) -> tensor[3, f32] = {\n  \
-         cast(x, f32)\n\
-         }\n",
+        "def cast_demo(x: tensor[3, f64]) -> tensor[3, f32] = cast(x, f32)\n",
         "cast_demo",
     );
     let kernel_c = build.path().join("cast_demo.c");
@@ -289,9 +285,7 @@ int main(void) {{
 #[test]
 fn cbackend_cast_tensor_f32_to_int32() {
     let build = chelis_build_c(
-        "def cast_demo(x: tensor[3, f32]) -> tensor[3, int32] = {\n  \
-         cast(x, int32)\n\
-         }\n",
+        "def cast_demo(x: tensor[3, f32]) -> tensor[3, int32] = cast(x, int32)\n",
         "cast_demo",
     );
     let kernel_c = build.path().join("cast_demo.c");
@@ -339,9 +333,7 @@ int main(void) {{
 #[test]
 fn cbackend_cast_tensor_int32_to_f32() {
     let build = chelis_build_c(
-        "def cast_demo(x: tensor[3, int32]) -> tensor[3, f32] = {\n  \
-         cast(x, f32)\n\
-         }\n",
+        "def cast_demo(x: tensor[3, int32]) -> tensor[3, f32] = cast(x, f32)\n",
         "cast_demo",
     );
     let kernel_c = build.path().join("cast_demo.c");

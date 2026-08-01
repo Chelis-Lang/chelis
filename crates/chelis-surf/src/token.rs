@@ -32,6 +32,10 @@ pub enum TokenKind {
     Cast,
     Export,
     Par,
+    Do,
+    Quote,
+    Unquote,
+    Splice,
 
     // Punctuation & Delimiters
     LParen,     // (

@@ -5826,7 +5826,7 @@ fn lower_tuple_get_host_expr(
 // Per `spec/design/phase5_host_scalar_ad.md`, the locked design is
 // forward-mode dual numbers. A scalar function `f: f32 -> f32` (or
 // multi-scalar-param) that lands in the host lane has no reverse-mode
-// transform, so `grad(f, wrt=(p))(args)` previously rejected with the
+// transform, so `grad(f, wrt=p)(args)` previously rejected with the
 // unresolved-callable marker. This pass implements the dual transform
 // entirely at compile time: it walks `f`'s pure-scalar body and produces
 // two parallel HostExpr trees — a value tree and a derivative tree — using
@@ -10583,7 +10583,7 @@ mod tests {
 type Column[n, a] = | Column(tensor[n, a])
 type Hamt[a] = | Leaf { value: a }
 type Frame[n, a] = | Frame { cols: Hamt[Column[n, a]] }
-def singleton[a](value: a) -> Hamt[a] = Leaf { value: value }
+def singleton[a](value: a) -> Hamt[a] = Leaf { value }
 def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
   Frame { cols: singleton(column) }
 "#,
@@ -11635,7 +11635,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
     /// after its output dim had been rewritten to the user-facing
     /// symbol. The Bucket 4d sweep in `dag.rs::symbolic_occurrences`
     /// panics on exactly that mixed state (no Load declares `dN`), and
-    /// before the fix the `grad(residual, wrt=(theta))` host-wrapper
+    /// before the fix the `grad(residual, wrt=theta)` host-wrapper
     /// canary in `chelis-cli/tests/cli.rs`
     /// (`build_c_tensor_grad_lm_style_mixed_scalar_tensor_args_builds`)
     /// tripped it. Pin that op-internal fields are renamed in lockstep

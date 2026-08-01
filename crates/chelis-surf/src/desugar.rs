@@ -330,6 +330,7 @@ fn expr_span(expr: &Expr) -> Span {
         | Expr::Apply(_, _, span)
         | Expr::List(_, span)
         | Expr::Record(_, _, span)
+        | Expr::RecordUpdate(_, _, span)
         | Expr::Access(_, _, span)
         | Expr::TupleGet(_, _, span)
         | Expr::Binary(_, _, _, span)
@@ -349,6 +350,10 @@ fn expr_span(expr: &Expr) -> Span {
         | Expr::WithSeed(_, _, span)
         | Expr::WithDevice(_, _, span)
         | Expr::Par(_, span)
+        | Expr::Do(_, span)
+        | Expr::Quote(_, span)
+        | Expr::Unquote(_, span)
+        | Expr::Splice(_, span)
         | Expr::Annotate(_, _, span)
         | Expr::Block(_, _, span) => *span,
     }
@@ -567,6 +572,47 @@ fn fresh_pipe_param_name(stage: &Expr) -> String {
     }
 }
 
+fn is_first_argument_pipe_lambda(expr: &Expr) -> bool {
+    let Expr::Lambda(params, body, _) = expr else {
+        return false;
+    };
+    let [param] = params.as_slice() else {
+        return false;
+    };
+    if param.ty.is_some() {
+        return false;
+    }
+    let is_param = |expr: &Expr| matches!(expr, Expr::Var(name, _) if name == &param.name);
+    match body.as_ref() {
+        Expr::Apply(_, arguments, _) => arguments.first().is_some_and(is_param),
+        Expr::Realize(argument, _) | Expr::Copy(argument, _) | Expr::Cast(argument, _, _) => {
+            is_param(argument)
+        }
+        _ => false,
+    }
+}
+
+fn mark_call_first_pipe_stage(expr: deep::Expr) -> deep::Expr {
+    let marker = ("surf_pipe_stage".to_string(), string("call-first"));
+    match expr {
+        deep::Expr::Node(mut node, span) => {
+            node.meta_mut()
+                .entries
+                .retain(|(key, _)| key != "surf_pipe_stage");
+            node.meta_mut().entries.push(marker);
+            deep::Expr::Node(node, span)
+        }
+        deep::Expr::List(mut list, span) => {
+            if let Some(deep::Expr::Map(meta, _)) = list.elements.get_mut(1) {
+                meta.entries.retain(|(key, _)| key != "surf_pipe_stage");
+                meta.entries.push(marker);
+            }
+            deep::Expr::List(list, span)
+        }
+        other => other,
+    }
+}
+
 fn expr_mentions_name(expr: &Expr, name: &str) -> bool {
     match expr {
         Expr::Lit(_, _) => false,
@@ -578,6 +624,12 @@ fn expr_mentions_name(expr: &Expr, name: &str) -> bool {
         Expr::Record(_, fields, _) => fields
             .iter()
             .any(|(_, value)| expr_mentions_name(value, name)),
+        Expr::RecordUpdate(base, fields, _) => {
+            expr_mentions_name(base, name)
+                || fields
+                    .iter()
+                    .any(|(_, value)| expr_mentions_name(value, name))
+        }
         Expr::Access(base, field, _) => expr_mentions_name(base, name) || field == name,
         Expr::TupleGet(base, _, _) => expr_mentions_name(base, name),
         Expr::Binary(_, lhs, rhs, _) => {
@@ -623,7 +675,7 @@ fn expr_mentions_name(expr: &Expr, name: &str) -> bool {
                         .is_some_and(|ty| type_mentions_name(ty, name))
             }) || expr_mentions_name(body, name)
         }
-        Expr::Tuple(items, _) | Expr::Par(items, _) => {
+        Expr::Tuple(items, _) | Expr::Par(items, _) | Expr::Do(items, _) => {
             items.iter().any(|item| expr_mentions_name(item, name))
         }
         Expr::Cast(expr, precision, _) => expr_mentions_name(expr, name) || precision == name,
@@ -638,6 +690,9 @@ fn expr_mentions_name(expr: &Expr, name: &str) -> bool {
         | Expr::Realize(expr, _)
         | Expr::Copy(expr, _)
         | Expr::Borrow(expr, _)
+        | Expr::Quote(expr, _)
+        | Expr::Unquote(expr, _)
+        | Expr::Splice(expr, _)
         | Expr::Annotate(expr, _, _) => expr_mentions_name(expr, name),
         Expr::WithSeed(seed, body, _) | Expr::WithDevice(seed, body, _) => {
             expr_mentions_name(seed, name) || expr_mentions_name(body, name)
@@ -861,7 +916,10 @@ impl DesugarCtx {
                     Box::new(Expr::Apply(func.clone(), applied_args, *span)),
                     *span,
                 );
-                self.desugar_expr_with_scope(&lambda, local_fn_params)
+                mark_call_first_pipe_stage(self.desugar_expr_with_scope(&lambda, local_fn_params))
+            }
+            Expr::Lambda(..) if is_first_argument_pipe_lambda(stage) => {
+                mark_call_first_pipe_stage(self.desugar_expr_with_scope(stage, local_fn_params))
             }
             _ => self.desugar_expr_with_scope(stage, local_fn_params),
         }
@@ -987,7 +1045,21 @@ impl DesugarCtx {
 
             Decl::Dim { names, .. } => names
                 .iter()
-                .map(|name| node(DeepTag::Defdim, vec![sym(name)]))
+                .enumerate()
+                .map(|(index, name)| {
+                    if index == 0 {
+                        node_meta(
+                            DeepTag::Defdim,
+                            meta_with_entries(vec![(
+                                "surf_dim_group_size".to_string(),
+                                int(names.len() as i64),
+                            )]),
+                            vec![sym(name)],
+                        )
+                    } else {
+                        node(DeepTag::Defdim, vec![sym(name)])
+                    }
+                })
                 .collect(),
 
             Decl::Module { name, decls, .. } => {
@@ -995,23 +1067,30 @@ impl DesugarCtx {
                 for d in decls {
                     children.extend(self.desugar_decl(d));
                 }
-                vec![node(DeepTag::Module, children)]
+                vec![node_meta(
+                    DeepTag::Module,
+                    meta_with_entries(vec![("surf_path".to_string(), string(name))]),
+                    children,
+                )]
             }
 
             Decl::Import { module, kind, .. } => match kind {
                 ImportKind::Names(ns) => {
                     let name_list = bare_list(ns.iter().map(|n| sym(n)).collect());
-                    vec![node(
+                    vec![node_meta(
                         DeepTag::Import,
+                        meta_with_entries(vec![("surf_path".to_string(), string(module))]),
                         vec![sym(&lower_module_path(module)), name_list],
                     )]
                 }
-                ImportKind::Qualified => vec![node(
+                ImportKind::Qualified => vec![node_meta(
                     DeepTag::Import,
+                    meta_with_entries(vec![("surf_path".to_string(), string(module))]),
                     vec![sym(&lower_module_path(module)), bare_list(vec![])],
                 )],
-                ImportKind::All => vec![node(
+                ImportKind::All => vec![node_meta(
                     DeepTag::ImportAll,
+                    meta_with_entries(vec![("surf_path".to_string(), string(module))]),
                     vec![sym(&lower_module_path(module))],
                 )],
             },
@@ -1372,19 +1451,30 @@ impl DesugarCtx {
                     .collect::<Vec<_>>(),
             ),
             Expr::Record(name, fields, _) => {
-                let mut fields = fields.clone();
-                fields.sort_by(|a, b| a.0.cmp(&b.0));
                 let mut children = vec![sym(name)];
                 for (field, value) in fields {
                     children.push(node(
                         DeepTag::Kv,
                         vec![
-                            sym(&field),
-                            self.desugar_expr_with_scope(&value, local_fn_params),
+                            sym(field),
+                            self.desugar_expr_with_scope(value, local_fn_params),
                         ],
                     ));
                 }
                 node(DeepTag::Record, children)
+            }
+            Expr::RecordUpdate(base, fields, _) => {
+                let mut children = vec![self.desugar_expr_with_scope(base, local_fn_params)];
+                for (field, value) in fields {
+                    children.push(node(
+                        DeepTag::Kv,
+                        vec![
+                            sym(field),
+                            self.desugar_expr_with_scope(value, local_fn_params),
+                        ],
+                    ));
+                }
+                node(DeepTag::RecordUpdate, children)
             }
             Expr::Access(target, field, _) => node(
                 DeepTag::Access,
@@ -1637,6 +1727,25 @@ impl DesugarCtx {
                     .iter()
                     .map(|expr| self.desugar_expr_with_scope(expr, local_fn_params))
                     .collect(),
+            ),
+            Expr::Do(exprs, _) => node(
+                DeepTag::Block,
+                exprs
+                    .iter()
+                    .map(|expr| self.desugar_expr_with_scope(expr, local_fn_params))
+                    .collect(),
+            ),
+            Expr::Quote(expr, _) => node(
+                DeepTag::Quote,
+                vec![self.desugar_expr_with_scope(expr, local_fn_params)],
+            ),
+            Expr::Unquote(expr, _) => node(
+                DeepTag::Unquote,
+                vec![self.desugar_expr_with_scope(expr, local_fn_params)],
+            ),
+            Expr::Splice(expr, _) => node(
+                DeepTag::Splice,
+                vec![self.desugar_expr_with_scope(expr, local_fn_params)],
             ),
 
             Expr::Annotate(e, ty, _) => {
@@ -2410,13 +2519,11 @@ fn desugar_pattern(pat: &Pattern) -> deep::Expr {
             pats.iter().map(desugar_pattern).collect(),
         ),
         Pattern::Record(name, fields, _) => {
-            let mut fields = fields.clone();
-            fields.sort_by(|a, b| a.0.cmp(&b.0));
             let mut children = vec![sym(name)];
             for (field_name, field_pat) in fields {
                 children.push(node(
                     DeepTag::Kv,
-                    vec![sym(&field_name), desugar_pattern(&field_pat)],
+                    vec![sym(field_name), desugar_pattern(field_pat)],
                 ));
             }
             node(DeepTag::PatRecord, children)
@@ -3402,7 +3509,7 @@ mod tests {
         };
         let nodes = desugar_decl_strs(&decl);
         assert_eq!(nodes.len(), 1);
-        assert_eq!(nodes[0], "(import-all {} foo)");
+        assert_eq!(nodes[0], "(import-all {surf_path: \"Foo\"} foo)");
     }
 
     #[test]
@@ -3414,7 +3521,7 @@ mod tests {
         };
         let nodes = desugar_decl_strs(&decl);
         assert_eq!(nodes.len(), 1);
-        assert_eq!(nodes[0], "(import {} foo (a b))");
+        assert_eq!(nodes[0], "(import {surf_path: \"Foo\"} foo (a b))");
     }
 
     // --- Record pattern ---
@@ -3431,7 +3538,7 @@ mod tests {
         );
         assert_eq!(
             print_expr(&desugar_pattern(&pat)),
-            "(pat-record {} Adam (kv {} eps (pat-var {} eps)) (kv {} lr (pat-var {} lr)))"
+            "(pat-record {} Adam (kv {} lr (pat-var {} lr)) (kv {} eps (pat-var {} eps)))"
         );
     }
 

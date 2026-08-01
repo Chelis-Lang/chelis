@@ -808,7 +808,7 @@ import Std.Io (read_file, process_run)
 
 -- Parse a Deep file and type-check with the reference checker. The Io effect uses the
 -- shipped `Effect::Io` (lowercase casing in the enum; §2).
-def reference_check(path: String) -> Option[(Type, EffectRow)] ! { Io } = {
+def reference_check(path: String) -> Option[(Type, EffectRow)] ! { IO } = {
   src = read_file(path)
   expr = parse_deep_file(src)?
   type_check([], expr)
@@ -816,13 +816,13 @@ def reference_check(path: String) -> Option[(Type, EffectRow)] ! { Io } = {
 
 -- Run the real compiler's structured check and parse the JSON result. `process_run` is
 -- the new subprocess builtin (under Io) that the next-phase monorepo work adds (§8.1).
-def compiler_check(path: String) -> Option[(Type, EffectRow)] ! { Io } = {
+def compiler_check(path: String) -> Option[(Type, EffectRow)] ! { IO } = {
   result = process_run("chelis", ["check", path, "--json"])
   parse_check_result(result)
 }
 
 -- Compare both results
-def differential_check(path: String) -> CheckResult ! { Io } = {
+def differential_check(path: String) -> CheckResult ! { IO } = {
   ref_result = reference_check(path)
   comp_result = compiler_check(path)
   match (ref_result, comp_result) {
@@ -1045,7 +1045,7 @@ original sketch listed `gen_conformance_suite.py` and `run_differential.py`. The
 reconciled as follows, and this is the pinned decision:
 
 - **`gen_conformance_suite` and `run_differential_suite` are Chelis drivers, not Python.**
-  They are `.ch` programs with `def main() -> unit ! { Io }` that read Deep files, run the
+  They are `.ch` programs with `def main() -> () ! { IO }` that read Deep files, run the
   reference checker/evaluator, shell out to the compiler, and write the corpus. They are
   pure Chelis because Hull gains a new `process_run` exec builtin (under `Io`) to invoke
   the compiler.

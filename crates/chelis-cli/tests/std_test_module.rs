@@ -83,7 +83,7 @@ fn std_test_assert_true_pass() {
 
 import Std.Test (assert_true)
 
-def test_case() -> unit ! { Test } = assert_true(true, "t-pass")
+def test_case() -> () ! { Test } = assert_true(true, "t-pass")
 
 ran = test_case()
 "#,
@@ -102,7 +102,7 @@ fn std_test_assert_true_fail_reports_label() {
 
 import Std.Test (assert_true)
 
-def test_case() -> unit ! { Test } = assert_true(false, "t-fail")
+def test_case() -> () ! { Test } = assert_true(false, "t-fail")
 
 ran = test_case()
 "#,
@@ -123,7 +123,7 @@ fn std_test_assert_false_pass() {
 
 import Std.Test (assert_false)
 
-def test_case() -> unit ! { Test } = assert_false(false, "f-pass")
+def test_case() -> () ! { Test } = assert_false(false, "f-pass")
 
 ran = test_case()
 "#,
@@ -142,7 +142,7 @@ fn std_test_assert_false_fail_reports_label() {
 
 import Std.Test (assert_false)
 
-def test_case() -> unit ! { Test } = assert_false(true, "f-fail")
+def test_case() -> () ! { Test } = assert_false(true, "f-fail")
 
 ran = test_case()
 "#,
@@ -163,7 +163,7 @@ fn std_test_assert_eq_pass() {
 
 import Std.Test (assert_eq)
 
-def test_case() -> unit ! { Test } = assert_eq(1.5, 1.5, "eq-pass")
+def test_case() -> () ! { Test } = assert_eq(1.5, 1.5, "eq-pass")
 
 ran = test_case()
 "#,
@@ -182,7 +182,7 @@ fn std_test_assert_eq_fail_reports_label() {
 
 import Std.Test (assert_eq)
 
-def test_case() -> unit ! { Test } = assert_eq(1.5, 2.5, "eq-fail")
+def test_case() -> () ! { Test } = assert_eq(1.5, 2.5, "eq-fail")
 
 ran = test_case()
 "#,
@@ -207,7 +207,7 @@ fn std_test_assert_eq_int_pass() {
 
 import Std.Test (assert_eq_int)
 
-def test_case() -> unit ! { Test } = assert_eq_int(cast(3, int64), cast(3, int64), "eq-int-pass")
+def test_case() -> () ! { Test } = assert_eq_int(cast(3, int64), cast(3, int64), "eq-int-pass")
 
 ran = test_case()
 "#,
@@ -226,7 +226,7 @@ fn std_test_assert_eq_int_fail_reports_label() {
 
 import Std.Test (assert_eq_int)
 
-def test_case() -> unit ! { Test } = assert_eq_int(cast(3, int64), cast(5, int64), "eq-int-fail")
+def test_case() -> () ! { Test } = assert_eq_int(cast(3, int64), cast(5, int64), "eq-int-fail")
 
 ran = test_case()
 "#,
@@ -250,7 +250,7 @@ fn std_test_assert_eq_bool_pass() {
 
 import Std.Test (assert_eq_bool)
 
-def test_case() -> unit ! { Test } = assert_eq_bool(true, true, "eq-bool-pass")
+def test_case() -> () ! { Test } = assert_eq_bool(true, true, "eq-bool-pass")
 
 ran = test_case()
 "#,
@@ -269,7 +269,7 @@ fn std_test_assert_eq_bool_fail_reports_label() {
 
 import Std.Test (assert_eq_bool)
 
-def test_case() -> unit ! { Test } = assert_eq_bool(true, false, "eq-bool-fail")
+def test_case() -> () ! { Test } = assert_eq_bool(true, false, "eq-bool-fail")
 
 ran = test_case()
 "#,
@@ -292,7 +292,7 @@ fn std_test_assert_eq_string_pass() {
 
 import Std.Test (assert_eq_string)
 
-def test_case() -> unit ! { Test } = assert_eq_string("hi", "hi", "eq-str-pass")
+def test_case() -> () ! { Test } = assert_eq_string("hi", "hi", "eq-str-pass")
 
 ran = test_case()
 "#,
@@ -311,7 +311,7 @@ fn std_test_assert_eq_string_fail_reports_label() {
 
 import Std.Test (assert_eq_string)
 
-def test_case() -> unit ! { Test } = assert_eq_string("foo", "bar", "eq-str-fail")
+def test_case() -> () ! { Test } = assert_eq_string("foo", "bar", "eq-str-fail")
 
 ran = test_case()
 "#,
@@ -335,7 +335,7 @@ fn std_test_assert_close_pass() {
 
 import Std.Test (assert_close)
 
-def test_case() -> unit ! { Test } = {
+def test_case() -> () ! { Test } = {
   _ = assert_close(1.0, 1.0, 0.0, "close-exact");
   assert_close(1.0, 1.01, 0.05, "close-tol")
 }
@@ -357,7 +357,7 @@ fn std_test_assert_close_fail_reports_label() {
 
 import Std.Test (assert_close)
 
-def test_case() -> unit ! { Test } = assert_close(1.0, 2.0, 0.001, "close-fail")
+def test_case() -> () ! { Test } = assert_close(1.0, 2.0, 0.001, "close-fail")
 
 ran = test_case()
 "#,
@@ -383,7 +383,7 @@ fn std_test_assert_close_tensor_pass() {
 
 import Std.Test (assert_close_tensor)
 
-def test_case() -> unit ! { Test } =
+def test_case() -> () ! { Test } =
   assert_close_tensor(to_tensor([1.0, 2.0]), to_tensor([1.0, 2.0]), 0.001, "close-tensor-pass")
 
 ran = test_case()
@@ -403,7 +403,7 @@ fn std_test_assert_close_tensor_fail_reports_label() {
 
 import Std.Test (assert_close_tensor)
 
-def test_case() -> unit ! { Test } =
+def test_case() -> () ! { Test } =
   assert_close_tensor(to_tensor([1.0, 2.0]), to_tensor([1.0, 9.0]), 0.001, "close-tensor-fail")
 
 ran = test_case()
@@ -429,7 +429,7 @@ fn std_test_assert_eq_tensor_int64_pass() {
 
 import Std.Test (assert_eq_tensor_int64)
 
-def test_case() -> unit ! { Test } =
+def test_case() -> () ! { Test } =
   assert_eq_tensor_int64(to_tensor([cast(0, int64), cast(1, int64), cast(2, int64)]), to_tensor([cast(0, int64), cast(1, int64), cast(2, int64)]), "eq-tensor-i64-pass")
 
 ran = test_case()
@@ -449,7 +449,7 @@ fn std_test_assert_eq_tensor_int64_fail_reports_label() {
 
 import Std.Test (assert_eq_tensor_int64)
 
-def test_case() -> unit ! { Test } =
+def test_case() -> () ! { Test } =
   assert_eq_tensor_int64(to_tensor([cast(0, int64), cast(1, int64), cast(2, int64)]), to_tensor([cast(0, int64), cast(7, int64), cast(2, int64)]), "eq-tensor-i64-fail")
 
 ran = test_case()
@@ -474,7 +474,7 @@ fn std_test_assert_shape_pass() {
 
 import Std.Test (assert_shape)
 
-def test_case() -> unit ! { Test } =
+def test_case() -> () ! { Test } =
   assert_shape(to_tensor([1.0, 2.0, 3.0]), cast(3, int64), "shape-3-pass")
 
 ran = test_case()
@@ -494,7 +494,7 @@ fn std_test_assert_shape_fail_reports_label() {
 
 import Std.Test (assert_shape)
 
-def test_case() -> unit ! { Test } =
+def test_case() -> () ! { Test } =
   assert_shape(to_tensor([1.0, 2.0]), cast(7, int64), "shape-fail")
 
 ran = test_case()
@@ -522,7 +522,7 @@ fn std_test_assertion_from_empty_effect_fn_is_rejected() {
 
 import Std.Test (assert_true)
 
-def g() -> unit ! {} = assert_true(true, "x")
+def g() -> () ! {} = assert_true(true, "x")
 "#,
     );
 
@@ -553,7 +553,7 @@ fn std_test_fail_wrapper_carries_test_effect() {
 
 import Std.Test (fail)
 
-def h() -> unit ! {} = fail("msg")
+def h() -> () ! {} = fail("msg")
 "#,
     );
 
@@ -582,7 +582,7 @@ fn std_test_assert_close_rejects_negative_tolerance() {
 
 import Std.Test (assert_close)
 
-def test_bad_tol() -> unit ! { Test } = assert_close(1.0, 1.0, sub(cast(0.0, f32), cast(1.0, f32)), "neg")
+def test_bad_tol() -> () ! { Test } = assert_close(1.0, 1.0, sub(cast(0.0, f32), cast(1.0, f32)), "neg")
 
 ran = test_bad_tol()
 "#,
@@ -626,7 +626,7 @@ fn std_test_assert_shape_reports_label_on_mismatch() {
 
 import Std.Test (assert_shape)
 
-def test_shape_bad() -> unit ! { Test } = assert_shape(to_tensor([1.0, 2.0]), cast(7, int64), "shape-bad")
+def test_shape_bad() -> () ! { Test } = assert_shape(to_tensor([1.0, 2.0]), cast(7, int64), "shape-bad")
 
 ran = test_shape_bad()
 "#,

@@ -5645,7 +5645,7 @@ impl LowerCtx {
                     _ => None,
                 })?;
                 // `visited` protects THIS resolution walk from alias cycles
-                // (`def a = b; def b = a`). It deliberately does NOT consult
+                // (`def a() = b; def b() = a`). It deliberately does NOT consult
                 // the active-inline state: a re-entrant call to a callee that
                 // is mid-inline resolves normally and unrolls, bounded by the
                 // depth caps in `lower_plain_callable_app` (chelis#620; the

@@ -29,9 +29,7 @@ pub fn scaffold(root: &Path, name: &str, module_prefix: &str, version: &str) -> 
     write(
         root,
         "src/main.ch",
-        &format!(
-            "module {module_prefix}.Main\n\ndef noop() -> unit = test_assert(true, \"noop\")\n"
-        ),
+        &format!("module {module_prefix}.Main\n\ndef noop() -> () = test_assert(true, \"noop\")\n"),
     )?;
 
     write(
@@ -39,7 +37,7 @@ pub fn scaffold(root: &Path, name: &str, module_prefix: &str, version: &str) -> 
         "tests_neg/example/rejects.ch",
         &format!(
             "module {module_prefix}.TestsNeg.Rejects\n\n\
-             def test_neg_example() -> unit = test_assert(false, \"example negative case\")\n"
+             def test_neg_example() -> () = test_assert(false, \"example negative case\")\n"
         ),
     )?;
     write(

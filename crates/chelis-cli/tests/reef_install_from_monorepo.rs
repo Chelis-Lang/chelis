@@ -152,7 +152,7 @@ chelis-std = {{ version = "0.4.0" }}
 
 import Std.Test (assert_true)
 
-def test_case() -> unit ! { Test } = assert_true(true, "ok")
+def test_case() -> () ! { Test } = assert_true(true, "ok")
 
 ran = test_case()
 "#,

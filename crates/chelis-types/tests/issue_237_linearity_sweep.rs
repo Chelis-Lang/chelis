@@ -69,10 +69,8 @@ fn closure_that_only_borrow_reads_capture_does_not_consume_outer_var() {
         r#"
 type Frame[n] =
   | Frame { col: tensor[n, f32] }
-def get_col[n](df: Frame[n]) -> tensor[n, f32] = {
-  match df with {
-    | Frame { col: c } => c
-  }
+def get_col[n](df: Frame[n]) -> tensor[n, f32] = match df with {
+  | Frame { col: c } => c
 }
 def f[n](df: Frame[n]) -> tensor[n, f32] = {
   c = get_col(df)

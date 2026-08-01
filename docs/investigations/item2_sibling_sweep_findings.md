@@ -71,7 +71,7 @@ unreachable-by-construction).
 - **Trigger shape (concrete Surf)**:
   ```
   def h(model: tensor[3, f32] -> tensor[3, f32], xs: tensor[2, 3, f32]) -> tensor[2, 3, f32] =
-    vmap(model, axis=0)(xs)
+    vmap(model)(xs)
   ```
   `chelis build` and `chelis eval` both emit
   `` `vmap` is not supported by IR evaluation yet; use `chelis build --target c` instead``.
@@ -92,7 +92,7 @@ unreachable-by-construction).
   `lower_vmap_callable_with_nodes` early-returns when no argument's
   rank exceeds `axis`.
 - **Trigger shape (concrete Surf)**: **not directly reachable**. The
-  type-checker rejects `vmap(f, axis=0)` over scalar arguments with
+  type-checker rejects `vmap(f)` over scalar arguments with
   "def 'h' body doesn't match declared signature" before lowering
   fires. The reduced empirical repro requires either hand-written Deep
   or a checker bypass.
@@ -117,7 +117,7 @@ unreachable-by-construction).
   `lower_vmap_grad_callable_with_nodes` early-returns on the same
   axis-vs-rank check as G3.
 - **Trigger shape (concrete Surf)**: **not directly reachable**.
-  Type-checker rejects `vmap(grad(f), axis=0)` over scalar arguments
+  Type-checker rejects `vmap(grad(f))` over scalar arguments
   similarly to G3.
 - **Trigger shape (concrete Deep)**: analogous to G3, with `vmap`
   wrapping `grad`.

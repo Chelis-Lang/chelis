@@ -60,7 +60,7 @@ mylib = {{ path = "./mylib" }}
     );
     write_file(
         &root.join("src/main.ch"),
-        "module App.Main\n\ndef placeholder -> int32 = cast(0, int32)\n",
+        "module App.Main\n\ndef placeholder() -> int32 = cast(0, int32)\n",
     );
 
     write_file(
@@ -127,7 +127,7 @@ fn list_cache_files(reef_home: &Path) -> Vec<PathBuf> {
 fn cmd_eval_warm_cache_hit_byte_identical_to_cold() {
     let (_pkg_dir, root) = path_dep_package();
     let entry_path = root.join("src/evalwarm.ch");
-    let snippet = "module App.EvalWarm\n\ndef warm_value -> int32 = 99\n";
+    let snippet = "module App.EvalWarm\n\ndef warm_value() -> int32 = 99\n";
     write_file(&entry_path, snippet);
 
     let reef_home = tempdir().expect("reef_home tempdir");
@@ -204,8 +204,7 @@ fn cmd_eval_source_edit_invalidates_cache_and_re_saves() {
     // filename). Negative parity to the warm-hit test above.
     let (_pkg_dir, root) = path_dep_package();
     let entry_path = root.join("src/evaledit.ch");
-    let snippet =
-        "module App.EvalEdit\nimport Mylib.Math (square)\n\ndef edit_value -> int32 = square(3)\n";
+    let snippet = "module App.EvalEdit\nimport Mylib.Math (square)\n\ndef edit_value() -> int32 = square(3)\n";
     write_file(&entry_path, snippet);
 
     let reef_home = tempdir().expect("reef_home tempdir");
@@ -275,7 +274,7 @@ fn cmd_test_warm_cache_creates_and_reuses_compiled_context() {
     fs::create_dir_all(root.join("tests")).expect("mkdir tests");
     write_file(
         &root.join("tests/smoke.ch"),
-        "module App.SmokeTest\n\ndef test_trivial -> bool = true\n",
+        "module App.SmokeTest\n\ndef test_trivial() -> bool = true\n",
     );
 
     let reef_home = tempdir().expect("reef_home tempdir");

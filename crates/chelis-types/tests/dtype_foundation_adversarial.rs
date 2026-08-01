@@ -68,7 +68,7 @@ fn parse_name_rejects_fp32_misspelling() {
 /// §5.3: bare integer literal defaults to int32.
 #[test]
 fn bare_int_literal_defaults_to_int32() {
-    let src = "def main -> int32 = 42";
+    let src = "def main() -> int32 = 42";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     assert!(
@@ -83,7 +83,7 @@ fn bare_int_literal_defaults_to_int32() {
 /// A program that asserts `int64` against bare `42` must fail.
 #[test]
 fn bare_int_literal_rejected_against_int64_context() {
-    let src = "def main -> int64 = 42";
+    let src = "def main() -> int64 = 42";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     // Per §5.3 contextual inference (§5.6) should NOT widen a bare
@@ -94,7 +94,7 @@ fn bare_int_literal_rejected_against_int64_context() {
         panic!(
             "spec §5.3: bare integer literal `42` defaults to int32 and must NOT \
              silently widen to int64 in a non-tensor scalar context. The program \
-             `def main -> int64 = 42` should be rejected, not accepted."
+             `def main() -> int64 = 42` should be rejected, not accepted."
         );
     }
 }
@@ -103,7 +103,7 @@ fn bare_int_literal_rejected_against_int64_context() {
 /// int64-typed scalar binding. Should error.
 #[test]
 fn bare_float_literal_does_not_satisfy_int64() {
-    let src = "def main -> int64 = 1.0";
+    let src = "def main() -> int64 = 1.0";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     assert!(
@@ -112,7 +112,7 @@ fn bare_float_literal_does_not_satisfy_int64() {
     );
 }
 
-// The `def main -> int32 = 2147483648` out-of-i32-range default case is
+// The `def main() -> int32 = 2147483648` out-of-i32-range default case is
 // pinned with the exact §5.3 range diagnostic by
 // `int_literal_overflow.rs::
 // literal_2_pow_31_rejected_with_spec_5_3_range_diagnostic`, which
@@ -129,7 +129,7 @@ fn bare_float_literal_does_not_satisfy_int64() {
 /// indirect path. This pins it.
 #[test]
 fn cast_to_f8e4m3_via_to_tensor_pipe_still_rejected() {
-    let src = "def main -> tensor[3, f32] = cast(to_tensor([1.0, 2.0, 3.0]), f8e4m3)";
+    let src = "def main() -> tensor[3, f32] = cast(to_tensor([1.0, 2.0, 3.0]), f8e4m3)";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("indirect cast to f8e4m3 must still be rejected");
@@ -151,7 +151,7 @@ fn cast_to_f8e4m3_via_to_tensor_pipe_still_rejected() {
 /// metadata as the literal's type.
 #[test]
 fn literal_suffix_f32_is_implemented_per_spec_5_5() {
-    let src = "def main -> f32 = 1.0f32";
+    let src = "def main() -> f32 = 1.0f32";
     let decls = match chelis_surf::parser::parse_str(src) {
         Ok(d) => d,
         Err(e) => panic!(
@@ -179,7 +179,7 @@ fn literal_suffix_f32_is_implemented_per_spec_5_5() {
 /// WS-B1 status: implemented; see `literal_suffix_f32_is_implemented_per_spec_5_5`.
 #[test]
 fn literal_suffix_i64_is_implemented_per_spec_5_5() {
-    let src = "def main -> int64 = 42i64";
+    let src = "def main() -> int64 = 42i64";
     let decls = match chelis_surf::parser::parse_str(src) {
         Ok(d) => d,
         Err(e) => panic!(
@@ -205,7 +205,7 @@ fn literal_suffix_i64_is_implemented_per_spec_5_5() {
 /// diagnostic pointing at §1.1.1.
 #[test]
 fn literal_suffix_f8e4m3_is_lex_error_per_spec_5_5() {
-    let src = "def main -> f32 = 1.0f8e4m3";
+    let src = "def main() -> f32 = 1.0f8e4m3";
     if let Ok(decls) = chelis_surf::parser::parse_str(src) {
         // The expected behavior per §5.5 is a parse error. Anything
         // else is divergence. If desugar/check don't catch it either,
@@ -229,7 +229,7 @@ fn literal_suffix_f8e4m3_is_lex_error_per_spec_5_5() {
 /// §5.5: deferred suffix `u8` (unsigned, §1.1.2) must be a parse error.
 #[test]
 fn literal_suffix_u8_is_lex_error_per_spec_5_5() {
-    let src = "def main -> int32 = 42u8";
+    let src = "def main() -> int32 = 42u8";
     if let Ok(decls) = chelis_surf::parser::parse_str(src) {
         let exprs = chelis_macros::expand_program(
             &desugar_program(&decls),
@@ -251,7 +251,7 @@ fn literal_suffix_u8_is_lex_error_per_spec_5_5() {
 /// cleanly halt rather than cascade. Pin here.
 #[test]
 fn cast_to_f8e4m3_then_arithmetic_does_not_cascade_silently() {
-    let src = "def main -> f32 = add(cast(1.0, f8e4m3), 1.0)";
+    let src = "def main() -> f32 = add(cast(1.0, f8e4m3), 1.0)";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("must error on the f8e4m3 cast");
@@ -269,7 +269,7 @@ fn cast_to_f8e4m3_then_arithmetic_does_not_cascade_silently() {
 /// §5.5: `1.0bf16` infers `bf16`, no widening.
 #[test]
 fn bf16_literal_suffix_infers_bf16() {
-    let src = "def main -> bf16 = 1.0bf16";
+    let src = "def main() -> bf16 = 1.0bf16";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     assert!(
@@ -282,7 +282,7 @@ fn bf16_literal_suffix_infers_bf16() {
 /// §5.5: `42i64` infers `int64`.
 #[test]
 fn i64_literal_suffix_infers_int64() {
-    let src = "def main -> int64 = 42i64";
+    let src = "def main() -> int64 = 42i64";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     assert!(
@@ -299,7 +299,7 @@ fn i64_literal_suffix_infers_int64() {
 /// that the program is rejected.
 #[test]
 fn f32_literal_does_not_widen_to_f64_context() {
-    let src = "def main -> f64 = 1.0f32";
+    let src = "def main() -> f64 = 1.0f32";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     assert!(
@@ -312,7 +312,7 @@ fn f32_literal_does_not_widen_to_f64_context() {
 /// diagnostic suggesting `cast` or whitespace.
 #[test]
 fn hex_float_suffix_is_rejected_at_lex_time() {
-    let src = "def main -> f32 = 0xFFf32";
+    let src = "def main() -> f32 = 0xFFf32";
     let err = parse_str(src).expect_err("spec §5.5: hex float suffix must lex-error");
     let msg = format!("{err}");
     assert!(
@@ -321,13 +321,13 @@ fn hex_float_suffix_is_rejected_at_lex_time() {
     );
 }
 
-/// §5.5 hex+integer-suffix rule: `0xFFi8` is well-formed.
+/// §5.5 integer-suffix rule: canonical decimal `255i8` is well-formed.
 #[test]
-fn hex_integer_suffix_is_well_formed() {
-    let src = "def main -> int8 = 0xFFi8";
+fn decimal_integer_suffix_is_well_formed() {
+    let src = "def main() -> int8 = 255i8";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
-    // 0xFF = 255 is out of range for i8 [-128, 127] but the suffix
+    // 255 is out of range for i8 [-128, 127] but the suffix
     // grammar must succeed at parse/lex time. The downstream type
     // checker may emit a range error; we accept either Ok or a range
     // error here, but NOT a missing-suffix or unknown-suffix error.
@@ -345,7 +345,7 @@ fn hex_integer_suffix_is_well_formed() {
 /// §5.5: `1.0i8` is a parse error (integer suffix on float literal).
 #[test]
 fn integer_suffix_on_float_literal_is_lex_error() {
-    let src = "def main -> int8 = 1.0i8";
+    let src = "def main() -> int8 = 1.0i8";
     let err = parse_str(src).expect_err("spec §5.5: int suffix on float lits must lex-error");
     let msg = format!("{err}");
     assert!(
@@ -357,7 +357,7 @@ fn integer_suffix_on_float_literal_is_lex_error() {
 /// §5.5: `1.0xyz` is a parse error (unknown adjacent identifier).
 #[test]
 fn unknown_suffix_is_lex_error() {
-    let src = "def main -> f32 = 1.0xyz";
+    let src = "def main() -> f32 = 1.0xyz";
     let err = parse_str(src).expect_err("spec §5.5: unknown suffix must lex-error");
     let msg = format!("{err}");
     assert!(
@@ -374,14 +374,14 @@ fn unknown_suffix_is_lex_error() {
 /// re-fires this same diagnostic (issue #308 review fix).
 ///
 /// Distinct input from `int_literal_overflow.rs`: this snippet
-/// declares an `int64` return position (`def main -> int64 = ...`),
+/// declares an `int64` return position (`def main() -> int64 = ...`),
 /// pinning that even an int64-typed context does not rescue a bare
 /// integer literal from the §5.3 int32 default and the D1 diagnostic
 /// still fires. The `ws_a0_*` exact-diagnostic version uses an `int32`
 /// return position, so it does not cover this case.
 #[test]
 fn d1_diagnostic_mentions_i64_suffix_and_cast() {
-    let src = "def main -> int64 = 2147483648";
+    let src = "def main() -> int64 = 2147483648";
     let deep = surf_to_deep(src);
     let rep = check_ir_program(&deep).expect_err("D1: literal must overflow i32 default");
     let messages: Vec<&str> = rep.errors.iter().map(|e| e.message.as_str()).collect();

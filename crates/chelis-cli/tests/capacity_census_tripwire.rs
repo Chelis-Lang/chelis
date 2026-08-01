@@ -3825,7 +3825,7 @@ fn planted_stdlib_rows(label: &str, source: &str) -> Vec<Row> {
 fn an_exported_stdlib_def_without_a_signature_fails_loudly() {
     let source = "module Std.Planted\n\
                   export (planted_weights)\n\
-                  def planted_weights = 1.0\n";
+                  def planted_weights() = 1.0\n";
     let message = expect_census_panic(move || {
         planted_stdlib_rows("planted", source);
     });
@@ -3846,8 +3846,8 @@ fn a_declared_stdlib_signature_enumerates_and_a_type_export_does_not() {
         "planted",
         "module Std.Planted\n\
          export (planted_weights)\n\
-         sig planted_weights: f32\n\
-         def planted_weights = 1.0\n",
+         sig planted_weights: () -> f32\n\
+         def planted_weights() = 1.0\n",
     );
     let row = rows
         .iter()
@@ -4025,8 +4025,8 @@ fn a_new_stdlib_numeric_def_requires_semantic_registration() {
         "planted",
         "module Std.Planted\n\
          export (planted_ratio)\n\
-         sig planted_ratio: f32\n\
-         def planted_ratio = 1.0\n",
+         sig planted_ratio: () -> f32\n\
+         def planted_ratio() = 1.0\n",
     );
     let mut float_row = float_rows
         .into_iter()

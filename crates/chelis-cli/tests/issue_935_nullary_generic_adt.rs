@@ -182,12 +182,12 @@ type Hamt[a] =
   | Leaf { value: a }
 type Frame[n] =
   | Frame { cols: Hamt[Column[n]] }
-def singleton[a](value: a) -> Hamt[a] = Leaf { value: value }
+def singleton[a](value: a) -> Hamt[a] = Leaf { value }
 def from_column[n](column: Column[n]) -> Frame[n] =
   Frame { cols: singleton(column) }
 def total[n](frame: Frame[n]) -> f32 =
   match frame with {
-    | Frame { cols: cols } =>
+    | Frame { cols } =>
       match cols with {
         | Leaf { value: column } =>
           match column with {
@@ -257,12 +257,12 @@ type Hamt[payload] =
   | Leaf { value: payload }
 type Frame[rows, dtype] =
   | Frame { cols: Hamt[Column[rows, dtype]] }
-def singleton[payload](value: payload) -> Hamt[payload] = Leaf { value: value }
+def singleton[payload](value: payload) -> Hamt[payload] = Leaf { value }
 def from_column[rows, dtype](column: Column[rows, dtype]) -> Frame[rows, dtype] =
   Frame { cols: singleton(column) }
 def first[rows, dtype](frame: Frame[rows, dtype]) -> dtype =
   match frame with {
-    | Frame { cols: cols } =>
+    | Frame { cols } =>
       match cols with {
         | Leaf { value: column } =>
           match column with {

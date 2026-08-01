@@ -567,7 +567,7 @@ fn reef_std_parquet_module_builds_cleanly() {
 import Std.Io.Parquet (read_parquet, write_parquet)
 
 def load_rows(path: string) -> List[Dict[string, string]] = read_parquet(path)
-def save_rows(path: string, rows: List[Dict[string, string]]) -> unit = write_parquet(path, rows)
+def save_rows(path: string, rows: List[Dict[string, string]]) -> () = write_parquet(path, rows)
 "#,
     );
 

@@ -79,7 +79,7 @@ fn parse_name_rejects_every_deferred_name() {
 #[test]
 fn cast_scalar_to_deferred_name_rejected_with_spec_1_1_1_diagnostic() {
     for name in DEFERRED_NAMES {
-        assert_deferred_rejection(&format!("def main -> int32 = cast(1, {name})"), name);
+        assert_deferred_rejection(&format!("def main() -> int32 = cast(1, {name})"), name);
     }
 }
 
@@ -90,7 +90,7 @@ fn cast_scalar_to_deferred_name_rejected_with_spec_1_1_1_diagnostic() {
 fn tensor_element_deferred_name_rejected_with_spec_1_1_1_diagnostic() {
     for name in DEFERRED_NAMES {
         assert_deferred_rejection(
-            &format!("def stash -> tensor[3, {name}] = to_tensor([1, 2, 3])"),
+            &format!("def stash() -> tensor[3, {name}] = to_tensor([1, 2, 3])"),
             name,
         );
     }
@@ -133,8 +133,8 @@ fn sig_precision_ordinary_tvar_still_quantifies() {
 #[test]
 fn active_dtypes_do_not_match_deferred_family() {
     for (src, what) in [
-        ("def main -> int32 = cast(1, int32)", "int32"),
-        ("def main -> f16 = cast(1.0, f16)", "f16"),
+        ("def main() -> int32 = cast(1, int32)", "int32"),
+        ("def main() -> f16 = cast(1.0, f16)", "f16"),
     ] {
         let deep = surf_to_deep(src);
         let res = check_ir_program(&deep);

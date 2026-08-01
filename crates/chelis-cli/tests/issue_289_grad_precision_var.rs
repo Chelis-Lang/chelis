@@ -98,7 +98,7 @@ fn error_messages(json: &Value) -> Vec<String> {
 // differentiated entry point `loss` is fully concrete `f32`.
 //
 // The compiled-and-run numeric cases use single-`wrt` grad
-// (`grad(loss, wrt=(target))(x, w)`), which lowers to a single gradient
+// (`grad(loss, wrt=target)(x, w)`), which lowers to a single gradient
 // tensor — NOT a tuple. The build/check cases below exercise the full
 // two-output `grad(loss)(x, w)` form. This split keeps the numeric
 // assertions off the unrelated `chelis_tuple_get` C-codegen path for
@@ -111,7 +111,7 @@ fn reproducer_source_wrt(wrt_target: &str) -> String {
          def loss(x: tensor[2, f32], w: tensor[2, f32]) -> f32 =\n\
            tensor_to_scalar(sum(lin_p(x, w), cast(0, int32)))\n\
          def dloss(x: tensor[2, f32], w: tensor[2, f32]) -> tensor[2, f32] =\n\
-           grad(loss, wrt=({wrt_target}))(x, w)\n\
+           grad(loss, wrt={wrt_target})(x, w)\n\
          out = dloss(to_tensor([3.0, 4.0]), to_tensor([5.0, 6.0]))\n",
     )
 }
@@ -207,7 +207,7 @@ fn issue_289_control_inline_f32_callee_dx_equals_w() {
          def loss(x: tensor[2, f32], w: tensor[2, f32]) -> f32 =\n\
            tensor_to_scalar(sum(lin_f32(x, w), cast(0, int32)))\n\
          def dloss(x: tensor[2, f32], w: tensor[2, f32]) -> tensor[2, f32] =\n\
-           grad(loss, wrt=(x))(x, w)\n\
+           grad(loss, wrt=x)(x, w)\n\
          out = dloss(to_tensor([3.0, 4.0]), to_tensor([5.0, 6.0]))\n";
     let stdout = build_and_run(source, "grad_inline_f32_control");
     let actual = parse_tensor_data(&stdout, "out");

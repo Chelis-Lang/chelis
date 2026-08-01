@@ -322,7 +322,7 @@ fn imported_rank_generic_adt_signatures_instantiate_independently() {
 type Curve[n] =
   | Curve { xs: tensor[n, f32] }
 def make[n](xs: tensor[n, f32]) -> Curve[n] =
-  Curve { xs: xs }
+  Curve { xs }
 def value[n](curve: Curve[n]) -> f32 =
   match curve with {
     | Curve { xs: values } => index(to_list(values), cast(0, int64))

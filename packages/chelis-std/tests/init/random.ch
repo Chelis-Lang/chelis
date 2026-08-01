@@ -19,26 +19,26 @@ def max_abs_diff[n](a: tensor[n, f32], b: tensor[n, f32]) -> f32 = {
   diffs = map(fn (pair: (f32, f32)) -> abs_f32(sub(pair.0, pair.1)), zip(to_list(a), to_list(b)))
   fold(fn (acc: f32, x: f32) -> if gt(x, acc) then x else acc, cast(0.0, f32), diffs)
 }
-def test_normal_like_is_deterministic_under_same_seed() -> unit ! { Test } = {
+def test_normal_like_is_deterministic_under_same_seed() -> () ! { Test } = {
   template = make_template(cast(64, int64))
   a = with seed(42i64) { normal_like(copy(template), cast(0.0, f32), cast(1.0, f32)) }
   b = with seed(42i64) { normal_like(template, cast(0.0, f32), cast(1.0, f32)) }
   assert_close_tensor(a, b, cast(0.0, f32), "normal_like under same seed produces identical tensors")
 }
-def test_normal_like_differs_across_seeds() -> unit ! { Test } = {
+def test_normal_like_differs_across_seeds() -> () ! { Test } = {
   template = make_template(cast(64, int64))
   a = with seed(1i64) { normal_like(copy(template), cast(0.0, f32), cast(1.0, f32)) }
   b = with seed(2i64) { normal_like(template, cast(0.0, f32), cast(1.0, f32)) }
   max_diff = max_abs_diff(a, b)
   assert_true(gt(max_diff, cast(0.5, f32)), "normal_like(seed=1) vs (seed=2): max element-wise diff > 0.5 across 64 draws")
 }
-def test_normal_like_preserves_template_shape() -> unit ! { Test } = {
+def test_normal_like_preserves_template_shape() -> () ! { Test } = {
   template = make_template(cast(64, int64))
   out = with seed(7i64) { normal_like(template, cast(0.0, f32), cast(1.0, f32)) }
   actual_n = cast(len(to_list(out)), int64)
   assert_eq_int(actual_n, cast(64, int64), "normal_like output length matches template length")
 }
-def test_normal_like_mean_zero_std_one_within_loose_bound() -> unit ! { Test } = {
+def test_normal_like_mean_zero_std_one_within_loose_bound() -> () ! { Test } = {
   template = make_template(cast(1024, int64))
   sample = with seed(42i64) { normal_like(template, cast(0.0, f32), cast(1.0, f32)) }
   m = sample_mean(copy(sample))
@@ -46,7 +46,7 @@ def test_normal_like_mean_zero_std_one_within_loose_bound() -> unit ! { Test } =
   _ = assert_close(m, cast(0.0, f32), cast(0.5, f32), "normal_like(mean=0, std=1) sample mean within 0.5 of 0 (loose; 1024 samples)")
   assert_close(s, cast(1.0, f32), cast(0.5, f32), "normal_like(mean=0, std=1) sample std within 0.5 of 1 (loose; 1024 samples)")
 }
-def test_normal_like_mean_shift_tracks_requested_mean() -> unit ! { Test } = {
+def test_normal_like_mean_shift_tracks_requested_mean() -> () ! { Test } = {
   template = make_template(cast(1024, int64))
   sample = with seed(42i64) { normal_like(template, cast(5.0, f32), cast(1.0, f32)) }
   m = sample_mean(sample)

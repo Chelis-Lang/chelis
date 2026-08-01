@@ -44,7 +44,7 @@ module_prefix = "Probe"
     );
     write_file(
         &pkg.join("src/main.ch"),
-        "module Probe.Main\n\ndef noop() -> unit = test_assert(true, \"noop\")\n",
+        "module Probe.Main\n\ndef noop() -> () = test_assert(true, \"noop\")\n",
     );
     (dir, pkg)
 }
@@ -91,7 +91,7 @@ fn neg_fail_with_substring_is_ok() {
         &pkg,
         "case",
         "Case",
-        r#"def test_neg_rejects() -> unit = test_assert(false, "expected int32, got f32")"#,
+        r#"def test_neg_rejects() -> () = test_assert(false, "expected int32, got f32")"#,
         Some("expected int32\n"),
     );
     run_expect(&pkg, "neg").success().stdout(verdict_is("ok"));
@@ -104,7 +104,7 @@ fn neg_pass_is_should_have_failed() {
         &pkg,
         "case",
         "Case",
-        r#"def test_neg_rejects() -> unit = test_assert(true, "unexpectedly accepted")"#,
+        r#"def test_neg_rejects() -> () = test_assert(true, "unexpectedly accepted")"#,
         Some("expected int32\n"),
     );
     run_expect(&pkg, "neg")
@@ -120,7 +120,7 @@ fn neg_fail_wrong_diagnostic() {
         &pkg,
         "case",
         "Case",
-        r#"def test_neg_rejects() -> unit = test_assert(false, "some unrelated failure")"#,
+        r#"def test_neg_rejects() -> () = test_assert(false, "some unrelated failure")"#,
         Some("expected int32\n"),
     );
     run_expect(&pkg, "neg")
@@ -209,7 +209,7 @@ fn blocked_fail_with_substring_is_ok() {
         &pkg,
         "probe",
         "Probe",
-        r#"def test_blocked_repro() -> unit = test_assert(false, "rank mismatch in expand")"#,
+        r#"def test_blocked_repro() -> () = test_assert(false, "rank mismatch in expand")"#,
         Some("rank mismatch\nchelis#345: promote to tests/ on fix\n"),
     );
     run_expect(&pkg, "blocked")
@@ -224,7 +224,7 @@ fn blocked_pass_is_fix_detected() {
         &pkg,
         "probe",
         "Probe",
-        r#"def test_blocked_repro() -> unit = test_assert(true, "now works")"#,
+        r#"def test_blocked_repro() -> () = test_assert(true, "now works")"#,
         Some("rank mismatch\nchelis#345: promote to tests/ on fix\n"),
     );
     run_expect(&pkg, "blocked")
@@ -240,7 +240,7 @@ fn blocked_fail_wrong_diagnostic_is_drifted() {
         &pkg,
         "probe",
         "Probe",
-        r#"def test_blocked_repro() -> unit = test_assert(false, "a completely different error")"#,
+        r#"def test_blocked_repro() -> () = test_assert(false, "a completely different error")"#,
         Some("rank mismatch\nchelis#345\n"),
     );
     run_expect(&pkg, "blocked")
@@ -255,7 +255,7 @@ fn blocked_bare_file_compile_failure_matches_sidecar_in_plain_output() {
     write_file_probe(
         &pkg,
         "probe",
-        r#"def helper() -> unit = missing_file_level_symbol()"#,
+        r#"def helper() -> () = missing_file_level_symbol()"#,
         "unbound variable\nchelis#967: preserve bare file diagnostics\n",
     );
     Command::cargo_bin("chelis")
@@ -277,7 +277,7 @@ fn blocked_bare_file_diagnostic_mismatch_is_drifted_and_preserved() {
     write_file_probe(
         &pkg,
         "probe",
-        r#"def helper() -> unit = missing_file_level_symbol()"#,
+        r#"def helper() -> () = missing_file_level_symbol()"#,
         "some other diagnostic\nchelis#967: preserve bare file diagnostics\n",
     );
     Command::cargo_bin("chelis")
@@ -291,7 +291,7 @@ fn blocked_bare_file_diagnostic_mismatch_is_drifted_and_preserved() {
         .stdout(predicate::eq(
             "DRIFTED            tests/probe.ch\n\
              \x20   expected diagnostic substring: \"some other diagnostic\"\n\
-             \x20   got: compile: unbound variable: missing_file_level_symbol; def 'helper' body doesn't match declared signature: body has type `() -> <error>`, declared type is `() -> unit`\n\n\
+             \x20   got: compile: unbound variable: missing_file_level_symbol; def 'helper' body doesn't match declared signature: body has type `() -> <error>`, declared type is `() -> ()`\n\n\
              0 ok, 1 failing (blocked mode)\n",
         ));
 }
@@ -302,7 +302,7 @@ fn blocked_bare_file_mismatch_ndjson_preserves_actual_diagnostic() {
     write_file_probe(
         &pkg,
         "probe",
-        r#"def helper() -> unit = missing_file_level_symbol()"#,
+        r#"def helper() -> () = missing_file_level_symbol()"#,
         "some other diagnostic\nchelis#967: preserve bare file diagnostics\n",
     );
     let output = Command::cargo_bin("chelis")
@@ -320,7 +320,7 @@ fn blocked_bare_file_mismatch_ndjson_preserves_actual_diagnostic() {
     assert_eq!(
         record["got"],
         serde_json::json!([
-            "compile: unbound variable: missing_file_level_symbol; def 'helper' body doesn't match declared signature: body has type `() -> <error>`, declared type is `() -> unit`"
+            "compile: unbound variable: missing_file_level_symbol; def 'helper' body doesn't match declared signature: body has type `() -> <error>`, declared type is `() -> ()`"
         ])
     );
 }
@@ -334,7 +334,7 @@ fn missing_sidecar_is_config_error() {
         &pkg,
         "probe",
         "Probe",
-        r#"def test_blocked_repro() -> unit = test_assert(false, "rank mismatch")"#,
+        r#"def test_blocked_repro() -> () = test_assert(false, "rank mismatch")"#,
         None, // no .expect
     );
     run_expect(&pkg, "blocked")
@@ -350,7 +350,7 @@ fn blocked_without_citation_is_config_error() {
         &pkg,
         "probe",
         "Probe",
-        r#"def test_blocked_repro() -> unit = test_assert(false, "rank mismatch")"#,
+        r#"def test_blocked_repro() -> () = test_assert(false, "rank mismatch")"#,
         Some("rank mismatch\nimplementation convenience\n"), // no auditable citation
     );
     run_expect(&pkg, "blocked")
@@ -362,7 +362,7 @@ fn blocked_without_citation_is_config_error() {
 #[test]
 fn clean_bare_file_is_config_error_with_exact_ndjson() {
     let (_d, pkg) = make_probe_package("clean-file");
-    write_file_probe(&pkg, "clean", r#"def helper() -> unit = ()"#, "must fail\n");
+    write_file_probe(&pkg, "clean", r#"def helper() -> () = ()"#, "must fail\n");
     run_expect(&pkg, "neg")
         .failure()
         .code(1)
@@ -391,7 +391,7 @@ fn filter_with_expect_is_rejected() {
         &pkg,
         "case",
         "Case",
-        r#"def test_x() -> unit = test_assert(false, "boom")"#,
+        r#"def test_x() -> () = test_assert(false, "boom")"#,
         Some("boom\n"),
     );
     Command::cargo_bin("chelis")

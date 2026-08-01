@@ -263,8 +263,8 @@ fn no_explicit_sig_keeps_synthesized_defsig() {
 #[test]
 fn explicit_eff_less_sig_preserves_def_empty_effect_bound() {
     let json = check_json(
-        "sig f: &tensor[n, f32] -> unit\n\
-         def f(x) -> unit ! {} = print(x)\n",
+        "sig f: &tensor[n, f32] -> ()\n\
+         def f(x) -> () ! {} = print(x)\n",
     );
     assert_effect_rejected(&json, "def !{} effect bound under eff-less sig");
 }
@@ -276,23 +276,23 @@ fn explicit_eff_less_sig_preserves_def_empty_effect_bound() {
 #[test]
 fn explicit_eff_less_sig_preserves_bare_def_empty_effect_bound() {
     let json = check_json(
-        "sig f: &tensor[n, f32] -> unit\n\
+        "sig f: &tensor[n, f32] -> ()\n\
          def f(x) ! {} = print(x)\n",
     );
     assert_effect_rejected(&json, "bare def !{} effect bound under eff-less sig");
 }
 
 /// Positive: the inherited bound is the *def's* clause, so an honest
-/// `! { io }` def whose body performs exactly `IO` under an eff-less sig
+/// `! { IO }` def whose body performs exactly `IO` under an eff-less sig
 /// must stay clean. The fix must not over-reject by inheriting a wrong
 /// (e.g. empty) bound.
 #[test]
 fn honest_def_io_effect_clause_under_eff_less_sig_type_checks() {
     let json = check_json(
-        "sig f: &tensor[n, f32] -> unit\n\
-         def f(x) -> unit ! { io } = print(x)\n",
+        "sig f: &tensor[n, f32] -> ()\n\
+         def f(x) -> () ! { IO } = print(x)\n",
     );
-    assert_clean(&json, "honest def !{io} under eff-less sig");
+    assert_clean(&json, "honest def !{IO} under eff-less sig");
 }
 
 /// Control: the same effect lie WITHOUT an explicit sig is caught by the
@@ -300,7 +300,7 @@ fn honest_def_io_effect_clause_under_eff_less_sig_type_checks() {
 /// inherited bound is distinguishable from a general effect-check regression.
 #[test]
 fn effect_lie_inline_only_no_sig_control_still_rejected() {
-    let json = check_json("def f(x: &tensor[n, f32]) -> unit ! {} = print(x)\n");
+    let json = check_json("def f(x: &tensor[n, f32]) -> () ! {} = print(x)\n");
     assert_effect_rejected(&json, "effect lie control (no inline sig)");
 }
 
@@ -310,8 +310,8 @@ fn effect_lie_inline_only_no_sig_control_still_rejected() {
 #[test]
 fn eff_less_sig_inherits_def_effect_metadata_into_single_defsig() {
     let deep = deep_text(
-        "sig f: &tensor[n, f32] -> unit\n\
-         def f(x) -> unit ! {} = print(x)\n",
+        "sig f: &tensor[n, f32] -> ()\n\
+         def f(x) -> () ! {} = print(x)\n",
     );
     let defsig_count = deep.matches("(defsig").count();
     assert_eq!(

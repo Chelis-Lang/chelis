@@ -2,13 +2,11 @@
 //! canonical Surf signature form; the colon variant
 //! `def name(params) : T = expr` is flagged.
 //!
-//! Spec authority: `spec/01-nomenclature.md` §3.5. Both forms parse, but
-//! the arrow is the ecosystem-wide canonical surface choice — it pairs
-//! visually with parameter `:` annotations without overloading the colon
-//! for two unrelated jobs (parameter binding vs. function-result type).
-//! `chelis fmt` rewrites colon-form decls to arrow-form on the next
-//! canonicalization, but the lint surfaces the violation explicitly so
-//! reviewers and authoring agents see the rule fire by name.
+//! Spec authority: `spec/01-nomenclature.md` §3.5. The canonical parser
+//! accepts only the arrow form. The lint still scans raw source so style-gate
+//! callers can name the legacy colon spelling directly instead of reporting
+//! only a generic parse error. `chelis migrate surf --from 0.18` owns the
+//! mechanical rewrite; `chelis fmt` is not a dialect translator.
 //!
 //! Implementation notes: the rule scans each `def NAME` start, balances
 //! the parameter parentheses (so types like `(i32, i32)` don't fool a
@@ -130,13 +128,13 @@ fn scan_for_annotation(s: &str) -> Option<AnnotationKind> {
     while i < limit && (bytes[i] == b' ' || bytes[i] == b'\t' || bytes[i] == b'\n') {
         i += 1;
     }
-    // Parameter parens are required for the rule's check; nullary
-    // value bindings (`def name = ...`) carry no return-type colon and
-    // are out of scope.
+    // Parameter parens are required in canonical function definitions.
+    // Retain a narrow scan of legacy no-parameter-list input so a direct
+    // colon annotation still receives this rule's actionable diagnostic.
     if i >= limit || bytes[i] != b'(' {
-        // No parameter list — could be `def name = expr` or
-        // a bare `def name : T = expr` (rare). Treat the latter as
-        // a colon-form violation; the former returns None.
+        // No parameter list — could be legacy `def name = expr` or
+        // `def name : T = expr`. Treat only the latter as a colon-form
+        // violation; canonical parsing reports the missing `()` separately.
         if i < limit && bytes[i] == b':' {
             return Some(AnnotationKind::Colon);
         }

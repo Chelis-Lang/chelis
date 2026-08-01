@@ -280,7 +280,7 @@ fn accepted_transforms() {
         "accepted_transforms",
         r#"module Parity.Transforms
 def process(x: tensor[features, f32]) -> tensor[features, f32] = relu(x)
-def batch_process(xs: tensor[batch, features, f32]) -> tensor[batch, features, f32] = xs |> vmap(process, axis=0)
+def batch_process(xs: tensor[batch, features, f32]) -> tensor[batch, features, f32] = xs |> vmap(process)
 "#,
     );
 }
@@ -361,7 +361,7 @@ fn rejected_transforms() {
         "rejected_transforms",
         r#"module Parity.TransformsRejected
 def label(x: tensor[features, f32]) -> string = "constant"
-def batch_label(xs: tensor[batch, features, f32]) -> tensor[batch, features, f32] = xs |> vmap(label, axis=0)
+def batch_label(xs: tensor[batch, features, f32]) -> tensor[batch, features, f32] = xs |> vmap(label)
 "#,
     );
 }

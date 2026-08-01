@@ -512,7 +512,7 @@ target = fn (row: tensor[1, f32]) -> tensor_scan(
   fn (prev: f32, _i: int64) -> mul(prev, cast(2.0, f32)),
   cast(4, int64)
 )
-out = vmap(target, axis=0)(to_tensor([[cast(1.0, f32)], [cast(2.0, f32)]]))
+out = vmap(target)(to_tensor([[cast(1.0, f32)], [cast(2.0, f32)]]))
 "#;
     let result = eval(EvalRequest {
         source_kind: SourceKind::Surf,

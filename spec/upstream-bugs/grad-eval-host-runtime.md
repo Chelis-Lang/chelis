@@ -143,7 +143,7 @@ def deltas[n](spots: tensor[n, f32]) -> tensor[n, f32] = {
 module Repro.Tests.Grad
 import Std.Test (assert_close)
 import Repro.Lib (deltas)
-def test_grad_evaluates() -> unit ! { Test } = {
+def test_grad_evaluates() -> () ! { Test } = {
   spots = to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)])
   ds = deltas(spots)
   d0 = index(to_list(ds), cast(0, int64))
