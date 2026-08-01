@@ -535,6 +535,12 @@ Deep uses explicit multi-argument application, not currying:
 
 If `f` expects 3 arguments and receives 2, this is a **type error**, not partial application.
 
+A nested application is nevertheless a distinct valid shape when the inner
+application returns a function value. `(app {} (app {} f x) y)` is not
+flattened to `(app {} f x y)`; canonical Surf writes it `(f(x))(y)`. The same
+grouped-callee rule preserves `if`, `fn`, unary, and other expression-valued
+callees.
+
 ### 4.2 Partial Application
 
 Explicit closure construction:
@@ -651,6 +657,11 @@ not erase or rewrite any other declared `type` or `eff` data, handler effects,
 `wrt`, `opaque`, `invariant`, property semantics, or a validated `surf_*`
 value. Implementations compare macro-authored Surf after expansion. Any other
 metadata loss is a round-trip failure.
+
+A negative `pat-lit` is not normalized to an application because patterns do
+not contain expression nodes. It resugars as minus followed by the one
+unsuffixed canonical numeric pattern token, including `-0.0` and the full
+`int64` minimum.
 
 ### 6.4 Literal Normalization
 

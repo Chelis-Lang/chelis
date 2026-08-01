@@ -57,6 +57,16 @@ call site:
 def identity[a](x: tensor[a, f32]) -> tensor[a, f32] = x
 ```
 
+Direct calls are flat: write `f(x, y)`. If an expression itself returns a
+function value, group that callee explicitly: `(make_adder(x))(y)`. The
+ungrouped `f(x)(y)` spelling is rejected because v0.18 treated it as an alias
+for the flat multi-argument call `f(x, y)`.
+
+Empty brackets are not decorative syntax: write `Option` and `def f(x)`, not
+`Option[]` or `def f[](x)`. A nullary constructor value such as `None` is bare,
+while `Empty {}` specifically represents a zero-field Deep record and remains
+distinct from bare `Empty`.
+
 A standalone signature with `sig` can precede a `def`. It must appear directly before the
 function it describes:
 
@@ -105,6 +115,7 @@ loss_fn = fn (w, b) -> mse_loss(predict(x, w, b), y)
 - A literal can carry a precision suffix that binds it exactly: float suffixes `f32 f64
   bf16 f16` (for example `42.0f32`, `1.0f64`), integer suffixes `i8
   i16 i32 i64` (int tokens only). The suffix must follow the digits with no space.
+  Literal patterns are unsuffixed because Deep patterns preserve only the raw value.
 - Strings: `"hello"` with escapes `\" \\ \n \t \r \0`.
 - Booleans: `true`, `false`.
 - Unit: `()` is both the unit value and the unit type.
@@ -213,6 +224,9 @@ match n with {
 }
 ```
 
+Negative numeric patterns are written directly (`-42`, `-1.5`, or `-0.0`);
+unlike expression position, pattern position has no unary-expression node.
+
 ## Types and constructors
 
 Type declarations introduce algebraic data types with `type`. Variants can be nullary,
@@ -284,6 +298,9 @@ def transpose[a, b](x: tensor[a, b, f32]) -> tensor[b, a, f32] = permute(x, 1, 0
 A function's effects can be annotated with a `! { ... }` suffix on the signature or the
 `def`. The handled effects are `Random` and `Resource("device")`; `IO` is inferred from
 host operations such as `print`. Handlers are introduced by `with`:
+
+An explicit empty effect row `! {}` declares a pure upper bound. It is distinct
+from omitting the clause, which leaves effects inferred.
 
 ```chelis-surf-fragment
 with seed(42i64) {

@@ -29,6 +29,16 @@ dialects. Legacy v0.18 aliases SHALL be accepted only by
 - **WHEN** source uses a colon result annotation or omitted nullary `()`
 - **THEN** canonical parsing rejects it and the explicit v0.18 migration command rewrites it
 
+#### Scenario: Decorative empty forms are aliases
+
+- **WHEN** source writes `Option[]`, `def f[](x)`, a zero-field type variant `type Empty = | Empty {}`, or `import Demo ()`
+- **THEN** canonical parsing rejects it in favor of the delimiter-free form
+
+#### Scenario: Empty effect rows carry a semantic constraint
+
+- **WHEN** a declaration explicitly writes `! {}`
+- **THEN** canonical parsing preserves the declared-pure upper bound rather than treating it as an alias for inferred effects
+
 ### Requirement: Reserved keywords
 
 Surf SHALL reserve the 28 lexical keywords listed by the numbered source spec so they cannot
@@ -58,6 +68,11 @@ exponentiation operator.
 
 - **WHEN** source is `f(x) + y`
 - **THEN** it parses as `f(x) + y`, while the juxtaposition alias `f x + y` is rejected
+
+#### Scenario: Applying a returned function is explicitly grouped
+
+- **WHEN** source is `(f(x))(y)`
+- **THEN** it desugars to `(app {} (app {} f x) y)`, while ungrouped `f(x)(y)` is rejected
 
 #### Scenario: Chained comparison is rejected
 
@@ -262,6 +277,9 @@ Surf SHALL construct records with braces (with field punning), access fields wit
 chaining, and preserve record `kv` pairs in written left-to-right order in Deep. A
 same-named field/value SHALL use pun syntax. Functional update SHALL use
 `base with { field: value }` and preserve the same order and pun rules.
+A zero-field type variant SHALL be bare, while zero-field record expressions and record
+patterns SHALL retain `{}` to distinguish Deep `record`/`pat-record` from constructor
+values/patterns. A record update SHALL contain at least one field.
 
 #### Scenario: Record punning and access
 
@@ -278,6 +296,8 @@ same-named field/value SHALL use pun syntax. Functional update SHALL use
 `match` SHALL use `=>` arms with the supported pattern forms (variable, wildcard, literal,
 constructor, nested, record, tuple, as-pattern) and optional `if` guards. Matches SHALL be
 exhaustive over the scrutinee ADT, and or-patterns SHALL NOT be supported in v1.
+Numeric literal patterns SHALL be unsuffixed; a leading minus SHALL decode directly into the
+raw negative `pat-lit` value, including negative zero and the full `int64` minimum.
 
 #### Scenario: Guarded arms with distinct patterns
 
@@ -348,7 +368,8 @@ Numeric literals MAY carry a closed set of precision suffixes (`f32`, `f64`, `bf
 Default-type suffixes SHALL remain accepted because contextual literal adoption can make
 them semantically distinct from an unsuffixed literal.
 A suffix SHALL be part of the token only if it immediately follows the digits; integer-typed
-suffixes attach to integer literals only.
+suffixes attach to integer literals only. Suffixes SHALL be rejected in pattern position,
+where Deep preserves only the raw literal value.
 
 #### Scenario: Suffix fixes the literal precision
 

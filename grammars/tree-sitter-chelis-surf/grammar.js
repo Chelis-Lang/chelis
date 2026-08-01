@@ -110,8 +110,8 @@ module.exports = grammar({
         field("name", $.type_identifier),
         optional(choice($.variant_record_fields, $.variant_tuple_fields)),
       ),
-    variant_record_fields: ($) => seq("{", commaSep($.field_declaration), "}"),
-    variant_tuple_fields: ($) => seq("(", commaSep($.type_expression), ")"),
+    variant_record_fields: ($) => seq("{", commaSep1($.field_declaration), "}"),
+    variant_tuple_fields: ($) => seq("(", commaSep1($.type_expression), ")"),
     field_declaration: ($) =>
       seq(field("name", $.identifier), ":", field("type", $.type_expression)),
 
@@ -441,7 +441,8 @@ module.exports = grammar({
       choice(
         $.wildcard,
         $.identifier,
-        $.number,
+        $.pattern_number,
+        $.negative_pattern_number,
         $.string,
         $.boolean,
         $.constructor_pattern,
@@ -489,7 +490,7 @@ module.exports = grammar({
       seq("tensor", "[", commaSep1(choice($.dimension_expression, $.identifier)), "]"),
     dimension_expression: ($) => choice($.axis_integer, "*", seq("..", $.identifier)),
     applied_type: ($) =>
-      prec(1, seq(field("name", $.qualified_type_name), "[", commaSep($.type_expression), "]")),
+      prec(1, seq(field("name", $.qualified_type_name), "[", commaSep1($.type_expression), "]")),
     unit_type: () => seq("(", ")"),
     tuple_type: ($) =>
       seq("(", $.type_expression, ",", optional(commaSep1($.type_expression)), ")"),
@@ -506,12 +507,21 @@ module.exports = grammar({
       token(
         choice(
           /(?:0|[1-9][0-9]*)/,
-          /(?:(?:0|[1-9][0-9]*)\.[0-9]+(?:e-?[1-9][0-9]*)?|[1-9](?:\.[0-9]+)?e-?[1-9][0-9]*)(?:f32|f64|bf16|f16)/,
+          /(?:(?:0|[1-9][0-9]*)\.(?:0|[0-9]*[1-9])|[1-9](?:\.[0-9]*[1-9])?e(?:-(?:[6-9]|[1-9][0-9]+)|(?:1[6-9]|[2-9][0-9]|[1-9][0-9]{2,})))(?:f32|f64|bf16|f16)/,
           /(?:0|[1-9][0-9]*)(?:i8|i16|i32|i64)/,
-          /(?:0|[1-9][0-9]*)\.[0-9]+(?:e-?[1-9][0-9]*)?/,
-          /[1-9](?:\.[0-9]+)?e-?[1-9][0-9]*/,
+          /(?:0|[1-9][0-9]*)\.(?:0|[0-9]*[1-9])/,
+          /[1-9](?:\.[0-9]*[1-9])?e(?:-(?:[6-9]|[1-9][0-9]+)|(?:1[6-9]|[2-9][0-9]|[1-9][0-9]{2,}))/,
         ),
       ),
+    pattern_number: () =>
+      token(
+        choice(
+          /(?:0|[1-9][0-9]*)/,
+          /(?:0|[1-9][0-9]*)\.(?:0|[0-9]*[1-9])/,
+          /[1-9](?:\.[0-9]*[1-9])?e(?:-(?:[6-9]|[1-9][0-9]+)|(?:1[6-9]|[2-9][0-9]|[1-9][0-9]{2,}))/,
+        ),
+      ),
+    negative_pattern_number: ($) => seq("-", $.pattern_number),
     string: () => token(seq('"', repeat(choice(/[^"\\\n\r]+/, /\\[nrt0"\\]/)), '"')),
     identifier: () => /[_a-z][_A-Za-z0-9]*/,
     single_upper_identifier: () => /[A-Z]/,

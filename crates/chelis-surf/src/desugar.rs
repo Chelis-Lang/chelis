@@ -2123,16 +2123,6 @@ fn fold_unary_minus_int(value: i64) -> i64 {
 
 impl DesugarCtx {
     fn desugar_apply(&self, func: &Expr, args: &[Expr], local_fn_params: &[String]) -> deep::Expr {
-        // Flatten nested Apply chains. We collect the original surface
-        // arguments (not their pre-desugared forms) so the contextual
-        // tensor-literal rule (position 2, spec §P10b / §5.6) can inspect
-        // each argument against the callee's declared signature.
-        let mut surf_args: Vec<&Expr> = Vec::new();
-        let base_func = self.collect_apply_chain_surf(func, &mut surf_args);
-        for arg in args {
-            surf_args.push(arg);
-        }
-
         // Position 2 (spec §P10b / §5.6): if the callee is a top-level
         // function with a declared signature whose i-th parameter is a
         // tensor type with element prim P, and the i-th argument is a
@@ -2146,13 +2136,13 @@ impl DesugarCtx {
         // unification path; the contextual narrowing here is the
         // ergonomic affordance for the named-callee case.
         let callee_param_prec: Option<&Vec<Option<String>>> =
-            if let Expr::Var(callee_name, _) = base_func {
+            if let Expr::Var(callee_name, _) = func {
                 self.top_level_fn_tensor_param_prec.get(callee_name)
             } else {
                 None
             };
 
-        let desugared_args: Vec<deep::Expr> = surf_args
+        let desugared_args: Vec<deep::Expr> = args
             .iter()
             .enumerate()
             .map(|(i, arg)| {
@@ -2168,25 +2158,9 @@ impl DesugarCtx {
             })
             .collect();
 
-        let mut children = vec![self.desugar_expr_with_scope(base_func, local_fn_params)];
+        let mut children = vec![self.desugar_expr_with_scope(func, local_fn_params)];
         children.extend(desugared_args);
         node(DeepTag::App, children)
-    }
-
-    /// Like `collect_apply_chain` but returns surface-level argument
-    /// references so contextual tensor-literal inference can inspect
-    /// the arg AST against the callee's signature before desugar.
-    fn collect_apply_chain_surf<'a>(&self, expr: &'a Expr, args: &mut Vec<&'a Expr>) -> &'a Expr {
-        match expr {
-            Expr::Apply(inner_func, inner_args, _) => {
-                let base = self.collect_apply_chain_surf(inner_func, args);
-                for arg in inner_args {
-                    args.push(arg);
-                }
-                base
-            }
-            other => other,
-        }
     }
 }
 
@@ -2737,12 +2711,12 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_chain_flattening() {
+    fn test_grouped_apply_chain_preserves_call_result_application() {
         let inner = Expr::Apply(Box::new(tvar("f")), vec![tvar("x")], s());
         let outer = Expr::Apply(Box::new(inner), vec![tvar("y")], s());
         assert_eq!(
             print_expr(&desugar_expr(&outer)),
-            "(app {} (var {} f) (var {} x) (var {} y))"
+            "(app {} (app {} (var {} f) (var {} x)) (var {} y))"
         );
     }
 

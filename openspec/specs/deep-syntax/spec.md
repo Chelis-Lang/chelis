@@ -226,6 +226,8 @@ SHALL be available without import; standard-library names SHALL require an expli
 Deep SHALL use explicit multi-argument application rather than currying: `(app {} f x y z)`.
 Supplying the wrong number of arguments to a function SHALL be a type error, not partial
 application; partial application SHALL require explicit closure construction with `fn`.
+A nested `app` whose callee is another expression SHALL remain nested and SHALL NOT be
+flattened; canonical Surf SHALL group that callee explicitly.
 
 #### Scenario: Full application type-checks
 
@@ -301,7 +303,9 @@ constructor without erasing semantic type data. Multi-pair `bind` nodes SHALL re
 their written sequential order; empty `pat-tuple` SHALL resugar directly as `()`.
 Negative Deep literals SHALL normalize to Surf's unary-minus application shape, including a
 non-overflowing decomposition for a signed minimum; float-typed integer atoms SHALL normalize
-to the equivalent float atom.
+to the equivalent float atom. Negative `pat-lit` values SHALL instead resugar directly as an
+unsuffixed negative pattern, including negative zero and the full `int64` minimum. Nested
+application SHALL preserve its association through an explicitly grouped Surf callee.
 
 #### Scenario: Direct Deep forms remain distinct
 

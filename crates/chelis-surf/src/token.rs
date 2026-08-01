@@ -81,8 +81,10 @@ pub enum TokenKind {
 
     // Literals
     Int(i64),
-    /// The one decimal magnitude that becomes representable only after a
-    /// leading minus. The optional suffix is absent or `i64`.
+    /// The one decimal magnitude that is not itself an `i64` but becomes
+    /// representable when preceded by `-`. The optional suffix is either
+    /// absent or `i64`; negative expression and pattern parsers turn this
+    /// sentinel into `i64::MIN`.
     IntMinMagnitude(Option<LiteralSuffix>),
     Float(f64),
     /// Numeric literal carrying an explicit precision suffix per

@@ -132,6 +132,10 @@ fn validate_canonical_literal_spellings(source: &str, tokens: &[Token]) -> Resul
                 crate::format::canonical_float(*value),
                 suffix.as_str()
             )),
+            TokenKind::IntMinMagnitude(suffix) => Some(format!(
+                "9223372036854775808{}",
+                suffix.as_ref().map_or("", |suffix| (*suffix).as_str())
+            )),
             TokenKind::Str(value) => Some(format!("{value:?}")),
             _ => None,
         };
@@ -734,9 +738,16 @@ impl Parser {
     }
 
     fn parse_name_bracket_list(&mut self) -> Result<Vec<String>, ParseError> {
-        self.expect(&TokenKind::LBracket)?;
+        let start = self.expect(&TokenKind::LBracket)?.span;
         let names = self.parse_ident_list(TokenKind::RBracket)?;
         self.expect(&TokenKind::RBracket)?;
+        if names.is_empty() && self.mode == ParseMode::Canonical {
+            return Err(ParseError::Expected {
+                expected: "omit empty `[]`".into(),
+                found: "empty parameter list".into(),
+                offset: start.offset,
+            });
+        }
         Ok(names)
     }
 
@@ -1334,6 +1345,13 @@ impl Parser {
                 }
             }
             let end = self.expect(&TokenKind::RBrace)?;
+            if fields.is_empty() && self.mode == ParseMode::Canonical {
+                return Err(ParseError::Expected {
+                    expected: format!("bare zero-field variant `{name}`"),
+                    found: format!("`{name} {{}}`"),
+                    offset: start.offset,
+                });
+            }
             Ok(Variant {
                 name,
                 fields: VariantFields::Record(fields),
@@ -1411,7 +1429,19 @@ impl Parser {
                 self.advance();
                 ImportKind::All
             } else {
-                ImportKind::Names(self.parse_ident_list(TokenKind::RParen)?)
+                let names = self.parse_ident_list(TokenKind::RParen)?;
+                if names.is_empty() {
+                    if self.mode == ParseMode::Canonical {
+                        return Err(ParseError::Expected {
+                            expected: "qualified import without empty `()`".into(),
+                            found: "empty import list".into(),
+                            offset: self.current_offset(),
+                        });
+                    }
+                    ImportKind::Qualified
+                } else {
+                    ImportKind::Names(names)
+                }
             };
             let end = self.expect(&TokenKind::RParen)?;
             (kind, end.span)
@@ -1430,6 +1460,13 @@ impl Parser {
         let start = self.advance().span; // consume Export
         self.expect(&TokenKind::LParen)?;
         let names = self.parse_ident_list(TokenKind::RParen)?;
+        if names.is_empty() {
+            return Err(ParseError::Expected {
+                expected: "at least one exported name".into(),
+                found: "empty export list".into(),
+                offset: self.current_offset(),
+            });
+        }
         let end = self.expect(&TokenKind::RParen)?;
         Ok(Decl::Export {
             names,
@@ -1531,6 +1568,16 @@ impl Parser {
                 self.advance();
                 let fields = self.parse_record_fields()?;
                 let end = self.tokens[self.pos - 1].span;
+                if fields.is_empty() {
+                    if self.mode == ParseMode::Canonical {
+                        return Err(ParseError::Expected {
+                            expected: "at least one record-update field".into(),
+                            found: "empty record update".into(),
+                            offset: start.offset,
+                        });
+                    }
+                    continue;
+                }
                 lhs = Expr::RecordUpdate(Box::new(lhs), fields, start.merge(end));
                 continue;
             }
@@ -1964,7 +2011,7 @@ impl Parser {
                 self.advance();
                 let args = self.parse_expr_list(TokenKind::RParen)?;
                 let end = self.expect(&TokenKind::RParen)?;
-                expr = Expr::Apply(Box::new(expr), args, start.merge(end.span));
+                expr = extend_legacy_application(expr, args, start.merge(end.span));
                 continue;
             }
 
@@ -1975,7 +2022,7 @@ impl Parser {
                 let arg = self.parse_primary_atom()?;
                 let start = expr_span(&expr);
                 let end = expr_span(&arg);
-                expr = Expr::Apply(Box::new(expr), vec![arg], start.merge(end));
+                expr = extend_legacy_application(expr, vec![arg], start.merge(end));
                 continue;
             }
 
@@ -2767,7 +2814,19 @@ impl Parser {
                         }
                     }
                     let end = self.expect(&TokenKind::RBracket)?;
-                    Ok(TypeExpr::App(name, args, tok_span.merge(end.span)))
+                    let span = tok_span.merge(end.span);
+                    if args.is_empty() {
+                        if self.mode == ParseMode::Canonical {
+                            return Err(ParseError::Expected {
+                                expected: format!("bare unapplied type `{name}`"),
+                                found: format!("`{name}[]`"),
+                                offset: tok_span.offset,
+                            });
+                        }
+                        Ok(TypeExpr::Named(name, span))
+                    } else {
+                        Ok(TypeExpr::App(name, args, span))
+                    }
                 } else {
                     Ok(TypeExpr::Named(name, tok_span))
                 }
@@ -2907,12 +2966,27 @@ impl Parser {
             }
             TokenKind::TypedInt(n, suffix) => {
                 let tok = self.advance();
-                Ok(Pattern::Lit(Literal::TypedInt(n, suffix), tok.span))
+                if self.mode == ParseMode::Canonical {
+                    return Err(ParseError::Expected {
+                        expected: "unsuffixed numeric literal pattern".into(),
+                        found: format!("numeric pattern with `{}` suffix", suffix.as_str()),
+                        offset: tok.span.offset,
+                    });
+                }
+                Ok(Pattern::Lit(Literal::Int(n), tok.span))
             }
             TokenKind::TypedFloat(f, suffix) => {
                 let tok = self.advance();
-                Ok(Pattern::Lit(Literal::TypedFloat(f, suffix), tok.span))
+                if self.mode == ParseMode::Canonical {
+                    return Err(ParseError::Expected {
+                        expected: "unsuffixed numeric literal pattern".into(),
+                        found: format!("numeric pattern with `{}` suffix", suffix.as_str()),
+                        offset: tok.span.offset,
+                    });
+                }
+                Ok(Pattern::Lit(Literal::Float(f), tok.span))
             }
+            TokenKind::Minus => self.parse_negative_pattern_literal(),
             TokenKind::Str(s) => {
                 let tok = self.advance();
                 Ok(Pattern::Lit(Literal::Str(s), tok.span))
@@ -3098,12 +3172,27 @@ impl Parser {
             }
             TokenKind::TypedInt(n, suffix) => {
                 let tok = self.advance();
-                Ok(Pattern::Lit(Literal::TypedInt(n, suffix), tok.span))
+                if self.mode == ParseMode::Canonical {
+                    return Err(ParseError::Expected {
+                        expected: "unsuffixed numeric literal pattern".into(),
+                        found: format!("numeric pattern with `{}` suffix", suffix.as_str()),
+                        offset: tok.span.offset,
+                    });
+                }
+                Ok(Pattern::Lit(Literal::Int(n), tok.span))
             }
             TokenKind::TypedFloat(f, suffix) => {
                 let tok = self.advance();
-                Ok(Pattern::Lit(Literal::TypedFloat(f, suffix), tok.span))
+                if self.mode == ParseMode::Canonical {
+                    return Err(ParseError::Expected {
+                        expected: "unsuffixed numeric literal pattern".into(),
+                        found: format!("numeric pattern with `{}` suffix", suffix.as_str()),
+                        offset: tok.span.offset,
+                    });
+                }
+                Ok(Pattern::Lit(Literal::Float(f), tok.span))
             }
+            TokenKind::Minus => self.parse_negative_pattern_literal(),
             TokenKind::Str(s) => {
                 let tok = self.advance();
                 Ok(Pattern::Lit(Literal::Str(s), tok.span))
@@ -3147,6 +3236,61 @@ impl Parser {
         }
     }
 
+    fn parse_negative_pattern_literal(&mut self) -> Result<Pattern, ParseError> {
+        let minus = self.advance().span;
+        let token = self.advance();
+        let literal = match token.kind {
+            TokenKind::Int(0) if self.mode == ParseMode::Canonical => {
+                return Err(ParseError::Expected {
+                    expected: "integer zero pattern `0`".into(),
+                    found: "negative integer zero pattern `-0`".into(),
+                    offset: minus.offset,
+                });
+            }
+            TokenKind::Int(value) => Literal::Int(-value),
+            TokenKind::IntMinMagnitude(None) => Literal::Int(i64::MIN),
+            TokenKind::IntMinMagnitude(Some(suffix)) => {
+                if self.mode == ParseMode::Canonical {
+                    return Err(ParseError::Expected {
+                        expected: "unsuffixed numeric literal pattern".into(),
+                        found: format!("numeric pattern with `{}` suffix", suffix.as_str()),
+                        offset: token.span.offset,
+                    });
+                }
+                Literal::Int(i64::MIN)
+            }
+            TokenKind::Float(value) => Literal::Float(-value),
+            TokenKind::TypedInt(value, suffix) => {
+                if self.mode == ParseMode::Canonical {
+                    return Err(ParseError::Expected {
+                        expected: "unsuffixed numeric literal pattern".into(),
+                        found: format!("numeric pattern with `{}` suffix", suffix.as_str()),
+                        offset: token.span.offset,
+                    });
+                }
+                Literal::Int(-value)
+            }
+            TokenKind::TypedFloat(value, suffix) => {
+                if self.mode == ParseMode::Canonical {
+                    return Err(ParseError::Expected {
+                        expected: "unsuffixed numeric literal pattern".into(),
+                        found: format!("numeric pattern with `{}` suffix", suffix.as_str()),
+                        offset: token.span.offset,
+                    });
+                }
+                Literal::Float(-value)
+            }
+            found => {
+                return Err(ParseError::Expected {
+                    expected: "numeric literal after `-` in a pattern".into(),
+                    found: format!("{found:?}"),
+                    offset: token.span.offset,
+                });
+            }
+        };
+        Ok(Pattern::Lit(literal, minus.merge(token.span)))
+    }
+
     fn is_pattern_arg_start(&self) -> bool {
         matches!(
             self.peek(),
@@ -3156,6 +3300,7 @@ impl Parser {
                 | TokenKind::Float(_)
                 | TokenKind::TypedInt(_, _)
                 | TokenKind::TypedFloat(_, _)
+                | TokenKind::Minus
                 | TokenKind::Str(_)
                 | TokenKind::True
                 | TokenKind::False
@@ -3256,6 +3401,16 @@ impl Parser {
 /// …). The value-binding case-split override (chelis#437) is limited to
 /// single-letter names so multi-letter PascalCase stays unambiguously a
 /// type or constructor name (§1.1, §3.1).
+fn extend_legacy_application(expr: Expr, args: Vec<Expr>, span: Span) -> Expr {
+    match expr {
+        Expr::Apply(function, mut existing, _) => {
+            existing.extend(args);
+            Expr::Apply(function, existing, span)
+        }
+        other => Expr::Apply(Box::new(other), args, span),
+    }
+}
+
 fn is_single_letter_upper(name: &str) -> bool {
     let mut chars = name.chars();
     matches!((chars.next(), chars.next()), (Some(c), None) if c.is_ascii_uppercase())
@@ -4719,21 +4874,16 @@ mod tests {
     }
 
     #[test]
-    fn juxtaposition_two_args() {
-        // f x y → Apply(Apply(f, [x]), [y])
+    fn juxtaposition_two_args_flattens_during_v018_migration() {
+        // The legacy ungrouped chain was the v0.18 spelling of a flat call.
+        // Canonical v0.19 prints the resulting node as f(x, y).
         let e = body("x = f x y");
         match &e {
-            Expr::Apply(inner, args2, _) => {
-                assert_eq!(args2.len(), 1);
-                assert!(matches!(&args2[0], Expr::Var(n, _) if n == "y"));
-                match inner.as_ref() {
-                    Expr::Apply(func, args1, _) => {
-                        assert!(matches!(func.as_ref(), Expr::Var(n, _) if n == "f"));
-                        assert_eq!(args1.len(), 1);
-                        assert!(matches!(&args1[0], Expr::Var(n, _) if n == "x"));
-                    }
-                    _ => panic!("expected inner Apply"),
-                }
+            Expr::Apply(func, args, _) => {
+                assert!(matches!(func.as_ref(), Expr::Var(n, _) if n == "f"));
+                assert_eq!(args.len(), 2);
+                assert!(matches!(&args[0], Expr::Var(n, _) if n == "x"));
+                assert!(matches!(&args[1], Expr::Var(n, _) if n == "y"));
             }
             _ => panic!("expected Apply, got {e:?}"),
         }

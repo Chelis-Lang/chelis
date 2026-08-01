@@ -37,9 +37,10 @@ The canonical forms are:
 
 - every function definition has a parameter list, including `()` for a
   nullary function, and an annotated result uses `->`;
-- calls and non-nullary constructor applications are flat and parenthesized
-  (`f(x, y)`, `Some(x)`), while a nullary constructor is bare (`None`);
-  application is never juxtaposed or chained;
+- direct calls and non-nullary constructor applications are flat and
+  parenthesized (`f(x, y)`, `Some(x)`), while a nullary constructor is bare
+  (`None`); applying a value returned by another expression uses explicit
+  grouping (`(f(x))(y)`), while ungrouped `f(x)(y)` is rejected;
 - ordinary binding blocks use newlines as separators, contain at least one
   binding and one tail expression, and contain no semicolons; `par` and direct
   Deep sequencing use their distinct semicolon-delimited forms;
@@ -50,6 +51,13 @@ The canonical forms are:
   `Resource(...)` with exactly that casing;
 - record fields preserve source order and evaluate left-to-right; a field
   whose value is the same-named variable is written as a pun;
+- zero-arity syntax has no decorative delimiters: empty type or dimension
+  arguments are omitted, a zero-field type variant is bare, and a
+  qualified-only import omits `()`; exports and record updates must be
+  nonempty. A zero-field record expression or record pattern retains `{}` to
+  distinguish Deep `record`/`pat-record` from a constructor value/pattern. An
+  explicit empty effect row `! {}` is likewise not decorative: it declares a
+  pure upper bound and is distinct from an omitted, inferred effect clause;
 - non-primary transform arguments are named: `grad(f, wrt=x)` and
   `vmap(f, axis=n)`. Axis zero is written `vmap(f)`;
 - literal source must equal the canonical literal printer's spelling for its
@@ -696,12 +704,13 @@ When `grad` targets one differentiable parameter, the result is that gradient va
 When it targets multiple parameters, the result is a flat tuple of gradients rather than
 `(value, grad)` or nested tuples.
 
-Ordinary application is flat and never chains: `f(x)(y)` is rejected. The
-one structural exception is application whose callee is a transform value,
-because public Deep can contain `(app {} (vmap ...) ...)` (and the equivalent
-shape for another transform). It is written `vmap(process)(xs)`. This is one
-transform expression followed by one ordinary argument list, not a general
-chained-call alias.
+Each direct application is flat: `f(x, y)` is one Deep `app`, and the
+ungrouped chained spelling `f(x)(y)` is rejected. Public Deep may nevertheless
+apply a value produced by another expression. That distinct operation uses an
+explicitly grouped callee: `(f(x))(y)` represents `(app {} (app {} f x) y)`,
+and `(if c then f else g)(x)` applies the selected function. A transform is
+self-delimiting, so `vmap(process)(xs)` likewise represents application whose
+callee is the transform value rather than an ordinary chained-call alias.
 
 `grad`, `vmap`, `jit`, and `cast` require their call-like special form;
 `g = grad` is a parse error. Unary `realize` and `copy` additionally have a
@@ -748,6 +757,9 @@ this rule.
 
 **Negative literals:** `-42` is always parsed as unary minus applied to `42`,
 not as a signed literal token. A negative argument is written `f(-42)`.
+Literal patterns are the exception because patterns contain no unary
+expression node: `-42`, `-1.5`, and `-0.0` decode directly to a negative
+`pat-lit`, including the full `int64` minimum.
 
 ### P10a: Literal Suffixes
 
@@ -801,6 +813,11 @@ ambiguity (`1.0f32`).
 
 The suffix grammar is identical in Deep canonical form (`spec/03-deep-syntax.md`
 §6.4); the Surf and Deep lexers parse the same token shape.
+
+Suffixes are expression-literal syntax. A Deep `pat-lit` contains only its raw
+value and has no precision slot, so canonical Surf literal patterns are
+unsuffixed. The v0.18 migration parser accepts a suffixed pattern only to emit
+the one unsuffixed pattern spelling.
 
 ### P10b: Contextual Tensor-Literal Inference
 
@@ -1054,8 +1071,7 @@ DimParams     <- '[' S Ident (S ',' S Ident)* S ']'
 Params        <- '(' S (Param (S ',' S Param)*)? S ')'
 Param         <- Ident (S ':' S TypeExpr)?
 ReturnType    <- S '->' S TypeExpr
-EffectClause  <- S '!' S '{' S (EffectExpr (S ',' S EffectExpr)*)?
-                  S '}'
+EffectClause  <- S '!' S '{' S (EffectExpr (S ',' S EffectExpr)*)? S '}'
 EffectExpr    <- 'Diff' / 'Random' / 'Accum' / 'IO' / 'Test'
                / 'Resource' S '(' S StringLit S ')'
 
@@ -1119,7 +1135,7 @@ FnExpr        <- 'fn' S Params S '->' S Expr
 # ── Operator expressions ──
 
 PipeExpr      <- UpdateExpr (S '|>' S UpdateExpr)*
-UpdateExpr    <- OrExpr (S 'with' S RecordBody)?
+UpdateExpr    <- OrExpr (S 'with' S UpdateRecordBody)?
 OrExpr        <- AndExpr (S '||' S AndExpr)*
 AndExpr       <- CmpExpr (S '&&' S CmpExpr)*
 CmpExpr       <- AddExpr (S CmpOp S AddExpr)?
@@ -1176,8 +1192,10 @@ TransformKw   <- 'grad' / 'vmap' / 'jit' / 'realize'
 TransformArg  <- PrecType / ('wrt' / 'axis') S '=' S Expr
 
 RecordExpr    <- CtorName S RecordBody
-RecordBody    <- '{' S RecordField
-                  (S ',' S RecordField)* S '}'
+RecordBody    <- '{' S (RecordField
+                  (S ',' S RecordField)*)? S '}'
+UpdateRecordBody <- '{' S RecordField
+                      (S ',' S RecordField)* S '}'
 RecordField   <- Ident S ':' S Expr / Ident
 
 QuoteExpr     <- ('quote' / 'unquote' / 'splice') S '(' S Expr S ')'
@@ -1193,14 +1211,16 @@ PatAtom       <- '(' S ')'
                / '(' S Pattern S ',' S ')'
                / '(' S Pattern S ',' S Pattern (S ',' S Pattern)* S ')'
                / '(' S Pattern S ')'
-               / CtorName S '{' S RecordPatField
-                  (S ',' S RecordPatField)* S '}'
+               / CtorName S '{' S (RecordPatField
+                  (S ',' S RecordPatField)*)? S '}'
                / CtorName S '(' S Pattern
                   (S ',' S Pattern)* S ')'
                / CtorName
-               / Literal
+               / PatLiteral
                / '_'
                / Ident
+
+PatLiteral    <- '-'? S (BareIntLit / BareFloatLit) / StringLit / BoolLit
 
 # Bare or module-qualified constructor head (`Train`, `Demo.Dropout.Train`).
 CtorName       <- TypeIdent ('.' TypeIdent)*
@@ -1222,10 +1242,12 @@ InfixOp       <- '|>' / '||' / '&&' / CmpOp
 Literal       <- FloatLit / IntLit / BoolLit / StringLit
 
 FloatLit      <- (DecimalFloat / ExponentFloat) FloatSuffix?
+BareFloatLit  <- DecimalFloat / ExponentFloat
 DecimalFloat  <- ('0' / [1-9] [0-9]*) '.' [0-9]+
 ExponentFloat <- ('0' / [1-9] [0-9]*) ('.' [0-9]+)?
                   'e' '-'? [1-9] [0-9]*
 IntLit        <- ('0' / [1-9] [0-9]*) IntSuffix?
+BareIntLit    <- '0' / [1-9] [0-9]*
 FloatSuffix   <- 'f32' / 'f64' / 'bf16' / 'f16'
 IntSuffix     <- 'i8' / 'i16' / 'i32' / 'i64'
 # After lexical recognition, the complete numeric token MUST equal the
@@ -1444,9 +1466,11 @@ x @ Some(_)                       ⟹  (pat-as {} x (pat-ctor {} Some (pat-wild 
 
 ### 6.1 Flat application
 
-An ordinary call has exactly one parenthesized argument list. Juxtaposition
-and ordinary chained calls are parse errors. The transform-callee exception
-is the explicit `TransformExpr CallArgs?` production in §4.
+An ordinary direct call has exactly one parenthesized argument list.
+Juxtaposition and ungrouped chained calls are parse errors. A returned
+function value is applied through a grouped callee, `(f(x))(y)`, which the
+`AtomExpr CallArgs?` production represents without flattening the two calls.
+Transform callees use the explicit `TransformExpr CallArgs?` production.
 
 ### 6.2 Bindings
 
@@ -1459,7 +1483,13 @@ There is no Surf `let ... in` expression form. `let` and `in` are ordinary ident
 
 ### 6.3 Negative Literals vs Unary Minus
 
-`-42` is always unary minus applied to `42`. The literal itself is non-negative. `f -42` parses as `f - 42` (infix). Use parens for negative arguments: `f(-42)`. During constant folding, `neg(42)` collapses to a negative literal in Deep.
+`-42` in expression position is always unary minus applied to `42`. The
+literal itself is non-negative. `f -42` parses as `f - 42` (infix). Use parens
+for negative arguments: `f(-42)`. During constant folding, `neg(42)` collapses
+to a negative literal in Deep. Pattern position has no unary-expression node,
+so minus plus an unsuffixed numeric token decodes directly to a negative
+`pat-lit`; `-0` is rejected in favor of `0`, while `-0.0` preserves IEEE
+negative zero.
 
 ### 6.4 Transform Recognition
 

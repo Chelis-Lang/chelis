@@ -87,6 +87,7 @@
 (identifier) @variable
 (string) @string
 (number) @number
+(pattern_number) @number
 (axis_integer) @number
 (nonzero_axis_integer) @number
 (boolean) @boolean

@@ -639,6 +639,7 @@ fn format_expr(expr: &Expr) -> String {
             "[{}]",
             items.iter().map(format_expr).collect::<Vec<_>>().join(", ")
         ),
+        Expr::Record(name, fields, _) if fields.is_empty() => format!("{name} {{}}"),
         Expr::Record(name, fields, _) => format!(
             "{name} {{ {} }}",
             fields
@@ -851,6 +852,7 @@ fn format_pattern(pattern: &Pattern) -> String {
                 format!("({body})")
             }
         }
+        Pattern::Record(name, fields, _) if fields.is_empty() => format!("{name} {{}}"),
         Pattern::Record(name, fields, _) => format!(
             "{name} {{ {} }}",
             fields
@@ -922,22 +924,43 @@ fn format_handler_body(expr: &Expr) -> String {
 }
 
 fn format_apply(function: &Expr, arguments: &[Expr]) -> String {
-    let mut flattened = Vec::new();
-    let mut callee = function;
-    while let Expr::Apply(inner, inner_arguments, _) = callee {
-        flattened.splice(0..0, inner_arguments.iter());
-        callee = inner;
-    }
-    flattened.extend(arguments);
     format!(
         "{}({})",
-        format_expr(callee),
-        flattened
+        format_call_callee(function),
+        arguments
             .iter()
-            .map(|argument| format_expr(argument))
+            .map(format_expr)
             .collect::<Vec<_>>()
             .join(", ")
     )
+}
+
+fn format_call_callee(function: &Expr) -> String {
+    match function {
+        // Ungrouped `f(x)(y)` is intentionally not canonical. Grouping the
+        // first call makes call-result application explicit and preserves a
+        // nested Deep `app` rather than flattening it to `f(x, y)`.
+        Expr::Apply(..)
+        // Prefix and keyword-led forms otherwise absorb the following call
+        // into their body or tail: `if c then f else g(x)`,
+        // `fn (x) -> x(y)`, `-f(y)`, and so on.
+        | Expr::Unary(..)
+        | Expr::Pipe(..)
+        | Expr::If(..)
+        | Expr::Match(..)
+        | Expr::Lambda(..)
+        | Expr::RecordUpdate(..)
+        | Expr::WithSeed(..)
+        | Expr::WithDevice(..)
+        | Expr::Par(..)
+        | Expr::Do(..)
+        | Expr::Block(..)
+        | Expr::Borrow(..) => format!("({})", format_expr(function)),
+        // Binary expressions and ascriptions already print with grouping;
+        // atoms and the remaining postfix/keyword-call forms are
+        // self-delimiting.
+        _ => format_expr(function),
+    }
 }
 
 fn format_block(bindings: &[LetBinding], body: &Expr) -> String {
@@ -1363,9 +1386,9 @@ mod tests {
 
     #[test]
     fn explicit_empty_effect_row_is_preserved() {
-        // Regression: `! {}` is a meaningful annotation (declared-pure) and must survive
-        // a format round-trip. Erasing it silently downgrades the effect contract and
-        // lets assertions leak into declared-pure functions.
+        // `! {}` is a meaningful annotation (declared-pure) and must survive
+        // a format round-trip. Erasing it silently downgrades the effect contract
+        // and lets assertions leak into declared-pure functions.
         let source = "def f() -> () ! {} = ()\n";
         let program = crate::parser::parse_str(source).expect("parse");
         let rendered = format_program(&program);

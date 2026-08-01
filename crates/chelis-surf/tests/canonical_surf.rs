@@ -36,6 +36,8 @@ fn canonical_declaration_and_expression_spellings_parse() {
         "def unit_value() -> () = ()",
         "def log() ! { IO } = ()",
         "result = Point { x, y: other }",
+        "result = Empty {}",
+        "result = match value with { | Empty {} => 0 }",
         "result = vmap(f)",
         "result = vmap(f, axis=1)",
         "result = grad(f, wrt=x)",
@@ -123,6 +125,15 @@ fn legacy_syntax_safe_aliases_are_rejected() {
         "result = splice(xs,)",
         "result = with seed(1,) { x }",
         "def resource() ! { Resource(\"gpu:0\",) } = ()",
+        "typed: Option[] = None",
+        "def empty_quantifiers[](x) = x",
+        "type EmptyRecord = | EmptyRecord {}",
+        "result = point with {}",
+        "import Demo ()",
+        "export ()",
+        "result = match value with { | 42i64 => 0 }",
+        "result = match value with { | 1.0f64 => 0 }",
+        "result = match value with { | -9_223_372_036_854_775_808 => 0 }",
     ];
 
     for source in aliases {
@@ -161,6 +172,27 @@ fn record_construction_and_update_preserve_left_to_right_field_order() {
     assert!(
         y < b,
         "record-update fields must not be alphabetized:\n{deep}"
+    );
+}
+
+#[test]
+fn zero_field_deep_records_and_record_patterns_keep_their_distinct_surface_form() {
+    let deep_source = concat!(
+        "(def {} value (record {} Empty))\n",
+        "(def {} matched (match {} (var {} value) ",
+        "(arm {} (pat-record {} Empty) () (lit {type: (t-prim {} int32)} 1)) ",
+        "(arm {} (pat-wild {}) () (lit {type: (t-prim {} int32)} 0))))\n",
+    );
+    let deep = parse_deep(deep_source).expect("zero-field Deep records parse");
+    let surf = format_program(&resugar_program(&deep).expect("zero-field records resugar"));
+
+    assert!(surf.contains("value = Empty {}"), "{surf}");
+    assert!(surf.contains("| Empty {} => 1"), "{surf}");
+
+    let redesugared = desugar_program(&parse_str(&surf).expect("resugared records reparse"));
+    assert_eq!(
+        print_canonical(&normalize_deep_for_surface_roundtrip(&deep)),
+        print_canonical(&normalize_deep_for_surface_roundtrip(&redesugared)),
     );
 }
 
@@ -311,6 +343,7 @@ fn deep_negative_literals_normalize_to_surfs_unary_minus_shape() {
         "(lit {type: (t-prim {} f64)} 42)",
         "(lit {type: (t-prim {} f64)} -42)",
         "(lit {type: (t-prim {} f64)} -0.0)",
+        "(lit {type: (t-prim {} int64)} -9223372036854775808)",
         "(cast {} (lit {type: (t-prim {} f32)} -1.5) (t-prim {} f64))",
     ] {
         let deep = parse_deep(deep_source).expect("negative Deep literal parses");
@@ -321,6 +354,63 @@ fn deep_negative_literals_normalize_to_surfs_unary_minus_shape() {
         let redesugared = desugar_program(&parse_str(&wrapped).expect("resugared Surf reparses"));
         let original = parse_deep(&format!("(def {{}} value {deep_source})"))
             .expect("negative fixture wraps as a definition");
+        assert_eq!(
+            print_canonical(&normalize_deep_for_surface_roundtrip(&original)),
+            print_canonical(&normalize_deep_for_surface_roundtrip(&redesugared)),
+            "Deep fixture: {deep_source}; Surf: {surf}"
+        );
+    }
+}
+
+#[test]
+fn negative_deep_literal_patterns_have_one_reparseable_surface_form() {
+    for value in ["-42", "-1.5", "-0.0", "-9223372036854775808"] {
+        let deep_source = format!(
+            "(def {{}} value (match {{}} (var {{}} x) (arm {{}} (pat-lit {{}} {value}) () (lit {{type: (t-prim {{}} int32)}} 1)) (arm {{}} (pat-wild {{}}) () (lit {{type: (t-prim {{}} int32)}} 0))))"
+        );
+        let deep = parse_deep(&deep_source).expect("negative pattern fixture parses");
+        let surf = format_program(&resugar_program(&deep).expect("negative pattern resugars"));
+        let reparsed = parse_str(&surf)
+            .unwrap_or_else(|error| panic!("negative pattern did not reparse: {error}\n{surf}"));
+        let redesugared = desugar_program(&reparsed);
+        assert_eq!(
+            print_canonical(&normalize_deep_for_surface_roundtrip(&deep)),
+            print_canonical(&normalize_deep_for_surface_roundtrip(&redesugared)),
+            "Deep fixture: {deep_source}; Surf: {surf}"
+        );
+    }
+}
+
+#[test]
+fn deep_application_callee_grouping_preserves_association_and_scope() {
+    let cases = [
+        (
+            "(app {} (app {} (var {} f) (var {} x)) (var {} y))",
+            "(f(x))(y)",
+        ),
+        (
+            "(app {} (if {} (var {} c) (var {} f) (var {} g)) (var {} x))",
+            "(if c then f else g)(x)",
+        ),
+        (
+            "(app {} (fn {} (params {} x) (var {} x)) (var {} y))",
+            "(fn (x) -> x)(y)",
+        ),
+        (
+            "(app {} (app {} (var {} neg) (var {} f)) (var {} y))",
+            "(-f)(y)",
+        ),
+    ];
+
+    for (deep_source, expected_surf) in cases {
+        let deep = parse_deep(deep_source).expect("Deep application parses");
+        let surf =
+            format_expression(&resugar_expression(&deep[0]).expect("Deep application resugars"));
+        assert_eq!(surf, expected_surf, "Deep fixture: {deep_source}");
+        let wrapped = format!("value = {surf}\n");
+        let redesugared = desugar_program(&parse_str(&wrapped).expect("callee grouping reparses"));
+        let original = parse_deep(&format!("(def {{}} value {deep_source})"))
+            .expect("application fixture wraps as a definition");
         assert_eq!(
             print_canonical(&normalize_deep_for_surface_roundtrip(&original)),
             print_canonical(&normalize_deep_for_surface_roundtrip(&redesugared)),
@@ -494,6 +584,39 @@ fn explicit_v018_migration_removes_trailing_separators_from_special_forms() {
     );
 
     assert_eq!(migrate_source_v018(legacy).unwrap(), expected);
+}
+
+#[test]
+fn explicit_v018_migration_removes_decorative_empty_and_pattern_aliases() {
+    let legacy = concat!(
+        "typed: Option[] = None\n",
+        "def identity[](x) = x\n",
+        "type Empty[] = | Empty {}\n",
+        "constructed = Empty {}\n",
+        "matched = match value with { | Empty {} => 0 | 42i64 => 1 | -1.5f64 => 2 | -9223372036854775808i64 => 3 }\n",
+        "unchanged = point with {}\n",
+        "import Demo ()\n",
+    );
+    let expected = concat!(
+        "typed: Option = None\n",
+        "def identity(x) = x\n",
+        "type Empty =\n",
+        "  | Empty\n",
+        "constructed = Empty {}\n",
+        "matched = match value with {\n",
+        "  | Empty {} => 0\n",
+        "  | 42 => 1\n",
+        "  | -1.5 => 2\n",
+        "  | -9223372036854775808 => 3\n",
+        "}\n",
+        "unchanged = point\n",
+        "import Demo\n",
+    );
+
+    let migrated = migrate_source_v018(legacy).expect("decorative aliases migrate");
+    assert_eq!(migrated, expected);
+    parse_str(&migrated).expect("migration emits canonical Surf");
+    assert_eq!(format_source(&migrated).unwrap(), migrated);
 }
 
 #[test]
