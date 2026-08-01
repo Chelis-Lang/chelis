@@ -714,6 +714,9 @@ EOF         ← !.
 - Every node is a 3-tuple: `(tag meta children...)`.
 - Tag is from the closed vocabulary (§2).
 - Meta is a valid `{}` map (may be empty).
+- A colon-prefixed keyword token such as `:type` is metadata-key syntax, not
+  an expression atom or node child. Outside metadata-key position, the parser
+  MUST reject it before checker or evaluator processing.
 
 ### 8.2 Arity Validation (Post-Parse)
 - `(if {} cond then else)` — exactly 3 children.

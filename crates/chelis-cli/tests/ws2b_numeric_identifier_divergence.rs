@@ -353,7 +353,7 @@ fn issue_387_float_div_by_zero_is_ieee_inf() {
     );
     assert_eq!(
         String::from_utf8_lossy(&out.stdout).trim_end(),
-        "inf",
+        "eval_result = inf",
         "float 1.0/0.0 must be +inf per IEEE-754",
     );
 }
@@ -391,7 +391,7 @@ fn chelis_178_scalar_floor_trunc_div_exact_sign_rounding() {
         );
         assert_eq!(
             String::from_utf8_lossy(&out.stdout).trim_end(),
-            *expected,
+            format!("eval_result = {expected}"),
             "`{expr}` must equal {expected} (spec/05 §2.1 sign-rounding)",
         );
     }

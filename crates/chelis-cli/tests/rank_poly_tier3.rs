@@ -1356,11 +1356,11 @@ fn eval_resolves_named_axis_issue_repro() {
          out = use2(to_tensor([[1.0, 2.0], [3.0, 4.0]]))\n";
     let dir = tempdir().expect("tempdir");
     let eval = eval_stdout(dir.path(), source, "issue_338_repro");
-    // A single-root program prints the bare value (no `out = ` prefix);
-    // pin the exact line: shape AND the issue's expected numerics.
+    // [05-OBS-6] labels every root, including a single root. Pin the exact
+    // line: root identity, shape, and the issue's expected numerics.
     assert_eq!(
         eval.trim(),
-        "tensor(shape=[2], data=[3.0, 7.0])",
+        "out = tensor(shape=[2], data=[3.0, 7.0])",
         "issue #338 repro: eval must yield the backend's numerics"
     );
 }
@@ -1812,13 +1812,13 @@ fn dim_var_formal_routes_and_matches_backend() {
             out.2[i]
         );
     }
-    // Single-root program: eval prints the bare value (no `out = `
-    // prefix), so pin the exact line rather than the named-tensor parser.
+    // [05-OBS-6] labels every root, including a single root, so pin the exact
+    // line rather than weakening this to a value-only comparison.
     let dir = tempdir().expect("tempdir");
     let eval = eval_stdout(dir.path(), source, "dim_var_formal");
     assert_eq!(
         eval.trim(),
-        "tensor(shape=[2, 2], data=[9.0, 12.0, 27.0, 30.0])",
+        "out = tensor(shape=[2, 2], data=[9.0, 12.0, 27.0, 30.0])",
         "dim-var formal: eval must route and match the backend"
     );
 }
@@ -1936,17 +1936,16 @@ fn named_reduce_over_literal_operand_builds_runs_evals() {
 }
 
 /// chelis#388 (eval lane): the exact-line oracle for the named reduction
-/// over a literal operand. A single-root program prints the bare value.
+/// over a literal operand, including [05-OBS-6]'s required root label.
 #[test]
 fn named_reduce_over_literal_operand_eval_exact() {
-    // Single-root program: eval prints the bare value with no name prefix.
     let source = "def reduce_seq(x: &tensor[batch, seq, f32]) -> tensor[batch, f32] = sum(x, seq)\n\
          out = reduce_seq(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))\n";
     let dir = tempdir().expect("tempdir");
     let eval = eval_stdout(dir.path(), source, "issue_388_eval_exact");
     assert_eq!(
         eval.trim(),
-        "tensor(shape=[2], data=[6.0, 15.0])",
+        "out = tensor(shape=[2], data=[6.0, 15.0])",
         "issue #388: named reduce over a literal operand must eval the seq-axis sums"
     );
 }
@@ -3031,14 +3030,13 @@ fn negative_axis_reduce_lowers_to_last_axis_in_backend() {
     }
 }
 
-/// Parse the bare `tensor(shape=[...], data=[...])` line `eval` prints for the
-/// final unnamed top-level expression (e.g. `out = grad(...)(...)`, whose value
-/// is printed without the `out = ` prefix).
-fn parse_bare_tensor(stdout: &str) -> (Vec<usize>, Vec<f64>) {
+/// Parse the [05-OBS-6] labelled `name = tensor(shape=[...], data=[...])`
+/// line `eval` prints for a top-level root.
+fn parse_eval_tensor(stdout: &str) -> (Vec<usize>, Vec<f64>) {
     let line = stdout
         .lines()
-        .find(|l| l.trim_start().starts_with("tensor(shape="))
-        .unwrap_or_else(|| panic!("eval printed no bare tensor line:\n{stdout}"));
+        .find(|l| l.contains(" = tensor(shape="))
+        .unwrap_or_else(|| panic!("eval printed no labelled tensor line:\n{stdout}"));
     let parse_usize_list = |s: &str| {
         s.split(',')
             .filter_map(|p| p.trim().parse::<usize>().ok())
@@ -3091,7 +3089,7 @@ fn grad_through_concrete_then_spread_named_reduce() {
     assert_clean(&check_json(source), "#373 grad chain checks clean");
     let dir = tempdir().expect("tempdir");
     let eval = eval_stdout(dir.path(), source, "grad_concrete_then_spread");
-    let (shape, data) = parse_bare_tensor(&eval);
+    let (shape, data) = parse_eval_tensor(&eval);
     assert_eq!(
         shape,
         vec![2, 3],
@@ -3120,7 +3118,7 @@ fn forward_through_concrete_then_spread_named_reduce_control() {
     assert_clean(&check_json(source), "#373 forward control checks clean");
     let dir = tempdir().expect("tempdir");
     let eval = eval_stdout(dir.path(), source, "forward_concrete_then_spread");
-    let (shape, data) = parse_bare_tensor(&eval);
+    let (shape, data) = parse_eval_tensor(&eval);
     assert_eq!(
         shape,
         vec![2],
@@ -3146,7 +3144,7 @@ fn grad_through_leading_spread_named_reduce() {
     assert_clean(&check_json(source), "#373 leading-spread grad checks clean");
     let dir = tempdir().expect("tempdir");
     let eval = eval_stdout(dir.path(), source, "grad_leading_spread");
-    let (shape, data) = parse_bare_tensor(&eval);
+    let (shape, data) = parse_eval_tensor(&eval);
     assert_eq!(
         shape,
         vec![4, 2],
@@ -3197,7 +3195,7 @@ fn grad_through_concrete_then_spread_named_reduce_values_are_axis_sensitive() {
     assert_clean(&check_json(source), "#373 axis-sensitive grad checks clean");
     let dir = tempdir().expect("tempdir");
     let eval = eval_stdout(dir.path(), source, "grad_axis_sensitive_values");
-    let (shape, data) = parse_bare_tensor(&eval);
+    let (shape, data) = parse_eval_tensor(&eval);
     assert_eq!(
         shape,
         vec![2, 3],

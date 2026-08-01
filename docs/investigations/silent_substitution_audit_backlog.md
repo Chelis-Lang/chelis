@@ -128,9 +128,11 @@ Lesson: the one op an agent cleared by reading a comment was the one extra bug.
 
 ### 4. `Atom::Keyword` -> `Const 0.0` - **REFUTED** (chelis#710)
 
-Guarded at runtime: a bare keyword atom in expression position gives
-`error: bare atom is not a runtime expression`. The `Const 0.0` never fires.
-`chelis check` does false-green it (score 1), which is #710.
+Parsed Deep input is guarded at the earliest competent stage: a bare keyword
+token in expression position is a parse error under `spec/03-deep-syntax.md`
+§8.1, so the `Const 0.0` never fires and `chelis check` scores below 1.0. The
+chelis#873 checker guard remains defense in depth for a programmatically
+constructed `Atom::Keyword` until chelis#908 completes the representation split.
 
 ### 5. `reduce_window` `unwrap_or_default()` - **NOT TESTED**
 
