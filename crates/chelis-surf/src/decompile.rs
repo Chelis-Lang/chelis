@@ -606,8 +606,10 @@ impl<'a> IdiomaticDecompiler<'a> {
             Expr::Map(_, _) => "()".to_string(),
             Expr::MetaExpr(meta, _) => self.decompile_expr(&meta.expr),
             Expr::List(list, _) => self.decompile_list_expr(list),
-            // Transitional arms for new Expr variants (#908)
-            Expr::Node(node, _) => format!("({})", node.tag().as_str()),
+            Expr::Node(node, span) => {
+                let list = node.to_list(*span);
+                self.decompile_list_expr(&list)
+            }
             Expr::BareList(_, _) => "(...)".to_string(),
             Expr::UnknownForm(data) => format!("({})", data.head),
         }
@@ -999,11 +1001,9 @@ fn collect_var_refs(expr: &Expr, refs: &mut Vec<String>) {
             }
         }
         Expr::Atom(_, _) => {}
-        // Transitional arms for new Expr variants (#908)
-        Expr::Node(node, _) => {
-            for child in node.expr_children() {
-                collect_var_refs(child, refs);
-            }
+        Expr::Node(node, span) => {
+            let bridged = Expr::List(node.to_list(*span), *span);
+            collect_var_refs(&bridged, refs);
         }
         Expr::BareList(elems, _) => {
             for elem in elems {
@@ -1595,8 +1595,18 @@ fn decompile_expr(expr: &Expr) -> String {
                 inner
             }
         }
-        // Transitional arms for new Expr variants (#908)
-        Expr::Node(node, _) => format!("({})", node.tag().as_str()),
+        // Bridge: reconstruct List for full decompilation (#908)
+        Expr::Node(node, span) => {
+            let list = node.to_list(*span);
+            let inner = decompile_list_expr(&list);
+            if should_render_type_annotation(&list)
+                && let Some(ty) = extract_type_meta_from_list(&list)
+            {
+                format!("({inner} : {})", decompile_type_expr(&ty))
+            } else {
+                inner
+            }
+        }
         Expr::BareList(_, _) => "(...)".to_string(),
         Expr::UnknownForm(data) => format!("({})", data.head),
     }
