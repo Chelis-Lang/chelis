@@ -96,7 +96,7 @@
         (app {span: "surf:333..350", type: (t-adt {} List (t-prim {} int64))}
           (var {} Cons)
           (cast {span: "surf:334..349", type: (t-prim {} int64)}
-            (lit {span: "surf:339..341", type: (t-prim {} int64)} 24)
+            (lit {span: "surf:339..341", surf_literal_style: "unsuffixed", type: (t-prim {} int64)} 24)
             (t-prim {} int64))
           (var {} Nil)))))
   (defsig {}
