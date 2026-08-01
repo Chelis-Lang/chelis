@@ -3,9 +3,9 @@
 //! Walks the Deep AST and produces syntactically valid Surf source
 //! that should re-parse without errors.
 
-use chelis_deep::DeepTag;
 use chelis_deep::ast::{Atom, Expr, List, MetaExpr, MetaMap};
 use chelis_deep::decode_effect_kind;
+use chelis_deep::{DeepTag, Span};
 use chelis_vocab::EffectKind;
 
 const SURF_WIDTH: usize = 80;
@@ -772,17 +772,17 @@ impl<'a> IdiomaticDecompiler<'a> {
                     arms
                 )
             }
-            Some(DeepTag::Cast) => {
+            Some(DeepTag::Cast) => format_resugared_list(list).unwrap_or_else(|| {
                 let kids = children(list);
                 if kids.len() < 2 {
                     return "()".to_string();
                 }
                 format!(
-                    "({} as {})",
+                    "cast({}, {})",
                     self.decompile_expr(&kids[0]),
                     decompile_type_expr(&kids[1])
                 )
-            }
+            }),
             Some(DeepTag::Grad) => format_grad_expr(
                 children(list).first().map(|expr| self.decompile_expr(expr)),
                 extract_grad_wrt_meta(list),
@@ -822,14 +822,16 @@ impl<'a> IdiomaticDecompiler<'a> {
                 .map(|expr| format!("&{}", self.decompile_expr(expr)))
                 .unwrap_or_else(|| "&()".to_string()),
             Some(DeepTag::HandleEffect) => self.decompile_handle_effect(list),
-            Some(DeepTag::Par) => format!(
-                "par({})",
-                children(list)
-                    .iter()
-                    .map(|expr| self.decompile_expr(expr))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
+            Some(DeepTag::Par) => format_resugared_list(list).unwrap_or_else(|| {
+                format!(
+                    "par {{ {} }}",
+                    children(list)
+                        .iter()
+                        .map(|expr| self.decompile_expr(expr))
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                )
+            }),
             Some(DeepTag::Record) => {
                 let kids = children(list);
                 if kids.is_empty() {
@@ -1754,15 +1756,15 @@ fn decompile_list_expr(list: &List) -> String {
             let arms: Vec<String> = kids[1..].iter().map(decompile_arm).collect();
             format!("match {scrutinee} with {{\n  {}\n}}", arms.join("\n  "))
         }
-        Some(DeepTag::Cast) => {
+        Some(DeepTag::Cast) => format_resugared_list(list).unwrap_or_else(|| {
             let kids = children(list);
             if kids.len() < 2 {
                 return "()".to_string();
             }
             let e = decompile_expr(&kids[0]);
             let ty = decompile_type_expr(&kids[1]);
-            format!("({e} as {ty})")
-        }
+            format!("cast({e}, {ty})")
+        }),
         Some(DeepTag::Grad) => format_grad_expr(
             children(list).first().map(decompile_expr),
             extract_grad_wrt_meta(list),
@@ -1818,11 +1820,11 @@ fn decompile_list_expr(list: &List) -> String {
             }
         }
         Some(DeepTag::HandleEffect) => decompile_handle_effect(list),
-        Some(DeepTag::Par) => {
+        Some(DeepTag::Par) => format_resugared_list(list).unwrap_or_else(|| {
             let kids = children(list);
             let parts: Vec<String> = kids.iter().map(decompile_expr).collect();
-            format!("par({})", parts.join(", "))
-        }
+            format!("par {{ {} }}", parts.join("; "))
+        }),
         Some(DeepTag::Record) => {
             let kids = children(list);
             if kids.is_empty() {
@@ -1871,6 +1873,18 @@ fn decompile_list_expr(list: &List) -> String {
             format!("({})", parts.join(", "))
         }
     }
+}
+
+/// Render a Deep expression through the shared Surf AST/printer boundary.
+///
+/// The foundation routes the two known divergent forms (`cast` and `par`)
+/// here first.  The v0.19 cutover extends the structural resugarer to every
+/// valid Deep expression and then removes the remaining string templates.
+fn format_resugared_list(list: &List) -> Option<String> {
+    let expr = Expr::List(list.clone(), Span::new(0, 0));
+    crate::resugar::resugar_expression(&expr)
+        .ok()
+        .map(|surf| crate::format::format_expression(&surf))
 }
 
 fn decompile_arm(expr: &Expr) -> String {

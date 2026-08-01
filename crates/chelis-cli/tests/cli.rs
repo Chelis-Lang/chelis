@@ -4426,6 +4426,44 @@ fn surf_roundtrip_canonicalizes_def_return_types_to_arrow() {
 }
 
 #[test]
+fn surf_deep_cast_and_par_emit_canonical_spellings() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("cast_par.dp");
+    write_file(
+        &path,
+        "(def {} result (fn {} (params {}) (par {}\n  (cast {} (lit {} 1.0) (t-prim {} f32))\n  (cast {} (lit {} 2.0) (t-prim {} f32)))))\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["surf", path.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("par {"))
+        .stdout(predicate::str::contains("cast(1.0, f32)"))
+        .stdout(predicate::str::contains("cast(2.0, f32)"))
+        .stdout(predicate::str::contains(" as ").not())
+        .stdout(predicate::str::contains("par(").not());
+}
+
+#[test]
+fn surf_rejects_malformed_deep_cast_before_decompiling() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("malformed_cast.dp");
+    write_file(
+        &path,
+        "(def {} result (fn {} (params {}) (cast {} (lit {} 1.0))))\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["surf", path.to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("wrong child count for `cast`"));
+}
+
+#[test]
 fn phase3e_pipe_first_acceptance_oracle() {
     let dir = tempdir().expect("tempdir");
     let surf_path = dir.path().join("mnist.ch");
