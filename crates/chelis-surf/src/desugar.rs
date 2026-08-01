@@ -12,6 +12,30 @@ use chelis_vocab::EffectKind;
 
 use crate::ast::*;
 
+/// Reconstruct a `deep::List` from a `Node` (bridge, chelis#908).
+fn node_to_list(node: &chelis_deep::node::Node, span: Span) -> deep::List {
+    use chelis_deep::node::ChildRef;
+    let mut elements = Vec::with_capacity(node.child_count() + 2);
+    elements.push(deep::Expr::Atom(deep::Atom::Name(node.tag().as_str().to_string()), span));
+    elements.push(deep::Expr::Map(node.meta().clone(), span));
+    for child_ref in node.children_iter() {
+        match child_ref {
+            ChildRef::Expr(e)
+            | ChildRef::Syntax(e)
+            | ChildRef::Type(e)
+            | ChildRef::EffectHandler(e)
+            | ChildRef::Bypass(e) => elements.push(e.clone()),
+            ChildRef::Binder(s) => {
+                elements.push(deep::Expr::Atom(deep::Atom::Name(s.to_string()), span));
+            }
+            ChildRef::Selector(s) => {
+                elements.push(deep::Expr::Atom(deep::Atom::Name(s.to_string()), span));
+            }
+        }
+    }
+    deep::List { elements }
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -45,7 +69,7 @@ fn normalize_to_lists(exprs: &[deep::Expr]) -> Vec<deep::Expr> {
 fn normalize_single(expr: &deep::Expr) -> deep::Expr {
     match expr {
         deep::Expr::Node(node, span) => {
-            let list = node.to_list(*span);
+            let list = node_to_list(node, *span);
             let elements = list.elements.iter().map(normalize_single).collect();
             deep::Expr::List(deep::List { elements }, *span)
         }
@@ -540,7 +564,7 @@ fn apply_effect_metadata(ty_expr: deep::Expr, effects: &Option<Vec<EffectExpr>>)
             let mut elements = list.elements;
             if matches!(
                 elements.first(),
-                Some(deep::Expr::Atom(deep::Atom::Tag(DeepTag::TFn), _))
+                Some(deep::Expr::Atom(deep::Atom::Name(s), _)) if s == DeepTag::TFn.as_str()
             ) {
                 elements[1] =
                     meta_with_entries(vec![("eff".to_string(), desugar_effect_set(effects))]);
@@ -2486,7 +2510,7 @@ mod tests {
         let contracts = deep
             .iter()
             .filter_map(|expr| match expr {
-                deep::Expr::Node(node, span) => Some(node.to_list(*span)),
+                deep::Expr::Node(node, span) => Some(node_to_list(node, *span)),
                 deep::Expr::List(list, _) => Some(list.clone()),
                 _ => None,
             })
@@ -2501,7 +2525,7 @@ mod tests {
             })
             .and_then(|value| match value {
                 deep::Expr::Node(node, span) => {
-                    let list = node.to_list(span);
+                    let list = node_to_list(&node, span);
                     Some(
                         list.elements
                             .iter()

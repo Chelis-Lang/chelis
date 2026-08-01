@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 
 use chelis_deep::Span;
 use chelis_deep::ast::{Atom, Expr, List, MetaMap};
+use crate::bridge::node_to_list;
 use serde::{Deserialize, Serialize};
 
 use crate::CheckedProgram;
@@ -607,7 +608,7 @@ impl Checker {
             },
             // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
             Expr::Node(node, span) => {
-                let bridged = Expr::List(node.to_list(*span), *span);
+                let bridged = Expr::List(node_to_list(&node, *span), *span);
                 self.check_expr(&bridged, scope);
             }
             Expr::BareList(elems, _) => {
@@ -1599,7 +1600,7 @@ fn collect_free_vars(expr: &Expr, bound: &mut Vec<HashSet<String>>, free: &mut H
         },
         // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
         Expr::Node(node, span) => {
-            let bridged = Expr::List(node.to_list(*span), *span);
+            let bridged = Expr::List(node_to_list(&node, *span), *span);
             collect_free_vars(&bridged, bound, free);
         }
         Expr::BareList(elems, _) => {
@@ -2176,6 +2177,7 @@ mod tests {
         Expr::Atom(Atom::Name(name.to_string()), span())
     }
 
+    #[allow(dead_code)]
     fn meta(entries: Vec<(&str, Expr)>) -> Expr {
         Expr::Map(
             MetaMap {
@@ -2190,13 +2192,20 @@ mod tests {
 
     /// Build `(tag {meta} children...)`.
     fn node(tag: &str, meta_entries: Vec<(&str, Expr)>, children: Vec<Expr>) -> Expr {
-        let head = match DeepTag::parse(tag) {
-            Some(tag) => Expr::Atom(Atom::Tag(tag), span()),
-            None => sym(tag),
+        let meta_map = MetaMap {
+            entries: meta_entries
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v))
+                .collect(),
         };
-        let mut elements = vec![head, meta(meta_entries)];
-        elements.extend(children);
-        Expr::List(List { elements }, span())
+        match DeepTag::parse(tag) {
+            Some(deep_tag) => Expr::node(deep_tag, meta_map, children, span()),
+            None => {
+                let mut elements = vec![sym(tag), Expr::Map(meta_map, span())];
+                elements.extend(children);
+                Expr::List(List { elements }, span())
+            }
+        }
     }
 
     /// Build a synthetic `(t-tensor {} (d-lit 4) (t-prim f32))` so the

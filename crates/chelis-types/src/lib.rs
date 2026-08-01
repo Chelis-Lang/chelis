@@ -1,5 +1,6 @@
 //! Type checker for the Chelis language.
 
+pub(crate) mod bridge;
 pub mod adt;
 pub mod context;
 pub(crate) mod deep_type;

@@ -27,6 +27,30 @@ use std::sync::{
 use std::thread;
 use std::time::{Duration, Instant};
 
+/// Reconstruct a `List` from a `Node` (bridge, chelis#908).
+fn node_to_list(node: &chelis_deep::node::Node, span: chelis_deep::Span) -> chelis_deep::List {
+    use chelis_deep::node::ChildRef;
+    let mut elements = Vec::with_capacity(node.child_count() + 2);
+    elements.push(DeepExpr::Atom(DeepAtom::Name(node.tag().as_str().to_string()), span));
+    elements.push(DeepExpr::Map(node.meta().clone(), span));
+    for child_ref in node.children_iter() {
+        match child_ref {
+            ChildRef::Expr(e)
+            | ChildRef::Syntax(e)
+            | ChildRef::Type(e)
+            | ChildRef::EffectHandler(e)
+            | ChildRef::Bypass(e) => elements.push(e.clone()),
+            ChildRef::Binder(s) => {
+                elements.push(DeepExpr::Atom(DeepAtom::Name(s.to_string()), span));
+            }
+            ChildRef::Selector(s) => {
+                elements.push(DeepExpr::Atom(DeepAtom::Name(s.to_string()), span));
+            }
+        }
+    }
+    chelis_deep::List { elements }
+}
+
 const RUNTIME_H: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../chelis-runtime/include/chelis_runtime.h"
@@ -9235,7 +9259,7 @@ fn normalize_deep_node(expr: &chelis_deep::ast::Expr) -> chelis_deep::ast::Expr 
     use chelis_deep::ast::{Expr, List, MetaExpr, MetaMap, UnknownFormData};
     match expr {
         Expr::Node(node, span) => {
-            let list = node.to_list(*span);
+            let list = node_to_list(&node, *span);
             let elements = list.elements.iter().map(normalize_deep_node).collect();
             Expr::List(List { elements }, *span)
         }
@@ -9417,7 +9441,7 @@ fn collect_lowered_root_names_from_expr(
             }
         },
         DeepExpr::Node(node, span) => {
-            let bridged = DeepExpr::List(node.to_list(*span), *span);
+            let bridged = DeepExpr::List(node_to_list(&node, *span), *span);
             collect_lowered_root_names_from_expr(&bridged, program_exprs, type_env, out);
         }
         _ => {}
@@ -9452,7 +9476,7 @@ fn collect_root_names_from_expr(
             }
         },
         DeepExpr::Node(node, span) => {
-            let bridged = DeepExpr::List(node.to_list(*span), *span);
+            let bridged = DeepExpr::List(node_to_list(&node, *span), *span);
             collect_root_names_from_expr(&bridged, type_env, out);
         }
         _ => {}
@@ -9756,7 +9780,7 @@ fn collect_symbolic_dims_expr(expr: &chelis_deep::ast::Expr, dims: &mut Vec<Stri
         chelis_deep::ast::Expr::Atom(_, _) => {}
         chelis_deep::ast::Expr::Node(node, span) => {
             // Bridge: reconstruct List so DName detection works unchanged (#908)
-            let bridged = chelis_deep::ast::Expr::List(node.to_list(*span), *span);
+            let bridged = chelis_deep::ast::Expr::List(node_to_list(&node, *span), *span);
             collect_symbolic_dims_expr(&bridged, dims);
         }
         chelis_deep::ast::Expr::BareList(elems, _) => {

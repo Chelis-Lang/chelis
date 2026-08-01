@@ -353,7 +353,7 @@ pub(super) fn infer_expr_with_type_metadata_ownership(
             // functions (`infer_var`, `infer_app`, etc.) work unchanged. Once
             // those functions are migrated to accept Node directly, this
             // `to_list` call becomes dead code.
-            let list = node.to_list(*span);
+            let list = node_to_list(&node, *span);
             match node.tag() {
                 DeepTag::Var => infer_var(&list, env, vg, subst, adt_reg, errors),
                 DeepTag::Lit => {
@@ -808,24 +808,6 @@ pub(super) fn infer_atom(atom: &deep::Atom, errors: &mut DiagnosticSink<'_>) -> 
                      C1.4; chelis#710 form 4)"
                 ),
                 vec![format!("to reference a binding, write `(var {{}} {name})`")],
-            ),
-        ),
-        deep::Atom::Tag(tag) => report(
-            errors,
-            CheckError::new(
-                CheckErrorKind::MalformedForm,
-                format!(
-                    "a decoded tag atom `{}` outside a list's tag position is structural \
-                     syntax, not an expression, and cannot be typed or lowered to the \
-                     executable IR (spec/design/loud_unsupported.md section C1.4; \
-                     chelis#710 form 4)",
-                    tag.as_str()
-                ),
-                vec![format!(
-                    "`{}` names a form; write `({} {{}} ...)` to use it as one",
-                    tag.as_str(),
-                    tag.as_str()
-                )],
             ),
         ),
     }

@@ -10,9 +10,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::ast::{Atom, Expr, List, MetaMap};
+use crate::ast::{Atom, Expr, MetaMap};
 use crate::role::{AritySpec, ChildStampRole, arity_contract, child_stamp_role};
-use crate::span::Span;
 use crate::tag::DeepTag;
 
 /// Error from `Node::try_new` — a child violated its role constraint or
@@ -175,25 +174,6 @@ impl Node {
     /// role-typed API.
     pub fn children_slice(&self) -> &[Expr] {
         &self.children
-    }
-
-    // === Bridge: reconstruct List for transition-period consumers ===
-
-    /// Reconstruct the canonical `List` representation that existing
-    /// consumer dispatch functions (`infer_var`, `infer_app`, etc.)
-    /// expect. This is a **transitional bridge**: once all consumers are
-    /// migrated to use the Node API directly, this method becomes dead
-    /// code and should be removed.
-    ///
-    /// The returned List has the same shape as what `Expr::node()` would
-    /// produce: `elements[0]` = `Atom::Tag(self.tag)`,
-    /// `elements[1]` = `Map(self.meta)`, `elements[2..]` = children.
-    pub fn to_list(&self, span: Span) -> List {
-        let mut elements = Vec::with_capacity(self.children.len() + 2);
-        elements.push(Expr::Atom(Atom::Tag(self.tag), span));
-        elements.push(Expr::Map(self.meta.clone(), span));
-        elements.extend(self.children.clone());
-        List { elements }
     }
 
     // === Role-typed accessors ===

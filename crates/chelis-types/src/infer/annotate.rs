@@ -156,7 +156,7 @@ pub(super) fn annotate_expr_with_scope(
         }
         // Bridge: reconstruct List so existing annotation logic runs unchanged (#908)
         deep::Expr::Node(node, span) => {
-            let bridged = deep::Expr::List(node.to_list(*span), *span);
+            let bridged = deep::Expr::List(node_to_list(&node, *span), *span);
             annotate_expr_with_scope(&bridged, product, annotation_context, errors)
         }
         deep::Expr::BareList(elems, span) => {

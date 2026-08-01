@@ -8,6 +8,32 @@ use chelis_deep::ast::{Atom, Expr, List, MetaExpr, MetaMap};
 use chelis_deep::decode_effect_kind;
 use chelis_vocab::EffectKind;
 
+use chelis_deep::Span;
+
+/// Reconstruct a `List` from a `Node` (bridge, chelis#908).
+fn node_to_list(node: &chelis_deep::node::Node, span: Span) -> List {
+    use chelis_deep::node::ChildRef;
+    let mut elements = Vec::with_capacity(node.child_count() + 2);
+    elements.push(Expr::Atom(Atom::Name(node.tag().as_str().to_string()), span));
+    elements.push(Expr::Map(node.meta().clone(), span));
+    for child_ref in node.children_iter() {
+        match child_ref {
+            ChildRef::Expr(e)
+            | ChildRef::Syntax(e)
+            | ChildRef::Type(e)
+            | ChildRef::EffectHandler(e)
+            | ChildRef::Bypass(e) => elements.push(e.clone()),
+            ChildRef::Binder(s) => {
+                elements.push(Expr::Atom(Atom::Name(s.to_string()), span));
+            }
+            ChildRef::Selector(s) => {
+                elements.push(Expr::Atom(Atom::Name(s.to_string()), span));
+            }
+        }
+    }
+    List { elements }
+}
+
 const SURF_WIDTH: usize = 80;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,7 +98,7 @@ fn normalize_nodes(exprs: &[Expr]) -> Vec<Expr> {
 fn normalize_node_expr(expr: &Expr) -> Expr {
     match expr {
         Expr::Node(node, span) => {
-            let list = node.to_list(*span);
+            let list = node_to_list(&node, *span);
             // Recursively normalize children
             let elements = list.elements.iter().map(normalize_node_expr).collect();
             Expr::List(List { elements }, *span)
@@ -222,7 +248,6 @@ fn sym_str(expr: &Expr) -> Option<&str> {
 fn brief(expr: &Expr) -> String {
     match expr {
         Expr::Atom(Atom::Name(s), _) => s.clone(),
-        Expr::Atom(Atom::Tag(t), _) => t.as_str().to_string(),
         Expr::Atom(Atom::Int(n), _) => n.to_string(),
         Expr::Atom(Atom::Float(f), _) => format_float(*f),
         Expr::Atom(Atom::Bool(b), _) => b.to_string(),
@@ -655,7 +680,6 @@ impl<'a> IdiomaticDecompiler<'a> {
     fn decompile_expr(&self, expr: &Expr) -> String {
         match expr {
             Expr::Atom(Atom::Name(s), _) => s.clone(),
-            Expr::Atom(Atom::Tag(t), _) => t.as_str().to_string(),
             Expr::Atom(Atom::Int(n), _) => n.to_string(),
             Expr::Atom(Atom::Float(f), _) => format_float(*f),
             Expr::Atom(Atom::Bool(b), _) => b.to_string(),
@@ -666,7 +690,7 @@ impl<'a> IdiomaticDecompiler<'a> {
             Expr::MetaExpr(meta, _) => self.decompile_expr(&meta.expr),
             Expr::List(list, _) => self.decompile_list_expr(list),
             Expr::Node(node, span) => {
-                let list = node.to_list(*span);
+                let list = node_to_list(&node, *span);
                 self.decompile_list_expr(&list)
             }
             Expr::BareList(_, _) => "(...)".to_string(),
@@ -1061,7 +1085,7 @@ fn collect_var_refs(expr: &Expr, refs: &mut Vec<String>) {
         }
         Expr::Atom(_, _) => {}
         Expr::Node(node, span) => {
-            let bridged = Expr::List(node.to_list(*span), *span);
+            let bridged = Expr::List(node_to_list(&node, *span), *span);
             collect_var_refs(&bridged, refs);
         }
         Expr::BareList(elems, _) => {
@@ -1627,7 +1651,6 @@ fn decompile_defdim(list: &List) -> String {
 fn decompile_expr(expr: &Expr) -> String {
     match expr {
         Expr::Atom(Atom::Name(s), _) => s.clone(),
-        Expr::Atom(Atom::Tag(t), _) => t.as_str().to_string(),
         Expr::Atom(Atom::Int(n), _) => n.to_string(),
         Expr::Atom(Atom::Float(f), _) => format_float(*f),
         Expr::Atom(Atom::Bool(b), _) => b.to_string(),
@@ -1655,7 +1678,7 @@ fn decompile_expr(expr: &Expr) -> String {
         }
         // Bridge: reconstruct List for full decompilation (#908)
         Expr::Node(node, span) => {
-            let list = node.to_list(*span);
+            let list = node_to_list(&node, *span);
             let inner = decompile_list_expr(&list);
             if should_render_type_annotation(&list)
                 && let Some(ty) = extract_type_meta_from_list(&list)

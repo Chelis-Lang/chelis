@@ -9,6 +9,30 @@ use chelis_vocab::EffectKind;
 
 pub mod realizability;
 
+/// Reconstruct a `List` from a `Node` (bridge, chelis#908).
+fn node_to_list(node: &chelis_deep::node::Node, span: Span) -> List {
+    use chelis_deep::node::ChildRef;
+    let mut elements = Vec::with_capacity(node.child_count() + 2);
+    elements.push(Expr::Atom(Atom::Name(node.tag().as_str().to_string()), span));
+    elements.push(Expr::Map(node.meta().clone(), span));
+    for child_ref in node.children_iter() {
+        match child_ref {
+            ChildRef::Expr(e)
+            | ChildRef::Syntax(e)
+            | ChildRef::Type(e)
+            | ChildRef::EffectHandler(e)
+            | ChildRef::Bypass(e) => elements.push(e.clone()),
+            ChildRef::Binder(s) => {
+                elements.push(Expr::Atom(Atom::Name(s.to_string()), span));
+            }
+            ChildRef::Selector(s) => {
+                elements.push(Expr::Atom(Atom::Name(s.to_string()), span));
+            }
+        }
+    }
+    List { elements }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EffectErrorKind {
     UnhandledEffect,
@@ -398,7 +422,7 @@ fn infer_expr_effects(
         }
         // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
         Expr::Node(node, span) => {
-            let bridged = Expr::List(node.to_list(*span), *span);
+            let bridged = Expr::List(node_to_list(&node, *span), *span);
             infer_expr_effects(&bridged, top_level_effects, top_level_callables, locals)
         }
         Expr::BareList(elems, _) => elems
@@ -690,7 +714,7 @@ fn annotate_effects(
         // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
         // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
         Expr::Node(node, span) => {
-            let bridged = Expr::List(node.to_list(*span), *span);
+            let bridged = Expr::List(node_to_list(&node, *span), *span);
             annotate_effects(&bridged, top_level_effects, top_level_callables, locals)
         }
         Expr::BareList(_, _) | Expr::UnknownForm(_) => expr.clone(),
@@ -783,7 +807,7 @@ fn validate_handler_expr(expr: &Expr, errors: &mut Vec<EffectError>) {
         Expr::Atom(_, _) => {}
         // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
         Expr::Node(node, span) => {
-            let bridged = Expr::List(node.to_list(*span), *span);
+            let bridged = Expr::List(node_to_list(&node, *span), *span);
             validate_handler_expr(&bridged, errors);
         }
         Expr::BareList(elems, _) => {
@@ -1002,7 +1026,7 @@ fn validate_build_target_expr(expr: &Expr, target: &str, errors: &mut Vec<Effect
         Expr::Atom(_, _) => {}
         // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
         Expr::Node(node, span) => {
-            let bridged = Expr::List(node.to_list(*span), *span);
+            let bridged = Expr::List(node_to_list(&node, *span), *span);
             validate_build_target_expr(&bridged, target, errors);
         }
         Expr::BareList(elems, _) => {

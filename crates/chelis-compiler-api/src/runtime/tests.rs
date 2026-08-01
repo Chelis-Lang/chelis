@@ -96,7 +96,7 @@ fn literal_seed_read_at_full_i64_width() {
         Expr::List(
             List {
                 elements: vec![
-                    Expr::Atom(Atom::Tag(DeepTag::Lit), sp),
+                    Expr::Atom(Atom::Name(DeepTag::Lit.as_str().to_string()), sp),
                     Expr::Map(
                         MetaMap {
                             entries: vec![("type".to_string(), t_int32)],

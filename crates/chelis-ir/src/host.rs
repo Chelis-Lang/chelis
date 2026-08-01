@@ -1,4 +1,5 @@
 use chelis_deep::DeepTag;
+use crate::bridge::node_to_list;
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -1950,7 +1951,7 @@ pub fn find_direct_builtin_call(program: &CheckedProgram, builtins: &[&str]) -> 
             Expr::Atom(_, _) => None,
             // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
             Expr::Node(node, span) => {
-                let bridged = Expr::List(node.to_list(*span), *span);
+                let bridged = Expr::List(node_to_list(&node, *span), *span);
                 find(&bridged, builtins)
             }
             Expr::BareList(elems, _) => elems.iter().find_map(|elem| find(elem, builtins)),
@@ -2706,19 +2707,13 @@ fn synthesize_callable_application(
     ret_type_expr: Option<&Expr>,
 ) -> Expr {
     let span = body.span();
-    let mut elements = vec![
-        Expr::Atom(Atom::Tag(DeepTag::App), span),
-        Expr::Map(
-            chelis_deep::ast::MetaMap {
-                entries: ret_type_expr
-                    .cloned()
-                    .map(|ret| vec![("type".to_string(), ret)])
-                    .unwrap_or_default(),
-            },
-            span,
-        ),
-        body.clone(),
-    ];
+    let app_meta = chelis_deep::ast::MetaMap {
+        entries: ret_type_expr
+            .cloned()
+            .map(|ret| vec![("type".to_string(), ret)])
+            .unwrap_or_default(),
+    };
+    let mut children = vec![body.clone()];
     for (index, param) in params.iter().enumerate() {
         let var_meta = chelis_deep::ast::MetaMap {
             entries: param_type_exprs
@@ -2727,18 +2722,14 @@ fn synthesize_callable_application(
                 .map(|ty| vec![("type".to_string(), ty)])
                 .unwrap_or_default(),
         };
-        elements.push(Expr::List(
-            List {
-                elements: vec![
-                    Expr::Atom(Atom::Tag(DeepTag::Var), span),
-                    Expr::Map(var_meta, span),
-                    Expr::Atom(Atom::Name(param.name.clone()), span),
-                ],
-            },
+        children.push(Expr::node(
+            DeepTag::Var,
+            var_meta,
+            vec![Expr::Atom(Atom::Name(param.name.clone()), span)],
             span,
         ));
     }
-    Expr::List(List { elements }, span)
+    Expr::node(DeepTag::App, app_meta, children, span)
 }
 
 /// Force-lower an expression through the tensor-helper path using an
@@ -3797,7 +3788,7 @@ fn beta_reduce_pipe_stage(stage: &Expr, acc: Expr) -> Expr {
         }
     }
     let elements = vec![
-        Expr::Atom(Atom::Tag(DeepTag::App), span),
+        Expr::Atom(Atom::Name(DeepTag::App.as_str().to_string()), span),
         Expr::Map(MetaMap::default(), span),
         stage.clone(),
         acc,
@@ -3858,7 +3849,7 @@ fn substitute_var(expr: &Expr, name: &str, replacement: &Expr) -> Expr {
         Expr::Atom(_, _) | Expr::Map(_, _) => expr.clone(),
         // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
         Expr::Node(node, span) => {
-            let bridged = Expr::List(node.to_list(*span), *span);
+            let bridged = Expr::List(node_to_list(&node, *span), *span);
             substitute_var(&bridged, name, replacement)
         }
         Expr::BareList(_, _) | Expr::UnknownForm(_) => expr.clone(),
@@ -7481,19 +7472,12 @@ fn hoist_host_lane_tensor_bindings(
                 value,
             });
             scoped.insert(name.clone(), ty);
-            new_elements.push(Expr::List(
-                List {
-                    elements: vec![
-                        Expr::Atom(Atom::Tag(DeepTag::Var), *span),
-                        Expr::Map(
-                            chelis_deep::ast::MetaMap {
-                                entries: Vec::new(),
-                            },
-                            *span,
-                        ),
-                        Expr::Atom(Atom::Name(name), *span),
-                    ],
+            new_elements.push(Expr::node(
+                DeepTag::Var,
+                chelis_deep::ast::MetaMap {
+                    entries: Vec::new(),
                 },
+                vec![Expr::Atom(Atom::Name(name), *span)],
                 *span,
             ));
         } else {

@@ -1210,7 +1210,7 @@ fn normalize_nodes_to_lists(exprs: &[deep::Expr]) -> Vec<deep::Expr> {
 fn normalize_node_to_list(expr: &deep::Expr) -> deep::Expr {
     match expr {
         deep::Expr::Node(node, span) => {
-            let list = node.to_list(*span);
+            let list = node_to_list(&node, *span);
             let elements = list.elements.iter().map(normalize_node_to_list).collect();
             deep::Expr::List(deep::List { elements }, *span)
         }

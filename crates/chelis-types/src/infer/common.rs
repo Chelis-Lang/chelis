@@ -17,6 +17,30 @@ pub(super) fn children(list: &deep::List) -> &[deep::Expr] {
     }
 }
 
+/// Reconstruct a `deep::List` from a `Node` (bridge, chelis#908).
+pub(super) fn node_to_list(node: &chelis_deep::node::Node, span: chelis_deep::Span) -> deep::List {
+    use chelis_deep::node::ChildRef;
+    let mut elements = Vec::with_capacity(node.child_count() + 2);
+    elements.push(deep::Expr::Atom(deep::Atom::Name(node.tag().as_str().to_string()), span));
+    elements.push(deep::Expr::Map(node.meta().clone(), span));
+    for child_ref in node.children_iter() {
+        match child_ref {
+            ChildRef::Expr(e)
+            | ChildRef::Syntax(e)
+            | ChildRef::Type(e)
+            | ChildRef::EffectHandler(e)
+            | ChildRef::Bypass(e) => elements.push(e.clone()),
+            ChildRef::Binder(s) => {
+                elements.push(deep::Expr::Atom(deep::Atom::Name(s.to_string()), span));
+            }
+            ChildRef::Selector(s) => {
+                elements.push(deep::Expr::Atom(deep::Atom::Name(s.to_string()), span));
+            }
+        }
+    }
+    deep::List { elements }
+}
+
 /// chelis#710 / spec/04-type-system.md §10 [04-TOT-3]: push a `MalformedForm`
 /// diagnostic for a Deep node whose arity or shape the checker cannot type,
 /// and return the `Type::Error` sentinel. This replaces the silent

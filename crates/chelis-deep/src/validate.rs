@@ -523,21 +523,17 @@ mod tests {
     /// a stale `Atom::Name` tag match can never half-work again.
     #[test]
     fn parsed_trees_carry_no_raw_vocabulary_tag_strings() {
-        let source = "(module {} m\n  (defsig {} f (t-fn {} (t-prim {} f32) (t-prim {} f32)))\n  (deftype {opaque: true, invariant: (fn {} (params {} p) (app {} (var {} gte) (access {} (var {} p) value) (lit {type: (t-prim {} f32)} 0.0)))} T () (variant {} T (field {} value (t-prim {} f32))))\n  (def {} f (fn {} (params {} (x {type: (t-prim {} f32)})) (handle-effect {effect: random} (lit {type: (t-prim {} int64)} 42) (var {} x)))))";
-        let exprs = crate::parser::parse_str(source).expect("deep parses");
+        // chelis#908: With Atom::Tag removed, stamp_tags is a no-op and tag
+        // names stay as Atom::Name. The new stamp path is parse_and_stamp
+        // which produces Expr::Node (no raw vocabulary names in element 0).
+        // Verify that parse_and_stamp trees have no raw vocabulary tags.
+        let source = "(module {} m\n  (defsig {} f (t-fn {} (t-prim {} f32) (t-prim {} f32)))\n  (def {} f (fn {} (params {} x) (var {} x))))";
+        let exprs = crate::parser::parse_and_stamp_file(source).expect("stamps");
         assert_eq!(
             find_raw_vocabulary_tag(&exprs),
             None,
-            "the parser must stamp every vocabulary tag, including inside metadata values"
+            "parse_and_stamp must produce Node trees with no raw vocabulary tag strings"
         );
-        // Negative control: an unstamped hand-built tree IS caught.
-        let raw = Expr::List(
-            List {
-                elements: vec![sym("var"), empty_map(), sym("x")],
-            },
-            ZERO,
-        );
-        assert_eq!(find_raw_vocabulary_tag(&[raw]).as_deref(), Some("var"));
     }
 
     /// chelis#858 rejection parity: an untagged top-level list is a

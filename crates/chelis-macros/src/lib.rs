@@ -131,7 +131,7 @@ impl Expander {
             Expr::Atom(_, _) | Expr::Map(_, _) => Ok(expr.clone()),
             // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
             Expr::Node(node, span) => {
-                let bridged = Expr::List(node.to_list(*span), *span);
+                let bridged = Expr::List(node_to_list(&node, *span), *span);
                 self.expand_expr(&bridged, macros, scope)
             }
             Expr::BareList(_, _) | Expr::UnknownForm(_) => Ok(expr.clone()),
@@ -399,7 +399,7 @@ fn replace_placeholder_vars(expr: &Expr, replacements: &HashMap<String, Expr>) -
         Expr::Atom(_, _) | Expr::Map(_, _) => expr.clone(),
         // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
         Expr::Node(node, span) => {
-            let bridged = Expr::List(node.to_list(*span), *span);
+            let bridged = Expr::List(node_to_list(&node, *span), *span);
             replace_placeholder_vars(&bridged, replacements)
         }
         Expr::BareList(_, _) | Expr::UnknownForm(_) => expr.clone(),
@@ -439,7 +439,7 @@ fn collect_symbols(expr: &Expr, out: &mut HashSet<String>) {
         Expr::Atom(_, _) | Expr::Map(_, _) => {}
         // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
         Expr::Node(node, span) => {
-            let bridged = Expr::List(node.to_list(*span), *span);
+            let bridged = Expr::List(node_to_list(&node, *span), *span);
             collect_symbols(&bridged, out);
         }
         Expr::BareList(_, _) | Expr::UnknownForm(_) => {}
@@ -534,7 +534,7 @@ fn substitute_expr(
         Expr::Atom(_, _) | Expr::Map(_, _) => expr.clone(),
         // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
         Expr::Node(node, span) => {
-            let bridged = Expr::List(node.to_list(*span), *span);
+            let bridged = Expr::List(node_to_list(&node, *span), *span);
             substitute_expr(&bridged, params, shadowed)
         }
         Expr::BareList(_, _) | Expr::UnknownForm(_) => expr.clone(),
@@ -677,7 +677,7 @@ fn hygienize_expr(expr: &Expr, counter: &mut usize, env: &HashMap<String, String
         Expr::Atom(_, _) | Expr::Map(_, _) => expr.clone(),
         // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
         Expr::Node(node, span) => {
-            let bridged = Expr::List(node.to_list(*span), *span);
+            let bridged = Expr::List(node_to_list(&node, *span), *span);
             hygienize_expr(&bridged, counter, env)
         }
         Expr::BareList(_, _) | Expr::UnknownForm(_) => expr.clone(),
@@ -972,7 +972,7 @@ fn annotate_source_expr(expr: &Expr, invocation: &Expr) -> Expr {
         Expr::Atom(_, _) | Expr::Map(_, _) => expr.clone(),
         // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
         Expr::Node(node, span) => {
-            let bridged = Expr::List(node.to_list(*span), *span);
+            let bridged = Expr::List(node_to_list(&node, *span), *span);
             annotate_source_expr(&bridged, invocation)
         }
         Expr::BareList(_, _) | Expr::UnknownForm(_) => expr.clone(),
@@ -1087,6 +1087,30 @@ fn get_tag(list: &List) -> Option<DeepTag> {
     list.tag()
 }
 
+/// Reconstruct a `List` from a `Node` for bridge traversal (chelis#908).
+fn node_to_list(node: &chelis_deep::node::Node, span: Span) -> List {
+    use chelis_deep::node::ChildRef;
+    let mut elements = Vec::with_capacity(node.child_count() + 2);
+    elements.push(Expr::Atom(Atom::Name(node.tag().as_str().to_string()), span));
+    elements.push(Expr::Map(node.meta().clone(), span));
+    for child_ref in node.children_iter() {
+        match child_ref {
+            ChildRef::Expr(e)
+            | ChildRef::Syntax(e)
+            | ChildRef::Type(e)
+            | ChildRef::EffectHandler(e)
+            | ChildRef::Bypass(e) => elements.push(e.clone()),
+            ChildRef::Binder(s) => {
+                elements.push(Expr::Atom(Atom::Name(s.to_string()), span));
+            }
+            ChildRef::Selector(s) => {
+                elements.push(Expr::Atom(Atom::Name(s.to_string()), span));
+            }
+        }
+    }
+    List { elements }
+}
+
 /// Compiler-internal pre-expansion tags (`defmacro` / `macro-invoke`)
 /// are deliberately outside the public vocabulary (spec/03 macro
 /// boundary rule) and remain symbol-headed; this is the macro layer's
@@ -1126,9 +1150,11 @@ fn is_unit_list(expr: &Expr) -> bool {
 }
 
 fn node_with_meta(tag: DeepTag, meta: Expr, children: Vec<Expr>, span: Span) -> Expr {
-    let mut elements = vec![Expr::Atom(Atom::Tag(tag), span), meta];
-    elements.extend(children);
-    Expr::List(List { elements }, span)
+    let meta_map = match meta {
+        Expr::Map(m, _) => m,
+        _ => MetaMap::default(),
+    };
+    Expr::node(tag, meta_map, children, span)
 }
 
 fn zero_span() -> Span {

@@ -123,7 +123,6 @@ impl Printer {
     fn fmt_atom(atom: &Atom) -> String {
         match atom {
             Atom::Name(s) => s.clone(),
-            Atom::Tag(tag) => tag.as_str().to_string(),
             Atom::Int(n) => n.to_string(),
             Atom::Float(f) => {
                 let s = f.to_string();
@@ -347,10 +346,13 @@ impl Printer {
 fn canonical_node_parts(list: &List) -> Option<(DeepTag, &MetaMap, &[Expr])> {
     match list.elements.as_slice() {
         [
-            Expr::Atom(Atom::Tag(tag), _),
+            Expr::Atom(Atom::Name(tag_str), _),
             Expr::Map(meta, _),
             children @ ..,
-        ] => Some((*tag, meta, children)),
+        ] => {
+            let tag = DeepTag::parse(tag_str)?;
+            Some((tag, meta, children))
+        }
         _ => None,
     }
 }
@@ -360,7 +362,7 @@ fn node_to_list(node: &crate::node::Node) -> List {
     use crate::node::ChildRef;
     let span = Span::new(0, 0);
     let mut elements = Vec::with_capacity(node.child_count() + 2);
-    elements.push(Expr::Atom(Atom::Tag(node.tag()), span));
+    elements.push(Expr::Atom(Atom::Name(node.tag().as_str().to_string()), span));
     elements.push(Expr::Map(node.meta().clone(), span));
     for child_ref in node.children_iter() {
         match child_ref {
@@ -393,7 +395,7 @@ fn unknown_form_to_list(head: &str, meta: &MetaMap, children: &[Expr]) -> List {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::{Atom, Expr, List, MetaExpr, MetaMap};
+    use crate::ast::{Atom, Expr, MetaExpr, MetaMap};
     use crate::span::Span;
 
     fn sp() -> Span {
@@ -408,30 +410,20 @@ mod tests {
         atom_expr(Atom::Name(name.to_string()))
     }
 
-    fn map_expr(entries: Vec<(&str, Expr)>) -> Expr {
-        Expr::Map(
-            MetaMap {
-                entries: entries
-                    .into_iter()
-                    .map(|(key, value)| (key.to_string(), value))
-                    .collect(),
-            },
-            sp(),
-        )
-    }
-
     fn node(tag: &str, meta: Vec<(&str, Expr)>, children: Vec<Expr>) -> Expr {
-        let mut elements = vec![sym(tag), map_expr(meta)];
-        elements.extend(children);
-        let mut expr = Expr::List(List { elements }, sp());
-        // Mirror the parser's decode-once stamping so these hand-built
-        // trees match what every real consumer sees.
-        crate::parser::stamp_tags(std::slice::from_mut(&mut expr));
-        expr
+        use crate::tag::DeepTag;
+        let meta_map = MetaMap {
+            entries: meta
+                .into_iter()
+                .map(|(key, value)| (key.to_string(), value))
+                .collect(),
+        };
+        let deep_tag = DeepTag::parse(tag).expect("test uses valid tag");
+        Expr::node(deep_tag, meta_map, children, sp())
     }
 
     fn generic_list(elements: Vec<Expr>) -> Expr {
-        Expr::List(List { elements }, sp())
+        Expr::BareList(elements, sp())
     }
 
     fn meta_expr(entries: Vec<(&str, Expr)>, expr: Expr) -> Expr {

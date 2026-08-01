@@ -225,7 +225,7 @@ impl<'a> EvalContext<'a> {
 
         // Synthesize `(app {} <transform-expr> <arg-expr_0> ...)`.
         let mut app_elements: Vec<Expr> = Vec::with_capacity(3 + arg_exprs.len());
-        app_elements.push(Expr::Atom(Atom::Tag(DeepTag::App), span));
+        app_elements.push(Expr::Atom(Atom::Name(DeepTag::App.as_str().to_string()), span));
         app_elements.push(Expr::Map(MetaMap::default(), span));
         app_elements.push(transform_expr.clone());
         app_elements.extend(arg_exprs);
@@ -539,7 +539,7 @@ fn make_adt_construction_expr(
     match field_names {
         Some(names) => {
             let mut elements = vec![
-                Expr::Atom(Atom::Tag(DeepTag::Record), span),
+                Expr::Atom(Atom::Name(DeepTag::Record.as_str().to_string()), span),
                 Expr::Map(MetaMap::default(), span),
                 Expr::Atom(Atom::Name(ctor.to_string()), span),
             ];
@@ -547,7 +547,7 @@ fn make_adt_construction_expr(
                 elements.push(Expr::List(
                     List {
                         elements: vec![
-                            Expr::Atom(Atom::Tag(DeepTag::Kv), span),
+                            Expr::Atom(Atom::Name(DeepTag::Kv.as_str().to_string()), span),
                             Expr::Map(MetaMap::default(), span),
                             Expr::Atom(Atom::Name(name.clone()), span),
                             make_var_with_type(placeholder, ty, span),
@@ -560,12 +560,12 @@ fn make_adt_construction_expr(
         }
         None => {
             let mut elements = vec![
-                Expr::Atom(Atom::Tag(DeepTag::App), span),
+                Expr::Atom(Atom::Name(DeepTag::App.as_str().to_string()), span),
                 Expr::Map(MetaMap::default(), span),
                 Expr::List(
                     List {
                         elements: vec![
-                            Expr::Atom(Atom::Tag(DeepTag::Var), span),
+                            Expr::Atom(Atom::Name(DeepTag::Var.as_str().to_string()), span),
                             Expr::Map(MetaMap::default(), span),
                             Expr::Atom(Atom::Name(ctor.to_string()), span),
                         ],
@@ -854,7 +854,7 @@ pub(super) fn make_var_with_type(name: &str, ty: &TensorType, span: Span) -> Exp
     let prim_node = Expr::List(
         List {
             elements: vec![
-                Expr::Atom(Atom::Tag(DeepTag::TPrim), span),
+                Expr::Atom(Atom::Name(DeepTag::TPrim.as_str().to_string()), span),
                 Expr::Map(MetaMap::default(), span),
                 Expr::Atom(Atom::Name(prim_name.to_string()), span),
             ],
@@ -865,7 +865,7 @@ pub(super) fn make_var_with_type(name: &str, ty: &TensorType, span: Span) -> Exp
         prim_node
     } else {
         let mut tensor_elems = vec![
-            Expr::Atom(Atom::Tag(DeepTag::TTensor), span),
+            Expr::Atom(Atom::Name(DeepTag::TTensor.as_str().to_string()), span),
             Expr::Map(MetaMap::default(), span),
         ];
         for dim in &ty.dims {
@@ -884,7 +884,7 @@ pub(super) fn make_var_with_type(name: &str, ty: &TensorType, span: Span) -> Exp
     Expr::List(
         List {
             elements: vec![
-                Expr::Atom(Atom::Tag(DeepTag::Var), span),
+                Expr::Atom(Atom::Name(DeepTag::Var.as_str().to_string()), span),
                 Expr::Map(meta, span),
                 Expr::Atom(Atom::Name(name.to_string()), span),
             ],
@@ -898,7 +898,7 @@ fn dim_to_expr(dim: &DimInfo, span: Span) -> Expr {
         DimInfo::Lit(value) => Expr::List(
             List {
                 elements: vec![
-                    Expr::Atom(Atom::Tag(DeepTag::DLit), span),
+                    Expr::Atom(Atom::Name(DeepTag::DLit.as_str().to_string()), span),
                     Expr::Map(MetaMap::default(), span),
                     Expr::Atom(Atom::Int(*value as i64), span),
                 ],
@@ -908,7 +908,7 @@ fn dim_to_expr(dim: &DimInfo, span: Span) -> Expr {
         DimInfo::Named(name, _) => Expr::List(
             List {
                 elements: vec![
-                    Expr::Atom(Atom::Tag(DeepTag::DName), span),
+                    Expr::Atom(Atom::Name(DeepTag::DName.as_str().to_string()), span),
                     Expr::Map(MetaMap::default(), span),
                     Expr::Atom(Atom::Name(name.clone()), span),
                 ],
@@ -928,7 +928,7 @@ fn synth_fn_expr(params: &[String], body: &Expr) -> Expr {
         .map(|name| Expr::Atom(Atom::Name(name.clone()), span))
         .collect::<Vec<_>>();
     let mut params_elements = vec![
-        Expr::Atom(Atom::Tag(DeepTag::Params), span),
+        Expr::Atom(Atom::Name(DeepTag::Params.as_str().to_string()), span),
         Expr::Map(MetaMap::default(), span),
     ];
     params_elements.extend(param_exprs);
@@ -941,7 +941,7 @@ fn synth_fn_expr(params: &[String], body: &Expr) -> Expr {
     Expr::List(
         List {
             elements: vec![
-                Expr::Atom(Atom::Tag(DeepTag::Fn), span),
+                Expr::Atom(Atom::Name(DeepTag::Fn.as_str().to_string()), span),
                 Expr::Map(MetaMap::default(), span),
                 params_list,
                 body.clone(),

@@ -1,3 +1,4 @@
+pub(crate) mod bridge;
 pub(crate) mod cache_envelope;
 pub mod compiler;
 pub mod context;

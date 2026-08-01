@@ -273,7 +273,7 @@ fn make_var(name: &str) -> Expr {
     Expr::List(
         List {
             elements: vec![
-                Expr::Atom(Atom::Tag(DeepTag::Var), Span::new(0, 0)),
+                Expr::Atom(Atom::Name(DeepTag::Var.as_str().to_string()), Span::new(0, 0)),
                 Expr::Map(Default::default(), Span::new(0, 0)),
                 Expr::Atom(Atom::Name(name.to_string()), Span::new(0, 0)),
             ],
@@ -501,7 +501,7 @@ fn reduce(
                 new_children.push(Expr::List(
                     List {
                         elements: vec![
-                            Expr::Atom(Atom::Tag(DeepTag::Kv), Span::new(0, 0)),
+                            Expr::Atom(Atom::Name(DeepTag::Kv.as_str().to_string()), Span::new(0, 0)),
                             Expr::Map(Default::default(), Span::new(0, 0)),
                             field,
                             val,
@@ -551,7 +551,7 @@ fn int_lit_node(value: i64, int_ty: &str) -> Expr {
     let type_node = Expr::List(
         List {
             elements: vec![
-                Expr::Atom(Atom::Tag(DeepTag::TPrim), Span::new(0, 0)),
+                Expr::Atom(Atom::Name(DeepTag::TPrim.as_str().to_string()), Span::new(0, 0)),
                 Expr::Map(MetaMap::default(), Span::new(0, 0)),
                 Expr::Atom(Atom::Name(int_ty.to_string()), Span::new(0, 0)),
             ],
@@ -563,7 +563,7 @@ fn int_lit_node(value: i64, int_ty: &str) -> Expr {
     Expr::List(
         List {
             elements: vec![
-                Expr::Atom(Atom::Tag(DeepTag::Lit), Span::new(0, 0)),
+                Expr::Atom(Atom::Name(DeepTag::Lit.as_str().to_string()), Span::new(0, 0)),
                 Expr::Map(meta, Span::new(0, 0)),
                 Expr::Atom(Atom::Int(value), Span::new(0, 0)),
             ],
@@ -580,7 +580,7 @@ fn float_lit_node(value: f64) -> Expr {
     let type_node = Expr::List(
         List {
             elements: vec![
-                Expr::Atom(Atom::Tag(DeepTag::TPrim), Span::new(0, 0)),
+                Expr::Atom(Atom::Name(DeepTag::TPrim.as_str().to_string()), Span::new(0, 0)),
                 Expr::Map(MetaMap::default(), Span::new(0, 0)),
                 Expr::Atom(Atom::Name("f32".to_string()), Span::new(0, 0)),
             ],
@@ -592,7 +592,7 @@ fn float_lit_node(value: f64) -> Expr {
     Expr::List(
         List {
             elements: vec![
-                Expr::Atom(Atom::Tag(DeepTag::Lit), Span::new(0, 0)),
+                Expr::Atom(Atom::Name(DeepTag::Lit.as_str().to_string()), Span::new(0, 0)),
                 Expr::Map(meta, Span::new(0, 0)),
                 Expr::Atom(Atom::Float(value), Span::new(0, 0)),
             ],
@@ -618,7 +618,7 @@ fn rebuild_app(callee: &str, args: Vec<Expr>) -> Expr {
     use chelis_deep::Span;
     use chelis_deep::ast::List;
     let mut elements = vec![
-        Expr::Atom(Atom::Tag(DeepTag::App), Span::new(0, 0)),
+        Expr::Atom(Atom::Name(DeepTag::App.as_str().to_string()), Span::new(0, 0)),
         Expr::Map(Default::default(), Span::new(0, 0)),
         make_var(callee),
     ];

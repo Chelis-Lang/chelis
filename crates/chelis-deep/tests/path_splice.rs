@@ -439,7 +439,7 @@ fn assert_is_def(node: &Expr) {
         panic!("expected def list");
     };
     assert!(
-        matches!(list.elements.first(), Some(Expr::Atom(Atom::Tag(t), _)) if *t == DeepTag::Def),
+        matches!(list.elements.first(), Some(Expr::Atom(Atom::Name(s), _)) if s == DeepTag::Def.as_str()),
         "expected a def node"
     );
 }

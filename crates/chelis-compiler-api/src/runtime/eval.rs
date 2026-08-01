@@ -1,3 +1,4 @@
+use crate::bridge::node_to_list;
 use chelis_deep::DeepTag;
 use std::collections::HashMap;
 use std::fs;
@@ -64,7 +65,7 @@ impl<'a> EvalContext<'a> {
             Expr::List(list, _) => self.eval_list(list),
             // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
             Expr::Node(node, span) => {
-                let bridged = node.to_list(*span);
+                let bridged = node_to_list(&node, *span);
                 self.eval_list(&bridged)
             }
             Expr::BareList(_, _) | Expr::UnknownForm(_) => {

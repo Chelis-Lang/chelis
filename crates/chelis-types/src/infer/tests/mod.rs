@@ -54,33 +54,26 @@ fn structural_child_stamp_roles_match_owner_positions() {
     }
 }
 
-/// chelis#873 / loud_unsupported.md section C1 rule 4, for decode-once's
-/// third structural token. Stamping is positional and `children()` skips
-/// elements 0-1, so no SOURCE program can put an `Atom::Tag` in
-/// expression position - which is exactly why the arm needs a canary
-/// rather than a comment. Built programmatically, the way the rule says
-/// to prove a path you believe is dead.
-///
-/// The sibling arms (`Symbol`, `Keyword`) are covered from source by
-/// `bare_atom_expression_position_scores_below_one` in the CLI corpus;
-/// this is the one arm that cannot be reached that way.
+/// chelis#873 / loud_unsupported.md section C1 rule 4, for a vocabulary
+/// name used as a bare symbol in expression position. With `Atom::Tag`
+/// removed (chelis#908), vocabulary names in expression position arrive
+/// as `Atom::Name` and hit the bare-symbol arm.
 #[test]
 fn tag_atom_in_expression_position_is_a_loud_malformed_form() {
     let program = vec![node_expr(
         DeepTag::Def,
         vec![
             symbol_expr("x"),
-            deep::Expr::Atom(deep::Atom::Tag(DeepTag::App), zero_span()),
+            deep::Expr::Atom(deep::Atom::Name("app".to_string()), zero_span()),
         ],
     )];
     let result = infer_program(&program);
     assert!(
         result.errors.iter().any(|error| {
             matches!(error.kind, CheckErrorKind::MalformedForm)
-                && error.message.contains("a decoded tag atom `app`")
-                && error.message.contains("outside a list's tag position")
+                && error.message.contains("bare symbol atom `app`")
         }),
-        "a tag atom in expression position must raise, not type as a value; got: {:?}",
+        "a bare symbol in expression position must raise, not type as a value; got: {:?}",
         result.errors
     );
 }

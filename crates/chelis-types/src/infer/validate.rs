@@ -555,7 +555,7 @@ pub(super) fn walk_for_tensor_precision(
         deep::Expr::Atom(_, _) => {}
         // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
         deep::Expr::Node(node, span) => {
-            let bridged = deep::Expr::List(node.to_list(*span), *span);
+            let bridged = deep::Expr::List(node_to_list(&node, *span), *span);
             walk_for_tensor_precision(&bridged, errors, seen, def_context);
         }
         deep::Expr::BareList(elems, _) => {
@@ -822,7 +822,7 @@ pub(super) fn walk_for_poly_op_constraint_violations(
         deep::Expr::Atom(_, _) => {}
         // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
         deep::Expr::Node(node, span) => {
-            let bridged = deep::Expr::List(node.to_list(*span), *span);
+            let bridged = deep::Expr::List(node_to_list(&node, *span), *span);
             walk_for_poly_op_constraint_violations(&bridged, defs, type_env, scope, errors);
         }
         deep::Expr::BareList(elems, _) => {
@@ -1540,7 +1540,7 @@ pub(super) fn validate_ir_expr(
         deep::Expr::Atom(_, _) => literal_static_value(expr),
         // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
         deep::Expr::Node(node, span) => {
-            let bridged = deep::Expr::List(node.to_list(*span), *span);
+            let bridged = deep::Expr::List(node_to_list(&node, *span), *span);
             validate_ir_expr(&bridged, type_env, static_env, failed_let_names, errors)
         }
         deep::Expr::BareList(elems, _) => {
@@ -1611,12 +1611,7 @@ pub(super) fn dim_to_deep_expr(dim: &Dim) -> deep::Expr {
 }
 
 pub(super) fn node_expr(tag: DeepTag, children: Vec<deep::Expr>) -> deep::Expr {
-    let mut elements = vec![
-        deep::Expr::Atom(deep::Atom::Tag(tag), zero_span()),
-        deep::Expr::Map(deep::MetaMap::default(), zero_span()),
-    ];
-    elements.extend(children);
-    deep::Expr::List(deep::List { elements }, zero_span())
+    deep::Expr::node(tag, deep::MetaMap::default(), children, zero_span())
 }
 
 pub(super) fn symbol_expr(name: &str) -> deep::Expr {
@@ -2534,27 +2529,19 @@ pub(super) fn build_tensor_type_expr_with_batch(
     let zero = zero_span();
     let empty_meta = || deep::MetaMap { entries: vec![] };
     let make_d_lit = |v: i64| {
-        deep::Expr::List(
-            deep::List {
-                elements: vec![
-                    deep::Expr::Atom(deep::Atom::Tag(DeepTag::DLit), zero),
-                    deep::Expr::Map(empty_meta(), zero),
-                    deep::Expr::Atom(deep::Atom::Int(v), zero),
-                ],
-            },
+        deep::Expr::node(
+            DeepTag::DLit,
+            empty_meta(),
+            vec![deep::Expr::Atom(deep::Atom::Int(v), zero)],
             zero,
         )
     };
-    let mut elements = vec![
-        deep::Expr::Atom(deep::Atom::Tag(DeepTag::TTensor), zero),
-        deep::Expr::Map(empty_meta(), zero),
-    ];
-    elements.push(batch_dim);
+    let mut children = vec![batch_dim];
     for &d in other_dims {
-        elements.push(make_d_lit(d));
+        children.push(make_d_lit(d));
     }
-    elements.push(prec);
-    deep::Expr::List(deep::List { elements }, zero)
+    children.push(prec);
+    deep::Expr::node(DeepTag::TTensor, empty_meta(), children, zero)
 }
 
 /// Look up positional arg `idx` of a `conv2d` call, attempt to
@@ -2755,7 +2742,7 @@ pub(super) fn annotated_totality_invariant_traces(exprs: &[deep::Expr]) -> Vec<S
             }
             // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
             deep::Expr::Node(node, span) => {
-                let bridged = deep::Expr::List(node.to_list(*span), *span);
+                let bridged = deep::Expr::List(node_to_list(&node, *span), *span);
                 walk(&bridged, traces);
             }
             deep::Expr::BareList(elems, _) => {

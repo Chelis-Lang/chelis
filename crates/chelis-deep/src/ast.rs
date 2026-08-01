@@ -9,6 +9,11 @@ pub enum Expr {
     /// An atomic value (symbol, number, string, keyword, bool).
     Atom(Atom, Span),
     /// A parenthesized list `(tag {} children...)`.
+    ///
+    /// **Deprecated (chelis#908):** No code path produces this variant
+    /// anymore. All producers route through `stamp_to_typed` which emits
+    /// `Expr::Node`. Match arms for this variant are dead code awaiting
+    /// removal. Do not construct new `Expr::List` values.
     List(List, Span),
     /// An inline metadata map `{key: value, ...}` or `{}`.
     Map(MetaMap, Span),
@@ -38,17 +43,14 @@ pub struct UnknownFormData {
 }
 
 impl Expr {
-    /// Construct a canonical tagged node `(tag {meta} children...)` with a
-    /// decoded tag. This is the typed producer entry point (decode-once,
-    /// chelis#731 Phase 3): programmatic Deep construction goes through
-    /// here (or stamps `Atom::Tag` directly) so the in-memory tree never
-    /// carries a vocabulary tag as a string.
+    /// Construct a canonical tagged node with a decoded tag. This is the
+    /// typed producer entry point: programmatic Deep construction goes
+    /// through here, producing an `Expr::Node` directly.
     pub fn node(tag: DeepTag, meta: MetaMap, children: Vec<Expr>, span: Span) -> Expr {
-        let mut elements = Vec::with_capacity(children.len() + 2);
-        elements.push(Expr::Atom(Atom::Tag(tag), span));
-        elements.push(Expr::Map(meta, span));
-        elements.extend(children);
-        Expr::List(List { elements }, span)
+        Expr::Node(
+            Box::new(crate::node::Node::new(tag, meta, children)),
+            span,
+        )
     }
 
     /// The decoded tag when this expression is a stamped vocabulary node.
@@ -81,27 +83,19 @@ impl Expr {
     /// index 1. The `span` key holds an opaque string identifier issued by
     /// an external producer (e.g., Octant's LaTeX-to-Deep translator).
     ///
-    /// Returns `Some(id)` when:
-    /// - the node is an `Expr::List` with at least two elements,
-    /// - element 1 is an `Expr::Map`,
-    /// - that map contains a `span` entry whose value is a string literal
-    ///   (`Expr::Atom(Atom::Str(_), _)`).
+    /// Returns `Some(id)` when the metadata map contains a `span` entry
+    /// whose value is a string literal (`Expr::Atom(Atom::Str(_), _)`).
     ///
     /// The empty string is a valid (though unusual) span ID and is returned
     /// as `Some("")`. Lock this convention in tests; do not silently coerce
     /// `Some("")` to `None`.
-    ///
-    /// Returns `None` for atoms, bare maps, legacy `MetaExpr` nodes, lists
-    /// without a metadata map at index 1, lists whose metadata map has no
-    /// `span` key, or `span` values that are not string literals (those are
-    /// shape errors callers handle separately, not a missing span).
     pub fn span_id(&self) -> Option<&str> {
-        let list = match self {
-            Expr::List(list, _) => list,
-            _ => return None,
-        };
-        let meta = match list.elements.get(1)? {
-            Expr::Map(m, _) => m,
+        let meta = match self {
+            Expr::Node(node, _) => node.meta(),
+            Expr::List(list, _) => match list.elements.get(1)? {
+                Expr::Map(m, _) => m,
+                _ => return None,
+            },
             _ => return None,
         };
         for (key, value) in &meta.entries {
@@ -119,13 +113,6 @@ impl Expr {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Atom {
     Name(String),
-    /// A decoded closed-vocabulary Deep tag at a node's tag position
-    /// (element 0). Stamped once by the parser or a typed constructor
-    /// (decode-once, chelis#731 Phase 3): after parsing, the tag string
-    /// does not exist in the in-memory tree, so no consumer can dispatch
-    /// on it; printers and serializers regenerate the string via
-    /// [`DeepTag::as_str`] at the serialization boundary only.
-    Tag(DeepTag),
     Int(i64),
     Float(f64),
     Str(String),
@@ -133,35 +120,37 @@ pub enum Atom {
 }
 
 /// A parenthesized list of expressions.
+///
+/// **Deprecated (chelis#908):** This struct exists only for compilation
+/// compatibility during the transition. No code path produces `Expr::List`
+/// anymore. Do not construct new `List` values.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct List {
-    /// All elements of the list. In canonical 3-tuple form:
-    /// elements[0] is the tag (an `Atom::Tag` after decode-once stamping),
-    /// elements[1] is a Map (metadata), elements[2..] are children.
+    /// All elements of the list.
     pub elements: Vec<Expr>,
 }
 
 impl List {
     /// The node's decoded closed-vocabulary tag, when element 0 carries
-    /// one. This is the only tag accessor consumers dispatch on
-    /// (decode-once, chelis#731 Phase 3): `None` means the list is not a
-    /// stamped vocabulary node (a bare structural list, a typed-name
-    /// helper, or a lenient-parsed unknown tag), and the caller owns the
-    /// loud raw-string-boundary response per checker_totality.md §C1.2.
+    /// one.
     pub fn tag(&self) -> Option<DeepTag> {
         match self.elements.first() {
-            Some(Expr::Atom(Atom::Tag(tag), _)) => Some(*tag),
+            Some(Expr::Atom(Atom::Name(symbol), _)) => DeepTag::parse(symbol),
             _ => None,
         }
     }
 
     /// The element-0 symbol of a list that is NOT a stamped vocabulary
-    /// node, for naming unknown tags in diagnostics. Returns `None`
-    /// whenever the list carries a real decoded tag, so this cannot be
-    /// used to dispatch on the closed vocabulary by string.
+    /// node, for naming unknown tags in diagnostics.
     pub fn unknown_tag_symbol(&self) -> Option<&str> {
         match self.elements.first() {
-            Some(Expr::Atom(Atom::Name(symbol), _)) => Some(symbol.as_str()),
+            Some(Expr::Atom(Atom::Name(symbol), _)) => {
+                if DeepTag::parse(symbol).is_none() {
+                    Some(symbol.as_str())
+                } else {
+                    None
+                }
+            }
             _ => None,
         }
     }
@@ -204,9 +193,6 @@ pub fn strip_metadata(expr: &Expr) -> Expr {
                 .iter()
                 .enumerate()
                 .map(|(index, element)| {
-                    // Element 1 of a canonical 3-tuple is the metadata map; empty
-                    // it rather than recursing (its entries are metadata values,
-                    // not children). Everything else recurses.
                     if index == 1 && matches!(element, Expr::Map(..)) {
                         Expr::Map(MetaMap::default(), element.span())
                     } else {

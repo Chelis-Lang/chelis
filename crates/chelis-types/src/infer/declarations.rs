@@ -650,7 +650,7 @@ pub(super) fn collect_top_level_calls(
         },
         // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
         deep::Expr::Node(node, span) => {
-            let bridged = deep::Expr::List(node.to_list(*span), *span);
+            let bridged = deep::Expr::List(node_to_list(&node, *span), *span);
             collect_top_level_calls(&bridged, def_names, bound, calls);
         }
         deep::Expr::BareList(elems, _) => {
@@ -902,7 +902,7 @@ pub(super) fn param_has_consuming_use_inner(
         },
         // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
         deep::Expr::Node(node, span) => {
-            let bridged = deep::Expr::List(node.to_list(*span), *span);
+            let bridged = deep::Expr::List(node_to_list(&node, *span), *span);
             param_has_consuming_use_inner(
                 &bridged,
                 param,
@@ -1142,7 +1142,7 @@ pub(super) fn expr_mentions_unshadowed_name(
         },
         // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
         deep::Expr::Node(node, span) => {
-            let bridged = deep::Expr::List(node.to_list(*span), *span);
+            let bridged = deep::Expr::List(node_to_list(&node, *span), *span);
             expr_mentions_unshadowed_name(&bridged, name, bound)
         }
         deep::Expr::BareList(elems, _) => elems
@@ -1889,7 +1889,7 @@ pub(super) fn collect_eager_refs(
         deep::Expr::Atom(_, _) => {}
         // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
         deep::Expr::Node(node, span) => {
-            let bridged = deep::Expr::List(node.to_list(*span), *span);
+            let bridged = deep::Expr::List(node_to_list(&node, *span), *span);
             collect_eager_refs(&bridged, bound, refs, applied);
         }
         deep::Expr::BareList(elems, _) => {

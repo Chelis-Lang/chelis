@@ -850,7 +850,7 @@ where
         Expr::Atom(..) => return,
         Expr::Node(node, span) => {
             // Bridge: reconstruct List so scope-aware traversal works unchanged (#908)
-            let list = node.to_list(*span);
+            let list = node_to_authoring_list(node, *span);
             let bridged = Expr::List(list, *span);
             walk_children(&bridged, scope, path, f);
             return;
@@ -917,7 +917,7 @@ where
             let placeholder = Expr::Atom(Atom::Bool(false), Span::new(0, 0));
             match std::mem::replace(expr, placeholder) {
                 Expr::Node(node, span) => {
-                    *expr = Expr::List(node.to_list(span), span);
+                    *expr = Expr::List(node_to_authoring_list(&node, span), span);
                     walk_children_mut(expr, scope, f);
                 }
                 _ => unreachable!(),
@@ -1375,6 +1375,31 @@ fn any_list_mut(expr: &mut Expr) -> Option<&mut List> {
 
 fn list_tag(list: &List) -> Option<DeepTag> {
     list.tag()
+}
+
+/// Reconstruct a `List` from a `Node` for authoring traversal (bridge,
+/// chelis#908). Uses `Atom::Name` for the tag since `Atom::Tag` is removed.
+fn node_to_authoring_list(node: &crate::node::Node, span: Span) -> List {
+    use crate::node::ChildRef;
+    let mut elements = Vec::with_capacity(node.child_count() + 2);
+    elements.push(Expr::Atom(Atom::Name(node.tag().as_str().to_string()), span));
+    elements.push(Expr::Map(node.meta().clone(), span));
+    for child_ref in node.children_iter() {
+        match child_ref {
+            ChildRef::Expr(e)
+            | ChildRef::Syntax(e)
+            | ChildRef::Type(e)
+            | ChildRef::EffectHandler(e)
+            | ChildRef::Bypass(e) => elements.push(e.clone()),
+            ChildRef::Binder(s) => {
+                elements.push(Expr::Atom(Atom::Name(s.to_string()), span));
+            }
+            ChildRef::Selector(s) => {
+                elements.push(Expr::Atom(Atom::Name(s.to_string()), span));
+            }
+        }
+    }
+    List { elements }
 }
 
 fn module_name(list: &List) -> Option<&str> {

@@ -23,6 +23,7 @@ pub const EVAL_TENSOR_CAPABLE_PRIMS: &[chelis_types::types::Prim] = &[
 ];
 
 pub mod analysis;
+pub(crate) mod bridge;
 pub mod dag;
 pub mod eval;
 pub mod fuse;

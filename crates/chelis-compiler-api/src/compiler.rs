@@ -1,3 +1,4 @@
+use crate::bridge::node_to_list;
 use chelis_deep::DeepTag;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -3368,12 +3369,6 @@ fn wire_deep_expr(expr: &DeepExpr) -> WireDeepExpr {
                     chelis_deep::Atom::Name(value) => WireDeepAtom::Symbol {
                         value: value.clone(),
                     },
-                    // Serialization boundary (decode-once, chelis#731 Phase
-                    // 3): a decoded tag crosses the wire as its canonical
-                    // string spelling, keeping the wire schema unchanged.
-                    chelis_deep::Atom::Tag(tag) => WireDeepAtom::Symbol {
-                        value: tag.as_str().to_string(),
-                    },
                     chelis_deep::Atom::Int(value) => WireDeepAtom::Int { value: *value },
                     chelis_deep::Atom::Float(value) => WireDeepAtom::Float { value: *value },
                     chelis_deep::Atom::Str(value) => WireDeepAtom::Str {
@@ -3419,7 +3414,7 @@ fn wire_deep_expr(expr: &DeepExpr) -> WireDeepExpr {
         },
         // Bridge: reconstruct List so wire format includes tag and meta (#908)
         DeepExpr::Node(node, s) => {
-            let bridged = DeepExpr::List(node.to_list(*s), *s);
+            let bridged = DeepExpr::List(node_to_list(&node, *s), *s);
             wire_deep_expr(&bridged)
         }
         DeepExpr::BareList(elems, s) => WireDeepExpr {

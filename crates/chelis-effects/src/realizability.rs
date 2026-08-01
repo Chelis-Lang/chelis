@@ -10,6 +10,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use chelis_deep::ast::{Atom, Expr, List};
+use super::node_to_list;
 use chelis_types::known_tags::{LaneContribution, tag_lane_contribution};
 use chelis_types::manifest::HostReason;
 use chelis_types::types::{Lane, Prim};
@@ -139,7 +140,7 @@ fn expr_needs_host(
         Expr::Atom(_, _) | Expr::Map(_, _) => false,
         // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
         Expr::Node(node, span) => {
-            let bridged = Expr::List(node.to_list(*span), *span);
+            let bridged = Expr::List(node_to_list(&node, *span), *span);
             expr_needs_host(
                 &bridged,
                 lane_by_def,
@@ -282,7 +283,6 @@ fn list_needs_host(
 fn get_tag(list: &List) -> Option<&str> {
     list.elements.first().and_then(|e| match e {
         Expr::Atom(Atom::Name(s), _) => Some(s.as_str()),
-        Expr::Atom(Atom::Tag(t), _) => Some(t.as_str()),
         _ => None,
     })
 }

@@ -60,6 +60,22 @@ use chelis_deep::ast as deep;
 use chelis_types::types::Type;
 use chelis_types::{CheckedProgram, InferResult};
 
+fn node_to_list_731(node: &chelis_deep::node::Node, span: chelis_deep::Span) -> deep::List {
+    use chelis_deep::node::ChildRef;
+    let mut elements = Vec::with_capacity(node.child_count() + 2);
+    elements.push(deep::Expr::Atom(deep::Atom::Name(node.tag().as_str().to_string()), span));
+    elements.push(deep::Expr::Map(deep::MetaMap::default(), span));
+    for child_ref in node.children_iter() {
+        match child_ref {
+            ChildRef::Expr(e) | ChildRef::Syntax(e) | ChildRef::Type(e)
+            | ChildRef::EffectHandler(e) | ChildRef::Bypass(e) => elements.push(e.clone()),
+            ChildRef::Binder(s) => elements.push(deep::Expr::Atom(deep::Atom::Name(s.to_string()), span)),
+            ChildRef::Selector(s) => elements.push(deep::Expr::Atom(deep::Atom::Name(s.to_string()), span)),
+        }
+    }
+    deep::List { elements }
+}
+
 const WELL_TYPED: &str = "add(cast(1.0, f32), cast(2.0, f32))";
 /// Same ill-typed expression the chelis#709 canary uses.
 const MASKED_ERROR: &str = "add(cast(1.0, f32), cast(2, int64))";
@@ -195,7 +211,7 @@ fn collect_tree_traces(expr: &deep::Expr, path: &str, check_stamp: bool, out: &m
         }
         // Bridge: reconstruct List so type-stamp checking works unchanged (#908)
         deep::Expr::Node(node, span) => {
-            let bridged = deep::Expr::List(node.to_list(*span), *span);
+            let bridged = deep::Expr::List(node_to_list_731(node.as_ref(), *span), *span);
             collect_tree_traces(&bridged, path, check_stamp, out);
         }
         deep::Expr::BareList(_, _) | deep::Expr::UnknownForm(_) => {}

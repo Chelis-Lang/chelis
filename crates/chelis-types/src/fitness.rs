@@ -5,6 +5,7 @@
 
 use crate::errors::{CheckError, CheckErrorKind};
 use crate::infer::{InferResult, infer_ir_program};
+use crate::bridge::node_to_list;
 
 /// Weights for each fitness component (spec section 6.1).
 const W_PARSE: f64 = 0.1;
@@ -286,7 +287,7 @@ fn count_node(expr: &chelis_deep::Expr) -> usize {
         }
         // Bridge: reconstruct List so all children (including meta) are counted (#908)
         chelis_deep::Expr::Node(node, span) => {
-            let bridged = chelis_deep::Expr::List(node.to_list(*span), *span);
+            let bridged = chelis_deep::Expr::List(node_to_list(&node, *span), *span);
             count_node(&bridged)
         }
         chelis_deep::Expr::BareList(elems, _) => 1 + elems.iter().map(count_node).sum::<usize>(),

@@ -1220,7 +1220,7 @@ pub(super) fn effect_metadata_is_singular(expr: &deep::Expr) -> bool {
         }
         // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
         deep::Expr::Node(node, span) => {
-            let bridged = deep::Expr::List(node.to_list(*span), *span);
+            let bridged = deep::Expr::List(node_to_list(&node, *span), *span);
             effect_metadata_is_singular(&bridged)
         }
         deep::Expr::BareList(elems, _) => elems.iter().all(effect_metadata_is_singular),

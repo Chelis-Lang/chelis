@@ -3,6 +3,7 @@
 //! Walks the Deep AST and produces a flat DAG of RISC primitive nodes.
 
 use std::any::Any;
+use crate::bridge::node_to_list;
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -317,35 +318,22 @@ fn synth_pipe_acc_binding_name() -> String {
 /// the call.
 fn synth_unary_app(fname: &str, acc_name: &str, app_span: Span) -> Expr {
     let zero_span = Span::new(0, 0);
-    let callee = Expr::List(
-        List {
-            elements: vec![
-                Expr::Atom(Atom::Tag(DeepTag::Var), zero_span),
-                Expr::Map(MetaMap::default(), zero_span),
-                Expr::Atom(Atom::Name(fname.to_string()), zero_span),
-            ],
-        },
+    let callee = Expr::node(
+        DeepTag::Var,
+        MetaMap::default(),
+        vec![Expr::Atom(Atom::Name(fname.to_string()), zero_span)],
         zero_span,
     );
-    let arg = Expr::List(
-        List {
-            elements: vec![
-                Expr::Atom(Atom::Tag(DeepTag::Var), zero_span),
-                Expr::Map(MetaMap::default(), zero_span),
-                Expr::Atom(Atom::Name(acc_name.to_string()), zero_span),
-            ],
-        },
+    let arg = Expr::node(
+        DeepTag::Var,
+        MetaMap::default(),
+        vec![Expr::Atom(Atom::Name(acc_name.to_string()), zero_span)],
         zero_span,
     );
-    Expr::List(
-        List {
-            elements: vec![
-                Expr::Atom(Atom::Tag(DeepTag::App), zero_span),
-                Expr::Map(MetaMap::default(), zero_span),
-                callee,
-                arg,
-            ],
-        },
+    Expr::node(
+        DeepTag::App,
+        MetaMap::default(),
+        vec![callee, arg],
         app_span,
     )
 }
@@ -357,26 +345,16 @@ fn synth_unary_app(fname: &str, acc_name: &str, app_span: Span) -> Expr {
 /// dims, so the result is order-insensitive.
 fn synth_reduction_app(fname: &str, operand: Expr, axis: Expr, app_span: Span) -> Expr {
     let zero_span = Span::new(0, 0);
-    let callee = Expr::List(
-        List {
-            elements: vec![
-                Expr::Atom(Atom::Tag(DeepTag::Var), zero_span),
-                Expr::Map(MetaMap::default(), zero_span),
-                Expr::Atom(Atom::Name(fname.to_string()), zero_span),
-            ],
-        },
+    let callee = Expr::node(
+        DeepTag::Var,
+        MetaMap::default(),
+        vec![Expr::Atom(Atom::Name(fname.to_string()), zero_span)],
         zero_span,
     );
-    Expr::List(
-        List {
-            elements: vec![
-                Expr::Atom(Atom::Tag(DeepTag::App), zero_span),
-                Expr::Map(MetaMap::default(), zero_span),
-                callee,
-                operand,
-                axis,
-            ],
-        },
+    Expr::node(
+        DeepTag::App,
+        MetaMap::default(),
+        vec![callee, operand, axis],
         app_span,
     )
 }
@@ -1890,7 +1868,7 @@ fn collect_body_precision_var_names(expr: &Expr, out: &mut HashSet<String>) {
         Expr::Atom(_, _) => {}
         // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
         Expr::Node(node, span) => {
-            let bridged = Expr::List(node.to_list(*span), *span);
+            let bridged = Expr::List(node_to_list(&node, *span), *span);
             collect_body_precision_var_names(&bridged, out);
         }
         Expr::BareList(elems, _) => {
@@ -2640,7 +2618,7 @@ fn expr_requires_host_runtime_with_ctx(expr: &Expr, exempt_to_tensor_literal: bo
         }
         // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
         Expr::Node(node, span) => {
-            let bridged = Expr::List(node.to_list(*span), *span);
+            let bridged = Expr::List(node_to_list(&node, *span), *span);
             expr_requires_host_runtime_with_ctx(&bridged, exempt_to_tensor_literal)
         }
         Expr::BareList(elems, _) => elems
@@ -3056,7 +3034,7 @@ fn expr_depends_on_nonlowerable_name(
         }
         // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
         Expr::Node(node, span) => {
-            let bridged = Expr::List(node.to_list(*span), *span);
+            let bridged = Expr::List(node_to_list(&node, *span), *span);
             expr_depends_on_nonlowerable_name(
                 &bridged,
                 top_level_defs,
@@ -3105,7 +3083,7 @@ fn collect_param_bound_names(param: &Expr, out: &mut HashSet<String>) {
         Expr::Map(_, _) | Expr::MetaExpr(_, _) | Expr::Atom(_, _) => {}
         // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
         Expr::Node(node, span) => {
-            let bridged = Expr::List(node.to_list(*span), *span);
+            let bridged = Expr::List(node_to_list(&node, *span), *span);
             collect_param_bound_names(&bridged, out);
         }
         Expr::BareList(_, _) | Expr::UnknownForm(_) => {}
@@ -3129,7 +3107,7 @@ fn collect_pattern_bound_names(pattern: &Expr, out: &mut HashSet<String>) {
         }
         // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
         Expr::Node(node, span) => {
-            let bridged = Expr::List(node.to_list(*span), *span);
+            let bridged = Expr::List(node_to_list(&node, *span), *span);
             collect_pattern_bound_names(&bridged, out);
         }
         Expr::BareList(elems, _) => {
@@ -3236,7 +3214,7 @@ fn assert_ir_lowerable(expr: &Expr) {
         Expr::Atom(_, _) => {}
         // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
         Expr::Node(node, span) => {
-            let bridged = Expr::List(node.to_list(*span), *span);
+            let bridged = Expr::List(node_to_list(&node, *span), *span);
             assert_ir_lowerable(&bridged);
         }
         Expr::BareList(elems, _) => {
@@ -3300,7 +3278,7 @@ fn assert_ir_typed(expr: &Expr) {
         Expr::Atom(_, _) => {}
         // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
         Expr::Node(node, span) => {
-            let bridged = Expr::List(node.to_list(*span), *span);
+            let bridged = Expr::List(node_to_list(&node, *span), *span);
             assert_ir_typed(&bridged);
         }
         Expr::BareList(elems, _) => {
@@ -4908,7 +4886,7 @@ impl LowerCtx {
             Expr::MetaExpr(meta_expr, _) => self.lower_expr(&meta_expr.expr),
             // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
             Expr::Node(node, span) => {
-                let bridged = Expr::List(node.to_list(*span), *span);
+                let bridged = Expr::List(node_to_list(&node, *span), *span);
                 self.lower_expr(&bridged)
             }
             Expr::BareList(_, _) | Expr::UnknownForm(_) => raise_malformed_deep(
@@ -5061,11 +5039,6 @@ impl LowerCtx {
             Atom::Str(_) => raise_malformed_deep(
                 "a string atom in DAG expression position (string values are host-lane \
                  only)",
-                None,
-                self.current_span_id.clone(),
-            ),
-            Atom::Tag(_) => raise_malformed_deep(
-                "a bare Deep tag atom in expression position",
                 None,
                 self.current_span_id.clone(),
             ),

@@ -315,11 +315,8 @@ fn check_in_grammar(expr: &Expr) -> Result<(), PredGrammarError> {
             Err(PredGrammarError::DisallowedNode(node_desc(expr)))
         }
         Expr::List(_, _) => check_list_in_grammar(expr),
-        // Bridge: reconstruct List so tag/children accessors work unchanged (#908)
-        Expr::Node(node, span) => {
-            let bridged = Expr::List(node.to_list(*span), *span);
-            check_list_in_grammar(&bridged)
-        }
+        // Node uses same logic as List — tag() and children() handle both
+        Expr::Node(_, _) => check_list_in_grammar(expr),
         Expr::BareList(_, _) | Expr::UnknownForm(_) => {
             Err(PredGrammarError::DisallowedNode(node_desc(expr)))
         }

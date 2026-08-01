@@ -6,6 +6,7 @@
 //! compiler-api crate does NOT depend on chelis-prove). The public decode
 //! chokepoint lives in `crate::decode`; it calls into this machinery.
 
+use crate::bridge::node_to_list;
 use std::collections::{HashMap, HashSet};
 
 use chelis_deep::Span;
@@ -569,7 +570,7 @@ fn strip_span_meta(expr: &mut Expr) {
             let placeholder = Expr::Atom(Atom::Bool(false), Span::new(0, 0));
             match std::mem::replace(expr, placeholder) {
                 Expr::Node(node, span) => {
-                    *expr = Expr::List(node.to_list(span), span);
+                    *expr = Expr::List(node_to_list(&node, span), span);
                     strip_span_meta(expr);
                 }
                 _ => unreachable!(),
