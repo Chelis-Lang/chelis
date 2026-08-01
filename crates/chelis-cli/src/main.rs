@@ -1083,7 +1083,7 @@ fn cmd_fmt(file: &Path, inplace: bool, check: bool) -> Result<(), Box<dyn std::e
     let source = fs::read_to_string(file)?;
     let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("");
     let output = if ext == "dp" {
-        let deep_exprs = chelis_deep::parser::parse_str_strict(&source)?;
+        let deep_exprs = chelis_deep::parser::parse_and_stamp_file(&source)?;
         chelis_deep::printer::print_canonical(&deep_exprs)
     } else {
         // .ch: parse Surf -> pretty-print Surf while preserving surface

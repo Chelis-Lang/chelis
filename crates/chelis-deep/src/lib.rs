@@ -22,7 +22,7 @@ pub mod validate;
 pub use ast::{Atom, Expr, List, MetaExpr, MetaMap, UnknownFormData};
 pub use effect_kind::decode_effect_kind;
 pub use lexer::LiteralSuffix;
-pub use parser::{StampOrParseError, parse_and_stamp, parse_raw_str};
+pub use parser::{StampOrParseError, parse_and_stamp, parse_and_stamp_file, parse_raw_str};
 pub use path::{
     DeepPath, InsertFunctionError, PathError, PathSegment, ResolveError, ResolvedFunction,
     function_body, function_defsig, insert_function_decls, module_excluding_function_def,
@@ -30,5 +30,5 @@ pub use path::{
 };
 pub use raw::{RawAtom, RawExpr};
 pub use span::Span;
-pub use stamp_to_typed::{StampError, StampErrorKind, stamp_to_typed};
+pub use stamp_to_typed::{StampError, StampErrorKind, stamp_deep_file, stamp_to_typed};
 pub use tag::DeepTag;
