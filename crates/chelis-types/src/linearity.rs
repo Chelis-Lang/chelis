@@ -605,11 +605,10 @@ impl Checker {
                     }
                 }
             },
-            // Transitional arms for new Expr variants (#908)
-            Expr::Node(node, _) => {
-                for child in node.expr_children() {
-                    self.check_expr(child, scope);
-                }
+            // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
+            Expr::Node(node, span) => {
+                let bridged = Expr::List(node.to_list(*span), *span);
+                self.check_expr(&bridged, scope);
             }
             Expr::BareList(elems, _) => {
                 for elem in elems {
@@ -1598,11 +1597,10 @@ fn collect_free_vars(expr: &Expr, bound: &mut Vec<HashSet<String>>, free: &mut H
                 }
             }
         },
-        // Transitional arms for new Expr variants (#908)
-        Expr::Node(node, _) => {
-            for child in node.expr_children() {
-                collect_free_vars(child, bound, free);
-            }
+        // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
+        Expr::Node(node, span) => {
+            let bridged = Expr::List(node.to_list(*span), *span);
+            collect_free_vars(&bridged, bound, free);
         }
         Expr::BareList(elems, _) => {
             for elem in elems {

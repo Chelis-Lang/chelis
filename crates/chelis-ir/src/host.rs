@@ -1948,8 +1948,11 @@ pub fn find_direct_builtin_call(program: &CheckedProgram, builtins: &[&str]) -> 
                     .find_map(|(_, value)| find(value, builtins))
             }),
             Expr::Atom(_, _) => None,
-            // Transitional arms for new Expr variants (#908)
-            Expr::Node(node, _) => node.expr_children().find_map(|child| find(child, builtins)),
+            // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
+            Expr::Node(node, span) => {
+                let bridged = Expr::List(node.to_list(*span), *span);
+                find(&bridged, builtins)
+            }
             Expr::BareList(elems, _) => elems.iter().find_map(|elem| find(elem, builtins)),
             Expr::UnknownForm(data) => data.children.iter().find_map(|child| find(child, builtins)),
         }
@@ -3725,8 +3728,13 @@ fn host_expr_lowering_error(
         Expr::Atom(_, _) => "raw Deep atom expression".to_string(),
         Expr::Map(_, _) => "raw Deep metadata map expression".to_string(),
         Expr::MetaExpr(_, _) => "wrapped Deep expression".to_string(),
-        // Transitional arms for new Expr variants (#908)
-        Expr::Node(node, _) => format!("stamped Node `{}`", node.tag().as_str()),
+        Expr::Node(node, _) => {
+            if node.tag() == DeepTag::Fn {
+                "anonymous function value `fn`".to_string()
+            } else {
+                format!("Deep expression `{}`", node.tag().as_str())
+            }
+        }
         Expr::BareList(_, _) => "bare list expression".to_string(),
         Expr::UnknownForm(data) => format!("unknown form `{}`", data.head),
     };
@@ -3848,8 +3856,12 @@ fn substitute_var(expr: &Expr, name: &str, replacement: &Expr) -> Expr {
             )
         }
         Expr::Atom(_, _) | Expr::Map(_, _) => expr.clone(),
-        // Transitional arms for new Expr variants (#908)
-        Expr::Node(_, _) | Expr::BareList(_, _) | Expr::UnknownForm(_) => expr.clone(),
+        // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
+        Expr::Node(node, span) => {
+            let bridged = Expr::List(node.to_list(*span), *span);
+            substitute_var(&bridged, name, replacement)
+        }
+        Expr::BareList(_, _) | Expr::UnknownForm(_) => expr.clone(),
     }
 }
 

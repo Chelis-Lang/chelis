@@ -129,8 +129,12 @@ impl Expander {
     ) -> Result<Expr, ExpansionError> {
         match expr {
             Expr::Atom(_, _) | Expr::Map(_, _) => Ok(expr.clone()),
-            // #908 migration: new variants pass through until full migration.
-            Expr::Node(_, _) | Expr::BareList(_, _) | Expr::UnknownForm(_) => Ok(expr.clone()),
+            // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
+            Expr::Node(node, span) => {
+                let bridged = Expr::List(node.to_list(*span), *span);
+                self.expand_expr(&bridged, macros, scope)
+            }
+            Expr::BareList(_, _) | Expr::UnknownForm(_) => Ok(expr.clone()),
             Expr::MetaExpr(meta, span) => Ok(Expr::MetaExpr(
                 MetaExpr {
                     entries: meta.entries.clone(),
@@ -392,11 +396,13 @@ fn fresh_placeholder(
 
 fn replace_placeholder_vars(expr: &Expr, replacements: &HashMap<String, Expr>) -> Expr {
     match expr {
-        Expr::Atom(_, _)
-        | Expr::Map(_, _)
-        | Expr::Node(_, _)
-        | Expr::BareList(_, _)
-        | Expr::UnknownForm(_) => expr.clone(),
+        Expr::Atom(_, _) | Expr::Map(_, _) => expr.clone(),
+        // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
+        Expr::Node(node, span) => {
+            let bridged = Expr::List(node.to_list(*span), *span);
+            replace_placeholder_vars(&bridged, replacements)
+        }
+        Expr::BareList(_, _) | Expr::UnknownForm(_) => expr.clone(),
         Expr::MetaExpr(meta, span) => Expr::MetaExpr(
             MetaExpr {
                 entries: meta.entries.clone(),
@@ -430,11 +436,13 @@ fn collect_symbols(expr: &Expr, out: &mut HashSet<String>) {
         Expr::Atom(Atom::Name(name), _) => {
             out.insert(name.clone());
         }
-        Expr::Atom(_, _)
-        | Expr::Map(_, _)
-        | Expr::Node(_, _)
-        | Expr::BareList(_, _)
-        | Expr::UnknownForm(_) => {}
+        Expr::Atom(_, _) | Expr::Map(_, _) => {}
+        // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
+        Expr::Node(node, span) => {
+            let bridged = Expr::List(node.to_list(*span), *span);
+            collect_symbols(&bridged, out);
+        }
+        Expr::BareList(_, _) | Expr::UnknownForm(_) => {}
         Expr::MetaExpr(meta, _) => collect_symbols(&meta.expr, out),
         Expr::List(list, _) => {
             for element in &list.elements {
@@ -523,11 +531,13 @@ fn substitute_expr(
     shadowed: &HashSet<String>,
 ) -> Expr {
     match expr {
-        Expr::Atom(_, _)
-        | Expr::Map(_, _)
-        | Expr::Node(_, _)
-        | Expr::BareList(_, _)
-        | Expr::UnknownForm(_) => expr.clone(),
+        Expr::Atom(_, _) | Expr::Map(_, _) => expr.clone(),
+        // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
+        Expr::Node(node, span) => {
+            let bridged = Expr::List(node.to_list(*span), *span);
+            substitute_expr(&bridged, params, shadowed)
+        }
+        Expr::BareList(_, _) | Expr::UnknownForm(_) => expr.clone(),
         Expr::MetaExpr(meta, span) => Expr::MetaExpr(
             MetaExpr {
                 entries: meta.entries.clone(),
@@ -664,11 +674,13 @@ fn substitute_match(
 
 fn hygienize_expr(expr: &Expr, counter: &mut usize, env: &HashMap<String, String>) -> Expr {
     match expr {
-        Expr::Atom(_, _)
-        | Expr::Map(_, _)
-        | Expr::Node(_, _)
-        | Expr::BareList(_, _)
-        | Expr::UnknownForm(_) => expr.clone(),
+        Expr::Atom(_, _) | Expr::Map(_, _) => expr.clone(),
+        // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
+        Expr::Node(node, span) => {
+            let bridged = Expr::List(node.to_list(*span), *span);
+            hygienize_expr(&bridged, counter, env)
+        }
+        Expr::BareList(_, _) | Expr::UnknownForm(_) => expr.clone(),
         Expr::MetaExpr(meta, span) => Expr::MetaExpr(
             MetaExpr {
                 entries: meta.entries.clone(),
@@ -957,11 +969,13 @@ fn hygienize_pattern(
 
 fn annotate_source_expr(expr: &Expr, invocation: &Expr) -> Expr {
     match expr {
-        Expr::Atom(_, _)
-        | Expr::Map(_, _)
-        | Expr::Node(_, _)
-        | Expr::BareList(_, _)
-        | Expr::UnknownForm(_) => expr.clone(),
+        Expr::Atom(_, _) | Expr::Map(_, _) => expr.clone(),
+        // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
+        Expr::Node(node, span) => {
+            let bridged = Expr::List(node.to_list(*span), *span);
+            annotate_source_expr(&bridged, invocation)
+        }
+        Expr::BareList(_, _) | Expr::UnknownForm(_) => expr.clone(),
         Expr::MetaExpr(meta, span) => Expr::MetaExpr(
             MetaExpr {
                 entries: meta.entries.clone(),

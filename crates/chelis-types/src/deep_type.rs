@@ -620,7 +620,6 @@ fn render_expr(expr: &deep::Expr) -> String {
             .to_string(),
         deep::Expr::Map(_, _) => "<metadata-map>".to_string(),
         deep::Expr::MetaExpr(_, _) => "<metadata-expression>".to_string(),
-        // Transitional arms for new Expr variants (#908)
         deep::Expr::Node(node, _) => node.tag().as_str().to_string(),
         deep::Expr::BareList(_, _) => "(...)".to_string(),
         deep::Expr::UnknownForm(data) => format!("({})", data.head),

@@ -137,8 +137,19 @@ fn expr_needs_host(
             true
         }
         Expr::Atom(_, _) | Expr::Map(_, _) => false,
-        // #908 foundation variants: treat as propagating (walk if they contain children).
-        Expr::Node(_, _) | Expr::BareList(_, _) | Expr::UnknownForm(_) => false,
+        // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
+        Expr::Node(node, span) => {
+            let bridged = Expr::List(node.to_list(*span), *span);
+            expr_needs_host(
+                &bridged,
+                lane_by_def,
+                target_prims,
+                type_env,
+                reasons,
+                inputs,
+            )
+        }
+        Expr::BareList(_, _) | Expr::UnknownForm(_) => false,
         Expr::MetaExpr(meta, _) => expr_needs_host(
             &meta.expr,
             lane_by_def,

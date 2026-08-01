@@ -154,16 +154,10 @@ pub(super) fn annotate_expr_with_scope(
             elements.extend(annotated_children);
             deep::Expr::List(deep::List { elements }, *span)
         }
-        // Transitional arms for the new typed-node variants (post-rebase).
+        // Bridge: reconstruct List so existing annotation logic runs unchanged (#908)
         deep::Expr::Node(node, span) => {
-            // Recurse into expression children, preserve the Node wrapper.
-            let annotated_children: Vec<deep::Expr> = node
-                .expr_children()
-                .map(|child| annotate_expr_with_scope(child, product, annotation_context, errors))
-                .collect();
-            // For now, return the expr unchanged (annotation is best-effort).
-            let _ = annotated_children;
-            deep::Expr::Node(node.clone(), *span)
+            let bridged = deep::Expr::List(node.to_list(*span), *span);
+            annotate_expr_with_scope(&bridged, product, annotation_context, errors)
         }
         deep::Expr::BareList(elems, span) => {
             let annotated: Vec<deep::Expr> = elems

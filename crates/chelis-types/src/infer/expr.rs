@@ -345,17 +345,184 @@ pub(super) fn infer_expr_with_type_metadata_ownership(
         deep::Expr::MetaExpr(meta, _) => {
             infer_expr(&meta.expr, env, vg, subst, adt_reg, errors, product)
         }
-        // Transitional arms for the new typed-node variants (post-rebase).
+        // Bridge: reconstruct List so tag-dispatch functions work unchanged (#908)
         // `Node` is a stamped vocabulary node — dispatch like `List` using its tag.
-        deep::Expr::Node(node, _span) => {
-            // Delegate to the same tag-based dispatch by reconstructing a
-            // temporary List view. For now, recurse into children and return
-            // the type of the last expression child (conservative).
-            let mut last_ty = Type::Unit;
-            for child in node.expr_children() {
-                last_ty = infer_expr(child, env, vg, subst, adt_reg, errors, product);
+        deep::Expr::Node(node, span) => {
+            // Transitional bridge (chelis#998 → consumer migration):
+            // reconstruct the List representation so the existing tag-dispatch
+            // functions (`infer_var`, `infer_app`, etc.) work unchanged. Once
+            // those functions are migrated to accept Node directly, this
+            // `to_list` call becomes dead code.
+            let list = node.to_list(*span);
+            match node.tag() {
+                DeepTag::Var => infer_var(&list, env, vg, subst, adt_reg, errors),
+                DeepTag::Lit => {
+                    infer_lit(&list, env, vg, adt_reg, errors, type_metadata_resolution)
+                }
+                DeepTag::App => infer_app(&list, env, vg, subst, adt_reg, errors, product),
+                DeepTag::Fn => infer_fn(&list, env, vg, subst, adt_reg, errors, product),
+                DeepTag::Let => infer_let(&list, env, vg, subst, adt_reg, errors, product),
+                DeepTag::If => infer_if(&list, env, vg, subst, adt_reg, errors, product),
+                DeepTag::Match => infer_match(&list, env, vg, subst, adt_reg, errors, product),
+                DeepTag::Pipe => infer_pipe(&list, env, vg, subst, adt_reg, errors, product),
+                DeepTag::Tuple => infer_tuple(&list, env, vg, subst, adt_reg, errors, product),
+                DeepTag::TupleGet => {
+                    infer_tuple_get(&list, env, vg, subst, adt_reg, errors, product)
+                }
+                DeepTag::Record => infer_record(&list, env, vg, subst, adt_reg, errors, product),
+                DeepTag::Access => infer_access(&list, env, vg, subst, adt_reg, errors, product),
+                DeepTag::RecordUpdate => {
+                    infer_record_update(&list, env, vg, subst, adt_reg, errors, product)
+                }
+                DeepTag::Cast => infer_cast(&list, env, vg, subst, adt_reg, errors, product),
+                DeepTag::Grad => infer_grad(&list, env, vg, subst, adt_reg, errors, product),
+                DeepTag::Vmap => infer_vmap(&list, env, vg, subst, adt_reg, errors, product),
+                DeepTag::Def => infer_def(&list, env, vg, subst, adt_reg, errors, product),
+                DeepTag::Defsig => Type::Unit,
+                DeepTag::Deftype | DeepTag::Typealias => Type::Unit,
+                DeepTag::Module
+                | DeepTag::Import
+                | DeepTag::ImportAll
+                | DeepTag::Export
+                | DeepTag::Defdim => Type::Unit,
+                DeepTag::Block => {
+                    let kids = children(&list);
+                    if kids.is_empty() {
+                        malformed_form(&list, "block", "at least one child expression", errors)
+                    } else {
+                        let mut last_ty = Type::Unit;
+                        for kid in kids {
+                            last_ty = infer_expr(kid, env, vg, subst, adt_reg, errors, product);
+                        }
+                        last_ty
+                    }
+                }
+                DeepTag::Par => {
+                    let kids = children(&list);
+                    let mut last_ty = Type::Unit;
+                    for kid in kids {
+                        last_ty = infer_expr(kid, env, vg, subst, adt_reg, errors, product);
+                    }
+                    last_ty
+                }
+                DeepTag::Jit => {
+                    let kids = children(&list);
+                    if let Some(inner) = kids.first() {
+                        infer_expr(inner, env, vg, subst, adt_reg, errors, product)
+                    } else {
+                        malformed_form(&list, "jit", "one wrapped expression", errors)
+                    }
+                }
+                DeepTag::Realize => {
+                    let kids = children(&list);
+                    if let Some(inner) = kids.first() {
+                        infer_expr(inner, env, vg, subst, adt_reg, errors, product)
+                    } else {
+                        malformed_form(&list, "realize", "one wrapped expression", errors)
+                    }
+                }
+                DeepTag::Copy => {
+                    let kids = children(&list);
+                    if let Some(inner) = kids.first() {
+                        let inner_ty = infer_expr(inner, env, vg, subst, adt_reg, errors, product);
+                        let resolved = subst.apply(&inner_ty);
+                        match resolved {
+                            Type::Tensor(_, _) | Type::Error(_) => resolved,
+                            Type::Ref(inner) if matches!(inner.as_ref(), Type::Tensor(_, _)) => {
+                                *inner
+                            }
+                            _ => report(
+                                errors,
+                                CheckError::new(
+                                    CheckErrorKind::TypeMismatch,
+                                    format!("copy requires tensor input, got {resolved}"),
+                                    vec!["Wrap only tensor values in copy".to_string()],
+                                ),
+                            ),
+                        }
+                    } else {
+                        malformed_form(&list, "copy", "one wrapped expression", errors)
+                    }
+                }
+                DeepTag::Borrow => {
+                    let kids = children(&list);
+                    if let Some(inner) = kids.first() {
+                        let inner_ty = infer_expr(inner, env, vg, subst, adt_reg, errors, product);
+                        let resolved = subst.apply(&inner_ty);
+                        match resolved {
+                            Type::Ref(_) => resolved,
+                            Type::Tensor(_, _)
+                            | Type::Adt(_, _)
+                            | Type::Tuple(_)
+                            | Type::Error(_) => Type::Ref(Box::new(resolved)),
+                            Type::Var(tv) => {
+                                subst.record_deferred_borrow_var(tv);
+                                Type::Ref(Box::new(Type::Var(tv)))
+                            }
+                            _ => report(
+                                errors,
+                                CheckError::new(
+                                    CheckErrorKind::TypeMismatch,
+                                    format!(
+                                        "borrow requires tensor or tensor-carrying input, got {resolved}"
+                                    ),
+                                    vec!["Use `&x` only with tensor values".to_string()],
+                                ),
+                            ),
+                        }
+                    } else {
+                        malformed_form(&list, "borrow", "one wrapped expression", errors)
+                    }
+                }
+                DeepTag::HandleEffect => {
+                    infer_handle_effect(&list, env, vg, subst, adt_reg, errors, product)
+                }
+                DeepTag::Variant
+                | DeepTag::Field
+                | DeepTag::Arm
+                | DeepTag::PatVar
+                | DeepTag::PatLit
+                | DeepTag::PatCtor
+                | DeepTag::PatTuple
+                | DeepTag::PatRecord
+                | DeepTag::PatWild
+                | DeepTag::PatAs
+                | DeepTag::TPrim
+                | DeepTag::TFn
+                | DeepTag::TTensor
+                | DeepTag::TRef
+                | DeepTag::TAdt
+                | DeepTag::TVar
+                | DeepTag::TUnit
+                | DeepTag::TTuple
+                | DeepTag::DName
+                | DeepTag::DVar
+                | DeepTag::DLit
+                | DeepTag::DRank
+                | DeepTag::Quote
+                | DeepTag::Unquote
+                | DeepTag::Splice
+                | DeepTag::Params
+                | DeepTag::Bind
+                | DeepTag::Kv
+                | DeepTag::Effects
+                | DeepTag::Resource => {
+                    let named = node.tag().as_str();
+                    report(
+                        errors,
+                        CheckError::new(
+                            CheckErrorKind::UnknownForm,
+                            format!(
+                                "Deep tag `{named}` has no expression-position checker \
+                             disposition (helper/pattern/type syntax outside its owning \
+                             form, or an expression form with no implemented case; \
+                             spec/03-deep-syntax.md; chelis#731 [04-TOT-1])"
+                            ),
+                            vec![],
+                        ),
+                    )
+                }
             }
-            last_ty
         }
         // `BareList` is an untagged structural list — no vocabulary head.
         deep::Expr::BareList(elems, _span) => {

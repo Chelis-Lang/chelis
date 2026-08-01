@@ -9614,11 +9614,10 @@ fn collect_symbolic_dims_expr(expr: &chelis_deep::ast::Expr, dims: &mut Vec<Stri
             }
         }
         chelis_deep::ast::Expr::Atom(_, _) => {}
-        // Transitional arms for new Expr variants (#908)
-        chelis_deep::ast::Expr::Node(node, _) => {
-            for child in node.expr_children() {
-                collect_symbolic_dims_expr(child, dims);
-            }
+        chelis_deep::ast::Expr::Node(node, span) => {
+            // Bridge: reconstruct List so DName detection works unchanged (#908)
+            let bridged = chelis_deep::ast::Expr::List(node.to_list(*span), *span);
+            collect_symbolic_dims_expr(&bridged, dims);
         }
         chelis_deep::ast::Expr::BareList(elems, _) => {
             for elem in elems {

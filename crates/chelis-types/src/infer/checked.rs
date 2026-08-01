@@ -1218,8 +1218,11 @@ pub(super) fn effect_metadata_is_singular(expr: &deep::Expr) -> bool {
             };
             singular_here && list.elements.iter().all(effect_metadata_is_singular)
         }
-        // Transitional: Node children are expression-only, recurse.
-        deep::Expr::Node(node, _) => node.expr_children().all(effect_metadata_is_singular),
+        // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
+        deep::Expr::Node(node, span) => {
+            let bridged = deep::Expr::List(node.to_list(*span), *span);
+            effect_metadata_is_singular(&bridged)
+        }
         deep::Expr::BareList(elems, _) => elems.iter().all(effect_metadata_is_singular),
         deep::Expr::UnknownForm(data) => data.children.iter().all(effect_metadata_is_singular),
     }
