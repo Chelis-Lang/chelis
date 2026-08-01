@@ -6,6 +6,8 @@
 use chelis_deep::DeepTag;
 use chelis_deep::ast::{Atom, Expr, List, MetaExpr, MetaMap};
 use chelis_deep::decode_effect_kind;
+use chelis_deep::node::{ChildRef, Node};
+use chelis_deep::span::Span;
 use chelis_vocab::EffectKind;
 
 const SURF_WIDTH: usize = 80;
@@ -53,6 +55,11 @@ pub fn decompile_program_with_context(
     options: &DecompileOptions,
     synthetic_name: Option<&str>,
 ) -> String {
+    // Bridge (#908): normalize new Node/BareList forms to legacy List for
+    // the existing decompiler until it is migrated to read new types directly.
+    let normalized = normalize_exprs_for_decompile(exprs);
+    let exprs = &normalized;
+
     if options.is_verbose() {
         return decompile_program_verbose(exprs);
     }
@@ -93,6 +100,22 @@ fn decompile_toplevel(expr: &Expr) -> String {
             Some(DeepTag::Defdim) => decompile_defdim(list),
             _ => format!("-- unknown: {}", brief(expr)),
         },
+        // Bridge (#908): convert Node to List for existing decompiler dispatch
+        Expr::Node(node, _) => {
+            let list = node_to_list(node);
+            match tag(&list) {
+                Some(DeepTag::Def) => decompile_def(&list),
+                Some(DeepTag::Defsig) => decompile_defsig(&list),
+                Some(DeepTag::Deftype) => decompile_deftype(&list),
+                Some(DeepTag::Typealias) => decompile_typealias(&list),
+                Some(DeepTag::Module) => decompile_module(&list),
+                Some(DeepTag::Import) => decompile_import(&list),
+                Some(DeepTag::ImportAll) => decompile_import_all(&list),
+                Some(DeepTag::Export) => decompile_export(&list),
+                Some(DeepTag::Defdim) => decompile_defdim(&list),
+                _ => format!("-- unknown: {}", brief(expr)),
+            }
+        }
         _ => format!("-- atom: {}", brief(expr)),
     }
 }
@@ -114,6 +137,114 @@ fn meta(list: &List) -> Option<&MetaMap> {
         Some(Expr::Map(map, _)) => Some(map),
         _ => None,
     }
+}
+
+/// Transitional bridge (#908): convert a stamped `Node` to the equivalent
+/// `List` so the existing decompiler dispatch can process it without a
+/// full rewrite. Will be removed when the decompiler is migrated to read
+/// `Node` directly.
+fn node_to_list(node: &Node) -> List {
+    let sp = Span::new(0, 0);
+    let mut elements = Vec::with_capacity(node.child_count() + 2);
+    elements.push(Expr::Atom(Atom::Name(node.tag().as_str().to_string()), sp));
+    elements.push(Expr::Map(node.meta().clone(), sp));
+    for child_ref in node.children_iter() {
+        match child_ref {
+            ChildRef::Expr(e)
+            | ChildRef::Syntax(e)
+            | ChildRef::Type(e)
+            | ChildRef::EffectHandler(e)
+            | ChildRef::Bypass(e) => elements.push(e.clone()),
+            ChildRef::Binder(s) => {
+                elements.push(Expr::Atom(Atom::Name(s.to_string()), sp));
+            }
+            ChildRef::Selector(s) => {
+                elements.push(Expr::Atom(Atom::Name(s.to_string()), sp));
+            }
+        }
+    }
+    List { tag: Some(node.tag()), elements }
+}
+
+/// Recursively normalize an expression tree from the new typed forms
+/// (`Expr::Node`, `Expr::BareList`) back to the legacy `Expr::List` form
+/// so the existing decompiler dispatch works unchanged. This is a
+/// transitional bridge (#908) that will be removed when the decompiler
+/// is migrated to read the new types directly.
+fn normalize_for_decompile(expr: &Expr) -> Expr {
+    match expr {
+        Expr::Node(node, span) => {
+            let list = node_to_list(node);
+            let elements = list
+                .elements
+                .iter()
+                .map(|e| normalize_for_decompile(e))
+                .collect();
+            Expr::List(List { tag: list.tag, elements }, *span)
+        }
+        Expr::BareList(elems, span) => {
+            let elements = elems.iter().map(|e| normalize_for_decompile(e)).collect();
+            Expr::List(List { tag: None, elements }, *span)
+        }
+        Expr::List(list, span) => {
+            let elements = list
+                .elements
+                .iter()
+                .map(|e| normalize_for_decompile(e))
+                .collect();
+            Expr::List(List { tag: list.tag, elements }, *span)
+        }
+        Expr::Map(map, span) => {
+            let entries = map
+                .entries
+                .iter()
+                .map(|(k, v)| (k.clone(), normalize_for_decompile(v)))
+                .collect();
+            Expr::Map(MetaMap { entries }, *span)
+        }
+        Expr::MetaExpr(meta, span) => {
+            let entries = meta
+                .entries
+                .iter()
+                .map(|(k, v)| (k.clone(), normalize_for_decompile(v)))
+                .collect();
+            Expr::MetaExpr(
+                MetaExpr {
+                    entries,
+                    expr: Box::new(normalize_for_decompile(&meta.expr)),
+                },
+                *span,
+            )
+        }
+        // Atoms pass through
+        Expr::Atom(..) => expr.clone(),
+        Expr::UnknownForm(data) => {
+            let children = data
+                .children
+                .iter()
+                .map(|e| normalize_for_decompile(e))
+                .collect();
+            let meta = MetaMap {
+                entries: data
+                    .meta
+                    .entries
+                    .iter()
+                    .map(|(k, v)| (k.clone(), normalize_for_decompile(v)))
+                    .collect(),
+            };
+            Expr::UnknownForm(Box::new(chelis_deep::ast::UnknownFormData {
+                head: data.head.clone(),
+                meta,
+                children,
+                span: data.span,
+            }))
+        }
+    }
+}
+
+/// Normalize a slice of expressions for decompiler consumption.
+fn normalize_exprs_for_decompile(exprs: &[Expr]) -> Vec<Expr> {
+    exprs.iter().map(|e| normalize_for_decompile(e)).collect()
 }
 
 fn extract_grad_wrt_meta(list: &List) -> Option<Vec<String>> {
@@ -219,12 +350,30 @@ impl<'a> IdiomaticDecompiler<'a> {
         while index < exprs.len() {
             if let Some((name, sig_expr)) = match_defsig_name(&exprs[index])
                 && let Some(next) = exprs.get(index + 1)
-                && let Some(def_list) = as_tagged_list(next, DeepTag::Def)
-                && def_name(def_list) == Some(name)
             {
-                lines.push(self.render_def(def_list, Some(sig_expr)));
-                index += 2;
-                continue;
+                // Try to pair with a following Def (either Expr::List or Expr::Node)
+                let paired = match next {
+                    Expr::List(list, _)
+                        if tag(list) == Some(DeepTag::Def)
+                            && def_name(list) == Some(name) =>
+                    {
+                        Some(self.render_def(list, Some(sig_expr)))
+                    }
+                    Expr::Node(node, _) if node.tag() == DeepTag::Def => {
+                        let list = node_to_list(node);
+                        if def_name(&list) == Some(name) {
+                            Some(self.render_def(&list, Some(sig_expr)))
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                };
+                if let Some(rendered) = paired {
+                    lines.push(rendered);
+                    index += 2;
+                    continue;
+                }
             }
 
             lines.push(self.render_toplevel(&exprs[index]));
@@ -255,6 +404,22 @@ impl<'a> IdiomaticDecompiler<'a> {
                 Some(DeepTag::Defdim) => decompile_defdim(list),
                 _ => format!("-- unknown: {}", brief(expr)),
             },
+            // Bridge (#908): convert Node to List for existing decompiler dispatch
+            Expr::Node(node, _) => {
+                let list = node_to_list(node);
+                match tag(&list) {
+                    Some(DeepTag::Def) => self.render_def(&list, None),
+                    Some(DeepTag::Defsig) => decompile_defsig(&list),
+                    Some(DeepTag::Deftype) => decompile_deftype(&list),
+                    Some(DeepTag::Typealias) => decompile_typealias(&list),
+                    Some(DeepTag::Module) => self.render_module(&list),
+                    Some(DeepTag::Import) => decompile_import(&list),
+                    Some(DeepTag::ImportAll) => decompile_import_all(&list),
+                    Some(DeepTag::Export) => decompile_export(&list),
+                    Some(DeepTag::Defdim) => decompile_defdim(&list),
+                    _ => format!("-- unknown: {}", brief(expr)),
+                }
+            }
             _ => format!("-- atom: {}", brief(expr)),
         }
     }
@@ -602,9 +767,20 @@ impl<'a> IdiomaticDecompiler<'a> {
             Expr::Map(_, _) => "()".to_string(),
             Expr::MetaExpr(meta, _) => self.decompile_expr(&meta.expr),
             Expr::List(list, _) => self.decompile_list_expr(list),
-            // Transitional arms for new Expr variants (#908)
-            Expr::Node(node, _) => format!("({})", node.tag().as_str()),
-            Expr::BareList(_, _) => "(...)".to_string(),
+            // Bridge (#908): convert Node to List for existing decompiler logic
+            Expr::Node(node, _) => {
+                let list = node_to_list(node);
+                self.decompile_list_expr(&list)
+            }
+            Expr::BareList(elems, _) => {
+                // Bare lists are structural (params, bind lists); render as
+                // space-separated atoms when all elements are atoms, else fallback.
+                elems
+                    .iter()
+                    .map(|e| decompile_expr(e))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            }
             Expr::UnknownForm(data) => format!("({})", data.head),
         }
     }
@@ -883,12 +1059,30 @@ fn def_body(list: &List) -> Option<&Expr> {
 }
 
 fn match_defsig_name(expr: &Expr) -> Option<(&str, &Expr)> {
-    let list = as_tagged_list(expr, DeepTag::Defsig)?;
-    let kids = children(list);
-    if kids.len() < 2 {
-        return None;
+    match expr {
+        Expr::List(list, _) if tag(list) == Some(DeepTag::Defsig) => {
+            let kids = children(list);
+            if kids.len() < 2 {
+                return None;
+            }
+            Some((sym_str(&kids[0])?, &kids[1]))
+        }
+        Expr::Node(node, _) if node.tag() == DeepTag::Defsig => {
+            // For a Defsig node, child 0 is the name (Binder role) and
+            // child 1 is the type. Access via children_iter.
+            let mut iter = node.children_iter();
+            let name = match iter.next()? {
+                ChildRef::Binder(s) => s,
+                _ => return None,
+            };
+            let type_expr = match iter.next()? {
+                ChildRef::Type(e) => e,
+                _ => return None,
+            };
+            Some((name, type_expr))
+        }
+        _ => None,
     }
-    Some((sym_str(&kids[0])?, &kids[1]))
 }
 
 fn extract_fn_signature(expr: &Expr) -> Option<FnSignature> {
@@ -961,6 +1155,12 @@ fn strip_meta(expr: &Expr) -> &Expr {
 fn extract_expr_type(expr: &Expr) -> Option<Expr> {
     match expr {
         Expr::List(list, _) => extract_type_meta_from_list(list),
+        Expr::Node(node, _) => node
+            .meta()
+            .entries
+            .iter()
+            .find(|(key, _)| key == "type")
+            .map(|(_, value)| value.clone()),
         Expr::MetaExpr(meta, _) => meta
             .entries
             .iter()
@@ -1589,9 +1789,25 @@ fn decompile_expr(expr: &Expr) -> String {
                 inner
             }
         }
-        // Transitional arms for new Expr variants (#908)
-        Expr::Node(node, _) => format!("({})", node.tag().as_str()),
-        Expr::BareList(_, _) => "(...)".to_string(),
+        // Bridge (#908): convert Node to List for existing decompiler logic
+        Expr::Node(node, _) => {
+            let list = node_to_list(node);
+            let inner = decompile_list_expr(&list);
+            if should_render_type_annotation(&list)
+                && let Some(ty) = extract_type_meta_from_list(&list)
+            {
+                format!("({inner} : {})", decompile_type_expr(&ty))
+            } else {
+                inner
+            }
+        }
+        Expr::BareList(elems, _) => {
+            elems
+                .iter()
+                .map(|e| decompile_expr(e))
+                .collect::<Vec<_>>()
+                .join(" ")
+        }
         Expr::UnknownForm(data) => format!("({})", data.head),
     }
 }
@@ -1953,10 +2169,19 @@ fn decompile_pattern(expr: &Expr) -> String {
 /// True when `expr` is a `t-fn` Deep node (a function type). Used to decide
 /// whether an arrow type in argument position needs grouping parens (#290).
 fn is_t_fn(expr: &Expr) -> bool {
-    matches!(expr, Expr::List(list, _) if tag(list) == Some(DeepTag::TFn))
+    match expr {
+        Expr::List(list, _) => tag(list) == Some(DeepTag::TFn),
+        Expr::Node(node, _) => node.tag() == DeepTag::TFn,
+        _ => false,
+    }
 }
 
 fn decompile_type_expr(expr: &Expr) -> String {
+    // Bridge (#908): convert Node to List for existing type-decompile logic
+    if let Expr::Node(node, _) = expr {
+        let list = node_to_list(node);
+        return decompile_type_expr(&Expr::List(list, Span::new(0, 0)));
+    }
     if let Expr::List(list, _) = expr {
         match tag(list) {
             Some(DeepTag::TPrim) => {
@@ -2041,6 +2266,11 @@ fn decompile_type_expr(expr: &Expr) -> String {
 }
 
 fn decompile_dim_or_prim(expr: &Expr) -> String {
+    // Bridge (#908): convert Node to List for existing dim/prim logic
+    if let Expr::Node(node, _) = expr {
+        let list = node_to_list(node);
+        return decompile_dim_or_prim(&Expr::List(list, Span::new(0, 0)));
+    }
     if let Expr::List(list, _) = expr {
         match tag(list) {
             Some(DeepTag::DLit | DeepTag::DVar | DeepTag::DName) => {
@@ -2082,6 +2312,10 @@ fn decompile_handle_effect(list: &List) -> String {
 fn decompile_expr_without_annotation(expr: &Expr) -> String {
     match expr {
         Expr::List(list, _) => decompile_list_expr(list),
+        Expr::Node(node, _) => {
+            let list = node_to_list(node);
+            decompile_list_expr(&list)
+        }
         Expr::MetaExpr(meta, _) => decompile_expr_without_annotation(&meta.expr),
         _ => decompile_expr(expr),
     }

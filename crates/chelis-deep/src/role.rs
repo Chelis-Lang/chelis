@@ -180,7 +180,7 @@ pub fn arity_contract(tag: DeepTag) -> AritySpec {
         DeepTag::Def => Fixed(2),            // name, body
         DeepTag::Defsig => Fixed(2),         // name, type
         DeepTag::Deftype => AtLeast(1),      // name [+ variants]
-        DeepTag::Typealias => Fixed(2),      // name, type
+        DeepTag::Typealias => Fixed(3),      // name, params, type
         DeepTag::Variant => AtLeast(1),      // name [+ fields]
         DeepTag::Field => Fixed(2),          // name, type
         DeepTag::Defdim => Fixed(1),         // name
@@ -189,7 +189,7 @@ pub fn arity_contract(tag: DeepTag) -> AritySpec {
         DeepTag::App => AtLeast(1),          // callee + args
         DeepTag::Let => Fixed(2),            // bindings, body
         DeepTag::Match => AtLeast(2),        // scrutinee + arms
-        DeepTag::Arm => Fixed(2),            // pattern, body
+        DeepTag::Arm => Fixed(3),            // pattern, guard, body
         DeepTag::If => Fixed(3),             // cond, then, else
         DeepTag::Var => Fixed(1),            // name
         DeepTag::Lit => Fixed(1),            // value
