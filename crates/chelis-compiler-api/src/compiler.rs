@@ -3379,9 +3379,6 @@ fn wire_deep_expr(expr: &DeepExpr) -> WireDeepExpr {
                     chelis_deep::Atom::Str(value) => WireDeepAtom::Str {
                         value: value.clone(),
                     },
-                    chelis_deep::Atom::Keyword(value) => WireDeepAtom::Keyword {
-                        value: value.clone(),
-                    },
                     chelis_deep::Atom::Bool(value) => WireDeepAtom::Bool { value: *value },
                 },
             },

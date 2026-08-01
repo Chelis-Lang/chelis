@@ -17,7 +17,8 @@ pub(crate) fn infer_program_in_session(
     exprs: &[deep::Expr],
     errors: &mut DiagnosticSink<'_>,
 ) -> InferStats {
-    infer_program_with_product_in_session(exprs, errors).stats()
+    let normalized = normalize_nodes_to_lists(exprs);
+    infer_program_with_product_in_session(&normalized, errors).stats()
 }
 
 pub(super) fn infer_program_with_product_in_session(
@@ -171,6 +172,9 @@ pub(crate) fn build_type_env_from_library_in_session(
     library_exprs: &[deep::Expr],
     errors: &mut DiagnosticSink<'_>,
 ) -> Result<TypeEnv, InferStats> {
+    // Normalize Node/BareList → List (#908 producer switch).
+    let normalized = normalize_nodes_to_lists(library_exprs);
+    let library_exprs = &normalized;
     // Reset the stack-exhaustion flag for this check unit; drained below
     // before the empty-errors gate (covered-or-rejected on deep input).
     let stack_scope = StackExhaustionScope::enter();
@@ -621,6 +625,9 @@ pub(crate) fn check_ir_with_signature_context_in_session(
     new_exprs: &[deep::Expr],
     errors: &mut DiagnosticSink<'_>,
 ) -> Result<CheckedProgram, InferStats> {
+    // Normalize Node/BareList → List (#908 producer switch).
+    let normalized = normalize_nodes_to_lists(new_exprs);
+    let new_exprs = &normalized;
     // Reset the stack-exhaustion flag for this check unit; drained into the
     // error vector below before the empty-errors gate so a deep-input stack
     // bail always fails the check (never a silent green / partial result).
@@ -724,6 +731,11 @@ pub(crate) fn check_typed_program_in_session(
     exprs: &[deep::Expr],
     errors: &mut DiagnosticSink<'_>,
 ) -> Result<CheckedProgram, InferStats> {
+    // Normalize Node/BareList → List at the entry boundary so the
+    // pointer-based owner-stamp system sees the same addresses throughout
+    // both registration, inference, and annotation passes (#908).
+    let normalized = normalize_nodes_to_lists(exprs);
+    let exprs = &normalized;
     // Outermost scope covers both inference (which has its own inner scope)
     // and the annotation pass below, so a bail in either surfaces as a hard
     // located failure rather than a partially-annotated `Ok`.
@@ -764,6 +776,9 @@ pub(crate) fn infer_ir_program_in_session(
     exprs: &[deep::Expr],
     errors: &mut DiagnosticSink<'_>,
 ) -> InferStats {
+    // Normalize Node/BareList → List (#908 producer switch).
+    let normalized = normalize_nodes_to_lists(exprs);
+    let exprs = &normalized;
     let stack_scope = StackExhaustionScope::enter();
     let type_env = build_ir_type_env(exprs);
     let stats = infer_ir_program_with_env(exprs, &type_env, errors);
@@ -1179,5 +1194,66 @@ pub(super) fn collect_ir_types_with_origins<'a>(
     CollectedIrTypes {
         type_env,
         final_origin_by_name,
+    }
+}
+
+/// Recursively convert `Expr::Node` → `Expr::List` and `Expr::BareList` →
+/// `Expr::List` so the pointer-keyed type-stamp system and existing
+/// List-based inference dispatch work on a single representation. This is
+/// the transitional normalization boundary for the #908 producer switch;
+/// once all inference functions are migrated to accept Node directly, this
+/// becomes dead code.
+fn normalize_nodes_to_lists(exprs: &[deep::Expr]) -> Vec<deep::Expr> {
+    exprs.iter().map(normalize_node_to_list).collect()
+}
+
+fn normalize_node_to_list(expr: &deep::Expr) -> deep::Expr {
+    match expr {
+        deep::Expr::Node(node, span) => {
+            let list = node.to_list(*span);
+            let elements = list.elements.iter().map(normalize_node_to_list).collect();
+            deep::Expr::List(deep::List { elements }, *span)
+        }
+        deep::Expr::List(list, span) => {
+            let elements = list.elements.iter().map(normalize_node_to_list).collect();
+            deep::Expr::List(deep::List { elements }, *span)
+        }
+        deep::Expr::BareList(elems, span) => {
+            let elements = elems.iter().map(normalize_node_to_list).collect();
+            deep::Expr::List(deep::List { elements }, *span)
+        }
+        deep::Expr::Map(map, span) => {
+            let entries = map
+                .entries
+                .iter()
+                .map(|(k, v)| (k.clone(), normalize_node_to_list(v)))
+                .collect();
+            deep::Expr::Map(deep::MetaMap { entries }, *span)
+        }
+        deep::Expr::MetaExpr(meta, span) => deep::Expr::MetaExpr(
+            deep::MetaExpr {
+                entries: meta
+                    .entries
+                    .iter()
+                    .map(|(k, v)| (k.clone(), normalize_node_to_list(v)))
+                    .collect(),
+                expr: Box::new(normalize_node_to_list(&meta.expr)),
+            },
+            *span,
+        ),
+        deep::Expr::UnknownForm(data) => deep::Expr::UnknownForm(Box::new(deep::UnknownFormData {
+            head: data.head.clone(),
+            meta: deep::MetaMap {
+                entries: data
+                    .meta
+                    .entries
+                    .iter()
+                    .map(|(k, v)| (k.clone(), normalize_node_to_list(v)))
+                    .collect(),
+            },
+            children: data.children.iter().map(normalize_node_to_list).collect(),
+            span: data.span,
+        })),
+        other => other.clone(),
     }
 }

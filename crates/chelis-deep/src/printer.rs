@@ -146,7 +146,6 @@ impl Printer {
                 out.push('"');
                 out
             }
-            Atom::Keyword(k) => format!(":{k}"),
             Atom::Bool(b) => if *b { "true" } else { "false" }.to_string(),
         }
     }

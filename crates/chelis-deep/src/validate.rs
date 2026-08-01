@@ -198,12 +198,15 @@ fn validate_tag_shape(
                 warn_arity(warnings, "exactly 2 children");
                 return;
             }
-            if !matches!(
-                list.elements.get(2),
-                Some(Expr::List(params, _))
-                    if params.tag() == Some(DeepTag::Params)
+            let params_ok = match list.elements.get(2) {
+                Some(Expr::List(params, _)) => {
+                    params.tag() == Some(DeepTag::Params)
                         && matches!(params.elements.get(1), Some(Expr::Map(_, _)))
-            ) {
+                }
+                Some(Expr::Node(node, _)) => node.tag() == DeepTag::Params,
+                _ => false,
+            };
+            if !params_ok {
                 warnings.push(ValidationWarning {
                     kind: WarningKind::Structural,
                     offset,
@@ -216,12 +219,15 @@ fn validate_tag_shape(
                 warn_arity(warnings, "exactly 2 children");
                 return;
             }
-            if !matches!(
-                list.elements.get(2),
-                Some(Expr::List(bind, _))
-                    if bind.tag() == Some(DeepTag::Bind)
+            let bind_ok = match list.elements.get(2) {
+                Some(Expr::List(bind, _)) => {
+                    bind.tag() == Some(DeepTag::Bind)
                         && matches!(bind.elements.get(1), Some(Expr::Map(_, _)))
-            ) {
+                }
+                Some(Expr::Node(node, _)) => node.tag() == DeepTag::Bind,
+                _ => false,
+            };
+            if !bind_ok {
                 warnings.push(ValidationWarning {
                     kind: WarningKind::Structural,
                     offset,

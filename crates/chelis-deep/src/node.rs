@@ -169,6 +169,14 @@ impl Node {
         self.children.len()
     }
 
+    /// Direct slice access to children (bridge convenience). Consumers
+    /// that need positional access without role-typed iteration use this
+    /// during the transition period before they are migrated to the
+    /// role-typed API.
+    pub fn children_slice(&self) -> &[Expr] {
+        &self.children
+    }
+
     // === Bridge: reconstruct List for transition-period consumers ===
 
     /// Reconstruct the canonical `List` representation that existing

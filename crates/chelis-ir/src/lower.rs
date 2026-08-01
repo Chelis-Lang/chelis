@@ -5050,11 +5050,6 @@ impl LowerCtx {
                 None,
                 self.current_span_id.clone(),
             ),
-            Atom::Keyword(_) => raise_malformed_deep(
-                "a bare keyword atom in expression position",
-                None,
-                self.current_span_id.clone(),
-            ),
             Atom::Tag(_) => raise_malformed_deep(
                 "a bare Deep tag atom in expression position",
                 None,

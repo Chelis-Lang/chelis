@@ -129,8 +129,6 @@ pub enum Atom {
     Int(i64),
     Float(f64),
     Str(String),
-    /// Keyword without the leading `:`, e.g. `":axis"` → `"axis"`.
-    Keyword(String),
     Bool(bool),
 }
 

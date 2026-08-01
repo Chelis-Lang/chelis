@@ -1210,14 +1210,13 @@ fn cmd_eval(
             // them so the host_root_values path can surface them.
             if selected_roots.is_empty() {
                 for decl in &entry_decls {
-                    if let Some(name) = decl_name(decl) {
-                        if checked
+                    if let Some(name) = decl_name(decl)
+                        && checked
                             .type_env()
                             .get(name)
-                            .is_some_and(|ty| type_expr_is_zero_arg_fn(ty))
-                        {
-                            selected_roots.push(name.to_string());
-                        }
+                            .is_some_and(type_expr_is_zero_arg_fn)
+                    {
+                        selected_roots.push(name.to_string());
                     }
                 }
             }
@@ -9163,8 +9162,67 @@ fn expanded_desugared_program(
 ) -> Result<Vec<chelis_deep::ast::Expr>, String> {
     let deep = chelis_surf::desugar::desugar_program(decls);
     chelis_macros::expand_program(&deep, &chelis_macros::ExpansionOptions::default())
-        .map(|expanded| expanded.into_exprs())
+        .map(|expanded| normalize_deep_nodes(expanded.into_exprs()))
         .map_err(|err| err.to_string())
+}
+
+/// Recursively convert `Expr::Node` → `Expr::List` and `Expr::BareList` →
+/// `Expr::List` at the CLI boundary so all downstream dispatch functions
+/// work on a uniform representation. Transitional (#908 producer switch).
+fn normalize_deep_nodes(exprs: Vec<chelis_deep::ast::Expr>) -> Vec<chelis_deep::ast::Expr> {
+    exprs.iter().map(normalize_deep_node).collect()
+}
+
+fn normalize_deep_node(expr: &chelis_deep::ast::Expr) -> chelis_deep::ast::Expr {
+    use chelis_deep::ast::{Expr, List, MetaExpr, MetaMap, UnknownFormData};
+    match expr {
+        Expr::Node(node, span) => {
+            let list = node.to_list(*span);
+            let elements = list.elements.iter().map(normalize_deep_node).collect();
+            Expr::List(List { elements }, *span)
+        }
+        Expr::List(list, span) => {
+            let elements = list.elements.iter().map(normalize_deep_node).collect();
+            Expr::List(List { elements }, *span)
+        }
+        Expr::BareList(elems, span) => {
+            let elements = elems.iter().map(normalize_deep_node).collect();
+            Expr::List(List { elements }, *span)
+        }
+        Expr::Map(map, span) => {
+            let entries = map
+                .entries
+                .iter()
+                .map(|(k, v)| (k.clone(), normalize_deep_node(v)))
+                .collect();
+            Expr::Map(MetaMap { entries }, *span)
+        }
+        Expr::MetaExpr(meta, span) => Expr::MetaExpr(
+            MetaExpr {
+                entries: meta
+                    .entries
+                    .iter()
+                    .map(|(k, v)| (k.clone(), normalize_deep_node(v)))
+                    .collect(),
+                expr: Box::new(normalize_deep_node(&meta.expr)),
+            },
+            *span,
+        ),
+        Expr::UnknownForm(data) => Expr::UnknownForm(Box::new(UnknownFormData {
+            head: data.head.clone(),
+            meta: MetaMap {
+                entries: data
+                    .meta
+                    .entries
+                    .iter()
+                    .map(|(k, v)| (k.clone(), normalize_deep_node(v)))
+                    .collect(),
+            },
+            children: data.children.iter().map(normalize_deep_node).collect(),
+            span: data.span,
+        })),
+        other => other.clone(),
+    }
 }
 
 fn lower_checked_for_cli(
@@ -9276,31 +9334,35 @@ fn collect_lowered_root_names_from_expr(
     type_env: &HashMap<String, DeepExpr>,
     out: &mut Vec<String>,
 ) {
-    let DeepExpr::List(list, _) = expr else {
-        return;
-    };
-    match list.tag() {
-        Some(DeepTag::Module) => {
-            for child in list.elements.iter().skip(3) {
-                collect_lowered_root_names_from_expr(child, program_exprs, type_env, out);
+    match expr {
+        DeepExpr::List(list, _) => match list.tag() {
+            Some(DeepTag::Module) => {
+                for child in list.elements.iter().skip(3) {
+                    collect_lowered_root_names_from_expr(child, program_exprs, type_env, out);
+                }
             }
+            _ => {
+                let Some(name) = deep_top_level_expr_name(expr) else {
+                    return;
+                };
+                if type_env.get(name).is_some_and(type_expr_is_function) {
+                    return;
+                }
+                if chelis_ir::lower::top_level_expr_is_lowered(expr, program_exprs, type_env) {
+                    extend_root_names_from_value(
+                        name,
+                        type_env.get(name),
+                        top_level_def_body(expr),
+                        out,
+                    );
+                }
+            }
+        },
+        DeepExpr::Node(node, span) => {
+            let bridged = DeepExpr::List(node.to_list(*span), *span);
+            collect_lowered_root_names_from_expr(&bridged, program_exprs, type_env, out);
         }
-        _ => {
-            let Some(name) = deep_top_level_expr_name(expr) else {
-                return;
-            };
-            if type_env.get(name).is_some_and(type_expr_is_function) {
-                return;
-            }
-            if chelis_ir::lower::top_level_expr_is_lowered(expr, program_exprs, type_env) {
-                extend_root_names_from_value(
-                    name,
-                    type_env.get(name),
-                    top_level_def_body(expr),
-                    out,
-                );
-            }
-        }
+        _ => {}
     }
 }
 
@@ -9309,44 +9371,76 @@ fn collect_root_names_from_expr(
     type_env: &HashMap<String, DeepExpr>,
     out: &mut Vec<String>,
 ) {
-    let DeepExpr::List(list, _) = expr else {
-        return;
-    };
-    match list.tag() {
-        Some(DeepTag::Module) => {
-            for child in list.elements.iter().skip(3) {
-                collect_root_names_from_expr(child, type_env, out);
+    match expr {
+        DeepExpr::List(list, _) => match list.tag() {
+            Some(DeepTag::Module) => {
+                for child in list.elements.iter().skip(3) {
+                    collect_root_names_from_expr(child, type_env, out);
+                }
             }
-        }
-        _ => {
-            let Some(name) = deep_top_level_expr_name(expr) else {
-                return;
-            };
-            if type_env.get(name).is_some_and(type_expr_is_function) {
-                return;
+            _ => {
+                let Some(name) = deep_top_level_expr_name(expr) else {
+                    return;
+                };
+                if type_env.get(name).is_some_and(type_expr_is_function) {
+                    return;
+                }
+                extend_root_names_from_value(
+                    name,
+                    type_env.get(name),
+                    top_level_def_body(expr),
+                    out,
+                );
             }
-            extend_root_names_from_value(name, type_env.get(name), top_level_def_body(expr), out);
+        },
+        DeepExpr::Node(node, span) => {
+            let bridged = DeepExpr::List(node.to_list(*span), *span);
+            collect_root_names_from_expr(&bridged, type_env, out);
         }
+        _ => {}
     }
 }
 
 fn deep_top_level_expr_name(expr: &DeepExpr) -> Option<&str> {
-    let DeepExpr::List(list, _) = expr else {
-        return None;
-    };
-    match (list.tag(), list.elements.get(2)) {
-        (Some(DeepTag::Def), Some(DeepExpr::Atom(DeepAtom::Name(name), _))) => Some(name.as_str()),
+    match expr {
+        DeepExpr::List(list, _) => match (list.tag(), list.elements.get(2)) {
+            (Some(DeepTag::Def), Some(DeepExpr::Atom(DeepAtom::Name(name), _))) => {
+                Some(name.as_str())
+            }
+            _ => None,
+        },
+        DeepExpr::Node(node, _) => {
+            if node.tag() == DeepTag::Def {
+                match node.children_slice().first() {
+                    Some(DeepExpr::Atom(DeepAtom::Name(name), _)) => Some(name.as_str()),
+                    _ => None,
+                }
+            } else {
+                None
+            }
+        }
         _ => None,
     }
 }
 
 fn deep_named_decl_name(expr: &DeepExpr) -> Option<&str> {
-    let DeepExpr::List(list, _) = expr else {
-        return None;
-    };
-    match (list.tag(), list.elements.get(2)) {
-        (Some(DeepTag::Def | DeepTag::Defsig), Some(DeepExpr::Atom(DeepAtom::Name(name), _))) => {
-            Some(name.as_str())
+    match expr {
+        DeepExpr::List(list, _) => match (list.tag(), list.elements.get(2)) {
+            (
+                Some(DeepTag::Def | DeepTag::Defsig),
+                Some(DeepExpr::Atom(DeepAtom::Name(name), _)),
+            ) => Some(name.as_str()),
+            _ => None,
+        },
+        DeepExpr::Node(node, _) => {
+            if matches!(node.tag(), DeepTag::Def | DeepTag::Defsig) {
+                match node.children_slice().first() {
+                    Some(DeepExpr::Atom(DeepAtom::Name(name), _)) => Some(name.as_str()),
+                    _ => None,
+                }
+            } else {
+                None
+            }
         }
         _ => None,
     }
@@ -9459,12 +9553,15 @@ fn host_display_tuple_root_prefix(full_name: &str, entry_root_names: &[String]) 
 }
 
 fn top_level_def_body(expr: &DeepExpr) -> Option<&DeepExpr> {
-    let DeepExpr::List(list, _) = expr else {
-        return None;
-    };
-    (list.tag() == Some(DeepTag::Def))
-        .then(|| list.elements.get(3))
-        .flatten()
+    match expr {
+        DeepExpr::List(list, _) => (list.tag() == Some(DeepTag::Def))
+            .then(|| list.elements.get(3))
+            .flatten(),
+        DeepExpr::Node(node, _) => (node.tag() == DeepTag::Def)
+            .then(|| node.children_slice().get(1))
+            .flatten(),
+        _ => None,
+    }
 }
 
 fn extend_root_names_from_value(
@@ -9561,21 +9658,6 @@ fn type_expr_is_zero_arg_fn(expr: &DeepExpr) -> bool {
     // t-fn structure: (t-fn {meta} arg-types... ret-type)
     // Elements: [tag, meta, ...args, ret]. Zero-arg = only tag+meta+ret = 3 elements.
     list.elements.len() == 3
-}
-
-/// For a zero-arg fn type `(t-fn {} ret-type)`, return the return type.
-fn unwrap_zero_arg_fn_return(expr: &DeepExpr) -> Option<&DeepExpr> {
-    let DeepExpr::List(list, _) = expr else {
-        return None;
-    };
-    if list.tag() != Some(DeepTag::TFn) {
-        return None;
-    }
-    if list.elements.len() == 3 {
-        list.elements.last()
-    } else {
-        None
-    }
 }
 
 fn collect_symbolic_dims_from_deep(exprs: &[chelis_deep::ast::Expr]) -> Vec<String> {

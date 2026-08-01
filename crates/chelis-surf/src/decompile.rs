@@ -53,11 +53,72 @@ pub fn decompile_program_with_context(
     options: &DecompileOptions,
     synthetic_name: Option<&str>,
 ) -> String {
+    let normalized = normalize_nodes(exprs);
+    let exprs = &normalized;
     if options.is_verbose() {
         return decompile_program_verbose(exprs);
     }
 
     IdiomaticDecompiler::new(*options, synthetic_name).decompile_program(exprs)
+}
+
+/// Recursively convert all `Expr::Node` to `Expr::List` for the decompiler's
+/// existing List-based dispatch. This is transitional: once the decompiler is
+/// migrated to use Node APIs directly, this normalization is removed.
+fn normalize_nodes(exprs: &[Expr]) -> Vec<Expr> {
+    exprs.iter().map(normalize_node_expr).collect()
+}
+
+fn normalize_node_expr(expr: &Expr) -> Expr {
+    match expr {
+        Expr::Node(node, span) => {
+            let list = node.to_list(*span);
+            // Recursively normalize children
+            let elements = list.elements.iter().map(normalize_node_expr).collect();
+            Expr::List(List { elements }, *span)
+        }
+        Expr::List(list, span) => {
+            let elements = list.elements.iter().map(normalize_node_expr).collect();
+            Expr::List(List { elements }, *span)
+        }
+        Expr::BareList(elems, span) => {
+            let elements = elems.iter().map(normalize_node_expr).collect();
+            Expr::List(List { elements }, *span)
+        }
+        Expr::MetaExpr(meta, span) => Expr::MetaExpr(
+            MetaExpr {
+                entries: meta
+                    .entries
+                    .iter()
+                    .map(|(k, v)| (k.clone(), normalize_node_expr(v)))
+                    .collect(),
+                expr: Box::new(normalize_node_expr(&meta.expr)),
+            },
+            *span,
+        ),
+        Expr::Map(map, span) => {
+            let entries = map
+                .entries
+                .iter()
+                .map(|(k, v)| (k.clone(), normalize_node_expr(v)))
+                .collect();
+            Expr::Map(MetaMap { entries }, *span)
+        }
+        Expr::UnknownForm(data) => Expr::UnknownForm(Box::new(chelis_deep::UnknownFormData {
+            head: data.head.clone(),
+            meta: MetaMap {
+                entries: data
+                    .meta
+                    .entries
+                    .iter()
+                    .map(|(k, v)| (k.clone(), normalize_node_expr(v)))
+                    .collect(),
+            },
+            children: data.children.iter().map(normalize_node_expr).collect(),
+            span: data.span,
+        })),
+        other => other.clone(),
+    }
 }
 
 fn decompile_program_verbose(exprs: &[Expr]) -> String {
@@ -168,7 +229,6 @@ fn brief(expr: &Expr) -> String {
         Expr::Atom(Atom::Str(s), _) => {
             format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
         }
-        Expr::Atom(Atom::Keyword(k), _) => format!(":{k}"),
         _ => "<expr>".to_string(),
     }
 }
@@ -602,7 +662,6 @@ impl<'a> IdiomaticDecompiler<'a> {
             Expr::Atom(Atom::Str(s), _) => {
                 format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
             }
-            Expr::Atom(Atom::Keyword(k), _) => format!(":{k}"),
             Expr::Map(_, _) => "()".to_string(),
             Expr::MetaExpr(meta, _) => self.decompile_expr(&meta.expr),
             Expr::List(list, _) => self.decompile_list_expr(list),
@@ -1575,7 +1634,6 @@ fn decompile_expr(expr: &Expr) -> String {
         Expr::Atom(Atom::Str(s), _) => {
             format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
         }
-        Expr::Atom(Atom::Keyword(k), _) => format!(":{k}"),
         Expr::Map(_, _) => "()".to_string(),
         Expr::MetaExpr(meta, _) => {
             let inner = decompile_expr(&meta.expr);
