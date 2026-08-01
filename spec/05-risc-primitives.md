@@ -999,6 +999,82 @@ make the build reject them *whole-program* like `tensor_scan`, not make them
 assertable — a rejection-cleanliness change, not the compiled-lane arm.)
 Until the compiled-lane helpers land, assertions are an eval-lane contract.
 
+### 3.7 Host-Lane JSON I/O And Decimal Rounding
+
+Fourteen eval/test-only builtins over a prelude `Json` ADT, plus
+`round_to`. Like `process_run` (§2.6) they run under the IR evaluator, and
+every compiled backend rejects a program that applies them, whole-program
+and before codegen, with a branded `unsupported:` diagnostic rather than a
+silent fallthrough. They are host-lane only, are not in the RISC DAG, and
+have no adjoint.
+
+The prelude type is
+
+```
+Json = JNull | JBool bool | JInt int64 | JNum f64 | JStr string
+     | JList List[Json] | JDict Dict[string, Json]
+```
+
+and `Json` together with its seven constructors is a reserved prelude type
+name under §8.5 of `spec/04-type-system.md`. `Std.Io.Json` separately
+defines a package-scoped `Json` with the same int/float document model; the
+two coexist because package declarations are internal-name-rewritten
+before the checker runs (§8.6 of that chapter).
+
+> **[05-JSON-1]** JSON has one number syntax and two exact carriers, so the
+> int-or-float decision SHALL be made at PARSE time and SHALL NOT be
+> revisited: a numeric token containing `.`, `e`, or `E` SHALL become
+> `JNum f64`; every other numeric token SHALL become `JInt int64`. An
+> integer token whose value does not fit `int64` SHALL fall back to
+> `JNum`, which is the family's only lossy case and SHALL be the only one.
+> A document containing integers SHALL therefore round-trip through
+> `to_json(parse_json(s))` at every magnitude int64 represents, and
+> `json_int` SHALL return the exact stored integer. `json_f64` and
+> `json_f64s` SHALL widen a `JInt` to f64 for source compatibility, which
+> is exact at or below 2^53 and is the caller's declared choice above it;
+> `json_int` SHALL REFUSE a `JNum` rather than truncate it, naming
+> `json_f64` as the remedy.
+
+| Name | Signature | Semantics |
+|---|---|---|
+| `parse_json` | `(s: string) -> Json` | RFC 8259, strict. A leading UTF-8 BOM is ignored. Duplicate object keys take first position, last value. Nesting deeper than 512 is rejected. Malformed input is a loud eval error naming the byte offset. |
+| `to_json` | `(v: Json) -> string` | Compact, keys in insertion order, byte-stable. `JInt` emits its exact digits with no decimal point; `JNum` emits the §8.1 number grammar, the same text `print` produces for an f64. A non-finite `JNum` is a loud error: JSON cannot represent it. |
+| `json_f64` | `(j: Json, path: string) -> f64` | Dot-path read. A segment names a dict key, or a list index when it is all digits with no sign and no leading zero. `JInt` widens per [05-JSON-1]. A missing path is a loud error naming the segment and listing available keys. |
+| `json_int` | `(j: Json, path: string) -> int64` | Exact integer read; refuses `JNum` per [05-JSON-1]. |
+| `json_str` | `(j: Json, path: string) -> string` | |
+| `json_list` | `(j: Json, path: string) -> List[Json]` | Elements re-enter the accessors with element-relative paths. |
+| `json_f64s` | `(j: Json, path: string) -> List[f64]` | Numbers at the path; a non-number element is a loud error naming its index. |
+| `jnum` | `(x: f64) -> Json` | Exactly f64. A narrower float is rejected at check time: bare float literals are f32 (§5.3 of `spec/04`), and quantizing one through the byte-exact serializer would be a silent narrowing. |
+| `jint` | `(n: int64) -> Json` | Exactly int64; narrower integers rejected on the same rule. |
+| `jstr` | `(s: string) -> Json` | |
+| `jlist` | `(items: List[Json]) -> Json` | |
+| `jdict` | `(entries: List[(string, Json)]) -> Json` | Insertion order; a duplicate key upserts. |
+| `json_set` | `(j: Json, path: string, v: Json) -> Json` | Returns the updated value. Missing intermediate dict keys auto-create nested dicts; a list segment replaces an existing element only. Both the path and the built result respect the 512 depth cap. |
+| `round_to` | `(x: f64, places: int64) -> f64` | See [05-OP-1]. |
+
+Every failure in the family - malformed input, a missing path, a type
+mismatch, a non-finite number, an out-of-range `places` - is a loud eval
+error. None has a default value, and none returns a placeholder.
+
+> **[05-OP-1]** `round_to(x, places)` SHALL round `x` to `places` decimal
+> fraction digits using round-half-to-even applied to the EXACT binary
+> value of `x`, never to a decimal approximation of it: `round_to(2.675,
+> 2)` is `2.67`, because the stored double is 2.67499999999999982..., and
+> `round_to(0.125, 2)` is `0.12` while `round_to(0.375, 2)` is `0.38`.
+> `places` SHALL be in `0..=100`; a value outside that range is a loud
+> error rather than guessed tens-rounding semantics. A non-finite `x`
+> SHALL pass through unchanged. The op is not differentiable: it is
+> piecewise constant, so `grad` through it SHALL be a
+> non-differentiability rejection and never a zero adjoint. It does not
+> accumulate, so no accumulator rule applies.
+>
+> `round_to`'s declared dtype set is `{f64}` ONLY. A narrower float
+> operand SHALL be rejected at check time. Widening one to f64, rounding,
+> and re-narrowing computes at other than the operand's declared
+> arithmetic width, which [04-NUM-8] does not permit and provides no
+> exception vocabulary for; the narrower widths return when their
+> per-dtype rounding rule is authored HERE, at their declared widths.
+
 ---
 
 ## 4. Standard Lowerings (Tier 2 → Tier 1)

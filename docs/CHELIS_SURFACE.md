@@ -304,16 +304,19 @@ above the width fully shift out the value, while negative counts trap
 ### 3.8 JSON I/O + decimal rounding — **eval-only** (chelis#890)
 
 Native JSON over the prelude `Json` ADT
-(`Json = JNull | JBool bool | JNum f64 | JStr string | JList List[Json] |
-JDict Dict[string, Json]`). **Eval/test-only**: `chelis build` rejects every
-name below whole-program (`EVAL_ONLY_HOST_BUILTINS`), like `process_run`.
-All failures (malformed JSON, missing path, type mismatch, non-finite
-number) are loud eval errors — no silent defaults.
+(`Json = JNull | JBool bool | JInt int64 | JNum f64 | JStr string |
+JList List[Json] | JDict Dict[string, Json]`). Normative definition:
+`spec/05-risc-primitives.md` §3.7 - [05-JSON-1] for the exact-integer
+contract, [05-OP-1] for `round_to`. **Eval/test-only**: `chelis build`
+rejects every name below whole-program (`EVAL_ONLY_HOST_BUILTINS`), with
+the branded `unsupported:` diagnostic, like `process_run`. All failures
+(malformed JSON, missing path, type mismatch, non-finite number,
+out-of-range `places`) are loud eval errors — no silent defaults.
 
 | Name | Signature | Notes |
 |---|---|---|
 | `parse_json` | `(s: string) -> Json` | strict RFC 8259; a leading UTF-8 BOM is ignored (§8.1, matching `parse_csv`); **int-vs-float is decided at parse time** — a token with `.`/`e`/`E` becomes `JNum f64`, anything else becomes `JInt int64` (the `Std.Io.Json` and Python `json` rule), so integers stay exact; an integer literal too wide for int64 falls back to `JNum` and is the one remaining lossy case; duplicate keys: first position, last value; depth cap 512 |
-| `to_json` | `(v: Json) -> string` | compact, **insertion-order keys**, `JInt` emitted exactly (no decimal point, no f64 round-trip), **shortest-round-trip f64** for `JNum` (Rust `{:?}` formatter — deliberately NOT the print channel, chelis#748/#723/#734); NaN/inf fail; non-ASCII emitted as raw UTF-8; byte-stable |
+| `to_json` | `(v: Json) -> string` | compact, **insertion-order keys**, `JInt` emitted exactly (no decimal point, no f64 round-trip), **shortest-round-trip f64** for `JNum` (routed through `format_element`, the §8.1 number grammar — deliberately NOT `render_value`/`to_string`, whose near-integer collapse and 16-digit starvation are chelis#748/#723/#734); NaN/inf fail; non-ASCII emitted as raw UTF-8; byte-stable |
 | `json_f64` | `(j: Json, path: string) -> f64` | dot-path: segment = dict key, or strictly all-digits list index (no sign, no leading zeros); fails name the missing key and list available keys; **widens `JInt` transparently** (lossy above 2^53 — use `json_int` for exactness) |
 | `json_int` | `(j: Json, path: string) -> int64` | exact integer read. Refuses a `JNum` rather than truncating it, naming `json_f64` as the remedy (§C1.1: no silent narrowing) |
 | `json_str` | `(j: Json, path: string) -> string` | |
@@ -325,7 +328,7 @@ number) are loud eval errors — no silent defaults.
 | `jlist` | `(items: List[Json]) -> Json` | |
 | `jdict` | `(entries: List[(string, Json)]) -> Json` | insertion order; duplicate keys upsert |
 | `json_set` | `(j: Json, path: string, v: Json) -> Json` | returns updated value; missing intermediate dict keys auto-create nested dicts (output assembly); list segments replace existing elements only; path segments and the built result respect the 512 depth cap |
-| `round_to` | `(x: f64, places: int) -> f64` | decimal rounding, **ties-to-even** on the exact binary value (= Python `round`): `round_to(2.5, 0) = 2.0`, `round_to(2.675, 2) = 2.67`; `places` in 0..=100; non-finite passes through. **f64-only** until its per-dtype semantics are authored in spec/05 (chelis#891 review: the widen/round/re-narrow path at f32 computes at other than the declared width, non-conforming under [04-NUM-8]) |
+| `round_to` | `(x: f64, places: int) -> f64` | decimal rounding, **ties-to-even** on the exact binary value (= Python `round`): `round_to(2.5, 0) = 2.0`, `round_to(2.675, 2) = 2.67`; `places` in 0..=100; non-finite passes through. **f64-only** by [05-OP-1] (spec/05 §3.7): the widen/round/re-narrow path at f32 computes at other than the declared width, which [04-NUM-8] does not permit; the narrower widths return when the atom declares their per-dtype rule |
 
 Composes with §3.5: `read_file |> parse_json`, accessors + tensor builtins
 for compute, `jdict`/`json_set`/`to_json` + `write_file` for nested output.
@@ -382,7 +385,7 @@ lowering** (`spec/05` §3.4) — treat it as unstable, not a stable builtin (see
 
 Prelude ADTs/constructors (also in scope): `Option`/`Some`/`None`,
 `List`/`Cons`/`Nil`, `MappedFile`, and
-`Json`/`JNull`/`JBool`/`JNum`/`JStr`/`JList`/`JDict` (§3.8).
+`Json`/`JNull`/`JBool`/`JInt`/`JNum`/`JStr`/`JList`/`JDict` (§3.8).
 
 ---
 

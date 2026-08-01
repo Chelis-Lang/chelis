@@ -20,15 +20,14 @@ use super::*;
 /// `fn (doc) -> json_f64(doc, "a")` genuinely types `Json -> f64` rather
 /// than `forall a. a -> f64`.
 ///
-/// Numeric slots: `round_to` accepts ANY float operand / integer `places`
-/// precision (unsuffixed literals default to f32/int32 per
-/// spec/04-type-system.md §5.3, and its return preserves the operand
-/// precision, so accepting f32 stays honest); an unresolved `Var` in
-/// either slot unifies with the canonical f64/int64. `jnum` is stricter —
-/// exactly f64 (chelis#891 review finding 7): its output feeds the
-/// byte-exact `to_json` channel, and silently widening an f32 literal
-/// would serialize `0.1f32` as `0.10000000149011612`. The diagnostic
-/// names the fix (suffix the literal or cast).
+/// Numeric slots: `round_to` takes exactly an f64 operand, which is the
+/// dtype set [05-OP-1] declares (spec/05-risc-primitives.md §3.7); its
+/// `places` slot accepts any integer precision, unifying an unresolved
+/// `Var` with the canonical int64. `jnum` is exactly f64 on a different
+/// rule (chelis#891 review finding 7): its output feeds the byte-exact
+/// `to_json` channel, and silently widening an f32 literal would
+/// serialize `0.1f32` as `0.10000000149011612`. Both diagnostics name
+/// the fix (suffix the literal or cast).
 pub(super) fn check_json_builtin_signature(
     fname: &str,
     list: &deep::List,
@@ -236,21 +235,20 @@ pub(super) fn check_json_builtin_signature(
             json_ty()
         }
         "round_to" => {
-            // f64-only until `round_to` has an authored [05-OP-N] atom
-            // (chelis#891 review, consolidated guidance item 3): the
-            // implementation widens the operand to f64, rounds decimally,
-            // and re-narrows, which at f32 computes at other than the
-            // declared arithmetic width -- non-conforming under [04-NUM-8],
-            // whose atom deliberately has no exception vocabulary. The
-            // f32 lane returns when its per-dtype semantics are authored
-            // in spec/05-risc-primitives.md at declared widths. Same
-            // strictness shape as `jnum` below; the diagnostic names the
-            // remediation.
+            // f64-only, per [05-OP-1] (spec/05-risc-primitives.md
+            // section 3.7, authored at chelis#891): the implementation
+            // widens the operand to f64, rounds decimally, and re-narrows,
+            // which at f32 computes at other than the declared arithmetic
+            // width -- non-conforming under [04-NUM-8], whose atom
+            // deliberately has no exception vocabulary. The narrower
+            // widths return when the atom declares their per-dtype rule at
+            // declared widths. Same strictness shape as `jnum` below; the
+            // diagnostic names the remediation.
             require_slot!(
                 0,
                 Type::Prim(Prim::F64),
-                "an f64 first argument (`round_to` is f64-only until its \
-                 per-dtype rounding semantics are authored in spec/05; \
+                "an f64 first argument (spec/05-risc-primitives.md \
+                 [05-OP-1] declares `round_to`'s dtype set as f64 only; \
                  suffix the literal `f64` or `cast` the operand)"
             );
             require_loose_numeric_slot!(
@@ -261,6 +259,17 @@ pub(super) fn check_json_builtin_signature(
             );
             Type::Prim(Prim::F64)
         }
-        other => unreachable!("check_json_builtin_signature dispatched on `{other}`"),
+        // The guarantee: this function is reached only through the JSON
+        // dispatch arm, whose match list and the arity table above are the
+        // same closed name set. A name here means those two lists drifted
+        // apart in one edit, which is a compiler bug, never a program
+        // condition (loud_unsupported.md section C1.3: name the guarantee,
+        // not the input).
+        other => unreachable!(
+            "check_json_builtin_signature is reachable only for the closed \
+             host-lane JSON builtin set that its caller dispatches on; \
+             `{other}` means the caller's name list and this function's \
+             arms drifted apart"
+        ),
     }
 }

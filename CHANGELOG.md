@@ -11,18 +11,29 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 - **Host-lane JSON I/O + `round_to` decimal rounding (chelis#890).** A `.ch`
   program can now read JSON inputs and write nested JSON outputs end-to-end
   in the eval lane, with no host-language glue: a prelude `Json` ADT
-  (`JNull | JBool | JNum f64 | JStr | JList | JDict`, matchable), strict
-  RFC 8259 `parse_json`, dot-path accessors (`json_f64`, `json_str`,
-  `json_list`, `json_f64s`) that fail loudly on missing paths and type
-  mismatches (naming the builtin, path, segment, and available keys),
-  output constructors (`jnum`, `jstr`, `jlist`, `jdict`, `json_set` with
-  auto-created intermediate objects), `to_json` with shortest-round-trip
-  f64 formatting and deterministic insertion-order keys (deliberately not
-  the print channel, chelis#748/#723/#734), and `round_to(x, places)` with
+  (`JNull | JBool | JInt int64 | JNum f64 | JStr | JList | JDict`,
+  matchable), strict RFC 8259 `parse_json`, dot-path accessors
+  (`json_f64`, `json_int`, `json_str`, `json_list`, `json_f64s`) that fail
+  loudly on missing paths and type mismatches (naming the builtin, path,
+  segment, and available keys), output constructors (`jnum`, `jint`,
+  `jstr`, `jlist`, `jdict`, `json_set` with auto-created intermediate
+  objects), `to_json` with shortest-round-trip f64 formatting and
+  deterministic insertion-order keys, and `round_to(x, places)` with
   ties-to-even decimal rounding on the exact binary value (matching
-  Python's `round`). Eval/test-only: `chelis build` rejects all twelve
-  names whole-program like `process_run`. `Json` becomes a reserved
-  prelude type name. See `docs/CHELIS_SURFACE.md` §3.8.
+  Python's `round`). **JSON integers stay exact**: the int-vs-float
+  decision is made at parse time, so a document round-trips at every
+  int64 magnitude - `9007199254740993` is `JInt`, not
+  `9007199254740992.0`. Eval/test-only: `chelis build` rejects all
+  fourteen names whole-program like `process_run`, with the branded
+  `unsupported:` diagnostic. `Json` and its seven constructors become
+  reserved prelude names. See `docs/CHELIS_SURFACE.md` §3.8.
+- **Normative spec for the host-lane JSON family (chelis#891 review).**
+  `spec/05-risc-primitives.md` §3.7 authors the fourteen builtins,
+  `[05-JSON-1]` (the parse-time int/float rule and the exactness it buys)
+  and `[05-OP-1]` (`round_to` at f64, with the reason the narrower widths
+  are rejected). The family shipped with no normative text at all, which
+  `spec/design/capability_table.md` §New numeric ops forbids for a new
+  numeric op.
 
 ### Changed
 

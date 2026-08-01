@@ -8278,7 +8278,8 @@ fn reject_eval_only_builtins_host(
             "compiled targets (the host interpreter's eval/test lanes only)",
             chelis_types::unsupported::Stage::Codegen("c"),
             "run the program with `chelis eval` or `chelis test`, or remove the \
-             call before building (spec/05-risc-primitives.md §3.6)",
+             call before building (spec/05-risc-primitives.md §2.6 for \
+             `process_run`, §3.7 for the JSON family)",
         )
         .to_string()
         .into());
