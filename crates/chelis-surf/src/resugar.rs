@@ -102,12 +102,15 @@ pub fn resugar_program(exprs: &[DeepExpr]) -> Result<Vec<Decl>, ResugarError> {
 /// therefore outside the structural Surf/Deep round-trip law.
 ///
 /// Semantic metadata (`type`, `eff`, `wrt`, property contracts, and the
-/// validated `surf_*` namespace) is retained, except for exact `type` entries
-/// on a `def`, its function value, and its parameters when the immediately
-/// preceding matching `defsig` already carries the same types. Canonical Surf
-/// deliberately folds that Deep pair into one typed declaration, so
-/// desugaring necessarily recreates those redundant annotations. A
-/// disagreement is retained and therefore still fails the oracle.
+/// semantic members of the validated `surf_*` namespace) is retained. The
+/// non-semantic `surf_literal_style` and `surf_binding_type` origin markers are
+/// consumed while choosing the Surf AST and then ignored by this Deep-side
+/// comparison. Exact `type` entries on a `def`, its function value, and its
+/// parameters are also removed when the immediately preceding matching
+/// `defsig` already carries the same types. Canonical Surf deliberately folds
+/// that Deep pair into one typed declaration, so desugaring necessarily
+/// recreates those redundant annotations. A disagreement is retained and
+/// therefore still fails the oracle.
 ///
 /// This narrow normalization is intentionally not
 /// [`chelis_deep::ast::strip_metadata`], which would erase language-relevant
@@ -609,7 +612,13 @@ fn normalize_roundtrip_meta(meta: &MetaMap) -> MetaMap {
 fn is_roundtrip_derived_key(key: &str) -> bool {
     matches!(
         key,
-        "span" | "loc" | "source" | "effects" | "invariant_amenability"
+        "span"
+            | "loc"
+            | "source"
+            | "effects"
+            | "invariant_amenability"
+            | "surf_literal_style"
+            | "surf_binding_type"
     )
 }
 
@@ -1166,7 +1175,11 @@ fn node_ref(expr: &DeepExpr) -> Result<NodeRef<'_>, ResugarError> {
         key.starts_with("surf_")
             && !matches!(
                 key.as_str(),
-                "surf_path" | "surf_dim_group_size" | "surf_pipe_stage"
+                "surf_path"
+                    | "surf_dim_group_size"
+                    | "surf_pipe_stage"
+                    | "surf_literal_style"
+                    | "surf_binding_type"
             )
     }) {
         return Err(ResugarError::UnknownSurfaceMetadata { key: key.clone() });
@@ -1444,11 +1457,33 @@ fn resugar_literal_impl(
     validate_literal_type(&node)?;
     reject_non_finite_float(&node.children[0])?;
     let suffix = literal_suffix(node.meta)?;
+    let style = match meta_value(node.meta, "surf_literal_style") {
+        None => None,
+        Some(DeepExpr::Atom(Atom::Str(value), _))
+            if matches!(value.as_str(), "unsuffixed" | "explicit") =>
+        {
+            Some(value.as_str())
+        }
+        Some(_) => {
+            return Err(ResugarError::InvalidChild {
+                tag: node.tag.as_str(),
+                index: 1,
+                expected: "`surf_literal_style` equal to `\"unsuffixed\"` or `\"explicit\"`",
+            });
+        }
+    };
+    let suppress_suffix = style == Some("unsuffixed");
+    let preserve_default_suffix = preserve_default_suffix || style == Some("explicit");
     if let DeepExpr::Atom(Atom::Int(value), _) = &node.children[0]
         && integer_minimum(suffix) == Some(*value)
     {
         let maximum = -(value + 1);
-        let literal = |value| Expr::Lit(surface_integer_literal(value, suffix), node.span);
+        let literal = |value| {
+            Expr::Lit(
+                surface_integer_literal(value, suffix, preserve_default_suffix, suppress_suffix),
+                node.span,
+            )
+        };
         return Ok(Expr::Binary(
             BinOp::Sub,
             Box::new(Expr::Unary(
@@ -1461,6 +1496,7 @@ fn resugar_literal_impl(
         ));
     }
     let literal = match (&node.children[0], suffix) {
+        (DeepExpr::Atom(Atom::Int(value), _), Some(_)) if suppress_suffix => Literal::Int(*value),
         (DeepExpr::Atom(Atom::Int(value), _), Some(LiteralSuffix::I32))
             if preserve_default_suffix =>
         {
@@ -1470,6 +1506,9 @@ fn resugar_literal_impl(
             Literal::Int(*value)
         }
         (DeepExpr::Atom(Atom::Int(value), _), Some(suffix)) => Literal::TypedInt(*value, suffix),
+        (DeepExpr::Atom(Atom::Float(value), _), Some(_)) if suppress_suffix => {
+            Literal::Float(*value)
+        }
         (DeepExpr::Atom(Atom::Float(value), _), Some(LiteralSuffix::F32))
             if preserve_default_suffix =>
         {
@@ -1500,8 +1539,19 @@ fn resugar_literal_impl(
     Ok(Expr::Lit(literal, node.span))
 }
 
-fn surface_integer_literal(value: i64, suffix: Option<LiteralSuffix>) -> Literal {
+fn surface_integer_literal(
+    value: i64,
+    suffix: Option<LiteralSuffix>,
+    preserve_default_suffix: bool,
+    suppress_suffix: bool,
+) -> Literal {
+    if suppress_suffix {
+        return Literal::Int(value);
+    }
     match suffix {
+        Some(LiteralSuffix::I32) if preserve_default_suffix => {
+            Literal::TypedInt(value, LiteralSuffix::I32)
+        }
         None | Some(LiteralSuffix::I32) => Literal::Int(value),
         Some(suffix) => Literal::TypedInt(value, suffix),
     }
@@ -1612,6 +1662,22 @@ fn resugar_let(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
     }
     let mut bindings = Vec::with_capacity(binding_node.children.len() / 2);
     for pair in binding_node.children.chunks_exact(2) {
+        let value_node = node_ref(&pair[1])?;
+        let binding_style = match meta_value(value_node.meta, "surf_binding_type") {
+            None => None,
+            Some(DeepExpr::Atom(Atom::Str(value), _))
+                if matches!(value.as_str(), "inferred" | "explicit") =>
+            {
+                Some(value.as_str())
+            }
+            Some(_) => {
+                return Err(ResugarError::InvalidChild {
+                    tag: value_node.tag.as_str(),
+                    index: 1,
+                    expected: "`surf_binding_type` equal to `\"inferred\"` or `\"explicit\"`",
+                });
+            }
+        };
         bindings.push(LetBinding {
             pattern: LetPattern::Var(
                 atom_name(&pair[0])
@@ -1623,11 +1689,15 @@ fn resugar_let(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
                     .to_string(),
                 binding_node.span,
             ),
-            ty: type_metadata(&pair[1]).transpose()?,
+            ty: if binding_style == Some("inferred") {
+                None
+            } else {
+                type_metadata(&pair[1]).transpose()?
+            },
             // A let binding's declared type is encoded on its value node. The
             // binding field above consumes that outer annotation; nested child
             // annotations still resugar normally.
-            value: resugar_node(node_ref(&pair[1])?)?,
+            value: resugar_node(value_node)?,
         });
     }
     let body = resugar_expression(&node.children[1])?;

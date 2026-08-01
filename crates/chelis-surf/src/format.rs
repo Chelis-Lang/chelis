@@ -924,6 +924,9 @@ fn format_handler_body(expr: &Expr) -> String {
 }
 
 fn format_apply(function: &Expr, arguments: &[Expr]) -> String {
+    if arguments.is_empty() && matches!(function, Expr::Constructor(..)) {
+        return format_expr(function);
+    }
     format!(
         "{}({})",
         format_call_callee(function),

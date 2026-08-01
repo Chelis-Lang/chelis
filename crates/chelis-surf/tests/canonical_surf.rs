@@ -197,6 +197,21 @@ fn zero_field_deep_records_and_record_patterns_keep_their_distinct_surface_form(
 }
 
 #[test]
+fn explicitly_pure_function_round_trips_without_becoming_inferred() {
+    let source = "def declared() ! {} = ()\n";
+    let deep = desugar_program(&parse_str(source).expect("declared-pure Surf parses"));
+    let surf = format_program(&resugar_program(&deep).expect("declared-pure Deep resugars"));
+
+    assert_eq!(surf, source, "explicit `! {{}}` is a semantic declaration");
+
+    let redesugared = desugar_program(&parse_str(&surf).expect("resugared Surf reparses"));
+    assert_eq!(
+        print_canonical(&normalize_deep_for_surface_roundtrip(&deep)),
+        print_canonical(&normalize_deep_for_surface_roundtrip(&redesugared)),
+    );
+}
+
+#[test]
 fn formatting_canonical_surf_is_idempotent() {
     let source = "def identity(x: f32) -> f32 = x\nresult = Point { x, y: other }\n";
     let once = format_source(source).expect("canonical Surf formats");
@@ -299,12 +314,23 @@ fn default_type_suffixes_are_preserved_when_contextual_adoption_changes_meaning(
         "cast(42i32, int64)"
     );
 
-    let source = "direct = cast(1.1, f64)\nwidened = cast(1.1f32, f64)\n";
-    let deep = print_canonical(&desugar_program(
-        &parse_str(source).expect("both forms parse"),
-    ));
+    let source = concat!(
+        "direct = cast(1.1, f64)\n",
+        "direct_i = cast(42, int64)\n",
+        "widened = cast(1.1f32, f64)\n",
+        "widened_i = cast(42i32, int64)\n",
+        "explicit_default_float = 1.0f32\n",
+        "explicit_default_int = 42i32\n",
+    );
+    let parsed = parse_str(source).expect("all contextual forms parse");
+    let desugared = desugar_program(&parsed);
+    let deep = print_canonical(&desugared);
     assert!(deep.contains("(t-prim {} f64)"));
     assert!(deep.contains("(t-prim {} f32)"));
+    assert_eq!(
+        format_program(&resugar_program(&desugared).expect("contextual literals resugar")),
+        source,
+    );
 }
 
 #[test]
@@ -314,6 +340,22 @@ fn multi_pair_deep_bind_resugars_as_ordered_surf_bindings() {
             "(let {} (bind {} x (lit {} 1) y (lit {} 2)) (app {} (var {} f) (var {} x) (var {} y)))"
         ),
         "{\n  x = 1\n  y = 2\n  f(x, y)\n}"
+    );
+}
+
+#[test]
+fn inferred_block_literal_types_do_not_become_authored_annotations() {
+    let source = "value = {\n  x = 1\n  y = 2\n  f(x, y)\n}\n";
+    let deep = desugar_program(&parse_str(source).expect("untyped block parses"));
+    let surf = format_program(&resugar_program(&deep).expect("untyped block resugars"));
+
+    assert_eq!(surf, source);
+
+    let typed = "value = {\n  x: int32 = 1\n  x\n}\n";
+    let deep = desugar_program(&parse_str(typed).expect("typed block parses"));
+    assert_eq!(
+        format_program(&resugar_program(&deep).expect("typed block resugars")),
+        typed,
     );
 }
 
@@ -527,6 +569,7 @@ fn explicit_v018_migration_rewrites_aliases_and_preserves_comments() {
         "def unit_value(): unit = ()\n",
         "legacy_number = 0x10\n",
         "legacy_float = 42f32\n",
+        "nullary_constructor = None()\n",
         "-- source footer\n",
     );
     let expected = concat!(
@@ -540,6 +583,7 @@ fn explicit_v018_migration_rewrites_aliases_and_preserves_comments() {
         "def unit_value() -> () = ()\n",
         "legacy_number = 16\n",
         "legacy_float = 42.0f32\n",
+        "nullary_constructor = None\n",
         "-- source footer\n",
     );
 
@@ -725,6 +769,23 @@ fn deep_surf_metadata_namespace_and_marker_values_are_closed() {
     let error = resugar_expression(&malformed.remove(0))
         .expect_err("unknown call-stage marker value must fail closed");
     assert!(error.to_string().contains("call-first"));
+
+    let mut malformed =
+        parse_deep("(lit {type: (t-prim {} f32), surf_literal_style: \"future\"} 1.0)")
+            .expect("known literal-style key parses for value validation");
+    let error = resugar_expression(&malformed.remove(0))
+        .expect_err("unknown literal-style marker value must fail closed");
+    assert!(error.to_string().contains("unsuffixed"));
+
+    let malformed = parse_deep(concat!(
+        "(let {} (bind {} x ",
+        "(lit {type: (t-prim {} int32), surf_binding_type: \"future\"} 1)) ",
+        "(var {} x))",
+    ))
+    .expect("known binding-style key parses for value validation");
+    let error = resugar_expression(&malformed[0])
+        .expect_err("unknown binding-style marker value must fail closed");
+    assert!(error.to_string().contains("inferred"));
 }
 
 #[test]
@@ -764,7 +825,8 @@ fn roundtrip_normalization_strips_only_enumerated_derived_metadata() {
         "source: (app {} (var {} macro_call)), ",
         "effects: (effects {} IO), invariant_amenability: \"linear\", ",
         "eff: (effects {} IO), type: (t-prim {} f32), ",
-        "surf_path: \"Module.Path\"} x)\n",
+        "surf_path: \"Module.Path\", surf_literal_style: \"explicit\", ",
+        "surf_binding_type: \"inferred\"} x)\n",
     ))
     .expect("metadata-rich Deep parses");
     let normalized = print_canonical(&normalize_deep_for_surface_roundtrip(&deep));
@@ -775,6 +837,8 @@ fn roundtrip_normalization_strips_only_enumerated_derived_metadata() {
         "source:",
         "effects:",
         "invariant_amenability:",
+        "surf_literal_style:",
+        "surf_binding_type:",
     ] {
         assert!(
             !normalized.contains(derived),

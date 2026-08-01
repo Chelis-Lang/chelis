@@ -3892,6 +3892,7 @@ name = "tree-sitter-chelis"
 version = "0.18.1"
 dependencies = [
  "cc",
+ "ryu",
  "tree-sitter",
 ]
 

@@ -35,7 +35,11 @@ fn parsers_reject_unknown_keys_in_the_closed_surf_namespace() {
 
 #[test]
 fn programmatic_validation_accepts_known_surface_metadata_and_rejects_unknown_keys() {
-    let known = variable_with_metadata(vec![("surf_path".to_string(), string("M.Path"))]);
+    let known = variable_with_metadata(vec![
+        ("surf_path".to_string(), string("M.Path")),
+        ("surf_literal_style".to_string(), string("explicit")),
+        ("surf_binding_type".to_string(), string("inferred")),
+    ]);
     assert!(
         validate(&[known])
             .iter()

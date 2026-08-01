@@ -17,6 +17,13 @@ const PREC = {
 module.exports = grammar({
   name: "chelis_surf",
 
+  externals: ($) => [
+    $._canonical_number,
+    $._canonical_pattern_number,
+    $._canonical_axis_integer,
+    $._canonical_nonzero_axis_integer,
+  ],
+
   extras: ($) => [/\s/, $.line_comment, $.block_comment],
   word: ($) => $.identifier,
 
@@ -501,26 +508,14 @@ module.exports = grammar({
 
     boolean: () => choice("true", "false"),
     wildcard: () => "_",
-    axis_integer: () => token(choice(/0/, /[1-9][0-9]*/)),
-    nonzero_axis_integer: () => token(/[1-9][0-9]*/),
-    number: () =>
-      token(
-        choice(
-          /(?:0|[1-9][0-9]*)/,
-          /(?:(?:0|[1-9][0-9]*)\.(?:0|[0-9]*[1-9])|[1-9](?:\.[0-9]*[1-9])?e(?:-(?:[6-9]|[1-9][0-9]+)|(?:1[6-9]|[2-9][0-9]|[1-9][0-9]{2,})))(?:f32|f64|bf16|f16)/,
-          /(?:0|[1-9][0-9]*)(?:i8|i16|i32|i64)/,
-          /(?:0|[1-9][0-9]*)\.(?:0|[0-9]*[1-9])/,
-          /[1-9](?:\.[0-9]*[1-9])?e(?:-(?:[6-9]|[1-9][0-9]+)|(?:1[6-9]|[2-9][0-9]|[1-9][0-9]{2,}))/,
-        ),
-      ),
-    pattern_number: () =>
-      token(
-        choice(
-          /(?:0|[1-9][0-9]*)/,
-          /(?:0|[1-9][0-9]*)\.(?:0|[0-9]*[1-9])/,
-          /[1-9](?:\.[0-9]*[1-9])?e(?:-(?:[6-9]|[1-9][0-9]+)|(?:1[6-9]|[2-9][0-9]|[1-9][0-9]{2,}))/,
-        ),
-      ),
+    axis_integer: ($) => $._canonical_axis_integer,
+    nonzero_axis_integer: ($) => $._canonical_nonzero_axis_integer,
+    // Canonical numeric spelling is value-sensitive: it is the shortest
+    // decimal that round-trips to the decoded f64. A regex can validate only
+    // the token's shape, so the external scanner performs the same shortest
+    // spelling check as the canonical Rust parser.
+    number: ($) => $._canonical_number,
+    pattern_number: ($) => $._canonical_pattern_number,
     negative_pattern_number: ($) => seq("-", $.pattern_number),
     string: () => token(seq('"', repeat(choice(/[^"\\\n\r]+/, /\\[nrt0"\\]/)), '"')),
     identifier: () => /[_a-z][_A-Za-z0-9]*/,

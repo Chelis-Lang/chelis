@@ -3861,75 +3861,20 @@
       "value": "_"
     },
     "axis_integer": {
-      "type": "TOKEN",
-      "content": {
-        "type": "CHOICE",
-        "members": [
-          {
-            "type": "PATTERN",
-            "value": "0"
-          },
-          {
-            "type": "PATTERN",
-            "value": "[1-9][0-9]*"
-          }
-        ]
-      }
+      "type": "SYMBOL",
+      "name": "_canonical_axis_integer"
     },
     "nonzero_axis_integer": {
-      "type": "TOKEN",
-      "content": {
-        "type": "PATTERN",
-        "value": "[1-9][0-9]*"
-      }
+      "type": "SYMBOL",
+      "name": "_canonical_nonzero_axis_integer"
     },
     "number": {
-      "type": "TOKEN",
-      "content": {
-        "type": "CHOICE",
-        "members": [
-          {
-            "type": "PATTERN",
-            "value": "(?:0|[1-9][0-9]*)"
-          },
-          {
-            "type": "PATTERN",
-            "value": "(?:(?:0|[1-9][0-9]*)\\.(?:0|[0-9]*[1-9])|[1-9](?:\\.[0-9]*[1-9])?e(?:-(?:[6-9]|[1-9][0-9]+)|(?:1[6-9]|[2-9][0-9]|[1-9][0-9]{2,})))(?:f32|f64|bf16|f16)"
-          },
-          {
-            "type": "PATTERN",
-            "value": "(?:0|[1-9][0-9]*)(?:i8|i16|i32|i64)"
-          },
-          {
-            "type": "PATTERN",
-            "value": "(?:0|[1-9][0-9]*)\\.(?:0|[0-9]*[1-9])"
-          },
-          {
-            "type": "PATTERN",
-            "value": "[1-9](?:\\.[0-9]*[1-9])?e(?:-(?:[6-9]|[1-9][0-9]+)|(?:1[6-9]|[2-9][0-9]|[1-9][0-9]{2,}))"
-          }
-        ]
-      }
+      "type": "SYMBOL",
+      "name": "_canonical_number"
     },
     "pattern_number": {
-      "type": "TOKEN",
-      "content": {
-        "type": "CHOICE",
-        "members": [
-          {
-            "type": "PATTERN",
-            "value": "(?:0|[1-9][0-9]*)"
-          },
-          {
-            "type": "PATTERN",
-            "value": "(?:0|[1-9][0-9]*)\\.(?:0|[0-9]*[1-9])"
-          },
-          {
-            "type": "PATTERN",
-            "value": "[1-9](?:\\.[0-9]*[1-9])?e(?:-(?:[6-9]|[1-9][0-9]+)|(?:1[6-9]|[2-9][0-9]|[1-9][0-9]{2,}))"
-          }
-        ]
-      }
+      "type": "SYMBOL",
+      "name": "_canonical_pattern_number"
     },
     "negative_pattern_number": {
       "type": "SEQ",
@@ -4110,7 +4055,24 @@
     ]
   ],
   "precedences": [],
-  "externals": [],
+  "externals": [
+    {
+      "type": "SYMBOL",
+      "name": "_canonical_number"
+    },
+    {
+      "type": "SYMBOL",
+      "name": "_canonical_pattern_number"
+    },
+    {
+      "type": "SYMBOL",
+      "name": "_canonical_axis_integer"
+    },
+    {
+      "type": "SYMBOL",
+      "name": "_canonical_nonzero_axis_integer"
+    }
+  ],
   "inline": [],
   "supertypes": [],
   "reserved": {}

@@ -132,6 +132,11 @@
     }
   },
   {
+    "type": "axis_integer",
+    "named": true,
+    "fields": {}
+  },
+  {
     "type": "bare_unary_transform",
     "named": true,
     "fields": {}
@@ -1426,6 +1431,16 @@
     }
   },
   {
+    "type": "nonzero_axis_integer",
+    "named": true,
+    "fields": {}
+  },
+  {
+    "type": "number",
+    "named": true,
+    "fields": {}
+  },
+  {
     "type": "opaque_type_declaration",
     "named": true,
     "fields": {
@@ -1610,6 +1625,11 @@
         }
       ]
     }
+  },
+  {
+    "type": "pattern_number",
+    "named": true,
+    "fields": {}
   },
   {
     "type": "pipe_expression",
@@ -2658,10 +2678,6 @@
     "named": false
   },
   {
-    "type": "axis_integer",
-    "named": true
-  },
-  {
     "type": "block_comment",
     "named": true,
     "extra": true
@@ -2756,24 +2772,12 @@
     "named": false
   },
   {
-    "type": "nonzero_axis_integer",
-    "named": true
-  },
-  {
-    "type": "number",
-    "named": true
-  },
-  {
     "type": "opaque",
     "named": false
   },
   {
     "type": "par",
     "named": false
-  },
-  {
-    "type": "pattern_number",
-    "named": true
   },
   {
     "type": "property",

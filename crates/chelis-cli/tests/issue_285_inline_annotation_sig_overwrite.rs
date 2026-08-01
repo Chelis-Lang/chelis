@@ -304,6 +304,15 @@ fn effect_lie_inline_only_no_sig_control_still_rejected() {
     assert_effect_rejected(&json, "effect lie control (no inline sig)");
 }
 
+#[test]
+fn untyped_nullary_effect_clause_synthesizes_its_contract() {
+    let rejected = check_json("def pure() ! {} = print(\"x\")\n");
+    assert_effect_rejected(&rejected, "untyped nullary declared-pure effect lie");
+
+    let accepted = check_json("def honest() ! { IO } = print(\"x\")\n");
+    assert_clean(&accepted, "untyped nullary honest IO declaration");
+}
+
 /// Structural lock: an eff-less explicit `sig` plus a `def` with an effect
 /// clause must emit exactly ONE `(defsig`, and that surviving defsig must
 /// carry the inherited `eff` metadata so the effect checker can read it.

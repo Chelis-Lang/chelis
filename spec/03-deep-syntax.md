@@ -56,9 +56,11 @@ portable across Surf and Reef boundaries.
 | `surf_path` | string | Exact canonical Surf module path spelling for a lowercased Deep module identity |
 | `surf_dim_group_size` | integer | Number of adjacent `defdim` declarations authored in one Surf `dim` group; present on the first member only |
 | `surf_pipe_stage` | string | Validated origin marker needed to reconstruct an exact first-argument call stage |
+| `surf_literal_style` | `"unsuffixed"` / `"explicit"` | Whether a numeric literal's precision came from an unsuffixed contextual/default binding or an authored suffix |
+| `surf_binding_type` | `"inferred"` / `"explicit"` | Whether a block binding's value `type` metadata came from inference or an authored binding annotation |
 
 The `surf_*` namespace is closed. A public Deep parser or programmatic
-validator MUST reject an unknown `surf_*` key. These three keys preserve only
+validator MUST reject an unknown `surf_*` key. These five keys preserve only
 surface distinctions that canonical Deep otherwise erases; they do not change
 evaluation. Producers MUST NOT use the namespace for arbitrary provenance.
 
@@ -652,11 +654,14 @@ numerals are unary minus rather than signed tokens, a negative Deep `lit`
 normalizes to the equivalent `neg` application; the minimum signed value uses
 `sub(neg(max), 1)` so its positive magnitude never overflows the literal width.
 An integer atom carrying a float primitive type normalizes to the equivalent
-float atom before that sign rule. It may
+float atom before that sign rule. The non-semantic `surf_literal_style` and
+`surf_binding_type` origin markers may be erased after they have selected the
+canonical Surf reconstruction; desugaring that Surf recreates the applicable
+marker. It may
 not erase or rewrite any other declared `type` or `eff` data, handler effects,
-`wrt`, `opaque`, `invariant`, property semantics, or a validated `surf_*`
-value. Implementations compare macro-authored Surf after expansion. Any other
-metadata loss is a round-trip failure.
+`wrt`, `opaque`, `invariant`, property semantics, or the other validated
+`surf_*` values. Implementations compare macro-authored Surf after expansion.
+Any other metadata loss is a round-trip failure.
 
 A negative `pat-lit` is not normalized to an application because patterns do
 not contain expression nodes. It resugars as minus followed by the one

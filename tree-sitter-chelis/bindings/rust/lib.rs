@@ -109,6 +109,9 @@ mod tests {
             "value = 1.0e3\n",
             "value = 42.00f32\n",
             "value = 1e-3f32\n",
+            "value = 1.00000000000000001\n",
+            "value = 0.10000000000000001\n",
+            "value = 0.10000000000000001f64\n",
         ] {
             assert!(
                 surf_has_error(source),
@@ -146,6 +149,36 @@ mod tests {
             "canonical Surf corpus contains tree-sitter errors:\n{}",
             failures.join("\n")
         );
+    }
+
+    #[test]
+    fn tree_sitter_accepts_ryu_shortest_float_corpus() {
+        let mut bits = 0x1234_5678_9abc_def0_u64;
+        for index in 0..4096 {
+            bits = bits
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            let value = f64::from_bits(bits & i64::MAX as u64);
+            if !value.is_finite() {
+                continue;
+            }
+            let mut buffer = ryu::Buffer::new();
+            let shortest = buffer.format_finite(value);
+            let canonical = if shortest.contains('.') || shortest.contains('e') {
+                shortest.to_string()
+            } else {
+                format!("{shortest}.0")
+            };
+            for source in [
+                format!("value_{index} = {canonical}\n"),
+                format!("typed_{index} = {canonical}f64\n"),
+            ] {
+                assert!(
+                    !surf_has_error(&source),
+                    "Ryū-shortest canonical float parsed with an error: {source}"
+                );
+            }
+        }
     }
 
     fn collect_surf_files(directory: &Path, paths: &mut Vec<PathBuf>) {

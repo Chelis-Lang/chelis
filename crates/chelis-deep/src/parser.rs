@@ -31,10 +31,17 @@ fn forbidden_byte_repr(b: u8) -> String {
 
 fn validate_surf_metadata_key(key: &str, offset: usize) -> Result<(), ParseError> {
     if key.starts_with("surf_")
-        && !matches!(key, "surf_path" | "surf_dim_group_size" | "surf_pipe_stage")
+        && !matches!(
+            key,
+            "surf_path"
+                | "surf_dim_group_size"
+                | "surf_pipe_stage"
+                | "surf_literal_style"
+                | "surf_binding_type"
+        )
     {
         return Err(ParseError::Expected {
-            expected: "a key in the closed Surf metadata namespace (`surf_path`, `surf_dim_group_size`, or `surf_pipe_stage`)".to_string(),
+            expected: "a key in the closed Surf metadata namespace (`surf_path`, `surf_dim_group_size`, `surf_pipe_stage`, `surf_literal_style`, or `surf_binding_type`)".to_string(),
             found: key.to_string(),
             offset,
         });

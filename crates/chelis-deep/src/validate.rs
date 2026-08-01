@@ -192,7 +192,11 @@ fn validate_surf_metadata_entries(
         if key.starts_with("surf_")
             && !matches!(
                 key.as_str(),
-                "surf_path" | "surf_dim_group_size" | "surf_pipe_stage"
+                "surf_path"
+                    | "surf_dim_group_size"
+                    | "surf_pipe_stage"
+                    | "surf_literal_style"
+                    | "surf_binding_type"
             )
         {
             warnings.push(ValidationWarning {

@@ -217,6 +217,51 @@ fn meta_with_entries(entries: Vec<(String, deep::Expr)>) -> deep::Expr {
     deep::Expr::Map(deep::MetaMap { entries }, sp())
 }
 
+fn numeric_literal_meta(ty: deep::Expr, style: &str) -> deep::Expr {
+    meta_with_entries(vec![
+        ("type".to_string(), ty),
+        ("surf_literal_style".to_string(), string(style)),
+    ])
+}
+
+fn add_surface_marker(expr: deep::Expr, key: &str, value: &str) -> deep::Expr {
+    let entry = (key.to_string(), string(value));
+    match expr {
+        deep::Expr::Node(mut node, span) => {
+            let meta = node.meta_mut();
+            meta.entries.retain(|(existing, _)| existing != key);
+            meta.entries.push(entry);
+            deep::Expr::Node(node, span)
+        }
+        deep::Expr::List(list, span) => {
+            let mut elements = list.elements;
+            if elements.len() >= 2 {
+                let mut entries = match elements.remove(1) {
+                    deep::Expr::Map(map, _) => map.entries,
+                    _ => Vec::new(),
+                };
+                entries.retain(|(existing, _)| existing != key);
+                entries.push(entry);
+                elements.insert(1, meta_with_entries(entries));
+            }
+            deep::Expr::List(deep::List { elements }, span)
+        }
+        other => other,
+    }
+}
+
+fn has_metadata_key(expr: &deep::Expr, key: &str) -> bool {
+    match expr {
+        deep::Expr::Node(node, _) => node.meta().entries.iter().any(|(name, _)| name == key),
+        deep::Expr::List(list, _) => matches!(
+            list.elements.get(1),
+            Some(deep::Expr::Map(meta, _))
+                if meta.entries.iter().any(|(name, _)| name == key)
+        ),
+        _ => false,
+    }
+}
+
 /// Build a stamped Deep node. Decode-once (chelis#731 Phase 3): the
 /// desugarer is a typed producer, so the tag is validated at construction
 /// time via `Node::new`.
@@ -1158,7 +1203,7 @@ impl DesugarCtx {
         // defsig binding) would overwrite the concrete explicit sig, dropping
         // the body-vs-signature contract on those positions. Suppress it and
         // let the explicit sig drive body validation.
-        if (params.iter().any(|p| p.ty.is_some()) || ret_ty.is_some())
+        if (params.iter().any(|p| p.ty.is_some()) || ret_ty.is_some() || effects.is_some())
             && !self.explicit_sig_names.contains(name)
         {
             // Tvar set for the synthesized sig:
@@ -1854,12 +1899,14 @@ impl DesugarCtx {
                         _ => self.desugar_expr(&binding.value),
                     };
                     if let Some(ty) = &binding.ty {
-                        out = bind_name_value(
-                            name,
-                            inject_type_metadata(value, desugar_type(ty)),
-                            out,
-                        );
+                        let value = inject_type_metadata(value, desugar_type(ty));
+                        out = bind_name_value(name, value, out);
                     } else {
+                        let value = if has_metadata_key(&value, "type") {
+                            add_surface_marker(value, "surf_binding_type", "inferred")
+                        } else {
+                            value
+                        };
                         out = bind_name_value(name, value, out);
                     }
                 }
@@ -1892,16 +1939,32 @@ fn desugar_literal(lit: &Literal) -> deep::Expr {
         // spec/04-type-system.md §5.5): bind at exactly the suffix
         // precision with no inference, no widening, no narrowing. The
         // type metadata is the user-facing contract.
-        Literal::TypedInt(n, suffix) => node_meta(
-            DeepTag::Lit,
-            meta_with_type(node(DeepTag::TPrim, vec![sym(suffix.t_prim_name())])),
-            vec![deep::Expr::Atom(deep::Atom::Int(*n), sp())],
-        ),
-        Literal::TypedFloat(f, suffix) => node_meta(
-            DeepTag::Lit,
-            meta_with_type(node(DeepTag::TPrim, vec![sym(suffix.t_prim_name())])),
-            vec![deep::Expr::Atom(deep::Atom::Float(*f), sp())],
-        ),
+        Literal::TypedInt(n, suffix) => {
+            let ty = node(DeepTag::TPrim, vec![sym(suffix.t_prim_name())]);
+            let meta = if *suffix == LiteralSuffix::I32 {
+                numeric_literal_meta(ty, "explicit")
+            } else {
+                meta_with_type(ty)
+            };
+            node_meta(
+                DeepTag::Lit,
+                meta,
+                vec![deep::Expr::Atom(deep::Atom::Int(*n), sp())],
+            )
+        }
+        Literal::TypedFloat(f, suffix) => {
+            let ty = node(DeepTag::TPrim, vec![sym(suffix.t_prim_name())]);
+            let meta = if *suffix == LiteralSuffix::F32 {
+                numeric_literal_meta(ty, "explicit")
+            } else {
+                meta_with_type(ty)
+            };
+            node_meta(
+                DeepTag::Lit,
+                meta,
+                vec![deep::Expr::Atom(deep::Atom::Float(*f), sp())],
+            )
+        }
         Literal::Bool(b) => node_meta(
             DeepTag::Lit,
             meta_with_type(node(DeepTag::TPrim, vec![sym("bool")])),
@@ -1947,13 +2010,12 @@ fn scalar_literal_adopts_cast_target(lit: &Literal, prec: &str) -> bool {
 /// construction (including the RT-2 P2 sign fold via `negate`). Only
 /// called for literals admitted by `scalar_literal_adopts_cast_target`.
 fn adopted_scalar_literal(lit: &Literal, prec: &str, negate: bool) -> deep::Expr {
-    let ty_meta = meta_with_type(node(DeepTag::TPrim, vec![sym(prec)]));
     match lit {
         Literal::Int(n) => {
             let value = if negate { fold_unary_minus_int(*n) } else { *n };
             node_meta(
                 DeepTag::Lit,
-                ty_meta,
+                numeric_literal_meta(node(DeepTag::TPrim, vec![sym(prec)]), "unsuffixed"),
                 vec![deep::Expr::Atom(deep::Atom::Int(value), sp())],
             )
         }
@@ -1961,7 +2023,7 @@ fn adopted_scalar_literal(lit: &Literal, prec: &str, negate: bool) -> deep::Expr
             let value = if negate { -*f } else { *f };
             node_meta(
                 DeepTag::Lit,
-                ty_meta,
+                numeric_literal_meta(node(DeepTag::TPrim, vec![sym(prec)]), "unsuffixed"),
                 vec![deep::Expr::Atom(deep::Atom::Float(value), sp())],
             )
         }
@@ -2054,12 +2116,12 @@ impl DesugarCtx {
         match item {
             Expr::Lit(Literal::Int(n), _) => node_meta(
                 DeepTag::Lit,
-                meta_with_type(node(DeepTag::TPrim, vec![sym(prec_name)])),
+                numeric_literal_meta(node(DeepTag::TPrim, vec![sym(prec_name)]), "unsuffixed"),
                 vec![deep::Expr::Atom(deep::Atom::Int(*n), sp())],
             ),
             Expr::Lit(Literal::Float(f), _) => node_meta(
                 DeepTag::Lit,
-                meta_with_type(node(DeepTag::TPrim, vec![sym(prec_name)])),
+                numeric_literal_meta(node(DeepTag::TPrim, vec![sym(prec_name)]), "unsuffixed"),
                 vec![deep::Expr::Atom(deep::Atom::Float(*f), sp())],
             ),
             // RT-2 fixup P2: the surface parser turns `-128` into
@@ -2072,7 +2134,7 @@ impl DesugarCtx {
             Expr::Unary(UnaryOp::Neg, inner, _) => match inner.as_ref() {
                 Expr::Lit(Literal::Int(n), _) => node_meta(
                     DeepTag::Lit,
-                    meta_with_type(node(DeepTag::TPrim, vec![sym(prec_name)])),
+                    numeric_literal_meta(node(DeepTag::TPrim, vec![sym(prec_name)]), "unsuffixed"),
                     vec![deep::Expr::Atom(
                         deep::Atom::Int(fold_unary_minus_int(*n)),
                         sp(),
@@ -2080,7 +2142,7 @@ impl DesugarCtx {
                 ),
                 Expr::Lit(Literal::Float(f), _) => node_meta(
                     DeepTag::Lit,
-                    meta_with_type(node(DeepTag::TPrim, vec![sym(prec_name)])),
+                    numeric_literal_meta(node(DeepTag::TPrim, vec![sym(prec_name)]), "unsuffixed"),
                     vec![deep::Expr::Atom(deep::Atom::Float(-*f), sp())],
                 ),
                 // Non-literal `neg` operand falls through to the
@@ -2809,7 +2871,7 @@ mod tests {
         let result = print_expr(&desugar_expr(&expr));
         assert_eq!(
             result,
-            "(let {}\n  (bind {}\n    x\n    (lit {type: (t-prim {} int32)} 1))\n  (var {} x))"
+            "(let {}\n  (bind {}\n    x\n    (lit {surf_binding_type: \"inferred\", type: (t-prim {} int32)} 1))\n  (var {} x))"
         );
     }
 
@@ -3175,7 +3237,7 @@ mod tests {
         let expr = Expr::Cast(Box::new(float_lit(1.1)), "f64".to_string(), s());
         assert_eq!(
             print_expr(&desugar_expr(&expr)),
-            "(cast {} (lit {type: (t-prim {} f64)} 1.1) (t-prim {} f64))"
+            "(cast {}\n  (lit {surf_literal_style: \"unsuffixed\", type: (t-prim {} f64)} 1.1)\n  (t-prim {} f64))"
         );
     }
 
@@ -3190,7 +3252,7 @@ mod tests {
         );
         assert_eq!(
             print_expr(&desugar_expr(&expr)),
-            "(cast {} (lit {type: (t-prim {} f64)} -1.1) (t-prim {} f64))"
+            "(cast {}\n  (lit {surf_literal_style: \"unsuffixed\", type: (t-prim {} f64)} -1.1)\n  (t-prim {} f64))"
         );
     }
 
@@ -3202,7 +3264,7 @@ mod tests {
         let expr = Expr::Cast(Box::new(int_lit(3_000_000_000)), "int64".to_string(), s());
         assert_eq!(
             print_expr(&desugar_expr(&expr)),
-            "(cast {} (lit {type: (t-prim {} int64)} 3000000000) (t-prim {} int64))"
+            "(cast {}\n  (lit {surf_literal_style: \"unsuffixed\", type: (t-prim {} int64)} 3000000000)\n  (t-prim {} int64))"
         );
     }
 
@@ -3211,7 +3273,7 @@ mod tests {
         let expr = Expr::Cast(Box::new(int_lit(5)), "f64".to_string(), s());
         assert_eq!(
             print_expr(&desugar_expr(&expr)),
-            "(cast {} (lit {type: (t-prim {} f64)} 5) (t-prim {} f64))"
+            "(cast {}\n  (lit {surf_literal_style: \"unsuffixed\", type: (t-prim {} f64)} 5)\n  (t-prim {} f64))"
         );
     }
 
@@ -3239,7 +3301,7 @@ mod tests {
         );
         assert_eq!(
             print_expr(&desugar_expr(&expr)),
-            "(cast {} (lit {type: (t-prim {} f32)} 1.1) (t-prim {} f64))"
+            "(cast {}\n  (lit {surf_literal_style: \"explicit\", type: (t-prim {} f32)} 1.1)\n  (t-prim {} f64))"
         );
     }
 

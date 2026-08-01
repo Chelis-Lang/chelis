@@ -36,8 +36,11 @@ Metadata keys SHALL use the identifier charset `[A-Za-z_][A-Za-z0-9_]*` (no hyph
 carry compiler-relevant annotations. The `type` key SHALL be checked rather than trusted, and
 metadata fields SHALL be preserved by all spec-defined transformations and round-trip through
 canonical form. The `surf_*` namespace SHALL be closed to `surf_path`,
-`surf_dim_group_size`, and `surf_pipe_stage`; an unknown key in that namespace SHALL be
-rejected.
+`surf_dim_group_size`, `surf_pipe_stage`, `surf_literal_style`, and
+`surf_binding_type`; an unknown key in that namespace SHALL be rejected. The latter two
+markers preserve authored-versus-inferred Surf distinctions and do not change evaluation.
+Round-trip normalization MAY erase those two origin markers after they select the Surf
+reconstruction; it SHALL retain the other validated `surf_*` values.
 
 #### Scenario: Producer-specific metadata key accepted
 
