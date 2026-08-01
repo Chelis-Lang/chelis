@@ -146,7 +146,7 @@ def keep_unmasked(masks: List[bool], rows: List[int64]) -> List[int64] =
     fn (acc: List[int64], row: int64) ->
       if index(masks, row) then acc else append(acc, row),
     [],
-    rows,
+    rows
   )
 def main() -> List[int64] = keep_unmasked([false], [cast(0, int64)])
 ";
@@ -195,7 +195,7 @@ def total[n](frame: Frame[n]) -> f32 =
               fold(
                 fn (acc: f32, value: f32) -> add(acc, value),
                 cast(0.0, f32),
-                to_list(values),
+                to_list(values)
               )
           }
       }

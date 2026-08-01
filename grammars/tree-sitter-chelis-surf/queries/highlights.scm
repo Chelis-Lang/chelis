@@ -69,11 +69,10 @@
 (signature_declaration name: (identifier) @function)
 (macro_definition name: (identifier) @function.macro)
 (call_expression
-  function: (primary_expression
-    (identifier) @function.call))
+  function: (identifier) @function.call)
 (call_expression
-  function: (field_expression
-    (access_step field: (identifier) @function.call)))
+  function: (callable_access_expression
+    field: (identifier) @function.call))
 (parameter name: (value_identifier (identifier) @parameter))
 (typed_parameter name: (value_identifier (identifier) @parameter))
 (access_step field: (identifier) @property)
