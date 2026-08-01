@@ -212,12 +212,18 @@ fn check_fmt(file: &Path, source: &str) -> Option<FmtDiff> {
     let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("");
     let canonical = if ext == "dp" {
         let format_source = strip_deep_lint_directive_lines(source);
-        match chelis_deep::parser::parse_str_strict(&format_source) {
+        match chelis_deep::parser::parse_and_stamp_file(&format_source) {
             Ok(exprs) => chelis_deep::printer::print_canonical(&exprs),
-            // If the file doesn't parse, the regular compile path will
-            // surface that error with a better message; we don't
-            // double-report here.
-            Err(_) => return None,
+            // Stamp failed (e.g. arity mismatch from CRLF content); fall
+            // back to parse_str_strict so formatting differences (line
+            // endings, indentation) still surface.
+            Err(_) => match chelis_deep::parser::parse_str_strict(&format_source) {
+                Ok(exprs) => chelis_deep::printer::print_canonical(&exprs),
+                // If the file doesn't parse at all, the regular compile
+                // path will surface that error with a better message; we
+                // don't double-report here.
+                Err(_) => return None,
+            },
         }
     } else {
         match chelis_surf::format::format_source(source) {

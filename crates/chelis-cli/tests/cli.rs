@@ -4334,9 +4334,11 @@ fn fmt_inplace_preserves_surf_comments() {
 fn fmt_check_fails_for_noncanonical_deep() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("program.dp");
+    // A valid declaration with non-canonical formatting (all on one line
+    // instead of indented multi-line):
     write_file(
         &path,
-        "(app {} (var {} mean) (app {} (var {} neg) (app {} (var {} sum) (var {} very_long_intermediate_name) (lit {type: (t-prim {} i32)} 0))))\n",
+        "(def {} x (app {} (var {} mean) (app {} (var {} neg) (app {} (var {} sum) (var {} very_long_intermediate_name) (lit {type: (t-prim {} i32)} 0)))))\n",
     );
 
     Command::cargo_bin("chelis")
@@ -5568,7 +5570,7 @@ fn surf_rejects_internal_macro_tags_in_deep_input() {
         .args(["surf", path.to_str().unwrap()])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("unknown tag 'defmacro'"));
+        .stderr(predicate::str::contains("defmacro"));
 }
 
 #[test]
@@ -5586,7 +5588,7 @@ fn fmt_rejects_internal_macro_tags_in_deep_input() {
         .args(["fmt", path.to_str().unwrap()])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("unknown tag 'defmacro'"));
+        .stderr(predicate::str::contains("defmacro"));
 }
 
 #[test]

@@ -83,6 +83,44 @@ pub fn stamp_to_typed(raw_exprs: Vec<RawExpr>) -> Result<Vec<Expr>, StampError> 
     Ok(out)
 }
 
+/// Stamp a `.dp` file's raw expressions into typed AST.
+///
+/// This handles two conventions for `.dp` files:
+/// 1. A single top-level `(module ...)` wrapper (produced by `chelis deep`)
+/// 2. Bare declarations at top level (hand-written `.dp`)
+///
+/// In case 1, the module is stamped as a Node with its children as
+/// declarations. In case 2, each top-level form is stamped as a declaration
+/// via `stamp_to_typed`.
+pub fn stamp_deep_file(raw_exprs: Vec<RawExpr>) -> Result<Vec<Expr>, StampError> {
+    // If there is exactly one top-level list whose head is `module`, stamp
+    // it as a module node (which internally expects declaration children).
+    if raw_exprs.len() == 1
+        && let Some(tag) = top_level_tag(&raw_exprs[0])
+        && tag == DeepTag::Module
+    {
+        let raw = raw_exprs.into_iter().next().unwrap();
+        let span = raw.span();
+        let RawExpr::List(elements, _) = raw else {
+            unreachable!()
+        };
+        let stamped = build_node(DeepTag::Module, elements, span)?;
+        return Ok(vec![stamped]);
+    }
+    // Otherwise, treat as bare declarations.
+    stamp_to_typed(raw_exprs)
+}
+
+/// Peek at the tag of a top-level raw list expression.
+fn top_level_tag(raw: &RawExpr) -> Option<DeepTag> {
+    if let RawExpr::List(elements, _) = raw
+        && let Some(RawExpr::Atom(RawAtom::Symbol(name), _)) = elements.first()
+    {
+        return DeepTag::parse(name);
+    }
+    None
+}
+
 /// Stamp a raw expression in a specific role context.
 fn stamp_in_role(
     raw: RawExpr,

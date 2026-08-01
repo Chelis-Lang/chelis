@@ -1124,6 +1124,16 @@ pub fn parse_and_stamp(source: &str) -> Result<Vec<Expr>, StampOrParseError> {
     Ok(typed)
 }
 
+/// Lex, parse, then stamp via `stamp_deep_file` — the entry point for `.dp`
+/// file ingestion. Accepts both a single top-level `(module ...)` and bare
+/// declarations.
+pub fn parse_and_stamp_file(source: &str) -> Result<Vec<Expr>, StampOrParseError> {
+    let tokens = lexer::lex(source).map_err(ParseError::from)?;
+    let raw_exprs = parse_raw(&tokens)?;
+    let typed = crate::stamp_to_typed::stamp_deep_file(raw_exprs)?;
+    Ok(typed)
+}
+
 /// Convenience: lex and parse a source string in one step.
 pub fn parse_str(source: &str) -> Result<Vec<Expr>, ParseError> {
     let tokens = lexer::lex(source)?;
