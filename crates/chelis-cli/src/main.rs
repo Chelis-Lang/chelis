@@ -1039,7 +1039,7 @@ fn cmd_surf(file: &Path, verbose: bool) -> Result<(), Box<dyn std::error::Error>
     let synthetic_name = file.file_stem().and_then(|stem| stem.to_str());
     if ext == "dp" {
         let deep_source = style_gate::strip_deep_lint_directive_lines(&source);
-        let deep_exprs = chelis_deep::parser::parse_str_strict(&deep_source)?;
+        let deep_exprs = chelis_deep::parse_and_stamp_file(&deep_source)?;
         let surf = chelis_surf::decompile::decompile_program_with_context(
             &deep_exprs,
             &options,
@@ -1174,7 +1174,7 @@ fn cmd_eval(
                 // The engine's own `parse_deep` is non-strict; surfacing
                 // the strict error in the CLI keeps every `.dp` CLI
                 // surface on the same closed-vocabulary gate.
-                chelis_deep::parser::parse_str_strict(&deep_source)
+                chelis_deep::parse_and_stamp_file(&deep_source)
                     .map_err(|err| boxed_string_error(err.to_string()))?;
                 return if json {
                     run_eval_json_emit(try_eval_result(SourceKind::Deep, &deep_source, None))
@@ -1459,7 +1459,7 @@ fn copy_cost_for_file(
     if ext == "dp" {
         let source = fs::read_to_string(file)?;
         let deep_source = style_gate::strip_deep_lint_directive_lines(&source);
-        let deep_exprs = chelis_deep::parser::parse_str_strict(&deep_source)
+        let deep_exprs = chelis_deep::parse_and_stamp_file(&deep_source)
             .map_err(|err| format!("Deep parse error: {err}"))?;
         let checked =
             checked_program_with_effects(&deep_exprs).map_err(|e| format!("Check errors: {e}"))?;
@@ -2157,7 +2157,7 @@ fn assemble_check_json(
 /// `check_ir_fitness` -> `check_typed_program` -> `check_program`
 /// (effects) -> `check_linearity`, then [`assemble_check_json`].
 ///
-/// `parse_str_strict` (not the non-strict `parse_str`) keeps the `.dp`
+/// `parse_and_stamp_file` keeps the `.dp`
 /// check surface on the same closed-vocabulary tag gate as
 /// `chelis build`, `chelis fmt`, and `chelis cost`: an unknown tag is a
 /// hard error rather than a silently-accepted node. Parse failures are
@@ -2169,7 +2169,7 @@ fn cmd_check_one_deep(
     show_inferred: bool,
 ) -> Result<(String, bool), Box<dyn std::error::Error>> {
     let deep_source = style_gate::strip_deep_lint_directive_lines(source);
-    let deep_exprs = match chelis_deep::parser::parse_str_strict(&deep_source) {
+    let deep_exprs = match chelis_deep::parse_and_stamp_file(&deep_source) {
         Ok(deep_exprs) => deep_exprs,
         Err(err) => {
             let json = synthetic_check_report_with_error(&err.to_string());
@@ -2859,7 +2859,7 @@ fn cmd_build(
 /// Deep-source ingestion path for `chelis build`.
 ///
 /// Mirrors the shape of `cmd_build` but reads Deep s-expression text
-/// directly via `chelis_deep::parser::parse_str_strict` and skips the
+/// directly via `chelis_deep::parse_and_stamp_file` and skips the
 /// Surf desugar / macro-expand phase (Deep is canonical post-expansion
 /// per `spec/03-deep-syntax.md` §2). All metadata — including span IDs
 /// — flows through the existing `chelis_types::check_ir_program`
@@ -2879,7 +2879,7 @@ fn cmd_build_deep(
     let source = fs::read_to_string(file)?;
     style_gate::enforce_style_gate(file, &source, allow_style_violations)?;
     let deep_source = style_gate::strip_deep_lint_directive_lines(&source);
-    let deep_exprs = chelis_deep::parser::parse_str_strict(&deep_source)
+    let deep_exprs = chelis_deep::parse_and_stamp_file(&deep_source)
         .map_err(|err| format!("Deep parse error: {err}"))?;
 
     // Deep ingestion has no separate "entry decls" concept — the whole
