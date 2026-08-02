@@ -1792,11 +1792,12 @@ fn validate_value(
     }
 }
 
-/// Flatten an opaque record [`ExecutionValue`] (`Adt{ctor, fields}` in the
-/// type's declared field order) into the dotted-path env the lowered
-/// predicate reads. A NaN scalar/element is kept as-is so the strict
-/// invariant comparison fails on it (CR-4/CR-6 fail-closed).
-fn opaque_record_env(
+/// Lossily flatten an opaque record [`ExecutionValue`] (`Adt{ctor, fields}`
+/// in the type's declared field order) into the legacy f64 dotted-path env
+/// the lowered predicate reads. A NaN scalar/element is kept as-is so the
+/// strict invariant comparison fails on it (CR-4/CR-6 fail-closed). The
+/// sealed-value env replacement remains chelis#688 / #729 Phase 2 work.
+fn opaque_record_env_lossy(
     value: &ExecutionValue,
     inv: &OpaqueInvariant,
 ) -> Result<BTreeMap<String, f64>, String> {
@@ -1828,12 +1829,12 @@ fn opaque_record_env(
     let mut env = BTreeMap::new();
     for ((fname, fty), fval) in inv.fields.iter().zip(fields.iter()) {
         let field_path = format!("{}.{}", inv.binder, fname);
-        flatten_field_value(fval, fty, &field_path, &mut env)?;
+        flatten_field_value_lossy(fval, fty, &field_path, &mut env)?;
     }
     Ok(env)
 }
 
-fn flatten_field_value(
+fn flatten_field_value_lossy(
     value: &ExecutionValue,
     fty: &crate::opaque::FieldType,
     field_path: &str,
@@ -1895,7 +1896,7 @@ fn flatten_field_value(
                 return Err("nested record arity mismatch".to_string());
             }
             for ((iname, ity), ival) in inner_fields.iter().zip(fields.iter()) {
-                flatten_field_value(ival, ity, &format!("{field_path}.{iname}"), env)?;
+                flatten_field_value_lossy(ival, ity, &format!("{field_path}.{iname}"), env)?;
             }
         }
     }
@@ -1917,7 +1918,7 @@ fn validate_produced_env(
     inv: &OpaqueInvariant,
     predicate: &crate::solver::SmtExpr,
 ) -> Result<bool, String> {
-    let env = opaque_record_env(value, inv)?;
+    let env = opaque_record_env_lossy(value, inv)?;
     // CR2-2 / U1 (fail-CLOSED on non-finite): a NaN/Inf representation leaf
     // is never a valid inhabitant of the opaque domain, REGARDLESS of the
     // predicate's shape. The strict evaluator gives `NaN != C == true`
@@ -2161,8 +2162,8 @@ mod finding_tests {
     use chelis_compiler_api::schema::{TensorElements, TensorValue};
     use chelis_pred::PredAmenability;
 
-    /// A minimal single-scalar-field opaque invariant. `opaque_record_env`
-    /// and `flatten_field_value` read only `ctor_name`, `binder`, and
+    /// A minimal single-scalar-field opaque invariant. `opaque_record_env_lossy`
+    /// and `flatten_field_value_lossy` read only `ctor_name`, `binder`, and
     /// `fields`; the `predicate`/`amenability` are placeholders here.
     fn scalar_inv(type_name: &str, ctor_name: &str, field: &str) -> OpaqueInvariant {
         OpaqueInvariant {
@@ -2191,7 +2192,7 @@ mod finding_tests {
             ctor: "Velocity".to_string(),
             fields: vec![ExecutionValue::Float32 { value: 0.5 }],
         };
-        let err = opaque_record_env(&wrong, &inv)
+        let err = opaque_record_env_lossy(&wrong, &inv)
             .expect_err("a wrong-ctor same-arity ADT must be rejected, not flattened");
         assert!(
             err.contains("ctor mismatch")
@@ -2210,8 +2211,8 @@ mod finding_tests {
             ctor: "Probability".to_string(),
             fields: vec![ExecutionValue::Float32 { value: 0.5 }],
         };
-        let env =
-            opaque_record_env(&right, &inv).expect("the matching-ctor case must flatten cleanly");
+        let env = opaque_record_env_lossy(&right, &inv)
+            .expect("the matching-ctor case must flatten cleanly");
         assert_eq!(
             env.get("p.value").copied(),
             Some(0.5),
@@ -2235,7 +2236,7 @@ mod finding_tests {
                 data: TensorElements::F32(vec![0.5, f32::NAN, 0.5]),
             },
         };
-        let err = flatten_field_value(&multi, &fty, "p.value", &mut env)
+        let err = flatten_field_value_lossy(&multi, &fty, "p.value", &mut env)
             .expect_err("a multi-element tensor for a Scalar field must fail-closed");
         assert!(
             err.contains("shape mismatch") && err.contains('3'),
@@ -2259,7 +2260,7 @@ mod finding_tests {
                 data: TensorElements::F32(vec![0.5]),
             },
         };
-        flatten_field_value(&single, &fty, "p.value", &mut env)
+        flatten_field_value_lossy(&single, &fty, "p.value", &mut env)
             .expect("a 1-element tensor scalar carrier still works");
         assert_eq!(env.get("p.value").copied(), Some(0.5));
     }
@@ -2269,7 +2270,7 @@ mod finding_tests {
         // A plain exact-tagged f32 scalar is unaffected by the fix.
         let fty = FieldType::Scalar("f32".to_string());
         let mut env = BTreeMap::new();
-        flatten_field_value(
+        flatten_field_value_lossy(
             &ExecutionValue::Float32 { value: 0.25 },
             &fty,
             "p.value",

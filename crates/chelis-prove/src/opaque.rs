@@ -1228,7 +1228,8 @@ pub fn generate_binder(
     if !producers.is_empty() {
         for _ in 0..ctor_budget {
             ctor_attempts += 1;
-            let Some(env) = propose_via_constructor(inv, module_source, producers, rng) else {
+            let Some(env) = propose_via_constructor_lossy(inv, module_source, producers, rng)
+            else {
                 continue;
             };
             // STILL validate (a buggy producer costs efficiency, never
@@ -1410,10 +1411,11 @@ fn field_value_expr(path: &str, fty: &FieldType, env: &BTreeMap<String, f64>) ->
 }
 
 /// Constructor-based proposal: pick a producer, sample its raw inputs,
-/// evaluate it, Option-unwrap failures, and read back the produced
-/// record's field values into a flattened env. Returns `None` on producer
-/// failure (None result) or an unreadable output.
-fn propose_via_constructor(
+/// evaluate it, Option-unwrap failures, and read back the produced record's
+/// field values into the legacy f64 env. The conversion is deliberately
+/// named lossy until chelis#688 / #729 Phase 2 replaces that env. Returns
+/// `None` on producer failure (None result) or an unreadable output.
+fn propose_via_constructor_lossy(
     inv: &OpaqueInvariant,
     module_source: &str,
     producers: &[GenProducer],
@@ -1436,7 +1438,7 @@ fn propose_via_constructor(
     let mut env = BTreeMap::new();
     for (fname, fty) in &inv.fields {
         let field_path = format!("{}.{}", inv.binder, fname);
-        if !read_produced_field(
+        if !read_produced_field_lossy(
             module_source,
             producer,
             &arg_exprs,
@@ -1452,11 +1454,12 @@ fn propose_via_constructor(
     Some(env)
 }
 
-/// Read one representation field of a producer's result into `env`.
+/// Lossily read one representation field of a producer's result into the
+/// legacy f64 `env`.
 /// Returns `Some(true)` on success, `Some(false)` when the producer
 /// returned `None` (failure to unwrap), `None` on evaluation error.
 #[allow(clippy::too_many_arguments)]
-fn read_produced_field(
+fn read_produced_field_lossy(
     module_source: &str,
     producer: &GenProducer,
     arg_exprs: &[Expr],

@@ -127,14 +127,13 @@ impl ScalarPayload {
         self.value.as_f64_lossy()
     }
 
-    /// View any integer scalar as exact i64; float scalars truncate
-    /// toward zero (the pre-refactor host-lane convention for the few
-    /// float-permissive integer read sites).
+    /// View an integer scalar as exact i64. Every caller first establishes
+    /// the integer-family guard; a float reaching this helper is an internal
+    /// invariant violation, never permission to truncate.
     pub(crate) fn as_i64(&self) -> i64 {
-        match self.value.as_i64_exact() {
-            Some(v) => v,
-            None => self.value.as_f64_lossy() as i64,
-        }
+        self.value
+            .as_i64_exact()
+            .expect("ScalarPayload::as_i64 requires an integer-family dtype")
     }
 }
 

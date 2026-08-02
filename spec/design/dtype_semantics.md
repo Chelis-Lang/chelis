@@ -1,13 +1,9 @@
 # Grounded Dtype Semantics
 
 **Status:** Active phased plan. Phase 0 and the PR #956 §C6 covered-family
-tripwire have landed. Predecessor draft PR #1033 implements the typed
-wire-schema and registered-PyO3 entry legs. This stacked change ports PR
-#857's Phase 1 implementation onto those completed hard edges and the current
-mainline: the sealed semantics module, the atomic per-dtype storage/wire/Python
-change, dtype-true IR constants, and eval adoption are present but do not count
-as landed until exact-head validation and fresh-context red-team execution
-complete. Phases 2-4 have not started. Tracking issue: [#729].
+tripwire have landed. The typed wire-schema and registered-PyO3 entry legs
+are implemented by this change; Phases 1-4 have not started. Tracking issue:
+[#729].
 **Owning specs:** `spec/04-type-system.md` (gains an authored overflow/rounding
 section, today silent), `spec/05-risc-primitives.md` (op result semantics),
 and the audit record in `docs/investigations/numeric_audit_next_sweeps.md` /
@@ -1306,15 +1302,19 @@ note).
 audited ways at your exit - expected); trap wiring in `host_ops`' scalar
 kernels beyond what finalize forces (Phase 2); any generated-C work.
 
-**Oracle:** `eval_tensor_narrowing_matrix.rs` fully green and un-ignored;
-the Phase 1 eval rows of `narrow_dtype_matrix.rs` ([#717] tensor cells),
-`precision_matrix.rs` ([#684] storage/binding cells),
-`int_width_lane_matrix.rs` (the eval tensor trap cell), and
-`reduction_and_bitwise_matrix.rs` ([#684] sum and [#724]'s eval half)
-green and un-ignored; every control untouched; the Phase 0 domain checker
-green on ALL eval outputs, not just audited cells. The exact scalar-kernel
-rows for [#680], [#688], [#718], and [#722] remain Phase 2 obligations;
-this oracle does not pull them across the kernel-split boundary.
+**Oracle:** `.venv/bin/python scripts/dtype_phase1_oracle.py` is this phase's
+single authoritative command. Acceptance is exit 0 with the final line
+`PHASE 1 ORACLE: PASS`. Its tested command manifest runs the three §C6 entry
+censuses; the sealed semantics, typed Load, and execution-wire exactness
+controls; `eval_tensor_narrowing_matrix.rs`; the Phase 1 eval rows of
+`narrow_dtype_matrix.rs` ([#717] tensor cells), `precision_matrix.rs`
+([#684] storage/binding cells), `int_width_lane_matrix.rs` (the eval tensor
+trap cell), and `reduction_and_bitwise_matrix.rs` ([#684] sum and [#724]'s
+eval half); the checker/payload controls; the Phase 0 domain checker over all
+eval outputs; and the Python/Hull tagged-wire readers. It never runs ignored
+rows or compiled-C phase work. The exact scalar-kernel rows for [#680],
+[#688], [#718], and [#722] remain Phase 2 obligations; this oracle does not
+pull them across the kernel-split boundary.
 
 ## Phase 2 - the kernel split and prove
 

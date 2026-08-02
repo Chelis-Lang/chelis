@@ -281,6 +281,23 @@ fn casts_to_float_targets_finalize_and_never_trap() {
     );
 }
 
+#[test]
+fn int64_to_bf16_rounds_once_at_the_target_width_on_both_eval_surfaces() {
+    // This exact integer is one above a bf16 midpoint but first becomes the
+    // midpoint if it is rounded through f64. Direct target-width RNE must
+    // therefore choose the upper bf16 value ([04-NUM-14]).
+    const ABOVE_MIDPOINT: &str = "4629700416936869889i64";
+    assert_eq!(
+        eval_lane_str(&format!("cast({ABOVE_MIDPOINT}, bf16)")).expect("scalar int64->bf16"),
+        "4.65e18"
+    );
+    assert_eq!(
+        eval_lane_str(&format!("cast(to_tensor([{ABOVE_MIDPOINT}]), bf16)"))
+            .expect("tensor int64->bf16"),
+        "tensor(shape=[1], data=[4.65e18])"
+    );
+}
+
 // ===========================================================================
 // The fold rule: a trapping cast DECLINES TO FOLD (section C2's decline
 // clause); the condition falls to runtime and traps loudly there. A fold

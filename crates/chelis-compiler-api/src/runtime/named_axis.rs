@@ -244,7 +244,7 @@ impl<'a> EvalContext<'a> {
                     (tensor.value.clone(), resolved_ty)
                 }
                 RuntimeValue::Scalar(_) | RuntimeValue::Bool(_) => {
-                    runtime_value_to_dag_input(value, Some(def_expr), index)?
+                    runtime_value_to_dag_input_lossy(value, Some(def_expr), index)?
                 }
                 _ => return Ok(None),
             };

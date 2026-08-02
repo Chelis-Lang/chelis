@@ -108,8 +108,14 @@ pub(crate) fn wire_tensor_to_ir(
             Prim::F32,
             RawTensor::Float(v.iter().map(|&x| x as f64).collect()),
         ),
-        TensorElements::F16(v) => (Prim::F16, RawTensor::Float(v.clone())),
-        TensorElements::Bf16(v) => (Prim::Bf16, RawTensor::Float(v.clone())),
+        TensorElements::F16(v) => {
+            validate_reduced_float_images(Prim::F16, v)?;
+            (Prim::F16, RawTensor::Float(v.clone()))
+        }
+        TensorElements::Bf16(v) => {
+            validate_reduced_float_images(Prim::Bf16, v)?;
+            (Prim::Bf16, RawTensor::Float(v.clone()))
+        }
         TensorElements::Int64(v) => (Prim::Int64, RawTensor::Int(v.clone())),
         TensorElements::Int32(v) => (
             Prim::Int32,
@@ -133,6 +139,29 @@ pub(crate) fn wire_tensor_to_ir(
         value.shape.clone(),
         storage,
     ))
+}
+
+fn validate_reduced_float_image(prim: Prim, image: f64) -> Result<(), String> {
+    let round_trip = match prim {
+        Prim::F16 => f64::from(half::f16::from_f64(image)),
+        Prim::Bf16 => f64::from(half::bf16::from_f64(image)),
+        _ => unreachable!("exact reduced-float validation is only for f16/bf16"),
+    };
+    if round_trip != image && !image.is_nan() {
+        return Err(format!(
+            "{} wire image {image} is not an exact {} value; refusing to renormalize a corrupt execution payload (chelis#729 section C3 finalize-on-decode)",
+            prim.name(),
+            prim.name()
+        ));
+    }
+    Ok(())
+}
+
+fn validate_reduced_float_images(prim: Prim, images: &[f64]) -> Result<(), String> {
+    for &image in images {
+        validate_reduced_float_image(prim, image)?;
+    }
+    Ok(())
 }
 
 pub fn decode_adt_value(
@@ -209,9 +238,11 @@ fn structural_decode(
         }
         ExecutionValue::Int64 { value } => Ok(RuntimeValue::int64(*value)),
         ExecutionValue::Float16 { value } => {
+            validate_reduced_float_image(Prim::F16, *value).map_err(DecodeError::Structural)?;
             RuntimeValue::scalar_like_float(Prim::F16, *value).map_err(DecodeError::Structural)
         }
         ExecutionValue::Bfloat16 { value } => {
+            validate_reduced_float_image(Prim::Bf16, *value).map_err(DecodeError::Structural)?;
             RuntimeValue::scalar_like_float(Prim::Bf16, *value).map_err(DecodeError::Structural)
         }
         ExecutionValue::Float32 { value } => {
@@ -352,9 +383,11 @@ fn decode_scalar_field(
             RuntimeValue::scalar_like_int(prim, *value).map_err(DecodeError::Structural)
         }
         (Prim::F16, ExecutionValue::Float16 { value }) => {
+            validate_reduced_float_image(prim, *value).map_err(DecodeError::Structural)?;
             RuntimeValue::scalar_like_float(prim, *value).map_err(DecodeError::Structural)
         }
         (Prim::Bf16, ExecutionValue::Bfloat16 { value }) => {
+            validate_reduced_float_image(prim, *value).map_err(DecodeError::Structural)?;
             RuntimeValue::scalar_like_float(prim, *value).map_err(DecodeError::Structural)
         }
         (Prim::F32, ExecutionValue::Float32 { value }) => {
@@ -532,6 +565,43 @@ type Probability = | Probability { value: f32 }
                 serde_json::to_value(reencoded).expect("serialize re-encoded value"),
                 serde_json::to_value(payload).expect("serialize original value"),
                 "nested numeric wire values must round-trip without dtype or value substitution"
+            );
+        }
+    }
+
+    #[test]
+    fn reduced_float_scalar_wire_rejects_non_exact_images() {
+        for payload in [
+            ExecutionValue::Float16 { value: 2049.0 },
+            ExecutionValue::Bfloat16 { value: 257.0 },
+        ] {
+            let err = structural_decode(&payload, &HashMap::new())
+                .expect_err("a reduced-float carrier may not silently round its claimed image");
+            assert!(
+                matches!(err, DecodeError::Structural(_)),
+                "corrupt reduced-float scalar must be structural: {err:?}"
+            );
+            assert!(
+                err.to_string().contains("exact"),
+                "the rejection must teach the exact-image contract: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn reduced_float_tensor_wire_rejects_non_exact_images() {
+        for data in [
+            crate::schema::TensorElements::F16(vec![2049.0]),
+            crate::schema::TensorElements::Bf16(vec![257.0]),
+        ] {
+            let err = wire_tensor_to_ir(&TensorValue {
+                shape: vec![1],
+                data,
+            })
+            .expect_err("a reduced-float tensor may not silently round its claimed image");
+            assert!(
+                err.contains("exact"),
+                "the rejection must teach the exact-image contract: {err}"
             );
         }
     }

@@ -161,7 +161,7 @@ impl<'a> EvalContext<'a> {
                         ));
                     }
                     let (tensor_value, tensor_type) =
-                        runtime_value_to_dag_input(field_value, None, index)?;
+                        runtime_value_to_dag_input_lossy(field_value, None, index)?;
                     let placeholder = format!("__chelis_xform_arg_{index}_field_{fidx}");
                     placeholder_tensors.insert(placeholder.clone(), tensor_value);
                     placeholder_names.push(placeholder.clone());
@@ -194,7 +194,7 @@ impl<'a> EvalContext<'a> {
             }
             let placeholder = format!("__chelis_xform_arg_{index}");
             let (tensor_value, mut tensor_type) =
-                runtime_value_to_dag_input(value, fn_expr, index)?;
+                runtime_value_to_dag_input_lossy(value, fn_expr, index)?;
             if let (Some((callee_fn, Some(axis))), RuntimeValue::Tensor(tensor)) =
                 (&vmap_formals, value)
                 && let Some(formal) = param_type_expr_at(callee_fn, index)
@@ -581,12 +581,13 @@ fn make_adt_construction_expr(
     }
 }
 
-/// Bucket 1 helper: convert a host-runtime argument into a
-/// `(TensorValue, TensorType)` pair the IR DAG can consume. Scalar args
-/// (Int/Float/Bool) are wrapped as rank-0 tensors with the precision
+/// Bucket 1 helper: lossily convert a host-runtime argument into the legacy
+/// f64-backed `(TensorValue, TensorType)` pair the IR DAG can consume. Scalar
+/// args (Int/Float/Bool) are wrapped as rank-0 tensors with the precision
 /// pulled from the inner fn's parameter type metadata when available, or
-/// from the runtime value as a fallback.
-pub(super) fn runtime_value_to_dag_input(
+/// from the runtime value as a fallback. Exact transform ingress remains
+/// chelis#688 / #729 Phase 2 work.
+pub(super) fn runtime_value_to_dag_input_lossy(
     value: &RuntimeValue,
     fn_expr: Option<&Expr>,
     index: usize,

@@ -492,6 +492,39 @@ impl TensorStorage {
     }
 }
 
+/// Round an exact i64 directly to bfloat16, once, with target-width
+/// round-to-nearest-ties-to-even. Converting through f64 first is not
+/// equivalent above 2^53: it can erase which side of a bf16 midpoint the
+/// exact integer occupies and then manufacture a tie (chelis#729 Phase 1,
+/// [04-NUM-14]).
+fn bf16_from_i64_rne(value: i64) -> half::bf16 {
+    if value == 0 {
+        return half::bf16::from_f64(0.0);
+    }
+
+    let negative = value.is_negative();
+    let magnitude = value.unsigned_abs();
+    let top_bit = 63 - magnitude.leading_zeros();
+    let rounded_magnitude = if top_bit <= 7 {
+        magnitude
+    } else {
+        let shift = top_bit - 7;
+        let mut significand = magnitude >> shift;
+        let remainder_mask = (1_u64 << shift) - 1;
+        let remainder = magnitude & remainder_mask;
+        let halfway = 1_u64 << (shift - 1);
+        if remainder > halfway || (remainder == halfway && significand & 1 == 1) {
+            significand += 1;
+        }
+        significand << shift
+    };
+
+    // `rounded_magnitude` has at most eight significant bits, so this u64
+    // to f64 conversion is exact even when the rounded result is 2^63.
+    let exact_image = rounded_magnitude as f64;
+    half::bf16::from_f64(if negative { -exact_image } else { exact_image })
+}
+
 /// Finalize one wide intermediate into `prim` per the section C1 table,
 /// or trap. THE construction chokepoint for op results.
 pub fn finalize_scalar(
@@ -514,7 +547,7 @@ pub fn finalize_scalar(
         }),
         Prim::Bf16 => Bits::Bf16(match raw {
             RawScalar::Float(x) => half::bf16::from_f64(x),
-            RawScalar::Int(i) => half::bf16::from_f64(i as f64),
+            RawScalar::Int(i) => bf16_from_i64_rne(i),
         }),
         Prim::Int8 | Prim::Int16 | Prim::Int32 | Prim::Int64 => {
             let wide = int_wide(op, prim, raw)?;
@@ -853,10 +886,7 @@ pub fn finalize_tensor(
         }),
         Prim::Bf16 => Buf::Bf16(match raw {
             RawTensor::Float(v) => v.into_iter().map(half::bf16::from_f64).collect(),
-            RawTensor::Int(v) => v
-                .into_iter()
-                .map(|i| half::bf16::from_f64(i as f64))
-                .collect(),
+            RawTensor::Int(v) => v.into_iter().map(bf16_from_i64_rne).collect(),
         }),
         Prim::Int8 => Buf::I8(int_buf(op, prim, raw)?),
         Prim::Int16 => Buf::I16(int_buf(op, prim, raw)?),
@@ -1072,6 +1102,36 @@ mod tests {
             fin(Prim::Bf16, wide).unwrap().as_f64_lossy(),
             0.010009765625
         );
+    }
+
+    #[test]
+    fn int64_to_bf16_rounds_once_at_the_target_width() {
+        const LOWER: i64 = 4_611_686_018_427_387_904;
+        const MIDPOINT: i64 = 4_629_700_416_936_869_888;
+        const UPPER: i64 = 4_647_714_815_446_351_872;
+
+        assert_eq!(
+            fin_i(Prim::Bf16, MIDPOINT - 1).unwrap().as_f64_lossy(),
+            LOWER as f64
+        );
+        assert_eq!(
+            fin_i(Prim::Bf16, MIDPOINT).unwrap().as_f64_lossy(),
+            LOWER as f64,
+            "the exact midpoint ties to the even lower significand"
+        );
+        assert_eq!(
+            fin_i(Prim::Bf16, MIDPOINT + 1).unwrap().as_f64_lossy(),
+            UPPER as f64,
+            "the first integer above the midpoint must not double-round through f64"
+        );
+        assert_eq!(
+            fin_i(Prim::Bf16, -(MIDPOINT + 1)).unwrap().as_f64_lossy(),
+            -(UPPER as f64)
+        );
+
+        let tensor =
+            finalize_tensor("test_op", Prim::Bf16, RawTensor::Int(vec![MIDPOINT + 1])).unwrap();
+        assert_eq!(tensor.element_f64_lossy(0), UPPER as f64);
     }
 
     #[test]

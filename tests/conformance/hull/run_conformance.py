@@ -30,6 +30,7 @@ import concurrent.futures
 import json
 import math
 import os
+import struct
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -56,6 +57,7 @@ EVAL_BUCKETS: tuple[str, ...] = ("agree", "disagree", "ref_not_value", "compiler
 # Float comparison tolerance for the eval lane (the f32 tolerance Hull's campaign
 # pinned: run_differential_suite.ch tol = 0.01).
 EVAL_TOL = 0.01
+NumericScalar = int | float
 
 
 # ============================================================================
@@ -202,29 +204,57 @@ def classify_check_program(
 # EVAL-LANE OUTCOME. Mirrors compiler_eval_scalar + read_root_scalar +
 # differential_eval (check.ch 528-704).
 # ============================================================================
-def _read_root_scalar(root_value: object) -> float | None:
-    """The f32 view of one EvaluatedRoot's value, mirroring read_root_scalar.
-    float64/float32 read directly; an explicit JSON null is a NON-FINITE render
-    -> NaN sentinel (Some(NaN), NOT None). int64 reads as float; bool -> 1.0/0.0;
-    tensor reads data[0]. Other value types -> None."""
+def _read_numeric_value(dtype: object, value: object) -> NumericScalar | None:
+    """Mechanically decode one execution-wire v2 numeric carrier.
+
+    Rust emits the shortest decimal which round-trips at the carrier width.
+    Python's JSON reader materializes that token as binary64, so an f32 token
+    must be rounded at f32 width before comparison. This recovers the value the
+    tagged carrier denotes; it does not introduce a comparison tolerance.
+    Reduced floats are already carried as exact binary64 images. Integer tags
+    remain Python integers so their exact values never pass through binary64.
+    """
+    if dtype in (
+        "f16",
+        "float16",
+        "bf16",
+        "bfloat16",
+        "f32",
+        "float32",
+        "f64",
+        "float64",
+    ):
+        if value is None:
+            return math.nan
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        numeric = float(value)
+        if dtype in ("f32", "float32"):
+            return struct.unpack("!f", struct.pack("!f", numeric))[0]
+        return numeric
+    if dtype in ("int8", "int16", "int32", "int64"):
+        if isinstance(value, bool) or not isinstance(value, int):
+            return None
+        return value
+    if dtype == "bool" and isinstance(value, bool):
+        return 1 if value else 0
+    return None
+
+
+def _read_root_scalar(root_value: object) -> NumericScalar | None:
+    """The numeric view of one v2 EvaluatedRoot value.
+
+    Numeric scalar and tensor carriers are interpreted at their tagged dtype.
+    An explicit JSON null on a float carrier is the NON-FINITE sentinel
+    (Some(NaN), not None). Other value types return None.
+    """
     if not isinstance(root_value, dict):
         return None
     ty = root_value.get("type")
     val = root_value.get("value")
-    if ty in ("float64", "float32"):
-        if val is None:
-            return math.nan  # the compiler-null non-finite sentinel
-        if isinstance(val, (int, float)):
-            return float(val)
-        return None
-    if ty == "int64":
-        if isinstance(val, int):
-            return float(val)
-        return None
-    if ty == "bool":
-        if isinstance(val, bool):
-            return 1.0 if val else 0.0
-        return None
+    scalar = _read_numeric_value(ty, val)
+    if scalar is not None:
+        return scalar
     if ty == "tensor":
         if isinstance(val, dict):
             data = val.get("data")
@@ -242,10 +272,7 @@ def _read_root_scalar(root_value: object) -> float | None:
                     and len(values) > 0
                     and isinstance(values[0], (bool, int, float))
                 ):
-                    first = values[0]
-                    if isinstance(first, bool):
-                        return 1.0 if first else 0.0
-                    return float(first)
+                    return _read_numeric_value(data.get("dtype"), values[0])
                 return None
             if isinstance(data, list):
                 raise ValueError(
@@ -257,7 +284,7 @@ def _read_root_scalar(root_value: object) -> float | None:
     return None
 
 
-def compiler_eval_scalar(exit_code: int, stdout: str) -> float | None:
+def compiler_eval_scalar(exit_code: int, stdout: str) -> NumericScalar | None:
     """The compiler's scalar view from `chelis eval --json`, mirroring
     compiler_eval_scalar. Reads the first root's value. exit != 0, non-JSON, no
     roots[] -> None (EvalCompilerCrash on the runner side)."""
@@ -278,12 +305,14 @@ def compiler_eval_scalar(exit_code: int, stdout: str) -> float | None:
     return _read_root_scalar(first.get("value"))
 
 
-def _is_finite(x: float) -> bool:
+def _is_finite(x: NumericScalar) -> bool:
     return math.isfinite(x)
 
 
 def derive_eval_outcome(
-    reference_scalar: float | None, compiler_scalar: float | None, tol: float
+    reference_scalar: NumericScalar | None,
+    compiler_scalar: NumericScalar | None,
+    tol: float,
 ) -> tuple[str, str]:
     """PURE eval-agreement classifier, mirroring differential_eval (check.ch 696).
     Returns (bucket, detail) over EVAL_BUCKETS. NON-FINITE reconciliation:
@@ -306,13 +335,30 @@ def derive_eval_outcome(
     return "disagree", f"reference {r} vs compiler {c}"
 
 
+def _parse_reference_scalar(value: object) -> NumericScalar | None:
+    """Decode Hull's frozen scalar without erasing exact integer spellings."""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return value
+    if not isinstance(value, str):
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        try:
+            return float(value)
+        except ValueError:
+            return None
+
+
 def classify_eval_program(
     record: dict, exit_code: int, stdout: str, tol: float = EVAL_TOL
 ) -> tuple[str, str]:
     """Classify ONE eval-lane program. The reference scalar is FROZEN in the
     record (hull_eval_value); the compiler scalar is read live."""
     ref = record.get("hull_eval_value")
-    reference_scalar = None if ref is None else float(ref)
+    reference_scalar = _parse_reference_scalar(ref)
     compiler_scalar = compiler_eval_scalar(exit_code, stdout)
     return derive_eval_outcome(reference_scalar, compiler_scalar, tol)
 

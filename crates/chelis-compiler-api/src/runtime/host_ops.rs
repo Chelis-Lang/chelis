@@ -465,7 +465,7 @@ fn tensor_scalar_binop(
     scalar: &RuntimeValue,
     op: &impl Fn(f64, f64) -> f64,
 ) -> Result<RuntimeValue, String> {
-    let scalar = runtime_scalar_as_f64(scalar)
+    let scalar = runtime_scalar_as_f64_lossy(scalar)
         .ok_or_else(|| format!("numeric op expects scalar rhs, got {scalar:?}"))?;
     let wide: Vec<f64> = tensor
         .value
@@ -487,7 +487,7 @@ fn scalar_tensor_binop(
     tensor: &RuntimeTensorValue,
     op: &impl Fn(f64, f64) -> f64,
 ) -> Result<RuntimeValue, String> {
-    let scalar = runtime_scalar_as_f64(scalar)
+    let scalar = runtime_scalar_as_f64_lossy(scalar)
         .ok_or_else(|| format!("numeric op expects scalar lhs, got {scalar:?}"))?;
     let wide: Vec<f64> = tensor
         .value
@@ -644,7 +644,7 @@ pub(super) fn activation_gelu_f64(x: f64) -> f64 {
     0.5 * x * (1.0 + inner.tanh())
 }
 
-fn runtime_scalar_as_f64(value: &RuntimeValue) -> Option<f64> {
+fn runtime_scalar_as_f64_lossy(value: &RuntimeValue) -> Option<f64> {
     match value {
         RuntimeValue::Scalar(payload) => Some(payload.as_f64_lossy()),
         RuntimeValue::Bool(value) => Some(if *value { 1.0 } else { 0.0 }),
@@ -959,10 +959,11 @@ pub(super) fn float_unop_with_tensor(
     }
 }
 
-/// Coerce a scalar `RuntimeValue` to its `f64` representation for
-/// comparison with a tensor element. Returns `None` for non-scalar values.
-fn scalar_as_f64(value: &RuntimeValue) -> Option<f64> {
-    runtime_scalar_as_f64(value)
+/// Lossily coerce a scalar `RuntimeValue` to its legacy `f64`
+/// representation for comparison with a tensor element. Integer values
+/// above 2^53 cannot remain exact. Returns `None` for non-scalar values.
+fn scalar_as_f64_lossy(value: &RuntimeValue) -> Option<f64> {
+    runtime_scalar_as_f64_lossy(value)
 }
 
 pub(super) fn compare_eq(args: &[RuntimeValue]) -> Result<RuntimeValue, String> {
@@ -992,12 +993,16 @@ pub(super) fn compare_eq(args: &[RuntimeValue]) -> Result<RuntimeValue, String> 
         // Element-wise tensor-scalar equality: broadcast the scalar across
         // every element. Mirrors the build-target lane and unblocks
         // `is_nan_local`-style scalar comparisons against a tensor.
-        (Some(RuntimeValue::Tensor(tensor)), Some(scalar)) if scalar_as_f64(scalar).is_some() => {
-            let scalar_f = scalar_as_f64(scalar).expect("scalar guard");
+        (Some(RuntimeValue::Tensor(tensor)), Some(scalar))
+            if scalar_as_f64_lossy(scalar).is_some() =>
+        {
+            let scalar_f = scalar_as_f64_lossy(scalar).expect("scalar guard");
             tensor_compare_scalar(tensor, scalar_f, |a, b| a == b).map(RuntimeValue::Tensor)
         }
-        (Some(scalar), Some(RuntimeValue::Tensor(tensor))) if scalar_as_f64(scalar).is_some() => {
-            let scalar_f = scalar_as_f64(scalar).expect("scalar guard");
+        (Some(scalar), Some(RuntimeValue::Tensor(tensor)))
+            if scalar_as_f64_lossy(scalar).is_some() =>
+        {
+            let scalar_f = scalar_as_f64_lossy(scalar).expect("scalar guard");
             tensor_compare_scalar(tensor, scalar_f, |a, b| a == b).map(RuntimeValue::Tensor)
         }
         other => Err(format!("eq/neq expect matching scalar args, got {other:?}")),
@@ -1032,14 +1037,18 @@ pub(super) fn ordered_compare(
         }
         // Element-wise tensor-scalar ordering: broadcast the scalar across
         // every element. The result is a `tensor[D, bool]` mask.
-        (Some(RuntimeValue::Tensor(tensor)), Some(scalar)) if scalar_as_f64(scalar).is_some() => {
-            let scalar_f = scalar_as_f64(scalar).expect("scalar guard");
+        (Some(RuntimeValue::Tensor(tensor)), Some(scalar))
+            if scalar_as_f64_lossy(scalar).is_some() =>
+        {
+            let scalar_f = scalar_as_f64_lossy(scalar).expect("scalar guard");
             tensor_compare_scalar(tensor, scalar_f, cmp).map(RuntimeValue::Tensor)
         }
-        (Some(scalar), Some(RuntimeValue::Tensor(tensor))) if scalar_as_f64(scalar).is_some() => {
+        (Some(scalar), Some(RuntimeValue::Tensor(tensor)))
+            if scalar_as_f64_lossy(scalar).is_some() =>
+        {
             // `cmp(scalar, tensor[i])` — flip the comparator so the helper
             // can keep using `cmp(tensor[i], scalar)` internally.
-            let scalar_f = scalar_as_f64(scalar).expect("scalar guard");
+            let scalar_f = scalar_as_f64_lossy(scalar).expect("scalar guard");
             tensor_compare_scalar(tensor, scalar_f, |t, s| cmp(s, t)).map(RuntimeValue::Tensor)
         }
         other => Err(format!(

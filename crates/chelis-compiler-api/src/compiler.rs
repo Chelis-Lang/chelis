@@ -4322,7 +4322,7 @@ dims = (rank(x), shape(x, 1), numel(x))
                 "x".to_string(),
                 crate::schema::TensorValue {
                     shape: vec![2, 3],
-                    data: crate::schema::TensorElements::from_f64_vec(vec![0.0; 6]),
+                    data: crate::schema::TensorElements::F32(vec![0.0; 6]),
                 },
             )]),
         })
@@ -4350,6 +4350,37 @@ dims = (rank(x), shape(x, 1), numel(x))
                 .any(|root| root.name.as_deref() == Some("dims.2")
                     && matches!(root.value, ExecutionValue::Int64 { value: 6 }))
         );
+    }
+
+    #[test]
+    fn eval_rejects_tagged_binding_dtype_substitution() {
+        let err = eval(EvalRequest {
+            source_kind: SourceKind::Surf,
+            source: "x: tensor[1, f32] = x\n".to_string(),
+            bindings: BTreeMap::from([(
+                "x".to_string(),
+                crate::schema::TensorValue {
+                    shape: vec![1],
+                    data: crate::schema::TensorElements::F16(vec![1.5]),
+                },
+            )]),
+        })
+        .expect_err("a tagged f16 binding must not be contextually cast to f32");
+        let message = err
+            .errors
+            .iter()
+            .map(|diagnostic| diagnostic.message.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            message.contains("f16"),
+            "source dtype must be named: {message}"
+        );
+        assert!(
+            message.contains("f32"),
+            "declared dtype must be named: {message}"
+        );
+        assert!(message.contains("casts are explicit"), "{message}");
     }
 
     #[test]
@@ -4650,7 +4681,7 @@ b: tensor[2, f32] = b
             "a".to_string(),
             crate::schema::TensorValue {
                 shape: vec![2],
-                data: crate::schema::TensorElements::from_f64_vec(vec![1.0, 2.0]),
+                data: crate::schema::TensorElements::F32(vec![1.0, 2.0]),
             },
         );
         // `b` is intentionally omitted so that evaluating root `b` fails.
@@ -4709,7 +4740,7 @@ b: tensor[2, f32] = b
             "a".to_string(),
             crate::schema::TensorValue {
                 shape: vec![2],
-                data: crate::schema::TensorElements::from_f64_vec(vec![1.0, 2.0]),
+                data: crate::schema::TensorElements::F32(vec![1.0, 2.0]),
             },
         );
 

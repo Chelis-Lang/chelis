@@ -33,36 +33,43 @@ use chelis_types::types::Prim;
 pub struct TensorValue {
     storage: TensorStorage,
     pub shape: Vec<usize>,
+    raw_f64_ingress: bool,
 }
 
 impl TensorValue {
-    /// Rank-0 f64-storage scalar (the `eval_scalar` ingress form; a Load
-    /// with a narrower declared dtype ingress-finalizes it).
+    /// Rank-0 raw-f64 host ingress. The consuming Load freezes it at its
+    /// declared dtype; this constructor is not an already-tagged value.
     pub fn scalar(value: f64) -> Self {
         Self {
             storage: finalize_tensor("scalar", Prim::F64, RawTensor::Float(vec![value]))
                 .expect("f64 finalize is total"),
             shape: vec![],
+            raw_f64_ingress: true,
         }
     }
 
-    /// f64-storage ingress constructor (tests, data loaders, the host
-    /// boundary's f64 paths). A Load with a different declared dtype
-    /// ingress-finalizes the buffer into that dtype; see
-    /// [`ingress_to_declared`].
+    /// Raw-f64 host ingress constructor (tests and legacy data loaders). The
+    /// consuming Load freezes the buffer once at its declared dtype. Typed
+    /// wire and runtime values use [`Self::from_storage`] instead, so their
+    /// tags can never be contextually substituted.
     pub fn from_vec(shape: Vec<usize>, data: Vec<f64>) -> Self {
         assert_eq!(numel(&shape), data.len());
         Self {
             storage: finalize_tensor("from_vec", Prim::F64, RawTensor::Float(data))
                 .expect("f64 finalize is total"),
             shape,
+            raw_f64_ingress: true,
         }
     }
 
     /// Wrap finalized storage with its shape.
     pub fn from_storage(shape: Vec<usize>, storage: TensorStorage) -> Self {
         assert_eq!(numel(&shape), storage.len());
-        Self { storage, shape }
+        Self {
+            storage,
+            shape,
+            raw_f64_ingress: false,
+        }
     }
 
     /// The element dtype, from the storage variant itself.
@@ -220,23 +227,28 @@ fn default_value(ty: &TensorType) -> TensorValue {
     TensorValue::from_storage(shape, storage)
 }
 
-/// Ingress-finalize a resolved Load input into the Load's declared dtype
-/// when the provided storage carries a different one (an f64 `from_vec`
-/// fixture feeding an f32 DAG, an Int64-tagged `to_tensor` feeding an
-/// int8 Load). Float targets apply the dtype's rounding; integer/bool
-/// targets domain-check, so an out-of-range input fails loud here instead
-/// of computing on impossible values.
+/// Freeze a raw-f64 host input once at the Load's declared dtype, or accept
+/// an already-tagged value only when its storage dtype matches the Load
+/// declaration. A tagged mismatch is not an implicit cast: [04-NUM-11]
+/// requires the carrier to preserve its declared dtype exactly.
 fn ingress_to_declared(
     name: &str,
     declared: Prim,
     value: &TensorValue,
 ) -> Result<TensorValue, String> {
+    if value.raw_f64_ingress {
+        let storage = finalize_tensor("load", declared, value.storage().to_raw())
+            .map_err(|trap| format!("input `{name}`: {trap}"))?;
+        return Ok(TensorValue::from_storage(value.shape.clone(), storage));
+    }
     if value.prim() == declared {
         return Ok(value.clone());
     }
-    let storage = finalize_tensor("load", declared, value.storage().to_raw())
-        .map_err(|trap| format!("input `{name}`: {trap}"))?;
-    Ok(TensorValue::from_storage(value.shape.clone(), storage))
+    Err(format!(
+        "input `{name}` carries dtype {} but the Load declares {}; provide a value with the declared dtype (casts are explicit in Chelis)",
+        value.prim().name(),
+        declared.name()
+    ))
 }
 
 /// The chelis#680 Phase 1 residue adapter: integer-family elementwise ops
@@ -2593,6 +2605,47 @@ mod tests {
             dims: dims.iter().copied().map(DimInfo::Lit).collect(),
             precision,
         }
+    }
+
+    #[test]
+    fn load_ingress_rejects_an_already_tagged_dtype_substitution() {
+        let f16 = finalize_tensor("test", Prim::F16, RawTensor::Float(vec![1.5])).unwrap();
+        let input = TensorValue::from_storage(vec![1], f16);
+        let err = ingress_to_declared("x", Prim::F32, &input)
+            .expect_err("a tagged f16 input must not be contextually cast to f32");
+        assert!(err.contains("f16"), "source dtype must be named: {err}");
+        assert!(err.contains("f32"), "declared dtype must be named: {err}");
+
+        let int8 = finalize_tensor("test", Prim::Int8, RawTensor::Int(vec![7])).unwrap();
+        let input = TensorValue::from_storage(vec![1], int8);
+        let err = ingress_to_declared("x", Prim::Int64, &input)
+            .expect_err("a tagged int8 input must not be contextually cast to int64");
+        assert!(err.contains("int8"), "source dtype must be named: {err}");
+        assert!(err.contains("int64"), "declared dtype must be named: {err}");
+    }
+
+    #[test]
+    fn load_ingress_preserves_an_exact_dtype_match() {
+        let f32 = finalize_tensor("test", Prim::F32, RawTensor::Float(vec![1.5])).unwrap();
+        let input = TensorValue::from_storage(vec![1], f32);
+        assert_eq!(ingress_to_declared("x", Prim::F32, &input).unwrap(), input);
+    }
+
+    #[test]
+    fn load_ingress_freezes_raw_host_values_at_the_declared_dtype() {
+        let raw = TensorValue::from_vec(vec![1], vec![0.1]);
+        let frozen = ingress_to_declared("x", Prim::F32, &raw)
+            .expect("raw host ingress is finalized once at the declared dtype");
+        assert_eq!(frozen.prim(), Prim::F32);
+        assert_eq!(frozen.element_f64_lossy(0), 0.1_f32 as f64);
+
+        let err = ingress_to_declared(
+            "count",
+            Prim::Int8,
+            &TensorValue::from_vec(vec![1], vec![300.0]),
+        )
+        .expect_err("raw ingress still domain-checks at the declared dtype");
+        assert!(err.contains("numeric trap: overflow"), "{err}");
     }
 
     /// chelis#368: the `shrink` evaluator must not overflow when a
