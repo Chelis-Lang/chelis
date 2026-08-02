@@ -1,8 +1,9 @@
 # Grounded Dtype Semantics
 
-**Status:** Active phased plan. Phase 0 has landed; the §C6 covered-family
-tripwire is implemented in PR #956 pending merge; Phases 1-4 have not
-started. Tracking issue: [#729].
+**Status:** Active phased plan. Phase 0 and the PR #956 §C6 covered-family
+tripwire have landed. The typed wire-schema and registered-PyO3 entry legs
+are implemented by this change; Phases 1-4 have not started. Tracking issue:
+[#729].
 **Owning specs:** `spec/04-type-system.md` (gains an authored overflow/rounding
 section, today silent), `spec/05-risc-primitives.md` (op result semantics),
 and the audit record in `docs/investigations/numeric_audit_next_sweeps.md` /
@@ -424,7 +425,7 @@ integration tier, not the workspace loop.
 
 ## C6. The covered-family capacity ratchet and Phase 1 entry edges (added 2026-07-30)
 
-**Current enforcement status.** The PR #956 change set implements the
+**Current enforcement status.** The merged PR #956 change set implements the
 structurally enforced successor for the header and stdlib families:
 canonical C declaration identity, matched-row metadata freeze, stdlib
 ADT-shape identity AND capacity classification, non-function ABI
@@ -433,12 +434,11 @@ walked published-header set, an INVERTED type-word rule that rejects
 unrecognized arithmetic spellings rather than classifying them
 dtype-free, runtime/stdlib numeric-callable authority registration,
 public-header context invariance, both pre-ratchet citation sets frozen
-by identity, and issue-kind-aware liveness are executable tripwires. These checks are
-not active on main until that PR lands. The checked-in baseline is still explicitly
-PARTIAL: wire-schema fields and PyO3 signatures are deferred typed legs
-whose named commands below are hard Phase 1 entry edges. No sentence in
-this section upgrades those legs to covered merely because metadata says
-so.
+by identity, and issue-kind-aware liveness are executable tripwires. The
+typed wire-schema and registered-PyO3 legs in this change complete the
+pre-Phase-1 inventory with separate generated baselines and mutation
+controls. Their named commands below remain the hard Phase 1 entry evidence;
+editing coverage metadata is not a substitute for making them green.
 
 §C1-§C5 make the EXISTING numeric surface correct and make
 supported-cell semantics unavoidable at op-result construction. The
@@ -633,7 +633,7 @@ cannot exist (PR #950 red team P1-3):
 | language ops | checker acceptance derived from Table A | [#729] Phase 4 | derivation |
 | published C signatures | tokenized canonical declaration inventory over callables AND non-function data, frozen derived classification, and a mechanically enforced ban on context-varying public ABI; this detects and blocks drift but does not generate the whole header | deliverable 1; the `RuntimeDType` fragment remains [#729] Phase 3 | census/tripwire |
 | prelude / stdlib value ADTs | permanent census whose identity preserves type, variant, and numeric field shape, CLASSIFIED on the same rule as the C families: a float primitive in an untagged variant or field is a `float-carrier` seam with no citation path, an integer primitive is a `numeric-op` owing a semantic decision. A numeric field is legal Surf, so no type seal can exist for this family - the seam classification is the strongest rung available | deliverable 1 | census/tripwire |
-| binding (PyO3) signatures | rustdoc-JSON registry + typed raw-dtype mutation oracle | the named pre-Phase-1 binding leg below | census/registry (deferred until its hard-edge command is green) |
+| binding (PyO3) signatures | rustdoc-JSON registry + typed raw-dtype mutation oracle | the named pre-Phase-1 binding leg below | census/registry |
 
 [#729] can close Phase 4 while chelis#893 remains open. Any
 C6-complete claim at the [#729] close is therefore scoped to the
@@ -651,9 +651,9 @@ Deliverables, with phase homes:
    `preprocessed_headers -> header_rows`; the stdlib legs use exactly
    `stdlib_rows -> scan_deftypes + scan_exported_numeric_defs`.
    Its leg manifest is a typed executable contract, not editable
-   `covered` prose; wire-schema fields and PyO3 signatures remain named
-   deferred legs until their separate entry commands below are
-   implemented and green. The payload-work citation is chelis#893, an
+   `covered` prose. This change adds the typed wire-schema and PyO3
+   signature legs and moves them to `covered` only with their separate
+   commands and red mutations green. The payload-work citation is chelis#893, an
    ISSUE - never PR #894. Implemented command:
    `cargo nextest run -p chelis-cli --test capacity_census_tripwire --no-fail-fast`
    is the authoritative covered-family oracle (regeneration: the same
@@ -677,19 +677,22 @@ Deliverables, with phase homes:
    is version 2, and its serialized `legs` value must equal the
    executable manifest exactly. Editing
    `spec/design/capacity_census.json` therefore cannot promote a
-   deferred leg. The two Phase 1 entry commitments are:
+   deferred leg. The completed typed Phase 1 entry commitments are:
 
-   | typed leg | owner | artifact | required enumerator | required command and expected success | standing mutations |
-   |---|---|---|---|---|---|
-   | `wire-schema-numeric-fields` | `chelis#729 Phase 1 entry hard edge` | `crates/chelis-compiler-api/src/schema.rs public serde/JsonSchema graph` | `PLANNED: typed public wire-schema numeric-field enumerator` | `PLANNED: cargo nextest run -p chelis-compiler-api --test capacity_census_wire`; `PLANNED: exact schema rows match a reviewed baseline` | `PLANNED: add/remove public f64 serde/JsonSchema field`; `CURRENT DEFERRED PROBE: ReviewerWireNumericProbe leaves this census unchanged` |
-   | `binding-raw-dtype-params` | `chelis#729 Phase 1 entry hard edge` | `crates/chelis-python/src/lib.rs registered PyO3 callables` | `PLANNED: rustdoc-JSON PyO3 callable-signature enumerator` | `PLANNED: cargo nextest run -p chelis-python --test capacity_census_bindings`; `PLANNED: exact binding rows match a reviewed baseline` | `PLANNED: add/remove registered #[pyfunction] dtype: i32 parameter`; `CURRENT DEFERRED PROBE: reviewer_raw_dtype_probe leaves this census unchanged` |
+   | typed leg | artifact | live enumerator | command and expected success | standing red mutation |
+   |---|---|---|---|---|
+   | `wire-schema-numeric-fields` | `crates/chelis-compiler-api/src/schema.rs` public serialized type graph | rustdoc JSON public schema type graph -> numeric fields | `cargo nextest run -p chelis-compiler-api --test capacity_census_wire`; `wire_schema_numeric_fields_match_the_reviewed_baseline` passes | `adding_or_removing_a_public_serialized_f64_field_changes_the_census` |
+   | `binding-raw-dtype-params` | `crates/chelis-python/src/lib.rs` registered PyO3 callables | live registered PyCFunctions/pyclasses joined to rustdoc JSON signatures | `cargo nextest run -p chelis-python --test capacity_census_bindings`; `registered_pyfunctions_match_the_reviewed_rustdoc_signatures` passes | `a_registered_pyfunction_with_a_raw_dtype_parameter_is_rejected` |
 
-   The `PLANNED:` strings are deliberately non-success states. Before
-   Phase 1, each owning change replaces every one with a live enumerator,
-   executable command, exact success condition, and mutation test in
-   `coverage_manifest()`; runs that command green; and updates this table
-   in the same change set. Merely deleting `PLANNED:` or moving a record
-   between vectors does not satisfy the edge.
+   Each leg is a live enumerator, executable command, exact success
+   condition, and mutation test recorded in `coverage_manifest()`. The wire
+   baseline freezes public serialized numeric carrier shapes only. In
+   particular, post-PR-#956 root structures are census inputs, not authority
+   for root identity, manifest order, dotted-root expansion, `requires_main`,
+   artifact routing, or `HostReason`; those remain chelis#912 work. The PyO3
+   leg freezes registered signatures and rejects raw dtype ingress; it does
+   not inspect or redesign private runtime-dtype decoding. `KNOWN_TAGS` and
+   Deep stamping are outside this task entirely.
 
    Acceptance requirements, from the 2026-07-30 and 2026-07-31
    adversarial passes. Each bullet names the standing control that turns
@@ -972,10 +975,11 @@ sanctioned disposition is present. The registry can validate an
 the right OP atom. CODEOWNERS routes that judgment but does not enforce
 owner approval.
 
-The baseline is also deliberately PARTIAL until its wire and PyO3 hard
-edges land, and a genuinely new surface kind remains invisible until an
-enumerator is added. For both covered and deferred families, the design
-criterion is CHEAPEST-PASSING-ACTION: an agent blocked by the tripwire
+The three baselines cover the currently named families after the wire and
+PyO3 hard edges land; a genuinely new surface kind remains invisible until
+an enumerator is added. For every covered family (and any future explicitly
+deferred family), the design criterion is CHEAPEST-PASSING-ACTION: an agent
+blocked by the tripwire
 must find that redesign/removal, extending the enumerator, or authoring
 the exact spec entry is the cheapest sanctioned action. The TODO flow,
 seam/metadata freeze, typed legs, liveness, mutation controls, and
@@ -1044,7 +1048,7 @@ numeric form is type-unrepresentable.
 | §C4 root envelope rule 7 | [05-OBS-6] authored 2026-07-31; full implementation acceptance pending [#1023] | spec/05 [05-OBS-6] + `faithful_observation.md` + this doc + the release roadmap + root-boundary corpus, one change set |
 | §C5 kernel signatures | Phase 2 | this doc |
 | §C6 covered-family census + tripwire | at PR #956 landing: canonical row identities, complete derived classifications, stdlib ADT shapes AND their capacity flags, callable-to-`[05-OP-N]` registrations, public-header context invariance, and BOTH grandfathered identity sets (seam and plain) all freeze; unflagged rows append by live ISSUE citation, new numeric callables also author/register a new OP atom, and FLAGGED rows are shrink-only (a shape-validated maintainer override is the sole human exception) | this doc + the executable tripwire/registry artifacts and their positive/negative controls, same change set |
-| §C6 deferred wire/PyO3 leg state | before Phase 1 entry, only when each named enumerator and mutation command below is green; an editable baseline field cannot change coverage | this doc + the typed leg manifest + owning enumerator/oracle in the same change set |
+| §C6 typed wire/PyO3 leg state | before Phase 1 entry: frozen when each named enumerator and mutation command is green; an editable baseline field cannot change coverage | this doc + the typed leg manifest + owning enumerator/oracle in the same change set |
 | capability table schema | Phase 4 entry | `capability_table.md` (the owning doc) + this doc |
 
 "Frozen" means: later phases may ADD consumers but not reinterpret
@@ -1135,22 +1139,14 @@ on the existing corpus with the fallback removed.
 ## Phase 1 - the semantics module, the storage decision, eval adoption
 
 **You inherit:** Phase 0's detectors (your acceptance instruments),
-Part I as the spec of what to build, and the §C6 capacity census +
-tripwire (PR #956), whose landing PRECEDES this phase (the roadmap's
-Wave 3 entry gate). The checked-in baseline is your starting inventory
-and is EXPLICITLY PARTIAL by the typed `coverage_manifest()` contract:
-header exports/layouts and stdlib ADTs/defs are covered; wire and PyO3
-are deferred. Phase 1 ENTRY therefore has two deliverables zero, before
-the storage decision touches `schema.rs`: implement the
-`wire-schema-numeric-fields` enumerator and make
-`cargo nextest run -p chelis-compiler-api --test capacity_census_wire`
-meet the exact §C6 success condition and mutations; implement the
-`binding-raw-dtype-params` rustdoc-JSON enumerator and make
-`cargo nextest run -p chelis-python --test capacity_census_bindings`
-meet its exact condition and mutations. Then replace the corresponding
-`PLANNED:` manifest fields and move each leg to `covered` in the same
-change set. "Every public numeric channel" is the state AFTER those
-commands are green, never the baseline's claim.
+Part I as the spec of what to build, and the complete §C6 capacity census
+and tripwire: PR #956's header/stdlib legs plus the typed wire-schema and
+registered-PyO3 legs landed before this phase (the roadmap's Wave 3 entry
+gate). Before touching the storage decision, re-run
+`capacity_census_tripwire`, `capacity_census_wire`, and
+`capacity_census_bindings`; all three must be green against the current
+surface. "Every public numeric channel" is the state those executable
+enumerators establish, never a prose or baseline claim.
 
 **You deliver:**
 

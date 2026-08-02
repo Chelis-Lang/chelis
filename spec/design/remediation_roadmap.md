@@ -121,13 +121,12 @@ at) is hard-gated on byte-identical rendering.
 module + storage decision; the kernel split + prove; backend adoption),
 validated by everything Waves 0-2 built. Entry gate: the [#729] §C6
 covered-family capacity census/tripwire (PR #956) lands BEFORE Phase 1
-entry. The baseline is explicitly partial: Phase 1 entry ALSO requires
-the typed wire-schema and PyO3 binding leg commands in [#729] §C6 to be
-implemented and green (`capacity_census_wire` and
-`capacity_census_bindings`, respectively), and Phase 1 re-derives its
-§C3 layer set from that completed census. These are explicit thick-red
-DAG edges below, not editable coverage metadata (PR #950 red teams P2-4
-and re-P1). The exact PR #956 follow-up
+entry. This change completes the two typed hard edges: the wire-schema and
+PyO3 binding commands in [#729] §C6 are implemented with reviewed baselines
+and red mutations (`capacity_census_wire` and `capacity_census_bindings`,
+respectively). Phase 1 re-derives its §C3 layer set from that completed
+census. These remain explicit thick-red DAG edges below, not editable
+coverage metadata (PR #950 red teams P2-4 and re-P1). The exact PR #956 follow-up
 `6ddf1a72d6dea6770a330d5c2ef3b8fa7d023c43` is part of that entry gate:
 conditional macro definitions taint their connected local-include
 component, bare and pointer-sized integer C callables classify
@@ -183,7 +182,7 @@ row (SATISFIED 2026-07-17: PR #760 merged, [#719] closed - the row may
 be authored when Phase 3 arrives); downstream of the set, [#754]'s
 ecosystem gate is hard-gated on [#732] Phase 2's byte-identical
 rendering. [#729] Phase 1 is separately hard-gated on PR #956's
-covered-family tripwire and both typed deferred-leg oracles. Not drawn
+covered-family tripwire and both typed-leg oracles. Not drawn
 (for legibility): OpenSpec remains [#733]'s planning workflow while a
 pinned Buoy shell and one-way Chelis adapter provide enforcement.
 The graph is acyclic. Node colors
@@ -247,8 +246,8 @@ flowchart TB
     direction TB
     n729p0["P0 · domain checker + #687 oracle lanes (LANDED)"]:::w0
     n729c6["C6 · covered-family capacity tripwire<br/>(PR #956)"]:::w3
-    n729c6wire["C6 · wire-schema enumerator<br/>+ mutation oracle"]:::w3
-    n729c6binding["C6 · PyO3 enumerator<br/>+ mutation oracle"]:::w3
+    n729c6wire["C6 · wire-schema enumerator<br/>+ mutation oracle (THIS CHANGE)"]:::w3
+    n729c6binding["C6 · PyO3 enumerator<br/>+ mutation oracle (THIS CHANGE)"]:::w3
     n729p1["P1 · semantics module + storage decision<br/>+ eval adoption"]:::w3
     n729p2["P2 · kernel split + traps + prove"]:::w3
     n729p3["P3 · C backend adoption<br/>+ generated observation"]:::w3

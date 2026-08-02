@@ -9,17 +9,18 @@ supposedly unwound - and must be re-adjudicated (un-censused, or re-cited to
 live work) rather than grandfathered forever. This is the known-red-ledger
 pattern of the chelis#732 Phase 2 oracle, applied to the census.
 
-Manual gate (needs network + gh auth, so it does not run in default CI):
+Network gate (run by the change-gated and nightly liveness jobs; it also runs
+manually at release cuts and during red-team passes):
 
     .venv/bin/python scripts/capacity_census_liveness.py
 
 Success is exit 0 with the final line `CAPACITY CENSUS LIVENESS: PASS`.
 Run it at every release cut and in red-team passes over the numeric surface.
-Every sanctioned citation names at least one chelis#N reference (the Rust
-tripwire enforces this, maintainer-override included), so every row is
-liveness-bound: the seam rows cite chelis#893 and the plain baseline rows
-cite chelis#729, which means the entire baseline comes up for
-re-adjudication when the plan closes.
+Every sanctioned citation names at least one chelis#N reference, so every row
+is liveness-bound: the seam rows cite chelis#893 and the plain baselines cite
+chelis#729, which means the entire inventory comes up for re-adjudication when
+the plan closes. The typed wire and PyO3 baselines carry one top-level citation
+that is inherited by every generated row.
 """
 
 from __future__ import annotations
@@ -34,7 +35,11 @@ from pathlib import Path
 from typing import Any, Callable
 
 REPO = "Chelis-Lang/chelis"
-CENSUS_REL = Path("spec/design/capacity_census.json")
+CENSUS_RELS = (
+    Path("spec/design/capacity_census.json"),
+    Path("spec/design/capacity_census_wire.json"),
+    Path("spec/design/capacity_census_bindings.json"),
+)
 ISSUE_REF = re.compile(r"chelis#(\d+)")
 
 
@@ -68,6 +73,29 @@ def extract_issue_refs(citation: str) -> list[int]:
         if number not in seen:
             seen.append(number)
     return seen
+
+
+def load_census_rows(
+    root: Path,
+    census_rels: tuple[Path, ...] = CENSUS_RELS,
+) -> list[dict]:
+    """Load all frozen census rows and apply a baseline-level citation.
+
+    The original covered-family baseline stores citations per row because
+    individual legacy seams can have different owners. The generated typed
+    baselines share one citation, kept at the top level so generator output is
+    entirely structural. A row-level citation, when present, remains stronger.
+    """
+    rows: list[dict] = []
+    for census_rel in census_rels:
+        payload = json.loads((root / census_rel).read_text())
+        inherited_citation = str(payload.get("citation", "")).strip()
+        for source_row in payload["rows"]:
+            row = dict(source_row)
+            if not str(row.get("citation", "")).strip() and inherited_citation:
+                row["citation"] = inherited_citation
+            rows.append(row)
+    return rows
 
 
 def adjudicate(rows: list[dict], issues: dict[int, IssueRecord]) -> list[str]:
@@ -136,8 +164,7 @@ def fetch_issue(
 
 def main() -> int:
     root = Path(__file__).resolve().parent.parent
-    census_path = root / CENSUS_REL
-    rows = json.loads(census_path.read_text())["rows"]
+    rows = load_census_rows(root)
 
     numbers = sorted({n for row in rows for n in extract_issue_refs(str(row.get("citation", "")))})
     resolved = {n: fetch_issue(n) for n in numbers}

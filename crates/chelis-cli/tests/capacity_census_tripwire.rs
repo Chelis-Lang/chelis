@@ -442,43 +442,38 @@ fn coverage_manifest() -> CoverageManifest {
                 expected_success: "capacity_census_matches_public_surface passes".to_string(),
                 mutations: vec!["exported_public_numeric_stdlib_def_is_enumerated".to_string()],
             },
-        ],
-        deferred: vec![
-            DeferredLeg {
+            CoveredLeg {
                 leg: "wire-schema-numeric-fields".to_string(),
-                owner: "chelis#729 Phase 1 entry hard edge".to_string(),
-                artifact: "crates/chelis-compiler-api/src/schema.rs public serde/JsonSchema graph"
+                artifact: "crates/chelis-compiler-api/src/schema.rs public serialized type graph"
                     .to_string(),
-                enumerator: "PLANNED: typed public wire-schema numeric-field enumerator"
+                enumerator: "rustdoc JSON public schema type graph -> wire-schema numeric fields"
                     .to_string(),
-                command:
-                    "PLANNED: cargo nextest run -p chelis-compiler-api --test capacity_census_wire"
-                        .to_string(),
-                expected_success: "PLANNED: exact schema rows match a reviewed baseline"
+                command: "cargo nextest run -p chelis-compiler-api --test capacity_census_wire"
+                    .to_string(),
+                expected_success: "wire_schema_numeric_fields_match_the_reviewed_baseline passes"
                     .to_string(),
                 mutations: vec![
-                    "PLANNED: add/remove public f64 serde/JsonSchema field".to_string(),
-                    "CURRENT DEFERRED PROBE: ReviewerWireNumericProbe leaves this census unchanged"
+                    "adding_or_removing_a_public_serialized_f64_field_changes_the_census"
                         .to_string(),
                 ],
             },
-            DeferredLeg {
+            CoveredLeg {
                 leg: "binding-raw-dtype-params".to_string(),
-                owner: "chelis#729 Phase 1 entry hard edge".to_string(),
                 artifact: "crates/chelis-python/src/lib.rs registered PyO3 callables".to_string(),
-                enumerator: "PLANNED: rustdoc-JSON PyO3 callable-signature enumerator".to_string(),
-                command:
-                    "PLANNED: cargo nextest run -p chelis-python --test capacity_census_bindings"
+                enumerator:
+                    "live registered PyCFunctions/pyclasses joined to rustdoc JSON signatures"
                         .to_string(),
-                expected_success: "PLANNED: exact binding rows match a reviewed baseline"
+                command: "cargo nextest run -p chelis-python --test capacity_census_bindings"
                     .to_string(),
-                mutations: vec![
-                    "PLANNED: add/remove registered #[pyfunction] dtype: i32 parameter".to_string(),
-                    "CURRENT DEFERRED PROBE: reviewer_raw_dtype_probe leaves this census unchanged"
+                expected_success:
+                    "registered_pyfunctions_match_the_reviewed_rustdoc_signatures passes"
                         .to_string(),
+                mutations: vec![
+                    "a_registered_pyfunction_with_a_raw_dtype_parameter_is_rejected".to_string(),
                 ],
             },
         ],
+        deferred: vec![],
     }
 }
 
@@ -2070,10 +2065,9 @@ fn check_against_baseline_with(
     if baseline.version != 2 || baseline.legs != expected_manifest {
         problems.push(format!(
             "INVALID COVERAGE MANIFEST: baseline version/legs do not equal \
-             the fixed executable `coverage_manifest`; deferred \
-             wire-schema-numeric-fields and binding-raw-dtype-params cannot \
-             become covered without a live enumerator, command, expected \
-             success, and mutation_oracle. expected={expected_manifest:?}, \
+             the fixed executable `coverage_manifest`; a leg cannot become \
+             covered without a live enumerator, command, expected success, \
+             and mutation_oracle. expected={expected_manifest:?}, \
              actual(version={}, legs={:?})",
             baseline.version, baseline.legs
         ));
