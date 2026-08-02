@@ -455,13 +455,11 @@ fn check_deep(ctx: &Context<'_>, source: &str) -> Vec<Violation> {
 fn deep_module_less_leaves(exprs: &[deep::Expr]) -> HashSet<String> {
     let mut out = HashSet::new();
     for expr in exprs {
-        let Some(list) = as_list(expr) else {
+        let Some((tag, _, children)) = deep_node_parts(expr) else {
             continue;
         };
-        if matches!(
-            list.tag(),
-            Some(DeepTag::Deftype) | Some(DeepTag::Typealias)
-        ) && let Some(name) = children(list).first().and_then(sym_str)
+        if matches!(tag, DeepTag::Deftype | DeepTag::Typealias)
+            && let Some(name) = children.first().and_then(sym_str)
         {
             out.insert(type_leaf(name).to_string());
         }
@@ -478,42 +476,42 @@ fn collect_deep_catalog(exprs: &[deep::Expr]) -> Catalog {
 }
 
 fn collect_deep_decls_catalog(expr: &deep::Expr, module: Option<String>, out: &mut Catalog) {
-    let Some(list) = as_list(expr) else {
+    let Some((tag, _, children)) = deep_node_parts(expr) else {
         return;
     };
-    match list.tag() {
-        Some(DeepTag::Module) => {
-            let module_name = children(list).first().and_then(sym_str).map(str::to_string);
-            for child in children(list).iter().skip(1) {
+    match tag {
+        DeepTag::Module => {
+            let module_name = children.first().and_then(sym_str).map(str::to_string);
+            for child in children.iter().skip(1) {
                 collect_deep_decls_catalog(child, module_name.clone(), out);
             }
         }
         // Every `deftype`/`typealias` records that its module declares a
         // local type of that leaf (CR-9); opaque deftypes also enter the
         // leaf/module indices.
-        Some(DeepTag::Deftype) => {
-            if let Some(name) = children(list).first().and_then(sym_str) {
+        DeepTag::Deftype => {
+            if let Some(name) = children.first().and_then(sym_str) {
                 out.declared_leaves
                     .insert((module.clone(), type_leaf(name).to_string()));
                 // CR3: only catalog opaque types from a named module --
                 // a module-less @opaque is a checker declaration error
                 // and would collapse distinct module-less files under
                 // the shared `None` key. See the Surf collector.
-                if meta_bool(list, "opaque")
+                if meta_bool(expr, "opaque")
                     && let Some(module) = module.as_deref()
                 {
                     out.insert_opaque(name, module);
                 }
             }
         }
-        Some(DeepTag::Typealias) => {
-            if let Some(name) = children(list).first().and_then(sym_str) {
+        DeepTag::Typealias => {
+            if let Some(name) = children.first().and_then(sym_str) {
                 out.declared_leaves
                     .insert((module, type_leaf(name).to_string()));
             }
         }
         _ => {
-            for child in children(list) {
+            for child in children {
                 collect_deep_decls_catalog(child, module.clone(), out);
             }
         }
@@ -528,19 +526,19 @@ fn check_deep_expr(
     module: Option<&str>,
     out: &mut Vec<Violation>,
 ) {
-    let Some(list) = as_list(expr) else {
+    let Some((tag, _, children)) = deep_node_parts(expr) else {
         return;
     };
-    match list.tag() {
-        Some(DeepTag::Module) => {
-            let module_name = children(list).first().and_then(sym_str);
-            for child in children(list).iter().skip(1) {
+    match tag {
+        DeepTag::Module => {
+            let module_name = children.first().and_then(sym_str);
+            for child in children.iter().skip(1) {
                 check_deep_expr(ctx, source, child, catalog, module_name, out);
             }
             return;
         }
-        Some(DeepTag::Record) => {
-            if let Some(name) = children(list).first().and_then(sym_str)
+        DeepTag::Record => {
+            if let Some(name) = children.first().and_then(sym_str)
                 && is_outside_opaque_module(name, module, catalog)
             {
                 push_violation(
@@ -554,8 +552,8 @@ fn check_deep_expr(
                 );
             }
         }
-        Some(DeepTag::Cast) => {
-            if let Some(target) = children(list).get(1).and_then(type_name_from_type_expr)
+        DeepTag::Cast => {
+            if let Some(target) = children.get(1).and_then(type_name_from_type_expr)
                 && is_outside_opaque_module(target, module, catalog)
             {
                 push_violation(
@@ -569,9 +567,9 @@ fn check_deep_expr(
                 );
             }
         }
-        Some(DeepTag::RecordUpdate) => {
-            let typed_target = type_name_from_meta(list)
-                .or_else(|| children(list).first().and_then(type_name_from_meta_expr));
+        DeepTag::RecordUpdate => {
+            let typed_target = type_name_from_meta(expr)
+                .or_else(|| children.first().and_then(type_name_from_meta_expr));
             if let Some(target) = typed_target
                 && is_outside_opaque_module(target, module, catalog)
             {
@@ -596,7 +594,7 @@ fn check_deep_expr(
         }
         _ => {}
     }
-    for child in children(list) {
+    for child in children {
         check_deep_expr(ctx, source, child, catalog, module, out);
     }
 }
@@ -694,25 +692,18 @@ fn line_col(source: &str, offset: usize) -> (usize, usize) {
     (line, col)
 }
 
-fn as_list(expr: &deep::Expr) -> Option<&deep::List> {
+fn deep_node_parts(expr: &deep::Expr) -> Option<(DeepTag, &deep::MetaMap, &[deep::Expr])> {
     match expr {
-        deep::Expr::List(list, _) => Some(list),
+        deep::Expr::Node(node, _) => Some((node.tag(), node.meta(), node.children_slice())),
+        deep::Expr::List(list, _) => {
+            let tag = list.tag()?;
+            let meta = match list.elements.get(1)? {
+                deep::Expr::Map(meta, _) => meta,
+                _ => return None,
+            };
+            Some((tag, meta, list.elements.get(2..)?))
+        }
         _ => None,
-    }
-}
-
-fn meta(list: &deep::List) -> Option<&deep::MetaMap> {
-    match list.elements.get(1)? {
-        deep::Expr::Map(map, _) => Some(map),
-        _ => None,
-    }
-}
-
-fn children(list: &deep::List) -> &[deep::Expr] {
-    if list.elements.len() <= 2 {
-        &[]
-    } else {
-        &list.elements[2..]
     }
 }
 
@@ -723,16 +714,17 @@ fn sym_str(expr: &deep::Expr) -> Option<&str> {
     }
 }
 
-fn meta_bool(list: &deep::List, key: &str) -> bool {
-    meta(list).is_some_and(|map| {
+fn meta_bool(expr: &deep::Expr, key: &str) -> bool {
+    deep_node_parts(expr).is_some_and(|(_, map, _)| {
         map.entries.iter().any(|(entry_key, value)| {
             entry_key == key && matches!(value, deep::Expr::Atom(deep::Atom::Bool(true), _))
         })
     })
 }
 
-fn type_name_from_meta(list: &deep::List) -> Option<&str> {
-    let value = meta(list)?
+fn type_name_from_meta(expr: &deep::Expr) -> Option<&str> {
+    let (_, meta, _) = deep_node_parts(expr)?;
+    let value = meta
         .entries
         .iter()
         .find_map(|(key, value)| (key == "type").then_some(value))?;
@@ -741,7 +733,7 @@ fn type_name_from_meta(list: &deep::List) -> Option<&str> {
 
 fn type_name_from_meta_expr(expr: &deep::Expr) -> Option<&str> {
     match expr {
-        deep::Expr::List(list, _) => type_name_from_meta(list),
+        deep::Expr::Node(..) | deep::Expr::List(..) => type_name_from_meta(expr),
         deep::Expr::MetaExpr(meta, _) => meta
             .entries
             .iter()
@@ -752,13 +744,13 @@ fn type_name_from_meta_expr(expr: &deep::Expr) -> Option<&str> {
 }
 
 fn type_name_from_type_expr(expr: &deep::Expr) -> Option<&str> {
-    let list = as_list(expr)?;
-    match list.tag() {
-        Some(DeepTag::TPrim) => children(list).first().and_then(sym_str),
-        Some(DeepTag::TAdt) => children(list)
+    let (tag, _, children) = deep_node_parts(expr)?;
+    match tag {
+        DeepTag::TPrim => children.first().and_then(sym_str),
+        DeepTag::TAdt => children
             .iter()
             .find_map(sym_str)
-            .or_else(|| children(list).first().and_then(sym_str)),
+            .or_else(|| children.first().and_then(sym_str)),
         _ => None,
     }
 }
@@ -840,7 +832,8 @@ def bad(x: f32) -> Probability = Probability { value: x }
 (module {} whale.types
   (deftype {opaque: true} Probability () (variant {} Probability (field {} value (t-prim {} f32)))))
 (module {} agent.strategy
-  (record-update {type: (t-adt {} Probability)} (var {} p) (kv {} value (lit {type: (t-prim {} f32)} 2.0))))
+  (def {} update
+    (record-update {type: (t-adt {} Probability)} (var {} p) (kv {} value (lit {type: (t-prim {} f32)} 2.0)))))
 "#;
         let violations = run_deep(src);
         assert_eq!(violations.len(), 1);
@@ -853,7 +846,8 @@ def bad(x: f32) -> Probability = Probability { value: x }
 (module {} whale.types
   (deftype {opaque: true} Probability () (variant {} Probability (field {} value (t-prim {} f32)))))
 (module {} agent.strategy
-  (record-update {} (var {} p) (kv {} value (lit {type: (t-prim {} f32)} 2.0))))
+  (def {} update
+    (record-update {} (var {} p) (kv {} value (lit {type: (t-prim {} f32)} 2.0)))))
 "#;
         let violations = run_deep(src);
         assert_eq!(violations.len(), 1);
@@ -870,7 +864,7 @@ def bad(x: f32) -> Probability = Probability { value: x }
 (module {} whale.types
   (deftype {opaque: true} Probability () (variant {} Probability (field {} value (t-prim {} f32)))))
 (module {} agent.strategy
-  (cast {} (var {} x) (t-adt {} Probability)))
+  (def {} coerce (cast {} (var {} x) (t-adt {} Probability))))
 "#;
         let violations = run_deep(src);
         assert_eq!(violations.len(), 1);
@@ -1368,7 +1362,7 @@ def bad(x: f32) -> Secret = Secret { value: x }
         let deep = temp.path().join("opaque.dp");
         std::fs::write(
             &deep,
-            "(module {} victim.types\n  (deftype {opaque: true} Token () (variant {} Token (field {} value (t-prim {} f32)))))\n(module {} agent.strategy\n  (record {} Token (kv {} value (lit {type: (t-prim {} f32)} 1.0))))\n",
+            "(module {} victim.types\n  (deftype {opaque: true} Token () (variant {} Token (field {} value (t-prim {} f32)))))\n(module {} agent.strategy\n  (def {} forge (record {} Token (kv {} value (lit {type: (t-prim {} f32)} 1.0)))))\n",
         )
         .expect("write Deep source");
         assert_eq!(

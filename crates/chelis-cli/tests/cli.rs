@@ -7497,7 +7497,7 @@ fn lint_deep_semicolon_allow_suppresses_diagnostic() {
     let path = dir.path().join("allow.dp");
     write_file(
         &path,
-        "; chelis-lint: allow deep-user-symbol-charset\n(def {} my-func (params {}) (lit {} 1))\n",
+        "; chelis-lint: allow deep-user-symbol-charset\n(def {} my-func (lit {} 1))\n",
     );
 
     Command::cargo_bin("chelis")

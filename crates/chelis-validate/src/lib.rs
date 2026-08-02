@@ -117,41 +117,47 @@ fn is_linker_format_name(name: &str) -> bool {
     matches!(stem.rsplit_once("__"), Some((module, _)) if !module.is_empty())
 }
 
+fn deep_node_parts(expr: &chelis_deep::ast::Expr) -> Option<(DeepTag, &[chelis_deep::ast::Expr])> {
+    match expr {
+        chelis_deep::ast::Expr::Node(node, _) => Some((node.tag(), node.children_slice())),
+        chelis_deep::ast::Expr::List(list, _) => Some((list.tag()?, list.elements.get(2..)?)),
+        _ => None,
+    }
+}
+
+fn deep_symbol(expr: &chelis_deep::ast::Expr) -> Option<&str> {
+    match expr {
+        chelis_deep::ast::Expr::Atom(chelis_deep::ast::Atom::Name(name), _) => Some(name),
+        _ => None,
+    }
+}
+
 /// Return the first top-level declaration binding name that matches the
 /// reef linker's reserved internal-name format (RFC v5), or `None`.
 fn first_forged_linker_name(exprs: &[chelis_deep::ast::Expr]) -> Option<String> {
-    fn binding_name(list: &chelis_deep::ast::List) -> Option<&str> {
-        // `defmacro` is compiler-internal pre-expansion syntax outside the
-        // vocabulary and stays symbol-headed (raw-string boundary).
+    fn binding_name(expr: &chelis_deep::ast::Expr) -> Option<&str> {
+        let (tag, children) = deep_node_parts(expr)?;
         let is_binding_decl = matches!(
-            list.tag(),
-            Some(DeepTag::Deftype | DeepTag::Def | DeepTag::Defsig | DeepTag::Typealias)
-        ) || list.unknown_tag_symbol() == Some("defmacro");
+            tag,
+            DeepTag::Deftype | DeepTag::Def | DeepTag::Defsig | DeepTag::Typealias
+        );
         if !is_binding_decl {
             return None;
         }
-        match list.elements.get(2) {
-            Some(chelis_deep::ast::Expr::Atom(chelis_deep::ast::Atom::Name(name), _)) => {
-                Some(name.as_str())
-            }
-            _ => None,
-        }
+        children.first().and_then(deep_symbol)
     }
     fn walk(expr: &chelis_deep::ast::Expr) -> Option<String> {
-        let chelis_deep::ast::Expr::List(list, _) = expr else {
-            return None;
-        };
-        let is_module = list.tag() == Some(DeepTag::Module);
-        if is_module {
+        let (tag, children) = deep_node_parts(expr)?;
+        if tag == DeepTag::Module {
             // Descend into a module wrapper's children.
-            for child in list.elements.iter().skip(3) {
+            for child in children.iter().skip(1) {
                 if let Some(found) = walk(child) {
                     return Some(found);
                 }
             }
             return None;
         }
-        if let Some(name) = binding_name(list)
+        if let Some(name) = binding_name(expr)
             && is_linker_format_name(name)
         {
             return Some(name.to_string());
@@ -166,26 +172,20 @@ fn first_forged_linker_name(exprs: &[chelis_deep::ast::Expr]) -> Option<String> 
 /// `None` if every wrapper name is unique. Mirrors the checker's
 /// `detect_module_reopens` (RFC v4b, RT-1 F2).
 fn first_reopened_module(exprs: &[chelis_deep::ast::Expr]) -> Option<String> {
-    fn module_name(list: &chelis_deep::ast::List) -> Option<&str> {
-        if list.tag() != Some(DeepTag::Module) {
+    fn module_name(expr: &chelis_deep::ast::Expr) -> Option<&str> {
+        let (tag, children) = deep_node_parts(expr)?;
+        if tag != DeepTag::Module {
             return None;
         }
-        match list.elements.get(2) {
-            Some(chelis_deep::ast::Expr::Atom(chelis_deep::ast::Atom::Name(name), _)) => {
-                Some(name.as_str())
-            }
-            _ => None,
-        }
+        children.first().and_then(deep_symbol)
     }
     fn walk(
         expr: &chelis_deep::ast::Expr,
         prefix: Option<&str>,
         seen: &mut std::collections::HashSet<String>,
     ) -> Option<String> {
-        let chelis_deep::ast::Expr::List(list, _) = expr else {
-            return None;
-        };
-        let name = module_name(list)?;
+        let (_, children) = deep_node_parts(expr)?;
+        let name = module_name(expr)?;
         let key = match prefix {
             Some(p) => format!("{p}.{name}"),
             None => name.to_string(),
@@ -193,7 +193,7 @@ fn first_reopened_module(exprs: &[chelis_deep::ast::Expr]) -> Option<String> {
         if !seen.insert(key.clone()) {
             return Some(key);
         }
-        for child in list.elements.iter().skip(3) {
+        for child in children.iter().skip(1) {
             if let Some(dup) = walk(child, Some(&key), seen) {
                 return Some(dup);
             }
@@ -214,34 +214,15 @@ fn first_reopened_module(exprs: &[chelis_deep::ast::Expr]) -> Option<String> {
 /// functions by arity, type, or rank, so multiple signatures for one name have
 /// no valid dispatch meaning.
 fn first_duplicate_defsig(exprs: &[chelis_deep::ast::Expr]) -> Option<String> {
-    fn tag(list: &chelis_deep::ast::List) -> Option<DeepTag> {
-        list.tag()
-    }
-
-    fn symbol_child(list: &chelis_deep::ast::List, index: usize) -> Option<&str> {
-        match list.elements.get(index) {
-            Some(chelis_deep::ast::Expr::Atom(chelis_deep::ast::Atom::Name(name), _)) => {
-                Some(name.as_str())
-            }
-            _ => None,
-        }
-    }
-
     fn walk(
         expr: &chelis_deep::ast::Expr,
         seen: &mut std::collections::HashSet<String>,
     ) -> Option<String> {
-        let chelis_deep::ast::Expr::List(list, _) = expr else {
-            return None;
-        };
-        match tag(list) {
-            Some(DeepTag::Module) => list
-                .elements
-                .iter()
-                .skip(3)
-                .find_map(|child| walk(child, seen)),
-            Some(DeepTag::Defsig) => {
-                let name = symbol_child(list, 2)?;
+        let (tag, children) = deep_node_parts(expr)?;
+        match tag {
+            DeepTag::Module => children.iter().skip(1).find_map(|child| walk(child, seen)),
+            DeepTag::Defsig => {
+                let name = children.first().and_then(deep_symbol)?;
                 if seen.insert(name.to_string()) {
                     None
                 } else {

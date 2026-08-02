@@ -193,7 +193,7 @@ fn validate_surf_fails_on_non_canonical_source() {
 fn validate_deep_fails_on_deep_lint_violation() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("bad_symbol.dp");
-    fs::write(&path, "(def {} my-func (params {}) (lit {} 1))\n").unwrap();
+    fs::write(&path, "(def {} my-func (lit {} 1))\n").unwrap();
     Command::cargo_bin("chelis")
         .expect("binary")
         .args(["validate", "--deep", path.to_str().unwrap()])
@@ -210,7 +210,7 @@ fn validate_deep_fails_on_opaque_domain_construction() {
     let path = dir.path().join("opaque_forge.dp");
     fs::write(
         &path,
-        "(module {} whale.types\n  (deftype {opaque: true} Probability () (variant {} Probability (field {} value (t-prim {} f32)))))\n(module {} agent.strategy\n  (record {} Probability (kv {} value (lit {type: (t-prim {} f32)} 2.0))))\n",
+        "(module {} whale.types\n  (deftype {opaque: true} Probability () (variant {} Probability (field {} value (t-prim {} f32)))))\n(module {} agent.strategy\n  (def {} forge\n    (record {} Probability (kv {} value (lit {type: (t-prim {} f32)} 2.0)))))\n",
     )
     .unwrap();
     Command::cargo_bin("chelis")
@@ -229,7 +229,7 @@ fn validate_deep_fails_on_untyped_opaque_record_update() {
     let path = dir.path().join("opaque_untyped_update.dp");
     fs::write(
         &path,
-        "(module {} whale.types\n  (deftype {opaque: true} Probability () (variant {} Probability (field {} value (t-prim {} f32)))))\n(module {} agent.strategy\n  (record-update {} (var {} p) (kv {} value (lit {type: (t-prim {} f32)} 2.0))))\n",
+        "(module {} whale.types\n  (deftype {opaque: true} Probability () (variant {} Probability (field {} value (t-prim {} f32)))))\n(module {} agent.strategy\n  (def {} update\n    (record-update {} (var {} p) (kv {} value (lit {type: (t-prim {} f32)} 2.0)))))\n",
     )
     .unwrap();
     Command::cargo_bin("chelis")
@@ -245,7 +245,7 @@ fn validate_deep_fails_on_untyped_opaque_record_update() {
 fn validate_deep_bypass_emits_warning_on_stderr() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("bad_symbol.dp");
-    fs::write(&path, "(def {} my-func (params {}) (lit {} 1))\n").unwrap();
+    fs::write(&path, "(def {} my-func (lit {} 1))\n").unwrap();
     Command::cargo_bin("chelis")
         .expect("binary")
         .args([
@@ -269,7 +269,7 @@ fn validate_deep_allows_lint_directive_without_format_failure() {
     fs::write(
         &path,
         format!(
-            "; chelis-lint: allow no-em-dash-in-public-strings\n(def {{}} message (params {{}}) (lit {{}} \"one {dash} two\"))\n"
+            "; chelis-lint: allow no-em-dash-in-public-strings\n(def {{}} message (lit {{}} \"one {dash} two\"))\n"
         ),
     )
     .unwrap();
@@ -287,7 +287,7 @@ fn validate_deep_allows_lint_directive_without_format_failure() {
 fn validate_deep_still_rejects_missing_final_newline_after_directive_stripping() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("no_newline.dp");
-    fs::write(&path, "(def {} value (params {}) (lit {} 1))").unwrap();
+    fs::write(&path, "(def {} value (lit {} 1))").unwrap();
     Command::cargo_bin("chelis")
         .expect("binary")
         .args(["validate", "--deep", path.to_str().unwrap()])
@@ -302,7 +302,7 @@ fn validate_deep_still_rejects_missing_final_newline_after_directive_stripping()
 fn validate_deep_still_rejects_crlf_after_directive_stripping() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("crlf.dp");
-    fs::write(&path, "(def {} value (params {}) (lit {} 1))\r\n").unwrap();
+    fs::write(&path, "(def {} value (lit {} 1))\r\n").unwrap();
     Command::cargo_bin("chelis")
         .expect("binary")
         .args(["validate", "--deep", path.to_str().unwrap()])

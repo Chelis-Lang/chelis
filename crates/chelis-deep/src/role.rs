@@ -317,8 +317,11 @@ pub fn arity_contract(tag: DeepTag) -> AritySpec {
         DeepTag::Unquote => Fixed(1), // expr
         DeepTag::Splice => Fixed(1),  // expr
 
-        DeepTag::Params => AtLeast(0),  // param names
-        DeepTag::Bind => AtLeast(2),    // name-value pairs (even count)
+        DeepTag::Params => AtLeast(0), // param names
+        // An empty bind is the canonical representation of a let with no
+        // local bindings. Pair parity is a structural validation rule, not a
+        // minimum-arity rule.
+        DeepTag::Bind => AtLeast(0),    // zero or more name-value pairs
         DeepTag::Kv => Fixed(2),        // key, value
         DeepTag::Effects => AtLeast(0), // effect names
         DeepTag::Resource => Fixed(1),  // device name
