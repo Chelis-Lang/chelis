@@ -12,6 +12,14 @@ dialects. Legacy v0.18 aliases SHALL be accepted only by
 - **WHEN** canonical source is formatted twice
 - **THEN** both outputs are byte-identical and parse through the canonical parser
 
+#### Scenario: Property delimiters make outer binary grouping redundant
+
+- **WHEN** a property has the binary precondition `where x <= 1:`
+- **THEN** the canonical formatter preserves that spelling without adding an outer grouping pair
+- **AND** the canonical parser rejects the former alias `where (x <= 1):`
+- **AND** the v0.18 migration parser rewrites that alias to the canonical spelling
+- **AND** meaningful operand grouping such as `where (x + 1) <= y:` remains accepted
+
 #### Scenario: Legacy alias requires migration
 
 - **WHEN** source uses a colon result annotation or omitted nullary `()`

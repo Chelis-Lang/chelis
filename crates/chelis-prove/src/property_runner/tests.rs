@@ -18,7 +18,7 @@ def bond_value(n: int32, coupon: f64, discount: f64) -> f64 =
   if (n <= 0) then cast(1.0, f64)
   else coupon + discount * bond_value(n - 1, coupon, discount)
 @property bond_value_nonnegative forall(n: int32, coupon: f64, discount: f64)
-where (n >= 0), (coupon >= cast(0.0, f64)), (discount >= cast(0.0, f64)):
+where n >= 0, coupon >= cast(0.0, f64), discount >= cast(0.0, f64):
   (bond_value(n, coupon, discount) >= cast(0.0, f64))
 ";
 
@@ -145,7 +145,7 @@ def bond_value(n: int32, coupon: f64, discount: f64) -> f64 =
   if (n <= 0) then cast(1.0, f64)
   else coupon + discount * recur_alias(n - 1, coupon, discount)
 @property bond_value_nonnegative forall(n: int32, coupon: f64, discount: f64)
-where (n >= 0), (coupon >= cast(0.0, f64)), (discount >= cast(0.0, f64)):
+where n >= 0, coupon >= cast(0.0, f64), discount >= cast(0.0, f64):
   (bond_value(n, coupon, discount) >= cast(0.0, f64))
 ";
     let outcomes = run_surf(source, "induction-only");
@@ -262,7 +262,7 @@ fn fuzz_counterexample_records_accepted_shrink_steps() {
 #[cfg(feature = "smt")]
 const INLINE_SCALAR_GRAD_PROPERTY: &str = "module M
 @property inline_grad_negative forall(d: f32, r: f32, g: f32)
-where (d > 0.5), (r > g), (r < 9.5):
+where d > 0.5, r > g, r < 9.5:
   (grad(fn (dd: f32, rr: f32, gg: f32) ->
     (dd / (rr - gg)), wrt=rr)(d, r, g) < 0.0)
 ";
@@ -299,7 +299,7 @@ fn scalar_grad_matches_closed_form_derivative() {
     let outcomes = run_surf(
         "module M
 @property quotient_grad_formula forall(d: f32, r: f32, g: f32)
-where (r > g):
+where r > g:
   (grad(fn (dd: f32, rr: f32, gg: f32) ->
     (dd / (rr - gg)), wrt=rr)(d, r, g)
     == (0.0 - d) / ((r - g) * (r - g)))
@@ -338,7 +338,7 @@ def quotient_value(dd: f32, rr: f32, gg: f32) -> f32 = {
   dd / denominator
 }
 @property named_grad_negative forall(d: f32, r: f32, g: f32)
-where (d > 0.5), (r > g), (r < 9.5):
+where d > 0.5, r > g, r < 9.5:
   (grad(quotient_value, wrt=rr)(d, r, g) < 0.0)
 ";
 
@@ -462,7 +462,7 @@ def h1(x: f32) -> f32 = h2(x)
 #[cfg(feature = "smt")]
 const UNSUPPORTED_SCALAR_GRAD_PROPERTY: &str = "module M
 @property exp_grad_positive forall(x: f32)
-where (x > 0.5), (x < 9.5):
+where x > 0.5, x < 9.5:
   (grad(fn (xx: f32) -> exp(xx), wrt=xx)(x) > 0.0)
 ";
 
@@ -972,7 +972,7 @@ fn assert_assumptions_are_tiered(outcome: &PropertyOutcome) -> usize {
 /// `fuzz_precondition_assumptions` discharge site: the pass carries one
 /// `preconditions:*` assumption that must be tiered.
 const GREEN_FUZZ_PRECONDITION_PROPERTY: &str = "module M
-@property guarded forall(x: f32) where (x > 0.0):
+@property guarded forall(x: f32) where x > 0.0:
   (x + 1.0 > x)
 ";
 

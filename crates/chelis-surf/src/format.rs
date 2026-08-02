@@ -170,7 +170,7 @@ pub fn format_proposition(params: &[Param], preconditions: &[Expr], body: &Expr)
         .join(", ");
     let preconds = preconditions
         .iter()
-        .map(format_expr)
+        .map(format_property_precondition)
         .collect::<Vec<_>>()
         .join(", ");
     format!("forall({params}) where {preconds}: {}", format_expr(body))
@@ -479,7 +479,7 @@ fn format_property(
         out.push_str(
             &preconditions
                 .iter()
-                .map(format_expr)
+                .map(format_property_precondition)
                 .collect::<Vec<_>>()
                 .join(", "),
         );
@@ -758,6 +758,22 @@ fn format_expr(expr: &Expr) -> String {
         Expr::Annotate(expr, ty, _) => format!("({} : {})", format_expr(expr), format_type(ty)),
         Expr::Block(bindings, body, _) if bindings.is_empty() => format_expr(body),
         Expr::Block(bindings, body, _) => format_block(bindings, body),
+    }
+}
+
+/// Format an expression in a property's comma/colon-delimited `where` list.
+///
+/// Binary expressions normally carry an outer grouping pair so they remain
+/// unambiguous in arbitrary expression positions. The property delimiters
+/// already bound the complete precondition, so that pair is redundant and is
+/// not part of canonical Surf.
+fn format_property_precondition(expr: &Expr) -> String {
+    match expr {
+        Expr::Binary(..) => {
+            let rendered = format_expr(expr);
+            rendered[1..rendered.len() - 1].to_string()
+        }
+        _ => format_expr(expr),
     }
 }
 
@@ -1393,7 +1409,7 @@ mod tests {
             property_parts("@property g forall(x: f32) where x > 0.0:\n  x <= x\n");
         assert_eq!(
             format_proposition(&params, &pre, &body),
-            "forall(x: f32) where (x > 0.0): (x <= x)"
+            "forall(x: f32) where x > 0.0: (x <= x)"
         );
         let (uparams, upre, ubody) = property_parts("@property u forall(x: f32):\n  x <= x\n");
         assert!(upre.is_empty());

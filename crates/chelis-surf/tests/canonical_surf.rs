@@ -46,6 +46,7 @@ fn canonical_declaration_and_expression_spellings_parse() {
         "result = 1.0f64",
         "result = 42i32",
         "result = 1.0f32",
+        "@property grouped_operand forall(x: int32, y: int32) where (x + 1) <= y: true",
         "tiny = 5e-324",
         "huge = 1.7976931348623157e308",
     ];
@@ -155,6 +156,7 @@ fn legacy_syntax_safe_aliases_are_rejected() {
         "result = (x, y,)",
         "def trailing_dim[a,](x) = x",
         "def trailing_effect() ! { IO, } = ()",
+        "@property grouped forall(x: int32) where (x <= 1): true",
         "result = par { f(x); g(y); }",
         "result = do { f(x); g(y); }",
         "result = None()",
@@ -272,6 +274,16 @@ fn formatting_canonical_surf_is_idempotent() {
     let source = "def identity(x: f32) -> f32 = x\nresult = Point { x, y: other }\n";
     let once = format_source(source).expect("canonical Surf formats");
     let twice = format_source(&once).expect("formatted Surf reparses");
+
+    assert_eq!(once, source);
+    assert_eq!(twice, once);
+}
+
+#[test]
+fn property_preconditions_are_formatter_fixed_points() {
+    let source = "@property bounded forall(x: int32) where x <= 1:\n  true\n";
+    let once = format_source(source).expect("canonical property parses");
+    let twice = format_source(&once).expect("formatted property reparses");
 
     assert_eq!(once, source);
     assert_eq!(twice, once);
@@ -619,7 +631,7 @@ fn opaque_invariants_properties_and_resource_effects_round_trip() {
         "type Probability =\n",
         "  | Probability { value: f32 }\n",
         "def sample(p: Probability) -> Probability ! { Random, Resource(\"gpu:0\") } = with device(\"gpu:0\") { with seed(42i64) { p } }\n",
-        "@property bounded forall(p: Probability) where (0.0 <= p.value):\n",
+        "@property bounded forall(p: Probability) where 0.0 <= p.value:\n",
         "  (p.value <= 1.0)\n",
         "  with tolerance = 0.001\n",
         "  with seed = 42i64\n",
@@ -653,6 +665,7 @@ fn explicit_v018_migration_rewrites_aliases_and_preserves_comments() {
         "legacy_number = 0x10\n",
         "legacy_float = 42f32\n",
         "nullary_constructor = None()\n",
+        "@property grouped forall(x: int32) where (x <= 1): true\n",
         "-- source footer\n",
     );
     let expected = concat!(
@@ -667,6 +680,8 @@ fn explicit_v018_migration_rewrites_aliases_and_preserves_comments() {
         "legacy_number = 16\n",
         "legacy_float = 42.0f32\n",
         "nullary_constructor = None\n",
+        "@property grouped forall(x: int32) where x <= 1:\n",
+        "  true\n",
         "-- source footer\n",
     );
 

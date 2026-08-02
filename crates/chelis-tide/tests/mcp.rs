@@ -1664,7 +1664,7 @@ def broken(x: f32) -> f32 = to_tensor([x])
 fn issue_977_tide_and_cli_match_full_constraint_sampling_evidence() {
     let source = "module Risk.Guards
 @property confidence_tail_order forall(alpha1: f32, alpha2: f32)
-where (alpha1 > 0.99), (alpha1 < alpha2), (alpha2 < 1.0):
+where alpha1 > 0.99, alpha1 < alpha2, alpha2 < 1.0:
   ((1.0 - alpha2) < (1.0 - alpha1))
 ";
     let response = handle_message(&json!({
@@ -1790,7 +1790,7 @@ fn issue_979_tide_and_cli_fail_closed_without_linked_nautilus_call() {
 
 #[test]
 fn issue_977_tide_and_cli_match_exhausted_sampling_evidence() {
-    let source = "module Risk.Guards\n@property narrow forall(x: f32)\nwhere (x > 0.99), (x < 1.0):\n  (x == x)\n";
+    let source = "module Risk.Guards\n@property narrow forall(x: f32)\nwhere x > 0.99, x < 1.0:\n  (x == x)\n";
     let response = handle_message(&json!({
         "jsonrpc":"2.0",
         "id":978,

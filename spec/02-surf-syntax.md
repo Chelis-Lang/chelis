@@ -1049,6 +1049,13 @@ PropertyDecl  <- '@property' S Ident S 'forall' S Params
 PropertyOption <- S 'with' S ('tolerance' / 'seed' / 'samples') S '=' S Expr
                 / S 'with' S 'contract' S '=' S StringLit
 
+The comma and colon delimiters bound each property precondition. A binary
+precondition therefore omits the redundant outer grouping pair used by the
+general expression printer: `where x <= 1:` is canonical. The canonical parser
+rejects `where (x <= 1):`; the v0.18 migration parser accepts that former alias
+and rewrites it to the canonical form. Parentheses that group an operand remain
+meaningful and accepted, as in `where (x + 1) <= y:`.
+
 Property contract options are proof dependencies, not labels. Before using a
 contract, the prover must bind every abstracted call to a linker-produced
 declaration from a resolved dependency package; author-written names and local

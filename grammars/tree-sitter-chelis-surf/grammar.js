@@ -152,7 +152,7 @@ module.exports = grammar({
           ":",
           seq(
             "where",
-            commaSep1(field("precondition", $.expression)),
+            commaSep1(field("precondition", $._property_precondition)),
             $._property_body_colon,
           ),
         ),
@@ -552,6 +552,44 @@ module.exports = grammar({
     infer_type: () => "_",
     qualified_type_name: ($) =>
       seq($.type_identifier, repeat(seq(".", $.type_identifier))),
+
+    // The comma/colon delimiters already group a complete property
+    // precondition. Canonical Surf therefore rejects a redundant pair around
+    // the whole clause while retaining parentheses inside the expression,
+    // such as `(a + b) < c`.
+    _property_precondition: ($) =>
+      choice(
+        $.lambda_expression,
+        $.if_expression,
+        $.match_expression,
+        $.with_handler_expression,
+        $.block_expression,
+        $.par_expression,
+        $.do_expression,
+        $.record_update_expression,
+        $.pipe_expression,
+        $.logical_or_expression,
+        $.logical_and_expression,
+        $.equality_expression,
+        $.comparison_expression,
+        $.additive_expression,
+        $.multiplicative_expression,
+        $.unary_expression,
+        $.annotation_expression,
+        $.call_expression,
+        $.field_expression,
+        $.transform_expression,
+        $.quote_expression,
+        $.identifier,
+        $.type_identifier,
+        $.number,
+        $.string,
+        $.boolean,
+        $.unit_expression,
+        $.tuple_expression,
+        $.list_expression,
+        $.record_expression,
+      ),
 
     boolean: () => choice("true", "false"),
     wildcard: () => "_",

@@ -77,6 +77,7 @@ mod tests {
             "later_pipe_argument = x |> fn (v) -> f(y, v)\n",
             "controls = \"\\u{8}\\u{1f}\\u{7f}\\u{85}\\0\\t\\n\\r\\\"\\\\\"\n",
             "@property bounded forall(x: int32) where x <= 1: true\n",
+            "@property grouped_operand forall(x: int32, y: int32) where (x + 1) <= y: true\n",
             "@property contracted forall():\n  true\n  with contract = \"std.identity\"\n",
         ] {
             assert!(
@@ -151,6 +152,7 @@ mod tests {
             "value = \"\\u{5c}\"\n",
             "value = \"\\u{41}\"\n",
             "@property bad forall():\n  true\n  with contract = contract_name\n",
+            "@property grouped forall(x: int32) where (x <= 1): true\n",
             "value = \"\\u{B}\"\n",
             "value = \"raw\tcontrol\"\n",
             "value = \"raw\u{8}control\"\n",

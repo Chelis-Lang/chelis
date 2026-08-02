@@ -45,7 +45,7 @@ The probe below checks as valid Surf on the current compiler:
 ```chelis
 module Probe.Induction
 def sum_to(n: int32) -> int32 = if (n <= 0) then 0 else (n + sum_to((n - 1)))
-@property sum_to_nonnegative forall(n: int32) where (n >= 0), (n <= 8):
+@property sum_to_nonnegative forall(n: int32) where n >= 0, n <= 8:
   (sum_to(n) >= 0)
 ```
 

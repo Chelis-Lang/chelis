@@ -1017,7 +1017,19 @@ impl Parser {
                 break;
             }
             let end = self.find_property_clause_end()?;
-            exprs.push(self.parse_expr_in_range(end, "`,` or `:` in property where clause")?);
+            let redundant_group_offset = self.redundant_property_group_offset(end);
+            let expr = self.parse_expr_in_range(end, "`,` or `:` in property where clause")?;
+            if self.mode == ParseMode::Canonical
+                && redundant_group_offset.is_some()
+                && !matches!(expr, Expr::Tuple(..))
+            {
+                return Err(ParseError::Expected {
+                    expected: "property precondition without redundant outer grouping".into(),
+                    found: "parenthesized property precondition".into(),
+                    offset: redundant_group_offset.unwrap_or_default(),
+                });
+            }
+            exprs.push(expr);
             if *self.peek() == TokenKind::Comma {
                 self.advance();
                 continue;
@@ -1032,6 +1044,38 @@ impl Parser {
             });
         }
         Ok(exprs)
+    }
+
+    /// Return the opening-parenthesis offset when one grouping pair encloses
+    /// the complete property precondition. Tuple/unit delimiters are filtered
+    /// after parsing; a pair that closes before the clause end is meaningful
+    /// operand or callee grouping and is therefore not reported here.
+    fn redundant_property_group_offset(&self, end: usize) -> Option<usize> {
+        let significant = self.tokens[self.pos..end]
+            .iter()
+            .filter(|token| !matches!(token.kind, TokenKind::Newline))
+            .collect::<Vec<_>>();
+        let first = significant.first()?;
+        if !matches!(first.kind, TokenKind::LParen)
+            || !matches!(significant.last()?.kind, TokenKind::RParen)
+        {
+            return None;
+        }
+
+        let mut depth = 0usize;
+        for (index, token) in significant.iter().enumerate() {
+            match token.kind {
+                TokenKind::LParen => depth += 1,
+                TokenKind::RParen => {
+                    depth = depth.checked_sub(1)?;
+                    if depth == 0 && index + 1 != significant.len() {
+                        return None;
+                    }
+                }
+                _ => {}
+            }
+        }
+        (depth == 0).then_some(first.span.offset)
     }
 
     fn find_property_clause_end(&self) -> Result<usize, ParseError> {
