@@ -90,6 +90,9 @@ impl SpecAtomRef {
         if !valid_atom_grammar(atom) {
             return Err(AuthorityConstructionError::MalformedAtom);
         }
+        if response_contract_atom(atom) {
+            return Err(AuthorityConstructionError::ResponseContractAtom);
+        }
         if !registered_atom(atom) {
             return Err(AuthorityConstructionError::UnknownAtom);
         }
@@ -161,8 +164,8 @@ enum RejectionCitation {
 /// ```compile_fail
 /// use chelis_types::unsupported::RejectionAuthority;
 /// let valid = chelis_types::deliberate_rejection!(
-///     "[05-UNS-1]",
-///     "reject instead of substituting",
+///     "[04-TOT-3]",
+///     "malformed typed forms are rejected",
 /// );
 /// let _ = RejectionAuthority { hint: "forged", ..valid };
 /// ```
@@ -179,7 +182,7 @@ enum RejectionCitation {
 ///
 /// ```compile_fail
 /// use chelis_types::unsupported::{RejectionAuthority, SpecAtomRef};
-/// let atom = SpecAtomRef::new("[05-UNS-1]").unwrap();
+/// let atom = SpecAtomRef::new("[04-TOT-3]").unwrap();
 /// let _ = RejectionAuthority::deliberate(atom, "forged").unwrap();
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -285,6 +288,7 @@ pub const fn __build_unimplemented_rejection(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthorityConstructionError {
     MalformedAtom,
+    ResponseContractAtom,
     UnknownAtom,
     ZeroIssue,
     UnknownIssue,
@@ -295,6 +299,9 @@ impl fmt::Display for AuthorityConstructionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let message = match self {
             Self::MalformedAtom => "malformed spec atom reference",
+            Self::ResponseContractAtom => {
+                "the unsupported-response contract does not decide a semantic case"
+            }
             Self::UnknownAtom => "spec atom is absent from the generated registry",
             Self::ZeroIssue => "issue reference must be nonzero",
             Self::UnknownIssue => "issue is absent from the live-validated manifest",
@@ -305,6 +312,22 @@ impl fmt::Display for AuthorityConstructionError {
 }
 
 impl std::error::Error for AuthorityConstructionError {}
+
+const fn response_contract_atom(atom: &str) -> bool {
+    let bytes = atom.as_bytes();
+    bytes.len() == 10
+        && bytes[0] == b'['
+        && bytes[1] == b'0'
+        && bytes[2] == b'5'
+        && bytes[3] == b'-'
+        && bytes[4] == b'U'
+        && bytes[5] == b'N'
+        && bytes[6] == b'S'
+        && bytes[7] == b'-'
+        && bytes[8] >= b'1'
+        && bytes[8] <= b'6'
+        && bytes[9] == b']'
+}
 
 const fn valid_atom_grammar(atom: &str) -> bool {
     let bytes = atom.as_bytes();
@@ -532,9 +555,9 @@ impl Unsupported {
             UnsupportedKind::Builtin(name.into()),
             format!("`chelis build --target {target}` host emission"),
             Stage::Codegen(target),
-            crate::unimplemented_rejection!(
-                705,
-                "host-only builtin; run it under `chelis eval` or `chelis test`, or rewrite the caller to use tensor-lane primitives (spec/05-risc-primitives.md §3.6; chelis#705)"
+            crate::deliberate_rejection!(
+                "[05-HOST-1]",
+                "host-runtime builders are intentionally excluded from compiled targets; run under `chelis eval` or `chelis test`, or rewrite the caller to use tensor-lane primitives"
             ),
         )
     }
@@ -577,16 +600,16 @@ mod tests {
             UnsupportedKind::Builtin("tensor_scan".to_string()),
             "`chelis build --target c` host emission",
             Stage::Codegen("c"),
-            crate::unimplemented_rejection!(
-                705,
-                "host-only builtin; run it under `chelis eval` (chelis#705)"
+            crate::deliberate_rejection!(
+                "[05-HOST-1]",
+                "host-runtime builders are intentionally excluded from compiled targets; run under `chelis eval`"
             ),
         );
         assert_eq!(
             err.to_string(),
             "unsupported: builtin `tensor_scan` on `chelis build --target c` host \
-             emission (codegen:c); unimplemented chelis#705: host-only builtin; run it \
-             under `chelis eval` (chelis#705)"
+             emission (codegen:c); deliberate [05-HOST-1]: host-runtime builders are \
+             intentionally excluded from compiled targets; run under `chelis eval`"
         );
     }
 
@@ -607,7 +630,7 @@ mod tests {
                 kind.clone(),
                 "test context",
                 Stage::Lowering,
-                crate::deliberate_rejection!("[05-UNS-1]", "hint text"),
+                crate::deliberate_rejection!("[04-TOT-3]", "hint text"),
             )
             .to_string();
             assert!(
@@ -615,7 +638,7 @@ mod tests {
                 "kind {kind:?} must render with the literal brand; got {rendered}"
             );
             assert!(
-                rendered.contains("(lowering); deliberate [05-UNS-1]: hint text"),
+                rendered.contains("(lowering); deliberate [04-TOT-3]: hint text"),
                 "kind {kind:?} must carry stage, authority, and hint; got {rendered}"
             );
         }

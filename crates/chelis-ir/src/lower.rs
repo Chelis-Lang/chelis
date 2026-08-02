@@ -7889,11 +7889,10 @@ impl LowerCtx {
                                 "the compiled-backend lowering of `reduce_window_*`",
                                 Stage::Lowering,
                                 chelis_types::unimplemented_rejection!(
-                                    725,
+                                    1058,
                                     "window and stride lists must be integer literals for the \
                                      compiled lane today; a runtime-parameterized window \
-                                     previously lowered to a silent no-op (chelis#725; \
-                                     chelis#730 census row 8)"
+                                     previously lowered to a silent no-op; chelis#1058 owns compiled runtime-list support"
                                 ),
                             );
                             raise_fatal_lowering_error(
