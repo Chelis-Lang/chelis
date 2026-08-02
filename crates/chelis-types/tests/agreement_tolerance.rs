@@ -2,7 +2,7 @@
 //! byte-equal-or-table-bounded numerical comparator.
 
 use chelis_types::agreement::{
-    AgreementError, AgreementOutcome, ArithmeticWidthStatus, OP_TOLERANCES,
+    AgreementError, AgreementOp, AgreementOutcome, ArithmeticWidthStatus, OP_TOLERANCES,
     compare_exact_observations, compare_rendered_elements, render_spec_tolerance_table,
     tolerance_for,
 };
@@ -21,26 +21,25 @@ const WIDTHS_CONFORM: ArithmeticWidthStatus = ArithmeticWidthStatus::StoredAtAri
 
 #[test]
 fn phase3_table_has_one_row_per_transcendental_and_no_blanket_fallback() {
-    let rows: Vec<(&str, u64)> = OP_TOLERANCES
+    let rows: Vec<(AgreementOp, u64)> = OP_TOLERANCES
         .iter()
         .map(|row| (row.op, row.max_ulps))
         .collect();
     assert_eq!(
         rows,
         vec![
-            ("atan", 1),
-            ("cos", 1),
-            ("exp", 1),
-            ("log", 1),
-            ("sin", 1),
-            ("sqrt", 0),
-            ("tan", 1),
+            (AgreementOp::Atan, 1),
+            (AgreementOp::Cos, 1),
+            (AgreementOp::Exp, 1),
+            (AgreementOp::Log, 1),
+            (AgreementOp::Sin, 1),
+            (AgreementOp::Sqrt, 0),
+            (AgreementOp::Tan, 1),
         ]
     );
-    assert_eq!(tolerance_for("sqrt"), 0);
-    assert_eq!(tolerance_for("exp"), 1);
-    assert_eq!(tolerance_for("add"), 0);
-    assert_eq!(tolerance_for("misspelled-exp"), 0);
+    assert_eq!(tolerance_for(AgreementOp::Sqrt), 0);
+    assert_eq!(tolerance_for(AgreementOp::Exp), 1);
+    assert_eq!(tolerance_for(AgreementOp::Exact), 0);
 }
 
 #[test]
@@ -49,18 +48,19 @@ fn one_f32_ulp_is_allowed_only_for_a_named_toleranced_op() {
     let next = f32_text(1.0_f32.to_bits() + 1);
 
     assert_eq!(
-        compare_rendered_elements("exp", Prim::F32, WIDTHS_CONFORM, &one, &next).unwrap(),
+        compare_rendered_elements(AgreementOp::Exp, Prim::F32, WIDTHS_CONFORM, &one, &next)
+            .unwrap(),
         AgreementOutcome::WithinTolerance {
             distance_ulps: 1,
             max_ulps: 1,
         }
     );
     assert!(matches!(
-        compare_rendered_elements("add", Prim::F32, WIDTHS_CONFORM, &one, &next),
+        compare_rendered_elements(AgreementOp::Exact, Prim::F32, WIDTHS_CONFORM, &one, &next),
         Err(AgreementError::UlpExceeded { max_ulps: 0, .. })
     ));
     assert!(matches!(
-        compare_rendered_elements("sqrt", Prim::F32, WIDTHS_CONFORM, &one, &next),
+        compare_rendered_elements(AgreementOp::Sqrt, Prim::F32, WIDTHS_CONFORM, &one, &next),
         Err(AgreementError::UlpExceeded { max_ulps: 0, .. })
     ));
 }
@@ -71,9 +71,17 @@ fn one_f64_ulp_passes_but_two_ulps_fail() {
     let next = f64_text(1.0_f64.to_bits() + 1);
     let next_next = f64_text(1.0_f64.to_bits() + 2);
 
-    assert!(compare_rendered_elements("sin", Prim::F64, WIDTHS_CONFORM, &one, &next).is_ok());
+    assert!(
+        compare_rendered_elements(AgreementOp::Sin, Prim::F64, WIDTHS_CONFORM, &one, &next).is_ok()
+    );
     assert!(matches!(
-        compare_rendered_elements("sin", Prim::F64, WIDTHS_CONFORM, &one, &next_next,),
+        compare_rendered_elements(
+            AgreementOp::Sin,
+            Prim::F64,
+            WIDTHS_CONFORM,
+            &one,
+            &next_next,
+        ),
         Err(AgreementError::UlpExceeded {
             distance_ulps: 2,
             max_ulps: 1,
@@ -86,7 +94,7 @@ fn one_f64_ulp_passes_but_two_ulps_fail() {
 fn integer_mismatches_never_pass_through_float_parsing() {
     assert!(matches!(
         compare_rendered_elements(
-            "exp",
+            AgreementOp::Exp,
             Prim::Int64,
             WIDTHS_CONFORM,
             "9007199254740992",
@@ -99,16 +107,25 @@ fn integer_mismatches_never_pass_through_float_parsing() {
 #[test]
 fn different_spellings_of_identical_bits_are_formatting_errors() {
     assert!(matches!(
-        compare_rendered_elements("exp", Prim::F32, WIDTHS_CONFORM, "1.0", "1.00"),
+        compare_rendered_elements(AgreementOp::Exp, Prim::F32, WIDTHS_CONFORM, "1.0", "1.00",),
         Err(AgreementError::NonCanonical { .. }) | Err(AgreementError::FormattingMismatch { .. })
     ));
 }
 
 #[test]
 fn non_finite_value_differences_are_never_tolerated() {
-    assert!(compare_rendered_elements("exp", Prim::F32, WIDTHS_CONFORM, "NaN", "NaN").is_ok());
+    assert!(
+        compare_rendered_elements(AgreementOp::Exp, Prim::F32, WIDTHS_CONFORM, "NaN", "NaN",)
+            .is_ok()
+    );
     assert!(matches!(
-        compare_rendered_elements("exp", Prim::F32, WIDTHS_CONFORM, "inf", "3.4028235e38",),
+        compare_rendered_elements(
+            AgreementOp::Exp,
+            Prim::F32,
+            WIDTHS_CONFORM,
+            "inf",
+            "3.4028235e38",
+        ),
         Err(AgreementError::NonFiniteMismatch { .. })
     ));
 }
@@ -116,7 +133,7 @@ fn non_finite_value_differences_are_never_tolerated() {
 #[test]
 fn signed_zero_differences_are_never_tolerated() {
     assert!(matches!(
-        compare_rendered_elements("sin", Prim::F32, WIDTHS_CONFORM, "-0.0", "0.0",),
+        compare_rendered_elements(AgreementOp::Sin, Prim::F32, WIDTHS_CONFORM, "-0.0", "0.0",),
         Err(AgreementError::SignedZeroMismatch { .. })
     ));
 }
@@ -136,9 +153,11 @@ fn adjacent_half_storage_values_can_witness_a_one_f32_ulp_computation_split() {
         compiled_bits: next.to_bits(),
     };
 
-    assert!(compare_rendered_elements("exp", Prim::F16, evidence, &lower, &upper).is_ok());
+    assert!(
+        compare_rendered_elements(AgreementOp::Exp, Prim::F16, evidence, &lower, &upper).is_ok()
+    );
     assert!(matches!(
-        compare_rendered_elements("sqrt", Prim::F16, evidence, &lower, &upper),
+        compare_rendered_elements(AgreementOp::Sqrt, Prim::F16, evidence, &lower, &upper),
         Err(AgreementError::UlpExceeded { max_ulps: 0, .. })
     ));
 }
@@ -149,12 +168,12 @@ fn reduced_float_mismatches_require_pre_final_f32_evidence() {
     let upper = format_element(Prim::F16, ElementRef::F16(half::f16::from_bits(0x3c01)));
 
     assert!(matches!(
-        compare_rendered_elements("exp", Prim::F16, WIDTHS_CONFORM, &lower, &upper),
+        compare_rendered_elements(AgreementOp::Exp, Prim::F16, WIDTHS_CONFORM, &lower, &upper),
         Err(AgreementError::MissingReducedFloatEvidence { .. })
     ));
     assert!(matches!(
         compare_rendered_elements(
-            "exp",
+            AgreementOp::Exp,
             Prim::F16,
             ArithmeticWidthStatus::ReducedFloatPreFinal {
                 eval_bits: 1.0_f32.to_bits(),
@@ -174,7 +193,7 @@ fn a_tolerance_cannot_hide_a_known_arithmetic_width_violation() {
 
     assert!(matches!(
         compare_rendered_elements(
-            "exp",
+            AgreementOp::Exp,
             Prim::F32,
             ArithmeticWidthStatus::Nonconforming { issue: 897 },
             &one,

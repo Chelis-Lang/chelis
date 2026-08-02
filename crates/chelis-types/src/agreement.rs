@@ -13,11 +13,45 @@ use std::fmt;
 use crate::observation::{ElementRef, format_element};
 use crate::types::Prim;
 
+/// Closed operation identity used by the [05-OBS-3] comparator.
+///
+/// Callers cannot manufacture a tolerant identity from a string. An IR
+/// consumer maps its actual operation into this enum with an exhaustive
+/// match, so adding an IR operation cannot silently inherit a tolerance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgreementOp {
+    /// Every operation without an authored tolerance row.
+    Exact,
+    Atan,
+    Cos,
+    Exp,
+    Log,
+    Sin,
+    Sqrt,
+    Tan,
+}
+
+impl AgreementOp {
+    /// Canonical operation spelling used by the spec table and diagnostics.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Exact => "exact",
+            Self::Atan => "atan",
+            Self::Cos => "cos",
+            Self::Exp => "exp",
+            Self::Log => "log",
+            Self::Sin => "sin",
+            Self::Sqrt => "sqrt",
+            Self::Tan => "tan",
+        }
+    }
+}
+
 /// One explicit [05-OBS-3] tolerance grant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OpTolerance {
-    /// Canonical Surf operation identity.
-    pub op: &'static str,
+    /// Closed operation identity.
+    pub op: AgreementOp,
     /// Maximum difference at [04-NUM-8]'s declared arithmetic width.
     pub max_ulps: u64,
 }
@@ -29,37 +63,37 @@ pub struct OpTolerance {
 /// reductions, and compound builtins do not inherit a float tolerance.
 pub const OP_TOLERANCES: &[OpTolerance] = &[
     OpTolerance {
-        op: "atan",
+        op: AgreementOp::Atan,
         max_ulps: 1,
     },
     OpTolerance {
-        op: "cos",
+        op: AgreementOp::Cos,
         max_ulps: 1,
     },
     OpTolerance {
-        op: "exp",
+        op: AgreementOp::Exp,
         max_ulps: 1,
     },
     OpTolerance {
-        op: "log",
+        op: AgreementOp::Log,
         max_ulps: 1,
     },
     OpTolerance {
-        op: "sin",
+        op: AgreementOp::Sin,
         max_ulps: 1,
     },
     OpTolerance {
-        op: "sqrt",
+        op: AgreementOp::Sqrt,
         max_ulps: 0,
     },
     OpTolerance {
-        op: "tan",
+        op: AgreementOp::Tan,
         max_ulps: 1,
     },
 ];
 
 /// Return the operation's maximum ULP difference. Absence means exactness.
-pub fn tolerance_for(op: &str) -> u64 {
+pub fn tolerance_for(op: AgreementOp) -> u64 {
     OP_TOLERANCES
         .iter()
         .find(|row| row.op == op)
@@ -287,20 +321,20 @@ pub fn compare_exact_observations(
 /// grammar. Text that parses to the same stored bits but uses another spelling
 /// is a formatting error, never a toleranced value difference.
 pub fn compare_rendered_elements(
-    op: &str,
+    op: AgreementOp,
     prim: Prim,
     width_status: ArithmeticWidthStatus,
     eval: &str,
     compiled: &str,
 ) -> Result<AgreementOutcome, AgreementError> {
     if let Ok(outcome) =
-        compare_exact_observations(&format!("{op}[{}]", prim.name()), eval, compiled)
+        compare_exact_observations(&format!("{}[{}]", op.name(), prim.name()), eval, compiled)
     {
         return Ok(outcome);
     }
     if !prim.is_float() {
         return Err(AgreementError::ExactMismatch {
-            context: format!("{op}[{}]", prim.name()),
+            context: format!("{}[{}]", op.name(), prim.name()),
             reference: eval.to_string(),
             candidate: compiled.to_string(),
         });
@@ -317,7 +351,7 @@ pub fn compare_rendered_elements(
     }
     if eval_value.is_zero() && compiled_value.is_zero() {
         return Err(AgreementError::SignedZeroMismatch {
-            op: op.to_string(),
+            op: op.name().to_string(),
             prim,
             eval: eval.to_string(),
             compiled: compiled.to_string(),
@@ -325,7 +359,7 @@ pub fn compare_rendered_elements(
     }
     if !eval_value.is_finite() || !compiled_value.is_finite() {
         return Err(AgreementError::NonFiniteMismatch {
-            op: op.to_string(),
+            op: op.name().to_string(),
             prim,
             eval: eval.to_string(),
             compiled: compiled.to_string(),
@@ -335,7 +369,7 @@ pub fn compare_rendered_elements(
     let distance_ulps = match width_status {
         ArithmeticWidthStatus::Nonconforming { issue } => {
             return Err(AgreementError::ArithmeticWidthNonconforming {
-                op: op.to_string(),
+                op: op.name().to_string(),
                 prim,
                 issue,
                 eval: eval.to_string(),
@@ -346,7 +380,7 @@ pub fn compare_rendered_elements(
             Prim::F32 | Prim::F64 => eval_value.stored_distance_ulps(compiled_value),
             Prim::F16 | Prim::Bf16 => {
                 return Err(AgreementError::MissingReducedFloatEvidence {
-                    op: op.to_string(),
+                    op: op.name().to_string(),
                     prim,
                     eval: eval.to_string(),
                     compiled: compiled.to_string(),
@@ -364,7 +398,7 @@ pub fn compare_rendered_elements(
             eval_bits,
             compiled_bits,
         } => reduced_float_pre_final_distance(
-            op,
+            op.name(),
             prim,
             eval_value,
             compiled_value,
@@ -380,7 +414,7 @@ pub fn compare_rendered_elements(
         })
     } else {
         Err(AgreementError::UlpExceeded {
-            op: op.to_string(),
+            op: op.name().to_string(),
             prim,
             distance_ulps,
             max_ulps,
@@ -564,7 +598,8 @@ pub fn render_spec_tolerance_table() -> String {
     for row in OP_TOLERANCES {
         out.push_str(&format!(
             "| `{}` | {} ULP at [04-NUM-8]'s arithmetic width | [05-OBS-3] |\n",
-            row.op, row.max_ulps
+            row.op.name(),
+            row.max_ulps
         ));
     }
     out

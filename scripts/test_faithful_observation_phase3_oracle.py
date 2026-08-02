@@ -50,6 +50,31 @@ fn hidden_value_row() {}
         violations = oracle.source_violations(sources)
         self.assertTrue(any("agreement_sqrt_is_exact" in item for item in violations), violations)
 
+    def test_empty_required_body_is_caught_by_missing_runtime_receipt(self) -> None:
+        receipts = "\n".join(
+            f"{case}\tbehavior executed"
+            for case in sorted(oracle.REQUIRED_EVAL_RECEIPTS - {"sqrt(4)"})
+        )
+        violations = oracle.receipt_violations(receipts)
+        self.assertEqual(violations, ["missing Phase 3 runtime receipt: sqrt(4)"])
+
+    def test_duplicate_or_fabricated_runtime_receipts_fail_closed(self) -> None:
+        receipts = [
+            f"{case}\tbehavior executed" for case in sorted(oracle.REQUIRED_EVAL_RECEIPTS)
+        ]
+        receipts.extend(
+            [
+                "compiled-observation-canary\tduplicate",
+                "fabricated-case\tundeclared",
+            ]
+        )
+        violations = oracle.receipt_violations("\n".join(receipts))
+        self.assertIn(
+            "Phase 3 runtime receipt must occur exactly once: compiled-observation-canary",
+            violations,
+        )
+        self.assertIn("undeclared Phase 3 runtime receipt: fabricated-case", violations)
+
 
 class ComparatorAdoptionTests(unittest.TestCase):
     def test_removed_f64_oracle_spellings_stay_absent(self) -> None:

@@ -33,6 +33,7 @@
 //! arithmetic-width oracle.
 
 use std::collections::HashMap;
+use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
@@ -40,7 +41,8 @@ use std::process::Command;
 use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType};
 use chelis_ir::eval::eval_tensor;
 use chelis_types::agreement::{
-    ArithmeticWidthStatus, compare_exact_observations, compare_rendered_elements,
+    AgreementError, AgreementOp, AgreementOutcome, ArithmeticWidthStatus,
+    compare_exact_observations, compare_rendered_elements,
 };
 use chelis_types::observation::format_element;
 use chelis_types::types::Prim;
@@ -299,17 +301,198 @@ fn arithmetic_width_status(prim: Prim) -> ArithmeticWidthStatus {
     }
 }
 
-fn assert_agrees(dag: &Dag, func_name: &str, op: &str, label: &str) -> String {
+/// Map the operation that actually produces the observed result into the
+/// comparator's closed identity. This match is deliberately exhaustive: a
+/// future RISC variant must decide whether it is exact or has numbered-spec
+/// authority for a tolerance before this harness compiles again.
+fn agreement_op_for_risc(op: &RiscOp) -> AgreementOp {
+    match op {
+        RiscOp::Atan => AgreementOp::Atan,
+        RiscOp::Cos => AgreementOp::Cos,
+        RiscOp::Exp => AgreementOp::Exp,
+        RiscOp::Log => AgreementOp::Log,
+        RiscOp::Sin => AgreementOp::Sin,
+        RiscOp::Sqrt => AgreementOp::Sqrt,
+        RiscOp::Tan => AgreementOp::Tan,
+        RiscOp::Add
+        | RiscOp::Mul
+        | RiscOp::Div
+        | RiscOp::FloorDiv
+        | RiscOp::TruncDiv
+        | RiscOp::CmpLt
+        | RiscOp::MaxElem
+        | RiscOp::Neg
+        | RiscOp::Abs
+        | RiscOp::Floor
+        | RiscOp::Ceil
+        | RiscOp::Round
+        | RiscOp::Recip
+        | RiscOp::UniformLike { .. }
+        | RiscOp::Dropout { .. }
+        | RiscOp::Sum { .. }
+        | RiscOp::MaxReduce { .. }
+        | RiscOp::MinReduce { .. }
+        | RiscOp::ProdReduce { .. }
+        | RiscOp::ReduceWindow { .. }
+        | RiscOp::ReduceWindowGrad { .. }
+        | RiscOp::Argmax { .. }
+        | RiscOp::Argmin { .. }
+        | RiscOp::Reshape { .. }
+        | RiscOp::Permute { .. }
+        | RiscOp::Expand { .. }
+        | RiscOp::OneHot { .. }
+        | RiscOp::Pad { .. }
+        | RiscOp::Shrink { .. }
+        | RiscOp::Stride { .. }
+        | RiscOp::Shape { .. }
+        | RiscOp::Const { .. }
+        | RiscOp::ConstTensor { .. }
+        | RiscOp::Load { .. }
+        | RiscOp::Store { .. }
+        | RiscOp::Copy
+        | RiscOp::Drop
+        | RiscOp::Realize
+        | RiscOp::Cast { .. }
+        | RiscOp::FusedElem { .. }
+        | RiscOp::BlasMatmul { .. }
+        | RiscOp::Gather { .. }
+        | RiscOp::ScatterAdd { .. }
+        | RiscOp::Scatter { .. }
+        | RiscOp::ScatterElements { .. } => AgreementOp::Exact,
+    }
+}
+
+fn record_phase3_receipt(case: &str, detail: &str) {
+    let Ok(path) = std::env::var("CHELIS_PHASE3_RECEIPT_PATH") else {
+        return;
+    };
+    let mut receipt = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .expect("open Phase 3 receipt file");
+    writeln!(receipt, "{case}\t{detail}").expect("append Phase 3 receipt");
+}
+
+fn compare_lanes_with<F>(
+    dag: &Dag,
+    func_name: &str,
+    label: &str,
+    compiled_transform: F,
+) -> Result<(String, AgreementOutcome), AgreementError>
+where
+    F: FnOnce(String) -> String,
+{
     let (prim, eval) = eval_last_rendered(dag);
-    let compiled = compile_and_run(dag, func_name);
-    compare_rendered_elements(op, prim, arithmetic_width_status(prim), &eval, &compiled)
-        .unwrap_or_else(|error| panic!("{label}: {error}"));
-    eval
+    let compiled = compiled_transform(compile_and_run(dag, func_name));
+    let result_op =
+        agreement_op_for_risc(&dag.nodes().last().expect("agreement DAG has a result").op);
+    let outcome = compare_rendered_elements(
+        result_op,
+        prim,
+        arithmetic_width_status(prim),
+        &eval,
+        &compiled,
+    )?;
+    record_phase3_receipt(
+        label,
+        &format!(
+            "op={}\tprim={}\teval={}\tcompiled={}",
+            result_op.name(),
+            prim.name(),
+            eval,
+            compiled
+        ),
+    );
+    Ok((eval, outcome))
+}
+
+fn assert_agrees(dag: &Dag, func_name: &str, label: &str) -> String {
+    compare_lanes_with(dag, func_name, label, |compiled| compiled)
+        .map(|(eval, _)| eval)
+        .unwrap_or_else(|error| panic!("{label}: {error}"))
 }
 
 fn assert_expected(label: &str, actual: &str, expected: &str) {
     compare_exact_observations(label, expected, actual)
         .unwrap_or_else(|error| panic!("{label}: {error}"));
+}
+
+#[test]
+fn agreement_operation_identity_is_derived_from_ir() {
+    let cases = [
+        (RiscOp::Add, AgreementOp::Exact),
+        (RiscOp::Exp, AgreementOp::Exp),
+        (RiscOp::Log, AgreementOp::Log),
+        (RiscOp::Sin, AgreementOp::Sin),
+        (RiscOp::Sqrt, AgreementOp::Sqrt),
+        (RiscOp::Cos, AgreementOp::Cos),
+        (RiscOp::Tan, AgreementOp::Tan),
+        (RiscOp::Atan, AgreementOp::Atan),
+    ];
+    for (risc, expected) in cases {
+        assert_eq!(agreement_op_for_risc(&risc), expected);
+    }
+    record_phase3_receipt("operation-identity-canary", "closed exhaustive IR mapping");
+}
+
+#[test]
+fn agreement_compiled_observation_reaches_comparator() {
+    if !gcc_available() {
+        panic!("Phase 3 compiled-observation canary requires a host C compiler");
+    }
+    let mut dag = Dag::new();
+    dag.add_node(
+        RiscOp::Const { value: 7.0 },
+        vec![],
+        scalar_ty(Prim::Int32),
+        None,
+    );
+
+    let error = compare_lanes_with(
+        &dag,
+        "test_compiled_observation_canary",
+        "compiled-observation-canary-unexpected-pass",
+        |_| "8".to_string(),
+    )
+    .expect_err("the perturbed compiled lane must reach the exact comparator");
+    assert!(matches!(
+        error,
+        AgreementError::ExactMismatch {
+            reference,
+            candidate,
+            ..
+        } if reference == "7" && candidate == "8"
+    ));
+    record_phase3_receipt(
+        "compiled-observation-canary",
+        "eval=7\tcompiled=8\terror=ExactMismatch",
+    );
+}
+
+#[test]
+fn agreement_width_nonconformance_is_behavioral() {
+    let eval = format_element(Prim::F32, ElementRef::F32(1.0));
+    let compiled = format_element(
+        Prim::F32,
+        ElementRef::F32(f32::from_bits(1.0_f32.to_bits() + 1)),
+    );
+    let error = compare_rendered_elements(
+        AgreementOp::Exp,
+        Prim::F32,
+        arithmetic_width_status(Prim::F32),
+        &eval,
+        &compiled,
+    )
+    .expect_err("a known arithmetic-width violation cannot borrow exp tolerance");
+    assert!(matches!(
+        error,
+        AgreementError::ArithmeticWidthNonconforming { issue: 897, .. }
+    ));
+    record_phase3_receipt(
+        "width-nonconformance-canary",
+        "op=exp\terror=ArithmeticWidthNonconforming\tissue=897",
+    );
 }
 
 #[test]
@@ -333,7 +516,7 @@ fn agreement_add() {
     );
     dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
 
-    let result = assert_agrees(&dag, "test_add", "add", "add(3,4)");
+    let result = assert_agrees(&dag, "test_add", "add(3,4)");
     assert_expected("add(3,4) expected", &result, "7.0");
 }
 
@@ -358,7 +541,7 @@ fn agreement_mul() {
     );
     dag.add_node(RiscOp::Mul, vec![a, b], scalar_f32(), None);
 
-    let result = assert_agrees(&dag, "test_mul", "mul", "mul(5,6)");
+    let result = assert_agrees(&dag, "test_mul", "mul(5,6)");
     assert_expected("mul(5,6) expected", &result, "30.0");
 }
 
@@ -377,7 +560,7 @@ fn agreement_neg() {
     );
     dag.add_node(RiscOp::Neg, vec![a], scalar_f32(), None);
 
-    let result = assert_agrees(&dag, "test_neg", "neg", "neg(7)");
+    let result = assert_agrees(&dag, "test_neg", "neg(7)");
     assert_expected("neg(7) expected", &result, "-7.0");
 }
 
@@ -405,7 +588,7 @@ fn agreement_relu() {
         );
         dag.add_node(RiscOp::MaxElem, vec![x, zero], scalar_f32(), None);
 
-        let result = assert_agrees(&dag, "test_relu_neg", "max_elem", "relu(-2)");
+        let result = assert_agrees(&dag, "test_relu_neg", "relu(-2)");
         assert_expected("relu(-2) expected", &result, "0.0");
     }
 
@@ -426,7 +609,7 @@ fn agreement_relu() {
         );
         dag.add_node(RiscOp::MaxElem, vec![x, zero], scalar_f32(), None);
 
-        let result = assert_agrees(&dag, "test_relu_pos", "max_elem", "relu(3)");
+        let result = assert_agrees(&dag, "test_relu_pos", "relu(3)");
         assert_expected("relu(3) expected", &result, "3.0");
     }
 }
@@ -446,7 +629,7 @@ fn agreement_exp() {
     );
     dag.add_node(RiscOp::Exp, vec![a], scalar_f32(), None);
 
-    let result = assert_agrees(&dag, "test_exp", "exp", "exp(0)");
+    let result = assert_agrees(&dag, "test_exp", "exp(0)");
     assert_expected("exp(0) expected", &result, "1.0");
 }
 
@@ -460,7 +643,7 @@ fn assert_unary_transcendental(op: RiscOp, op_name: &str, input: f64, expected: 
     dag.add_node(op, vec![argument], scalar_f32(), None);
     let func_name = format!("test_{op_name}");
     let label = format!("{op_name}({input})");
-    let result = assert_agrees(&dag, &func_name, op_name, &label);
+    let result = assert_agrees(&dag, &func_name, &label);
     assert_expected(&format!("{label} expected"), &result, expected);
 }
 
@@ -516,7 +699,7 @@ fn agreement_bf16_add() {
         None,
     );
     dag.add_node(RiscOp::Add, vec![a, b], scalar_ty(Prim::Bf16), None);
-    let result = assert_agrees(&dag, "test_bf16_add", "add", "bf16 add(1.5, 2.5)");
+    let result = assert_agrees(&dag, "test_bf16_add", "bf16 add(1.5, 2.5)");
     assert_expected("bf16 add expected", &result, "4.0");
 }
 
@@ -540,7 +723,7 @@ fn agreement_f16_add() {
         None,
     );
     dag.add_node(RiscOp::Add, vec![a, b], scalar_ty(Prim::F16), None);
-    let result = assert_agrees(&dag, "test_f16_add", "add", "f16 add(1.5, 2.5)");
+    let result = assert_agrees(&dag, "test_f16_add", "f16 add(1.5, 2.5)");
     assert_expected("f16 add expected", &result, "4.0");
 }
 
@@ -562,11 +745,6 @@ fn agreement_bf16_reduce_sum_matches_eval_exactly() {
     );
     let sum = RiscOp::sum_default(0, Prim::Bf16).expect("sum constructs");
     dag.add_node(sum, vec![c], scalar_ty(Prim::F32), None);
-    let result = assert_agrees(
-        &dag,
-        "test_bf16_sum_const",
-        "sum",
-        "bf16 reduce_sum(0.25 x 8)",
-    );
+    let result = assert_agrees(&dag, "test_bf16_sum_const", "bf16 reduce_sum(0.25 x 8)");
     assert_expected("bf16 reduce_sum expected", &result, "2.0");
 }

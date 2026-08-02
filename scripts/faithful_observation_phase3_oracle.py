@@ -25,10 +25,12 @@ agent or session may build concurrently.
 from __future__ import annotations
 
 from pathlib import Path
+import os
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from typing import Mapping
 
 
@@ -70,6 +72,9 @@ REQUIRED_TESTS = {
         "parity_comparator_rejects_non_tensor_diff",
     },
     EVAL_AGREEMENT_SOURCE: {
+        "agreement_operation_identity_is_derived_from_ir",
+        "agreement_compiled_observation_reaches_comparator",
+        "agreement_width_nonconformance_is_behavioral",
         "agreement_add",
         "agreement_mul",
         "agreement_neg",
@@ -90,6 +95,27 @@ REQUIRED_TESTS = {
         "metal_rank2_abort_stub_names_itself_in_the_emission",
         "runtime_rejected_cells_abort_with_their_pinned_diagnostics",
     },
+}
+
+REQUIRED_EVAL_RECEIPTS = {
+    "operation-identity-canary",
+    "compiled-observation-canary",
+    "width-nonconformance-canary",
+    "add(3,4)",
+    "mul(5,6)",
+    "neg(7)",
+    "relu(-2)",
+    "relu(3)",
+    "exp(0)",
+    "log(1)",
+    "sin(0)",
+    "sqrt(4)",
+    "cos(0)",
+    "tan(0)",
+    "atan(0)",
+    "bf16 add(1.5, 2.5)",
+    "f16 add(1.5, 2.5)",
+    "bf16 reduce_sum(0.25 x 8)",
 }
 
 SUITE_COMMANDS = (
@@ -212,6 +238,9 @@ def comparator_violations(sources: Mapping[Path, str] | None = None) -> list[str
         EVAL_AGREEMENT_SOURCE: (
             "compare_rendered_elements",
             "chelis_format_shortest",
+            "agreement_op_for_risc",
+            "agreement_compiled_observation_reaches_comparator",
+            "agreement_width_nonconformance_is_behavioral",
             "ArithmeticWidthStatus::Nonconforming { issue: 897 }",
         ),
         REJECTED_SOURCE: ("compare_exact_observations",),
@@ -239,9 +268,35 @@ def comparator_violations(sources: Mapping[Path, str] | None = None) -> list[str
     return violations
 
 
-def run_command(label: str, command: tuple[str, ...]) -> bool:
+def receipt_violations(receipt_text: str) -> list[str]:
+    observed: list[str] = []
+    malformed: list[str] = []
+    for line in receipt_text.splitlines():
+        case, separator, detail = line.partition("\t")
+        if not separator or not case or not detail:
+            malformed.append(line)
+            continue
+        observed.append(case)
+
+    violations = [f"malformed Phase 3 runtime receipt: {line!r}" for line in malformed]
+    observed_set = set(observed)
+    for case in sorted(REQUIRED_EVAL_RECEIPTS - observed_set):
+        violations.append(f"missing Phase 3 runtime receipt: {case}")
+    for case in sorted(observed_set - REQUIRED_EVAL_RECEIPTS):
+        violations.append(f"undeclared Phase 3 runtime receipt: {case}")
+    for case in sorted({case for case in observed if observed.count(case) != 1}):
+        violations.append(f"Phase 3 runtime receipt must occur exactly once: {case}")
+    return violations
+
+
+def run_command(
+    label: str,
+    command: tuple[str, ...],
+    *,
+    env: Mapping[str, str] | None = None,
+) -> bool:
     print(f"\n== {label} ==", flush=True)
-    completed = subprocess.run(command, cwd=REPO_ROOT, check=False)
+    completed = subprocess.run(command, cwd=REPO_ROOT, check=False, env=env)
     if completed.returncode != 0:
         print(
             f"PHASE 3 ORACLE: FAIL ({label} exited {completed.returncode})",
@@ -265,8 +320,22 @@ def main() -> int:
         print("PHASE 3 ORACLE: FAIL: cargo is required", file=sys.stderr)
         return 1
 
-    for label, command in SUITE_COMMANDS:
+    for label, command in SUITE_COMMANDS[:-1]:
         if not run_command(label, command):
+            return 1
+
+    label, command = SUITE_COMMANDS[-1]
+    with tempfile.TemporaryDirectory(prefix="chelis-phase3-receipts-") as temp_dir:
+        receipt_path = Path(temp_dir) / "eval-agreement.tsv"
+        env = os.environ.copy()
+        env["CHELIS_PHASE3_RECEIPT_PATH"] = str(receipt_path)
+        if not run_command(label, command, env=env):
+            return 1
+        receipt_text = receipt_path.read_text(encoding="utf-8") if receipt_path.exists() else ""
+        violations = receipt_violations(receipt_text)
+        if violations:
+            for violation in violations:
+                print(f"PHASE 3 ORACLE: FAIL: {violation}", file=sys.stderr)
             return 1
 
     print("\nPHASE 3 ORACLE: PASS")
