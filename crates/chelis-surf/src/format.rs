@@ -100,19 +100,24 @@ fn first_ambiguous_comment_offset(decls: &[Decl], comments: &[Comment]) -> Optio
             .iter()
             .filter(|comment| comment.span.offset > span.offset && comment.span.offset < span.end())
         {
-            let block_span = match decl {
+            let block = match decl {
                 Decl::FunDef {
-                    body: Expr::Block(_, _, block_span),
+                    body: Expr::Block(bindings, body, block_span),
                     ..
                 }
                 | Decl::LetDef {
-                    value: Expr::Block(_, _, block_span),
+                    value: Expr::Block(bindings, body, block_span),
                     ..
-                } => Some(*block_span),
+                } => Some((bindings.as_slice(), body.as_ref(), *block_span)),
                 _ => None,
             };
-            if block_span.is_some_and(|block| {
-                comment.span.offset > block.offset && comment.span.offset < block.end()
+            if block.is_some_and(|(bindings, body, block_span)| {
+                comment_is_at_preservable_block_boundary(
+                    bindings,
+                    body,
+                    block_span,
+                    comment.span.offset,
+                )
             }) {
                 continue;
             }
@@ -120,6 +125,26 @@ fn first_ambiguous_comment_offset(decls: &[Decl], comments: &[Comment]) -> Optio
         }
     }
     None
+}
+
+fn comment_is_at_preservable_block_boundary(
+    bindings: &[LetBinding],
+    body: &Expr,
+    block_span: chelis_deep::Span,
+    offset: usize,
+) -> bool {
+    if offset <= block_span.offset || offset >= block_span.end() {
+        return false;
+    }
+    for binding in bindings {
+        let item_start = let_pattern_span(&binding.pattern).offset;
+        let value_end = expression_span(&binding.value).end();
+        if offset > item_start && offset < value_end {
+            return false;
+        }
+    }
+    let body_span = expression_span(body);
+    !(offset > body_span.offset && offset < body_span.end())
 }
 
 fn format_decls_with_comments(decls: &[Decl], comments: &[Comment]) -> String {

@@ -1238,15 +1238,117 @@ fn cmd_migrate_surf(
     }
 
     if inplace {
-        for (path, source, migrated) in migrations {
-            if source != migrated {
-                fs::write(&path, migrated)?;
-            }
-        }
+        persist_migrations_atomically(&migrations)?;
     } else if let Some((_, _, migrated)) = migrations.into_iter().next() {
         print!("{migrated}");
     }
     Ok(())
+}
+
+struct PendingMigrationWrite {
+    path: PathBuf,
+    staged: Option<tempfile::NamedTempFile>,
+    backup: Option<tempfile::NamedTempFile>,
+}
+
+/// Stage every changed file beside its destination before replacing any file.
+/// Each per-file replacement is atomic; if a later replacement reports an
+/// error, already-replaced files are restored from their staged backups before
+/// the command returns the error.
+fn persist_migrations_atomically(
+    migrations: &[(PathBuf, String, String)],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut pending = migrations
+        .iter()
+        .filter(|(_, source, migrated)| source != migrated)
+        .map(|(path, source, migrated)| prepare_migration_write(path, source, migrated))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    for index in 0..pending.len() {
+        let path = pending[index].path.clone();
+        let Some(staged) = pending[index].staged.take() else {
+            return Err(format!("{} had no prepared migration file", path.display()).into());
+        };
+        if let Err(error) = staged.persist(&path) {
+            let rollback_errors = rollback_committed_migrations(&mut pending, index);
+            let rollback = if rollback_errors.is_empty() {
+                String::new()
+            } else {
+                format!("; rollback failures: {}", rollback_errors.join("; "))
+            };
+            return Err(format!(
+                "failed to atomically replace {}: {error}{rollback}",
+                path.display()
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
+
+fn prepare_migration_write(
+    path: &Path,
+    source: &str,
+    migrated: &str,
+) -> Result<PendingMigrationWrite, Box<dyn std::error::Error>> {
+    let metadata = fs::metadata(path)?;
+    if metadata.permissions().readonly() {
+        return Err(format!(
+            "{} is read-only; no migration files were changed",
+            path.display()
+        )
+        .into());
+    }
+    fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .map_err(|error| format!("{} is not writable: {error}", path.display()))?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("{} has no parent directory", path.display()))?;
+
+    let staged = prepare_sibling_temp(parent, migrated.as_bytes(), metadata.permissions())?;
+    let backup = prepare_sibling_temp(parent, source.as_bytes(), metadata.permissions())?;
+    Ok(PendingMigrationWrite {
+        path: path.to_path_buf(),
+        staged: Some(staged),
+        backup: Some(backup),
+    })
+}
+
+fn prepare_sibling_temp(
+    parent: &Path,
+    contents: &[u8],
+    permissions: fs::Permissions,
+) -> Result<tempfile::NamedTempFile, Box<dyn std::error::Error>> {
+    let mut file = tempfile::Builder::new()
+        .prefix(".chelis-migrate-")
+        .tempfile_in(parent)?;
+    file.write_all(contents)?;
+    file.flush()?;
+    file.as_file().sync_all()?;
+    file.as_file().set_permissions(permissions)?;
+    Ok(file)
+}
+
+fn rollback_committed_migrations(
+    pending: &mut [PendingMigrationWrite],
+    committed: usize,
+) -> Vec<String> {
+    let mut errors = Vec::new();
+    for migration in pending[..committed].iter_mut().rev() {
+        let Some(backup) = migration.backup.take() else {
+            errors.push(format!(
+                "{} had no prepared backup",
+                migration.path.display()
+            ));
+            continue;
+        };
+        if let Err(error) = backup.persist(&migration.path) {
+            errors.push(format!("{}: {error}", migration.path.display()));
+        }
+    }
+    errors
 }
 
 /// Parse the `--target` flag for `chelis eval` into a `Target` enum value.

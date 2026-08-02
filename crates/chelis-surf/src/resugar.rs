@@ -121,16 +121,17 @@ pub fn resugar_program(exprs: &[DeepExpr]) -> Result<Vec<Decl>, ResugarError> {
 ///
 /// Semantic metadata (`type`, `eff`, `wrt`, property contracts, and the
 /// semantic members of the validated `surf_*` namespace) is retained. The
-/// non-semantic `surf_literal_style` and `surf_binding_type` origin markers are
-/// consumed while choosing the Surf AST and then ignored by this Deep-side
-/// comparison only when their values and placements satisfy the closed surface
-/// metadata contract. Malformed or misplaced markers remain visible. Exact
-/// `type` entries on a `def`, its function value, and its parameters are also
-/// removed when the immediately preceding matching `defsig` already carries
-/// the same types. Canonical Surf deliberately folds that Deep pair into one
-/// typed declaration, so desugaring necessarily recreates those redundant
-/// annotations. A disagreement is retained and therefore still fails the
-/// oracle.
+/// non-semantic `surf_literal_style` and `surf_binding_type` origin markers,
+/// plus reconstructible default `surf_path` and single-member
+/// `surf_dim_group_size` markers, are consumed while choosing the Surf AST and
+/// then ignored by this Deep-side comparison only when their values and
+/// placements satisfy the closed surface metadata contract. Non-default,
+/// malformed, or misplaced markers remain visible. Exact `type` entries on a
+/// `def`, its function value, and its parameters are also removed when the
+/// immediately preceding matching `defsig` already carries the same types.
+/// Canonical Surf deliberately folds that Deep pair into one typed declaration,
+/// so desugaring necessarily recreates those redundant annotations. A
+/// disagreement is retained and therefore still fails the oracle.
 ///
 /// This narrow normalization is intentionally not
 /// [`chelis_deep::ast::strip_metadata`], which would erase language-relevant
@@ -534,13 +535,9 @@ fn normalize_roundtrip_expr_with_context(
                 )
             })
             .collect();
-        return rebuild_node_like(
-            expr,
-            node.tag,
-            normalize_roundtrip_meta(node.meta, Some(node.tag), context),
-            children,
-            node.span,
-        );
+        let meta = normalize_roundtrip_meta(node.meta, Some(node.tag), context);
+        let meta = strip_reconstructible_surface_metadata(node.tag, node.children, meta);
+        return rebuild_node_like(expr, node.tag, meta, children, node.span);
     }
     match expr {
         DeepExpr::Atom(..) => expr.clone(),
@@ -735,6 +732,25 @@ fn is_valid_surface_origin_marker(
         }
         _ => false,
     }
+}
+
+fn strip_reconstructible_surface_metadata(
+    tag: DeepTag,
+    children: &[DeepExpr],
+    mut meta: MetaMap,
+) -> MetaMap {
+    meta.entries.retain(|(key, value)| match key.as_str() {
+        "surf_path" if matches!(tag, DeepTag::Module | DeepTag::Import | DeepTag::ImportAll) => {
+            children.first().and_then(atom_name).is_none_or(|lowered| {
+                !matches!(value, DeepExpr::Atom(Atom::Str(path), _) if path == &default_surface_path(lowered))
+            })
+        }
+        "surf_dim_group_size" if tag == DeepTag::Defdim => {
+            !matches!(value, DeepExpr::Atom(Atom::Int(1), _))
+        }
+        _ => true,
+    });
+    meta
 }
 
 fn is_roundtrip_derived_key(key: &str) -> bool {
@@ -1078,7 +1094,11 @@ fn resugar_surface_path(node: &NodeRef<'_>, index: usize) -> Result<String, Resu
         return Ok(path.to_string());
     }
     let lowered = name_child(node, index)?;
-    Ok(lowered
+    Ok(default_surface_path(lowered))
+}
+
+fn default_surface_path(lowered: &str) -> String {
+    lowered
         .split('.')
         .map(|component| {
             let mut chars = component.chars();
@@ -1088,7 +1108,7 @@ fn resugar_surface_path(node: &NodeRef<'_>, index: usize) -> Result<String, Resu
             }
         })
         .collect::<Vec<_>>()
-        .join("."))
+        .join(".")
 }
 
 fn surf_group_size(node: &NodeRef<'_>) -> Result<usize, ResugarError> {

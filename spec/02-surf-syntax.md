@@ -1110,7 +1110,7 @@ TypeAtom      <- 'tensor' '[' S DimList S ',' S PrecType S ']'
                / '(' S TypeExpr S ')'
                / TypeName TypeArgs?
 
-TypeArgs      <- '[' S (TypeExpr (S ',' S TypeExpr)*)? S ']'
+TypeArgs      <- '[' S TypeExpr (S ',' S TypeExpr)* S ']'
 
 # Bare or module-qualified type name (`Mode`, `Demo.Dropout.Mode`).
 TypeName      <- TypeIdent ('.' TypeIdent)*

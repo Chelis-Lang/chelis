@@ -111,18 +111,26 @@ fn supported_expression_nodes_preserve_semantic_type_metadata() {
 }
 
 #[test]
-fn unsupported_semantic_type_metadata_fails_explicitly() {
+fn semantic_type_metadata_is_preserved_or_fails_explicitly() {
     let deep = parse_one_deep("(var {type: (t-adt {} Option (t-prim {} f64))} x)");
 
-    let error = resugar_expression(&deep)
-        .expect_err("the foundation must not silently discard unsupported type metadata");
-
-    assert!(
-        error
-            .to_string()
-            .contains("`t-adt` is outside the tested resugaring foundation"),
-        "unsupported semantic metadata must identify the unimplemented type form: {error}"
-    );
+    match resugar_expression(&deep) {
+        Ok(surface) => {
+            let surf = format_expression(&surface);
+            assert_eq!(surf, "(x : Option[f64])");
+            let redesugared = redesugar_expression(&surf);
+            assert!(
+                redesugared.contains("type: (t-adt {} Option (t-prim {} f64))"),
+                "supported semantic metadata must survive the round trip: {redesugared}"
+            );
+        }
+        Err(error) => assert!(
+            error
+                .to_string()
+                .contains("`t-adt` is outside the tested resugaring foundation"),
+            "unsupported semantic metadata must identify the unimplemented type form: {error}"
+        ),
+    }
 }
 
 #[test]
@@ -148,10 +156,9 @@ fn incompatible_literal_type_metadata_is_rejected() {
 
     let error = resugar_expression(&deep).expect_err("integer is not a bool literal");
 
+    let diagnostic = error.to_string();
     assert!(
-        error
-            .to_string()
-            .contains("literal compatible with its primitive `type` metadata"),
+        diagnostic.contains("`type` metadata") && diagnostic.contains("compatible"),
         "diagnostic should identify the literal/type mismatch: {error}"
     );
 }

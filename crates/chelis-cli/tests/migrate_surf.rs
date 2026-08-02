@@ -75,6 +75,43 @@ fn migrate_surf_batch_is_all_or_nothing_on_ambiguous_comments() {
     assert_eq!(fs::read_to_string(ambiguous_path).unwrap(), ambiguous);
 }
 
+#[cfg(unix)]
+#[test]
+fn migrate_surf_batch_is_all_or_nothing_on_write_failure() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempdir().expect("tempdir");
+    let writable_path = dir.path().join("first.ch");
+    let read_only_path = dir.path().join("second.ch");
+    let writable_source = "def first = value\n";
+    let read_only_source = "def second = value\n";
+    fs::write(&writable_path, writable_source).expect("write first fixture");
+    fs::write(&read_only_path, read_only_source).expect("write second fixture");
+    fs::set_permissions(&read_only_path, fs::Permissions::from_mode(0o444))
+        .expect("make second fixture read-only");
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["migrate", "surf", "--from", "0.18", "--inplace"])
+        .arg(&writable_path)
+        .arg(&read_only_path)
+        .assert()
+        .failure();
+
+    assert_eq!(
+        fs::read_to_string(&writable_path).unwrap(),
+        writable_source,
+        "a later write failure must not leave the first file migrated",
+    );
+    assert_eq!(
+        fs::read_to_string(&read_only_path).unwrap(),
+        read_only_source,
+    );
+
+    fs::set_permissions(&read_only_path, fs::Permissions::from_mode(0o644))
+        .expect("restore fixture permissions for cleanup");
+}
+
 #[test]
 fn migrate_surf_rejects_unknown_source_versions() {
     let dir = tempdir().expect("tempdir");

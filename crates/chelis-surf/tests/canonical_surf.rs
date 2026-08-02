@@ -96,6 +96,43 @@ fn every_deep_string_has_one_reparseable_canonical_surf_spelling() {
 }
 
 #[test]
+fn hand_authored_deep_without_optional_surface_origin_metadata_roundtrips() {
+    for (deep_source, expected_surf) in [
+        ("(import-all {} foo)", "import Foo (..)\n"),
+        ("(defdim {} n)", "dim n\n"),
+    ] {
+        let deep = parse_deep(deep_source).expect("hand-authored Deep parses");
+        let surf = format_program(&resugar_program(&deep).expect("public Deep resugars"));
+        assert_eq!(surf, expected_surf);
+
+        let redesugared = desugar_program(&parse_str(&surf).expect("resugared Surf reparses"));
+        assert_eq!(
+            print_canonical(&normalize_deep_for_surface_roundtrip(&deep)),
+            print_canonical(&normalize_deep_for_surface_roundtrip(&redesugared)),
+            "optional origin metadata must not break the Deep roundtrip for {deep_source}",
+        );
+    }
+}
+
+#[test]
+fn roundtrip_normalization_retains_non_default_surface_origin_metadata() {
+    let deep = parse_deep(concat!(
+        "(import-all {surf_path: \"HTTP\"} http)\n",
+        "(defdim {surf_dim_group_size: 2} rows)\n",
+        "(defdim {} cols)\n",
+    ))
+    .expect("non-default surface metadata parses");
+
+    let normalized = print_canonical(&normalize_deep_for_surface_roundtrip(&deep));
+
+    assert!(normalized.contains("surf_path: \"HTTP\""), "{normalized}");
+    assert!(
+        normalized.contains("surf_dim_group_size: 2"),
+        "{normalized}"
+    );
+}
+
+#[test]
 fn string_escape_aliases_and_raw_controls_are_rejected() {
     for source in [
         r#"value = "\u{08}""#,
@@ -766,6 +803,21 @@ fn migration_rejects_ambiguous_interior_comment_attachment() {
     let legacy = "def f(x) = g({- belongs to the argument expression -} x)\n";
 
     let error = migrate_source_v018(legacy).expect_err("ambiguous attachment must not migrate");
+
+    assert!(error.to_string().contains("inside a declaration"));
+}
+
+#[test]
+fn migration_rejects_comments_inside_block_binding_expressions() {
+    let legacy = concat!(
+        "def f(x) = {\n",
+        "  y = g({- belongs to the argument expression -} x)\n",
+        "  y\n",
+        "}\n",
+    );
+
+    let error = migrate_source_v018(legacy)
+        .expect_err("an expression-interior comment must not be relocated to a block boundary");
 
     assert!(error.to_string().contains("inside a declaration"));
 }
