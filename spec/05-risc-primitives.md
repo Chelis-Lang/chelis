@@ -1371,43 +1371,7 @@ schema.)*
 
 ---
 
-## 8. Observation And Formatting Contract (Payload Ratified At chelis#732 Phase 1; Root-Envelope Acceptance Pending chelis#1023)
-
-**Status banner:** atoms [05-OBS-1..5] were RATIFIED at chelis#732
-Phase 1 (2026-07-20), which landed `format_element` (the single
-renderer, `chelis-types::observation`) and routed every EVAL-lane exit
-through it. [05-OBS-6] was added for chelis#912 on 2026-07-31; its
-always-labelled prefix is live, while its manifested root-order and
-unavailable-root acceptance remain under chelis#1023. chelis#732 Phase 2
-(2026-07-24) brought the compiled C lane
-onto the same grammar: the emitted print helper is GENERATED from an
-exhaustive `Prim` match, every compiled float exit routes through the
-runtime's `chelis_format_shortest` (byte-locked against
-`format_element`), `to_list` reads every dtype (chelis#716, #723,
-#726's C half, #748, #749 fixed; close on the PR #863 merge), and
-cross-lane byte equality holds for identical stored bits at matching
-rendered widths. Remaining annexed deviations are issue-linked: the
-deliberate eval tensor width note in section 8.1 (chelis#729's metadata
-repair), and the compiled lane's untagged
-f64 value box, which renders narrower float elements (f32 as well as
-f16/bf16) at f64-image width through `to_list` and list/tuple boxing -
-faithful parse-back, not the own-width shortest form (chelis#865, the
-chelis#729/#686 capacity family). Every remaining annexed cell carries
-an `#[ignore]`d red test naming its owning issue,
-and none of them is a silent skip: the phase oracle
-(`.venv/bin/python scripts/faithful_observation_phase2_oracle.py`) holds
-the complete ledger, requires the harness's ignore inventory to equal
-it, re-executes each cell, and FAILS if one is red for an undeclared
-reason or has gone green - so an upstream chelis#729 repair cannot leave
-a permanently skipped test or a stale conformance sentence behind. The
-same oracle independently recompiles/runs every executable declared C
-corpus exclusion and compares intended bits; comment/string-only source
-fingerprints cannot preserve an exclusion after exact behavior returns.
-Atom IDs are stable, and the current blockquote authorities remain
-normative until selected
-for chelis#733 Phase 1 migration. Full revisions are attached and checked
-through the pinned Buoy shell-side integration. The delivery plan and full
-elaboration is `spec/design/faithful_observation.md` (meta chelis#728).
+## 8. Observation And Formatting Contract
 
 > **[05-OBS-1]** Every exit that renders a stored numeric value as text -
 > `print`, `to_list`, diagnostics, the wire schema's rendering - SHALL
@@ -1415,41 +1379,11 @@ elaboration is `spec/design/faithful_observation.md` (meta chelis#728).
 > own dtype width, and all exits within a lane SHALL agree with each
 > other and with the stored bits.
 
-*(Conformant in both lanes since chelis#732 Phase 2 EXCEPT the annexed
-value-layer cell named here, which remains an issue-linked red test
-re-executed by the phase oracle - one deliberate width note is also
-recorded in §8.1. The exception: an
-int64 SCALAR ROOT above 2^53 renders the f64-collapsed stored value at
-the labeled root while `print`/`to_string` of the same def are exact -
-the interpreter's rank-0 realization collapses the value BEFORE the
-renderer sees it (chelis#684, [#729]'s value layer; surfaced by PR
-#792's red team). The former cast-constructed f64 tensor divergence
-(chelis#864, surfaced by PR #863's red team) is repaired and un-ignored:
-the root metadata was already F64, while the static `to_tensor` DAG
-shortcut had skipped f32 literal-ingress finalization before widening.
-The C lane's former violations (chelis#716, #723, #748, #749) went green
-at Phase 2 by un-ignoring their red cells.)*
-
 > **[05-OBS-2]** Integer dtypes SHALL print as integers with all digits
 > exact; floats SHALL print the shortest string that round-trips at
 > their own width; `bool` SHALL print `true`/`false` at every exit; the
 > number grammar (digit selection, exponent form, special-value
 > spellings) SHALL be identical across lanes and is pinned in §8.1.
-
-*(Conformant in both lanes since chelis#732 Phase 2 EXCEPT the annexed
-own-width cell named at the end of this note, which remains an
-issue-linked red test re-executed by the phase oracle. Eval adopted the
-grammar at Phase 1 (integers lost the `.0`, bool tensors print
-`true`/`false`, scalars render at own width) and Phase 2's generated
-helper brought the compiled lane onto the identical grammar - exact
-integer printf at width (chelis#723 fixed), `chelis_format_shortest`
-replacing the `%.1f`/`%.16g` split (chelis#748 fixed). One annexed
-own-width deviation: the compiled lane's untagged f64 value box renders
-narrower float elements (f32/f16/bf16 reached through `to_list` or
-list/tuple boxing) at their exact f64-image width - the text parses
-back to the stored bits at the element's width, but is not the shortest
-own-width form until the box learns element widths (chelis#865, the
-chelis#729/#686 capacity family).)*
 
 > **[05-OBS-3]** Cross-lane VALUE differences are permitted only for the
 > ops listed in the per-op tolerance table below, within the listed bound;
@@ -1478,8 +1412,8 @@ Operations absent from the table have a zero-ULP bound. In particular,
 add, subtract, multiply, divide, comparisons, reductions, and compound
 builtins are exact-by-default; a new or misspelled operation identity
 cannot inherit a float fallback. A table row is eligible only when both
-lanes compute at [04-NUM-8]'s declared arithmetic width. A known width
-violation must remain an issue-linked oracle exclusion and may not be
+lanes compute at [04-NUM-8]'s declared arithmetic width. A lane pair that
+does not meet that precondition is a failed comparison and may not be
 laundered through the table. For f16 and bf16, which compute at f32 and
 round once into narrower storage, differing final strings do not by
 themselves prove a distance at the f32 arithmetic width: a conforming
@@ -1490,11 +1424,9 @@ rounding-bin acceptance. Non-finite and signed-zero mismatches are never
 toleranced. Byte-different strings which denote identical stored bits are
 formatting violations under [05-OBS-2], not value differences.
 
-*(This section, spec/05 §8, is the table's single authored address:
-`dtype_semantics.md` §C4 item 5 and `faithful_observation.md` Phase 3
-point here and do not host a second copy. The table covers only genuine
+This section is the table's single normative address. The table covers only
 implementation variance at a single width - one lane's libm or SLEEF or
-vForce against another's - and never a structural precision mismatch.)*
+vForce against another's - and never a structural precision mismatch.
 
 > **[05-OBS-4]** A scalar-typed value SHALL render as the bare scalar at
 > every exit in both lanes, including as a top-level labeled root
@@ -1505,42 +1437,17 @@ vForce against another's - and never a structural precision mismatch.)*
 > internally; that realization SHALL NOT leak into the observation
 > channel.
 
-*(The chelis#775 decision, authored 2026-07-20. Rationale: `print` of a
-scalar already rendered bare in BOTH lanes and the compiled lane's
-labeled roots did too, so the bare form is the only choice consistent
-with [05-OBS-1]'s intra-lane exit agreement; the rank-0 wrapper was an
-eval-interpreter storage artifact. Conformant in both lanes for the
-locked repro; general C-lane digit grammar is Phase 2. The bare-scalar
-rendering inherits [05-OBS-1]'s annexed chelis#684 exception: an int64
-scalar root above 2^53 renders bare but carries the f64-collapsed
-stored value until chelis#729 repairs the realization's storage.)*
-
 > **[05-OBS-5]** Every exit in both lanes SHALL truncate tensor element
 > rendering after 32 elements, marking the cut with `, ...` inside the
 > `data=[..]` brackets. `to_list` and the wire schema never truncate:
 > full-element fidelity is theirs.
-
-*(Decided 2026-07-17, faithful_observation.md open question 4; the
-threshold is one documented constant, `TENSOR_RENDER_LIMIT`. Eval lane
-conformant since chelis#732 Phase 1 - the formerly unlimited transcript
-and the labeled root's former `+ ...` marker both moved in the §B2.1
-migration. The C lane's nested-in-list renderer (formerly a 10-element
-cut with NO marker, chelis#749) adopted the same rule at Phase 2.)*
 
 > **[05-OBS-6]** Every root SHALL render with a `name = value` label at
 > every exit in both lanes. The bare-when-single form is removed. Render
 > order is manifest entry order. A lane that cannot produce a root it
 > owes SHALL emit [05-UNS-1] naming that root, the lane, and the reason.
 
-*(Decided 2026-07-31, chelis#912. The bare form cost cross-lane byte
-identity and line-count parity, which are the two properties #687 and
-#763 are built on. The always-labelled prefix has landed in both lanes.
-Full conformance remains pending under chelis#1023 until the manifest is
-the production observation/build boundary, every owed dotted root is
-enumerated, and an unavailable root exercises the required [05-UNS-1]
-diagnostic with root, lane, and reason.)*
-
-### 8.1 The Number Grammar (Normative Constants, Frozen At chelis#732 Phase 1)
+### 8.1 The Number Grammar
 
 The grammar is Rust `{:?}` (`Debug`) float formatting, normatively
 (`faithful_observation.md` §C1.3; `Display` is NOT this grammar - it
@@ -1550,9 +1457,7 @@ never emits e-notation):
 - decimal form exactly when the RENDERED magnitude - the value the
   chosen shortest digits denote - is zero or satisfies
   `1e-4 <= |v| < 1e16` (the normative threshold constants
-  `DECIMAL_LOWER_BOUND` / `DECIMAL_UPPER_BOUND` in
-  `chelis-types::observation`, captured empirically from rustc and
-  locked by unit tests so a rustc formatting change breaks loudly).
+  `DECIMAL_LOWER_BOUND` / `DECIMAL_UPPER_BOUND`).
   The rule follows the digits actually printed, not the stored
   magnitude: when a width's ulp straddles a threshold, the shortest
   rendering can sit on the other side of it - the bf16 whose image is
@@ -1560,8 +1465,7 @@ never emits e-notation):
   9.9999997e-5 renders `0.0001` (decimal). This is rustc's observed
   `{:?}` behavior, which compares against the constants at the value's
   own width - equivalent to the rendered-magnitude rule at every
-  representable boundary (ratified at PR #792 after its red team's F2
-  finding; the exhaustive half-format tests lock the boundary cases);
+  representable boundary;
 - decimal renderings of integral values keep one fractional digit
   (`2048.0`, never `2048`);
 - e-notation is `<mantissa>e<exp>`: lowercase `e`, no `+`, no zero
@@ -1571,25 +1475,13 @@ never emits e-notation):
 - `f16`/`bf16` print the shortest decimal whose parse-back (`strtod` to
   f64, then one correctly-rounded narrowing to the half width - safe by
   [04-NUM-1]'s single-rounding argument) yields the stored bits,
-  verified exhaustively over all 65536 bit patterns per format; their
-  decimal/e-notation decision applies the same rendered-magnitude rule
-  to the chosen digits, and a same-length candidate tie breaks to the
-  numerically closest, then the even mantissa;
+  for all bit patterns; their decimal/e-notation decision applies the
+  same rendered-magnitude rule to the chosen digits, and a same-length
+  candidate tie breaks to the numerically closest, then the even mantissa;
 - integer dtypes print exact base-10 digits (i64 formatting, never
   through double).
 
-**Eval width note (deliberate, chelis#732 Phase 1):** eval TENSOR float
-elements render at the stored f64 width, because the eval tensor store
-is f64-backed and its runtime precision tag is unreliable for float
-width (chelis#717); narrowing at render time would launder stored bits,
-which [05-OBS-1] forbids. Scalar exits render at their own width. Own-
-width tensor digits arrive when chelis#729 repairs the value metadata -
-a value-layer fix, not a grammar change.
-
 **Tag-vs-bits disagreements print the bits:** when an integer- or
-bool-tagged tensor slot stores a value outside the tag's value set (the
-live example: `mean` of an int64 tensor stores 187.5 - chelis#724
-domain territory), the element renders as the stored f64, so the value
-bug stays visible at the exit instead of being truncated into a
-well-formed lie. Rendering never repairs, rounds, or rejects stored
-values.
+bool-tagged tensor slot stores a value outside the tag's value set, the
+element renders the stored value without truncating it into a well-formed
+lie. Rendering never repairs, rounds, or rejects stored values.
