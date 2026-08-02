@@ -86,14 +86,16 @@ Authority is subject-specific during the migration from numbered chapters to Ope
 
 A chapter transfers only through a reviewed change that records the transfer. The chapter must mark itself superseded and link the controlling capability.
 
-If a chapter has no complete transfer record, the numbered chapter remains controlling. `openspec/specs/spec-authority-migration/spec.md` defines the complete transfer contract.
+If a chapter has no complete transfer record, the numbered chapter remains controlling.
+`openspec/changes/migrate-spec-authority/specs/spec-authority-migration/spec.md`
+defines the transfer contract while that migration change is active.
 
 If active documents disagree, correct the document that controls the subject. Do not add a third explanation.
 
-That ordering is for **project-level** questions: what Chelis is, what it is for, what
-the roadmap says. It is not the ordering for language semantics, and the canonical
-reference says so itself: "Language semantics still belong in the numbered spec
-documents."
+That ordering governs both project-level and language-semantic questions by subject.
+For transferred semantics, the controlling OpenSpec capability wins; for untransferred
+semantics, the numbered chapter wins. The canonical project reference does not override
+either normative tier.
 
 ### Normative Specs Are Timeless Contracts
 

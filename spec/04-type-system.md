@@ -50,28 +50,39 @@ names; the reserved spellings in §1.1.1 are recognized but rejected.
 
 The following spellings are reserved but are not primitive types. Every one is
 rejected by the type checker with a diagnostic pointing at this section, and
-`cast(x, <name>)` is rejected likewise. A reserved spelling has no storage,
-arithmetic, backend, wire, binding, or observation semantics.
+`cast(x, <name>)` is rejected likewise. Reservation fixes the canonical
+spelling, semantic family, and arithmetic width that the name denotes; it does
+not admit the name into executable programs or assign it a backend, wire, or
+binding representation.
 
 **Reduced-precision floats.**
 
-- `f8e4m3`, `f8e5m2` — the standard OCP FP8 format-pair spellings.
+- `f8e4m3`, `f8e5m2` — the standard OCP FP8 format-pair spellings. Their
+  arithmetic width is `f32`. `f8e4m3` uses the OCP E4M3 value format and
+  therefore requires an explicit finalization rule rather than inheriting
+  [04-NUM-2], because E4M3 has no infinities.
 
 **Unsigned integers.**
 
 - `uint8`, `uint16`, `uint32`, `uint64` — standard-width unsigned integers.
-- `int4`, `uint4` — signed and unsigned four-bit integer spellings.
+  Arithmetic is exact at the declared width, overflow traps under [04-NUM-3],
+  and the named modular operations of [04-NUM-7] provide wrapping behavior.
+- `int4`, `uint4` — signed and unsigned four-bit integer spellings. Arithmetic
+  is exact at four bits with the same trap and named-modular-operation rules;
+  the reservation does not choose an addressable storage packing.
 
 **Complex.**
 
 - `complex64`, `complex128` — complex numbers with `f32` and `f64` components
-  respectively; the number is total width, matching the ecosystem spelling.
+  respectively. Arithmetic uses the corresponding component width; the number
+  in the spelling is total width, matching the ecosystem convention.
 
 **Decimal (interchange only).**
 
-- `decimal128`, `decimal256` — Arrow/parquet interchange spellings. They are
-  not tensor element types; `Std.Decimal` is the language-level scalar
-  abstraction for exact base-10 work.
+- `decimal128`, `decimal256` — Arrow/parquet interchange spellings with exact
+  base-10 arithmetic at the declared precision and scale. They are not tensor
+  element types; `Std.Decimal` is the language-level scalar abstraction for
+  exact base-10 work.
 
 **Not reserved, and deliberately so: scaled and block-scaled formats.**
 `qint8`/`quint8` (PyTorch), the MX formats of the OCP Microscaling
@@ -104,8 +115,8 @@ rejects it under [05-UNS-1..6]; it does not narrow the language contract.
 | dtype  | C backend                                                                                                         | HIP backend                                          | Metal backend                                | Evaluator |
 |--------|-------------------------------------------------------------------------------------------------------------------|------------------------------------------------------|----------------------------------------------|-----------|
 | f32    | admitted                                                                                                          | admitted                                             | admitted                                     | admitted  |
-| f64    | admitted                                                                                                          | admitted                                             | **rejected (hardware)**                      | admitted  |
-| bf16   | admitted (storage as `uint16_t`; arithmetic via convert-to-f32; matmul via convert-then-`cblas_sgemm` per §5.7.1) | admitted (matmul + load/store via `hipblasGemmEx`)   | admitted on Apple7+ (M3 or later)            | admitted  |
+| f64    | admitted                                                                                                          | admitted                                             | admitted only with native FP64 capability    | admitted  |
+| bf16   | admitted (storage as `uint16_t`; arithmetic via convert-to-f32; matmul via convert-then-`cblas_sgemm` per §5.7.1) | admitted (matmul + load/store via `hipblasGemmEx`)   | admitted only with native `bfloat` capability | admitted  |
 | f16    | admitted (storage as `uint16_t`; arithmetic via convert-to-f32; matmul via convert-then-`cblas_sgemm` per §5.7.1) | admitted (matmul + load/store via `hipblasGemmEx`)   | admitted                                     | admitted  |
 | int8   | admitted                                                                                                          | admitted                                             | admitted                                     | admitted  |
 | int16  | admitted                                                                                                          | admitted                                             | admitted                                     | admitted  |
@@ -133,55 +144,53 @@ Cell semantics:
 - **rejected (hardware)** — the backend rejects the dtype at codegen with a
   diagnostic naming the hardware constraint. Software emulation is not a
   conforming implementation of the declared dtype (see the f64-on-Metal entry below).
+- **admitted only with native capability** — the selected target profile and
+  runtime device must expose the named arithmetic capability. Absence is a
+  hardware rejection, not permission to substitute another dtype.
 
-##### f64 on Metal: hard-rejected (hardware rationale)
+##### f64 on Metal: native FP64 capability
 
-f64 on the Metal backend is **hard-rejected**. Apple Silicon
-GPUs (M1, M2, M3, M4, and every announced successor in the Apple GPU family)
-have no double-precision floating-point ALUs in their GPU compute units;
-this is a hardware constraint, not a Chelis design choice. Software
+The Metal backend admits `f64` only when the selected target profile and runtime
+device expose native double-precision floating-point arithmetic. Software
 emulation (e.g., double-double arithmetic over two f32s) is **explicitly
 out of scope**: the precision,
 performance, and AD-adjoint stories for emulated f64 do not match the
 language-level f64 contract, and silently substituting an emulated value
 would violate the no-implicit-precision-promotion rule in §5.
 
-The required diagnostic when a program uses f64 with `--target metal` is:
+The required diagnostic when the selected Metal capability profile lacks native
+FP64 is:
 
-> "Apple Silicon GPUs lack FP64 ALUs; use `--target c` or `--target hip` for
-> f64 workloads."
+> "Selected Metal target lacks native FP64 arithmetic; use a Metal device with
+> FP64 capability or `--target c` / `--target hip` for f64 workloads."
 
 This rejection is enforced at the CLI gate, at the IR validation pass, and
 defensively at the codegen entry point. All three surfaces must surface the
-same diagnostic. f64 must never reach the kernel emission path on Metal.
+same diagnostic. `f64` must never reach kernel emission for a capability
+profile that does not admit it.
 
-##### bf16 on Metal: requires Apple7+ GPU family
+##### bf16 on Metal: native bfloat capability
 
-bf16 on the Metal backend is admitted only on the Apple7 GPU family (M3) or
-later. There are two enforcement surfaces, and the spec pins both because
-they fail in different places at different times:
+`bf16` on the Metal backend requires both an MSL language version that exposes
+`bfloat` and a runtime device with native bfloat operations. There are two
+enforcement surfaces:
 
 - **Compile-time (kernel template).** MSL exposes the `bfloat` scalar type
-  only when the target language version is 3.2 or higher (which corresponds
-  to Apple7+ GPU family targeting). The Metal kernel template emits any
+  only when the target language version is 3.2 or higher. The Metal kernel template emits any
   `bfloat`-typed kernel inside `#if __METAL_VERSION__ >= 320 ... #endif`. A
   CLI build that emits bf16 kernels still produces a syntactically valid
   Metal source artifact: the artifact contains the `#if`-guarded kernel
-  text and is acceptable to `metal` / `clang++ -framework Metal` on every
-  toolchain version, regardless of the target GPU family.
+  text and is acceptable to `metal` / `clang++ -framework Metal` independent
+  of the selected device.
 - **Runtime (pipeline creation).** Even with the kernel artifact present,
-  pipeline state creation on a pre-Apple7 device (M1, M2) will fail because
-  the device's GPU does not support `bfloat` operations. The Metal runtime
+  pipeline state creation fails when the device does not support `bfloat`
+  operations. The Metal runtime
   surfaces this as a clean diagnostic at pipeline creation time, not as a
   silent kernel-load failure.
 
-The required diagnostic when bf16 pipeline creation fails on a pre-Apple7
-device is:
+The required diagnostic when bf16 pipeline creation lacks either capability is:
 
-> "bf16 requires Apple7+ GPU family (M3 or later); detected device family is
-> Apple{N}."
-
-Programs that target bf16 on Metal require Apple7+ hardware.
+> "Selected Metal target lacks native bfloat capability or MSL bfloat support."
 
 ##### Metal runtime header: ARC vs MRC and MPS wrapper ownership model
 

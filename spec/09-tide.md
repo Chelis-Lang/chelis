@@ -111,9 +111,10 @@ floating-point soundness.
 
 Induction reports success only after the same sound SMT engine discharges both a
 concrete base case and a symbolic step case. Unsupported, missing, vacuous, timed-out,
-sampled, or assumed evidence cannot become a proof. Deep input under
-`tier:"induction-only"` is `unsupported` with zero samples rather than being
-reinterpreted as fuzzing.
+sampled, or assumed evidence cannot become a proof. Equivalent Surf and canonical Deep
+input collect the same properties and producer obligations and use the same tiered
+dispatch. An induction-only request that cannot be discharged returns `unsupported`
+with zero samples, irrespective of input surface; it is never reinterpreted as fuzzing.
 
 ## 7. Language Server
 

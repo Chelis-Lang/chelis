@@ -199,19 +199,22 @@ mixing.
 ### Requirement: Scatter determinism and AD policy
 
 `Scatter` (last-write-wins) and `ScatterAdd` (commutative accumulation) SHALL be distinct
-primitives. `Scatter` SHALL resolve duplicate indices by updates-tensor row-major flat order on
-every backend and SHALL structurally reject reverse-mode
-AD via `AdError::NotSupported`; `ScatterAdd` SHALL have the `Gather` adjoint.
+primitives. `Scatter` and `ScatterElements` SHALL resolve duplicate indices by updates-tensor
+row-major flat order on every backend: the maximum flat-index update is the winner for a
+destination. In reverse mode, untouched target/data cells SHALL receive the output cotangent and
+written cells SHALL receive zero; the winning update SHALL receive its destination cotangent and
+every shadowed update SHALL receive zero. Indices SHALL be non-differentiable. `ScatterAdd` SHALL
+have the `Gather` adjoint.
 
 #### Scenario: ScatterAdd is differentiable
 
 - **WHEN** `grad` differentiates through `ScatterAdd`
 - **THEN** the adjoint is `Gather` and duplicate indices fan out correctly
 
-#### Scenario: Scatter AD is rejected
+#### Scenario: Scatter AD follows the deterministic winner
 
 - **WHEN** `grad` is applied through `Scatter`
-- **THEN** it is rejected with `AdError::NotSupported` because the forward result depends on iteration order at duplicate indices
+- **THEN** each destination cotangent routes to its maximum flat-index writer and shadowed updates receive zero
 
 ### Requirement: Host-runtime builtins
 

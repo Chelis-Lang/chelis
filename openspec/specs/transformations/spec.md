@@ -135,39 +135,49 @@ reused in its own adjoint) SHALL be preserved as graph references, not duplicate
 - **WHEN** the second `grad` encounters a node shared by the forward and backward DAG
 - **THEN** it handles the shared reference correctly rather than treating the DAG as a tree
 
-### Requirement: Static match and if differentiation
+### Requirement: Piecewise match and if differentiation
 
 Inside a differentiated body, a `match` whose scrutinee is a compile-time-known constructor and
-an `if` whose condition const-folds SHALL lower only the taken arm/branch, giving the exact
-gradient. A runtime scrutinee, an arm guard, nested destructuring beyond field bindings, or a
-runtime-condition `if` over an ADT/tuple branch SHALL be rejected loudly.
+an `if` whose condition const-folds SHALL lower only the selected arm or branch. A runtime
+condition SHALL lower through `RiscOp::Select`, selecting tuple and ADT results structurally per
+leaf. A runtime-scrutinee `match` SHALL select by constructor tag and apply the same piecewise
+rule. Conditions, tags, pattern tests, and guards SHALL be stop-gradient boundaries; cotangents
+SHALL flow only through the selected branch while ordinary match destructuring semantics remain
+unchanged.
 
 #### Scenario: Static arm selection lowers the taken arm
 
 - **WHEN** a differentiated body matches on an ADT-typed parameter fixed at the `grad` boundary
 - **THEN** only the taken arm is lowered and differentiated as the exact gradient
 
-#### Scenario: Runtime-scrutinee match differentiation is rejected
+#### Scenario: Runtime-scrutinee match differentiates the selected arm
 
-- **WHEN** a differentiated `match` has a scrutinee that lowers to a tensor node
-- **THEN** it is rejected loudly rather than differentiated
+- **WHEN** a differentiated `match` selects its constructor arm from a runtime tag
+- **THEN** the runtime constructor tag selects the arm and cotangents flow only through that arm
 
 ### Requirement: Field-wise ADT gradients
 
-`grad(f)(Ctor { .. })` over an ADT argument whose fields are all float tensors/scalars SHALL
-return the same constructor shape with one gradient per field, zero-filling non-influencing
-fields. An ADT with a non-float field in any variant, or a pure enum with no fields, SHALL be
-rejected loudly; the compiled C lane SHALL reject `grad` exports over ADT-typed parameters.
+`grad(f)(Ctor { .. })` over an ADT argument SHALL return the same constructor shape. Float tensor
+and float scalar fields SHALL carry their field-wise gradients, with explicit zeros for fields
+that do not influence the result. A non-differentiable field SHALL contain `unit` in the
+corresponding gradient position. A pure enum has no continuous payload and SHALL be a type error
+when explicitly selected in `wrt`. Every execution lane SHALL preserve this structure, including
+compiled exports over ADT-typed parameters.
 
 #### Scenario: Field-wise gradient matches the argument structure
 
 - **WHEN** `grad(f)` differentiates an all-float-field ADT argument
 - **THEN** it returns the same constructor shape with a gradient per field, zeros for non-influencing fields
 
-#### Scenario: Mixed-type ADT field is rejected
+#### Scenario: Non-differentiable ADT field produces unit
 
 - **WHEN** the ADT argument's type has a non-float-tensor field in any variant
-- **THEN** it is rejected loudly naming the field, even if the constructed variant is float-clean
+- **THEN** the corresponding gradient field is `unit` while differentiable fields retain their gradients
+
+#### Scenario: Compiled ADT gradient preserves structure
+
+- **WHEN** a compiled function exports a gradient over an ADT-typed parameter
+- **THEN** the compiled result has the same constructor and field structure required by the evaluator
 
 ### Requirement: vmap vectorization
 

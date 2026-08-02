@@ -3,7 +3,8 @@
 **Status:** Active project-level reference.
 Use this document to align README text, roadmap updates, design docs, and agent-authored
 documentation.
-Language semantics still belong in the numbered spec documents.
+Language semantics belong to a transferred chapter's controlling OpenSpec capability;
+an untransferred numbered chapter remains controlling for its subject.
 
 ---
 
@@ -832,14 +833,15 @@ Use the docs in this order:
 
 1. `spec/design/chelis_canonical_reference.md` for project-level truth, current
    status, naming, ecosystem boundaries, and cross-doc alignment
-2. numbered specs `spec/00-11*.md` for language, CLI, serialization, backend,
-   and FFI contracts
-3. `spec/design/chelis_project_plan.md` and active phase plans such as
+2. a transferred chapter's named `openspec/specs/<capability>/spec.md` for its
+   controlling subject contract
+3. numbered specs `spec/00-11*.md` for every subject not yet transferred
+4. `spec/design/chelis_project_plan.md` and active phase plans such as
    `spec/design/chelis_phase3_plan.md` for phased execution and explicit acceptance
    oracles
-4. focused active design docs under `spec/design/` for current implementation
+5. focused active design docs under `spec/design/` for current implementation
    contracts not yet folded into numbered specs
-5. `README.md` and `docs/book/` for repository orientation and developer-facing usage
+6. `README.md` and `docs/book/` for repository orientation and developer-facing usage
    docs; they should follow the hierarchy above, not redefine it
 
 Historical design notes belong under `spec/design/archive/` and must be treated as

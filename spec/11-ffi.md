@@ -32,9 +32,10 @@ set is derived from the selected backend's declared capability; the binding must
 element width and NumPy/DLPack dtype from the tagged Chelis dtype. It must never assume
 that compiled tensors are `f32`.
 
-Concrete-shape requirements are validated before entering native code. A rejected
-shape, dtype, or device produces a Python-side error rather than truncation, implicit
-copy to an incompatible device, or an ABI mismatch.
+Before entering native code, supplied shapes are validated against the function's typed
+shape contract, including symbolic and runtime shape expressions. A rejected shape,
+dtype, or device produces a Python-side error rather than truncation, implicit copy to
+an incompatible device, or an ABI mismatch.
 
 JAX interchange uses the same typed DLPack principles when paired with the StableHLO
 integration target.

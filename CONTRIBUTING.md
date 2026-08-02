@@ -9,17 +9,22 @@ repo coherent.
 When updating docs, treat these as the owning sources:
 
 1. `spec/design/chelis_canonical_reference.md`
-   Project-level decisions, naming, active backend strategy, CLI surface, and current
-   phase status.
-2. `spec/00-11*.md`
-   Language semantics and subsystem specifications.
-3. `spec/design/chelis_project_plan.md`
+   Cross-subject architecture, project boundaries, naming, and project status.
+2. `openspec/specs/<capability>/spec.md`
+   The controlling source for a subject whose numbered chapter has a complete transfer
+   record.
+3. `spec/00-11*.md`
+   The controlling source for every subject not yet transferred to OpenSpec.
+4. `spec/design/chelis_project_plan.md`
    Phased execution plan and remaining design work.
-4. `spec/design/archive/`
+5. `spec/design/archive/`
    Historical rationale only.
    Archived docs must never be treated as current guidance.
 
 If two active docs disagree, fix the disagreement instead of adding a third explanation.
+
+Chapter transfers follow
+`openspec/changes/migrate-spec-authority/specs/spec-authority-migration/spec.md`.
 
 ## Agent Guidance
 
@@ -51,6 +56,25 @@ hand-maintained copies.
 - Update tests with behavior changes.
 - Update the owning doc when a public language or compiler behavior changes.
 - Do not revert unrelated work already present in the repo.
+
+## Branch Naming
+
+Type prefixes follow conventional commits (`feat`, `fix`, `test`, `docs`, `style`,
+`chore`, `refactor`). Work tied to a project phase uses
+`{type}/{phase-id}-{item-slug-kebab}`; work with no phase dependency uses
+`{type}/{item-slug-kebab}`.
+
+Numbered phase identifiers use `phase` plus a digit and optional lowercase suffix
+(`phase5`, `phase3j`, `phase1a`). Lettered tracks use `phase-a` in branch and commit
+scopes and `phase_a` in filenames.
+
+Examples:
+
+```text
+feat/phase-a-item6-from-github
+fix/phase3j-runtime-shape
+docs/spec-nomenclature-expansion
+```
 
 ## Repo Gate (before every push)
 

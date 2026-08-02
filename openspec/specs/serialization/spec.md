@@ -64,8 +64,11 @@ diagnostic; the transient `OneHot` marker SHALL NOT reach backends after special
 Any codec that materializes a value of an invariant-carrying opaque type from an external payload
 SHALL revalidate the declared invariant at materialization time via the `decode_adt_value`
 chokepoint: structural validation (declared constructor, matching representation) then invariant
-revalidation, with a mandatory NaN/non-finite pre-check before predicate evaluation. Decode of a
-violating payload SHALL be a failure, never a repair.
+revalidation. Before predicate evaluation, every numeric representation field SHALL pass its
+sanity check and every floating field SHALL be finite, whether or not the predicate reads it. The
+predicate SHALL complete and return boolean `true`; `false`, evaluation failure, unresolved
+references, and non-boolean results SHALL be decode failures. Decode of a violating payload SHALL
+be a failure, never a repair.
 
 #### Scenario: Valid payload passes both passes
 
@@ -74,7 +77,7 @@ violating payload SHALL be a failure, never a repair.
 
 #### Scenario: Violating payload is rejected, not repaired
 
-- **WHEN** a payload's fields structurally match but violate the invariant (or contain a NaN in a numeric field)
+- **WHEN** a payload's fields structurally match but violate the invariant, contain a non-finite numeric field, fail predicate evaluation, leave a reference unresolved, or produce a non-boolean predicate result
 - **THEN** decode fails and yields no value, never clamping/normalizing the payload into the admissible set
 
 #### Scenario: Structural mismatch is distinct from invariant violation

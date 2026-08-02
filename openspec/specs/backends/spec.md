@@ -68,14 +68,15 @@ Rust dependencies.
 ### Requirement: Per-backend dtype gating
 
 Each backend SHALL gate dtypes per the §1.1.3 matrix at the CLI gate, the IR validation pass, and
-the codegen entry point. f64 on Metal SHALL be hard-rejected with the FP64-ALU hardware
-diagnostic; bf16 on Metal SHALL require the Apple7+ GPU family. A backend capability gap
-SHALL be rejected before codegen under [05-UNS-1..6].
+the codegen entry point. Metal SHALL admit `f64` only with native FP64 arithmetic and `bf16` only
+with MSL and device bfloat capability. A backend capability gap SHALL be rejected under
+[05-UNS-1..6] at the earliest boundary where the selected profile or runtime device makes the
+gap knowable.
 
-#### Scenario: f64 on Metal is hard-rejected across surfaces
+#### Scenario: Metal profile without FP64 rejects f64
 
-- **WHEN** an f64 program is built with `--target metal`
-- **THEN** the CLI gate, IR validation, and codegen entry each reject it with the FP64-ALU diagnostic and no kernel is emitted
+- **WHEN** an f64 program is built for a Metal profile without native FP64 arithmetic
+- **THEN** validation rejects it with the native-FP64 capability diagnostic and no f64 kernel is emitted
 
 #### Scenario: Unsupported backend capability rejected before codegen
 

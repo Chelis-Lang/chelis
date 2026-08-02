@@ -33,9 +33,11 @@ raw Deep, and effect inference SHALL run after HM type inference on the same ann
 ### Requirement: Primitive dtype set
 
 The numeric primitive set SHALL be exactly `f32`, `f64`, `bf16`, `f16`, `int8`,
-`int16`, `int32`, `int64`, `bool`, and `string`. `f8e4m3` and the canonical `uint*`
-names SHALL remain reserved non-type spellings and SHALL be rejected by the checker with
-a diagnostic pointing at §1.1.1.
+`int16`, `int32`, `int64`, `bool`, and `string`. The spellings in §1.1.1 SHALL remain
+reserved non-types and SHALL be rejected by the checker. Their reservations SHALL retain the
+semantic families and arithmetic widths declared there: OCP FP8 computes at `f32`; unsigned and
+four-bit integers are exact at their own widths; complex arithmetic uses its `f32` or `f64`
+component width; and decimal interchange values are exact base-10 at their declared scale.
 
 #### Scenario: Primitive resolves
 
@@ -44,25 +46,27 @@ a diagnostic pointing at §1.1.1.
 
 #### Scenario: Reserved spellings are rejected
 
-- **WHEN** a program uses `(t-prim {} f8e4m3)` or a `u32` type
+- **WHEN** a program uses `(t-prim {} f8e4m3)` or a `uint32` type
 - **THEN** the checker rejects it, pointing at §1.1.1's reserved-name set
 
 ### Requirement: Per-backend dtype support matrix
 
 Backend codegen SHALL honor the per-backend dtype matrix independently of the language-level
-dtype contract. f64 on the Metal backend SHALL be hard-rejected at the CLI gate, IR validation,
-and codegen entry with the FP64-ALU hardware diagnostic and SHALL never reach kernel emission;
-bf16 on Metal SHALL require the Apple7+ (M3+) GPU family.
+dtype contract. Metal SHALL admit `f64` only when the selected target profile and runtime device
+expose native FP64 arithmetic, and SHALL admit `bf16` only when both MSL and the device expose
+native bfloat capability. A missing capability SHALL be rejected consistently at the CLI gate,
+IR validation, codegen entry, or runtime pipeline boundary where it becomes knowable; no lane
+may substitute another dtype or software-emulated arithmetic.
 
 #### Scenario: f32 admitted on every backend
 
 - **WHEN** a program uses f32 with any backend target
 - **THEN** codegen admits it
 
-#### Scenario: f64 on Metal is hard-rejected
+#### Scenario: Metal without FP64 rejects f64
 
-- **WHEN** a program uses f64 with `--target metal`
-- **THEN** all three surfaces emit the "Apple Silicon GPUs lack FP64 ALUs; use `--target c` or `--target hip`" diagnostic and no f64 kernel is emitted
+- **WHEN** a program uses f64 with a Metal target profile that lacks native FP64 arithmetic
+- **THEN** validation emits the native-FP64 capability diagnostic and no f64 kernel is emitted
 
 ### Requirement: Tensor and function type shape
 

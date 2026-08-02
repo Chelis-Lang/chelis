@@ -592,7 +592,7 @@ their AD policies:
 | Op | Duplicate-index semantics | AD adjoint |
 |---|---|---|
 | `ScatterAdd { axis }` | commutative accumulation (`+=`) | `Gather { axis }` — duplicate indices fan-out correctly |
-| `Scatter { axis }` | last-write-wins (deterministic order rule below) | **no_grad** — fail-closed with `AdError::NotSupported` |
+| `Scatter { axis }` | last-write-wins (deterministic order rule below) | deterministic last-writer adjoint defined below |
 
 **Deterministic-order rule for `Scatter`:** updates-tensor row-major
 (C order) flat iteration. For each `i ∈ 0..updates.size` in
@@ -604,25 +604,13 @@ Every backend must observe this rule. Sequential execution is conforming; a
 parallel realization must use a deterministic tie-breaker that selects the
 maximum flat-index writer for each target cell.
 
-**AD policy for `Scatter`:** reverse-mode AD is structurally
-rejected. The forward result depends on iteration order at
-duplicate indices, so distributing a single output gradient across
-the colliding updates would require an arbitrary policy that does
-not derive from the forward semantics. The rejection is returned
-through the structured error type `chelis_ir::grad::AdError`:
-
-```rust
-AdError::NotSupported {
-    op: "scatter_replace",
-    reason: AdRejectionReason::NonDeterministicAtDuplicateIndices,
-}
-```
-
-Downstream consumers pattern-match on the enum variant; the
-rendered `Display` string is for human consumption only. Programs
-that need a differentiable variant must use `ScatterAdd` (whose
-adjoint is well-defined as `Gather`) or wrap `Scatter` in a
-stop-gradient.
+**AD policy for `Scatter`:** let `g` be the output cotangent. For each output
+cell written by one or more updates, the target cotangent is zero; every other
+target cell receives `g` unchanged. An update receives the cotangent at its
+destination exactly when it is the maximum flat-index writer for that cell;
+every shadowed update receives zero. Indices are non-differentiable. Thus the
+adjoint uses the same deterministic winner relation as the forward operation
+and never distributes one cotangent among colliding updates.
 
 #### 3.5.1 Element-wise scatter (`ScatterElements`)
 
@@ -663,18 +651,14 @@ element-wise and hyperplane contracts coincide, which is why a 1-D
 
 **Duplicate-index semantics.** Last-write-wins under the same
 deterministic order as `Scatter`: updates-tensor row-major (C order)
-flat iteration. The C backend emits a single-threaded sequential loop
-and the HIP backend a `<<<1, 1>>>` serial kernel, for the same
-race-freedom reason given for `Scatter`.
+flat iteration. A parallel implementation must select the maximum flat-index
+writer for each destination.
 
-**AD policy.** Fail-closed, identical to `Scatter`:
-
-```rust
-AdError::NotSupported {
-    op: "scatter_elements",
-    reason: AdRejectionReason::NonDeterministicAtDuplicateIndices,
-}
-```
+**AD policy.** The adjoint is the element-wise form of the `Scatter` rule.
+Written data cells receive zero cotangent and untouched data cells receive the
+output cotangent. Each destination's maximum flat-index update receives that
+destination's cotangent; shadowed updates receive zero. Indices are
+non-differentiable.
 
 The tensor-lane Surf builtin
 `scatter_elements(data, indices, updates, axis)` lowers directly to

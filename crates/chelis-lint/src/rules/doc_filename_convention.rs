@@ -402,7 +402,7 @@ mod tests {
     fn accepts_numeric_kebab_spec() {
         assert!(run("/repo/spec/02-surf-syntax.md").is_empty());
         assert!(run("/repo/spec/00-context.md").is_empty());
-        assert!(run("/repo/spec/12-roadmap.md").is_empty());
+        assert!(run("/repo/spec/11-ffi.md").is_empty());
     }
 
     #[test]

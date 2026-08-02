@@ -47,16 +47,21 @@ two-pass:
 
 1. **Structural validation:** the constructor is declared and the field arity and types
    match the representation.
-2. **Invariant validation:** the materialized fields satisfy the declared predicate.
+2. **Invariant validation:** predicate evaluation completes and returns boolean `true`.
 
 Structural mismatch and invariant violation are distinct failures. Neither yields a
 value.
 
 ### 4.1 Numeric pre-check
 
-Before predicate evaluation, every floating field used by an invariant must be finite.
-NaN and infinity fail decode even if host-language comparison behavior would make a
+Before predicate evaluation, every numeric representation field is sanity-checked;
+every floating field must be finite. NaN and infinity fail decode even when the
+predicate does not read that field or host-language comparison behavior would make the
 predicate appear true.
+
+A predicate that returns `false`, fails to evaluate (including division by zero or a
+domain error), contains an unresolved reference, or returns a non-boolean value is an
+invariant failure. Every such failure yields no decoded value.
 
 ### 4.2 No repair
 

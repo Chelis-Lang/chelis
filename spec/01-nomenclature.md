@@ -893,20 +893,7 @@ already outside the rule's scope; no additional carve-out is needed.
 
 ## 9. Project-cutting conventions
 
-### 9.1 Branch naming
-
-**Rule:** `{type}/{item-slug-kebab}`.
-
-Type prefixes follow conventional commits (`feat`, `fix`, `test`,
-`docs`, `style`, `chore`, `refactor`).
-
-```
-feat/install-from-github
-fix/chelis-std-runtime
-docs/spec-nomenclature-expansion
-```
-
-### 9.2 Commit conventions
+### 9.1 Commit conventions
 
 **Rule:** Conventional commits.
 
@@ -917,10 +904,11 @@ style(reef): normalize test identifiers
 docs(spec): expand nomenclature with style rules
 ```
 
-### 9.3 CI workflows
+### 9.2 CI workflows
 
-**Rule:** Three workflow files per repo, identical names across all
-five repos.
+**Rule:** Workflow classes use the same filenames in every repository in the
+canonical shell registry. A repository that implements one of these workflow
+classes uses its canonical filename:
 
 ```
 .github/workflows/ci.yml

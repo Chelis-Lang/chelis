@@ -90,10 +90,11 @@ The Metal backend:
   memory; and
 - validates generated Objective-C++ independently of GPU availability.
 
-Apple GPU hardware has no double-precision floating-point ALUs. The Metal target
-therefore rejects `f64` computation with a diagnostic that names the hardware
-constraint. `bf16` kernels require an Apple7-or-newer GPU family and must report that
-requirement when pipeline construction runs on older hardware.
+Metal dtype admission is capability-based. `f64` requires native FP64 arithmetic and
+must never be replaced by software-emulated or narrowed arithmetic. `bf16` requires an
+MSL language version exposing `bfloat` and a runtime device with native bfloat
+operations. A target missing either capability reports the missing capability rather
+than emitting or loading a substitute kernel.
 
 ## 6. Backend Capability And Rejection
 
