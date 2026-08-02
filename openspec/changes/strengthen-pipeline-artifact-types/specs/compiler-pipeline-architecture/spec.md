@@ -166,7 +166,9 @@ The guard SHALL retain stable Boolean facts across loop iterations. It SHALL pre
 
 Pattern bindings SHALL shadow outer callable aliases in `if let`, `while let`, `match`, and `for` scopes.
 
-The guard SHALL preserve full import targets, including `extern crate` aliases. It SHALL resolve local type aliases before receiver method lookup.
+The guard SHALL preserve full import targets. These targets SHALL include `extern crate` aliases.
+
+The guard SHALL resolve local type aliases before receiver method lookup.
 
 It SHALL NOT classify an unrelated receiver, import, type alias, or external call only from its final name.
 

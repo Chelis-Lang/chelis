@@ -232,7 +232,11 @@ All 54 focused source-guard tests passed after the fifth remediation. The author
 
 All 65 focused source-guard tests passed after the sixth remediation. The authoritative oracle passed after the current target rebase.
 
-All 74 focused source-guard tests passed after the seventh remediation. The final target rebase and authoritative oracle remain pending.
+All 74 focused source-guard tests passed after the seventh remediation.
+
+The authoritative oracle passed on target `ad63fa0600737dd656a4f3ece15f43695ce89902`. The implementation commit was `d7844ae5204a31127e4de91b50f392c8622a10cd`.
+
+A final fresh review of the exact corrected tree remains pending.
 
 The first local gate found that blanket empty-DAG alignment broke a valid C host-backend program. The revised typed policy preserves that build.
 
