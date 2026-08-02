@@ -193,6 +193,11 @@ primitive — the reductions here, `softmax`, `mean`, `gather`,
 `scatter`, and the movement and ordering ops — and is the convention
 the formula examples below already use (`axis=-1` for the last axis).
 
+> **[05-AXIS-1]** A reduction axis and `expand`'s insert axis SHALL be a
+> compile-time integer constant (a literal or a literal wrapped in an
+> integer cast). A runtime expression is a type error at the call site; no
+> lowering or backend SHALL substitute axis zero or another axis.
+
 The reduction axis must be a compile-time constant (a literal, or a
 `cast(N, int32)`-wrapped literal). Because the output shape is "remove
 the dimension at position `axis`", the type checker cannot determine
@@ -282,6 +287,11 @@ issue text proposed `(x, window_shape, strides, reducer)` with no
 explicit mode; this matches `Valid` as the implicit default.
 
 **Shape contract.**
+
+> **[05-RWIN-1]** `reduce_window_*` SHALL receive equal-length, non-empty
+> `window_shape` and `strides` lists; their length SHALL NOT exceed the input
+> rank; and every entry SHALL be a positive int32. A violation is a type
+> error, never an empty-list default, truncated rank, or backend assertion.
 
 - `window_shape` and `strides` are int32 lists of equal length
   `n >= 1`.
@@ -1524,19 +1534,6 @@ plan's Phase 3.)*
 > atom that decides it, and a not-yet-implemented case cites its
 > tracking issue. The two SHALL be distinguishable at the diagnostic
 > surface, and a rejection carrying neither citation is a defect.
-
-*(Decided 2026-07-30; enforced on the shared `Unsupported` channel since
-2026-08-01. Every current production constructor supplies an opaque,
-registry-validated `RejectionAuthority`; the two formerly uncited
-`reduce_window` sites now cite chelis#959. chelis#730's remaining Phase 3
-work carries that distinction through the closed diagnostic-kind pipeline
-(design doc §C2.1-C2.2); the capability table (chelis#729 Phase 4) later
-populates the deliberate-versus-unimplemented decision per cell. The
-validator proves citation identity and last-verified issue kind/open
-state, not that a cited issue actually tracks the rejected
-site/capability: that relevance judgment remains a required review
-step, with an open-but-unrelated issue as the negative review control.
-The design doc implements; this atom decides.)*
 
 > **[05-UNS-6]** The machine-facing kind of a diagnostic is drawn from
 > a closed vocabulary with stable spellings; the build surface's

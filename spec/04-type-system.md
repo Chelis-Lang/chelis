@@ -56,6 +56,13 @@ names (or to a documented deferred name in §1.1.1).
 
 #### 1.1.1 Deferred Numeric Primitives
 
+> **[04-DTYPE-1]** A primitive type position SHALL name one of the active
+> primitives in §1.1. Every deferred name in this section is reserved but
+> rejected by the type checker, including as a `cast` target, until a spec
+> revision moves it into the active set. Any other primitive spelling is an
+> unknown type and is likewise rejected; it SHALL NOT acquire the operand's
+> type or a default dtype.
+
 The following primitive names are reserved in the spec but **not active** in
 the current dtype build-out cycle. They are documented here rather than
 silently dropped so producers do not assume they have gone away. Every name
@@ -225,6 +232,11 @@ Cell semantics:
   below).
 
 ##### f64 on Metal: hard-rejected (hardware rationale)
+
+> **[04-TGT-1]** The Metal target SHALL reject every f64 value before kernel
+> emission and SHALL direct the user to the C or HIP target. It SHALL NOT
+> substitute f32 or software-emulated arithmetic for the language's f64
+> semantics.
 
 f64 on the Metal backend is **hard-rejected**, not deferred. Apple Silicon
 GPUs (M1, M2, M3, M4, and every announced successor in the Apple GPU family)
@@ -2162,6 +2174,11 @@ Settled Phase 2a design decisions:
 - `Accum` is internal-only in v1; users do not handle it directly
 - `Random` and `Resource(Device)` are the real Phase 2a boundary effects
 - `IO` is a shipped Phase 3 host-side effect rather than a Phase 2a handler boundary
+
+> **[04-EFF-1]** A `handle-effect` form SHALL name one of the two user
+> handler boundaries, `random` or `resource`. Any other handler kind is a
+> type error; lowering SHALL NOT erase its handler or execute the body as if
+> no handler were present.
 
 Current shipped inference/checking behavior:
 

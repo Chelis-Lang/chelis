@@ -2,8 +2,11 @@
 
 #[rustfmt::skip]
 pub(crate) const REGISTERED_SPEC_ATOMS: &[&str] = &[
+    "[01-CID-1]",
     "[04-ADT-1]",
     "[04-ADT-2]",
+    "[04-DTYPE-1]",
+    "[04-EFF-1]",
     "[04-FIT-1]",
     "[04-NUM-10]",
     "[04-NUM-11]",
@@ -17,9 +20,11 @@ pub(crate) const REGISTERED_SPEC_ATOMS: &[&str] = &[
     "[04-NUM-7]",
     "[04-NUM-8]",
     "[04-NUM-9]",
+    "[04-TGT-1]",
     "[04-TOT-1]",
     "[04-TOT-2]",
     "[04-TOT-3]",
+    "[05-AXIS-1]",
     "[05-OBS-1]",
     "[05-OBS-2]",
     "[05-OBS-3]",
@@ -27,6 +32,7 @@ pub(crate) const REGISTERED_SPEC_ATOMS: &[&str] = &[
     "[05-OBS-5]",
     "[05-OBS-6]",
     "[05-RNG-1]",
+    "[05-RWIN-1]",
     "[05-UNS-1]",
     "[05-UNS-2]",
     "[05-UNS-3]",
@@ -37,12 +43,14 @@ pub(crate) const REGISTERED_SPEC_ATOMS: &[&str] = &[
 
 #[rustfmt::skip]
 pub(crate) const REGISTERED_OPEN_ISSUES: &[u32] = &[
+    600,
     689,
     691,
     692,
     705,
     714,
     725,
+    729,
     734,
     879,
     951,

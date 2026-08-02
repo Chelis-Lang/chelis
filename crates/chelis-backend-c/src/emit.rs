@@ -4789,10 +4789,10 @@ impl CEmitter {
                 ),
                 Stage::Codegen("c"),
                 chelis_types::unimplemented_rejection!(
-                    959,
+                    729,
                     "the C windowed-reduction emitter is f32-only today; cast to f32 \
                      before the windowed reduction (spec/05-risc-primitives.md \
-                     section 2.3.1; chelis#959)"
+                     section 2.3.1)"
                 ),
             ));
         }
@@ -4811,7 +4811,7 @@ impl CEmitter {
                 format!("the C DAG emitter (node {id})"),
                 Stage::Codegen("c"),
                 chelis_types::deliberate_rejection!(
-                    "[05-UNS-1]",
+                    "[05-RWIN-1]",
                     "internal desync: lowering guarantees equal-length literal window and \
                      stride lists (chelis#725; chelis#730 census rows 8/12)"
                 ),
@@ -4828,7 +4828,7 @@ impl CEmitter {
                 format!("the C DAG emitter (node {id})"),
                 Stage::Codegen("c"),
                 chelis_types::deliberate_rejection!(
-                    "[05-UNS-1]",
+                    "[05-RWIN-1]",
                     "internal desync: the checker guarantees window arity <= input rank \
                      (chelis#730 census row 12)"
                 ),
@@ -4856,10 +4856,10 @@ impl CEmitter {
                     format!("the C DAG emitter (node {id})"),
                     Stage::Codegen("c"),
                     chelis_types::unimplemented_rejection!(
-                        959,
+                        600,
                         "the windowed output extent floor((d - window) / stride) + 1 is \
                          not statically representable; bind the axis to a concrete size \
-                         (spec/05-risc-primitives.md section 2.3.1; chelis#959)"
+                         (spec/05-risc-primitives.md section 2.3.1)"
                     ),
                 ));
             }

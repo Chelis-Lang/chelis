@@ -8216,7 +8216,7 @@ impl LowerCtx {
                             "the compiled-backend lowering of `expand`",
                             Stage::Lowering,
                             chelis_types::deliberate_rejection!(
-                                "[05-UNS-1]",
+                                "[05-AXIS-1]",
                                 "the expand axis must be an integer literal or a named \
                                  dimension; a computed axis previously fell back to axis 0 \
                                  silently (chelis#730 section C1.4, flagged by chelis#782)"
@@ -10148,7 +10148,7 @@ impl LowerCtx {
                 "a `handle-effect` form in IR lowering",
                 Stage::Lowering,
                 chelis_types::deliberate_rejection!(
-                    "[05-UNS-1]",
+                    "[04-EFF-1]",
                     "known effect kinds are `random` and `resource` \
                      (spec/03-deep-syntax.md); an unknown kind previously dropped its \
                      handler silently (chelis#730 census row 9)"
@@ -10590,8 +10590,8 @@ impl LowerCtx {
                 UnsupportedKind::Op(format!("{op:?}")),
                 format!("`{}` tensors in IR lowering", input_prec.name()),
                 Stage::Lowering,
-                chelis_types::deliberate_rejection!(
-                    "[05-UNS-1]",
+                chelis_types::unimplemented_rejection!(
+                    729,
                     "this op family is float-only in the executable IR today; cast the \
                      operand to a float dtype first. Integer support for the well-defined \
                      cases (abs/floor/ceil/round) is tracked by chelis#729; the silent \
@@ -11054,7 +11054,7 @@ impl LowerCtx {
                 "a `cast` target in IR lowering",
                 Stage::Lowering,
                 chelis_types::deliberate_rejection!(
-                    "[05-UNS-1]",
+                    "[04-DTYPE-1]",
                     "the cast target must name an active primitive type \
                      (spec/04-type-system.md section 1.1); a bogus target previously \
                      lowered as f32 silently in the build lane (chelis#744, chelis#730 \
