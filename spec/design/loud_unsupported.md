@@ -415,8 +415,9 @@ remains directly constructible:
 
 **Delivery status (2026-08-02): implemented as a focused Phase 3 slice.**
 `DiagnosticKind`, the sealed producer/wire split, the typed general-kind
-projection, the compile-fail controls, the two same-crate planted privacy
-mutations, and the added-kind exhaustiveness mutation now execute through
+projection, the compile-fail controls, the consumer-to-producer conversion
+mutation, the two same-crate planted privacy mutations, and the added-kind
+exhaustiveness mutation now execute through
 `scripts/diagnostic_kind_oracle.py`. The required
 `Diagnostic Kind Mutation Oracle` job runs that actual mutation runner when
 any owner, oracle, detector, or workflow input changes; its path detector is
@@ -492,7 +493,10 @@ compiler-api module must fail the workspace check, byte-restored
 after (the Phase 2 oracle's planted style, which is how a same-crate
 privacy violation can be continuously proven at all - a
 `compile_fail` doctest compiles as a foreign crate and cannot see
-in-crate privacy). The change-path CI job executes these mutations themselves,
+in-crate privacy). A planted `From<WireDiagnostic> for Diagnostic` conversion
+must make the same doctest component oracle go red, proving that the negative
+control tests the conversion route rather than only a direct vector type
+mismatch. The change-path CI job executes these mutations themselves,
 not merely the Python runner's unit tests; the `format!("{:?}")` and message-substring
 dispatch sites are gone.
 The wire field itself remains a `String` - the enum governs producers,

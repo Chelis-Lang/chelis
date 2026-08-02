@@ -3,10 +3,10 @@
 
 This is a focused Phase 3 component oracle, not the full Phase 3 completion
 oracle. It runs the closed-vocabulary, producer/wire, and compile-fail suites,
-then plants each same-crate privacy bypass in a non-chokepoint compiler-api
-module and one fully rendered vocabulary addition. Every mutation must make
-the workspace check fail, and each owner file is restored byte-for-byte in a
-``finally`` block.
+then plants a consumer-to-producer conversion, each same-crate privacy bypass
+in a non-chokepoint compiler-api module, and one fully rendered vocabulary
+addition. Every mutation must make its component oracle fail, and each owner
+file is restored byte-for-byte in a ``finally`` block.
 """
 
 from __future__ import annotations
@@ -22,8 +22,10 @@ import tempfile
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MUTATION_SOURCE = Path("crates/chelis-compiler-api/src/context.rs")
+SCHEMA_SOURCE = Path("crates/chelis-compiler-api/src/schema.rs")
 VOCAB_SOURCE = Path("crates/chelis-vocab/src/lib.rs")
 MUTATION_ANCHOR = "\n#[cfg(test)]"
+WIRE_BRIDGE_ANCHOR = "\n/// The producer projection of [`DiagnosticKind`]."
 
 FOCUSED_COMMANDS: tuple[tuple[str, ...], ...] = (
     ("cargo", "nextest", "run", "-p", "chelis-vocab"),
@@ -57,6 +59,14 @@ VOCABULARY_CHECK: tuple[str, ...] = (
     "check",
     "--workspace",
     "--lib",
+)
+
+WIRE_BRIDGE_CHECK: tuple[str, ...] = (
+    "cargo",
+    "test",
+    "-p",
+    "chelis-compiler-api",
+    "--doc",
 )
 
 
@@ -147,6 +157,31 @@ def mutate_diagnostic_vocabulary(source: str) -> str:
     return mutated
 
 
+def mutate_wire_bridge(source: str) -> str:
+    mutation = """
+impl From<WireDiagnostic> for Diagnostic {
+    fn from(wire: WireDiagnostic) -> Self {
+        Self {
+            kind: wire.kind,
+            message: wire.message,
+            severity: wire.severity,
+            expected: wire.expected,
+            got: wire.got,
+            suggestions: wire.suggestions,
+            span: wire.span,
+            deep_path: wire.deep_path,
+        }
+    }
+}
+"""
+    count = source.count(WIRE_BRIDGE_ANCHOR)
+    if count != 1:
+        raise OracleFailure(
+            f"wire bridge mutation anchor drifted: expected 1, found {count}"
+        )
+    return source.replace(WIRE_BRIDGE_ANCHOR, f"\n{mutation}{WIRE_BRIDGE_ANCHOR}", 1)
+
+
 @contextmanager
 def temporary_mutation(path: Path, mutate: Callable[[str], str]) -> Iterator[None]:
     original = path.read_bytes()
@@ -177,6 +212,7 @@ def assert_mutation_sources_clean(env: dict[str, str]) -> None:
             "--porcelain",
             "--",
             str(MUTATION_SOURCE),
+            str(SCHEMA_SOURCE),
             str(VOCAB_SOURCE),
         ),
         cwd=REPO_ROOT,
@@ -248,12 +284,41 @@ def run_vocabulary_mutation(env: dict[str, str]) -> None:
             )
 
 
+def run_wire_bridge_mutation(env: dict[str, str]) -> None:
+    path = REPO_ROOT / SCHEMA_SOURCE
+    print(
+        "+ add WireDiagnostic -> Diagnostic; expect "
+        f"{command_text(WIRE_BRIDGE_CHECK)} to fail",
+        flush=True,
+    )
+    with temporary_mutation(path, mutate_wire_bridge):
+        completed = subprocess.run(
+            WIRE_BRIDGE_CHECK,
+            cwd=REPO_ROOT,
+            env=env,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        output = completed.stdout + completed.stderr
+        if completed.returncode == 0:
+            raise OracleFailure(
+                "WireDiagnostic converted into a producer without breaking the oracle"
+            )
+        if "compile_fail" not in output or "compiled successfully" not in output:
+            raise OracleFailure(
+                "WireDiagnostic bridge failed for the wrong reason; expected the "
+                f"consumer-to-producer compile-fail probe to compile, got:\n{output[-4000:]}"
+            )
+
+
 def main() -> int:
     env = oracle_environment()
     try:
         for command in FOCUSED_COMMANDS:
             run_success(command, env)
         assert_mutation_sources_clean(env)
+        run_wire_bridge_mutation(env)
         run_privacy_mutation(
             mutate_diagnostic_literal,
             "error[E0451]",

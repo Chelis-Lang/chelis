@@ -1055,19 +1055,19 @@ impl HipEmitter {
                     Self::elem_kind(input_ty)?,
                 ))
             }
-            // `reduce_window_*` HIP codegen is deferred per the
-            // initial-admission scope (issue #254 / spec §2.3.1). The
+            // `reduce_window_*` HIP codegen is excluded by the
+            // target contract ([05-RWIN-2] / spec §2.3.1). The
             // C backend is canonical; returning `None` here means no
             // kernel name is registered, and the launch-emit arm below
             // panics via `todo!` if a `ReduceWindow` node ever reaches
             // codegen on the HIP target.
             RiscOp::ReduceWindow { .. } => None,
-            // `reduce_window_*` adjoint: HIP codegen deferred alongside the
-            // forward op (see above); launch-emit panics via `todo!`.
+            // `reduce_window_*` adjoint: excluded alongside the forward op
+            // under [05-RWIN-2]; launch-emit panics via `todo!`.
             RiscOp::ReduceWindowGrad { .. } => None,
             RiscOp::OneHot { .. } => None,
-            // The runtime `shape` value read is HIP-deferred (chelis#513/
-            // #558); `reject_unsupported_hip_ops` rejects it cleanly before
+            // The runtime `shape` value read is excluded by [05-SHAPE-1];
+            // `reject_unsupported_hip_ops` rejects it cleanly before
             // codegen, so no kernel name is registered. The launch-emit arm
             // below is a defensive `todo!` if one ever reaches codegen.
             RiscOp::Shape { .. } => None,
@@ -1666,8 +1666,8 @@ impl HipEmitter {
                 // collected by the first pass.
                 self.emit_extra_reduce_launch(id, *axis, &node.inputs, &node.output_type, dag)?;
             }
-            // `reduce_window_*` HIP codegen is deferred per the
-            // initial-admission scope (issue #254 / spec §2.3.1). C is
+            // `reduce_window_*` HIP codegen is excluded by the
+            // target contract ([05-RWIN-2] / spec §2.3.1). C is
             // the canonical backend. A `reduce_window_*` node is rejected
             // before codegen with a clean `unsupported_feature` diagnostic by
             // `reject_unsupported_hip_ops` (compiler-api + CLI mirror); the
@@ -1675,14 +1675,12 @@ impl HipEmitter {
             // HIP stubs above, reached only if some path bypasses that guard.
             RiscOp::ReduceWindow { .. } => {
                 todo!(
-                    "reduce_window_* HIP codegen is deferred (issue #254 / spec/05-risc-primitives.md §2.3.1). \
-                     Use the C backend, or open a follow-up issue if you need GPU windowed reductions."
+                    "reduce_window_* must have been rejected before HIP codegen by [05-RWIN-2]. Use the C backend."
                 )
             }
             RiscOp::ReduceWindowGrad { .. } => {
                 todo!(
-                    "reduce_window_* adjoint (ReduceWindowGrad) HIP codegen is deferred alongside the forward op \
-                     (spec/05-risc-primitives.md §2.3.1). Use the C backend for windowed-reduction gradients."
+                    "ReduceWindowGrad must have been rejected before HIP codegen by [05-RWIN-2]. Use the C backend."
                 )
             }
             RiscOp::OneHot { .. } => {
@@ -1690,15 +1688,14 @@ impl HipEmitter {
                     "HIP backend: internal OneHot must be consumed by specialization before codegen"
                 )
             }
-            // The runtime `shape` value read is HIP-deferred (chelis#513/
-            // #558) and rejected before codegen by
+            // The runtime `shape` value read is excluded by [05-SHAPE-1]
+            // and rejected before codegen by
             // `reject_unsupported_hip_ops` (compiler-api + CLI mirror); this
             // `todo!` is a defensive backstop matching the ReduceWindow
             // stubs above, reached only if some path bypasses that guard.
             RiscOp::Shape { .. } => {
                 todo!(
-                    "runtime `shape` value read HIP codegen is deferred (chelis#513/#558); \
-                     the C backend is canonical for runtime-dim reads. Use `--target c`."
+                    "runtime `shape` value read must have been rejected before HIP codegen by [05-SHAPE-1]. Use `--target c`."
                 )
             }
             RiscOp::Reshape { .. } => {
@@ -3483,8 +3480,8 @@ impl HipEmitter {
             | RiscOp::Pad { .. }
             | RiscOp::Shrink { .. }
             // `Shape` materializes a fresh rank-0 scalar (trivially
-            // contiguous). It is HIP-rejected before codegen (chelis#513/
-            // #558), so this arm is only for classification completeness.
+            // contiguous). It is HIP-rejected before codegen under
+            // [05-SHAPE-1], so this arm is only for classification completeness.
             | RiscOp::Shape { .. } => true,
             RiscOp::Reshape { .. } | RiscOp::Store { .. } => {
                 Self::node_is_statically_contiguous(dag, dag.get(id).unwrap().inputs[0])

@@ -3403,37 +3403,37 @@ fn reject_unsupported_hip_ops(dag: &Dag) -> Result<()> {
             // `gpu_correctness` manual oracle). No reject arm: they fall
             // through to codegen.
 
-            // `reduce_window_*` HIP codegen is deferred (spec §2.3.1). Reject
+            // `reduce_window_*` HIP codegen is excluded by [05-RWIN-2]. Reject
             // it cleanly here rather than letting it reach the launch-emit
             // `todo!`, which would abort the build with an `internal error`
             // panic. The C backend is canonical; use `--target c`.
             RiscOp::ReduceWindow { .. } => {
                 return Err(unsupported_gate_error(
                     format!(
-                        "`chelis build --target hip` does not yet support `reduce_window_*`; \
-                         lowered node {} requires it. HIP windowed-reduction codegen is deferred \
+                        "`chelis build --target hip` does not support `reduce_window_*`; \
+                         lowered node {} requires it. HIP windowed-reduction codegen is excluded \
                          (spec/05-risc-primitives.md §2.3.1); use `--target c`.",
                         node.id.0
                     ),
                     "hip",
-                    chelis_types::unimplemented_rejection!(
-                        957,
-                        "the HIP windowed-reduction emitter is still an unimplemented panic-family site"
+                    chelis_types::deliberate_rejection!(
+                        "[05-RWIN-2]",
+                        "windowed reduction kernels are intentionally excluded from the HIP target; use the C target"
                     ),
                 ));
             }
             RiscOp::ReduceWindowGrad { .. } => {
                 return Err(unsupported_gate_error(
                     format!(
-                        "`chelis build --target hip` does not yet support the `reduce_window_*` \
-                         adjoint; lowered node {} requires it. HIP windowed-reduction codegen is \
-                         deferred (spec/05-risc-primitives.md §2.3.1); use `--target c`.",
+                        "`chelis build --target hip` does not support the `reduce_window_*` \
+                         adjoint (`ReduceWindowGrad`); lowered node {} requires it. HIP windowed-reduction codegen is \
+                         excluded (spec/05-risc-primitives.md §2.3.1); use `--target c`.",
                         node.id.0
                     ),
                     "hip",
-                    chelis_types::unimplemented_rejection!(
-                        957,
-                        "the HIP windowed-reduction adjoint emitter is still an unimplemented panic-family site"
+                    chelis_types::deliberate_rejection!(
+                        "[05-RWIN-2]",
+                        "windowed reduction adjoint kernels are intentionally excluded from the HIP target; use the C target"
                     ),
                 ));
             }
@@ -3454,15 +3454,15 @@ fn reject_unsupported_hip_ops(dag: &Dag) -> Result<()> {
             RiscOp::Shape { .. } => {
                 return Err(unsupported_gate_error(
                     format!(
-                        "`chelis build --target hip` does not yet support the runtime `shape` \
+                        "`chelis build --target hip` does not support the runtime `shape` \
                          value read; lowered node {} requires it. The C backend is canonical \
-                         for runtime-dim reads (chelis#513/#558); use `--target c`.",
+                         for runtime-dim reads (spec/05-risc-primitives.md [05-SHAPE-1]); use `--target c`.",
                         node.id.0
                     ),
                     "hip",
-                    chelis_types::unimplemented_rejection!(
-                        513,
-                        "runtime symbolic-shape machinery is not available on the HIP device lane"
+                    chelis_types::deliberate_rejection!(
+                        "[05-SHAPE-1]",
+                        "runtime shape-value reads are intentionally excluded from the HIP device lane; use the C target"
                     ),
                 ));
             }
@@ -4814,7 +4814,7 @@ mod tests {
     }
 
     #[test]
-    fn hip_shape_rejection_names_symbolic_shape_owner() {
+    fn hip_shape_rejection_names_the_target_authority() {
         let mut dag = Dag::new();
         let input = dag.add_node(
             RiscOp::Load { name: "x".into() },
@@ -4832,7 +4832,7 @@ mod tests {
 
         let err = reject_unsupported_hip_ops(&dag)
             .expect_err("HIP must reject a runtime shape value node");
-        assert!(err.errors[0].message.contains("unimplemented chelis#513:"));
+        assert!(err.errors[0].message.contains("deliberate [05-SHAPE-1]:"));
     }
 
     #[test]
@@ -5086,7 +5086,7 @@ windowed = reduce_window_max(padded, [2], [1])
 
     // --- reduce_window: HIP build rejects the node cleanly (no todo! panic) ---
     //
-    // PR #261 review finding #2: HIP windowed-reduction codegen is deferred.
+    // HIP windowed-reduction codegen is excluded by [05-RWIN-2].
     // The build must reject a `ReduceWindow` node with a clean
     // `unsupported_feature` error before it reaches the launch-emit `todo!`.
     #[test]
@@ -5099,11 +5099,47 @@ windowed = reduce_window_max(padded, [2], [1])
             message.contains("reduce_window") && message.contains("--target hip"),
             "unexpected message: {message}"
         );
-        assert!(message.contains("unimplemented chelis#957:"));
+        assert!(message.contains("deliberate [05-RWIN-2]:"));
         assert_eq!(
             err.errors[0].kind(),
             chelis_vocab::DiagnosticKind::UnsupportedFeature
         );
+    }
+
+    #[test]
+    fn hip_rejects_reduce_window_grad_with_the_same_target_authority() {
+        use chelis_ir::dag::ReduceWindowKind;
+
+        let mut dag = Dag::new();
+        let input = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            tensor_type(vec![4], chelis_types::types::Prim::F32),
+            None,
+        );
+        let cotangent = dag.add_node(
+            RiscOp::Load { name: "g".into() },
+            vec![],
+            tensor_type(vec![3], chelis_types::types::Prim::F32),
+            None,
+        );
+        let grad = dag.add_node(
+            RiscOp::ReduceWindowGrad {
+                reducer: ReduceWindowKind::Max,
+                window_shape: vec![2],
+                strides: vec![1],
+            },
+            vec![input, cotangent],
+            tensor_type(vec![4], chelis_types::types::Prim::F32),
+            None,
+        );
+        dag.add_root(grad);
+
+        let err = reject_unsupported_hip_ops(&dag)
+            .expect_err("HIP must reject reduce_window adjoint codegen");
+        let message = &err.errors[0].message;
+        assert!(message.contains("ReduceWindowGrad"), "{message}");
+        assert!(message.contains("deliberate [05-RWIN-2]:"), "{message}");
     }
 
     /// chelis#616: a runtime (node-valued) reshape target extent is C-only;

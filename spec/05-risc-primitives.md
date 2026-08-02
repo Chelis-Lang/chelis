@@ -312,8 +312,8 @@ explicit mode; this matches `Valid` as the implicit default.
 `{reducer, window_shape, strides}` triple. The IR evaluator, the host
 runtime, and the C backend each implement it as a direct windowed loop
 nest — `Mean` is implemented as windowed `Sum` divided by the window
-volume, computed inline rather than as a separate `Div` op. (HIP
-codegen is deferred; see **Backend status** below.) There is no Tier-2
+volume, computed inline rather than as a separate `Div` op. (The HIP
+target rejects it under [05-RWIN-2].) There is no Tier-2
 to Tier-1 decomposition: `reduce_window_*` is a Tier-1 primitive in its
 own right. The Surf `reduce_window_*` names are the public surface;
 the IR node and backends share the single `ReduceWindow` lowering
@@ -371,8 +371,8 @@ input cotangent `din` (shape `S_in`). The adjoints, accumulated over the
 Like the forward op, `ReduceWindowGrad` is implemented directly by the IR
 evaluator, the host runtime, and the C backend (the C adjoint is emitted
 serially, since overlapping windows scatter-add into shared `din`
-positions); HIP codegen is deferred and rejected before codegen (see
-**Backend status**). Second-order AD through the adjoint itself is not
+positions); the HIP target rejects it before codegen under [05-RWIN-2].
+Second-order AD through the adjoint itself is not
 defined. The adjoints are validated against central
 finite differences for all four reducers over overlapping and strided
 windows (`chelis-ir::eval` unit tests), and the C backend is checked for
@@ -388,17 +388,10 @@ formula `floor((input_dim - window) / stride) + 1` matches
 `jax.lax.reduce_window` / PyTorch pool kernels and is the normative
 contract above.
 
-**Backend status (initial admission).** The C backend is the
-canonical lowering and is exercised by a gcc compile-and-run
-evaluator-parity gate. The HIP backend codegen for `ReduceWindow` (and
-its `ReduceWindowGrad` adjoint) is **deferred**: `chelis build --target
-hip` on a program containing `reduce_window_*` is **rejected** at compile
-time with a clean `unsupported_feature` error
-(`reject_unsupported_hip_ops`, compiler-api + CLI mirror) rather than
-emitting a GPU kernel. The HIP launch-emit arm retains a deferred-feature
-`todo!` as a defensive backstop (matching the `Pad` / `Shrink` HIP stubs),
-reached only if some path bypasses the guard. Use the default C target
-until GPU windowed reductions land.
+> **[05-RWIN-2]** The C target SHALL implement `ReduceWindow` and
+> `ReduceWindowGrad`. The HIP target SHALL reject either node before codegen
+> with an `unsupported_feature` diagnostic that directs the caller to the C
+> target; it SHALL NOT emit a stub kernel or enter a panic backstop.
 
 **Statically-known windowed extents required on the build path.** The
 build/backend path needs each *windowed* axis extent to be known at
@@ -692,6 +685,12 @@ runtime input tensor rather than baked at codegen time. Under `--target hip` a
 metadata op); a `Shape` node reaching the HIP device-kernel path is rejected
 loudly (`reject_unsupported_hip_ops`) and the Metal lane rejects it via its
 emit-time `unsupported`-op arm. eval and C are the mandatory lanes.
+
+> **[05-SHAPE-1]** A scalar `Shape` value SHALL be implemented by evaluation
+> and the C target. A `Shape` node that reaches the HIP device-kernel path
+> SHALL be rejected before codegen with an `unsupported_feature` diagnostic
+> that directs the caller to the C target; it SHALL NOT be replaced by a
+> constant, a default extent, or a stub kernel.
 
 A `shape()` read whose `axis` is not a compile-time literal (a data- or
 metadata-derived runtime axis) is not DAG-representable, because `RiscOp::Shape`

@@ -265,8 +265,29 @@ class DiagnosticKindOracleJobTests(unittest.TestCase):
         self.assertIn("needs: [changes]", block)
         self.assertIn("needs.changes.outputs.diagnostic_kind_changed", block)
         self.assertIn("contents: read", block)
-        self.assertIn("scripts/diagnostic_kind_oracle.py", block)
+        run_lines = [line.strip() for line in block.splitlines() if line.strip().startswith("run:")]
+        self.assertIn(
+            "run: .venv/bin/python scripts/diagnostic_kind_oracle.py",
+            run_lines,
+        )
         self.assertIn("taiki-e/install-action@nextest", block)
+
+    def test_a_quoted_passing_noop_is_not_the_oracle_step(self):
+        block = _ci_job_block("diagnostic-kind-oracle")
+        mutated = block.replace(
+            "run: .venv/bin/python scripts/diagnostic_kind_oracle.py",
+            'run: "true # scripts/diagnostic_kind_oracle.py"',
+            1,
+        )
+        run_lines = [
+            line.strip()
+            for line in mutated.splitlines()
+            if line.strip().startswith("run:")
+        ]
+        self.assertNotIn(
+            "run: .venv/bin/python scripts/diagnostic_kind_oracle.py",
+            run_lines,
+        )
 
 # Whole WORKFLOW FILES that are out-of-scope-by-design for the per-PR developer
 # `gate.py` quartet (like the backend-sanitizers / macos-smoke jobs in ci.yml,

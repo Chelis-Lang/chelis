@@ -162,11 +162,12 @@ pub enum WireApiEnvelope<T> {
 /// A deserialized consumer value cannot enter an envelope producer API:
 ///
 /// ```compile_fail
-/// use chelis_compiler_api::schema::{ApiEnvelope, WireDiagnostic};
+/// use chelis_compiler_api::schema::{ApiEnvelope, Diagnostic, WireDiagnostic};
 /// let wire: WireDiagnostic = serde_json::from_str(
 ///     r#"{"kind":"unsupported_feature","message":"forged","severity":1.0}"#,
 /// ).unwrap();
-/// let _: ApiEnvelope<()> = ApiEnvelope::failure("compile", vec![wire]);
+/// let producer: Diagnostic = wire.into();
+/// let _: ApiEnvelope<()> = ApiEnvelope::failure("compile", vec![producer]);
 /// ```
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct Diagnostic {
