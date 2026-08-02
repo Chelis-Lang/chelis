@@ -1234,9 +1234,8 @@ are the ground truth", which had already gone stale against §2.3's cascade;
 corrected 2026-07-28.)
 
 The GPU backend must satisfy [05-OBS-3]'s per-operation, per-arithmetic-width
-agreement table. The former blanket `1e-6` (f32) / `1e-12` (f64) bounds were
-superseded when that table was authored; they are not a conforming cross-lane
-oracle.
+agreement table. Blanket `1e-6` (f32) / `1e-12` (f64) bounds are not a
+conforming cross-lane oracle.
 
 ---
 
@@ -1408,16 +1407,6 @@ a permanently skipped test or a stale conformance sentence behind. The
 same oracle independently recompiles/runs every executable declared C
 corpus exclusion and compares intended bits; comment/string-only source
 fingerprints cannot preserve an exclusion after exact behavior returns.
-Phase 3 is DELIVERED in the source revision carrying this text: the
-[05-OBS-3] table below is mirrored from
-`chelis_types::agreement::OP_TOLERANCES`, `parity.rs`,
-`eval_agreement.rs`, and the chelis#687 rejected-cell corpus use that one
-comparator, and
-`.venv/bin/python scripts/faithful_observation_phase3_oracle.py` is the
-authoritative composite acceptance command (exit 0 with final line
-`PHASE 3 ORACLE: PASS`). The current eval float lane is explicitly
-ineligible for tolerance while chelis#897 records its [04-NUM-8] width
-violation; byte-identical results still pass, but a mismatch stays visible.
 Atom IDs are stable, and the current blockquote authorities remain
 normative until selected
 for chelis#733 Phase 1 migration. Full revisions are attached and checked
@@ -1473,9 +1462,10 @@ chelis#729/#686 capacity family).)*
 > SHALL be correctly rounded (bound zero, per chelis#719). Formatting
 > differences are never within tolerance.
 
-The authoritative machine form is
-`chelis_types::agreement::OP_TOLERANCES`; the following block is
-tripwire-checked byte-for-byte against its generated rendering.
+The following table is normative. Implementations SHALL mirror it through a
+closed operation identity derived from the operation being compared; callers
+MUST NOT supply an unchecked textual identity. The executable mirror is
+tripwire-checked byte-for-byte against this block.
 
 <!-- BEGIN GENERATED OBSERVATION TOLERANCE TABLE -->
 | operation | maximum cross-lane value difference | authority |
@@ -1505,8 +1495,7 @@ rounding-bin acceptance. Non-finite and signed-zero mismatches are never
 toleranced. Byte-different strings which denote identical stored bits are
 formatting violations under [05-OBS-2], not value differences.
 
-*(#719's fix (PR #760) preceded the zero-bound `sqrt` row. This section,
-spec/05 §8, is the table's single authored address:
+*(This section, spec/05 §8, is the table's single authored address:
 `dtype_semantics.md` §C4 item 5 and `faithful_observation.md` Phase 3
 point here and do not host a second copy. The table covers only genuine
 implementation variance at a single width - one lane's libm or SLEEF or

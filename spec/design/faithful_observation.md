@@ -824,7 +824,10 @@ visible as exactly themselves.
    rebuilt on the byte-equal-or-table-bounded rule (§C4.3). (The silent
    float-parse fallback itself is deleted earlier, by [#729] Phase 0 -
    this phase replaces the comparison rule it left behind; see the
-   corpus-diet note in that deliverable.)
+   corpus-diet note in that deliverable.) Tolerance selection uses the
+   closed `AgreementOp` identity, derived by an exhaustive match on the
+   actual result-producing `RiscOp`; a caller cannot label an exact op as a
+   transcendental by passing a string.
 3. The rejected-cells corpus (from `loud_unsupported.md` Phase 0) and
    the value corpus unified under the same comparison rule so
    diagnostics and values are oracle-checked identically.
@@ -841,6 +844,13 @@ exit 0 with the final line `PHASE 3 ORACLE: PASS`. It runs the shared policy
 and numbered-spec tripwire, the full current `parity.rs` plus rejected-cell
 corpus, and `eval_agreement.rs`; it also freezes each suite's test inventory,
 comparator adoption, forbidden legacy f64/epsilon paths, and ignore ledger.
+The eval/C suite emits one runtime receipt per required behavior while the
+oracle runs and the oracle requires the exact receipt set, so a named test
+with an empty body is red. Two required behavioral canaries perturb the
+compiled observation before the shared comparator and present an adjacent
+f32 result while the evaluator is marked nonconforming; they prove that the
+compiled bytes reach the decision and that chelis#897 blocks tolerance,
+rather than relying on source-token presence.
 The sole allowed ignore is
 `parity_transformer_block_library_only`, whose exact reason is the
 environmental system-CBLAS prerequisite. There are no value-divergence
