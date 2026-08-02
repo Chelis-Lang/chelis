@@ -165,4 +165,7 @@
 - [x] 8.3 Confirm that hosted output shows no wire, CLI, backend, runtime, package, or generated-code drift.
   - The integration gate, backend sanitizers, generated C and Metal smoke tests, package checks, and conformance gate passed.
   - The hosted output contained no drift finding for the wire, CLI, backend, runtime, package, or generated-code surfaces.
-- [ ] 8.4 Confirm that hosted CI executes both compile-fail gate commands on the remediated head.
+- [x] 8.4 Confirm that hosted CI executes both compile-fail gate commands on the remediated head.
+  - All 13 hosted checks passed for exact head `3c133f2f98dfa5420f845637e47570dcedac7c6e`.
+  - Run `30768292087` passed one regular and five compile-fail compiler-API doctests.
+  - The same run reported `diagnostic checkpoint compile-fail: PASS`.

@@ -317,7 +317,11 @@ Current `main` includes the stack-safe normalization fix from #1035. All five `i
 
 ### Hosted Evidence
 
-Hosted CI evidence is pending. Local results do not replace macOS Smoke, Docs, or the changed-crate jobs.
+All 13 hosted checks passed for exact head `3c133f2f98dfa5420f845637e47570dcedac7c6e`.
+
+The `Lint and Unit Tests (Linux)` job in run `30768292087` executed both new controls. The compiler-API command passed one regular doctest and five compile-fail doctests.
+
+The raw-checkpoint command reported `diagnostic checkpoint compile-fail: PASS`. The same hosted run also passed macOS Smoke, Docs, and Integration Tests.
 
 ### PR Review Remediation
 

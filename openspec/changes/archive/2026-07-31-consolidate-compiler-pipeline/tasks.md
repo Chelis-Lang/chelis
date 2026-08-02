@@ -75,7 +75,9 @@
 - [x] 8.4 Run `.venv/bin/python scripts/gate.py --local` as additional local evidence.
 - [x] 8.5 Run a fresh-context adversarial review against the specification and executable behavior.
 - [x] 8.6 Correct each confirmed finding and rerun the authoritative oracle.
-- [x] 8.7 Record hosted CI status: not requested because this workflow has no fresh remote approval.
+- [x] 8.7 Record hosted CI status.
+  - All 13 hosted checks passed for exact head `3c133f2f98dfa5420f845637e47570dcedac7c6e`.
+  - Run `30768292087` passed macOS Smoke, Docs, Lint and Unit Tests, and Integration Tests.
 - [x] 8.8 Correct the ownership scope after PR review found the under-specified Reef exception.
   - The active specification names the three guarded roots and the issue #1012 exception.
   - The exact-root source-guard test passed.
