@@ -7,8 +7,11 @@ PR #1054 consolidates the complete Phase 2 kernel split, exact prover
 carriers, trap freeze, integer-unary evaluator rows, and the ordinary,
 windowed, argument-reduction, and overlapping window-adjoint consumers
 discovered by its red team. Its single Phase 2 oracle is
-`.venv/bin/python scripts/dtype_phase2_oracle.py`; Phases 3-4 have not
-landed. Tracking issue: [#729].
+`.venv/bin/python scripts/dtype_phase2_oracle.py`. Draft PR #1065 begins
+Phase 3 with the exact, minimum-trapping signed-integer `abs` kernel in the C
+tensor and scalar-host lanes. General fused integer kernels and the remaining
+C rows mean Phase 3 is not complete, and Phase 4 has not started. Tracking
+issue: [#729].
 **Owning specs:** `spec/04-type-system.md` (gains an authored overflow/rounding
 section, today silent), `spec/05-risc-primitives.md` (op result semantics),
 and the audit record in `docs/investigations/numeric_audit_next_sweeps.md` /
@@ -1403,6 +1406,17 @@ prover-carrier boundary. It never runs ignored rows or Phase 3 backend suites.
 RENDERER whose printed strings are the expected values for yours (the
 rendering contract, not the value contract - values are owed to
 [04-NUM-8] by both lanes independently).
+
+**Implementation status:** draft PR #1065 delivers the first bounded C-kernel
+row on top of #1054. Direct signed-integer `abs` uses its declared width for
+int8/int16/int32/int64 in both the tensor emitter and scalar host emitter,
+traps on each width's minimum before C negation, and emits §C2's byte-exact
+diagnostic generated from `NumericTrap`. Integer `abs` stays materialized
+until the general fused-integer emitter carries the same semantics;
+externally supplied fused integer-`abs` IR remains loud. This also makes
+[#722]'s compiled integer-`abs` gradient row green. It does not deliver the
+other integer kernels, generated observation helper, or Phase 3 oracle, and
+it does not widen the HIP/Metal scope.
 
 **You deliver:**
 

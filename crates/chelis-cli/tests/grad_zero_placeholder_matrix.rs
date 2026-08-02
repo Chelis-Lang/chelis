@@ -84,11 +84,15 @@ fn c_first_line(program: &str, name: &str) -> Result<String, String> {
     let run = std::process::Command::new(out_dir.join(name))
         .output()
         .expect("compiled binary should run");
-    String::from_utf8_lossy(&run.stdout)
+    if !run.status.success() {
+        return Err(String::from_utf8_lossy(&run.stderr).into_owned());
+    }
+    Ok(String::from_utf8_lossy(&run.stdout)
         .lines()
-        .find(|l| l.contains("tensor("))
-        .map(|l| l.trim().to_string())
-        .ok_or_else(|| "no tensor line".to_string())
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_string())
 }
 
 /// The loss is sum(x * w) with w = OP(int64 weights) cast to f32; the
@@ -125,14 +129,8 @@ fn eval_grad_through_int_abs_is_the_true_gradient() {
     );
 }
 
-/// Observed today: `[0.0, 0.0, 0.0, 0.0]` from the compiled binary too -
-/// both lanes agree on the wrong answer, invisible to any cross-lane oracle.
+/// The compiled lane must match the evaluator reference for the #722 row.
 #[test]
-#[ignore = "chelis#722; since chelis#730 Phase 1 the placeholder is a LOUD lowering error \
-            in both lanes (see grad_through_int_abs_fails_loudly_not_zero) - red for a \
-            better reason until chelis#729 lands integer abs/floor. Original finding: grad through abs(int64 tensor) returns zeros in the compiled lane \
-            as well; correct gradient is [100, 200, 300, 400]. Run with \
-            `cargo test -p chelis-cli --test grad_zero_placeholder_matrix -- --ignored`."]
 fn c_grad_through_int_abs_is_the_true_gradient() {
     if !c_toolchain_available() {
         panic!("needs a host C toolchain");
@@ -182,21 +180,59 @@ fn eval_int64_abs_min_traps_instead_of_rounding_or_wrapping() {
     );
 }
 
-// ===========================================================================
-// chelis#722 compiled half: remains loud until Phase 3 + chelis#699
-// ===========================================================================
-
-/// Phase 2 intentionally enables the evaluator only. The compiled lane must
-/// remain loud until Phase 3 supplies an exact integer kernel; emitting the
-/// current float-only backend `fabsf` template would be a wrong answer.
+/// Every signed width uses its declared-width integer kernel in compiled C.
 #[test]
-fn c_grad_through_int_abs_remains_loud_until_phase3() {
-    if c_toolchain_available() {
-        let err = c_first_line(&grad_program("abs", false), "grad_abs_int_loud")
-            .expect_err("the compiled lane must reject integer abs");
+fn c_tensor_abs_is_exact_at_every_integer_width() {
+    if !c_toolchain_available() {
+        return;
+    }
+    for (prim, magnitude) in [
+        ("int8", 7),
+        ("int16", 300),
+        ("int32", 70000),
+        ("int64", 9007199254740993_i64),
+    ] {
+        let program = format!(
+            "def int_abs(x: tensor[2, {prim}]) -> tensor[2, {prim}] = abs(x)\n\
+             out = print(int_abs(to_tensor([cast(-{magnitude}, {prim}), cast(5, {prim})])))\n"
+        );
+        let line = c_first_line(&program, &format!("c_abs_{prim}"))
+            .unwrap_or_else(|error| panic!("compiled {prim} abs must run: {error}"));
         assert!(
-            err.contains("unsupported:"),
-            "the build-lane failure must carry the branded diagnostic; got: {err}"
+            line.contains(&format!("data=[{magnitude}, 5]")),
+            "compiled {prim} abs must preserve its exact integer values; got: {line}"
+        );
+    }
+}
+
+/// The minimum value at each signed width traps with the frozen C2 bytes.
+#[test]
+fn c_tensor_abs_min_traps_at_every_integer_width() {
+    if !c_toolchain_available() {
+        return;
+    }
+    for (prim, minimum) in [
+        ("int8", "-128.0"),
+        ("int16", "-32768.0"),
+        ("int32", "-2147483648.0"),
+        ("int64", "-9223372036854775808.0"),
+    ] {
+        let program = format!(
+            "def int_abs(x: tensor[1, {prim}]) -> tensor[1, {prim}] = abs(x)\n\
+             out = int_abs(cast(to_tensor([{minimum}]), {prim}))\n"
+        );
+        let error = c_first_line(&program, &format!("c_abs_min_{prim}"))
+            .expect_err("compiled minimum abs must trap");
+        let trap = error
+            .lines()
+            .find_map(|line| line.find("numeric trap:").map(|start| &line[start..]))
+            .unwrap_or_else(|| {
+                panic!("compiled {prim} abs failed without a numeric trap: {error}")
+            });
+        assert_eq!(
+            trap,
+            format!("numeric trap: overflow in abs at {prim}"),
+            "compiled abs trap bytes are frozen per C2"
         );
     }
 }

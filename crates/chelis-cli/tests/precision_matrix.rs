@@ -1276,6 +1276,54 @@ fn int64_scalar_abs_is_exact_in_the_compiled_host_lane() {
     );
 }
 
+/// The scalar host lane owes the same C2 minimum-value trap as the tensor
+/// kernel. Building MIN from two representable literals avoids relying on a
+/// source token whose unsigned magnitude is outside the lexer range.
+#[test]
+fn int64_scalar_abs_min_traps_in_the_compiled_host_lane() {
+    if !c_toolchain_available() {
+        eprintln!("skipping: no host C toolchain");
+        return;
+    }
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("abs_host_min.ch");
+    let out_dir = dir.path().join("abs-host-min-out");
+    write_file(
+        &path,
+        "def run() -> int64 = \
+         abs(sub(cast(-9223372036854775807, int64), cast(1, int64)))\n\
+         out = run()\n",
+    );
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let emitted =
+        std::fs::read_to_string(out_dir.join("abs_host_min.c")).expect("generated scalar host C");
+    assert!(emitted.contains("chelis_int_abs_guard"));
+    assert!(!emitted.contains("llabs"));
+    let status = common::link_generated(&out_dir, "abs_host_min.c", "abs_host_min");
+    assert!(status.success(), "link failed: {status}");
+    let run = std::process::Command::new(out_dir.join("abs_host_min"))
+        .output()
+        .expect("compiled scalar host artifact should run");
+    assert!(!run.status.success(), "integer abs MIN must trap");
+    assert_eq!(
+        String::from_utf8_lossy(&run.stderr).trim(),
+        "numeric trap: overflow in abs at int64",
+        "scalar host abs trap bytes are frozen per C2"
+    );
+}
+
 // ===========================================================================
 // Std.Decimal: the surface that started this investigation.
 //
@@ -1409,15 +1457,14 @@ fn decimal_rounding_modes_are_correct_on_the_tie_case() {
 // must fail the build, not evaluate to zero.
 // ===========================================================================
 
-/// Assert an int64-tensor unary op agrees across lanes.
-///
-/// Verified today: eval is correct, compiled C returns all zeros.
+/// Assert an int64-tensor unary op agrees across lanes and executes its
+/// compiled artifact, rather than treating source-shape inspection as parity.
 fn assert_int_tensor_unop_parity(op: &str, expected: &str, name: &str) {
     let eval_program = format!(
         "module M.Main\n\
          def run(x: tensor[4, int64]) -> tensor[4, int64] = {op}(x)\n\
-         out = print(to_list(run(to_tensor([cast(-100, int64), cast(200, int64), \
-         cast(-300, int64), cast(400, int64)]))))\n"
+         out = print(run(to_tensor([cast(-100, int64), cast(200, int64), \
+         cast(-300, int64), cast(400, int64)])))\n"
     );
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("u.ch");
@@ -1436,9 +1483,9 @@ fn assert_int_tensor_unop_parity(op: &str, expected: &str, name: &str) {
         .trim()
         .to_string();
     common::assert_elements_in_domain("int64", &eval_got, name);
-    assert_eq!(
-        eval_got, expected,
-        "{name}: eval lane must be correct for `{op}` on an int64 tensor"
+    assert!(
+        eval_got.contains(&format!("data={expected}")),
+        "{name}: eval lane must be correct for `{op}` on an int64 tensor; got {eval_got}"
     );
 
     if !c_toolchain_available() {
@@ -1478,40 +1525,50 @@ fn assert_int_tensor_unop_parity(op: &str, expected: &str, name: &str) {
          error, so the compiled program silently returns zeros while eval \
          returns {expected}. chelis#699"
     );
+    let status = common::link_generated(&cout, &format!("{name}.c"), name);
+    assert!(status.success(), "{name}: link failed: {status}");
+    let run = std::process::Command::new(cout.join(name))
+        .output()
+        .expect("compiled unary artifact should run");
+    assert!(
+        run.status.success(),
+        "{name}: compiled `{op}` failed: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(
+        stdout.contains(&format!("data={expected}")),
+        "{name}: compiled `{op}` must agree with eval; got {stdout}"
+    );
 }
 
-/// Verified: eval `[100, 200, 300, 400]`, compiled C `[0.0, 0.0, 0.0, 0.0]`.
+/// Integer `abs` is exact in both lanes and must retain its tensor operand.
 #[test]
-#[ignore = "chelis#699: abs on an int64 tensor silently compiles to zeros \
-            (lower_transcendental's non-float 'error placeholder' raises no \
-            error). This test asserts the CORRECT behavior and fails until the \
-            fix lands. Run with `cargo test -p chelis-cli --test \
-            precision_matrix -- --ignored`."]
 fn int64_tensor_abs_agrees_across_lanes() {
     assert_int_tensor_unop_parity("abs", "[100, 200, 300, 400]", "abs_i64");
 }
 
-/// `floor` is identity on integers. Verified: compiled C returns zeros.
+/// `floor` remains a separate Phase 3 integer-kernel row.
 #[test]
-#[ignore = "chelis#699: floor on an int64 tensor silently compiles to zeros. \
+#[ignore = "chelis#699: floor on an int64 tensor still has no compiled integer kernel. \
             Run with `cargo test -p chelis-cli --test precision_matrix -- \
             --ignored`."]
 fn int64_tensor_floor_agrees_across_lanes() {
     assert_int_tensor_unop_parity("floor", "[-100, 200, -300, 400]", "floor_i64");
 }
 
-/// `ceil` is identity on integers. Verified: compiled C returns zeros.
+/// `ceil` remains a separate Phase 3 integer-kernel row.
 #[test]
-#[ignore = "chelis#699: ceil on an int64 tensor silently compiles to zeros. \
+#[ignore = "chelis#699: ceil on an int64 tensor still has no compiled integer kernel. \
             Run with `cargo test -p chelis-cli --test precision_matrix -- \
             --ignored`."]
 fn int64_tensor_ceil_agrees_across_lanes() {
     assert_int_tensor_unop_parity("ceil", "[-100, 200, -300, 400]", "ceil_i64");
 }
 
-/// `round` is identity on integers. Verified: compiled C returns zeros.
+/// `round` remains a separate Phase 3 integer-kernel row.
 #[test]
-#[ignore = "chelis#699: round on an int64 tensor silently compiles to zeros. \
+#[ignore = "chelis#699: round on an int64 tensor still has no compiled integer kernel. \
             Run with `cargo test -p chelis-cli --test precision_matrix -- \
             --ignored`."]
 fn int64_tensor_round_agrees_across_lanes() {
@@ -1526,10 +1583,6 @@ fn int64_tensor_round_agrees_across_lanes() {
 /// No crash, no NaN, no absurd magnitude. This is the property that makes the
 /// placeholder worse than an unimplemented-op panic: it is not self-announcing.
 #[test]
-#[ignore = "chelis#699: the zeroed abs subtree poisons downstream arithmetic \
-            and yields plausible output ([1,1,1,1] instead of [101,201,301,401]). \
-            Run with `cargo test -p chelis-cli --test precision_matrix -- \
-            --ignored`."]
 fn zeroed_abs_does_not_silently_poison_downstream_arithmetic() {
     if !c_toolchain_available() {
         eprintln!("skipping: no host C toolchain");
@@ -1564,13 +1617,17 @@ fn zeroed_abs_does_not_silently_poison_downstream_arithmetic() {
     let run = std::process::Command::new(out_dir.join("poison"))
         .output()
         .expect("compiled binary should run");
+    assert!(
+        run.status.success(),
+        "compiled abs/add artifact failed: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
     let stdout = String::from_utf8_lossy(&run.stdout);
     assert!(
-        !stdout.contains("[1.0, 1.0, 1.0, 1.0]"),
-        "add(abs(x), [1,1,1,1]) returned [1,1,1,1]: the abs subtree was zeroed \
-         and the add computed 0+1 correctly on it. Expected [101, 201, 301, 401]. \
-         Note the output is PLAUSIBLE, not obviously broken. chelis#699. \
-         Got: {stdout}"
+        stdout.contains("data=[101, 201, 301, 401]"),
+        "add(abs(x), [1,1,1,1]) must preserve the exact integer abs subtree; \
+         the old placeholder returned the plausible wrong value [1,1,1,1]. \
+         chelis#699. Got: {stdout}"
     );
 }
 
