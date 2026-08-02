@@ -1271,7 +1271,15 @@ IntSuffix     <- 'i8' / 'i16' / 'i32' / 'i64'
 # literal (e.g. `1.0xyz`, `42u8`, `1.0f8e4m3`) is a parse error per P10a.
 BoolLit       <- 'true' / 'false'
 StringLit     <- '"' StringChar* '"'
-StringChar    <- '\\' [nrt0"\\] / !'"' .
+StringChar    <- '\\' [nrt0"\\]
+               / UnicodeControlEscape
+               / OrdinaryStringChar
+UnicodeControlEscape <- '\\u{' [0-9a-f]+ '}'
+OrdinaryStringChar <- !('"' / '\\' / RawControl) .
+RawControl    <- [\u0000-\u001f\u007f-\u009f]
+# After lexical recognition, UnicodeControlEscape MUST encode one scalar in
+# P11's closed control-character set using its minimal lowercase hexadecimal
+# spelling. It is not an alias for a named escape or printable character.
 
 # ═══════════════════════════════════════════════════
 #  IDENTIFIERS
