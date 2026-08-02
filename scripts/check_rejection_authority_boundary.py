@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import re
 import sys
+from collections import Counter
 from pathlib import Path
 
 
@@ -27,6 +28,27 @@ ALLOWED_PUBLIC_METHODS = {
 PUBLIC_FN = re.compile(
     r"^\s*pub(?:\([^)]*\))?\s+(?:const\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)",
     re.MULTILINE,
+)
+
+EXPECTED_PUBLIC_FUNCTIONS = Counter(
+    {
+        "as_str": 1,
+        "registry": 2,
+        "number": 1,
+        "kind": 1,
+        "atom": 1,
+        "issue": 1,
+        "hint": 1,
+        "citation": 1,
+        "__build_deliberate_rejection": 1,
+        "__build_unimplemented_rejection": 1,
+        "new": 1,
+        "compiled_host_only_builtin": 1,
+        "with_span": 1,
+    }
+)
+DIRECT_BUILDER = re.compile(
+    r"\b(__build_deliberate_rejection|__build_unimplemented_rejection)\b"
 )
 
 DELIBERATE_LITERAL = re.compile(
@@ -60,6 +82,23 @@ def _impl_body(source: str, type_name: str) -> str:
 
 def validate_source(source: str) -> list[str]:
     errors: list[str] = []
+    public_functions = Counter(PUBLIC_FN.findall(source))
+    if public_functions != EXPECTED_PUBLIC_FUNCTIONS:
+        for name in sorted(set(public_functions) | set(EXPECTED_PUBLIC_FUNCTIONS)):
+            actual = public_functions[name]
+            expected = EXPECTED_PUBLIC_FUNCTIONS[name]
+            if actual != expected:
+                errors.append(
+                    f"unsupported.rs public function inventory changed: {name} "
+                    f"appears {actual} time(s), expected {expected}"
+                )
+
+    for fragment in ("pub mod ", "pub use ", "include!("):
+        if fragment in source:
+            errors.append(
+                f"unsupported.rs exposes an unreviewed module/export edge: {fragment}"
+            )
+
     for type_name, allowed in ALLOWED_PUBLIC_METHODS.items():
         try:
             body = _impl_body(source, type_name)
@@ -100,6 +139,12 @@ def validate_source(source: str) -> list[str]:
 
 def validate_usage_source(path: str, source: str) -> list[str]:
     errors: list[str] = []
+    if path != "crates/chelis-types/src/lib.rs":
+        for builder in sorted(set(DIRECT_BUILDER.findall(source))):
+            errors.append(
+                f"{path}: direct authority builder `{builder}` bypasses the canonical "
+                "literal macro; use deliberate_rejection! or unimplemented_rejection!"
+            )
     for atom in DELIBERATE_LITERAL.findall(source):
         if atom in RESPONSE_ONLY_ATOMS:
             errors.append(

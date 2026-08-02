@@ -46,6 +46,31 @@ class RejectionAuthorityBoundaryTests(unittest.TestCase):
         errors = MODULE.validate_source(mutated)
         self.assertTrue(any("unimplemented" in error for error in errors), errors)
 
+    def test_same_module_public_free_function_is_rejected(self):
+        mutated = self.source.replace(
+            "/// Sole downstream construction edge for a deliberate rejection.",
+            "pub fn redteam_unchecked_authority() -> RejectionAuthority {\n"
+            "    RejectionAuthority {\n"
+            "        citation: RejectionCitation::Issue(IssueRef(NonZeroU32::MIN)),\n"
+            "        hint: \"forged\",\n"
+            "    }\n"
+            "}\n\n"
+            "/// Sole downstream construction edge for a deliberate rejection.",
+            1,
+        )
+        errors = MODULE.validate_source(mutated)
+        self.assertTrue(
+            any("redteam_unchecked_authority" in error for error in errors), errors
+        )
+
+    def test_direct_public_builder_call_is_rejected_in_production(self):
+        errors = MODULE.validate_usage_source(
+            "crates/example/src/lib.rs",
+            'let _ = chelis_types::unsupported::__build_deliberate_rejection('
+            '"[04-TOT-2]", "hint");',
+        )
+        self.assertTrue(any("direct authority builder" in error for error in errors), errors)
+
     def test_public_builder_cannot_skip_registry_validation(self):
         mutated = self.source.replace(
             "let issue = match IssueRef::new(issue)",

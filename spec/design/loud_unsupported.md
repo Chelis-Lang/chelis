@@ -303,7 +303,10 @@ authority slice is implemented.** `Unsupported` no longer accepts a bare
 hint; every current production constructor supplies an opaque validated
 authority. The windowed-reduction dtype gap cites its implementation owner
 [#729], and runtime-symbolic window extents cite the dynamic-shape owner
-[#600]; [#959] owns the diagnostic migration, not either capability.
+[#600]. Runtime-valued window/stride lists cite their compiled-lowering owner
+[#1058], compiled tensor/list `to_string` cites [#1059], and host-runtime-only
+builders cite the deliberate [05-HOST-1] contract; remediation instances
+[#705], [#725], [#734], and [#959] are not capability owners.
 The remaining Phase 3 work is the §C2.2 diagnostic-kind pipeline and the gate
 contract; this slice does not claim Phase 3 completion.
 
@@ -321,8 +324,12 @@ REGISTRIES of what actually exists:
   validation inside `chelis-types`; downstream crates cannot construct a
   `SpecAtomRef`/`IssueRef` and then compose it with a second generic authority
   constructor. `scripts/check_rejection_authority_boundary.py` locks the
-  public-method allowlist and the two validating macro edges, including a
-  planted-public-constructor mutation.
+  complete public-function inventory of the owning module (free functions as
+  well as methods), rejects extra module/re-export/include edges, rejects
+  direct production calls to the hidden builders, and mutation-tests those
+  bypasses. Construction itself refuses [05-UNS-1..6], so a macro alias or a
+  direct validating-builder call cannot turn the response contract into a
+  semantic authority.
 - `SpecAtomRef` validates in two gates: the `[NN-AAA-N]` grammar,
   then MEMBERSHIP in the derived atom registry - a generated artifact
   parsed from the numbered specs' blockquote atoms and locked by a
@@ -2074,5 +2081,7 @@ and never depends on predicting a path.
 [#957]: https://github.com/Chelis-Lang/chelis/issues/957
 [#958]: https://github.com/Chelis-Lang/chelis/issues/958
 [#959]: https://github.com/Chelis-Lang/chelis/issues/959
+[#1058]: https://github.com/Chelis-Lang/chelis/issues/1058
+[#1059]: https://github.com/Chelis-Lang/chelis/issues/1059
 [#960]: https://github.com/Chelis-Lang/chelis/issues/960
 [#912]: https://github.com/Chelis-Lang/chelis/issues/912

@@ -2909,10 +2909,10 @@ impl<'a> HostEmitter<'a> {
                             "`chelis build` host emission",
                             Stage::Codegen("c"),
                             chelis_types::unimplemented_rejection!(
-                                734,
+                                1059,
                                 "the compiled lane stringifies int64/f32/f64/bool/string scalars \
-                                 only today; tensor/list rendering is tracked by chelis#732 \
-                                 (was the `<value>` placeholder, chelis#734)"
+                                 only today; chelis#1059 owns compiled tensor/list rendering \
+                                 (the former `<value>` placeholder is chelis#734)"
                             ),
                         ));
                     }
