@@ -3,6 +3,10 @@
 #include <charconv>
 #include <cmath>
 #include <cstdint>
+#include <iomanip>
+#include <limits>
+#include <locale>
+#include <sstream>
 #include <string>
 #include <system_error>
 
@@ -372,16 +376,44 @@ bool scan_string(TSLexer *lexer) {
   return false;
 }
 
-std::string canonical_float(double value) {
-  char scientific[64];
-  const auto result = std::to_chars(
-      scientific, scientific + sizeof(scientific), value,
-      std::chars_format::scientific);
-  if (result.ec != std::errc()) {
-    return {};
-  }
+bool parse_float_classic(const std::string &text, double &value) {
+  // Callers pass strings whose decimal grammar was already validated (or a
+  // string produced below). Some standard libraries set `failbit` while
+  // still returning the correctly rounded subnormal value. libstdc++ 10 also
+  // saturates overflow at `double::max()` while setting `failbit`, whereas
+  // libc++ returns infinity. Reject the saturating form explicitly; infinity
+  // and underflow-to-zero still fail the finite/canonical-render comparison.
+  std::istringstream input(text);
+  input.imbue(std::locale::classic());
+  input >> std::noskipws >> value;
+  return !input.bad() &&
+         !(input.fail() && value == std::numeric_limits<double>::max());
+}
 
-  const std::string shortest(scientific, result.ptr);
+std::string shortest_scientific(double value) {
+  for (int significant_digits = 1;
+       significant_digits <= std::numeric_limits<double>::max_digits10;
+       ++significant_digits) {
+    std::ostringstream output;
+    output.imbue(std::locale::classic());
+    output << std::scientific << std::setprecision(significant_digits - 1)
+           << value;
+    const std::string candidate = output.str();
+
+    double reparsed = 0.0;
+    if (parse_float_classic(candidate, reparsed) && reparsed == value) {
+      return candidate;
+    }
+  }
+  return {};
+}
+
+std::string canonical_float(double value) {
+  // Floating `<charconv>` is absent from GCC/libstdc++ 10, which is the
+  // toolchain used by the glibc 2.31 compatibility build. The classic-locale
+  // streams keep the scanner locale-independent while the round-trip search
+  // preserves the same shortest-source rule as the Surf Ryū printer.
+  const std::string shortest = shortest_scientific(value);
   const std::size_t exponent_pos = shortest.find('e');
   if (exponent_pos == std::string::npos) {
     return {};
@@ -458,11 +490,8 @@ bool is_canonical_number(const std::string &numeric,
   }
 
   double value = 0.0;
-  const char *begin = numeric.data();
-  const char *end = numeric.data() + numeric.size();
-  const auto parsed = std::from_chars(begin, end, value);
-  return parsed.ec == std::errc() && parsed.ptr == end &&
-         std::isfinite(value) && canonical_float(value) == numeric;
+  return parse_float_classic(numeric, value) && std::isfinite(value) &&
+         canonical_float(value) == numeric;
 }
 
 bool scan_number(TSLexer *lexer, const bool *valid_symbols) {

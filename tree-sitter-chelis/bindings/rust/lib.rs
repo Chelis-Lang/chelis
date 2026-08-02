@@ -206,7 +206,7 @@ mod tests {
     #[test]
     fn tree_sitter_accepts_ryu_shortest_float_corpus() {
         let mut bits = 0x1234_5678_9abc_def0_u64;
-        for index in 0..4096 {
+        for index in 0..65_536 {
             bits = bits
                 .wrapping_mul(6_364_136_223_846_793_005)
                 .wrapping_add(1_442_695_040_888_963_407);
@@ -231,6 +231,28 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn surf_scanner_does_not_require_floating_charconv() {
+        // Debian 11's GCC/libstdc++ 10 implements integer `<charconv>` but
+        // not the floating overloads. Keep the external scanner usable by
+        // the glibc 2.31 compatibility build instead of silently raising its
+        // C++ runtime floor.
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("tree-sitter crate lives at the workspace root");
+        let scanner =
+            fs::read_to_string(workspace.join("grammars/tree-sitter-chelis-surf/src/scanner.cc"))
+                .expect("read Surf external scanner");
+        assert!(
+            !scanner.contains("std::chars_format"),
+            "Surf scanner must not require floating std::to_chars"
+        );
+        assert!(
+            !scanner.contains("std::from_chars(begin, end, value)"),
+            "Surf scanner must not require floating std::from_chars"
+        );
     }
 
     fn collect_surf_files(directory: &Path, paths: &mut Vec<PathBuf>) {
