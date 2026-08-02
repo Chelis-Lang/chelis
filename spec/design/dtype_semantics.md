@@ -190,13 +190,15 @@ The `prim` on `DivZero` is required by controlling [04-NUM-9], which says
 EVERY trap names the dtype. The earlier one-field design sketch was a design
 bug; the numbered spec wins.
 
-- **Message format (frozen at Phase 2 exit):**
-  `numeric trap: <kind> in <op> at <prim>` following the branding precedent
-  of `chelis_int_div_guard` / `integer division or remainder by zero`
-  (`chelis-runtime/include/chelis_runtime.h:165-171`). The EXACT strings are
-  recorded in the module as `pub const` and every lane emits them verbatim -
-  the C lane via generated guard snippets (Phase 3), eval via the module
-  directly. [#687]'s oracle compares them byte-for-byte.
+- **Message format (frozen by controlling [04-NUM-9]):** the exact three
+  forms and the operation-name rule live in that atom. The operation slot is
+  the canonical lowered primitive whose numeric kernel raised the trap; a
+  composed operation forwards that trap unchanged, without an internal
+  evaluator prefix. The exact fragments are recorded in the module as
+  `pub const` and every lane emits them verbatim - the C lane via generated
+  guard snippets (Phase 3), eval via the module directly. [#687]'s later
+  oracle compares them byte-for-byte. This resolves [#861]'s Phase 2 decision
+  without introducing source-operation provenance that no lowered lane owns.
 - Traps are *values* (`Result::Err`) inside the lanes and become process
   aborts only at the lane boundary (eval: `error:` + nonzero exit;
   compiled C: stderr + nonzero exit). No lane may `panic!` for a user-input

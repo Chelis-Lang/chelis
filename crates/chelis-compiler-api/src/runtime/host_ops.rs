@@ -2201,8 +2201,14 @@ fn extract_root(
     root: NodeId,
     op_label: &str,
 ) -> Result<RuntimeTensorValue, String> {
-    let values = eval_tensor_roots_with(dag, &[root], |name| inputs.get(name).cloned())
-        .map_err(|err| format!("{op_label}: IR eval failed: {err}"))?;
+    let values =
+        eval_tensor_roots_with(dag, &[root], |name| inputs.get(name).cloned()).map_err(|err| {
+            if err.starts_with(chelis_types::NUMERIC_TRAP_PREFIX) {
+                err
+            } else {
+                format!("{op_label}: IR eval failed: {err}")
+            }
+        })?;
     let tensor_value = values
         .get(&root)
         .cloned()
@@ -3237,5 +3243,33 @@ mod normalize_axis_tests {
             err.contains("gather") && err.contains("out of bounds"),
             "expected an out-of-bounds gather diagnostic, got {err:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod numeric_trap_forwarding_tests {
+    use super::*;
+
+    #[test]
+    fn composed_evaluation_forwards_the_raising_primitive_trap_without_plumbing() {
+        let input = RuntimeTensorValue::from_wide_int("test", Prim::Int8, vec![2], vec![127, 1])
+            .expect("input is representable at int8");
+        let err = eval_composed_unary(&input, |dag, x, ty| {
+            let output_ty = TensorType {
+                dims: Vec::new(),
+                precision: ty.precision,
+            };
+            dag.add_node(
+                RiscOp::sum_default(0, ty.precision).expect("int8 sum is admitted"),
+                vec![x],
+                output_ty,
+                None,
+            )
+        })
+        .expect_err("the composed int8 sum must overflow");
+
+        assert_eq!(err, "numeric trap: overflow in sum at int8");
+        assert!(!err.contains("IR eval failed"));
+        assert!(!err.contains("composed unary"));
     }
 }

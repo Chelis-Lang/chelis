@@ -37,17 +37,28 @@
 //! * `F16`/`Bf16` buffers store `half::f16` / `half::bf16` (both
 //!   `repr(transparent)` over `u16`, the sketch's spelling).
 //!
-//! ## Trap-string status
+//! ## Frozen trap strings
 //!
-//! The message SHAPE below (`numeric trap: <kind> in <op> at <prim>`) is
-//! the section C2 contract; the exact strings freeze at Phase 2 exit
-//! together with the chelis#687 corpus. This first Phase 2 slice routes the
-//! host runtime's basic arithmetic through the trap type. The remaining
-//! cross-lane corpus and composed-operation naming decision freeze later in
-//! the phase.
+//! The public constants below are the exact [04-NUM-9] / section C2 message
+//! grammar. The operation slot names the canonical primitive whose numeric
+//! kernel raised the trap after lowering; composed evaluation forwards the
+//! message unchanged.
 
 use crate::observation::ElementRef;
 use crate::types::Prim;
+
+/// Frozen prefix shared by every [04-NUM-9] numeric-trap diagnostic.
+pub const NUMERIC_TRAP_PREFIX: &str = "numeric trap: ";
+/// Frozen spelling of the [04-NUM-9] overflow kind.
+pub const NUMERIC_TRAP_OVERFLOW_KIND: &str = "overflow";
+/// Frozen spelling of the [04-NUM-9] domain kind.
+pub const NUMERIC_TRAP_DOMAIN_KIND: &str = "domain";
+/// Frozen spelling of the [04-NUM-9] division-by-zero kind.
+pub const NUMERIC_TRAP_DIV_ZERO_KIND: &str = "division by zero";
+/// Frozen separator before the canonical raising primitive name.
+pub const NUMERIC_TRAP_OPERATION_SEPARATOR: &str = " in ";
+/// Frozen separator before the finalized dtype name.
+pub const NUMERIC_TRAP_DTYPE_SEPARATOR: &str = " at ";
 
 /// The one numeric error type, identical in every lane
 /// (`spec/design/dtype_semantics.md` section C2).
@@ -66,15 +77,26 @@ impl std::fmt::Display for NumericTrap {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             NumericTrap::Overflow { op, prim } => {
-                write!(f, "numeric trap: overflow in {op} at {}", prim.name())
+                write!(
+                    f,
+                    "{NUMERIC_TRAP_PREFIX}{NUMERIC_TRAP_OVERFLOW_KIND}\
+                     {NUMERIC_TRAP_OPERATION_SEPARATOR}{op}{NUMERIC_TRAP_DTYPE_SEPARATOR}{}",
+                    prim.name()
+                )
             }
             NumericTrap::Domain { op, prim } => {
-                write!(f, "numeric trap: domain in {op} at {}", prim.name())
+                write!(
+                    f,
+                    "{NUMERIC_TRAP_PREFIX}{NUMERIC_TRAP_DOMAIN_KIND}\
+                     {NUMERIC_TRAP_OPERATION_SEPARATOR}{op}{NUMERIC_TRAP_DTYPE_SEPARATOR}{}",
+                    prim.name()
+                )
             }
             NumericTrap::DivZero { op, prim } => {
                 write!(
                     f,
-                    "numeric trap: division by zero in {op} at {}",
+                    "{NUMERIC_TRAP_PREFIX}{NUMERIC_TRAP_DIV_ZERO_KIND}\
+                     {NUMERIC_TRAP_OPERATION_SEPARATOR}{op}{NUMERIC_TRAP_DTYPE_SEPARATOR}{}",
                     prim.name()
                 )
             }

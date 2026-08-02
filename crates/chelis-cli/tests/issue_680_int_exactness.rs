@@ -362,7 +362,7 @@ fn min_elem_is_exact_at_two_pow_53_boundary() {
 // ---------------------------------------------------------------------------
 
 /// Assert an expression fails with a branded integer-overflow diagnostic.
-fn assert_overflow_traps(expr: &str, label: &str) {
+fn assert_overflow_traps(expr: &str, expected: &str, label: &str) {
     let program = format!("module Probe.Main\nout = print({expr})\n");
     let (ok, stdout, stderr) = eval_lane(&program);
     assert!(
@@ -370,11 +370,18 @@ fn assert_overflow_traps(expr: &str, label: &str) {
         "{label}: `{expr}` must trap on integer overflow, but it succeeded \
          and printed: {stdout}"
     );
-    let combined = format!("{stdout}{stderr}");
-    assert!(
-        combined.contains("overflow"),
-        "{label}: `{expr}` failed but without a branded overflow diagnostic. \
-         Got: {combined}"
+    let trap = stderr
+        .lines()
+        .find_map(|line| line.find("numeric trap:").map(|start| &line[start..]))
+        .unwrap_or_else(|| {
+            panic!(
+                "{label}: `{expr}` failed without a numeric-trap line. \
+                 stdout: {stdout}; stderr: {stderr}"
+            )
+        });
+    assert_eq!(
+        trap, expected,
+        "{label}: numeric traps are a byte-frozen cross-lane contract"
     );
 }
 
@@ -383,6 +390,7 @@ fn assert_overflow_traps(expr: &str, label: &str) {
 fn int64_add_overflow_traps() {
     assert_overflow_traps(
         &format!("add(cast({I64_MAX}, int64), cast(1, int64))"),
+        "numeric trap: overflow in add at int64",
         "int64_add_overflow",
     );
 }
@@ -392,6 +400,7 @@ fn int64_add_overflow_traps() {
 fn int64_mul_overflow_traps() {
     assert_overflow_traps(
         "mul(cast(4000000000, int64), cast(4000000000, int64))",
+        "numeric trap: overflow in mul at int64",
         "int64_mul_overflow",
     );
 }
@@ -399,7 +408,11 @@ fn int64_mul_overflow_traps() {
 /// Historical failure: the old narrowing cast wrapped this to `-128`.
 #[test]
 fn int8_add_overflow_traps() {
-    assert_overflow_traps("add(cast(127, int8), cast(1, int8))", "int8_add_overflow");
+    assert_overflow_traps(
+        "add(cast(127, int8), cast(1, int8))",
+        "numeric trap: overflow in add at int8",
+        "int8_add_overflow",
+    );
 }
 
 /// Int16 parity for the same overflow contract.
@@ -407,6 +420,7 @@ fn int8_add_overflow_traps() {
 fn int16_add_overflow_traps() {
     assert_overflow_traps(
         "add(cast(32767, int16), cast(1, int16))",
+        "numeric trap: overflow in add at int16",
         "int16_add_overflow",
     );
 }
@@ -416,6 +430,7 @@ fn int16_add_overflow_traps() {
 fn int32_add_overflow_traps() {
     assert_overflow_traps(
         "add(cast(2147483647, int32), cast(1, int32))",
+        "numeric trap: overflow in add at int32",
         "int32_add_overflow",
     );
 }
