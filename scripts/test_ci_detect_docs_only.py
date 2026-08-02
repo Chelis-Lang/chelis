@@ -101,8 +101,14 @@ class RejectionAuthorityChangeTests(unittest.TestCase):
         for path in (
             "spec/design/loud_unsupported_issue_manifest.json",
             "scripts/validate_rejection_issue_manifest.py",
+            "scripts/check_rejection_authority_boundary.py",
+            "scripts/test_check_rejection_authority_boundary.py",
             "scripts/generate_rejection_registries.py",
+            "scripts/capacity_census_liveness.py",
+            "scripts/ci_detect_docs_only.py",
             "crates/chelis-types/src/rejection_registry_generated.rs",
+            "crates/chelis-types/src/unsupported.rs",
+            "crates/chelis-types/src/lib.rs",
             ".github/workflows/ci.yml",
         ):
             self.assertTrue(m.rejection_authority_changed([path]), path)

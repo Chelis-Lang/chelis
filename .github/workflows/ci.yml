@@ -91,6 +91,9 @@ jobs:
       - name: Create uv-managed venv
         run: uv venv --python 3.11
 
+      - name: Validate rejection authority construction boundary
+        run: .venv/bin/python scripts/check_rejection_authority_boundary.py
+
       - name: Validate rejection issue authorities against GitHub
         env:
           GH_TOKEN: ${{ github.token }}

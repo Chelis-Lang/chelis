@@ -3,7 +3,7 @@
 //!
 //! Part II's law: every conversion lands with a test that the formerly
 //! substituted case now fails loudly with the branded section C2 shape
-//! (`unsupported: <what> on <context> (<stage>); <hint>`), plus a control
+//! (`unsupported: <what> on <context> (<stage>); <authority>: <hint>`), plus a control
 //! that the supported neighbor still works. The acceptance-shaped tests
 //! (reject-or-correct) live in their original files and are un-ignored by
 //! the same change set; THIS file pins the brand and the controls the
@@ -135,7 +135,7 @@ fn c_run_first_line(program: &str, name: &str) -> Result<String, String> {
 
 /// Assert a build rejection carries the frozen section C2 shape: the
 /// `error:` surfacing, the literal `unsupported: ` brand, the ` on `
-/// context clause, a parenthesized stage, and the `; ` hint separator.
+/// context clause, a parenthesized stage, and a typed authority clause.
 fn assert_branded_rejection(stderr: &str, what_fragment: &str, ctx: &str) {
     assert!(
         stderr.contains("error:"),
@@ -150,9 +150,10 @@ fn assert_branded_rejection(stderr: &str, what_fragment: &str, ctx: &str) {
         "{ctx}: the diagnostic must name `{what_fragment}`; got: {line}"
     );
     assert!(
-        line.contains(" on ") && line.contains("); "),
-        "{ctx}: the diagnostic must follow the frozen \
-         `unsupported: <what> on <context> (<stage>); <hint>` shape; got: {line}"
+        line.contains(" on ")
+            && (line.contains("); deliberate [") || line.contains("); unimplemented chelis#")),
+        "{ctx}: the diagnostic must follow the authority-bearing \
+         `unsupported: <what> on <context> (<stage>); <authority>: <hint>` shape; got: {line}"
     );
 }
 

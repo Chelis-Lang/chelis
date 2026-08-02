@@ -133,10 +133,9 @@ impl CExpressionBuiltin {
                     "`chelis build` host emission",
                     Stage::Codegen("c"),
                     chelis_types::deliberate_rejection!(
-                        "[05-UNS-1]",
-                        "this builtin has no compiled-lane expression identity; the eval lane \
-                         may support it (`chelis eval`). Silent-stub class: chelis#703; \
-                         instances chelis#682/#704/#705/#715 ([05-UNS-1])"
+                        "[04-TOT-2]",
+                        "the checked builtin vocabulary and C expression vocabulary disagree; \
+                         no fallback expression is permitted"
                     ),
                 ));
             }
@@ -605,7 +604,7 @@ fn reject_duplicate_emitted_function_names(
         "C host identifier emission",
         Stage::Codegen("c"),
         chelis_types::deliberate_rejection!(
-            "[05-UNS-1]",
+            "[01-CID-1]",
             "the reserved-word mapping prefixes with `chelis_user__` and cannot disambiguate a \
              definition that literally spells the mangled name; rename one definition \
              (chelis#840)"
@@ -2700,9 +2699,9 @@ impl<'a> HostEmitter<'a> {
                     .to_string(),
                 Stage::Codegen("c"),
                 chelis_types::deliberate_rejection!(
-                    "[05-UNS-1]",
-                    "this op has no compiled tensor arm yet; the eval lane may support \
-                     it (chelis#703 class; the DAG lane owns the supported tensor ops)"
+                    "[04-TOT-2]",
+                    "a checked tensor operation must route through the typed DAG lane; the C \
+                     host scalar lane has no fallback tensor expression"
                 ),
             ));
         }
@@ -2934,8 +2933,7 @@ impl<'a> HostEmitter<'a> {
                                 chelis_types::unimplemented_rejection!(
                                     714,
                                     "the resolved result dtype has no scalar-tensor constructor; \
-                                     implement the exact target capability instead of selecting f32 \
-                                     ([05-UNS-1]; chelis#714, chelis#729)"
+                                     implement the exact target capability instead of selecting f32"
                                 ),
                             ));
                         }
@@ -4815,7 +4813,7 @@ impl<'a> HostEmitter<'a> {
                 "`chelis build` host emission",
                 Stage::Codegen("c"),
                 chelis_types::deliberate_rejection!(
-                    "[05-UNS-1]",
+                    "[04-TOT-2]",
                     "internal desync: the checker guarantees a two-list tuple type for \
                      partition results (chelis#730 census row 15)"
                 ),
@@ -5134,7 +5132,7 @@ impl<'a> HostEmitter<'a> {
                     "a `print` site in `chelis build` host emission",
                     Stage::Codegen("c"),
                     chelis_types::deliberate_rejection!(
-                        "[05-UNS-1]",
+                        "[04-TOT-2]",
                         "the value's host type never resolved to a printable representation \
                          (chelis#714's Unknown chain); previously this compiled to the \
                          literal `<value>` placeholder"
@@ -5248,7 +5246,7 @@ impl<'a> HostEmitter<'a> {
                     "a labeled-root print in `chelis build` host emission",
                     Stage::Codegen("c"),
                     chelis_types::deliberate_rejection!(
-                        "[05-UNS-1]",
+                        "[04-TOT-2]",
                         "the value's host type never resolved to a printable representation \
                          (chelis#714's Unknown chain); previously this compiled to the \
                          literal `<value>` placeholder"
@@ -5682,25 +5680,42 @@ fn invalid_abi_shape(detail: String, context: &'static str) -> Unsupported {
         context,
         Stage::Codegen("c"),
         chelis_types::deliberate_rejection!(
-            "[05-UNS-1]",
+            "[04-TOT-2]",
             "the resolved host IR and C ABI projection disagree; this is an internal \
              compiler error, never a request to select a fallback representation \
-             (chelis#730; [05-UNS-1])"
+             (chelis#730)"
         ),
     )
 }
 
 fn unsupported_value_boxing(ty: &HostType, context: &'static str) -> Unsupported {
+    let authority = match ty {
+        HostType::ReducedFloatBoxed(_) => chelis_types::unimplemented_rejection!(
+            714,
+            "the C host lane has no exact scalar representation for f16/bf16 boxing"
+        ),
+        HostType::Callback(_, _) => chelis_types::unimplemented_rejection!(
+            879,
+            "the C host lane has no general first-class function-value box"
+        ),
+        HostType::Option(_) | HostType::MappedFile | HostType::Unit => {
+            chelis_types::deliberate_rejection!(
+                "[04-TOT-2]",
+                "this checked host value cannot reach the generic boxing path; no fallback \
+                 representation is permitted"
+            )
+        }
+        _ => chelis_types::deliberate_rejection!(
+            "[04-TOT-2]",
+            "the resolved host type and boxing dispatcher disagree; no fallback \
+             representation is permitted"
+        ),
+    };
     Unsupported::new(
         UnsupportedKind::HostType(format!("{ty:?}")),
         context,
         Stage::Codegen("c"),
-        chelis_types::deliberate_rejection!(
-            "[05-UNS-1]",
-            "the resolved C-host ABI has no chelis_value boxing representation for this \
-             type; implement that representation explicitly or reject the containing \
-             construct ([05-UNS-1]; chelis#730, chelis#729)"
-        ),
+        authority,
     )
 }
 

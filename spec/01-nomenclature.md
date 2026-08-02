@@ -134,8 +134,15 @@ the lint is.
 
 ### 1.7 Backend symbol emission
 
-C and HIP backends emit user names as-is. No symbol mangling, no case
-rewriting. Surf identifiers cross the language boundary literally.
+> **[01-CID-1]** C and HIP backend symbol emission SHALL preserve the
+> spelling of a user identifier unless that spelling is reserved by the
+> target language. The C backend SHALL prefix a reserved C spelling with
+> `chelis_user__`; if that mapping collides with another user identifier,
+> the build SHALL reject both names and ask the user to rename one. It SHALL
+> NOT select one definition or emit an ambiguous translation unit.
+
+No case rewriting is performed. Non-reserved Surf identifiers cross the
+language boundary literally.
 
 ---
 

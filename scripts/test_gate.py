@@ -84,6 +84,7 @@ class RejectionAuthorityLivenessJobTests(unittest.TestCase):
         self.assertIn("needs.changes.outputs.rejection_authority_changed", block)
         self.assertIn("issues: read", block)
         self.assertIn("contents: read", block)
+        self.assertIn("scripts/check_rejection_authority_boundary.py", block)
         self.assertIn("scripts/validate_rejection_issue_manifest.py", block)
 
 # Whole WORKFLOW FILES that are out-of-scope-by-design for the per-PR developer

@@ -146,3 +146,88 @@ fn issue254_emit_reduce_window_max_uses_stride_in_index_arithmetic() {
         "stride>1 emit must multiply the output index by the stride along axis 1, got:\n{src}"
     );
 }
+
+#[test]
+fn non_f32_windowed_reduction_names_its_real_implementation_owner() {
+    let mut dag = Dag::new();
+    let input_ty = TensorType {
+        dims: vec![DimInfo::Lit(4)],
+        precision: Prim::F16,
+    };
+    let load = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], input_ty, None);
+    dag.add_node(
+        RiscOp::ReduceWindow {
+            reducer: ReduceWindowKind::Sum,
+            window_shape: vec![2],
+            strides: vec![1],
+        },
+        vec![load],
+        TensorType {
+            dims: vec![DimInfo::Lit(3)],
+            precision: Prim::F16,
+        },
+        None,
+    );
+
+    let error = match codegen(&dag, "kernel") {
+        Ok(_) => panic!("non-f32 windowed reduction must reject"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        error.to_string(),
+        "unsupported: op `reduce_window_*` on `f16` tensors in the C DAG emitter \
+         (node 1) (codegen:c); unimplemented chelis#729: the C windowed-reduction \
+         emitter is f32-only today; cast to f32 before the windowed reduction \
+         (spec/05-risc-primitives.md section 2.3.1)"
+    );
+}
+
+#[test]
+fn runtime_symbolic_window_extent_names_dynamic_shape_owner() {
+    let mut dag = Dag::new();
+    let load = dag.add_node(
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        TensorType {
+            dims: vec![
+                DimInfo::Lit(1),
+                DimInfo::Lit(1),
+                DimInfo::Named("runtime_height".into(), None),
+                DimInfo::Lit(4),
+            ],
+            precision: Prim::F32,
+        },
+        None,
+    );
+    dag.add_node(
+        RiscOp::ReduceWindow {
+            reducer: ReduceWindowKind::Max,
+            window_shape: vec![2, 2],
+            strides: vec![1, 1],
+        },
+        vec![load],
+        TensorType {
+            dims: vec![
+                DimInfo::Lit(1),
+                DimInfo::Lit(1),
+                DimInfo::Named("runtime_height".into(), None),
+                DimInfo::Lit(3),
+            ],
+            precision: Prim::F32,
+        },
+        None,
+    );
+
+    let error = match codegen(&dag, "kernel") {
+        Ok(_) => panic!("runtime-symbolic window extent must reject"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        error.to_string(),
+        "unsupported: a `reduce_window_*` windowed axis 2 with a runtime-only \
+         symbolic extent on the C DAG emitter (node 1) (codegen:c); unimplemented \
+         chelis#600: the windowed output extent floor((d - window) / stride) + 1 is \
+         not statically representable; bind the axis to a concrete size \
+         (spec/05-risc-primitives.md section 2.3.1)"
+    );
+}
