@@ -154,10 +154,36 @@ pub(super) fn annotate_expr_with_scope(
             elements.extend(annotated_children);
             deep::Expr::List(deep::List { elements }, *span)
         }
-        // Bridge: reconstruct List so existing annotation logic runs unchanged (#908)
         deep::Expr::Node(node, span) => {
-            let bridged = deep::Expr::List(node.to_list(*span), *span);
-            annotate_expr_with_scope(&bridged, product, annotation_context, errors)
+            let tag = node.tag();
+            let children = node.children_slice();
+            let fn_ty_override = (tag == DeepTag::Fn)
+                .then(|| product.owner_type(expr, "function node", errors))
+                .flatten();
+            let annotated_children = children
+                .iter()
+                .enumerate()
+                .map(|(index, child)| {
+                    annotate_child_for_role(
+                        tag,
+                        index,
+                        children.len(),
+                        child,
+                        product,
+                        annotation_context,
+                        errors,
+                    )
+                })
+                .collect();
+            let meta = annotated_node_meta_with_override(
+                tag,
+                node.meta(),
+                expr,
+                fn_ty_override,
+                product,
+                errors,
+            );
+            deep::Expr::node(tag, meta, annotated_children, *span)
         }
         deep::Expr::BareList(elems, span) => {
             let annotated: Vec<deep::Expr> = elems
@@ -391,7 +417,7 @@ pub(super) fn annotated_meta_map_with_override(
     if let Some(ty) = ty_for_meta
         && !matches!(ty, Type::Error(_))
     {
-        let ty_expr = type_to_deep_expr(&ty);
+        let ty_expr = type_to_legacy_deep_expr(&ty);
         if let Some((_, existing)) = entries.iter_mut().find(|(key, _)| key == "type") {
             *existing = ty_expr;
         } else {
@@ -400,6 +426,40 @@ pub(super) fn annotated_meta_map_with_override(
     }
 
     deep::Expr::Map(deep::MetaMap { entries }, meta_span)
+}
+
+pub(super) fn annotated_node_meta_with_override(
+    tag: DeepTag,
+    meta: &deep::MetaMap,
+    expr: &deep::Expr,
+    precomputed_ty: Option<Type>,
+    product: &InferenceProduct,
+    errors: &mut DiagnosticSink<'_>,
+) -> deep::MetaMap {
+    let mut entries = meta.entries.clone();
+    let ty_for_meta = match (tag, precomputed_ty) {
+        (DeepTag::Fn, Some(ty)) => Some(ty),
+        (DeepTag::PatVar | DeepTag::PatAs, _) => {
+            product.owner_type(expr, "pattern binding", errors)
+        }
+        (t, _) if should_attach_type_metadata(t) => {
+            product.owner_type(expr, "metadata-eligible expression", errors)
+        }
+        _ => None,
+    };
+
+    if let Some(ty) = ty_for_meta
+        && !matches!(ty, Type::Error(_))
+    {
+        let ty_expr = type_to_deep_expr(&ty);
+        if let Some((_, existing)) = entries.iter_mut().find(|(key, _)| key == "type") {
+            *existing = ty_expr;
+        } else {
+            entries.push(("type".to_string(), ty_expr));
+        }
+    }
+
+    deep::MetaMap { entries }
 }
 
 pub(super) fn should_attach_type_metadata(tag: DeepTag) -> bool {

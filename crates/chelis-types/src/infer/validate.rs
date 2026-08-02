@@ -765,23 +765,21 @@ pub(super) fn collect_def_bodies(exprs: &[deep::Expr]) -> DefBodyMap {
 }
 
 pub(super) fn extract_fn_params_and_body(expr: &deep::Expr) -> Option<(Vec<String>, deep::Expr)> {
-    let deep::Expr::List(list, _) = expr else {
+    let (DeepTag::Fn, _, kids) = stamped_parts(expr)? else {
         return None;
     };
-    if get_tag(list) != Some(DeepTag::Fn) {
-        return None;
-    }
-    let kids = children(list);
     let params_expr = kids.first()?;
     let body_expr = kids.get(1)?;
-    let deep::Expr::List(params_list, _) = params_expr else {
-        return None;
+    let params = match params_expr {
+        deep::Expr::Node(node, _) if node.tag() == DeepTag::Params => node.children_slice(),
+        deep::Expr::List(params_list, _) if get_tag(params_list) == Some(DeepTag::Params) => {
+            children(params_list)
+        }
+        deep::Expr::BareList(elements, _) => elements.as_slice(),
+        _ => return None,
     };
-    if get_tag(params_list) != Some(DeepTag::Params) {
-        return None;
-    }
     let mut names = Vec::new();
-    for param in children(params_list) {
+    for param in params {
         if let Some(name) = param_name_for_refs(param) {
             names.push(name);
         }
@@ -1564,49 +1562,74 @@ pub(super) fn validate_ir_expr(
 /// Lowering consumers use this boundary when they need the checker's
 /// alias-resolved ADT field types without reparsing authored declarations.
 pub fn type_to_deep_expr(ty: &Type) -> deep::Expr {
+    type_to_deep_expr_with(ty, stamped_node_expr)
+}
+
+pub(super) fn type_to_legacy_deep_expr(ty: &Type) -> deep::Expr {
+    type_to_deep_expr_with(ty, node_expr)
+}
+
+type NodeBuilder = fn(DeepTag, Vec<deep::Expr>) -> deep::Expr;
+
+fn type_to_deep_expr_with(ty: &Type, make_node: NodeBuilder) -> deep::Expr {
     match ty {
-        Type::Prim(prim) => node_expr(DeepTag::TPrim, vec![symbol_expr(prim.name())]),
+        Type::Prim(prim) => make_node(DeepTag::TPrim, vec![symbol_expr(prim.name())]),
         Type::Fn(args, ret) => {
-            let mut children: Vec<deep::Expr> = args.iter().map(type_to_deep_expr).collect();
-            children.push(type_to_deep_expr(ret));
-            node_expr(DeepTag::TFn, children)
+            let mut children: Vec<deep::Expr> = args
+                .iter()
+                .map(|arg| type_to_deep_expr_with(arg, make_node))
+                .collect();
+            children.push(type_to_deep_expr_with(ret, make_node));
+            make_node(DeepTag::TFn, children)
         }
-        Type::Ref(inner) => node_expr(DeepTag::TRef, vec![type_to_deep_expr(inner)]),
+        Type::Ref(inner) => make_node(
+            DeepTag::TRef,
+            vec![type_to_deep_expr_with(inner, make_node)],
+        ),
         Type::Tensor(dims, prec) => {
-            let mut children: Vec<deep::Expr> = dims.iter().map(dim_to_deep_expr).collect();
+            let mut children: Vec<deep::Expr> = dims
+                .iter()
+                .map(|dim| dim_to_deep_expr_with(dim, make_node))
+                .collect();
             children.push(match prec {
-                TensorPrec::Concrete(p) => type_to_deep_expr(&Type::Prim(*p)),
+                TensorPrec::Concrete(p) => type_to_deep_expr_with(&Type::Prim(*p), make_node),
                 TensorPrec::Var(v) => {
-                    node_expr(DeepTag::TVar, vec![symbol_expr(&format!("t{}", v.0))])
+                    make_node(DeepTag::TVar, vec![symbol_expr(&format!("t{}", v.0))])
                 }
             });
-            node_expr(DeepTag::TTensor, children)
+            make_node(DeepTag::TTensor, children)
         }
         Type::Adt(name, args) => {
             let mut children = vec![symbol_expr(name)];
-            children.extend(args.iter().map(type_to_deep_expr));
-            node_expr(DeepTag::TAdt, children)
+            children.extend(
+                args.iter()
+                    .map(|arg| type_to_deep_expr_with(arg, make_node)),
+            );
+            make_node(DeepTag::TAdt, children)
         }
-        Type::Var(var) => node_expr(DeepTag::TVar, vec![symbol_expr(&format!("t{}", var.0))]),
-        Type::Tuple(types) => node_expr(
+        Type::Var(var) => make_node(DeepTag::TVar, vec![symbol_expr(&format!("t{}", var.0))]),
+        Type::Tuple(types) => make_node(
             DeepTag::TTuple,
-            types.iter().map(type_to_deep_expr).collect(),
+            types
+                .iter()
+                .map(|ty| type_to_deep_expr_with(ty, make_node))
+                .collect(),
         ),
-        Type::Unit => node_expr(DeepTag::TUnit, vec![]),
-        Type::Error(_) => node_expr(DeepTag::TVar, vec![symbol_expr("_")]),
+        Type::Unit => make_node(DeepTag::TUnit, vec![]),
+        Type::Error(_) => make_node(DeepTag::TVar, vec![symbol_expr("_")]),
     }
 }
 
-pub(super) fn dim_to_deep_expr(dim: &Dim) -> deep::Expr {
+fn dim_to_deep_expr_with(dim: &Dim, make_node: NodeBuilder) -> deep::Expr {
     match dim {
-        Dim::Name(name) => node_expr(DeepTag::DName, vec![symbol_expr(name)]),
-        Dim::Var(var) => node_expr(DeepTag::DVar, vec![symbol_expr(&format!("d{}", var.0))]),
-        Dim::Lit(value) => node_expr(
+        Dim::Name(name) => make_node(DeepTag::DName, vec![symbol_expr(name)]),
+        Dim::Var(var) => make_node(DeepTag::DVar, vec![symbol_expr(&format!("d{}", var.0))]),
+        Dim::Lit(value) => make_node(
             DeepTag::DLit,
             vec![deep::Expr::Atom(deep::Atom::Int(*value), zero_span())],
         ),
-        Dim::Wildcard => node_expr(DeepTag::DName, vec![symbol_expr("*")]),
-        Dim::Rank(rank) => node_expr(DeepTag::DRank, vec![symbol_expr(&format!("r{}", rank.0))]),
+        Dim::Wildcard => make_node(DeepTag::DName, vec![symbol_expr("*")]),
+        Dim::Rank(rank) => make_node(DeepTag::DRank, vec![symbol_expr(&format!("r{}", rank.0))]),
     }
 }
 
@@ -1617,6 +1640,10 @@ pub(super) fn node_expr(tag: DeepTag, children: Vec<deep::Expr>) -> deep::Expr {
     ];
     elements.extend(children);
     deep::Expr::List(deep::List { elements }, zero_span())
+}
+
+pub(super) fn stamped_node_expr(tag: DeepTag, children: Vec<deep::Expr>) -> deep::Expr {
+    deep::Expr::node(tag, deep::MetaMap::default(), children, zero_span())
 }
 
 pub(super) fn symbol_expr(name: &str) -> deep::Expr {
@@ -1797,6 +1824,17 @@ pub(super) fn let_rhs_is_recognized_shape_sensitive(expr: &deep::Expr) -> bool {
 pub(super) fn expr_type_expr(expr: &deep::Expr, type_env: &IrTypeEnv) -> Option<deep::Expr> {
     stack_guard!("expr_type_expr", expr, None);
     match expr {
+        deep::Expr::Node(node, _) => {
+            if let Some((_, ty)) = node.meta().entries.iter().find(|(key, _)| key == "type") {
+                return Some(ty.clone());
+            }
+            if node.tag() == DeepTag::Var
+                && let Some(name) = node.children_slice().first().and_then(symbol_name)
+            {
+                return type_env.get(name).cloned();
+            }
+            None
+        }
         deep::Expr::List(list, _) => {
             if let Some(meta) = get_meta(list)
                 && let Some((_, ty)) = meta.entries.iter().find(|(k, _)| k == "type")

@@ -17,6 +17,26 @@ pub(super) fn children(list: &deep::List) -> &[deep::Expr] {
     }
 }
 
+/// Observe a decoded vocabulary node without changing its physical carrier.
+///
+/// `Expr::List` remains available only for legacy/programmatic callers during
+/// the #1023 migration. Stamped compiler ingress uses `Expr::Node`; readers at
+/// semantic boundaries must preserve that carrier instead of rebuilding a
+/// `List` through `Node::to_list`.
+pub(super) fn stamped_parts(expr: &deep::Expr) -> Option<(DeepTag, &deep::MetaMap, &[deep::Expr])> {
+    match expr {
+        deep::Expr::Node(node, _) => Some((node.tag(), node.meta(), node.children_slice())),
+        deep::Expr::List(list, _) => {
+            let tag = get_tag(list)?;
+            let deep::Expr::Map(meta, _) = list.elements.get(1)? else {
+                return None;
+            };
+            Some((tag, meta, children(list)))
+        }
+        _ => None,
+    }
+}
+
 /// chelis#710 / spec/04-type-system.md §10 [04-TOT-3]: push a `MalformedForm`
 /// diagnostic for a Deep node whose arity or shape the checker cannot type,
 /// and return the `Type::Error` sentinel. This replaces the silent
@@ -209,11 +229,9 @@ pub(super) fn get_meta(list: &deep::List) -> Option<&deep::MetaMap> {
 
 /// True when a `deftype` node carries `opaque: true` metadata
 /// (RFC D-META; the key is unprefixed language semantics).
-pub(super) fn deftype_opaque_meta(list: &deep::List) -> bool {
-    get_meta(list).is_some_and(|meta| {
-        meta.entries.iter().any(|(key, value)| {
-            key == "opaque" && matches!(value, deep::Expr::Atom(deep::Atom::Bool(true), _))
-        })
+pub(super) fn deftype_opaque_meta(meta: &deep::MetaMap) -> bool {
+    meta.entries.iter().any(|(key, value)| {
+        key == "opaque" && matches!(value, deep::Expr::Atom(deep::Atom::Bool(true), _))
     })
 }
 
@@ -697,30 +715,27 @@ pub(super) fn precollect_type_resolution_env(
 ) -> TypeResolutionEnv {
     let mut headers = TypeResolutionEnv::from_registry(adt_reg);
     for (_, expr) in items {
-        let deep::Expr::List(list, _) = expr else {
+        let Some((tag, _, kids)) = stamped_parts(expr) else {
             continue;
         };
-        if !matches!(
-            get_tag(list),
-            Some(DeepTag::Deftype) | Some(DeepTag::Typealias)
-        ) {
+        if !matches!(tag, DeepTag::Deftype | DeepTag::Typealias) {
             continue;
         }
-        let kids = children(list);
-        let (Some(name), Some(deep::Expr::List(params, _))) =
-            (kids.first().and_then(symbol_name), kids.get(1))
-        else {
+        let (Some(name), Some(params)) = (kids.first().and_then(symbol_name), kids.get(1)) else {
             continue;
         };
-        if get_tag(params) == Some(DeepTag::Variant) {
+        if stamped_parts(params).is_some_and(|(tag, _, _)| tag == DeepTag::Variant) {
             // Legacy Deep permits omitting the explicit empty parameter list.
             headers.insert(name, 0);
-        } else if params
-            .elements
-            .iter()
-            .all(|param| symbol_name(param).is_some())
-        {
-            headers.insert(name, params.elements.len());
+        } else {
+            let params = match params {
+                deep::Expr::List(list, _) => list.elements.as_slice(),
+                deep::Expr::BareList(elements, _) => elements.as_slice(),
+                _ => continue,
+            };
+            if params.iter().all(|param| symbol_name(param).is_some()) {
+                headers.insert(name, params.len());
+            }
         }
     }
     headers
@@ -1010,14 +1025,8 @@ pub(super) fn collect_declarations(
     errors: &mut DiagnosticSink<'_>,
     phase: DeclPhase,
 ) {
-    let list = match expr {
-        deep::Expr::List(list, _) => list,
-        _ => return,
-    };
-
-    let tag = match get_tag(list) {
-        Some(t) => t,
-        None => return,
+    let Some((tag, meta, kids)) = stamped_parts(expr) else {
+        return;
     };
 
     // Aliases register first so `deftype` field-type alias expansion sees a
@@ -1030,8 +1039,6 @@ pub(super) fn collect_declarations(
     if !in_phase {
         return;
     }
-
-    let kids = children(list);
 
     match tag {
         DeepTag::Deftype => {
@@ -1061,7 +1068,7 @@ pub(super) fn collect_declarations(
             // declaration has no module identity, which would make
             // the enforcement boundary collide across combined
             // sources.
-            let opaque = deftype_opaque_meta(list);
+            let opaque = deftype_opaque_meta(meta);
             let defining_module = crate::opacity::module_key_for_item(
                 lexical_module,
                 kids.first().and_then(symbol_name),
@@ -1117,6 +1124,11 @@ pub(super) fn collect_declarations(
                 let params = match &kids[1] {
                     deep::Expr::List(list, _) => list
                         .elements
+                        .iter()
+                        .filter_map(symbol_name)
+                        .map(str::to_string)
+                        .collect::<Vec<_>>(),
+                    deep::Expr::BareList(elements, _) => elements
                         .iter()
                         .filter_map(symbol_name)
                         .map(str::to_string)
@@ -1185,9 +1197,8 @@ pub(super) fn app_var_name(callee: &deep::Expr) -> Option<&str> {
 pub(super) fn collect_user_def_names(items: &[&deep::Expr]) -> HashSet<String> {
     let mut out = HashSet::new();
     for expr in items {
-        if let deep::Expr::List(list, _) = expr
-            && get_tag(list) == Some(DeepTag::Def)
-            && let Some(name) = children(list).first().and_then(symbol_name)
+        if let Some((DeepTag::Def, _, kids)) = stamped_parts(expr)
+            && let Some(name) = kids.first().and_then(symbol_name)
         {
             out.insert(name.to_string());
         }
@@ -1335,19 +1346,18 @@ pub(super) fn infer_top_level(
     user_def_names: &HashSet<String>,
     declared_signatures: &HashMap<String, DeclaredSigMetadata>,
 ) -> Option<(String, Type)> {
-    let list = match expr {
-        deep::Expr::List(list, _) => list,
-        _ => return None,
-    };
-
-    let Some(tag) = get_tag(list) else {
+    let Some((tag, _, kids)) = stamped_parts(expr) else {
         // chelis#858 / [04-TOT-1]: a top-level list with no decoded tag
         // used to be silently skipped here, so a program like
         // `((var {} f) (var {} x))` was never type-checked while the
         // fitness clean path manufactured a vacuous 1.0. The disposition
         // is a loud rejection; the raw-string boundary names an unknown
         // symbol head when there is one.
-        let named = list.unknown_tag_symbol().unwrap_or("<untagged-list>");
+        let named = match expr {
+            deep::Expr::List(list, _) => list.unknown_tag_symbol().unwrap_or("<untagged-list>"),
+            deep::Expr::UnknownForm(data) => data.head.as_str(),
+            _ => "<untagged-list>",
+        };
         report(
             errors,
             CheckError::new(
@@ -1365,8 +1375,6 @@ pub(super) fn infer_top_level(
     if tag == DeepTag::Deftype || tag == DeepTag::Defsig || tag == DeepTag::Typealias {
         return None;
     }
-
-    let kids = children(list);
 
     if tag == DeepTag::Def && kids.len() >= 2 {
         let name = symbol_name(&kids[0])?.to_string();

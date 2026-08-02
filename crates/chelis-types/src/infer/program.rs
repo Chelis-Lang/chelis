@@ -731,11 +731,6 @@ pub(crate) fn check_typed_program_in_session(
     exprs: &[deep::Expr],
     errors: &mut DiagnosticSink<'_>,
 ) -> Result<CheckedProgram, InferStats> {
-    // Normalize Node/BareList → List at the entry boundary so the
-    // pointer-based owner-stamp system sees the same addresses throughout
-    // both registration, inference, and annotation passes (#908).
-    let normalized = normalize_nodes_to_lists(exprs);
-    let exprs = &normalized;
     // Outermost scope covers both inference (which has its own inner scope)
     // and the annotation pass below, so a bail in either surfaces as a hard
     // located failure rather than a partially-annotated `Ok`.
@@ -1014,17 +1009,11 @@ pub(super) fn primary_inference_schedule(
         .enumerate()
         .filter_map(|(index, (module, expr))| {
             module.as_ref()?;
-            let deep::Expr::List(list, _) = expr else {
+            let (DeepTag::Def, _, kids) = stamped_parts(expr)? else {
                 return None;
             };
-            if get_tag(list) != Some(DeepTag::Def)
-                || children(list)
-                    .get(1)
-                    .and_then(as_tagged_list_expr(DeepTag::Fn))
-                    .is_none()
-            {
-                return None;
-            }
+            kids.get(1)
+                .and_then(|body| tagged_children(body, DeepTag::Fn))?;
             Some((expr_key(expr), index))
         })
         .collect::<HashMap<_, _>>();
@@ -1123,26 +1112,28 @@ pub(super) fn prebind_recursive_function_schemes(
     let mut provisional = HashMap::new();
     for index in indices {
         let expr = items[*index].1;
-        let deep::Expr::List(list, _) = expr else {
+        let Some((DeepTag::Def, _, kids)) = stamped_parts(expr) else {
             continue;
         };
-        let kids = children(list);
-        let (Some(name), Some(fn_list)) = (
+        let (Some(name), Some(fn_kids)) = (
             kids.first().and_then(symbol_name),
-            kids.get(1).and_then(as_tagged_list_expr(DeepTag::Fn)),
+            kids.get(1)
+                .and_then(|body| tagged_children(body, DeepTag::Fn)),
         ) else {
             continue;
         };
         if declared_signatures.contains_key(name) || metadata_prebound_names.contains(name) {
             continue;
         }
-        let Some(params) = children(fn_list).first() else {
+        let Some(params) = fn_kids.first() else {
             continue;
         };
         let arity = match params {
+            deep::Expr::Node(node, _) if node.tag() == DeepTag::Params => node.child_count(),
             deep::Expr::List(params, _) if get_tag(params) == Some(DeepTag::Params) => {
                 children(params).len()
             }
+            deep::Expr::BareList(elements, _) => elements.len(),
             _ => continue,
         };
         let ty = Type::Fn(
@@ -1176,13 +1167,9 @@ pub(super) fn collect_ir_types_with_origins<'a>(
     let mut type_env = HashMap::new();
     let mut final_origin_by_name = HashMap::new();
     for (declaration_index, expr) in items.into_iter().enumerate() {
-        let deep::Expr::List(list, _) = expr else {
+        let Some((DeepTag::Def, _, kids)) = stamped_parts(expr) else {
             continue;
         };
-        if get_tag(list) != Some(DeepTag::Def) {
-            continue;
-        }
-        let kids = children(list);
         let (Some(name), Some(body)) = (kids.first().and_then(symbol_name), kids.get(1)) else {
             continue;
         };

@@ -290,6 +290,13 @@ pub(super) struct TypeStampEpoch {
     id: u64,
     owners: HashMap<usize, StampRequirement>,
     writes: HashMap<usize, Vec<OwnerTypeWrite>>,
+    /// Transitional per-node bridge identities. A `Node::to_list` reader
+    /// clones children, so pointer-keyed owner writes from that temporary
+    /// view must resolve back to the original stamped child registered by
+    /// `begin_root`. The whole-tree normalization boundary is gone; this map
+    /// remains only until the individual inference readers consume Nodes
+    /// directly.
+    bridge_aliases: HashMap<usize, usize>,
 }
 
 #[derive(Clone, Copy)]
@@ -327,6 +334,7 @@ impl InferenceProduct {
             id,
             owners: HashMap::new(),
             writes: HashMap::new(),
+            bridge_aliases: HashMap::new(),
         };
         register_annotation_owners(root, &mut epoch);
         self.active_epoch = Some(epoch);
@@ -344,7 +352,7 @@ impl InferenceProduct {
         let Some(epoch) = self.active_epoch.as_mut() else {
             return;
         };
-        let key = expr_key(expr);
+        let key = epoch.canonical_key(expr_key(expr));
         if !epoch.owners.contains_key(&key) {
             return;
         }
@@ -353,6 +361,71 @@ impl InferenceProduct {
             .entry(key)
             .or_default()
             .push(OwnerTypeWrite { ty, source });
+    }
+
+    pub(super) fn register_bridge_children(
+        &mut self,
+        stamped_children: &[deep::Expr],
+        bridged_children: &[deep::Expr],
+    ) {
+        let Some(epoch) = self.active_epoch.as_mut() else {
+            return;
+        };
+        debug_assert_eq!(stamped_children.len(), bridged_children.len());
+        let mut pending = stamped_children
+            .iter()
+            .zip(bridged_children)
+            .collect::<Vec<_>>();
+        while let Some((stamped, bridged)) = pending.pop() {
+            let stamped_key = epoch.canonical_key(expr_key(stamped));
+            epoch.bridge_aliases.insert(expr_key(bridged), stamped_key);
+            match (stamped, bridged) {
+                (deep::Expr::Node(left, _), deep::Expr::Node(right, _)) => {
+                    pending.extend(left.children_slice().iter().zip(right.children_slice()));
+                    pending.extend(
+                        left.meta()
+                            .entries
+                            .iter()
+                            .zip(&right.meta().entries)
+                            .map(|((_, left), (_, right))| (left, right)),
+                    );
+                }
+                (deep::Expr::List(left, _), deep::Expr::List(right, _)) => {
+                    pending.extend(left.elements.iter().zip(&right.elements));
+                }
+                (deep::Expr::BareList(left, _), deep::Expr::BareList(right, _)) => {
+                    pending.extend(left.iter().zip(right));
+                }
+                (deep::Expr::Map(left, _), deep::Expr::Map(right, _)) => {
+                    pending.extend(
+                        left.entries
+                            .iter()
+                            .zip(&right.entries)
+                            .map(|((_, left), (_, right))| (left, right)),
+                    );
+                }
+                (deep::Expr::MetaExpr(left, _), deep::Expr::MetaExpr(right, _)) => {
+                    pending.push((&left.expr, &right.expr));
+                    pending.extend(
+                        left.entries
+                            .iter()
+                            .zip(&right.entries)
+                            .map(|((_, left), (_, right))| (left, right)),
+                    );
+                }
+                (deep::Expr::UnknownForm(left), deep::Expr::UnknownForm(right)) => {
+                    pending.extend(left.children.iter().zip(&right.children));
+                    pending.extend(
+                        left.meta
+                            .entries
+                            .iter()
+                            .zip(&right.meta.entries)
+                            .map(|((_, left), (_, right))| (left, right)),
+                    );
+                }
+                _ => {}
+            }
+        }
     }
 
     pub(super) fn finish_root(&mut self, subst: &Subst, errors: &mut DiagnosticSink<'_>) {
@@ -440,7 +513,8 @@ impl InferenceProduct {
             ));
             return None;
         };
-        let Some(writes) = epoch.writes.get(&expr_key(expr)) else {
+        let key = epoch.canonical_key(expr_key(expr));
+        let Some(writes) = epoch.writes.get(&key) else {
             errors.push(internal_owner_stamp_error(
                 "canonical inference could not find an already-inferred child stamp".to_string(),
             ));
@@ -455,6 +529,18 @@ impl InferenceProduct {
             return None;
         }
         Some(canonical)
+    }
+}
+
+impl TypeStampEpoch {
+    fn canonical_key(&self, mut key: usize) -> usize {
+        while let Some(next) = self.bridge_aliases.get(&key).copied() {
+            if next == key {
+                break;
+            }
+            key = next;
+        }
+        key
     }
 }
 
@@ -481,13 +567,27 @@ pub(super) fn internal_owner_stamp_error(message: String) -> CheckError {
 // takes a `DiagnosticSink`.
 pub(super) fn register_annotation_owners(expr: &deep::Expr, epoch: &mut TypeStampEpoch) {
     stack_guard!("register_annotation_owners", expr);
-    let deep::Expr::List(list, _) = expr else {
-        if let deep::Expr::MetaExpr(meta, _) = expr {
+    let (tag, kids) = match expr {
+        deep::Expr::Node(node, _) => (Some(node.tag()), node.children_slice()),
+        deep::Expr::List(list, _) => (get_tag(list), children(list)),
+        deep::Expr::MetaExpr(meta, _) => {
             register_annotation_owners(&meta.expr, epoch);
+            return;
         }
-        return;
+        deep::Expr::BareList(elements, _) => {
+            for child in elements {
+                register_annotation_owners(child, epoch);
+            }
+            return;
+        }
+        deep::Expr::UnknownForm(data) => {
+            for child in &data.children {
+                register_annotation_owners(child, epoch);
+            }
+            return;
+        }
+        deep::Expr::Atom(_, _) | deep::Expr::Map(_, _) => return,
     };
-    let tag = get_tag(list);
     if let Some(tag) = tag {
         let (role, stamp_required) = if tag == DeepTag::Fn {
             ("function node", true)
@@ -500,7 +600,6 @@ pub(super) fn register_annotation_owners(expr: &deep::Expr, epoch: &mut TypeStam
         };
         register_owner(epoch, expr, role, stamp_required);
     }
-    let kids = children(list);
     for (index, child) in kids.iter().enumerate() {
         // Decode-once: `child_stamp_role` is total over `DeepTag`, so the
         // old "no child ownership classification" version-skew arm is
@@ -682,37 +781,39 @@ pub(super) fn extend_declared_sig_binders_from_def_params(
     map: &mut HashMap<String, DeclaredSigMetadata>,
 ) {
     stack_guard!("extend_declared_sig_binders_from_def_params", expr);
-    let deep::Expr::List(list, _) = expr else {
+    let Some((tag, _, kids)) = stamped_parts(expr) else {
         return;
     };
-    if get_tag(list) == Some(DeepTag::Module) {
-        for child in children(list) {
+    if tag == DeepTag::Module {
+        for child in kids.iter().skip(1) {
             extend_declared_sig_binders_from_def_params(child, map);
         }
         return;
     }
-    if get_tag(list) != Some(DeepTag::Def) {
+    if tag != DeepTag::Def {
         return;
     }
-    let kids = children(list);
-    let (Some(name), Some(deep::Expr::List(fn_list, _))) =
-        (kids.first().and_then(symbol_name), kids.get(1))
-    else {
+    let (Some(name), Some(fn_expr)) = (kids.first().and_then(symbol_name), kids.get(1)) else {
         return;
     };
-    if get_tag(fn_list) != Some(DeepTag::Fn) {
+    let Some((DeepTag::Fn, _, fn_kids)) = stamped_parts(fn_expr) else {
         return;
-    }
-    let Some(params) = children(fn_list).first() else {
+    };
+    let Some(params) = fn_kids.first() else {
         return;
     };
     let Some(metadata) = map.get_mut(name) else {
         return;
     };
-    let deep::Expr::List(params_list, _) = params else {
-        return;
+    let params = match params {
+        deep::Expr::Node(node, _) if node.tag() == DeepTag::Params => node.children_slice(),
+        deep::Expr::List(params_list, _) if get_tag(params_list) == Some(DeepTag::Params) => {
+            children(params_list)
+        }
+        deep::Expr::BareList(elements, _) => elements.as_slice(),
+        _ => return,
     };
-    for param in children(params_list) {
+    for param in params {
         let type_expr = match param {
             deep::Expr::MetaExpr(meta, _) => meta
                 .entries
@@ -720,6 +821,15 @@ pub(super) fn extend_declared_sig_binders_from_def_params(
                 .find(|(key, _)| key == "type")
                 .map(|(_, value)| value),
             deep::Expr::List(param_list, _) => param_list.elements.get(1).and_then(|meta| {
+                let deep::Expr::Map(meta, _) = meta else {
+                    return None;
+                };
+                meta.entries
+                    .iter()
+                    .find(|(key, _)| key == "type")
+                    .map(|(_, value)| value)
+            }),
+            deep::Expr::BareList(elements, _) => elements.get(1).and_then(|meta| {
                 let deep::Expr::Map(meta, _) = meta else {
                     return None;
                 };
@@ -752,27 +862,25 @@ pub(super) fn collect_defsig_param_types(
     // keeps the "every recursive walker is bounded" invariant uniform and
     // cheap.)
     stack_guard!("collect_defsig_param_types", expr);
-    let deep::Expr::List(list, _) = expr else {
+    let Some((tag, _, kids)) = stamped_parts(expr) else {
         return;
     };
-    match get_tag(list) {
-        Some(DeepTag::Module) => {
-            for child in children(list) {
+    match tag {
+        DeepTag::Module => {
+            for child in kids.iter().skip(1) {
                 collect_defsig_param_types(child, map);
             }
         }
-        Some(DeepTag::Defsig) => {
-            let kids = children(list);
+        DeepTag::Defsig => {
             let Some(name) = kids.first().and_then(symbol_name) else {
                 return;
             };
-            let Some(deep::Expr::List(fn_list, _)) = kids.get(1) else {
+            let Some(fn_expr) = kids.get(1) else {
                 return;
             };
-            if get_tag(fn_list) != Some(DeepTag::TFn) {
+            let Some((DeepTag::TFn, _, fn_kids)) = stamped_parts(fn_expr) else {
                 return;
-            }
-            let fn_kids = children(fn_list);
+            };
             if fn_kids.is_empty() {
                 return;
             }
@@ -792,18 +900,16 @@ pub(super) fn deep_type_binder_names(type_expr: &deep::Expr) -> HashSet<String> 
     let mut names = HashSet::new();
     let mut pending = vec![type_expr];
     while let Some(current) = pending.pop() {
-        let deep::Expr::List(type_list, _) = current else {
+        let Some((tag, _, children)) = stamped_parts(current) else {
             continue;
         };
-        if matches!(
-            get_tag(type_list),
-            Some(DeepTag::TVar | DeepTag::DVar | DeepTag::DRank)
-        ) && let Some(variable) = children(type_list).first().and_then(symbol_name)
+        if matches!(tag, DeepTag::TVar | DeepTag::DVar | DeepTag::DRank)
+            && let Some(variable) = children.first().and_then(symbol_name)
             && variable != "_"
         {
             names.insert(variable.to_string());
         }
-        pending.extend(children(type_list));
+        pending.extend(children);
     }
     names
 }
@@ -1170,6 +1276,47 @@ pub(super) fn effects_only_expr_matches(before: &deep::Expr, after: &deep::Expr)
                         effects_only_expr_matches(before_element, after_element)
                     })
         }
+        (deep::Expr::Node(before_node, before_span), deep::Expr::Node(after_node, after_span)) => {
+            before_span == after_span
+                && before_node.tag() == after_node.tag()
+                && metadata_entries_match(
+                    &before_node.meta().entries,
+                    &after_node.meta().entries,
+                    true,
+                )
+                && before_node.children_slice().len() == after_node.children_slice().len()
+                && before_node
+                    .children_slice()
+                    .iter()
+                    .zip(after_node.children_slice())
+                    .all(|(before_child, after_child)| {
+                        effects_only_expr_matches(before_child, after_child)
+                    })
+        }
+        (
+            deep::Expr::BareList(before_elements, before_span),
+            deep::Expr::BareList(after_elements, after_span),
+        ) => {
+            before_span == after_span
+                && before_elements.len() == after_elements.len()
+                && before_elements
+                    .iter()
+                    .zip(after_elements)
+                    .all(|(before_child, after_child)| {
+                        effects_only_expr_matches(before_child, after_child)
+                    })
+        }
+        (deep::Expr::UnknownForm(before_data), deep::Expr::UnknownForm(after_data)) => {
+            before_data.head == after_data.head
+                && before_data.span == after_data.span
+                && metadata_entries_match(&before_data.meta.entries, &after_data.meta.entries, true)
+                && before_data.children.len() == after_data.children.len()
+                && before_data.children.iter().zip(&after_data.children).all(
+                    |(before_child, after_child)| {
+                        effects_only_expr_matches(before_child, after_child)
+                    },
+                )
+        }
         _ => false,
     }
 }
@@ -1227,12 +1374,37 @@ pub(super) fn effect_metadata_is_singular(expr: &deep::Expr) -> bool {
             };
             singular_here && list.elements.iter().all(effect_metadata_is_singular)
         }
-        // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
-        deep::Expr::Node(node, span) => {
-            let bridged = deep::Expr::List(node.to_list(*span), *span);
-            effect_metadata_is_singular(&bridged)
+        deep::Expr::Node(node, _) => {
+            node.meta()
+                .entries
+                .iter()
+                .filter(|(key, _)| key == "effects")
+                .count()
+                <= 1
+                && node
+                    .meta()
+                    .entries
+                    .iter()
+                    .all(|(_, value)| effect_metadata_is_singular(value))
+                && node
+                    .children_slice()
+                    .iter()
+                    .all(effect_metadata_is_singular)
         }
         deep::Expr::BareList(elems, _) => elems.iter().all(effect_metadata_is_singular),
-        deep::Expr::UnknownForm(data) => data.children.iter().all(effect_metadata_is_singular),
+        deep::Expr::UnknownForm(data) => {
+            data.meta
+                .entries
+                .iter()
+                .filter(|(key, _)| key == "effects")
+                .count()
+                <= 1
+                && data
+                    .meta
+                    .entries
+                    .iter()
+                    .all(|(_, value)| effect_metadata_is_singular(value))
+                && data.children.iter().all(effect_metadata_is_singular)
+        }
     }
 }

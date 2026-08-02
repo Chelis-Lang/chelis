@@ -251,8 +251,8 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
                 canonical: false,
             });
         }
-        if let deep::Expr::List(list, _) = expr {
-            let (form_tag, tag, children) = self.type_form(list)?;
+        if matches!(expr, deep::Expr::List(_, _) | deep::Expr::Node(_, _)) {
+            let (form_tag, tag, children) = self.type_form_expr(expr)?;
             if form_tag == Some(DeepTag::TPrim) {
                 let name = self.one_symbol(tag, children)?;
                 return Ok(ResolvedCastTarget::PrimitiveSpelling {
@@ -307,14 +307,7 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
 
     fn resolve_type(&mut self, expr: &deep::Expr) -> Result<Type, ErrorWitness> {
         self.enter_expr(expr);
-        let deep::Expr::List(list, _) = expr else {
-            return Err(self.malformed(format!(
-                "{} must use a canonical Deep type form; bare `{}` is not a type",
-                self.use_site.label(),
-                render_expr(expr)
-            )));
-        };
-        let (form_tag, tag, children) = self.type_form(list)?;
+        let (form_tag, tag, children) = self.type_form_expr(expr)?;
         match form_tag {
             Some(DeepTag::TPrim) => {
                 let name = self.one_symbol(tag, children)?;
@@ -416,14 +409,7 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
 
     fn resolve_dim(&mut self, expr: &deep::Expr) -> Result<Dim, ErrorWitness> {
         self.enter_expr(expr);
-        let deep::Expr::List(list, _) = expr else {
-            return Err(self.malformed(format!(
-                "tensor dimension in {} must use a canonical Deep dimension form, got `{}`",
-                self.use_site.label(),
-                render_expr(expr)
-            )));
-        };
-        let (form_tag, tag, children) = self.type_form(list)?;
+        let (form_tag, tag, children) = self.type_form_expr(expr)?;
         match form_tag {
             Some(DeepTag::DName) => {
                 let name = self.one_symbol(tag, children)?;
@@ -544,6 +530,26 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
             )));
         }
         Ok((tag, tag_str, &list.elements[2..]))
+    }
+
+    fn type_form_expr<'b>(
+        &mut self,
+        expr: &'b deep::Expr,
+    ) -> Result<(Option<DeepTag>, &'b str, &'b [deep::Expr]), ErrorWitness> {
+        match expr {
+            deep::Expr::Node(node, _) => {
+                Ok((Some(node.tag()), node.tag().as_str(), node.children_slice()))
+            }
+            deep::Expr::List(list, _) => self.type_form(list),
+            deep::Expr::UnknownForm(data) => {
+                Ok((None, data.head.as_str(), data.children.as_slice()))
+            }
+            _ => Err(self.malformed(format!(
+                "{} must use a canonical Deep type form; bare `{}` is not a type",
+                self.use_site.label(),
+                render_expr(expr)
+            ))),
+        }
     }
 
     fn one_symbol<'b>(

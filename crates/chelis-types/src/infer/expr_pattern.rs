@@ -46,10 +46,7 @@ pub(super) fn infer_match(
     let mut has_wildcard = false;
 
     for arm_expr in &kids[1..] {
-        if let deep::Expr::List(arm_list, _) = arm_expr
-            && get_tag(arm_list) == Some(DeepTag::Arm)
-        {
-            let arm_kids = children(arm_list);
+        if let Some((DeepTag::Arm, _, arm_kids)) = stamped_parts(arm_expr) {
             // arm_kids[0] = pattern, arm_kids[1] = guard (usually ()), arm_kids[2] = body
             if arm_kids.len() >= 3 {
                 let mut arm_env = env.clone();
@@ -77,7 +74,8 @@ pub(super) fn infer_match(
                 );
 
                 let guard = &arm_kids[1];
-                let empty_guard = matches!(guard, deep::Expr::List(guard_list, _) if guard_list.elements.is_empty());
+                let empty_guard = matches!(guard, deep::Expr::List(guard_list, _) if guard_list.elements.is_empty())
+                    || matches!(guard, deep::Expr::BareList(elements, _) if elements.is_empty());
                 if !empty_guard {
                     let guard_ty =
                         infer_expr(guard, &mut arm_env, vg, subst, adt_reg, errors, product);
@@ -148,14 +146,12 @@ pub(super) fn infer_match(
 /// `pat-var`, `pat-wild`, and `pat-as` wrapping an irrefutable inner
 /// pattern (`q @ x`). Applies at the ARM level only.
 pub(super) fn top_level_arm_is_irrefutable(pat: &deep::Expr) -> bool {
-    let deep::Expr::List(list, _) = pat else {
+    let Some((tag, _, kids)) = stamped_parts(pat) else {
         return false;
     };
-    match get_tag(list) {
-        Some(DeepTag::PatVar) | Some(DeepTag::PatWild) => true,
-        Some(DeepTag::PatAs) => children(list)
-            .get(1)
-            .is_some_and(top_level_arm_is_irrefutable),
+    match tag {
+        DeepTag::PatVar | DeepTag::PatWild => true,
+        DeepTag::PatAs => kids.get(1).is_some_and(top_level_arm_is_irrefutable),
         _ => false,
     }
 }
@@ -174,11 +170,7 @@ pub(super) fn pattern_bindings(
     has_wildcard: &mut bool,
 ) {
     stack_guard!("pattern_bindings", pat);
-    if let deep::Expr::List(list, _) = pat {
-        let Some(tag) = get_tag(list) else {
-            return;
-        };
-        let kids = children(list);
+    if let Some((tag, _, kids)) = stamped_parts(pat) {
         match tag {
             DeepTag::PatVar => {
                 if let Some(name) = kids.first().and_then(|e| symbol_name(e)) {
@@ -212,10 +204,7 @@ pub(super) fn pattern_bindings(
                     if constructor_pattern_out_of_scope(ctor_name, env, adt_reg) {
                         errors.push(CheckError::new(
                             CheckErrorKind::UnknownConstructor,
-                            with_macro_provenance(
-                                &deep::Expr::List(list.clone(), zero_span()),
-                                format!("unknown constructor: {ctor_name}"),
-                            ),
+                            with_macro_provenance(pat, format!("unknown constructor: {ctor_name}")),
                             vec![format!(
                                 "Constructor '{ctor_name}' is not in scope. Declare it \
                                  locally or add it to an import (e.g. \
@@ -332,10 +321,7 @@ pub(super) fn pattern_bindings(
                     if constructor_pattern_out_of_scope(ctor_name, env, adt_reg) {
                         errors.push(CheckError::new(
                             CheckErrorKind::UnknownConstructor,
-                            with_macro_provenance(
-                                &deep::Expr::List(list.clone(), zero_span()),
-                                format!("unknown constructor: {ctor_name}"),
-                            ),
+                            with_macro_provenance(pat, format!("unknown constructor: {ctor_name}")),
                             vec![format!(
                                 "Constructor '{ctor_name}' is not in scope. Declare it \
                                  locally or add it to an import (e.g. \
@@ -420,116 +406,111 @@ pub(super) fn pattern_bindings(
                     };
 
                     for kv_expr in kids.iter().skip(1) {
-                        if let deep::Expr::List(kv_list, _) = kv_expr
-                            && get_tag(kv_list) == Some(DeepTag::Kv)
+                        if let Some((DeepTag::Kv, _, kv_kids)) = stamped_parts(kv_expr)
+                            && kv_kids.len() >= 2
                         {
-                            let kv_kids = children(kv_list);
-                            if kv_kids.len() >= 2 {
-                                let field_name = symbol_name(&kv_kids[0]);
-                                // Look up declared field type — reject unknown fields
-                                let field_ty = match field_name {
-                                    Some(n) => {
-                                        if known_field_set.contains(n) {
-                                            // Prefer the instantiated arg type from
-                                            // the constructor scheme so the
-                                            // scrutinee's concrete type arguments
-                                            // are reflected in the pattern binding.
-                                            let pos = declared_field_names
-                                                .iter()
-                                                .position(|nm| nm.as_deref() == Some(n));
-                                            match pos.and_then(|i| instantiated_arg_types.get(i)) {
-                                                Some(ty) => subst.apply(ty),
-                                                None => {
-                                                    // Fallback: un-instantiated declared field
-                                                    // type when the constructor scheme isn't
-                                                    // in `env`. This branch SHOULD be
-                                                    // unreachable in practice: every `deftype`
-                                                    // registered in `adt_reg` via
-                                                    // `collect_declarations` also binds its
-                                                    // constructor scheme in `env` in the same
-                                                    // call. If that invariant drifts (e.g., a
-                                                    // future code path populates `adt_reg`
-                                                    // without binding into `env`), the
-                                                    // fallback would silently produce
-                                                    // `Var(T_a)` from the un-instantiated
-                                                    // VariantInfo — exactly the bug #181 fixed.
-                                                    // The debug_assert below flags the drift
-                                                    // in tests; the runtime fallback to
-                                                    // `vi.fields[i]` preserves pre-fix
-                                                    // behavior in release builds.
-                                                    debug_assert!(
-                                                        false,
-                                                        "env/adt_reg sync invariant violated: \
+                            let field_name = symbol_name(&kv_kids[0]);
+                            // Look up declared field type — reject unknown fields
+                            let field_ty = match field_name {
+                                Some(n) => {
+                                    if known_field_set.contains(n) {
+                                        // Prefer the instantiated arg type from
+                                        // the constructor scheme so the
+                                        // scrutinee's concrete type arguments
+                                        // are reflected in the pattern binding.
+                                        let pos = declared_field_names
+                                            .iter()
+                                            .position(|nm| nm.as_deref() == Some(n));
+                                        match pos.and_then(|i| instantiated_arg_types.get(i)) {
+                                            Some(ty) => subst.apply(ty),
+                                            None => {
+                                                // Fallback: un-instantiated declared field
+                                                // type when the constructor scheme isn't
+                                                // in `env`. This branch SHOULD be
+                                                // unreachable in practice: every `deftype`
+                                                // registered in `adt_reg` via
+                                                // `collect_declarations` also binds its
+                                                // constructor scheme in `env` in the same
+                                                // call. If that invariant drifts (e.g., a
+                                                // future code path populates `adt_reg`
+                                                // without binding into `env`), the
+                                                // fallback would silently produce
+                                                // `Var(T_a)` from the un-instantiated
+                                                // VariantInfo — exactly the bug #181 fixed.
+                                                // The debug_assert below flags the drift
+                                                // in tests; the runtime fallback to
+                                                // `vi.fields[i]` preserves pre-fix
+                                                // behavior in release builds.
+                                                debug_assert!(
+                                                    false,
+                                                    "env/adt_reg sync invariant violated: \
                                                          field `{n}` of constructor `{ctor_name}` \
                                                          is known to `adt_reg` (variant_info found) \
                                                          but the constructor scheme is missing from \
                                                          `env`. See infer.rs pat-record fallback note."
-                                                    );
-                                                    variant_info
-                                                        .and_then(|(_, vi)| {
-                                                            vi.fields.iter().find_map(
-                                                                |(name, ty)| {
-                                                                    (name.as_deref() == Some(n))
-                                                                        .then(|| ty.clone())
-                                                                },
-                                                            )
+                                                );
+                                                variant_info
+                                                    .and_then(|(_, vi)| {
+                                                        vi.fields.iter().find_map(|(name, ty)| {
+                                                            (name.as_deref() == Some(n))
+                                                                .then(|| ty.clone())
                                                         })
-                                                        // Per the loop guard `known_field_set
-                                                        // .contains(n)` and the fact that
-                                                        // `known_field_set` is derived from
-                                                        // `declared_field_names` whose
-                                                        // `Some(_)` entries are exactly the
-                                                        // named fields of `vi.fields`, the
-                                                        // find_map above always returns Some
-                                                        // here. The expect makes that explicit;
-                                                        // if it ever fires, both data sources
-                                                        // are themselves out of sync — a bug
-                                                        // upstream of this site.
-                                                        .expect(
-                                                            "known_field_set is derived from \
+                                                    })
+                                                    // Per the loop guard `known_field_set
+                                                    // .contains(n)` and the fact that
+                                                    // `known_field_set` is derived from
+                                                    // `declared_field_names` whose
+                                                    // `Some(_)` entries are exactly the
+                                                    // named fields of `vi.fields`, the
+                                                    // find_map above always returns Some
+                                                    // here. The expect makes that explicit;
+                                                    // if it ever fires, both data sources
+                                                    // are themselves out of sync — a bug
+                                                    // upstream of this site.
+                                                    .expect(
+                                                        "known_field_set is derived from \
                                                              vi.fields' named entries; mismatch \
                                                              indicates a corrupted AdtRegistry",
-                                                        )
-                                                }
+                                                    )
                                             }
-                                        } else if !known_field_set.is_empty() {
-                                            // Unknown field name — error
-                                            report(
-                                                errors,
-                                                CheckError::new(
-                                                    CheckErrorKind::TypeMismatch,
-                                                    format!(
-                                                        "unknown record field '{}' in pattern for {}",
-                                                        n, ctor_name
-                                                    ),
-                                                    vec![format!(
-                                                        "known fields: {:?}",
-                                                        declared_field_names
-                                                            .iter()
-                                                            .filter_map(|f| f.as_deref())
-                                                            .collect::<Vec<_>>()
-                                                    )],
-                                                ),
-                                            )
-                                        } else {
-                                            vg.fresh_type() // no ADT info available
                                         }
+                                    } else if !known_field_set.is_empty() {
+                                        // Unknown field name — error
+                                        report(
+                                            errors,
+                                            CheckError::new(
+                                                CheckErrorKind::TypeMismatch,
+                                                format!(
+                                                    "unknown record field '{}' in pattern for {}",
+                                                    n, ctor_name
+                                                ),
+                                                vec![format!(
+                                                    "known fields: {:?}",
+                                                    declared_field_names
+                                                        .iter()
+                                                        .filter_map(|f| f.as_deref())
+                                                        .collect::<Vec<_>>()
+                                                )],
+                                            ),
+                                        )
+                                    } else {
+                                        vg.fresh_type() // no ADT info available
                                     }
-                                    None => vg.fresh_type(),
-                                };
-                                pattern_bindings(
-                                    &kv_kids[1],
-                                    &field_ty,
-                                    env,
-                                    vg,
-                                    subst,
-                                    adt_reg,
-                                    errors,
-                                    product,
-                                    covered_variants,
-                                    has_wildcard,
-                                );
-                            }
+                                }
+                                None => vg.fresh_type(),
+                            };
+                            pattern_bindings(
+                                &kv_kids[1],
+                                &field_ty,
+                                env,
+                                vg,
+                                subst,
+                                adt_reg,
+                                errors,
+                                product,
+                                covered_variants,
+                                has_wildcard,
+                            );
                         }
                     }
                 }

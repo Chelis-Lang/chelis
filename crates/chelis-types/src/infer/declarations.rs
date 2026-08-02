@@ -6,26 +6,21 @@
 use super::*;
 
 pub(super) fn top_level_decl_name(expr: &deep::Expr) -> Option<&str> {
-    let deep::Expr::List(list, _) = expr else {
-        return None;
-    };
-    let tag = get_tag(list)?;
+    let (tag, _, kids) = stamped_parts(expr)?;
     if !matches!(
         tag,
         DeepTag::Def | DeepTag::Defsig | DeepTag::Deftype | DeepTag::Typealias
     ) {
         return None;
     }
-    children(list).first().and_then(symbol_name)
+    kids.first().and_then(symbol_name)
 }
 
 pub(super) fn top_level_decl_items(exprs: &[deep::Expr]) -> Vec<&deep::Expr> {
     fn push<'a>(expr: &'a deep::Expr, out: &mut Vec<&'a deep::Expr>) {
-        if let deep::Expr::List(list, _) = expr
-            && get_tag(list) == Some(DeepTag::Module)
-        {
-            // `(module {} name children...)` — skip tag, meta, name.
-            for child in list.elements.iter().skip(3) {
+        if let Some((DeepTag::Module, _, kids)) = stamped_parts(expr) {
+            // `(module {} name children...)` — skip the name child.
+            for child in kids.iter().skip(1) {
                 push(child, out);
             }
             return;
@@ -53,17 +48,15 @@ pub(super) fn top_level_decl_items_with_modules(
         prefix: Option<&str>,
         out: &mut Vec<(Option<String>, &'a deep::Expr)>,
     ) {
-        if let deep::Expr::List(list, _) = expr
-            && get_tag(list) == Some(DeepTag::Module)
-        {
-            // `(module {} name children...)` — skip tag, meta, name.
-            let name = list.elements.get(2).and_then(symbol_name);
+        if let Some((DeepTag::Module, _, kids)) = stamped_parts(expr) {
+            // `(module {} name children...)` — skip the name child.
+            let name = kids.first().and_then(symbol_name);
             let key = match (prefix, name) {
                 (Some(p), Some(n)) => Some(format!("{p}.{n}")),
                 (None, Some(n)) => Some(n.to_string()),
                 (p, None) => p.map(str::to_string),
             };
-            for child in list.elements.iter().skip(3) {
+            for child in kids.iter().skip(1) {
                 push(child, key.as_deref(), out);
             }
             return;
@@ -232,17 +225,16 @@ pub(super) fn infer_signature_metadata_with_context_and_headers(
         functions.clear();
         let mut available_signatures = imported_signatures.clone();
         for expr in &ordered_defs {
-            let deep::Expr::List(list, _) = expr else {
+            let Some((DeepTag::Def, _, kids)) = stamped_parts(expr) else {
                 continue;
             };
-            if get_tag(list) != Some(DeepTag::Def) {
-                continue;
-            }
-            let kids = children(list);
             let Some(name) = kids.first().and_then(symbol_name) else {
                 continue;
             };
-            let Some(fn_list) = kids.get(1).and_then(as_tagged_list_expr(DeepTag::Fn)) else {
+            let Some(fn_kids) = kids
+                .get(1)
+                .and_then(|body| tagged_children(body, DeepTag::Fn))
+            else {
                 continue;
             };
             let Some(checked_signature) = type_env
@@ -254,7 +246,6 @@ pub(super) fn infer_signature_metadata_with_context_and_headers(
             let Type::Fn(checked_args, checked_ret) = checked_signature.clone() else {
                 continue;
             };
-            let fn_kids = children(fn_list);
             let Some(params_expr) = fn_kids.first() else {
                 continue;
             };
@@ -338,16 +329,12 @@ pub(super) fn function_inference_sccs(exprs: &[deep::Expr]) -> Vec<FunctionInfer
     let def_items = top_level_decl_items(exprs)
         .into_iter()
         .filter_map(|expr| {
-            let deep::Expr::List(list, _) = expr else {
+            let (DeepTag::Def, _, kids) = stamped_parts(expr)? else {
                 return None;
             };
-            if get_tag(list) != Some(DeepTag::Def) {
-                return None;
-            }
-            let name = children(list).first().and_then(symbol_name)?;
-            children(list)
-                .get(1)
-                .and_then(as_tagged_list_expr(DeepTag::Fn))?;
+            let name = kids.first().and_then(symbol_name)?;
+            kids.get(1)
+                .and_then(|body| tagged_children(body, DeepTag::Fn))?;
             Some((name.to_string(), expr))
         })
         .collect::<Vec<_>>();
@@ -357,16 +344,15 @@ pub(super) fn function_inference_sccs(exprs: &[deep::Expr]) -> Vec<FunctionInfer
         .collect::<HashSet<_>>();
     let mut graph = HashMap::<String, HashSet<String>>::new();
     for (name, expr) in &def_items {
-        let deep::Expr::List(list, _) = expr else {
+        let Some((DeepTag::Def, _, kids)) = stamped_parts(expr) else {
             continue;
         };
-        let Some(fn_list) = children(list)
+        let Some(fn_kids) = kids
             .get(1)
-            .and_then(as_tagged_list_expr(DeepTag::Fn))
+            .and_then(|body| tagged_children(body, DeepTag::Fn))
         else {
             continue;
         };
-        let fn_kids = children(fn_list);
         let (Some(params), Some(body)) = (fn_kids.first(), fn_kids.get(1)) else {
             continue;
         };
@@ -411,8 +397,8 @@ pub(super) fn function_inference_sccs(exprs: &[deep::Expr]) -> Vec<FunctionInfer
     let mut component_by_name = HashMap::new();
     for (component_index, component) in unordered.iter().enumerate() {
         for expr in &component.members {
-            if let deep::Expr::List(list, _) = expr
-                && let Some(name) = children(list).first().and_then(symbol_name)
+            if let Some((DeepTag::Def, _, kids)) = stamped_parts(expr)
+                && let Some(name) = kids.first().and_then(symbol_name)
             {
                 component_by_name.insert(name.to_string(), component_index);
             }
@@ -481,9 +467,8 @@ pub(super) fn signature_inference_def_order(exprs: &[deep::Expr]) -> Vec<&deep::
 pub(super) fn collect_defsig_names(exprs: &[deep::Expr]) -> HashSet<String> {
     let mut names = HashSet::new();
     for expr in top_level_decl_items(exprs) {
-        if let deep::Expr::List(list, _) = expr
-            && get_tag(list) == Some(DeepTag::Defsig)
-            && let Some(name) = children(list).first().and_then(symbol_name)
+        if let Some((DeepTag::Defsig, _, kids)) = stamped_parts(expr)
+            && let Some(name) = kids.first().and_then(symbol_name)
         {
             names.insert(name.to_string());
         }
@@ -498,13 +483,9 @@ pub(super) fn collect_authored_signature_types(
 ) -> HashMap<String, Type> {
     let mut signatures = HashMap::new();
     for expr in top_level_decl_items(exprs) {
-        let deep::Expr::List(list, _) = expr else {
+        let Some((DeepTag::Defsig, _, kids)) = stamped_parts(expr) else {
             continue;
         };
-        if get_tag(list) != Some(DeepTag::Defsig) {
-            continue;
-        }
-        let kids = children(list);
         let (Some(name), Some(signature_expr)) = (kids.first().and_then(symbol_name), kids.get(1))
         else {
             continue;
@@ -523,8 +504,8 @@ pub(super) fn recursive_call_cycle_members(exprs: &[deep::Expr]) -> HashSet<Stri
             continue;
         }
         for expr in component.members {
-            if let deep::Expr::List(list, _) = expr
-                && let Some(name) = children(list).first().and_then(symbol_name)
+            if let Some((DeepTag::Def, _, kids)) = stamped_parts(expr)
+                && let Some(name) = kids.first().and_then(symbol_name)
             {
                 recursive.insert(name.to_string());
             }
@@ -608,8 +589,10 @@ pub(super) fn collect_top_level_calls(
                     return;
                 }
                 let mut let_names = HashSet::new();
-                if let Some(bind_list) = kids.first().and_then(as_tagged_list_expr(DeepTag::Bind)) {
-                    let bind_kids = children(bind_list);
+                if let Some(bind_kids) = kids
+                    .first()
+                    .and_then(|bind| tagged_children(bind, DeepTag::Bind))
+                {
                     let mut index = 0;
                     while index + 1 < bind_kids.len() {
                         collect_top_level_calls(&bind_kids[index + 1], def_names, bound, calls);
@@ -629,10 +612,9 @@ pub(super) fn collect_top_level_calls(
                     collect_top_level_calls(scrutinee, def_names, bound, calls);
                 }
                 for arm in kids.iter().skip(1) {
-                    let Some(arm_list) = as_tagged_list_expr(DeepTag::Arm)(arm) else {
+                    let Some(arm_kids) = tagged_children(arm, DeepTag::Arm) else {
                         continue;
                     };
-                    let arm_kids = children(arm_list);
                     if arm_kids.len() < 3 {
                         continue;
                     }
@@ -813,8 +795,10 @@ pub(super) fn param_has_consuming_use_inner(
                     return false;
                 }
                 let mut let_names = HashSet::new();
-                if let Some(bind_list) = kids.first().and_then(as_tagged_list_expr(DeepTag::Bind)) {
-                    let bind_kids = children(bind_list);
+                if let Some(bind_kids) = kids
+                    .first()
+                    .and_then(|bind| tagged_children(bind, DeepTag::Bind))
+                {
                     let mut index = 0;
                     while index + 1 < bind_kids.len() {
                         if param_has_consuming_use_inner(
@@ -856,10 +840,9 @@ pub(super) fn param_has_consuming_use_inner(
                     return true;
                 }
                 for arm in kids.iter().skip(1) {
-                    let Some(arm_list) = as_tagged_list_expr(DeepTag::Arm)(arm) else {
+                    let Some(arm_kids) = tagged_children(arm, DeepTag::Arm) else {
                         continue;
                     };
-                    let arm_kids = children(arm_list);
                     if arm_kids.len() < 3 {
                         continue;
                     }
@@ -1376,10 +1359,13 @@ pub(super) fn validate_deferred_opaque_uses(
 }
 
 pub(super) fn param_source_infos(expr: &deep::Expr) -> Vec<(String, bool)> {
-    let Some(list) = as_tagged_list_expr(DeepTag::Params)(expr) else {
-        return Vec::new();
+    let params = match expr {
+        deep::Expr::Node(node, _) if node.tag() == DeepTag::Params => node.children_slice(),
+        deep::Expr::List(list, _) if get_tag(list) == Some(DeepTag::Params) => children(list),
+        deep::Expr::BareList(elements, _) => elements.as_slice(),
+        _ => return Vec::new(),
     };
-    children(list)
+    params
         .iter()
         .filter_map(|param| match param {
             deep::Expr::Atom(deep::Atom::Name(name), _) => Some((name.clone(), false)),
@@ -1396,6 +1382,16 @@ pub(super) fn param_source_infos(expr: &deep::Expr) -> Vec<(String, bool)> {
                 let name = param_list.elements.first().and_then(symbol_name)?;
                 let written = get_meta(param_list)
                     .is_some_and(|meta| meta.entries.iter().any(|(key, _)| key == "type"));
+                Some((name.to_string(), written))
+            }
+            deep::Expr::BareList(elements, _) => {
+                let name = elements.first().and_then(symbol_name)?;
+                let written = elements.get(1).is_some_and(|expr| {
+                    let deep::Expr::Map(meta, _) = expr else {
+                        return false;
+                    };
+                    meta.entries.iter().any(|(key, _)| key == "type")
+                });
                 Some((name.to_string(), written))
             }
             _ => None,
@@ -1441,18 +1437,14 @@ pub(super) fn collect_pattern_names_for_signature(expr: &deep::Expr, names: &mut
     }
 }
 
-pub(super) fn as_tagged_list_expr(tag: DeepTag) -> impl Fn(&deep::Expr) -> Option<&deep::List> {
-    move |expr| match expr {
-        deep::Expr::List(list, _) if get_tag(list) == Some(tag) => Some(list),
-        _ => None,
-    }
+pub(super) fn tagged_children(expr: &deep::Expr, tag: DeepTag) -> Option<&[deep::Expr]> {
+    stamped_parts(expr).and_then(|(found, _, children)| (found == tag).then_some(children))
 }
 
 pub(super) fn var_name_expr(expr: &deep::Expr) -> Option<&str> {
-    let deep::Expr::List(list, _) = expr else {
-        return None;
-    };
-    var_name_list(list)
+    tagged_children(expr, DeepTag::Var)?
+        .first()
+        .and_then(symbol_name)
 }
 
 pub(super) fn var_name_list(list: &deep::List) -> Option<&str> {
