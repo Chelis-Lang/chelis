@@ -5,7 +5,8 @@
 //! shared Surf AST through [`crate::resugar`] and renders that AST through the
 //! one canonical formatter in [`crate::format`].
 
-use chelis_deep::Expr;
+use chelis_deep::role::is_declaration_tag;
+use chelis_deep::{DeepTag, Expr};
 
 use crate::ast::Decl;
 use crate::format::format_program;
@@ -73,7 +74,7 @@ pub fn try_decompile_program_with_context(
 ) -> Result<String, ResugarError> {
     let declarations = match resugar_program(exprs) {
         Ok(declarations) => declarations,
-        Err(_) if exprs.len() == 1 => {
+        Err(_) if exprs.len() == 1 && !is_top_level_declaration(&exprs[0]) => {
             let value = resugar_expression(&exprs[0])?;
             vec![Decl::LetDef {
                 name: synthetic_name.unwrap_or("result").to_string(),
@@ -93,6 +94,11 @@ pub fn try_decompile_program_with_context(
         reason: error.to_string(),
     })?;
     Ok(source)
+}
+
+fn is_top_level_declaration(expr: &Expr) -> bool {
+    expr.tag()
+        .is_some_and(|tag| tag == DeepTag::Module || is_declaration_tag(tag))
 }
 
 fn append_deep_debug_comments(source: &mut String, exprs: &[Expr]) {

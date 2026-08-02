@@ -6,11 +6,20 @@ Surf v0.19 SHALL accept exactly one spelling for each grammatical construct. `ch
 SHALL be an idempotent layout printer for canonical source and SHALL NOT translate syntax
 dialects. Legacy v0.18 aliases SHALL be accepted only by
 `chelis migrate surf --from 0.18`, which SHALL emit canonical v0.19 source.
+With `--inplace`, migration SHALL preflight the whole batch before replacing
+any file, reject symbolic links and multiply linked files, replace each file
+atomically, and restore every earlier replacement byte-for-byte if a later
+replacement fails.
 
 #### Scenario: Canonical source is a formatter fixed point
 
 - **WHEN** canonical source is formatted twice
 - **THEN** both outputs are byte-identical and parse through the canonical parser
+
+#### Scenario: In-place batch migration rolls back
+
+- **WHEN** persisting a later file fails after an earlier file was replaced
+- **THEN** the earlier file is restored byte-for-byte before migration reports failure
 
 #### Scenario: Property delimiters make outer binary grouping redundant
 

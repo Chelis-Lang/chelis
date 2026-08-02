@@ -39,14 +39,17 @@ canonical form. The `surf_*` namespace SHALL be closed to `surf_path`,
 `surf_dim_group_size`, `surf_pipe_stage`, `surf_literal_style`, and
 `surf_binding_type`; an unknown key in that namespace SHALL be rejected. Known keys SHALL
 also be rejected outside their closed contracts: `surf_path` is a string on a module or
-import, `surf_dim_group_size` is a positive integer on the first grouped `defdim`,
+import whose ASCII-lowercased value equals the node's lowered path child,
+`surf_dim_group_size` is a positive integer on the first grouped `defdim`,
 `surf_pipe_stage` is `"call-first"` on an `fn` used as a non-initial pipe stage,
 `surf_literal_style` is `"unsuffixed"` or `"explicit"` on a `lit`, and
 `surf_binding_type` is `"inferred"` or `"explicit"` on a `bind` value. The latter two
 markers preserve authored-versus-inferred Surf distinctions and do not change evaluation.
 Round-trip normalization MAY erase those two origin markers only when their value and
-placement are valid and after they select the Surf reconstruction; malformed or misplaced
-markers and the other validated `surf_*` values SHALL remain visible.
+placement are valid and after they select the Surf reconstruction. It MAY also erase a
+`surf_path` equal to the deterministic default spelling of its lowered child and a correctly
+placed `surf_dim_group_size: 1`; malformed, misplaced, and non-default markers and all other
+validated `surf_*` values SHALL remain visible.
 Repeatable Surf `with contract = "..."` property options SHALL be represented by ordered
 `property_contracts: (tuple {} string...)` metadata on the property `def`.
 

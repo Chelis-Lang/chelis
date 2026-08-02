@@ -133,6 +133,60 @@ fn roundtrip_normalization_retains_non_default_surface_origin_metadata() {
 }
 
 #[test]
+fn mismatched_surface_path_fails_closed() {
+    let deep = parse_deep("(import-all {surf_path: \"Other\"} foo)")
+        .expect("known surface metadata parses for contract validation");
+
+    let error = resugar_program(&deep)
+        .expect_err("surface path metadata must agree with the lowered Deep path");
+
+    assert!(error.to_string().contains("lowered path child"), "{error}");
+}
+
+#[test]
+fn normalization_retains_malformed_surface_path_marker() {
+    let deep = parse_deep("(import-all {surf_path: \"FOO\"} FOO)")
+        .expect("known surface metadata parses for normalization");
+
+    let normalized = print_canonical(&normalize_deep_for_surface_roundtrip(&deep));
+
+    assert!(
+        normalized.contains("surf_path: \"FOO\""),
+        "normalization must retain a marker that disagrees with a non-lowered path child: {normalized}",
+    );
+}
+
+#[test]
+fn dimension_group_marker_on_non_first_member_fails_closed() {
+    let deep = parse_deep(concat!(
+        "(defdim {surf_dim_group_size: 2} rows)\n",
+        "(defdim {surf_dim_group_size: 1} cols)\n",
+    ))
+    .expect("known surface metadata parses for sequence validation");
+
+    let error = resugar_program(&deep)
+        .expect_err("only the first member of a dimension group may carry the marker");
+
+    assert!(error.to_string().contains("first `defdim`"), "{error}");
+}
+
+#[test]
+fn normalization_retains_misplaced_default_dimension_marker() {
+    let deep = parse_deep(concat!(
+        "(defdim {surf_dim_group_size: 2} rows)\n",
+        "(defdim {surf_dim_group_size: 1} cols)\n",
+    ))
+    .expect("known surface metadata parses for normalization");
+
+    let normalized = print_canonical(&normalize_deep_for_surface_roundtrip(&deep));
+
+    assert!(
+        normalized.contains("(defdim {surf_dim_group_size: 1} cols)"),
+        "normalization must retain a default marker when it is misplaced: {normalized}",
+    );
+}
+
+#[test]
 fn string_escape_aliases_and_raw_controls_are_rejected() {
     for source in [
         r#"value = "\u{08}""#,

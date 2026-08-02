@@ -1269,7 +1269,19 @@ fn persist_migrations_atomically(
         let Some(staged) = pending[index].staged.take() else {
             return Err(format!("{} had no prepared migration file", path.display()).into());
         };
-        if let Err(error) = staged.persist(&path) {
+        let replacement = if env::var("CHELIS_TEST_MIGRATION_FAIL_PERSIST_INDEX")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            == Some(index)
+        {
+            Err("injected migration persist failure".to_string())
+        } else {
+            staged
+                .persist(&path)
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        };
+        if let Err(error) = replacement {
             let rollback_errors = rollback_committed_migrations(&mut pending, index);
             let rollback = if rollback_errors.is_empty() {
                 String::new()
@@ -1291,7 +1303,33 @@ fn prepare_migration_write(
     source: &str,
     migrated: &str,
 ) -> Result<PendingMigrationWrite, Box<dyn std::error::Error>> {
-    let metadata = fs::metadata(path)?;
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() {
+        return Err(format!(
+            "{} is a symbolic link; no migration files were changed",
+            path.display()
+        )
+        .into());
+    }
+    if !metadata.file_type().is_file() {
+        return Err(format!(
+            "{} is not an ordinary file; no migration files were changed",
+            path.display()
+        )
+        .into());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+
+        if metadata.nlink() != 1 {
+            return Err(format!(
+                "{} has multiple hard links; no migration files were changed",
+                path.display()
+            )
+            .into());
+        }
+    }
     if metadata.permissions().readonly() {
         return Err(format!(
             "{} is read-only; no migration files were changed",

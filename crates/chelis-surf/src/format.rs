@@ -880,10 +880,6 @@ pub(crate) fn canonical_float(value: f64) -> String {
     }
 }
 
-fn format_args(args: &[Expr]) -> String {
-    args.iter().map(format_expr).collect::<Vec<_>>().join(", ")
-}
-
 fn format_arm(arm: &MatchArm) -> String {
     let guard = arm
         .guard

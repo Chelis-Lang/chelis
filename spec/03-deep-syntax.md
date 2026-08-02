@@ -54,7 +54,7 @@ portable across Surf and Reef boundaries.
 | `opaque` | `true` | On a `deftype`: the type is opaque (see §2.2) |
 | `invariant` | `(fn {} (params {} <binder>) <expr>)` | On an opaque `deftype`: the declared invariant predicate (see §2.2) |
 | `invariant_amenability` | string | On an invariant-carrying `deftype`: `"linear"`/`"polynomial"`/`"transcendental"`/`"opaque"`; derived data, recomputed on desugar (see §2.2) |
-| `surf_path` | string | Exact canonical Surf module path spelling; permitted only on `module`, `import`, and `import-all` |
+| `surf_path` | string | Exact canonical Surf module path spelling; permitted only on `module`, `import`, and `import-all`; its ASCII-lowercased value must equal the node's lowered module-path child |
 | `surf_dim_group_size` | positive integer | Number of adjacent `defdim` declarations authored in one Surf `dim` group; permitted only on the first member |
 | `surf_pipe_stage` | `"call-first"` | First-argument call-stage origin; permitted only on an `fn` child used as a non-initial `pipe` stage |
 | `surf_literal_style` | `"unsuffixed"` / `"explicit"` | Numeric literal origin; permitted only on `lit` |
@@ -663,12 +663,16 @@ An integer atom carrying a float primitive type normalizes to the equivalent
 float atom before that sign rule. A valid, correctly placed non-semantic
 `surf_literal_style` or `surf_binding_type` origin marker may be erased after it
 has selected the canonical Surf reconstruction; desugaring that Surf recreates
-the applicable marker. A malformed or misplaced marker is retained so the
-round-trip oracle cannot hide a resugaring error. Normalization may
-not erase or rewrite any other declared `type` or `eff` data, handler effects,
-`wrt`, `opaque`, `invariant`, property semantics, or the other validated
-`surf_*` values. Implementations compare macro-authored Surf after expansion.
-Any other metadata loss is a round-trip failure.
+the applicable marker. Normalization may likewise erase a `surf_path` equal to
+the deterministic default spelling of its lowered path child and a
+`surf_dim_group_size: 1` marker on the first member of its one-member group,
+because canonical desugaring deterministically recreates those defaults. A
+non-default, malformed, or misplaced marker is retained so the round-trip
+oracle cannot hide a resugaring error. Normalization may not erase or rewrite
+any other declared `type` or `eff` data, handler effects, `wrt`, `opaque`,
+`invariant`, property semantics, or validated `surf_*` values. Implementations
+compare macro-authored Surf after expansion. Any other metadata loss is a
+round-trip failure.
 
 A negative `pat-lit` is not normalized to an application because patterns do
 not contain expression nodes. It resugars as minus followed by the one

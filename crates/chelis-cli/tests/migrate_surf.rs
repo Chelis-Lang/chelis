@@ -112,6 +112,93 @@ fn migrate_surf_batch_is_all_or_nothing_on_write_failure() {
         .expect("restore fixture permissions for cleanup");
 }
 
+#[cfg(unix)]
+#[test]
+fn migrate_surf_rejects_symlink_paths_before_writing_any_file() {
+    use std::os::unix::fs::symlink;
+
+    let dir = tempdir().expect("tempdir");
+    let first_path = dir.path().join("first.ch");
+    let target_path = dir.path().join("target.ch");
+    let symlink_path = dir.path().join("linked.ch");
+    let first_source = "def first = value\n";
+    let target_source = "def target = value\n";
+    fs::write(&first_path, first_source).expect("write first fixture");
+    fs::write(&target_path, target_source).expect("write symlink target");
+    symlink(&target_path, &symlink_path).expect("create symlink fixture");
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["migrate", "surf", "--from", "0.18", "--inplace"])
+        .arg(&first_path)
+        .arg(&symlink_path)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("symbolic link"));
+
+    assert_eq!(fs::read_to_string(&first_path).unwrap(), first_source);
+    assert_eq!(fs::read_to_string(&target_path).unwrap(), target_source);
+    assert!(
+        fs::symlink_metadata(&symlink_path)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn migrate_surf_rejects_multiply_linked_files_before_writing() {
+    let dir = tempdir().expect("tempdir");
+    let first_path = dir.path().join("first.ch");
+    let linked_path = dir.path().join("linked.ch");
+    let linked_alias = dir.path().join("linked-alias.ch");
+    let first_source = "def first = value\n";
+    let linked_source = "def linked = value\n";
+    fs::write(&first_path, first_source).expect("write first fixture");
+    fs::write(&linked_path, linked_source).expect("write linked fixture");
+    fs::hard_link(&linked_path, &linked_alias).expect("create hard-link fixture");
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["migrate", "surf", "--from", "0.18", "--inplace"])
+        .arg(&first_path)
+        .arg(&linked_path)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("multiple hard links"));
+
+    assert_eq!(fs::read_to_string(&first_path).unwrap(), first_source);
+    assert_eq!(fs::read_to_string(&linked_path).unwrap(), linked_source);
+    assert_eq!(fs::read_to_string(&linked_alias).unwrap(), linked_source);
+}
+
+#[test]
+fn migrate_surf_rolls_back_a_committed_file_on_late_persist_failure() {
+    let dir = tempdir().expect("tempdir");
+    let first_path = dir.path().join("first.ch");
+    let second_path = dir.path().join("second.ch");
+    let first_source = "def first = value\n";
+    let second_source = "def second = value\n";
+    fs::write(&first_path, first_source).expect("write first fixture");
+    fs::write(&second_path, second_source).expect("write second fixture");
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_TEST_MIGRATION_FAIL_PERSIST_INDEX", "1")
+        .args(["migrate", "surf", "--from", "0.18", "--inplace"])
+        .arg(&first_path)
+        .arg(&second_path)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "injected migration persist failure",
+        ));
+
+    assert_eq!(fs::read_to_string(&first_path).unwrap(), first_source);
+    assert_eq!(fs::read_to_string(&second_path).unwrap(), second_source);
+}
+
 #[test]
 fn migrate_surf_rejects_unknown_source_versions() {
     let dir = tempdir().expect("tempdir");

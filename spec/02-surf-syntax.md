@@ -33,6 +33,12 @@ canonical parser rejects legacy syntax aliases; `chelis fmt` changes layout
 only and is an idempotent printer for already-canonical Surf. Legacy v0.18
 source is accepted only by `chelis migrate surf --from 0.18`.
 
+With `--inplace`, migration is a batch transaction over ordinary source files.
+Before replacing any input, the command MUST preflight every path and reject a
+symbolic link or a file with multiple hard links. Each individual replacement
+MUST be atomic. If a later replacement fails, every earlier replacement MUST be
+restored byte-for-byte before the command reports failure.
+
 The canonical forms are:
 
 - every function definition has a parameter list, including `()` for a

@@ -142,10 +142,11 @@ pub fn normalize_deep_for_surface_roundtrip(exprs: &[DeepExpr]) -> Vec<DeepExpr>
 }
 
 fn normalize_declaration_sequence_roundtrip(exprs: Vec<DeepExpr>) -> Vec<DeepExpr> {
-    let exprs = exprs
+    let mut exprs = exprs
         .into_iter()
         .map(normalize_nested_declaration_sequence)
         .collect::<Vec<_>>();
+    strip_correctly_placed_default_dimension_markers(&mut exprs);
     let mut exprs = materialize_standalone_definition_signatures(exprs);
 
     for index in 0..exprs.len().saturating_sub(1) {
@@ -156,6 +157,52 @@ fn normalize_declaration_sequence_roundtrip(exprs: Vec<DeepExpr>) -> Vec<DeepExp
         }
     }
     exprs
+}
+
+fn strip_correctly_placed_default_dimension_markers(exprs: &mut [DeepExpr]) {
+    let mut index = 0;
+    while index < exprs.len() {
+        let Ok(node) = node_ref(&exprs[index]) else {
+            index += 1;
+            continue;
+        };
+        if node.tag != DeepTag::Defdim {
+            index += 1;
+            continue;
+        }
+        let Some(DeepExpr::Atom(Atom::Int(size), _)) = meta_value(node.meta, "surf_dim_group_size")
+        else {
+            index += 1;
+            continue;
+        };
+        let Ok(group_size) = usize::try_from(*size) else {
+            index += 1;
+            continue;
+        };
+        if group_size == 0 {
+            index += 1;
+            continue;
+        }
+        if group_size == 1 {
+            let meta = MetaMap {
+                entries: node
+                    .meta
+                    .entries
+                    .iter()
+                    .filter(|(key, _)| key != "surf_dim_group_size")
+                    .cloned()
+                    .collect(),
+            };
+            exprs[index] = rebuild_node_like(
+                &exprs[index],
+                node.tag,
+                meta,
+                node.children.to_vec(),
+                node.span,
+            );
+        }
+        index = index.saturating_add(group_size);
+    }
 }
 
 fn materialize_standalone_definition_signatures(exprs: Vec<DeepExpr>) -> Vec<DeepExpr> {
@@ -742,11 +789,13 @@ fn strip_reconstructible_surface_metadata(
     meta.entries.retain(|(key, value)| match key.as_str() {
         "surf_path" if matches!(tag, DeepTag::Module | DeepTag::Import | DeepTag::ImportAll) => {
             children.first().and_then(atom_name).is_none_or(|lowered| {
-                !matches!(value, DeepExpr::Atom(Atom::Str(path), _) if path == &default_surface_path(lowered))
+                !matches!(
+                    value,
+                    DeepExpr::Atom(Atom::Str(path), _)
+                        if path == &default_surface_path(lowered)
+                            && path.to_ascii_lowercase() == lowered
+                )
             })
-        }
-        "surf_dim_group_size" if tag == DeepTag::Defdim => {
-            !matches!(value, DeepExpr::Atom(Atom::Int(1), _))
         }
         _ => true,
     });
@@ -841,6 +890,12 @@ fn resugar_declaration_sequence(exprs: &[DeepExpr]) -> Result<Vec<Decl>, Resugar
                             tag: node.tag.as_str(),
                             index: offset,
                             expected: "an adjacent `(defdim ...)` group member",
+                        });
+                    }
+                    if meta_value(member.meta, "surf_dim_group_size").is_some() {
+                        return Err(ResugarError::InvalidSurfaceMetadata {
+                            key: "surf_dim_group_size".to_string(),
+                            expected: surface_metadata_expectation("surf_dim_group_size"),
                         });
                     }
                     exact(&member, 1)?;
@@ -1366,7 +1421,13 @@ fn validate_surface_node_metadata(
         let valid = match key.as_str() {
             "surf_path" => {
                 matches!(tag, DeepTag::Module | DeepTag::Import | DeepTag::ImportAll)
-                    && matches!(value, DeepExpr::Atom(Atom::Str(_), _))
+                    && matches!(
+                        value,
+                        DeepExpr::Atom(Atom::Str(path), _)
+                            if children.first().and_then(atom_name).is_some_and(
+                                |lowered| path.to_ascii_lowercase() == lowered
+                            )
+                    )
             }
             "surf_dim_group_size" => {
                 tag == DeepTag::Defdim
@@ -1419,8 +1480,10 @@ fn is_known_surface_metadata_key(key: &str) -> bool {
 
 fn surface_metadata_expectation(key: &str) -> &'static str {
     match key {
-        "surf_path" => "a string on a module or import node",
-        "surf_dim_group_size" => "a positive integer on the first defdim in a group",
+        "surf_path" => {
+            "a string on a module or import whose ASCII-lowercased value equals its lowered path child"
+        }
+        "surf_dim_group_size" => "a positive integer on the first `defdim` in a group",
         "surf_pipe_stage" => "`\"call-first\"` on a function used as a pipe stage",
         "surf_literal_style" => "`\"unsuffixed\"` or `\"explicit\"` on a literal",
         "surf_binding_type" => "`\"inferred\"` or `\"explicit\"` on a bind value",

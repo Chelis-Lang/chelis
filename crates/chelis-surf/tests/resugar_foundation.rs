@@ -275,15 +275,15 @@ fn public_decompiler_propagates_malformed_foundation_nodes() {
 }
 
 #[test]
-fn fallible_program_boundary_rejects_invalid_legacy_emitter_output() {
+fn fallible_program_boundary_rejects_invalid_declaration_without_expression_fallback() {
     let malformed = parse_one_deep("(def {} result (var {} if))");
 
     let error = try_decompile_program(std::slice::from_ref(&malformed))
         .expect_err("fallible public boundary must not return unparsable Surf");
 
     assert!(
-        error.to_string().contains("invalid Surf"),
-        "diagnostic must identify the invalid emitted program: {error}"
+        error.to_string().contains("valid Surf value identifier"),
+        "diagnostic must preserve the invalid declaration's actual cause: {error}"
     );
 }
 
