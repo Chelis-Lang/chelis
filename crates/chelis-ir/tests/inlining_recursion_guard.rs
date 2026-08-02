@@ -131,10 +131,10 @@ fn nested_fn_param_call_lowers_via_substituted_callable() {
     let expected = [4.0, 8.0, 12.0];
     for (i, want) in expected.iter().enumerate() {
         assert!(
-            (out.data[i] - want).abs() < 1e-6,
+            (out.to_f64_lossy_vec()[i] - want).abs() < 1e-6,
             "nested f(f(seed)) must equal 4*seed elementwise: index {i} \
              expected {want}, got {:?}",
-            out.data,
+            out.to_f64_lossy_vec(),
         );
     }
 }
@@ -241,7 +241,7 @@ fn static_base_case_recursion_unrolls_within_cap() {
     let out = &values[roots.last().unwrap()];
     assert_eq!(out.shape, vec![3]);
     assert_eq!(
-        out.data,
+        out.to_f64_lossy_vec(),
         vec![1.0, 2.0, 3.0],
         "count_up is the identity on its tensor argument after 500 pruned levels"
     );

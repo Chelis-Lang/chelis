@@ -141,6 +141,16 @@ jobs:
       - name: Script unit tests (scripts/test_*.py)
         run: .venv/bin/python -m unittest discover -s scripts -p 'test_*.py'
 
+      # Phase 1's registered-PyO3 ingress tests are pure Python and stub the
+      # native module, but intentionally exercise real NumPy dtype identities.
+      # Install only that declared runtime dependency; safetensors is stubbed by
+      # the suite so this step never builds the extension module.
+      - name: Install Python binding ingress test dependency
+        run: uv pip install --python .venv/bin/python 'numpy>=2.0'
+
+      - name: Python binding ingress unit tests
+        run: .venv/bin/python -m unittest discover -s bindings/python/tests -p 'test_*.py'
+
       # The lint-and-unit gate subset (build, clippy, fmt, chelis lint
       # --check) is defined once in scripts/gate.py and run here via
       # `gate.py lint-and-unit`. Do not hand-inline cargo/chelis

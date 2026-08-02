@@ -28,9 +28,9 @@
 //! * `eval_cast_tensor_f64_to_f32` -- f64 source narrows to f32; we pick
 //!   values that round-trip exactly (1.5, 2.5, 3.5 are exactly representable
 //!   in both).
-//! * `eval_cast_tensor_f32_to_int32` -- float-to-int truncates toward zero
-//!   (1.5 -> 1, 2.5 -> 2, 3.5 -> 3); matches the C/HIP semantics for
-//!   `(int32_t)f` and the IR-level precision intent.
+//! * `eval_cast_tensor_fractional_f32_to_int32_traps` -- the checked default
+//!   refuses to choose a rounding rule for fractional values and traps
+//!   `Domain`; callers spell `floor` or `round` before `cast`.
 //! * `eval_cast_tensor_int32_to_f32` -- integer source widens to f32;
 //!   `cast(cast(to_tensor([..]), int32), f32)` exercises the int-source arm.
 
@@ -115,11 +115,9 @@ fn eval_cast_tensor_f64_to_f32() {
 }
 
 #[test]
-fn eval_cast_tensor_f32_to_int32() {
-    // Float-to-int cast truncates toward zero: 1.5 -> 1, 2.5 -> 2, 3.5 -> 3.
-    // This matches the C semantics `(int32_t)f` that the C/HIP backends
-    // would emit if their `Cast` op did the conversion, and matches Rust's
-    // `f32 as i32` saturating-cast semantics.
+fn eval_cast_tensor_fractional_f32_to_int32_traps() {
+    // The checked default does not choose a rounding policy implicitly.
+    // Fractional values require an explicit floor/round/trunc operation.
     let dir = tempdir().expect("tempdir");
     let path = write_program(
         dir.path(),
@@ -127,13 +125,11 @@ fn eval_cast_tensor_f32_to_int32() {
         "result = cast(to_tensor([1.5, 2.5, 3.5]), int32)\n",
     );
     let (ok, stdout, stderr) = eval_file(&path);
+    assert!(!ok, "fractional f32->int32 must trap; stdout={stdout}");
     assert!(
-        ok,
-        "tensor cast f32->int32 should eval (spec section 2.7); stderr={stderr} stdout={stdout}"
+        stderr.contains("numeric trap: domain in cast at int32"),
+        "expected checked-cast Domain trap; stderr={stderr}"
     );
-    let elements = parse_anonymous_tensor_data(&stdout)
-        .unwrap_or_else(|| panic!("expected tensor in stdout: {stdout}"));
-    assert_eq!(elements, vec![1.0, 2.0, 3.0], "stdout={stdout}");
 }
 
 #[test]

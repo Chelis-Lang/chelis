@@ -301,9 +301,7 @@ fn lower_one_hot_node(out: &mut Dag, indices: NodeId, source: &DagNode, vocab: u
 
     for class in 0..vocab {
         let class_id = out.add_node(
-            RiscOp::Const {
-                value: class as f64,
-            },
+            RiscOp::synth_const(indices_ty.precision, class as f64),
             vec![],
             indices_ty.clone(),
             source.span_id.clone(),
@@ -327,7 +325,7 @@ fn lower_one_hot_node(out: &mut Dag, indices: NodeId, source: &DagNode, vocab: u
             source.span_id.clone(),
         );
         let one = out.add_node(
-            RiscOp::Const { value: 1.0 },
+            RiscOp::synth_const(bool_ty.precision, 1.0),
             vec![],
             bool_ty.clone(),
             source.span_id.clone(),
@@ -845,8 +843,18 @@ mod tests {
     #[test]
     fn identity_cast_does_not_hide_matmul() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat(2, 3), None);
-        let b = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat(3, 4), None);
+        let a = dag.add_node(
+            RiscOp::synth_const(mat(2, 3).precision, 1.0),
+            vec![],
+            mat(2, 3),
+            None,
+        );
+        let b = dag.add_node(
+            RiscOp::synth_const(mat(3, 4).precision, 1.0),
+            vec![],
+            mat(3, 4),
+            None,
+        );
         let ea = dag.add_node(
             RiscOp::Expand {
                 axis: 2,
@@ -988,14 +996,24 @@ mod tests {
     #[test]
     fn noncontiguous_operand_stays_on_generic_path() {
         let mut dag = Dag::new();
-        let base_a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat(3, 2), None);
+        let base_a = dag.add_node(
+            RiscOp::synth_const(mat(3, 2).precision, 1.0),
+            vec![],
+            mat(3, 2),
+            None,
+        );
         let a = dag.add_node(
             RiscOp::Permute { axes: vec![1, 0] },
             vec![base_a],
             mat(2, 3),
             None,
         );
-        let b = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat(3, 4), None);
+        let b = dag.add_node(
+            RiscOp::synth_const(mat(3, 4).precision, 1.0),
+            vec![],
+            mat(3, 4),
+            None,
+        );
         let ea = dag.add_node(
             RiscOp::Expand {
                 axis: 2,
@@ -1207,8 +1225,8 @@ mod tests {
         let before = crate::eval::eval_tensor(&dag, &inputs).expect("dense gather eval");
         let after = crate::eval::eval_tensor(&specialized, &inputs).expect("specialized eval");
         assert_eq!(
-            before[&gathered].data,
-            after[specialized.roots().first().expect("root")].data
+            before[&gathered].to_f64_lossy_vec(),
+            after[specialized.roots().first().expect("root")].to_f64_lossy_vec()
         );
     }
 
@@ -1331,11 +1349,11 @@ mod tests {
         let before = crate::eval::eval_tensor(&dag, &inputs).expect("one_hot eval");
         let after = crate::eval::eval_tensor(&specialized, &inputs).expect("lowered eval");
         assert_eq!(
-            before[&one_hot].data,
-            after[specialized.roots().first().expect("root")].data
+            before[&one_hot].to_f64_lossy_vec(),
+            after[specialized.roots().first().expect("root")].to_f64_lossy_vec()
         );
         assert_eq!(
-            after[specialized.roots().first().expect("root")].data,
+            after[specialized.roots().first().expect("root")].to_f64_lossy_vec(),
             vec![0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
         );
     }

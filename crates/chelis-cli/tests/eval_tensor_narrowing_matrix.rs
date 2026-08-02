@@ -125,10 +125,11 @@ fn c_f64_tensor_unary_ops_are_f64_precise() {
         eprintln!("skipping: no host C toolchain");
         return;
     }
-    let line = c_first_line(&f64_unop_program("tan", "1.5", "3.0"), "c_f64_tan")
-        .expect("C lane should run");
+    let tan_program = f64_unop_program("tan", "1.5", "3.0");
+    let line = c_first_line(&tan_program, "c_f64_tan").expect("C lane should run");
     common::assert_elements_in_domain("f64", &line, "c_f64_tan");
-    // Property-based, not an exact string: double tan is not required to
+    // Property-based, not an exact string: the Phase 1 implementation
+    // control uses a 1e-12 separating margin because double tan is not required to
     // be correctly rounded and may differ by a few ulp between platform
     // libms (see the eval tan control above). f64 PRECISION is the claim:
     // the #717 bug's f32-destroyed value is ~5e-7 away from true tan,
@@ -139,6 +140,23 @@ fn c_f64_tensor_unary_ops_are_f64_precise() {
         (v - truth).abs() < 1e-12,
         "C f64 tan(1.5) must be f64-precise (within 1e-12 of {truth}); got {v} in: {line}"
     );
+    let eval_line = eval_first_line(&tan_program).expect("eval tan should run");
+    let eval_v = parse_data(&eval_line)[0];
+    assert!(
+        (v - eval_v).abs() <= 1e-12,
+        "Phase 1 f64 tan lane delta exceeds the implementation control's 1e-12 margin: eval={eval_v}, C={v}"
+    );
+
+    let exp_program = f64_unop_program("exp", "2.0", "3.0");
+    let c_exp_line = c_first_line(&exp_program, "c_f64_exp").expect("C exp should run");
+    let c_exp = parse_data(&c_exp_line)[0];
+    let eval_exp_line = eval_first_line(&exp_program).expect("eval exp should run");
+    let eval_exp = parse_data(&eval_exp_line)[0];
+    assert!(
+        (c_exp - eval_exp).abs() <= 1e-12,
+        "Phase 1 f64 exp lane delta exceeds the implementation control's 1e-12 margin: eval={eval_exp}, C={c_exp}"
+    );
+
     let line = c_first_line(&f64_unop_program("sqrt", "2.0", "3.0"), "c_f64_sqrt")
         .expect("C lane should run");
     assert!(
@@ -198,6 +216,18 @@ fn c_f32_tensor_add_rounds_to_f32() {
     );
 }
 
+/// Parse the flat `data=[..]` payload at f32 width (the eval f32 tensor
+/// exit's own width per spec/05 section 8.1; parsing shortest-at-f32
+/// digits as f64 would manufacture a non-f32 value).
+fn parse_data_f32(line: &str) -> Vec<f32> {
+    let start = line.find("data=[").expect("data marker") + "data=[".len();
+    let end = start + line[start..].find(']').expect("closing bracket");
+    line[start..end]
+        .split(',')
+        .map(|s| s.trim().parse::<f32>().expect("numeric"))
+        .collect()
+}
+
 /// Parse the flat `data=[..]` payload of a printed tensor line.
 fn parse_data(line: &str) -> Vec<f64> {
     let start = line.find("data=[").expect("data marker") + "data=[".len();
@@ -237,18 +267,18 @@ fn eval_f32_tensor_tan_and_sqrt_do_narrow_to_f32() {
     // f32-representability property mechanically; the hand-rolled loop
     // below stays as the original control (controls never move).
     common::assert_elements_in_domain("f32", &line, "eval_f32_tan");
-    let values = parse_data(&line);
+    // chelis#729 Phase 1 width migration (spec/05 section 8.1's recorded
+    // note: own-width tensor digits arrive when #729 repairs the storage,
+    // which is this change): eval f32 tensor elements now render
+    // shortest-round-trip AT F32 WIDTH, so the parse-back property check
+    // reads them at f32 and the exact strings below carry f32 digits.
+    let values = parse_data_f32(&line);
     for (v, truth) in values
         .iter()
         .zip([14.10141994717172_f64, -0.1425465430742778])
     {
         assert!(
-            (*v as f32) as f64 == *v,
-            "eval f32 tensor tan must produce f32-representable values \
-             (the narrowing under test); got non-f32 {v} in: {line}"
-        );
-        assert!(
-            (v - truth).abs() < 1e-4 * truth.abs().max(1.0),
+            (f64::from(*v) - truth).abs() < 1e-4 * truth.abs().max(1.0),
             "tan value implausibly far from tan(x); got {v} in: {line}"
         );
     }
@@ -260,7 +290,7 @@ fn eval_f32_tensor_tan_and_sqrt_do_narrow_to_f32() {
     .expect("eval should run");
     common::assert_elements_in_domain("f32", &line, "eval_f32_sqrt");
     assert!(
-        line.contains("data=[1.2247449159622192, 1.7320507764816284]"),
+        line.contains("data=[1.2247449, 1.7320508]"),
         "eval f32 tensor sqrt narrows through f32 today (and is correctly \
          rounded on every platform per IEEE-754, unlike the C lane's \
          vvsqrtf - chelis#719); got: {line}"
@@ -275,23 +305,26 @@ fn eval_f32_tensor_tan_and_sqrt_do_narrow_to_f32() {
 /// for an f64 tensor. Eight significant digits of a declared-f64 value are
 /// silently gone.
 #[test]
-#[ignore = "chelis#717: eval computes f64 tensor tan through f32 (tensor_float_unop_f32) \
-            and prints 14.101419448852539; the f64 answer is 14.10141994717172 and the \
-            compiled C lane produces it. Run with \
-            `cargo test -p chelis-cli --test eval_tensor_narrowing_matrix -- --ignored`."]
 fn eval_f64_tensor_tan_keeps_f64_precision() {
     let line = eval_first_line(&f64_unop_program("tan", "1.5", "3.0")).expect("eval should run");
+    common::assert_elements_in_domain("f64", &line, "eval_f64_tan");
+    // Property-based like the C control above, under the same Phase 1
+    // implementation margin and for the same reason
+    // (rt857 round-1 CI caught it): double tan is not required to be
+    // correctly rounded and differs by 1 ulp between platform libms
+    // (macOS 14.10141994717172 vs glibc 14.101419947171719). f64
+    // PRECISION is the claim: the chelis#717 f32-destroyed value is
+    // ~5e-7 away, while any reasonable libm is within ~1e-15.
+    let v = parse_data(&line)[0];
+    let truth = 14.10141994717172_f64;
     assert!(
-        line.contains("14.10141994717172"),
-        "f64 tensor tan must be f64-precise; got: {line}"
+        (v - truth).abs() < 1e-12,
+        "f64 tensor tan must be f64-precise (within 1e-12 of {truth}); got {v} in: {line}"
     );
 }
 
 /// Observed today: 1.4142135381698608 = f32(sqrt(2)).
 #[test]
-#[ignore = "chelis#717: eval computes f64 tensor sqrt through f32 and prints \
-            1.4142135381698608 (= f32(sqrt 2)); the f64 answer is 1.4142135623730951. Run \
-            with `cargo test -p chelis-cli --test eval_tensor_narrowing_matrix -- --ignored`."]
 fn eval_f64_tensor_sqrt_keeps_f64_precision() {
     let line = eval_first_line(&f64_unop_program("sqrt", "2.0", "3.0")).expect("eval should run");
     assert!(
@@ -302,14 +335,18 @@ fn eval_f64_tensor_sqrt_keeps_f64_precision() {
 
 /// Observed today: 7.389056205749512 = f32(exp(2)).
 #[test]
-#[ignore = "chelis#717: eval computes f64 tensor exp through f32 and prints \
-            7.389056205749512; the f64 answer is 7.38905609893065. Run with \
-            `cargo test -p chelis-cli --test eval_tensor_narrowing_matrix -- --ignored`."]
 fn eval_f64_tensor_exp_keeps_f64_precision() {
     let line = eval_first_line(&f64_unop_program("exp", "2.0", "3.0")).expect("eval should run");
+    common::assert_elements_in_domain("f64", &line, "eval_f64_exp");
+    // Property-based under the Phase 1 implementation's 1e-12 separating
+    // margin, for the same libm-variance reason as tan (double
+    // exp is also not required correctly rounded); sqrt keeps its exact
+    // string below because IEEE-754 requires sqrt correctly rounded.
+    let v = parse_data(&line)[0];
+    let truth = 7.38905609893065_f64;
     assert!(
-        line.contains("7.38905609893065"),
-        "f64 tensor exp must be f64-precise; got: {line}"
+        (v - truth).abs() < 1e-12,
+        "f64 tensor exp must be f64-precise (within 1e-12 of {truth}); got {v} in: {line}"
     );
 }
 
@@ -322,9 +359,6 @@ fn eval_f64_tensor_exp_keeps_f64_precision() {
 /// Computing in f64 and rounding once IS correctly rounded for f32 - eval
 /// just skips the rounding step for add.
 #[test]
-#[ignore = "chelis#717: eval f32 tensor add(0.1, 0.2) prints 0.30000000447034836, not an \
-            f32 value; correct f32 sum is 0.30000001192092896 and the C lane produces it. \
-            Run with `cargo test -p chelis-cli --test eval_tensor_narrowing_matrix -- --ignored`."]
 fn eval_f32_tensor_add_rounds_to_f32() {
     let line = eval_first_line(
         "module M.Main\n\
@@ -336,16 +370,14 @@ fn eval_f32_tensor_add_rounds_to_f32() {
     // domain checker is the mechanical form of this cell's claim.
     common::assert_elements_in_domain("f32", &line, "eval_f32_tensor_add");
     assert!(
-        line.contains("0.30000001192092896"),
-        "f32 tensor add must round its result to f32; got: {line}"
+        line.contains("data=[0.3, 3.0]"),
+        "f32 tensor add must round its result to f32 (rendered at f32 \
+         width per spec/05 section 8.1); got: {line}"
     );
 }
 
 /// Observed today: 0.3333333333333333 (raw f64 quotient).
 #[test]
-#[ignore = "chelis#717: eval f32 tensor div(1, 3) prints 0.3333333333333333 (f64, not an \
-            f32 value); correct f32 quotient is 0.3333333432674408. Run with \
-            `cargo test -p chelis-cli --test eval_tensor_narrowing_matrix -- --ignored`."]
 fn eval_f32_tensor_div_rounds_to_f32() {
     let line = eval_first_line(
         "module M.Main\n\
@@ -355,17 +387,15 @@ fn eval_f32_tensor_div_rounds_to_f32() {
     .expect("eval should run");
     common::assert_elements_in_domain("f32", &line, "eval_f32_tensor_div");
     assert!(
-        line.contains("0.3333333432674408"),
-        "f32 tensor div must round its result to f32; got: {line}"
+        line.contains("data=[0.33333334, 0.6666667]"),
+        "f32 tensor div must round its result to f32 (rendered at f32 \
+         width per spec/05 section 8.1); got: {line}"
     );
 }
 
 /// Observed today: 0.6666666666666666 (raw f64). Note the irony: recip is on
 /// the very op list #695 names as living on the lossy f64 helpers.
 #[test]
-#[ignore = "chelis#717: eval f32 tensor recip(1.5) prints 0.6666666666666666 (f64, not an \
-            f32 value); correct f32 value is 0.6666666865348816. Run with \
-            `cargo test -p chelis-cli --test eval_tensor_narrowing_matrix -- --ignored`."]
 fn eval_f32_tensor_recip_rounds_to_f32() {
     let line = eval_first_line(
         "module M.Main\n\
@@ -375,7 +405,8 @@ fn eval_f32_tensor_recip_rounds_to_f32() {
     .expect("eval should run");
     common::assert_elements_in_domain("f32", &line, "eval_f32_tensor_recip");
     assert!(
-        line.contains("0.6666666865348816"),
-        "f32 tensor recip must round its result to f32; got: {line}"
+        line.contains("data=[0.6666667, 0.33333334]"),
+        "f32 tensor recip must round its result to f32 (rendered at f32 \
+         width per spec/05 section 8.1); got: {line}"
     );
 }

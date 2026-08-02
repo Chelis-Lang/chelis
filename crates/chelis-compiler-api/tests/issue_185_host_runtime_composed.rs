@@ -87,7 +87,12 @@ out = mean(&make, 0)
     assert_eq!(out.shape, vec![3], "mean axis-0 shape");
     let expected = [2.0, 5.0, 3.0];
     for (i, &want) in expected.iter().enumerate() {
-        assert_close(out.data[i], want, 1e-6, &format!("mean[{i}]"));
+        assert_close(
+            out.data.element_as_f64_lossy(i),
+            want,
+            1e-6,
+            &format!("mean[{i}]"),
+        );
     }
 }
 
@@ -101,8 +106,13 @@ out = mean(&make, 1)
     let result = eval_surf(src);
     let out = root_tensor(&result, "out");
     assert_eq!(out.shape, vec![2], "mean axis-1 shape");
-    assert_close(out.data[0], 7.0 / 3.0, 1e-6, "mean[0]");
-    assert_close(out.data[1], 13.0 / 3.0, 1e-6, "mean[1]");
+    assert_close(out.data.element_as_f64_lossy(0), 7.0 / 3.0, 1e-6, "mean[0]");
+    assert_close(
+        out.data.element_as_f64_lossy(1),
+        13.0 / 3.0,
+        1e-6,
+        "mean[1]",
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -137,7 +147,12 @@ out = layer_norm(&x, &g, &b)
     let denom = (1.25_f64 + 1e-5).sqrt();
     let expected = [-1.5 / denom, -0.5 / denom, 0.5 / denom, 1.5 / denom];
     for (i, &want) in expected.iter().enumerate() {
-        assert_close(out.data[i], want, 1e-5, &format!("layer_norm[{i}]"));
+        assert_close(
+            out.data.element_as_f64_lossy(i),
+            want,
+            1e-5,
+            &format!("layer_norm[{i}]"),
+        );
     }
 }
 
@@ -177,7 +192,7 @@ out = run_conv2d(make_x(), make_k())
     let result = eval_surf_selected(src, &["out"]);
     let out = root_tensor(&result, "out");
     assert_eq!(out.shape, vec![1, 1, 1, 1], "conv2d shape");
-    assert_close(out.data[0], 15.0, 1e-5, "conv2d[0]");
+    assert_close(out.data.element_as_f64_lossy(0), 15.0, 1e-5, "conv2d[0]");
 }
 
 // ---------------------------------------------------------------------------

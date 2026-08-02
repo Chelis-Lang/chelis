@@ -378,6 +378,18 @@ class CiParityTests(unittest.TestCase):
         self.assertIn("scripts/gate.py lint-and-unit", text)
         self.assertIn("scripts/gate.py integration", text)
 
+    def test_python_binding_ingress_suite_is_continuous(self):
+        text = CI_YML.read_text()
+        self.assertIn(
+            ".venv/bin/python -m unittest discover -s bindings/python/tests "
+            "-p 'test_*.py'",
+            text,
+            (
+                "bindings/python/tests contains the #729 Python-ingress oracle; "
+                "the lint-and-unit job must discover it continuously"
+            ),
+        )
+
     def test_non_gate_jobs_are_excluded_by_name(self):
         # The non-gate jobs are allowed to keep their own cargo/chelis
         # invocations. This test pins the exclusion list so it stays

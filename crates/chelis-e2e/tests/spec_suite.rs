@@ -22,6 +22,18 @@ fn scalar_f32() -> TensorType {
     TensorType::scalar_f32()
 }
 
+// chelis#729 Phase 1: the finite-difference autodiff specs verify grad
+// machinery against f64 central differences, so their DAGs are f64-typed
+// (an f32-typed DAG now genuinely rounds at f32, which drowns the h=1e-5
+// difference quotient in rounding noise; the dtype behavior itself is
+// covered by the chelis-cli matrix suites).
+fn scalar_f64() -> TensorType {
+    TensorType {
+        dims: vec![],
+        precision: chelis_types::types::Prim::F64,
+    }
+}
+
 /// Lower Deep source text to a RISC DAG via the types-checked lowering path.
 fn lower_deep(src: &str) -> Dag {
     let exprs = chelis_deep::parser::parse_str(src).expect("Deep parse failed");
@@ -302,7 +314,7 @@ fn spec_relu_decomposes_to_max_elem() {
     let has_const_zero = dag
         .nodes()
         .iter()
-        .any(|n| matches!(n.op, RiscOp::Const { value } if value == 0.0));
+        .any(|n| matches!(n.op, RiscOp::Const { value } if value.as_f64_lossy() == 0.0));
     assert!(has_max_elem, "relu should decompose to MaxElem");
     assert!(has_const_zero, "relu should decompose with Const(0)");
     // No standalone Relu op should exist in the DAG.
@@ -544,8 +556,18 @@ fn spec_generated_c_compiles() {
         return;
     }
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
-    let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32(), None);
+    let a = dag.add_node(
+        RiscOp::synth_const(scalar_f32().precision, 1.0),
+        vec![],
+        scalar_f32(),
+        None,
+    );
+    let b = dag.add_node(
+        RiscOp::synth_const(scalar_f32().precision, 2.0),
+        vec![],
+        scalar_f32(),
+        None,
+    );
     let c = dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
     dag.add_root(c);
 
@@ -565,8 +587,18 @@ fn spec_add_numerical_correctness() {
         return;
     }
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
-    let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32(), None);
+    let a = dag.add_node(
+        RiscOp::synth_const(scalar_f32().precision, 1.0),
+        vec![],
+        scalar_f32(),
+        None,
+    );
+    let b = dag.add_node(
+        RiscOp::synth_const(scalar_f32().precision, 2.0),
+        vec![],
+        scalar_f32(),
+        None,
+    );
     let c = dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
     dag.add_root(c);
 
@@ -587,8 +619,18 @@ fn spec_relu_numerical_correctness() {
     // relu(const(-1)) -> 0.0
     {
         let mut dag = Dag::new();
-        let x = dag.add_node(RiscOp::Const { value: -1.0 }, vec![], scalar_f32(), None);
-        let zero = dag.add_node(RiscOp::Const { value: 0.0 }, vec![], scalar_f32(), None);
+        let x = dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, -1.0),
+            vec![],
+            scalar_f32(),
+            None,
+        );
+        let zero = dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, 0.0),
+            vec![],
+            scalar_f32(),
+            None,
+        );
         let r = dag.add_node(RiscOp::MaxElem, vec![x, zero], scalar_f32(), None);
         dag.add_root(r);
 
@@ -599,8 +641,18 @@ fn spec_relu_numerical_correctness() {
     // relu(const(5)) -> 5.0
     {
         let mut dag = Dag::new();
-        let x = dag.add_node(RiscOp::Const { value: 5.0 }, vec![], scalar_f32(), None);
-        let zero = dag.add_node(RiscOp::Const { value: 0.0 }, vec![], scalar_f32(), None);
+        let x = dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, 5.0),
+            vec![],
+            scalar_f32(),
+            None,
+        );
+        let zero = dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, 0.0),
+            vec![],
+            scalar_f32(),
+            None,
+        );
         let r = dag.add_node(RiscOp::MaxElem, vec![x, zero], scalar_f32(), None);
         dag.add_root(r);
 
@@ -624,16 +676,16 @@ fn spec_grad_add_is_one() {
     let x = dag.add_node(
         RiscOp::Load { name: "x".into() },
         vec![],
-        scalar_f32(),
+        scalar_f64(),
         None,
     );
     let y = dag.add_node(
         RiscOp::Load { name: "y".into() },
         vec![],
-        scalar_f32(),
+        scalar_f64(),
         None,
     );
-    let out = dag.add_node(RiscOp::Add, vec![x, y], scalar_f32(), None);
+    let out = dag.add_node(RiscOp::Add, vec![x, y], scalar_f64(), None);
     dag.add_root(out);
 
     let grad_result = grad_dag(&dag, out, &[x, y]).expect("grad_dag failed");
@@ -678,16 +730,16 @@ fn spec_grad_mul_is_cross() {
     let x = dag.add_node(
         RiscOp::Load { name: "x".into() },
         vec![],
-        scalar_f32(),
+        scalar_f64(),
         None,
     );
     let y = dag.add_node(
         RiscOp::Load { name: "y".into() },
         vec![],
-        scalar_f32(),
+        scalar_f64(),
         None,
     );
-    let out = dag.add_node(RiscOp::Mul, vec![x, y], scalar_f32(), None);
+    let out = dag.add_node(RiscOp::Mul, vec![x, y], scalar_f64(), None);
     dag.add_root(out);
 
     let grad_result = grad_dag(&dag, out, &[x, y]).expect("grad_dag failed");
@@ -730,11 +782,11 @@ fn spec_grad_composed_chain() {
     let x = dag.add_node(
         RiscOp::Load { name: "x".into() },
         vec![],
-        scalar_f32(),
+        scalar_f64(),
         None,
     );
-    let neg_x = dag.add_node(RiscOp::Neg, vec![x], scalar_f32(), None);
-    let out = dag.add_node(RiscOp::Exp, vec![neg_x], scalar_f32(), None);
+    let neg_x = dag.add_node(RiscOp::Neg, vec![x], scalar_f64(), None);
+    let out = dag.add_node(RiscOp::Exp, vec![neg_x], scalar_f64(), None);
     dag.add_root(out);
 
     let grad_result = grad_dag(&dag, out, &[x]).expect("grad_dag failed");
@@ -823,8 +875,8 @@ def per_example_grad(xs: tensor[batch, features, f32]) -> tensor[batch, features
     let grad = grad_dag(&single, loss, &[x]).expect("single-example grad baseline should exist");
     let grad_root = grad.grad_nodes[&x];
 
-    let mut expected = Vec::with_capacity(xs.data.len());
-    for example in xs.data.chunks(4) {
+    let mut expected = Vec::with_capacity(xs.len());
+    for example in xs.to_f64_lossy_vec().chunks(4) {
         let baseline_inputs = HashMap::from([(
             "x".to_string(),
             TensorValue::from_vec(vec![4], example.to_vec()),
@@ -833,16 +885,21 @@ def per_example_grad(xs: tensor[batch, features, f32]) -> tensor[batch, features
             baseline_inputs.get(name).cloned()
         })
         .expect("baseline grad evaluation should succeed");
-        expected.extend(baseline_values[&grad_root].data.iter().copied());
+        expected.extend(
+            baseline_values[&grad_root]
+                .to_f64_lossy_vec()
+                .iter()
+                .copied(),
+        );
     }
 
     assert_eq!(actual.shape, vec![3, 4]);
     assert_eq!(
-        actual.data.len(),
+        actual.len(),
         expected.len(),
         "per-example gradient element count mismatch"
     );
-    for (actual_value, expected_value) in actual.data.iter().zip(expected.iter()) {
+    for (actual_value, expected_value) in actual.to_f64_lossy_vec().iter().zip(expected.iter()) {
         assert!(
             (actual_value - expected_value).abs() <= 1e-6,
             "expected per-example gradient value {expected_value}, got {actual_value}"
@@ -922,15 +979,15 @@ def grads(x: tensor[4, f32], w: tensor[4, f32], v: tensor[4, f32])
     for batch_index in 0..3 {
         let x = TensorValue::from_vec(
             vec![4],
-            xs.data[batch_index * 4..(batch_index + 1) * 4].to_vec(),
+            xs.to_f64_lossy_vec()[batch_index * 4..(batch_index + 1) * 4].to_vec(),
         );
         let w = TensorValue::from_vec(
             vec![4],
-            ws.data[batch_index * 4..(batch_index + 1) * 4].to_vec(),
+            ws.to_f64_lossy_vec()[batch_index * 4..(batch_index + 1) * 4].to_vec(),
         );
         let v = TensorValue::from_vec(
             vec![4],
-            vs.data[batch_index * 4..(batch_index + 1) * 4].to_vec(),
+            vs.to_f64_lossy_vec()[batch_index * 4..(batch_index + 1) * 4].to_vec(),
         );
         let values =
             eval_tensor_roots_with_strict(&single.dag, &[single_dw_root, single_dv_root], |name| {
@@ -942,14 +999,14 @@ def grads(x: tensor[4, f32], w: tensor[4, f32], v: tensor[4, f32])
                 }
             })
             .expect("single-example multi-wrt grad evaluation should succeed");
-        expected_dw.extend(values[&single_dw_root].data.iter().copied());
-        expected_dv.extend(values[&single_dv_root].data.iter().copied());
+        expected_dw.extend(values[&single_dw_root].to_f64_lossy_vec().iter().copied());
+        expected_dv.extend(values[&single_dv_root].to_f64_lossy_vec().iter().copied());
     }
 
     assert_eq!(actual_dw.shape, vec![3, 4]);
     assert_eq!(actual_dv.shape, vec![3, 4]);
-    assert_eq!(actual_dw.data, expected_dw);
-    assert_eq!(actual_dv.data, expected_dv);
+    assert_eq!(actual_dw.to_f64_lossy_vec(), expected_dw);
+    assert_eq!(actual_dv.to_f64_lossy_vec(), expected_dv);
 }
 
 // =========================================================================
@@ -984,7 +1041,7 @@ fn spec_eval_matmul_correct() {
     let result = &vals[&result_id];
 
     assert_eq!(result.shape, vec![2, 2]);
-    assert_eq!(result.data, vec![58.0, 64.0, 139.0, 154.0]);
+    assert_eq!(result.to_f64_lossy_vec(), vec![58.0, 64.0, 139.0, 154.0]);
 }
 
 #[test]
@@ -1006,7 +1063,7 @@ fn spec_eval_softmax_sums_to_one() {
     let result_id = *dag.roots().last().expect("DAG root");
     let result = &vals[&result_id];
 
-    let sum: f64 = result.data.iter().sum();
+    let sum: f64 = result.to_f64_lossy_vec().iter().sum();
     assert!(
         (sum - 1.0).abs() < 1e-6,
         "softmax output should sum to 1.0, got {sum}"
@@ -1014,7 +1071,12 @@ fn spec_eval_softmax_sums_to_one() {
 
     // Check individual values match known softmax([1,2,3]).
     let expected = [0.09003057, 0.24472847, 0.66524096];
-    for (i, (actual, target)) in result.data.iter().zip(expected.iter()).enumerate() {
+    for (i, (actual, target)) in result
+        .to_f64_lossy_vec()
+        .iter()
+        .zip(expected.iter())
+        .enumerate()
+    {
         assert!(
             (actual - target).abs() < 1e-5,
             "softmax[{i}]: expected {target}, got {actual}"
@@ -1042,5 +1104,5 @@ fn spec_eval_relu_preserves_positive() {
     let result = &vals[&result_id];
 
     assert_eq!(result.shape, vec![5]);
-    assert_eq!(result.data, vec![0.0, 0.0, 2.0, 0.0, 5.0]);
+    assert_eq!(result.to_f64_lossy_vec(), vec![0.0, 0.0, 2.0, 0.0, 5.0]);
 }

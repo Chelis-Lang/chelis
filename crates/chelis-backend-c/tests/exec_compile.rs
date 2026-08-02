@@ -2264,8 +2264,8 @@ fn ws_a3_bf16_f16_matmul_admitted_at_ir_validation() {
             dims: vec![DimInfo::Lit(2), DimInfo::Lit(4)],
             precision: prim,
         };
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], ty, None);
-        let b = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], ty_b, None);
+        let a = dag.add_node(RiscOp::synth_const(ty.precision, 1.0), vec![], ty, None);
+        let b = dag.add_node(RiscOp::synth_const(ty_b.precision, 1.0), vec![], ty_b, None);
         let matmul_op = RiscOp::matmul_default(
             vec![],
             DimExpr::Concrete(2),
@@ -2747,7 +2747,7 @@ fn run_cmplt_parity(
         TensorValue::from_vec(vec![n], b_vals.to_vec()),
     );
     let evaluated = eval_tensor(&dag, &inputs).expect("evaluator must succeed");
-    let expected: Vec<f64> = evaluated[&root].data.clone();
+    let expected: Vec<f64> = evaluated[&root].to_f64_lossy_vec().clone();
     assert_eq!(expected.len(), n);
 
     let dag = fuse(&dag);

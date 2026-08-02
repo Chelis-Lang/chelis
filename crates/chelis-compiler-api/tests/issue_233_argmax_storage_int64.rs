@@ -90,7 +90,7 @@ out = eq(preds, refs)
     let out = root_tensor(&result, "out");
     assert_eq!(out.shape, vec![2], "eq output shape");
     assert_eq!(
-        out.data,
+        out.data.to_f64_lossy_vec(),
         vec![1.0, 1.0],
         "argmax_reduce(x, 1) must equal [1, 2] element-wise"
     );
@@ -110,7 +110,7 @@ out = eq(preds, refs)
     let out = root_tensor(&result, "out");
     assert_eq!(out.shape, vec![2], "eq output shape");
     assert_eq!(
-        out.data,
+        out.data.to_f64_lossy_vec(),
         vec![1.0, 1.0],
         "argmin_reduce(x, 1) must equal [0, 1] element-wise"
     );
@@ -130,7 +130,7 @@ out = eq(preds, refs)
     let result = eval_surf(src);
     let out = root_tensor(&result, "out");
     assert_eq!(out.shape, vec![3], "eq output shape");
-    assert_eq!(out.data, vec![1.0, 1.0, 1.0]);
+    assert_eq!(out.data.to_f64_lossy_vec(), vec![1.0, 1.0, 1.0]);
 }
 
 /// EXPECT: argmax over a cast-widened f64 input still produces an
@@ -151,7 +151,7 @@ out = eq(preds, refs)
     let result = eval_surf(src);
     let out = root_tensor(&result, "out");
     assert_eq!(out.shape, vec![2]);
-    assert_eq!(out.data, vec![1.0, 1.0]);
+    assert_eq!(out.data.to_f64_lossy_vec(), vec![1.0, 1.0]);
 }
 
 // ---------------------------------------------------------------------
@@ -238,7 +238,7 @@ all_correct = eq(hits, to_tensor([cast(1, int64), cast(1, int64)]))
     let all_correct = root_tensor(&result, "all_correct");
     assert_eq!(all_correct.shape, vec![2]);
     assert_eq!(
-        all_correct.data,
+        all_correct.data.to_f64_lossy_vec(),
         vec![1.0, 1.0],
         "school accuracy pattern: all predictions hit labels"
     );

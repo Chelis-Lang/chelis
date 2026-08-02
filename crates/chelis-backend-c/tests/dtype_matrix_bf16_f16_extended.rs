@@ -231,7 +231,7 @@ fn eval_last(dag: &Dag) -> Vec<f64> {
     let inputs = HashMap::new();
     let vals = eval_tensor(dag, &inputs).unwrap();
     let last_id = NodeId(dag.len() - 1);
-    vals[&last_id].data.clone()
+    vals[&last_id].to_f64_lossy_vec().clone()
 }
 
 /// Build a vector-rooted unary kernel: input tensor of `vals` interpreted
@@ -449,7 +449,7 @@ fn bf16_div_agrees_with_evaluator() {
     .collect();
     let vals = eval_tensor(&dag, &inputs).unwrap();
     let last_id = NodeId(dag.len() - 1);
-    let expected = vals[&last_id].data.clone();
+    let expected = vals[&last_id].to_f64_lossy_vec().clone();
     run_binary_reduced(
         "bf16_div",
         Prim::Bf16,
@@ -500,7 +500,7 @@ fn f16_div_agrees_with_evaluator() {
     .collect();
     let vals = eval_tensor(&dag, &inputs).unwrap();
     let last_id = NodeId(dag.len() - 1);
-    let expected = vals[&last_id].data.clone();
+    let expected = vals[&last_id].to_f64_lossy_vec().clone();
     run_binary_reduced(
         "f16_div",
         Prim::F16,
@@ -534,7 +534,7 @@ fn unary_eval(op: RiscOp, prec: Prim, vals: &[f32]) -> Vec<f64> {
     .collect();
     let vals = eval_tensor(&dag, &inputs).unwrap();
     let last_id = NodeId(dag.len() - 1);
-    vals[&last_id].data.clone()
+    vals[&last_id].to_f64_lossy_vec().clone()
 }
 
 #[test]
@@ -977,9 +977,7 @@ fn run_cast_f32_to_reduced(test_name: &str, dst: Prim, value: f32, tol: f64) {
     let n = 4;
     let mut dag = Dag::new();
     let src = dag.add_node(
-        RiscOp::Const {
-            value: value as f64,
-        },
+        RiscOp::synth_const(vec_ty(n, Prim::F32).precision, value as f64),
         vec![],
         vec_ty(n, Prim::F32),
         None,
@@ -1041,9 +1039,7 @@ fn run_cast_reduced_to_f32(test_name: &str, src: Prim, value: f32, tol: f64) {
     let n = 4;
     let mut dag = Dag::new();
     let c = dag.add_node(
-        RiscOp::Const {
-            value: value as f64,
-        },
+        RiscOp::synth_const(vec_ty(n, src).precision, value as f64),
         vec![],
         vec_ty(n, src),
         None,
@@ -1093,9 +1089,7 @@ fn run_cast_reduced_to_reduced(test_name: &str, src: Prim, dst: Prim, value: f32
     let n = 4;
     let mut dag = Dag::new();
     let c = dag.add_node(
-        RiscOp::Const {
-            value: value as f64,
-        },
+        RiscOp::synth_const(vec_ty(n, src).precision, value as f64),
         vec![],
         vec_ty(n, src),
         None,
@@ -1220,7 +1214,7 @@ fn cast_f32_to_f16_sweep_non_round_values() {
 fn eval_last_helper_returns_const_value() {
     let mut dag = Dag::new();
     dag.add_node(
-        RiscOp::Const { value: 7.0 },
+        RiscOp::synth_const(scalar_ty(Prim::F32).precision, 7.0),
         vec![],
         scalar_ty(Prim::F32),
         None,

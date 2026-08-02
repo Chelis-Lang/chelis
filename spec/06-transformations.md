@@ -385,7 +385,8 @@ nested destructuring beyond `pat-var`/`pat-wild` field bindings.
 static arm selection: when an `if` condition const-folds at lowering time
 (its lowered subgraph is scalar, closed over literals — no `Load`, no
 `shape()` read, no random op — and every op is in the pure scalar
-vocabulary, with `cast` truncation matching the evaluator exactly, a
+vocabulary, with `cast` target-finalization matching the evaluator exactly
+and a trapping cast refusing the fold, a
 zero-divisor `floor_div`/`trunc_div` refusing the fold rather than folding
 a trap away, and any non-finite intermediate refusing the fold, because
 the lowered comparison composition disagrees with the forward lanes' IEEE

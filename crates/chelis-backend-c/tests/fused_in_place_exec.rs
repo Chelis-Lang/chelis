@@ -199,7 +199,12 @@ int main(void) {
 fn fused_in_place_compile_run_matches_contiguous_and_strided_inputs() {
     let mut dag = Dag::new();
     let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
-    let scale = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], vec_f32(4), None);
+    let scale = dag.add_node(
+        RiscOp::synth_const(vec_f32(4).precision, 2.0),
+        vec![],
+        vec_f32(4),
+        None,
+    );
     let ops = vec![FusedStep {
         op: FusedStepOp::Mul,
         input_indices: vec![FusedInput::External(0), FusedInput::External(1)],

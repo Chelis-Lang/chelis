@@ -604,6 +604,22 @@ pub(super) fn infer_pipe(
         } else {
             infer_expr(stage, env, vg, subst, adt_reg, errors, product)
         };
+        // A bare pipe stage (`x |> recip`) has no `app` node, so the normal
+        // post-application policy check cannot see it. Consult the identical
+        // chelis#860 operand policy at this application boundary.
+        if let Some(fname) = bare_var_stage_name(stage) {
+            let resolved = type_for_readonly_check(&current_ty, subst);
+            if let Some((kind, message, hints)) = operand_dtype_rejection(fname, &resolved) {
+                let mut error = CheckError::new(kind, message, hints);
+                if let Some(id) = stage.span_id() {
+                    error.span_offset = parse_span_offset(id);
+                    error.span_id = Some(id.to_string());
+                } else if stage.span().offset > 0 {
+                    error.span_offset = Some(stage.span().offset);
+                }
+                return report(errors, error);
+            }
+        }
         let ret_tv = vg.fresh_type();
         let stage_arg_tys = auto_borrow_call_arg_types(&stage_ty, vec![current_ty.clone()], subst);
         let expected = Type::Fn(stage_arg_tys, Box::new(ret_tv.clone()));
@@ -629,6 +645,19 @@ pub(super) fn infer_pipe(
     }
 
     current_ty
+}
+
+/// Return the builtin name of a bare-reference pipe stage. Lambda-shaped
+/// stages contain ordinary application nodes and are handled by the normal
+/// post-application chokepoint.
+pub(super) fn bare_var_stage_name(stage: &deep::Expr) -> Option<&str> {
+    let deep::Expr::List(list, _) = stage else {
+        return None;
+    };
+    if get_tag(list) != Some(DeepTag::Var) {
+        return None;
+    }
+    children(list).first().and_then(symbol_name)
 }
 
 /// If `stage` is a `(fn (params x) body)` Deep node with exactly one

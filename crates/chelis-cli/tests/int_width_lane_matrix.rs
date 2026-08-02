@@ -168,9 +168,6 @@ fn c_scalar_int8_neg_min_traps() {
 /// Observed today: eval prints `data=[200.0, 3.0]` - no width applied
 /// (f64 storage, chelis#684), and float-formatted integers to boot.
 #[test]
-#[ignore = "chelis#718: eval int8 TENSOR add(100, 100) prints 200.0 (no width; f64 \
-            storage); compiled C wraps to -56; the contract says both must trap. Run with \
-            `cargo test -p chelis-cli --test int_width_lane_matrix -- --ignored`."]
 fn eval_tensor_int8_add_overflow_traps() {
     let result = eval_first_line(TENSOR_I8_OVERFLOW);
     match result {

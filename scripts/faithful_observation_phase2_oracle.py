@@ -35,11 +35,10 @@ The obligations, in execution order:
      leaves a permanently-skipped test behind and nobody learns.
 5. **The formatter byte locks** (`chelis_format_shortest` == the Rust
    `format_element`, exhaustive over both half formats) must pass.
-6. **The corpus-exclusion lists** carry the full §B2.9 three-legged
-   treatment. The harness excludes rows for chelis#751 (C ingress) and
-   chelis#717 (the eval f64 to_list tag); both are documented at their
-   definitions, both are legitimate, and both are also exactly how a
-   corpus gets narrowed until "green" means nothing. Leg 1: each list
+6. **Every corpus-exclusion list** carries the full §B2.9 three-legged
+   treatment. The remaining harness exclusion is chelis#751 (C ingress),
+   documented at its definition; chelis#717's eval f64 `to_list` exclusion
+   retired when chelis#729 repaired the typed value path. Leg 1: each list
    must EQUAL its `DECLARED_EXCLUSIONS` row - changing a list in either
    direction edits this ledger too (the pre-2026-07-30 check stopped
    here, so a stale list overstating breakage stayed green). Legs 2-3:
@@ -47,8 +46,7 @@ The obligations, in execution order:
    harness, iterate the list constant itself, and carry the
    shrink-protocol message - the probes run in the default suite (and in
    obligation 3's harness leg), re-executing every excluded behavior and
-   failing the moment an upstream repair lands. Their first execution
-   shrank `EVAL_F64_LIST_EXCLUDED` by the text-coincident `f64-tenth`.
+   failing the moment an upstream repair lands.
    Hardened per PR #962's red team (round 1 F2, round 2 M1): each probe
    must carry exactly the unconditional `#[test]` attribute (a
    `cfg_attr` ignore or a cfg gate fails the scan, and unrecognized
@@ -211,11 +209,6 @@ RETIRED_LOCKS: tuple[str, ...] = (
 # A list may not exist here without probes and rows (§B2.9: a boundary
 # that cannot be re-executed may not exist).
 #
-# 2026-07-30: `f64-tenth` left EVAL_F64_LIST_EXCLUDED on the probes' first
-# execution - its F32-narrowed image renders `0.1`, text-coincident with
-# the original f64, so the text assertion the list guards passes for it.
-# The stale row is precisely what the pre-probe equality-only check could
-# never catch.
 DECLARED_EXCLUSIONS: tuple[
     tuple[
         str,
@@ -253,58 +246,6 @@ DECLARED_EXCLUSIONS: tuple[
                 "9.999999980506448e19",
             ),
             ("f32-max", "f32", "3.4028234663852886e38", "3.4028234663852886e38"),
-        ),
-    ),
-    (
-        "EVAL_F64_LIST_EXCLUDED",
-        "chelis#717 (eval's to_list narrows through the stale F32 tag)",
-        (
-            (
-                "eval_f64_list_excluded_rows_still_narrow_through_the_f32_tag",
-                (
-                    "f64-max",
-                    "f64-min-subnormal",
-                    "f64-min-normal",
-                    "f64-17-digit",
-                    "f64-2p53",
-                    "f64-2p53-plus-2",
-                    "f64-audit-e19",
-                ),
-            ),
-        ),
-        (
-            (
-                "f64-max",
-                "f64",
-                "cast(1.7976931348623157e308, f64)",
-                "1.7976931348623157e308",
-            ),
-            ("f64-min-subnormal", "f64", "cast(5e-324, f64)", "5e-324"),
-            (
-                "f64-min-normal",
-                "f64",
-                "cast(2.2250738585072014e-308, f64)",
-                "2.2250738585072014e-308",
-            ),
-            (
-                "f64-17-digit",
-                "f64",
-                "cast(0.30000000000000004, f64)",
-                "0.30000000000000004",
-            ),
-            ("f64-2p53", "f64", "cast(9007199254740992.0, f64)", "9007199254740992.0"),
-            (
-                "f64-2p53-plus-2",
-                "f64",
-                "cast(9007199254740994.0, f64)",
-                "9007199254740994.0",
-            ),
-            (
-                "f64-audit-e19",
-                "f64",
-                "cast(9.999999980506448e19, f64)",
-                "9.999999980506448e19",
-            ),
         ),
     ),
 )
@@ -771,6 +712,16 @@ def exclusion_list(source: str, const_name: str) -> list[str] | None:
 @instrument
 def exclusion_violations(source: str) -> list[str]:
     violations: list[str] = []
+    declared_names = {const_name for const_name, _owner, _probes, _rows in DECLARED_EXCLUSIONS}
+    discovered_names = set(
+        re.findall(r"const\s+([A-Z][A-Z0-9_]*_EXCLUDED)\s*:\s*&\[&str\]", source)
+    )
+    for const_name in sorted(discovered_names - declared_names):
+        violations.append(
+            f"{const_name}: exclusion list is not declared in DECLARED_EXCLUSIONS. "
+            "A corpus filter without an owner, probes, and independently re-executed "
+            "ground truth can silently narrow the oracle."
+        )
     for const_name, owner, _probes, rows in DECLARED_EXCLUSIONS:
         declared = exclusion_labels(rows)
         found = exclusion_list(source, const_name)
@@ -1361,7 +1312,6 @@ B2_RULE_INSTRUMENTS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
             "exclusion_probe_violations",
             "probe_attribute_violations",
             "classify_probe_outputs",
-            "eval_exclusion_ground_truth_violations",
             "c_exclusion_ground_truth_violations",
         ),
     ),
@@ -1796,51 +1746,6 @@ def c_has_bare_giant_integer_literal(c_source: str) -> bool:
     return False
 
 
-@instrument
-def eval_exclusion_ground_truth_violations(
-    texts: Sequence[str], rows: Sequence[tuple[str, str, str, str]]
-) -> list[str]:
-    """The chelis#717 fingerprint, re-derived by the ORACLE from a
-    to_list render it produced itself: each excluded element's text must
-    parse to the F32-narrowing of the intended value (any other shape is
-    a different defect) and must NOT round-trip at f64 (when it does,
-    the repair landed and the exclusion must shrink). No probe output is
-    trusted anywhere in this leg (PR #962 round-2 M1)."""
-
-    violations: list[str] = []
-    if len(texts) != len(rows):
-        return [
-            f"eval ground truth: expected {len(rows)} rendered elements, "
-            f"got {len(texts)} - the driver program and the ledger drifted."
-        ]
-    for (label, _dt, _elem, value_text), text in zip(rows, texts):
-        value = float(value_text)
-        try:
-            rendered = float(text)
-        except ValueError:
-            violations.append(
-                f"eval ground truth [{label}]: `{text}` is not a float - a "
-                "different defect; file it per B2.5."
-            )
-            continue
-        if f32_bits(rendered) != f32_bits(value):
-            violations.append(
-                f"eval ground truth [{label}]: `{text}` is not the F32-tag "
-                "narrowing of the intended value - the declared chelis#717 "
-                "fingerprint no longer matches; file the new defect per B2.5 "
-                "before touching the exclusion."
-            )
-        elif f64_bits(rendered) == f64_bits(value):
-            violations.append(
-                f"eval ground truth [{label}]: the to_list render now "
-                "round-trips at f64 - the chelis#717/[#729] repair landed (or "
-                "the row went text-coincident). Remove the label from "
-                "EVAL_F64_LIST_EXCLUDED and DECLARED_EXCLUSIONS in one change "
-                "set."
-            )
-    return violations
-
-
 class CExclusionGroundTruth:
     """One oracle-owned C emission plus its independently observed behavior."""
 
@@ -2073,53 +1978,6 @@ def run_exclusion_ground_truth_into(violations: list[str], env: dict[str, str]) 
 
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
-
-        eval_rows = exclusions["EVAL_F64_LIST_EXCLUDED"]
-        elems = ", ".join(elem for _l, _d, elem, _v in eval_rows)
-        program = (
-            "module M.Main\n"
-            f"def mk() -> tensor[{len(eval_rows)}, f64] = to_tensor([{elems}])\n"
-            "lroot = to_list(mk())\n"
-        )
-        source = tmp_path / "eval_ground_truth.ch"
-        source.write_text(program, encoding="utf-8")
-        print("+ oracle-driven eval re-execution of EVAL_F64_LIST_EXCLUDED", flush=True)
-        completed = run_chelis(("eval", "--file", str(source)), env)
-        if completed.returncode != 0:
-            violations.append(
-                f"eval ground truth: `chelis eval` failed:\n{completed.stderr[-2000:]}"
-            )
-        else:
-            # A single-root program renders its list BARE in eval; a
-            # multi-root program labels it `lroot = [...]` (the chelis#862
-            # root-labeling behavior). Accept both.
-            line = next(
-                (
-                    stripped.removeprefix("lroot = ")
-                    for stripped in (
-                        l.strip() for l in completed.stdout.splitlines()
-                    )
-                    if stripped.startswith("lroot = [") or stripped.startswith("[")
-                ),
-                None,
-            )
-            if line is None:
-                violations.append(
-                    "eval ground truth: no to_list render in the driver "
-                    f"output:\n{completed.stdout[-2000:]}"
-                )
-            else:
-                texts = [
-                    t.strip()
-                    for t in line.removeprefix("[").rstrip("]").split(",")
-                    if t.strip()
-                ]
-                consume_findings(
-                    violations,
-                    eval_exclusion_ground_truth_violations,
-                    texts,
-                    eval_rows,
-                )
 
         entries: list[CExclusionGroundTruth] = []
         for label, dt, elem, value_text in exclusions["C_LANE_EXCLUDED"]:

@@ -150,12 +150,12 @@ Per-dtype rules:
    string that parses back to exactly the stored f64 / f32 / f16 / bf16
    value. This single rule replaces C's `%.1f`/`%.16g` split and eval's
    f64-width formatting, and is what makes byte-equal lane comparison
-   possible. (Phase 1 width note: eval TENSOR float elements still
-   render at the stored f64 width - the eval tensor store is f64-backed
-   and its precision tag is [#717]-unreliable, so narrowing at render
-   time would launder stored bits, which §C2.1 forbids. Scalar exits
-   render at own width now; own-width tensor digits arrive when [#729]
-   repairs the metadata. Recorded normatively at spec/05 §8.1.)
+   possible. (Width note, resolved: the Phase 1 interim rendered eval
+   TENSOR float elements at the stored f64 width because the pre-[#729]
+   tensor store was f64-backed with a [#717]-unreliable tag; [#729]
+   Phase 1's per-dtype storage removes that state, and own-width tensor
+   digits are implemented with it in the current [#729] stack - the deferred
+   half of the §B2.1 migration. Recorded normatively at spec/05 §8.1.)
 3. **The number grammar is Rust `{:?}` (`Debug`) float formatting,
    normatively**: shortest round-trip digits, `inf`/`-inf`/`NaN`
    spellings, lowercase `e` with unpadded exponent (`1e-7`, not `1e-07`),

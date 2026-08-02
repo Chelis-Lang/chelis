@@ -30,8 +30,9 @@
 //!     bit patterns into an f64 buffer, producing garbage.
 //!   * `cbackend_cast_tensor_f64_to_f32` -- narrowing; requires rounding.
 //!     memcpy copies the low 4 bytes of each f64, also garbage.
-//!   * `cbackend_cast_tensor_f32_to_int32` -- truncating-toward-zero
-//!     conversion. memcpy reinterprets f32 bit patterns as int32s.
+//!   * `cbackend_cast_tensor_f32_to_int32` -- exactly integral float values
+//!     convert to integers. memcpy reinterprets f32 bit patterns as int32s;
+//!     fractional checked-cast behavior is separately red/ignored for Phase 3.
 //!   * `cbackend_cast_tensor_int32_to_f32` -- integer widening to float.
 //!     memcpy reinterprets int32 bit patterns as f32s.
 //!
@@ -283,9 +284,9 @@ int main(void) {{
     );
 }
 
-/// f32 -> int32 truncation toward zero. Input `[1.5, 2.5, 3.5]`
-/// truncates to `[1, 2, 3]`. With the memcpy bug, the int32 buffer
-/// contains the raw f32 bit patterns (1.5f -> 0x3FC00000 -> 1069547520).
+/// f32 -> int32 exact integral conversion. Input `[1.0, 2.0, 3.0]`
+/// converts to `[1, 2, 3]`. With the memcpy bug, the int32 buffer
+/// contains the raw f32 bit patterns (1.0f -> 0x3F800000 -> 1065353216).
 #[test]
 fn cbackend_cast_tensor_f32_to_int32() {
     let build = chelis_build_c(
@@ -303,7 +304,7 @@ fn cbackend_cast_tensor_f32_to_int32() {
 extern chelis_tensor* cast_demo(chelis_tensor* x);
 
 int main(void) {{
-    float in_data[3] = {{1.5f, 2.5f, 3.5f}};
+    float in_data[3] = {{1.0f, 2.0f, 3.0f}};
     chelis_tensor t;
     memset(&t, 0, sizeof(t));
     t.data = in_data;
@@ -329,7 +330,7 @@ int main(void) {{
     let trimmed = stdout.trim();
     assert_eq!(
         trimmed, "1 2 3",
-        "expected truncate-toward-zero f32->int32; got stdout={trimmed:?}"
+        "expected exact integral f32->int32 conversion; got stdout={trimmed:?}"
     );
 }
 

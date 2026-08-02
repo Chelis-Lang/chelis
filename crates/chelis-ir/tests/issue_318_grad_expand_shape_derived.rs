@@ -137,7 +137,7 @@ fn build_forward(extent: Extent, source_shape: &[usize]) -> (Dag, NodeId, NodeId
 
     // scalar_to_tensor(cast(c_val, f32)) -> f32 constant of `source_ty`.
     let raw = dag.add_node(
-        RiscOp::Const { value: 3.0 },
+        RiscOp::synth_const(source_ty.precision, 3.0),
         vec![],
         source_ty.clone(),
         None,
@@ -201,7 +201,7 @@ fn issue_318_forward_shape_derived_expand_evaluates() {
         // 3.0 * (5 + 6) = 33.0
         assert_close(
             &format!("forward shape-derived source={shape:?}"),
-            &vals[&out].data,
+            &vals[&out].to_f64_lossy_vec(),
             &[33.0],
         );
     }
@@ -247,7 +247,7 @@ fn issue_318_grad_through_shape_derived_expand_is_correct() {
         let vals = eval_tensor(&result.dag, &inputs).expect("grad DAG eval");
         assert_close(
             &format!("grad_x shape-derived source={shape:?}"),
-            &vals[&grad_x].data,
+            &vals[&grad_x].to_f64_lossy_vec(),
             &[3.0, 3.0],
         );
         assert_eq!(
@@ -275,7 +275,7 @@ fn issue_318_literal_and_shape_derived_agree() {
             let mut inputs = HashMap::new();
             inputs.insert("x".into(), TensorValue::from_vec(vec![2], vec![5.0, 6.0]));
             let vals = eval_tensor(&result.dag, &inputs).expect("grad eval");
-            grads.push(vals[&grad_x].data.clone());
+            grads.push(vals[&grad_x].to_f64_lossy_vec().clone());
         }
         assert_close(
             &format!("literal-vs-shape-derived source={shape:?}"),
@@ -300,22 +300,24 @@ fn issue_318_grad_matches_finite_difference() {
         let mut inputs: HashMap<String, TensorValue> = HashMap::new();
         inputs.insert("x".into(), base.clone());
         let analytic = eval_tensor(&result.dag, &inputs).expect("analytic eval")[&grad_x]
-            .data
+            .to_f64_lossy_vec()
             .clone();
 
         let h = 1e-3;
         let mut numerical = [0.0f64; 2];
         for (j, slot) in numerical.iter_mut().enumerate() {
-            let mut plus = base.clone();
-            let mut minus = base.clone();
-            plus.data[j] += h;
-            minus.data[j] -= h;
+            let mut plus_data = base.to_f64_lossy_vec();
+            let mut minus_data = base.to_f64_lossy_vec();
+            plus_data[j] += h;
+            minus_data[j] -= h;
+            let plus = TensorValue::from_vec(base.shape.clone(), plus_data);
+            let minus = TensorValue::from_vec(base.shape.clone(), minus_data);
             let mut ip = HashMap::new();
             ip.insert("x".into(), plus);
             let mut im = HashMap::new();
             im.insert("x".into(), minus);
-            let fp = eval_tensor(&dag, &ip).expect("plus eval")[&out].data[0];
-            let fm = eval_tensor(&dag, &im).expect("minus eval")[&out].data[0];
+            let fp = eval_tensor(&dag, &ip).expect("plus eval")[&out].to_f64_lossy_vec()[0];
+            let fm = eval_tensor(&dag, &im).expect("minus eval")[&out].to_f64_lossy_vec()[0];
             *slot = (fp - fm) / (2.0 * h);
         }
         for (i, (a, n)) in analytic.iter().zip(numerical.iter()).enumerate() {
