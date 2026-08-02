@@ -2,10 +2,11 @@
 //!
 //! The issue's chokepoint (`flatten_field_value` / `read_produced_field`
 //! collapsing produced int64 fields to f64) needs the smt build plus an
-//! @opaque int64-field type to drive. But the CLASS is live in the default
-//! build: the fuzz tier's concrete interpreter computes int64 arithmetic
-//! through the #680 f64 evaluator, so `chelis prove` reports a TRUE int64
-//! theorem as failed, with a "counterexample" that witnesses nothing.
+//! @opaque int64-field type to drive. Before the #729 Phase 2 kernel and prove
+//! slices, the class was also live in the default build: the fuzz tier's
+//! concrete interpreter computed int64 arithmetic through f64, so
+//! `chelis prove` reported a TRUE theorem as failed, with a "counterexample"
+//! that witnessed nothing. This file is now the end-to-end regression oracle.
 //!
 //! `shift_a(x) = x + (2^53 + 1)` and `shift_b(x) = x + 2^53` differ by
 //! exactly 1 at every int64 input; `shift_a(x) != shift_b(x)` is a theorem.
@@ -48,13 +49,9 @@ fn prove(program: &str) -> (String, bool) {
     )
 }
 
-/// Observed today: `property failure: distinct_offsets_stay_distinct` with
-/// counterexample x = 0, which does not violate the property.
+/// Regression oracle: `property failure: distinct_offsets_stay_distinct` with
+/// counterexample x = 0 does not violate the property.
 #[test]
-#[ignore = "chelis#688: prove's fuzz-tier interpreter collapses the int64 offsets 2^53+1 \
-            and 2^53 to one f64 and reports a true theorem failed with a spurious \
-            counterexample (x = 0). Run with \
-            `cargo test -p chelis-cli --test prove_int64_exactness -- --ignored`."]
 fn prove_does_not_refute_a_true_int64_theorem() {
     let (stdout, _) = prove(
         "module Audit.ProveInt\n\

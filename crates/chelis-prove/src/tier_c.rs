@@ -75,11 +75,11 @@ pub fn fuzz(property_source: &str, property_name: &str, samples: usize, _seed: u
 
 // --- SmtProperty-based fuzzer (used by --tier auto) ---
 
-use crate::concrete_eval::eval_bool;
+use crate::concrete_eval::{ConcreteEnv, eval_bool};
 use crate::tier_b::SmtProperty;
-use std::collections::HashMap;
+use chelis_types::{ScalarValue, scalar_from_f64, scalar_from_i64, types::Prim};
 
-/// Fuzz an SmtProperty directly via concrete f64 evaluation.
+/// Fuzz an SmtProperty directly via dtype-aware concrete evaluation.
 /// Quantified properties (Forall/Exists in postcondition) → Error (unsupported).
 pub fn fuzz_smt_property(property: &SmtProperty, samples: usize, seed: u64) -> TierCResult {
     // Check fuzzability: quantifiers in postcondition → unsupported
@@ -103,10 +103,26 @@ pub fn fuzz_smt_property(property: &SmtProperty, samples: usize, seed: u64) -> T
 
     while accepted < samples && attempts < max_attempts {
         attempts += 1;
-        let env: HashMap<String, f64> = property
+        let env: ConcreteEnv = property
             .variables
             .iter()
-            .map(|(name, _)| (name.clone(), rng.next_f64(-10.0, 10.0)))
+            .map(|(name, sort)| {
+                let value = match sort {
+                    crate::solver::SmtSort::Int => {
+                        scalar_from_i64("prove-fuzz-sample", Prim::Int64, rng.next_i64(-10, 10))
+                            .expect("the int64 fuzz bounds are representable")
+                    }
+                    crate::solver::SmtSort::Real => {
+                        scalar_from_f64("prove-fuzz-sample", Prim::F64, rng.next_f64(-10.0, 10.0))
+                            .expect("every f64 fuzz sample is a valid f64")
+                    }
+                    crate::solver::SmtSort::Bool => {
+                        scalar_from_i64("prove-fuzz-sample", Prim::Bool, i64::from(rng.next_bool()))
+                            .expect("boolean samples are exactly zero or one")
+                    }
+                };
+                (name.clone(), value)
+            })
             .collect();
 
         // Check preconditions
@@ -122,7 +138,7 @@ pub fn fuzz_smt_property(property: &SmtProperty, samples: usize, seed: u64) -> T
         if !eval_bool(&property.postcondition, &env) {
             let cx: serde_json::Map<String, Value> = env
                 .iter()
-                .map(|(k, v)| (k.clone(), Value::from(*v)))
+                .map(|(k, v)| (k.clone(), scalar_json(*v)))
                 .collect();
             return TierCResult::Failed(Value::Object(cx));
         }
@@ -134,6 +150,16 @@ pub fn fuzz_smt_property(property: &SmtProperty, samples: usize, seed: u64) -> T
         ));
     }
     TierCResult::AllPassed(accepted)
+}
+
+fn scalar_json(value: ScalarValue) -> Value {
+    if let Some(value) = value.as_bool_exact() {
+        Value::from(value)
+    } else if let Some(value) = value.as_i64_exact() {
+        Value::from(value)
+    } else {
+        Value::from(value.as_f64_lossy())
+    }
 }
 
 struct Lcg {
@@ -155,6 +181,15 @@ impl Lcg {
     fn next_f64(&mut self, min: f64, max: f64) -> f64 {
         let unit = (self.next_u64() >> 11) as f64 / ((1u64 << 53) as f64);
         min + (max - min) * unit
+    }
+
+    fn next_i64(&mut self, min: i64, max: i64) -> i64 {
+        let width = (max as i128 - min as i128 + 1) as u64;
+        min + (self.next_u64() % width) as i64
+    }
+
+    fn next_bool(&mut self) -> bool {
+        self.next_u64() & 1 == 1
     }
 }
 
@@ -182,6 +217,27 @@ mod tests {
             TierCResult::AllPassed(n) => assert_eq!(n, 100),
             other => panic!("expected AllPassed, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn integer_fuzz_variables_are_sampled_and_reported_as_integers() {
+        let prop = SmtProperty {
+            variables: vec![("x".to_string(), SmtSort::Int)],
+            preconditions: vec![],
+            postcondition: SmtExpr::Cmp(
+                CmpOp::Ne,
+                Box::new(SmtExpr::Var("x".into())),
+                Box::new(SmtExpr::Var("x".into())),
+            ),
+        };
+        let TierCResult::Failed(Value::Object(counterexample)) = fuzz_smt_property(&prop, 1, 7)
+        else {
+            panic!("x != x must produce an integer counterexample")
+        };
+        assert!(
+            counterexample["x"].as_i64().is_some(),
+            "an SMT Int sample must never enter or leave Tier C as a float"
+        );
     }
 
     #[test]

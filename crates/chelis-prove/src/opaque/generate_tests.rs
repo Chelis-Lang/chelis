@@ -36,7 +36,7 @@ fn rejection_sampling_produces_a_valid_probability() {
     )
     .expect("a [0,1] band has ~10% acceptance, never starves");
     assert_eq!(got.method, GenMethod::Rejection);
-    let v = got.env.get("p.value").copied().unwrap();
+    let v = got.env.get("p.value").copied().unwrap().as_f64_lossy();
     assert!((0.0..=1.0).contains(&v), "validated in [0,1], got {v}");
 }
 
@@ -174,10 +174,32 @@ fn simplex_band_is_served_by_constructor_generation_not_starved() {
         "the measure-near-zero band is served by the producer, not rejection"
     );
     let sum: f64 = (0..3)
-        .map(|i| got.env.get(&format!("p.weights.{i}")).copied().unwrap())
+        .map(|i| {
+            got.env
+                .get(&format!("p.weights.{i}"))
+                .copied()
+                .unwrap()
+                .as_f64_lossy()
+        })
         .sum();
     assert!(
         (sum - 1.0).abs() <= 0.0001 + 1e-6,
         "validated in band, sum={sum}"
     );
+}
+
+#[test]
+fn constructor_tensor_input_sampling_preserves_declared_integer_dtype() {
+    let mut rng = GenRng::new(17);
+    let expr = sample_raw_input_expr(
+        &GenParamKind::Tensor {
+            dims: vec![2],
+            precision: "int64".to_string(),
+        },
+        &mut rng,
+    );
+    let deep = chelis_deep::printer::print_canonical(&[expr]);
+
+    assert!(deep.contains("(t-prim {} int64)"), "{deep}");
+    assert!(!deep.contains("(t-prim {} f32)"), "{deep}");
 }
