@@ -80,6 +80,8 @@ pub fn validate_deep(source: &str) -> Result<(), ValidationError> {
     // rejection here is unconditional. Parse through the AST parser (the
     // grammar already validated above, so this succeeds).
     if let Ok(exprs) = chelis_deep::parser::parse_str_strict(source) {
+        // #1047: stamped parsing may produce Expr::Node; normalize for checks.
+        let exprs = normalize_to_lists(&exprs);
         if let Some(name) = first_forged_linker_name(&exprs) {
             return Err(ValidationError::Failed(format!(
                 "`{name}` uses the reef package-linker's reserved internal-name \
@@ -550,6 +552,33 @@ fn validate_effects_children(
         }
     }
     Ok(())
+}
+
+
+/// Recursively normalize `Expr::Node`/`Expr::BareList` → `Expr::List` for
+/// structural validation checks that only handle `Expr::List`.
+fn normalize_to_lists(exprs: &[chelis_deep::ast::Expr]) -> Vec<chelis_deep::ast::Expr> {
+    exprs.iter().map(normalize_expr_to_list).collect()
+}
+
+fn normalize_expr_to_list(expr: &chelis_deep::ast::Expr) -> chelis_deep::ast::Expr {
+    use chelis_deep::ast::{Expr, List};
+    match expr {
+        Expr::Node(node, span) => {
+            let list = node.to_list(*span);
+            let elements = list.elements.iter().map(normalize_expr_to_list).collect();
+            Expr::List(List { elements }, *span)
+        }
+        Expr::BareList(elems, span) => {
+            let elements = elems.iter().map(normalize_expr_to_list).collect();
+            Expr::List(List { elements }, *span)
+        }
+        Expr::List(list, span) => {
+            let elements = list.elements.iter().map(normalize_expr_to_list).collect();
+            Expr::List(List { elements }, *span)
+        }
+        other => other.clone(),
+    }
 }
 
 #[cfg(test)]
