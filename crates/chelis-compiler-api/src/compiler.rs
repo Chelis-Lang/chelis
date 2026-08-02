@@ -1269,11 +1269,11 @@ pub fn compile_for_execution_in_context(
 /// entry's inputs, #817) and keeps the dim/precision checks off unrelated
 /// library helper nodes (which may carry polymorphic symbolic dims).
 ///
-/// - explicit `entry_name` → the root matching it exactly, else the UNIQUE
-///   root whose linker-mangled name ends with `__<entry_name>` (two or more
-///   suffix matches error as ambiguous); no match on a non-empty root set
-///   errors listing the tensor entries. Own-package roots are BARE (the
-///   suffix arm only fires for library-originated mangled names);
+/// - explicit `entry_name` → the root matching it EXACTLY (the same rule as
+///   the monolithic `resolve_execution_entry`); no match on a non-empty root
+///   set errors listing the tensor entries. All selectable roots are the
+///   compiled source's own defs with their bare names: library defs are
+///   callable from the entry but are not themselves selectable entries;
 /// - no `entry_name`, a tensor root named `main` → that root (the same `main`
 ///   preference `resolve_execution_entry` applies, so a file behaves the same
 ///   inside and outside a reef project);
@@ -1317,51 +1317,32 @@ fn resolve_in_context_entry<'a>(
     }
     let index = match entry_name {
         Some(name) => {
-            // Exact match wins. Otherwise fall back to a linker-mangled root
-            // whose name ends with `__<name>` — but if MORE THAN ONE mangled
-            // root suffix-matches, that is genuinely ambiguous and must error
-            // rather than silently taking the first (review round 2). Own-
-            // package roots come back BARE, so the suffix arm only fires for
-            // library-originated (mangled) names.
+            // Exact match ONLY, mirroring the monolithic strict lane's
+            // `resolve_execution_entry`. An earlier revision fell back to a
+            // linker-mangled root whose name ends with `__<name>`, on the
+            // theory that library-originated entries come back mangled. They
+            // never do: `tensor_root_names` holds NEW-CODE roots only (the
+            // composed roots are sliced past `library_root_count`), and
+            // new-code decl names are copied verbatim (`rewrite_eval_decl`)
+            // with linker-format user decls hard-rejected. The suffix arm's
+            // only reachable effect was silently compiling a DIFFERENT def:
+            // an ordinary double-underscore def like `compute__solve` (legal
+            // source) satisfied `entry_name = "solve"` with no diagnostic,
+            // which is the #817 wrong-entry class this lane exists to close.
             if let Some(index) = roots.iter().position(|root| root == name) {
                 index
+            } else if roots.is_empty() {
+                return Ok(None);
             } else {
-                let suffix = format!("__{name}");
-                let matches: Vec<usize> = roots
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, root)| root.ends_with(&suffix))
-                    .map(|(index, _)| index)
-                    .collect();
-                match matches.as_slice() {
-                    [index] => *index,
-                    [] if roots.is_empty() => return Ok(None),
-                    [] => {
-                        return Err(stage_error(
-                            "compile",
-                            format!(
-                                "unknown entry_name `{name}`; this program's tensor entries are: \
-                                 {}. Pass one of these as entry_name.",
-                                roots.join(", ")
-                            ),
-                            "compile_error",
-                        ));
-                    }
-                    _ => {
-                        let ambiguous: Vec<&str> =
-                            matches.iter().map(|&i| roots[i].as_str()).collect();
-                        return Err(stage_error(
-                            "compile",
-                            format!(
-                                "ambiguous entry_name `{name}`: it suffix-matches multiple \
-                                 linker-mangled tensor entries ({}). Pass the exact entry name \
-                                 to select one.",
-                                ambiguous.join(", ")
-                            ),
-                            "compile_error",
-                        ));
-                    }
-                }
+                return Err(stage_error(
+                    "compile",
+                    format!(
+                        "unknown entry_name `{name}`; this program's tensor entries are: \
+                         {}. Pass one of these as entry_name.",
+                        roots.join(", ")
+                    ),
+                    "compile_error",
+                ));
             }
         }
         None => {
@@ -1401,6 +1382,33 @@ fn resolve_in_context_entry<'a>(
     scoped.set_roots(vec![root]);
     let scoped = chelis_ir::optimize::dead_code_eliminate(&scoped);
     Ok(Some((roots[index].as_str(), scoped)))
+}
+
+/// The branded HIP reef-context rejection (chelis#829), shared by the Hip
+/// codegen arm and by chelis-python's EARLY guard in
+/// `run_compile_and_load_job` (#822 review round 3, finding 3): the
+/// rejection depends on nothing but the target and the presence of a reef
+/// root, so callers reject BEFORE paying the context compile (the first
+/// build of a real project is tens of seconds to minutes). Routed through
+/// `Unsupported` so it carries the section C2 `unsupported:` brand and the
+/// `unsupported_feature` kind; the #730 sweeps match on both, and a
+/// `compile_error` here would read as internal desync rather than a
+/// not-yet-implemented capability.
+pub fn reef_context_hip_unsupported_error() -> CompilerError {
+    unsupported_stage_error(chelis_types::unsupported::Unsupported::new(
+        chelis_types::unsupported::UnsupportedKind::Construct(
+            "reef-context compilation (a `project_root=` with \
+             reef-declared imports)"
+                .to_string(),
+        ),
+        "the HIP backend, which does not yet apply the entry-scoped DAG \
+         selection the C path uses and would merge every reef-linked \
+         def's inputs/outputs into a single kernel instead of compiling \
+         the requested entry",
+        chelis_types::unsupported::Stage::Codegen("hip"),
+        "compile the entry with `target=\"c\"`, or run it through `eval`, \
+         until HIP reef-context support lands (chelis#829)",
+    ))
 }
 
 /// The post-`compile_source` body shared by [`compile_for_execution`] and
@@ -1511,7 +1519,12 @@ fn execution_artifact_from_compiled(
                 // roots instead and slice `compiled.dag` to the entry's root,
                 // so the metadata / dim checks run on the entry's reachable
                 // subgraph only (not unreachable library helper nodes, which
-                // may carry polymorphic symbolic dims).
+                // may carry polymorphic symbolic dims). NOTE: this branch does
+                // not consult `strictness` — `resolve_in_context_entry` is
+                // strict by construction (exact-name errors, ambiguity errors,
+                // no decline fallthrough), and no LEGACY caller routes
+                // in-context today. A future `compile()`-in-context surface
+                // must decide its own policy here rather than inherit this.
                 //
                 // Invariant guard, symmetric to Fix A in
                 // `resolve_in_context_entry` (#822 review): a RESOLVED entry
@@ -1698,27 +1711,7 @@ fn execution_artifact_from_compiled(
             // exposes `target="hip"`). Tracked as chelis#829 (apply the same
             // entry-scoped selection to HIP, then lift this reject).
             if compiled.library_runtime.is_some() {
-                // Routed through `Unsupported` so the rejection carries the
-                // section C2 `unsupported:` brand and the
-                // `unsupported_feature` kind -- the #730 sweeps match on
-                // both, and a `compile_error` here would read as internal
-                // desync rather than a not-yet-implemented capability.
-                return Err(unsupported_stage_error(
-                    chelis_types::unsupported::Unsupported::new(
-                        chelis_types::unsupported::UnsupportedKind::Construct(
-                            "reef-context compilation (a `project_root=` with \
-                             reef-declared imports)"
-                                .to_string(),
-                        ),
-                        "the HIP backend, which does not yet apply the entry-scoped DAG \
-                         selection the C path uses and would merge every reef-linked \
-                         def's inputs/outputs into a single kernel instead of compiling \
-                         the requested entry",
-                        chelis_types::unsupported::Stage::Codegen("hip"),
-                        "compile the entry with `target=\"c\"`, or run it through `eval`, \
-                         until HIP reef-context support lands (chelis#829)",
-                    ),
-                ));
+                return Err(reef_context_hip_unsupported_error());
             }
             let host_requires_host_backend = host_compiled
                 .host
@@ -5192,6 +5185,50 @@ def out(x: tensor[2, f32]) -> tensor[2, f32] = add(consume(x), consume(x))
             message.contains("ambiguous entry") && message.contains("none named `main`"),
             "expected ambiguity guidance, got: {message}"
         );
+    }
+
+    // Reviewer finding 1 (#822 round 3): entry selection is EXACT-name only.
+    // An earlier suffix-match fallback (`__<name>`) could never fire for its
+    // stated purpose (library roots are never in `tensor_root_names`) and
+    // instead silently compiled a DIFFERENT def: `def compute__solve` is
+    // legal source and satisfied `entry_name = "solve"` with no diagnostic —
+    // the #817 wrong-entry class. The selector must reject the near-miss
+    // loudly, listing the real entries.
+    #[test]
+    fn resolve_in_context_entry_rejects_suffix_near_miss() {
+        let (_dir, root) = copy_drop_context_fixture();
+        let context = crate::compile_reef_context(Path::new("/tmp/inctx-suffix"), &root)
+            .expect("compile context");
+        let source = "module App.Sfx\nimport Mylib.Copy (consume)\n\n\
+             def compute__solve(x: tensor[2, f32]) -> tensor[2, f32] = consume(x)\n";
+        let err =
+            compile_for_execution_in_context(&context, source, CompileTarget::C, Some("solve"))
+                .expect_err("a suffix near-miss must not silently select compute__solve");
+        let message = &err.errors[0].message;
+        assert!(
+            message.contains("unknown entry_name `solve`") && message.contains("compute__solve"),
+            "expected the exact-match unknown-entry error listing the real def, got: {message}"
+        );
+    }
+
+    // Positive parity for the exact-match rule: the same def selected by its
+    // real (double-underscore) name compiles and scopes correctly.
+    #[test]
+    fn resolve_in_context_entry_selects_double_underscore_def_by_exact_name() {
+        let (_dir, root) = copy_drop_context_fixture();
+        let context = crate::compile_reef_context(Path::new("/tmp/inctx-suffix-pos"), &root)
+            .expect("compile context");
+        let source = "module App.Sfx\nimport Mylib.Copy (consume)\n\n\
+             def compute__solve(x: tensor[2, f32]) -> tensor[2, f32] = consume(x)\n";
+        let artifact = compile_for_execution_in_context(
+            &context,
+            source,
+            CompileTarget::C,
+            Some("compute__solve"),
+        )
+        .expect("exact name must select the def");
+        assert_eq!(artifact.inputs.len(), 1, "{:?}", artifact.inputs);
+        assert_eq!(artifact.inputs[0].name, "x");
     }
 
     // Fix A invariant guard (#822 review): zero named tensor roots while the

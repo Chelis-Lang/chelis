@@ -216,10 +216,11 @@ def compile_and_load(
     - ``False`` — force the bare self-contained path even for an importing source inside
       a project. This is the explicit opt-out from auto-discovery.
 
-    Entry defs selected from a reef package come back with linker-mangled names
-    (``pkg__<pkg>__<Module>__<name>``) for **library-originated** entries; an entry from
-    the package's *own* source keeps its bare name. ``input_names`` / ``output_names``
-    reflect that, matching the CLI. A scalar-signature entry (e.g.
+    Only the defs in the compiled source itself are selectable as entries, by
+    their bare names; imported library defs are callable from the entry's body
+    but are not themselves selectable via ``entry_name=``. ``input_names`` /
+    ``output_names`` are the selected entry's own parameter/output names. A
+    scalar-signature entry (e.g.
     ``def main(s: f32, ...) -> f32``) is not a compiled tensor kernel — wrap scalars as
     ``tensor[1, f32]``; use :func:`eval` for scalar results.
     """

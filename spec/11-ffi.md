@@ -60,11 +60,14 @@ The Phase 3 Python path is split into two cuts:
   top-level (non-`def`) value binding in the new source does not decline compilation
   (monolithically it does, `HasGlobals`) — the artifact is scoped to the selected
   entry, and an unreferenced sibling global's computation is simply not part of it.
-  Run `eval` for whole-program semantics. Roots sourced
-  from the reef library graph keep their linker-mangled names; entries from the
-  package's own source keep their bare names. Reef-context resolution is **C-target
+  Run `eval` for whole-program semantics. Only the compiled source's own defs
+  are selectable as entries, by their bare names; imported library defs are
+  callable from the entry's body but are not themselves selectable via
+  `entry_name`. Reef-context resolution is **C-target
   only**: a HIP reef-context compile (`target="hip"` with a `project_root=`) is rejected
-  as unsupported (chelis#829) rather than silently mis-scoped.
+  as unsupported (chelis#829) rather than silently mis-scoped, and the rejection
+  fires before the reef context is compiled, so it does not cost the first
+  context build.
 
 ### Phase 5a
 

@@ -10,6 +10,7 @@ use std::sync::OnceLock;
 
 use chelis_compiler_api::compiler::{
     self, CompiledExecutionArtifact, CompilerError, EntryLaneDecline, ExecutionTensorSpec,
+    reef_context_hip_unsupported_error,
 };
 use chelis_compiler_api::schema::{
     CheckRequest, CompileRequest, CompileTarget, DecompileRequest, DesugarRequest, EvalRequest,
@@ -904,6 +905,18 @@ fn run_compile_and_load_job(
     let source = fs::read_to_string(&job.source_path)
         .map_err(|err| CompileAndLoadError::Message(format!("read source failed: {err}")))?;
     let reef_root = resolve_compile_reef_root(&job, &source)?;
+    // #822 review round 3, finding 3: the HIP reef-context rejection depends
+    // on nothing but the target and the presence of a reef root, so fire it
+    // BEFORE `load_reef_context` pays the whole context compile (tens of
+    // seconds to minutes on a real project). The compiler-side guard in the
+    // Hip codegen arm stays as defense in depth for non-python callers; both
+    // sites share `reef_context_hip_unsupported_error`, so the brand and
+    // guidance cannot drift.
+    if job.target == CompileTarget::Hip && reef_root.is_some() {
+        return Err(CompileAndLoadError::Compiler(
+            reef_context_hip_unsupported_error(),
+        ));
+    }
     // #822 review, Fix B: auto-discovery was attempted (importing Surf source,
     // no explicit root, no opt-out) but found no enclosing reef project — e.g.
     // the walk stopped at a nested `.git` or filesystem boundary before any
@@ -3726,6 +3739,99 @@ def free(x: tensor[1, f32]) -> tensor[1, f32] = mul(copy(x), x)
         assert!(
             message.contains("batch_process") && message.contains("eval"),
             "expected the strict transform-entry error naming the def and eval, got: {message}"
+        );
+    }
+
+    // #822 review round 3, finding 3: the HIP reef-context rejection must
+    // fire BEFORE the reef context is compiled. The fixture's reef.toml is
+    // deliberately unparseable garbage: if the job ever reached
+    // `load_reef_context` first, the failure would be a manifest error, not
+    // the branded HIP rejection asserted here.
+    #[test]
+    fn compile_and_load_job_rejects_hip_reef_context_before_context_compile() {
+        let dir = tempdir().expect("tempdir");
+        let source_path = dir.path().join("model.ch");
+        fs::write(
+            &source_path,
+            "import Mylib.Copy (consume)\n\
+             def main(x: tensor[2, f32]) -> tensor[2, f32] = consume(x)\n",
+        )
+        .expect("write source");
+        let project = tempdir().expect("tempdir");
+        fs::write(project.path().join("reef.toml"), "this is not TOML {{{{")
+            .expect("write garbage manifest");
+        let result = run_compile_and_load_job(CompileAndLoadJob {
+            source_path,
+            source_kind: SourceKind::Surf,
+            target: CompileTarget::Hip,
+            entry_name: None,
+            artifact_dir: Some(PathBuf::from(dir.path())),
+            project_root: Some(project.path().to_path_buf()),
+            force_bare: false,
+        });
+        let message = match result {
+            Ok(_) => panic!("HIP reef-context must be rejected"),
+            Err(CompileAndLoadError::Message(m)) => m,
+            Err(CompileAndLoadError::Compiler(e)) => e
+                .errors
+                .first()
+                .map(|d| format!("{} {}", d.kind, d.message))
+                .unwrap_or_else(|| format!("{e:?}")),
+        };
+        assert!(
+            message.contains("unsupported_feature") && message.contains("chelis#829"),
+            "expected the branded early HIP rejection (not a manifest error), got: {message}"
+        );
+    }
+
+    // #822 review round 3, finding 5: the documented "an explicit
+    // `project_root=` forces in-context resolution regardless of whether the
+    // source imports" claim had no test. Route detection: the fixture's
+    // library is corrupted, so the CONTEXT compile fails; an import-free
+    // source that silently took the bare path would compile fine. Getting the
+    // context error proves the forced routing; the bare-path control proves
+    // the same source is otherwise healthy.
+    #[test]
+    fn explicit_project_root_forces_context_for_import_free_source() {
+        let (_dir, root) = path_dep_tensor_project();
+        fs::write(root.join("mylib/src/lib.ch"), "def broken( := nonsense\n")
+            .expect("corrupt library source");
+        let outside = tempdir().expect("tempdir");
+        let source_path = outside.path().join("model.ch");
+        fs::write(
+            &source_path,
+            "def main(x: tensor[1, f32]) -> tensor[1, f32] = mul(copy(x), x)\n",
+        )
+        .expect("write source");
+        let artifact_dir = tempdir().expect("artifact tempdir");
+
+        // Control: bare path (no project_root) compiles the healthy source.
+        run_compile_and_load_job(CompileAndLoadJob {
+            source_path: source_path.clone(),
+            source_kind: SourceKind::Surf,
+            target: CompileTarget::C,
+            entry_name: None,
+            artifact_dir: Some(PathBuf::from(artifact_dir.path())),
+            project_root: None,
+            force_bare: false,
+        })
+        .expect("bare path must compile the import-free source");
+
+        // Explicit root: must route in-context and therefore hit the broken
+        // library, never silently fall back to the bare path.
+        let result = run_compile_and_load_job(CompileAndLoadJob {
+            source_path,
+            source_kind: SourceKind::Surf,
+            target: CompileTarget::C,
+            entry_name: None,
+            artifact_dir: Some(PathBuf::from(artifact_dir.path())),
+            project_root: Some(root),
+            force_bare: false,
+        });
+        assert!(
+            result.is_err(),
+            "an explicit project_root must force in-context resolution (and hit the \
+             corrupted library), not silently take the bare path"
         );
     }
 }

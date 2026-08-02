@@ -89,9 +89,9 @@ Reef dependency resolution (chelis#816):
   bare/monolithic path, where top-level bindings decline the entry lane and keep
   whole-program host-lane routing. Use `eval` when the sibling globals'
   computations matter.
-- **Mangled names.** Roots that come from the reef **library** graph carry
-  linker-mangled names (`pkg__<pkg>__<Module>__<name>`), matching the CLI (no
-  demangling); entries from the package's **own** source keep their bare names. A
+- **Selectable entries.** Only the defs in the compiled source itself are
+  selectable as entries, by their bare names; imported library defs are callable
+  from the entry's body but are not themselves selectable via `entry_name=`. A
   compiled entry's `input_names` are its own parameter names; consult them (do not
   assume order).
 - **Rank-0 scalars.** A tensor-in / scalar-out entry (e.g. a reduce to a `tensor[f32]`)

@@ -12,12 +12,14 @@ for the environment prerequisites and the Shoals-specific note (the published
 Shoals 0.23.1 artifact fails HEAD's `with seed(...)` int64 rule — tracked as
 chelis#825).
 
-Run (from the repo root, with the bindings installed into `.venv`):
+Run (from the repo root, with the bindings installed into `py/.venv` -- the
+same venv the cargo driver in crates/chelis-python/tests/manual_reef_context.rs
+installs into and asserts):
 
-    export DYLD_LIBRARY_PATH="$(.venv/bin/python -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR"))')"
+    export DYLD_LIBRARY_PATH="$(py/.venv/bin/python -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR"))')"
     export CHELIS_RUNTIME_DIR="$PWD/target/agents/<name>/debug"   # dir with libchelis_runtime.a
-    export CHELIS_TOOLCHAIN=0.16.1
-    .venv/bin/python bindings/python/tests/manual_reef_context.py
+    export CHELIS_ORACLE_COMPILER_PIN="=<workspace version>"      # the cargo driver sets this
+    py/.venv/bin/python bindings/python/tests/manual_reef_context.py
 """
 
 import math

@@ -9,9 +9,13 @@
 //! kernel) — plus auto-discovery, the no-root regression, and scalar-entry
 //! rejection.
 //!
-//! Prerequisites (this workstation): the chelis toolchain `0.16.1` installed
-//! (`~/.chelis`) with its reef registry populated, `uv`, and a built
-//! `libchelis_runtime.a` discoverable via `CHELIS_RUNTIME_DIR`.
+//! Prerequisites (this workstation): a populated local reef registry
+//! (`~/.chelis/reef`) containing `chelis-std 0.4.0`, `uv`, `py/.venv`, and a
+//! built `libchelis_runtime.a` discoverable via `CHELIS_RUNTIME_DIR`. No
+//! installed toolchain or `CHELIS_TOOLCHAIN` is involved: the bindings embed
+//! the DEV compiler in-process, and the temp project pins the workspace
+//! version (see `CHELIS_ORACLE_COMPILER_PIN` below); the registry is the only
+//! artifact borrowed from a toolchain install.
 //!
 //! Manual command (from the repo root; the first temp-project context compile
 //! takes tens of seconds):
@@ -20,7 +24,6 @@
 //! # bindings installed into py/.venv, runtime staticlib on CHELIS_RUNTIME_DIR
 //! cargo build -p chelis-runtime --target-dir target/agents/<name>
 //! export CHELIS_RUNTIME_DIR="$PWD/target/agents/<name>/debug"
-//! export CHELIS_TOOLCHAIN=0.16.1
 //! export DYLD_LIBRARY_PATH="$(py/.venv/bin/python -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR"))')"
 //! cargo test -p chelis-python --test manual_reef_context -- --ignored
 //! ```
