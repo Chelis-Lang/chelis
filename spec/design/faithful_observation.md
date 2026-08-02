@@ -843,14 +843,20 @@ visible.
 exit 0 with the final line `PHASE 3 ORACLE: PASS`. It runs the shared policy
 and numbered-spec tripwire, the full current `parity.rs` plus rejected-cell
 corpus, and `eval_agreement.rs`; it also freezes each suite's test inventory,
-comparator adoption, forbidden legacy f64/epsilon paths, and ignore ledger.
-The eval/C suite emits one runtime receipt per required behavior while the
-oracle runs and the oracle requires the exact receipt set, so a named test
-with an empty body is red. Two required behavioral canaries perturb the
-compiled observation before the shared comparator and present an adjacent
-f32 result while the evaluator is marked nonconforming; they prove that the
-compiled bytes reach the decision and that chelis#897 blocks tolerance,
-rather than relying on source-token presence.
+comparator adoption, forbidden legacy f64/epsilon paths, ignore ledger, and
+the exact reviewed definition of every required Rust test. The definition
+digests are a guard artifact: changing one requires independent evidence for
+the replacement behavior, and changing the digest merely to accept a test
+edit is not a repair. This makes an emptied parity row, an emptied rejected-cell
+driver, or an eval test that emits a forged producer-authored receipt fail
+before its suite runs. Eval/C receipts remain runtime-entry and multiplicity
+evidence; they are not trusted as evidence of their own free-form detail.
+Two digest-locked behavioral canaries perturb the compiled observation before
+the shared comparator and present an adjacent f32 result while the evaluator
+is marked nonconforming; together with the exact operation-identity canary,
+they prove that compiled bytes reach the decision, the real IR op selects the
+tolerance, and chelis#897 blocks tolerance rather than relying on source-token
+presence.
 The sole allowed ignore is
 `parity_transformer_block_library_only`, whose exact reason is the
 environmental system-CBLAS prerequisite. There are no value-divergence
