@@ -24,11 +24,30 @@
 use std::process::Command;
 
 use chelis_runtime::{
-    chelis_list_empty, chelis_list_extend, chelis_list_push, chelis_list_retain,
-    chelis_value_from_int64,
+    chelis_list_empty, chelis_list_extend, chelis_list_push, chelis_list_release,
+    chelis_list_retain, chelis_list_with_capacity, chelis_value_from_int64,
 };
 
 const CHILD_CASE_ENV: &str = "CHELIS_LIST_EXCLUSIVITY_CHILD_CASE";
+
+fn assert_child_refuses(case: &str, diagnostic: &str) {
+    let test_binary = std::env::current_exe().expect("current test binary");
+    let output = Command::new(&test_binary)
+        .args(["--exact", "shared_list_mutation_child", "--nocapture"])
+        .env(CHILD_CASE_ENV, case)
+        .output()
+        .unwrap_or_else(|error| panic!("run invalid-input child `{case}`: {error}"));
+
+    assert!(
+        !output.status.success(),
+        "invalid-input case `{case}` returned success; its boundary guard did not fire"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(diagnostic),
+        "invalid-input case `{case}` terminated without its branded diagnostic:\n{stderr}"
+    );
+}
 
 /// The child half. Builds a list, takes a second reference so
 /// `refcount == 2`, and drives the mutator that must refuse it. Each arm
@@ -39,24 +58,60 @@ fn shared_list_mutation_child() {
         return;
     };
     unsafe {
-        let list = chelis_list_empty();
-        // The second owner. This is the condition the guard exists for:
-        // pushing now would mutate a view someone else still holds.
-        chelis_list_retain(list);
-
         match case.as_str() {
             "push" => {
+                let list = chelis_list_empty();
+                // The second owner. This is the condition the guard exists for:
+                // pushing now would mutate a view someone else still holds.
+                chelis_list_retain(list);
                 chelis_list_push(list, chelis_value_from_int64(1));
             }
             "extend" => {
+                let list = chelis_list_empty();
+                chelis_list_retain(list);
                 let src = chelis_list_empty();
                 chelis_list_push(src, chelis_value_from_int64(2));
                 chelis_list_extend(list, src);
             }
+            "negative_capacity" => {
+                chelis_list_with_capacity(-1);
+            }
+            "push_null" => {
+                chelis_list_push(std::ptr::null_mut(), chelis_value_from_int64(1));
+            }
+            "extend_null" => {
+                chelis_list_extend(std::ptr::null_mut(), std::ptr::null());
+            }
+            "self_extend" => {
+                let list = chelis_list_empty();
+                chelis_list_extend(list, list);
+            }
             other => panic!("unknown child case {other}"),
         }
     }
-    panic!("shared-list case `{case}` returned instead of terminating");
+    panic!("guarded child case `{case}` returned instead of terminating");
+}
+
+#[test]
+fn list_capacity_refuses_negative_values() {
+    assert_child_refuses(
+        "negative_capacity",
+        "chelis_list_with_capacity requires non-negative capacity",
+    );
+}
+
+#[test]
+fn in_place_list_mutators_refuse_null_destinations() {
+    assert_child_refuses("push_null", "chelis_list_push on a null list");
+    assert_child_refuses("extend_null", "chelis_list_extend on a null list");
+}
+
+#[test]
+fn list_extend_refuses_source_aliasing_destination() {
+    assert_child_refuses(
+        "self_extend",
+        "chelis_list_extend source aliases destination",
+    );
 }
 
 #[test]
@@ -106,5 +161,7 @@ fn exclusively_owned_lists_accept_in_place_mutation() {
             3,
             "an exclusively owned list must accept push and extend"
         );
+        chelis_list_release(src);
+        chelis_list_release(list);
     }
 }

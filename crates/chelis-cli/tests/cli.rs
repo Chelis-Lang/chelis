@@ -1306,6 +1306,54 @@ fn build_c_runs_iter_foundation_and_matches_eval_output() {
         .assert()
         .success();
 
+    let generated =
+        fs::read_to_string(out_dir.join("iter_foundation.c")).expect("read generated iter C");
+    let runtime_header =
+        fs::read_to_string(out_dir.join("chelis_runtime.h")).expect("read copied runtime header");
+
+    for symbol in [
+        "chelis_list_with_capacity",
+        "chelis_list_push",
+        "chelis_list_extend",
+    ] {
+        assert!(
+            !runtime_header.contains(symbol),
+            "emitter-internal accumulator `{symbol}` must not enter the published C header"
+        );
+    }
+
+    for declaration in [
+        "chelis_list *chelis_list_with_capacity(int64_t capacity);",
+        "void chelis_list_push(chelis_list *list, chelis_value value);",
+        "void chelis_list_extend(chelis_list *list, const chelis_list *src);",
+    ] {
+        assert!(
+            generated.contains(declaration),
+            "generated C must privately declare `{declaration}`"
+        );
+    }
+
+    for (symbol, expected_calls) in [
+        ("chelis_list_with_capacity(", 6),
+        ("chelis_list_push(", 5),
+        ("chelis_list_extend(", 1),
+    ] {
+        let occurrences = generated.matches(symbol).count();
+        assert_eq!(
+            occurrences - 1,
+            expected_calls,
+            "iter_foundation must exercise every in-place combinator path for `{symbol}`"
+        );
+    }
+    assert!(
+        !generated.contains(" = chelis_list_append("),
+        "compiled combinator loops must not rebuild accumulators with list_append"
+    );
+    assert!(
+        !generated.contains(" = chelis_list_concat("),
+        "compiled flat_map must not rebuild its accumulator with list_concat"
+    );
+
     let eval_stdout = Command::cargo_bin("chelis")
         .expect("binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
@@ -8930,13 +8978,17 @@ fn build_c_list_combinator_program_has_zero_definitely_lost_under_valgrind() {
         vg_stdout.contains("total = 18.0"),
         "combinator pipeline produced wrong output under valgrind:\n{vg_stdout}"
     );
+    let no_definitely_lost = vg_stderr.contains("definitely lost: 0 bytes in 0 blocks")
+        || vg_stderr.contains("All heap blocks were freed -- no leaks are possible");
     assert!(
-        vg_stderr.contains("definitely lost: 0 bytes in 0 blocks"),
+        no_definitely_lost,
         "chelis-built map/filter program must have zero definitely-lost \
          bytes under valgrind (issue #943); valgrind reported:\n{vg_stderr}"
     );
+    let no_suppressed_errors = vg_stderr.contains("suppressed: 0 bytes in 0 blocks")
+        || vg_stderr.contains("(suppressed: 0 from 0)");
     assert!(
-        vg_stderr.contains("suppressed: 0 bytes in 0 blocks"),
+        no_suppressed_errors,
         "the #943 leak oracle must run with NO suppressions; \
          valgrind reported:\n{vg_stderr}"
     );

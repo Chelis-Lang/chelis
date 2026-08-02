@@ -291,14 +291,6 @@ chelis_list *chelis_list_empty(void);
 chelis_list *chelis_list_from_values(const chelis_value *items, int64_t len);
 chelis_value chelis_list_index(const chelis_list *list, int64_t index);
 chelis_list *chelis_list_append(const chelis_list *list, chelis_value value);
-/* chelis#943: the in-place accumulator entry points
- * (chelis_list_with_capacity / chelis_list_push / chelis_list_extend) are
- * deliberately NOT published here. They are emitter-internal ABI -- the C
- * backend declares them in its own emitted preamble -- because they exist
- * solely for compiler-owned accumulators whose exclusivity (refcount 1)
- * the emitter proves. Publishing them would grow the public surface
- * chelis#893 is shrinking and hand shells a mutation API whose safety
- * argument they cannot make. */
 chelis_list *chelis_list_concat(const chelis_list *lhs, const chelis_list *rhs);
 chelis_list *chelis_list_take(const chelis_list *list, int64_t count);
 chelis_list *chelis_list_drop(const chelis_list *list, int64_t count);

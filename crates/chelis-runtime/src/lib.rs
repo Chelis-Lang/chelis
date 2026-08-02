@@ -1575,7 +1575,11 @@ pub unsafe extern "C" fn chelis_list_append(
 
 #[no_mangle]
 pub unsafe extern "C" fn chelis_list_with_capacity(capacity: i64) -> *mut chelis_list {
-    let capacity = if capacity > 0 { capacity as usize } else { 0 };
+    if capacity < 0 {
+        runtime_fail!("chelis_list_with_capacity requires non-negative capacity");
+    }
+    let capacity = usize::try_from(capacity)
+        .unwrap_or_else(|_| runtime_fail!("chelis_list_with_capacity exceeds platform size"));
     Box::into_raw(Box::new(chelis_list {
         refcount: 1,
         items: Vec::with_capacity(capacity),
@@ -1602,6 +1606,9 @@ pub unsafe extern "C" fn chelis_list_extend(list: *mut chelis_list, src: *const 
     // In-place concat counterpart of chelis_list_push (chelis#943).
     if list.is_null() {
         runtime_fail!("chelis_list_extend on a null list");
+    }
+    if std::ptr::eq(list as *const chelis_list, src) {
+        runtime_fail!("chelis_list_extend source aliases destination");
     }
     if (*list).refcount != 1 {
         runtime_fail!("chelis_list_extend requires exclusive ownership (refcount 1)");
@@ -3937,22 +3944,15 @@ mod tests {
     fn list_push_appends_in_place_with_amortized_growth() {
         unsafe {
             let list = chelis_list_with_capacity(2);
+            assert!((*list).items.capacity() >= 2);
             chelis_list_push(list, chelis_value_from_int64(1));
             chelis_list_push(list, chelis_value_from_int64(2));
             chelis_list_push(list, chelis_value_from_int64(3));
             assert_eq!(chelis_list_len(list), 3);
+            assert!((*list).items.capacity() >= 3);
             let item = chelis_list_index(list, 2);
             assert_eq!(chelis_value_as_int64(item), 3);
             chelis_value_release(item);
-            chelis_list_release(list);
-        }
-    }
-
-    #[test]
-    fn list_with_capacity_negative_is_empty() {
-        unsafe {
-            let list = chelis_list_with_capacity(-5);
-            assert_eq!(chelis_list_len(list), 0);
             chelis_list_release(list);
         }
     }
@@ -3976,14 +3976,16 @@ mod tests {
         unsafe {
             let dst = chelis_list_with_capacity(0);
             chelis_list_push(dst, chelis_value_from_int64(1));
-            let items = [chelis_value_from_int64(7), chelis_value_from_int64(8)];
+            let value = chelis_value_from_string(runtime_str("retained"));
+            let items = [chelis_value_from_int64(7), value];
             let src = chelis_list_from_values(items.as_ptr(), 2);
+            chelis_value_release(value);
             chelis_list_extend(dst, src);
             assert_eq!(chelis_list_len(dst), 3);
-            let last = chelis_list_index(dst, 2);
-            assert_eq!(chelis_value_as_int64(last), 8);
-            chelis_value_release(last);
             chelis_list_release(src);
+            let last = chelis_list_index(dst, 2);
+            assert_eq!(string_text(chelis_value_as_string(last)), "retained");
+            chelis_value_release(last);
             chelis_list_release(dst);
         }
     }

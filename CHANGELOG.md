@@ -6,6 +6,14 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Compiled list combinators grow accumulators in place (part of chelis#943).**
+  The C backend now gives `map`, `filter`, `scan`, `partition`, and `flat_map`
+  exclusive, pre-sized accumulators instead of rebuilding a list for every
+  element. Runtime guards preserve immutable-list semantics and reject invalid
+  capacities, shared destinations, and self-extension.
+
 ## [0.18.1] — 2026-08-01
 
 ### Added
