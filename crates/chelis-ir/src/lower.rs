@@ -3767,11 +3767,20 @@ fn symbolic_dim_var_name(expr: &Expr) -> Option<String> {
 /// runtime tensor literal and prints the result.
 ///
 /// `shape` is the rank-N dimension list (row-major). `data` is the
-/// row-major-flat float buffer of length `shape.iter().product()`.
+/// row-major-flat typed scalar buffer of length `shape.iter().product()`.
 #[derive(Debug, Clone, PartialEq)]
 struct LiteralToTensor {
     shape: Vec<usize>,
-    data: Vec<f64>,
+    data: Vec<StaticNumericLeaf>,
+}
+
+/// A checked scalar literal after evaluating its explicit cast chain at each
+/// declared width. The private tag is load-bearing: an enclosing f64 tensor
+/// must widen an f32 leaf's stored value, not reinterpret its lexical f64.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct StaticNumericLeaf {
+    value: f64,
+    precision: Prim,
 }
 
 /// If `expr` is a `to_tensor(...)` application whose single argument
@@ -3826,7 +3835,7 @@ fn extract_cons_chain_tensor(expr: &Expr) -> Option<LiteralToTensor> {
     if let Some(scalars) = elements
         .iter()
         .map(|e| extract_numeric_leaf(e))
-        .collect::<Option<Vec<f64>>>()
+        .collect::<Option<Vec<StaticNumericLeaf>>>()
     {
         return Some(LiteralToTensor {
             shape: vec![scalars.len()],
@@ -3864,50 +3873,95 @@ const MAX_STATIC_RECURSION_DEPTH: usize = 512;
 /// recursive cycles (k names at 512 each would otherwise stack k*512 levels).
 const MAX_TOTAL_INLINE_DEPTH: usize = 1024;
 
-/// Extract a numeric scalar from a Deep expression. Recognizes:
+/// Extract and width-finalize a numeric scalar from a checked Deep expression.
+/// Recognizes:
 ///   * `Atom::Int` / `Atom::Float` / `Atom::Bool`
 ///   * `(lit {} <Int|Float|Bool>)`
-///   * `(cast {} <Int|Float|Bool> <prim>)` (constant after cast is
-///     still a constant; the precision distinction is carried on the
-///     enclosing `to_tensor`'s type metadata, which the emit path
-///     uses for the lowered tensor's `precision` slot).
+///   * `(cast {} <Int|Float|Bool> <prim>)`, applying every f32/f64 cast in
+///     order instead of discarding the inner scalar's checked precision.
 ///   * `(app {} (var {} neg) <inner>)` (issue Chelis-Lang/chelis#218
 ///     R1 HIGH-1): surface negative literals like `-1.0` desugar to
 ///     `(app (var neg) (lit 1.0))`; the recognizer returns the
 ///     negated inner value. Nested casts and lits are handled by the
 ///     recursive call.
-fn extract_numeric_leaf(expr: &Expr) -> Option<f64> {
+fn extract_numeric_leaf(expr: &Expr) -> Option<StaticNumericLeaf> {
     match expr {
-        Expr::Atom(Atom::Int(n), _) => Some(*n as f64),
-        Expr::Atom(Atom::Float(f), _) => Some(*f),
-        Expr::Atom(Atom::Bool(b), _) => Some(if *b { 1.0 } else { 0.0 }),
+        Expr::Atom(Atom::Int(n), _) => Some(StaticNumericLeaf {
+            value: *n as f64,
+            precision: Prim::Int64,
+        }),
+        Expr::Atom(Atom::Float(f), _) => Some(StaticNumericLeaf {
+            value: *f,
+            precision: Prim::F64,
+        }),
+        Expr::Atom(Atom::Bool(b), _) => Some(StaticNumericLeaf {
+            value: if *b { 1.0 } else { 0.0 },
+            precision: Prim::Bool,
+        }),
         Expr::List(list, _) => match get_tag(list)? {
-            DeepTag::Lit => match list.elements.get(2)? {
-                Expr::Atom(Atom::Int(n), _) => Some(*n as f64),
-                Expr::Atom(Atom::Float(f), _) => Some(*f),
-                Expr::Atom(Atom::Bool(b), _) => Some(if *b { 1.0 } else { 0.0 }),
-                _ => None,
-            },
+            DeepTag::Lit => {
+                let (value, fallback) = match list.elements.get(2)? {
+                    Expr::Atom(Atom::Int(n), _) => (*n as f64, Prim::Int64),
+                    Expr::Atom(Atom::Float(f), _) => (*f, Prim::F64),
+                    Expr::Atom(Atom::Bool(b), _) => (if *b { 1.0 } else { 0.0 }, Prim::Bool),
+                    _ => return None,
+                };
+                let precision = expr_type_metadata(expr)
+                    .and_then(LowerCtx::try_extract_prim)
+                    .unwrap_or(fallback);
+                Some(StaticNumericLeaf {
+                    value: finalize_static_float_width(value, precision),
+                    precision,
+                })
+            }
             DeepTag::Cast => {
                 let inner = list.elements.get(2)?;
-                extract_numeric_leaf(inner)
+                let target = LowerCtx::try_extract_prim(list.elements.get(3)?)?;
+                let inner = extract_numeric_leaf(inner)?;
+                Some(StaticNumericLeaf {
+                    // This repair makes the active f32/f64 widths explicit.
+                    // Other targets retain the shortcut's prior f64-carrier
+                    // behavior until the dtype storage migration replaces it;
+                    // rejecting them here changes host/DAG routing.
+                    value: finalize_static_float_width(inner.value, target),
+                    precision: target,
+                })
             }
             DeepTag::App => {
                 // Negative literal: `-x` desugars to
-                // `(app (var neg) <inner>)`. The recognizer returns
-                // `-extract(inner)` so the literal recognizer sees
-                // through the desugared unary minus. Any other app
-                // shape is not a static literal.
+                // `(app (var neg) <inner>)`. Preserve the finalized inner
+                // precision while negating its value.
                 let callee = children(list).first()?;
                 if !expr_is_var_named(callee, "neg") {
                     return None;
                 }
                 let inner = children(list).get(1)?;
-                Some(-extract_numeric_leaf(inner)?)
+                let mut leaf = extract_numeric_leaf(inner)?;
+                leaf.value = -leaf.value;
+                Some(leaf)
             }
             _ => None,
         },
         _ => None,
+    }
+}
+
+/// Materialize the active f32/f64 value width in the private f64 carrier.
+/// Other primitive values retain the shortcut's pre-existing representation;
+/// the dtype storage migration owns their width-specific carrier semantics.
+fn finalize_static_float_width(value: f64, precision: Prim) -> f64 {
+    match precision {
+        Prim::F32 => (value as f32) as f64,
+        Prim::F64
+        | Prim::F16
+        | Prim::Bf16
+        | Prim::F8e4m3
+        | Prim::Int8
+        | Prim::Int16
+        | Prim::Int32
+        | Prim::Int64
+        | Prim::Bool
+        | Prim::String => value,
     }
 }
 
@@ -8604,13 +8658,10 @@ impl LowerCtx {
     fn emit_literal_tensor(&mut self, literal: &LiteralToTensor, ty: &TensorType) -> NodeId {
         let shape: Vec<DimInfo> = literal.shape.iter().map(|n| DimInfo::Lit(*n)).collect();
         let precision = ty.precision;
-        // chelis#864: `extract_numeric_leaf` necessarily reads Surf decimal
-        // literals into f64, but the host `to_tensor` path first constructs
-        // each checker-typed f32 scalar at f32 width.  Preserve that source
-        // value when this static lowering shortcut replaces the host path:
-        // otherwise `cast(to_tensor([0.1]), f64)` widens lexical f64 `0.1`
-        // instead of the stored f32 value `0.10000000149011612`, and the DAG
-        // root disagrees with `print` before rendering even begins.
+        // chelis#864: each `StaticNumericLeaf` has already evaluated its cast
+        // chain at the checked scalar widths. Materialize the enclosing tensor
+        // precision only after that step: f32 -> f64 widening must keep the f32
+        // stored value instead of recovering the lexical f64 decimal.
         //
         // This is deliberately the f32 literal-ingress repair only.  The
         // dtype-semantics Phase 1 per-dtype storage change owns f16/bf16 and
@@ -8620,11 +8671,11 @@ impl LowerCtx {
         let stored_data = literal
             .data
             .iter()
-            .map(|value| {
-                if precision == Prim::F32 {
-                    (*value as f32) as f64
+            .map(|leaf| {
+                if leaf.precision == precision {
+                    leaf.value
                 } else {
-                    *value
+                    finalize_static_float_width(leaf.value, precision)
                 }
             })
             .collect::<Vec<_>>();

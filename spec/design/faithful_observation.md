@@ -31,7 +31,10 @@ acceptance remain under [#912]/[#1023], not this formatter class. The
 cast-constructed f64 root cell [#864], surfaced by PR #863, is repaired
 and un-ignored after a post-Phase-3 re-diagnosis: the root tag was already
 F64, but the static `to_tensor` DAG shortcut widened lexical decimals
-without first materializing its F32 source values. Phase 3
+without first materializing each typed leaf and cast chain at its declared
+width. The repair carries a private `{value, Prim}` leaf through extraction,
+so both an enclosing f32 tensor and an explicitly f32 scalar widened into an
+f64 tensor preserve the same stored value as the host path. Phase 3
 authors the [05-OBS-3] table, moves both value harnesses and the rejected-cell
 corpus onto `chelis_types::agreement`, and supplies one executable acceptance
 oracle. Its implementation is complete here; merge/CI acceptance is recorded
@@ -679,9 +682,12 @@ today - that divergence is [#729]'s subject matter and stays visible
 accepted at exit 0 with the final line `PHASE 2 ORACLE: PASS`. It is the
 executable form of what this phase used to state as prose, plus the leg
 that prose could not carry. Its obligations:
+`eval_f64_cast_tensor_root_renders_stored_width` ([#864]),
 `c_int64_tensor_print_is_exact_above_2p53` ([#723]) and
 `c_print_of_f16_tensor_prints_f16_values` / `c_to_list_of_f16_tensor_works`
-([#716]) present, un-ignored, and green; the
+([#716]) present, green, and carrying exactly one unconditional `#[test]`
+attribute. A `cfg`, `cfg_attr`, `ignore`, or unrecognized attribute shape
+around any repaired row is a structural failure before the suites run. The
 `c_dag_kernels_compute_correct_f16_bits_despite_print` byte-decode lock
 retired per its own instructions (replaced by the direct print row); the
 round-trip harness green on every exit in both lanes **except the
@@ -730,7 +736,7 @@ check).
 Scope, stated rather than assumed: the ignore-inventory equality covers
 the observation harness, this plan's own instrument. The sibling matrix
 files carry `#[ignore]`d cells owned by [#714]/[#717]/[#724]/[#729];
-for those the oracle asserts only that the three rows named above are
+for those the oracle asserts only that the three matrix rows named above are
 un-ignored and green.
 
 **Default CI does NOT run this oracle** (same standing as [#730]'s Phase
@@ -792,8 +798,13 @@ shortest). Both are [#729]-family value/capacity repairs; rendering is
 not the fix site for either. The chelis#864 follow-up re-diagnosed its
 current exact cause: the root tag was already F64, while static
 `to_tensor` lowering retained lexical f64 decimals in an F32 source node
-and widened the wrong stored value. Finalizing that F32 literal ingress
-repaired the cell, so it is now un-ignored and absent from the ledger;
+and widened the wrong stored value. Finalizing an enclosing F32 tensor was
+necessary but not sufficient: a scalar `f32 -> f64` cast inside an enclosing
+f64 `to_tensor` bypassed that check. Static literal extraction now evaluates
+every f32/f64 leaf/cast chain at its typed width and carries the leaf precision
+into tensor materialization. The cell is un-ignored, absent from the known-red
+ledger, and present in the separate must-run inventory whose exact
+unconditional attribute shape is checked;
 [#865] remains annexed.
 (5) The phase's oracle became a script rather than a prose conjunction,
 after PR #863's exact-head red team (F3) observed that the default
@@ -805,7 +816,8 @@ not visible from a green suite. The ledger makes the boundary
 executable, and its unexpectedly-green leg turns each cell into
 [#729]'s exit-criteria instrument: the day a value or box-width repair
 lands, this oracle fails until the cell is un-ignored. That transition
-has now occurred for [#864]; its row and ignore left together. The
+has now occurred for [#864]; its ignore and known-red row left together,
+while the repaired test entered the must-run inventory. The
 accompanying status texts here and at spec/05 §8 were narrowed in the
 same change set to say "conformant except the enumerated annexed cells"
 rather than leading with an unqualified conformance claim.
@@ -911,7 +923,8 @@ and every remaining value divergence is a failure rather than tolerance.
   open on that side and each already has its named cell: the runtime
   box's single `CHELIS_VALUE_FLOAT64` tag and `f64_` slot ([#865]),
   eval's separable `Vec<f64>` plus `precision: Prim` fields ([#717];
-  [#864]'s narrower static-literal ingress instance is repaired), and the
+  [#864]'s narrower static-literal ingress instance now carries a private
+  typed leaf through every f32/f64 cast before entering that storage), and the
   wire's `Vec<f64>` tensor data plus lone `Float64`
   scalar variant ([#686]).
   **Phase 2's FORMATTING is forward-compatible with that payload by

@@ -195,6 +195,22 @@ class UnignoredAndRetiredTests(unittest.TestCase):
             violations,
         )
 
+    def test_a_conditionally_reignored_repaired_row_is_a_violation(self) -> None:
+        sources = self._shipped_sources()
+        sources[oracle.HARNESS_SOURCE] = sources[oracle.HARNESS_SOURCE].replace(
+            "#[test]\nfn eval_f64_cast_tensor_root_renders_stored_width() {",
+            "#[test]\n"
+            '#[cfg_attr(not(any()), ignore = "silently re-ignore chelis#864")]\n'
+            "fn eval_f64_cast_tensor_root_renders_stored_width() {",
+        )
+
+        violations = oracle.unignored_violations(sources)
+
+        self.assertTrue(
+            any("eval_f64_cast_tensor_root_renders_stored_width" in v for v in violations),
+            violations,
+        )
+
     def test_a_deleted_oracle_row_is_a_violation(self) -> None:
         sources = self._shipped_sources()
         sources[oracle.NARROW_MATRIX_SOURCE] = sources[
