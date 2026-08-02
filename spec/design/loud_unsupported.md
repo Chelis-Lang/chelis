@@ -413,12 +413,15 @@ implements it with the plan's own §C4.1 move plus a sealed producer -
 a public closed enum alone is NOT the seal, because a public variant
 remains directly constructible:
 
-**Delivery status (2026-08-01): implemented as a focused Phase 3 slice.**
+**Delivery status (2026-08-02): implemented as a focused Phase 3 slice.**
 `DiagnosticKind`, the sealed producer/wire split, the typed general-kind
 projection, the compile-fail controls, the two same-crate planted privacy
 mutations, and the added-kind exhaustiveness mutation now execute through
-`scripts/diagnostic_kind_oracle.py`. That runner is the C2.2 component oracle,
-not a claim that Phase 3's gate work is complete.
+`scripts/diagnostic_kind_oracle.py`. The required
+`Diagnostic Kind Mutation Oracle` job runs that actual mutation runner when
+any owner, oracle, detector, or workflow input changes; its path detector is
+self-triggering and fails safe on an unreadable change set. That runner is the
+C2.2 component oracle, not a claim that Phase 3's gate work is complete.
 The old Reef message classifier had no typed cause to justify its
 `package_not_found` / `lockfile_error` guesses, so those substring-invented
 spellings collapse to the honest `reef_error` kind rather than entering the
@@ -459,12 +462,14 @@ closed vocabulary as false precision.
   builds the forged value without touching the chokepoint (executed in
   the 2026-07-30 addendum). The producer type therefore derives
   `Serialize` ONLY. Wire READING moves to a separate consumer-side
-  type (`WireDiagnostic`, the `deep_path` module's side of the
-  schema) that derives `Deserialize` for tests, tooling, and shells -
-  and the envelope-assembly APIs (`ApiSuccess`/`ApiFailure`
-  construction) accept only the producer type, so a deserialized
-  value cannot re-enter the production pipeline: there is no
-  `WireDiagnostic -> Diagnostic` conversion. **Threat-model
+  graph (`WireDiagnostic`, `WireApiSuccess`/`WireApiFailure`,
+  `WireApiEnvelope`, `WireCheckResult`, `WireBatchResult`, and
+  `WireBatchResultEnvelope`) that derives `Deserialize` for tests, tooling,
+  and shells. The complete Tide response and batch shapes therefore remain
+  decodable without placing `Deserialize` on a producer carrier. The
+  envelope-assembly APIs accept only producer types, so a deserialized value
+  cannot re-enter the production pipeline: there is no consumer-to-producer
+  conversion. **Threat-model
   calibration, stated:** no type system stops a process from printing
   arbitrary bytes to stdout; what this seals is the PRODUCTION
   pipeline - every diagnostic that reaches the wire through the
@@ -487,7 +492,8 @@ compiler-api module must fail the workspace check, byte-restored
 after (the Phase 2 oracle's planted style, which is how a same-crate
 privacy violation can be continuously proven at all - a
 `compile_fail` doctest compiles as a foreign crate and cannot see
-in-crate privacy); the `format!("{:?}")` and message-substring
+in-crate privacy). The change-path CI job executes these mutations themselves,
+not merely the Python runner's unit tests; the `format!("{:?}")` and message-substring
 dispatch sites are gone.
 The wire field itself remains a `String` - the enum governs producers,
 the string is the rendering - and nothing here adds `Serialize` or
@@ -1713,8 +1719,9 @@ mislabel).
    `chelis-vocab`, the `stage_error` signature change, the
    `unsupported_feature`-only-via-`unsupported_stage_error` rule, the
    producer/wire type split (`Serialize`-only producer with the
-   private `kind`; `Deserialize`-only `WireDiagnostic` that no
-   envelope-assembly API accepts), the wire-spelling lock test, and
+   private `kind`; a complete `Deserialize`-only consumer envelope/check/batch
+   graph that no envelope-assembly API accepts), the wire-spelling lock test,
+   the required change-path mutation job, and
    removal of the `format!("{:?}")` and message-substring kind paths.
 4. **The typed rejection authority** (§C2.1): the 33-site `hint ->
    RejectionAuthority` migration, with the [#687] rejected-cells corpus

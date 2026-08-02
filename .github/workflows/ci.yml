@@ -35,6 +35,7 @@ jobs:
     outputs:
       docs_only: ${{ steps.detect.outputs.docs_only }}
       rejection_authority_changed: ${{ steps.detect.outputs.rejection_authority_changed }}
+      diagnostic_kind_changed: ${{ steps.detect.outputs.diagnostic_kind_changed }}
     steps:
       # Shallow checkout (depth 1); the detect step deepens to the PR
       # commit range. GitHub Actions expressions have no arithmetic, so
@@ -57,6 +58,8 @@ jobs:
             # push-to-main (or any non-PR event) always runs the full
             # suite; do not skip heavy jobs off a PR diff.
             echo "docs_only=false" >> "$GITHUB_OUTPUT"
+            echo "rejection_authority_changed=false" >> "$GITHUB_OUTPUT"
+            echo "diagnostic_kind_changed=false" >> "$GITHUB_OUTPUT"
             echo "non-PR event ($EVENT_NAME): docs_only=false (full suite)"
             exit 0
           fi
@@ -98,6 +101,46 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: .venv/bin/python scripts/validate_rejection_issue_manifest.py
+
+  # C2.2's producer seal depends on same-crate privacy, which an external
+  # compile-fail doctest cannot distinguish from pub(crate). Run the actual
+  # controlled mutations whenever any owner/oracle/control input changes.
+  diagnostic-kind-oracle:
+    name: Diagnostic Kind Mutation Oracle
+    runs-on: ubuntu-latest
+    needs: [changes]
+    if: ${{ !cancelled() && github.event_name == 'pull_request' && (needs.changes.result != 'success' || needs.changes.outputs.diagnostic_kind_changed != 'false') }}
+    permissions:
+      contents: read
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+      CARGO_TARGET_DIR: target/diagnostic-kind-oracle
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Free disk space (Ubuntu)
+        uses: ./.github/actions/free-disk-space
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+
+      - name: Create uv-managed venv + wire libpython rpath
+        run: python3 scripts/ci_setup_uv_python.py
+
+      - name: Cache cargo registry and mutation-oracle build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target/diagnostic-kind-oracle
+
+      - name: Run C2.2 controlled mutations
+        run: .venv/bin/python scripts/diagnostic_kind_oracle.py
 
   lint-and-unit:
     name: Lint and Unit Tests (Linux)

@@ -124,6 +124,34 @@ class RejectionAuthorityChangeTests(unittest.TestCase):
         self.assertTrue(m.rejection_authority_changed([]))
 
 
+class DiagnosticKindChangeTests(unittest.TestCase):
+    def test_every_oracle_owner_and_control_triggers_the_mutation_job(self):
+        for path in (
+            ".github/workflows/ci.yml",
+            "crates/chelis-compiler-api/src/context.rs",
+            "crates/chelis-compiler-api/src/lib.rs",
+            "crates/chelis-compiler-api/src/schema.rs",
+            "crates/chelis-compiler-api/tests/diagnostic_kind_pipeline.rs",
+            "crates/chelis-vocab/src/lib.rs",
+            "scripts/ci_detect_docs_only.py",
+            "scripts/diagnostic_kind_oracle.py",
+            "scripts/test_ci_detect_docs_only.py",
+            "scripts/test_diagnostic_kind_oracle.py",
+            "scripts/test_gate.py",
+        ):
+            self.assertTrue(m.diagnostic_kind_changed([path]), path)
+
+    def test_unrelated_paths_do_not_trigger_the_mutation_job(self):
+        self.assertFalse(
+            m.diagnostic_kind_changed(
+                ["README.md", "crates/chelis-ir/src/lower.rs"]
+            )
+        )
+
+    def test_empty_change_set_fails_safe(self):
+        self.assertTrue(m.diagnostic_kind_changed([]))
+
+
 class EmitTests(unittest.TestCase):
     def test_emit_writes_github_output_and_stdout(self):
         with tempfile.TemporaryDirectory() as d:
@@ -133,15 +161,23 @@ class EmitTests(unittest.TestCase):
             try:
                 buf = io.StringIO()
                 with redirect_stdout(buf):
-                    m._emit(True, False)
+                    m._emit(True, False, False)
                 self.assertEqual(
                     buf.getvalue().splitlines(),
-                    ["docs_only=true", "rejection_authority_changed=false"],
+                    [
+                        "docs_only=true",
+                        "rejection_authority_changed=false",
+                        "diagnostic_kind_changed=false",
+                    ],
                 )
                 with open(out_path, encoding="utf-8") as fh:
                     self.assertEqual(
                         fh.read().splitlines(),
-                        ["docs_only=true", "rejection_authority_changed=false"],
+                        [
+                            "docs_only=true",
+                            "rejection_authority_changed=false",
+                            "diagnostic_kind_changed=false",
+                        ],
                     )
             finally:
                 if old is None:
@@ -154,10 +190,14 @@ class EmitTests(unittest.TestCase):
         try:
             buf = io.StringIO()
             with redirect_stdout(buf):
-                m._emit(False, True)
+                m._emit(False, True, True)
             self.assertEqual(
                 buf.getvalue().splitlines(),
-                ["docs_only=false", "rejection_authority_changed=true"],
+                [
+                    "docs_only=false",
+                    "rejection_authority_changed=true",
+                    "diagnostic_kind_changed=true",
+                ],
             )
         finally:
             if old is not None:
@@ -176,7 +216,11 @@ class MainTests(unittest.TestCase):
             self.assertEqual(rc, 0)
             self.assertEqual(
                 buf.getvalue().splitlines(),
-                ["docs_only=true", "rejection_authority_changed=false"],
+                [
+                    "docs_only=true",
+                    "rejection_authority_changed=false",
+                    "diagnostic_kind_changed=false",
+                ],
             )
         finally:
             sys.stdin = old_stdin

@@ -2201,6 +2201,10 @@ fn reject_unsized_named_dims(dag: &Dag, target: &'static str) -> Result<()> {
                         node.id.0
                     ),
                     target,
+                    chelis_types::unimplemented_rejection!(
+                        600,
+                        "dynamic output shapes do not yet have a backend representation"
+                    ),
                 ));
             }
         }
@@ -2250,6 +2254,10 @@ fn reject_symbolic_windowed_reduce(dag: &Dag, target: &'static str) -> Result<()
                         node.id.0
                     ),
                     target,
+                    chelis_types::unimplemented_rejection!(
+                        600,
+                        "the runtime-derived window output extent needs a dynamic output shape"
+                    ),
                 ));
             }
         }
@@ -2287,6 +2295,10 @@ fn reject_unsupported_reduce_window_precision(dag: &Dag, target: &'static str) -
                     prec.name(),
                 ),
                 target,
+                chelis_types::unimplemented_rejection!(
+                    729,
+                    "the dtype capability table and typed window kernels do not yet cover this cell"
+                ),
             ));
         }
     }
@@ -2309,15 +2321,16 @@ fn host_only_builtin_error(name: &str, target: CompileTarget) -> CompilerError {
     unsupported_stage_error(unsupported)
 }
 
-fn unsupported_gate_error(message: impl Into<String>, target: &'static str) -> CompilerError {
+fn unsupported_gate_error(
+    message: impl Into<String>,
+    target: &'static str,
+    authority: chelis_types::unsupported::RejectionAuthority,
+) -> CompilerError {
     unsupported_stage_error(chelis_types::unsupported::Unsupported::new(
         chelis_types::unsupported::UnsupportedKind::Construct(message.into()),
         format!("`chelis build --target {target}` early capability gate"),
         chelis_types::unsupported::Stage::Codegen(target),
-        chelis_types::unimplemented_rejection!(
-            959,
-            "the typed gate inventory tracks this capability rejection (chelis#959)"
-        ),
+        authority,
     ))
 }
 
@@ -2537,6 +2550,10 @@ fn reject_unsupported_hip_ops(dag: &Dag) -> Result<()> {
                         node.id.0
                     ),
                     "hip",
+                    chelis_types::unimplemented_rejection!(
+                        957,
+                        "the HIP windowed-reduction emitter is still an unimplemented panic-family site"
+                    ),
                 ));
             }
             RiscOp::ReduceWindowGrad { .. } => {
@@ -2548,6 +2565,10 @@ fn reject_unsupported_hip_ops(dag: &Dag) -> Result<()> {
                         node.id.0
                     ),
                     "hip",
+                    chelis_types::unimplemented_rejection!(
+                        957,
+                        "the HIP windowed-reduction adjoint emitter is still an unimplemented panic-family site"
+                    ),
                 ));
             }
             RiscOp::OneHot { .. } => {
@@ -2558,6 +2579,10 @@ fn reject_unsupported_hip_ops(dag: &Dag) -> Result<()> {
                         node.id.0
                     ),
                     "hip",
+                    chelis_types::deliberate_rejection!(
+                        "[05-SPARSE-2]",
+                        "OneHot is internal-only and must be consumed before backend emission"
+                    ),
                 ));
             }
             RiscOp::Shape { .. } => {
@@ -2569,6 +2594,10 @@ fn reject_unsupported_hip_ops(dag: &Dag) -> Result<()> {
                         node.id.0
                     ),
                     "hip",
+                    chelis_types::unimplemented_rejection!(
+                        513,
+                        "runtime symbolic-shape machinery is not available on the HIP device lane"
+                    ),
                 ));
             }
             // chelis#616: node-valued (runtime) movement bounds are C-only.
@@ -2581,6 +2610,10 @@ fn reject_unsupported_hip_ops(dag: &Dag) -> Result<()> {
                         node.id.0
                     ),
                     "hip",
+                    chelis_types::deliberate_rejection!(
+                        "[05-MOV-1]",
+                        "runtime movement bounds are defined on eval and C; use the C target"
+                    ),
                 ));
             }
             RiscOp::Pad { padding, .. } if padding.iter().any(pair_has_node_bound) => {
@@ -2591,6 +2624,10 @@ fn reject_unsupported_hip_ops(dag: &Dag) -> Result<()> {
                         node.id.0
                     ),
                     "hip",
+                    chelis_types::deliberate_rejection!(
+                        "[05-MOV-1]",
+                        "runtime movement bounds are defined on eval and C; use the C target"
+                    ),
                 ));
             }
             RiscOp::Stride { strides } if strides.iter().any(|s| s.node_input().is_some()) => {
@@ -2601,6 +2638,10 @@ fn reject_unsupported_hip_ops(dag: &Dag) -> Result<()> {
                         node.id.0
                     ),
                     "hip",
+                    chelis_types::deliberate_rejection!(
+                        "[05-MOV-1]",
+                        "runtime movement bounds are defined on eval and C; use the C target"
+                    ),
                 ));
             }
             RiscOp::Reshape { new_shape } if new_shape.iter().any(|d| d.node_input().is_some()) => {
@@ -2612,6 +2653,10 @@ fn reject_unsupported_hip_ops(dag: &Dag) -> Result<()> {
                         node.id.0
                     ),
                     "hip",
+                    chelis_types::deliberate_rejection!(
+                        "[05-MOV-1]",
+                        "runtime reshape targets are defined on eval and C; use the C target"
+                    ),
                 ));
             }
             RiscOp::Gather { .. } => {
@@ -2630,6 +2675,10 @@ fn reject_unsupported_hip_ops(dag: &Dag) -> Result<()> {
                             node.output_type.precision.name()
                         ),
                         "hip",
+                        chelis_types::unimplemented_rejection!(
+                            729,
+                            "the HIP sparse payload dtype cell is not implemented"
+                        ),
                     ));
                 }
                 if !matches!(
@@ -2644,6 +2693,10 @@ fn reject_unsupported_hip_ops(dag: &Dag) -> Result<()> {
                             indices.precision.name()
                         ),
                         "hip",
+                        chelis_types::deliberate_rejection!(
+                            "[05-SPARSE-1]",
+                            "sparse indices must use the specified int32 or int64 dtype"
+                        ),
                     ));
                 }
                 if !matches!(index_node.op, RiscOp::Load { .. }) {
@@ -2655,6 +2708,10 @@ fn reject_unsupported_hip_ops(dag: &Dag) -> Result<()> {
                             node.id.0, index_node.op
                         ),
                         "hip",
+                        chelis_types::unimplemented_rejection!(
+                            729,
+                            "non-load sparse index producers need typed integer HIP kernels"
+                        ),
                     ));
                 }
             }
@@ -2706,6 +2763,10 @@ fn reject_unsupported_hip_ops(dag: &Dag) -> Result<()> {
                             node.output_type.precision.name()
                         ),
                         "hip",
+                        chelis_types::unimplemented_rejection!(
+                            729,
+                            "the HIP sparse payload dtype cell is not implemented"
+                        ),
                     ));
                 }
                 if !matches!(
@@ -2720,6 +2781,10 @@ fn reject_unsupported_hip_ops(dag: &Dag) -> Result<()> {
                             indices.precision.name()
                         ),
                         "hip",
+                        chelis_types::deliberate_rejection!(
+                            "[05-SPARSE-1]",
+                            "sparse indices must use the specified int32 or int64 dtype"
+                        ),
                     ));
                 }
                 if !matches!(index_node.op, RiscOp::Load { .. }) {
@@ -2731,6 +2796,10 @@ fn reject_unsupported_hip_ops(dag: &Dag) -> Result<()> {
                             node.id.0, index_node.op
                         ),
                         "hip",
+                        chelis_types::unimplemented_rejection!(
+                            729,
+                            "non-load sparse index producers need typed integer HIP kernels"
+                        ),
                     ));
                 }
             }
@@ -2754,6 +2823,10 @@ fn reject_unsupported_hip_ops(dag: &Dag) -> Result<()> {
                         other.name()
                     ),
                     "hip",
+                    chelis_types::unimplemented_rejection!(
+                        729,
+                        "the HIP target dtype capability cell is not implemented"
+                    ),
                 ));
             }
         }
@@ -3727,6 +3800,76 @@ mod tests {
     }
 
     #[test]
+    fn hip_sparse_gather_rejects_float_indices_with_deciding_atom() {
+        let mut dag = Dag::new();
+        let values = dag.add_node(
+            RiscOp::Load {
+                name: "values".into(),
+            },
+            vec![],
+            tensor_type(vec![3, 2], chelis_types::types::Prim::F32),
+            None,
+        );
+        let indices = dag.add_node(
+            RiscOp::Load {
+                name: "indices".into(),
+            },
+            vec![],
+            tensor_type(vec![4], chelis_types::types::Prim::F32),
+            None,
+        );
+        let gather = dag.add_node(
+            RiscOp::Gather { axis: 0 },
+            vec![values, indices],
+            tensor_type(vec![4, 2], chelis_types::types::Prim::F32),
+            None,
+        );
+        dag.add_root(gather);
+
+        let err = reject_unsupported_hip_ops(&dag)
+            .expect_err("HIP must reject a sparse gather with float indices");
+        assert!(err.errors[0].message.contains("deliberate [05-SPARSE-1]:"));
+    }
+
+    #[test]
+    fn hip_internal_one_hot_rejection_names_specialization_invariant() {
+        let mut dag = Dag::new();
+        let one_hot = dag.add_node(
+            RiscOp::OneHot { vocab: 4 },
+            vec![],
+            tensor_type(vec![2, 4], chelis_types::types::Prim::F32),
+            None,
+        );
+        dag.add_root(one_hot);
+
+        let err =
+            reject_unsupported_hip_ops(&dag).expect_err("OneHot must not survive to HIP emission");
+        assert!(err.errors[0].message.contains("deliberate [05-SPARSE-2]:"));
+    }
+
+    #[test]
+    fn hip_shape_rejection_names_symbolic_shape_owner() {
+        let mut dag = Dag::new();
+        let input = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            tensor_type(vec![4], chelis_types::types::Prim::F32),
+            None,
+        );
+        let shape = dag.add_node(
+            RiscOp::Shape { axis: 0 },
+            vec![input],
+            tensor_type(vec![], chelis_types::types::Prim::Int32),
+            None,
+        );
+        dag.add_root(shape);
+
+        let err = reject_unsupported_hip_ops(&dag)
+            .expect_err("HIP must reject a runtime shape value node");
+        assert!(err.errors[0].message.contains("unimplemented chelis#513:"));
+    }
+
+    #[test]
     fn hip_sparse_gather_rejects_non_load_integer_index_producer() {
         let mut dag = Dag::new();
         let values = dag.add_node(
@@ -3756,6 +3899,7 @@ mod tests {
         let message = &err.errors[0].message;
         assert!(message.contains("indices to be loaded input tensors"));
         assert!(message.contains("Non-load integer index producers need integer HIP codegen"));
+        assert!(message.contains("unimplemented chelis#729:"));
     }
 
     #[test]
@@ -3796,6 +3940,7 @@ mod tests {
         let message = &err.errors[0].message;
         assert!(message.contains("indices to be loaded input tensors"));
         assert!(message.contains("Non-load integer index producers need integer HIP codegen"));
+        assert!(message.contains("unimplemented chelis#729:"));
     }
 
     // --- reduce_window: runtime-symbolic windowed axis is a build error ---
@@ -3854,6 +3999,7 @@ mod tests {
             "unexpected message: {message}"
         );
         assert!(message.contains("`seq`"), "unexpected message: {message}");
+        assert!(message.contains("unimplemented chelis#600:"));
     }
 
     #[test]
@@ -3951,6 +4097,7 @@ windowed = reduce_window_max(padded, [2], [1])
             message.contains("f32") && message.contains("reduce_window"),
             "unexpected message: {message}"
         );
+        assert!(message.contains("unimplemented chelis#729:"));
         assert_eq!(
             err.errors[0].kind(),
             chelis_vocab::DiagnosticKind::UnsupportedFeature
@@ -3980,6 +4127,7 @@ windowed = reduce_window_max(padded, [2], [1])
             message.contains("reduce_window") && message.contains("--target hip"),
             "unexpected message: {message}"
         );
+        assert!(message.contains("unimplemented chelis#957:"));
         assert_eq!(
             err.errors[0].kind(),
             chelis_vocab::DiagnosticKind::UnsupportedFeature
@@ -4021,6 +4169,7 @@ windowed = reduce_window_max(padded, [2], [1])
             message.contains("reshape") && message.contains("--target c"),
             "unexpected message: {message}"
         );
+        assert!(message.contains("deliberate [05-MOV-1]:"));
         assert_eq!(
             err.errors[0].kind(),
             chelis_vocab::DiagnosticKind::UnsupportedFeature
@@ -4066,6 +4215,7 @@ windowed = reduce_window_max(padded, [2], [1])
         let message = &err.errors[0].message;
         assert!(message.contains("sparse scatter_add supports f32 payloads only"));
         assert!(message.contains("f64 scatter_add needs backend-specific atomic support"));
+        assert!(message.contains("unimplemented chelis#729:"));
     }
 
     #[test]

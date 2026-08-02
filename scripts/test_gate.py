@@ -60,6 +60,9 @@ NON_GATE_JOBS = {
     # [05-UNS-5] manifest liveness check is CI-owned and deliberately absent
     # from the offline developer gate.
     "rejection-authority-liveness",
+    # Rule-id: GATE-SCOPE-DIAGNOSTIC-KIND -- C2.2's controlled source
+    # mutations are CI-owned and run only when an owner/control path changes.
+    "diagnostic-kind-oracle",
     # Rule-id: GATE-SCOPE-SMT -- the smt-build job is the required fast
     # cvc5-backed `smt` feature smoke. It is out of gate.py scope by
     # design, like backend-sanitizers; the full prove corpus lives in
@@ -86,6 +89,16 @@ class RejectionAuthorityLivenessJobTests(unittest.TestCase):
         self.assertIn("contents: read", block)
         self.assertIn("scripts/check_rejection_authority_boundary.py", block)
         self.assertIn("scripts/validate_rejection_issue_manifest.py", block)
+
+
+class DiagnosticKindOracleJobTests(unittest.TestCase):
+    def test_job_is_change_gated_and_executes_the_mutation_oracle(self):
+        block = _ci_job_block("diagnostic-kind-oracle")
+        self.assertIn("needs: [changes]", block)
+        self.assertIn("needs.changes.outputs.diagnostic_kind_changed", block)
+        self.assertIn("contents: read", block)
+        self.assertIn("scripts/diagnostic_kind_oracle.py", block)
+        self.assertIn("taiki-e/install-action@nextest", block)
 
 # Whole WORKFLOW FILES that are out-of-scope-by-design for the per-PR developer
 # `gate.py` quartet (like the backend-sanitizers / macos-smoke jobs in ci.yml,
@@ -597,7 +610,10 @@ class DocsOnlySkipTests(unittest.TestCase):
     }
     # Jobs that use the same always-present `changes` job but key on a
     # narrower contract input rather than on the docs-only classification.
-    CHANGE_GATED_JOBS = {"rejection-authority-liveness"}
+    CHANGE_GATED_JOBS = {
+        "rejection-authority-liveness",
+        "diagnostic-kind-oracle",
+    }
     # Jobs that must ALWAYS run (never gated on docs_only).
     # smt-build-glibc231 / smt-build-darwin-arm64 were added by chelis#422
     # (ship-smt) without a docs_only `if`, so today they run unconditionally

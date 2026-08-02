@@ -22,7 +22,8 @@ would let a code change skip the heavy gate.
 Usage:
     git diff --name-only <base>..<head> | python3 scripts/ci_detect_docs_only.py
 
-Writes both `docs_only=<bool>` and `rejection_authority_changed=<bool>` to
+Writes `docs_only=<bool>`, `rejection_authority_changed=<bool>`, and
+`diagnostic_kind_changed=<bool>` to
 the file named by `$GITHUB_OUTPUT` (the GitHub Actions step-output
 mechanism); if that env var is unset it prints both lines to stdout so the
 script is runnable and testable off CI. Exit status is always 0. An empty or
@@ -82,6 +83,27 @@ REJECTION_AUTHORITY_PATHS: frozenset[str] = frozenset(
     }
 )
 
+# Every source or control whose edit could reopen same-crate Diagnostic.kind
+# construction/mutation or make the closed-vocabulary mutation oracle stop
+# exercising its real owner. The required diagnostic-kind-oracle job consumes
+# this output. Including the detector and workflow makes bypass edits
+# self-triggering.
+DIAGNOSTIC_KIND_PATHS: frozenset[str] = frozenset(
+    {
+        ".github/workflows/ci.yml",
+        "crates/chelis-compiler-api/src/context.rs",
+        "crates/chelis-compiler-api/src/lib.rs",
+        "crates/chelis-compiler-api/src/schema.rs",
+        "crates/chelis-compiler-api/tests/diagnostic_kind_pipeline.rs",
+        "crates/chelis-vocab/src/lib.rs",
+        "scripts/ci_detect_docs_only.py",
+        "scripts/diagnostic_kind_oracle.py",
+        "scripts/test_ci_detect_docs_only.py",
+        "scripts/test_diagnostic_kind_oracle.py",
+        "scripts/test_gate.py",
+    }
+)
+
 
 def is_doc_path(path: str) -> bool:
     """True if `path` is documentation/prose under the allowlist."""
@@ -119,11 +141,25 @@ def rejection_authority_changed(paths: list[str]) -> bool:
     return any(path in REJECTION_AUTHORITY_PATHS for path in cleaned)
 
 
-def _emit(docs_only: bool, authority_changed: bool) -> None:
+def diagnostic_kind_changed(paths: list[str]) -> bool:
+    """Whether the diff must run the C2.2 mutation oracle; empty fails safe."""
+    cleaned = [p.strip().strip('"') for p in paths if p.strip()]
+    if not cleaned:
+        return True
+    return any(path in DIAGNOSTIC_KIND_PATHS for path in cleaned)
+
+
+def _emit(
+    docs_only: bool,
+    authority_changed: bool,
+    diagnostic_changed: bool,
+) -> None:
     lines = [
         f"docs_only={'true' if docs_only else 'false'}",
         "rejection_authority_changed="
         f"{'true' if authority_changed else 'false'}",
+        "diagnostic_kind_changed="
+        f"{'true' if diagnostic_changed else 'false'}",
     ]
     out = os.environ.get("GITHUB_OUTPUT")
     if out:
@@ -136,7 +172,11 @@ def _emit(docs_only: bool, authority_changed: bool) -> None:
 
 def main(argv: list[str]) -> int:
     paths = sys.stdin.read().splitlines()
-    _emit(is_docs_only(paths), rejection_authority_changed(paths))
+    _emit(
+        is_docs_only(paths),
+        rejection_authority_changed(paths),
+        diagnostic_kind_changed(paths),
+    )
     return 0
 
 

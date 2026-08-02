@@ -560,9 +560,14 @@ not pull their producers (e.g. a window-count `floor_div`) into the
 differentiability check. A runtime (node-valued) stride STEP has no
 structural adjoint yet and fails loud.
 
-Runtime movement bounds and reshape targets are canonical on the eval and C
-lanes; `--target hip` and `--target metal` reject them with a clean
-diagnostic naming `--target c` (chelis#616).
+> **[05-MOV-1]** Runtime movement bounds and reshape targets SHALL be
+> available on the eval and C lanes. The HIP and Metal targets SHALL reject
+> them with a clean diagnostic naming the C target; they SHALL NOT erase the
+> runtime value, substitute a literal bound, or emit a device kernel with a
+> statically guessed extent.
+
+This is the target disposition of the runtime-bound representation delivered
+under chelis#616.
 
 ### 2.5 Memory
 
@@ -760,6 +765,12 @@ index operand.
 
 #### Replace-scatter vs scatter-add
 
+> **[05-SPARSE-1]** `Gather`, `ScatterAdd`, `Scatter`, and
+> `ScatterElements` SHALL take int32 or int64 indices. For the three scatter
+> forms, target, updates, and output SHALL have identical precision. A
+> different index dtype or a precision mismatch is a type error, never an
+> implicit cast.
+
 `Scatter` and `ScatterAdd` are intentionally distinct primitives. Both
 take inputs `(target, indices, updates)` with the same shape contract
 (updates shape equals `target.dims[..axis] ++ indices.dims ++
@@ -767,6 +778,12 @@ target.dims[axis+1..]`) and the same precision constraints
 (int32/int64 indices; target/updates/output precision identical).
 They differ only in how duplicate target indices are resolved and in
 their AD policies:
+
+> **[05-SPARSE-2]** `RiscOp::OneHot` is an internal specialization marker,
+> not a backend operation. Specialization SHALL consume it or lower it to
+> ordinary primitive IR before backend emission. A backend boundary that
+> encounters it SHALL reject the broken compiler invariant; it SHALL NOT
+> emit a placeholder result.
 
 | Op | Duplicate-index semantics | AD adjoint |
 |---|---|---|

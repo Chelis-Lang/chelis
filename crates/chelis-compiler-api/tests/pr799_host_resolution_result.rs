@@ -57,8 +57,7 @@ fn assert_unrepresentable_function_value(result: Result<impl std::fmt::Debug, Co
         diagnostic.message.contains("unsupported:")
             && diagnostic.message.contains("anonymous function value `fn`")
             && diagnostic.message.contains("host expression lowering")
-            && diagnostic.message.contains("[05-UNS-1]")
-            && diagnostic.message.contains("chelis#730"),
+            && diagnostic.message.contains("unimplemented chelis#879:"),
         "the rejection must come from the fallible host-expression boundary: {diagnostic:?}"
     );
 }
@@ -78,8 +77,7 @@ fn assert_named_function_value_has_no_c_abi(result: Result<impl std::fmt::Debug,
             && diagnostic.message.contains("function value")
             && diagnostic.message.contains("C host ABI")
             && diagnostic.message.contains("(codegen:c)")
-            && diagnostic.message.contains("[05-UNS-1]")
-            && diagnostic.message.contains("chelis#730"),
+            && diagnostic.message.contains("unimplemented chelis#879:"),
         "the target boundary must reject the value without an alternate representation: \
          {diagnostic:?}"
     );
