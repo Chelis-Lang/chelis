@@ -545,7 +545,11 @@ pub fn install_chelis_panic_hook() {
 use chelis_deep::ast::{Atom, Expr, List, MetaMap};
 use chelis_deep::{DeepTag, Span, decode_effect_kind};
 use chelis_types::unsupported::{Stage, Unsupported, UnsupportedKind};
-use chelis_types::{BUILTIN_NAMES, CheckedProgram, LinearityInfo, types::Prim};
+use chelis_types::{
+    BUILTIN_NAMES, CheckedProgram, CompareOp, FloatBinOp, FloatUnOp, IntBinOp, IntUnOp,
+    LinearityInfo, ScalarValue, cast_scalar, compare_scalars, float_binop, float_unop, int_binop,
+    int_unop, scalar_from_i64, types::Prim,
+};
 use chelis_vocab::EffectKind;
 
 use crate::dag::{Dag, DimExpr, DimInfo, NodeId, RiscOp, RtDim, TensorType};
@@ -9530,9 +9534,11 @@ impl LowerCtx {
     /// runtime), no `Shape` (a shape read participates in the #616
     /// conform/mask machinery and must stay on the runtime path), no
     /// `UniformLike`/`Dropout` (nondeterministic), no `shape_deps`, no
-    /// non-scalar node, and every op inside the whitelisted vocabulary whose
-    /// arms mirror `crate::eval` exactly (`Cast` shares
-    /// [`crate::eval::convert_cast_data`] so the two lanes cannot diverge).
+    /// non-scalar node, and every op inside the whitelisted vocabulary. Every
+    /// arithmetic arm enters the same closed, dtype-width kernel vocabulary as
+    /// `crate::eval`; constants and casts stay sealed [`ScalarValue`]s, so an
+    /// int64 condition never crosses an f64 memo slot and f16/bf16 casts are
+    /// finalized before their consumers run.
     ///
     /// Works at the DAG-node level, not the Deep-expression level, because by
     /// the time `lower_if` runs, inlined-function parameters are already
@@ -9543,7 +9549,45 @@ impl LowerCtx {
     /// builtins. Zero-divisor `FloorDiv`/`TruncDiv` refuses the fold rather
     /// than folding a runtime trap away.
     fn fold_static_cond(&self, cond: NodeId) -> Option<bool> {
-        let mut memo: HashMap<NodeId, f64> = HashMap::new();
+        fn numeric_binop(
+            lhs: ScalarValue,
+            rhs: ScalarValue,
+            int_op: Option<IntBinOp>,
+            float_op: Option<FloatBinOp>,
+        ) -> Option<ScalarValue> {
+            if lhs.prim().is_integer() {
+                int_binop(int_op?, lhs, rhs).ok()
+            } else if lhs.prim().is_float() {
+                float_binop(float_op?, lhs, rhs).ok()
+            } else {
+                None
+            }
+        }
+
+        fn numeric_unop(
+            value: ScalarValue,
+            int_op: Option<IntUnOp>,
+            float_op: Option<FloatUnOp>,
+        ) -> Option<ScalarValue> {
+            if value.prim().is_integer() {
+                int_unop(int_op?, value).ok()
+            } else if value.prim().is_float() {
+                float_unop(float_op?, value).ok()
+            } else {
+                None
+            }
+        }
+
+        fn bool_binop(
+            lhs: ScalarValue,
+            rhs: ScalarValue,
+            op: impl FnOnce(bool, bool) -> bool,
+        ) -> Option<ScalarValue> {
+            let value = op(lhs.as_bool_exact()?, rhs.as_bool_exact()?);
+            scalar_from_i64("fold_static_cond", Prim::Bool, i64::from(value)).ok()
+        }
+
+        let mut memo: HashMap<NodeId, ScalarValue> = HashMap::new();
         // Iterative post-order: (node, inputs_pushed).
         let mut stack: Vec<(NodeId, bool)> = vec![(cond, false)];
         while let Some((id, inputs_pushed)) = stack.pop() {
@@ -9572,61 +9616,51 @@ impl LowerCtx {
                 .and_then(|input| memo.get(input))
                 .copied();
             let value = match &node.op {
-                RiscOp::Const { value } => {
-                    // The fold memo is the f64 wide image (the
-                    // chelis#680 residue; exact integer folding arrives
-                    // with the Phase 2 kernel split). An integer
-                    // payload whose f64 image is not exact DECLINES the
-                    // fold instead of baking a collapsed value in
-                    // (chelis#856): the condition falls to runtime,
-                    // which reads the sealed payload exactly.
-                    if let Some(i) = value.as_i64_exact()
-                        && (i as f64) as i128 != i as i128
-                    {
-                        return None;
-                    }
-                    value.as_f64_lossy()
-                }
+                RiscOp::Const { value } => *value,
                 RiscOp::Cast { new_precision } => {
-                    let input_id = *node.inputs.first()?;
-                    let src = self.dag.get(input_id)?.output_type.precision;
                     // A trapping cast DECLINES TO FOLD (the section C2
                     // fold rule for casts): the condition falls to
                     // runtime, where the checked ladder traps with its
                     // full diagnostic. A fold must never bake a trap
                     // away nor bake one in.
-                    crate::eval::convert_cast_data(input0?, src, *new_precision).ok()?
+                    cast_scalar("cast", input0?, *new_precision).ok()?
                 }
-                RiscOp::Add => input0? + input1?,
-                RiscOp::Mul => input0? * input1?,
-                RiscOp::Neg => -input0?,
-                RiscOp::Div => input0? / input1?,
-                RiscOp::FloorDiv => {
-                    let divisor = input1?;
-                    if divisor == 0.0 {
-                        return None;
-                    }
-                    (input0? / divisor).floor()
+                RiscOp::Add => {
+                    numeric_binop(input0?, input1?, Some(IntBinOp::Add), Some(FloatBinOp::Add))?
                 }
+                RiscOp::Mul if input0?.prim() == Prim::Bool => {
+                    bool_binop(input0?, input1?, |lhs, rhs| lhs && rhs)?
+                }
+                RiscOp::Mul => {
+                    numeric_binop(input0?, input1?, Some(IntBinOp::Mul), Some(FloatBinOp::Mul))?
+                }
+                RiscOp::Neg => numeric_unop(input0?, Some(IntUnOp::Neg), Some(FloatUnOp::Neg))?,
+                RiscOp::Div => numeric_binop(input0?, input1?, None, Some(FloatBinOp::Div))?,
+                RiscOp::FloorDiv => numeric_binop(
+                    input0?,
+                    input1?,
+                    Some(IntBinOp::FloorDiv),
+                    Some(FloatBinOp::FloorDiv),
+                )?,
                 RiscOp::TruncDiv => {
-                    let divisor = input1?;
-                    if divisor == 0.0 {
-                        return None;
-                    }
-                    (input0? / divisor).trunc()
+                    numeric_binop(input0?, input1?, Some(IntBinOp::TruncDiv), None)?
                 }
-                RiscOp::CmpLt => {
-                    if input0? < input1? {
-                        1.0
-                    } else {
-                        0.0
-                    }
+                RiscOp::CmpLt => scalar_from_i64(
+                    "fold_static_cond",
+                    Prim::Bool,
+                    i64::from(compare_scalars(CompareOp::Lt, input0?, input1?).ok()?),
+                )
+                .ok()?,
+                RiscOp::MaxElem if input0?.prim() == Prim::Bool => {
+                    bool_binop(input0?, input1?, |lhs, rhs| lhs || rhs)?
                 }
-                RiscOp::MaxElem => input0?.max(input1?),
-                RiscOp::Abs => input0?.abs(),
-                RiscOp::Floor => input0?.floor(),
-                RiscOp::Ceil => input0?.ceil(),
-                RiscOp::Round => input0?.round_ties_even(),
+                RiscOp::MaxElem => {
+                    numeric_binop(input0?, input1?, Some(IntBinOp::Max), Some(FloatBinOp::Max))?
+                }
+                RiscOp::Abs => numeric_unop(input0?, Some(IntUnOp::Abs), Some(FloatUnOp::Abs))?,
+                RiscOp::Floor => numeric_unop(input0?, None, Some(FloatUnOp::Floor))?,
+                RiscOp::Ceil => numeric_unop(input0?, None, Some(FloatUnOp::Ceil))?,
+                RiscOp::Round => numeric_unop(input0?, None, Some(FloatUnOp::Round))?,
                 _ => return None,
             };
             // chelis#620 red-team fix: refuse the fold on any non-finite
@@ -9638,12 +9672,17 @@ impl LowerCtx {
             // the forward pass never takes. Falling to the runtime mask
             // path keeps the pre-existing (pre-#620) behavior for such
             // conditions instead of extending it to ADT/list pruning.
-            if !value.is_finite() {
+            if value.prim().is_float() && !value.as_f64_lossy().is_finite() {
                 return None;
             }
             memo.insert(id, value);
         }
-        memo.get(&cond).map(|v| *v != 0.0)
+        memo.get(&cond).map(|value| {
+            value
+                .as_bool_exact()
+                .or_else(|| value.as_i64_exact().map(|value| value != 0))
+                .unwrap_or_else(|| value.as_f64_lossy() != 0.0)
+        })
     }
 
     /// chelis#513 gap 3 (school im2col witness): const-fold a `reshape`
@@ -14925,6 +14964,97 @@ mod regression_tests {
                 .iter()
                 .any(|node| matches!(node.op, RiscOp::Mul)),
             "fractional checked cast must stay on the runtime mask path: {dag:?}"
+        );
+    }
+
+    #[test]
+    fn static_cond_fold_uses_f16_storage_semantics() {
+        // 2049 rounds to 2048 at f16 storage width, so the comparison is
+        // false. Keeping the constants/casts sealed through the fold makes
+        // the else branch the only lowered payload.
+        let dag = parse_and_lower_unchecked(
+            "(if {} (app {} (var {} lt) \
+             (cast {} (lit {} 2048.0) f16) (cast {} (lit {} 2049.0) f16)) \
+             (lit {type: (t-prim {} f32)} 111.0) \
+             (lit {type: (t-prim {} f32)} 222.0))",
+        );
+        assert!(
+            dag.nodes().iter().any(
+                |node| matches!(node.op, RiscOp::Const { value } if value.as_f64_lossy() == 222.0)
+            ),
+            "f16-finalized comparison must select the else branch: {dag:?}"
+        );
+        assert!(
+            !dag.nodes().iter().any(
+                |node| matches!(node.op, RiscOp::Const { value } if value.as_f64_lossy() == 111.0)
+            ),
+            "the untaken branch must not be lowered: {dag:?}"
+        );
+    }
+
+    #[test]
+    fn static_cond_fold_uses_bf16_storage_semantics() {
+        // 257 rounds to 256 at bf16 storage width, the sibling boundary to
+        // the f16 test above.
+        let dag = parse_and_lower_unchecked(
+            "(if {} (app {} (var {} lt) \
+             (cast {} (lit {} 256.0) bf16) (cast {} (lit {} 257.0) bf16)) \
+             (lit {type: (t-prim {} f32)} 111.0) \
+             (lit {type: (t-prim {} f32)} 222.0))",
+        );
+        assert!(
+            dag.nodes().iter().any(
+                |node| matches!(node.op, RiscOp::Const { value } if value.as_f64_lossy() == 222.0)
+            ),
+            "bf16-finalized comparison must select the else branch: {dag:?}"
+        );
+        assert!(
+            !dag.nodes().iter().any(
+                |node| matches!(node.op, RiscOp::Const { value } if value.as_f64_lossy() == 111.0)
+            ),
+            "the untaken branch must not be lowered: {dag:?}"
+        );
+    }
+
+    #[test]
+    fn static_cond_fold_compares_int64_exactly_above_binary64_mantissa() {
+        let dag = parse_and_lower_unchecked(
+            "(if {} (app {} (var {} lt) \
+             (lit {type: (t-prim {} int64)} 9007199254740992) \
+             (lit {type: (t-prim {} int64)} 9007199254740993)) \
+             (lit {type: (t-prim {} f32)} 111.0) \
+             (lit {type: (t-prim {} f32)} 222.0))",
+        );
+        assert!(
+            dag.nodes().iter().any(
+                |node| matches!(node.op, RiscOp::Const { value } if value.as_f64_lossy() == 111.0)
+            ),
+            "exact int64 comparison must select the then branch: {dag:?}"
+        );
+        assert!(
+            !dag.nodes().iter().any(
+                |node| matches!(node.op, RiscOp::Const { value } if value.as_f64_lossy() == 222.0)
+            ),
+            "the untaken branch must not be lowered: {dag:?}"
+        );
+    }
+
+    #[test]
+    fn static_cond_fold_declines_on_integer_overflow() {
+        let dag = parse_and_lower_unchecked(
+            "(if {} (app {} (var {} lt) \
+             (app {} (var {} add) (cast {} (lit {} 127) int8) \
+                                    (cast {} (lit {} 1) int8)) \
+             (cast {} (lit {} 0) int8)) \
+             (lit {type: (t-prim {} f32)} 111.0) \
+             (lit {type: (t-prim {} f32)} 222.0))",
+        );
+        assert!(
+            dag.nodes()
+                .iter()
+                .any(|node| matches!(node.op, RiscOp::Mul)),
+            "a trapping typed kernel must decline the fold and retain runtime control flow: \
+             {dag:?}"
         );
     }
 
