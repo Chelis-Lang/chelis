@@ -1997,19 +1997,13 @@ fn producer_param_names(exprs: &[Expr], producer: &str) -> Vec<String> {
             {
                 let mut out = Vec::new();
                 for p in node_children(params) {
-                    if let Some(n) = sym_text(p) {
-                        out.push(n.to_string());
-                    } else if let Expr::List(l, _) = p
-                        && let Some(Expr::Atom(Atom::Name(s), _)) = l.elements.first()
-                    {
-                        out.push(s.clone());
+                    if let Some(name) = binder_name(p) {
+                        out.push(name.to_string());
                     }
                 }
                 return Some(out);
             }
-            if let Expr::List(l, _) = expr
-                && let Some(found) = find(&l.elements[2.min(l.elements.len())..], producer)
-            {
+            if let Some(found) = find(node_children(expr), producer) {
                 return Some(found);
             }
         }
@@ -2085,12 +2079,14 @@ fn deep_bool_lit(v: bool) -> Expr {
 }
 fn list_tag(expr: &Expr) -> Option<DeepTag> {
     match expr {
+        Expr::Node(node, _) => Some(node.tag()),
         Expr::List(list, _) => list.tag(),
         _ => None,
     }
 }
 fn node_children(expr: &Expr) -> &[Expr] {
     match expr {
+        Expr::Node(node, _) => node.children_slice(),
         Expr::List(l, _) if l.elements.len() >= 2 => &l.elements[2..],
         _ => &[],
     }
@@ -2098,6 +2094,17 @@ fn node_children(expr: &Expr) -> &[Expr] {
 fn sym_text(expr: &Expr) -> Option<&str> {
     match expr {
         Expr::Atom(Atom::Name(s), _) => Some(s.as_str()),
+        _ => None,
+    }
+}
+
+fn binder_name(expr: &Expr) -> Option<&str> {
+    match expr {
+        Expr::Atom(Atom::Name(name), _) => Some(name.as_str()),
+        Expr::MetaExpr(meta, _) => sym_text(&meta.expr),
+        Expr::BareList(elements, _) | Expr::List(List { elements }, _) => {
+            elements.first().and_then(sym_text)
+        }
         _ => None,
     }
 }

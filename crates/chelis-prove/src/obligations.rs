@@ -110,18 +110,17 @@ pub struct ObligationCollection {
 
 fn tag(expr: &Expr) -> Option<DeepTag> {
     match expr {
+        Expr::Node(node, _) => Some(node.tag()),
         Expr::List(list, _) => list.tag(),
         _ => None,
     }
 }
 
 fn children(expr: &Expr) -> &[Expr] {
-    if let Expr::List(list, _) = expr
-        && list.elements.len() >= 2
-    {
-        &list.elements[2..]
-    } else {
-        &[]
+    match expr {
+        Expr::Node(node, _) => node.children_slice(),
+        Expr::List(list, _) if list.elements.len() >= 2 => &list.elements[2..],
+        _ => &[],
     }
 }
 
@@ -152,9 +151,7 @@ fn collect_exports_in(exprs: &[Expr], out: &mut BTreeSet<String>) {
                 }
             }
         }
-        if let Expr::List(list, _) = expr {
-            collect_exports_in(&list.elements[2.min(list.elements.len())..], out);
-        }
+        collect_exports_in(children(expr), out);
     }
 }
 
@@ -167,9 +164,7 @@ fn collect_def_bodies(exprs: &[Expr], with_body: &mut BTreeSet<String>) {
         {
             with_body.insert(name.to_string());
         }
-        if let Expr::List(list, _) = expr {
-            collect_def_bodies(&list.elements[2.min(list.elements.len())..], with_body);
-        }
+        collect_def_bodies(children(expr), with_body);
     }
 }
 
@@ -202,9 +197,7 @@ fn collect_declared_returns_in(
         {
             out.insert(name.to_string(), *ret);
         }
-        if let Expr::List(list, _) = expr {
-            collect_declared_returns_in(&list.elements[2.min(list.elements.len())..], aliases, out);
-        }
+        collect_declared_returns_in(children(expr), aliases, out);
     }
 }
 
@@ -318,9 +311,7 @@ fn collect_type_aliases_in(exprs: &[Expr], out: &mut BTreeMap<String, Expr>) {
                 out.insert(name.to_string(), target.clone());
             }
         }
-        if let Expr::List(list, _) = expr {
-            collect_type_aliases_in(&list.elements[2.min(list.elements.len())..], out);
-        }
+        collect_type_aliases_in(children(expr), out);
     }
 }
 
@@ -485,22 +476,22 @@ fn collect_record_fields_in(
                 out.insert(name.to_string(), field_types);
             }
         }
-        if let Expr::List(list, _) = expr {
-            collect_record_fields_in(&list.elements[2.min(list.elements.len())..], aliases, out);
-        }
+        collect_record_fields_in(children(expr), aliases, out);
     }
 }
 
 fn meta_value<'a>(expr: &'a Expr, key: &str) -> Option<&'a Expr> {
-    if let Expr::List(list, _) = expr
-        && let Some(Expr::Map(map, _)) = list.elements.get(1)
-    {
-        return map
-            .entries
-            .iter()
-            .find_map(|(k, v)| (k == key).then_some(v));
-    }
-    None
+    let meta = match expr {
+        Expr::Node(node, _) => node.meta(),
+        Expr::List(list, _) => match list.elements.get(1) {
+            Some(Expr::Map(map, _)) => map,
+            _ => return None,
+        },
+        _ => return None,
+    };
+    meta.entries
+        .iter()
+        .find_map(|(k, v)| (k == key).then_some(v))
 }
 
 /// Whether a parameter type hands the opaque type to caller-supplied code

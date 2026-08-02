@@ -786,15 +786,14 @@ fn param_precision_at(fn_expr: &Expr, index: usize) -> Option<Prim> {
 }
 
 pub(super) fn extract_prim_from_type_expr(expr: &Expr) -> Option<Prim> {
-    let Expr::List(list, _) = expr else {
-        return None;
+    let (node_tag, kids) = match expr {
+        Expr::List(list, _) => (tag(list)?, children(list)),
+        Expr::Node(node, _) => (node.tag(), node.children_slice()),
+        _ => return None,
     };
-    match tag(list) {
-        Some(DeepTag::TPrim) => children(list)
-            .first()
-            .and_then(symbol_name)
-            .and_then(prim_from_name),
-        Some(DeepTag::TTensor) => children(list).last().and_then(extract_prim_from_type_expr),
+    match node_tag {
+        DeepTag::TPrim => kids.first().and_then(symbol_name).and_then(prim_from_name),
+        DeepTag::TTensor => kids.last().and_then(extract_prim_from_type_expr),
         _ => None,
     }
 }
@@ -952,11 +951,15 @@ fn synth_fn_expr(params: &[String], body: &Expr) -> Expr {
 }
 
 pub(super) fn var_name(expr: &Expr) -> Option<&str> {
-    let list = as_list(expr)?;
-    if tag(list) != Some(DeepTag::Var) {
-        return None;
+    match expr {
+        Expr::List(list, _) if tag(list) == Some(DeepTag::Var) => {
+            children(list).first().and_then(symbol_name)
+        }
+        Expr::Node(node, _) if node.tag() == DeepTag::Var => {
+            node.children_slice().first().and_then(symbol_name)
+        }
+        _ => None,
     }
-    children(list).first().and_then(symbol_name)
 }
 
 pub(super) fn runtime_param_name(expr: &Expr) -> Option<&str> {

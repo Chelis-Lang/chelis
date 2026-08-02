@@ -88,6 +88,22 @@ pub fn validate(exprs: &[Expr]) -> Vec<ValidationWarning> {
             }
             Expr::BareList(elems, span)
                 if matches!(
+                    elems.first(),
+                    Some(Expr::Atom(crate::ast::Atom::Name(head), _))
+                        if DeepTag::parse(head).is_some()
+                ) && !matches!(elems.get(1), Some(Expr::Map(_, _))) =>
+            {
+                let Expr::Atom(crate::ast::Atom::Name(head), _) = &elems[0] else {
+                    unreachable!("guard requires a name head")
+                };
+                warnings.push(ValidationWarning {
+                    kind: WarningKind::MissingMetadata,
+                    offset: span.offset,
+                    message: format!("`{head}` node must carry a metadata map at index 1"),
+                });
+            }
+            Expr::BareList(elems, span)
+                if matches!(
                     (elems.first(), elems.get(1)),
                     (
                         Some(Expr::Atom(crate::ast::Atom::Name(_), _)),
@@ -1009,6 +1025,16 @@ mod tests {
         assert!(
             invalid_param.to_string().contains("params"),
             "the strict Node path must preserve the parameter-shape diagnostic: {invalid_param}"
+        );
+    }
+
+    #[test]
+    fn strict_parser_rejects_vocabulary_head_without_metadata() {
+        let error = crate::parser::parse_str_strict("(var x)")
+            .expect_err("a vocabulary-headed form cannot fall through as a structural bare list");
+        assert!(
+            error.to_string().contains("metadata map"),
+            "the rejection must identify the missing canonical metadata slot: {error}"
         );
     }
 

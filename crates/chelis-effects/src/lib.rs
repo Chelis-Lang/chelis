@@ -252,11 +252,9 @@ fn infer_program_effects_with_context(
 /// build/eval path. Descends nested wrappers to any depth.
 fn flattened_top_level(exprs: &[Expr]) -> Vec<&Expr> {
     fn push<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
-        if let Expr::List(list, _) = expr
-            && get_tag(list) == Some(DeepTag::Module)
-        {
-            // `(module {} name children...)`: skip tag, meta, name.
-            for child in list.elements.iter().skip(3) {
+        if let Some(kids) = stamped_children(expr, DeepTag::Module) {
+            // Module semantic children are `[name, declarations...]`.
+            for child in kids.iter().skip(1) {
                 push(child, out);
             }
             return;
@@ -273,15 +271,11 @@ fn flattened_top_level(exprs: &[Expr]) -> Vec<&Expr> {
 fn top_level_def_bodies(exprs: &[Expr]) -> HashMap<String, Expr> {
     let mut defs = HashMap::new();
     for expr in flattened_top_level(exprs) {
-        if let Expr::List(list, _) = expr
-            && get_tag(list) == Some(DeepTag::Def)
+        if let Some(kids) = stamped_children(expr, DeepTag::Def)
+            && kids.len() >= 2
+            && let Some(name) = symbol_name(&kids[0])
         {
-            let kids = children(list);
-            if kids.len() >= 2
-                && let Some(name) = symbol_name(&kids[0])
-            {
-                defs.insert(name.to_string(), kids[1].clone());
-            }
+            defs.insert(name.to_string(), kids[1].clone());
         }
     }
     defs
@@ -290,11 +284,17 @@ fn top_level_def_bodies(exprs: &[Expr]) -> HashMap<String, Expr> {
 fn top_level_callable_names(bodies: &HashMap<String, Expr>) -> HashSet<String> {
     bodies
         .iter()
-        .filter_map(|(name, body)| match body {
-            Expr::List(list, _) if get_tag(list) == Some(DeepTag::Fn) => Some(name.clone()),
-            _ => None,
-        })
+        .filter(|(_, body)| body.tag() == Some(DeepTag::Fn))
+        .map(|(name, _)| name.clone())
         .collect()
+}
+
+fn stamped_children(expr: &Expr, expected: DeepTag) -> Option<&[Expr]> {
+    match expr {
+        Expr::List(list, _) if get_tag(list) == Some(expected) => Some(children(list)),
+        Expr::Node(node, _) if node.tag() == expected => Some(node.children_slice()),
+        _ => None,
+    }
 }
 
 fn infer_expr_effects(
@@ -1076,13 +1076,15 @@ fn upsert_meta(meta: &mut MetaMap, key: &str, value: Expr) {
 }
 
 fn var_name(expr: &Expr) -> Option<&str> {
-    let Expr::List(list, _) = expr else {
-        return None;
-    };
-    if get_tag(list) != Some(DeepTag::Var) {
-        return None;
+    match expr {
+        Expr::List(list, _) if get_tag(list) == Some(DeepTag::Var) => {
+            children(list).first().and_then(symbol_name)
+        }
+        Expr::Node(node, _) if node.tag() == DeepTag::Var => {
+            node.children_slice().first().and_then(symbol_name)
+        }
+        _ => None,
     }
-    children(list).first().and_then(symbol_name)
 }
 
 fn get_tag(list: &List) -> Option<DeepTag> {
