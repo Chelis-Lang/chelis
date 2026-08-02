@@ -79,6 +79,7 @@ impl CEmitter {
         func_name: &str,
         options: crate::CodegenOptions,
     ) -> Result<String, Unsupported> {
+        Self::reject_integer_abs(dag)?;
         Self::validate_supported_precisions(dag);
         Self::validate_load_abi(dag);
         Self::validate_sparse_contracts(dag);
@@ -793,6 +794,21 @@ impl CEmitter {
             .enumerate()
             .map(|(slot, label)| (label, slot))
             .collect()
+    }
+
+    /// Integer `abs` has an exact evaluator kernel but the C backend's
+    /// current unary template calls `fabsf`. Reject at the public emitter
+    /// edge until Phase 3 installs the typed, trapping C kernel (chelis#699).
+    fn reject_integer_abs(dag: &Dag) -> Result<(), Unsupported> {
+        if let Some(node) = chelis_ir::analysis::first_integer_abs_node(dag) {
+            return Err(Unsupported::new(
+                UnsupportedKind::Op("Abs".to_string()),
+                format!("an integer tensor at C DAG node {}", node.0),
+                Stage::Codegen("c"),
+                "integer abs code generation waits for the typed, trapping Phase 3 kernel (chelis#699); use `chelis eval` for the Phase 2 reference lane",
+            ));
+        }
+        Ok(())
     }
 
     fn validate_supported_precisions(dag: &Dag) {
@@ -5998,6 +6014,37 @@ mod tests {
             dims: dims.iter().copied().map(DimInfo::Lit).collect(),
             precision,
         }
+    }
+
+    #[test]
+    fn integer_abs_is_rejected_before_the_float_unary_template() {
+        let ty = tensor_ty(&[1], Prim::Int64);
+
+        let mut direct = Dag::new();
+        let x = direct.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
+        let out = direct.add_node(RiscOp::Abs, vec![x], ty.clone(), None);
+        direct.set_roots(vec![out]);
+        let err = CEmitter::emit_dag(&direct, "integer_abs")
+            .expect_err("integer abs must not enter the C fabsf template");
+        assert!(err.to_string().contains("unsupported: op `Abs`"));
+
+        let mut fused = Dag::new();
+        let x = fused.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
+        let out = fused.add_node(
+            RiscOp::FusedElem {
+                ops: vec![FusedStep {
+                    op: FusedStepOp::Abs,
+                    input_indices: vec![FusedInput::External(0)],
+                }],
+            },
+            vec![x],
+            ty,
+            None,
+        );
+        fused.set_roots(vec![out]);
+        let err = CEmitter::emit_dag(&fused, "fused_integer_abs")
+            .expect_err("fused integer abs must not bypass the C guard");
+        assert!(err.to_string().contains("unsupported: op `Abs`"));
     }
 
     fn mat_f32(r: usize, c: usize) -> TensorType {

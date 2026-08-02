@@ -251,30 +251,6 @@ impl RuntimeValue {
             .map_err(|trap| trap.to_string())
     }
 
-    /// Construct an integer-dtype scalar from a WIDE f64 an unsplit
-    /// kernel produced, with the same discipline as the tensor lane's
-    /// `finalize_wide` (chelis#729 Phase 1; the rt857 F1 repair): an
-    /// INTEGRAL wide saturates through `as i64` (the cited chelis#680
-    /// residue, exact for int8/16/32 and saturating at the int64
-    /// boundary until the Phase 2 kernel split), while a fractional or
-    /// non-finite wide stays on the float raw path so finalize
-    /// Domain-traps. Truncating the fraction BEFORE finalize would hand
-    /// the chokepoint a legal integer and launder a substituted value
-    /// (the `int |> recip` class).
-    pub(crate) fn scalar_from_int_wide(template_dtype: Prim, wide: f64) -> Result<Self, String> {
-        if wide.is_finite() && wide.fract() == 0.0 {
-            Self::scalar_like_int(template_dtype, wide as i64)
-        } else {
-            chelis_types::finalize_scalar(
-                "arithmetic",
-                template_dtype,
-                chelis_types::RawScalar::Float(wide),
-            )
-            .map(Self::from_scalar_value)
-            .map_err(|trap| trap.to_string())
-        }
-    }
-
     /// True for any [`RuntimeValue::Scalar`] whose dtype is integer-typed
     /// per `Prim::is_integer`. Used by dispatch sites that previously
     /// matched `RuntimeValue::Int(_)`.

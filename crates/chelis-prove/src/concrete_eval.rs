@@ -1,4 +1,4 @@
-//! Concrete (native `f64`) evaluation of [`SmtExpr`] terms.
+//! Concrete dtype-aware evaluation of [`SmtExpr`] terms.
 //!
 //! This is the predicate evaluator the Tier C fuzzer uses to check a
 //! candidate sample against a property's preconditions and postcondition
@@ -23,13 +23,23 @@
 //!   D-STARVE "exact float equality starves by design").
 
 use crate::solver::{ArithOp, BoolOp, CmpOp, SmtExpr};
+use chelis_types::{
+    CompareOp, FloatBinOp, FloatUnOp, IntBinOp, IntUnOp, ScalarValue, cast_scalar, compare_scalars,
+    float_binop, float_unop, int_binop, int_unop, scalar_from_f64, scalar_from_i64, types::Prim,
+};
 use std::collections::HashMap;
+
+/// Exact, dtype-carrying environment for concrete prover evaluation.
+///
+/// The value type is deliberately sealed by `chelis-types`: callers cannot
+/// insert a bare `f64` or erase an integer width before evaluation.
+pub type ConcreteEnv = HashMap<String, ScalarValue>;
 
 /// Evaluate a boolean-shaped [`SmtExpr`] with the legacy *fuzz*
 /// comparison semantics: `==`/`!=` carry a `1e-10` tolerance. This is the
 /// user-property postcondition evaluator and must NOT be used for
 /// invariant-sample acceptance (use [`eval_bool_strict`] there).
-pub fn eval_bool(expr: &SmtExpr, env: &HashMap<String, f64>) -> bool {
+pub fn eval_bool(expr: &SmtExpr, env: &ConcreteEnv) -> bool {
     eval_bool_with(expr, env, false)
 }
 
@@ -40,11 +50,11 @@ pub fn eval_bool(expr: &SmtExpr, env: &HashMap<String, f64>) -> bool {
 /// weaken exactly the soundness that validation provides). NaN operands
 /// compare false under both `==` and (per IEEE) yield `true` for `!=`, so
 /// a NaN representation never spuriously satisfies an equality invariant.
-pub fn eval_bool_strict(expr: &SmtExpr, env: &HashMap<String, f64>) -> bool {
+pub fn eval_bool_strict(expr: &SmtExpr, env: &ConcreteEnv) -> bool {
     eval_bool_with(expr, env, true)
 }
 
-fn eval_bool_with(expr: &SmtExpr, env: &HashMap<String, f64>, strict: bool) -> bool {
+fn eval_bool_with(expr: &SmtExpr, env: &ConcreteEnv, strict: bool) -> bool {
     match expr {
         SmtExpr::BoolLit(v) => *v,
         SmtExpr::Cmp(op, left, right) => {
@@ -53,8 +63,12 @@ fn eval_bool_with(expr: &SmtExpr, env: &HashMap<String, f64>, strict: bool) -> b
             // operand keeps the exact-equality semantics under
             // `eval_bool_strict`, instead of silently reverting to the
             // 1e-10 fuzz tolerance via `eval_arith` (strict = false).
-            let l = eval_arith_with(left, env, strict);
-            let r = eval_arith_with(right, env, strict);
+            let Some(l) = eval_scalar_with(left, env, strict) else {
+                return false;
+            };
+            let Some(r) = eval_scalar_with(right, env, strict) else {
+                return false;
+            };
             eval_cmp(*op, l, r, strict)
         }
         SmtExpr::Bool(BoolOp::And, children) => {
@@ -103,32 +117,72 @@ fn eval_bool_with(expr: &SmtExpr, env: &HashMap<String, f64>, strict: bool) -> b
         // its forms, `Not`, `Cmp`, `Ite`, `BoolLit`) is handled above, so
         // this arm only ever sees arithmetic variants and cannot re-enter
         // `eval_bool_with` for the same `expr` (no unbounded recursion).
-        _ => eval_arith_with(expr, env, strict) != 0.0,
+        _ => eval_scalar_with(expr, env, strict).is_some_and(|value| {
+            value
+                .as_bool_exact()
+                .unwrap_or_else(|| value.as_f64_lossy() != 0.0)
+        }),
     }
 }
 
 /// Evaluate a single comparison. `strict` selects exact IEEE `==`/`!=`
 /// (invariant validation) vs the `1e-10`-tolerant fuzz comparison.
-fn eval_cmp(op: CmpOp, l: f64, r: f64, strict: bool) -> bool {
+fn eval_cmp(op: CmpOp, lhs: ScalarValue, rhs: ScalarValue, strict: bool) -> bool {
+    let Some((lhs, rhs)) = align_literal_widths(lhs, rhs) else {
+        return false;
+    };
+    let exact_op = match op {
+        CmpOp::Lt => CompareOp::Lt,
+        CmpOp::Le => CompareOp::Lte,
+        CmpOp::Gt => CompareOp::Gt,
+        CmpOp::Ge => CompareOp::Gte,
+        CmpOp::Eq => CompareOp::Eq,
+        CmpOp::Ne => CompareOp::Ne,
+    };
     match op {
-        CmpOp::Lt => l < r,
-        CmpOp::Le => l <= r,
-        CmpOp::Gt => l > r,
-        CmpOp::Ge => l >= r,
         CmpOp::Eq => {
-            if strict {
-                l == r
+            if strict || !lhs.prim().is_float() || !rhs.prim().is_float() {
+                compare_scalars(exact_op, lhs, rhs).unwrap_or(false)
             } else {
-                (l - r).abs() < 1e-10
+                (lhs.as_f64_lossy() - rhs.as_f64_lossy()).abs() < 1e-10
             }
         }
         CmpOp::Ne => {
-            if strict {
-                l != r
+            if strict || !lhs.prim().is_float() || !rhs.prim().is_float() {
+                compare_scalars(exact_op, lhs, rhs).unwrap_or(false)
             } else {
-                (l - r).abs() >= 1e-10
+                (lhs.as_f64_lossy() - rhs.as_f64_lossy()).abs() >= 1e-10
             }
         }
+        CmpOp::Lt | CmpOp::Le | CmpOp::Gt | CmpOp::Ge => {
+            compare_scalars(exact_op, lhs, rhs).unwrap_or(false)
+        }
+    }
+}
+
+/// `SmtExpr::{RealLit, IntLit}` carry exact values but not their source width.
+/// When one operand is a dtype-carrying variable and the other is the canonical
+/// F64/Int64 literal carrier, finalize the literal at the variable width before
+/// the operation. Checked programs cannot contain a genuine mixed-dtype op.
+fn align_literal_widths(lhs: ScalarValue, rhs: ScalarValue) -> Option<(ScalarValue, ScalarValue)> {
+    if lhs.prim() == rhs.prim() {
+        Some((lhs, rhs))
+    } else if lhs.prim() == Prim::F64 && rhs.prim().is_float() {
+        Some((
+            cast_scalar("prove-real-literal", lhs, rhs.prim()).ok()?,
+            rhs,
+        ))
+    } else if rhs.prim() == Prim::F64 && lhs.prim().is_float() {
+        Some((
+            lhs,
+            cast_scalar("prove-real-literal", rhs, lhs.prim()).ok()?,
+        ))
+    } else if lhs.prim() == Prim::Int64 && rhs.prim().is_integer() {
+        Some((cast_scalar("prove-int-literal", lhs, rhs.prim()).ok()?, rhs))
+    } else if rhs.prim() == Prim::Int64 && lhs.prim().is_integer() {
+        Some((lhs, cast_scalar("prove-int-literal", rhs, lhs.prim()).ok()?))
+    } else {
+        None
     }
 }
 
@@ -136,70 +190,161 @@ fn eval_cmp(op: CmpOp, l: f64, r: f64, strict: bool) -> bool {
 /// environment with the fuzz comparison semantics (`1e-10` tolerance for
 /// any nested `==`/`!=`). Unbound variables read as `0.0`; division by
 /// zero and out-of-domain transcendentals yield `NaN`.
-pub fn eval_arith(expr: &SmtExpr, env: &HashMap<String, f64>) -> f64 {
-    eval_arith_with(expr, env, false)
+pub fn eval_arith(expr: &SmtExpr, env: &ConcreteEnv) -> f64 {
+    eval_scalar_with(expr, env, false)
+        .map(|value| value.as_f64_lossy())
+        .unwrap_or(f64::NAN)
 }
 
-fn eval_arith_with(expr: &SmtExpr, env: &HashMap<String, f64>, strict: bool) -> f64 {
+fn eval_scalar_with(expr: &SmtExpr, env: &ConcreteEnv, strict: bool) -> Option<ScalarValue> {
     match expr {
-        SmtExpr::Var(name) => env.get(name).copied().unwrap_or(0.0),
-        SmtExpr::RealLit(v) => *v,
-        SmtExpr::IntLit(v) => *v as f64,
+        SmtExpr::Var(name) => env
+            .get(name)
+            .copied()
+            .or_else(|| scalar_from_f64("prove-unbound", Prim::F64, 0.0).ok()),
+        SmtExpr::RealLit(v) => scalar_from_f64("prove-real-literal", Prim::F64, *v).ok(),
+        SmtExpr::IntLit(v) => scalar_from_i64("prove-int-literal", Prim::Int64, *v).ok(),
         SmtExpr::BoolLit(v) => {
-            if *v {
-                1.0
-            } else {
-                0.0
-            }
+            scalar_from_i64("prove-bool-literal", Prim::Bool, i64::from(*v)).ok()
         }
         SmtExpr::Arith(op, left, right) => {
-            let l = eval_arith_with(left, env, strict);
-            let r = eval_arith_with(right, env, strict);
-            match op {
-                ArithOp::Add => l + r,
-                ArithOp::Sub => l - r,
-                ArithOp::Mul => l * r,
-                ArithOp::Div => {
-                    if r != 0.0 {
-                        l / r
-                    } else {
-                        f64::NAN
-                    }
+            let lhs = eval_scalar_with(left, env, strict)?;
+            if matches!(op, ArithOp::Neg) {
+                return if lhs.prim().is_integer() {
+                    int_unop(IntUnOp::Neg, lhs).ok()
+                } else if lhs.prim().is_float() {
+                    float_unop(FloatUnOp::Neg, lhs).ok()
+                } else {
+                    None
+                };
+            }
+            let rhs = eval_scalar_with(right, env, strict)?;
+            let (lhs, rhs) = align_literal_widths(lhs, rhs)?;
+            if matches!(op, ArithOp::Div) && rhs.as_f64_lossy() == 0.0 {
+                return None;
+            }
+            if lhs.prim().is_integer() && rhs.prim().is_integer() {
+                if matches!(op, ArithOp::Div) {
+                    let lhs = scalar_from_f64(
+                        "prove-int-div-cast",
+                        Prim::F64,
+                        lhs.as_i64_exact()? as f64,
+                    )
+                    .ok()?;
+                    let rhs = scalar_from_f64(
+                        "prove-int-div-cast",
+                        Prim::F64,
+                        rhs.as_i64_exact()? as f64,
+                    )
+                    .ok()?;
+                    return float_binop(FloatBinOp::Div, lhs, rhs).ok();
                 }
-                ArithOp::Neg => -l,
+                let op = match op {
+                    ArithOp::Add => IntBinOp::Add,
+                    ArithOp::Sub => IntBinOp::Sub,
+                    ArithOp::Mul => IntBinOp::Mul,
+                    ArithOp::Div | ArithOp::Neg => unreachable!("handled above"),
+                };
+                int_binop(op, lhs, rhs).ok()
+            } else if lhs.prim().is_float() && rhs.prim().is_float() {
+                let op = match op {
+                    ArithOp::Add => FloatBinOp::Add,
+                    ArithOp::Sub => FloatBinOp::Sub,
+                    ArithOp::Mul => FloatBinOp::Mul,
+                    ArithOp::Div => FloatBinOp::Div,
+                    ArithOp::Neg => unreachable!("handled above"),
+                };
+                float_binop(op, lhs, rhs).ok()
+            } else {
+                None
             }
         }
         SmtExpr::Apply(name, args) => {
-            let a: Vec<f64> = args
+            let values: Vec<ScalarValue> = args
                 .iter()
-                .map(|x| eval_arith_with(x, env, strict))
-                .collect();
-            apply_intrinsic(name, &a)
+                .map(|expr| eval_scalar_with(expr, env, strict))
+                .collect::<Option<_>>()?;
+            match (name.as_str(), values.as_slice()) {
+                ("abs", [value]) if value.prim().is_integer() => {
+                    int_unop(IntUnOp::Abs, *value).ok()
+                }
+                ("exp" | "log" | "sqrt" | "sin" | "cos" | "abs", [value])
+                    if value.prim().is_float() =>
+                {
+                    let op = match name.as_str() {
+                        "exp" => FloatUnOp::Exp,
+                        "log" => FloatUnOp::Log,
+                        "sqrt" => FloatUnOp::Sqrt,
+                        "sin" => FloatUnOp::Sin,
+                        "cos" => FloatUnOp::Cos,
+                        "abs" => FloatUnOp::Abs,
+                        _ => unreachable!("matched closed unary intrinsic"),
+                    };
+                    float_unop(op, *value).ok()
+                }
+                ("min" | "max", [lhs, rhs]) => {
+                    let (lhs, rhs) = align_literal_widths(*lhs, *rhs)?;
+                    if lhs.prim().is_integer() && rhs.prim().is_integer() {
+                        int_binop(
+                            if name == "min" {
+                                IntBinOp::Min
+                            } else {
+                                IntBinOp::Max
+                            },
+                            lhs,
+                            rhs,
+                        )
+                        .ok()
+                    } else if lhs.prim().is_float() && rhs.prim().is_float() {
+                        float_binop(
+                            if name == "min" {
+                                FloatBinOp::Min
+                            } else {
+                                FloatBinOp::Max
+                            },
+                            lhs,
+                            rhs,
+                        )
+                        .ok()
+                    } else {
+                        None
+                    }
+                }
+                _ if values.iter().all(|value| value.prim().is_float()) => {
+                    let values = values
+                        .iter()
+                        .map(ScalarValue::as_f64_lossy)
+                        .collect::<Vec<_>>();
+                    scalar_from_f64("prove-intrinsic", Prim::F64, apply_intrinsic(name, &values))
+                        .ok()
+                }
+                _ => None,
+            }
         }
         SmtExpr::Ite(cond, then_e, else_e) => {
             if eval_bool_with(cond, env, strict) {
-                eval_arith_with(then_e, env, strict)
+                eval_scalar_with(then_e, env, strict)
             } else {
-                eval_arith_with(else_e, env, strict)
+                eval_scalar_with(else_e, env, strict)
             }
         }
         SmtExpr::Cmp(op, left, right) => {
-            let l = eval_arith_with(left, env, strict);
-            let r = eval_arith_with(right, env, strict);
-            if eval_cmp(*op, l, r, strict) {
-                1.0
-            } else {
-                0.0
-            }
+            let lhs = eval_scalar_with(left, env, strict)?;
+            let rhs = eval_scalar_with(right, env, strict)?;
+            scalar_from_i64(
+                "prove-comparison",
+                Prim::Bool,
+                i64::from(eval_cmp(*op, lhs, rhs, strict)),
+            )
+            .ok()
         }
-        SmtExpr::Bool(_, _) | SmtExpr::Not(_) => {
-            if eval_bool_with(expr, env, strict) {
-                1.0
-            } else {
-                0.0
-            }
-        }
-        SmtExpr::Forall(_, _) | SmtExpr::Exists(_, _) => f64::NAN, // unreachable after fuzzability check
+        SmtExpr::Bool(_, _) | SmtExpr::Not(_) => scalar_from_i64(
+            "prove-bool",
+            Prim::Bool,
+            i64::from(eval_bool_with(expr, env, strict)),
+        )
+        .ok(),
+        SmtExpr::Forall(_, _) | SmtExpr::Exists(_, _) => None, // unreachable after fuzzability check
     }
 }
 
@@ -314,8 +459,16 @@ mod tests {
     use super::*;
     use crate::solver::SmtExpr;
 
-    fn env(pairs: &[(&str, f64)]) -> HashMap<String, f64> {
-        pairs.iter().map(|(k, v)| (k.to_string(), *v)).collect()
+    fn env(pairs: &[(&str, f64)]) -> ConcreteEnv {
+        pairs
+            .iter()
+            .map(|(k, v)| {
+                (
+                    k.to_string(),
+                    scalar_from_f64("prove-test", Prim::F64, *v).expect("finite f64 test value"),
+                )
+            })
+            .collect()
     }
 
     #[test]
@@ -327,6 +480,57 @@ mod tests {
         );
         assert!(eval_bool(&e, &env(&[("x", 1.0)])));
         assert!(!eval_bool(&e, &env(&[("x", -1.0)])));
+    }
+
+    #[test]
+    fn int64_comparison_is_exact_above_the_f64_mantissa_boundary() {
+        let distinct = SmtExpr::Cmp(
+            CmpOp::Ne,
+            Box::new(SmtExpr::IntLit(9_007_199_254_740_993)),
+            Box::new(SmtExpr::IntLit(9_007_199_254_740_992)),
+        );
+        assert!(
+            eval_bool_strict(&distinct, &HashMap::new()),
+            "adjacent int64 values above 2^53 must not collapse in the concrete prover"
+        );
+    }
+
+    #[test]
+    fn int64_arithmetic_is_exact_above_the_f64_mantissa_boundary() {
+        let plus_one = SmtExpr::Arith(
+            ArithOp::Add,
+            Box::new(SmtExpr::IntLit(9_007_199_254_740_992)),
+            Box::new(SmtExpr::IntLit(1)),
+        );
+        let exact = SmtExpr::Cmp(
+            CmpOp::Ne,
+            Box::new(plus_one),
+            Box::new(SmtExpr::IntLit(9_007_199_254_740_992)),
+        );
+        assert!(
+            eval_bool_strict(&exact, &HashMap::new()),
+            "integer arithmetic must remain exact rather than compute through f64"
+        );
+    }
+
+    #[test]
+    fn integer_intrinsics_do_not_reopen_the_f64_path() {
+        let min = SmtExpr::Apply(
+            "min".to_string(),
+            vec![
+                SmtExpr::IntLit(9_007_199_254_740_993),
+                SmtExpr::IntLit(9_007_199_254_740_992),
+            ],
+        );
+        let exact = SmtExpr::Cmp(
+            CmpOp::Ne,
+            Box::new(min),
+            Box::new(SmtExpr::IntLit(9_007_199_254_740_993)),
+        );
+        assert!(
+            eval_bool_strict(&exact, &HashMap::new()),
+            "integer min must preserve the adjacent int64 distinction"
+        );
     }
 
     #[test]

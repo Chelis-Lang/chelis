@@ -2596,16 +2596,16 @@ refuses the default.
 > its kind, the operation that raised it, and the dtype it was finalizing
 > to, and SHALL render byte-identically in every lane and on every surface.
 > A lane that raises a numeric failure outside this set, or renders one of
-> these differently from another lane, is a defect.
-
-*(The exact strings are not frozen by this atom.
-`spec/design/dtype_semantics.md` §C2 carries the working shape
-`numeric trap: <kind> in <op> at <prim>`, following the branding precedent
-of `chelis_int_div_guard` / `integer division or remainder by zero`
-(`spec/05-risc-primitives.md` §2.1); the operation-name slot is an open
-decision on chelis#861, and the strings freeze at chelis#729 Phase 2, at
-which point they are recorded here. What this atom fixes now is the closed
-kind set and the cross-lane identity requirement.)*
+> these differently from another lane, is a defect. The exact renderings are
+> `numeric trap: overflow in <op> at <prim>`,
+> `numeric trap: domain in <op> at <prim>`, and
+> `numeric trap: division by zero in <op> at <prim>`. The `<op>` slot SHALL
+> be the canonical name of the primitive whose numeric kernel produced the
+> trap after lowering. When a composed source operation lowers to that
+> primitive, the trap SHALL retain the lowered primitive name; it SHALL NOT
+> be renamed to the composed operation or wrapped in lane, lowering, or
+> evaluator plumbing. No additional prefix or suffix is permitted on any
+> user-facing numeric-trap line.
 
 > **[04-NUM-10]** A numeric trap SHALL be a VALUE inside a lane and SHALL
 > become a process failure only at that lane's boundary: `chelis eval`

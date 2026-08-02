@@ -285,9 +285,12 @@ fn tensor_value<'a>(stdout: &'a str, name: &str) -> &'a str {
 // #387 — integer division / remainder by zero must TRAP
 // -----------------------------------------------------------------------------
 
-/// The single canonical evaluator diagnostic shared by integer `div` and
-/// `mod` (the consistency requirement: the two must agree).
+/// Pre-Phase-3 C-lane diagnostic. The typed eval kernels already use the
+/// [04-NUM-9] branded shape with the actual operation and dtype; C adopts it
+/// in chelis#729 Phase 3.
 const INT_DIV_ZERO_DIAGNOSTIC: &str = "integer division or remainder by zero";
+const EVAL_TRUNC_DIV_ZERO_DIAGNOSTIC: &str = "numeric trap: division by zero in trunc_div at int64";
+const EVAL_MOD_ZERO_DIAGNOSTIC: &str = "numeric trap: division by zero in mod at int64";
 
 /// POSITIVE: integer `trunc_div` is truncating (round toward zero) and
 /// agrees byte-for-byte between eval and the C backend. `7/2 == 3`,
@@ -411,7 +414,7 @@ fn issue_387_integer_trunc_div_by_zero_traps_in_eval() {
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains(INT_DIV_ZERO_DIAGNOSTIC),
+        stderr.contains(EVAL_TRUNC_DIV_ZERO_DIAGNOSTIC),
         "integer div by zero must emit the canonical diagnostic; stderr={stderr:?}",
     );
     // The pre-fix silently-wrong value must never appear.
@@ -421,10 +424,9 @@ fn issue_387_integer_trunc_div_by_zero_traps_in_eval() {
     );
 }
 
-/// NEGATIVE / consistency: integer `mod` by zero traps with the SAME clean
-/// diagnostic as `trunc_div` (pre-fix: a raw Rust remainder panic). The
-/// integer division/remainder family (`trunc_div`, `floor_div`, `mod`) must
-/// agree.
+/// NEGATIVE / consistency: integer `mod` by zero traps with the same branded
+/// kind/dtype shape as `trunc_div`, while [04-NUM-9]'s required operation slot
+/// distinguishes `mod` from `trunc_div` (pre-fix: a raw Rust panic).
 #[test]
 fn issue_387_integer_mod_by_zero_traps_with_same_diagnostic() {
     let out = chelis_eval_expr("mod(cast(7, int64), cast(0, int64))");
@@ -435,9 +437,9 @@ fn issue_387_integer_mod_by_zero_traps_with_same_diagnostic() {
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains(INT_DIV_ZERO_DIAGNOSTIC),
-        "integer mod by zero must emit the SAME canonical diagnostic as trunc_div \
-         (integer division/remainder consistency); stderr={stderr:?}",
+        stderr.contains(EVAL_MOD_ZERO_DIAGNOSTIC),
+        "integer mod by zero must emit the branded diagnostic with its actual op; \
+         stderr={stderr:?}",
     );
     assert!(
         !stderr.contains("attempt to calculate the remainder"),

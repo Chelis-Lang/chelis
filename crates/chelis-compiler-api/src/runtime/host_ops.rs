@@ -4,7 +4,13 @@ use chelis_deep::ast::{Atom, Expr};
 use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType};
 use chelis_ir::eval::{TensorValue as IrTensorValue, eval_tensor_roots_with};
 use chelis_ir::tier2;
-use chelis_types::{BUILTIN_NAMES, types::Prim};
+use chelis_types::{
+    BUILTIN_NAMES, CompareOp, FloatBinOp, FloatUnOp, IntBinOp, IntUnOp, ScalarValue,
+    compare_scalar_tensor, compare_scalars, compare_tensor_scalar, compare_tensors, float_binop,
+    float_scalar_tensor_binop, float_tensor_binop, float_tensor_scalar_binop, float_tensor_unop,
+    float_unop, int_binop, int_scalar_tensor_binop, int_tensor_binop, int_tensor_scalar_binop,
+    int_tensor_unop, int_unop, scalar_from_i64, types::Prim,
+};
 
 use super::transforms::*;
 use super::*;
@@ -339,81 +345,104 @@ fn terminal_name(name: &str) -> &str {
         .unwrap_or(name)
 }
 
-/// Per-dtype dispatch helper for two-argument numeric ops on host
-/// scalars. WS-A0: each dtype gets the same code path but the result
-/// dtype matches the operand dtype (per spec §5.1 "no implicit precision
-/// promotion"). The closure is invoked at f64 precision and re-packed
-/// at the operand dtype on the way out.
-pub(super) fn dispatch_scalar_binop(
-    lhs: &RuntimeValue,
-    rhs: &RuntimeValue,
-    op: &impl Fn(f64, f64) -> f64,
-) -> Result<RuntimeValue, String> {
-    match (lhs, rhs) {
-        (RuntimeValue::Scalar(lp), RuntimeValue::Scalar(rp))
-            if lp.dtype().is_integer() && rp.dtype().is_integer() =>
-        {
-            // chelis#729 Phase 1: the wide value still comes from the
-            // unsplit f64 closure, and the trailing `as i64` saturating
-            // cast is the documented chelis#680 residue adapter (exact
-            // for int8/16/32, saturating at int64 until the Phase 2
-            // kernel split computes integers in i64). Construction then
-            // runs through finalize, which traps out-of-width results.
-            let (ldt, rdt) = (lp.dtype(), rp.dtype());
-            let result_dtype = if ldt == rdt { ldt } else { Prim::Int64 };
-            RuntimeValue::scalar_from_int_wide(
-                result_dtype,
-                op(lp.as_f64_lossy(), rp.as_f64_lossy()),
-            )
-        }
-        (RuntimeValue::Scalar(lp), RuntimeValue::Scalar(rp))
-            if lp.dtype().is_float() && rp.dtype().is_float() =>
-        {
-            // Float-float: pick the wider of the two operand dtypes (no
-            // implicit promotion when they match — but keep f64 if either
-            // side is f64 so we don't downgrade an f64-typed value).
-            //
-            // E1 (WS-A0 RT-1 fixup): per spec/04-type-system.md §5.1
-            // there is no implicit precision promotion. The mixed
-            // narrow-float case (`(Bf16, F16)` and `(F16, Bf16)`) must
-            // be rejected by the type checker before reaching this
-            // dispatch; if the runtime ever observes it the type
-            // checker has a hole. Replace the silent `_ => Prim::F32`
-            // re-precisioning fallback with an `unreachable!` that
-            // names the spec invariant.
-            let (ldt, rdt) = (lp.dtype(), rp.dtype());
-            let result_dtype = match (ldt, rdt) {
-                (Prim::F64, _) | (_, Prim::F64) => Prim::F64,
-                (Prim::F32, _) | (_, Prim::F32) => Prim::F32,
-                (Prim::Bf16, Prim::Bf16) => Prim::Bf16,
-                (Prim::F16, Prim::F16) => Prim::F16,
-                _ => unreachable!(
-                    "type checker must reject mismatched float precisions per \
-                     spec/04-type-system.md §5.1 (no implicit precision promotion); \
-                     reached float-binop fallback with ({:?}, {:?})",
-                    ldt, rdt
-                ),
-            };
-            let value = op(lp.as_f64_lossy(), rp.as_f64_lossy());
-            RuntimeValue::scalar_like_float(result_dtype, value)
-        }
-        _ => Err(format!(
-            "numeric op expects matching int or float args, got ({lhs:?}, {rhs:?})"
-        )),
-    }
+fn tensor_result(
+    template: &RuntimeTensorValue,
+    storage: chelis_types::TensorStorage,
+) -> RuntimeValue {
+    RuntimeValue::Tensor(RuntimeTensorValue::new(IrTensorValue::from_storage(
+        template.value.shape.clone(),
+        storage,
+    )))
 }
 
+/// The only host-runtime binary arithmetic dispatcher. Callable names map
+/// to closed kernel enums before this boundary; arithmetic never enters as
+/// an `f64`/`i64` closure.
 pub(super) fn numeric_binop(
     args: &[RuntimeValue],
-    op: impl Fn(f64, f64) -> f64,
+    int_op: Option<IntBinOp>,
+    float_op: Option<FloatBinOp>,
 ) -> Result<RuntimeValue, String> {
     match (args.first(), args.get(1)) {
-        (Some(RuntimeValue::Tensor(lhs)), Some(RuntimeValue::Tensor(rhs))) => {
-            tensor_numeric_binop(lhs, rhs, &op)
+        (Some(RuntimeValue::Scalar(lhs)), Some(RuntimeValue::Scalar(rhs)))
+            if lhs.dtype().is_integer() && rhs.dtype().is_integer() =>
+        {
+            let op = int_op.ok_or_else(|| "numeric op does not accept integer args".to_string())?;
+            int_binop(op, lhs.value(), rhs.value())
+                .map(RuntimeValue::from_scalar_value)
+                .map_err(|error| error.to_string())
         }
-        (Some(RuntimeValue::Tensor(lhs)), Some(rhs)) => tensor_scalar_binop(lhs, rhs, &op),
-        (Some(lhs), Some(RuntimeValue::Tensor(rhs))) => scalar_tensor_binop(lhs, rhs, &op),
-        (Some(lhs), Some(rhs)) => dispatch_scalar_binop(lhs, rhs, &op),
+        (Some(RuntimeValue::Scalar(lhs)), Some(RuntimeValue::Scalar(rhs)))
+            if lhs.dtype().is_float() && rhs.dtype().is_float() =>
+        {
+            let op = float_op.ok_or_else(|| "numeric op does not accept float args".to_string())?;
+            float_binop(op, lhs.value(), rhs.value())
+                .map(RuntimeValue::from_scalar_value)
+                .map_err(|error| error.to_string())
+        }
+        (Some(RuntimeValue::Tensor(lhs)), Some(RuntimeValue::Tensor(rhs))) => {
+            if lhs.value.shape != rhs.value.shape {
+                return Err(format!(
+                    "tensor shapes must match for elementwise op, got {:?} vs {:?}",
+                    lhs.value.shape, rhs.value.shape
+                ));
+            }
+            let storage = if lhs.precision.is_integer() && rhs.precision.is_integer() {
+                let op = int_op
+                    .ok_or_else(|| "numeric op does not accept integer tensors".to_string())?;
+                int_tensor_binop(op, lhs.value.storage(), rhs.value.storage())
+            } else if lhs.precision.is_float() && rhs.precision.is_float() {
+                let op = float_op
+                    .ok_or_else(|| "numeric op does not accept float tensors".to_string())?;
+                float_tensor_binop(op, lhs.value.storage(), rhs.value.storage())
+            } else {
+                return Err(format!(
+                    "numeric op expects matching int or float tensors, got {} and {}",
+                    lhs.precision.name(),
+                    rhs.precision.name()
+                ));
+            }
+            .map_err(|error| error.to_string())?;
+            Ok(tensor_result(lhs, storage))
+        }
+        (Some(RuntimeValue::Tensor(tensor)), Some(RuntimeValue::Scalar(scalar))) => {
+            let storage = if tensor.precision.is_integer() && scalar.dtype().is_integer() {
+                let op = int_op
+                    .ok_or_else(|| "numeric op does not accept integer tensors".to_string())?;
+                int_tensor_scalar_binop(op, tensor.value.storage(), scalar.value())
+            } else if tensor.precision.is_float() && scalar.dtype().is_float() {
+                let op = float_op
+                    .ok_or_else(|| "numeric op does not accept float tensors".to_string())?;
+                float_tensor_scalar_binop(op, tensor.value.storage(), scalar.value())
+            } else {
+                return Err(format!(
+                    "numeric op expects matching int or float args, got {} and {}",
+                    tensor.precision.name(),
+                    scalar.dtype().name()
+                ));
+            }
+            .map_err(|error| error.to_string())?;
+            Ok(tensor_result(tensor, storage))
+        }
+        (Some(RuntimeValue::Scalar(scalar)), Some(RuntimeValue::Tensor(tensor))) => {
+            let storage = if scalar.dtype().is_integer() && tensor.precision.is_integer() {
+                let op = int_op
+                    .ok_or_else(|| "numeric op does not accept integer tensors".to_string())?;
+                int_scalar_tensor_binop(op, scalar.value(), tensor.value.storage())
+            } else if scalar.dtype().is_float() && tensor.precision.is_float() {
+                let op = float_op
+                    .ok_or_else(|| "numeric op does not accept float tensors".to_string())?;
+                float_scalar_tensor_binop(op, scalar.value(), tensor.value.storage())
+            } else {
+                return Err(format!(
+                    "numeric op expects matching int or float args, got {} and {}",
+                    scalar.dtype().name(),
+                    tensor.precision.name()
+                ));
+            }
+            .map_err(|error| error.to_string())?;
+            Ok(tensor_result(tensor, storage))
+        }
         other => Err(format!(
             "numeric op expects matching int or float args, got {other:?}"
         )),
@@ -422,15 +451,37 @@ pub(super) fn numeric_binop(
 
 pub(super) fn numeric_unop(
     args: &[RuntimeValue],
-    op: impl Fn(f64) -> f64,
+    int_op: Option<IntUnOp>,
+    float_op: Option<FloatUnOp>,
 ) -> Result<RuntimeValue, String> {
     match args.first() {
-        Some(RuntimeValue::Tensor(tensor)) => tensor_numeric_unop(tensor, &op),
-        Some(RuntimeValue::Scalar(payload)) if payload.dtype().is_integer() => {
-            RuntimeValue::scalar_from_int_wide(payload.dtype(), op(payload.as_f64_lossy()))
+        Some(RuntimeValue::Scalar(value)) if value.dtype().is_integer() => {
+            let op =
+                int_op.ok_or_else(|| "numeric op does not accept an integer arg".to_string())?;
+            int_unop(op, value.value())
+                .map(RuntimeValue::from_scalar_value)
+                .map_err(|error| error.to_string())
         }
-        Some(RuntimeValue::Scalar(payload)) if payload.dtype().is_float() => {
-            RuntimeValue::scalar_like_float(payload.dtype(), op(payload.as_f64_lossy()))
+        Some(RuntimeValue::Scalar(value)) if value.dtype().is_float() => {
+            let op =
+                float_op.ok_or_else(|| "numeric op does not accept a float arg".to_string())?;
+            float_unop(op, value.value())
+                .map(RuntimeValue::from_scalar_value)
+                .map_err(|error| error.to_string())
+        }
+        Some(RuntimeValue::Tensor(tensor)) if tensor.precision.is_integer() => {
+            let op =
+                int_op.ok_or_else(|| "numeric op does not accept an integer tensor".to_string())?;
+            let storage =
+                int_tensor_unop(op, tensor.value.storage()).map_err(|error| error.to_string())?;
+            Ok(tensor_result(tensor, storage))
+        }
+        Some(RuntimeValue::Tensor(tensor)) if tensor.precision.is_float() => {
+            let op =
+                float_op.ok_or_else(|| "numeric op does not accept a float tensor".to_string())?;
+            let storage =
+                float_tensor_unop(op, tensor.value.storage()).map_err(|error| error.to_string())?;
+            Ok(tensor_result(tensor, storage))
         }
         other => Err(format!(
             "numeric op expects int or float arg, got {other:?}"
@@ -438,221 +489,35 @@ pub(super) fn numeric_unop(
     }
 }
 
-fn tensor_numeric_binop(
-    lhs: &RuntimeTensorValue,
-    rhs: &RuntimeTensorValue,
-    op: &impl Fn(f64, f64) -> f64,
-) -> Result<RuntimeValue, String> {
-    if lhs.value.shape != rhs.value.shape {
-        return Err(format!(
-            "tensor shapes must match for elementwise op, got {:?} vs {:?}",
-            lhs.value.shape, rhs.value.shape
-        ));
-    }
-    let wide: Vec<f64> = lhs
-        .value
-        .to_f64_lossy_vec()
-        .into_iter()
-        .zip(rhs.value.to_f64_lossy_vec())
-        .map(|(l, r)| op(l, r))
-        .collect();
-    RuntimeTensorValue::from_wide("arithmetic", lhs.precision, lhs.value.shape.clone(), wide)
-        .map(RuntimeValue::Tensor)
-}
-
-fn tensor_scalar_binop(
-    tensor: &RuntimeTensorValue,
-    scalar: &RuntimeValue,
-    op: &impl Fn(f64, f64) -> f64,
-) -> Result<RuntimeValue, String> {
-    let scalar = runtime_scalar_as_f64_lossy(scalar)
-        .ok_or_else(|| format!("numeric op expects scalar rhs, got {scalar:?}"))?;
-    let wide: Vec<f64> = tensor
-        .value
-        .to_f64_lossy_vec()
-        .into_iter()
-        .map(|value| op(value, scalar))
-        .collect();
-    RuntimeTensorValue::from_wide(
-        "arithmetic",
-        tensor.precision,
-        tensor.value.shape.clone(),
-        wide,
-    )
-    .map(RuntimeValue::Tensor)
-}
-
-fn scalar_tensor_binop(
-    scalar: &RuntimeValue,
-    tensor: &RuntimeTensorValue,
-    op: &impl Fn(f64, f64) -> f64,
-) -> Result<RuntimeValue, String> {
-    let scalar = runtime_scalar_as_f64_lossy(scalar)
-        .ok_or_else(|| format!("numeric op expects scalar lhs, got {scalar:?}"))?;
-    let wide: Vec<f64> = tensor
-        .value
-        .to_f64_lossy_vec()
-        .into_iter()
-        .map(|value| op(scalar, value))
-        .collect();
-    RuntimeTensorValue::from_wide(
-        "arithmetic",
-        tensor.precision,
-        tensor.value.shape.clone(),
-        wide,
-    )
-    .map(RuntimeValue::Tensor)
-}
-
-fn tensor_numeric_unop(
-    tensor: &RuntimeTensorValue,
-    op: &impl Fn(f64) -> f64,
-) -> Result<RuntimeValue, String> {
-    let wide: Vec<f64> = tensor
-        .value
-        .to_f64_lossy_vec()
-        .into_iter()
-        .map(op)
-        .collect();
-    RuntimeTensorValue::from_wide(
-        "arithmetic",
-        tensor.precision,
-        tensor.value.shape.clone(),
-        wide,
-    )
-    .map(RuntimeValue::Tensor)
-}
-
-/// Tensor-elementwise unary at the tensor's OWN dtype (chelis#729
-/// Phase 1; the former `tensor_float_unop_f32` f32 funnel is deleted,
-/// closing chelis#717's f64-destroyed-to-f32 and skipped-narrowing
-/// rows). An f64 tensor computes through the f64 closure at full
-/// precision; every narrower float width computes through the f32
-/// closure (the C backend's `chelis_host_*_f32` parity path) and then
-/// finalizes once at its own width, which is the identity for f32 and
-/// the IEEE rounding for f16/bf16.
 pub(super) fn tensor_float_unop(
     tensor: &RuntimeTensorValue,
-    scalar_op: impl Fn(f64) -> f64,
-    tensor_op: impl Fn(f32) -> f32,
+    op: FloatUnOp,
 ) -> Result<RuntimeTensorValue, String> {
-    let wide: Vec<f64> = match tensor.precision {
-        Prim::F64 => tensor
-            .value
-            .to_f64_lossy_vec()
-            .into_iter()
-            .map(scalar_op)
-            .collect(),
-        Prim::F32 | Prim::F16 | Prim::Bf16 => tensor
-            .value
-            .to_f64_lossy_vec()
-            .into_iter()
-            .map(|value| tensor_op(value as f32) as f64)
-            .collect(),
-        Prim::Int8 | Prim::Int16 | Prim::Int32 | Prim::Int64 | Prim::Bool => {
-            return Err(format!(
-                "float tensor op expects a float tensor, got {}",
-                tensor.precision.name()
-            ));
-        }
-        Prim::F8e4m3 | Prim::String => {
-            return Err(format!(
-                "float tensor op expects a float tensor, got {}",
-                tensor.precision.name()
-            ));
-        }
-    };
-    RuntimeTensorValue::from_wide(
-        "arithmetic",
-        tensor.precision,
+    let storage =
+        float_tensor_unop(op, tensor.value.storage()).map_err(|error| error.to_string())?;
+    Ok(RuntimeTensorValue::new(IrTensorValue::from_storage(
         tensor.value.shape.clone(),
-        wide,
-    )
+        storage,
+    )))
 }
 
-/// `relu(x) = max(0, x)`. Exact in any precision; we still take `f32`
-/// here so the host-lane and C-lane storage shapes line up.
-pub(super) fn activation_relu_f32(x: f32) -> f32 {
-    if x > 0.0 { x } else { 0.0 }
+pub(super) fn eval_div(args: &[RuntimeValue]) -> Result<RuntimeValue, String> {
+    numeric_binop(args, Some(IntBinOp::TruncDiv), Some(FloatBinOp::Div))
 }
 
-/// `sigmoid(x) = 1 / (1 + exp(-x))`. Mirrors `chelis_host_sigmoid_f32`
-/// in `crates/chelis-backend-c/src/host_emit.rs:137` exactly — single
-/// `expf` of `-x`, no f64 widening.
-pub(super) fn activation_sigmoid_f32(x: f32) -> f32 {
-    1.0 / (1.0 + (-x).exp())
+pub(super) fn eval_mod(args: &[RuntimeValue]) -> Result<RuntimeValue, String> {
+    numeric_binop(args, Some(IntBinOp::Rem), None)
 }
 
-/// `tanh(x)` via `f32::tanh`. Matches the C backend's `tanhf` helper.
-pub(super) fn activation_tanh_f32(x: f32) -> f32 {
-    x.tanh()
+pub(super) fn eval_floor_div(args: &[RuntimeValue]) -> Result<RuntimeValue, String> {
+    numeric_binop(args, Some(IntBinOp::FloorDiv), Some(FloatBinOp::FloorDiv))
 }
 
-/// `silu(x) = x * sigmoid(x)` (a.k.a. swish). Composed from
-/// `activation_sigmoid_f32` so the f32-rounding profile is identical
-/// to the C-backend helper — i.e., the C side computes
-/// `x * chelis_host_sigmoid_f32(x)` and we mirror it 1:1.
-pub(super) fn activation_silu_f32(x: f32) -> f32 {
-    x * activation_sigmoid_f32(x)
+pub(super) fn eval_trunc_div(args: &[RuntimeValue]) -> Result<RuntimeValue, String> {
+    numeric_binop(args, Some(IntBinOp::TruncDiv), None)
 }
 
-/// `gelu(x)` via the tanh approximation, matching `School.Nn.Gelu.gelu_scalar`:
-///
-///   gelu(x) ≈ 0.5 * x * (1 + tanh(sqrt(2/π) * (x + 0.044715 * x^3)))
-///
-/// We use the tanh-approx (not the erf-exact form) because the
-/// C-backend host helper composes the same way and the Std layer is
-/// the canonical reference. If/when a `Erf` RISC op is added the
-/// exact form can replace this and both lanes must move together.
-pub(super) fn activation_gelu_f32(x: f32) -> f32 {
-    // The literal is the f64 value that `School.Nn.Gelu` and the C-backend
-    // helper (`0.7978845608028654f` in host_emit.rs) both encode; the
-    // explicit cast keeps the f32 round-trip identical to those lanes.
-    // `clippy::excessive_precision` complains about the trailing digits
-    // being beyond f32 representability — that's intentional (we want
-    // the same source-level constant the other lanes use).
-    #[allow(clippy::excessive_precision)]
-    const C: f32 = 0.7978845608028654_f32; // sqrt(2/pi)
-    const K: f32 = 0.044715_f32;
-    let inner = C * (x + K * x * x * x);
-    0.5 * x * (1.0 + inner.tanh())
-}
-
-/// f64-precision activation bodies for f64 tensors (chelis#729 Phase 1:
-/// an f64 tensor computes at genuine f64 precision, chelis#717; the f32
-/// bodies above remain the C-parity path for the narrower widths).
-pub(super) fn activation_relu_f64(x: f64) -> f64 {
-    if x > 0.0 { x } else { 0.0 }
-}
-
-pub(super) fn activation_sigmoid_f64(x: f64) -> f64 {
-    1.0 / (1.0 + (-x).exp())
-}
-
-pub(super) fn activation_tanh_f64(x: f64) -> f64 {
-    x.tanh()
-}
-
-pub(super) fn activation_silu_f64(x: f64) -> f64 {
-    x * activation_sigmoid_f64(x)
-}
-
-pub(super) fn activation_gelu_f64(x: f64) -> f64 {
-    const C: f64 = 0.7978845608028654; // sqrt(2/pi)
-    const K: f64 = 0.044715;
-    let inner = C * (x + K * x * x * x);
-    0.5 * x * (1.0 + inner.tanh())
-}
-
-fn runtime_scalar_as_f64_lossy(value: &RuntimeValue) -> Option<f64> {
-    match value {
-        RuntimeValue::Scalar(payload) => Some(payload.as_f64_lossy()),
-        RuntimeValue::Bool(value) => Some(if *value { 1.0 } else { 0.0 }),
-        _ => None,
-    }
-}
-
-pub(super) fn int_binop(
+pub(super) fn bit_int_binop(
     args: &[RuntimeValue],
     op: impl Fn(i64, i64) -> i64,
 ) -> Result<RuntimeValue, String> {
@@ -668,202 +533,6 @@ pub(super) fn int_binop(
             let (ldt, rdt) = (lp.dtype(), rp.dtype());
             let result_dtype = if ldt == rdt { ldt } else { Prim::Int64 };
             RuntimeValue::scalar_like_int(result_dtype, op(lp.as_i64(), rp.as_i64()))
-        }
-        other => Err(format!("integer op expects int args, got {other:?}")),
-    }
-}
-
-/// Canonical evaluator diagnostic for integer division/remainder by zero
-/// (#387). `div` and `mod` share one message so the two primitives trap
-/// consistently. Per `spec/05-risc-primitives.md` (integer division) a
-/// `1 / 0` (or `% 0`) on integer operands must trap rather than yield a
-/// silently-wrong finite value; the C backend follows the platform's
-/// SIGFPE for the same operands. Returning a clean `Err` halts evaluation
-/// with `error: <message>` (exit 1) instead of an unhandled Rust panic.
-const INT_DIV_ZERO_MSG: &str = "integer division or remainder by zero";
-
-/// True when every operand resolves to an integer precision (scalar dtype
-/// or integer-precision tensor). Integer `div`/`mod` follow C truncating
-/// semantics and trap on a zero divisor; float operands keep IEEE-754
-/// division (`1.0 / 0.0 == inf`), so the integer trap must not fire there.
-fn operand_is_integer(value: &RuntimeValue) -> bool {
-    match value {
-        RuntimeValue::Scalar(payload) => payload.dtype().is_integer(),
-        RuntimeValue::Tensor(tensor) => tensor.precision.is_integer(),
-        _ => false,
-    }
-}
-
-/// `div` evaluator entry: integer operands trap on a zero divisor and use
-/// true integer (truncating, round-toward-zero) division; float operands
-/// fall through to IEEE-754 `numeric_binop` (`1.0 / 0.0 == inf`). Routing
-/// integers through real `i64` division (rather than the f64 round-trip
-/// `lhs / rhs as i64`) also preserves the full `int64` range that the f64
-/// mantissa would otherwise truncate. See #387.
-pub(super) fn eval_div(args: &[RuntimeValue]) -> Result<RuntimeValue, String> {
-    let both_integer = args.len() == 2
-        && args.iter().all(operand_is_integer)
-        && args
-            .iter()
-            .any(|v| matches!(v, RuntimeValue::Scalar(_)) || matches!(v, RuntimeValue::Tensor(_)));
-    if both_integer {
-        return checked_int_binop(args, |lhs, rhs| {
-            if rhs == 0 {
-                Err(INT_DIV_ZERO_MSG.to_string())
-            } else {
-                Ok(lhs.wrapping_div(rhs))
-            }
-        });
-    }
-    numeric_binop(args, |lhs, rhs| lhs / rhs)
-}
-
-/// `mod` evaluator entry: integer-only (the surface `mod` primitive),
-/// trapping on a zero divisor with the same diagnostic as `eval_div` so
-/// the two stay consistent (#387). Uses true integer remainder.
-pub(super) fn eval_mod(args: &[RuntimeValue]) -> Result<RuntimeValue, String> {
-    checked_int_binop(args, |lhs, rhs| {
-        if rhs == 0 {
-            Err(INT_DIV_ZERO_MSG.to_string())
-        } else {
-            Ok(lhs.wrapping_rem(rhs))
-        }
-    })
-}
-
-/// Integer floor division (round toward −∞). The quotient is the
-/// truncating `/` corrected down by one when the remainder is nonzero and
-/// the operands have opposite signs. Matches Python `//` / the C-backend
-/// remainder-sign correction. Traps on a zero divisor. See chelis#178.
-fn floor_div_i64(lhs: i64, rhs: i64) -> Result<i64, String> {
-    if rhs == 0 {
-        return Err(INT_DIV_ZERO_MSG.to_string());
-    }
-    let q = lhs.wrapping_div(rhs);
-    let r = lhs.wrapping_rem(rhs);
-    if r != 0 && ((r < 0) != (rhs < 0)) {
-        Ok(q - 1)
-    } else {
-        Ok(q)
-    }
-}
-
-/// `floor_div` evaluator entry (chelis#178): integer operands round the
-/// quotient toward −∞ (and trap on a zero divisor); float operands compute
-/// `floor(a / b)` under IEEE division (a zero divisor follows IEEE,
-/// `floor(+inf) == +inf`, never traps).
-pub(super) fn eval_floor_div(args: &[RuntimeValue]) -> Result<RuntimeValue, String> {
-    let both_integer = args.len() == 2 && args.iter().all(operand_is_integer);
-    if both_integer {
-        return checked_int_binop(args, floor_div_i64);
-    }
-    numeric_binop(args, |lhs, rhs| (lhs / rhs).floor())
-}
-
-/// `trunc_div` evaluator entry (chelis#178): integer-only truncating
-/// (round-toward-zero) division — the C/Rust integer `/` quotient. Traps
-/// on a zero divisor with the shared diagnostic. The type checker rejects
-/// float operands; this entry handles the integer (scalar/tensor) lanes.
-pub(super) fn eval_trunc_div(args: &[RuntimeValue]) -> Result<RuntimeValue, String> {
-    checked_int_binop(args, |lhs, rhs| {
-        if rhs == 0 {
-            Err(INT_DIV_ZERO_MSG.to_string())
-        } else {
-            Ok(lhs.wrapping_div(rhs))
-        }
-    })
-}
-
-/// Integer binop helper whose closure may fail (the failing path is the
-/// zero-divisor trap). Handles integer scalars and integer-precision
-/// tensors element-wise; the closure runs at `i64` precision. A tensor
-/// result keeps the operand precision. Mixed scalar/tensor integer forms
-/// broadcast the scalar across the tensor, mirroring `numeric_binop`.
-fn checked_int_binop(
-    args: &[RuntimeValue],
-    op: impl Fn(i64, i64) -> Result<i64, String>,
-) -> Result<RuntimeValue, String> {
-    match (args.first(), args.get(1)) {
-        (Some(RuntimeValue::Scalar(lp)), Some(RuntimeValue::Scalar(rp)))
-            if lp.dtype().is_integer() && rp.dtype().is_integer() =>
-        {
-            let (ldt, rdt) = (lp.dtype(), rp.dtype());
-            let result_dtype = if ldt == rdt { ldt } else { Prim::Int64 };
-            let value = op(lp.as_i64(), rp.as_i64())?;
-            RuntimeValue::scalar_like_int(result_dtype, value)
-        }
-        (Some(RuntimeValue::Tensor(lhs)), Some(RuntimeValue::Tensor(rhs)))
-            if lhs.precision.is_integer() && rhs.precision.is_integer() =>
-        {
-            if lhs.value.shape != rhs.value.shape {
-                return Err(format!(
-                    "tensor shapes must match for elementwise op, got {:?} vs {:?}",
-                    lhs.value.shape, rhs.value.shape
-                ));
-            }
-            let a = lhs
-                .value
-                .storage()
-                .to_i64_exact_vec()
-                .expect("integer tensor storage reads exactly");
-            let b = rhs
-                .value
-                .storage()
-                .to_i64_exact_vec()
-                .expect("integer tensor storage reads exactly");
-            let mut data = Vec::with_capacity(a.len());
-            for (l, r) in a.into_iter().zip(b) {
-                data.push(op(l, r)?);
-            }
-            RuntimeTensorValue::from_wide_int(
-                "arithmetic",
-                lhs.precision,
-                lhs.value.shape.clone(),
-                data,
-            )
-            .map(RuntimeValue::Tensor)
-        }
-        (Some(RuntimeValue::Tensor(lhs)), Some(RuntimeValue::Scalar(rp)))
-            if lhs.precision.is_integer() && rp.dtype().is_integer() =>
-        {
-            let rhs = rp.as_i64();
-            let a = lhs
-                .value
-                .storage()
-                .to_i64_exact_vec()
-                .expect("integer tensor storage reads exactly");
-            let mut data = Vec::with_capacity(a.len());
-            for l in a {
-                data.push(op(l, rhs)?);
-            }
-            RuntimeTensorValue::from_wide_int(
-                "arithmetic",
-                lhs.precision,
-                lhs.value.shape.clone(),
-                data,
-            )
-            .map(RuntimeValue::Tensor)
-        }
-        (Some(RuntimeValue::Scalar(lp)), Some(RuntimeValue::Tensor(rhs)))
-            if lp.dtype().is_integer() && rhs.precision.is_integer() =>
-        {
-            let lhs = lp.as_i64();
-            let b = rhs
-                .value
-                .storage()
-                .to_i64_exact_vec()
-                .expect("integer tensor storage reads exactly");
-            let mut data = Vec::with_capacity(b.len());
-            for r in b {
-                data.push(op(lhs, r)?);
-            }
-            RuntimeTensorValue::from_wide_int(
-                "arithmetic",
-                rhs.precision,
-                rhs.value.shape.clone(),
-                data,
-            )
-            .map(RuntimeValue::Tensor)
         }
         other => Err(format!("integer op expects int args, got {other:?}")),
     }
@@ -931,170 +600,105 @@ pub(super) fn int_shift_binop(
     }
 }
 
-fn float_unop(args: &[RuntimeValue], op: impl Fn(f64) -> f64) -> Result<RuntimeValue, String> {
-    match args.first() {
-        Some(RuntimeValue::Scalar(payload)) if payload.dtype().is_float() => {
-            RuntimeValue::scalar_like_float(payload.dtype(), op(payload.as_f64_lossy()))
-        }
-        other => Err(format!("float op expects float arg, got {other:?}")),
-    }
-}
-
-/// Float unary that accepts both scalar floats and tensors. Scalar args
-/// run in `f64` via `scalar_op` (matching the C backend's libm `sqrt`/
-/// `exp`/`log`/`sin` scalar emit in `host_emit.rs`). Tensor args run
-/// elementwise in `f32` via `tensor_op` (matching the C backend's
-/// `expf`/`logf`/`sinf`/`sqrtf` tensor emit and the activation-block
-/// `f32` parity rule above).
 pub(super) fn float_unop_with_tensor(
     args: &[RuntimeValue],
-    scalar_op: impl Fn(f64) -> f64,
-    tensor_op: impl Fn(f32) -> f32,
+    op: FloatUnOp,
 ) -> Result<RuntimeValue, String> {
-    match args.first() {
-        Some(RuntimeValue::Tensor(tensor)) => {
-            tensor_float_unop(tensor, scalar_op, tensor_op).map(RuntimeValue::Tensor)
-        }
-        _ => float_unop(args, scalar_op),
-    }
+    numeric_unop(args, None, Some(op))
 }
 
-/// Lossily coerce a scalar `RuntimeValue` to its legacy `f64`
-/// representation for comparison with a tensor element. Integer values
-/// above 2^53 cannot remain exact. Returns `None` for non-scalar values.
-fn scalar_as_f64_lossy(value: &RuntimeValue) -> Option<f64> {
-    runtime_scalar_as_f64_lossy(value)
+fn comparison_scalar(value: &RuntimeValue) -> Option<ScalarValue> {
+    match value {
+        RuntimeValue::Scalar(payload) => Some(payload.value()),
+        RuntimeValue::Bool(value) => Some(
+            scalar_from_i64("compare", Prim::Bool, i64::from(*value))
+                .expect("a bool is always in the bool dtype domain"),
+        ),
+        _ => None,
+    }
 }
 
 pub(super) fn compare_eq(args: &[RuntimeValue]) -> Result<RuntimeValue, String> {
+    compare_runtime(args, CompareOp::Eq)
+}
+
+pub(super) fn compare_runtime(
+    args: &[RuntimeValue],
+    op: CompareOp,
+) -> Result<RuntimeValue, String> {
     match (args.first(), args.get(1)) {
-        (Some(RuntimeValue::Scalar(lp)), Some(RuntimeValue::Scalar(rp)))
-            if lp.dtype().is_integer() && rp.dtype().is_integer() =>
+        (Some(lhs), Some(rhs))
+            if comparison_scalar(lhs).is_some() && comparison_scalar(rhs).is_some() =>
         {
-            Ok(RuntimeValue::Bool(lp.as_i64() == rp.as_i64()))
+            compare_scalars(
+                op,
+                comparison_scalar(lhs).expect("comparison scalar guard"),
+                comparison_scalar(rhs).expect("comparison scalar guard"),
+            )
+            .map(RuntimeValue::Bool)
+            .map_err(|error| error.to_string())
         }
-        (Some(RuntimeValue::Scalar(lp)), Some(RuntimeValue::Scalar(rp)))
-            if lp.dtype().is_float() && rp.dtype().is_float() =>
-        {
-            Ok(RuntimeValue::Bool(lp.as_f64_lossy() == rp.as_f64_lossy()))
-        }
-        (Some(RuntimeValue::Bool(lhs)), Some(RuntimeValue::Bool(rhs))) => {
-            Ok(RuntimeValue::Bool(lhs == rhs))
-        }
-        (Some(RuntimeValue::String(lhs)), Some(RuntimeValue::String(rhs))) => {
-            Ok(RuntimeValue::Bool(lhs == rhs))
-        }
-        // Element-wise tensor-tensor equality. The build-target lane already
-        // supports this; the host evaluator was returning an error, blocking
-        // IntCol/BoolCol construction and tensor-level is_nan in chelis test.
+        (Some(RuntimeValue::String(lhs)), Some(RuntimeValue::String(rhs))) => match op {
+            CompareOp::Eq => Ok(RuntimeValue::Bool(lhs == rhs)),
+            CompareOp::Ne => Ok(RuntimeValue::Bool(lhs != rhs)),
+            _ => Err("ordered comparison does not accept string args".to_string()),
+        },
         (Some(RuntimeValue::Tensor(lhs)), Some(RuntimeValue::Tensor(rhs))) => {
-            tensor_compare_value(lhs, rhs, |a, b| a == b).map(RuntimeValue::Tensor)
+            tensor_compare_value(lhs, rhs, op).map(RuntimeValue::Tensor)
         }
-        // Element-wise tensor-scalar equality: broadcast the scalar across
-        // every element. Mirrors the build-target lane and unblocks
-        // `is_nan_local`-style scalar comparisons against a tensor.
         (Some(RuntimeValue::Tensor(tensor)), Some(scalar))
-            if scalar_as_f64_lossy(scalar).is_some() =>
+            if comparison_scalar(scalar).is_some() =>
         {
-            let scalar_f = scalar_as_f64_lossy(scalar).expect("scalar guard");
-            tensor_compare_scalar(tensor, scalar_f, |a, b| a == b).map(RuntimeValue::Tensor)
+            let storage = compare_tensor_scalar(
+                op,
+                tensor.value.storage(),
+                comparison_scalar(scalar).expect("comparison scalar guard"),
+            )
+            .map_err(|error| error.to_string())?;
+            match tensor_result(tensor, storage) {
+                RuntimeValue::Tensor(value) => Ok(RuntimeValue::Tensor(value)),
+                _ => unreachable!("tensor_result always constructs a tensor"),
+            }
         }
         (Some(scalar), Some(RuntimeValue::Tensor(tensor)))
-            if scalar_as_f64_lossy(scalar).is_some() =>
+            if comparison_scalar(scalar).is_some() =>
         {
-            let scalar_f = scalar_as_f64_lossy(scalar).expect("scalar guard");
-            tensor_compare_scalar(tensor, scalar_f, |a, b| a == b).map(RuntimeValue::Tensor)
+            let storage = compare_scalar_tensor(
+                op,
+                comparison_scalar(scalar).expect("comparison scalar guard"),
+                tensor.value.storage(),
+            )
+            .map_err(|error| error.to_string())?;
+            match tensor_result(tensor, storage) {
+                RuntimeValue::Tensor(value) => Ok(RuntimeValue::Tensor(value)),
+                _ => unreachable!("tensor_result always constructs a tensor"),
+            }
         }
-        other => Err(format!("eq/neq expect matching scalar args, got {other:?}")),
+        other => Err(format!("comparison expects matching args, got {other:?}")),
     }
 }
 
 pub(super) fn ordered_compare(
     args: &[RuntimeValue],
-    cmp: impl Fn(f64, f64) -> bool,
+    op: CompareOp,
 ) -> Result<RuntimeValue, String> {
-    match (args.first(), args.get(1)) {
-        (Some(RuntimeValue::Scalar(lp)), Some(RuntimeValue::Scalar(rp)))
-            if lp.dtype().is_integer() && rp.dtype().is_integer() =>
-        {
-            Ok(RuntimeValue::Bool(cmp(
-                lp.as_f64_lossy(),
-                rp.as_f64_lossy(),
-            )))
-        }
-        (Some(RuntimeValue::Scalar(lp)), Some(RuntimeValue::Scalar(rp)))
-            if lp.dtype().is_float() && rp.dtype().is_float() =>
-        {
-            Ok(RuntimeValue::Bool(cmp(
-                lp.as_f64_lossy(),
-                rp.as_f64_lossy(),
-            )))
-        }
-        // Element-wise tensor-tensor ordering. Mirrors the build-target lane
-        // and unblocks the same downstream tensor-level boolean ops.
-        (Some(RuntimeValue::Tensor(lhs)), Some(RuntimeValue::Tensor(rhs))) => {
-            tensor_compare_value(lhs, rhs, cmp).map(RuntimeValue::Tensor)
-        }
-        // Element-wise tensor-scalar ordering: broadcast the scalar across
-        // every element. The result is a `tensor[D, bool]` mask.
-        (Some(RuntimeValue::Tensor(tensor)), Some(scalar))
-            if scalar_as_f64_lossy(scalar).is_some() =>
-        {
-            let scalar_f = scalar_as_f64_lossy(scalar).expect("scalar guard");
-            tensor_compare_scalar(tensor, scalar_f, cmp).map(RuntimeValue::Tensor)
-        }
-        (Some(scalar), Some(RuntimeValue::Tensor(tensor)))
-            if scalar_as_f64_lossy(scalar).is_some() =>
-        {
-            // `cmp(scalar, tensor[i])` — flip the comparator so the helper
-            // can keep using `cmp(tensor[i], scalar)` internally.
-            let scalar_f = scalar_as_f64_lossy(scalar).expect("scalar guard");
-            tensor_compare_scalar(tensor, scalar_f, |t, s| cmp(s, t)).map(RuntimeValue::Tensor)
-        }
-        other => Err(format!(
-            "ordered comparison expects matching numeric args, got {other:?}"
-        )),
-    }
+    compare_runtime(args, op)
 }
 
 pub(super) fn tensor_compare_value(
     lhs: &RuntimeTensorValue,
     rhs: &RuntimeTensorValue,
-    cmp: impl Fn(f64, f64) -> bool,
+    op: CompareOp,
 ) -> Result<RuntimeTensorValue, String> {
-    if lhs.precision != rhs.precision {
-        return Err("tensor comparison expects matching tensor precision".to_string());
-    }
     if lhs.value.shape != rhs.value.shape {
         return Err("tensor comparison expects matching tensor shape".to_string());
     }
-    let data = lhs
-        .value
-        .to_f64_lossy_vec()
-        .into_iter()
-        .zip(rhs.value.to_f64_lossy_vec())
-        .map(|(lhs, rhs)| if cmp(lhs, rhs) { 1 } else { 0 })
-        .collect::<Vec<i64>>();
-    RuntimeTensorValue::from_wide_int("cmp", Prim::Bool, lhs.value.shape.clone(), data)
-}
-
-/// Element-wise tensor-vs-scalar comparison. The scalar is broadcast across
-/// every element of the tensor and the result is a `tensor[D, bool]` mask
-/// with the same shape as the input tensor. The comparator is invoked as
-/// `cmp(tensor_element, scalar)`; callers passing the scalar as the lhs
-/// should pre-flip the comparator.
-fn tensor_compare_scalar(
-    tensor: &RuntimeTensorValue,
-    scalar: f64,
-    cmp: impl Fn(f64, f64) -> bool,
-) -> Result<RuntimeTensorValue, String> {
-    let data = tensor
-        .value
-        .to_f64_lossy_vec()
-        .into_iter()
-        .map(|element| if cmp(element, scalar) { 1 } else { 0 })
-        .collect::<Vec<i64>>();
-    RuntimeTensorValue::from_wide_int("cmp", Prim::Bool, tensor.value.shape.clone(), data)
+    let storage = compare_tensors(op, lhs.value.storage(), rhs.value.storage())
+        .map_err(|error| error.to_string())?;
+    Ok(RuntimeTensorValue::new(IrTensorValue::from_storage(
+        lhs.value.shape.clone(),
+        storage,
+    )))
 }
 
 pub(super) fn bool_binop(
@@ -2597,8 +2201,14 @@ fn extract_root(
     root: NodeId,
     op_label: &str,
 ) -> Result<RuntimeTensorValue, String> {
-    let values = eval_tensor_roots_with(dag, &[root], |name| inputs.get(name).cloned())
-        .map_err(|err| format!("{op_label}: IR eval failed: {err}"))?;
+    let values =
+        eval_tensor_roots_with(dag, &[root], |name| inputs.get(name).cloned()).map_err(|err| {
+            if err.starts_with(chelis_types::NUMERIC_TRAP_PREFIX) {
+                err
+            } else {
+                format!("{op_label}: IR eval failed: {err}")
+            }
+        })?;
     let tensor_value = values
         .get(&root)
         .cloned()
@@ -3633,5 +3243,33 @@ mod normalize_axis_tests {
             err.contains("gather") && err.contains("out of bounds"),
             "expected an out-of-bounds gather diagnostic, got {err:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod numeric_trap_forwarding_tests {
+    use super::*;
+
+    #[test]
+    fn composed_evaluation_forwards_the_raising_primitive_trap_without_plumbing() {
+        let input = RuntimeTensorValue::from_wide_int("test", Prim::Int8, vec![2], vec![127, 1])
+            .expect("input is representable at int8");
+        let err = eval_composed_unary(&input, |dag, x, ty| {
+            let output_ty = TensorType {
+                dims: Vec::new(),
+                precision: ty.precision,
+            };
+            dag.add_node(
+                RiscOp::sum_default(0, ty.precision).expect("int8 sum is admitted"),
+                vec![x],
+                output_ty,
+                None,
+            )
+        })
+        .expect_err("the composed int8 sum must overflow");
+
+        assert_eq!(err, "numeric trap: overflow in sum at int8");
+        assert!(!err.contains("IR eval failed"));
+        assert!(!err.contains("composed unary"));
     }
 }

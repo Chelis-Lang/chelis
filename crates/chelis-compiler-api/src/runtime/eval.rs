@@ -6,7 +6,7 @@ use chelis_deep::ast::{Atom, Expr, List};
 use chelis_deep::{Span, decode_effect_kind};
 use chelis_ir::eval::TensorValue as IrTensorValue;
 use chelis_ir::tier2;
-use chelis_types::types::Prim;
+use chelis_types::{CompareOp, FloatBinOp, FloatUnOp, IntBinOp, IntUnOp, types::Prim};
 use chelis_vocab::EffectKind;
 
 use super::host_ops::*;
@@ -903,9 +903,9 @@ impl<'a> EvalContext<'a> {
 
     fn eval_builtin(&mut self, name: &str, args: &[RuntimeValue]) -> Result<RuntimeValue, String> {
         match name {
-            "add" => numeric_binop(args, |lhs, rhs| lhs + rhs),
-            "sub" => numeric_binop(args, |lhs, rhs| lhs - rhs),
-            "mul" => numeric_binop(args, |lhs, rhs| lhs * rhs),
+            "add" => numeric_binop(args, Some(IntBinOp::Add), Some(FloatBinOp::Add)),
+            "sub" => numeric_binop(args, Some(IntBinOp::Sub), Some(FloatBinOp::Sub)),
+            "mul" => numeric_binop(args, Some(IntBinOp::Mul), Some(FloatBinOp::Mul)),
             // #387: integer `div`/`mod` trap on a zero divisor with one
             // shared diagnostic instead of returning a silently-wrong value
             // (`f64` div round-trip yielded `i64::MAX`/`-1`); float `div`
@@ -926,15 +926,15 @@ impl<'a> EvalContext<'a> {
             // closure form fuses that into a direct `f64::min` for the
             // same observable result. Wired for issue
             // Chelis-Lang/chelis#185.
-            "max_elem" => numeric_binop(args, f64::max),
-            "min_elem" => numeric_binop(args, f64::min),
+            "max_elem" => numeric_binop(args, Some(IntBinOp::Max), Some(FloatBinOp::Max)),
+            "min_elem" => numeric_binop(args, Some(IntBinOp::Min), Some(FloatBinOp::Min)),
             "mod" => eval_mod(args),
-            "neg" => numeric_unop(args, |value| -value),
-            "recip" => numeric_unop(args, |value| 1.0 / value),
-            "exp" => float_unop_with_tensor(args, f64::exp, f32::exp),
-            "log" => float_unop_with_tensor(args, f64::ln, f32::ln),
-            "sin" => float_unop_with_tensor(args, f64::sin, f32::sin),
-            "sqrt" => float_unop_with_tensor(args, f64::sqrt, f32::sqrt),
+            "neg" => numeric_unop(args, Some(IntUnOp::Neg), Some(FloatUnOp::Neg)),
+            "recip" => numeric_unop(args, None, Some(FloatUnOp::Recip)),
+            "exp" => float_unop_with_tensor(args, FloatUnOp::Exp),
+            "log" => float_unop_with_tensor(args, FloatUnOp::Log),
+            "sin" => float_unop_with_tensor(args, FloatUnOp::Sin),
+            "sqrt" => float_unop_with_tensor(args, FloatUnOp::Sqrt),
             // Tier 1 unary primitives wired for issue Chelis-Lang/chelis#185.
             // Each delegates to the same `float_unop_with_tensor` /
             // `numeric_unop` helper used by the already-wired siblings; the
@@ -942,56 +942,26 @@ impl<'a> EvalContext<'a> {
             // emit (`cosf`/`tanf`/`floorf`/`ceilf`/`atanf`), which is the
             // canonical-evaluator equivalent (per
             // `feedback_evaluator_byte_identical_gate`).
-            "cos" => float_unop_with_tensor(args, f64::cos, f32::cos),
-            "tan" => float_unop_with_tensor(args, f64::tan, f32::tan),
-            "atan" => float_unop_with_tensor(args, f64::atan, f32::atan),
-            "floor" => float_unop_with_tensor(args, f64::floor, f32::floor),
-            "ceil" => float_unop_with_tensor(args, f64::ceil, f32::ceil),
+            "cos" => float_unop_with_tensor(args, FloatUnOp::Cos),
+            "tan" => float_unop_with_tensor(args, FloatUnOp::Tan),
+            "atan" => float_unop_with_tensor(args, FloatUnOp::Atan),
+            "floor" => float_unop_with_tensor(args, FloatUnOp::Floor),
+            "ceil" => float_unop_with_tensor(args, FloatUnOp::Ceil),
             // Round-half-to-even (banker's rounding), matching the DAG
             // evaluator and the C backend's `rintf`. NOT `round`, which
             // is ties-away-from-zero.
-            "round" => float_unop_with_tensor(args, f64::round_ties_even, f32::round_ties_even),
+            "round" => float_unop_with_tensor(args, FloatUnOp::Round),
             // `abs` accepts ints and floats and is sign-flipping for both;
             // route through `numeric_unop` so scalar Int64/Int32/F32/F64
             // inputs all keep their dtype.
-            "abs" => numeric_unop(args, f64::abs),
+            "abs" => numeric_unop(args, Some(IntUnOp::Abs), Some(FloatUnOp::Abs)),
             "eq" => compare_eq(args),
-            "neq" => compare_eq(args).map(|value| match value {
-                RuntimeValue::Bool(value) => RuntimeValue::Bool(!value),
-                RuntimeValue::Tensor(t) => {
-                    let flipped: Vec<i64> = t
-                        .value
-                        .storage()
-                        .to_i64_exact_vec()
-                        .expect("bool tensor storage reads exactly")
-                        .into_iter()
-                        .map(|x| if x == 0 { 1 } else { 0 })
-                        .collect();
-                    RuntimeValue::Tensor(
-                        RuntimeTensorValue::from_wide_int(
-                            "neq",
-                            Prim::Bool,
-                            t.value.shape.clone(),
-                            flipped,
-                        )
-                        .expect("0/1 buffer finalizes at bool"),
-                    )
-                }
-                other => other,
-            }),
-            "cmplt" => {
-                if let (Some(RuntimeValue::Tensor(lhs)), Some(RuntimeValue::Tensor(rhs))) =
-                    (args.first(), args.get(1))
-                {
-                    tensor_compare_value(lhs, rhs, |lhs, rhs| lhs < rhs).map(RuntimeValue::Tensor)
-                } else {
-                    ordered_compare(args, |lhs, rhs| lhs < rhs)
-                }
-            }
-            "lt" => ordered_compare(args, |lhs, rhs| lhs < rhs),
-            "gt" => ordered_compare(args, |lhs, rhs| lhs > rhs),
-            "gte" => ordered_compare(args, |lhs, rhs| lhs >= rhs),
-            "lte" => ordered_compare(args, |lhs, rhs| lhs <= rhs),
+            "neq" => compare_runtime(args, CompareOp::Ne),
+            "cmplt" => ordered_compare(args, CompareOp::Lt),
+            "lt" => ordered_compare(args, CompareOp::Lt),
+            "gt" => ordered_compare(args, CompareOp::Gt),
+            "gte" => ordered_compare(args, CompareOp::Gte),
+            "lte" => ordered_compare(args, CompareOp::Lte),
             "uniform_like" => {
                 let template = expect_tensor_arg(args, 0)?;
                 let low = expect_float_arg(args, 1)?;
@@ -1033,9 +1003,9 @@ impl<'a> EvalContext<'a> {
                 }
                 _ => bool_unop(args, |value| !value),
             },
-            "bitand" => int_binop(args, |lhs, rhs| lhs & rhs),
-            "bitor" => int_binop(args, |lhs, rhs| lhs | rhs),
-            "bitxor" => int_binop(args, |lhs, rhs| lhs ^ rhs),
+            "bitand" => bit_int_binop(args, |lhs, rhs| lhs & rhs),
+            "bitor" => bit_int_binop(args, |lhs, rhs| lhs | rhs),
+            "bitxor" => bit_int_binop(args, |lhs, rhs| lhs ^ rhs),
             "shl" => int_shift_binop(args, IntShiftOp::Left),
             "shr" => int_shift_binop(args, IntShiftOp::Right),
             "string_len" => {
@@ -1795,7 +1765,11 @@ impl<'a> EvalContext<'a> {
                     .get(axis)
                     .copied()
                     .ok_or_else(|| format!("shape axis {axis} out of bounds"))?;
-                Ok(RuntimeValue::int64(dim as i64))
+                // `shape` is normatively int32 (`spec/05-risc-primitives.md`
+                // §2.2). The old int64 runtime payload only stayed hidden
+                // while arithmetic silently promoted mixed widths; the
+                // closed kernel boundary exposes that mismatch.
+                RuntimeValue::scalar_like_int(Prim::Int32, dim as i64)
             }
             "numel" => {
                 let tensor = expect_tensor_arg(args, 0)?;
@@ -2230,28 +2204,23 @@ impl<'a> EvalContext<'a> {
             // once at their own width.
             "relu" => {
                 let tensor = expect_tensor_arg(args, 0)?;
-                tensor_float_unop(&tensor, activation_relu_f64, activation_relu_f32)
-                    .map(RuntimeValue::Tensor)
+                tensor_float_unop(&tensor, FloatUnOp::Relu).map(RuntimeValue::Tensor)
             }
             "sigmoid" => {
                 let tensor = expect_tensor_arg(args, 0)?;
-                tensor_float_unop(&tensor, activation_sigmoid_f64, activation_sigmoid_f32)
-                    .map(RuntimeValue::Tensor)
+                tensor_float_unop(&tensor, FloatUnOp::Sigmoid).map(RuntimeValue::Tensor)
             }
             "tanh" => {
                 let tensor = expect_tensor_arg(args, 0)?;
-                tensor_float_unop(&tensor, activation_tanh_f64, activation_tanh_f32)
-                    .map(RuntimeValue::Tensor)
+                tensor_float_unop(&tensor, FloatUnOp::Tanh).map(RuntimeValue::Tensor)
             }
             "silu" => {
                 let tensor = expect_tensor_arg(args, 0)?;
-                tensor_float_unop(&tensor, activation_silu_f64, activation_silu_f32)
-                    .map(RuntimeValue::Tensor)
+                tensor_float_unop(&tensor, FloatUnOp::Silu).map(RuntimeValue::Tensor)
             }
             "gelu" => {
                 let tensor = expect_tensor_arg(args, 0)?;
-                tensor_float_unop(&tensor, activation_gelu_f64, activation_gelu_f32)
-                    .map(RuntimeValue::Tensor)
+                tensor_float_unop(&tensor, FloatUnOp::Gelu).map(RuntimeValue::Tensor)
             }
             other => Err(format!("unsupported builtin `{other}` in host runtime")),
         }

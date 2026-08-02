@@ -1,4 +1,4 @@
-//! THE dtype semantics layer (chelis#729 Phase 1).
+//! THE dtype semantics layer (chelis#729 Phases 1-2).
 //!
 //! Single source of truth for what a dtype MEANS: value set, finalize
 //! (rounding / width / domain), and the trap contract. Implements
@@ -8,9 +8,10 @@
 //!
 //! The mechanism is privacy, not convention: [`ScalarValue`] and
 //! [`TensorStorage`] have module-private representations, so producing a
-//! numeric value without passing through [`finalize_scalar`] /
-//! [`finalize_tensor`] (or the ingress constructors [`scalar_from_i64`] /
-//! [`scalar_from_f64`]) is a compile error, never a review finding. Reads
+//! numeric value without passing through the typed kernels or
+//! [`finalize_scalar`] / [`finalize_tensor`] (or the ingress constructors
+//! [`scalar_from_i64`] / [`scalar_from_f64`]) is a compile error, never a
+//! review finding. Reads
 //! are free-form (section C3: `as_f64_lossy` is explicitly named lossy,
 //! `as_i64_exact` is checked); only CONSTRUCTION is gated. The one
 //! deliberate hole is the `reuse_*` family below, whose doc contract is
@@ -36,18 +37,28 @@
 //! * `F16`/`Bf16` buffers store `half::f16` / `half::bf16` (both
 //!   `repr(transparent)` over `u16`, the sketch's spelling).
 //!
-//! ## Trap-string status
+//! ## Frozen trap strings
 //!
-//! The message SHAPE below (`numeric trap: <kind> in <op> at <prim>`) is
-//! the section C2 contract; the exact strings freeze at Phase 2 exit
-//! together with the chelis#687 corpus. The existing integer
-//! division-by-zero diagnostic (`integer division or remainder by zero`)
-//! stays byte-identical across lanes and is NOT rerouted in Phase 1;
-//! [`NumericTrap::DivZero`] exists as the contract shape it is absorbed
-//! into at Phase 2.
+//! The public constants below are the exact [04-NUM-9] / section C2 message
+//! grammar. The operation slot names the canonical primitive whose numeric
+//! kernel raised the trap after lowering; composed evaluation forwards the
+//! message unchanged.
 
 use crate::observation::ElementRef;
 use crate::types::Prim;
+
+/// Frozen prefix shared by every [04-NUM-9] numeric-trap diagnostic.
+pub const NUMERIC_TRAP_PREFIX: &str = "numeric trap: ";
+/// Frozen spelling of the [04-NUM-9] overflow kind.
+pub const NUMERIC_TRAP_OVERFLOW_KIND: &str = "overflow";
+/// Frozen spelling of the [04-NUM-9] domain kind.
+pub const NUMERIC_TRAP_DOMAIN_KIND: &str = "domain";
+/// Frozen spelling of the [04-NUM-9] division-by-zero kind.
+pub const NUMERIC_TRAP_DIV_ZERO_KIND: &str = "division by zero";
+/// Frozen separator before the canonical raising primitive name.
+pub const NUMERIC_TRAP_OPERATION_SEPARATOR: &str = " in ";
+/// Frozen separator before the finalized dtype name.
+pub const NUMERIC_TRAP_DTYPE_SEPARATOR: &str = " at ";
 
 /// The one numeric error type, identical in every lane
 /// (`spec/design/dtype_semantics.md` section C2).
@@ -58,23 +69,36 @@ pub enum NumericTrap {
     /// Value not a member of the dtype's set (fractional or non-finite
     /// into an integer width, non-0/1 into bool).
     Domain { op: &'static str, prim: Prim },
-    /// Division/remainder by zero (existing behavior, absorbed here at
-    /// Phase 2; unused by Phase 1 paths, which keep the byte-locked
-    /// legacy diagnostic).
-    DivZero { op: &'static str },
+    /// Division/remainder by zero.
+    DivZero { op: &'static str, prim: Prim },
 }
 
 impl std::fmt::Display for NumericTrap {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             NumericTrap::Overflow { op, prim } => {
-                write!(f, "numeric trap: overflow in {op} at {}", prim.name())
+                write!(
+                    f,
+                    "{NUMERIC_TRAP_PREFIX}{NUMERIC_TRAP_OVERFLOW_KIND}\
+                     {NUMERIC_TRAP_OPERATION_SEPARATOR}{op}{NUMERIC_TRAP_DTYPE_SEPARATOR}{}",
+                    prim.name()
+                )
             }
             NumericTrap::Domain { op, prim } => {
-                write!(f, "numeric trap: domain in {op} at {}", prim.name())
+                write!(
+                    f,
+                    "{NUMERIC_TRAP_PREFIX}{NUMERIC_TRAP_DOMAIN_KIND}\
+                     {NUMERIC_TRAP_OPERATION_SEPARATOR}{op}{NUMERIC_TRAP_DTYPE_SEPARATOR}{}",
+                    prim.name()
+                )
             }
-            NumericTrap::DivZero { op } => {
-                write!(f, "numeric trap: division by zero in {op}")
+            NumericTrap::DivZero { op, prim } => {
+                write!(
+                    f,
+                    "{NUMERIC_TRAP_PREFIX}{NUMERIC_TRAP_DIV_ZERO_KIND}\
+                     {NUMERIC_TRAP_OPERATION_SEPARATOR}{op}{NUMERIC_TRAP_DTYPE_SEPARATOR}{}",
+                    prim.name()
+                )
             }
         }
     }
@@ -203,6 +227,544 @@ impl ScalarValue {
             Bits::Bool(v) => ElementRef::Bool(v),
         }
     }
+}
+
+/// Closed operation set for integer binary kernels. A consumer must map
+/// its callable identity to one of these variants before arithmetic can
+/// begin; there is no string or closure fallback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IntBinOp {
+    Add,
+    Sub,
+    Mul,
+    FloorDiv,
+    TruncDiv,
+    Rem,
+    Max,
+    Min,
+}
+
+impl IntBinOp {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Add => "add",
+            Self::Sub => "sub",
+            Self::Mul => "mul",
+            Self::FloorDiv => "floor_div",
+            Self::TruncDiv => "trunc_div",
+            Self::Rem => "mod",
+            Self::Max => "max_elem",
+            Self::Min => "min_elem",
+        }
+    }
+}
+
+/// Closed operation set for integer unary kernels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IntUnOp {
+    Neg,
+    Abs,
+}
+
+impl IntUnOp {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Neg => "neg",
+            Self::Abs => "abs",
+        }
+    }
+}
+
+/// Closed operation set for float binary kernels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FloatBinOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    FloorDiv,
+    Max,
+    Min,
+}
+
+impl FloatBinOp {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Add => "add",
+            Self::Sub => "sub",
+            Self::Mul => "mul",
+            Self::Div => "div",
+            Self::FloorDiv => "floor_div",
+            Self::Max => "max_elem",
+            Self::Min => "min_elem",
+        }
+    }
+}
+
+/// Closed operation set for float unary kernels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FloatUnOp {
+    Neg,
+    Recip,
+    Exp,
+    Log,
+    Sin,
+    Sqrt,
+    Cos,
+    Tan,
+    Atan,
+    Abs,
+    Floor,
+    Ceil,
+    Round,
+    Relu,
+    Sigmoid,
+    Tanh,
+    Silu,
+    Gelu,
+}
+
+impl FloatUnOp {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Neg => "neg",
+            Self::Recip => "recip",
+            Self::Exp => "exp",
+            Self::Log => "log",
+            Self::Sin => "sin",
+            Self::Sqrt => "sqrt",
+            Self::Cos => "cos",
+            Self::Tan => "tan",
+            Self::Atan => "atan",
+            Self::Abs => "abs",
+            Self::Floor => "floor",
+            Self::Ceil => "ceil",
+            Self::Round => "round",
+            Self::Relu => "relu",
+            Self::Sigmoid => "sigmoid",
+            Self::Tanh => "tanh",
+            Self::Silu => "silu",
+            Self::Gelu => "gelu",
+        }
+    }
+}
+
+/// Closed comparison operation set for finalized scalar values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompareOp {
+    Eq,
+    Ne,
+    Lt,
+    Gt,
+    Lte,
+    Gte,
+}
+
+impl CompareOp {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Eq => "eq",
+            Self::Ne => "neq",
+            Self::Lt => "cmplt",
+            Self::Gt => "cmpgt",
+            Self::Lte => "cmplte",
+            Self::Gte => "cmpgte",
+        }
+    }
+}
+
+/// Arithmetic family required by a closed kernel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NumericFamily {
+    Int,
+    Float,
+}
+
+/// A kernel boundary failure. Arithmetic traps remain the single public
+/// [`NumericTrap`] value; family and dtype mismatches indicate a consumer
+/// violated its checker-proven call contract before arithmetic began.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NumericKernelError {
+    Trap(NumericTrap),
+    WrongFamily {
+        op: &'static str,
+        expected: NumericFamily,
+        actual: Prim,
+    },
+    DtypeMismatch {
+        op: &'static str,
+        lhs: Prim,
+        rhs: Prim,
+    },
+    LengthMismatch {
+        op: &'static str,
+        lhs: usize,
+        rhs: usize,
+    },
+}
+
+impl From<NumericTrap> for NumericKernelError {
+    fn from(value: NumericTrap) -> Self {
+        Self::Trap(value)
+    }
+}
+
+impl std::fmt::Display for NumericKernelError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Trap(trap) => trap.fmt(f),
+            Self::WrongFamily {
+                op,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "numeric kernel {op} expects {expected:?} operands, got {}",
+                actual.name()
+            ),
+            Self::DtypeMismatch { op, lhs, rhs } => write!(
+                f,
+                "numeric kernel {op} expects matching dtypes, got {} and {}",
+                lhs.name(),
+                rhs.name()
+            ),
+            Self::LengthMismatch { op, lhs, rhs } => write!(
+                f,
+                "numeric kernel {op} expects matching buffer lengths, got {lhs} and {rhs}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for NumericKernelError {}
+
+fn require_family(
+    op: &'static str,
+    value: ScalarValue,
+    expected: NumericFamily,
+) -> Result<(), NumericKernelError> {
+    let matches = match expected {
+        NumericFamily::Int => value.prim().is_integer(),
+        NumericFamily::Float => value.prim().is_float(),
+    };
+    if matches {
+        Ok(())
+    } else {
+        Err(NumericKernelError::WrongFamily {
+            op,
+            expected,
+            actual: value.prim(),
+        })
+    }
+}
+
+fn require_same_dtype(
+    op: &'static str,
+    lhs: ScalarValue,
+    rhs: ScalarValue,
+) -> Result<(), NumericKernelError> {
+    if lhs.prim() == rhs.prim() {
+        Ok(())
+    } else {
+        Err(NumericKernelError::DtypeMismatch {
+            op,
+            lhs: lhs.prim(),
+            rhs: rhs.prim(),
+        })
+    }
+}
+
+macro_rules! int_binop_at_width {
+    ($op:expr, $prim:expr, $lhs:expr, $rhs:expr, $variant:ident) => {{
+        let lhs = $lhs;
+        let rhs = $rhs;
+        let value = match $op {
+            IntBinOp::Add => lhs.checked_add(rhs),
+            IntBinOp::Sub => lhs.checked_sub(rhs),
+            IntBinOp::Mul => lhs.checked_mul(rhs),
+            IntBinOp::FloorDiv => {
+                if rhs == 0 {
+                    return Err(NumericTrap::DivZero {
+                        op: $op.name(),
+                        prim: $prim,
+                    }
+                    .into());
+                }
+                let quotient = lhs.checked_div(rhs).ok_or(NumericTrap::Overflow {
+                    op: $op.name(),
+                    prim: $prim,
+                })?;
+                let remainder = lhs % rhs;
+                if remainder != 0 && (remainder < 0) != (rhs < 0) {
+                    quotient.checked_sub(1)
+                } else {
+                    Some(quotient)
+                }
+            }
+            IntBinOp::TruncDiv => {
+                if rhs == 0 {
+                    return Err(NumericTrap::DivZero {
+                        op: $op.name(),
+                        prim: $prim,
+                    }
+                    .into());
+                }
+                lhs.checked_div(rhs)
+            }
+            IntBinOp::Rem => {
+                if rhs == 0 {
+                    return Err(NumericTrap::DivZero {
+                        op: $op.name(),
+                        prim: $prim,
+                    }
+                    .into());
+                }
+                Some(if rhs == -1 { 0 } else { lhs % rhs })
+            }
+            IntBinOp::Max => Some(lhs.max(rhs)),
+            IntBinOp::Min => Some(lhs.min(rhs)),
+        }
+        .ok_or(NumericTrap::Overflow {
+            op: $op.name(),
+            prim: $prim,
+        })?;
+        Ok(ScalarValue {
+            bits: Bits::$variant(value),
+        })
+    }};
+}
+
+/// Perform one integer operation at the operand dtype's exact arithmetic
+/// width, trapping before any narrowing or cross-family conversion.
+pub fn int_binop(
+    op: IntBinOp,
+    lhs: ScalarValue,
+    rhs: ScalarValue,
+) -> Result<ScalarValue, NumericKernelError> {
+    require_family(op.name(), lhs, NumericFamily::Int)?;
+    require_family(op.name(), rhs, NumericFamily::Int)?;
+    require_same_dtype(op.name(), lhs, rhs)?;
+    match (lhs.bits, rhs.bits) {
+        (Bits::I8(lhs), Bits::I8(rhs)) => int_binop_at_width!(op, Prim::Int8, lhs, rhs, I8),
+        (Bits::I16(lhs), Bits::I16(rhs)) => {
+            int_binop_at_width!(op, Prim::Int16, lhs, rhs, I16)
+        }
+        (Bits::I32(lhs), Bits::I32(rhs)) => {
+            int_binop_at_width!(op, Prim::Int32, lhs, rhs, I32)
+        }
+        (Bits::I64(lhs), Bits::I64(rhs)) => {
+            int_binop_at_width!(op, Prim::Int64, lhs, rhs, I64)
+        }
+        _ => unreachable!("family and dtype checks make the integer match exhaustive"),
+    }
+}
+
+macro_rules! int_unop_at_width {
+    ($op:expr, $prim:expr, $value:expr, $variant:ident) => {{
+        let value = match $op {
+            IntUnOp::Neg => $value.checked_neg(),
+            IntUnOp::Abs => $value.checked_abs(),
+        }
+        .ok_or(NumericTrap::Overflow {
+            op: $op.name(),
+            prim: $prim,
+        })?;
+        Ok(ScalarValue {
+            bits: Bits::$variant(value),
+        })
+    }};
+}
+
+/// Perform one integer unary operation at the operand dtype's exact
+/// arithmetic width.
+pub fn int_unop(op: IntUnOp, value: ScalarValue) -> Result<ScalarValue, NumericKernelError> {
+    require_family(op.name(), value, NumericFamily::Int)?;
+    match value.bits {
+        Bits::I8(value) => int_unop_at_width!(op, Prim::Int8, value, I8),
+        Bits::I16(value) => int_unop_at_width!(op, Prim::Int16, value, I16),
+        Bits::I32(value) => int_unop_at_width!(op, Prim::Int32, value, I32),
+        Bits::I64(value) => int_unop_at_width!(op, Prim::Int64, value, I64),
+        _ => unreachable!("family check makes the integer match exhaustive"),
+    }
+}
+
+fn apply_float_binop_f32(op: FloatBinOp, lhs: f32, rhs: f32) -> f32 {
+    match op {
+        FloatBinOp::Add => lhs + rhs,
+        FloatBinOp::Sub => lhs - rhs,
+        FloatBinOp::Mul => lhs * rhs,
+        FloatBinOp::Div => lhs / rhs,
+        FloatBinOp::FloorDiv => (lhs / rhs).floor(),
+        FloatBinOp::Max => lhs.max(rhs),
+        FloatBinOp::Min => lhs.min(rhs),
+    }
+}
+
+fn apply_float_binop_f64(op: FloatBinOp, lhs: f64, rhs: f64) -> f64 {
+    match op {
+        FloatBinOp::Add => lhs + rhs,
+        FloatBinOp::Sub => lhs - rhs,
+        FloatBinOp::Mul => lhs * rhs,
+        FloatBinOp::Div => lhs / rhs,
+        FloatBinOp::FloorDiv => (lhs / rhs).floor(),
+        FloatBinOp::Max => lhs.max(rhs),
+        FloatBinOp::Min => lhs.min(rhs),
+    }
+}
+
+/// Perform one float operation at f64 for f64 and f32 for every other
+/// active float dtype, then finalize once into the operand storage width.
+pub fn float_binop(
+    op: FloatBinOp,
+    lhs: ScalarValue,
+    rhs: ScalarValue,
+) -> Result<ScalarValue, NumericKernelError> {
+    require_family(op.name(), lhs, NumericFamily::Float)?;
+    require_family(op.name(), rhs, NumericFamily::Float)?;
+    require_same_dtype(op.name(), lhs, rhs)?;
+    let bits =
+        match (lhs.bits, rhs.bits) {
+            (Bits::F64(lhs), Bits::F64(rhs)) => Bits::F64(apply_float_binop_f64(op, lhs, rhs)),
+            (Bits::F32(lhs), Bits::F32(rhs)) => Bits::F32(apply_float_binop_f32(op, lhs, rhs)),
+            (Bits::F16(lhs), Bits::F16(rhs)) => Bits::F16(half::f16::from_f32(
+                apply_float_binop_f32(op, lhs.to_f32(), rhs.to_f32()),
+            )),
+            (Bits::Bf16(lhs), Bits::Bf16(rhs)) => Bits::Bf16(half::bf16::from_f32(
+                apply_float_binop_f32(op, lhs.to_f32(), rhs.to_f32()),
+            )),
+            _ => unreachable!("family and dtype checks make the float match exhaustive"),
+        };
+    Ok(ScalarValue { bits })
+}
+
+fn apply_float_unop_f32(op: FloatUnOp, value: f32) -> f32 {
+    match op {
+        FloatUnOp::Neg => -value,
+        FloatUnOp::Recip => value.recip(),
+        FloatUnOp::Exp => value.exp(),
+        FloatUnOp::Log => value.ln(),
+        FloatUnOp::Sin => value.sin(),
+        FloatUnOp::Sqrt => value.sqrt(),
+        FloatUnOp::Cos => value.cos(),
+        FloatUnOp::Tan => value.tan(),
+        FloatUnOp::Atan => value.atan(),
+        FloatUnOp::Abs => value.abs(),
+        FloatUnOp::Floor => value.floor(),
+        FloatUnOp::Ceil => value.ceil(),
+        FloatUnOp::Round => value.round_ties_even(),
+        FloatUnOp::Relu => {
+            if value > 0.0 {
+                value
+            } else {
+                0.0
+            }
+        }
+        FloatUnOp::Sigmoid => 1.0 / (1.0 + (-value).exp()),
+        FloatUnOp::Tanh => value.tanh(),
+        FloatUnOp::Silu => value * (1.0 / (1.0 + (-value).exp())),
+        FloatUnOp::Gelu => {
+            #[allow(clippy::excessive_precision)]
+            const C: f32 = 0.7978845608028654_f32;
+            const K: f32 = 0.044715_f32;
+            let inner = C * (value + K * value * value * value);
+            0.5 * value * (1.0 + inner.tanh())
+        }
+    }
+}
+
+fn apply_float_unop_f64(op: FloatUnOp, value: f64) -> f64 {
+    match op {
+        FloatUnOp::Neg => -value,
+        FloatUnOp::Recip => value.recip(),
+        FloatUnOp::Exp => value.exp(),
+        FloatUnOp::Log => value.ln(),
+        FloatUnOp::Sin => value.sin(),
+        FloatUnOp::Sqrt => value.sqrt(),
+        FloatUnOp::Cos => value.cos(),
+        FloatUnOp::Tan => value.tan(),
+        FloatUnOp::Atan => value.atan(),
+        FloatUnOp::Abs => value.abs(),
+        FloatUnOp::Floor => value.floor(),
+        FloatUnOp::Ceil => value.ceil(),
+        FloatUnOp::Round => value.round_ties_even(),
+        FloatUnOp::Relu => {
+            if value > 0.0 {
+                value
+            } else {
+                0.0
+            }
+        }
+        FloatUnOp::Sigmoid => 1.0 / (1.0 + (-value).exp()),
+        FloatUnOp::Tanh => value.tanh(),
+        FloatUnOp::Silu => value * (1.0 / (1.0 + (-value).exp())),
+        FloatUnOp::Gelu => {
+            const C: f64 = 0.7978845608028654;
+            const K: f64 = 0.044715;
+            let inner = C * (value + K * value * value * value);
+            0.5 * value * (1.0 + inner.tanh())
+        }
+    }
+}
+
+/// Perform one float unary operation at the dtype's arithmetic width and
+/// finalize once into its storage width.
+pub fn float_unop(op: FloatUnOp, value: ScalarValue) -> Result<ScalarValue, NumericKernelError> {
+    require_family(op.name(), value, NumericFamily::Float)?;
+    let bits = match value.bits {
+        Bits::F64(value) => Bits::F64(apply_float_unop_f64(op, value)),
+        Bits::F32(value) => Bits::F32(apply_float_unop_f32(op, value)),
+        Bits::F16(value) => Bits::F16(half::f16::from_f32(apply_float_unop_f32(
+            op,
+            value.to_f32(),
+        ))),
+        Bits::Bf16(value) => Bits::Bf16(half::bf16::from_f32(apply_float_unop_f32(
+            op,
+            value.to_f32(),
+        ))),
+        _ => unreachable!("family check makes the float match exhaustive"),
+    };
+    Ok(ScalarValue { bits })
+}
+
+macro_rules! compare_values {
+    ($op:expr, $lhs:expr, $rhs:expr) => {
+        match $op {
+            CompareOp::Eq => $lhs == $rhs,
+            CompareOp::Ne => $lhs != $rhs,
+            CompareOp::Lt => $lhs < $rhs,
+            CompareOp::Gt => $lhs > $rhs,
+            CompareOp::Lte => $lhs <= $rhs,
+            CompareOp::Gte => $lhs >= $rhs,
+        }
+    };
+}
+
+/// Compare finalized operands at their exact matching dtype. In
+/// particular, int64 never crosses f64 and half values compare only after
+/// their ingress finalization.
+pub fn compare_scalars(
+    op: CompareOp,
+    lhs: ScalarValue,
+    rhs: ScalarValue,
+) -> Result<bool, NumericKernelError> {
+    require_same_dtype(op.name(), lhs, rhs)?;
+    let result = match (lhs.bits, rhs.bits) {
+        (Bits::I8(lhs), Bits::I8(rhs)) => compare_values!(op, lhs, rhs),
+        (Bits::I16(lhs), Bits::I16(rhs)) => compare_values!(op, lhs, rhs),
+        (Bits::I32(lhs), Bits::I32(rhs)) => compare_values!(op, lhs, rhs),
+        (Bits::I64(lhs), Bits::I64(rhs)) => compare_values!(op, lhs, rhs),
+        (Bits::F16(lhs), Bits::F16(rhs)) => {
+            compare_values!(op, lhs.to_f32(), rhs.to_f32())
+        }
+        (Bits::Bf16(lhs), Bits::Bf16(rhs)) => {
+            compare_values!(op, lhs.to_f32(), rhs.to_f32())
+        }
+        (Bits::F32(lhs), Bits::F32(rhs)) => compare_values!(op, lhs, rhs),
+        (Bits::F64(lhs), Bits::F64(rhs)) => compare_values!(op, lhs, rhs),
+        (Bits::Bool(lhs), Bits::Bool(rhs)) => compare_values!(op, lhs, rhs),
+        _ => unreachable!("dtype check makes the comparison match exhaustive"),
+    };
+    Ok(result)
 }
 
 /// Sealed per-dtype element buffer (section C3's storage decision:
@@ -523,6 +1085,467 @@ fn bf16_from_i64_rne(value: i64) -> half::bf16 {
     // to f64 conversion is exact even when the rounded result is 2^63.
     let exact_image = rounded_magnitude as f64;
     half::bf16::from_f64(if negative { -exact_image } else { exact_image })
+}
+
+fn require_same_storage_shape(
+    op: &'static str,
+    lhs: &TensorStorage,
+    rhs: &TensorStorage,
+) -> Result<(), NumericKernelError> {
+    if lhs.len() != rhs.len() {
+        return Err(NumericKernelError::LengthMismatch {
+            op,
+            lhs: lhs.len(),
+            rhs: rhs.len(),
+        });
+    }
+    if lhs.prim() != rhs.prim() {
+        return Err(NumericKernelError::DtypeMismatch {
+            op,
+            lhs: lhs.prim(),
+            rhs: rhs.prim(),
+        });
+    }
+    Ok(())
+}
+
+fn zip_map<T: Copy, U>(lhs: &[T], rhs: &[T], mut op: impl FnMut(T, T) -> U) -> Vec<U> {
+    lhs.iter()
+        .copied()
+        .zip(rhs.iter().copied())
+        .map(|(lhs, rhs)| op(lhs, rhs))
+        .collect()
+}
+
+fn zip_try_map<T: Copy, U, E>(
+    lhs: &[T],
+    rhs: &[T],
+    mut op: impl FnMut(T, T) -> Result<U, E>,
+) -> Result<Vec<U>, E> {
+    lhs.iter()
+        .copied()
+        .zip(rhs.iter().copied())
+        .map(|(lhs, rhs)| op(lhs, rhs))
+        .collect()
+}
+
+macro_rules! int_tensor_binop_at_width {
+    ($op:expr, $prim:expr, $lhs:expr, $rhs:expr, $variant:ident) => {{
+        let overflow = || NumericTrap::Overflow {
+            op: $op.name(),
+            prim: $prim,
+        };
+        let div_zero = || NumericTrap::DivZero {
+            op: $op.name(),
+            prim: $prim,
+        };
+        let values = match $op {
+            IntBinOp::Add => zip_try_map($lhs, $rhs, |lhs, rhs| {
+                lhs.checked_add(rhs).ok_or_else(overflow)
+            }),
+            IntBinOp::Sub => zip_try_map($lhs, $rhs, |lhs, rhs| {
+                lhs.checked_sub(rhs).ok_or_else(overflow)
+            }),
+            IntBinOp::Mul => zip_try_map($lhs, $rhs, |lhs, rhs| {
+                lhs.checked_mul(rhs).ok_or_else(overflow)
+            }),
+            IntBinOp::FloorDiv => zip_try_map($lhs, $rhs, |lhs, rhs| {
+                if rhs == 0 {
+                    return Err(div_zero());
+                }
+                let quotient = lhs.checked_div(rhs).ok_or_else(overflow)?;
+                let remainder = lhs % rhs;
+                if remainder != 0 && (remainder < 0) != (rhs < 0) {
+                    quotient.checked_sub(1).ok_or_else(overflow)
+                } else {
+                    Ok(quotient)
+                }
+            }),
+            IntBinOp::TruncDiv => zip_try_map($lhs, $rhs, |lhs, rhs| {
+                if rhs == 0 {
+                    Err(div_zero())
+                } else {
+                    lhs.checked_div(rhs).ok_or_else(overflow)
+                }
+            }),
+            IntBinOp::Rem => zip_try_map($lhs, $rhs, |lhs, rhs| {
+                if rhs == 0 {
+                    Err(div_zero())
+                } else {
+                    Ok(if rhs == -1 { 0 } else { lhs % rhs })
+                }
+            }),
+            IntBinOp::Max => Ok(zip_map($lhs, $rhs, |lhs, rhs| lhs.max(rhs))),
+            IntBinOp::Min => Ok(zip_map($lhs, $rhs, |lhs, rhs| lhs.min(rhs))),
+        }?;
+        Ok(TensorStorage {
+            buf: Buf::$variant(values),
+        })
+    }};
+}
+
+/// Bulk integer binary kernel. Operation dispatch happens once outside a
+/// monomorphized loop for the storage width, never once per element.
+pub fn int_tensor_binop(
+    op: IntBinOp,
+    lhs: &TensorStorage,
+    rhs: &TensorStorage,
+) -> Result<TensorStorage, NumericKernelError> {
+    if !lhs.prim().is_integer() {
+        return Err(NumericKernelError::WrongFamily {
+            op: op.name(),
+            expected: NumericFamily::Int,
+            actual: lhs.prim(),
+        });
+    }
+    if !rhs.prim().is_integer() {
+        return Err(NumericKernelError::WrongFamily {
+            op: op.name(),
+            expected: NumericFamily::Int,
+            actual: rhs.prim(),
+        });
+    }
+    require_same_storage_shape(op.name(), lhs, rhs)?;
+    match (&lhs.buf, &rhs.buf) {
+        (Buf::I8(lhs), Buf::I8(rhs)) => {
+            int_tensor_binop_at_width!(op, Prim::Int8, lhs, rhs, I8)
+        }
+        (Buf::I16(lhs), Buf::I16(rhs)) => {
+            int_tensor_binop_at_width!(op, Prim::Int16, lhs, rhs, I16)
+        }
+        (Buf::I32(lhs), Buf::I32(rhs)) => {
+            int_tensor_binop_at_width!(op, Prim::Int32, lhs, rhs, I32)
+        }
+        (Buf::I64(lhs), Buf::I64(rhs)) => {
+            int_tensor_binop_at_width!(op, Prim::Int64, lhs, rhs, I64)
+        }
+        _ => unreachable!("family and dtype checks make the integer buffers exhaustive"),
+    }
+}
+
+macro_rules! int_tensor_unop_at_width {
+    ($op:expr, $prim:expr, $values:expr, $variant:ident) => {{
+        let overflow = || NumericTrap::Overflow {
+            op: $op.name(),
+            prim: $prim,
+        };
+        let values: Result<Vec<_>, NumericTrap> = match $op {
+            IntUnOp::Neg => $values
+                .iter()
+                .copied()
+                .map(|value| value.checked_neg().ok_or_else(overflow))
+                .collect(),
+            IntUnOp::Abs => $values
+                .iter()
+                .copied()
+                .map(|value| value.checked_abs().ok_or_else(overflow))
+                .collect(),
+        };
+        Ok(TensorStorage {
+            buf: Buf::$variant(values?),
+        })
+    }};
+}
+
+/// Bulk integer unary kernel with one operation dispatch per buffer.
+pub fn int_tensor_unop(
+    op: IntUnOp,
+    value: &TensorStorage,
+) -> Result<TensorStorage, NumericKernelError> {
+    if !value.prim().is_integer() {
+        return Err(NumericKernelError::WrongFamily {
+            op: op.name(),
+            expected: NumericFamily::Int,
+            actual: value.prim(),
+        });
+    }
+    match &value.buf {
+        Buf::I8(values) => int_tensor_unop_at_width!(op, Prim::Int8, values, I8),
+        Buf::I16(values) => int_tensor_unop_at_width!(op, Prim::Int16, values, I16),
+        Buf::I32(values) => int_tensor_unop_at_width!(op, Prim::Int32, values, I32),
+        Buf::I64(values) => int_tensor_unop_at_width!(op, Prim::Int64, values, I64),
+        _ => unreachable!("family check makes the integer buffer exhaustive"),
+    }
+}
+
+fn float_vec_binop_f32<T: Copy>(
+    op: FloatBinOp,
+    lhs: &[T],
+    rhs: &[T],
+    to_f32: impl Fn(T) -> f32,
+    from_f32: impl Fn(f32) -> T,
+) -> Vec<T> {
+    match op {
+        FloatBinOp::Add => zip_map(lhs, rhs, |lhs, rhs| from_f32(to_f32(lhs) + to_f32(rhs))),
+        FloatBinOp::Sub => zip_map(lhs, rhs, |lhs, rhs| from_f32(to_f32(lhs) - to_f32(rhs))),
+        FloatBinOp::Mul => zip_map(lhs, rhs, |lhs, rhs| from_f32(to_f32(lhs) * to_f32(rhs))),
+        FloatBinOp::Div => zip_map(lhs, rhs, |lhs, rhs| from_f32(to_f32(lhs) / to_f32(rhs))),
+        FloatBinOp::FloorDiv => zip_map(lhs, rhs, |lhs, rhs| {
+            from_f32((to_f32(lhs) / to_f32(rhs)).floor())
+        }),
+        FloatBinOp::Max => zip_map(lhs, rhs, |lhs, rhs| from_f32(to_f32(lhs).max(to_f32(rhs)))),
+        FloatBinOp::Min => zip_map(lhs, rhs, |lhs, rhs| from_f32(to_f32(lhs).min(to_f32(rhs)))),
+    }
+}
+
+fn float_vec_binop_f64(op: FloatBinOp, lhs: &[f64], rhs: &[f64]) -> Vec<f64> {
+    match op {
+        FloatBinOp::Add => zip_map(lhs, rhs, |lhs, rhs| lhs + rhs),
+        FloatBinOp::Sub => zip_map(lhs, rhs, |lhs, rhs| lhs - rhs),
+        FloatBinOp::Mul => zip_map(lhs, rhs, |lhs, rhs| lhs * rhs),
+        FloatBinOp::Div => zip_map(lhs, rhs, |lhs, rhs| lhs / rhs),
+        FloatBinOp::FloorDiv => zip_map(lhs, rhs, |lhs, rhs| (lhs / rhs).floor()),
+        FloatBinOp::Max => zip_map(lhs, rhs, f64::max),
+        FloatBinOp::Min => zip_map(lhs, rhs, f64::min),
+    }
+}
+
+/// Bulk float binary kernel with native f64/f32 arithmetic and one final
+/// half-width conversion per element.
+pub fn float_tensor_binop(
+    op: FloatBinOp,
+    lhs: &TensorStorage,
+    rhs: &TensorStorage,
+) -> Result<TensorStorage, NumericKernelError> {
+    if !lhs.prim().is_float() {
+        return Err(NumericKernelError::WrongFamily {
+            op: op.name(),
+            expected: NumericFamily::Float,
+            actual: lhs.prim(),
+        });
+    }
+    if !rhs.prim().is_float() {
+        return Err(NumericKernelError::WrongFamily {
+            op: op.name(),
+            expected: NumericFamily::Float,
+            actual: rhs.prim(),
+        });
+    }
+    require_same_storage_shape(op.name(), lhs, rhs)?;
+    let buf = match (&lhs.buf, &rhs.buf) {
+        (Buf::F64(lhs), Buf::F64(rhs)) => Buf::F64(float_vec_binop_f64(op, lhs, rhs)),
+        (Buf::F32(lhs), Buf::F32(rhs)) => Buf::F32(float_vec_binop_f32(op, lhs, rhs, |x| x, |x| x)),
+        (Buf::F16(lhs), Buf::F16(rhs)) => Buf::F16(float_vec_binop_f32(
+            op,
+            lhs,
+            rhs,
+            half::f16::to_f32,
+            half::f16::from_f32,
+        )),
+        (Buf::Bf16(lhs), Buf::Bf16(rhs)) => Buf::Bf16(float_vec_binop_f32(
+            op,
+            lhs,
+            rhs,
+            half::bf16::to_f32,
+            half::bf16::from_f32,
+        )),
+        _ => unreachable!("family and dtype checks make the float buffers exhaustive"),
+    };
+    Ok(TensorStorage { buf })
+}
+
+fn float_vec_unop_f32<T: Copy>(
+    op: FloatUnOp,
+    values: &[T],
+    to_f32: impl Fn(T) -> f32,
+    from_f32: impl Fn(f32) -> T,
+) -> Vec<T> {
+    macro_rules! map {
+        ($body:expr) => {
+            values
+                .iter()
+                .copied()
+                .map(|value| from_f32($body(to_f32(value))))
+                .collect()
+        };
+    }
+    match op {
+        FloatUnOp::Neg => map!(|x: f32| -x),
+        FloatUnOp::Recip => map!(f32::recip),
+        FloatUnOp::Exp => map!(f32::exp),
+        FloatUnOp::Log => map!(f32::ln),
+        FloatUnOp::Sin => map!(f32::sin),
+        FloatUnOp::Sqrt => map!(f32::sqrt),
+        FloatUnOp::Cos => map!(f32::cos),
+        FloatUnOp::Tan => map!(f32::tan),
+        FloatUnOp::Atan => map!(f32::atan),
+        FloatUnOp::Abs => map!(f32::abs),
+        FloatUnOp::Floor => map!(f32::floor),
+        FloatUnOp::Ceil => map!(f32::ceil),
+        FloatUnOp::Round => map!(f32::round_ties_even),
+        FloatUnOp::Relu
+        | FloatUnOp::Sigmoid
+        | FloatUnOp::Tanh
+        | FloatUnOp::Silu
+        | FloatUnOp::Gelu => values
+            .iter()
+            .copied()
+            .map(|value| from_f32(apply_float_unop_f32(op, to_f32(value))))
+            .collect(),
+    }
+}
+
+fn float_vec_unop_f64(op: FloatUnOp, values: &[f64]) -> Vec<f64> {
+    macro_rules! map {
+        ($body:expr) => {
+            values.iter().copied().map($body).collect()
+        };
+    }
+    match op {
+        FloatUnOp::Neg => map!(|x: f64| -x),
+        FloatUnOp::Recip => map!(f64::recip),
+        FloatUnOp::Exp => map!(f64::exp),
+        FloatUnOp::Log => map!(f64::ln),
+        FloatUnOp::Sin => map!(f64::sin),
+        FloatUnOp::Sqrt => map!(f64::sqrt),
+        FloatUnOp::Cos => map!(f64::cos),
+        FloatUnOp::Tan => map!(f64::tan),
+        FloatUnOp::Atan => map!(f64::atan),
+        FloatUnOp::Abs => map!(f64::abs),
+        FloatUnOp::Floor => map!(f64::floor),
+        FloatUnOp::Ceil => map!(f64::ceil),
+        FloatUnOp::Round => map!(f64::round_ties_even),
+        FloatUnOp::Relu
+        | FloatUnOp::Sigmoid
+        | FloatUnOp::Tanh
+        | FloatUnOp::Silu
+        | FloatUnOp::Gelu => values
+            .iter()
+            .copied()
+            .map(|value| apply_float_unop_f64(op, value))
+            .collect(),
+    }
+}
+
+/// Bulk float unary kernel with one operation dispatch per buffer.
+pub fn float_tensor_unop(
+    op: FloatUnOp,
+    value: &TensorStorage,
+) -> Result<TensorStorage, NumericKernelError> {
+    if !value.prim().is_float() {
+        return Err(NumericKernelError::WrongFamily {
+            op: op.name(),
+            expected: NumericFamily::Float,
+            actual: value.prim(),
+        });
+    }
+    let buf = match &value.buf {
+        Buf::F64(values) => Buf::F64(float_vec_unop_f64(op, values)),
+        Buf::F32(values) => Buf::F32(float_vec_unop_f32(op, values, |x| x, |x| x)),
+        Buf::F16(values) => Buf::F16(float_vec_unop_f32(
+            op,
+            values,
+            half::f16::to_f32,
+            half::f16::from_f32,
+        )),
+        Buf::Bf16(values) => Buf::Bf16(float_vec_unop_f32(
+            op,
+            values,
+            half::bf16::to_f32,
+            half::bf16::from_f32,
+        )),
+        _ => unreachable!("family check makes the float buffer exhaustive"),
+    };
+    Ok(TensorStorage { buf })
+}
+
+fn splat_storage(value: ScalarValue, len: usize) -> TensorStorage {
+    let buf = match value.bits {
+        Bits::I8(value) => Buf::I8(vec![value; len]),
+        Bits::I16(value) => Buf::I16(vec![value; len]),
+        Bits::I32(value) => Buf::I32(vec![value; len]),
+        Bits::I64(value) => Buf::I64(vec![value; len]),
+        Bits::F16(value) => Buf::F16(vec![value; len]),
+        Bits::Bf16(value) => Buf::Bf16(vec![value; len]),
+        Bits::F32(value) => Buf::F32(vec![value; len]),
+        Bits::F64(value) => Buf::F64(vec![value; len]),
+        Bits::Bool(value) => Buf::Bool(vec![u8::from(value); len]),
+    };
+    TensorStorage { buf }
+}
+
+pub fn int_tensor_scalar_binop(
+    op: IntBinOp,
+    tensor: &TensorStorage,
+    scalar: ScalarValue,
+) -> Result<TensorStorage, NumericKernelError> {
+    int_tensor_binop(op, tensor, &splat_storage(scalar, tensor.len()))
+}
+
+pub fn int_scalar_tensor_binop(
+    op: IntBinOp,
+    scalar: ScalarValue,
+    tensor: &TensorStorage,
+) -> Result<TensorStorage, NumericKernelError> {
+    int_tensor_binop(op, &splat_storage(scalar, tensor.len()), tensor)
+}
+
+pub fn float_tensor_scalar_binop(
+    op: FloatBinOp,
+    tensor: &TensorStorage,
+    scalar: ScalarValue,
+) -> Result<TensorStorage, NumericKernelError> {
+    float_tensor_binop(op, tensor, &splat_storage(scalar, tensor.len()))
+}
+
+pub fn float_scalar_tensor_binop(
+    op: FloatBinOp,
+    scalar: ScalarValue,
+    tensor: &TensorStorage,
+) -> Result<TensorStorage, NumericKernelError> {
+    float_tensor_binop(op, &splat_storage(scalar, tensor.len()), tensor)
+}
+
+fn compare_vec<T: Copy + PartialEq + PartialOrd>(op: CompareOp, lhs: &[T], rhs: &[T]) -> Vec<u8> {
+    match op {
+        CompareOp::Eq => zip_map(lhs, rhs, |lhs, rhs| u8::from(lhs == rhs)),
+        CompareOp::Ne => zip_map(lhs, rhs, |lhs, rhs| u8::from(lhs != rhs)),
+        CompareOp::Lt => zip_map(lhs, rhs, |lhs, rhs| u8::from(lhs < rhs)),
+        CompareOp::Gt => zip_map(lhs, rhs, |lhs, rhs| u8::from(lhs > rhs)),
+        CompareOp::Lte => zip_map(lhs, rhs, |lhs, rhs| u8::from(lhs <= rhs)),
+        CompareOp::Gte => zip_map(lhs, rhs, |lhs, rhs| u8::from(lhs >= rhs)),
+    }
+}
+
+/// Compare two finalized buffers at their shared storage width and return
+/// sealed bool storage.
+pub fn compare_tensors(
+    op: CompareOp,
+    lhs: &TensorStorage,
+    rhs: &TensorStorage,
+) -> Result<TensorStorage, NumericKernelError> {
+    require_same_storage_shape(op.name(), lhs, rhs)?;
+    let values = match (&lhs.buf, &rhs.buf) {
+        (Buf::I8(lhs), Buf::I8(rhs)) => compare_vec(op, lhs, rhs),
+        (Buf::I16(lhs), Buf::I16(rhs)) => compare_vec(op, lhs, rhs),
+        (Buf::I32(lhs), Buf::I32(rhs)) => compare_vec(op, lhs, rhs),
+        (Buf::I64(lhs), Buf::I64(rhs)) => compare_vec(op, lhs, rhs),
+        (Buf::F16(lhs), Buf::F16(rhs)) => compare_vec(op, lhs, rhs),
+        (Buf::Bf16(lhs), Buf::Bf16(rhs)) => compare_vec(op, lhs, rhs),
+        (Buf::F32(lhs), Buf::F32(rhs)) => compare_vec(op, lhs, rhs),
+        (Buf::F64(lhs), Buf::F64(rhs)) => compare_vec(op, lhs, rhs),
+        (Buf::Bool(lhs), Buf::Bool(rhs)) => compare_vec(op, lhs, rhs),
+        _ => unreachable!("dtype check makes the comparison buffers exhaustive"),
+    };
+    Ok(TensorStorage {
+        buf: Buf::Bool(values),
+    })
+}
+
+pub fn compare_tensor_scalar(
+    op: CompareOp,
+    tensor: &TensorStorage,
+    scalar: ScalarValue,
+) -> Result<TensorStorage, NumericKernelError> {
+    compare_tensors(op, tensor, &splat_storage(scalar, tensor.len()))
+}
+
+pub fn compare_scalar_tensor(
+    op: CompareOp,
+    scalar: ScalarValue,
+    tensor: &TensorStorage,
+) -> Result<TensorStorage, NumericKernelError> {
+    compare_tensors(op, &splat_storage(scalar, tensor.len()), tensor)
 }
 
 /// Finalize one wide intermediate into `prim` per the section C1 table,
@@ -1409,6 +2432,244 @@ mod tests {
         assert_eq!(w.to_i64_exact_vec(), Some(vec![9, 0, 0]));
     }
 
+    // ---- Phase 2 closed numeric kernels ([04-NUM-8], section C5) ----
+
+    #[test]
+    fn int_binop_is_exact_above_f64_mantissa_and_traps_at_each_width() {
+        let exact = int_binop(
+            IntBinOp::Add,
+            scalar_from_i64("test", Prim::Int64, 9_007_199_254_740_992).unwrap(),
+            scalar_from_i64("test", Prim::Int64, 1).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(exact.as_i64_exact(), Some(9_007_199_254_740_993));
+
+        for (prim, max) in [
+            (Prim::Int8, i8::MAX as i64),
+            (Prim::Int16, i16::MAX as i64),
+            (Prim::Int32, i32::MAX as i64),
+            (Prim::Int64, i64::MAX),
+        ] {
+            let err = int_binop(
+                IntBinOp::Add,
+                scalar_from_i64("test", prim, max).unwrap(),
+                scalar_from_i64("test", prim, 1).unwrap(),
+            )
+            .unwrap_err();
+            assert_eq!(
+                err,
+                NumericKernelError::Trap(NumericTrap::Overflow { op: "add", prim })
+            );
+
+            let in_range = int_binop(
+                IntBinOp::Add,
+                scalar_from_i64("test", prim, max - 1).unwrap(),
+                scalar_from_i64("test", prim, 1).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(in_range.as_i64_exact(), Some(max));
+        }
+    }
+
+    #[test]
+    fn int_division_kernels_distinguish_divzero_overflow_and_rounding() {
+        let i64v = |value| scalar_from_i64("test", Prim::Int64, value).unwrap();
+        assert_eq!(
+            int_binop(IntBinOp::FloorDiv, i64v(-7), i64v(3))
+                .unwrap()
+                .as_i64_exact(),
+            Some(-3)
+        );
+        assert_eq!(
+            int_binop(IntBinOp::TruncDiv, i64v(-7), i64v(3))
+                .unwrap()
+                .as_i64_exact(),
+            Some(-2)
+        );
+        assert_eq!(
+            int_binop(IntBinOp::Rem, i64v(-7), i64v(3))
+                .unwrap()
+                .as_i64_exact(),
+            Some(-1)
+        );
+        assert_eq!(
+            int_binop(IntBinOp::TruncDiv, i64v(1), i64v(0)).unwrap_err(),
+            NumericKernelError::Trap(NumericTrap::DivZero {
+                op: "trunc_div",
+                prim: Prim::Int64
+            })
+        );
+        assert_eq!(
+            int_binop(IntBinOp::TruncDiv, i64v(i64::MIN), i64v(-1)).unwrap_err(),
+            NumericKernelError::Trap(NumericTrap::Overflow {
+                op: "trunc_div",
+                prim: Prim::Int64
+            })
+        );
+    }
+
+    #[test]
+    fn int_unop_traps_on_signed_min_and_keeps_in_range_values_exact() {
+        for (prim, min) in [
+            (Prim::Int8, i8::MIN as i64),
+            (Prim::Int16, i16::MIN as i64),
+            (Prim::Int32, i32::MIN as i64),
+            (Prim::Int64, i64::MIN),
+        ] {
+            let value = scalar_from_i64("test", prim, min).unwrap();
+            assert_eq!(
+                int_unop(IntUnOp::Neg, value).unwrap_err(),
+                NumericKernelError::Trap(NumericTrap::Overflow { op: "neg", prim })
+            );
+            let in_range = scalar_from_i64("test", prim, min + 1).unwrap();
+            assert_eq!(
+                int_unop(IntUnOp::Abs, in_range).unwrap().as_i64_exact(),
+                Some(-(min + 1))
+            );
+        }
+    }
+
+    #[test]
+    fn float_kernels_compute_at_declared_arithmetic_width() {
+        // This f32 input is a one-ulp witness on macOS: native expf and
+        // f64-exp-then-narrow differ. The contract assertion is against the
+        // platform f32 operation itself, not a hard-coded libm result.
+        let x = f32::from_bits(1_040_209_326);
+        let input = scalar_from_f64("test", Prim::F32, f64::from(x)).unwrap();
+        let got = float_unop(FloatUnOp::Exp, input).unwrap();
+        assert_eq!(got.as_f64_lossy(), f64::from(x.exp()));
+
+        let lhs = scalar_from_f64("test", Prim::F32, f64::from(0.1_f32)).unwrap();
+        let rhs = scalar_from_f64("test", Prim::F32, f64::from(0.2_f32)).unwrap();
+        let sum = float_binop(FloatBinOp::Add, lhs, rhs).unwrap();
+        assert_eq!(sum.as_f64_lossy(), f64::from(0.1_f32 + 0.2_f32));
+
+        for prim in [Prim::F16, Prim::Bf16] {
+            let lhs = scalar_from_f64("test", prim, 2048.0).unwrap();
+            let rhs = scalar_from_f64("test", prim, 1.0).unwrap();
+            let sum = float_binop(FloatBinOp::Add, lhs, rhs).unwrap();
+            assert_eq!(sum.prim(), prim);
+            assert_eq!(sum.as_f64_lossy(), 2048.0);
+        }
+    }
+
+    #[test]
+    fn kernel_family_and_dtype_mismatches_fail_before_arithmetic() {
+        let int = scalar_from_i64("test", Prim::Int32, 1).unwrap();
+        let float = scalar_from_f64("test", Prim::F32, 1.0).unwrap();
+        assert!(matches!(
+            float_binop(FloatBinOp::Add, int, int),
+            Err(NumericKernelError::WrongFamily {
+                expected: NumericFamily::Float,
+                ..
+            })
+        ));
+        assert!(matches!(
+            int_binop(IntBinOp::Add, int, float),
+            Err(NumericKernelError::WrongFamily {
+                expected: NumericFamily::Int,
+                ..
+            })
+        ));
+
+        let wider = scalar_from_i64("test", Prim::Int64, 1).unwrap();
+        assert_eq!(
+            int_binop(IntBinOp::Add, int, wider).unwrap_err(),
+            NumericKernelError::DtypeMismatch {
+                op: "add",
+                lhs: Prim::Int32,
+                rhs: Prim::Int64
+            }
+        );
+    }
+
+    #[test]
+    fn comparisons_use_exact_integer_values_and_matching_float_widths() {
+        let lo = scalar_from_i64("test", Prim::Int64, 9_007_199_254_740_992).unwrap();
+        let hi = scalar_from_i64("test", Prim::Int64, 9_007_199_254_740_993).unwrap();
+        assert!(compare_scalars(CompareOp::Lt, lo, hi).unwrap());
+        assert!(!compare_scalars(CompareOp::Eq, lo, hi).unwrap());
+
+        let f16_lo = scalar_from_f64("test", Prim::F16, 2048.0).unwrap();
+        let f16_same = scalar_from_f64("test", Prim::F16, 2049.0).unwrap();
+        assert!(compare_scalars(CompareOp::Eq, f16_lo, f16_same).unwrap());
+        assert!(!compare_scalars(CompareOp::Lt, f16_lo, f16_same).unwrap());
+    }
+
+    #[test]
+    fn tensor_kernels_are_exact_at_width_and_preserve_broadcast_order() {
+        let lhs = finalize_tensor(
+            "test",
+            Prim::Int64,
+            RawTensor::Int(vec![9_007_199_254_740_992, 7]),
+        )
+        .unwrap();
+        let rhs = finalize_tensor("test", Prim::Int64, RawTensor::Int(vec![1, 3])).unwrap();
+        assert_eq!(
+            int_tensor_binop(IntBinOp::Add, &lhs, &rhs)
+                .unwrap()
+                .to_i64_exact_vec(),
+            Some(vec![9_007_199_254_740_993, 10])
+        );
+
+        let scalar = scalar_from_i64("test", Prim::Int64, 10).unwrap();
+        assert_eq!(
+            int_tensor_scalar_binop(IntBinOp::Sub, &rhs, scalar)
+                .unwrap()
+                .to_i64_exact_vec(),
+            Some(vec![-9, -7])
+        );
+        assert_eq!(
+            int_scalar_tensor_binop(IntBinOp::Sub, scalar, &rhs)
+                .unwrap()
+                .to_i64_exact_vec(),
+            Some(vec![9, 7])
+        );
+
+        let overflow = finalize_tensor("test", Prim::Int8, RawTensor::Int(vec![0, 127])).unwrap();
+        let one = scalar_from_i64("test", Prim::Int8, 1).unwrap();
+        assert_eq!(
+            int_tensor_scalar_binop(IntBinOp::Add, &overflow, one).unwrap_err(),
+            NumericKernelError::Trap(NumericTrap::Overflow {
+                op: "add",
+                prim: Prim::Int8
+            })
+        );
+    }
+
+    #[test]
+    fn tensor_float_and_comparison_kernels_do_not_widen_elements() {
+        let x = f32::from_bits(1_040_209_326);
+        let input =
+            finalize_tensor("test", Prim::F32, RawTensor::Float(vec![f64::from(x)])).unwrap();
+        assert_eq!(
+            float_tensor_unop(FloatUnOp::Exp, &input)
+                .unwrap()
+                .to_f64_lossy_vec(),
+            vec![f64::from(x.exp())]
+        );
+
+        let lo = finalize_tensor(
+            "test",
+            Prim::Int64,
+            RawTensor::Int(vec![9_007_199_254_740_992]),
+        )
+        .unwrap();
+        let hi = scalar_from_i64("test", Prim::Int64, 9_007_199_254_740_993).unwrap();
+        assert_eq!(
+            compare_tensor_scalar(CompareOp::Lt, &lo, hi)
+                .unwrap()
+                .to_i64_exact_vec(),
+            Some(vec![1])
+        );
+        assert_eq!(
+            compare_scalar_tensor(CompareOp::Lt, hi, &lo)
+                .unwrap()
+                .to_i64_exact_vec(),
+            Some(vec![0])
+        );
+    }
+
     // ---- trap message shape (section C2; strings freeze at Phase 2) ----
 
     #[test]
@@ -1430,8 +2691,12 @@ mod tests {
             "numeric trap: domain in cast at bool"
         );
         assert_eq!(
-            NumericTrap::DivZero { op: "trunc_div" }.to_string(),
-            "numeric trap: division by zero in trunc_div"
+            NumericTrap::DivZero {
+                op: "trunc_div",
+                prim: Prim::Int64
+            }
+            .to_string(),
+            "numeric trap: division by zero in trunc_div at int64"
         );
     }
 

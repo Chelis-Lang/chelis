@@ -8,10 +8,10 @@
 //! with a specific diagnostic, and rank-2+ falls back to a LOUD abort stub
 //! that names itself. No F32 substitution anywhere (contrast chelis#689).
 //!
-//! The #699 Metal symptom is also settled here: an int64 `abs` emits
-//! `// node 0 = Const 0` with a `(int64_t)0LL` fill and the input tensor
-//! absent from the kernel signature - the zero arrives PRE-PLANTED from
-//! `lower_transcendental`; there is no separate Metal bug.
+//! The #699 Metal symptom is also settled here: an int64 `abs` no longer
+//! lowers to a pre-planted `Const 0`. Until Phase 3 supplies a typed,
+//! trapping Metal kernel, emission falls back to the backend's named abort
+//! stub carrying the branded unsupported reason.
 //!
 //! chelis#726: `add` on bool tensors - the checker accepts it, both host
 //! lanes store the out-of-domain value 2 in a bool-typed tensor (prints
@@ -151,28 +151,33 @@ fn metal_rank2_fallback_is_a_named_abort_stub() {
 
 /// The #699 Metal symptom, REPLACED at chelis#730 Phase 1: the int64
 /// `abs` def used to arrive with a pre-planted `Const 0` node from
-/// `lower_transcendental` and Metal emitted a zero-filled buffer. The
-/// placeholder now raises, so the build is REJECTED loudly (the DAG lane
-/// refuses; the host-emission fallback's scalar arm refuses the tensor
-/// operand) and no zero-filled emission exists to lock. Replace with a
-/// correctness row when chelis#729 lands integer abs.
+/// `lower_transcendental` and Metal emitted a zero-filled buffer. Phase 2
+/// now preserves a typed integer `Abs` node. Metal's public DAG emitter
+/// rejects that node, and the build surface materializes its established
+/// named-abort fallback with the branded reason. Replace this with a
+/// correctness row when the chelis#699 Phase 3 kernel lands.
 #[test]
-fn metal_int64_abs_is_rejected_not_pre_planted_zero() {
+fn metal_int64_abs_is_a_named_abort_not_pre_planted_zero() {
     let (ok, stderr, emitted) = build_metal(
         "def f(a: tensor[4, int64]) -> tensor[4, int64] = abs(a)\n",
         "metal_i64_abs",
     );
     assert!(
-        !ok,
-        "an int64 abs def must be rejected, never emitted as a zero buffer"
-    );
-    assert!(
-        stderr.contains("unsupported:"),
-        "the rejection must carry the branded diagnostic; got: {stderr}"
+        ok,
+        "the Metal build surface emits loud fallback stubs: {stderr}"
     );
     assert!(
         !emitted.contains("node 0 = Const 0"),
         "no pre-planted zero emission may be left behind"
+    );
+    assert!(
+        emitted.contains("fallback stub")
+            && emitted.contains("abort()")
+            && emitted.contains("unsupported:")
+            && emitted.contains(
+                "integer abs code generation waits for the typed, trapping Phase 3 kernel"
+            ),
+        "integer abs must produce the named abort fallback with its branded reason; got:\n{emitted}"
     );
 }
 

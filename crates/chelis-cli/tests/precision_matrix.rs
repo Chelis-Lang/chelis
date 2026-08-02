@@ -748,67 +748,74 @@ fn int_recip_through_pipe_fails_loud_never_zero() {
 // The split is decided purely by which Rust `as` cast runs last.
 // ===========================================================================
 
-fn assert_traps_with_overflow(expr: &str, label: &str) {
+fn assert_traps_with_overflow(expr: &str, expected: &str, label: &str) {
     match eval_lane_str(expr) {
         Ok(v) => panic!(
             "{label}: `{expr}` must trap on integer overflow per chelis#680 \
              (errors, not wraps), but it succeeded and returned {v}"
         ),
-        Err(stderr) => assert!(
-            stderr.contains("overflow"),
-            "{label}: `{expr}` failed but without a branded overflow \
-             diagnostic. Got: {stderr}"
-        ),
+        Err(stderr) => {
+            let trap = stderr
+                .lines()
+                .find_map(|line| line.find("numeric trap:").map(|start| &line[start..]))
+                .unwrap_or_else(|| {
+                    panic!("{label}: `{expr}` failed without a numeric-trap line. Got: {stderr}")
+                });
+            assert_eq!(
+                trap, expected,
+                "{label}: numeric traps are a byte-frozen cross-lane contract"
+            );
+        }
     }
 }
 
-/// Verified today: returns i64::MAX (saturates).
+/// Historical failure: returned i64::MAX by saturation instead of trapping.
 #[test]
-#[ignore = "chelis#680: still saturates to i64::MAX. chelis#729 Phase 1 made int8/16/32 trap \
-            through finalize (their f64 wide value is exact); int64's wide value still comes \
-            from the unsplit f64 closures behind the cited saturating adapter, so the trap \
-            lands with the Phase 2 kernel split. Run with \
-            `cargo test -p chelis-cli --test precision_matrix -- --ignored`."]
 fn int64_add_overflow_traps() {
     assert_traps_with_overflow(
         &format!("add(cast({I64_MAX}, int64), cast(1, int64))"),
+        "numeric trap: overflow in add at int64",
         "int64_add_overflow",
     );
 }
 
-/// Verified today: returns i64::MAX. Both operands are in range; only the
-/// product overflows, so this cannot be dismissed as a bad literal.
+/// Historical failure: returned i64::MAX. Both operands are in range; only
+/// the product overflows, so this cannot be dismissed as a bad literal.
 #[test]
-#[ignore = "chelis#680: still saturates to i64::MAX (see int64_add_overflow_traps: the \
-            int64 wide value waits for the Phase 2 kernel split). Run with \
-            `cargo test -p chelis-cli --test precision_matrix -- --ignored`."]
 fn int64_mul_overflow_traps() {
     assert_traps_with_overflow(
         "mul(cast(4000000000, int64), cast(4000000000, int64))",
+        "numeric trap: overflow in mul at int64",
         "int64_mul_overflow",
     );
 }
 
-/// Verified today: returns -128 (WRAPS, unlike int64 which saturates).
+/// Historical failure: returned -128 by wrapping.
 #[test]
 fn int8_add_overflow_traps() {
-    assert_traps_with_overflow("add(cast(127, int8), cast(1, int8))", "int8_add_overflow");
+    assert_traps_with_overflow(
+        "add(cast(127, int8), cast(1, int8))",
+        "numeric trap: overflow in add at int8",
+        "int8_add_overflow",
+    );
 }
 
-/// Verified today: returns -32768 (wraps).
+/// Historical failure: returned -32768 by wrapping.
 #[test]
 fn int16_add_overflow_traps() {
     assert_traps_with_overflow(
         "add(cast(32767, int16), cast(1, int16))",
+        "numeric trap: overflow in add at int16",
         "int16_add_overflow",
     );
 }
 
-/// Verified today: returns -2147483648 (wraps).
+/// Historical failure: returned -2147483648 by wrapping.
 #[test]
 fn int32_add_overflow_traps() {
     assert_traps_with_overflow(
         "add(cast(2147483647, int32), cast(1, int32))",
+        "numeric trap: overflow in add at int32",
         "int32_add_overflow",
     );
 }
@@ -1644,11 +1651,6 @@ fn f32_tensor_abs_is_correct_and_unaffected_by_the_placeholder() {
 /// (= 222.0, the else branch) and `111.0`'s bit pattern `0x42de0000` appears
 /// NOWHERE in the file. `2^53 < 2^53 + 1` is true, so the answer is 111.0.
 #[test]
-#[ignore = "chelis#711: fold_static_cond folds the int64 comparison in f64, \
-            selects the wrong branch, and DELETES the then-branch at compile \
-            time. This test asserts the CORRECT behavior and fails until the \
-            fix lands. Run with `cargo test -p chelis-cli --test \
-            precision_matrix -- --ignored`."]
 fn static_int_condition_does_not_delete_the_correct_branch() {
     if !c_toolchain_available() {
         eprintln!("skipping: no host C toolchain");
