@@ -20,6 +20,7 @@ enum TokenType {
   CANONICAL_RECORD_FIELD_NAME,
   CANONICAL_RECORD_PATTERN_FIELD_NAME,
   CANONICAL_PIPE_LAMBDA_FN,
+  PROPERTY_BODY_COLON,
 };
 
 bool is_digit(int32_t value) { return value >= '0' && value <= '9'; }
@@ -575,6 +576,12 @@ bool tree_sitter_chelis_surf_external_scanner_scan(void *, TSLexer *lexer,
   }
   if (valid_symbols[CANONICAL_STRING] && lexer->lookahead == '"') {
     return scan_string(lexer);
+  }
+  if (valid_symbols[PROPERTY_BODY_COLON] && lexer->lookahead == ':') {
+    lexer->advance(lexer, false);
+    lexer->mark_end(lexer);
+    lexer->result_symbol = PROPERTY_BODY_COLON;
+    return true;
   }
   if (valid_symbols[CANONICAL_PIPE_LAMBDA_FN] && lexer->lookahead == 'f') {
     const bool accepted = scan_pipe_lambda_fn(lexer);

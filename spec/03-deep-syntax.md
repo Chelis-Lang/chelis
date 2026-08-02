@@ -50,6 +50,7 @@ portable across Surf and Reef boundaries.
 | `property_tolerance` | expr | Optional property runner tolerance metadata |
 | `property_seed` | expr | Optional property runner seed metadata |
 | `property_samples` | expr | Optional property runner sample-count metadata |
+| `property_contracts` | `(tuple {} string...)` | Ordered repeatable standard-contract dependencies authored with `with contract = "..."` |
 | `opaque` | `true` | On a `deftype`: the type is opaque (see §2.2) |
 | `invariant` | `(fn {} (params {} <binder>) <expr>)` | On an opaque `deftype`: the declared invariant predicate (see §2.2) |
 | `invariant_amenability` | string | On an invariant-carrying `deftype`: `"linear"`/`"polynomial"`/`"transcendental"`/`"opaque"`; derived data, recomputed on desugar (see §2.2) |

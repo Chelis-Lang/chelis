@@ -29,6 +29,7 @@ module.exports = grammar({
     $._canonical_record_field_name,
     $._canonical_record_pattern_field_name,
     $._canonical_pipe_lambda_fn,
+    $._property_body_colon,
   ],
 
   extras: ($) => [/\s/, $.line_comment, $.block_comment],
@@ -147,18 +148,26 @@ module.exports = grammar({
         "(",
         commaSep($.typed_parameter),
         ")",
-        optional(seq("where", commaSep1(field("precondition", $.property_precondition)))),
-        ":",
+        choice(
+          ":",
+          seq(
+            "where",
+            commaSep1(field("precondition", $.expression)),
+            $._property_body_colon,
+          ),
+        ),
         field("body", $.expression),
         repeat($.property_option),
       ),
-    property_precondition: ($) => choice($.call_expression, $.primary_expression),
     property_option: ($) =>
-      seq(
-        "with",
-        choice("tolerance", "seed", "samples", "contract"),
-        "=",
-        field("value", $.expression),
+      choice(
+        seq(
+          "with",
+          choice("tolerance", "seed", "samples"),
+          "=",
+          field("value", $.expression),
+        ),
+        seq("with", "contract", "=", field("value", $.string)),
       ),
 
     function_definition: ($) =>

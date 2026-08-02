@@ -190,7 +190,7 @@ enum Command {
         annotate: bool,
         file: PathBuf,
     },
-    /// Decompile Deep (.dp) to Surf (best-effort)
+    /// Resugar well-formed public Deep (.dp) to canonical Surf
     Surf {
         file: PathBuf,
         #[arg(long)]

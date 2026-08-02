@@ -76,6 +76,8 @@ mod tests {
             "different_record_pattern = match p with { | Point { x: y } => y }\n",
             "later_pipe_argument = x |> fn (v) -> f(y, v)\n",
             "controls = \"\\u{8}\\u{1f}\\u{7f}\\u{85}\\0\\t\\n\\r\\\"\\\\\"\n",
+            "@property bounded forall(x: int32) where x <= 1: true\n",
+            "@property contracted forall():\n  true\n  with contract = \"std.identity\"\n",
         ] {
             assert!(
                 !surf_has_error(source),
@@ -148,6 +150,7 @@ mod tests {
             "value = \"\\u{22}\"\n",
             "value = \"\\u{5c}\"\n",
             "value = \"\\u{41}\"\n",
+            "@property bad forall():\n  true\n  with contract = contract_name\n",
             "value = \"\\u{B}\"\n",
             "value = \"raw\tcontrol\"\n",
             "value = \"raw\u{8}control\"\n",

@@ -47,6 +47,8 @@ markers preserve authored-versus-inferred Surf distinctions and do not change ev
 Round-trip normalization MAY erase those two origin markers only when their value and
 placement are valid and after they select the Surf reconstruction; malformed or misplaced
 markers and the other validated `surf_*` values SHALL remain visible.
+Repeatable Surf `with contract = "..."` property options SHALL be represented by ordered
+`property_contracts: (tuple {} string...)` metadata on the property `def`.
 
 #### Scenario: Producer-specific metadata key accepted
 
