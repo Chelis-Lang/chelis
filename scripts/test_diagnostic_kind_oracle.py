@@ -29,6 +29,19 @@ class DiagnosticKindOracleTests(unittest.TestCase):
         self.assertEqual(mutated.count("diagnostic_kind_oracle_mutation"), 1)
         self.assertIn('diagnostic.kind = "compile_error".to_owned()', mutated)
 
+    def test_wire_bridge_mutation_adds_a_working_producer_conversion(self) -> None:
+        source = (oracle.REPO_ROOT / oracle.SCHEMA_SOURCE).read_text(encoding="utf-8")
+        mutated = oracle.mutate_wire_bridge(source)
+        self.assertNotEqual(mutated, source)
+        self.assertEqual(mutated.count("impl From<WireDiagnostic> for Diagnostic"), 1)
+        self.assertIn("kind: wire.kind", mutated)
+
+    def test_wire_bridge_mutation_runs_the_compiler_api_doctests(self) -> None:
+        self.assertEqual(
+            oracle.command_text(oracle.WIRE_BRIDGE_CHECK),
+            "cargo test -p chelis-compiler-api --doc",
+        )
+
     def test_vocabulary_mutation_adds_one_fully_rendered_owner_variant(self) -> None:
         source = (oracle.REPO_ROOT / oracle.VOCAB_SOURCE).read_text(encoding="utf-8")
         mutated = oracle.mutate_diagnostic_vocabulary(source)
