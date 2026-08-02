@@ -1,5 +1,5 @@
 //! chelis#722 - grad of a forward pass containing `abs`/`floor` on an
-//! integer tensor returns ALL-ZERO gradients in BOTH lanes.
+//! integer tensor returned ALL-ZERO gradients in BOTH lanes.
 //!
 //! This is #699's `Const { value: 0.0 }` placeholder
 //! (`lower_transcendental`, lower.rs:9834-9845) reached through grad's
@@ -112,18 +112,11 @@ fn grad_program(weight_op: &str, print_form: bool) -> String {
 }
 
 // ===========================================================================
-// chelis#722 - the zero gradients (both lanes)
+// chelis#722 - evaluator support; the compiled half waits for Phase 3
 // ===========================================================================
 
-/// Observed today: `[0.0, 0.0, 0.0, 0.0]` from eval. The correct gradient is
-/// `w = abs(weights) = [100, 200, 300, 400]`.
+/// The correct gradient is `w = abs(weights) = [100, 200, 300, 400]`.
 #[test]
-#[ignore = "chelis#722; since chelis#730 Phase 1 the placeholder is a LOUD lowering error \
-            in both lanes (see grad_through_int_abs_fails_loudly_not_zero) - red for a \
-            better reason until chelis#729 lands integer abs/floor. Original finding: grad through abs(int64 tensor) returns zeros in eval (the #699 \
-            placeholder poisons the grad-lowered forward pass); correct gradient is \
-            [100, 200, 300, 400]. Run with \
-            `cargo test -p chelis-cli --test grad_zero_placeholder_matrix -- --ignored`."]
 fn eval_grad_through_int_abs_is_the_true_gradient() {
     let line = eval_first_line(&grad_program("abs", true)).expect("eval should run");
     assert!(
@@ -151,15 +144,9 @@ fn c_grad_through_int_abs_is_the_true_gradient() {
     );
 }
 
-/// floor on an already-integral int64 tensor is the identity, so the true
-/// gradient is the raw weights. Observed today: zeros in eval.
+/// `floor` on an already-integral int64 tensor is the identity, so the true
+/// gradient is the raw weights.
 #[test]
-#[ignore = "chelis#722; since chelis#730 Phase 1 the placeholder is a LOUD lowering error \
-            in both lanes (see grad_through_int_abs_fails_loudly_not_zero) - red for a \
-            better reason until chelis#729 lands integer abs/floor. Original finding: grad through floor(int64 tensor) returns zeros in eval (same \
-            placeholder as abs, per #699's op list); correct gradient is \
-            [-100, 200, -300, 400]. Run with \
-            `cargo test -p chelis-cli --test grad_zero_placeholder_matrix -- --ignored`."]
 fn eval_grad_through_int_floor_is_the_true_gradient() {
     let line = eval_first_line(&grad_program("floor", true)).expect("eval should run");
     assert!(
@@ -168,25 +155,45 @@ fn eval_grad_through_int_floor_is_the_true_gradient() {
     );
 }
 
+/// `ceil` and `round` have the same exact identity semantics on integers as
+/// `floor`; neither may route through a float kernel or fabricate a gradient.
+#[test]
+fn eval_grad_through_int_ceil_and_round_is_the_true_gradient() {
+    for op in ["ceil", "round"] {
+        let line = eval_first_line(&grad_program(op, true)).expect("eval should run");
+        assert!(
+            line.contains("data=[-100.0, 200.0, -300.0, 400.0]"),
+            "grad of sum(x*{op}(w)) wrt x must be the exact integer weights; got: {line}"
+        );
+    }
+}
+
+/// Integer `abs` is not merely an identity rewrite: the minimum signed value
+/// has no positive representative and must retain the [04-NUM-9] trap.
+#[test]
+fn eval_int64_abs_min_traps_instead_of_rounding_or_wrapping() {
+    let program = "def int_abs(x: tensor[1, int64]) -> tensor[1, int64] = abs(x)\n\
+                   out = print(int_abs(to_tensor([add(neg(cast(9223372036854775807, int64)), \
+                   cast(-1, int64))])))\n";
+    let err = eval_first_line(program).expect_err("abs(int64::MIN) must trap");
+    assert!(
+        err.contains("numeric trap: overflow in abs at int64"),
+        "integer abs must preserve the exact overflow trap; got: {err}"
+    );
+}
+
 // ===========================================================================
-// chelis#730 Phase 1 (census row 1's grad half): loud, not zero
+// chelis#722 compiled half: remains loud until Phase 3 + chelis#699
 // ===========================================================================
 
-/// The conversion's parity row: grad through `abs`/`floor` on an int64
-/// tensor now fails LOUDLY in both lanes with the branded diagnostic -
-/// never plausible zero gradients. Flips to the value tests above when
-/// chelis#729 lands integer abs/floor support.
+/// Phase 2 intentionally enables the evaluator only. The compiled lane must
+/// remain loud until Phase 3 supplies an exact integer kernel; emitting the
+/// current float-only backend `fabsf` template would be a wrong answer.
 #[test]
-fn grad_through_int_abs_fails_loudly_not_zero() {
-    let err = eval_first_line(&grad_program("abs", true))
-        .expect_err("chelis#722: grad through abs(int64) must fail loudly, not zero");
-    assert!(
-        err.contains("unsupported:"),
-        "the eval-lane failure must carry the branded diagnostic; got: {err}"
-    );
+fn c_grad_through_int_abs_remains_loud_until_phase3() {
     if c_toolchain_available() {
         let err = c_first_line(&grad_program("abs", false), "grad_abs_int_loud")
-            .expect_err("the compiled lane must reject the same program");
+            .expect_err("the compiled lane must reject integer abs");
         assert!(
             err.contains("unsupported:"),
             "the build-lane failure must carry the branded diagnostic; got: {err}"
@@ -205,8 +212,8 @@ fn grad_through_int_abs_fails_loudly_not_zero() {
 /// lowers every tensor-signature def as a DAG root; the chelis#699
 /// placeholder zeroed it silently). Two honest halves now:
 /// the inline host-runtime forward computes 300.0, and the def-rooted
-/// program fails LOUDLY with the branded diagnostic instead of printing
-/// a correct first line above a fabricated zero root.
+/// def-rooted program must now compute the same value instead of fabricating
+/// a trailing zero root or failing during DAG lowering.
 #[test]
 fn forward_pass_without_grad_is_correct_in_eval() {
     let inline = "out = print(sum(mul(to_tensor([0.1, 0.2, 0.3, 0.4]), \
@@ -222,11 +229,10 @@ fn forward_pass_without_grad_is_correct_in_eval() {
            sum(mul(copy(x), w), 0)\n\
          }\n\
          out = print(g(to_tensor([0.1, 0.2, 0.3, 0.4])))\n";
-    let err = eval_first_line(def_rooted)
-        .expect_err("the def-rooted program must fail loudly, never print a fabricated root");
-    assert!(
-        err.contains("unsupported:"),
-        "the failure must carry the branded diagnostic; got: {err}"
+    let line = eval_first_line(def_rooted).expect("the def-rooted program must evaluate");
+    assert_eq!(
+        line, "300.0",
+        "the def-rooted evaluator path must preserve integer abs; got: {line}"
     );
 }
 

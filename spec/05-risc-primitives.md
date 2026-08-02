@@ -156,10 +156,10 @@ target.
 | `tan` | `(&tensor[D,p]) -> tensor[D,p]` | Element-wise tan(x) | `g / (cos(x) * cos(x))` (= `g / cos²(x)`) |
 | `atan` | `(&tensor[D,p]) -> tensor[D,p]` | Element-wise atan(x) | `g / (1 + x * x)` |
 | `sqrt` | `(&tensor[D,p]) -> tensor[D,p]` | Element-wise sqrt(x) | `g / (2 * sqrt(x))` |
-| `abs` | `(&tensor[D,p]) -> tensor[D,p]` | Element-wise absolute value | `g * sign(x)` (sign = `(x > 0) - (x < 0)`; 0 at x = 0) |
-| `floor` | `(&tensor[D,p]) -> tensor[D,p]` | Element-wise floor | non-differentiable (piecewise constant); `grad` rejects it |
-| `ceil` | `(&tensor[D,p]) -> tensor[D,p]` | Element-wise ceil | non-differentiable (piecewise constant); `grad` rejects it |
-| `round` | `(&tensor[D,p]) -> tensor[D,p]` | Element-wise round to nearest, ties to even (IEEE-754 roundTiesToEven / banker's rounding) | non-differentiable (piecewise constant); `grad` rejects it |
+| `abs` | `(&tensor[D,p]) -> tensor[D,p]` | Element-wise absolute value | For float operands, `g * sign(x)` (sign = `(x > 0) - (x < 0)`; 0 at x = 0); integer operands are forward-only |
+| `floor` | `(&tensor[D,p]) -> tensor[D,p]` | Element-wise floor; identity on integer operands | Float operands are non-differentiable (piecewise constant) and `grad` rejects them; the integer identity may be erased before AD |
+| `ceil` | `(&tensor[D,p]) -> tensor[D,p]` | Element-wise ceil; identity on integer operands | Float operands are non-differentiable (piecewise constant) and `grad` rejects them; the integer identity may be erased before AD |
+| `round` | `(&tensor[D,p]) -> tensor[D,p]` | Element-wise round to nearest, ties to even (IEEE-754 roundTiesToEven / banker's rounding); identity on integer operands | Float operands are non-differentiable (piecewise constant) and `grad` rejects them; the integer identity may be erased before AD |
 
 **`recip`.** Native IEEE-754 reciprocal, used inside
 `lower_sigmoid` (and any other reciprocal-shaped lowering) to
@@ -167,7 +167,14 @@ produce a single op instead of the prior `exp(neg(log(x)))` chain.
 `recip(0) = +inf`, `recip(-0) = -inf`, `recip(-x) = -recip(x)` for
 finite x — never NaN-from-log.
 
-**Precision rule:** Float types only (f32, f64, f16, bf16). Not valid on integer types (type error).
+**Precision rule:** `recip`, `exp`, `log`, `sin`, `cos`, `tan`, `atan`, and
+`sqrt` admit float types only (f32, f64, f16, bf16). `neg` and `abs` admit
+those float types plus the signed integer types. Integer `neg` and `abs`
+compute at the operand's declared width and trap on the unrepresentable
+minimum-value case according to [04-NUM-9]. `floor`, `ceil`, and `round` admit
+both float and signed-integer types; each is exactly the identity on an
+integer operand, with no float conversion. No unary numeric primitive admits
+`bool`, `string`, or the deferred `f8e4m3` dtype.
 
 ### 2.3 Reduction
 
@@ -1154,10 +1161,12 @@ Lowering:
 Every RISC primitive has a defined adjoint rule (§2). This means `grad` can differentiate through any composition of RISC primitives.
 
 **Non-differentiable primitives:** `cmplt`, `const`, `load` have zero gradient.
-`floor`, `ceil`, and `round` are piecewise constant and `grad` rejects them with an
-`AdRejectionReason::PiecewiseConstant` error rather than silently returning a zero
-gradient. The type system (Phase 2, via the `Diff` effect) will detect when `grad` is
-applied to a function containing non-differentiable operations and report which
+On float operands, `floor`, `ceil`, and `round` are piecewise constant and `grad`
+rejects them with an `AdRejectionReason::PiecewiseConstant` error rather than
+silently returning a zero gradient. On integer operands those three operations
+are exact identities and may be erased before AD; integers themselves do not carry
+cotangents. The type system (Phase 2, via the `Diff` effect) will detect when `grad`
+is applied to a function containing non-differentiable operations and report which
 operations are the problem.
 
 **Almost-everywhere differentiable:** `max_elem` (gradient is zero at the boundary where inputs are equal), `relu` via `max_elem(x, 0)` (gradient is zero at x=0). These are valid targets for `grad` — the subgradient convention (pick one side) is standard in ML.

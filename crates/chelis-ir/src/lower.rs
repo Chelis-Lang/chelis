@@ -7230,23 +7230,39 @@ impl LowerCtx {
             }
             "abs" if args.len() == 1 => {
                 let x = self.lower_expr_node(&args[0], "abs input");
-                let node = self.lower_transcendental(RiscOp::Abs, x, ty);
-                self.attach_reuse_hint(node, app_span, &[x])
+                let node = self.lower_exact_numeric_unary(RiscOp::Abs, x, ty);
+                if node == x {
+                    node
+                } else {
+                    self.attach_reuse_hint(node, app_span, &[x])
+                }
             }
             "floor" if args.len() == 1 => {
                 let x = self.lower_expr_node(&args[0], "floor input");
-                let node = self.lower_transcendental(RiscOp::Floor, x, ty);
-                self.attach_reuse_hint(node, app_span, &[x])
+                let node = self.lower_exact_numeric_unary(RiscOp::Floor, x, ty);
+                if node == x {
+                    node
+                } else {
+                    self.attach_reuse_hint(node, app_span, &[x])
+                }
             }
             "ceil" if args.len() == 1 => {
                 let x = self.lower_expr_node(&args[0], "ceil input");
-                let node = self.lower_transcendental(RiscOp::Ceil, x, ty);
-                self.attach_reuse_hint(node, app_span, &[x])
+                let node = self.lower_exact_numeric_unary(RiscOp::Ceil, x, ty);
+                if node == x {
+                    node
+                } else {
+                    self.attach_reuse_hint(node, app_span, &[x])
+                }
             }
             "round" if args.len() == 1 => {
                 let x = self.lower_expr_node(&args[0], "round input");
-                let node = self.lower_transcendental(RiscOp::Round, x, ty);
-                self.attach_reuse_hint(node, app_span, &[x])
+                let node = self.lower_exact_numeric_unary(RiscOp::Round, x, ty);
+                if node == x {
+                    node
+                } else {
+                    self.attach_reuse_hint(node, app_span, &[x])
+                }
             }
             "uniform_like" if args.len() == 3 => {
                 let template = self.lower_expr_node(&args[0], "uniform_like template");
@@ -10418,8 +10434,8 @@ impl LowerCtx {
         out
     }
 
-    /// C4: Enforce float-only for the unary elementwise float family
-    /// (exp, log, sin, sqrt, cos, tan, atan, abs, floor, ceil, round).
+    /// C4: Enforce float-only for the unary transcendental family
+    /// (exp, log, sin, sqrt, cos, tan, atan).
     ///
     /// chelis#730 Phase 1 (census row 1, chelis#699/#722): a non-float
     /// input raises a FATAL lowering error instead of substituting a
@@ -10429,11 +10445,8 @@ impl LowerCtx {
     /// op as a host call over a tensor pointer - garbage C, not a loud
     /// failure (the chelis#776/#782 laundering finding). Under the
     /// chelis#729 interlock (section I1) these cells are CLEANLY
-    /// REJECTED here; computing the well-defined integer cases
-    /// (abs/floor/ceil/round) is chelis#729's work and replaces this
-    /// raise, never a silent default. The raise also fires under `grad`
-    /// lowering, which turns chelis#722's silent zero gradients into
-    /// the same loud error in both lanes.
+    /// REJECTED here. The well-defined integer unary family is handled by
+    /// `lower_exact_numeric_unary`; it never enters this float-only gate.
     fn lower_transcendental(&mut self, op: RiscOp, x: NodeId, ty: &TensorType) -> NodeId {
         // Elementwise: output dims come from the lowered operand, not the
         // annotation (whose dims can be stale symbolics inside a rank-poly
@@ -10491,6 +10504,60 @@ impl LowerCtx {
             }
             raise_lowering_error(unsupported.to_string(), None, self.current_span_id.clone())
         }
+    }
+
+    /// Lower the exact numeric unary family without crossing a float funnel.
+    ///
+    /// `abs` remains an executable node for both float and integer inputs so
+    /// the integer minimum-value trap survives to the typed kernel. Applying
+    /// `floor`, `ceil`, or `round` to an integer is exactly the identity, so
+    /// canonical lowering returns the operand and emits no float-only IR op.
+    /// This is the evaluator half of chelis#722; compiled integer `abs` stays
+    /// rejected at each backend boundary until Phase 3 / chelis#699.
+    fn lower_exact_numeric_unary(&mut self, op: RiscOp, x: NodeId, ty: &TensorType) -> NodeId {
+        let out_ty = Self::elementwise_out_ty(&self.dag, x, ty, None);
+        let input_prec = match self.dag.get(x) {
+            Some(node) => node.output_type.precision,
+            None => raise_lowering_error(
+                format!(
+                    "internal lowering desync: operand node {} of an exact numeric unary op is \
+                     missing from the DAG",
+                    x.0
+                ),
+                None,
+                self.current_span_id.clone(),
+            ),
+        };
+
+        if input_prec.is_float() {
+            return self
+                .dag
+                .add_node(op, vec![x], out_ty, self.current_span_id.clone());
+        }
+        if input_prec.is_integer() {
+            return match op {
+                RiscOp::Abs => {
+                    self.dag
+                        .add_node(RiscOp::Abs, vec![x], out_ty, self.current_span_id.clone())
+                }
+                RiscOp::Floor | RiscOp::Ceil | RiscOp::Round => x,
+                _ => unreachable!("exact numeric unary helper called with {op:?}"),
+            };
+        }
+
+        let unsupported = Unsupported::new(
+            UnsupportedKind::Op(format!("{op:?}")),
+            format!("`{}` tensors in IR lowering", input_prec.name()),
+            Stage::Lowering,
+            "this numeric unary family accepts active float and signed-integer dtypes only",
+        );
+        if unrepresentable_panic_suppressed() {
+            std::panic::panic_any(UnrepresentableDag);
+        }
+        if self.allow_host_list_ad_rewrites {
+            raise_fatal_lowering_error(unsupported.to_string(), None, self.current_span_id.clone())
+        }
+        raise_lowering_error(unsupported.to_string(), None, self.current_span_id.clone())
     }
 
     /// `(fn {} (params {} p1 p2 ...) body)`
@@ -10659,71 +10726,60 @@ impl LowerCtx {
                         ty,
                         self.current_span_id.clone(),
                     )),
-                    "exp" => LoweredValue::Node(self.dag.add_node(
+                    "exp" => LoweredValue::Node(self.lower_transcendental(
                         RiscOp::Exp,
-                        vec![current_node],
-                        ty,
-                        self.current_span_id.clone(),
+                        current_node,
+                        &ty,
                     )),
-                    "log" => LoweredValue::Node(self.dag.add_node(
+                    "log" => LoweredValue::Node(self.lower_transcendental(
                         RiscOp::Log,
-                        vec![current_node],
-                        ty,
-                        self.current_span_id.clone(),
+                        current_node,
+                        &ty,
                     )),
-                    "sin" => LoweredValue::Node(self.dag.add_node(
+                    "sin" => LoweredValue::Node(self.lower_transcendental(
                         RiscOp::Sin,
-                        vec![current_node],
-                        ty,
-                        self.current_span_id.clone(),
+                        current_node,
+                        &ty,
                     )),
-                    "sqrt" => LoweredValue::Node(self.dag.add_node(
+                    "sqrt" => LoweredValue::Node(self.lower_transcendental(
                         RiscOp::Sqrt,
-                        vec![current_node],
-                        ty,
-                        self.current_span_id.clone(),
+                        current_node,
+                        &ty,
                     )),
-                    "cos" => LoweredValue::Node(self.dag.add_node(
+                    "cos" => LoweredValue::Node(self.lower_transcendental(
                         RiscOp::Cos,
-                        vec![current_node],
-                        ty,
-                        self.current_span_id.clone(),
+                        current_node,
+                        &ty,
                     )),
-                    "tan" => LoweredValue::Node(self.dag.add_node(
+                    "tan" => LoweredValue::Node(self.lower_transcendental(
                         RiscOp::Tan,
-                        vec![current_node],
-                        ty,
-                        self.current_span_id.clone(),
+                        current_node,
+                        &ty,
                     )),
-                    "atan" => LoweredValue::Node(self.dag.add_node(
+                    "atan" => LoweredValue::Node(self.lower_transcendental(
                         RiscOp::Atan,
-                        vec![current_node],
-                        ty,
-                        self.current_span_id.clone(),
+                        current_node,
+                        &ty,
                     )),
-                    "abs" => LoweredValue::Node(self.dag.add_node(
+                    "abs" => LoweredValue::Node(self.lower_exact_numeric_unary(
                         RiscOp::Abs,
-                        vec![current_node],
-                        ty,
-                        self.current_span_id.clone(),
+                        current_node,
+                        &ty,
                     )),
-                    "floor" => LoweredValue::Node(self.dag.add_node(
+                    "floor" => LoweredValue::Node(self.lower_exact_numeric_unary(
                         RiscOp::Floor,
-                        vec![current_node],
-                        ty,
-                        self.current_span_id.clone(),
+                        current_node,
+                        &ty,
                     )),
-                    "ceil" => LoweredValue::Node(self.dag.add_node(
+                    "ceil" => LoweredValue::Node(self.lower_exact_numeric_unary(
                         RiscOp::Ceil,
-                        vec![current_node],
-                        ty,
-                        self.current_span_id.clone(),
+                        current_node,
+                        &ty,
                     )),
-                    "round" => LoweredValue::Node(self.dag.add_node(
+                    "round" => LoweredValue::Node(self.lower_exact_numeric_unary(
                         RiscOp::Round,
-                        vec![current_node],
-                        ty,
-                        self.current_span_id.clone(),
+                        current_node,
+                        &ty,
                     )),
                     "relu" => LoweredValue::Node(tier2::lower_relu(
                         &mut self.dag,

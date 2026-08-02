@@ -240,6 +240,7 @@ pub struct EmitResult {
 /// rank > 1 with non-trivial layout, partial-axis reductions outside the
 /// matmul subgraph, RNG).
 pub fn emit_dag(dag: &Dag, func_name: &str) -> Result<EmitResult, String> {
+    reject_integer_abs(dag)?;
     let mut e = Emitter::new(func_name);
     e.emit(dag)?;
     let peak_device_bytes = e.peak_device_bytes();
@@ -247,6 +248,22 @@ pub fn emit_dag(dag: &Dag, func_name: &str) -> Result<EmitResult, String> {
         mm_source: e.into_source(),
         peak_device_bytes,
     })
+}
+
+/// The Metal unary template maps `Abs` to `fabs`; reject integer inputs at
+/// the public emission boundary until Phase 3 provides a typed, trapping
+/// backend kernel (chelis#699).
+fn reject_integer_abs(dag: &Dag) -> Result<(), String> {
+    if let Some(node) = chelis_ir::analysis::first_integer_abs_node(dag) {
+        return Err(Unsupported::new(
+            UnsupportedKind::Op("Abs".to_string()),
+            format!("an integer tensor at Metal DAG node {}", node.0),
+            Stage::Codegen("metal"),
+            "integer abs code generation waits for the typed, trapping Phase 3 kernel (chelis#699); use `chelis eval` for the Phase 2 reference lane",
+        )
+        .to_string());
+    }
+    Ok(())
 }
 
 /// Per-tensor metadata emitted alongside the host program.

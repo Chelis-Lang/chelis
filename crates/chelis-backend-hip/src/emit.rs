@@ -165,11 +165,27 @@ impl MatmulWrapper {
 }
 
 impl HipEmitter {
+    /// The current HIP unary kernel spells `fabsf` for every dtype. Keep
+    /// integer `abs` out of that float-only template until Phase 3 supplies
+    /// the typed, trapping backend kernel (chelis#699).
+    fn reject_integer_abs(dag: &Dag) -> Result<(), Unsupported> {
+        if let Some(node) = chelis_ir::analysis::first_integer_abs_node(dag) {
+            return Err(Unsupported::new(
+                UnsupportedKind::Op("Abs".to_string()),
+                format!("an integer tensor at HIP DAG node {}", node.0),
+                Stage::Codegen("hip"),
+                "integer abs code generation waits for the typed, trapping Phase 3 kernel (chelis#699); use `chelis eval` for the Phase 2 reference lane",
+            ));
+        }
+        Ok(())
+    }
+
     /// Emit complete C/HIP source for a DAG as a function.
     pub(crate) fn emit_dag(
         dag: &Dag,
         func_name: &str,
     ) -> Result<(String, PeakDeviceBytesBreakdown), Unsupported> {
+        Self::reject_integer_abs(dag)?;
         // F1 (WS-A0 RT-1 fixup, tactical) — lifted by WS-A2 (HIP f32/f64)
         // and WS-A3 (HIP bf16/f16).
         //
@@ -3815,6 +3831,41 @@ mod tests {
             dims: vec![DimInfo::Lit(n)],
             precision: Prim::F64,
         }
+    }
+
+    #[test]
+    fn integer_abs_is_rejected_before_the_float_unary_template() {
+        let ty = vec_i64(1);
+
+        let mut direct = Dag::new();
+        let x = direct.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
+        let out = direct.add_node(RiscOp::Abs, vec![x], ty.clone(), None);
+        direct.set_roots(vec![out]);
+        let err = match HipEmitter::emit_dag(&direct, "integer_abs") {
+            Err(error) => error,
+            Ok(_) => panic!("integer abs must not enter the HIP fabsf template"),
+        };
+        assert!(err.to_string().contains("unsupported: op `Abs`"));
+
+        let mut fused = Dag::new();
+        let x = fused.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
+        let out = fused.add_node(
+            RiscOp::FusedElem {
+                ops: vec![FusedStep {
+                    op: FusedStepOp::Abs,
+                    input_indices: vec![FusedInput::External(0)],
+                }],
+            },
+            vec![x],
+            ty,
+            None,
+        );
+        fused.set_roots(vec![out]);
+        let err = match HipEmitter::emit_dag(&fused, "fused_integer_abs") {
+            Err(error) => error,
+            Ok(_) => panic!("fused integer abs must not bypass the HIP guard"),
+        };
+        assert!(err.to_string().contains("unsupported: op `Abs`"));
     }
 
     fn mat_f32(rows: usize, cols: usize) -> TensorType {
