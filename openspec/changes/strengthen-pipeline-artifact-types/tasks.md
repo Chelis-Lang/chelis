@@ -139,7 +139,9 @@
 - [x] 7.17 Correct the loop, control-flow, pattern-scope, macro-import, and documentation findings.
 - [x] 7.18 Rebase onto the current remote `main` after the target moved.
 - [x] 7.19 Run the authoritative oracle after the sixth remediation and target rebase.
-- [ ] 7.20 Run a final fresh local red-team agent against the exact rebased tree and require a PASS verdict.
+- [x] 7.20 Run a final fresh local red-team agent against the exact rebased tree and require a PASS verdict.
+  - A fresh local Pi subagent reviewed exact commit `6583814412bc86a549666ca1bb97a6b180f4932c`.
+  - The review returned PASS with no implementation or specification findings.
 
 ## 8. Hosted Acceptance
 
