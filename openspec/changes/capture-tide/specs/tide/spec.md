@@ -34,8 +34,9 @@ three fail on measured workloads. This SHALL be a policy decision, not an open e
 
 ### Requirement: Interactive and inspection command semantics
 
-`chelis tide` SHALL launch a REPL accepting Deep (and Surf where available); `chelis deep
-file.ch` SHALL show canonical Deep (width-aware by default, `--flat` for per-form output);
+`chelis tide` SHALL launch a REPL accepting Surf and canonical Deep through their normal
+front-end paths; `chelis deep file.ch` SHALL show canonical Deep (width-aware by default,
+`--flat` for per-form output);
 `chelis surf file.dp` SHALL decompile to formatter-canonical Surf (`--verbose` for best-effort
 debug); and `chelis fmt` SHALL apply the canonical style, with `--check` validating without
 rewriting.
@@ -91,7 +92,11 @@ query substrate before reporting success, with whole-module validation as the fi
 as the CLI `chelis prove` on the same module, returning the derived obligation records and a
 summary count. An SMT-tier proof SHALL be discharged over the reals while runtime arithmetic is
 IEEE floating-point, and such artifacts SHALL carry `arith_model:"real"` with no float-level
-soundness claimed.
+soundness claimed. Equivalent Surf and canonical Deep inputs SHALL collect the same properties
+and producer obligations and SHALL use the same tiered dispatch. Induction SHALL report success
+only when the SMT engine discharges both a concrete base case and a symbolic step case. An
+induction-only request that cannot be discharged SHALL return `unsupported` with zero samples
+on either input surface and SHALL NOT be reinterpreted as fuzzing.
 
 #### Scenario: MCP prove matches the CLI
 
@@ -102,6 +107,11 @@ soundness claimed.
 
 - **WHEN** an obligation is discharged at `proof_tier:"smt"`
 - **THEN** it carries `arith_model:"real"` and claims no float-level soundness
+
+#### Scenario: Surf and canonical Deep have proof parity
+
+- **WHEN** semantically equivalent Surf and canonical Deep request induction-only proof
+- **THEN** they collect the same obligations and either discharge both proof cases or return `unsupported` with zero samples
 
 ### Requirement: Cross-lane evaluator conformance
 

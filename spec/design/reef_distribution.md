@@ -238,9 +238,9 @@ path under the hood.
   naming the cycle.
 - Install each shell in order via Item 6's `install_validated_artifact_pair`
   + lockfile update.
-- The built-in default list covers the canonical shells: `nautilus`,
-  `coral`, `shoals`, `octant`. This list is hard-coded for the
-  pre-launch dev team; multi-publisher generalization is post-launch.
+- The built-in default list is derived from the canonical Reef-distributed
+  shell entries and their dependency edges. A second hand-maintained list is
+  not an authority for shell membership or bootstrap order.
 
 **chelis-std is the language runtime, not a shell.** The runtime is
 distributed bundled with the compiler — it version-marches with the
@@ -299,10 +299,9 @@ Two consequences:
 
 - A clean dev environment with `GITHUB_TOKEN` set runs `chelis reef
   install --bootstrap` (no arguments — uses the default list) and ends
-  with all four canonical shells (`nautilus`, `coral`, `shoals`,
-  `octant`) installed in the local registry, in the correct order so
-  each shell's dependencies were already present when it was
-  installed.
+  with every shell in the canonical Reef bootstrap set installed in the local
+  registry, in the correct order so each shell's dependencies were already
+  present when it was installed.
 - Explicit list form `chelis reef install --bootstrap
   <org>/nautilus@v0.5.0 <org>/coral@v0.5.0` installs only the two
   named shells in topological order.

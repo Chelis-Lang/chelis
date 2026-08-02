@@ -644,8 +644,8 @@ integer or float literal token. Integer-typed suffixes (`i8`, `i16`,
 No suffix exists for any reserved name of `spec/04-type-system.md` §1.1.1
 (`f8e4m3`, `f8e5m2`, the `uint*` family, `int4`/`uint4`,
 `complex64`/`complex128`, `decimal128`/`decimal256`); each is rejected at
-lex time with a diagnostic citing §1.1.1, and a suffix is authored only
-when its dtype activates. The short unsigned spellings (`u8`, `u16`,
+lex time with a diagnostic citing §1.1.1; none is a literal suffix in this
+grammar. The short unsigned spellings (`u8`, `u16`,
 `u32`, `u64`) are not reserved in any form - `uint8`/`uint16`/`uint32`/
 `uint64` are canonical per §1.1.2 - and are likewise rejected at lex time.
 Hex integer literals interact with float-typed suffixes per the

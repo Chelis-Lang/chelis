@@ -14,9 +14,10 @@ Chelis distinguishes a single **runtime** from a family of substitutable
   Every Chelis program depends on it implicitly the same way a Rust
   program depends on `core`/`std`. It version-marches with the
   toolchain and is **never** installed via reef.
-- The four canonical shells are `nautilus`, `coral`, `shoals`, and
-  `octant`. Each is a distributable library that builds on the
-  runtime; users install them via reef.
+- The canonical shells are the entries in
+  `chelis_conformance::registry::REGISTRY`. Each builds on the runtime; its
+  registry `ShellKind` determines whether its distribution surface is Reef,
+  Cargo, or a container. The book does not maintain a separate shell roster.
 
 The runtime bytes (the `chelis-std` source archive and `.chb` shell)
 are embedded into the `chelis` binary at compile time via the

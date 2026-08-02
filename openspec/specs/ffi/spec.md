@@ -16,6 +16,10 @@ through a shared `chelis-compiler-api` crate, provide typed CPU DLPack interop w
 safetensors round-trip helpers, and release the
 GIL during compiler/evaluator work. `ChelisError` SHALL be reserved for compiler/build/runtime
 failures while Python-side data mismatches SHALL surface as `ValueError`.
+Before native entry, each supplied shape SHALL be checked against the function's typed shape
+contract, including symbolic dimensions and runtime shape expressions. A shape, dtype, or device
+mismatch SHALL fail on the Python side without entering native code, truncating a dimension,
+copying to an incompatible device, or changing the ABI interpretation.
 
 #### Scenario: CPU DLPack interop with PyTorch
 
@@ -26,6 +30,11 @@ failures while Python-side data mismatches SHALL surface as `ValueError`.
 
 - **WHEN** a tensor on a device incompatible with the selected backend is passed in
 - **THEN** it is rejected as a Python-side `ValueError` rather than copied or reinterpreted silently
+
+#### Scenario: Runtime shape contract is checked before native entry
+
+- **WHEN** supplied tensor shapes do not satisfy a typed symbolic or runtime shape expression
+- **THEN** Python raises `ValueError` without entering native code or truncating a dimension
 
 ### Requirement: Direct execution and NumPy guarantee
 
@@ -38,7 +47,7 @@ the selected backend capability. It SHALL never assume compiled tensors are `f32
 #### Scenario: compile_and_load runs a compiled artifact
 
 - **WHEN** `chelis.compile_and_load("model.ch")` is called
-- **THEN** it compiles and loads the artifact for direct execution, verified for PyTorch CPU tensors and NumPy arrays
+- **THEN** it compiles and loads the artifact for direct execution through the typed PyTorch CPU tensor and NumPy array interchange paths
 
 #### Scenario: load warns on changed source
 

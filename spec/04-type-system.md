@@ -57,10 +57,23 @@ binding representation.
 
 **Reduced-precision floats.**
 
-- `f8e4m3`, `f8e5m2` — the standard OCP FP8 format-pair spellings. Their
-  arithmetic width is `f32`. `f8e4m3` uses the OCP E4M3 value format and
-  therefore requires an explicit finalization rule rather than inheriting
-  [04-NUM-2], because E4M3 has no infinities.
+- `f8e4m3`, `f8e5m2` — the OCP OFP8 format-pair spellings. Both have one sign
+  bit and compute at `f32`. E4M3 has a four-bit exponent with bias 7 and a
+  three-bit trailing significand; E5M2 has a five-bit exponent with bias 15
+  and a two-bit trailing significand. Both preserve subnormals and signed
+  zero; no lane may flush subnormals to zero.
+- Finalization from `f32` is round-to-nearest, ties-to-even. `f8e5m2` uses the
+  OCP E5M2 value set: finite overflow and signed infinity finalize to the
+  correctly signed infinity. `f8e4m3` uses the OCP E4M3 value set: it has no
+  infinity, its maximum finite magnitude is 448, and non-saturating OFP8
+  conversion is the language rule, so a rounded magnitude above 448 or either
+  signed infinity finalizes to NaN rather than clamping. Saturating conversion
+  is not implicit and requires a separately named operation.
+- E4M3 encodings `0x7f` and `0xff` are NaNs; every NaN result finalizes to the
+  canonical quiet NaN `0x7f`. E5M2 NaN results likewise canonicalize to quiet
+  NaN `0x7f`. A finite magnitude whose ties-to-even result lies below the
+  minimum subnormal becomes signed zero; representable subnormals remain
+  subnormal.
 
 **Unsigned integers.**
 
@@ -74,15 +87,25 @@ binding representation.
 **Complex.**
 
 - `complex64`, `complex128` — complex numbers with `f32` and `f64` components
-  respectively. Arithmetic uses the corresponding component width; the number
-  in the spelling is total width, matching the ecosystem convention.
+  respectively, stored as the ordered pair `(real, imag)`. Arithmetic uses the
+  corresponding component width and each component finalizes under [04-NUM-2]
+  before the complex result becomes observable. NaN, infinity, subnormal, and
+  signed-zero behavior is component-wise; a backend may not replace a complex
+  value with a magnitude/phase approximation. The number in the spelling is
+  total width, matching the ecosystem convention.
 
 **Decimal (interchange only).**
 
-- `decimal128`, `decimal256` — Arrow/parquet interchange spellings with exact
-  base-10 arithmetic at the declared precision and scale. They are not tensor
-  element types; `Std.Decimal` is the language-level scalar abstraction for
-  exact base-10 work.
+- `decimal128`, `decimal256` — Arrow fixed-point interchange spellings. A value
+  is a signed two's-complement coefficient `c` plus schema parameters
+  `(precision, scale)` and denotes exactly `c * 10^(-scale)`. `decimal128`
+  admits precision 1 through 38; `decimal256` admits precision 1 through 76;
+  scale is a signed integer. Import and export preserve the coefficient,
+  precision, and scale exactly. A coefficient outside the declared precision,
+  a width overflow, or a requested implicit rescale is rejected rather than
+  rounded or truncated. These spellings are not tensor element types and
+  define no primitive arithmetic operations; `Std.Decimal` is the
+  language-level scalar abstraction for exact base-10 arithmetic.
 
 **Not reserved, and deliberately so: scaled and block-scaled formats.**
 `qint8`/`quint8` (PyTorch), the MX formats of the OCP Microscaling
@@ -1481,7 +1504,7 @@ Reserved suffix spellings:
 - No suffix exists for any reserved name of §1.1.1 (`f8e4m3`, `f8e5m2`, the
   `uint*` family, `int4`/`uint4`, `complex64`/`complex128`,
   `decimal128`/`decimal256`). Each is rejected at lex time with a diagnostic
-  pointing at §1.1.1. A suffix is authored only when its dtype activates.
+  pointing at §1.1.1; none is a literal suffix in this grammar.
 - The short unsigned spellings (`u8`, `u16`, `u32`, `u64`) are not reserved in
   any form; `uint8`/`uint16`/`uint32`/`uint64` are the canonical names per
   §1.1.2, matching numpy and Arrow.
@@ -2145,9 +2168,10 @@ No hardware target provides a bf16 arithmetic instruction: AVX512-BF16's
 no `vaddbf16` on any target. f16 arithmetic does exist (ARMv8.2-A,
 AVX512-FP16, NVIDIA `__hadd`), which is why the atom permits it, but even
 there the transcendental path converts to f32 because the special-function
-units are f32. FP8 is likewise a matmul-input format whose tensor-core ops
-accumulate in f32 and require an out-of-band scale factor, so §1.1.1 reserves
-its spellings without defining it as a self-contained primitive dtype.
+units are f32. FP8 tensor-core use likewise accumulates in f32 and commonly
+requires an out-of-band scale factor. Section 1.1.1 therefore fixes the bare
+OFP8 value formats and finalization independently of any scaled tensor scheme;
+scale metadata is never inferred from the primitive spelling.
 
 **Why f32 is not widened.** f32 has native arithmetic on every CPU and GPU
 in the supported set, so computing it at f64 invents a width the format
@@ -2265,7 +2289,12 @@ i64.
 | `int64` | integers in [-2^63, 2^63-1] | exact int64 | must be integral and in range, else trap | trap: `Overflow` out of range, `Domain` non-integral ([04-NUM-9]) | none |
 | `int32` / `int16` / `int8` | integers at width | exact at width | same rule at width | trap: `Overflow` / `Domain` at width | none |
 | `bool` | {0, 1} | n/a (not an arithmetic dtype) | must be exactly 0 or 1, else trap | trap, kind `Domain` | none |
-| reserved names (§1.1.1) | rejected by the checker | - | unreachable: rejection is compile-time-visible, never a runtime arm | - | - |
+| `f8e4m3` (reserved) | OCP E4M3, max finite magnitude 448 | f32 | RNE using non-saturating OFP8 conversion | overflow / ±inf -> canonical NaN `0x7f` | subnormals and signed zero preserved; `0x7f` / `0xff` decode as NaN |
+| `f8e5m2` (reserved) | OCP E5M2 | f32 | RNE to E5M2 | overflow -> correctly signed infinity | subnormals and signed zero preserved; NaN canonicalizes to `0x7f` |
+| `uint8` / `uint16` / `uint32` / `uint64` (reserved) | unsigned integers at width | exact at width | must be integral and in range | trap: `Overflow` / `Domain` at width | none |
+| `int4` / `uint4` (reserved) | signed / unsigned four-bit integers | exact at four bits | must be integral and in range | trap: `Overflow` / `Domain`; named wrap ops use modulo 16 | none |
+| `complex64` / `complex128` (reserved) | ordered `(real, imag)` f32 / f64 pair | component width | component-wise [04-NUM-2] | component-wise IEEE result | component-wise NaN, ±inf, subnormal, and signed zero |
+| `decimal128` / `decimal256` (reserved interchange) | signed coefficient × 10^-scale, precision 1..38 / 1..76 | exact interchange | preserve coefficient, precision, and scale | reject width / precision violation or implicit rescale | none |
 
 Reading notes:
 
@@ -2282,11 +2311,10 @@ Reading notes:
 - The **bool row has no arithmetic width** because arithmetic on `bool` is
   rejected rather than performed ([04-NUM-4]). `and` / `or` / `not` are the
   logical operations; counting is the explicit-cast idiom.
-- The **reserved-name row** covers every name reserved in §1.1.1. Each has its
-  arithmetic width declared at reservation, so activating one adds a row here
-  without reopening the width question; `f8e4m3` additionally needs its
-  finalize cell authored on activation, since OCP E4M3 has no infinities and
-  is therefore not a parameterization of [04-NUM-2].
+- The **reserved rows** fix the spellings' semantics while §1.1.1 keeps them
+  outside the primitive set. Their runtime cells are unreachable because the
+  checker rejects the names, but rejection does not leave their meaning open
+  or delegate any cell to backend implementation work.
 
 ## 10. Checker Totality
 

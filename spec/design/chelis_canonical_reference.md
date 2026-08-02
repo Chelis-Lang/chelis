@@ -168,11 +168,9 @@ normative in [`shell_repo_contract.md`](shell_repo_contract.md), mechanized by
 The **machine-readable** shell registry is `chelis_conformance::registry::REGISTRY`
 (the `chelis-conformance` crate), ground-truthed to the
 `.github/workflows/ecosystem-drift.yml` canary matrix by the
-`registry_matches_drift_matrix` tripwire. The active set it tracks (nautilus,
-coral, shoals, school, hull, whale, octant, calcify, c-earchin, hydronnx,
-hello-chelis) is the authority for the live ecosystem; the prose table below is
-a narrative view and may lag it (reconciling the two into a single generated
-table is tracked follow-up).
+`registry_matches_drift_matrix` tripwire. Its entries are the authority for
+ecosystem membership. Prose may classify shell roles, but it does not define or
+duplicate the membership set.
 
 **Runtime vs shells.** `chelis-std` is the language **runtime**, not a shell.
 It version-marches with the compiler, ships bundled with the toolchain, and

@@ -36,6 +36,32 @@ component width; and decimal interchange values are exact base-10 at their decla
 - **WHEN** a program uses `(t-prim {} f8e4m3)` or a `uint32` type
 - **THEN** the checker rejects it, pointing at §1.1.1's reserved-name set
 
+### Requirement: Reserved numeric-format semantics
+
+The reserved FP8 formats SHALL use the OCP OFP8 encodings and `f32` arithmetic width.
+Finalization SHALL be round-to-nearest, ties-to-even, preserving signed zero and subnormals.
+E5M2 overflow SHALL produce the correctly signed infinity. E4M3 SHALL use non-saturating
+conversion: a rounded magnitude above 448 or an infinity SHALL produce NaN, never a clamp;
+`0x7f` and `0xff` are its NaN encodings and every E4M3 NaN result SHALL canonicalize to quiet
+NaN `0x7f`. E5M2 NaNs SHALL also canonicalize to quiet NaN `0x7f`.
+
+Reserved complex values SHALL be ordered `(real, imag)` pairs of `f32` components for
+`complex64` and `f64` components for `complex128`, with component-wise finalization and special
+values. Reserved decimal values SHALL be Arrow fixed-point interchange values denoting
+`coefficient * 10^(-scale)`: `decimal128` admits precision 1 through 38 and `decimal256`
+precision 1 through 76. Decimal interchange SHALL preserve coefficient, precision, and signed
+scale exactly and SHALL reject overflow, precision violations, and implicit rescaling.
+
+#### Scenario: E4M3 overflow is deterministic
+
+- **WHEN** an `f32` result finalizes to reserved `f8e4m3` with rounded magnitude above 448
+- **THEN** it becomes canonical quiet NaN `0x7f`, not infinity or a saturated finite value
+
+#### Scenario: Decimal interchange is exact
+
+- **WHEN** a decimal interchange value cannot preserve its coefficient, precision, and scale
+- **THEN** the boundary rejects it rather than rounding, truncating, or implicitly rescaling it
+
 ### Requirement: Per-backend dtype support matrix
 
 Backend codegen SHALL honor the per-backend dtype matrix independently of the language-level

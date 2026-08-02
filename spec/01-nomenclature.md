@@ -2,8 +2,9 @@
 
 The Chelis ecosystem's naming conventions, organized by layer. This is
 the canonical source of truth for identifier and filename conventions
-across the chelis monorepo and all downstream shell repos
-(`nautilus`, `coral`, `shoals`, `octant`).
+across the chelis monorepo and every downstream shell named by
+`chelis_conformance::registry::REGISTRY`. The registry, rather than a
+hand-maintained roster in this chapter, controls ecosystem membership.
 
 The conventions documented here fall into three categories:
 
@@ -242,8 +243,9 @@ exception list; every other script remains Python.
 
 **Rule:** lowercase, no separator.
 
-Examples: `ci.yml`, `release.yml`, `nightly.yml`. Identical across all
-five ecosystem repos.
+Examples: `ci.yml`, `release.yml`, `nightly.yml`. A repository named by the
+canonical shell registry uses these same filenames for the workflow classes it
+implements.
 
 ### 2.11 Hidden config conventions
 
@@ -474,10 +476,11 @@ substituted independently. The reef lockfile records it as
 `chelis-runtime` is a separate Rust crate at `chelis/crates/chelis-runtime/`
 supporting the C backend. Different artifact, different role.
 
-The ecosystem's other reef packages are **shells**: distributable
-libraries that build on `chelis-std`. Canonical shell names are `nautilus`,
-`coral`, `shoals`, `octant`, `school`, `darwin`, `hull`, `hydrostatic`, and
-`beacon`.
+The ecosystem's other packages are **shells**: substitutable consumers that
+build on `chelis-std`. The canonical shell set is exactly the entries in
+`chelis_conformance::registry::REGISTRY`; each entry's `ShellKind` decides
+whether it is distributed through Reef, Cargo, or a container. This chapter
+does not duplicate that set as prose.
 
 ---
 

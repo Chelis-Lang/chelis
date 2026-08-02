@@ -84,8 +84,12 @@ chain rule). The combined forward+backward DAG SHALL remain acyclic.
 
 ### Requirement: Non-differentiable operation handling
 
-`grad` SHALL error only when a `wrt` parameter's type is non-differentiable (bool, integer,
-ADT with a non-tensor field), not on non-differentiable operations in the forward pass. `CmpLt`
+`grad` SHALL classify a target structurally. Float scalar and float tensor leaves SHALL be
+differentiable; every other leaf SHALL contribute `unit` to the gradient structure. Tuples and
+ADTs SHALL be valid `wrt` targets when they contain at least one differentiable leaf and SHALL
+preserve their tuple or selected-constructor shape. A target with no differentiable leaf (for
+example a bool, integer, string, or pure enum) SHALL be a `non_differentiable` error.
+Non-differentiable operations in the forward pass SHALL NOT make the target an error: `CmpLt`
 and `Cast` to an integer type SHALL contribute zero gradient with a warning; `Cast` to a float
 type SHALL be differentiable.
 
@@ -250,8 +254,9 @@ DAG; `grad(vmap(f))` at the source level SHALL be rejected unless reduced to a s
 
 ### Requirement: Transform error contract
 
-The transformations SHALL surface the defined errors: `non_differentiable` (non-tensor `wrt`
-parameter), `no_differentiable_path` (warning, gradient identically zero),
+The transformations SHALL surface the defined errors: `non_differentiable` (a `wrt` target
+whose type contains no float scalar or float tensor leaf), `no_differentiable_path` (warning,
+gradient identically zero),
 `non_scalar_grad_output` (non-scalar output without a seed), `axis_out_of_bounds` (vmap), and
 `shape_mismatch_in_jit` (recompile trigger, not an error). Each error SHALL name the offending
 construct and, where applicable, a repair.

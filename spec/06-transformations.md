@@ -27,13 +27,14 @@ Then grad(f) : A -> dA
 where `dA` is the gradient type:
 - If `A` is a single tensor type `tensor[D, P]`, then `dA = tensor[D, P]` (same type).
 - If `A` is a tuple `(T1, T2, ..., Tn)`, then `dA = (dT1, dT2, ..., dTn)`.
-- If `A` is an ADT/record whose fields (across every variant) are all float tensors
-  or float scalars, and at least one variant carries a field, then `dA` is the same
-  constructor shape with a gradient per field.
-- If a component of `A` is otherwise non-differentiable (e.g., `bool`, `i32`, an ADT
-  with a non-tensor field in any variant, or a pure enum with no fields at all),
-  then its gradient component is `unit`. An explicit `wrt` target that has no
-  differentiable component is a type error.
+- Float tensor and float scalar leaves are differentiable and retain their type in `dA`.
+- Every other leaf (including `bool`, integer, string, and constructor-only enum
+  state) is non-differentiable and becomes `unit` in `dA`.
+- Tuples and ADTs are differentiated structurally: their gradient preserves the same
+  tuple or selected-constructor shape and applies the two leaf rules recursively.
+- A parameter is a valid explicit `wrt` target exactly when its type contains at least
+  one differentiable leaf. A scalar `bool`/integer/string, a pure enum, or any other
+  type with no float scalar or float tensor leaf is a `non_differentiable` type error.
 
 Chelis's source-level `grad` returns gradients only, not `(value, grad)`.
 For a multi-parameter function, the gradient payload is flattened:
@@ -110,7 +111,8 @@ The backward DAG returns the requested gradient payload:
 adjoint[p_1], ..., adjoint[p_m]
 ```
 
-where `p_1, ..., p_m` are the parameters specified by `wrt` (or all tensor-typed Load nodes if `wrt` is not specified).
+where `p_1, ..., p_m` are the parameters specified by `wrt` (or all parameters whose
+types contain a differentiable leaf if `wrt` is not specified).
 
 ### 2.4 Gradient Accumulation (Multi-Use Nodes)
 
@@ -864,11 +866,15 @@ Transformations can produce the following errors:
 
 ### 8.1 `non_differentiable`
 
-**Trigger:** `grad` applied to a function whose `wrt` parameters include non-tensor types (bool, integer, ADT).
+**Trigger:** `grad` applied to a function whose explicit `wrt` parameters include a
+type with no differentiable leaf. Float scalar and float tensor leaves are
+differentiable; tuples and ADTs are classified recursively and may mix differentiable
+leaves with `unit` gradient leaves.
 
-**Message:** `"Cannot differentiate with respect to parameter 'x' of type bool. Only tensor-typed parameters with float precision are differentiable."`
+**Message:** `"Cannot differentiate with respect to parameter 'x' of type bool: the type has no continuous component. A gradient target must contain at least one float scalar or float tensor leaf."`
 
-**Repair:** Suggest excluding the parameter from `wrt`, or restructuring the function.
+**Repair:** Suggest excluding the parameter from `wrt`, or adding/selecting a parameter
+whose type contains a float scalar or float tensor leaf.
 
 ### 8.2 `no_differentiable_path`
 
