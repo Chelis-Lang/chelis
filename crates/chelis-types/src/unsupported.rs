@@ -14,8 +14,8 @@
 //! absorbs it by rendering [`Unsupported::to_string`] into its message,
 //! not by replacement.
 //!
-//! **Message format (frozen at Phase 1 exit):**
-//! `unsupported: <what> on <context> (<stage>); <hint>` - branded with the
+//! **Message format:**
+//! `unsupported: <what> on <context> (<stage>); <authority-kind> <citation>: <hint>` - branded with the
 //! literal prefix `unsupported:` so tests and shells can match it. The
 //! branded string is the RENDERING of the contract; machine surfaces carry
 //! the structured kind and payload, and agents match those, never regex
@@ -86,7 +86,7 @@ use crate::rejection_registry_generated::{REGISTERED_OPEN_ISSUES, REGISTERED_SPE
 pub struct SpecAtomRef(&'static str);
 
 impl SpecAtomRef {
-    pub const fn new(atom: &'static str) -> Result<Self, AuthorityConstructionError> {
+    const fn new(atom: &'static str) -> Result<Self, AuthorityConstructionError> {
         if !valid_atom_grammar(atom) {
             return Err(AuthorityConstructionError::MalformedAtom);
         }
@@ -111,7 +111,7 @@ impl SpecAtomRef {
 pub struct IssueRef(NonZeroU32);
 
 impl IssueRef {
-    pub const fn new(number: u32) -> Result<Self, AuthorityConstructionError> {
+    const fn new(number: u32) -> Result<Self, AuthorityConstructionError> {
         let Some(number) = NonZeroU32::new(number) else {
             return Err(AuthorityConstructionError::ZeroIssue);
         };
@@ -138,6 +138,15 @@ pub enum RejectionAuthorityKind {
     Unimplemented,
 }
 
+impl fmt::Display for RejectionAuthorityKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Deliberate => f.write_str("deliberate"),
+            Self::Unimplemented => f.write_str("unimplemented"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum RejectionCitation {
     Atom(SpecAtomRef),
@@ -157,6 +166,22 @@ enum RejectionCitation {
 /// );
 /// let _ = RejectionAuthority { hint: "forged", ..valid };
 /// ```
+///
+/// The validated scalar constructors are private too. Downstream crates use
+/// the literal macros, so adding a second public `IssueRef` constructor cannot
+/// be composed with a public authority constructor to bypass the registry:
+///
+/// ```compile_fail
+/// use chelis_types::unsupported::{IssueRef, RejectionAuthority};
+/// let issue = IssueRef::new(879).unwrap();
+/// let _ = RejectionAuthority::unimplemented(issue, "forged").unwrap();
+/// ```
+///
+/// ```compile_fail
+/// use chelis_types::unsupported::{RejectionAuthority, SpecAtomRef};
+/// let atom = SpecAtomRef::new("[05-UNS-1]").unwrap();
+/// let _ = RejectionAuthority::deliberate(atom, "forged").unwrap();
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RejectionAuthority {
     citation: RejectionCitation,
@@ -164,7 +189,7 @@ pub struct RejectionAuthority {
 }
 
 impl RejectionAuthority {
-    pub const fn deliberate(
+    const fn deliberate(
         atom: SpecAtomRef,
         hint: &'static str,
     ) -> Result<Self, AuthorityConstructionError> {
@@ -177,7 +202,7 @@ impl RejectionAuthority {
         })
     }
 
-    pub const fn unimplemented(
+    const fn unimplemented(
         issue: IssueRef,
         hint: &'static str,
     ) -> Result<Self, AuthorityConstructionError> {
@@ -221,6 +246,39 @@ impl RejectionAuthority {
             RejectionCitation::Issue(issue) => format!("chelis#{}", issue.number()),
         }
     }
+}
+
+/// Sole downstream construction edge for a deliberate rejection.
+///
+/// This function is public only because exported macros expand in downstream
+/// crates. It accepts the raw literal, performs both grammar and generated
+/// registry validation, and never accepts a preconstructed `SpecAtomRef`.
+#[doc(hidden)]
+pub const fn __build_deliberate_rejection(
+    atom: &'static str,
+    hint: &'static str,
+) -> Result<RejectionAuthority, AuthorityConstructionError> {
+    let atom = match SpecAtomRef::new(atom) {
+        Ok(atom) => atom,
+        Err(error) => return Err(error),
+    };
+    RejectionAuthority::deliberate(atom, hint)
+}
+
+/// Sole downstream construction edge for an unimplemented rejection.
+///
+/// Like [`__build_deliberate_rejection`], this validates the raw literal
+/// itself so no public `IssueRef` constructor is needed or exposed.
+#[doc(hidden)]
+pub const fn __build_unimplemented_rejection(
+    issue: u32,
+    hint: &'static str,
+) -> Result<RejectionAuthority, AuthorityConstructionError> {
+    let issue = match IssueRef::new(issue) {
+        Ok(issue) => issue,
+        Err(error) => return Err(error),
+    };
+    RejectionAuthority::unimplemented(issue, hint)
 }
 
 /// Failure to construct a typed rejection authority.
@@ -326,13 +384,8 @@ const fn registered_issue(number: u32) -> bool {
 #[macro_export]
 macro_rules! deliberate_rejection {
     ($atom:literal, $hint:expr $(,)?) => {{
-        const ATOM: $crate::unsupported::SpecAtomRef =
-            match $crate::unsupported::SpecAtomRef::new($atom) {
-                Ok(atom) => atom,
-                Err(_) => panic!("invalid or unregistered rejection atom"),
-            };
         const AUTHORITY: $crate::unsupported::RejectionAuthority =
-            match $crate::unsupported::RejectionAuthority::deliberate(ATOM, $hint) {
+            match $crate::unsupported::__build_deliberate_rejection($atom, $hint) {
                 Ok(authority) => authority,
                 Err(_) => panic!("invalid deliberate rejection authority"),
             };
@@ -345,13 +398,8 @@ macro_rules! deliberate_rejection {
 #[macro_export]
 macro_rules! unimplemented_rejection {
     ($issue:literal, $hint:expr $(,)?) => {{
-        const ISSUE: $crate::unsupported::IssueRef =
-            match $crate::unsupported::IssueRef::new($issue) {
-                Ok(issue) => issue,
-                Err(_) => panic!("invalid or unregistered rejection issue"),
-            };
         const AUTHORITY: $crate::unsupported::RejectionAuthority =
-            match $crate::unsupported::RejectionAuthority::unimplemented(ISSUE, $hint) {
+            match $crate::unsupported::__build_unimplemented_rejection($issue, $hint) {
                 Ok(authority) => authority,
                 Err(_) => panic!("invalid unimplemented rejection authority"),
             };
@@ -437,8 +485,9 @@ pub struct SpanRef {
 }
 
 /// The section C2 unsupported diagnostic. Construct with
-/// [`Unsupported::new`] and render with `to_string()`; the rendering is
-/// the frozen branded format.
+/// [`Unsupported::new`] and render with `to_string()`; the rendering exposes
+/// the validated authority kind and citation after the frozen brand/context
+/// clauses.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Unsupported {
     /// What was encountered.
@@ -499,15 +548,17 @@ impl Unsupported {
 }
 
 impl fmt::Display for Unsupported {
-    /// The frozen section C2 rendering:
-    /// `unsupported: <what> on <context> (<stage>); <hint>`.
+    /// The section C2 rendering exposes the validated authority rather than
+    /// trusting a citation embedded in free-form hint prose.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "unsupported: {} on {} ({}); {}",
+            "unsupported: {} on {} ({}); {} {}: {}",
             self.what,
             self.context,
             self.stage,
+            self.authority.kind(),
+            self.authority.citation(),
             self.authority.hint()
         )
     }
@@ -519,10 +570,9 @@ impl std::error::Error for Unsupported {}
 mod tests {
     use super::*;
 
-    /// The frozen message format, byte-checked: this string shape is what
-    /// downstream shells and the chelis#687 rejected-cells corpus match.
+    /// The authority-bearing message format, byte-checked.
     #[test]
-    fn rendering_follows_the_frozen_branded_format() {
+    fn rendering_exposes_the_authority_bearing_format() {
         let err = Unsupported::new(
             UnsupportedKind::Builtin("tensor_scan".to_string()),
             "`chelis build --target c` host emission",
@@ -535,8 +585,8 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "unsupported: builtin `tensor_scan` on `chelis build --target c` host \
-             emission (codegen:c); host-only builtin; run it under `chelis eval` \
-             (chelis#705)"
+             emission (codegen:c); unimplemented chelis#705: host-only builtin; run it \
+             under `chelis eval` (chelis#705)"
         );
     }
 
@@ -565,8 +615,8 @@ mod tests {
                 "kind {kind:?} must render with the literal brand; got {rendered}"
             );
             assert!(
-                rendered.contains("(lowering); hint text"),
-                "kind {kind:?} must carry stage and hint; got {rendered}"
+                rendered.contains("(lowering); deliberate [05-UNS-1]: hint text"),
+                "kind {kind:?} must carry stage, authority, and hint; got {rendered}"
             );
         }
     }

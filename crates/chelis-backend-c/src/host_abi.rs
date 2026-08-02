@@ -108,8 +108,8 @@ impl HostAbiType {
                 return Err(rejected_dtype(
                     Prim::F8e4m3,
                     chelis_types::deliberate_rejection!(
-                        "[05-UNS-1]",
-                        "deferred by spec/04-type-system.md section 1.1.1 ([05-UNS-1])"
+                        "[04-DTYPE-1]",
+                        "f8e4m3 is reserved but not active; use an active dtype"
                     ),
                 ));
             }
@@ -150,8 +150,8 @@ impl HostAbiType {
                     return Err(rejected_dtype(
                         Prim::F8e4m3,
                         chelis_types::deliberate_rejection!(
-                            "[05-UNS-1]",
-                            "deferred by spec/04-type-system.md section 1.1.1 ([05-UNS-1])"
+                            "[04-DTYPE-1]",
+                            "f8e4m3 is reserved but not active; use an active dtype"
                         ),
                     ));
                 }
@@ -599,7 +599,7 @@ fn unimplemented_scalar(precision: Prim) -> Unsupported {
         precision,
         chelis_types::unimplemented_rejection!(
             714,
-            "C-host scalar ABI support is tracked by chelis#714; no alternate dtype is permitted by [05-UNS-1]"
+            "the C-host scalar ABI has no exact representation for this dtype; no alternate dtype is permitted"
         ),
     )
 }
@@ -622,7 +622,7 @@ fn unsupported_function_value(ty: &ConcreteHostType, context: &'static str) -> U
             879,
             "the C host backend supports typed callback parameters and direct statically-known \
              callback arguments, but no first-class function-value ABI; specialize the call or \
-             reject the containing construct ([05-UNS-1]; chelis#730)"
+             reject the containing construct"
         ),
     )
 }
@@ -635,7 +635,7 @@ fn unsupported_function_symbol(name: &str) -> Unsupported {
         chelis_types::unimplemented_rejection!(
             879,
             "only a declared function symbol or an in-scope typed callback parameter can cross \
-             this boundary; dynamic function values have no C host ABI ([05-UNS-1]; chelis#730)"
+             this boundary; dynamic function values have no C host ABI"
         ),
     )
 }
@@ -649,11 +649,11 @@ fn unsupported_callable_use(marker: &str) -> Unsupported {
             UnsupportedKind::HostAbi("unresolved `grad`/`vmap` transform application".to_string()),
             "C host ABI callable-use projection",
             Stage::Codegen("c"),
-            chelis_types::deliberate_rejection!(
-                "[05-UNS-1]",
-                "the host lane recognized an AD transform it could not lower; rewrite the \
+            chelis_types::unimplemented_rejection!(
+                879,
+                "general C-host transformed function values are not implemented; rewrite the \
                  differentiated body to pure tensor ops (sum, add, mul, einsum) or run under \
-                 `chelis eval` ([05-UNS-1]; chelis#730)"
+                 `chelis eval`"
             ),
         );
     }
@@ -664,8 +664,7 @@ fn unsupported_callable_use(marker: &str) -> Unsupported {
         chelis_types::unimplemented_rejection!(
             879,
             "the host lowerer did not resolve this application to a declared function symbol or \
-             typed callback parameter; unresolved callables have no raw C call target \
-             ([05-UNS-1]; chelis#730)"
+             typed callback parameter; unresolved callables have no raw C call target"
         ),
     )
 }
@@ -676,9 +675,9 @@ fn invalid_callback_shape(detail: String) -> Unsupported {
         "C host callback ABI projection",
         Stage::Codegen("c"),
         chelis_types::deliberate_rejection!(
-            "[05-UNS-1]",
+            "[04-TOT-2]",
             "checked callable metadata and the resolved host program disagree; no fallback \
-             callable representation is permitted ([05-UNS-1]; chelis#730)"
+             callable representation is permitted"
         ),
     )
 }

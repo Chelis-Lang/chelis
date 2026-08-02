@@ -1,0 +1,148 @@
+#!/usr/bin/env python3
+"""Check the privacy half of the [05-UNS-5] authority boundary.
+
+Registry membership is enforced by Rust construction and the generated
+registries. This check locks the complementary property: downstream crates
+cannot obtain the scalar citation wrappers or compose a second generic
+authority constructor around one. The only public builders accept raw
+literals and perform registry validation themselves.
+"""
+
+from __future__ import annotations
+
+import re
+import sys
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+SOURCE = ROOT / "crates/chelis-types/src/unsupported.rs"
+
+ALLOWED_PUBLIC_METHODS = {
+    "SpecAtomRef": {"as_str", "registry"},
+    "IssueRef": {"number", "registry"},
+    "RejectionAuthority": {"kind", "atom", "issue", "hint", "citation"},
+}
+
+PUBLIC_FN = re.compile(
+    r"^\s*pub(?:\([^)]*\))?\s+(?:const\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)",
+    re.MULTILINE,
+)
+
+DELIBERATE_LITERAL = re.compile(
+    r"deliberate_rejection!\(\s*\"(\[[0-9]{2}-[A-Z]+-[0-9]+\])\"",
+    re.MULTILINE,
+)
+UNIMPLEMENTED_LITERAL = re.compile(
+    r"unimplemented_rejection!\(\s*([0-9][0-9_]*)",
+    re.MULTILINE,
+)
+RESPONSE_ONLY_ATOMS = {f"[05-UNS-{index}]" for index in range(1, 7)}
+
+
+def _impl_body(source: str, type_name: str) -> str:
+    marker = f"impl {type_name} {{"
+    start = source.find(marker)
+    if start < 0:
+        raise ValueError(f"missing {marker}")
+    brace = source.find("{", start)
+    depth = 0
+    for index in range(brace, len(source)):
+        char = source[index]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return source[brace + 1 : index]
+    raise ValueError(f"unterminated {marker}")
+
+
+def validate_source(source: str) -> list[str]:
+    errors: list[str] = []
+    for type_name, allowed in ALLOWED_PUBLIC_METHODS.items():
+        try:
+            body = _impl_body(source, type_name)
+        except ValueError as error:
+            errors.append(str(error))
+            continue
+        public = set(PUBLIC_FN.findall(body))
+        unexpected = sorted(public - allowed)
+        if unexpected:
+            errors.append(
+                f"{type_name} exposes unapproved public constructor/method(s): "
+                + ", ".join(unexpected)
+            )
+
+    required_private_edges = (
+        "const fn new(atom: &'static str)",
+        "const fn new(number: u32)",
+        "const fn deliberate(",
+        "const fn unimplemented(",
+    )
+    for fragment in required_private_edges:
+        if fragment not in source:
+            errors.append(f"missing private construction edge: {fragment}")
+
+    required_validating_builders = (
+        "pub const fn __build_deliberate_rejection(",
+        "let atom = match SpecAtomRef::new(atom)",
+        "RejectionAuthority::deliberate(atom, hint)",
+        "pub const fn __build_unimplemented_rejection(",
+        "let issue = match IssueRef::new(issue)",
+        "RejectionAuthority::unimplemented(issue, hint)",
+    )
+    for fragment in required_validating_builders:
+        if fragment not in source:
+            errors.append(f"validated macro edge changed or bypassed: {fragment}")
+    return errors
+
+
+def validate_usage_source(path: str, source: str) -> list[str]:
+    errors: list[str] = []
+    for atom in DELIBERATE_LITERAL.findall(source):
+        if atom in RESPONSE_ONLY_ATOMS:
+            errors.append(
+                f"{path}: {atom} governs the response contract, not the semantic case; "
+                "cite the deciding atom"
+            )
+    for raw_issue in UNIMPLEMENTED_LITERAL.findall(source):
+        if int(raw_issue.replace("_", "")) == 959:
+            errors.append(
+                f"{path}: chelis#959 owns diagnostic migration, not implementation of a "
+                "rejected capability"
+            )
+    return errors
+
+
+def validate_production_usage(root: Path = ROOT) -> list[str]:
+    errors: list[str] = []
+    crates = root / "crates"
+    for path in sorted(crates.rglob("*.rs")):
+        relative = path.relative_to(root)
+        if "tests" in relative.parts or relative.as_posix().endswith(
+            "chelis-types/src/unsupported.rs"
+        ):
+            continue
+        errors.extend(
+            validate_usage_source(
+                relative.as_posix(), path.read_text(encoding="utf-8")
+            )
+        )
+    return errors
+
+
+def main() -> int:
+    errors = validate_source(SOURCE.read_text(encoding="utf-8"))
+    errors.extend(validate_production_usage())
+    if errors:
+        for error in errors:
+            print(f"REJECTION AUTHORITY BOUNDARY: {error}", file=sys.stderr)
+        print("REJECTION AUTHORITY BOUNDARY: FAIL", file=sys.stderr)
+        return 1
+    print("REJECTION AUTHORITY BOUNDARY: PASS")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

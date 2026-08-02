@@ -69,8 +69,14 @@ DOC_DIR_PREFIXES: tuple[str, ...] = ("docs/", "openspec/changes/")
 REJECTION_AUTHORITY_PATHS: frozenset[str] = frozenset(
     {
         ".github/workflows/ci.yml",
+        "crates/chelis-types/src/lib.rs",
         "crates/chelis-types/src/rejection_registry_generated.rs",
+        "crates/chelis-types/src/unsupported.rs",
+        "scripts/capacity_census_liveness.py",
+        "scripts/check_rejection_authority_boundary.py",
+        "scripts/ci_detect_docs_only.py",
         "scripts/generate_rejection_registries.py",
+        "scripts/test_check_rejection_authority_boundary.py",
         "scripts/validate_rejection_issue_manifest.py",
         "spec/design/loud_unsupported_issue_manifest.json",
     }
