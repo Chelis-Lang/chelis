@@ -27,7 +27,7 @@ pub enum ValidateMode {
     Desugar,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct ApiSuccess<T> {
     pub ok: bool,
     pub result: T,
@@ -92,6 +92,42 @@ impl<T> ApiEnvelope<T> {
             )],
         )
     }
+}
+
+/// Consumer-only success envelope decoded from the public JSON surface.
+///
+/// This is intentionally distinct from [`ApiSuccess`]: deserialized input
+/// cannot be reused as a compiler-produced envelope.
+#[derive(Debug, Clone, Deserialize)]
+pub struct WireApiSuccess<T> {
+    pub ok: bool,
+    pub result: T,
+}
+
+/// Consumer-only failure envelope decoded from the public JSON surface.
+#[derive(Debug, Clone, Deserialize)]
+pub struct WireApiFailure {
+    pub ok: bool,
+    pub stage: String,
+    pub errors: Vec<WireDiagnostic>,
+}
+
+/// Complete read-only consumer shape for a Tide/compiler API response.
+///
+/// There is deliberately no conversion from this type into [`ApiEnvelope`].
+///
+/// ```compile_fail
+/// use chelis_compiler_api::schema::{ApiEnvelope, WireApiEnvelope};
+/// let wire: WireApiEnvelope<()> = serde_json::from_str(
+///     r#"{"ok":true,"result":null}"#,
+/// ).unwrap();
+/// let _: ApiEnvelope<()> = wire.into();
+/// ```
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum WireApiEnvelope<T> {
+    Success(WireApiSuccess<T>),
+    Failure(WireApiFailure),
 }
 
 /// A compiler-produced diagnostic.
@@ -1154,6 +1190,28 @@ pub enum BatchResult {
 #[derive(Debug, Clone, Serialize)]
 pub struct BatchResultEnvelope {
     pub results: Vec<BatchResult>,
+}
+
+/// Consumer-only counterpart to [`BatchResult`]. The `Check` arm uses the
+/// read-only diagnostic graph all the way through the enclosing envelope.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WireBatchResult {
+    Parse(WireApiEnvelope<ParseResult>),
+    Desugar(WireApiEnvelope<DesugarResult>),
+    Check(WireApiEnvelope<WireCheckResult>),
+    Lower(WireApiEnvelope<LowerResult>),
+    Compile(WireApiEnvelope<CompileResult>),
+    Eval(WireApiEnvelope<EvalResult>),
+    Grad(WireApiEnvelope<GradResult>),
+    Validate(WireApiEnvelope<ValidateResult>),
+    Decompile(WireApiEnvelope<DecompileResult>),
+}
+
+/// Complete read-only consumer shape for the batch endpoint response.
+#[derive(Debug, Clone, Deserialize)]
+pub struct WireBatchResultEnvelope {
+    pub results: Vec<WireBatchResult>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

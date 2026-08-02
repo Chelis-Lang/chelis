@@ -57,13 +57,14 @@ fn assert_unrepresentable_function_value(result: Result<impl std::fmt::Debug, Co
         diagnostic.message.contains("unsupported:")
             && diagnostic.message.contains("anonymous function value `fn`")
             && diagnostic.message.contains("host expression lowering")
-            // [05-UNS-5]: the citation is now the TYPED authority, not the
+            // [05-UNS-5]: the citation is the TYPED authority, not the
             // prose `([05-UNS-1]; chelis#730)` this replaced. Construction
-            // refuses [05-UNS-1..6] outright — the response contract does
-            // not decide a semantic case — so the owning capability
+            // refuses [05-UNS-1..6] outright - the response contract does
+            // not decide a semantic case - so the owning capability
             // (chelis#879, the general C-host function-value ABI) is what
-            // the rejection cites, in the rendering the contract fixes.
-            && diagnostic.message.contains("unimplemented chelis#879"),
+            // the rejection cites. The trailing colon pins the exact
+            // `{kind} {citation}: {hint}` rendering the contract fixes.
+            && diagnostic.message.contains("unimplemented chelis#879:"),
         "the rejection must come from the fallible host-expression boundary and cite its \
          typed authority: {diagnostic:?}"
     );
@@ -85,8 +86,8 @@ fn assert_named_function_value_has_no_c_abi(result: Result<impl std::fmt::Debug,
             && diagnostic.message.contains("C host ABI")
             && diagnostic.message.contains("(codegen:c)")
             // [05-UNS-5] typed authority, replacing the prose
-            // `([05-UNS-1]; chelis#730)` citation — see the sibling helper.
-            && diagnostic.message.contains("unimplemented chelis#879"),
+            // `([05-UNS-1]; chelis#730)` citation - see the sibling helper.
+            && diagnostic.message.contains("unimplemented chelis#879:"),
         "the target boundary must reject the value without an alternate representation, \
          citing its typed authority: {diagnostic:?}"
     );
