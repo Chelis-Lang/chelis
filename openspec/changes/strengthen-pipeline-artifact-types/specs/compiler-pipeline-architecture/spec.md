@@ -142,9 +142,13 @@ The guard SHALL preserve local call-site multiplicity. It SHALL resolve local ca
 
 Alias bindings SHALL remain specific to one execution path and lexical scope. Typed, parenthesized, and assigned callable values SHALL use the same resolver.
 
+Callable results from `if` and `match` expressions SHALL remain path-specific. Known callable elements in an array iterable SHALL bind to their exact iteration.
+
 If a local helper invokes a callable parameter, the guard SHALL substitute the caller's callable argument into that helper path.
 
 The guard SHALL inspect implementation methods and trait default methods. An invoked local macro SHALL resolve direct canonical calls and canonical imports.
+
+A local macro identity SHALL include its lexical block scope. An inner definition SHALL NOT replace an outer definition after the inner block ends.
 
 The guard SHALL track executable paths. Return, break, and continue SHALL isolate unreachable statements from their paths.
 
@@ -158,9 +162,13 @@ The guard SHALL preserve the zero-iteration exit path for `while` and `for` loop
 
 The guard SHALL calculate a fixed point across repeated loop iterations. It SHALL preserve labeled break and continue targets.
 
+The guard SHALL retain stable Boolean facts across loop iterations. It SHALL preserve exact values and counts for syntax-known array iterables.
+
 Pattern bindings SHALL shadow outer callable aliases in `if let`, `while let`, `match`, and `for` scopes.
 
-The guard SHALL preserve full import targets. It SHALL NOT classify an unrelated receiver, import, or external call only from its final name.
+The guard SHALL preserve full import targets, including `extern crate` aliases. It SHALL resolve local type aliases before receiver method lookup.
+
+It SHALL NOT classify an unrelated receiver, import, type alias, or external call only from its final name.
 
 A focused helper that reaches only one semantic stage SHALL remain valid. A production function that reaches two or more stages through helpers SHALL be rejected.
 
@@ -200,6 +208,14 @@ A focused helper that reaches only one semantic stage SHALL remain valid. A prod
 - **WHEN** an inner lexical block binds an unrelated callable under the same name as an outer stage alias
 - **THEN** the source architecture guard uses the inner binding only inside that block
 
+#### Scenario: A branch expression returns a callable
+- **WHEN** an `if` or `match` expression selects a canonical stage callable
+- **THEN** the source architecture guard retains the selected callable on each applicable path
+
+#### Scenario: An array iterable contains stage callables
+- **WHEN** a `for` loop invokes known callable elements from an array iterable
+- **THEN** the source architecture guard composes the stages in exact iteration order
+
 #### Scenario: A higher-order helper invokes its parameter
 - **WHEN** a local helper invokes a callable parameter that receives a canonical stage argument
 - **THEN** the source architecture guard adds that stage to the caller's path
@@ -220,6 +236,10 @@ A focused helper that reaches only one semantic stage SHALL remain valid. A prod
 - **WHEN** a local receiver method invokes a callable parameter with a canonical stage argument
 - **THEN** the source architecture guard adds that stage for method and qualified-method syntax
 
+#### Scenario: A local type alias names a receiver
+- **WHEN** a typed receiver uses a local alias for a crate-local method owner
+- **THEN** the source architecture guard resolves the alias before method lookup
+
 #### Scenario: An unrelated typed receiver uses a local method name
 - **WHEN** an external receiver type uses the same method name as a crate-local helper
 - **THEN** the source architecture guard does not resolve that call to the local helper
@@ -231,6 +251,14 @@ A focused helper that reaches only one semantic stage SHALL remain valid. A prod
 #### Scenario: Repeated loop iterations compose stages
 - **WHEN** separate iterations can select body paths that reach different canonical stages
 - **THEN** the source architecture guard rejects the function and identifies both stages
+
+#### Scenario: A loop branch uses a stable Boolean
+- **WHEN** an immutable Boolean selects one semantic stage on every iteration
+- **THEN** the source architecture guard does not create a path through the unselected branch
+
+#### Scenario: An array loop has zero or one iteration
+- **WHEN** an array iterable contains zero or one stage-bearing element
+- **THEN** the source architecture guard does not compose stages from impossible extra iterations
 
 #### Scenario: A loop control expression terminates a path
 - **WHEN** break or continue precedes another stage call in the same loop body path
@@ -247,6 +275,14 @@ A focused helper that reaches only one semantic stage SHALL remain valid. A prod
 #### Scenario: An invoked local macro contributes a stage
 - **WHEN** a local macro calls a canonical stage through a direct path or imported alias
 - **THEN** the source architecture guard includes that stage in the caller's execution path
+
+#### Scenario: A nested macro shadows an outer macro
+- **WHEN** an inner block defines a macro with the same name as an outer macro
+- **THEN** each call resolves the definition from its lexical block
+
+#### Scenario: An extern crate alias names a canonical module
+- **WHEN** `extern crate` renames a canonical stage module
+- **THEN** the source architecture guard preserves the canonical import target
 
 #### Scenario: A return terminates one branch
 - **WHEN** one branch reaches a stage and returns before a later stage call

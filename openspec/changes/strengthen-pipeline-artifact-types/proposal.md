@@ -15,9 +15,11 @@ The new compiler pipeline uses types for its major phases, but several public ar
 - Replace the wide rejection type of `complete_checks` with an effect-or-linearity rejection type.
 - Replace the parallel error vectors in `LayeredCheck` with exclusive typed outcomes.
 - Extend the source guard through workspace-local helpers, path-specific aliases, higher-order calls, receiver methods, traits, and stage macros.
-- Resolve canonical imports inside invoked local macros.
+- Preserve callable results from branch expressions and known array iterables.
+- Resolve `extern crate` aliases, local receiver type aliases, and canonical imports inside invoked local macros.
 - Classify canonical stages by module and function identity.
-- Track repeated loops, labeled control flow, pattern scopes, and uninvoked callable bodies as separate execution paths.
+- Track repeated loops, known array loops, labeled control flow, pattern scopes, and uninvoked callable bodies as separate execution paths.
+- Preserve stable Boolean facts across loop iterations and macro definitions across nested block scopes.
 - Exclude unrelated receivers, imports, and external qualified calls that only reuse a canonical stage name.
 - Rebase onto the current typed Deep AST and preserve typed ingestion, wire output, root collection, and the realizability manifest observation.
 - Add positive tests and compile-fail tests for each construction boundary.

@@ -204,17 +204,25 @@ Function identities will include their crate, module, and implementation or trai
 
 Qualified calls will resolve local path prefixes and imported aliases. Shared final function names will not merge stage identities.
 
-Named imports, glob imports, and local function-value aliases will resolve to their original callable. Direct, typed, parenthesized, and assigned callable expressions will use one resolution path.
+Named imports, glob imports, and local function-value aliases will resolve to their original callable. `extern crate` aliases will use the same import map.
+
+Direct, typed, parenthesized, assigned, `if`, and `match` callable expressions will use one abstract-value resolver.
 
 Each execution path will retain its own alias bindings. A lexical shadow will hide the outer binding only in its lexical block.
 
 A local helper's callable parameter will contribute stages only when the helper invokes it. Higher-order calls will substitute callable arguments into the helper summary.
 
-Typed receiver bindings will resolve crate-local methods. Qualified-method calls will remove the explicit receiver before callable argument substitution.
+Typed receiver bindings will resolve crate-local methods. Local type aliases will resolve before method lookup.
+
+Qualified-method calls will remove the explicit receiver before callable argument substitution.
 
 Invoked nested functions and closures will contribute their stages. Local macros will resolve direct canonical calls and canonical imports from their definition scope.
 
+Macro identities will include nested block scopes. Lookup will restore an outer macro after an inner block ends.
+
 The loop model will calculate a fixed point across repeated iterations. It will retain zero-iteration exits for `while` and `for`.
+
+Known array iterables will retain their element values and exact iteration counts. Stable Boolean values will restrict branch selection on each loop path.
 
 Return, break, and continue outcomes will remain distinct. Labeled control will terminate only the path for its target loop.
 
@@ -255,8 +263,10 @@ The authoritative oracle will run only after the rebase compiles against the tar
 - **Risk: Final-name matching merges stage identities.** → Classify each stage with its owning module and function.
 - **Risk: Receiver syntax hides a higher-order helper.** → Resolve typed local receivers and test qualified-method argument positions.
 - **Risk: A loop model loses repeated stages.** → Calculate a fixed point over iteration and labeled control outcomes.
+- **Risk: A loop model creates an impossible path.** → Preserve stable Boolean facts and known finite iteration counts.
 - **Risk: A branch pattern leaks an outer alias.** → Bind patterns before branch analysis and remove them at scope exit.
 - **Risk: A macro alias hides a stage.** → Resolve canonical imports from the macro definition scope.
+- **Risk: An inner macro replaces an outer macro.** → Include block identity in the lexical macro key.
 - **Risk: The stale branch loses target changes during conflict resolution.** → Preserve typed ingestion, the wire bridge, root support, and the #912 observation.
 - **Risk: `UnitInterval` expands the change.** → Complete a separate API review and proposal before code changes.
 

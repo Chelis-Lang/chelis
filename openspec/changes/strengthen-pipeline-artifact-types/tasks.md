@@ -24,6 +24,7 @@
 - [x] 1.22 Add executable compile-fail evidence that rejects a raw diagnostic offset.
 - [x] 1.23 Add module-identity, typed-receiver method, qualified-method, and zero-iteration loop source-guard tests.
 - [x] 1.24 Add repeated-loop, labeled-control, pattern-shadow, and imported-macro-alias source-guard tests.
+- [x] 1.25 Add branch-result, array-iterable, import-alias, type-alias, nested-macro, and stable-loop source-guard tests.
 
 ## 2. Edit Proof and Semantic Rejection
 
@@ -74,6 +75,7 @@
 - [x] 4.18 Keep alias bindings on execution paths and substitute higher-order callable arguments.
 - [x] 4.19 Classify full stage identities, resolve typed receiver methods, and preserve zero-iteration loop paths.
 - [x] 4.20 Calculate loop fixed points, track labeled control, bind branch patterns, and resolve macro imports.
+- [x] 4.21 Preserve abstract values, known array iterations, full aliases, and nested macro scopes.
 
 ## 5. Documentation and Deferred Review
 
@@ -122,7 +124,7 @@
 - [x] 7.17 Correct the loop, control-flow, pattern-scope, macro-import, and documentation findings.
 - [x] 7.18 Rebase onto the current remote `main` after the target moved.
 - [x] 7.19 Run the authoritative oracle after the sixth remediation and target rebase.
-- [ ] 7.20 Run a final fresh local red-team agent against the exact rebased tree.
+- [ ] 7.20 Run a final fresh local red-team agent against the exact rebased tree and require a PASS verdict.
 
 ## 8. Hosted Acceptance
 

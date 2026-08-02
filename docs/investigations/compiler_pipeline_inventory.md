@@ -55,13 +55,17 @@ The source guard checks production functions in these trees:
 
 The guard builds one callable inventory for all guarded files. It propagates stage sets through crate-local helpers, imports, aliases, and higher-order calls.
 
-Canonical stage identities include the owning module and function. Typed receiver bindings resolve crate-local methods without matching unrelated receiver types.
+Canonical stage identities include the owning module and function. Typed receiver bindings resolve crate-local methods without matches for unrelated receiver types.
 
-Each execution path retains its alias bindings. Lexical shadows and mutually exclusive assignments remain separate.
+The import map includes `use` and `extern crate` aliases. Local type aliases resolve before receiver method lookup.
 
-The guard calculates a fixed point across loop iterations. It tracks zero-iteration exits, returns, labeled breaks, and continues.
+Each execution path retains its abstract values. Callable branch results, stable Boolean values, and mutually exclusive assignments remain separate.
 
-Branch and loop patterns create lexical bindings. Local macros resolve canonical imports from their definition scope.
+The guard calculates a fixed point across unknown loop iterations. It retains exact values and counts for known array iterables.
+
+The path model tracks zero-iteration exits, returns, labeled breaks, and continues.
+
+Branch and loop patterns create lexical bindings. Local macros resolve canonical imports from their definition scope and lexical block.
 
 The guard ignores uninvoked callable bodies. Mutually exclusive execution paths remain valid.
 
@@ -189,7 +193,26 @@ Equivalent probes with a varying branch condition confirmed the loop defect. Per
 
 The sixth remediation adds a loop fixed point and distinct flow states. It preserves labeled control targets and lexical pattern scopes.
 
-The macro inventory now resolves module and block imports from each macro definition scope. A final fresh post-remediation red-team remains pending.
+The macro inventory now resolves module and block imports from each macro definition scope.
+
+A seventh fresh red-team found four source-guard defect classes:
+
+- Branch-result callables and callable iterable elements did not resolve.
+- `extern crate` aliases and local receiver type aliases did not resolve.
+- Nested macro definitions did not retain lexical block identity.
+- Stable loop conditions and known array counts created impossible paths.
+
+One reported macro positive control invoked a type-stage macro before an effect stage. That program contained a real duplicate sequence.
+
+The corrected positive control does not invoke the inner type-stage macro. The negative control confirms that lookup restores the outer macro.
+
+The seventh remediation adds one abstract-value resolver for expressions, arguments, conditions, and iterables.
+
+It preserves callable branch results, stable Boolean values, and known array elements on each path.
+
+The import inventory now includes `extern crate` aliases and local type aliases. Macro keys now include lexical block identity.
+
+A final fresh post-remediation red-team remains pending.
 
 ## Acceptance Evidence
 
@@ -208,6 +231,8 @@ The oracle passed after the fourth remediation. It included the path-alias tests
 All 54 focused source-guard tests passed after the fifth remediation. The authoritative oracle also passed on that tree.
 
 All 65 focused source-guard tests passed after the sixth remediation. The authoritative oracle passed after the current target rebase.
+
+All 74 focused source-guard tests passed after the seventh remediation. The final target rebase and authoritative oracle remain pending.
 
 The first local gate found that blanket empty-DAG alignment broke a valid C host-backend program. The revised typed policy preserves that build.
 

@@ -31,6 +31,7 @@ struct MacroKey {
     unit: String,
     module: Vec<String>,
     scope: Vec<String>,
+    blocks: Vec<usize>,
     name: String,
 }
 
@@ -54,10 +55,29 @@ struct CallablePath {
     parameter_calls: BTreeMap<usize, u8>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord)]
+enum AbstractValue {
+    Bool(bool),
+    Callable(CallTarget),
+    Iterable(Vec<AbstractValue>),
+    Tuple(Vec<AbstractValue>),
+    #[default]
+    Unknown,
+}
+
+impl AbstractValue {
+    fn callable(&self) -> Option<CallTarget> {
+        match self {
+            Self::Callable(target) => Some(target.clone()),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct ValueBinding {
     depth: usize,
-    target: Option<CallTarget>,
+    value: AbstractValue,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -120,11 +140,13 @@ enum CallTarget {
 }
 
 type ImportMap = BTreeMap<ModuleKey, BTreeMap<String, Vec<String>>>;
+type TypeAliasMap = BTreeMap<ModuleKey, BTreeMap<String, Vec<String>>>;
 
 struct ImportCollector<'a> {
     unit: &'a str,
     module: Vec<String>,
     imports: &'a mut ImportMap,
+    type_aliases: &'a mut TypeAliasMap,
 }
 
 impl ImportCollector<'_> {
@@ -185,12 +207,42 @@ impl ImportCollector<'_> {
             .or_default()
             .insert(visible, target);
     }
+
+    fn record_type_alias(&mut self, visible: String, target: Vec<String>) {
+        self.type_aliases
+            .entry(ModuleKey {
+                unit: self.unit.to_string(),
+                module: self.module.clone(),
+            })
+            .or_default()
+            .insert(visible, target);
+    }
 }
 
 impl<'ast> Visit<'ast> for ImportCollector<'_> {
     fn visit_item_use(&mut self, item: &'ast syn::ItemUse) {
         if !is_test_only(&item.attrs) {
             self.collect_tree(&item.tree, &[]);
+        }
+    }
+
+    fn visit_item_extern_crate(&mut self, item: &'ast syn::ItemExternCrate) {
+        if is_test_only(&item.attrs) {
+            return;
+        }
+        let visible = item
+            .rename
+            .as_ref()
+            .map_or_else(|| item.ident.to_string(), |(_, rename)| rename.to_string());
+        self.record_import(visible, vec![item.ident.to_string()]);
+    }
+
+    fn visit_item_type(&mut self, item: &'ast syn::ItemType) {
+        if is_test_only(&item.attrs) {
+            return;
+        }
+        if let Some(target) = type_path_segments(&item.ty) {
+            self.record_type_alias(item.ident.to_string(), target);
         }
     }
 
@@ -221,6 +273,7 @@ struct InventoryCollector<'a> {
     unit: &'a str,
     module: Vec<String>,
     scope: Vec<String>,
+    block_scope: Vec<usize>,
     owner: Option<String>,
     imports: &'a ImportMap,
     local_imports: BTreeMap<String, Vec<String>>,
@@ -369,6 +422,7 @@ impl<'ast> Visit<'ast> for InventoryCollector<'_> {
                 unit: self.unit.to_string(),
                 module: self.module.clone(),
                 scope: self.scope.clone(),
+                blocks: self.block_scope.clone(),
                 name: name.to_string(),
             },
             stages_in_macro_tokens(&macro_item.mac.tokens.to_string(), Some(&visible_imports)),
@@ -376,6 +430,7 @@ impl<'ast> Visit<'ast> for InventoryCollector<'_> {
     }
 
     fn visit_block(&mut self, block: &'ast syn::Block) {
+        self.block_scope.push(block as *const syn::Block as usize);
         let outer_imports = self.local_imports.clone();
         for statement in &block.stmts {
             if let syn::Stmt::Item(syn::Item::Use(item)) = statement
@@ -388,6 +443,7 @@ impl<'ast> Visit<'ast> for InventoryCollector<'_> {
             self.visit_stmt(statement);
         }
         self.local_imports = outer_imports;
+        self.block_scope.pop();
     }
 
     fn visit_item_use(&mut self, _item: &'ast syn::ItemUse) {}
@@ -407,16 +463,28 @@ impl<'ast> Visit<'ast> for InventoryCollector<'_> {
     }
 }
 
+#[derive(Clone, Copy)]
+struct SourceInventory<'a> {
+    imports: &'a ImportMap,
+    type_aliases: &'a TypeAliasMap,
+    function_inventory: &'a BTreeSet<FunctionKey>,
+    receiver_methods: &'a BTreeSet<FunctionKey>,
+    macro_stages: &'a BTreeMap<MacroKey, BTreeSet<&'static str>>,
+}
+
 struct CallCollector<'a> {
     unit: String,
     module: Vec<String>,
     scope: Vec<String>,
     owner: Option<String>,
     imports: &'a ImportMap,
+    type_aliases: &'a TypeAliasMap,
     function_inventory: &'a BTreeSet<FunctionKey>,
     receiver_methods: &'a BTreeSet<FunctionKey>,
     macro_stages: &'a BTreeMap<MacroKey, BTreeSet<&'static str>>,
     local_imports: BTreeMap<String, Vec<String>>,
+    local_type_aliases: BTreeMap<String, Vec<String>>,
+    block_scope: Vec<usize>,
     binding_depth: usize,
     paths: Vec<CallPath>,
 }
@@ -424,12 +492,10 @@ struct CallCollector<'a> {
 impl<'a> CallCollector<'a> {
     fn new(
         key: &FunctionKey,
-        imports: &'a ImportMap,
-        function_inventory: &'a BTreeSet<FunctionKey>,
-        receiver_methods: &'a BTreeSet<FunctionKey>,
-        macro_stages: &'a BTreeMap<MacroKey, BTreeSet<&'static str>>,
+        inventory: SourceInventory<'a>,
         parameter_bindings: BTreeMap<String, usize>,
         parameter_receiver_bindings: BTreeMap<String, String>,
+        enclosing_blocks: Vec<usize>,
     ) -> Self {
         let mut scope = key.scope.clone();
         scope.push(callable_scope_segment(key.owner.as_deref(), &key.name));
@@ -437,7 +503,7 @@ impl<'a> CallCollector<'a> {
         for (name, index) in parameter_bindings {
             path.bindings.entry(name).or_default().push(ValueBinding {
                 depth: 0,
-                target: Some(CallTarget::Parameter(index)),
+                value: AbstractValue::Callable(CallTarget::Parameter(index)),
             });
         }
         for (name, owner) in parameter_receiver_bindings {
@@ -454,11 +520,14 @@ impl<'a> CallCollector<'a> {
             module: key.module.clone(),
             scope,
             owner: key.owner.clone(),
-            imports,
-            function_inventory,
-            receiver_methods,
-            macro_stages,
+            imports: inventory.imports,
+            type_aliases: inventory.type_aliases,
+            function_inventory: inventory.function_inventory,
+            receiver_methods: inventory.receiver_methods,
+            macro_stages: inventory.macro_stages,
             local_imports: BTreeMap::new(),
+            local_type_aliases: BTreeMap::new(),
+            block_scope: enclosing_blocks,
             binding_depth: 0,
             paths: vec![path],
         }
@@ -471,10 +540,13 @@ impl<'a> CallCollector<'a> {
             scope: self.scope.clone(),
             owner: self.owner.clone(),
             imports: self.imports,
+            type_aliases: self.type_aliases,
             function_inventory: self.function_inventory,
             receiver_methods: self.receiver_methods,
             macro_stages: self.macro_stages,
             local_imports: self.local_imports.clone(),
+            local_type_aliases: self.local_type_aliases.clone(),
+            block_scope: self.block_scope.clone(),
             binding_depth: self.binding_depth,
             paths: self.paths.clone(),
         }
@@ -506,24 +578,11 @@ impl<'a> CallCollector<'a> {
         *current = current.saturating_add(count).min(2);
     }
 
-    fn target_arguments(
-        &self,
-        path: &CallPath,
-        arguments: &syn::punctuated::Punctuated<syn::Expr, syn::Token![,]>,
-        skip_explicit_receiver: bool,
-    ) -> Vec<Option<CallTarget>> {
-        arguments
-            .iter()
-            .skip(usize::from(skip_explicit_receiver))
-            .map(|argument| self.callable_target(path, argument))
-            .collect()
-    }
-
     fn apply_target_to_path(
         &self,
         mut path: CallPath,
         target: CallTarget,
-        arguments: &syn::punctuated::Punctuated<syn::Expr, syn::Token![,]>,
+        arguments: &[Option<CallTarget>],
         has_explicit_receiver: bool,
     ) -> Vec<CallPath> {
         if path.flow != FlowState::Active {
@@ -539,7 +598,11 @@ impl<'a> CallCollector<'a> {
                     has_explicit_receiver && self.receiver_methods.contains(&key);
                 let call = LocalCall {
                     key,
-                    arguments: self.target_arguments(&path, arguments, skip_explicit_receiver),
+                    arguments: arguments
+                        .iter()
+                        .skip(usize::from(skip_explicit_receiver))
+                        .cloned()
+                        .collect(),
                 };
                 Self::record_local_call(&mut path.local_calls, call, 1);
                 vec![path]
@@ -556,19 +619,14 @@ impl<'a> CallCollector<'a> {
                     for (mut call, count) in inline_path.local_calls {
                         for argument in &mut call.arguments {
                             if let Some(CallTarget::Parameter(index)) = argument {
-                                *argument = arguments
-                                    .get(*index)
-                                    .and_then(|value| self.callable_target(&path, value));
+                                *argument = arguments.get(*index).cloned().flatten();
                             }
                         }
                         Self::record_local_call(&mut combined.local_calls, call, count);
                     }
                     let mut variants = vec![combined];
                     for (index, count) in inline_path.parameter_calls {
-                        let Some(Some(argument_target)) = arguments
-                            .get(index)
-                            .map(|argument| self.callable_target(&path, argument))
-                        else {
+                        let Some(Some(argument_target)) = arguments.get(index) else {
                             continue;
                         };
                         for _ in 0..count {
@@ -578,7 +636,7 @@ impl<'a> CallCollector<'a> {
                                     self.apply_target_to_path(
                                         variant,
                                         argument_target.clone(),
-                                        &syn::punctuated::Punctuated::new(),
+                                        &[],
                                         true,
                                     )
                                 })
@@ -610,7 +668,7 @@ impl<'a> CallCollector<'a> {
                     .or_default()
                     .push(ValueBinding {
                         depth: collector.binding_depth,
-                        target: Some(CallTarget::Parameter(index)),
+                        value: AbstractValue::Callable(CallTarget::Parameter(index)),
                     });
                 closure_path
                     .receiver_bindings
@@ -637,19 +695,256 @@ impl<'a> CallCollector<'a> {
         )
     }
 
-    fn callable_target(&self, path: &CallPath, expression: &syn::Expr) -> Option<CallTarget> {
-        match expression {
-            syn::Expr::Path(expression) => self.target_for_path(path, &expression.path),
-            syn::Expr::Closure(closure) => Some(self.closure_target(path, closure)),
-            syn::Expr::Cast(cast) => self.callable_target(path, &cast.expr),
-            syn::Expr::Group(group) => self.callable_target(path, &group.expr),
-            syn::Expr::Paren(parenthesized) => self.callable_target(path, &parenthesized.expr),
-            syn::Expr::Reference(reference) => self.callable_target(path, &reference.expr),
-            syn::Expr::Unary(unary) if matches!(unary.op, syn::UnOp::Deref(_)) => {
-                self.callable_target(path, &unary.expr)
-            }
-            _ => None,
+    fn evaluate_expression_value(
+        &self,
+        path: CallPath,
+        expression: &syn::Expr,
+    ) -> Vec<(CallPath, AbstractValue)> {
+        if path.flow != FlowState::Active {
+            return vec![(path, AbstractValue::Unknown)];
         }
+        match expression {
+            syn::Expr::Path(expression) => {
+                vec![(
+                    path.clone(),
+                    self.abstract_value_for_path(&path, &expression.path),
+                )]
+            }
+            syn::Expr::Closure(closure) => vec![(
+                path.clone(),
+                AbstractValue::Callable(self.closure_target(&path, closure)),
+            )],
+            syn::Expr::Lit(expression) => match &expression.lit {
+                syn::Lit::Bool(value) => vec![(path, AbstractValue::Bool(value.value))],
+                _ => vec![(path, AbstractValue::Unknown)],
+            },
+            syn::Expr::Array(array) => self
+                .evaluate_value_sequence(path, array.elems.iter())
+                .into_iter()
+                .map(|(path, values)| (path, AbstractValue::Iterable(values)))
+                .collect(),
+            syn::Expr::Tuple(tuple) => self
+                .evaluate_value_sequence(path, tuple.elems.iter())
+                .into_iter()
+                .map(|(path, values)| (path, AbstractValue::Tuple(values)))
+                .collect(),
+            syn::Expr::If(expression) => self.evaluate_if_value(path, expression),
+            syn::Expr::Match(expression) => self.evaluate_match_value(path, expression),
+            syn::Expr::Block(expression) => self.evaluate_block_value(path, &expression.block),
+            syn::Expr::Cast(cast) => self.evaluate_expression_value(path, &cast.expr),
+            syn::Expr::Group(group) => self.evaluate_expression_value(path, &group.expr),
+            syn::Expr::Paren(parenthesized) => {
+                self.evaluate_expression_value(path, &parenthesized.expr)
+            }
+            syn::Expr::Reference(reference) => {
+                self.evaluate_expression_value(path, &reference.expr)
+            }
+            syn::Expr::Unary(unary) if matches!(unary.op, syn::UnOp::Deref(_)) => {
+                self.evaluate_expression_value(path, &unary.expr)
+            }
+            _ => {
+                let mut collector = self.fork();
+                collector.paths = vec![path];
+                collector.visit_expr(expression);
+                collector
+                    .paths
+                    .into_iter()
+                    .map(|path| (path, AbstractValue::Unknown))
+                    .collect()
+            }
+        }
+    }
+
+    fn evaluate_value_sequence<'expr>(
+        &self,
+        path: CallPath,
+        expressions: impl Iterator<Item = &'expr syn::Expr>,
+    ) -> Vec<(CallPath, Vec<AbstractValue>)> {
+        let mut variants = vec![(path, Vec::new())];
+        for expression in expressions {
+            variants = variants
+                .into_iter()
+                .flat_map(|(path, values)| {
+                    self.evaluate_expression_value(path, expression)
+                        .into_iter()
+                        .map(move |(path, value)| {
+                            let mut next_values = values.clone();
+                            next_values.push(value);
+                            (path, next_values)
+                        })
+                })
+                .collect();
+        }
+        variants
+    }
+
+    fn evaluate_arguments(
+        &self,
+        path: CallPath,
+        arguments: &syn::punctuated::Punctuated<syn::Expr, syn::Token![,]>,
+    ) -> Vec<(CallPath, Vec<Option<CallTarget>>)> {
+        self.evaluate_value_sequence(path, arguments.iter())
+            .into_iter()
+            .map(|(path, values)| {
+                let targets = values.into_iter().map(|value| value.callable()).collect();
+                (path, targets)
+            })
+            .collect()
+    }
+
+    fn evaluate_condition(
+        &self,
+        path: CallPath,
+        expression: &syn::Expr,
+    ) -> Vec<(CallPath, Option<bool>)> {
+        self.evaluate_expression_value(path, expression)
+            .into_iter()
+            .map(|(path, value)| {
+                let value = match value {
+                    AbstractValue::Bool(value) => Some(value),
+                    _ => None,
+                };
+                (path, value)
+            })
+            .collect()
+    }
+
+    fn evaluate_if_value(
+        &self,
+        path: CallPath,
+        expression: &syn::ExprIf,
+    ) -> Vec<(CallPath, AbstractValue)> {
+        let (conditions, pattern) = if let syn::Expr::Let(let_expression) = expression.cond.as_ref()
+        {
+            (
+                self.evaluate_expression_value(path, &let_expression.expr)
+                    .into_iter()
+                    .map(|(path, _)| (path, None))
+                    .collect::<Vec<_>>(),
+                Some(let_expression.pat.as_ref()),
+            )
+        } else {
+            (self.evaluate_condition(path, &expression.cond), None)
+        };
+        let mut results = Vec::new();
+        for (condition_path, condition) in conditions {
+            if condition != Some(false) {
+                let mut then_path = condition_path.clone();
+                if let Some(pattern) = pattern {
+                    Self::bind_pattern_value(
+                        std::slice::from_mut(&mut then_path),
+                        pattern,
+                        AbstractValue::Unknown,
+                        self.binding_depth + 1,
+                    );
+                }
+                results.extend(self.evaluate_block_value(then_path, &expression.then_branch));
+            }
+            if condition != Some(true) {
+                if let Some((_, else_expression)) = &expression.else_branch {
+                    results.extend(self.evaluate_expression_value(condition_path, else_expression));
+                } else {
+                    results.push((condition_path, AbstractValue::Unknown));
+                }
+            }
+        }
+        results
+    }
+
+    fn evaluate_match_value(
+        &self,
+        path: CallPath,
+        expression: &syn::ExprMatch,
+    ) -> Vec<(CallPath, AbstractValue)> {
+        let mut results = Vec::new();
+        for (scrutinee_path, scrutinee) in self.evaluate_expression_value(path, &expression.expr) {
+            for arm in &expression.arms {
+                if !pattern_can_match_value(&arm.pat, &scrutinee) {
+                    continue;
+                }
+                let mut branch = self.fork();
+                branch.binding_depth += 1;
+                let arm_depth = branch.binding_depth;
+                branch.paths = vec![scrutinee_path.clone()];
+                Self::bind_pattern_value(&mut branch.paths, &arm.pat, scrutinee.clone(), arm_depth);
+                let branch_paths = branch.paths.clone();
+                let guard_paths = if let Some((_, guard)) = &arm.guard {
+                    branch_paths
+                        .into_iter()
+                        .flat_map(|path| branch.evaluate_condition(path, guard))
+                        .filter(|(_, value)| *value != Some(false))
+                        .map(|(path, _)| path)
+                        .collect()
+                } else {
+                    branch_paths
+                };
+                for guard_path in guard_paths {
+                    for (mut result_path, value) in
+                        branch.evaluate_expression_value(guard_path, &arm.body)
+                    {
+                        Self::remove_bindings_at_depth(
+                            std::slice::from_mut(&mut result_path),
+                            arm_depth,
+                        );
+                        results.push((result_path, value));
+                    }
+                }
+                if value_has_definite_pattern_match(&arm.pat, &scrutinee) && arm.guard.is_none() {
+                    break;
+                }
+            }
+        }
+        if results.is_empty() {
+            return Vec::new();
+        }
+        results
+    }
+
+    fn evaluate_block_value(
+        &self,
+        path: CallPath,
+        block: &syn::Block,
+    ) -> Vec<(CallPath, AbstractValue)> {
+        let mut branch = self.fork();
+        let outer_imports = branch.local_imports.clone();
+        let outer_type_aliases = branch.local_type_aliases.clone();
+        branch.block_scope.push(block as *const syn::Block as usize);
+        branch.binding_depth += 1;
+        let block_depth = branch.binding_depth;
+        branch.paths = vec![path];
+
+        let tail = block.stmts.last().and_then(|statement| match statement {
+            syn::Stmt::Expr(expression, None) => Some(expression),
+            _ => None,
+        });
+        let statement_count = block.stmts.len() - usize::from(tail.is_some());
+        for statement in &block.stmts[..statement_count] {
+            branch.visit_stmt(statement);
+        }
+
+        let mut results: Vec<(CallPath, AbstractValue)> = if let Some(tail) = tail {
+            branch
+                .paths
+                .clone()
+                .into_iter()
+                .flat_map(|path| branch.evaluate_expression_value(path, tail))
+                .collect()
+        } else {
+            branch
+                .paths
+                .clone()
+                .into_iter()
+                .map(|path| (path, AbstractValue::Unknown))
+                .collect()
+        };
+        for result in &mut results {
+            Self::remove_bindings_at_depth(std::slice::from_mut(&mut result.0), block_depth);
+        }
+        branch.binding_depth -= 1;
+        branch.block_scope.pop();
+        branch.local_imports = outer_imports;
+        branch.local_type_aliases = outer_type_aliases;
+        results
     }
 
     fn collect_local_use_tree(&mut self, tree: &syn::UseTree, prefix: &[String]) {
@@ -851,26 +1146,129 @@ impl<'a> CallCollector<'a> {
         }
     }
 
-    fn local_method_key(&self, owner: String, name: String) -> Option<FunctionKey> {
-        let mut segments = owner.split("::").map(str::to_string).collect::<Vec<_>>();
-        let first = segments.first().cloned()?;
-        let module_key = ModuleKey {
+    fn owner_module_and_name(&self, segments: &[String]) -> Option<(Vec<String>, String)> {
+        let (name, prefix) = segments.split_last()?;
+        let mut module = self.module.clone();
+        let mut remaining = prefix.to_vec();
+        if remaining.first().is_some_and(|segment| segment == "crate") {
+            module.clear();
+            remaining.remove(0);
+        } else {
+            while remaining.first().is_some_and(|segment| segment == "super") {
+                module.pop();
+                remaining.remove(0);
+            }
+            if remaining.first().is_some_and(|segment| segment == "self") {
+                remaining.remove(0);
+            }
+        }
+        module.extend(remaining);
+        Some((module, name.clone()))
+    }
+
+    fn absolute_type_target(&self, base_module: &[String], target: &[String]) -> Vec<String> {
+        let Some((module, name)) = self.owner_module_and_name_from(base_module, target) else {
+            return target.to_vec();
+        };
+        let mut absolute = vec!["crate".to_string()];
+        absolute.extend(module);
+        absolute.push(name);
+        absolute
+    }
+
+    fn owner_module_and_name_from(
+        &self,
+        base_module: &[String],
+        segments: &[String],
+    ) -> Option<(Vec<String>, String)> {
+        let (name, prefix) = segments.split_last()?;
+        let mut module = base_module.to_vec();
+        let mut remaining = prefix.to_vec();
+        if remaining.first().is_some_and(|segment| segment == "crate") {
+            module.clear();
+            remaining.remove(0);
+        } else {
+            while remaining.first().is_some_and(|segment| segment == "super") {
+                module.pop();
+                remaining.remove(0);
+            }
+            if remaining.first().is_some_and(|segment| segment == "self") {
+                remaining.remove(0);
+            }
+        }
+        module.extend(remaining);
+        Some((module, name.clone()))
+    }
+
+    fn expanded_owner_segments(&self, owner: &str) -> Vec<String> {
+        let current_module_key = ModuleKey {
             unit: self.unit.to_string(),
             module: self.module.clone(),
         };
-        if let Some(target) = self.local_imports.get(&first).or_else(|| {
-            self.imports
-                .get(&module_key)
-                .and_then(|module_imports| module_imports.get(&first))
-        }) {
-            segments.remove(0);
-            let mut expanded = target.clone();
-            expanded.extend(segments);
-            segments = expanded;
+        let mut segments = owner.split("::").map(str::to_string).collect::<Vec<_>>();
+        let mut expanded_aliases = BTreeSet::new();
+        while expanded_aliases.insert(segments.clone()) {
+            let Some(first) = segments.first().cloned() else {
+                break;
+            };
+            if let Some(target) = self
+                .local_type_aliases
+                .get(&first)
+                .or_else(|| self.local_imports.get(&first))
+                .or_else(|| {
+                    self.imports
+                        .get(&current_module_key)
+                        .and_then(|imports| imports.get(&first))
+                })
+            {
+                segments.remove(0);
+                let mut expanded = target.clone();
+                expanded.extend(segments);
+                segments = expanded;
+                continue;
+            }
+
+            let Some((alias_module, alias_name)) = self.owner_module_and_name(&segments) else {
+                break;
+            };
+            let alias_key = ModuleKey {
+                unit: self.unit.to_string(),
+                module: alias_module.clone(),
+            };
+            let Some(target) = self
+                .type_aliases
+                .get(&alias_key)
+                .and_then(|aliases| aliases.get(&alias_name))
+            else {
+                break;
+            };
+            segments = self.absolute_type_target(&alias_module, target);
         }
+        segments
+    }
+
+    fn local_method_key(&self, owner: String, name: String) -> Option<FunctionKey> {
+        let mut segments = self.expanded_owner_segments(&owner);
         segments.push(name);
         self.local_function_for_segments(&segments)
             .filter(|key| self.receiver_methods.contains(key))
+    }
+
+    fn abstract_value_for_path(
+        &self,
+        execution_path: &CallPath,
+        path: &syn::Path,
+    ) -> AbstractValue {
+        if let Some(name) = path.get_ident()
+            && let Some(binding) = execution_path
+                .bindings
+                .get(&name.to_string())
+                .and_then(|bindings| bindings.last())
+        {
+            return binding.value.clone();
+        }
+        self.target_for_path(execution_path, path)
+            .map_or(AbstractValue::Unknown, AbstractValue::Callable)
     }
 
     fn target_for_path(&self, execution_path: &CallPath, path: &syn::Path) -> Option<CallTarget> {
@@ -881,7 +1279,7 @@ impl<'a> CallCollector<'a> {
                 .get(&name)
                 .and_then(|bindings| bindings.last())
             {
-                return binding.target.clone();
+                return binding.value.callable();
             }
         }
 
@@ -933,14 +1331,17 @@ impl<'a> CallCollector<'a> {
         module.extend(remaining);
         if lexical_call {
             for scope_length in (0..=self.scope.len()).rev() {
-                let key = MacroKey {
-                    unit: self.unit.to_string(),
-                    module: module.clone(),
-                    scope: self.scope[..scope_length].to_vec(),
-                    name: name.clone(),
-                };
-                if self.macro_stages.contains_key(&key) {
-                    return Some(key);
+                for block_length in (0..=self.block_scope.len()).rev() {
+                    let key = MacroKey {
+                        unit: self.unit.to_string(),
+                        module: module.clone(),
+                        scope: self.scope[..scope_length].to_vec(),
+                        blocks: self.block_scope[..block_length].to_vec(),
+                        name: name.clone(),
+                    };
+                    if self.macro_stages.contains_key(&key) {
+                        return Some(key);
+                    }
                 }
             }
             return None;
@@ -949,6 +1350,7 @@ impl<'a> CallCollector<'a> {
             unit: self.unit.to_string(),
             module,
             scope: Vec::new(),
+            blocks: Vec::new(),
             name: name.clone(),
         };
         self.macro_stages.contains_key(&key).then_some(key)
@@ -965,6 +1367,17 @@ impl<'a> CallCollector<'a> {
     }
 
     fn bind_pattern(paths: &mut [CallPath], pattern: &syn::Pat, depth: usize) {
+        Self::bind_pattern_value(paths, pattern, AbstractValue::Unknown, depth);
+    }
+
+    fn bind_pattern_value(
+        paths: &mut [CallPath],
+        pattern: &syn::Pat,
+        value: AbstractValue,
+        depth: usize,
+    ) {
+        let mut values = BTreeMap::new();
+        collect_pattern_values(pattern, &value, &mut values);
         let mut names = BTreeSet::new();
         collect_pattern_names(pattern, &mut names);
         for path in paths {
@@ -974,7 +1387,7 @@ impl<'a> CallCollector<'a> {
                     .or_default()
                     .push(ValueBinding {
                         depth,
-                        target: None,
+                        value: values.get(name).cloned().unwrap_or_default(),
                     });
                 path.receiver_bindings
                     .entry(name.clone())
@@ -1016,6 +1429,8 @@ impl<'a> CallCollector<'a> {
 impl<'ast> Visit<'ast> for CallCollector<'_> {
     fn visit_block(&mut self, block: &'ast syn::Block) {
         let outer_imports = self.local_imports.clone();
+        let outer_type_aliases = self.local_type_aliases.clone();
+        self.block_scope.push(block as *const syn::Block as usize);
         self.binding_depth += 1;
         let block_depth = self.binding_depth;
         for statement in &block.stmts {
@@ -1023,7 +1438,9 @@ impl<'ast> Visit<'ast> for CallCollector<'_> {
         }
         Self::remove_bindings_at_depth(&mut self.paths, block_depth);
         self.binding_depth -= 1;
+        self.block_scope.pop();
         self.local_imports = outer_imports;
+        self.local_type_aliases = outer_type_aliases;
     }
 
     fn visit_item_use(&mut self, item: &'ast syn::ItemUse) {
@@ -1032,88 +1449,113 @@ impl<'ast> Visit<'ast> for CallCollector<'_> {
         }
     }
 
+    fn visit_item_extern_crate(&mut self, item: &'ast syn::ItemExternCrate) {
+        if is_test_only(&item.attrs) {
+            return;
+        }
+        let visible = item
+            .rename
+            .as_ref()
+            .map_or_else(|| item.ident.to_string(), |(_, rename)| rename.to_string());
+        self.local_imports
+            .insert(visible, vec![item.ident.to_string()]);
+    }
+
+    fn visit_item_type(&mut self, item: &'ast syn::ItemType) {
+        if is_test_only(&item.attrs) {
+            return;
+        }
+        if let Some(target) = type_path_segments(&item.ty) {
+            self.local_type_aliases
+                .insert(item.ident.to_string(), target);
+        }
+    }
+
     fn visit_local(&mut self, local: &'ast syn::Local) {
-        if let Some(init) = &local.init {
-            self.visit_expr(&init.expr);
-            if let Some((_, diverge)) = &init.diverge {
-                let mut branch = self.fork();
-                branch.visit_expr(diverge);
-                let mut paths = self.paths.clone();
-                paths.extend(branch.paths);
-                self.replace_paths(paths);
+        let original_paths = std::mem::take(&mut self.paths);
+        let mut values = Vec::new();
+        for path in original_paths {
+            if let Some(init) = &local.init {
+                let evaluated = self.evaluate_expression_value(path, &init.expr);
+                if let Some((_, diverge)) = &init.diverge {
+                    for (evaluated_path, _) in &evaluated {
+                        let mut branch = self.fork();
+                        branch.paths = vec![evaluated_path.clone()];
+                        branch.visit_expr(diverge);
+                        values.extend(
+                            branch
+                                .paths
+                                .into_iter()
+                                .map(|path| (path, AbstractValue::Unknown)),
+                        );
+                    }
+                }
+                values.extend(evaluated);
+            } else {
+                values.push((path, AbstractValue::Unknown));
             }
         }
 
         let alias_name = single_pattern_name(&local.pat);
-        let mut names = BTreeSet::new();
-        collect_pattern_names(&local.pat, &mut names);
-        let mut paths = std::mem::take(&mut self.paths);
-        for path in &mut paths {
-            let target = local.init.as_ref().and_then(|init| {
-                alias_name
-                    .as_ref()
-                    .and_then(|_| self.callable_target(path, &init.expr))
-            });
-            let receiver_owner = pattern_type_owner(&local.pat).or_else(|| {
-                local
-                    .init
-                    .as_ref()
-                    .and_then(|init| expression_type_owner(&init.expr))
-            });
-            for name in &names {
-                path.bindings
-                    .entry(name.clone())
-                    .or_default()
-                    .push(ValueBinding {
-                        depth: self.binding_depth,
-                        target: (alias_name.as_ref() == Some(name))
-                            .then_some(target.clone())
-                            .flatten(),
-                    });
-                path.receiver_bindings
-                    .entry(name.clone())
-                    .or_default()
-                    .push(ReceiverBinding {
-                        depth: self.binding_depth,
-                        owner: (alias_name.as_ref() == Some(name))
-                            .then_some(receiver_owner.clone())
-                            .flatten(),
-                    });
+        let receiver_owner = pattern_type_owner(&local.pat).or_else(|| {
+            local
+                .init
+                .as_ref()
+                .and_then(|init| expression_type_owner(&init.expr))
+        });
+        let mut paths = Vec::new();
+        for (mut path, value) in values {
+            Self::bind_pattern_value(
+                std::slice::from_mut(&mut path),
+                &local.pat,
+                value,
+                self.binding_depth,
+            );
+            if let Some(name) = &alias_name
+                && let Some(binding) = path
+                    .receiver_bindings
+                    .get_mut(name)
+                    .and_then(|bindings| bindings.last_mut())
+            {
+                binding.owner = receiver_owner.clone();
             }
+            paths.push(path);
         }
-        self.paths = paths;
+        self.replace_paths(paths);
     }
 
     fn visit_expr_assign(&mut self, assignment: &'ast syn::ExprAssign) {
-        self.visit_expr(&assignment.right);
         let assigned_name = match assignment.left.as_ref() {
             syn::Expr::Path(path) => path.path.get_ident().map(ToString::to_string),
             _ => None,
         };
-        if let Some(name) = assigned_name {
-            let mut paths = std::mem::take(&mut self.paths);
-            for path in &mut paths {
-                let target = self.callable_target(path, &assignment.right);
-                if let Some(binding) = path
-                    .bindings
-                    .get_mut(&name)
-                    .and_then(|bindings| bindings.last_mut())
-                {
-                    binding.target = target;
+        let original_paths = std::mem::take(&mut self.paths);
+        let mut paths = Vec::new();
+        for path in original_paths {
+            for (mut path, value) in self.evaluate_expression_value(path, &assignment.right) {
+                if let Some(name) = &assigned_name {
+                    if let Some(binding) = path
+                        .bindings
+                        .get_mut(name)
+                        .and_then(|bindings| bindings.last_mut())
+                    {
+                        binding.value = value;
+                    }
+                    let receiver_owner = self
+                        .receiver_owner(&path, &assignment.right)
+                        .or_else(|| expression_type_owner(&assignment.right));
+                    if let Some(binding) = path
+                        .receiver_bindings
+                        .get_mut(name)
+                        .and_then(|bindings| bindings.last_mut())
+                    {
+                        binding.owner = receiver_owner;
+                    }
                 }
-                let receiver_owner = self
-                    .receiver_owner(path, &assignment.right)
-                    .or_else(|| expression_type_owner(&assignment.right));
-                if let Some(binding) = path
-                    .receiver_bindings
-                    .get_mut(&name)
-                    .and_then(|bindings| bindings.last_mut())
-                {
-                    binding.owner = receiver_owner;
-                }
+                paths.push(path);
             }
-            self.paths = paths;
         }
+        self.replace_paths(paths);
         self.visit_expr(&assignment.left);
     }
 
@@ -1121,91 +1563,72 @@ impl<'ast> Visit<'ast> for CallCollector<'_> {
         let original_paths = std::mem::take(&mut self.paths);
         let mut called_paths = Vec::new();
         for path in original_paths {
-            if let Some(target) = self.callable_target(&path, &call.func) {
-                called_paths.extend(self.apply_target_to_path(path, target, &call.args, true));
-            } else {
-                let mut branch = self.fork();
-                branch.paths = vec![path];
-                branch.visit_expr(&call.func);
-                called_paths.extend(branch.paths);
+            for (function_path, function_value) in self.evaluate_expression_value(path, &call.func)
+            {
+                for (argument_path, arguments) in self.evaluate_arguments(function_path, &call.args)
+                {
+                    if let Some(target) = function_value.callable() {
+                        called_paths.extend(self.apply_target_to_path(
+                            argument_path,
+                            target,
+                            &arguments,
+                            true,
+                        ));
+                    } else {
+                        called_paths.push(argument_path);
+                    }
+                }
             }
         }
         self.replace_paths(called_paths);
-        for argument in &call.args {
-            self.visit_expr(argument);
-        }
     }
 
     fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
         let original_paths = std::mem::take(&mut self.paths);
         let mut called_paths = Vec::new();
         for path in original_paths {
-            let local_key = self
-                .receiver_owner(&path, &call.receiver)
-                .and_then(|owner| self.local_method_key(owner, call.method.to_string()));
-            if let Some(key) = local_key {
-                called_paths.extend(self.apply_target_to_path(
-                    path,
-                    CallTarget::Function(key),
-                    &call.args,
-                    false,
-                ));
-            } else {
-                called_paths.push(path);
+            for (receiver_path, _) in self.evaluate_expression_value(path, &call.receiver) {
+                let local_key = self
+                    .receiver_owner(&receiver_path, &call.receiver)
+                    .and_then(|owner| self.local_method_key(owner, call.method.to_string()));
+                for (argument_path, arguments) in self.evaluate_arguments(receiver_path, &call.args)
+                {
+                    if let Some(key) = &local_key {
+                        called_paths.extend(self.apply_target_to_path(
+                            argument_path,
+                            CallTarget::Function(key.clone()),
+                            &arguments,
+                            false,
+                        ));
+                    } else {
+                        called_paths.push(argument_path);
+                    }
+                }
             }
         }
         self.replace_paths(called_paths);
-        self.visit_expr(&call.receiver);
-        for argument in &call.args {
-            self.visit_expr(argument);
-        }
     }
 
     fn visit_expr_if(&mut self, expression: &'ast syn::ExprIf) {
-        let pattern = if let syn::Expr::Let(let_expression) = expression.cond.as_ref() {
-            self.visit_expr(&let_expression.expr);
-            Some(let_expression.pat.as_ref())
-        } else {
-            self.visit_expr(&expression.cond);
-            None
-        };
-        let mut then_branch = self.fork();
-        if let Some(pattern) = pattern {
-            let depth = then_branch.binding_depth + 1;
-            Self::bind_pattern(&mut then_branch.paths, pattern, depth);
-        }
-        then_branch.visit_block(&expression.then_branch);
-        let mut paths = then_branch.paths;
-        if let Some((_, else_expression)) = &expression.else_branch {
-            let mut else_branch = self.fork();
-            else_branch.visit_expr(else_expression);
-            paths.extend(else_branch.paths);
-        } else {
-            paths.extend(self.paths.clone());
-        }
-        self.replace_paths(paths);
+        let original_paths = std::mem::take(&mut self.paths);
+        self.replace_paths(
+            original_paths
+                .into_iter()
+                .flat_map(|path| self.evaluate_if_value(path, expression))
+                .map(|(path, _)| path)
+                .collect(),
+        );
     }
 
     fn visit_expr_match(&mut self, expression: &'ast syn::ExprMatch) {
-        self.visit_expr(&expression.expr);
-        let mut paths = Vec::new();
-        for arm in &expression.arms {
-            let mut branch = self.fork();
-            branch.binding_depth += 1;
-            let arm_depth = branch.binding_depth;
-            Self::bind_pattern(&mut branch.paths, &arm.pat, arm_depth);
-            if let Some((_, guard)) = &arm.guard {
-                branch.visit_expr(guard);
-            }
-            branch.visit_expr(&arm.body);
-            Self::remove_bindings_at_depth(&mut branch.paths, arm_depth);
-            branch.binding_depth -= 1;
-            paths.extend(branch.paths);
-        }
-        if paths.is_empty() {
-            paths.extend(self.paths.clone());
-        }
-        self.replace_paths(paths);
+        let original_paths = std::mem::take(&mut self.paths);
+        self.replace_paths(
+            original_paths
+                .into_iter()
+                .flat_map(|path| self.evaluate_match_value(path, expression))
+                .map(|(path, _)| path)
+                .collect(),
+        );
     }
 
     fn visit_expr_while(&mut self, expression: &'ast syn::ExprWhile) {
@@ -1218,15 +1641,28 @@ impl<'ast> Visit<'ast> for CallCollector<'_> {
             } else {
                 (expression.cond.as_ref(), None)
             };
-        self.visit_expr(condition_expression);
         let loop_label = syntax_label(expression.label.as_ref());
-        let mut exits = self.paths.clone();
-        let mut inputs = self
-            .paths
-            .iter()
-            .filter(|path| path.flow == FlowState::Active)
-            .cloned()
-            .collect::<Vec<_>>();
+        let mut exits = Vec::new();
+        let mut inputs = Vec::new();
+        let original_paths = std::mem::take(&mut self.paths);
+        for path in original_paths {
+            let conditions = if pattern.is_some() {
+                self.evaluate_expression_value(path, condition_expression)
+                    .into_iter()
+                    .map(|(path, _)| (path, None))
+                    .collect()
+            } else {
+                self.evaluate_condition(path, condition_expression)
+            };
+            for (condition_path, condition) in conditions {
+                if condition != Some(true) {
+                    exits.push(condition_path.clone());
+                }
+                if condition != Some(false) && condition_path.flow == FlowState::Active {
+                    inputs.push(condition_path);
+                }
+            }
+        }
         let mut seen = BTreeSet::new();
         loop {
             inputs = Self::normalized_paths(inputs)
@@ -1260,12 +1696,19 @@ impl<'ast> Visit<'ast> for CallCollector<'_> {
                         continue;
                     }
                 }
-                let mut condition = self.fork();
-                condition.paths = vec![path];
-                condition.visit_expr(condition_expression);
-                for condition_path in condition.paths {
-                    exits.push(condition_path.clone());
-                    if condition_path.flow == FlowState::Active {
+                let conditions = if pattern.is_some() {
+                    self.evaluate_expression_value(path, condition_expression)
+                        .into_iter()
+                        .map(|(path, _)| (path, None))
+                        .collect()
+                } else {
+                    self.evaluate_condition(path, condition_expression)
+                };
+                for (condition_path, condition) in conditions {
+                    if condition != Some(true) {
+                        exits.push(condition_path.clone());
+                    }
+                    if condition != Some(false) && condition_path.flow == FlowState::Active {
                         next_inputs.push(condition_path);
                     }
                 }
@@ -1277,15 +1720,64 @@ impl<'ast> Visit<'ast> for CallCollector<'_> {
     }
 
     fn visit_expr_for_loop(&mut self, expression: &'ast syn::ExprForLoop) {
-        self.visit_expr(&expression.expr);
         let loop_label = syntax_label(expression.label.as_ref());
-        let mut exits = self.paths.clone();
-        let mut inputs = self
-            .paths
-            .iter()
-            .filter(|path| path.flow == FlowState::Active)
-            .cloned()
-            .collect::<Vec<_>>();
+        let original_paths = std::mem::take(&mut self.paths);
+        let mut exits = Vec::new();
+        let mut unknown_inputs = Vec::new();
+
+        for path in original_paths {
+            for (iterable_path, iterable) in self.evaluate_expression_value(path, &expression.expr)
+            {
+                match iterable {
+                    AbstractValue::Iterable(values) => {
+                        let mut iteration_paths = vec![iterable_path];
+                        for value in values {
+                            let mut body = self.fork();
+                            body.paths = iteration_paths;
+                            let body_depth = body.binding_depth + 1;
+                            Self::bind_pattern_value(
+                                &mut body.paths,
+                                &expression.pat,
+                                value,
+                                body_depth,
+                            );
+                            body.visit_block(&expression.body);
+                            iteration_paths = Vec::new();
+                            for mut path in body.paths {
+                                match &path.flow {
+                                    FlowState::Active => iteration_paths.push(path),
+                                    FlowState::Continue(target)
+                                        if control_targets_loop(target, &loop_label) =>
+                                    {
+                                        path.flow = FlowState::Active;
+                                        iteration_paths.push(path);
+                                    }
+                                    FlowState::Break(target)
+                                        if control_targets_loop(target, &loop_label) =>
+                                    {
+                                        path.flow = FlowState::Active;
+                                        exits.push(path);
+                                    }
+                                    _ => exits.push(path),
+                                }
+                            }
+                            if iteration_paths.is_empty() {
+                                break;
+                            }
+                        }
+                        exits.extend(iteration_paths);
+                    }
+                    _ => {
+                        exits.push(iterable_path.clone());
+                        if iterable_path.flow == FlowState::Active {
+                            unknown_inputs.push(iterable_path);
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut inputs = unknown_inputs;
         let mut seen = BTreeSet::new();
         loop {
             inputs = Self::normalized_paths(inputs)
@@ -1414,8 +1906,10 @@ struct FunctionCollector<'a> {
     unit: &'a str,
     module: Vec<String>,
     scope: Vec<String>,
+    block_scope: Vec<usize>,
     owner: Option<String>,
     imports: &'a ImportMap,
+    type_aliases: &'a TypeAliasMap,
     function_inventory: &'a BTreeSet<FunctionKey>,
     receiver_methods: &'a BTreeSet<FunctionKey>,
     macro_stages: &'a BTreeMap<MacroKey, BTreeSet<&'static str>>,
@@ -1431,12 +1925,16 @@ impl FunctionCollector<'_> {
     ) {
         let mut calls = CallCollector::new(
             &key,
-            self.imports,
-            self.function_inventory,
-            self.receiver_methods,
-            self.macro_stages,
+            SourceInventory {
+                imports: self.imports,
+                type_aliases: self.type_aliases,
+                function_inventory: self.function_inventory,
+                receiver_methods: self.receiver_methods,
+                macro_stages: self.macro_stages,
+            },
             function_parameter_bindings(inputs),
             function_parameter_receiver_bindings(inputs),
+            self.block_scope.clone(),
         );
         calls.visit_block(block);
         self.functions.push(FunctionFacts {
@@ -1448,6 +1946,12 @@ impl FunctionCollector<'_> {
 }
 
 impl<'ast> Visit<'ast> for FunctionCollector<'_> {
+    fn visit_block(&mut self, block: &'ast syn::Block) {
+        self.block_scope.push(block as *const syn::Block as usize);
+        visit::visit_block(self, block);
+        self.block_scope.pop();
+    }
+
     fn visit_item_fn(&mut self, function: &'ast syn::ItemFn) {
         if is_test_only(&function.attrs) {
             return;
@@ -1465,7 +1969,7 @@ impl<'ast> Visit<'ast> for FunctionCollector<'_> {
             &function.block,
         );
         self.scope.push(callable_scope_segment(None, &name));
-        visit::visit_block(self, &function.block);
+        self.visit_block(&function.block);
         self.scope.pop();
     }
 
@@ -1497,7 +2001,7 @@ impl<'ast> Visit<'ast> for FunctionCollector<'_> {
         );
         self.scope
             .push(callable_scope_segment(self.owner.as_deref(), &name));
-        visit::visit_block(self, &function.block);
+        self.visit_block(&function.block);
         self.scope.pop();
     }
 
@@ -1529,7 +2033,7 @@ impl<'ast> Visit<'ast> for FunctionCollector<'_> {
             );
             self.scope
                 .push(callable_scope_segment(self.owner.as_deref(), &name));
-            visit::visit_block(self, block);
+            self.visit_block(block);
             self.scope.pop();
         }
     }
@@ -1585,13 +2089,26 @@ fn function_parameter_receiver_bindings(
     bindings
 }
 
-fn path_owner(path: &syn::Path) -> Option<String> {
-    let segments = path
-        .segments
+fn path_segments(path: &syn::Path) -> Vec<String> {
+    path.segments
         .iter()
         .map(|segment| segment.ident.to_string())
-        .collect::<Vec<_>>();
+        .collect()
+}
+
+fn path_owner(path: &syn::Path) -> Option<String> {
+    let segments = path_segments(path);
     (!segments.is_empty()).then(|| segments.join("::"))
+}
+
+fn type_path_segments(value_type: &syn::Type) -> Option<Vec<String>> {
+    match value_type {
+        syn::Type::Path(path) if path.qself.is_none() => Some(path_segments(&path.path)),
+        syn::Type::Reference(reference) => type_path_segments(&reference.elem),
+        syn::Type::Group(group) => type_path_segments(&group.elem),
+        syn::Type::Paren(parenthesized) => type_path_segments(&parenthesized.elem),
+        _ => None,
+    }
 }
 
 fn type_owner(value_type: &syn::Type) -> Option<String> {
@@ -1697,6 +2214,98 @@ fn collect_pattern_names(pattern: &syn::Pat, names: &mut BTreeSet<String>) {
         }
         syn::Pat::Type(pattern) => collect_pattern_names(&pattern.pat, names),
         _ => {}
+    }
+}
+
+fn collect_pattern_values(
+    pattern: &syn::Pat,
+    value: &AbstractValue,
+    values: &mut BTreeMap<String, AbstractValue>,
+) {
+    match pattern {
+        syn::Pat::Ident(pattern) => {
+            values.insert(pattern.ident.to_string(), value.clone());
+            if let Some((_, subpattern)) = &pattern.subpat {
+                collect_pattern_values(subpattern, value, values);
+            }
+        }
+        syn::Pat::Paren(pattern) => collect_pattern_values(&pattern.pat, value, values),
+        syn::Pat::Reference(pattern) => collect_pattern_values(&pattern.pat, value, values),
+        syn::Pat::Type(pattern) => collect_pattern_values(&pattern.pat, value, values),
+        syn::Pat::Tuple(pattern) => {
+            let tuple_values = match value {
+                AbstractValue::Tuple(values) => Some(values),
+                _ => None,
+            };
+            for (index, element) in pattern.elems.iter().enumerate() {
+                let value = tuple_values
+                    .and_then(|values| values.get(index))
+                    .cloned()
+                    .unwrap_or_default();
+                collect_pattern_values(element, &value, values);
+            }
+        }
+        syn::Pat::Slice(pattern) => {
+            let element_values = match value {
+                AbstractValue::Iterable(values) => Some(values),
+                _ => None,
+            };
+            for (index, element) in pattern.elems.iter().enumerate() {
+                let value = element_values
+                    .and_then(|values| values.get(index))
+                    .cloned()
+                    .unwrap_or_default();
+                collect_pattern_values(element, &value, values);
+            }
+        }
+        syn::Pat::Or(pattern) => {
+            for case in &pattern.cases {
+                collect_pattern_values(case, value, values);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn pattern_matches_bool(pattern: &syn::Pat, value: bool) -> Option<bool> {
+    match pattern {
+        syn::Pat::Lit(pattern) => match &pattern.lit {
+            syn::Lit::Bool(pattern_value) => Some(pattern_value.value == value),
+            _ => Some(false),
+        },
+        syn::Pat::Wild(_) => Some(true),
+        syn::Pat::Paren(pattern) => pattern_matches_bool(&pattern.pat, value),
+        syn::Pat::Reference(pattern) => pattern_matches_bool(&pattern.pat, value),
+        syn::Pat::Type(pattern) => pattern_matches_bool(&pattern.pat, value),
+        syn::Pat::Or(pattern) => {
+            let matches = pattern
+                .cases
+                .iter()
+                .map(|case| pattern_matches_bool(case, value))
+                .collect::<Vec<_>>();
+            if matches.contains(&Some(true)) {
+                Some(true)
+            } else if matches.iter().all(|matches| *matches == Some(false)) {
+                Some(false)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+fn pattern_can_match_value(pattern: &syn::Pat, value: &AbstractValue) -> bool {
+    match value {
+        AbstractValue::Bool(value) => pattern_matches_bool(pattern, *value) != Some(false),
+        _ => true,
+    }
+}
+
+fn value_has_definite_pattern_match(pattern: &syn::Pat, value: &AbstractValue) -> bool {
+    match value {
+        AbstractValue::Bool(value) => pattern_matches_bool(pattern, *value) == Some(true),
+        _ => false,
     }
 }
 
@@ -1869,11 +2478,13 @@ fn inspect_source(path: &str, source: &str) -> Result<Vec<Finding>, syn::Error> 
 
 fn inspect_parsed_sources(sources: &[ParsedSource]) -> Vec<Finding> {
     let mut imports = ImportMap::new();
+    let mut type_aliases = TypeAliasMap::new();
     for source in sources {
         let mut collector = ImportCollector {
             unit: &source.unit,
             module: source.base_module.clone(),
             imports: &mut imports,
+            type_aliases: &mut type_aliases,
         };
         collector.visit_file(&source.file);
     }
@@ -1886,6 +2497,7 @@ fn inspect_parsed_sources(sources: &[ParsedSource]) -> Vec<Finding> {
             unit: &source.unit,
             module: source.base_module.clone(),
             scope: Vec::new(),
+            block_scope: Vec::new(),
             owner: None,
             imports: &imports,
             local_imports: BTreeMap::new(),
@@ -1903,8 +2515,10 @@ fn inspect_parsed_sources(sources: &[ParsedSource]) -> Vec<Finding> {
             unit: &source.unit,
             module: source.base_module.clone(),
             scope: Vec::new(),
+            block_scope: Vec::new(),
             owner: None,
             imports: &imports,
+            type_aliases: &type_aliases,
             function_inventory: &function_inventory,
             receiver_methods: &receiver_methods,
             macro_stages: &macro_stages,
@@ -3482,6 +4096,315 @@ fn if_let_pattern_binding_shadows_an_outer_callable_alias() {
         inspect_source("if_let_pattern_shadow.rs", source)
             .unwrap()
             .is_empty()
+    );
+}
+
+#[test]
+fn branch_result_callable_aliases_cannot_bypass_the_guard() {
+    let source = r#"
+        fn from_if(select_type: bool, exprs: &[Expr], checked: &CheckedProgram) {
+            let stage = if select_type {
+                chelis_types::check_ir_program
+            } else {
+                chelis_effects::check_program
+            };
+            stage(exprs);
+            chelis_ir::try_lower_program(checked);
+        }
+        fn from_match(goal: Goal, exprs: &[Expr], checked: &CheckedProgram) {
+            let stage = match goal {
+                Goal::Type => chelis_types::check_ir_program,
+                Goal::Effects => chelis_effects::check_program,
+            };
+            stage(exprs);
+            chelis_ir::try_lower_program(checked);
+        }
+        fn direct(select_type: bool, exprs: &[Expr], checked: &CheckedProgram) {
+            (if select_type {
+                chelis_types::check_ir_program
+            } else {
+                chelis_effects::check_program
+            })(exprs);
+            chelis_ir::try_lower_program(checked);
+        }
+        fn invoke(stage: fn(&[Expr]), exprs: &[Expr]) {
+            stage(exprs);
+        }
+        fn higher_order(select_type: bool, exprs: &[Expr], checked: &CheckedProgram) {
+            invoke(
+                if select_type {
+                    chelis_types::check_ir_program
+                } else {
+                    chelis_effects::check_program
+                },
+                exprs,
+            );
+            chelis_ir::try_lower_program(checked);
+        }
+    "#;
+    assert_eq!(
+        inspect_source("branch_result_callable.rs", source)
+            .unwrap()
+            .into_iter()
+            .map(|finding| finding.function)
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([
+            "direct".to_string(),
+            "from_if".to_string(),
+            "from_match".to_string(),
+            "higher_order".to_string(),
+        ])
+    );
+}
+
+#[test]
+fn branch_result_callable_aliases_preserve_path_correlation() {
+    let source = r#"
+        fn correlated(select_type: bool, exprs: &[Expr]) {
+            let stage = if select_type {
+                chelis_types::check_ir_program(exprs);
+                chelis_types::check_ir_program
+            } else {
+                chelis_effects::check_program(exprs);
+                chelis_effects::check_program
+            };
+            stage(exprs);
+        }
+    "#;
+    assert!(
+        inspect_source("branch_result_correlation.rs", source)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn known_callable_iterable_elements_cannot_bypass_the_guard() {
+    let source = r#"
+        fn duplicate(exprs: &[Expr]) {
+            let stages: [fn(&[Expr]); 2] = [
+                chelis_types::check_ir_program,
+                chelis_effects::check_program,
+            ];
+            for stage in stages {
+                stage(exprs);
+            }
+        }
+    "#;
+    assert_eq!(
+        inspect_source("callable_iterable.rs", source)
+            .unwrap()
+            .into_iter()
+            .map(|finding| finding.function)
+            .collect::<Vec<_>>(),
+        ["duplicate"]
+    );
+}
+
+#[test]
+fn extern_crate_aliases_preserve_full_import_targets() {
+    let source = r#"
+        extern crate chelis_types as types;
+        extern crate remote as external;
+        fn duplicate(exprs: &[Expr]) {
+            types::check_ir_program(exprs);
+            chelis_effects::check_program(exprs);
+        }
+        fn unrelated(exprs: &[Expr]) {
+            chelis_effects::check_program(exprs);
+            external::check_ir_program(exprs);
+        }
+    "#;
+    assert_eq!(
+        inspect_source("extern_crate_alias.rs", source)
+            .unwrap()
+            .into_iter()
+            .map(|finding| finding.function)
+            .collect::<Vec<_>>(),
+        ["duplicate"]
+    );
+}
+
+#[test]
+fn local_receiver_type_aliases_resolve_method_owners() {
+    let source = r#"
+        struct Driver;
+        impl Driver {
+            fn invoke(&self, stage: fn(&[Expr]), exprs: &[Expr]) {
+                stage(exprs);
+            }
+        }
+        mod helpers {
+            pub struct Driver;
+            impl Driver {
+                pub fn invoke(&self, stage: fn(&[Expr]), exprs: &[Expr]) {
+                    stage(exprs);
+                }
+            }
+            pub type DriverAlias = Driver;
+        }
+        use helpers::DriverAlias as ImportedDriverAlias;
+        type DriverAlias = Driver;
+        type RemoteAlias = Remote;
+        fn duplicate(driver: &DriverAlias, exprs: &[Expr]) {
+            driver.invoke(chelis_types::check_ir_program, exprs);
+            chelis_effects::check_program(exprs);
+        }
+        fn imported_duplicate(driver: &ImportedDriverAlias, exprs: &[Expr]) {
+            driver.invoke(chelis_types::check_ir_program, exprs);
+            chelis_effects::check_program(exprs);
+        }
+        fn qualified_duplicate(driver: &helpers::DriverAlias, exprs: &[Expr]) {
+            driver.invoke(chelis_types::check_ir_program, exprs);
+            chelis_effects::check_program(exprs);
+        }
+        fn unrelated(remote: &RemoteAlias, exprs: &[Expr]) {
+            remote.invoke(chelis_types::check_ir_program, exprs);
+            chelis_effects::check_program(exprs);
+        }
+    "#;
+    assert_eq!(
+        inspect_source("receiver_type_alias.rs", source)
+            .unwrap()
+            .into_iter()
+            .map(|finding| finding.function)
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([
+            "duplicate".to_string(),
+            "imported_duplicate".to_string(),
+            "qualified_duplicate".to_string(),
+        ])
+    );
+}
+
+#[test]
+fn nested_macro_definitions_restore_the_outer_lexical_scope() {
+    let source = r#"
+        fn unrelated_outer(exprs: &[Expr]) {
+            macro_rules! stage { ($e:expr) => { remote::inspect($e) }; }
+            {
+                macro_rules! stage { ($e:expr) => { chelis_types::check_ir_program($e) }; }
+            }
+            stage!(exprs);
+            chelis_effects::check_program(exprs);
+        }
+        fn canonical_outer(exprs: &[Expr]) {
+            macro_rules! stage { ($e:expr) => { chelis_types::check_ir_program($e) }; }
+            {
+                macro_rules! stage { ($e:expr) => { remote::inspect($e) }; }
+                stage!(exprs);
+            }
+            stage!(exprs);
+            chelis_effects::check_program(exprs);
+        }
+    "#;
+    assert_eq!(
+        inspect_source("nested_macro_scope.rs", source)
+            .unwrap()
+            .into_iter()
+            .map(|finding| finding.function)
+            .collect::<Vec<_>>(),
+        ["canonical_outer"]
+    );
+}
+
+#[test]
+fn enclosing_block_macro_is_visible_to_a_nested_function() {
+    let source = r#"
+        fn outer() {
+            macro_rules! stage { ($e:expr) => { chelis_types::check_ir_program($e) }; }
+            fn duplicate(exprs: &[Expr]) {
+                stage!(exprs);
+                chelis_effects::check_program(exprs);
+            }
+        }
+    "#;
+    assert_eq!(
+        inspect_source("nested_function_macro_scope.rs", source)
+            .unwrap()
+            .into_iter()
+            .map(|finding| finding.function)
+            .collect::<Vec<_>>(),
+        ["duplicate"]
+    );
+}
+
+#[test]
+fn invariant_loop_conditions_do_not_create_impossible_stage_paths() {
+    let source = r#"
+        fn literal(exprs: &[Expr]) {
+            while remote::again() {
+                if true {
+                    chelis_types::check_ir_program(exprs);
+                } else {
+                    chelis_effects::check_program(exprs);
+                }
+            }
+        }
+        fn immutable(exprs: &[Expr]) {
+            let select_type = true;
+            while remote::again() {
+                if select_type {
+                    chelis_types::check_ir_program(exprs);
+                } else {
+                    chelis_effects::check_program(exprs);
+                }
+            }
+        }
+        fn literal_match(exprs: &[Expr], values: &[Value]) {
+            for _value in values {
+                match true {
+                    true => chelis_types::check_ir_program(exprs),
+                    false => chelis_effects::check_program(exprs),
+                }
+            }
+        }
+    "#;
+    assert!(
+        inspect_source("invariant_loop_conditions.rs", source)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn known_finite_for_loops_preserve_iteration_count_and_values() {
+    let source = r#"
+        fn zero(exprs: &[Expr]) {
+            for select_type in [] {
+                if select_type {
+                    chelis_types::check_ir_program(exprs);
+                } else {
+                    chelis_effects::check_program(exprs);
+                }
+            }
+        }
+        fn one(exprs: &[Expr]) {
+            for select_type in [true] {
+                if select_type {
+                    chelis_types::check_ir_program(exprs);
+                } else {
+                    chelis_effects::check_program(exprs);
+                }
+            }
+        }
+        fn two(exprs: &[Expr]) {
+            for select_type in [true, false] {
+                if select_type {
+                    chelis_types::check_ir_program(exprs);
+                } else {
+                    chelis_effects::check_program(exprs);
+                }
+            }
+        }
+    "#;
+    assert_eq!(
+        inspect_source("finite_for_loops.rs", source)
+            .unwrap()
+            .into_iter()
+            .map(|finding| finding.function)
+            .collect::<Vec<_>>(),
+        ["two"]
     );
 }
 
