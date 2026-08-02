@@ -3142,6 +3142,31 @@ impl CEmitter {
             // The channel chelis#730 Phase 1 (census row 11) established: a
             // section C3 diagnostic, not a compiler panic. This site is
             // census row 24, not row 11.
+            let authority = match ty.precision {
+                Prim::Int8 | Prim::Int16 | Prim::Int32 | Prim::Int64 => {
+                    chelis_types::unimplemented_rejection!(
+                        691,
+                        "integer fused elementwise chains need exact integer step operators rather than libm calls"
+                    )
+                }
+                Prim::F16 | Prim::Bf16 => chelis_types::unimplemented_rejection!(
+                    729,
+                    "reduced-float fused chains need the target capability table's convert-compute-finalize kernel"
+                ),
+                Prim::F8e4m3 => chelis_types::deliberate_rejection!(
+                    "[04-DTYPE-1]",
+                    "f8e4m3 is reserved but inactive and must not reach backend emission"
+                ),
+                Prim::Bool => chelis_types::deliberate_rejection!(
+                    "[04-NUM-4]",
+                    "bool has no arithmetic width and arithmetic fused chains are rejected"
+                ),
+                Prim::String => chelis_types::unimplemented_rejection!(
+                    729,
+                    "the exhaustive target capability table has no C fused-chain string cell"
+                ),
+                Prim::F32 | Prim::F64 => unreachable!("supported fused precision"),
+            };
             return Err(Unsupported::new(
                 UnsupportedKind::Op("fused elementwise chain".to_string()),
                 format!(
@@ -3149,13 +3174,7 @@ impl CEmitter {
                     ty.precision.name()
                 ),
                 Stage::Codegen("c"),
-                chelis_types::unimplemented_rejection!(
-                    691,
-                    "the fused elementwise kernel emits float or double step variables \
-                     and libm math symbols; it supports f32 and f64 only. Cast to f32 \
-                     or f64 before the fused chain. Widening to the reduced-float and \
-                     integer dtypes is follow-on work (chelis#691)"
-                ),
+                authority,
             ));
         }
         // Element type and math-symbol precision come from the same
@@ -4509,9 +4528,9 @@ impl CEmitter {
                 ),
                 Stage::Codegen("c"),
                 chelis_types::unimplemented_rejection!(
-                    692,
+                    729,
                     "the C reduce kernels are f32-hardcoded today (WS-A1/F1); cast to f32 \
-                     before the reduction. Non-f32 widening is follow-on work (chelis#692)"
+                     before the reduction. The target capability table owns non-f32 widening"
                 ),
             ));
         }
@@ -4684,9 +4703,9 @@ impl CEmitter {
                 ),
                 Stage::Codegen("c"),
                 chelis_types::unimplemented_rejection!(
-                    692,
+                    729,
                     "the C reduce kernels are f32-hardcoded today (WS-A1/F1); cast to f32 \
-                     before the reduction. Non-f32 widening is follow-on work (chelis#692)"
+                     before the reduction. The target capability table owns non-f32 widening"
                 ),
             ));
         }
@@ -5118,9 +5137,9 @@ impl CEmitter {
                 ),
                 Stage::Codegen("c"),
                 chelis_types::unimplemented_rejection!(
-                    692,
+                    729,
                     "the C argmax/argmin kernels read f32 inputs only today (WS-A1/F1); \
-                     cast to f32 before the reduction (chelis#692)"
+                     cast to f32 before the reduction; the target capability table owns widening"
                 ),
             ));
         }

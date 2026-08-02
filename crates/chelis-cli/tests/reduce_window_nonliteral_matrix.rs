@@ -4,6 +4,8 @@
 //! with the wrong shape while `chelis check` scores 1 and eval pools
 //! correctly. With only ONE list non-literal, the emitter's length
 //! assertion (emit.rs:4509) panics the compiler instead.
+//! The site now rejects loudly; chelis#1058 owns implementing compiled
+//! runtime-valued window and stride lists.
 //!
 //! This settled the last open item (item 5) of
 //! `docs/investigations/silent_substitution_audit_backlog.md` - and unlike
