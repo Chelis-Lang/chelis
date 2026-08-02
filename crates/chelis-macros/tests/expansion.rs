@@ -33,6 +33,40 @@ def f(x: tensor[4, f32]): tensor[4, f32] = relu_ref(x)
 }
 
 #[test]
+fn parsed_deep_internal_macro_expands_from_raw_form_boundary() {
+    let deep = chelis_deep::parser::parse_str(
+        r#"(defmacro {} bump (params {} x) (app {} (var {} add) (var {} x) (lit {} 1.0)))
+(def {} f (app {} (var {} bump) (lit {} 2.0)))"#,
+    )
+    .expect("Deep internal macro fixture must stamp");
+    assert!(
+        matches!(
+            deep.first(),
+            Some(chelis_deep::Expr::BareList(elements, _))
+                if matches!(
+                    elements.first(),
+                    Some(chelis_deep::Expr::Atom(chelis_deep::Atom::Name(head), _))
+                        if head == "defmacro"
+                )
+        ),
+        "the compiler-internal macro definition must retain its recorded raw-string boundary"
+    );
+
+    let expanded = expand_program(
+        &deep,
+        &ExpansionOptions {
+            max_iterations: 100,
+            load_std_prelude: false,
+        },
+    )
+    .expect("parsed Deep macro must expand");
+    let text = print_canonical(expanded.exprs());
+    assert!(!text.contains("defmacro"), "{text}");
+    assert!(!text.contains(" bump)"), "{text}");
+    assert!(text.contains(" add)"), "{text}");
+}
+
+#[test]
 fn lexical_binding_blocks_prelude_macro_expansion() {
     let text = expand_surf(
         r#"

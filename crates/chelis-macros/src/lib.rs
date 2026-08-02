@@ -481,13 +481,14 @@ impl Scope {
 }
 
 fn extract_macro_def(expr: &Expr) -> Result<Option<MacroDef>, ExpansionError> {
-    let Expr::List(list, _) = expr else {
-        return Ok(None);
+    let kids = match expr {
+        Expr::List(list, _) if internal_tag(list) == Some("defmacro") => children(list),
+        Expr::BareList(elements, _) if bare_internal_tag(elements) == Some("defmacro") => {
+            elements.get(2..).unwrap_or(&[])
+        }
+        Expr::UnknownForm(data) if data.head == "defmacro" => data.children.as_slice(),
+        _ => return Ok(None),
     };
-    if internal_tag(list) != Some("defmacro") {
-        return Ok(None);
-    }
-    let kids = children(list);
     if kids.len() != 3 {
         return Err(ExpansionError::MalformedDefinition {
             message: "defmacro expects name, params, and body".to_string(),
@@ -498,17 +499,20 @@ fn extract_macro_def(expr: &Expr) -> Result<Option<MacroDef>, ExpansionError> {
             message: "defmacro name must be a symbol".to_string(),
         });
     };
-    let Expr::List(params_list, _) = &kids[1] else {
-        return Err(ExpansionError::MalformedDefinition {
-            message: format!("defmacro `{name}` must use `(params {{}} ...)`"),
-        });
+    let params_children = match &kids[1] {
+        Expr::List(params_list, _) if get_tag(params_list) == Some(DeepTag::Params) => {
+            children(params_list)
+        }
+        Expr::Node(params_node, _) if params_node.tag() == DeepTag::Params => {
+            params_node.children_slice()
+        }
+        _ => {
+            return Err(ExpansionError::MalformedDefinition {
+                message: format!("defmacro `{name}` must use `(params {{}} ...)`"),
+            });
+        }
     };
-    if get_tag(params_list) != Some(DeepTag::Params) {
-        return Err(ExpansionError::MalformedDefinition {
-            message: format!("defmacro `{name}` must use `(params {{}} ...)`"),
-        });
-    }
-    let params = children(params_list)
+    let params = params_children
         .iter()
         .map(|param| {
             symbol_name(param)
@@ -1096,6 +1100,15 @@ fn internal_tag(list: &List) -> Option<&str> {
     list.unknown_tag_symbol()
 }
 
+/// Parsed compiler-internal forms at a structural syntax position remain a
+/// `BareList`; recognize their raw head only at this recorded macro boundary.
+fn bare_internal_tag(elements: &[Expr]) -> Option<&str> {
+    let [Expr::Atom(Atom::Name(head), _), Expr::Map(_, _), ..] = elements else {
+        return None;
+    };
+    DeepTag::parse(head).is_none().then_some(head.as_str())
+}
+
 fn children(list: &List) -> &[Expr] {
     if list.elements.len() > 2 {
         &list.elements[2..]
@@ -1112,13 +1125,15 @@ fn symbol_name(expr: &Expr) -> Option<&str> {
 }
 
 fn var_name(expr: &Expr) -> Option<&str> {
-    let Expr::List(list, _) = expr else {
-        return None;
-    };
-    if get_tag(list) != Some(DeepTag::Var) {
-        return None;
+    match expr {
+        Expr::List(list, _) if get_tag(list) == Some(DeepTag::Var) => {
+            children(list).first().and_then(symbol_name)
+        }
+        Expr::Node(node, _) if node.tag() == DeepTag::Var => {
+            node.children_slice().first().and_then(symbol_name)
+        }
+        _ => None,
     }
-    children(list).first().and_then(symbol_name)
 }
 
 fn is_unit_list(expr: &Expr) -> bool {
