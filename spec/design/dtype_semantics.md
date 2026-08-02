@@ -795,6 +795,16 @@ Deliverables, with phase homes:
    not inspect or redesign private runtime-dtype decoding. `KNOWN_TAGS` and
    Deep stamping are outside this task entirely.
 
+   Binding-baseline dispositions (each entry is the C6 review a frozen
+   fingerprint update cites):
+
+   - 2026-08-02, chelis#816 (PRs #819/#822): `compile_and_load` gains
+     `project_root: Option<&str>, force_bare: bool` and `eval_json` gains
+     `project_root: Option<&str>` for reef-context resolution. All three
+     parameters are dtype-free control/path inputs (a filesystem path and a
+     lane selector); the enumerator classifies both rows `[]`, no numeric
+     capacity enters the surface, and no raw dtype id is introduced.
+
    Acceptance requirements, from the 2026-07-30 and 2026-07-31
    adversarial passes. Each bullet names the standing control that turns
    RED when its guard is reverted; the round-4 additions are the

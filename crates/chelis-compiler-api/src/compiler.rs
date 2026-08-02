@@ -5083,7 +5083,7 @@ def out(x: tensor[2, f32]) -> tensor[2, f32] = add(consume(x), consume(x))
             "x".to_string(),
             crate::schema::TensorValue {
                 shape: vec![2],
-                data: vec![3.0, 4.0],
+                data: crate::schema::TensorElements::F32(vec![3.0, 4.0]),
             },
         );
         let eval_result = eval_in_context_with_bindings(&context, source, bindings)
@@ -5097,7 +5097,11 @@ def out(x: tensor[2, f32]) -> tensor[2, f32] = add(consume(x), consume(x))
             ExecutionValue::Tensor { value } => value.data.clone(),
             other => panic!("expected a tensor root, got {other:?}"),
         };
-        assert_eq!(data, vec![3.0, 4.0], "identity consume(x) == x");
+        assert_eq!(
+            data,
+            crate::schema::TensorElements::F32(vec![3.0, 4.0]),
+            "identity consume(x) == x"
+        );
 
         let artifact = compile_for_execution_in_context(&context, source, CompileTarget::C, None)
             .expect("in-context compile");
