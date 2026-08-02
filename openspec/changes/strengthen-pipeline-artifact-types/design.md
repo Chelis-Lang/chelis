@@ -240,9 +240,31 @@ A focused helper that reaches one stage will remain valid. Tests will cover cros
 
 The implementation branch predates the typed Deep AST changes on `main`. The rebase will replace removed `Atom::Symbol` use with the current `Atom::Name` or typed AST accessors.
 
-The root collector will use one tagged-child view for transitional `List` values and typed `Node` values. This view preserves ordered tuple-root expansion.
+The root collector uses one tagged-child view for transitional `List` values and typed `Node` values. This view preserves ordered tuple-root expansion.
 
-The CLI will retain target `.dp` ingestion through `parse_and_stamp_file`. The compiler API wire adapter will retain the `Node::to_list` bridge.
+Strict parsing identifies unknown tags and malformed known tags in typed fallbacks. Nested structural lists remain valid.
+
+Lenient fragment parsing uses typed nodes for valid input. It retains a transitional diagnostic form if the stamp pass fails, except for a function without a body.
+
+Canonical `deftype` and `typealias` parameter lists use syntax roles. Their type bodies and variants retain their current roles.
+
+The macro expander reads compiler-internal definitions from the typed fallback. It resolves typed variable nodes at macro call sites.
+
+The CLI retains target `.dp` ingestion through `parse_and_stamp_file`. The compiler API wire adapter retains the `Node::to_list` bridge.
+
+The shared Deep verification consumers parse through the typed file boundary. A heap worklist converts the complete tree for their transitional list dispatch.
+
+These consumers include property discovery, producer obligations, constant probes, and constructor probes.
+
+The Deep validator uses one complete tagged-list view for transitional `List` and typed `Node` values. Identity checks use this view.
+
+Deep lint uses a borrowed view of both representations.
+
+The trace fixture walker visits every typed expression variant. It retains nested span IDs without a raw representation fallback.
+
+Compiler API authoring reads declaration tags, binders, and metadata from both representations. The insertion helper calculates a declaration-relative index before it applies the representation offset.
+
+Opaque-value decode collectors use one borrowed view of both representations. The field table supplies the field names for invariant evaluation.
 
 The conflict in `compiler.rs` overlaps the #912 realizability manifest observation. The conflict resolution will retain that observation around the migrated pipeline path.
 
@@ -260,6 +282,15 @@ The authoritative oracle will run only after the rebase compiles against the tar
 - **Risk: A successful empty DAG bypasses policy.** → Require an exact or selected host-backend root-binding mode.
 - **Risk: Helper composition bypasses the source guard.** → Test cross-file calls, path-specific aliases, higher-order calls, traits, and macros.
 - **Risk: Syntax creates false findings.** → Track path termination and exclude uninvoked callable bodies.
+- **Risk: A typed fallback hides an invalid Deep tag shape.** → Reject unknown and malformed tags while retaining nested structural lists.
+- **Risk: The typed stamp pass removes checker diagnostics for malformed fixtures.** → Retain the malformed fragment only at the lenient diagnostic boundary.
+- **Risk: Typed declaration roles reject canonical generic ADTs.** → Keep parameter lists as syntax and retain typed variants.
+- **Risk: Typed macro nodes hide an internal macro call.** → Read fallback definitions and typed variable callees.
+- **Risk: Typed Deep verification disappears from a list-based consumer.** → Parse through the typed boundary and bridge the complete tree.
+- **Risk: Typed Deep identity checks accept a forgery.** → Use one complete tagged-list view for both representations.
+- **Risk: Typed Deep lint or trace traversal skips a subtree.** → Visit metadata and children for each typed expression variant.
+- **Risk: Typed Deep authoring uses a raw-list insertion offset.** → Calculate the declaration index before applying the representation offset.
+- **Risk: Typed Deep decode omits invariant data.** → Collect field types, field names, invariants, and constants through one representation view.
 - **Risk: Final-name matching merges stage identities.** → Classify each stage with its owning module and function.
 - **Risk: Receiver syntax hides a higher-order helper.** → Resolve typed local receivers and test qualified-method argument positions.
 - **Risk: A loop model loses repeated stages.** → Calculate a fixed point over iteration and labeled control outcomes.

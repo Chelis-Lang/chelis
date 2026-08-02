@@ -25,6 +25,11 @@
 - [x] 1.23 Add module-identity, typed-receiver method, qualified-method, and zero-iteration loop source-guard tests.
 - [x] 1.24 Add repeated-loop, labeled-control, pattern-shadow, and imported-macro-alias source-guard tests.
 - [x] 1.25 Add branch-result, array-iterable, import-alias, type-alias, nested-macro, and stable-loop source-guard tests.
+- [x] 1.26 Lock typed Deep properties, producer verification, and identity validation in the authoritative oracle.
+- [x] 1.27 Lock typed Deep lint, declaration parsing, and trace traversal in the authoritative oracle.
+- [x] 1.28 Lock typed Deep authoring and opaque-value decode behavior in the authoritative oracle.
+- [x] 1.29 Lock strict invalid-tag rejection and nested structural-list acceptance in the authoritative oracle.
+- [x] 1.30 Lock lenient diagnostics, generic ADT parsing, and typed macro expansion in the authoritative oracle.
 
 ## 2. Edit Proof and Semantic Rejection
 
@@ -76,6 +81,13 @@
 - [x] 4.19 Classify full stage identities, resolve typed receiver methods, and preserve zero-iteration loop paths.
 - [x] 4.20 Calculate loop fixed points, track labeled control, bind branch patterns, and resolve macro imports.
 - [x] 4.21 Preserve abstract values, known array iterations, full aliases, and nested macro scopes.
+- [x] 4.22 Preserve typed Deep verification consumers through one complete transitional list bridge.
+- [x] 4.23 Preserve structural identity validation through a complete typed `Node` view.
+- [x] 4.24 Preserve Deep lint and trace traversal across complete typed `Node` values.
+- [x] 4.25 Preserve Deep authoring and opaque-value decode behavior across typed `Node` values.
+- [x] 4.26 Preserve strict invalid-tag rejection after typed fallback construction.
+- [x] 4.27 Preserve malformed checker diagnostics at the lenient fragment boundary.
+- [x] 4.28 Preserve generic ADT parsing and internal macro expansion across typed values.
 
 ## 5. Documentation and Deferred Review
 
@@ -102,6 +114,9 @@
   - The other 1,010 `chelis-types` tests passed.
 - [x] 6.10 Add the real CLI host-backend regression test to the authoritative oracle.
 - [x] 6.11 Add the raw diagnostic-offset compile-fail fixture to the authoritative oracle.
+- [x] 6.12 Run the current-target local gate and authoritative oracle after all typed Deep target corrections.
+  - The authoritative oracle passed with the expanded typed Deep and macro coverage.
+  - The local gate passed for all nine changed crates.
 
 ## 7. Adversarial Validation
 

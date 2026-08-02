@@ -21,7 +21,7 @@ The new compiler pipeline uses types for its major phases, but several public ar
 - Track repeated loops, known array loops, labeled control flow, pattern scopes, and uninvoked callable bodies as separate execution paths.
 - Preserve stable Boolean facts across loop iterations and macro definitions across nested block scopes.
 - Exclude unrelated receivers, imports, and external qualified calls that only reuse a canonical stage name.
-- Rebase onto the current typed Deep AST and preserve typed ingestion, wire output, root collection, and the realizability manifest observation.
+- Rebase onto the current typed Deep AST and preserve typed ingestion, verification, identity validation, wire output, root collection, authoring, decode, and the realizability observation.
 - Add positive tests and compile-fail tests for each construction boundary.
 - Keep all wire conversions at existing schema boundaries.
 
@@ -47,7 +47,9 @@ None.
 
 ## Impact
 
-The main changes affect `chelis-compiler-api`, `chelis-types`, `chelis-cli`, and `chelis-e2e`. Existing Rust callers of the changed public compiler API must migrate.
+The main changes affect `chelis-compiler-api`, `chelis-types`, `chelis-deep`, `chelis-macros`, `chelis-prove`, `chelis-lint`, `chelis-validate`, `chelis-cli`, and `chelis-e2e`.
+
+Existing Rust callers of the changed public compiler API must migrate.
 
 The implementation must compile against the current target branch. The migration must retain the existing #912 realizability manifest observation.
 

@@ -10,6 +10,11 @@ The scope covers these consumers:
 - caches
 - contexts
 - E2E tools
+- shared Deep verification consumers
+- the structural Deep validator
+- Deep lint and trace consumers
+- Deep authoring and opaque-value decode consumers
+- lenient Deep diagnostics and typed macro expansion
 
 Tests can call individual stages for focused evidence.
 
@@ -46,6 +51,18 @@ The CLI check paths ran inference twice. They called `check_ir_fitness` and `che
 - root metadata
 
 Adapters retain presentation and policy. The CLI retains style checks, Reef preparation, JSON, exit codes, target selection, and backend emission.
+
+Shared Deep verification consumers retain typed parser ingress. One complete transitional bridge supplies their list-based dispatch.
+
+The Deep validator uses one complete tagged-list view for transitional and typed representations.
+
+Deep lint uses the same representation discipline. Trace tests visit metadata and children in every typed expression variant.
+
+Deep authoring reads typed declaration tags, binders, and metadata. Opaque-value decode reads typed field types, invariants, constants, and field names.
+
+Valid generic ADTs retain typed declarations. The lenient fragment boundary retains malformed input for checker diagnostics.
+
+The macro expander reads internal definitions and typed variable calls.
 
 The source guard checks production functions in these trees:
 
@@ -235,6 +252,52 @@ All 65 focused source-guard tests passed after the sixth remediation. The author
 All 74 focused source-guard tests passed after the seventh remediation.
 
 The authoritative oracle passed on target `ad63fa0600737dd656a4f3ece15f43695ce89902`. The implementation commit was `d7844ae5204a31127e4de91b50f392c8622a10cd`.
+
+The current target then changed known Deep parser output from `List` to `Node`. The local gate found that the shared property runner silently skipped typed properties.
+
+A crate run also found that a constructor probe lost all accepted samples. Current `origin/main` reproduced both defects.
+
+The correction retains typed parsing and uses one heap worklist for complete transitional list conversion. Property, obligation, constant, and constructor paths use this boundary.
+
+The next local gate found that structural identity checks accepted reopened modules and reserved linker names. Current `origin/main` reproduced both failures.
+
+The validator now uses a complete view of typed `Node` values. Its nested-bind comment fixture now has the required typed arity.
+
+A full CLI run then found four more target-integration defects. Deep lint skipped typed nodes, two formatter fixtures used invalid old arity, and trace collection skipped nested node spans.
+
+Deep lint uses one borrowed representation view. Trace collection visits every typed expression variant.
+
+The formatter fixtures now use valid typed declaration arity. CLI validation retains its existing fragment diagnostics.
+
+The oracle runs typed property, verification, validation, lint, formatting, and trace tests. It also runs the CLI Deep-property parity test.
+
+The next local gate found two typed authoring failures. Authoring rejected typed declarations, and insertion used a raw-list offset for a typed module.
+
+A baseline run on current `origin/main` reproduced five authoring failures and six opaque-value decode failures.
+
+The authoring boundary now accepts both representations. The insertion helper uses a declaration-relative index and then applies the representation offset.
+
+The list-only decode collectors omitted field types, invariants, constants, and field names.
+
+Opaque-value decode now uses one borrowed representation view. Its positive, negative, and fail-closed tests pass for typed `Node` programs.
+
+The next gate found that strict parsing accepted invalid tags after typed fallback construction. The failures covered an unknown tag and a known tag without metadata.
+
+The Deep validator now reports both invalid top-level forms. Its positive control retains nested structural lists.
+
+The next gate found two generic ADT failures because the typed parser treated parameter lists as type expressions.
+
+A complete type-checker run found 12 more failures. The failures covered malformed diagnostic fixtures, unknown-tag text, and typed macro calls.
+
+Canonical ADT parameter lists now use syntax roles. The lenient fragment boundary retains malformed structures for checker diagnostics.
+
+The macro expander now reads internal fallback definitions and typed variable callees.
+
+All 1,013 `chelis-types` tests, 212 `chelis-deep` tests, six `chelis-macros` tests, and 149 `chelis-e2e` tests passed after these corrections.
+
+The expanded authoritative oracle passed after all target corrections.
+
+The current-target local gate passed for all nine changed crates.
 
 A final fresh review of the exact corrected tree remains pending.
 

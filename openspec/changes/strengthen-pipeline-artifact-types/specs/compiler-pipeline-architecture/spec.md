@@ -92,7 +92,25 @@ It SHALL use current typed name variants or typed accessors. It SHALL NOT restor
 
 Conflict resolution SHALL preserve existing target-branch compiler observations. This change SHALL retain the #912 realizability manifest observation around the migrated compile path.
 
-The migration SHALL preserve target-branch typed `.dp` ingestion and the typed `Node` wire bridge. Root collection SHALL read tags, metadata, and children from both transitional `List` values and typed `Node` values.
+The migration SHALL preserve target-branch typed `.dp` ingestion and the typed `Node` wire bridge. It SHALL preserve property verification and producer obligations for typed `Node` input.
+
+Strict Deep parsing SHALL reject unknown tags and malformed known tags after lenient stamping produces a typed fallback.
+
+Lenient Deep fragment parsing SHALL retain malformed structures for checker diagnostics. It SHALL still reject a function node without a body.
+
+Typed Deep parsing SHALL accept canonical parameter lists in `deftype` and `typealias` declarations.
+
+Typed macro expansion SHALL accept the compiler-internal `defmacro` fallback. It SHALL resolve macro calls whose variable is a typed `Node`.
+
+The Deep validator SHALL reject reopened modules and reserved linker names in typed `Node` input.
+
+Deep lint and trace consumers SHALL visit metadata and children in typed `Node` input.
+
+Compiler API authoring SHALL accept typed `Node` declarations. It SHALL insert them at the correct declaration index in typed modules.
+
+Opaque-value decoding SHALL collect field types, invariants, and constants from typed `Node` input.
+
+Root collection SHALL read tags, metadata, and children from both transitional `List` values and typed `Node` values.
 
 #### Scenario: The implementation uses a removed AST variant
 - **WHEN** the rebased pipeline refers to `Atom::Symbol` after the target branch replaced it with `Atom::Name`
@@ -106,6 +124,30 @@ The migration SHALL preserve target-branch typed `.dp` ingestion and the typed `
 - **WHEN** `.dp` input contains a bare name in a runtime expression position
 - **THEN** the CLI returns the target typed-parser error and does not format the input
 
+#### Scenario: Strict Deep parsing receives an unknown tag
+- **WHEN** `.dp` input contains a tagged form outside the closed vocabulary
+- **THEN** strict parsing rejects the input with the existing unknown-tag diagnostic
+
+#### Scenario: Strict Deep parsing receives a malformed known tag
+- **WHEN** `.dp` input omits metadata from a tag in the closed vocabulary
+- **THEN** strict parsing rejects the input with the existing metadata diagnostic
+
+#### Scenario: Lenient parsing receives a malformed checker fixture
+- **WHEN** a checker test parses a malformed type or expression fragment
+- **THEN** the checker receives the original structure and emits its existing diagnostic
+
+#### Scenario: Lenient parsing receives a function without a body
+- **WHEN** a function node contains parameters but no body
+- **THEN** parsing rejects the node before a path operation can use it
+
+#### Scenario: Typed Deep parsing receives a generic ADT
+- **WHEN** a canonical `deftype` contains a parameter list and variants
+- **THEN** typed parsing preserves the parameter list and the type checker accepts valid construction
+
+#### Scenario: Typed macro expansion receives an internal definition
+- **WHEN** lenient parsing produces a `defmacro` fallback and a typed `Node` call
+- **THEN** macro expansion substitutes the call and preserves call-site module attribution
+
 #### Scenario: Typed Deep input reaches root collection
 - **WHEN** a typed `Node` module contains a tuple-valued root declaration
 - **THEN** root collection returns the same ordered names as the transitional `List` form
@@ -113,6 +155,42 @@ The migration SHALL preserve target-branch typed `.dp` ingestion and the typed `
 #### Scenario: Typed Deep input crosses the wire boundary
 - **WHEN** a typed `Node` crosses the compiler API wire adapter
 - **THEN** the wire value preserves its tag, metadata, binders, and syntax children
+
+#### Scenario: A typed Deep property reaches the shared property runner
+- **WHEN** the CLI sends a typed `Node` property to the shared property runner
+- **THEN** the runner verifies the property and rejects malformed property metadata
+
+#### Scenario: A typed Deep opaque producer reaches verification
+- **WHEN** a typed `Node` module contains an invariant and an exported producer
+- **THEN** constructor generation and producer obligations retain their positive and negative results
+
+#### Scenario: Typed Deep input forges module identity
+- **WHEN** a typed `Node` file reopens a module or uses a reserved linker name
+- **THEN** Deep validation rejects the file with the existing identity diagnostic
+
+#### Scenario: Typed Deep input constructs an opaque value outside its module
+- **WHEN** a typed `Node` file directly constructs or updates an opaque domain value
+- **THEN** the blocking Deep lint rejects the file
+
+#### Scenario: Typed Deep input carries trace spans
+- **WHEN** a typed `Node` fixture carries span IDs in nested nodes
+- **THEN** trace collection returns every ID that the sidecar declares
+
+#### Scenario: Typed Deep authoring adds a function
+- **WHEN** compiler API authoring appends a typed declaration or inserts it after a target function
+- **THEN** the result preserves the declaration order and passes the complete module check
+
+#### Scenario: Typed Deep authoring receives a bad declaration
+- **WHEN** compiler API authoring receives a declaration with an invalid shape
+- **THEN** it rejects the request before it edits the module
+
+#### Scenario: Typed Deep decode receives an opaque value
+- **WHEN** a typed `Node` program declares an opaque type, an invariant, and a constant
+- **THEN** decode accepts a valid value and rejects a value that violates the invariant
+
+#### Scenario: Typed Deep decode receives malformed invariant metadata
+- **WHEN** a typed `Node` program declares malformed invariant metadata
+- **THEN** decode rejects the value as an invariant failure
 
 ### Requirement: Authoritative artifact-type oracle
 The existing `.venv/bin/python scripts/compiler_pipeline_oracle.py` command SHALL remain the authoritative completion oracle. It SHALL run the proof, root, semantic-outcome, checkpoint, consumer-parity, and compile-fail tests.

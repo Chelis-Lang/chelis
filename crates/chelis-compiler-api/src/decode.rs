@@ -47,8 +47,8 @@ use chelis_types::types::Prim;
 
 use crate::runtime::{
     DecodeField, DecodeFieldType, InvariantEntry, RuntimeTensorValue, RuntimeValue,
-    collect_adt_ctor_fields, collect_ctor_field_types, collect_type_invariants,
-    collect_zero_arg_constants, revalidate_adt_value,
+    collect_ctor_field_types, collect_type_invariants, collect_zero_arg_constants,
+    revalidate_adt_value,
 };
 use crate::schema::ExecutionValue;
 
@@ -108,7 +108,15 @@ pub fn try_decode_adt_value(
     payload: &ExecutionValue,
 ) -> Result<RuntimeValue, DecodeError> {
     let field_types = collect_ctor_field_types(program_exprs);
-    let adt_fields = collect_adt_ctor_fields(program_exprs);
+    let adt_fields = field_types
+        .iter()
+        .map(|(ctor, fields)| {
+            (
+                ctor.clone(),
+                fields.iter().map(|field| field.name.clone()).collect(),
+            )
+        })
+        .collect();
     let invariants = collect_type_invariants(program_exprs);
     // In-module zero-arg constants the invariant predicate may reference
     // (CR-3, RFC D-WF). Without these, a predicate using a tolerance
