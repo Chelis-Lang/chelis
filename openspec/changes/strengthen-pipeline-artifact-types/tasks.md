@@ -141,7 +141,9 @@
 - [x] 7.18 Rebase onto the current remote `main` after the target moved.
   - The target moved again after the first hosted push. The branch now uses `fe9e5a6ad35ab0c95720cbb99c184aebba55f71c`.
 - [x] 7.19 Run the authoritative oracle after the sixth remediation and target rebase.
-- [ ] 7.20 Run a final fresh local red-team agent against the exact rebased tree and require a PASS verdict.
+- [x] 7.20 Run a final fresh local red-team agent against the exact rebased tree and require a PASS verdict.
+  - A fresh local Pi subagent reviewed exact commit `2ed580dabfe3f23525f013bada28b67e04f408c6`.
+  - The review returned PASS with no implementation or specification findings.
 
 ## 8. Hosted Acceptance
 
