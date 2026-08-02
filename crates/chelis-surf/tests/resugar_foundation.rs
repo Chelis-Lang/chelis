@@ -9,7 +9,7 @@
 use chelis_deep::Expr as DeepExpr;
 use chelis_deep::parser::parse_str as parse_deep;
 use chelis_deep::printer::print_canonical;
-use chelis_surf::decompile::decompile_program;
+use chelis_surf::decompile::{decompile_program, try_decompile_program};
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::format::format_expression;
 use chelis_surf::parser::parse_str as parse_surf;
@@ -72,6 +72,119 @@ fn cast_preserves_literal_dtype_metadata_with_a_surface_suffix() {
 }
 
 #[test]
+fn cast_preserves_default_literal_dtype_metadata_with_a_surface_suffix() {
+    let deep = parse_one_deep("(cast {} (lit {type: (t-prim {} f32)} 1.25) (t-prim {} f64))");
+
+    let surf_ast = resugar_expression(&deep).expect("typed f32 literal resugars");
+    let surf = format_expression(&surf_ast);
+
+    assert_eq!(surf, "cast(1.25f32, f64)");
+    let redesugared = redesugar_expression(&surf);
+    assert!(
+        redesugared.contains("type: (t-prim {} f32)"),
+        "default literal precision must survive the round trip:\n{redesugared}"
+    );
+}
+
+#[test]
+fn supported_expression_nodes_preserve_semantic_type_metadata() {
+    for (deep_source, expected) in [
+        ("(var {type: (t-prim {} f64)} x)", "(x : f64)"),
+        (
+            "(app {type: (t-prim {} f64)} (var {} f) (var {} x))",
+            "(f(x) : f64)",
+        ),
+    ] {
+        let deep = parse_one_deep(deep_source);
+        let surf = format_expression(
+            &resugar_expression(&deep).expect("typed supported expression resugars"),
+        );
+
+        assert_eq!(surf, expected);
+        let redesugared = redesugar_expression(&surf);
+        assert!(
+            redesugared.contains("type: (t-prim {} f64)"),
+            "semantic expression type must survive the round trip:\n{redesugared}"
+        );
+    }
+}
+
+#[test]
+fn unsupported_semantic_type_metadata_fails_explicitly() {
+    let deep = parse_one_deep("(var {type: (t-adt {} Option (t-prim {} f64))} x)");
+
+    let error = resugar_expression(&deep)
+        .expect_err("the foundation must not silently discard unsupported type metadata");
+
+    assert!(
+        error
+            .to_string()
+            .contains("`t-adt` is outside the tested resugaring foundation"),
+        "unsupported semantic metadata must identify the unimplemented type form: {error}"
+    );
+}
+
+#[test]
+fn non_numeric_literal_type_metadata_resugars_when_compatible() {
+    for (deep_source, expected) in [
+        ("(lit {type: (t-prim {} bool)} true)", "true"),
+        ("(lit {type: (t-prim {} string)} \"text\")", "\"text\""),
+        ("(lit {type: (t-unit {})} ())", "()"),
+    ] {
+        let deep = parse_one_deep(deep_source);
+        let surf = format_expression(
+            &resugar_expression(&deep).expect("compatible non-numeric literal resugars"),
+        );
+
+        assert_eq!(surf, expected);
+        redesugar_expression(&surf);
+    }
+}
+
+#[test]
+fn incompatible_literal_type_metadata_is_rejected() {
+    let deep = parse_one_deep("(lit {type: (t-prim {} bool)} 1)");
+
+    let error = resugar_expression(&deep).expect_err("integer is not a bool literal");
+
+    assert!(
+        error
+            .to_string()
+            .contains("literal compatible with its primitive `type` metadata"),
+        "diagnostic should identify the literal/type mismatch: {error}"
+    );
+}
+
+#[test]
+fn int64_minimum_resugars_to_parseable_typed_surf() {
+    let deep = parse_one_deep("(lit {type: (t-prim {} int64)} -9223372036854775808)");
+
+    let surf = format_expression(&resugar_expression(&deep).expect("i64 minimum resugars"));
+
+    assert_eq!(surf, "-9223372036854775808i64");
+    let redesugared = redesugar_expression(&surf);
+    assert!(
+        redesugared.contains("type: (t-prim {} int64)"),
+        "the typed minimum must survive the round trip:\n{redesugared}"
+    );
+}
+
+#[test]
+fn names_that_canonical_surf_cannot_parse_are_rejected() {
+    for deep_source in ["(var {} if)", "(var {} bad-name)", "(var {} Upper.lower)"] {
+        let deep = parse_one_deep(deep_source);
+
+        let error = resugar_expression(&deep)
+            .expect_err("a successful resugar must never print an invalid Surf name");
+
+        assert!(
+            error.to_string().contains("not a valid Surf"),
+            "diagnostic should identify the invalid name: {error}"
+        );
+    }
+}
+
+#[test]
 fn par_resugars_through_the_canonical_surf_ast_printer() {
     let deep = parse_one_deep("(par {} (lit {} 1) (lit {} 2))");
 
@@ -127,6 +240,29 @@ fn malformed_cast_is_an_error_not_a_placeholder() {
             .to_string()
             .contains("`cast` expects exactly 2 children"),
         "diagnostic should identify the violated Deep shape: {error}"
+    );
+}
+
+#[test]
+fn public_decompiler_propagates_malformed_foundation_nodes() {
+    let malformed = parse_one_deep("(cast {} (lit {} 1.0))");
+
+    let error = try_decompile_program(std::slice::from_ref(&malformed))
+        .expect_err("fallible public boundary must propagate malformed Deep");
+    assert!(
+        error
+            .to_string()
+            .contains("`cast` expects exactly 2 children")
+    );
+
+    let displayed = decompile_program(std::slice::from_ref(&malformed));
+    assert!(
+        displayed.starts_with("-- Deep resugaring error:"),
+        "display wrapper must expose the error: {displayed}"
+    );
+    assert!(
+        !displayed.contains("= ()"),
+        "malformed Deep must never become a placeholder program: {displayed}"
     );
 }
 

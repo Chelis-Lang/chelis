@@ -77,6 +77,9 @@ pub enum TokenKind {
 
     // Literals
     Int(i64),
+    /// The one decimal magnitude that becomes representable only after a
+    /// leading minus. The optional suffix is absent or `i64`.
+    IntMinMagnitude(Option<LiteralSuffix>),
     Float(f64),
     /// Numeric literal carrying an explicit precision suffix per
     /// `spec/02-surf-syntax.md` §P10a / `spec/04-type-system.md` §5.5.

@@ -1552,7 +1552,8 @@ pub fn validate(request: ValidateRequest) -> Result<ValidateResult> {
 
 pub fn decompile(request: DecompileRequest) -> Result<DecompileResult> {
     let exprs = parse_deep(&request.source)?;
-    let surf_text = chelis_surf::decompile::decompile_program(&exprs);
+    let surf_text = chelis_surf::decompile::try_decompile_program(&exprs)
+        .map_err(|err| stage_error("decompile", err.to_string(), "resugar_error"))?;
     Ok(DecompileResult {
         surf_text: canonicalize_decompiled_surf(&surf_text)?,
     })

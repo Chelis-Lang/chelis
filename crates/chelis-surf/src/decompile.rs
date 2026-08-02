@@ -8,6 +8,8 @@ use chelis_deep::decode_effect_kind;
 use chelis_deep::{DeepTag, Span};
 use chelis_vocab::EffectKind;
 
+use crate::resugar::{ResugarError, resugar_expression};
+
 const SURF_WIDTH: usize = 80;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,6 +55,38 @@ pub fn decompile_program_with_context(
     options: &DecompileOptions,
     synthetic_name: Option<&str>,
 ) -> String {
+    match try_decompile_program_with_context(exprs, options, synthetic_name) {
+        Ok(source) => source,
+        Err(error) => format!("-- Deep resugaring error: {error}\n"),
+    }
+}
+
+/// Fallible public boundary for callers that must not turn malformed Deep
+/// into a display-only diagnostic.
+pub fn try_decompile_program(exprs: &[Expr]) -> Result<String, ResugarError> {
+    try_decompile_program_with_context(exprs, &DecompileOptions::idiomatic(), None)
+}
+
+pub fn try_decompile_program_with_context(
+    exprs: &[Expr],
+    options: &DecompileOptions,
+    synthetic_name: Option<&str>,
+) -> Result<String, ResugarError> {
+    for expr in exprs {
+        validate_foundation_emitters(expr)?;
+    }
+    Ok(decompile_program_with_context_unchecked(
+        exprs,
+        options,
+        synthetic_name,
+    ))
+}
+
+fn decompile_program_with_context_unchecked(
+    exprs: &[Expr],
+    options: &DecompileOptions,
+    synthetic_name: Option<&str>,
+) -> String {
     let normalized = normalize_nodes(exprs);
     let exprs = &normalized;
     if options.is_verbose() {
@@ -60,6 +94,58 @@ pub fn decompile_program_with_context(
     }
 
     IdiomaticDecompiler::new(*options, synthetic_name).decompile_program(exprs)
+}
+
+fn validate_foundation_emitters(expr: &Expr) -> Result<(), ResugarError> {
+    match expr {
+        Expr::Node(node, _) => {
+            if matches!(node.tag(), DeepTag::Cast | DeepTag::Par) {
+                resugar_expression(expr)?;
+                return Ok(());
+            }
+            for child in node.children_slice() {
+                validate_foundation_emitters(child)?;
+            }
+            for (_, value) in &node.meta().entries {
+                validate_foundation_emitters(value)?;
+            }
+        }
+        Expr::List(list, _) => {
+            if matches!(tag(list), Some(DeepTag::Cast | DeepTag::Par)) {
+                resugar_expression(expr)?;
+                return Ok(());
+            }
+            for child in &list.elements {
+                validate_foundation_emitters(child)?;
+            }
+        }
+        Expr::BareList(children, _) => {
+            for child in children {
+                validate_foundation_emitters(child)?;
+            }
+        }
+        Expr::Map(meta, _) => {
+            for (_, value) in &meta.entries {
+                validate_foundation_emitters(value)?;
+            }
+        }
+        Expr::MetaExpr(meta, _) => {
+            for (_, value) in &meta.entries {
+                validate_foundation_emitters(value)?;
+            }
+            validate_foundation_emitters(&meta.expr)?;
+        }
+        Expr::UnknownForm(data) => {
+            for (_, value) in &data.meta.entries {
+                validate_foundation_emitters(value)?;
+            }
+            for child in &data.children {
+                validate_foundation_emitters(child)?;
+            }
+        }
+        Expr::Atom(..) => {}
+    }
+    Ok(())
 }
 
 /// Recursively convert all `Expr::Node` to `Expr::List` for the decompiler's

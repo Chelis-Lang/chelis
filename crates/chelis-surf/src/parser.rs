@@ -1604,6 +1604,15 @@ impl Parser {
             }
             TokenKind::Minus => {
                 let tok = self.advance();
+                if let TokenKind::IntMinMagnitude(suffix) = self.peek().clone() {
+                    let magnitude = self.advance();
+                    let literal = match suffix {
+                        None => Literal::Int(i64::MIN),
+                        Some(LiteralSuffix::I64) => Literal::TypedInt(i64::MIN, LiteralSuffix::I64),
+                        Some(_) => unreachable!("lexer admits only an i64 suffix here"),
+                    };
+                    return Ok(Expr::Lit(literal, tok.span.merge(magnitude.span)));
+                }
                 let operand = self.parse_expr(13)?;
                 let span = tok.span.merge(expr_span(&operand));
                 return Ok(Expr::Unary(UnaryOp::Neg, Box::new(operand), span));

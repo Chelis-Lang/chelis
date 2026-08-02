@@ -1040,11 +1040,11 @@ fn cmd_surf(file: &Path, verbose: bool) -> Result<(), Box<dyn std::error::Error>
     if ext == "dp" {
         let deep_source = style_gate::strip_deep_lint_directive_lines(&source);
         let deep_exprs = chelis_deep::parse_and_stamp_file(&deep_source)?;
-        let surf = chelis_surf::decompile::decompile_program_with_context(
+        let surf = chelis_surf::decompile::try_decompile_program_with_context(
             &deep_exprs,
             &options,
             synthetic_name,
-        );
+        )?;
         let surf = if verbose {
             surf
         } else {
@@ -1055,11 +1055,11 @@ fn cmd_surf(file: &Path, verbose: bool) -> Result<(), Box<dyn std::error::Error>
         // For .ch files, round-trip through deep and back
         let decls = chelis_surf::parser::parse_str(&source)?;
         let deep_exprs = chelis_surf::desugar::desugar_program(&decls);
-        let surf = chelis_surf::decompile::decompile_program_with_context(
+        let surf = chelis_surf::decompile::try_decompile_program_with_context(
             &deep_exprs,
             &options,
             synthetic_name,
-        );
+        )?;
         let surf = if verbose {
             surf
         } else {

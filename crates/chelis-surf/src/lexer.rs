@@ -724,6 +724,12 @@ fn lex_number(source: &str, i: &mut usize) -> Result<Token, LexError> {
             })
         }
     } else {
+        if clean == "9223372036854775808" && matches!(suffix, None | Some(LiteralSuffix::I64)) {
+            return Ok(Token {
+                kind: TokenKind::IntMinMagnitude(suffix),
+                span: Span::new(start, *i - start),
+            });
+        }
         let val: i64 = clean.parse().map_err(|_| LexError::InvalidNumber {
             text: text.to_string(),
             offset: start,
