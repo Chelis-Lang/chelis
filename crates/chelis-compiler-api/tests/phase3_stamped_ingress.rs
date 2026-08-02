@@ -41,3 +41,27 @@ fn generic_parse_and_check_use_stamped_deep_ingress() {
     })
     .expect("well-formed Deep still parses");
 }
+
+#[test]
+fn generic_parse_wire_preserves_unknown_form_head_and_metadata() {
+    let parsed = compiler::parse(ParseRequest {
+        source_kind: SourceKind::Deep,
+        source: r#"(def {} f
+  (future-form {sentinel_meta: "keep-me"}
+    (lit {} 1)))"#
+            .to_string(),
+    })
+    .expect("unknown forms remain available for downstream diagnostics");
+
+    let wire = serde_json::to_string(&parsed.deep_ast.expect("Deep AST must be present"))
+        .expect("wire AST must serialize");
+    assert!(
+        wire.contains("future-form"),
+        "unknown head was lost: {wire}"
+    );
+    assert!(
+        wire.contains("sentinel_meta"),
+        "metadata key was lost: {wire}"
+    );
+    assert!(wire.contains("keep-me"), "metadata value was lost: {wire}");
+}

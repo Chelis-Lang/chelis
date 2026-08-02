@@ -19,8 +19,9 @@
 //! * both polarities: the dispatched tags still check cleanly on a
 //!   well-typed control program.
 
-use chelis_deep::DeepTag;
+use chelis_deep::ast::{Atom, Expr, List, MetaMap};
 use chelis_deep::parser::parse_str;
+use chelis_deep::{DeepTag, Span};
 use chelis_types::errors::CheckErrorKind;
 use chelis_types::infer_program;
 
@@ -65,11 +66,33 @@ const NO_EXPRESSION_DISPOSITION: [DeepTag; 30] = [
     DeepTag::Resource,
 ];
 
-/// Infer `(def {} f (<tag> {}))` and return the error list.
-fn errors_for_body_tag(tag: &str) -> Vec<chelis_types::errors::CheckError> {
-    let source = format!("(def {{}} f ({tag} {{}}))");
-    let exprs = parse_str(&source).expect("lenient Deep parse");
-    infer_program(&exprs).errors
+/// Inject an unchecked legacy list at the checker boundary.
+///
+/// Production parsing now enforces arity while stamping `Expr::Node`, so an
+/// empty `variant`, `field`, etc. is rejected before inference. This explicit
+/// downstream mutation keeps the exhaustive checker-dispatch oracle honest:
+/// even a legacy/programmatic carrier that bypasses the parser must fail
+/// loudly rather than reach a wildcard or silent default.
+fn errors_for_body_head(head: Atom) -> Vec<chelis_types::errors::CheckError> {
+    let span = Span::new(0, 0);
+    let body = Expr::List(
+        List {
+            elements: vec![Expr::Atom(head, span), Expr::Map(MetaMap::default(), span)],
+        },
+        span,
+    );
+    let def = Expr::List(
+        List {
+            elements: vec![
+                Expr::Atom(Atom::Tag(DeepTag::Def), span),
+                Expr::Map(MetaMap::default(), span),
+                Expr::Atom(Atom::Name("f".to_string()), span),
+                body,
+            ],
+        },
+        span,
+    );
+    infer_program(&[def]).errors
 }
 
 // ── Negative polarity: no-disposition tags are rejected loudly ──────────────
@@ -77,7 +100,7 @@ fn errors_for_body_tag(tag: &str) -> Vec<chelis_types::errors::CheckError> {
 #[test]
 fn in_vocabulary_tags_without_expression_disposition_are_rejected_loudly() {
     for tag in NO_EXPRESSION_DISPOSITION {
-        let errors = errors_for_body_tag(tag.as_str());
+        let errors = errors_for_body_head(Atom::Tag(tag));
         assert!(
             !errors.is_empty(),
             "`{}` in expression position must push a diagnostic, not be \
@@ -143,7 +166,7 @@ fn no_disposition_list_is_disjoint_and_in_vocabulary() {
 
 #[test]
 fn unknown_tag_outside_the_vocabulary_keeps_the_raw_string_loud_arm() {
-    let errors = errors_for_body_tag("bogus_wrapper");
+    let errors = errors_for_body_head(Atom::Name("bogus_wrapper".to_string()));
     let unknown_form = errors
         .iter()
         .find(|e| matches!(e.kind, CheckErrorKind::UnknownForm))
@@ -158,12 +181,30 @@ fn unknown_tag_outside_the_vocabulary_keeps_the_raw_string_loud_arm() {
     );
 }
 
-/// An untagged bare list in expression position also lands in the
-/// raw-string arm (there is no tag string to decode).
+/// An unchecked legacy list with no tag in expression position also lands
+/// in the raw-string arm. Production stamping rejects this shape earlier;
+/// the mutation proves the checker boundary still fails loudly if bypassed.
 #[test]
 fn untagged_list_in_expression_position_is_rejected_loudly() {
-    let exprs = parse_str("(def {} f ((var {} g) (var {} x)))").expect("lenient Deep parse");
-    let errors = infer_program(&exprs).errors;
+    let span = Span::new(0, 0);
+    let untagged = Expr::List(
+        List {
+            elements: vec![Expr::Atom(Atom::Bool(false), span)],
+        },
+        span,
+    );
+    let def = Expr::List(
+        List {
+            elements: vec![
+                Expr::Atom(Atom::Tag(DeepTag::Def), span),
+                Expr::Map(MetaMap::default(), span),
+                Expr::Atom(Atom::Name("f".to_string()), span),
+                untagged,
+            ],
+        },
+        span,
+    );
+    let errors = infer_program(&[def]).errors;
     assert!(
         errors
             .iter()
@@ -207,7 +248,7 @@ fn block_checks_every_child_not_only_the_last() {
 
 #[test]
 fn childless_block_is_malformed() {
-    let errors = errors_for_body_tag("block");
+    let errors = errors_for_body_head(Atom::Tag(DeepTag::Block));
     assert!(
         errors
             .iter()

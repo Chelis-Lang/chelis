@@ -538,7 +538,9 @@ pub(super) fn infer_expr_with_type_metadata_ownership(
             CheckError::new(
                 CheckErrorKind::UnknownForm,
                 format!(
-                    "unknown form `{}` has no checker disposition (typed-node boundary)",
+                    "unknown Deep tag `{}` has no checker disposition (not in the 62-tag \
+                     closed vocabulary of spec/03-deep-syntax.md; typed-node boundary; \
+                     chelis#731 [04-TOT-1])",
                     data.head
                 ),
                 vec![],

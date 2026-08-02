@@ -786,15 +786,10 @@ fn param_precision_at(fn_expr: &Expr, index: usize) -> Option<Prim> {
 }
 
 pub(super) fn extract_prim_from_type_expr(expr: &Expr) -> Option<Prim> {
-    let Expr::List(list, _) = expr else {
-        return None;
-    };
-    match tag(list) {
-        Some(DeepTag::TPrim) => children(list)
-            .first()
-            .and_then(symbol_name)
-            .and_then(prim_from_name),
-        Some(DeepTag::TTensor) => children(list).last().and_then(extract_prim_from_type_expr),
+    let (tag, kids) = tagged_children(expr)?;
+    match tag {
+        DeepTag::TPrim => kids.first().and_then(symbol_name).and_then(prim_from_name),
+        DeepTag::TTensor => kids.last().and_then(extract_prim_from_type_expr),
         _ => None,
     }
 }
@@ -952,11 +947,11 @@ fn synth_fn_expr(params: &[String], body: &Expr) -> Expr {
 }
 
 pub(super) fn var_name(expr: &Expr) -> Option<&str> {
-    let list = as_list(expr)?;
-    if tag(list) != Some(DeepTag::Var) {
+    let (tag, kids) = tagged_children(expr)?;
+    if tag != DeepTag::Var {
         return None;
     }
-    children(list).first().and_then(symbol_name)
+    kids.first().and_then(symbol_name)
 }
 
 pub(super) fn runtime_param_name(expr: &Expr) -> Option<&str> {
@@ -968,6 +963,7 @@ pub(super) fn runtime_param_name(expr: &Expr) -> Option<&str> {
             .first()
             .and_then(symbol_name)
             .or_else(|| children(list).first().and_then(symbol_name)),
+        Expr::Node(node, _) => node.children_slice().first().and_then(symbol_name),
         _ => None,
     }
 }

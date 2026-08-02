@@ -174,6 +174,37 @@ fn node_constructor_rejects_raw_vocabulary_below_its_gate() {
 }
 
 #[test]
+fn node_metadata_replacement_revalidates_before_commit() {
+    let mut node = Node::try_new(
+        DeepTag::Var,
+        MetaMap::default(),
+        vec![Expr::Atom(Atom::Name("x".to_string()), sp())],
+    )
+    .expect("clean node must construct");
+
+    let rejected = node.try_replace_meta(MetaMap {
+        entries: vec![("probe".to_string(), raw_vocabulary_form("lit"))],
+    });
+    assert!(matches!(
+        rejected,
+        Err(NodeError::RawVocabularyTag { ref raw_tag, .. }) if raw_tag == "lit"
+    ));
+    assert!(
+        node.meta().entries.is_empty(),
+        "a rejected replacement must leave the original metadata intact"
+    );
+
+    node.try_replace_meta(MetaMap {
+        entries: vec![(
+            "span".to_string(),
+            Expr::Atom(Atom::Str("source:1".to_string()), sp()),
+        )],
+    })
+    .expect("clean annotation metadata must remain writable");
+    assert_eq!(node.meta().entries.len(), 1);
+}
+
+#[test]
 fn typed_expr_constructor_produces_a_gated_node() {
     let expr = Expr::node(
         DeepTag::Lit,

@@ -797,11 +797,13 @@ fn top_level_items(exprs: &[Expr]) -> Vec<&Expr> {
 }
 
 fn collect_top_level_items<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
-    let Expr::List(list, _) = expr else {
+    let Some((tag, children)) = tagged_children(expr) else {
         return;
     };
-    if tag(list) == Some(DeepTag::Module) {
-        for child in list.elements.iter().skip(3) {
+    if tag == DeepTag::Module {
+        // Both representations expose only semantic children here: module
+        // name first, followed by declarations.
+        for child in children.iter().skip(1) {
             collect_top_level_items(child, out);
         }
         return;
@@ -979,6 +981,26 @@ fn tag(list: &List) -> Option<DeepTag> {
 fn get_meta(list: &List) -> Option<&MetaMap> {
     match list.elements.get(1) {
         Some(Expr::Map(map, _)) => Some(map),
+        _ => None,
+    }
+}
+
+/// Read a stamped node without reconstructing the deprecated `Expr::List`
+/// carrier. Decode accepts hand-authored Deep directly, so its declaration
+/// collectors must work on the parser's canonical `Expr::Node` output as
+/// well as on legacy checked-program lists during the migration.
+fn tagged_children(expr: &Expr) -> Option<(DeepTag, &[Expr])> {
+    match expr {
+        Expr::Node(node, _) => Some((node.tag(), node.children_slice())),
+        Expr::List(list, _) => Some((tag(list)?, children(list))),
+        _ => None,
+    }
+}
+
+fn tagged_meta(expr: &Expr) -> Option<&MetaMap> {
+    match expr {
+        Expr::Node(node, _) => Some(node.meta()),
+        Expr::List(list, _) => get_meta(list),
         _ => None,
     }
 }

@@ -455,7 +455,7 @@ pub fn insert_function_decls(
         });
     }
 
-    let insert_index = if let Some(target) = insert_after_function {
+    let insert_decl_index = if let Some(target) = insert_after_function {
         let resolved = resolve_function(module_exprs, target)?;
         let module = find_module(module_exprs).ok_or(InsertFunctionError::NoModule)?;
         let (_, bare_name) = split_qualified_name(&resolved.qualified_name);
@@ -473,23 +473,17 @@ pub fn insert_function_decls(
             })
             .max()
             .unwrap_or(resolved.decl_index);
-        MODULE_DECLS_START + last_bundle_decl_index + 1
+        last_bundle_decl_index + 1
     } else {
         let module = find_module(module_exprs).ok_or(InsertFunctionError::NoModule)?;
-        match module {
-            Expr::List(list, _) => list.elements.len(),
-            Expr::Node(node, _) => node.children_slice().len() + 2, // +2 for tag+meta offset
-            _ => MODULE_DECLS_START,
-        }
+        decls(module).len()
     };
 
     let mut program = module_exprs.to_vec();
-    let (_decl_offset, decl_vec) =
+    let (decl_offset, decl_vec) =
         find_module_decls_mut(&mut program).ok_or(InsertFunctionError::NoModule)?;
 
-    // insert_index was computed relative to the full List elements vec (MODULE_DECLS_START-based).
-    // For Node, decl_offset is already MODULE_DECLS_START equivalent but in the children vec
-    // context. Normalize: decl_offset is the start of decls in the vec.
+    let insert_index = decl_offset + insert_decl_index;
     for (offset, decl) in new_decls.iter().cloned().enumerate() {
         decl_vec.insert(insert_index + offset, decl);
     }

@@ -20,14 +20,16 @@
 //! Spec authority: spec/04-type-system.md §10 [04-TOT-2];
 //! spec/design/checker_totality.md §C3.
 
+mod support;
+
 use chelis_deep::Expr;
-use chelis_deep::parser::parse_str as parse_deep_lenient;
 use chelis_deep::parser::parse_str_strict as parse_deep;
 use chelis_deep::printer::print_canonical;
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str as parse_surf;
 use chelis_types::errors::CheckErrorKind;
 use chelis_types::{FitnessReport, InferResult, check_ir_fitness, check_ir_program};
+use support::parse_unchecked_legacy;
 
 const ACTIVE_CAST_TARGETS: [&str; 9] = [
     "f32", "f64", "bf16", "f16", "bool", "int8", "int16", "int32", "int64",
@@ -154,8 +156,7 @@ fn canonical_t_prim_with_an_extra_child_is_rejected_once() {
     // Deliberately lenient: strict Deep validation rejects this shape at the
     // parser boundary, while this regression owns the checker's nested cast
     // consumer when malformed Deep reaches it programmatically.
-    let deep = parse_deep_lenient(&deep_cast_program("(t-prim {} f32 extra)"))
-        .expect("malformed nested cast target must remain parseable leniently");
+    let deep = parse_unchecked_legacy(&deep_cast_program("(t-prim {} f32 extra)"));
     let report = check_ir_fitness(&deep);
     assert!(
         report.score < 1.0,

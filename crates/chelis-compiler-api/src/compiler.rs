@@ -513,7 +513,7 @@ fn parse_add_function_decls(exprs: Vec<DeepExpr>) -> Result<ParsedAddFunctionDec
     for expr in &exprs {
         let Some(tag) = deep_expr_tag(expr) else {
             return Err(add_function_decl_error(
-                "`new_decls` entries must be Deep declaration lists",
+                "`new_decls` entries must be stamped Deep declarations",
             ));
         };
         match tag {
@@ -1916,17 +1916,15 @@ fn expr_type_metadata(expr: &DeepExpr) -> Option<&DeepExpr> {
 }
 
 fn deep_expr_tag(expr: &DeepExpr) -> Option<DeepTag> {
-    match expr {
-        DeepExpr::List(list, _) => list.tag(),
-        _ => None,
-    }
+    expr.tag()
 }
 
 fn deep_decl_name(expr: &DeepExpr) -> Option<&str> {
-    let DeepExpr::List(list, _) = expr else {
-        return None;
-    };
-    list.elements.get(2).and_then(symbol_name)
+    match expr {
+        DeepExpr::Node(node, _) => node.children_slice().first().and_then(symbol_name),
+        DeepExpr::List(list, _) => list.elements.get(2).and_then(symbol_name),
+        _ => None,
+    }
 }
 
 fn deep_def_is_function(expr: &DeepExpr) -> bool {
@@ -1934,14 +1932,16 @@ fn deep_def_is_function(expr: &DeepExpr) -> bool {
 }
 
 fn deep_def_has_role(expr: &DeepExpr, expected: &str) -> bool {
-    let DeepExpr::List(list, _) = expr else {
+    if deep_expr_tag(expr) != Some(DeepTag::Def) {
         return false;
     };
-    if list_tag(list) != Some(DeepTag::Def) {
-        return false;
-    }
-    let Some(DeepExpr::Map(meta, _)) = list.elements.get(1) else {
-        return false;
+    let meta = match expr {
+        DeepExpr::Node(node, _) => node.meta(),
+        DeepExpr::List(list, _) => match list.elements.get(1) {
+            Some(DeepExpr::Map(meta, _)) => meta,
+            _ => return false,
+        },
+        _ => return false,
     };
     meta.entries.iter().any(|(key, value)| {
         key == "chelis_role"
@@ -3437,12 +3437,41 @@ fn wire_deep_expr(expr: &DeepExpr) -> WireDeepExpr {
             },
             span: Some(span(*s)),
         },
-        DeepExpr::UnknownForm(data) => WireDeepExpr {
-            kind: WireDeepExprKind::List {
-                elements: data.children.iter().map(wire_deep_expr).collect(),
-            },
-            span: Some(span(data.span)),
-        },
+        DeepExpr::UnknownForm(data) => {
+            // Unknown forms retain the same canonical list-shaped wire
+            // representation as known nodes: head, metadata, then children.
+            // Dropping either of the first two elements erases the identity
+            // and diagnostic context that UnknownForm exists to preserve.
+            let wire_span = Some(span(data.span));
+            let mut elements = Vec::with_capacity(data.children.len() + 2);
+            elements.push(WireDeepExpr {
+                kind: WireDeepExprKind::Atom {
+                    atom: WireDeepAtom::Symbol {
+                        value: data.head.clone(),
+                    },
+                },
+                span: wire_span,
+            });
+            elements.push(WireDeepExpr {
+                kind: WireDeepExprKind::Map {
+                    entries: data
+                        .meta
+                        .entries
+                        .iter()
+                        .map(|(key, value)| WireMetaEntry {
+                            key: key.clone(),
+                            value: wire_deep_expr(value),
+                        })
+                        .collect(),
+                },
+                span: wire_span,
+            });
+            elements.extend(data.children.iter().map(wire_deep_expr));
+            WireDeepExpr {
+                kind: WireDeepExprKind::List { elements },
+                span: wire_span,
+            }
+        }
     }
 }
 

@@ -134,6 +134,30 @@ impl Expander {
                 let bridged = Expr::List(node.to_list(*span), *span);
                 self.expand_expr(&bridged, macros, scope)
             }
+            Expr::UnknownForm(data) if data.head == "macro-invoke" => {
+                // `macro-invoke` deliberately lives outside the public Deep
+                // vocabulary. The stamped parser preserves it as an
+                // `UnknownForm`; reconstruct only this compiler-internal
+                // boundary shape for the macro pass.
+                let mut elements = vec![
+                    Expr::Atom(Atom::Name(data.head.clone()), data.span),
+                    Expr::Map(data.meta.clone(), data.span),
+                ];
+                elements.extend(data.children.clone());
+                self.expand_expr(&Expr::List(List { elements }, data.span), macros, scope)
+            }
+            Expr::BareList(elements, span) if matches!(elements.first(), Some(Expr::Atom(Atom::Name(head), _)) if head == "macro-invoke") => {
+                self.expand_expr(
+                    &Expr::List(
+                        List {
+                            elements: elements.clone(),
+                        },
+                        *span,
+                    ),
+                    macros,
+                    scope,
+                )
+            }
             Expr::BareList(_, _) | Expr::UnknownForm(_) => Ok(expr.clone()),
             Expr::MetaExpr(meta, span) => Ok(Expr::MetaExpr(
                 MetaExpr {
@@ -481,13 +505,17 @@ impl Scope {
 }
 
 fn extract_macro_def(expr: &Expr) -> Result<Option<MacroDef>, ExpansionError> {
-    let Expr::List(list, _) = expr else {
-        return Ok(None);
+    let kids = match expr {
+        Expr::List(list, _) if internal_tag(list) == Some("defmacro") => children(list),
+        Expr::BareList(elements, _)
+            if matches!(elements.first(), Some(Expr::Atom(Atom::Name(head), _)) if head == "defmacro")
+                && matches!(elements.get(1), Some(Expr::Map(..))) =>
+        {
+            &elements[2..]
+        }
+        Expr::UnknownForm(data) if data.head == "defmacro" => data.children.as_slice(),
+        _ => return Ok(None),
     };
-    if internal_tag(list) != Some("defmacro") {
-        return Ok(None);
-    }
-    let kids = children(list);
     if kids.len() != 3 {
         return Err(ExpansionError::MalformedDefinition {
             message: "defmacro expects name, params, and body".to_string(),
@@ -498,17 +526,17 @@ fn extract_macro_def(expr: &Expr) -> Result<Option<MacroDef>, ExpansionError> {
             message: "defmacro name must be a symbol".to_string(),
         });
     };
-    let Expr::List(params_list, _) = &kids[1] else {
+    let Some((params_tag, param_kids)) = tagged_children(&kids[1]) else {
         return Err(ExpansionError::MalformedDefinition {
             message: format!("defmacro `{name}` must use `(params {{}} ...)`"),
         });
     };
-    if get_tag(params_list) != Some(DeepTag::Params) {
+    if params_tag != DeepTag::Params {
         return Err(ExpansionError::MalformedDefinition {
             message: format!("defmacro `{name}` must use `(params {{}} ...)`"),
         });
     }
-    let params = children(params_list)
+    let params = param_kids
         .iter()
         .map(|param| {
             symbol_name(param)
@@ -1087,6 +1115,14 @@ fn get_tag(list: &List) -> Option<DeepTag> {
     list.tag()
 }
 
+fn tagged_children(expr: &Expr) -> Option<(DeepTag, &[Expr])> {
+    match expr {
+        Expr::Node(node, _) => Some((node.tag(), node.children_slice())),
+        Expr::List(list, _) => Some((get_tag(list)?, children(list))),
+        _ => None,
+    }
+}
+
 /// Compiler-internal pre-expansion tags (`defmacro` / `macro-invoke`)
 /// are deliberately outside the public vocabulary (spec/03 macro
 /// boundary rule) and remain symbol-headed; this is the macro layer's
@@ -1112,13 +1148,11 @@ fn symbol_name(expr: &Expr) -> Option<&str> {
 }
 
 fn var_name(expr: &Expr) -> Option<&str> {
-    let Expr::List(list, _) = expr else {
-        return None;
-    };
-    if get_tag(list) != Some(DeepTag::Var) {
+    let (tag, kids) = tagged_children(expr)?;
+    if tag != DeepTag::Var {
         return None;
     }
-    children(list).first().and_then(symbol_name)
+    kids.first().and_then(symbol_name)
 }
 
 fn is_unit_list(expr: &Expr) -> bool {

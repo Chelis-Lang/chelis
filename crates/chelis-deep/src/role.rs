@@ -86,7 +86,18 @@ pub fn child_stamp_role(tag: DeepTag, index: usize, _arity: usize) -> ChildStamp
                 Type
             }
         }
-        DeepTag::Deftype | DeepTag::Typealias | DeepTag::Variant | DeepTag::Field => {
+        DeepTag::Deftype | DeepTag::Typealias => {
+            if index == 0 {
+                Binder
+            } else if index == 1 {
+                // `(type-params...)` is a structural binder list, not a
+                // type expression with a decodable vocabulary head.
+                Binder
+            } else {
+                Type
+            }
+        }
+        DeepTag::Variant | DeepTag::Field => {
             if index == 0 {
                 Binder
             } else {

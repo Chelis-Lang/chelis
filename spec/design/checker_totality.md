@@ -730,10 +730,20 @@ the gated carrier, rejects raw vocabulary forms recursively at public `Node`
 construction, recurses the validator and raw-tag oracle through `Node`
 metadata/children plus `BareList` and `UnknownForm`, and routes the generic
 compiler API Deep source path through `parse_and_stamp_file`. Its expanded
-executable oracle locks those repairs and their positive controls. The parser
-and typed producer now emit the gated carrier, while the legacy `List` variant,
-consumer bridge, and mutating authoring normalization remain active; stacked
-follow-up work owns the read-only authoring API cut. The transitional checker
+executable oracle locks those repairs and their positive controls. Public
+metadata replacement is validate-before-commit so callers cannot reopen the
+raw-vocabulary domain after construction, and generic Deep wire output retains
+an `UnknownForm`'s head, metadata, and children. The parser and typed producer
+now emit the gated carrier; the role table keeps the explicit
+`deftype`/`typealias` parameter list structural while stamping their actual
+type-expression children. The hand-authored-Deep decode collectors read
+stamped declaration/type children directly, and the pre-expansion macro layer
+recognizes its two deliberately out-of-vocabulary internal forms after syntax
+stamping. Checker-totality mutations that deliberately bypass the constructor
+now do so through an explicitly test-only raw-to-legacy adapter; ordinary
+positive coverage continues through the production stamped parser. The legacy
+`List` variant, consumer bridge, and mutating authoring normalization remain
+active; stacked follow-up work owns the read-only authoring API cut. The transitional checker
 normalization uses an explicit heap worklist before its guarded walkers, and
 the depth-oracle harness tears down its owned deep fixture on a fresh
 production-sized grown segment. The WI-1 covered-or-rejected tests therefore

@@ -182,10 +182,16 @@ impl Node {
         &self.meta
     }
 
-    /// Mutable access to metadata (for annotation passes that add
-    /// type/span info without rebuilding the node).
-    pub fn meta_mut(&mut self) -> &mut MetaMap {
-        &mut self.meta
+    /// Replace metadata only after revalidating the complete node.
+    ///
+    /// The replacement is transactional: validation failure leaves the
+    /// original metadata untouched. Public callers never receive a mutable
+    /// reference that could reopen the raw-vocabulary domain after
+    /// construction (chelis#731 Phase 3).
+    pub fn try_replace_meta(&mut self, meta: MetaMap) -> Result<(), NodeError> {
+        Self::validate(self.tag, &meta, &self.children)?;
+        self.meta = meta;
+        Ok(())
     }
 
     /// Number of children.

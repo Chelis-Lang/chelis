@@ -12,9 +12,12 @@
 //! spec/04-type-system.md §10 [04-TOT-2];
 //! spec/design/checker_totality.md §C3.1.
 
+mod support;
+
 use chelis_types::errors::CheckErrorKind;
 use chelis_types::types::Type;
 use chelis_types::{build_type_env_from_library, check_ir_program, check_ir_with_context};
+use support::parse_unchecked_legacy;
 
 fn parse(source: &str) -> Vec<chelis_deep::Expr> {
     // Deliberately lenient: the checker owns the fail-closed diagnostic for an
@@ -77,6 +80,30 @@ fn assert_one_type_resolution_error(source: &str, needle: &str, label: &str) {
     assert!(
         error.span_offset.is_some() || error.span_id.is_some(),
         "{label}: the owning Deep type use site must provide a stable location: {error:?}"
+    );
+}
+
+fn assert_one_unchecked_type_resolution_error(source: &str, needle: &str, label: &str) {
+    let exprs = parse_unchecked_legacy(source);
+    let result =
+        check_ir_program(&exprs).expect_err("unchecked malformed Deep type must fail the checker");
+    assert_eq!(
+        result.errors.len(),
+        1,
+        "{label}: a nested type failure must report once without a cascade: {:?}",
+        result.errors
+    );
+    let error = &result.errors[0];
+    assert!(
+        matches!(
+            error.kind,
+            CheckErrorKind::TypeMismatch | CheckErrorKind::MalformedForm
+        ),
+        "{label}: expected a type-resolution diagnostic, got {error:?}"
+    );
+    assert!(
+        error.message.contains(needle),
+        "{label}: diagnostic must name `{needle}`, got {error:?}"
     );
 }
 
@@ -382,7 +409,7 @@ fn malformed_nested_type_and_dimension_forms_report_once_without_drops() {
     ];
 
     for (source, needle, label) in cases {
-        assert_one_type_resolution_error(&source, needle, label);
+        assert_one_unchecked_type_resolution_error(&source, needle, label);
     }
 }
 
@@ -419,13 +446,13 @@ fn malformed_canonical_primitive_reports_once_at_every_type_consumer() {
     ];
 
     for (source, label) in cases {
-        assert_one_type_resolution_error(&source, "t-prim", label);
+        assert_one_unchecked_type_resolution_error(&source, "t-prim", label);
     }
 }
 
 #[test]
 fn independent_rhs_and_malformed_let_ascription_each_report_once() {
-    let exprs = parse(
+    let exprs = parse_unchecked_legacy(
         "(def {} bad
            (let {} (bind {} value
              (var {type: (t-prim {} f32 extra)} missing))
@@ -463,7 +490,7 @@ fn independent_rhs_and_malformed_let_ascription_each_report_once() {
 
 #[test]
 fn prebound_failure_is_owned_by_its_exact_duplicate_name_declaration() {
-    let exprs = parse(
+    let exprs = parse_unchecked_legacy(
         "(def {} duplicate (var {} missing))
          (def {} duplicate (lit {type: (t-prim {} f32 extra)} 1.0))",
     );

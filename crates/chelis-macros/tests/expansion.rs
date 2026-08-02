@@ -18,6 +18,34 @@ fn assert_contains_var_ref(text: &str, name: &str) {
 }
 
 #[test]
+fn parsed_internal_macro_forms_expand_after_typed_stamping() {
+    let parsed = chelis_deep::parser::parse_str(
+        "(defmacro {} identity (params {} x) (var {} x))\n\
+         (def {} f (fn {} (params {}) (app {} (var {} identity) (lit {} 1))))",
+    )
+    .expect("internal macro fixture stamps");
+    assert!(
+        matches!(&parsed[0], chelis_deep::Expr::BareList(elements, _) if
+            matches!(elements.first(), Some(chelis_deep::Expr::Atom(
+                chelis_deep::ast::Atom::Name(head), _)) if head == "defmacro")),
+        "the syntax-position parser must preserve the internal macro definition boundary: {:#?}",
+        parsed[0],
+    );
+
+    let expanded = expand_program(&parsed, &ExpansionOptions::default()).expect("macro expansion");
+    let text = print_canonical(expanded.exprs());
+    assert_eq!(expanded.expansions(), 1, "exactly one macro call expands");
+    assert!(
+        !text.contains("defmacro"),
+        "definition must be consumed: {text}"
+    );
+    assert!(
+        text.contains("(lit {source: (identity (lit {} 1))} 1)"),
+        "expanded argument and source attribution survive: {text}"
+    );
+}
+
+#[test]
 fn simple_macro_expands_to_base_tags_with_source_metadata() {
     let text = expand_surf(
         r#"

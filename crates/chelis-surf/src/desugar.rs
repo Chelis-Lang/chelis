@@ -305,9 +305,11 @@ fn attach_span_metadata(expr: deep::Expr, span: Span) -> deep::Expr {
 
     match expr {
         deep::Expr::Node(mut node, node_span) => {
-            let meta = node.meta_mut();
+            let mut meta = node.meta().clone();
             meta.entries.retain(|(key, _)| key != "span");
             meta.entries.push(entry);
+            node.try_replace_meta(meta)
+                .expect("span annotation must preserve the stamped Node invariant");
             deep::Expr::Node(node, node_span)
         }
         deep::Expr::List(list, list_span) => {
@@ -480,9 +482,11 @@ fn typed_param_needs_meta_wrapper(name: &str) -> bool {
 fn inject_type_metadata(expr: deep::Expr, ty: deep::Expr) -> deep::Expr {
     match expr {
         deep::Expr::Node(mut node, span) => {
-            let meta = node.meta_mut();
+            let mut meta = node.meta().clone();
             meta.entries.retain(|(key, _)| key != "type");
             meta.entries.push(("type".to_string(), ty));
+            node.try_replace_meta(meta)
+                .expect("type annotation must preserve the stamped Node invariant");
             deep::Expr::Node(node, span)
         }
         deep::Expr::List(list, span) => {
@@ -531,8 +535,10 @@ fn apply_effect_metadata(ty_expr: deep::Expr, effects: &Option<Vec<EffectExpr>>)
         // "no annotation" when validating declared vs inferred effects.
         (Some(effects), deep::Expr::Node(mut node, span)) => {
             if node.tag() == DeepTag::TFn {
-                let meta = node.meta_mut();
+                let mut meta = node.meta().clone();
                 meta.entries = vec![("eff".to_string(), desugar_effect_set(effects))];
+                node.try_replace_meta(meta)
+                    .expect("effect annotation must preserve the stamped Node invariant");
             }
             deep::Expr::Node(node, span)
         }
