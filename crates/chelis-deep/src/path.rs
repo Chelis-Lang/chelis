@@ -114,8 +114,12 @@ impl DeepPath {
         Ok(current)
     }
 
-    /// Resolve this path to a mutable reference, starting at a `(def ...)`
-    /// node.
+    /// Resolve this path to a mutable reference in the deprecated legacy
+    /// List carrier.
+    ///
+    /// Stamped [`Expr::Node`] values reject mutable borrowing: successor
+    /// nodes must be rewritten through a transactional API that revalidates
+    /// the complete candidate before commit.
     pub fn resolve_mut<'a>(&self, def: &'a mut Expr) -> Result<&'a mut Expr, PathError> {
         let mut current = def;
         for (depth, segment) in self.segments.iter().enumerate() {
@@ -173,6 +177,9 @@ fn step_mut<'a>(
             if !is_tagged(node, DeepTag::Def) {
                 return Err(PathError::NotAtDef { depth });
             }
+            if matches!(node, Expr::Node(..)) {
+                return Err(PathError::StampedNodeNeedsTransactionalRewrite { depth });
+            }
             function_body_mut(node).ok_or(PathError::BodyNeedsFnAddressing { depth })
         }
         PathSegment::Child(index) => match node {
@@ -185,15 +192,7 @@ fn step_mut<'a>(
                         index: element_index,
                     })
             }
-            Expr::Node(n, _) => {
-                let element_index = 2 + index;
-                n.children_slice_mut()
-                    .get_mut(*index)
-                    .ok_or(PathError::OutOfBounds {
-                        depth,
-                        index: element_index,
-                    })
-            }
+            Expr::Node(..) => Err(PathError::StampedNodeNeedsTransactionalRewrite { depth }),
             _ => Err(PathError::NotAList { depth }),
         },
     }
@@ -221,6 +220,11 @@ pub enum PathError {
     /// A computed element index was out of bounds at the given path depth.
     #[error("path step {depth}: child index {index} is out of bounds")]
     OutOfBounds { depth: usize, index: usize },
+
+    /// Mutable references into a validated successor Node would bypass its
+    /// constructor invariant.
+    #[error("path step {depth}: stamped nodes require a transactional rewrite")]
+    StampedNodeNeedsTransactionalRewrite { depth: usize },
 }
 
 /// A located function definition within a module.
@@ -291,6 +295,10 @@ pub enum ResolveError {
     /// instead of indexing past the end of the fn node.
     #[error("function `{name}` has no body to address while resolving `{searched}`")]
     MalformedFunction { searched: String, name: String },
+
+    /// A candidate rewrite violated the validated successor carrier.
+    #[error("invalid stamped rewrite while resolving `{searched}`: {message}")]
+    InvalidStampedRewrite { searched: String, message: String },
 }
 
 /// Find a top-level function definition by a module-qualified name and
@@ -395,18 +403,23 @@ pub fn splice_function_body(
     let resolved = resolve_function(module_exprs, qualified_name)?;
     let mut program = module_exprs.to_vec();
 
-    let (decl_offset, decl_vec) =
-        find_module_decls_mut(&mut program).ok_or_else(|| ResolveError::NoModule {
-            searched: qualified_name.to_string(),
-        })?;
-
-    // Declarations live at decl_offset..; the resolved decl_index is relative.
-    let def = decl_vec
-        .get_mut(decl_offset + resolved.decl_index)
-        .expect("resolve_function returned an in-range decl index");
-
-    let body_slot = function_body_mut(def).expect("resolved function has a body slot");
-    *body_slot = new_body;
+    edit_module_decls(&mut program, |decl_offset, decl_vec| {
+        let def = decl_vec
+            .get_mut(decl_offset + resolved.decl_index)
+            .expect("resolve_function returned an in-range decl index");
+        replace_function_body(def, new_body)
+    })
+    .map_err(|error| ResolveError::InvalidStampedRewrite {
+        searched: qualified_name.to_string(),
+        message: error.to_string(),
+    })?
+    .ok_or_else(|| ResolveError::NoModule {
+        searched: qualified_name.to_string(),
+    })?
+    .map_err(|error| ResolveError::InvalidStampedRewrite {
+        searched: qualified_name.to_string(),
+        message: error.to_string(),
+    })?;
 
     Ok(program)
 }
@@ -426,6 +439,10 @@ pub enum InsertFunctionError {
     /// The requested insertion target could not be resolved as a function.
     #[error("{0}")]
     InsertionTarget(#[from] ResolveError),
+
+    /// The proposed declarations violate the validated successor carrier.
+    #[error("invalid stamped declaration rewrite: {message}")]
+    InvalidStampedRewrite { message: String },
 }
 
 /// Insert `new_decls` into the single module's top-level declaration list.
@@ -480,13 +497,16 @@ pub fn insert_function_decls(
     };
 
     let mut program = module_exprs.to_vec();
-    let (decl_offset, decl_vec) =
-        find_module_decls_mut(&mut program).ok_or(InsertFunctionError::NoModule)?;
-
-    let insert_index = decl_offset + insert_decl_index;
-    for (offset, decl) in new_decls.iter().cloned().enumerate() {
-        decl_vec.insert(insert_index + offset, decl);
-    }
+    edit_module_decls(&mut program, |decl_offset, decl_vec| {
+        let insert_index = decl_offset + insert_decl_index;
+        for (offset, decl) in new_decls.iter().cloned().enumerate() {
+            decl_vec.insert(insert_index + offset, decl);
+        }
+    })
+    .map_err(|error| InsertFunctionError::InvalidStampedRewrite {
+        message: error.to_string(),
+    })?
+    .ok_or(InsertFunctionError::NoModule)?;
 
     Ok(program)
 }
@@ -508,19 +528,25 @@ pub fn spliced_function_def(
     let resolved = resolve_function(module_exprs, qualified_name)?;
     let mut program = module_exprs.to_vec();
 
-    let (decl_offset, decl_vec) =
-        find_module_decls_mut(&mut program).ok_or_else(|| ResolveError::NoModule {
-            searched: qualified_name.to_string(),
-        })?;
+    let rewritten_def = edit_module_decls(&mut program, |decl_offset, decl_vec| {
+        let def = decl_vec
+            .get_mut(decl_offset + resolved.decl_index)
+            .expect("resolve_function returned an in-range decl index");
+        replace_function_body(def, new_body).map(|()| def.clone())
+    })
+    .map_err(|error| ResolveError::InvalidStampedRewrite {
+        searched: qualified_name.to_string(),
+        message: error.to_string(),
+    })?
+    .ok_or_else(|| ResolveError::NoModule {
+        searched: qualified_name.to_string(),
+    })?
+    .map_err(|error| ResolveError::InvalidStampedRewrite {
+        searched: qualified_name.to_string(),
+        message: error.to_string(),
+    })?;
 
-    let def = decl_vec
-        .get_mut(decl_offset + resolved.decl_index)
-        .expect("resolve_function returned an in-range decl index");
-
-    let body_slot = function_body_mut(def).expect("resolved function has a body slot");
-    *body_slot = new_body;
-
-    Ok(def.clone())
+    Ok(rewritten_def)
 }
 
 /// Return the program with the named function's `(def {meta} <name> (fn
@@ -546,14 +572,18 @@ pub fn module_excluding_function_def(
     let resolved = resolve_function(module_exprs, qualified_name)?;
     let mut program = module_exprs.to_vec();
 
-    let (decl_offset, decl_vec) =
-        find_module_decls_mut(&mut program).ok_or_else(|| ResolveError::NoModule {
-            searched: qualified_name.to_string(),
-        })?;
-
-    // The resolved decl_index is relative to the declarations slice,
-    // so the def node lives at decl_offset + decl_index.
-    decl_vec.remove(decl_offset + resolved.decl_index);
+    edit_module_decls(&mut program, |decl_offset, decl_vec| {
+        // The resolved decl_index is relative to the declarations slice,
+        // so the def node lives at decl_offset + decl_index.
+        decl_vec.remove(decl_offset + resolved.decl_index);
+    })
+    .map_err(|error| ResolveError::InvalidStampedRewrite {
+        searched: qualified_name.to_string(),
+        message: error.to_string(),
+    })?
+    .ok_or_else(|| ResolveError::NoModule {
+        searched: qualified_name.to_string(),
+    })?;
 
     Ok(program)
 }
@@ -637,9 +667,10 @@ pub fn function_body(def: &Expr) -> Option<&Expr> {
     }
 }
 
-/// Mutably borrow the body subtree of a function `(def ...)` node, if
-/// present.
-pub fn function_body_mut(def: &mut Expr) -> Option<&mut Expr> {
+/// Mutably borrow the body subtree of a deprecated legacy-List function.
+/// Successor Nodes are deliberately excluded because returning `&mut Expr`
+/// would bypass `Node` validation.
+fn function_body_mut(def: &mut Expr) -> Option<&mut Expr> {
     match def {
         Expr::List(def_list, _) => {
             let fn_list = match def_list.elements.get_mut(DEF_FN_INDEX)? {
@@ -651,20 +682,42 @@ pub fn function_body_mut(def: &mut Expr) -> Option<&mut Expr> {
             }
             fn_list.elements.get_mut(FN_BODY_INDEX)
         }
-        Expr::Node(node, _) if node.tag() == DeepTag::Def => {
-            // Node children: [0]=name binder, [1]=fn node
-            let fn_expr = node.children_slice_mut().get_mut(DEF_FN_INDEX - 2)?;
-            match fn_expr {
+        _ => None,
+    }
+}
+
+/// Replace a function body without ever exposing mutable access to a
+/// successor Node's children. Nested Nodes are rebuilt inside-out and each
+/// candidate is validated before commit.
+fn replace_function_body(def: &mut Expr, new_body: Expr) -> Result<(), crate::node::NodeError> {
+    match def {
+        Expr::List(..) => {
+            let body = function_body_mut(def).expect("resolved legacy function has a body slot");
+            *body = new_body;
+            Ok(())
+        }
+        Expr::Node(def_node, _) if def_node.tag() == DeepTag::Def => {
+            let fn_index = DEF_FN_INDEX - 2;
+            let mut fn_expr = def_node
+                .children_slice()
+                .get(fn_index)
+                .expect("resolved stamped function has an fn child")
+                .clone();
+            match &mut fn_expr {
                 Expr::Node(fn_node, _) if fn_node.tag() == DeepTag::Fn => {
-                    fn_node.children_slice_mut().get_mut(FN_BODY_INDEX - 2)
+                    fn_node.try_replace_child(FN_BODY_INDEX - 2, new_body)?;
                 }
                 Expr::List(fn_list, _) if tag(fn_list) == Some(DeepTag::Fn) => {
-                    fn_list.elements.get_mut(FN_BODY_INDEX)
+                    *fn_list
+                        .elements
+                        .get_mut(FN_BODY_INDEX)
+                        .expect("resolved legacy fn child has a body slot") = new_body;
                 }
-                _ => None,
+                _ => unreachable!("resolve_function accepted a non-function child"),
             }
+            def_node.try_replace_child(fn_index, fn_expr)
         }
-        _ => None,
+        _ => unreachable!("resolve_function returned a non-def expression"),
     }
 }
 
@@ -861,17 +914,28 @@ fn expr_def_has_body(expr: &Expr) -> bool {
 /// - For `Expr::Node`: `1` (declarations at `children[1..]`, after the name binder)
 ///
 /// The caller uses `decl_start_offset + decl_index` to address a specific decl.
-fn find_module_decls_mut(program: &mut [Expr]) -> Option<(usize, &mut Vec<Expr>)> {
-    program.iter_mut().find_map(|expr| match expr {
-        Expr::List(list, _) if list.tag() == Some(DeepTag::Module) => {
-            Some((MODULE_DECLS_START, &mut list.elements))
+fn edit_module_decls<R>(
+    program: &mut [Expr],
+    edit: impl FnOnce(usize, &mut Vec<Expr>) -> R,
+) -> Result<Option<R>, crate::node::NodeError> {
+    let Some(module) = program
+        .iter_mut()
+        .find(|expr| is_tagged(expr, DeepTag::Module))
+    else {
+        return Ok(None);
+    };
+    match module {
+        Expr::List(list, _) => Ok(Some(edit(MODULE_DECLS_START, &mut list.elements))),
+        Expr::Node(node, _) => {
+            // Work on a detached candidate and commit only after the complete
+            // Module node revalidates.
+            let mut children = node.children_slice().to_vec();
+            let result = edit(1, &mut children);
+            node.try_replace_children(children)?;
+            Ok(Some(result))
         }
-        Expr::Node(node, _) if node.tag() == DeepTag::Module => {
-            // Node children: [0]=name binder, [1..]=decls; offset 1
-            Some((1, node.children_vec_mut()))
-        }
-        _ => None,
-    })
+        _ => unreachable!("is_tagged located a non-node module"),
+    }
 }
 
 /// Split a qualified name into an optional module prefix and the bare

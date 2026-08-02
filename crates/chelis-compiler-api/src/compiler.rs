@@ -587,7 +587,9 @@ fn add_function_insert_error_to_compiler_error(
         InsertFunctionError::InsertionTarget(err) => {
             stage_error("name-resolution", err.to_string(), "name_resolution_error")
         }
-        InsertFunctionError::NoModule | InsertFunctionError::MultipleModules { .. } => {
+        InsertFunctionError::NoModule
+        | InsertFunctionError::MultipleModules { .. }
+        | InsertFunctionError::InvalidStampedRewrite { .. } => {
             stage_error("add-function", error.to_string(), "deep_decl_error")
         }
     }

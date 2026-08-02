@@ -243,7 +243,69 @@ fn validate_node_tag_shape(
     match deep_tag {
         DeepTag::Def => validate_property_def_metadata_from_node(node, offset, warnings),
         DeepTag::Deftype => validate_deftype_invariant_metadata_from_node(node, offset, warnings),
-        _ => {}
+        // Explicit no-op dispositions keep the successor validator total:
+        // adding a vocabulary variant fails this match until its Node-form
+        // shape behavior is decided alongside the legacy validator.
+        DeepTag::Module
+        | DeepTag::Import
+        | DeepTag::ImportAll
+        | DeepTag::Export
+        | DeepTag::Defsig
+        | DeepTag::Typealias
+        | DeepTag::Variant
+        | DeepTag::Field
+        | DeepTag::Defdim
+        | DeepTag::If
+        | DeepTag::Match
+        | DeepTag::Arm
+        | DeepTag::Fn
+        | DeepTag::Let
+        | DeepTag::Bind
+        | DeepTag::Var
+        | DeepTag::Lit
+        | DeepTag::App
+        | DeepTag::Record
+        | DeepTag::Access
+        | DeepTag::Pipe
+        | DeepTag::Block
+        | DeepTag::Tuple
+        | DeepTag::TupleGet
+        | DeepTag::RecordUpdate
+        | DeepTag::Par
+        | DeepTag::Borrow
+        | DeepTag::PatVar
+        | DeepTag::PatLit
+        | DeepTag::PatCtor
+        | DeepTag::PatTuple
+        | DeepTag::PatRecord
+        | DeepTag::PatWild
+        | DeepTag::PatAs
+        | DeepTag::TPrim
+        | DeepTag::TFn
+        | DeepTag::TTensor
+        | DeepTag::TRef
+        | DeepTag::TAdt
+        | DeepTag::TVar
+        | DeepTag::TUnit
+        | DeepTag::TTuple
+        | DeepTag::DName
+        | DeepTag::DVar
+        | DeepTag::DLit
+        | DeepTag::DRank
+        | DeepTag::Effects
+        | DeepTag::Resource
+        | DeepTag::HandleEffect
+        | DeepTag::Grad
+        | DeepTag::Vmap
+        | DeepTag::Jit
+        | DeepTag::Realize
+        | DeepTag::Cast
+        | DeepTag::Copy
+        | DeepTag::Quote
+        | DeepTag::Unquote
+        | DeepTag::Splice
+        | DeepTag::Params
+        | DeepTag::Kv => {}
     }
 }
 

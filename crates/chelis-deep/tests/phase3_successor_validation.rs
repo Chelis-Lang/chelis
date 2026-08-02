@@ -205,6 +205,72 @@ fn node_metadata_replacement_revalidates_before_commit() {
 }
 
 #[test]
+fn node_child_replacement_revalidates_before_commit() {
+    let original = Expr::node(
+        DeepTag::Lit,
+        MetaMap::default(),
+        vec![Expr::Atom(Atom::Int(1), sp())],
+        sp(),
+    );
+    let mut node = Node::try_new(
+        DeepTag::Def,
+        MetaMap::default(),
+        vec![
+            Expr::Atom(Atom::Name("f".to_string()), sp()),
+            original.clone(),
+        ],
+    )
+    .expect("clean node must construct");
+
+    let rejected = node.try_replace_child(1, raw_vocabulary_form("lit"));
+    assert!(matches!(
+        rejected,
+        Err(NodeError::RawVocabularyTag { ref raw_tag, .. }) if raw_tag == "lit"
+    ));
+    assert_eq!(
+        node.expr_child(1),
+        &original,
+        "a rejected child replacement must leave the original node intact"
+    );
+}
+
+#[test]
+fn node_children_replacement_revalidates_arity_before_commit() {
+    let original = Expr::Atom(Atom::Name("x".to_string()), sp());
+    let mut node = Node::try_new(DeepTag::Var, MetaMap::default(), vec![original.clone()])
+        .expect("clean node must construct");
+
+    let rejected = node.try_replace_children(Vec::new());
+    assert!(matches!(rejected, Err(NodeError::ArityViolation { .. })));
+    assert_eq!(node.child_count(), 1);
+    assert!(matches!(
+        node.children_iter().next(),
+        Some(chelis_deep::node::ChildRef::Syntax(child)) if child == &original
+    ));
+}
+
+#[test]
+fn node_constructor_rejects_tag_atom_at_runtime_expr_slot() {
+    let result = Node::try_new(
+        DeepTag::Def,
+        MetaMap::default(),
+        vec![
+            Expr::Atom(Atom::Name("f".to_string()), sp()),
+            Expr::Atom(Atom::Tag(DeepTag::Lit), sp()),
+        ],
+    );
+
+    assert!(matches!(result, Err(NodeError::TagAtExprSlot { .. })));
+}
+
+#[test]
+fn node_public_api_exposes_no_raw_mutable_child_borrows() {
+    let source = include_str!("../src/node.rs");
+    assert!(!source.contains("pub fn children_slice_mut("));
+    assert!(!source.contains("pub fn children_vec_mut("));
+}
+
+#[test]
 fn typed_expr_constructor_produces_a_gated_node() {
     let expr = Expr::node(
         DeepTag::Lit,

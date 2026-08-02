@@ -731,9 +731,15 @@ construction, recurses the validator and raw-tag oracle through `Node`
 metadata/children plus `BareList` and `UnknownForm`, and routes the generic
 compiler API Deep source path through `parse_and_stamp_file`. Its expanded
 executable oracle locks those repairs and their positive controls. Public
-metadata replacement is validate-before-commit so callers cannot reopen the
-raw-vocabulary domain after construction, and generic Deep wire output retains
-an `UnknownForm`'s head, metadata, and children. The parser and typed producer
+metadata and child replacement are validate-before-commit, raw mutable child
+borrows have been removed, and path/module rewrites rebuild stamped Nodes
+inside-out so callers cannot reopen the raw-vocabulary or arity domain after
+construction. RuntimeExpr slots reject both bare names and the transitional
+`Atom::Tag` carrier. The successor Node validator has an explicit disposition
+for every `DeepTag`, so the scratch-variant mutation reaches it as a compile
+failure. The cold-oracle subprocess budget covers a workspace compile rather
+than assuming a warm target. Generic Deep wire output retains an
+`UnknownForm`'s head, metadata, and children. The parser and typed producer
 now emit the gated carrier; the role table keeps the explicit
 `deftype`/`typealias` parameter list structural while stamping their actual
 type-expression children. The hand-authored-Deep decode collectors read

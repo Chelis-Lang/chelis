@@ -290,6 +290,10 @@ class TestChelisCheckCommand(unittest.TestCase):
         self.assertIn("--quiet", cmd)
         self.assertIn("--allow-style-violations", cmd)
 
+    def test_cold_build_timeouts_cover_a_workspace_compile(self) -> None:
+        self.assertGreaterEqual(oracle.CHELIS_CHECK_TIMEOUT_SECONDS, 300)
+        self.assertGreaterEqual(oracle.SUCCESSOR_SUITE_TIMEOUT_SECONDS, 300)
+
 
 class TestRepoRoot(unittest.TestCase):
     """Test REPO_ROOT resolution."""

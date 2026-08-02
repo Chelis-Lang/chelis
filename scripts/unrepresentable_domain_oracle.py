@@ -35,6 +35,8 @@ from typing import Sequence
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+CHELIS_CHECK_TIMEOUT_SECONDS = 300
+SUCCESSOR_SUITE_TIMEOUT_SECONDS = 300
 
 # ── Fixture programs ─────────────────────────────────────────────────
 
@@ -129,7 +131,7 @@ def run_chelis_check(fixture_path: Path) -> subprocess.CompletedProcess[str]:
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
-        timeout=60,
+        timeout=CHELIS_CHECK_TIMEOUT_SECONDS,
     )
 
 
@@ -255,7 +257,7 @@ def check_successor_integration_tests() -> None:
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
-        timeout=180,
+        timeout=SUCCESSOR_SUITE_TIMEOUT_SECONDS,
     )
     if result.returncode != 0:
         raise OracleFailure(
