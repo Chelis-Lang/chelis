@@ -549,7 +549,9 @@ pub fn parse_str_strict(source: &str) -> Result<Vec<Expr>, ParseError> {
             offset: w.offset,
         });
     }
-    Ok(exprs)
+    // Normalize Node/BareList → List so downstream consumers that only
+    // handle Expr::List work correctly (#1047).
+    Ok(crate::authoring::normalize_to_list(&exprs))
 }
 
 #[cfg(test)]

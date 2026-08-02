@@ -21,11 +21,14 @@ const FN_PARAMS_INDEX: usize = 2;
 /// Recursively convert all `Expr::Node` and `Expr::BareList` in a tree to
 /// the `Expr::List` form that the authoring module's internal helpers expect.
 /// This is a boundary normalization applied at each public entry point.
-fn normalize_to_list(exprs: &[Expr]) -> Vec<Expr> {
+/// Recursively normalize all `Expr::Node`/`Expr::BareList` to `Expr::List`.
+/// Used by consumers that only handle the `Expr::List` form.
+pub fn normalize_to_list(exprs: &[Expr]) -> Vec<Expr> {
     exprs.iter().map(normalize_expr).collect()
 }
 
-fn normalize_expr(expr: &Expr) -> Expr {
+/// Normalize a single expression from Node/BareList to List recursively.
+pub fn normalize_expr(expr: &Expr) -> Expr {
     match expr {
         Expr::Node(node, span) => {
             let list = node.to_list(*span);
