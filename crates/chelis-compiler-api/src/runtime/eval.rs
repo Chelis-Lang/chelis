@@ -1571,6 +1571,290 @@ impl<'a> EvalContext<'a> {
                     .map_err(|err| format!("read_file failed for `{path}`: {err}"))?;
                 Ok(RuntimeValue::String(text))
             }
+            // Host-lane JSON I/O (chelis#890). Eval-only; the build backends
+            // reject these via `find_eval_only_host_builtin`. The core logic
+            // (parser, serializer, path navigation, decimal rounding) lives
+            // in `runtime/json.rs`; every failure is a loud eval error
+            // naming the builtin, the path, and the failing segment -- no
+            // silent defaults ([05-OP-1..5]).
+            "parse_json" => {
+                let text = expect_string_arg(args, 0)?;
+                super::json::parse_json_text(&text)
+            }
+            "to_json" => {
+                let value = args
+                    .first()
+                    .ok_or_else(|| "to_json expects 1 argument".to_string())?;
+                super::json::json_value_to_text(value).map(RuntimeValue::String)
+            }
+            "json_f64" => {
+                let value = args
+                    .first()
+                    .ok_or_else(|| "json_f64 expects 2 arguments".to_string())?;
+                let path = expect_string_arg(args, 1)?;
+                super::json::json_f64_at(value, &path).map(RuntimeValue::float64)
+            }
+            "json_int" => {
+                let value = args
+                    .first()
+                    .ok_or_else(|| "json_int expects 2 arguments".to_string())?;
+                let path = expect_string_arg(args, 1)?;
+                super::json::json_int_at(value, &path).map(RuntimeValue::int64)
+            }
+            "json_str" => {
+                let value = args
+                    .first()
+                    .ok_or_else(|| "json_str expects 2 arguments".to_string())?;
+                let path = expect_string_arg(args, 1)?;
+                super::json::json_str_at(value, &path).map(RuntimeValue::String)
+            }
+            "json_list" => {
+                let value = args
+                    .first()
+                    .ok_or_else(|| "json_list expects 2 arguments".to_string())?;
+                let path = expect_string_arg(args, 1)?;
+                super::json::json_list_at(value, &path).map(RuntimeValue::List)
+            }
+            "json_f64s" => {
+                let value = args
+                    .first()
+                    .ok_or_else(|| "json_f64s expects 2 arguments".to_string())?;
+                let path = expect_string_arg(args, 1)?;
+                super::json::json_f64s_at(value, &path).map(|values| {
+                    RuntimeValue::List(values.into_iter().map(RuntimeValue::float64).collect())
+                })
+            }
+            "json_ints" => {
+                let value = args
+                    .first()
+                    .ok_or_else(|| "json_ints expects 2 arguments".to_string())?;
+                let path = expect_string_arg(args, 1)?;
+                super::json::json_ints_at(value, &path).map(|values| {
+                    RuntimeValue::List(values.into_iter().map(RuntimeValue::int64).collect())
+                })
+            }
+            "jnum" => {
+                // Exactly f64 ([05-OP-4]): the checker rejects other
+                // precisions; this guard keeps the byte-exact serialization
+                // contract even on dynamically-constructed calls -- an f32
+                // widened here would emit `0.10000000149011612` for `0.1f32`.
+                let value = match args.first() {
+                    Some(RuntimeValue::Scalar(payload)) if payload.dtype() == Prim::F64 => {
+                        payload.as_f64_lossy()
+                    }
+                    Some(RuntimeValue::Scalar(payload)) if payload.dtype().is_float() => {
+                        return Err(format!(
+                            "jnum: expected an f64 value, got {:?} (suffix the literal, \
+                             `0.1f64`, or use cast(n, f64); an f32 value would quantize \
+                             through the byte-exact serializer)",
+                            payload.dtype()
+                        ));
+                    }
+                    other => {
+                        return Err(format!("expected f64 arg at index 0, got {other:?}"));
+                    }
+                };
+                Ok(super::json::jnum(value))
+            }
+            "jint" => {
+                // Exactly int64, mirroring `jnum`'s f64-only guard
+                // ([05-OP-4]): a narrower integer widened here would be
+                // indistinguishable in the ADT from an exact int64 the user
+                // meant, and the whole point of the variant is that the
+                // width is honest.
+                let value = match args.first() {
+                    Some(RuntimeValue::Scalar(payload)) if payload.dtype() == Prim::Int64 => {
+                        payload.as_i64()
+                    }
+                    Some(RuntimeValue::Scalar(payload)) if payload.dtype().is_integer() => {
+                        return Err(format!(
+                            "jint: expected an int64 value, got {:?} (suffix the literal, \
+                             `1i64`, or use cast(n, int64))",
+                            payload.dtype()
+                        ));
+                    }
+                    other => {
+                        return Err(format!("expected int64 arg at index 0, got {other:?}"));
+                    }
+                };
+                Ok(super::json::jint(value))
+            }
+            "jstr" => {
+                let value = expect_string_arg(args, 0)?;
+                Ok(super::json::jstr(value))
+            }
+            "jlist" => {
+                let items = expect_list_arg(args, 0)?;
+                for (index, item) in items.iter().enumerate() {
+                    super::json::ensure_json_value(item)
+                        .map_err(|err| format!("jlist: element {index}: {err}"))?;
+                }
+                Ok(super::json::jlist(items))
+            }
+            "jdict" => {
+                let entries = expect_list_arg(args, 0)?;
+                let mut out = OrderedStringDictBuilder::new();
+                for (index, entry) in entries.into_iter().enumerate() {
+                    let RuntimeValue::Tuple(items) = entry else {
+                        return Err(format!(
+                            "jdict expects a List of (string, Json) 2-tuples, got \
+                             non-tuple element at index {index}"
+                        ));
+                    };
+                    if items.len() != 2 {
+                        return Err(format!(
+                            "jdict expects (string, Json) 2-tuples, got a {}-tuple \
+                             at index {index}",
+                            items.len()
+                        ));
+                    }
+                    let mut items = items.into_iter();
+                    let key = match items.next() {
+                        Some(RuntimeValue::String(key)) => key,
+                        other => {
+                            return Err(format!(
+                                "jdict keys must be strings, got {other:?} at index {index}"
+                            ));
+                        }
+                    };
+                    let value = items.next().expect("length checked above");
+                    super::json::ensure_json_value(&value)
+                        .map_err(|err| format!("jdict: value for key `{key}`: {err}"))?;
+                    // Duplicate keys: first position, last value -- the same
+                    // upsert semantics as `dict_of` and `parse_json`, via
+                    // the shared hash-assisted builder (chelis#891 review
+                    // findings 11 and 15).
+                    out.upsert(key, value);
+                }
+                Ok(RuntimeValue::Adt {
+                    ctor: "JDict".to_string(),
+                    fields: vec![RuntimeValue::Dict(out.into_entries())],
+                    field_names: None,
+                })
+            }
+            "json_set" => {
+                let value = args
+                    .first()
+                    .ok_or_else(|| "json_set expects 3 arguments".to_string())?;
+                let path = expect_string_arg(args, 1)?;
+                let new_value = args
+                    .get(2)
+                    .ok_or_else(|| "json_set expects 3 arguments".to_string())?;
+                super::json::ensure_json_value(new_value)
+                    .map_err(|err| format!("json_set: replacement value: {err}"))?;
+                super::json::json_set_at(value, &path, new_value)
+            }
+            "round_to" => {
+                // [05-OP-1]: per-dtype at declared widths, f64 and f32
+                // only, dispatched STRICTLY on the operand's own dtype --
+                // no widen/round/re-narrow lane exists ([04-NUM-8] has no
+                // exception vocabulary), and unsupported float widths fail
+                // loudly here exactly as they do at check time.
+                let places = expect_int_arg(args, 1)?;
+                match args.first() {
+                    Some(RuntimeValue::Scalar(payload)) if payload.dtype() == Prim::F64 => {
+                        let rounded =
+                            super::json::round_to_f64_impl(payload.as_f64_lossy(), places)?;
+                        Ok(RuntimeValue::float64(rounded))
+                    }
+                    Some(RuntimeValue::Scalar(payload)) if payload.dtype() == Prim::F32 => {
+                        let rounded =
+                            super::json::round_to_f32_impl(payload.as_f64_lossy() as f32, places)?;
+                        RuntimeValue::scalar_like_float(Prim::F32, f64::from(rounded))
+                    }
+                    Some(RuntimeValue::Scalar(payload)) if payload.dtype().is_float() => {
+                        Err(format!(
+                            "round_to: unsupported operand dtype {:?} ([05-OP-1] authors \
+                             decimal rounding for f64 and f32 only; cast the operand \
+                             explicitly)",
+                            payload.dtype()
+                        ))
+                    }
+                    other => Err(format!("expected float arg at index 0, got {other:?}")),
+                }
+            }
+            // Host-lane CSV I/O (chelis#903). Eval-only, like the JSON
+            // family above. A Csv document rides the prelude `Json` ADT as
+            // the fixed shape `{"columns": .., "rows": ..}` (see
+            // `runtime/csv.rs`), so the `json_*` accessors compose with it;
+            // the `csv_*` builtins are the column-oriented surface. Every
+            // failure is a loud eval error naming the builtin, column, and
+            // row -- no silent NaN/defaults.
+            "parse_csv" => {
+                let text = expect_string_arg(args, 0)?;
+                super::csv::parse_csv_text(&text)
+            }
+            "to_csv" => {
+                let value = args
+                    .first()
+                    .ok_or_else(|| "to_csv expects 1 argument".to_string())?;
+                super::csv::csv_to_text(value).map(RuntimeValue::String)
+            }
+            "csv_f64s" => {
+                let value = args
+                    .first()
+                    .ok_or_else(|| "csv_f64s expects 2 arguments".to_string())?;
+                let column = expect_string_arg(args, 1)?;
+                super::csv::csv_f64s_at(value, &column).map(|values| {
+                    RuntimeValue::List(values.into_iter().map(RuntimeValue::float64).collect())
+                })
+            }
+            "csv_ints" => {
+                let value = args
+                    .first()
+                    .ok_or_else(|| "csv_ints expects 2 arguments".to_string())?;
+                let column = expect_string_arg(args, 1)?;
+                super::csv::csv_ints_at(value, &column).map(|values| {
+                    RuntimeValue::List(values.into_iter().map(RuntimeValue::int64).collect())
+                })
+            }
+            "csv_strs" => {
+                let value = args
+                    .first()
+                    .ok_or_else(|| "csv_strs expects 2 arguments".to_string())?;
+                let column = expect_string_arg(args, 1)?;
+                super::csv::csv_strs_at(value, &column).map(|values| {
+                    RuntimeValue::List(values.into_iter().map(RuntimeValue::String).collect())
+                })
+            }
+            "csv_nrows" => {
+                let value = args
+                    .first()
+                    .ok_or_else(|| "csv_nrows expects 1 argument".to_string())?;
+                super::csv::csv_nrows_of(value).map(RuntimeValue::int64)
+            }
+            "csv_cols" => {
+                let value = args
+                    .first()
+                    .ok_or_else(|| "csv_cols expects 1 argument".to_string())?;
+                super::csv::csv_cols_of(value).map(|columns| {
+                    RuntimeValue::List(columns.into_iter().map(RuntimeValue::String).collect())
+                })
+            }
+            "csv_f64" => {
+                let value = args
+                    .first()
+                    .ok_or_else(|| "csv_f64 expects 3 arguments".to_string())?;
+                let row_idx = expect_int_arg(args, 1)?;
+                let column = expect_string_arg(args, 2)?;
+                super::csv::csv_f64_at(value, row_idx, &column).map(RuntimeValue::float64)
+            }
+            "csv_int" => {
+                let value = args
+                    .first()
+                    .ok_or_else(|| "csv_int expects 3 arguments".to_string())?;
+                let row_idx = expect_int_arg(args, 1)?;
+                let column = expect_string_arg(args, 2)?;
+                super::csv::csv_int_at(value, row_idx, &column).map(RuntimeValue::int64)
+            }
+            "csv_str" => {
+                let value = args
+                    .first()
+                    .ok_or_else(|| "csv_str expects 3 arguments".to_string())?;
+                let row_idx = expect_int_arg(args, 1)?;
+                let column = expect_string_arg(args, 2)?;
+                super::csv::csv_str_at(value, row_idx, &column).map(RuntimeValue::String)
+            }
             // Hull Phase 0a: `process_run(cmd, args) -> (exit_code, stdout, stderr)`.
             //
             // Eval/test-only subprocess exec. Arguments are passed straight to

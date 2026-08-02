@@ -8,6 +8,37 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Host-lane JSON I/O builtins (chelis#890).** A prelude `Json` ADT
+  (`JNull | JBool bool | JInt int64 | JNum f64 | JStr string | JList
+  List[Json] | JDict Dict[string, Json]`) with `parse_json`/`to_json`,
+  dot-path accessors (`json_f64`, `json_int`, `json_str`, `json_list`,
+  `json_f64s`, `json_ints`), output constructors (`jnum`, `jint`, `jstr`,
+  `jlist`, `jdict`, `json_set`), and `round_to` decimal rounding
+  (ties-to-even on the exact binary value, per-dtype at declared widths
+  over f64 and f32 per the new [05-OP-1] atom). Integer-capable from the
+  start: JSON integers ingest as exact `JInt int64` ([05-OP-2]), integer
+  accessors refuse floats rather than truncate, and `json_f64` on a
+  `JInt` is the named lossy widening. Eval/test-only — `chelis build`
+  and the public `compile()` API reject every name whole-program through
+  the branded `unsupported:` channel. `docs/CHELIS_SURFACE.md` §3.8.
+- **Host-lane CSV I/O builtins (chelis#903).** `parse_csv`/`to_csv` plus
+  column accessors (`csv_f64s`, `csv_ints`, `csv_strs`, `csv_nrows`,
+  `csv_cols`, `csv_f64`, `csv_int`, `csv_str`) over a Csv document that
+  rides the `Json` ADT (`{"columns": .., "rows": ..}`, cells as strings
+  at parse time), with a loud row/column-numbered malformed-input
+  taxonomy and strict per-accessor numeric cell grammar — int64 ID
+  columns above 2^53 read exactly through `csv_ints`/`csv_int`, and an
+  out-of-range integer cell is a loud Overflow-class error, never an f64
+  fallback. Eval/test-only like the JSON family.
+  `docs/CHELIS_SURFACE.md` §3.9.
+- **`prelude-adt-numeric` capacity-census leg.** Rust-registered prelude
+  value ADTs now enumerate into the dtype capacity census
+  (`prelude_adt_rows -> chelis_types::prelude_adt_defs`), classified on
+  the same float-carrier/numeric-op rule as the `.ch` stdlib ADTs; the
+  prelude `Json` row lands behind a review-routed maintainer override
+  and registers its numeric capacity against [05-OP-2]
+  (`spec/design/dtype_semantics.md` §C6).
+
 - **Locked Nix packages expose the Chelis compiler, C runtime, and `chelisup`.**
   The root flake supports `x86_64-linux` and `aarch64-darwin` with native checks.
   Pinned `crate2nix` crate derivations share dependency outputs across the product packages.
@@ -24,6 +55,21 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   Native Nix CI uses the reviewed portable Devenv action and public cache.
   The Linux job runs per pull request with bounded parallelism, reclaimed runner disk, and a cached cvc5 toolchain closure.
   The macOS job is a documented manual dispatch gate with the identical check set.
+
+### Changed
+
+- **A builtin-named function parameter that is *called* in its own body
+  is now a check error** (`BuiltinShadowing`): calls dispatch
+  builtin-first under eval and lowering, so such a call could never
+  reach the parameter and silently invoked the builtin instead
+  (chelis#891 review finding 4). Value-position reuse of builtin names
+  remains allowed.
+- **The eval-only build rejection is branded and shared.** The
+  `EVAL_ONLY_HOST_BUILTINS` list moved to `chelis_ir::host` and both
+  build entry points (the CLI pipeline and
+  `compile_for_execution`/chelis-python) reject through the section-C2
+  `unsupported: builtin ...` diagnostic; `process_run`'s rejection
+  prose changed accordingly.
 
 ### Fixed
 

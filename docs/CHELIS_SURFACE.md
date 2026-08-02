@@ -301,6 +301,86 @@ no AD. Shifts use declared-width two's-complement semantics; counts at or
 above the width fully shift out the value, while negative counts trap
 ([04-NUM-13]).
 
+### 3.8 JSON I/O + decimal rounding — **eval-only** (chelis#890)
+
+Native JSON over the prelude `Json` ADT
+(`Json = JNull | JBool bool | JInt int64 | JNum f64 | JStr string |
+JList List[Json] | JDict Dict[string, Json]`). **Eval/test-only**:
+`chelis build` and the public `compile()` API reject every name below
+whole-program (`chelis_ir::host::EVAL_ONLY_HOST_BUILTINS`), like
+`process_run`. All failures (malformed JSON, missing path, type mismatch,
+non-finite number) are loud eval errors — no silent defaults. Numeric
+semantics are normative in `spec/05-risc-primitives.md` §3.7
+([05-OP-1]..[05-OP-5]).
+
+| Name | Signature | Notes |
+|---|---|---|
+| `parse_json` | `(s: string) -> Json` | strict RFC 8259; a leading UTF-8 BOM is ignored (§8.1, matching `parse_csv`); **int-vs-float is decided at parse time** ([05-OP-2]) — a token with `.`/`e`/`E` becomes `JNum f64`, anything else becomes `JInt int64` (the `Std.Io.Json` and Python `json` rule), so integers stay exact; an integer literal too wide for int64 falls back to `JNum` and is the one documented lossy case; duplicate keys: first position, last value; depth cap 512 |
+| `to_json` | `(v: Json) -> string` | compact, **insertion-order keys**, `JInt` emitted exactly (no decimal point, no f64 round-trip), **shortest-round-trip f64** for `JNum` through the [05-OBS-1] `format_element` channel ([05-OP-5]; deliberately NOT the print helpers, chelis#748/#723/#734); NaN/inf fail; non-ASCII emitted as raw UTF-8; byte-stable |
+| `json_f64` | `(j: Json, path: string) -> f64` | dot-path: segment = dict key, or strictly all-digits list index (no sign, no leading zeros); failures name the missing key and list available keys; **widens `JInt` via the named lossy widening** ([05-OP-3]; lossy above 2^53 — use `json_int` for exactness) |
+| `json_int` | `(j: Json, path: string) -> int64` | exact integer read ([05-OP-3]). Refuses a `JNum` rather than truncating it, naming `json_f64` as the remedy (§C1.1: no silent narrowing) |
+| `json_str` | `(j: Json, path: string) -> string` | |
+| `json_list` | `(j: Json, path: string) -> List[Json]` | elements re-enter the accessors (element-relative paths) |
+| `json_f64s` | `(j: Json, path: string) -> List[f64]` | list of numbers at path; `JInt` elements widen as in `json_f64`; any non-number element fails with its index |
+| `json_ints` | `(j: Json, path: string) -> List[int64]` | exact integer list ([05-OP-3]); any `JNum` element fails with its index, naming `json_f64s` as the remedy |
+| `jnum` | `(x: f64) -> Json` | **exactly f64** ([05-OP-4]; bare literals are f32 per §5.3 and are rejected loudly — suffix them `0.1f64` or use `cast(n, f64)`; an f32 would quantize through the byte-exact serializer) |
+| `jint` | `(n: int64) -> Json` | **exactly int64** ([05-OP-4]; narrower integers rejected loudly — suffix `1i64` or `cast(n, int64)`), mirroring `jnum`'s width guard |
+| `jstr` | `(s: string) -> Json` | |
+| `jlist` | `(items: List[Json]) -> Json` | |
+| `jdict` | `(entries: List[(string, Json)]) -> Json` | insertion order; duplicate keys upsert |
+| `json_set` | `(j: Json, path: string, v: Json) -> Json` | returns updated value; missing intermediate dict keys auto-create nested dicts (output assembly); list segments replace existing elements only; path segments and the built result respect the 512 depth cap |
+| `round_to` | `(x: f64\|f32, places: int) -> f64\|f32` | decimal rounding, **ties-to-even on the exact binary value** (= Python `round`): `round_to(2.5f64, 0) = 2.0`, `round_to(2.675f64, 2) = 2.67`; `places` in 0..=100, any integer precision; non-finite passes through. Per-dtype at declared widths ([05-OP-1], [04-NUM-8]): the operand's exact binary value decimal-rounds and finalizes ONCE to the operand's own width — the result preserves the operand dtype; f16/bf16 operands are rejected loudly at check and eval |
+
+Composes with §3.5: `read_file |> parse_json`, accessors + tensor builtins
+for compute, `jdict`/`json_set`/`to_json` + `write_file` for nested output.
+Matching on the `Json` constructors is available for power users; the
+accessors are the primary agent surface.
+
+Two contract notes: (1) an UN-annotated `round_to` operand (e.g. a bare
+lambda parameter) pins to **f64** — annotate the parameter (`fn (x: f32)
+-> round_to(x, 3)`) to select the f32 lane; (2) accessor paths take at
+least one segment — the root value itself is not path-addressable, so a
+top-level array reads element-wise (`json_int(doc, "0")`) or via ADT
+matching, never as `json_list(doc, "")`.
+
+### 3.9 CSV I/O — **eval-only** (chelis#903)
+
+Native CSV, first row = header, riding the `Json` ADT: a **Csv document**
+is the fixed-shape Json value
+`JDict {"columns": JList[JStr], "rows": JList[JDict]}` (cells from
+`parse_csv` are `JStr` — no silent numeric coercion at parse time), so
+every §3.8 accessor works on it (`json_list(c, "rows")`, `json_str(c,
+"rows.0.px")`, `to_json(c)` for debugging) and there is deliberately no
+`Csv` prelude type. **Eval/test-only** like §3.8
+(`chelis_ir::host::EVAL_ONLY_HOST_BUILTINS`). All failures are loud eval
+errors — no silent NaN/defaults. Numeric cell semantics are normative in
+`spec/05-risc-primitives.md` §3.7 ([05-OP-2], [05-OP-3]).
+
+| Name | Signature | Notes |
+|---|---|---|
+| `parse_csv` | `(s: string) -> Json` | RFC-4180-ish: quoted fields, doubled embedded quotes, commas/newlines literal inside quotes; LF or CRLF (mixed ok); leading UTF-8 BOM stripped; blank rows only at EOF. Errors name the 1-based row, plus the 1-based column where one applies (quote/separator errors): unclosed quote, content after closing quote, bare `"` in an unquoted field, bare CR, ragged row (row-level), interior blank row (row-level), **duplicate header names** |
+| `to_csv` | `(c: Json) -> string` | serializes the exact document shape `parse_csv` returns; the round-trip is **values-as-text**: every cell re-reads as the `JStr` of its serialized field text (all-`JStr` documents round-trip identically; `JNum` re-reads bit-exactly via `csv_f64`, `JInt` exactly via `csv_int`; cell *types* other than `JStr` do not survive — CSV is untyped). Cells may be `JStr`/`JInt` (exact digits)/`JNum` (**shortest-round-trip f64**, the same [05-OP-5] channel as `to_json`)/`JBool`/`JNull` (empty cell); minimal quoting (incl. a BOM-leading first header field), LF rows, trailing newline, byte-stable; loud on non-finite numbers, container cells, unexpected top-level keys, a row missing a declared column or carrying an undeclared/duplicate key |
+| `csv_f64s` | `(c: Json, col: string) -> List[f64]` | whole column as numbers; strict JSON number grammar per cell — literally `parse_json`'s scanner (surrounding ASCII spaces/tabs tolerated, matching Python `float()`); empty or non-numeric cells fail naming the column, 0-based data row, and offending text; finite `JNum` cells (assembled docs) read directly and `JInt` cells widen per [05-OP-3], non-finite fail; `JBool`/`JNull` cells fail per-type |
+| `csv_ints` | `(c: Json, col: string) -> List[int64]` | whole column as **exact int64** ([05-OP-3]): strict integer grammar on `JStr` cells (optional `-`, digits, no leading zeros beyond `0` itself; ASCII space/tab trim; out-of-range int64 is a loud Overflow-class error, never an f64 fallback); `JInt` cells read exactly; `JNum` cells fail naming `csv_f64s` as the remedy |
+| `csv_strs` | `(c: Json, col: string) -> List[string]` | whole column verbatim (`JStr` cells only; other cell types fail per-type — no cross-type coercion) |
+| `csv_nrows` | `(c: Json) -> int64` | data rows (header excluded), exact count ([05-OP-3]) |
+| `csv_cols` | `(c: Json) -> List[string]` | header names in file order (preserved even for zero-row files) |
+| `csv_f64` | `(c: Json, row: int, col: string) -> f64` | one cell as a number; `row` is a 0-based data-row index, any integer precision (bare literals work) |
+| `csv_int` | `(c: Json, row: int, col: string) -> int64` | one cell as exact int64, same grammar and refusal contract as `csv_ints` |
+| `csv_str` | `(c: Json, row: int, col: string) -> string` | one cell verbatim |
+
+Missing columns fail naming the column **and listing the available
+columns**. Document-shape validation is eager and uniform: every accessor
+(including `csv_nrows`/`csv_cols`) checks that `columns` is a list of
+unique strings and every row a JDict; cell types are checked at read.
+**Integer columns are first-class**: an int64 ID column above 2^53 reads
+exactly through `csv_ints`/`csv_int` — reaching for `csv_f64s` on such a
+column is the [04-NUM-11] collapse the integer accessors exist to prevent
+(`csv_f64` widens with the named 2^53 boundary, same as `json_f64`).
+Composes end-to-end with §3.5/§3.8:
+`read_file |> parse_csv` → `csv_f64s`/`csv_ints` + tensor builtins →
+`round_to` → `jdict`/`json_set`/`to_json` (or `to_csv`) + `write_file`.
+
 ---
 
 ## 4. Complete closed vocabulary (completeness check)
@@ -338,6 +418,10 @@ Host lane:    cumsum sort einsum diagonal trace where clamp concat split scatter
               to_list
               read_file write_file read_lines read_bytes file_exists list_dir
               mmap_file mmap_read mmap_len process_run
+              parse_json to_json json_f64 json_int json_str json_list json_f64s
+              json_ints jnum jint jstr jlist jdict json_set round_to
+              parse_csv to_csv csv_f64s csv_ints csv_strs csv_nrows csv_cols
+              csv_f64 csv_int csv_str
               print fail debug test_assert test_assert_eq_f32 test_assert_eq_int
               test_assert_eq_bool test_assert_eq_string test_assert_close_tensor
               test_assert_eq_tensor_int64
@@ -348,7 +432,8 @@ Host lane:    cumsum sort einsum diagonal trace where clamp concat split scatter
 lowering** (`spec/05` §3.4) — treat it as unstable, not a stable builtin (see §2).
 
 Prelude ADTs/constructors (also in scope): `Option`/`Some`/`None`,
-`List`/`Cons`/`Nil`, `MappedFile`.
+`List`/`Cons`/`Nil`, `MappedFile`, and
+`Json`/`JNull`/`JBool`/`JInt`/`JNum`/`JStr`/`JList`/`JDict` (§3.8).
 
 ---
 

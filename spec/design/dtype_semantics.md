@@ -761,6 +761,20 @@ Deliverables, with phase homes:
    callables. The header legs use
    `preprocessed_headers -> header_rows`; the stdlib legs use exactly
    `stdlib_rows -> scan_deftypes + scan_exported_numeric_defs`.
+   The prelude / stdlib value-ADT family has a second enumeration
+   source since chelis#890: **Rust-registered prelude ADTs**
+   (`register_prelude_adts` in `crates/chelis-types/src/builtins.rs`)
+   enumerate through `prelude_adt_rows -> chelis_types::prelude_adt_defs`
+   as the `prelude-adt-numeric` leg, classified on the identical
+   float-carrier / numeric-op rule with a shape-complete identity.
+   Before chelis#890 no prelude ADT carried a numeric payload, so the
+   `.ch` enumerator had nothing to miss; the prelude `Json` ADT
+   (`JInt int64` beside `JNum f64`, split decided by [05-OP-2]) made
+   the Rust registry a numeric surface, and this leg closes what would
+   otherwise be exactly the unenumerated-surface blind spot this
+   section forbids. A prelude ADT registered outside
+   `register_prelude_adts` cannot exist (there is one registration
+   path), so the enumeration is complete by construction.
    Its leg manifest is a typed executable contract, not editable
    `covered` prose. This change adds the typed wire-schema and PyO3
    signature legs and moves them to `covered` only with their separate

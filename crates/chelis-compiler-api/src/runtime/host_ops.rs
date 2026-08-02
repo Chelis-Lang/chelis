@@ -943,6 +943,68 @@ pub(super) fn dict_lookup<'a>(
         .map(|(_, value)| value)
 }
 
+/// Past this many entries, [`OrderedStringDictBuilder`] switches from a
+/// linear duplicate scan to a key -> slot hash index.
+const ORDERED_DICT_INDEX_THRESHOLD: usize = 32;
+
+/// Insertion-ordered, string-keyed dict builder with duplicate-key upsert
+/// (first occurrence's position, last occurrence's value). Small objects
+/// use a linear scan; past [`ORDERED_DICT_INDEX_THRESHOLD`] a key -> slot
+/// hash index takes over so building an n-key JSON object is O(n) instead
+/// of the O(n²) CPU-DoS a 100k-key document produced (chelis#891 review
+/// findings 11 and 15). Shared by `parse_json`'s object parser and the
+/// `jdict` eval arm.
+pub(super) struct OrderedStringDictBuilder {
+    entries: Vec<(RuntimeValue, RuntimeValue)>,
+    index: Option<std::collections::HashMap<String, usize>>,
+}
+
+impl OrderedStringDictBuilder {
+    pub(super) fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+            index: None,
+        }
+    }
+
+    pub(super) fn upsert(&mut self, key: String, value: RuntimeValue) {
+        if self.index.is_none() && self.entries.len() >= ORDERED_DICT_INDEX_THRESHOLD {
+            self.index = Some(
+                self.entries
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(slot, (existing, _))| match existing {
+                        RuntimeValue::String(existing) => Some((existing.clone(), slot)),
+                        _ => None,
+                    })
+                    .collect(),
+            );
+        }
+        if let Some(index) = self.index.as_mut() {
+            if let Some(&slot) = index.get(&key) {
+                self.entries[slot].1 = value;
+            } else {
+                index.insert(key.clone(), self.entries.len());
+                self.entries.push((RuntimeValue::String(key), value));
+            }
+            return;
+        }
+        if let Some(slot) = self
+            .entries
+            .iter_mut()
+            .find(|(existing, _)| matches!(existing, RuntimeValue::String(k) if *k == key))
+        {
+            slot.1 = value;
+        } else {
+            self.entries.push((RuntimeValue::String(key), value));
+        }
+    }
+
+    pub(super) fn into_entries(self) -> Vec<(RuntimeValue, RuntimeValue)> {
+        self.entries
+    }
+}
+
 /// V2-F2: element-wise precision conversion for `cast(tensor[..], q)` in
 /// the host runtime. Spec §2.7 lists `cast` as a first-class precision
 /// transform; the IR DAG and C backend already handle the tensor form

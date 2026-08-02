@@ -1972,6 +1972,56 @@ fn host_program_call_name_sites<T>(
     out
 }
 
+/// Builtins available only under `chelis eval` / `chelis test` (the host
+/// evaluator) and deliberately absent from every compiled backend:
+/// emitting the C codegen catch-all for them would produce a silent wrong
+/// value (the chelis#734 class). Both public build entry points -- the CLI
+/// build pipeline and `chelis-compiler-api::compile_for_execution` (the
+/// chelis-python path) -- reject them via
+/// [`find_eval_only_host_builtin`], sharing this one list so the two
+/// gates cannot drift (chelis#891 review finding 13).
+pub const EVAL_ONLY_HOST_BUILTINS: &[&str] = &[
+    "process_run",
+    // Host-lane JSON I/O (chelis#890).
+    "parse_json",
+    "to_json",
+    "json_f64",
+    "json_int",
+    "json_str",
+    "json_list",
+    "json_f64s",
+    "json_ints",
+    "jnum",
+    "jint",
+    "jstr",
+    "jlist",
+    "jdict",
+    "json_set",
+    "round_to",
+    // Host-lane CSV I/O (chelis#903): same eval-only scope as the JSON
+    // family above -- the compiled backends have no Json/Csv document
+    // runtime, so the build gates reject these loudly.
+    "parse_csv",
+    "to_csv",
+    "csv_f64s",
+    "csv_ints",
+    "csv_strs",
+    "csv_nrows",
+    "csv_cols",
+    "csv_f64",
+    "csv_int",
+    "csv_str",
+];
+
+/// First eval/test-only builtin applied anywhere in the lowered host
+/// program, if any (see [`EVAL_ONLY_HOST_BUILTINS`]).
+pub fn find_eval_only_host_builtin<T>(program: &HostProgram<T>) -> Option<&'static str> {
+    EVAL_ONLY_HOST_BUILTINS
+        .iter()
+        .copied()
+        .find(|builtin| host_program_uses_builtin(program, builtin))
+}
+
 /// Returns `true` if any global binding or function body in `program`
 /// applies the named builtin. Used by the build backends to reject
 /// eval/test-only builtins (e.g. `process_run`, Hull Phase 0a) with a
@@ -10017,6 +10067,36 @@ fn infer_builtin_host_type_from_arg_tys_unchecked(
             HostTypeTerm::String,
             HostTypeTerm::String,
         ])),
+        // Host-lane JSON I/O (chelis#890) and CSV I/O (chelis#903), over the
+        // prelude `Json` ADT. Eval/test-only like `process_run`: the terms
+        // here exist so host lowering can complete and hand the program to
+        // `find_eval_only_host_builtin`, which rejects every compiled-target
+        // use loudly before codegen.
+        "parse_json" | "parse_csv" | "jnum" | "jint" | "jstr" | "jlist" | "jdict" | "json_set" => {
+            Some(HostTypeTerm::Adt("Json".to_string(), Vec::new()))
+        }
+        "to_json" | "to_csv" | "json_str" | "csv_str" => Some(HostTypeTerm::String),
+        "json_f64" | "csv_f64" => Some(HostTypeTerm::Float64),
+        "json_int" | "csv_int" | "csv_nrows" => Some(HostTypeTerm::Int64),
+        "json_list" => Some(HostTypeTerm::List(Box::new(HostTypeTerm::Adt(
+            "Json".to_string(),
+            Vec::new(),
+        )))),
+        "json_f64s" | "csv_f64s" => Some(HostTypeTerm::List(Box::new(HostTypeTerm::Float64))),
+        "json_ints" | "csv_ints" => Some(HostTypeTerm::List(Box::new(HostTypeTerm::Int64))),
+        "csv_strs" | "csv_cols" => Some(HostTypeTerm::List(Box::new(HostTypeTerm::String))),
+        // `round_to` preserves its operand's float dtype ([05-OP-1]: f64 or
+        // f32, decided by the checker); an unresolved operand stays an
+        // inference hole rather than advertising a width this table cannot
+        // know.
+        "round_to" => match arg_tys.first() {
+            Some(
+                term @ HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(
+                    chelis_types::types::Prim::F64 | chelis_types::types::Prim::F32,
+                )),
+            ) => Some(term.clone()),
+            _ => Some(fresh_host_inference()),
+        },
         _ => None,
     }
 }

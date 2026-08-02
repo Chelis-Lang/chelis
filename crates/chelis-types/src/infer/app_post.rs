@@ -2803,6 +2803,24 @@ pub(super) fn finish_unified_app(
                     Type::Prim(Prim::String),
                 ]);
             }
+            // Host-lane JSON I/O (chelis#890): parse/serialize, dot-path
+            // accessors, output constructors over the prelude `Json` ADT,
+            // and `round_to` decimal rounding ([05-OP-1..5]). Eval-only;
+            // the build backends reject them (see
+            // `reject_eval_only_builtins_host`).
+            "parse_json" | "to_json" | "json_f64" | "json_int" | "json_str" | "json_list"
+            | "json_f64s" | "json_ints" | "jnum" | "jint" | "jstr" | "jlist" | "jdict"
+            | "json_set" | "round_to" => {
+                return check_json_builtin_signature(fname, list, &arg_tys, subst, errors);
+            }
+            // Host-lane CSV I/O (chelis#903): parse/serialize plus column
+            // accessors. A Csv document rides the `Json` ADT as a fixed
+            // shape, so the value type here is `Json`. Eval-only, like the
+            // JSON family above.
+            "parse_csv" | "to_csv" | "csv_f64s" | "csv_ints" | "csv_strs" | "csv_nrows"
+            | "csv_cols" | "csv_f64" | "csv_int" | "csv_str" => {
+                return check_csv_builtin_signature(fname, list, &arg_tys, subst, errors);
+            }
             _ => {}
         }
     }

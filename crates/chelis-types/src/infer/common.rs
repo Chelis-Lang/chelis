@@ -673,6 +673,7 @@ pub(super) fn collect_all_declarations(
     report_duplicate_defs(&bare_items, errors);
     report_duplicate_defsigs(&bare_items, errors);
     report_builtin_shadowing(&bare_items, errors);
+    report_builtin_param_call_shadowing(&bare_items, errors);
     let resolution_env = precollect_type_resolution_env(items, adt_reg);
     // Install the provisional self/forward header scope explicitly in this
     // per-check registry clone. Declaration bodies resolve against it, while
@@ -1023,6 +1024,147 @@ pub(super) fn report_builtin_shadowing(items: &[&deep::Expr], errors: &mut Diagn
                  internal-name-rewritten before checking"
             )],
         ));
+    }
+}
+
+/// A function parameter MAY reuse a builtin name (the deliberate #353
+/// carve-out -- it binds a value and shadows harmlessly in value position),
+/// but a CALL through that name never reaches the parameter: the host
+/// evaluator (`runtime/eval.rs::eval_app`) and IR lowering both dispatch
+/// builtin-first by name. `def apply(round_to, x) = round_to(x, 0)`
+/// therefore type-checked while silently invoking the BUILTIN (chelis#891
+/// review finding 4). Reject exactly that shape -- a builtin-named
+/// parameter applied by name inside its own scope -- and leave
+/// value-position reuse intact (pinned by
+/// `value_params_and_locals_may_reuse_builtin_names`).
+///
+/// Walks through [`stamped_parts`], so both the stamped `Expr::Node`
+/// carrier (all compiler ingress since #908) and the legacy programmatic
+/// `Expr::List` carrier are covered.
+pub(super) fn report_builtin_param_call_shadowing(
+    items: &[&deep::Expr],
+    errors: &mut DiagnosticSink<'_>,
+) {
+    let mut reported: HashSet<String> = HashSet::new();
+    for expr in items {
+        let mut scope: Vec<String> = Vec::new();
+        walk_builtin_param_calls(expr, &mut scope, &mut reported, errors);
+    }
+}
+
+/// Extract a parameter's bound name from any of the shapes
+/// [`extract_params`] accepts (bare `Name` atom, `MetaExpr`-wrapped name,
+/// legacy `(name {type: ..})` list, or stamped `BareList` pair), without
+/// resolving annotations.
+fn builtin_shadow_param_name(param: &deep::Expr) -> Option<&str> {
+    let mut current = param;
+    loop {
+        match current {
+            deep::Expr::Atom(deep::Atom::Name(name), _) => return Some(name.as_str()),
+            deep::Expr::MetaExpr(meta, _) => current = &meta.expr,
+            deep::Expr::BareList(elements, _) => return elements.first().and_then(symbol_name),
+            deep::Expr::List(list, _) => return list.elements.first().and_then(symbol_name),
+            _ => return None,
+        }
+    }
+}
+
+/// The element slice of a `(params ...)` container, mirroring the carrier
+/// shapes [`extract_params`] accepts.
+fn builtin_shadow_param_elems(container: &deep::Expr) -> &[deep::Expr] {
+    match container {
+        deep::Expr::Node(node, _) if node.tag() == DeepTag::Params => node.children_slice(),
+        deep::Expr::List(list, _) if get_tag(list) == Some(DeepTag::Params) => children(list),
+        deep::Expr::List(list, _) => list.elements.as_slice(),
+        deep::Expr::BareList(elements, _) => elements.as_slice(),
+        _ => &[],
+    }
+}
+
+/// Extract the name of a `(var name)` callee, unwrapping `MetaExpr`
+/// annotation layers, on either physical carrier.
+fn builtin_shadow_callee_name(callee: &deep::Expr) -> Option<&str> {
+    let mut current = callee;
+    loop {
+        if let deep::Expr::MetaExpr(meta, _) = current {
+            current = &meta.expr;
+            continue;
+        }
+        return match stamped_parts(current) {
+            Some((DeepTag::Var, _, kids)) => kids.first().and_then(symbol_name),
+            _ => None,
+        };
+    }
+}
+
+fn walk_builtin_param_calls(
+    expr: &deep::Expr,
+    scope: &mut Vec<String>,
+    reported: &mut HashSet<String>,
+    errors: &mut DiagnosticSink<'_>,
+) {
+    stack_guard!("walk_builtin_param_calls", expr);
+    match expr {
+        deep::Expr::MetaExpr(meta, _) => {
+            walk_builtin_param_calls(&meta.expr, scope, reported, errors);
+        }
+        deep::Expr::BareList(elements, _) => {
+            for element in elements {
+                walk_builtin_param_calls(element, scope, reported, errors);
+            }
+        }
+        deep::Expr::UnknownForm(data) => {
+            for child in &data.children {
+                walk_builtin_param_calls(child, scope, reported, errors);
+            }
+        }
+        _ => {
+            let Some((tag, _, kids)) = stamped_parts(expr) else {
+                return;
+            };
+            if tag == DeepTag::Fn {
+                let mut added = 0usize;
+                if let Some(container) = kids.first() {
+                    for param in builtin_shadow_param_elems(container) {
+                        if let Some(name) = builtin_shadow_param_name(param)
+                            && builtins::BUILTIN_NAMES.contains(&name)
+                        {
+                            scope.push(name.to_string());
+                            added += 1;
+                        }
+                    }
+                }
+                for kid in kids.iter().skip(1) {
+                    walk_builtin_param_calls(kid, scope, reported, errors);
+                }
+                scope.truncate(scope.len() - added);
+                return;
+            }
+            if tag == DeepTag::App
+                && let Some(callee) = kids.first()
+                && let Some(name) = builtin_shadow_callee_name(callee)
+                && scope.iter().any(|param| param == name)
+                && reported.insert(name.to_string())
+            {
+                errors.push(CheckError::new(
+                    CheckErrorKind::BuiltinShadowing,
+                    format!(
+                        "parameter `{name}` shadows the builtin `{name}` and is called in \
+                         this function body: calls dispatch builtin-first under eval and \
+                         lowering (spec/04-type-system.md \u{00a7}8.6), so `{name}(...)` here \
+                         always invokes the builtin; the parameter can never be reached \
+                         by name."
+                    ),
+                    vec![format!(
+                        "rename the parameter (e.g. `{name}_fn`); builtin-named parameters \
+                         remain allowed in value position"
+                    )],
+                ));
+            }
+            for kid in kids {
+                walk_builtin_param_calls(kid, scope, reported, errors);
+            }
+        }
     }
 }
 

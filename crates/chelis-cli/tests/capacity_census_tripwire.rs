@@ -443,6 +443,20 @@ fn coverage_manifest() -> CoverageManifest {
                 mutations: vec!["exported_public_numeric_stdlib_def_is_enumerated".to_string()],
             },
             CoveredLeg {
+                leg: "prelude-adt-numeric".to_string(),
+                artifact: "chelis_types::builtins::register_prelude_adts Rust-registered \
+                           prelude value ADTs"
+                    .to_string(),
+                enumerator: "prelude_adt_rows -> chelis_types::prelude_adt_defs".to_string(),
+                command: "cargo nextest run -p chelis-cli --test capacity_census_tripwire"
+                    .to_string(),
+                expected_success: "capacity_census_matches_public_surface passes".to_string(),
+                mutations: vec![
+                    "planted_prelude_adt_with_f64_variant_is_detected".to_string(),
+                    "registered_prelude_json_adt_is_enumerated_with_both_flags".to_string(),
+                ],
+            },
+            CoveredLeg {
                 leg: "wire-schema-numeric-fields".to_string(),
                 artifact: "crates/chelis-compiler-api/src/schema.rs public serialized type graph"
                     .to_string(),
@@ -490,10 +504,21 @@ struct SemanticRegistration {
     atom: &'static str,
 }
 
-/// Empty until spec/05 acquires its first `[05-OP-N]` atom. Existing
-/// numeric rows are the frozen pre-ratchet baseline; every future callable
-/// requires an exact entry here and the controlling atom in the same change.
-const SEMANTIC_REGISTRATIONS: &[SemanticRegistration] = &[];
+/// Existing pre-ratchet numeric rows are the frozen grandfathered
+/// baseline; every future callable requires an exact entry here and the
+/// controlling atom in the same change set. The first registered atom
+/// group is chelis#890/#903's host-lane data I/O family
+/// (spec/05-risc-primitives.md §3.7).
+const SEMANTIC_REGISTRATIONS: &[SemanticRegistration] = &[
+    // The prelude `Json` ADT's numeric capacity (JInt int64 beside JNum
+    // f64): the parse-time int-vs-float split and the exactness contract
+    // are decided by the ingestion atom.
+    SemanticRegistration {
+        callable: "[prelude-adt-numeric] prelude::Json: JNull | JBool(bool) | JInt(int64) | \
+                   JNum(f64) | JStr(string) | JList(List[Json]) | JDict(Dict[string, Json])",
+        atom: "[05-OP-2]",
+    },
+];
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1948,6 +1973,137 @@ fn stdlib_rows(root: &Path) -> Vec<Row> {
 }
 
 // ---------------------------------------------------------------------------
+// Rust-registered prelude value ADTs (the chelis#890 `Json` shape)
+// ---------------------------------------------------------------------------
+
+/// Deterministic census rendering of one prelude ADT field type. Not the
+/// Deep printer (a Rust-registered `chelis_types::Type` never passes
+/// through Deep), but the same identity discipline: type name, variant
+/// list, and per-field type spelling, so any change to a numeric field's
+/// position or dtype changes the row id and fails the diff.
+fn render_prelude_census_type(ty: &chelis_types::types::Type) -> String {
+    use chelis_types::types::Type;
+    match ty {
+        Type::Prim(p) => p.name().to_string(),
+        Type::Adt(name, args) => {
+            if args.is_empty() {
+                name.clone()
+            } else {
+                format!(
+                    "{name}[{}]",
+                    args.iter()
+                        .map(render_prelude_census_type)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            }
+        }
+        Type::Tuple(items) => format!(
+            "({})",
+            items
+                .iter()
+                .map(render_prelude_census_type)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Type::Ref(inner) => format!("&{}", render_prelude_census_type(inner)),
+        Type::Fn(args, ret) => format!(
+            "({}) -> {}",
+            args.iter()
+                .map(render_prelude_census_type)
+                .collect::<Vec<_>>()
+                .join(", "),
+            render_prelude_census_type(ret)
+        ),
+        Type::Var(v) => format!("t{}", v.0),
+        Type::Unit => "unit".to_string(),
+        // A tensor or error type inside a prelude ADT registration would
+        // itself be new surface; render it loudly rather than skipping.
+        other => format!("<unrenderable {other:?}>"),
+    }
+}
+
+/// Collect the numeric primitive spellings reachable in one prelude ADT
+/// field type, the `collect_numeric_tprims` counterpart for
+/// Rust-registered types.
+fn collect_prelude_numeric_prims(ty: &chelis_types::types::Type, prims: &mut BTreeSet<String>) {
+    use chelis_types::types::{TensorPrec, Type};
+    match ty {
+        Type::Prim(p) => {
+            if NUMERIC_PRIMS.contains(&p.name()) {
+                prims.insert(p.name().to_string());
+            }
+        }
+        Type::Adt(_, args) | Type::Tuple(args) | Type::Fn(args, _) => {
+            for arg in args {
+                collect_prelude_numeric_prims(arg, prims);
+            }
+            if let Type::Fn(_, ret) = ty {
+                collect_prelude_numeric_prims(ret, prims);
+            }
+        }
+        Type::Ref(inner) => collect_prelude_numeric_prims(inner, prims),
+        Type::Tensor(_, TensorPrec::Concrete(p)) if NUMERIC_PRIMS.contains(&p.name()) => {
+            prims.insert(p.name().to_string());
+        }
+        _ => {}
+    }
+}
+
+/// The prelude-adt-numeric leg (spec/design/dtype_semantics.md §C6): the
+/// Rust-registered prelude value ADTs, enumerated from the single
+/// registration path (`chelis_types::prelude_adt_defs`, which rebuilds
+/// through `register_prelude_adts`). Before chelis#890 no prelude ADT
+/// carried a numeric payload, so the family's `.ch` enumerator had
+/// nothing to miss; the prelude `Json` ADT (JInt int64 / JNum f64) made
+/// the Rust registry a numeric surface, and an unenumerated numeric
+/// surface is exactly the §C6 review-blocking blind spot. Same
+/// classification rule as every other family: a float primitive is a
+/// `float-carrier` seam, an integer primitive is `numeric-op`.
+fn prelude_adt_rows() -> Vec<Row> {
+    let mut rows = Vec::new();
+    for def in chelis_types::prelude_adt_defs() {
+        let mut prims = BTreeSet::new();
+        for variant in &def.variants {
+            for (_, ty) in &variant.fields {
+                collect_prelude_numeric_prims(ty, &mut prims);
+            }
+        }
+        if prims.is_empty() {
+            continue;
+        }
+        let shape = def
+            .variants
+            .iter()
+            .map(|variant| {
+                if variant.fields.is_empty() {
+                    variant.name.clone()
+                } else {
+                    format!(
+                        "{}({})",
+                        variant.name,
+                        variant
+                            .fields
+                            .iter()
+                            .map(|(_, ty)| render_prelude_census_type(ty))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" | ");
+        rows.push(Row {
+            kind: "prelude-adt-numeric".to_string(),
+            id: format!("prelude::{}: {}", def.name, shape),
+            flags: numeric_carrier_flags(&prims),
+            citation: String::new(),
+        });
+    }
+    rows
+}
+
+// ---------------------------------------------------------------------------
 // The inventory, the baseline, and the diff
 // ---------------------------------------------------------------------------
 
@@ -1963,6 +2119,7 @@ fn current_inventory(root: &Path) -> Vec<Row> {
         rows.extend(header_rows(name, text, &typedefs));
     }
     rows.extend(stdlib_rows(root));
+    rows.extend(prelude_adt_rows());
     rows.sort_by(|a, b| (a.kind.as_str(), a.id.as_str()).cmp(&(b.kind.as_str(), b.id.as_str())));
     rows.dedup_by(|a, b| a.kind == b.kind && a.id == b.id);
     rows
@@ -4108,5 +4265,81 @@ fn a_spliced_line_directive_is_caught_by_the_ban_itself() {
     assert!(
         message.contains("LINE-DIRECTIVE SPOOFING SURFACE"),
         "a spliced directive is the same directive: {message}"
+    );
+}
+
+/// prelude-adt-numeric negative control: a Rust-registered prelude ADT
+/// with a bare-f64 variant is detected as a float-carrier seam by the
+/// leg's own classifier -- the chelis#891 JNum shape at the Rust registry,
+/// mirroring `planted_deftype_with_f64_variant_is_detected` on the `.ch`
+/// leg. Built through the same `AdtDef` value the registry stores, so
+/// the control exercises the exact enumeration path minus only the
+/// `register_prelude_adts` source.
+#[test]
+fn planted_prelude_adt_with_f64_variant_is_detected() {
+    use chelis_types::adt::{AdtDef, VariantInfo};
+    use chelis_types::types::Type;
+    let planted = AdtDef {
+        name: "Planted".to_string(),
+        type_params: Vec::new(),
+        param_vars: Vec::new(),
+        opaque: false,
+        defining_module: None,
+        variants: vec![VariantInfo {
+            name: "PFloat".to_string(),
+            fields: vec![(None, Type::Prim(Prim::F64))],
+        }],
+    };
+    let mut prims = BTreeSet::new();
+    for variant in &planted.variants {
+        for (_, ty) in &variant.fields {
+            collect_prelude_numeric_prims(ty, &mut prims);
+        }
+    }
+    let flags = numeric_carrier_flags(&prims);
+    assert_eq!(flags, vec!["float-carrier".to_string()], "{prims:?}");
+    assert!(is_seam(&flags), "a bare-f64 prelude variant is a seam");
+    // And the renderer preserves the field shape in the identity.
+    assert_eq!(
+        render_prelude_census_type(&Type::Prim(Prim::F64)),
+        "f64",
+        "identity must spell the dtype"
+    );
+}
+
+/// prelude-adt-numeric positive control: the real registered prelude
+/// `Json` ADT is enumerated with BOTH classifications -- `float-carrier`
+/// (JNum f64: the seam a maintainer override dispositions in review) and
+/// `numeric-op` (JInt int64: owes the [05-OP-2] semantic registration) --
+/// under a shape-complete identity, and the non-numeric prelude ADTs
+/// (Option, List, MappedFile) contribute no rows.
+#[test]
+fn registered_prelude_json_adt_is_enumerated_with_both_flags() {
+    let rows = prelude_adt_rows();
+    assert_eq!(
+        rows.len(),
+        1,
+        "exactly the Json ADT carries numeric capacity today: {rows:?}"
+    );
+    let row = &rows[0];
+    assert_eq!(row.kind, "prelude-adt-numeric");
+    assert_eq!(
+        row.id,
+        "prelude::Json: JNull | JBool(bool) | JInt(int64) | JNum(f64) | JStr(string) | \
+         JList(List[Json]) | JDict(Dict[string, Json])"
+    );
+    assert_eq!(
+        row.flags,
+        vec!["float-carrier".to_string(), "numeric-op".to_string()]
+    );
+    assert!(is_seam(&row.flags));
+    // The numeric-op half is registered against its authority atom, and
+    // the registration key matches the row identity exactly.
+    let callable = callable_identity(row);
+    assert!(
+        SEMANTIC_REGISTRATIONS
+            .iter()
+            .any(|r| r.callable == callable && r.atom == "[05-OP-2]"),
+        "the Json row must map to [05-OP-2]; key: {callable}"
     );
 }

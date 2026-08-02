@@ -8500,15 +8500,25 @@ fn reject_host_only_builtins_before_host_lowering(
 fn reject_eval_only_builtins_host(
     program: &chelis_ir::host::ConcreteHostProgram,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    for builtin in EVAL_ONLY_HOST_BUILTINS {
-        if chelis_ir::host::host_program_uses_builtin(program, builtin) {
-            return Err(format!(
-                "{builtin} is an eval/test-only builtin; not available in compiled \
-                    targets. Run the program with `chelis eval` or `chelis test` instead, \
-                    or remove the {builtin} call before building."
-            )
-            .into());
-        }
+    if let Some(builtin) = chelis_ir::host::find_eval_only_host_builtin(program) {
+        // Branded through `Unsupported` (section C2,
+        // spec/design/loud_unsupported.md): this rejection predates the C2
+        // contract and shipped unbranded while it covered one name
+        // (`process_run`); widening the list to the chelis#890/#903
+        // JSON/CSV families would have made it a 26-name unbranded site
+        // invisible to the brand-based #730 sweeps. The sibling gate
+        // above (`compiled_host_only_builtin`) is the shape, and
+        // `compile_for_execution`'s twin (`reject_eval_only_builtins` in
+        // chelis-compiler-api) brands identically.
+        return Err(chelis_types::unsupported::Unsupported::new(
+            chelis_types::unsupported::UnsupportedKind::Builtin(builtin.to_string()),
+            "compiled targets (the host interpreter's eval/test lanes only)",
+            chelis_types::unsupported::Stage::Codegen("c"),
+            "run the program with `chelis eval` or `chelis test`, or remove the \
+             call before building (spec/05-risc-primitives.md §3.6)",
+        )
+        .to_string()
+        .into());
     }
     Ok(())
 }
@@ -9697,7 +9707,11 @@ fn deep_named_decl_name(expr: &DeepExpr) -> Option<&str> {
 /// supports but the compiled build backends deliberately do not. Kept in
 /// one place so [`reject_eval_only_builtins_host`] and
 /// [`drop_unreachable_eval_only_defs`] stay in agreement.
-const EVAL_ONLY_HOST_BUILTINS: &[&str] = &["process_run"];
+// The list itself lives in `chelis_ir::host` and is shared with the
+// public compiler API's `compile_for_execution` gate, so the CLI build
+// pipeline and the chelis-python path cannot drift (chelis#891 review
+// finding 13).
+const EVAL_ONLY_HOST_BUILTINS: &[&str] = chelis_ir::host::EVAL_ONLY_HOST_BUILTINS;
 
 /// Drop top-level decls for any function whose body references an eval-only
 /// host builtin ([`EVAL_ONLY_HOST_BUILTINS`]) and is not reachable from the

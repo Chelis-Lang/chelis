@@ -1007,6 +1007,119 @@ make the build reject them *whole-program* like `tensor_scan`, not make them
 assertable — a rejection-cleanliness change, not the compiled-lane arm.)
 Until the compiled-lane helpers land, assertions are an eval-lane contract.
 
+### 3.7 Host-Lane Data I/O Numeric Operations (Eval-Only; chelis#890 / chelis#903)
+
+The JSON and CSV I/O builtin families (`parse_json`/`to_json`, the
+`json_*` accessors, the `j*` constructors, `round_to`, `parse_csv`/
+`to_csv`, and the `csv_*` accessors; surface inventory in
+`docs/CHELIS_SURFACE.md` §3.8–§3.9) are **host-runtime only**: they run
+under `chelis eval` / `chelis test`, and every compiled target rejects a
+program that reaches one, whole-program, through the §7 `Unsupported`
+channel (`chelis_ir::host::EVAL_ONLY_HOST_BUILTINS`). None of these
+operations is in the RISC DAG and none carries an AD adjoint — the whole
+family is **non-differentiable**, and no operation in it accumulates, so
+no accumulator rule applies anywhere in this section unless an atom
+states one.
+
+The atoms below are the normative numeric authority for the family, in
+the sense `spec/design/capability_table.md` §New numeric ops requires: a
+callable in these families has exactly the numeric behavior its
+governing atom states, and a numeric behavior no atom governs does not
+ship. The prelude `Json` ADT's numeric capacity (`JInt int64` beside
+`JNum f64`) is decided by [05-OP-2].
+
+#### Decimal rounding atom
+
+Transitional blockquote authority per `spec/design/spec_provenance.md`
+§C1, matching the §7/§8 atoms of this file.
+
+> **[05-OP-1]** `round_to(x, places) -> r` performs decimal rounding at
+> a digit boundary: `r` is the decimal number with `places` fractional
+> digits nearest to the EXACT binary value of `x`, ties resolved to the
+> even final digit (IEEE 754 roundTiesToEven at a decimal boundary; the
+> semantics of Python's `round`), finalized ONCE to the operand's own
+> storage width. The supported operand dtypes and result dtypes are:
+>
+> | operand dtype | computation | result dtype |
+> |---|---|---|
+> | `f64` | exact decimal rounding of the exact binary value, one final rounding to f64 | `f64` |
+> | `f32` | exact decimal rounding of the exact binary value, one final rounding to f32 | `f32` |
+> | `f16`, `bf16` | **unsupported**: loud rejection at check and eval | — |
+> | integer, bool, tensor | type error | — |
+>
+> No lane may compute an operand at any width other than the operand's
+> own ([04-NUM-8]; the decimal rounding itself is exact, so the single
+> finalization is the only rounding). `places` is a value-domain integer
+> accepted at any integer storage width; values outside `0..=100` are a
+> loud error (negative `places` has no defined semantics). A non-finite
+> operand passes through unchanged. `round_to` is non-differentiable and
+> has no accumulator.
+
+#### Numeric ingestion atom
+
+> **[05-OP-2]** Ingestion preserves the source format's numeric
+> distinctions ([04-NUM-11]; `spec/design/dtype_semantics.md` §C6 "type
+> the boundary"). A JSON number token containing `.`, `e`, or `E` SHALL
+> ingest as `JNum` carrying the correctly-rounded f64 of the token; any
+> other number token SHALL ingest as `JInt` carrying its exact int64
+> value. An integer token outside int64 range falls back to the
+> correctly-rounded `JNum` — the ONE sanctioned lossy ingestion case,
+> which every surface documenting the family SHALL name — and a token
+> whose f64 image is non-finite is a loud error. CSV cells are TEXT at
+> parse time (no inferred numeric type); numeric meaning is assigned
+> only by an accessor, under the JSON number grammar with surrounding
+> ASCII space/tab tolerated: float accessors accept the full grammar,
+> integer accessors accept only its integer subset (a `.`/`e`/`E`
+> production refuses loudly, naming the float accessor), and an
+> integer cell outside int64 range is a loud Overflow-kind error, never
+> an f64 fallback. An empty or non-conforming cell is a loud error in
+> every numeric accessor — no NaN, no default, no skip.
+
+#### Exact read atom
+
+> **[05-OP-3]** An integer read (`json_int`, `json_ints`, `csv_int`,
+> `csv_ints`) returns the stored int64 EXACTLY and SHALL refuse a float
+> value, naming the corresponding float accessor — never truncating,
+> never rounding. A float read (`json_f64`, `json_f64s`, `csv_f64`,
+> `csv_f64s`) returns a stored f64 exactly; applied to a stored int64 it
+> performs the NAMED lossy int64-to-f64 widening (exact for magnitudes
+> at or below 2^53), which every surface documenting the family SHALL
+> state together with `json_int`/`csv_int` as the exact alternative.
+> Structural counts (`csv_nrows`) are exact int64. Every missing path,
+> missing column, out-of-range row, or type mismatch is a loud error.
+
+#### Exact construction atom
+
+> **[05-OP-4]** `jnum` accepts exactly `f64` and `jint` exactly `int64`;
+> every other operand width is a loud error at check and at eval, naming
+> the suffix/cast remedy. No construction path widens or narrows a
+> numeric value: the constructed document feeds the byte-exact
+> serialization channel of [05-OP-5], and a silent f32-to-f64 widening
+> would serialize the f32 literal's image (`0.1f32` as
+> `0.10000000149011612`) rather than the value the program stated.
+
+#### Numeric serialization atom
+
+> **[05-OP-5]** Serialization (`to_json`, `to_csv`) emits a stored int64
+> as its exact decimal digits with no fractional part and no float
+> round-trip, and a stored f64 through the [05-OBS-1] shortest-
+> round-trip channel (`format_element` at `f64`; the §8.1 grammar —
+> every finite emission parses back to the identical f64 and is a valid
+> JSON number token). A non-finite f64 is a loud serialization error in
+> both formats. Equal documents serialize to identical bytes.
+
+*(Implemented by `crates/chelis-compiler-api/src/runtime/json.rs` and
+`runtime/csv.rs`, with the checker contracts in
+`crates/chelis-types/src/infer/app_hostio.rs`; the acceptance surface is
+`crates/chelis-cli/tests/json_io.rs` / `csv_io.rs` plus the runtime unit
+and pipeline suites. The f32 lane of [05-OP-1] is pinned by a
+width-divergence test — `2.0025f32` rounds to `2.003` while `2.0025f64`
+rounds to `2.002` — so a widen-to-f64 implementation cannot pass. The
+non-ASCII-emission, escape, duplicate-key, and depth rules of the JSON
+text layer are documented at the surface (`docs/CHELIS_SURFACE.md`
+§3.8–§3.9); they are text-layer behavior, not numeric semantics, and are
+deliberately not frozen here.)*
+
 ---
 
 ## 4. Standard Lowerings (Tier 2 → Tier 1)
