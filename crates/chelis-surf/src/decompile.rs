@@ -75,11 +75,11 @@ pub fn try_decompile_program_with_context(
     for expr in exprs {
         validate_foundation_emitters(expr)?;
     }
-    Ok(decompile_program_with_context_unchecked(
-        exprs,
-        options,
-        synthetic_name,
-    ))
+    let source = decompile_program_with_context_unchecked(exprs, options, synthetic_name);
+    crate::parser::parse_str(&source).map_err(|error| ResugarError::InvalidSurfaceProgram {
+        reason: error.to_string(),
+    })?;
+    Ok(source)
 }
 
 fn decompile_program_with_context_unchecked(

@@ -6,9 +6,10 @@
 //! `cast` and `par` nodes.  Resugaring must preserve those node classes and
 //! malformed Deep must fail rather than turn into a placeholder program.
 
-use chelis_deep::Expr as DeepExpr;
+use chelis_deep::ast::{Atom as DeepAtom, MetaMap};
 use chelis_deep::parser::parse_str as parse_deep;
 use chelis_deep::printer::print_canonical;
+use chelis_deep::{DeepTag, Expr as DeepExpr, Span};
 use chelis_surf::decompile::{decompile_program, try_decompile_program};
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::format::format_expression;
@@ -264,6 +265,40 @@ fn public_decompiler_propagates_malformed_foundation_nodes() {
         !displayed.contains("= ()"),
         "malformed Deep must never become a placeholder program: {displayed}"
     );
+}
+
+#[test]
+fn fallible_program_boundary_rejects_invalid_legacy_emitter_output() {
+    let malformed = parse_one_deep("(def {} result (var {} if))");
+
+    let error = try_decompile_program(std::slice::from_ref(&malformed))
+        .expect_err("fallible public boundary must not return unparsable Surf");
+
+    assert!(
+        error.to_string().contains("invalid Surf"),
+        "diagnostic must identify the invalid emitted program: {error}"
+    );
+}
+
+#[test]
+fn constructed_non_finite_deep_float_fails_loudly() {
+    let span = Span::new(0, 0);
+    for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let deep = DeepExpr::node(
+            DeepTag::Lit,
+            MetaMap::default(),
+            vec![DeepExpr::Atom(DeepAtom::Float(value), span)],
+            span,
+        );
+
+        let error = resugar_expression(&deep)
+            .expect_err("non-finite Deep floats have no canonical Surf literal");
+
+        assert!(
+            error.to_string().contains("finite float literal"),
+            "diagnostic must identify the unrepresentable float: {error}"
+        );
+    }
 }
 
 #[test]

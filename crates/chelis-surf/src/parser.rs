@@ -1606,12 +1606,22 @@ impl Parser {
                 let tok = self.advance();
                 if let TokenKind::IntMinMagnitude(suffix) = self.peek().clone() {
                     let magnitude = self.advance();
+                    // The positive magnitude 2^63 cannot fit in the signed
+                    // payload carried by `Literal`. Keep the signed minimum
+                    // only as an internal magnitude sentinel, but preserve
+                    // P10's user-visible parse shape: the expression is
+                    // still unary minus, never a negative literal node.
                     let literal = match suffix {
                         None => Literal::Int(i64::MIN),
                         Some(LiteralSuffix::I64) => Literal::TypedInt(i64::MIN, LiteralSuffix::I64),
                         Some(_) => unreachable!("lexer admits only an i64 suffix here"),
                     };
-                    return Ok(Expr::Lit(literal, tok.span.merge(magnitude.span)));
+                    let operand = Expr::Lit(literal, magnitude.span);
+                    return Ok(Expr::Unary(
+                        UnaryOp::Neg,
+                        Box::new(operand),
+                        tok.span.merge(magnitude.span),
+                    ));
                 }
                 let operand = self.parse_expr(13)?;
                 let span = tok.span.merge(expr_span(&operand));
@@ -3725,6 +3735,16 @@ mod tests {
             }
             _ => panic!("expected WithSeed, got {e:?}"),
         }
+    }
+
+    #[test]
+    fn int64_minimum_keeps_the_normative_unary_minus_ast() {
+        let expression = body("def result() = -9223372036854775808i64");
+
+        assert!(
+            matches!(expression, Expr::Unary(UnaryOp::Neg, _, _)),
+            "spec/02 P10 requires every negative literal to parse as unary minus: {expression:?}"
+        );
     }
 
     #[test]

@@ -1430,6 +1430,15 @@ impl DesugarCtx {
                 }
             }
 
+            // P10 parses every negative spelling as unary minus. The one
+            // magnitude outside the positive i64 range is stored in the
+            // Surf AST as a signed-minimum sentinel; fold that sentinel back
+            // to the representable Deep literal instead of applying `neg`
+            // twice or overflowing in Rust.
+            Expr::Unary(UnaryOp::Neg, operand, _) if is_i64_min_magnitude_sentinel(operand) => {
+                self.desugar_expr_with_scope(operand, local_fn_params)
+            }
+
             Expr::Unary(op, operand, _) => {
                 let op_name = match op {
                     UnaryOp::Neg => "neg",
@@ -1832,7 +1841,7 @@ fn adopted_scalar_literal(lit: &Literal, prec: &str, negate: bool) -> deep::Expr
     let ty_meta = meta_with_type(node(DeepTag::TPrim, vec![sym(prec)]));
     match lit {
         Literal::Int(n) => {
-            let value = if negate { -*n } else { *n };
+            let value = if negate { fold_unary_minus_int(*n) } else { *n };
             node_meta(
                 DeepTag::Lit,
                 ty_meta,
@@ -1955,7 +1964,10 @@ impl DesugarCtx {
                 Expr::Lit(Literal::Int(n), _) => node_meta(
                     DeepTag::Lit,
                     meta_with_type(node(DeepTag::TPrim, vec![sym(prec_name)])),
-                    vec![deep::Expr::Atom(deep::Atom::Int(-*n), sp())],
+                    vec![deep::Expr::Atom(
+                        deep::Atom::Int(fold_unary_minus_int(*n)),
+                        sp(),
+                    )],
                 ),
                 Expr::Lit(Literal::Float(f), _) => node_meta(
                     DeepTag::Lit,
@@ -1986,6 +1998,18 @@ impl DesugarCtx {
             other => self.desugar_expr_with_scope(other, local_fn_params),
         }
     }
+}
+
+fn is_i64_min_magnitude_sentinel(expr: &Expr) -> bool {
+    matches!(
+        expr,
+        Expr::Lit(Literal::Int(i64::MIN), _)
+            | Expr::Lit(Literal::TypedInt(i64::MIN, LiteralSuffix::I64), _)
+    )
+}
+
+fn fold_unary_minus_int(value: i64) -> i64 {
+    value.checked_neg().unwrap_or(i64::MIN)
 }
 
 impl DesugarCtx {

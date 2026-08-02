@@ -47,6 +47,9 @@ pub enum ResugarError {
 
     #[error("foundation resugaring unexpectedly constructed unsupported Surf {kind}")]
     InvalidSurfaceAst { kind: &'static str },
+
+    #[error("Deep decompiler emitted invalid Surf: {reason}")]
+    InvalidSurfaceProgram { reason: String },
 }
 
 #[derive(Clone, Copy)]
@@ -230,6 +233,16 @@ fn resugar_node(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
 
 fn resugar_literal(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
     exact(&node, 1)?;
+    if matches!(
+        node.children.first(),
+        Some(DeepExpr::Atom(Atom::Float(value), _)) if !value.is_finite()
+    ) {
+        return Err(ResugarError::InvalidChild {
+            tag: node.tag.as_str(),
+            index: 0,
+            expected: "a finite float literal representable in canonical Surf",
+        });
+    }
     let literal_type = literal_type(node.meta)?;
     let literal = match (&node.children[0], literal_type) {
         (DeepExpr::Atom(Atom::Int(value), _), LiteralType::Unspecified) => Literal::Int(*value),

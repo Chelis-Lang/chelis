@@ -517,6 +517,13 @@ fn format_expr(expr: &Expr) -> String {
                 wrap_operand(right)
             )
         }
+        // The Surf parser stores the otherwise-unrepresentable positive
+        // magnitude 2^63 as a signed-minimum payload under a unary-minus
+        // node. The literal already formats with the required leading `-`;
+        // do not manufacture a second minus for that internal sentinel.
+        Expr::Unary(UnaryOp::Neg, expr, _) if is_i64_min_magnitude_sentinel(expr) => {
+            format_expr(expr)
+        }
         Expr::Unary(op, expr, _) => format!("{}{}", format_unary(*op), wrap_simple(expr)),
         Expr::Pipe(seed, stages, _) => format_pipe_expr(seed, stages),
         Expr::If(cond, then_expr, else_expr, _) => format!(
@@ -610,6 +617,14 @@ fn format_lit(lit: &Literal) -> String {
         Literal::Str(value) => format!("{value:?}"),
         Literal::Bool(value) => value.to_string(),
     }
+}
+
+fn is_i64_min_magnitude_sentinel(expr: &Expr) -> bool {
+    matches!(
+        expr,
+        Expr::Lit(Literal::Int(i64::MIN), _)
+            | Expr::Lit(Literal::TypedInt(i64::MIN, LiteralSuffix::I64), _)
+    )
 }
 
 fn format_args(args: &[Expr]) -> String {
