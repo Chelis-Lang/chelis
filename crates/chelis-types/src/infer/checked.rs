@@ -95,7 +95,16 @@ pub(super) fn child_stamp_role(tag: DeepTag, index: usize, _arity: usize) -> Chi
                 Type
             }
         }
-        DeepTag::Deftype | DeepTag::Typealias | DeepTag::Variant | DeepTag::Field => {
+        DeepTag::Deftype | DeepTag::Typealias => {
+            if index == 0 {
+                Binder
+            } else if index == 1 {
+                Syntax
+            } else {
+                Type
+            }
+        }
+        DeepTag::Variant | DeepTag::Field => {
             if index == 0 {
                 Binder
             } else {

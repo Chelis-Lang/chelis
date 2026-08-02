@@ -249,7 +249,16 @@ fn validate_node_tag_shape(
 ) {
     match deep_tag {
         DeepTag::Def => validate_property_def_metadata_from_node(node, offset, warnings),
-        DeepTag::Deftype => validate_deftype_invariant_metadata_from_node(node, offset, warnings),
+        DeepTag::Deftype => {
+            validate_deftype_invariant_metadata_from_node(node, offset, warnings);
+            validate_type_parameter_list("deftype", node.children_slice().get(1), offset, warnings);
+        }
+        DeepTag::Typealias => validate_type_parameter_list(
+            "typealias",
+            node.children_slice().get(1),
+            offset,
+            warnings,
+        ),
         DeepTag::Fn => {
             if !matches!(
                 node.children_slice().first(),
@@ -346,7 +355,6 @@ fn validate_node_tag_shape(
         | DeepTag::ImportAll
         | DeepTag::Export
         | DeepTag::Defsig
-        | DeepTag::Typealias
         | DeepTag::Variant
         | DeepTag::Field
         | DeepTag::Defdim
@@ -424,7 +432,13 @@ fn validate_tag_shape(
 
     match deep_tag {
         DeepTag::Def => validate_property_def_metadata(list, offset, warnings),
-        DeepTag::Deftype => validate_deftype_invariant_metadata(list, offset, warnings),
+        DeepTag::Deftype => {
+            validate_deftype_invariant_metadata(list, offset, warnings);
+            validate_type_parameter_list("deftype", list.elements.get(3), offset, warnings);
+        }
+        DeepTag::Typealias => {
+            validate_type_parameter_list("typealias", list.elements.get(3), offset, warnings)
+        }
         DeepTag::If | DeepTag::Arm => {
             if child_count != 3 {
                 warn_arity(warnings, "exactly 3 children");
@@ -548,7 +562,6 @@ fn validate_tag_shape(
         | DeepTag::ImportAll
         | DeepTag::Export
         | DeepTag::Defsig
-        | DeepTag::Typealias
         | DeepTag::Variant
         | DeepTag::Field
         | DeepTag::Defdim
@@ -593,6 +606,32 @@ fn validate_tag_shape(
         | DeepTag::Unquote
         | DeepTag::Splice
         | DeepTag::Kv => {}
+    }
+}
+
+fn validate_type_parameter_list(
+    declaration: &str,
+    params: Option<&Expr>,
+    offset: usize,
+    warnings: &mut Vec<ValidationWarning>,
+) {
+    let elements = match params {
+        Some(Expr::BareList(elements, _)) => Some(elements.as_slice()),
+        Some(Expr::List(list, _)) => Some(list.elements.as_slice()),
+        _ => None,
+    };
+    if !elements.is_some_and(|elements| {
+        elements
+            .iter()
+            .all(|expr| matches!(expr, Expr::Atom(crate::ast::Atom::Name(_), _)))
+    }) {
+        warnings.push(ValidationWarning {
+            kind: WarningKind::Structural,
+            offset,
+            message: format!(
+                "`{declaration}` must use a type-parameter list of bare names at child 1"
+            ),
+        });
     }
 }
 

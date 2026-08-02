@@ -73,7 +73,7 @@ fn post_sprint_def_ast_structure() {
 
 #[test]
 fn multiple_top_level_exprs() {
-    let source = "(deftype {} Foo) (def {} bar (fn {} (params {}) (var {} nop)))";
+    let source = "(deftype {} Foo ()) (def {} bar (fn {} (params {}) (var {} nop)))";
     let exprs = parse_str(source).expect("parse failed");
     assert_eq!(exprs.len(), 2);
     match &exprs[0] {
@@ -189,8 +189,8 @@ fn spec_colon_as_list_head_parser_leniency() {
 
 #[test]
 fn spec_nested_lists_post_sprint() {
-    // Post-sprint form: (deftype {} Option (t-var {} a) (variant {} Some (t-var {} a)) (variant {} None))
-    let src = "(deftype {} Option (t-var {} a) (variant {} Some (t-var {} a)) (variant {} None))";
+    // Numbered-spec form: type parameters are a structural binder list.
+    let src = "(deftype {} Option (a) (variant {} Some (t-var {} a)) (variant {} None))";
     let exprs = parse_str(src).expect("parse failed");
     assert_eq!(exprs.len(), 1);
     match &exprs[0] {

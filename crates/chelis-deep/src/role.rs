@@ -86,7 +86,19 @@ pub fn child_stamp_role(tag: DeepTag, index: usize, _arity: usize) -> ChildStamp
                 Type
             }
         }
-        DeepTag::Deftype | DeepTag::Typealias | DeepTag::Variant | DeepTag::Field => {
+        DeepTag::Deftype | DeepTag::Typealias => {
+            if index == 0 {
+                Binder
+            } else if index == 1 {
+                // The numbered Deep spec makes this a structural list of
+                // binder names, not a type expression. Treating `(a b)` as a
+                // type asks the decoder to interpret `a` as a type head.
+                Syntax
+            } else {
+                Type
+            }
+        }
+        DeepTag::Variant | DeepTag::Field => {
             if index == 0 {
                 Binder
             } else {
@@ -259,7 +271,7 @@ pub fn arity_contract(tag: DeepTag) -> AritySpec {
 
         DeepTag::Def => Fixed(2),       // name, body
         DeepTag::Defsig => Fixed(2),    // name, type
-        DeepTag::Deftype => AtLeast(1), // name [+ variants]
+        DeepTag::Deftype => AtLeast(2), // name, params [+ variants]
         DeepTag::Typealias => Fixed(3), // name, params, type
         DeepTag::Variant => AtLeast(1), // name [+ fields]
         DeepTag::Field => Fixed(2),     // name, type

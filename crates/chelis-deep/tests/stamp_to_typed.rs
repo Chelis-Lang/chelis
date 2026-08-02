@@ -98,6 +98,72 @@ fn params_children_are_binder_names() {
     }
 }
 
+// ── Declaration type-parameter lists are structural binder syntax ───
+
+#[test]
+fn deftype_type_parameters_remain_bare_and_variants_are_stamped() {
+    let source = "(deftype {} Option (a)\n\
+                  (variant {} Some (field {} value (t-var {} a)))\n\
+                  (variant {} None))";
+    let typed = parse_and_stamp(source).expect("spec-valid deftype must stamp");
+    let Expr::Node(deftype, _) = &typed[0] else {
+        panic!("expected stamped deftype, got {:?}", typed[0]);
+    };
+
+    assert_eq!(deftype.tag(), DeepTag::Deftype);
+    assert!(
+        matches!(&deftype.children_slice()[1], Expr::BareList(params, _) if matches!(params.as_slice(), [Expr::Atom(chelis_deep::Atom::Name(name), _)] if name == "a")),
+        "the `(a)` binder list must not be decoded as a type expression: {:?}",
+        deftype.children_slice()[1]
+    );
+    assert!(
+        deftype.children_slice()[2..]
+            .iter()
+            .all(|expr| matches!(expr, Expr::Node(node, _) if node.tag() == DeepTag::Variant)),
+        "every variant child must still be stamped"
+    );
+}
+
+#[test]
+fn typealias_type_parameters_remain_bare_and_rhs_is_stamped() {
+    let source = "(typealias {} Pair (a b)\n\
+                  (t-tuple {} (t-var {} a) (t-var {} b)))";
+    let typed = parse_and_stamp(source).expect("spec-valid typealias must stamp");
+    let Expr::Node(alias, _) = &typed[0] else {
+        panic!("expected stamped typealias, got {:?}", typed[0]);
+    };
+
+    assert_eq!(alias.tag(), DeepTag::Typealias);
+    assert!(
+        matches!(&alias.children_slice()[1], Expr::BareList(params, _) if params.len() == 2),
+        "the type-parameter list must remain structural binder syntax"
+    );
+    assert!(
+        matches!(&alias.children_slice()[2], Expr::Node(node, _) if node.tag() == DeepTag::TTuple),
+        "the alias RHS must remain a stamped type node"
+    );
+}
+
+#[test]
+fn deftype_requires_an_explicit_type_parameter_list() {
+    let err = chelis_deep::parser::parse_str_strict("(deftype {} Option (variant {} None))")
+        .expect_err("the spec requires a type-parameter list, including `()`");
+    assert!(
+        err.to_string().contains("type-parameter list"),
+        "the declaration validator must reject the missing slot: {err}"
+    );
+}
+
+#[test]
+fn strict_parse_rejects_a_tagged_type_parameter_slot() {
+    let err = chelis_deep::parser::parse_str_strict("(typealias {} Bad (t-var {} a) (t-var {} a))")
+        .expect_err("type parameters must be a structural list of binder names");
+    assert!(
+        err.to_string().contains("type-parameter list"),
+        "the declaration owner must diagnose the malformed binder slot: {err}"
+    );
+}
+
 #[test]
 fn bare_list_at_syntax_slot_produces_barelist() {
     // Var's child 0 is Syntax role. A list without a known tag there

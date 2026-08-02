@@ -18,13 +18,18 @@ fn child_stamp_roles_cover_the_canonical_deep_vocabulary() {
 #[test]
 fn structural_child_stamp_roles_match_owner_positions() {
     use ChildStampRole::{
-        Binder, EffectHandler, ExplicitInferenceBypass, RuntimeExpr, Selector, Type,
+        Binder, EffectHandler, ExplicitInferenceBypass, RuntimeExpr, Selector, Syntax, Type,
     };
     let cases = [
         (DeepTag::Module, 0, 2, Binder),
         (DeepTag::Module, 1, 2, ExplicitInferenceBypass),
         (DeepTag::Def, 0, 2, Binder),
         (DeepTag::Def, 1, 2, RuntimeExpr),
+        (DeepTag::Deftype, 0, 3, Binder),
+        (DeepTag::Deftype, 1, 3, Syntax),
+        (DeepTag::Deftype, 2, 3, Type),
+        (DeepTag::Typealias, 1, 3, Syntax),
+        (DeepTag::Typealias, 2, 3, Type),
         (DeepTag::Fn, 0, 2, Binder),
         (DeepTag::Fn, 1, 2, RuntimeExpr),
         (DeepTag::HandleEffect, 0, 2, EffectHandler),
@@ -1126,7 +1131,7 @@ fn grad_over_all_float_field_adt_types_as_same_adt() {
     // gets a field-wise gradient of the same constructor shape, so
     // `grad(f : Box -> f32) : Box -> Box`.
     let exprs = chelis_deep::parser::parse_str(
-        "(deftype {} Box
+        "(deftype {} Box ()
             (variant {} Box
                 (field {} t (t-tensor {} (d-lit {} 2) (t-prim {} f32)))))
          (defsig {} f (t-fn {} (t-adt {} Box) (t-prim {} f32)))
@@ -1148,7 +1153,7 @@ fn grad_over_mixed_field_adt_stays_non_differentiable() {
     // differentiable, so the default (no `wrt`) gradient payload is
     // unit, exactly as before the slice.
     let exprs = chelis_deep::parser::parse_str(
-        "(deftype {} Mixed
+        "(deftype {} Mixed ()
             (variant {} Mixed
                 (field {} t (t-tensor {} (d-lit {} 2) (t-prim {} f32)))
                 (field {} n (t-prim {} int32))))
@@ -1173,7 +1178,7 @@ fn grad_over_adt_plus_tensor_multi_target_returns_tuple() {
     // field-wise gradient struct and whose tensor slot is the bare
     // tensor gradient.
     let exprs = chelis_deep::parser::parse_str(
-        "(deftype {} Box
+        "(deftype {} Box ()
             (variant {} Box
                 (field {} t (t-tensor {} (d-lit {} 2) (t-prim {} f32)))))
          (defsig {} f (t-fn {}
@@ -1202,7 +1207,7 @@ fn grad_wrt_adt_in_multi_arg_call_returns_struct() {
     // yields the bare field-wise gradient struct (a single target, so
     // no enclosing tuple).
     let exprs = chelis_deep::parser::parse_str(
-        "(deftype {} Box
+        "(deftype {} Box ()
             (variant {} Box
                 (field {} t (t-tensor {} (d-lit {} 2) (t-prim {} f32)))))
          (defsig {} f (t-fn {}
@@ -1230,7 +1235,7 @@ fn grad_over_pure_enum_stays_unit() {
     // no continuous payload, so it stays non-differentiable and the
     // default gradient payload is unit, the pre-#520 typing.
     let exprs = chelis_deep::parser::parse_str(
-        "(deftype {} Mode
+        "(deftype {} Mode ()
             (variant {} ModeA)
             (variant {} ModeB))
          (defsig {} f (t-fn {} (t-adt {} Mode) (t-prim {} f32)))
@@ -1253,7 +1258,7 @@ fn grad_over_enum_plus_tensor_keeps_tensor_only_payload() {
     // rejection; the enum is non-differentiable (skipped), so the
     // gradient payload is the tensor alone, the pre-#520 typing.
     let exprs = chelis_deep::parser::parse_str(
-        "(deftype {} Mode
+        "(deftype {} Mode ()
             (variant {} ModeA)
             (variant {} ModeB))
          (defsig {} f (t-fn {}
