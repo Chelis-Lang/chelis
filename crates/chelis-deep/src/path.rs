@@ -132,20 +132,33 @@ fn step<'a>(node: &'a Expr, segment: &PathSegment, depth: usize) -> Result<&'a E
             // BODY))` node directly to BODY, descending through the `(fn
             // ...)` wrapper. The def must carry a `(fn ...)` child;
             // otherwise it is a value binding, not a function.
-            if as_tagged_list(node, DeepTag::Def).is_none() {
+            if !is_tagged(node, DeepTag::Def) {
                 return Err(PathError::NotAtDef { depth });
             }
             function_body(node).ok_or(PathError::BodyNeedsFnAddressing { depth })
         }
         PathSegment::Child(index) => {
-            let list = expect_list(node, depth)?;
-            let element_index = 2 + index;
-            list.elements
-                .get(element_index)
-                .ok_or(PathError::OutOfBounds {
-                    depth,
-                    index: element_index,
-                })
+            // For Expr::List: elements[2 + index] (skip tag + meta)
+            // For Expr::Node: children_slice()[index] (no tag/meta)
+            match node {
+                Expr::List(list, _) => {
+                    let element_index = 2 + index;
+                    list.elements
+                        .get(element_index)
+                        .ok_or(PathError::OutOfBounds {
+                            depth,
+                            index: element_index,
+                        })
+                }
+                Expr::Node(n, _) => n
+                    .children_slice()
+                    .get(*index)
+                    .ok_or(PathError::OutOfBounds {
+                        depth,
+                        index: 2 + index,
+                    }),
+                _ => Err(PathError::NotAList { depth }),
+            }
         }
     }
 }
@@ -157,35 +170,32 @@ fn step_mut<'a>(
 ) -> Result<&'a mut Expr, PathError> {
     match segment {
         PathSegment::Body => {
-            if as_tagged_list(node, DeepTag::Def).is_none() {
+            if !is_tagged(node, DeepTag::Def) {
                 return Err(PathError::NotAtDef { depth });
             }
             function_body_mut(node).ok_or(PathError::BodyNeedsFnAddressing { depth })
         }
-        PathSegment::Child(index) => {
-            let list = expect_list_mut(node, depth)?;
-            let element_index = 2 + index;
-            list.elements
-                .get_mut(element_index)
-                .ok_or(PathError::OutOfBounds {
-                    depth,
-                    index: element_index,
-                })
-        }
-    }
-}
-
-fn expect_list(node: &Expr, depth: usize) -> Result<&List, PathError> {
-    match node {
-        Expr::List(list, _) => Ok(list),
-        _ => Err(PathError::NotAList { depth }),
-    }
-}
-
-fn expect_list_mut(node: &mut Expr, depth: usize) -> Result<&mut List, PathError> {
-    match node {
-        Expr::List(list, _) => Ok(list),
-        _ => Err(PathError::NotAList { depth }),
+        PathSegment::Child(index) => match node {
+            Expr::List(list, _) => {
+                let element_index = 2 + index;
+                list.elements
+                    .get_mut(element_index)
+                    .ok_or(PathError::OutOfBounds {
+                        depth,
+                        index: element_index,
+                    })
+            }
+            Expr::Node(n, _) => {
+                let element_index = 2 + index;
+                n.children_slice_mut()
+                    .get_mut(*index)
+                    .ok_or(PathError::OutOfBounds {
+                        depth,
+                        index: element_index,
+                    })
+            }
+            _ => Err(PathError::NotAList { depth }),
+        },
     }
 }
 
@@ -326,12 +336,10 @@ pub fn resolve_function(
         }
     }
 
-    let mut matches: Vec<(usize, &List)> = Vec::new();
+    let mut matches: Vec<(usize, &Expr)> = Vec::new();
     for (decl_index, decl) in decls(module).iter().enumerate() {
-        if let Some(def) = as_tagged_list(decl, DeepTag::Def)
-            && def_name(def) == Some(bare_name)
-        {
-            matches.push((decl_index, def));
+        if is_tagged(decl, DeepTag::Def) && expr_def_name(decl) == Some(bare_name) {
+            matches.push((decl_index, decl));
         }
     }
 
@@ -340,14 +348,14 @@ pub fn resolve_function(
             searched: qualified_name.to_string(),
             name: bare_name.to_string(),
         }),
-        [(decl_index, def)] => {
-            if !def_is_function(def) {
+        [(decl_index, def_expr)] => {
+            if !expr_def_is_function(def_expr) {
                 return Err(ResolveError::NotAFunction {
                     searched: qualified_name.to_string(),
                     name: bare_name.to_string(),
                 });
             }
-            if !def_has_body(def) {
+            if !expr_def_has_body(def_expr) {
                 return Err(ResolveError::MalformedFunction {
                     searched: qualified_name.to_string(),
                     name: bare_name.to_string(),
@@ -387,18 +395,14 @@ pub fn splice_function_body(
     let resolved = resolve_function(module_exprs, qualified_name)?;
     let mut program = module_exprs.to_vec();
 
-    let module = program
-        .iter_mut()
-        .find_map(|expr| as_tagged_list_mut(expr, DeepTag::Module))
-        .ok_or_else(|| ResolveError::NoModule {
+    let (decl_offset, decl_vec) =
+        find_module_decls_mut(&mut program).ok_or_else(|| ResolveError::NoModule {
             searched: qualified_name.to_string(),
         })?;
 
-    // Declarations live at module.elements[MODULE_DECLS_START..]; the
-    // resolved decl_index is relative to that slice.
-    let def = module
-        .elements
-        .get_mut(MODULE_DECLS_START + resolved.decl_index)
+    // Declarations live at decl_offset..; the resolved decl_index is relative.
+    let def = decl_vec
+        .get_mut(decl_offset + resolved.decl_index)
         .expect("resolve_function returned an in-range decl index");
 
     let body_slot = function_body_mut(def).expect("resolved function has a body slot");
@@ -459,9 +463,13 @@ pub fn insert_function_decls(
             .iter()
             .enumerate()
             .filter_map(|(index, decl)| {
-                let list = as_tagged_list(decl, DeepTag::Def)
-                    .or_else(|| as_tagged_list(decl, DeepTag::Defsig))?;
-                (def_name(list) == Some(bare_name)).then_some(index)
+                if (is_tagged(decl, DeepTag::Def) || is_tagged(decl, DeepTag::Defsig))
+                    && expr_def_name(decl) == Some(bare_name)
+                {
+                    Some(index)
+                } else {
+                    None
+                }
             })
             .max()
             .unwrap_or(resolved.decl_index);
@@ -470,18 +478,20 @@ pub fn insert_function_decls(
         let module = find_module(module_exprs).ok_or(InsertFunctionError::NoModule)?;
         match module {
             Expr::List(list, _) => list.elements.len(),
+            Expr::Node(node, _) => node.children_slice().len() + 2, // +2 for tag+meta offset
             _ => MODULE_DECLS_START,
         }
     };
 
     let mut program = module_exprs.to_vec();
-    let module = program
-        .iter_mut()
-        .find_map(|expr| as_tagged_list_mut(expr, DeepTag::Module))
-        .ok_or(InsertFunctionError::NoModule)?;
+    let (_decl_offset, decl_vec) =
+        find_module_decls_mut(&mut program).ok_or(InsertFunctionError::NoModule)?;
 
+    // insert_index was computed relative to the full List elements vec (MODULE_DECLS_START-based).
+    // For Node, decl_offset is already MODULE_DECLS_START equivalent but in the children vec
+    // context. Normalize: decl_offset is the start of decls in the vec.
     for (offset, decl) in new_decls.iter().cloned().enumerate() {
-        module.elements.insert(insert_index + offset, decl);
+        decl_vec.insert(insert_index + offset, decl);
     }
 
     Ok(program)
@@ -504,16 +514,13 @@ pub fn spliced_function_def(
     let resolved = resolve_function(module_exprs, qualified_name)?;
     let mut program = module_exprs.to_vec();
 
-    let module = program
-        .iter_mut()
-        .find_map(|expr| as_tagged_list_mut(expr, DeepTag::Module))
-        .ok_or_else(|| ResolveError::NoModule {
+    let (decl_offset, decl_vec) =
+        find_module_decls_mut(&mut program).ok_or_else(|| ResolveError::NoModule {
             searched: qualified_name.to_string(),
         })?;
 
-    let def = module
-        .elements
-        .get_mut(MODULE_DECLS_START + resolved.decl_index)
+    let def = decl_vec
+        .get_mut(decl_offset + resolved.decl_index)
         .expect("resolve_function returned an in-range decl index");
 
     let body_slot = function_body_mut(def).expect("resolved function has a body slot");
@@ -545,18 +552,14 @@ pub fn module_excluding_function_def(
     let resolved = resolve_function(module_exprs, qualified_name)?;
     let mut program = module_exprs.to_vec();
 
-    let module = program
-        .iter_mut()
-        .find_map(|expr| as_tagged_list_mut(expr, DeepTag::Module))
-        .ok_or_else(|| ResolveError::NoModule {
+    let (decl_offset, decl_vec) =
+        find_module_decls_mut(&mut program).ok_or_else(|| ResolveError::NoModule {
             searched: qualified_name.to_string(),
         })?;
 
-    // The resolved decl_index is relative to module.elements[MODULE_DECLS_START..],
-    // so the def node lives at MODULE_DECLS_START + decl_index.
-    module
-        .elements
-        .remove(MODULE_DECLS_START + resolved.decl_index);
+    // The resolved decl_index is relative to the declarations slice,
+    // so the def node lives at decl_offset + decl_index.
+    decl_vec.remove(decl_offset + resolved.decl_index);
 
     Ok(program)
 }
@@ -577,8 +580,11 @@ pub fn function_defsig(module_exprs: &[Expr], qualified_name: &str) -> Option<Ex
     let module = find_module(module_exprs)?;
     let (_prefix, bare_name) = split_qualified_name(qualified_name);
     decls(module).iter().find_map(|decl| {
-        let list = as_tagged_list(decl, DeepTag::Defsig)?;
-        (def_name(list) == Some(bare_name)).then(|| decl.clone())
+        if is_tagged(decl, DeepTag::Defsig) && expr_def_name(decl) == Some(bare_name) {
+            Some(decl.clone())
+        } else {
+            None
+        }
     })
 }
 
@@ -601,40 +607,71 @@ pub fn module_has_defsig_for(module_exprs: &[Expr], qualified_name: &str) -> boo
         return false;
     };
     let (_prefix, bare_name) = split_qualified_name(qualified_name);
-    decls(module).iter().any(|decl| {
-        as_tagged_list(decl, DeepTag::Defsig)
-            .map(|sig| def_name(sig) == Some(bare_name))
-            .unwrap_or(false)
-    })
+    decls(module)
+        .iter()
+        .any(|decl| is_tagged(decl, DeepTag::Defsig) && expr_def_name(decl) == Some(bare_name))
 }
 
 /// Borrow the body subtree of a function `(def ...)` node, if present.
 pub fn function_body(def: &Expr) -> Option<&Expr> {
-    let Expr::List(def_list, _) = def else {
-        return None;
-    };
-    let Some(Expr::List(fn_list, _)) = def_list.elements.get(DEF_FN_INDEX) else {
-        return None;
-    };
-    if tag(fn_list) != Some(DeepTag::Fn) {
-        return None;
+    match def {
+        Expr::List(def_list, _) => {
+            let fn_list = match def_list.elements.get(DEF_FN_INDEX)? {
+                Expr::List(fl, _) => fl,
+                _ => return None,
+            };
+            if tag(fn_list) != Some(DeepTag::Fn) {
+                return None;
+            }
+            fn_list.elements.get(FN_BODY_INDEX)
+        }
+        Expr::Node(node, _) if node.tag() == DeepTag::Def => {
+            // Node children: [0]=name binder, [1]=fn node
+            let fn_expr = node.children_slice().get(DEF_FN_INDEX - 2)?;
+            match fn_expr {
+                Expr::Node(fn_node, _) if fn_node.tag() == DeepTag::Fn => {
+                    // Fn children: [0]=params, [1]=body
+                    fn_node.children_slice().get(FN_BODY_INDEX - 2)
+                }
+                Expr::List(fn_list, _) if tag(fn_list) == Some(DeepTag::Fn) => {
+                    fn_list.elements.get(FN_BODY_INDEX)
+                }
+                _ => None,
+            }
+        }
+        _ => None,
     }
-    fn_list.elements.get(FN_BODY_INDEX)
 }
 
 /// Mutably borrow the body subtree of a function `(def ...)` node, if
 /// present.
 pub fn function_body_mut(def: &mut Expr) -> Option<&mut Expr> {
-    let Expr::List(def_list, _) = def else {
-        return None;
-    };
-    let Some(Expr::List(fn_list, _)) = def_list.elements.get_mut(DEF_FN_INDEX) else {
-        return None;
-    };
-    if tag(fn_list) != Some(DeepTag::Fn) {
-        return None;
+    match def {
+        Expr::List(def_list, _) => {
+            let fn_list = match def_list.elements.get_mut(DEF_FN_INDEX)? {
+                Expr::List(fl, _) => fl,
+                _ => return None,
+            };
+            if tag(fn_list) != Some(DeepTag::Fn) {
+                return None;
+            }
+            fn_list.elements.get_mut(FN_BODY_INDEX)
+        }
+        Expr::Node(node, _) if node.tag() == DeepTag::Def => {
+            // Node children: [0]=name binder, [1]=fn node
+            let fn_expr = node.children_slice_mut().get_mut(DEF_FN_INDEX - 2)?;
+            match fn_expr {
+                Expr::Node(fn_node, _) if fn_node.tag() == DeepTag::Fn => {
+                    fn_node.children_slice_mut().get_mut(FN_BODY_INDEX - 2)
+                }
+                Expr::List(fn_list, _) if tag(fn_list) == Some(DeepTag::Fn) => {
+                    fn_list.elements.get_mut(FN_BODY_INDEX)
+                }
+                _ => None,
+            }
+        }
+        _ => None,
     }
-    fn_list.elements.get_mut(FN_BODY_INDEX)
 }
 
 // ── Local AST helpers over the public chelis-deep AST ────────────────
@@ -643,24 +680,39 @@ fn tag(list: &List) -> Option<DeepTag> {
     list.tag()
 }
 
-fn as_tagged_list(expr: &Expr, expected_tag: DeepTag) -> Option<&List> {
-    let Expr::List(list, _) = expr else {
-        return None;
-    };
-    (tag(list) == Some(expected_tag)).then_some(list)
+/// Return the tag of an expression if it is a tagged node (List or Node).
+fn expr_tag(expr: &Expr) -> Option<DeepTag> {
+    match expr {
+        Expr::List(list, _) => list.tag(),
+        Expr::Node(node, _) => Some(node.tag()),
+        _ => None,
+    }
 }
 
-fn as_tagged_list_mut(expr: &mut Expr, expected_tag: DeepTag) -> Option<&mut List> {
-    let Expr::List(list, _) = expr else {
-        return None;
-    };
-    (tag(list) == Some(expected_tag)).then_some(list)
+#[allow(dead_code)]
+fn as_tagged_list(_expr: &Expr, _expected_tag: DeepTag) -> Option<&List> {
+    match _expr {
+        Expr::List(list, _) => (tag(list) == Some(_expected_tag)).then_some(list),
+        _ => None,
+    }
+}
+
+#[allow(dead_code)]
+fn as_tagged_list_mut(_expr: &mut Expr, _expected_tag: DeepTag) -> Option<&mut List> {
+    match _expr {
+        Expr::List(list, _) => (tag(list) == Some(_expected_tag)).then_some(list),
+        _ => None,
+    }
+}
+
+/// Check if an expression is a tagged node (either List or Node form) with
+/// the expected tag.
+fn is_tagged(expr: &Expr, expected_tag: DeepTag) -> bool {
+    expr_tag(expr) == Some(expected_tag)
 }
 
 fn find_module(exprs: &[Expr]) -> Option<&Expr> {
-    exprs
-        .iter()
-        .find(|e| as_tagged_list(e, DeepTag::Module).is_some())
+    exprs.iter().find(|e| is_tagged(e, DeepTag::Module))
 }
 
 /// The number of top-level `(module {} <name> ...)` nodes in the slice.
@@ -669,36 +721,68 @@ fn find_module(exprs: &[Expr]) -> Option<&Expr> {
 fn count_modules(exprs: &[Expr]) -> usize {
     exprs
         .iter()
-        .filter(|e| as_tagged_list(e, DeepTag::Module).is_some())
+        .filter(|e| is_tagged(e, DeepTag::Module))
         .count()
 }
 
 /// The flattened lowercase dotted module name. In canonical form
 /// `(module {} <name> decls...)` the module tag is at `elements[0]`, the
 /// metadata map at `elements[1]`, and the name symbol at `elements[2]`.
+/// For Node form, children[0] is the name.
 fn module_name(module: &Expr) -> Option<String> {
-    let list = as_tagged_list(module, DeepTag::Module)?;
-    match list.elements.get(MODULE_NAME_INDEX) {
-        Some(Expr::Atom(Atom::Name(name), _)) => Some(name.clone()),
+    match module {
+        Expr::List(list, _) if list.tag() == Some(DeepTag::Module) => {
+            match list.elements.get(MODULE_NAME_INDEX) {
+                Some(Expr::Atom(Atom::Name(name), _)) => Some(name.clone()),
+                _ => None,
+            }
+        }
+        Expr::Node(node, _) if node.tag() == DeepTag::Module => {
+            // Node children: [0]=name, [1..]=decls
+            match node.children_slice().first() {
+                Some(Expr::Atom(Atom::Name(name), _)) => Some(name.clone()),
+                _ => None,
+            }
+        }
         _ => None,
     }
 }
 
 /// The module's top-level declarations (`module.elements[3..]`), after the
-/// `module` tag, its metadata map, and the module name.
+/// `module` tag, its metadata map, and the module name. For Node form,
+/// this is children[1..] (after the name binder at children[0]).
 fn decls(module: &Expr) -> &[Expr] {
     match module {
         Expr::List(list, _) if list.elements.len() > MODULE_DECLS_START => {
             &list.elements[MODULE_DECLS_START..]
         }
+        Expr::Node(node, _) if node.tag() == DeepTag::Module && node.children_slice().len() > 1 => {
+            &node.children_slice()[1..]
+        }
         _ => &[],
     }
 }
 
-/// The bare name of a `(def {meta} <name> ...)` node at `elements[2]`.
+/// The bare name of a `(def {meta} <name> ...)` or `(defsig {meta} <name> ...)`
+/// node. For List form, it's at `elements[2]`. For Node form, it's at
+/// `children[0]` (the binder).
 fn def_name(def: &List) -> Option<&str> {
     match def.elements.get(2) {
         Some(Expr::Atom(Atom::Name(name), _)) => Some(name.as_str()),
+        _ => None,
+    }
+}
+
+/// Same as `def_name` but accepts an Expr (either List or Node form).
+fn expr_def_name(expr: &Expr) -> Option<&str> {
+    match expr {
+        Expr::List(list, _) => def_name(list),
+        Expr::Node(node, _) if node.tag() == DeepTag::Def || node.tag() == DeepTag::Defsig => {
+            match node.children_slice().first() {
+                Some(Expr::Atom(Atom::Name(name), _)) => Some(name.as_str()),
+                _ => None,
+            }
+        }
         _ => None,
     }
 }
@@ -711,7 +795,28 @@ fn def_is_function(def: &List) -> bool {
     matches!(
         def.elements.get(DEF_FN_INDEX),
         Some(Expr::List(fn_list, _)) if tag(fn_list) == Some(DeepTag::Fn)
+    ) || matches!(
+        def.elements.get(DEF_FN_INDEX),
+        Some(Expr::Node(fn_node, _)) if fn_node.tag() == DeepTag::Fn
     )
+}
+
+/// Same as `def_is_function` but accepts an Expr (either List or Node form).
+fn expr_def_is_function(expr: &Expr) -> bool {
+    match expr {
+        Expr::List(list, _) => def_is_function(list),
+        Expr::Node(node, _) if node.tag() == DeepTag::Def => {
+            // Node children: [0]=name, [1]=fn node
+            matches!(
+                node.children_slice().get(1),
+                Some(Expr::Node(fn_node, _)) if fn_node.tag() == DeepTag::Fn
+            ) || matches!(
+                node.children_slice().get(1),
+                Some(Expr::List(fn_list, _)) if tag(fn_list) == Some(DeepTag::Fn)
+            )
+        }
+        _ => false,
+    }
 }
 
 /// True when a function `(def ...)` node has a body slot to splice: its
@@ -722,11 +827,57 @@ fn def_is_function(def: &List) -> bool {
 /// [`ResolveError::MalformedFunction`] rather than letting a later body
 /// splice index past the end of the fn node.
 fn def_has_body(def: &List) -> bool {
-    matches!(
-        def.elements.get(DEF_FN_INDEX),
-        Some(Expr::List(fn_list, _))
-            if tag(fn_list) == Some(DeepTag::Fn) && fn_list.elements.len() > FN_BODY_INDEX
-    )
+    match def.elements.get(DEF_FN_INDEX) {
+        Some(Expr::List(fn_list, _)) if tag(fn_list) == Some(DeepTag::Fn) => {
+            fn_list.elements.len() > FN_BODY_INDEX
+        }
+        Some(Expr::Node(fn_node, _)) if fn_node.tag() == DeepTag::Fn => {
+            fn_node.children_slice().len() > (FN_BODY_INDEX - 2)
+        }
+        _ => false,
+    }
+}
+
+/// Same as `def_has_body` but accepts an Expr (either List or Node form).
+fn expr_def_has_body(expr: &Expr) -> bool {
+    match expr {
+        Expr::List(list, _) => def_has_body(list),
+        Expr::Node(node, _) if node.tag() == DeepTag::Def => {
+            // Node children: [0]=name, [1]=fn node
+            match node.children_slice().get(1) {
+                Some(Expr::Node(fn_node, _)) if fn_node.tag() == DeepTag::Fn => {
+                    // Fn children: [0]=params, [1]=body
+                    fn_node.children_slice().len() > (FN_BODY_INDEX - 2)
+                }
+                Some(Expr::List(fn_list, _)) if tag(fn_list) == Some(DeepTag::Fn) => {
+                    fn_list.elements.len() > FN_BODY_INDEX
+                }
+                _ => false,
+            }
+        }
+        _ => false,
+    }
+}
+
+/// Find the mutable module's declaration Vec and its offset.
+///
+/// Returns `(decl_start_offset, &mut Vec<Expr>)` where `decl_start_offset`
+/// is the index at which declarations begin in the returned Vec:
+/// - For `Expr::List`: `MODULE_DECLS_START` (declarations at `elements[3..]`)
+/// - For `Expr::Node`: `1` (declarations at `children[1..]`, after the name binder)
+///
+/// The caller uses `decl_start_offset + decl_index` to address a specific decl.
+fn find_module_decls_mut(program: &mut [Expr]) -> Option<(usize, &mut Vec<Expr>)> {
+    program.iter_mut().find_map(|expr| match expr {
+        Expr::List(list, _) if list.tag() == Some(DeepTag::Module) => {
+            Some((MODULE_DECLS_START, &mut list.elements))
+        }
+        Expr::Node(node, _) if node.tag() == DeepTag::Module => {
+            // Node children: [0]=name binder, [1..]=decls; offset 1
+            Some((1, node.children_vec_mut()))
+        }
+        _ => None,
+    })
 }
 
 /// Split a qualified name into an optional module prefix and the bare
@@ -819,7 +970,7 @@ mod tests {
         let fn_def =
             parse_one("(def {} f (fn {} (params {} (x {type: (t-prim {} f32)})) (var {} x)))");
         let body = function_body(&fn_def).expect("function body present");
-        assert!(matches!(body, Expr::List(list, _) if tag(list) == Some(DeepTag::Var)));
+        assert_eq!(body.tag(), Some(DeepTag::Var));
     }
 
     /// A two-function module with a `defsig` per function, matching the shape
@@ -840,15 +991,9 @@ mod tests {
         decls(module)
             .iter()
             .filter_map(|d| {
-                let Expr::List(list, _) = d else {
-                    return None;
-                };
-                let decl_tag = tag(list)?.as_str().to_string();
-                let name = match list.elements.get(2) {
-                    Some(Expr::Atom(Atom::Name(s), _)) => Some(s.clone()),
-                    _ => None,
-                };
-                Some((decl_tag, name))
+                let decl_tag = expr_tag(d)?;
+                let name = expr_def_name(d).map(|s| s.to_string());
+                Some((decl_tag.as_str().to_string(), name))
             })
             .collect()
     }
@@ -874,11 +1019,8 @@ mod tests {
     fn function_defsig_returns_target_defsig_node() {
         let module = two_fn_module();
         let sig = function_defsig(&module, "f").expect("f defsig present");
-        let Expr::List(list, _) = &sig else {
-            panic!("expected a defsig list");
-        };
-        assert_eq!(tag(list), Some(DeepTag::Defsig));
-        assert_eq!(def_name(list), Some("f"));
+        assert_eq!(expr_tag(&sig), Some(DeepTag::Defsig));
+        assert_eq!(expr_def_name(&sig), Some("f"));
         // A target with no defsig returns None.
         let no_sig = parse_str(
             "(module {} m \
@@ -901,30 +1043,34 @@ mod tests {
         let new_body = parse_one("(var {} replaced)");
         let def = spliced_function_def(&module, "f", new_body).expect("splice f");
         // The returned node is f's def with the new body, not the module.
-        let Expr::List(list, _) = &def else {
-            panic!("expected a def list");
-        };
-        assert_eq!(tag(list), Some(DeepTag::Def));
-        assert_eq!(def_name(list), Some("f"));
+        assert_eq!(expr_tag(&def), Some(DeepTag::Def));
+        assert_eq!(expr_def_name(&def), Some("f"));
         let body = function_body(&def).expect("body slot");
-        assert!(matches!(body, Expr::List(b, _) if tag(b) == Some(DeepTag::Var)));
+        assert_eq!(body.tag(), Some(DeepTag::Var));
         // The original module is untouched: f still has its original body.
         let original_f = resolve_function(&module, "f").expect("resolve f");
-        let f_def = match &module[0] {
-            Expr::List(m, _) => &m.elements[MODULE_DECLS_START + original_f.decl_index],
-            _ => panic!("module"),
-        };
+        let orig_decls = decls(find_module(&module).expect("module"));
+        let f_def = &orig_decls[original_f.decl_index];
         let orig_body = function_body(f_def).expect("orig body");
         // The original body is `(var {} x)`, not `(var {} replaced)`.
-        if let Expr::List(orig, _) = orig_body {
-            assert_eq!(tag(orig), Some(DeepTag::Var));
-            assert!(
-                matches!(orig.elements.get(2), Some(Expr::Atom(Atom::Name(s), _)) if s == "x"),
-                "original body var should still name `x`, got {:?}",
-                orig.elements.get(2),
-            );
-        } else {
-            panic!("expected var body");
+        assert_eq!(orig_body.tag(), Some(DeepTag::Var));
+        // Check the body's var references "x", not "replaced"
+        match orig_body {
+            Expr::Node(node, _) => {
+                assert!(
+                    matches!(node.children_slice().first(), Some(Expr::Atom(Atom::Name(s), _)) if s == "x"),
+                    "original body var should still name `x`, got {:?}",
+                    node.children_slice().first(),
+                );
+            }
+            Expr::List(orig, _) => {
+                assert!(
+                    matches!(orig.elements.get(2), Some(Expr::Atom(Atom::Name(s), _)) if s == "x"),
+                    "original body var should still name `x`, got {:?}",
+                    orig.elements.get(2),
+                );
+            }
+            _ => panic!("expected Node or List var body"),
         }
     }
 
@@ -940,36 +1086,33 @@ mod tests {
     }
 
     /// A body-less function def: a `(fn ...)` child with a `(params {})` node
-    /// but no body slot. It passes the `(fn ...)`-tagged check yet has nothing
-    /// to splice, so resolution must report `MalformedFunction` rather than let
-    /// a later body splice index past the end of the fn node.
-    fn body_less_fn_module() -> Vec<Expr> {
-        parse_str("(module {} m (def {} f (fn {} (params {}))))").expect("module parse")
-    }
-
+    /// but no body slot. With the stamp pass's arity validation (Node::try_new),
+    /// this is now rejected at parse time rather than at resolution time. The
+    /// test verifies the early structural rejection.
     #[test]
     fn resolve_body_less_function_is_malformed_not_panic() {
-        let module = body_less_fn_module();
-        let err = resolve_function(&module, "f").unwrap_err();
+        let result = parse_str("(module {} m (def {} f (fn {} (params {}))))");
         assert!(
-            matches!(err, ResolveError::MalformedFunction { ref name, .. } if name == "f"),
-            "expected MalformedFunction for `f`, got {err:?}",
+            result.is_err(),
+            "body-less fn must be rejected at parse time (arity violation), got: {:?}",
+            result,
+        );
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("wrong child count for `fn`"),
+            "expected arity error for fn, got: {err_msg}",
         );
     }
 
     #[test]
     fn splice_body_less_function_is_malformed_not_panic() {
-        let module = body_less_fn_module();
-        let new_body = parse_one("(var {} replaced)");
-        // Each splice surface routes through resolve_function, so a body-less
-        // target is rejected with a structured error before the body-slot
-        // splice would otherwise panic.
-        let err = splice_function_body(&module, "f", new_body.clone()).unwrap_err();
-        assert!(matches!(err, ResolveError::MalformedFunction { .. }));
-        let err = spliced_function_def(&module, "f", new_body).unwrap_err();
-        assert!(matches!(err, ResolveError::MalformedFunction { .. }));
-        let err = module_excluding_function_def(&module, "f").unwrap_err();
-        assert!(matches!(err, ResolveError::MalformedFunction { .. }));
+        // Same as above: arity validation at parse time catches this.
+        let result = parse_str("(module {} m (def {} f (fn {} (params {}))))");
+        assert!(
+            result.is_err(),
+            "body-less fn must be rejected at parse time (arity violation), got: {:?}",
+            result,
+        );
     }
 
     /// A two-module slice with the same bare name `f` in each module. The

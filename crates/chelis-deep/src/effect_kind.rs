@@ -42,10 +42,11 @@ mod tests {
             .into_iter()
             .next()
             .expect("one expression");
-        let Expr::List(list, _) = expr else {
-            panic!("expected list")
-        };
-        list
+        match expr {
+            Expr::Node(node, span) => node.to_list(span),
+            Expr::List(list, _) => list,
+            other => panic!("expected Node or List, got {:?}", other),
+        }
     }
 
     #[test]

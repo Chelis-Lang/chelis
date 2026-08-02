@@ -419,50 +419,88 @@ fn resolved_def<'a>(module: &'a [Expr], qualified_name: &str) -> &'a Expr {
 }
 
 fn def_node(module: &[Expr], decl_index: usize) -> &Expr {
-    let Expr::List(module_list, _) = &module[0] else {
-        panic!("expected module list");
-    };
-    let node = &module_list.elements[MODULE_DECLS_START + decl_index];
-    assert_is_def(node);
-    node
+    match &module[0] {
+        Expr::List(module_list, _) => {
+            let node = &module_list.elements[MODULE_DECLS_START + decl_index];
+            assert_is_def(node);
+            node
+        }
+        Expr::Node(node, _) if node.tag() == DeepTag::Module => {
+            // Node children: [0]=name, [1..]=decls; decl_index is relative to decls
+            let node = &node.children_slice()[1 + decl_index];
+            assert_is_def(node);
+            node
+        }
+        _ => panic!("expected module list or Node"),
+    }
 }
 
 fn def_node_mut(module: &mut [Expr], decl_index: usize) -> &mut Expr {
-    let Expr::List(module_list, _) = &mut module[0] else {
-        panic!("expected module list");
-    };
-    &mut module_list.elements[MODULE_DECLS_START + decl_index]
+    match &mut module[0] {
+        Expr::List(module_list, _) => &mut module_list.elements[MODULE_DECLS_START + decl_index],
+        Expr::Node(node, _) if node.tag() == DeepTag::Module => {
+            &mut node.children_slice_mut()[1 + decl_index]
+        }
+        _ => panic!("expected module list or Node"),
+    }
 }
 
 fn assert_is_def(node: &Expr) {
-    let Expr::List(list, _) = node else {
-        panic!("expected def list");
-    };
-    assert!(
-        matches!(list.elements.first(), Some(Expr::Atom(Atom::Tag(t), _)) if *t == DeepTag::Def),
-        "expected a def node"
-    );
+    match node {
+        Expr::List(list, _) => {
+            assert!(
+                matches!(list.elements.first(), Some(Expr::Atom(Atom::Tag(t), _)) if *t == DeepTag::Def),
+                "expected a def node"
+            );
+        }
+        Expr::Node(n, _) => {
+            assert_eq!(n.tag(), DeepTag::Def, "expected a def node");
+        }
+        _ => panic!("expected def list or Node"),
+    }
 }
 
-fn def_elements(def: &Expr) -> &[Expr] {
-    let Expr::List(list, _) = def else {
-        panic!("expected def list");
-    };
-    &list.elements
+fn def_elements(def: &Expr) -> Vec<Expr> {
+    match def {
+        Expr::List(list, _) => list.elements.clone(),
+        Expr::Node(node, span) => {
+            // Reconstruct the canonical List form: [tag, meta, children...]
+            node.to_list(*span).elements
+        }
+        _ => panic!("expected def list or Node"),
+    }
 }
 
 /// Assert that two `(fn {} (params {} ...) BODY)` nodes are identical
-/// everywhere except the body slot at `elements[3]`.
+/// everywhere except the body slot.
 fn assert_fn_differs_only_in_body(orig_fn: &Expr, spliced_fn: &Expr) {
-    let (Expr::List(orig, _), Expr::List(spliced, _)) = (orig_fn, spliced_fn) else {
-        panic!("expected fn lists");
-    };
-    assert_eq!(orig.elements.len(), spliced.elements.len());
-    assert_eq!(orig.elements[0], spliced.elements[0], "fn tag changed");
-    assert_eq!(orig.elements[1], spliced.elements[1], "fn metadata changed");
-    assert_eq!(orig.elements[2], spliced.elements[2], "params changed");
-    assert_ne!(
-        orig.elements[3], spliced.elements[3],
-        "body slot did not change"
-    );
+    match (orig_fn, spliced_fn) {
+        (Expr::List(orig, _), Expr::List(spliced, _)) => {
+            assert_eq!(orig.elements.len(), spliced.elements.len());
+            assert_eq!(orig.elements[0], spliced.elements[0], "fn tag changed");
+            assert_eq!(orig.elements[1], spliced.elements[1], "fn metadata changed");
+            assert_eq!(orig.elements[2], spliced.elements[2], "params changed");
+            assert_ne!(
+                orig.elements[3], spliced.elements[3],
+                "body slot did not change"
+            );
+        }
+        (Expr::Node(orig, _), Expr::Node(spliced, _)) => {
+            assert_eq!(orig.tag(), spliced.tag(), "fn tag changed");
+            assert_eq!(orig.meta(), spliced.meta(), "fn metadata changed");
+            assert_eq!(orig.child_count(), spliced.child_count());
+            // children[0] = params, children[1] = body
+            assert_eq!(
+                orig.children_slice()[0],
+                spliced.children_slice()[0],
+                "params changed"
+            );
+            assert_ne!(
+                orig.children_slice()[1],
+                spliced.children_slice()[1],
+                "body slot did not change"
+            );
+        }
+        _ => panic!("expected matching fn node types"),
+    }
 }

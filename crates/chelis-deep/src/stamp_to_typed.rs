@@ -83,6 +83,19 @@ pub fn stamp_to_typed(raw_exprs: Vec<RawExpr>) -> Result<Vec<Expr>, StampError> 
     Ok(out)
 }
 
+/// Stamp raw expressions leniently — treats each top-level expression as a
+/// bare/syntax position (no declaration requirement). Symbols are kept as
+/// `Atom::Name`, known tags in list-head position are decoded to Nodes.
+/// This is the entry point for `parse_str` which handles arbitrary Deep
+/// fragments, not just programs.
+pub fn stamp_exprs_lenient(raw_exprs: Vec<RawExpr>) -> Result<Vec<Expr>, StampError> {
+    let mut out = Vec::with_capacity(raw_exprs.len());
+    for raw in raw_exprs {
+        out.push(stamp_bare(raw)?);
+    }
+    Ok(out)
+}
+
 /// Stamp a `.dp` file's raw expressions into typed AST.
 ///
 /// `.dp` files may contain:

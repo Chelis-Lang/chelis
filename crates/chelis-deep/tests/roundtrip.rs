@@ -52,32 +52,21 @@ fn post_sprint_def_ast_structure() {
     assert_eq!(exprs.len(), 1);
 
     match &exprs[0] {
-        Expr::List(list, _) => {
-            // element 0: tag "def"
-            match &list.elements[0] {
-                Expr::Atom(Atom::Tag(t), _) => assert_eq!(*t, DeepTag::Def),
-                other => panic!("expected Symbol(def), got {:?}", other),
-            }
-            // element 1: metadata map {}
-            match &list.elements[1] {
-                Expr::Map(m, _) => assert!(m.entries.is_empty()),
-                other => panic!("expected empty Map, got {:?}", other),
-            }
-            // element 2: name "square"
-            match &list.elements[2] {
+        Expr::Node(node, _) => {
+            assert_eq!(node.tag(), DeepTag::Def);
+            assert!(node.meta().entries.is_empty());
+            // children[0] = name "square"
+            match &node.children_slice()[0] {
                 Expr::Atom(Atom::Name(s), _) => assert_eq!(s, "square"),
                 other => panic!("expected Symbol(square), got {:?}", other),
             }
-            // element 3: fn node
-            match &list.elements[3] {
-                Expr::List(func, _) => match &func.elements[0] {
-                    Expr::Atom(Atom::Tag(t), _) => assert_eq!(*t, DeepTag::Fn),
-                    other => panic!("expected Symbol(fn), got {:?}", other),
-                },
-                other => panic!("expected fn list, got {:?}", other),
+            // children[1] = fn node
+            match &node.children_slice()[1] {
+                Expr::Node(fn_node, _) => assert_eq!(fn_node.tag(), DeepTag::Fn),
+                other => panic!("expected fn Node, got {:?}", other),
             }
         }
-        other => panic!("expected top-level List, got {:?}", other),
+        other => panic!("expected top-level Node, got {:?}", other),
     }
     roundtrip(src);
 }
@@ -88,18 +77,12 @@ fn multiple_top_level_exprs() {
     let exprs = parse_str(source).expect("parse failed");
     assert_eq!(exprs.len(), 2);
     match &exprs[0] {
-        Expr::List(list, _) => match &list.elements[0] {
-            Expr::Atom(Atom::Tag(t), _) => assert_eq!(*t, DeepTag::Deftype),
-            other => panic!("expected Symbol(deftype), got {:?}", other),
-        },
-        other => panic!("expected List(deftype), got {:?}", other),
+        Expr::Node(node, _) => assert_eq!(node.tag(), DeepTag::Deftype),
+        other => panic!("expected Node(deftype), got {:?}", other),
     }
     match &exprs[1] {
-        Expr::List(list, _) => match &list.elements[0] {
-            Expr::Atom(Atom::Tag(t), _) => assert_eq!(*t, DeepTag::Def),
-            other => panic!("expected Symbol(def), got {:?}", other),
-        },
-        other => panic!("expected List(def), got {:?}", other),
+        Expr::Node(node, _) => assert_eq!(node.tag(), DeepTag::Def),
+        other => panic!("expected Node(def), got {:?}", other),
     }
 }
 
@@ -186,14 +169,14 @@ fn spec_colon_as_list_head_parser_leniency() {
     let exprs = parse_str("(: 42 i32)").expect("parse failed");
     assert_eq!(exprs.len(), 1);
     match &exprs[0] {
-        Expr::List(list, _) => {
-            assert_eq!(list.elements.len(), 3);
-            match &list.elements[0] {
+        Expr::BareList(elems, _) => {
+            assert_eq!(elems.len(), 3);
+            match &elems[0] {
                 Expr::Atom(Atom::Name(s), _) => assert_eq!(s, ":"),
                 other => panic!("expected Symbol(:), got {:?}", other),
             }
         }
-        other => panic!("expected List, got {:?}", other),
+        other => panic!("expected BareList, got {:?}", other),
     }
     // Bare list — no Map at [1], so validator skips it (not a tagged node)
     let warnings = validate(&exprs);
@@ -211,14 +194,10 @@ fn spec_nested_lists_post_sprint() {
     let exprs = parse_str(src).expect("parse failed");
     assert_eq!(exprs.len(), 1);
     match &exprs[0] {
-        Expr::List(list, _) => {
-            // tag = deftype, meta = {}, name = Option, then type-var and variants
-            match &list.elements[0] {
-                Expr::Atom(Atom::Tag(t), _) => assert_eq!(*t, DeepTag::Deftype),
-                other => panic!("expected Symbol(deftype), got {:?}", other),
-            }
+        Expr::Node(node, _) => {
+            assert_eq!(node.tag(), DeepTag::Deftype);
         }
-        other => panic!("expected List, got {:?}", other),
+        other => panic!("expected Node, got {:?}", other),
     }
     let warnings = validate(&exprs);
     assert!(
@@ -230,16 +209,17 @@ fn spec_nested_lists_post_sprint() {
 
 #[test]
 fn spec_metadata_on_list_items() {
-    // (fn (^{:type f32} x) body) — metadata on items within a list
+    // (fn (^{:type f32} x) body) — metadata on items within a list.
+    // Since the list lacks a metadata map at index 1, this becomes a BareList.
     let exprs = parse_str("(fn (^{:type f32} x) body)").expect("parse failed");
     assert_eq!(exprs.len(), 1);
     match &exprs[0] {
-        Expr::List(outer, _) => {
-            assert_eq!(outer.elements.len(), 3);
-            match &outer.elements[1] {
-                Expr::List(params, _) => {
-                    assert_eq!(params.elements.len(), 1);
-                    match &params.elements[0] {
+        Expr::BareList(outer, _) => {
+            assert_eq!(outer.len(), 3);
+            match &outer[1] {
+                Expr::BareList(params, _) => {
+                    assert_eq!(params.len(), 1);
+                    match &params[0] {
                         Expr::MetaExpr(meta, _) => {
                             assert_eq!(meta.entries.len(), 1);
                             assert_eq!(meta.entries[0].0, "type");
@@ -247,10 +227,10 @@ fn spec_metadata_on_list_items() {
                         other => panic!("expected MetaExpr, got {:?}", other),
                     }
                 }
-                other => panic!("expected params list, got {:?}", other),
+                other => panic!("expected params BareList, got {:?}", other),
             }
         }
-        other => panic!("expected List, got {:?}", other),
+        other => panic!("expected BareList, got {:?}", other),
     }
     roundtrip("(fn (^{:type f32} x) body)");
 }

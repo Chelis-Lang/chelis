@@ -64,17 +64,34 @@ pub fn validate(exprs: &[Expr]) -> Vec<ValidationWarning> {
         // an untagged list like `((var {} f) (var {} x))`, a rejection-
         // parity divergence on exactly the input class whose checker-side
         // silent skip motivated the issue.
-        if let Expr::List(list, span) = expr
-            && !list.elements.is_empty()
-            && list.tag().is_none()
-            && list.unknown_tag_symbol().is_none()
-        {
-            warnings.push(ValidationWarning {
-                kind: WarningKind::Structural,
-                offset: span.offset,
-                message: "top-level expression must be a canonical `(tag {} ...)` node                           (chelis#858)"
-                    .to_string(),
-            });
+        match expr {
+            Expr::List(list, span)
+                if !list.elements.is_empty()
+                    && list.tag().is_none()
+                    && list.unknown_tag_symbol().is_none() =>
+            {
+                warnings.push(ValidationWarning {
+                    kind: WarningKind::Structural,
+                    offset: span.offset,
+                    message: "top-level expression must be a canonical `(tag {} ...)` node                           (chelis#858)"
+                        .to_string(),
+                });
+            }
+            Expr::BareList(elems, span)
+                if !elems.is_empty()
+                    && !matches!(
+                        elems.first(),
+                        Some(Expr::Atom(crate::ast::Atom::Name(_), _))
+                    ) =>
+            {
+                warnings.push(ValidationWarning {
+                    kind: WarningKind::Structural,
+                    offset: span.offset,
+                    message: "top-level expression must be a canonical `(tag {} ...)` node                           (chelis#858)"
+                        .to_string(),
+                });
+            }
+            _ => {}
         }
         validate_expr(expr, &mut warnings);
     }
@@ -151,9 +168,47 @@ fn validate_expr(expr: &Expr, warnings: &mut Vec<ValidationWarning>) {
             }
         }
         Expr::Atom(_, _) => {} // Atoms are always valid
-        // Stamped variants: these are produced by stamp_to_typed and are
-        // structurally valid by construction. No further validation needed.
-        Expr::Node(_, _) | Expr::BareList(_, _) | Expr::UnknownForm(..) => {}
+        // Stamped Node variants: structurally valid by construction (arity
+        // and role gates are checked at Node::new/try_new). However, we
+        // still need to validate semantic metadata shapes (e.g., invariant
+        // on deftype) and recurse into children for validation.
+        Expr::Node(node, span) => {
+            validate_node_tag_shape(node.tag(), node, span.offset, warnings);
+            // Recurse into children
+            for child in node.children_slice() {
+                validate_expr(child, warnings);
+            }
+            // Recurse into metadata values
+            for (_, v) in &node.meta().entries {
+                validate_expr(v, warnings);
+            }
+        }
+        Expr::BareList(elems, _) => {
+            for child in elems {
+                validate_expr(child, warnings);
+            }
+        }
+        Expr::UnknownForm(data) => {
+            for child in &data.children {
+                validate_expr(child, warnings);
+            }
+        }
+    }
+}
+
+/// Per-tag metadata validation for Node-form expressions. Arity is already
+/// enforced at construction time (`Node::try_new`), so this only runs the
+/// metadata-shape checks that `validate_tag_shape` performs on List-form.
+fn validate_node_tag_shape(
+    deep_tag: DeepTag,
+    node: &crate::node::Node,
+    offset: usize,
+    warnings: &mut Vec<ValidationWarning>,
+) {
+    match deep_tag {
+        DeepTag::Def => validate_property_def_metadata_from_node(node, offset, warnings),
+        DeepTag::Deftype => validate_deftype_invariant_metadata_from_node(node, offset, warnings),
+        _ => {}
     }
 }
 
@@ -465,25 +520,63 @@ fn validate_deftype_invariant_metadata(
 /// <body>)`: a `fn` node whose first child is a `params` node holding
 /// exactly one bare-symbol binder, and which has a body child.
 fn is_predicate_fn_shape(expr: &Expr) -> bool {
-    let Expr::List(fn_list, _) = expr else {
-        return false;
-    };
-    let is_fn = fn_list.tag() == Some(DeepTag::Fn)
-        && matches!(fn_list.elements.get(1), Some(Expr::Map(_, _)));
-    if !is_fn || fn_list.elements.len() != 4 {
-        return false;
+    match expr {
+        Expr::List(fn_list, _) => {
+            let is_fn = fn_list.tag() == Some(DeepTag::Fn)
+                && matches!(fn_list.elements.get(1), Some(Expr::Map(_, _)));
+            if !is_fn || fn_list.elements.len() != 4 {
+                return false;
+            }
+            // params node with exactly one bare-symbol binder.
+            match fn_list.elements.get(2) {
+                Some(Expr::List(params, _)) => {
+                    params.tag() == Some(DeepTag::Params)
+                        && matches!(params.elements.get(1), Some(Expr::Map(_, _)))
+                        && params.elements.len() == 3
+                        && matches!(
+                            params.elements.get(2),
+                            Some(Expr::Atom(crate::ast::Atom::Name(_), _))
+                        )
+                }
+                Some(Expr::Node(params_node, _)) => {
+                    params_node.tag() == DeepTag::Params
+                        && params_node.child_count() == 1
+                        && matches!(
+                            params_node.children_slice().first(),
+                            Some(Expr::Atom(crate::ast::Atom::Name(_), _))
+                        )
+                }
+                _ => false,
+            }
+        }
+        Expr::Node(fn_node, _) => {
+            if fn_node.tag() != DeepTag::Fn || fn_node.child_count() != 2 {
+                return false;
+            }
+            // params node with exactly one bare-symbol binder.
+            match fn_node.children_slice().first() {
+                Some(Expr::Node(params_node, _)) => {
+                    params_node.tag() == DeepTag::Params
+                        && params_node.child_count() == 1
+                        && matches!(
+                            params_node.children_slice().first(),
+                            Some(Expr::Atom(crate::ast::Atom::Name(_), _))
+                        )
+                }
+                Some(Expr::List(params, _)) => {
+                    params.tag() == Some(DeepTag::Params)
+                        && matches!(params.elements.get(1), Some(Expr::Map(_, _)))
+                        && params.elements.len() == 3
+                        && matches!(
+                            params.elements.get(2),
+                            Some(Expr::Atom(crate::ast::Atom::Name(_), _))
+                        )
+                }
+                _ => false,
+            }
+        }
+        _ => false,
     }
-    // params node with exactly one bare-symbol binder.
-    let Some(Expr::List(params, _)) = fn_list.elements.get(2) else {
-        return false;
-    };
-    params.tag() == Some(DeepTag::Params)
-        && matches!(params.elements.get(1), Some(Expr::Map(_, _)))
-        && params.elements.len() == 3
-        && matches!(
-            params.elements.get(2),
-            Some(Expr::Atom(crate::ast::Atom::Name(_), _))
-        )
 }
 
 fn is_canonical_amenability(expr: &Expr) -> bool {
@@ -492,6 +585,112 @@ fn is_canonical_amenability(expr: &Expr) -> bool {
         Expr::Atom(crate::ast::Atom::Str(s), _)
             if matches!(s.as_str(), "linear" | "polynomial" | "transcendental" | "opaque")
     )
+}
+
+/// Node-form: validate property def metadata (mirrors validate_property_def_metadata).
+fn validate_property_def_metadata_from_node(
+    node: &crate::node::Node,
+    offset: usize,
+    warnings: &mut Vec<ValidationWarning>,
+) {
+    let meta = node.meta();
+    let is_property = meta.entries.iter().any(|(key, value)| {
+        key == "chelis_role"
+            && matches!(value, Expr::Atom(crate::ast::Atom::Str(value), _) if value == "property")
+    });
+    if !is_property {
+        return;
+    }
+    let has_source_kind = meta.entries.iter().any(|(key, value)| {
+        key == "property_source_kind" && matches!(value, Expr::Atom(crate::ast::Atom::Str(_), _))
+    });
+    let has_quantifiers = meta.entries.iter().any(|(key, value)| {
+        key == "property_quantifiers"
+            && (matches!(
+                value,
+                Expr::List(params, _)
+                    if params.tag() == Some(DeepTag::Params)
+                        && matches!(params.elements.get(1), Some(Expr::Map(_, _)))
+            ) || matches!(
+                value,
+                Expr::Node(n, _) if n.tag() == DeepTag::Params
+            ))
+    });
+    let has_preconditions = meta.entries.iter().any(|(key, value)| {
+        key == "property_preconditions"
+            && (matches!(
+                value,
+                Expr::List(tuple, _)
+                    if tuple.tag() == Some(DeepTag::Tuple)
+                        && matches!(tuple.elements.get(1), Some(Expr::Map(_, _)))
+            ) || matches!(
+                value,
+                Expr::Node(n, _) if n.tag() == DeepTag::Tuple
+            ))
+    });
+    let body_is_fn = matches!(
+        node.children_slice().get(1), // children[1] is the fn body
+        Some(Expr::Node(fn_node, _)) if fn_node.tag() == DeepTag::Fn
+    ) || matches!(
+        node.children_slice().get(1),
+        Some(Expr::List(body, _)) if body.tag() == Some(DeepTag::Fn)
+    );
+    for (ok, message) in [
+        (
+            has_source_kind,
+            "property def metadata must include string `property_source_kind`",
+        ),
+        (
+            has_quantifiers,
+            "property def metadata must include `(params {} ...)` `property_quantifiers`",
+        ),
+        (
+            has_preconditions,
+            "property def metadata must include `(tuple {} ...)` `property_preconditions`",
+        ),
+        (body_is_fn, "property def body must be a callable `fn`"),
+    ] {
+        if !ok {
+            warnings.push(ValidationWarning {
+                kind: WarningKind::Structural,
+                offset,
+                message: message.to_string(),
+            });
+        }
+    }
+}
+
+/// Node-form: validate deftype invariant metadata (mirrors validate_deftype_invariant_metadata).
+fn validate_deftype_invariant_metadata_from_node(
+    node: &crate::node::Node,
+    offset: usize,
+    warnings: &mut Vec<ValidationWarning>,
+) {
+    let meta = node.meta();
+    if let Some((_, value)) = meta.entries.iter().find(|(key, _)| key == "invariant")
+        && !is_predicate_fn_shape(value)
+    {
+        warnings.push(ValidationWarning {
+            kind: WarningKind::Structural,
+            offset,
+            message: "`invariant` metadata must be `(fn {} (params {} <binder>) <expr>)`"
+                .to_string(),
+        });
+    }
+    if let Some((_, value)) = meta
+        .entries
+        .iter()
+        .find(|(key, _)| key == "invariant_amenability")
+        && !is_canonical_amenability(value)
+    {
+        warnings.push(ValidationWarning {
+            kind: WarningKind::Structural,
+            offset,
+            message: "`invariant_amenability` must be one of \
+                      \"linear\"|\"polynomial\"|\"transcendental\"|\"opaque\""
+                .to_string(),
+        });
+    }
 }
 
 #[cfg(test)]

@@ -177,6 +177,19 @@ impl Node {
         &self.children
     }
 
+    /// Mutable slice access to children (bridge convenience for the
+    /// path-module rewrite operations that need to replace a child
+    /// in-place).
+    pub fn children_slice_mut(&mut self) -> &mut [Expr] {
+        &mut self.children
+    }
+
+    /// Mutable Vec access to children (bridge convenience for structural
+    /// operations that insert/remove children, e.g. module-excluding-def).
+    pub fn children_vec_mut(&mut self) -> &mut Vec<Expr> {
+        &mut self.children
+    }
+
     // === Bridge: reconstruct List for transition-period consumers ===
 
     /// Reconstruct the canonical `List` representation that existing
