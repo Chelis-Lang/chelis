@@ -13,10 +13,37 @@ pub(super) fn annotate_ir_program(
     let items = top_level_decl_items_with_modules(exprs);
     let declared_signatures = collect_declared_sig_metadata(items.iter().map(|(_, expr)| *expr));
     let annotation_context = AnnotationResolutionContext::root(&declared_signatures);
-    exprs
-        .iter()
-        .map(|expr| annotate_expr_with_scope(expr, product, annotation_context, errors))
-        .collect()
+    annotate_top_levels(exprs, product, annotation_context, errors)
+}
+
+/// Annotate each top-level expression, stopping early if cancellation was
+/// requested (chelis#930).
+///
+/// Annotation is the third front-end pass whose cost scales with declaration
+/// count — measured at ~13.8s on the Coral library in the perf baseline — so
+/// it polls per top level for the same reason inference does. A short result
+/// vector is never consumed: every caller runs a `cancellation_gate`
+/// immediately after and returns the hard failure.
+pub(super) fn annotate_top_levels(
+    exprs: &[deep::Expr],
+    product: &InferenceProduct,
+    annotation_context: AnnotationResolutionContext<'_>,
+    errors: &mut DiagnosticSink<'_>,
+) -> Vec<deep::Expr> {
+    let cancel = crate::cancel::current_cancel_token();
+    let mut annotated = Vec::with_capacity(exprs.len());
+    for expr in exprs {
+        if cancel.as_ref().is_some_and(CancelToken::is_cancelled) {
+            break;
+        }
+        annotated.push(annotate_expr_with_scope(
+            expr,
+            product,
+            annotation_context,
+            errors,
+        ));
+    }
+    annotated
 }
 
 pub(super) fn annotate_expr_with_scope(

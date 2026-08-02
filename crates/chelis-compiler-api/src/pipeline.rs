@@ -171,6 +171,9 @@ impl std::error::Error for SemanticRejection {}
 /// Native typed failures from canonical preparation, semantic, and lowering stages.
 #[derive(Debug)]
 pub enum PipelineRejection {
+    Cancelled {
+        stage: &'static str,
+    },
     Preparation(PreparationError),
     Type {
         fitness: FitnessReport,
@@ -201,6 +204,7 @@ impl From<SemanticRejection> for PipelineRejection {
 impl fmt::Display for PipelineRejection {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Cancelled { .. } => formatter.write_str(chelis_types::EVAL_CANCELLED_MSG),
             Self::Preparation(error) => write!(formatter, "{error}"),
             Self::Type { fitness } => write!(formatter, "Type errors: {:?}", fitness.errors),
             Self::Effects { errors } => {
@@ -576,8 +580,10 @@ pub enum SemanticContext<'a> {
 
 /// Run a source request through the required pipeline prefix.
 pub fn run_source(request: PipelineRequest<'_>) -> Result<PipelineOutcome, PipelineRejection> {
+    pipeline_bail_if_cancelled("parse")?;
     let prepared = prepare_source(request.source_kind, request.source, request.entry)
         .map_err(PipelineRejection::Preparation)?;
+    pipeline_bail_if_cancelled("check")?;
     run_prepared(prepared, request.goal)
 }
 
@@ -587,8 +593,9 @@ pub fn run_prepared(
     goal: PipelineGoal,
 ) -> Result<PipelineOutcome, PipelineRejection> {
     match goal {
-        PipelineGoal::TypeAnalysis => Ok(PipelineOutcome::TypeAnalysis(
-            match analyze_prepared(prepared) {
+        PipelineGoal::TypeAnalysis => {
+            pipeline_bail_if_cancelled("check")?;
+            let analysis = match analyze_prepared(prepared) {
                 PreparedTypeAnalysisOutcome::Rejected { fitness } => {
                     TypeAnalysisOutcome::Rejected { fitness }
                 }
@@ -599,17 +606,27 @@ pub fn run_prepared(
                         program: Box::new(analysis.program),
                     }
                 }
-            },
-        )),
+            };
+            pipeline_bail_if_cancelled("check")?;
+            Ok(PipelineOutcome::TypeAnalysis(analysis))
+        }
         PipelineGoal::FullCheck => {
             let analysis = require_accepted_analysis(prepared)?;
+            pipeline_bail_if_cancelled("effects")?;
             complete_checks(analysis, SemanticContext::Isolated)
                 .map(PipelineOutcome::Checked)
-                .map_err(PipelineRejection::from)
+                .map_err(lift_semantic_rejection)
+                .and_then(|outcome| {
+                    pipeline_bail_if_cancelled("linearity")?;
+                    Ok(outcome)
+                })
         }
         PipelineGoal::Lower(mode) => {
             let analysis = require_accepted_analysis(prepared)?;
-            let checked = complete_checks(analysis, SemanticContext::Isolated)?;
+            pipeline_bail_if_cancelled("effects")?;
+            let checked = complete_checks(analysis, SemanticContext::Isolated)
+                .map_err(lift_semantic_rejection)?;
+            pipeline_bail_if_cancelled("linearity")?;
             lower_checked(checked, mode).map(PipelineOutcome::Lowered)
         }
     }
@@ -618,7 +635,10 @@ pub fn run_prepared(
 fn require_accepted_analysis(
     prepared: PreparedProgram,
 ) -> Result<PreparedTypeAnalysis, PipelineRejection> {
-    match analyze_prepared(prepared) {
+    pipeline_bail_if_cancelled("check")?;
+    let outcome = analyze_prepared(prepared);
+    pipeline_bail_if_cancelled("check")?;
+    match outcome {
         PreparedTypeAnalysisOutcome::Accepted(analysis) => Ok(*analysis),
         PreparedTypeAnalysisOutcome::Rejected { fitness } => {
             Err(PipelineRejection::Type { fitness })
@@ -772,7 +792,10 @@ pub(crate) fn compose_checked(
 
 /// Lower a checked library carrier without target-specific emission.
 pub fn lower_library(program: &CheckedProgram) -> Result<LoweredLibrary, PipelineRejection> {
-    chelis_ir::lower::try_lower_program_to_library(program).map_err(PipelineRejection::Lower)
+    pipeline_bail_if_cancelled("lower")?;
+    let lowered = chelis_ir::lower::try_lower_program_to_library(program);
+    pipeline_bail_if_cancelled("lower")?;
+    lowered.map_err(PipelineRejection::Lower)
 }
 
 /// Lower an isolated checked compilation.
@@ -780,7 +803,9 @@ pub fn lower_checked(
     checked: CheckedCompilation,
     mode: LoweringMode,
 ) -> Result<LoweredCompilation, PipelineRejection> {
+    pipeline_bail_if_cancelled("lower")?;
     let lower_result = chelis_ir::lower::try_lower_program(checked.program());
+    pipeline_bail_if_cancelled("lower")?;
     finish_isolated_lowering(checked, mode, lower_result)
 }
 
@@ -789,6 +814,7 @@ fn finish_isolated_lowering(
     mode: LoweringMode,
     lower_result: Result<Dag, LowerDiagnostic>,
 ) -> Result<LoweredCompilation, PipelineRejection> {
+    pipeline_bail_if_cancelled("lower")?;
     let (dag, root_binding_mode) = match lower_result {
         Ok(dag) if mode == LoweringMode::AllowHostBackend && dag.roots().is_empty() => {
             (dag, RootBindingMode::SelectedHostBackend)
@@ -815,6 +841,7 @@ pub fn lower_checked_with_context(
     library: &LoweredLibrary,
     mode: LoweringMode,
 ) -> Result<LoweredCompilation, PipelineRejection> {
+    pipeline_bail_if_cancelled("lower")?;
     let lowered_map = chelis_ir::lower::top_level_lowering_map_with_context(
         library,
         checked.program.exprs(),
@@ -823,18 +850,19 @@ pub fn lower_checked_with_context(
     checked.root_metadata = root_metadata(&checked.program, Some(&lowered_map));
     let tensor_names = checked.root_metadata.tensor_names.clone();
 
-    let (mut dag, accepted_nonfatal_rejection) =
-        match chelis_ir::lower::try_lower_program_with_context(library, &checked.program) {
-            Ok(dag) => (dag, false),
-            Err(diagnostic)
-                if mode == LoweringMode::AllowHostOnly
-                    && !diagnostic.fatal
-                    && tensor_names.is_empty() =>
-            {
-                (library.dag.clone(), true)
-            }
-            Err(diagnostic) => return Err(PipelineRejection::Lower(diagnostic)),
-        };
+    let lower_result = chelis_ir::lower::try_lower_program_with_context(library, &checked.program);
+    pipeline_bail_if_cancelled("lower")?;
+    let (mut dag, accepted_nonfatal_rejection) = match lower_result {
+        Ok(dag) => (dag, false),
+        Err(diagnostic)
+            if mode == LoweringMode::AllowHostOnly
+                && !diagnostic.fatal
+                && tensor_names.is_empty() =>
+        {
+            (library.dag.clone(), true)
+        }
+        Err(diagnostic) => return Err(PipelineRejection::Lower(diagnostic)),
+    };
 
     let library_root_count = library.dag.roots().len();
     let root_start = library_root_count.min(dag.roots().len());
@@ -848,6 +876,26 @@ pub fn lower_checked_with_context(
         RootBindingMode::Exact
     };
     finish_lowering(checked, dag, RootCountContext::NewCode, root_binding_mode)
+}
+
+fn pipeline_bail_if_cancelled(stage: &'static str) -> Result<(), PipelineRejection> {
+    if chelis_types::cancellation_requested() {
+        Err(PipelineRejection::Cancelled { stage })
+    } else {
+        Ok(())
+    }
+}
+
+fn lift_semantic_rejection(rejection: SemanticRejection) -> PipelineRejection {
+    if chelis_types::cancellation_requested() {
+        let stage = match rejection {
+            SemanticRejection::Effects { .. } => "effects",
+            SemanticRejection::Linearity { .. } => "linearity",
+        };
+        PipelineRejection::Cancelled { stage }
+    } else {
+        rejection.into()
+    }
 }
 
 fn finish_lowering(

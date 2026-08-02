@@ -43,7 +43,7 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-use crate::compiler::{CompilerError, check_error_diagnostic};
+use crate::compiler::{CompilerError, bail_if_cancelled, cancelled_or, check_error_diagnostic};
 use crate::schema::Diagnostic;
 
 /// 32-byte content hash of every source file that contributed to a
@@ -913,8 +913,16 @@ pub fn compile_reef_context(
         }
     };
 
+    // chelis#930: the library-context build is the dominant per-call front-end
+    // cost for a reef package (chelis#828 measures ~4.5 minutes with a real
+    // library context), so it polls the cancellation token at every phase
+    // boundary. The per-declaration polling that makes those bounds useful
+    // lives in `chelis-types`; `prepare_reef_graph_cached` itself is
+    // filesystem work and is not covered.
+    bail_if_cancelled("reef")?;
     let reef_state = prepare_reef_graph_cached(package_dir).map_err(|e| reef_error(&e))?;
     log_phase("prepare_reef_graph", &mut t);
+    bail_if_cancelled("check")?;
     let digests = reef_state
         .source_digests()
         .map_err(|error| hash_error(&error))?;
@@ -938,6 +946,12 @@ pub fn compile_reef_context(
         Some(Ok(triple)) => triple,
         Some(Err(err)) => return Err(err),
         None => {
+            // chelis#930: the layered path folds ANY failure into `None` so
+            // the monolithic path can produce the byte-identical diagnostic.
+            // An abandoned compile must not take that route: it would rerun
+            // the entire library check it just abandoned, so a cancelled
+            // library-context build would cost MORE than an uncancelled one.
+            bail_if_cancelled("check")?;
             // Surf → Deep desugar + macro expand of the WHOLE library.
             // `linked_library_decls` is already linked + internal-name-
             // rewritten by `prepare_reef_graph`.
@@ -964,16 +978,20 @@ pub fn compile_reef_context(
                 .map_err(|report| CompilerError {
                     stage: "check".to_string(),
                     errors: report.errors.iter().map(check_error_diagnostic).collect(),
-                })?;
+                })
+                .map_err(|error| cancelled_or("check", error))?;
             log_phase("build_compiled_library_context", &mut t);
             let analysis = crate::pipeline::prepared_analysis_from_checked(prepared, checked);
+            bail_if_cancelled("effects")?;
             let checked = crate::pipeline::complete_checks(
                 analysis,
                 crate::pipeline::SemanticContext::Isolated,
             )
             .map_err(|rejection| {
                 crate::compiler::pipeline_rejection_to_compiler_error(rejection.into())
-            })?;
+            })
+            .map_err(|error| cancelled_or("effects", error))?;
+            bail_if_cancelled("linearity")?;
             log_phase("semantic_checks", &mut t);
             let (_, _, library_checked, _) = checked.into_parts();
             (type_env, library_checked)
@@ -986,8 +1004,10 @@ pub fn compile_reef_context(
     // lowering the monolithic one (the composed program carries the same
     // chelis-std ++ package annotated bodies), so the layered path does not
     // need to reuse the cached chelis-std `library_dag` here.
+    bail_if_cancelled("lower")?;
     let library_dag = crate::pipeline::lower_library(&library_checked)
-        .map_err(crate::compiler::pipeline_rejection_to_compiler_error)?;
+        .map_err(crate::compiler::pipeline_rejection_to_compiler_error)
+        .map_err(|error| cancelled_or("lower", error))?;
     log_phase("lower_program_to_library", &mut t);
 
     // Package + build identity: canonical `package_root` from the

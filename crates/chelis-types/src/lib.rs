@@ -43,8 +43,8 @@ pub use builtins::{
     realizability, shape_class,
 };
 pub use cancel::{
-    CancelToken, CancelTokenGuard, EVAL_CANCELLED_MSG, current_cancel_token, install_cancel_token,
-    is_cancellation,
+    CancelToken, CancelTokenGuard, EVAL_CANCELLED_MSG, cancellation_check_error,
+    cancellation_requested, current_cancel_token, install_cancel_token, is_cancellation,
 };
 pub use chelis_vocab::EffectKind;
 pub use context::TypeEnv;

@@ -1170,16 +1170,34 @@ fn cmd_eval(
 
 /// Arm the `--timeout` watchdog and install its token for the current thread.
 ///
-/// Two-stage on purpose. The token is the clean path: the eval lanes notice it
-/// at the next node visit and unwind normally, so destructors run and the
-/// error surfaces through the ordinary error channel. But the token is only
-/// observed *during evaluation* — a program wedged in parse, type-check, or
-/// lowering never reaches a node visit and would sail past its own timeout.
-/// Since the entire point of `--timeout` is an unconditional loud failure for
-/// unattended runs, a grace period after the deadline the watchdog gives up on
-/// cooperation and exits the process. Front-end cancellation would remove the
-/// need for the backstop; until then, silently not timing out is the worse
-/// failure.
+/// Two-stage on purpose. The token is the clean path: the compiler and the
+/// eval lanes notice it at their next check point and unwind normally, so
+/// destructors run and the error surfaces through the ordinary error channel.
+/// A grace period after the deadline, the watchdog gives up on cooperation and
+/// exits the process.
+///
+/// **Why the backstop stays after chelis#930.** When only evaluation was
+/// cancellable (chelis#914), the backstop was not a backstop at all: a
+/// compile-bound program could never observe the token, so the hard exit was
+/// the *normal* path for that entire class and the effective deadline was
+/// silently `<N> + grace`. chelis#930 made parse / desugar / check / lower poll
+/// the token too, so cooperative unwinding is now the ordinary outcome for
+/// compile-bound programs as well — measured on the chelis#930 repro, a
+/// front-end-bound `--timeout 2` now reports at ~2.05 s instead of at the
+/// 7 s hard exit.
+///
+/// It is not, however, removable, because "everything is cancellable" is
+/// stronger than what the front end actually proves. Cancellation is polled at
+/// phase boundaries and at top-level-declaration boundaries, so the residual
+/// uninterruptible unit is one declaration — unbounded in principle — and
+/// several steps on the `eval --file` path poll nothing at all: the style gate,
+/// reef graph preparation and linking, and lowering's whole-program walk. A
+/// genuinely wedged pass (an accidental non-terminating loop in the compiler)
+/// would never reach a poll by construction. `--timeout` exists to give
+/// unattended runs an unconditional loud failure, and a guarantee qualified by
+/// "unless the wedge is somewhere we did not instrument" is not that. Silently
+/// not timing out remains the worse failure, so the backstop stays as defence
+/// in depth rather than as the mechanism.
 fn install_eval_timeout(secs: u64) -> chelis_compiler_api::CancelTokenGuard {
     let token = chelis_compiler_api::CancelToken::new();
     let watchdog = token.clone();

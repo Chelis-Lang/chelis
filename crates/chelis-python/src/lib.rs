@@ -670,9 +670,10 @@ const SIGNAL_POLL_INTERVAL: Duration = Duration::from_millis(50);
 ///
 /// **The worker is always joined, never detached.** A detached worker would
 /// keep burning CPU inside an abandoned evaluation while the caller believes
-/// it stopped — strictly worse than the bug being fixed. Because the token is
-/// checked at every node visit in both eval lanes, the join is bounded by one
-/// node visit rather than by the remaining work.
+/// it stopped — strictly worse than the bug being fixed. During evaluation,
+/// both lanes poll at every node visit; during front-end work, the compiler
+/// polls at phase and top-level-declaration boundaries. The join is bounded by
+/// the current cooperative unit rather than by all remaining work.
 fn run_json<T, F>(py: Python<'_>, f: F) -> PyResult<String>
 where
     T: serde::Serialize + Send + 'static,
