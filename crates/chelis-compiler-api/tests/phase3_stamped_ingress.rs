@@ -7,7 +7,7 @@
 use chelis_compiler_api::compiler;
 use chelis_compiler_api::schema::{
     CheckRequest, DeepCallGraphRequest, DeepOutlineRequest, DeepReferencesRequest, ParseRequest,
-    SourceKind,
+    RenameRequest, SourceKind,
 };
 
 const VALID_MODULE: &str =
@@ -103,4 +103,62 @@ fn read_only_authoring_ingresses_use_the_stamp_gate() {
         module: VALID_MODULE.to_string(),
     })
     .expect("well-formed stamped module still supports call graph");
+}
+
+#[test]
+fn arm_pattern_binders_shadow_top_level_references_and_call_edges() {
+    let module = r#"(module {}
+  phase3.arm_scope
+  (def {} target
+    (fn {} (params {} (x {type: (t-prim {} bool)})) (var {} x)))
+  (def {} shadowed
+    (fn {} (params {} (x {type: (t-prim {} bool)}))
+      (match {} (var {} x)
+        (arm {} (pat-var {} target)
+          (var {} target)
+          (var {} target)))))
+  (def {} unshadowed
+    (fn {} (params {}) (app {} (var {} target) (lit {} true)))))"#;
+
+    let references = compiler::deep_references(DeepReferencesRequest {
+        module: module.to_string(),
+        symbol: "target".to_string(),
+    })
+    .expect("references query");
+    assert_eq!(
+        references.references.len(),
+        1,
+        "only the genuinely unshadowed top-level reference remains: {:?}",
+        references.references
+    );
+    assert_eq!(
+        references.references[0].caller,
+        "phase3.arm_scope.unshadowed"
+    );
+
+    let graph = compiler::deep_call_graph(DeepCallGraphRequest {
+        module: module.to_string(),
+    })
+    .expect("call graph query");
+    assert_eq!(
+        graph.edges.len(),
+        1,
+        "pattern-local calls must not become top-level call-graph edges: {:?}",
+        graph.edges
+    );
+    assert_eq!(graph.edges[0].caller, "phase3.arm_scope.unshadowed");
+    assert_eq!(graph.edges[0].callee, "phase3.arm_scope.target");
+
+    let renamed = compiler::rename(RenameRequest {
+        module: module.to_string(),
+        function_name: "target".to_string(),
+        new_name: "renamed".to_string(),
+        preimage_sha256: None,
+    })
+    .expect("rename preserves pattern-local shadowing");
+    assert_eq!(renamed.renamed_references, 1);
+    assert!(renamed.module_deep.contains("(def {} renamed"));
+    assert!(renamed.module_deep.contains("(arm {} (pat-var {} target)"));
+    assert_eq!(renamed.module_deep.matches("(var {} target)").count(), 2);
+    assert_eq!(renamed.module_deep.matches("(var {} renamed)").count(), 1);
 }

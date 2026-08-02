@@ -752,7 +752,10 @@ positive coverage continues through the production stamped parser. The legacy
 follow-up routes outline, references, and call-graph APIs through stamped
 ingress and makes their traversal consume borrowed `Node` views directly,
 including metadata and scope-bearing children; it does not reconstruct a
-`List`. Mutating authoring normalization remains active and must migrate with
+`List`. Both read-only and mutating walkers treat recursive `arm` pattern
+binders as local across the arm guard and body, so a pattern-local name cannot
+be reported or rewritten as a top-level reference. Mutating authoring
+normalization remains active and must migrate with
 its producer/consumer cut. The transitional checker normalization uses an
 explicit heap worklist before its guarded walkers, and
 the depth-oracle harness tears down its owned deep fixture on a fresh
