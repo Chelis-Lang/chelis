@@ -181,10 +181,14 @@ pub enum NumericTrap {
     /// Value not a member of the dtype's set (fractional -> int,
     /// non-0/1 -> bool).
     Domain   { op: &'static str, prim: Prim },
-    /// Division/remainder by zero (existing behavior, absorbed here).
-    DivZero  { op: &'static str },
+    /// Division/remainder by zero.
+    DivZero  { op: &'static str, prim: Prim },
 }
 ```
+
+The `prim` on `DivZero` is required by controlling [04-NUM-9], which says
+EVERY trap names the dtype. The earlier one-field design sketch was a design
+bug; the numbered spec wins.
 
 - **Message format (frozen at Phase 2 exit):**
   `numeric trap: <kind> in <op> at <prim>` following the branding precedent
@@ -1318,9 +1322,9 @@ pull them across the kernel-split boundary.
 
 ## Phase 2 - the kernel split and prove
 
-**You inherit:** the module (frozen §C1/§C3/§C4-Rust), eval as reference
-lane, and the not-yet-split `host_ops` helpers now visibly awkward (they
-finalize but still accept `Fn(f64,f64)`).
+**At phase entry you inherit:** the module (frozen §C1/§C3/§C4-Rust), eval
+as reference lane, and the not-yet-split `host_ops` helpers now visibly
+awkward (they finalize but still accept `Fn(f64,f64)`).
 
 **You deliver:**
 

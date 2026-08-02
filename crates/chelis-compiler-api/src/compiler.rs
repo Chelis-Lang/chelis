@@ -4341,7 +4341,7 @@ dims = (rank(x), shape(x, 1), numel(x))
                 .roots
                 .iter()
                 .any(|root| root.name.as_deref() == Some("dims.1")
-                    && matches!(root.value, ExecutionValue::Int64 { value: 3 }))
+                    && matches!(root.value, ExecutionValue::Int32 { value: 3 }))
         );
         assert!(
             result

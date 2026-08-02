@@ -2,10 +2,8 @@
 //!
 //! ## Why this file exists
 //!
-//! The evaluator computes integer scalar arithmetic in `f64` and casts back
-//! with a saturating `as i64`
-//! (`crates/chelis-compiler-api/src/runtime/host_ops.rs:362`, in
-//! `dispatch_scalar_binop`):
+//! The pre-chelis#729 evaluator computed integer scalar arithmetic in `f64`
+//! and cast back with a saturating `as i64`:
 //!
 //! ```ignore
 //! // Mirror pre-WS-A0 behavior: integer scalar ops compute the
@@ -13,15 +11,15 @@
 //! let value = op(lb.as_f64(), rb.as_f64()) as i64;
 //! ```
 //!
-//! `add`/`sub`/`mul` are declared as `f64` lambdas
-//! (`crates/chelis-compiler-api/src/runtime/eval.rs:820-822`) and the shared
-//! helpers `numeric_binop` / `numeric_unop` / `tensor_numeric_binop` are all
-//! typed `Fn(f64, f64) -> f64`. Two defects fall out of that one line:
+//! `add`/`sub`/`mul` were declared as `f64` lambdas and the shared helpers
+//! accepted `Fn(f64, f64) -> f64`. Two defects fell out of that one line:
 //!
 //!   * precision loss above `2^53` (the f64 mantissa is 53 bits), and
 //!   * saturation at `i64::MAX` (Rust's `f64 as i64` is a saturating cast).
 //!
-//! The C backend lowers `RiscOp::Add` to a native `+` on `int64_t`
+//! Chelis#729 Phase 2 replaces that route with closed typed kernels over
+//! sealed scalars and buffers. The C backend lowers `RiscOp::Add` to a native
+//! `+` on `int64_t`
 //! (`crates/chelis-backend-c/src/emit.rs:441`), so it is exact for scalars.
 //! The two lanes therefore disagree on the same program. Cross-lane parity is
 //! the load-bearing invariant here, and it is what the tests below lock down.
@@ -48,8 +46,8 @@
 //!      `TensorElement` trait (see `crates/chelis-e2e/tests/dtype_op_matrix.rs`),
 //!   2. integer `div`/`mod` round-tripped through f64 and yielded `i64::MAX`;
 //!      fixed for those four ops with `checked_int_binop` (#387),
-//!   3. `add`/`sub`/`mul`/`neg`/`abs`/`lt`/`gt`/`max_elem`/reductions were
-//!      left on the f64 path (this issue).
+//!   3. `add`/`sub`/`mul`/`neg`/`abs`/`lt`/`gt`/`max_elem` were left on the
+//!      f64 host-runtime path (this issue; now locked by the tests below).
 //!
 //! Every assertion below states an exactness or parity invariant rather than a
 //! tolerance, so the class stays locked once fixed.
@@ -235,9 +233,6 @@ fn assert_lane_parity(expr: &str, expected: i64, name: &str) {
 /// returns 9007199254740993. `2^53` and `1` are both exactly representable in
 /// f64; their true sum is not. This is the minimal reproduction of #680.
 #[test]
-#[ignore = "chelis#680: eval 9007199254740992, compiled C 9007199254740993. This test asserts the CORRECT \
-            behavior and fails until the fix lands. Run with `cargo test -p \
-            chelis-cli --test issue_680_int_exactness -- --ignored`."]
 fn add_at_two_pow_53_agrees_across_lanes() {
     assert_lane_parity(
         &format!("add(cast({TWO_POW_53}, int64), cast(1, int64))"),
@@ -251,9 +246,6 @@ fn add_at_two_pow_53_agrees_across_lanes() {
 /// and reports `2^53 < 2^53 + 1` as false. A program must not change control
 /// flow based on its execution lane.
 #[test]
-#[ignore = "chelis#680: eval takes else (222), compiled C takes then (111). This test asserts the CORRECT \
-            behavior and fails until the fix lands. Run with `cargo test -p \
-            chelis-cli --test issue_680_int_exactness -- --ignored`."]
 fn static_int_condition_selects_same_branch_across_lanes() {
     let expr = format!(
         "if lt(cast({TWO_POW_53}, int64), cast({TWO_POW_53_PLUS_1}, int64)) \
@@ -303,17 +295,12 @@ fn i64_max_literal_survives_the_front_end_exactly() {
 }
 
 // ---------------------------------------------------------------------------
-// Group 3: comparison ops. Verified WRONG today.
+// Group 3: comparison ops. Exact finalized-value comparisons.
 // ---------------------------------------------------------------------------
 
-/// Verified: returns `false`. `ordered_compare`
-/// (`host_ops.rs:881-893`) compares integer scalars via `.as_f64()` even
-/// though `ScalarBits::I64` holds them exactly. Note `compare_eq` directly
-/// above it was fixed to use `.as_i64()`; `ordered_compare` never was.
+/// Historical failure: the old `ordered_compare` compared integer scalars
+/// via `.as_f64()` and returned `false`.
 #[test]
-#[ignore = "chelis#680: ordered_compare compares via as_f64; returns false. This test asserts the CORRECT \
-            behavior and fails until the fix lands. Run with `cargo test -p \
-            chelis-cli --test issue_680_int_exactness -- --ignored`."]
 fn lt_is_exact_at_two_pow_53_boundary() {
     assert!(
         eval_bool(&format!(
@@ -323,11 +310,8 @@ fn lt_is_exact_at_two_pow_53_boundary() {
     );
 }
 
-/// Verified: returns `false`.
+/// Negative-direction sibling for the same exact comparison boundary.
 #[test]
-#[ignore = "chelis#680: ordered_compare compares via as_f64; returns false. This test asserts the CORRECT \
-            behavior and fails until the fix lands. Run with `cargo test -p \
-            chelis-cli --test issue_680_int_exactness -- --ignored`."]
 fn gt_is_exact_at_two_pow_53_boundary() {
     assert!(
         eval_bool(&format!(
@@ -348,12 +332,9 @@ fn eq_is_exact_at_two_pow_53_boundary() {
     );
 }
 
-/// Verified: returns 9007199254740992, i.e. the SMALLER operand. `max_elem`
-/// routes through `numeric_binop(args, f64::max)` (`eval.rs:843`).
+/// Historical failure: the f64 closure returned the smaller operand after
+/// both int64 inputs collapsed to the same float image.
 #[test]
-#[ignore = "chelis#680: returns the SMALLER operand. This test asserts the CORRECT \
-            behavior and fails until the fix lands. Run with `cargo test -p \
-            chelis-cli --test issue_680_int_exactness -- --ignored`."]
 fn max_elem_is_exact_at_two_pow_53_boundary() {
     assert_eq!(
         eval_int(&format!(
@@ -397,12 +378,8 @@ fn assert_overflow_traps(expr: &str, label: &str) {
     );
 }
 
-/// Verified today: returns `9223372036854775807` (saturates), because the f64
-/// round-trip's `as i64` saturates.
+/// Historical failure: the f64 round-trip saturated to `i64::MAX`.
 #[test]
-#[ignore = "chelis#680: saturates to i64::MAX instead of trapping. This test asserts the CORRECT \
-            behavior and fails until the fix lands. Run with \
-            `cargo test -p chelis-cli --test issue_680_int_exactness -- --ignored`."]
 fn int64_add_overflow_traps() {
     assert_overflow_traps(
         &format!("add(cast({I64_MAX}, int64), cast(1, int64))"),
@@ -410,12 +387,8 @@ fn int64_add_overflow_traps() {
     );
 }
 
-/// Verified today: returns `9223372036854775807`. Both operands are in range;
-/// only the product overflows, so this cannot be dismissed as a bad literal.
+/// Both operands are in range and only the product overflows.
 #[test]
-#[ignore = "chelis#680: saturates to i64::MAX instead of trapping. This test asserts the CORRECT \
-            behavior and fails until the fix lands. Run with \
-            `cargo test -p chelis-cli --test issue_680_int_exactness -- --ignored`."]
 fn int64_mul_overflow_traps() {
     assert_overflow_traps(
         "mul(cast(4000000000, int64), cast(4000000000, int64))",
@@ -423,24 +396,14 @@ fn int64_mul_overflow_traps() {
     );
 }
 
-/// Verified today: returns `-128` (wraps). int8/16/32 wrap while int64
-/// saturates, decided purely by which Rust `as` cast runs last:
-/// `ScalarBits::from_i64_as` narrows with `value as i8`
-/// (`crates/chelis-compiler-api/src/runtime/mod.rs:145`), and int->int `as`
-/// truncates bits.
+/// Historical failure: the old narrowing cast wrapped this to `-128`.
 #[test]
-#[ignore = "chelis#680: wraps to -128 instead of trapping. This test asserts the CORRECT \
-            behavior and fails until the fix lands. Run with \
-            `cargo test -p chelis-cli --test issue_680_int_exactness -- --ignored`."]
 fn int8_add_overflow_traps() {
     assert_overflow_traps("add(cast(127, int8), cast(1, int8))", "int8_add_overflow");
 }
 
-/// Verified today: returns `-32768` (wraps).
+/// Int16 parity for the same overflow contract.
 #[test]
-#[ignore = "chelis#680: wraps to -32768 instead of trapping. This test asserts the CORRECT \
-            behavior and fails until the fix lands. Run with \
-            `cargo test -p chelis-cli --test issue_680_int_exactness -- --ignored`."]
 fn int16_add_overflow_traps() {
     assert_overflow_traps(
         "add(cast(32767, int16), cast(1, int16))",
@@ -448,11 +411,8 @@ fn int16_add_overflow_traps() {
     );
 }
 
-/// Verified today: returns `-2147483648` (wraps).
+/// Int32 parity for the same overflow contract.
 #[test]
-#[ignore = "chelis#680: wraps to -2147483648 instead of trapping. This test asserts the CORRECT \
-            behavior and fails until the fix lands. Run with \
-            `cargo test -p chelis-cli --test issue_680_int_exactness -- --ignored`."]
 fn int32_add_overflow_traps() {
     assert_overflow_traps(
         "add(cast(2147483647, int32), cast(1, int32))",
@@ -487,21 +447,11 @@ fn int8_add_at_max_does_not_trap() {
 // ---------------------------------------------------------------------------
 // Group 5: tensor storage fidelity.
 //
-// `IrTensorValue` stores `data: Vec<f64>` for every dtype
-// (`crates/chelis-ir/src/eval.rs:13`), so int64 tensors are lossy AT REST,
-// before any op runs. Verified: `to_list(to_tensor([2^53+1]))` returns
-// `[9007199254740992]`.
-//
-// This needs a dtype-tagged tensor storage change rather than an arithmetic
-// fix, so it is tracked separately and ignored here rather than silently
-// omitted (see the "no silent caps" rule in CLAUDE.md).
+// Phase 1 replaced `Vec<f64>` with sealed dtype-tagged tensor storage, so the
+// exact-at-rest lock is active alongside the Phase 2 arithmetic locks.
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "chelis#680 follow-up: int64 tensor storage is Vec<f64> \
-            (crates/chelis-ir/src/eval.rs:13) and is lossy at rest. Needs \
-            dtype-tagged storage, not an arithmetic fix. Run with \
-            `cargo test -p chelis-cli --test issue_680_int_exactness -- --ignored`."]
 fn int64_tensor_survives_to_tensor_round_trip() {
     let program = format!(
         "module Probe.Main\n\

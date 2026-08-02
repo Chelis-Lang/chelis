@@ -33,8 +33,13 @@ pub use builtins::{
 pub use chelis_vocab::EffectKind;
 pub use context::TypeEnv;
 pub use dtype_semantics::{
+    CompareOp, FloatBinOp, FloatUnOp, IntBinOp, IntUnOp, NumericFamily, NumericKernelError,
     NumericTrap, RawScalar, RawTensor, ScalarValue, StorageView, TensorStorage, cast_raw,
-    cast_scalar, finalize_scalar, finalize_tensor, scalar_from_f64, scalar_from_i64,
+    cast_scalar, compare_scalar_tensor, compare_scalars, compare_tensor_scalar, compare_tensors,
+    finalize_scalar, finalize_tensor, float_binop, float_scalar_tensor_binop, float_tensor_binop,
+    float_tensor_scalar_binop, float_tensor_unop, float_unop, int_binop, int_scalar_tensor_binop,
+    int_tensor_binop, int_tensor_scalar_binop, int_tensor_unop, int_unop, scalar_from_f64,
+    scalar_from_i64,
 };
 pub use fitness::{
     FitnessReport, StructuralStats, check_ir_program as check_ir_fitness, check_program,
