@@ -408,31 +408,58 @@ fn independent_global_computation_survives_host_lane_routing() {
 /// emitted — drops it from `host_program.globals` (`skip_for_lowered`), so
 /// the old lowered-artifact check saw "no globals", the entry lane CLAIMED
 /// the program, and `glb`'s computation vanished from the emitted C. The
-/// decline is now keyed on SOURCE-LEVEL top-level value bindings
+/// decline is keyed on SOURCE-LEVEL top-level value bindings
 /// (`chelis_ir::host::program_has_top_level_value_bindings`), so ANY
 /// top-level value binding declines regardless of its lowered
 /// classification.
+///
+/// On the STRICT (callable) surface that decline is now a loud error: the
+/// whole-DAG fallback would hand back the merged (#817) manifest while
+/// quietly ignoring `entry_name`, which is exactly the defect class this
+/// stack fixes. (An earlier revision returned that merged 3-output
+/// manifest from `compile_for_execution` and pinned it as intended.)
+const SCALAR_GLOBAL_MULTI_DEF: &str = "\
+glb = 2.0
+def helper(x: tensor[1, f32]) -> tensor[1, f32] = mul(x, x)
+def main(a: tensor[1, f32]) -> tensor[1, f32] = mul(copy(a), a)
+";
+
 #[test]
-fn scalar_global_multi_def_declines_entry_lane() {
-    let artifact = compile_c(
-        "glb = 2.0\n\
-         def helper(x: tensor[1, f32]) -> tensor[1, f32] = mul(x, x)\n\
-         def main(a: tensor[1, f32]) -> tensor[1, f32] = mul(copy(a), a)\n",
-        None,
+fn scalar_global_multi_def_is_a_loud_error_on_the_callable_surface() {
+    let err = compile_for_execution(CompileRequest {
+        source_kind: SourceKind::Surf,
+        source: SCALAR_GLOBAL_MULTI_DEF.to_string(),
+        target: CompileTarget::C,
+        entry_name: Some("main".to_string()),
+    })
+    .expect_err("a top-level binding must be a loud error on compile_for_execution");
+    let message = &err.errors[0].message;
+    assert!(
+        message.contains("top-level") && message.contains("chelis#817"),
+        "message must name the top-level-binding cause and the #817 class, got: {message}"
     );
-    assert_eq!(
-        artifact.entry_lane_decline,
-        Some(EntryLaneDecline::HasGlobals),
-        "a scalar top-level binding must decline the entry lane as HasGlobals"
+    assert!(
+        message.contains("eval"),
+        "message must point at `eval` as the whole-program runner, got: {message}"
     );
-    // The decline routes the program to the legacy whole-DAG path (the DAG
-    // is fully lowerable, so there is no host early-return here): the
-    // manifest is the merged whole-program one, and — the point of the fix
-    // — `glb`'s computation survives as a DAG root instead of vanishing.
-    // The C body does not carry binding names, so pin the computation by
-    // its value: a fill with the f32 bit pattern of 2.0 (0x40000000).
-    let c = &artifact
-        .compile_result
+}
+
+/// LEGACY surface pin: the same program still compiles whole-program via
+/// `compile()` (tide's `/compile`, cove, `chelis.compile()`), where the
+/// whole-program emission IS the product contract, and `glb`'s computation
+/// survives as a DAG root instead of vanishing. The C body does not carry
+/// binding names, so pin the computation by its value: a fill with the f32
+/// bit pattern of 2.0 (0x40000000).
+#[test]
+fn scalar_global_multi_def_still_emits_whole_program_via_compile() {
+    let result = compile(CompileRequest {
+        source_kind: SourceKind::Surf,
+        source: SCALAR_GLOBAL_MULTI_DEF.to_string(),
+        target: CompileTarget::C,
+        entry_name: None,
+    })
+    .unwrap_or_else(|err| panic!("legacy surface must still compile, got: {err:?}"));
+    let c = &result
         .files
         .iter()
         .find(|file| file.path.ends_with(".c"))
@@ -442,16 +469,6 @@ fn scalar_global_multi_def_declines_entry_lane() {
         c.contains("chelis_fill_f32_bits") && c.contains("0x40000000"),
         "`glb`'s computation (2.0f fill) must not vanish from the compiled \
          output, got:\n{c}"
-    );
-    assert_eq!(
-        artifact.outputs.len(),
-        3,
-        "whole-DAG path must keep all three roots (glb, helper, main), got {:?}",
-        artifact
-            .outputs
-            .iter()
-            .map(|spec| spec.name.clone())
-            .collect::<Vec<_>>()
     );
 }
 
@@ -534,5 +551,111 @@ fn compile_emits_entry_scoped_kernel_not_sibling_def() {
     assert!(
         !c.contains("void helper(") && !c.contains("chelis_helper("),
         "sibling `helper` must not be emitted as a standalone entry, got:\n{c}"
+    );
+}
+
+/// Reviewer B1: a `vmap` entry declines the lane as `GradLike` but, unlike
+/// `grad`, does NOT force the host backend, so it reaches the legacy
+/// whole-DAG fallthrough. An earlier revision `debug_assert!`ed that this
+/// combination was impossible: a vmap entry panicked every debug-built
+/// caller of the shared pipeline (tide serve included) and, in release,
+/// silently returned the merged whole-program manifest (#817 unfixed). On
+/// the STRICT surface it is now a loud unsupported-feature error.
+const VMAP_ENTRY: &str = "\
+def process(x: tensor[4, f32]) -> tensor[4, f32] = relu(x)
+def batch_process(xs: tensor[8, 4, f32]) -> tensor[8, 4, f32] = xs |> vmap(process, axis=0)
+";
+
+#[test]
+fn vmap_entry_is_a_loud_unsupported_error_on_the_callable_surface() {
+    let err = compile_for_execution(CompileRequest {
+        source_kind: SourceKind::Surf,
+        source: VMAP_ENTRY.to_string(),
+        target: CompileTarget::C,
+        entry_name: Some("batch_process".to_string()),
+    })
+    .expect_err("a vmap entry must be a loud error on compile_for_execution, not a panic");
+    let diagnostic = &err.errors[0];
+    assert_eq!(
+        diagnostic.kind, "unsupported_feature",
+        "a transform entry is a not-yet-implemented capability, got kind {}: {}",
+        diagnostic.kind, diagnostic.message
+    );
+    assert!(
+        diagnostic.message.contains("batch_process") && diagnostic.message.contains("eval"),
+        "message must name the entry and point at `eval`, got: {}",
+        diagnostic.message
+    );
+}
+
+/// LEGACY surface pin for the same program: `compile()` must keep emitting
+/// the whole program (pre-entry-lane behavior) with no panic and no error.
+#[test]
+fn vmap_entry_via_compile_still_emits_whole_program() {
+    let result = compile(CompileRequest {
+        source_kind: SourceKind::Surf,
+        source: VMAP_ENTRY.to_string(),
+        target: CompileTarget::C,
+        entry_name: Some("batch_process".to_string()),
+    })
+    .unwrap_or_else(|err| panic!("legacy surface must still compile a vmap program: {err:?}"));
+    assert!(
+        result.files.iter().any(|file| file.path.ends_with(".c")),
+        "whole-program C must be emitted"
+    );
+}
+
+/// Reviewer S1: the ambiguous-default rule is STRICT-surface only. tide's
+/// `/compile`, cove's live pane, and `chelis.compile()` hardcode
+/// `entry_name: None` and compile multi-def programs with no `main`
+/// (examples/linreg.ch, examples/mnist.ch); an earlier revision hard-errored
+/// that whole surface. The legacy surface falls back to whole-program
+/// emission instead.
+#[test]
+fn ambiguous_default_via_compile_emits_whole_program() {
+    let result = compile(CompileRequest {
+        source_kind: SourceKind::Surf,
+        source: HELPER_PLUS_ENTRY.to_string(),
+        target: CompileTarget::C,
+        entry_name: None,
+    })
+    .unwrap_or_else(|err| {
+        panic!("legacy surface must not hard-error on an ambiguous default: {err:?}")
+    });
+    let c = &result
+        .files
+        .iter()
+        .find(|file| file.path.ends_with(".c"))
+        .expect("emitted C present")
+        .contents;
+    assert!(
+        !c.is_empty(),
+        "whole-program C must be emitted for the ambiguous default"
+    );
+}
+
+/// Reviewer S5 (legacy half): on the C-source surface an `entry_name`
+/// naming no def keeps its documented meaning as the OUTPUT SYMBOL (tide's
+/// contract), sanitized but passed through, instead of the strict surface's
+/// unknown-selector error.
+#[test]
+fn unknown_entry_name_via_compile_is_the_output_symbol() {
+    let result = compile(CompileRequest {
+        source_kind: SourceKind::Surf,
+        source: HELPER_PLUS_ENTRY.to_string(),
+        target: CompileTarget::C,
+        entry_name: Some("mymodel".to_string()),
+    })
+    .unwrap_or_else(|err| {
+        panic!("legacy surface must treat a non-def entry_name as the output symbol: {err:?}")
+    });
+    assert!(
+        result.files.iter().any(|file| file.path == "mymodel.c"),
+        "the emitted file must carry the requested output symbol, got: {:?}",
+        result
+            .files
+            .iter()
+            .map(|f| f.path.clone())
+            .collect::<Vec<_>>()
     );
 }

@@ -763,8 +763,37 @@ pub fn lower(request: LowerRequest) -> Result<LowerResult> {
     })
 }
 
+/// Compile to generated source files: the C-SOURCE surface (tide's
+/// `/compile`, cove's live pane, python's `chelis.compile()`).
+///
+/// This surface keeps the LEGACY whole-program contract: with no
+/// `entry_name`, a multi-def program with no unambiguous entry emits the
+/// whole program (never an "ambiguous entry" error), and an `entry_name`
+/// naming no def is the output symbol (sanitized), not a selector error.
+/// Entry-integrity strictness belongs to [`compile_for_execution`], the
+/// callable surface, where a merged manifest is the #817 defect; here the
+/// merged whole-program emission IS the product behavior.
 pub fn compile(request: CompileRequest) -> Result<CompileResult> {
-    Ok(compile_for_execution(request)?.compile_result)
+    Ok(compile_for_execution_impl(request, EntryStrictness::Legacy)?.compile_result)
+}
+
+/// Entry-integrity policy for the shared compile pipeline.
+///
+/// `compile()` (tide/cove/`chelis.compile`) and `compile_for_execution`
+/// (`compile_and_load`) share one pipeline, so entry-selection rules added
+/// for the callable surface would otherwise leak into the C-source surface
+/// (that leak broke tide/cove default compiles of multi-def programs, and
+/// let a `vmap` entry reach a debug assert). The policy is threaded as a
+/// value, not read from the request, so it cannot be set over the wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EntryStrictness {
+    /// The callable surface: unknown `entry_name`, ambiguous default,
+    /// and entry-lane declines that would fall through to merged
+    /// whole-program metadata are loud errors.
+    Strict,
+    /// The C-source surface: legacy whole-program behavior with the
+    /// decline reason recorded on the artifact.
+    Legacy,
 }
 
 /// Map a caller-supplied `entry_name` to the emitted C symbol / file
@@ -784,24 +813,30 @@ pub fn compile(request: CompileRequest) -> Result<CompileResult> {
 /// unchanged, so existing output-name usage is preserved.
 ///
 /// ASYMMETRY (Fix 2, #817): this sanitizing mapping is used by the HOST
-/// lane and by the free-form pure-DAG lane. The free-form lane is every
-/// program that lowers NO host program — a file with no top-level `def`s,
-/// or exactly one fully-DAG-lowerable `def` (multiple lowerable defs get
-/// per-def host wrappers, so a host program exists for them); there
-/// `entry_name` becomes the output symbol after sanitization only, a
-/// public `chelis build`/tide contract left intact. The host lane covers
+/// lane, by the free-form pure-DAG lane, and by the LEGACY surface's
+/// decline-fallthrough (whole-program emission on [`compile`] when the
+/// entry lane declines). The free-form lane is every program that lowers
+/// NO host program — a file with no top-level `def`s, or exactly one
+/// fully-DAG-lowerable `def` (multiple lowerable defs get per-def host
+/// wrappers, so a host program exists for them); there `entry_name`
+/// becomes the output symbol after sanitization only, a public
+/// `chelis build`/tide contract left intact. The host lane covers
 /// everything the entry-scoped lane declines (see [`EntryLaneDecline`]:
 /// top-level globals, scalar/`grad` entries, host-only programs). The
 /// sanitization rewrites `main` -> `chelis_main`, non-identifier
 /// characters -> `_`, and prefixes a digit-leading or empty name with
-/// `chelis_`, but does NOT guard a libc collision (`free`,
-/// `malloc`, …): a single-def program whose def is named `free`, compiled
-/// via the free-form path, still emits `void free(...)`. The entry-scoped
-/// metadata lane — which claims multi-def tensor programs and single-def
-/// programs whose body needs host lowering (e.g. `concat`) — instead uses
-/// the fixed, collision-free [`EXECUTION_ENTRY_C_SYMBOL`] (`chelis_main`),
-/// because there `entry_name` is a def *selector* the user must pass and
-/// so cannot avoid such names.
+/// `chelis_`, but guards NEITHER a libc collision (`free`, `malloc`, …)
+/// NOR the runtime's own `chelis_*` namespace (`chelis_runtime.h`
+/// declares `chelis_free`, `chelis_tuple_get`, …): a single-def program
+/// whose def is named `free`, compiled via the free-form path, still
+/// emits `void free(...)`, and an `entry_name` of `chelis_free` emits
+/// verbatim. Both gaps are documented in `spec/11-ffi.md` §5a. The
+/// entry-scoped metadata lane — which claims multi-def tensor programs
+/// and single-def programs whose body needs host lowering (e.g. `concat`)
+/// — instead uses the fixed, collision-free
+/// [`EXECUTION_ENTRY_C_SYMBOL`] (`chelis_main`), because there
+/// `entry_name` is a def *selector* the user must pass and so cannot
+/// avoid such names.
 fn execution_c_symbol(entry_name: Option<&str>) -> String {
     let Some(name) = entry_name else {
         return "chelis_main".to_string();
@@ -858,12 +893,15 @@ fn tensor_signature_defs(host_program: &chelis_ir::host::ConcreteHostProgram) ->
 /// (`inputs`/`outputs`), independent of the emitted C symbol.
 ///
 /// `host_only` is the whole-program host-backend requirement. It matters
-/// only for the *unmatched-name* and *ambiguous-default* branches: those
-/// are loud errors for a clean tensor program (a typo/ambiguity the caller
-/// can fix), but for a host-requiring program the selection is just the
-/// file-stem symbol threaded to the host lane (e.g. a `grad` module whose
-/// `entry_name` is the program name, not a def name — see issue #309), so
-/// we return `None` and let the host lane own it rather than erroring.
+/// only for the *unmatched-name* and *ambiguous-default* branches: on the
+/// STRICT (callable) surface those are loud errors for a clean tensor
+/// program (a typo/ambiguity the caller can fix); on the LEGACY (C-source)
+/// surface they decline instead, preserving tide/cove's whole-program
+/// contract (`entry_name` as output symbol; multi-def default compiles).
+/// For a host-requiring program the selection is just the file-stem symbol
+/// threaded to the host lane (e.g. a `grad` module whose `entry_name` is
+/// the program name, not a def name — see issue #309), so we return `None`
+/// and let the host lane own it rather than erroring on either surface.
 ///
 /// - explicit `entry_name` naming a def → scope to it (#817);
 /// - explicit `entry_name` naming no def, clean tensor program → typo'd
@@ -880,6 +918,7 @@ fn resolve_execution_entry<'a>(
     entry_name: Option<&'a str>,
     host_program: &'a chelis_ir::host::ConcreteHostProgram,
     host_only: bool,
+    strictness: EntryStrictness,
 ) -> Result<Option<&'a str>> {
     match entry_name {
         Some(name) => {
@@ -893,6 +932,12 @@ fn resolve_execution_entry<'a>(
                 // The `entry_name` is not a def in this host-requiring
                 // program: it is the file-stem output symbol (e.g. #309's
                 // `grad` module). The host lane owns emission; don't error.
+                Ok(None)
+            } else if strictness == EntryStrictness::Legacy {
+                // C-source surface: `entry_name` naming no def is the
+                // output symbol (tide's documented contract), not a typo'd
+                // selector. Decline the entry lane and let the legacy
+                // whole-program path emit under `execution_c_symbol`.
                 Ok(None)
             } else {
                 let available = tensor_signature_defs(host_program).join(", ");
@@ -920,6 +965,12 @@ fn resolve_execution_entry<'a>(
                 } else if candidates.len() == 1 {
                     Ok(Some(candidates[0]))
                 } else if candidates.is_empty() {
+                    Ok(None)
+                } else if strictness == EntryStrictness::Legacy {
+                    // C-source surface: no unambiguous entry means the
+                    // legacy whole-program emission, exactly as before the
+                    // entry lane existed (tide/cove compile multi-def
+                    // programs like examples/linreg.ch with no entry_name).
                     Ok(None)
                 } else {
                     Err(stage_error(
@@ -991,6 +1042,52 @@ pub enum EntryLaneDecline {
     InputsOutsideParams { entry: String, extra: Vec<String> },
 }
 
+/// Loud error for an entry-lane decline on the STRICT (callable) surface.
+///
+/// On [`compile_for_execution`], a decline that would fall through to the
+/// legacy whole-DAG emission means the returned manifest would merge every
+/// def's inputs/outputs (the #817 defect) while quietly ignoring any
+/// `entry_name`. Each reason maps to an actionable error instead. The
+/// LEGACY surface ([`compile`]) never calls this: there the whole-program
+/// emission is the product contract.
+fn strict_entry_decline_error(reason: EntryLaneDecline) -> CompilerError {
+    match reason {
+        EntryLaneDecline::HasGlobals => stage_error(
+            "compile",
+            "this program has top-level (non-def) value bindings, so the compiled-execution \
+             lane cannot scope a callable to one entry: the whole-program artifact would \
+             merge every def's params and outputs into the manifest (the chelis#817 class). \
+             Move the bindings into the entry def, or run the program through `eval`, which \
+             supports top-level bindings.",
+            "compile_error",
+        ),
+        EntryLaneDecline::GradLike { entry } => {
+            unsupported_stage_error(chelis_types::unsupported::Unsupported::new(
+                chelis_types::unsupported::UnsupportedKind::Construct(format!(
+                    "a `grad`/`vmap` transform entry (`{entry}`)"
+                )),
+                "the compiled-execution lane (compile_and_load), which emits a single \
+                 entry-scoped tensor kernel and does not yet lower transform entries \
+                 standalone",
+                chelis_types::unsupported::Stage::Codegen("c"),
+                "run the transform through `eval`, or select a non-transform def with \
+                 `entry_name=`",
+            ))
+        }
+        other => stage_error(
+            "compile",
+            format!(
+                "the compiled-execution lane declined this program ({other:?}) and refuses \
+                 to fall back to whole-program codegen, which would merge every def's \
+                 inputs/outputs into the callable manifest (the chelis#817 class). Use \
+                 `eval` to run the program, or restructure the entry to a plain \
+                 tensor-in/tensor-out def."
+            ),
+            "compile_error",
+        ),
+    }
+}
+
 /// The entry lane's claim/decline decision for one compilation.
 enum EntryLaneOutcome<'a> {
     /// The lane claims the compilation: emit `dag` scoped to `entry`.
@@ -1011,14 +1108,18 @@ enum EntryLaneOutcome<'a> {
 ///     for why the check is source-level rather than
 ///     `host_program.globals`;
 ///   - a single entry def resolves via [`resolve_execution_entry`]
-///     (`NoEntryResolved` otherwise; a typo'd or ambiguous selector in a
-///     clean tensor program is a loud `Err`, not a decline);
+///     (`NoEntryResolved` otherwise; on the STRICT surface a typo'd or
+///     ambiguous selector in a clean tensor program is a loud `Err`, while
+///     the LEGACY surface declines to whole-program emission);
 ///   - that def is tensor-signature (`NotTensorSignature` otherwise) — a
 ///     scalar/record/ADT entry stays on the host lane;
 ///   - the def does NOT use a `grad`/`vmap` form (`GradLike` otherwise) —
 ///     the host lane owns multi-root grad-tuple emission (#309), which
 ///     `lower_named_tensor_entry_dag` can technically lower but must not
-///     here;
+///     here. NOTE: unlike `grad`, a `vmap` entry does NOT force the host
+///     backend, so its `GradLike` decline reaches the legacy whole-DAG
+///     fallthrough (a loud error on the strict surface, whole-program
+///     emission on the legacy one);
 ///   - the def lowers to a DAG (`LoweringFailed`) that is non-empty after
 ///     DCE (`EmptyAfterDce`);
 ///   - the DAG's `Load` labels are a subset of the def's declared param
@@ -1033,6 +1134,7 @@ fn entry_lane_decision<'a>(
     checked: &CheckedProgram,
     host_program: &'a chelis_ir::host::ConcreteHostProgram,
     host_only: bool,
+    strictness: EntryStrictness,
 ) -> Result<EntryLaneOutcome<'a>> {
     use EntryLaneOutcome::Decline;
 
@@ -1050,7 +1152,8 @@ fn entry_lane_decision<'a>(
     {
         return Ok(Decline(EntryLaneDecline::HasGlobals));
     }
-    let Some(entry) = resolve_execution_entry(entry_name, host_program, host_only)? else {
+    let Some(entry) = resolve_execution_entry(entry_name, host_program, host_only, strictness)?
+    else {
         return Ok(Decline(EntryLaneDecline::NoEntryResolved));
     };
     if !chelis_ir::host::function_has_tensor_signature(host_program, entry) {
@@ -1098,7 +1201,22 @@ fn entry_lane_decision<'a>(
     Ok(EntryLaneOutcome::Claim { entry, dag })
 }
 
+/// Compile to a callable execution artifact: the CALLABLE surface
+/// (python's `compile_and_load`). STRICT entry integrity: an unknown
+/// `entry_name`, an ambiguous default on a multi-def program, or an
+/// entry-lane decline that would otherwise fall through to merged
+/// whole-program metadata (top-level value bindings, a `grad`/`vmap`
+/// transform entry) is a loud error here, never a silently merged
+/// manifest (#817) and never a debug assert. The C-source surface with
+/// the legacy whole-program contract is [`compile`].
 pub fn compile_for_execution(request: CompileRequest) -> Result<CompiledExecutionArtifact> {
+    compile_for_execution_impl(request, EntryStrictness::Strict)
+}
+
+fn compile_for_execution_impl(
+    request: CompileRequest,
+    strictness: EntryStrictness,
+) -> Result<CompiledExecutionArtifact> {
     let compiled = compile_source(request.source_kind, &request.source)?;
     reject_host_only_builtins_before_host_lowering(&compiled.checked, request.target)?;
     let host_compiled =
@@ -1194,6 +1312,7 @@ pub fn compile_for_execution(request: CompileRequest) -> Result<CompiledExecutio
                     &compiled.checked,
                     host_program,
                     host_only,
+                    strictness,
                 )? {
                     EntryLaneOutcome::Claim { entry, dag } => Some((entry, dag)),
                     EntryLaneOutcome::Decline(reason) => {
@@ -1274,24 +1393,20 @@ pub fn compile_for_execution(request: CompileRequest) -> Result<CompiledExecutio
             );
             // On this legacy whole-DAG path a `Some(decline)` co-occurs with
             // a real (whole-program, merged) manifest — see the
-            // `entry_lane_decline` field doc. Only declines that leave the
-            // whole-program DAG rooted can get here: `HasGlobals` (a
-            // fully-DAG-lowerable scalar-global program) and the
-            // entry-lowering failures. A resolution/signature decline
-            // (`NoEntryResolved`/`NotTensorSignature`/`GradLike`) implies a
-            // host-requiring program, which takes the host early-return
-            // above instead.
-            if let Some(reason) = &entry_lane_decline {
-                debug_assert!(
-                    matches!(
-                        reason,
-                        EntryLaneDecline::HasGlobals
-                            | EntryLaneDecline::LoweringFailed { .. }
-                            | EntryLaneDecline::EmptyAfterDce { .. }
-                            | EntryLaneDecline::InputsOutsideParams { .. }
-                    ),
-                    "unexpected entry-lane decline {reason:?} on the legacy whole-DAG path"
-                );
+            // `entry_lane_decline` field doc. Every decline reason that
+            // leaves the whole-program DAG rooted can get here, including
+            // `GradLike`: a `vmap` entry declines the lane but, unlike
+            // `grad`, does NOT force the host backend, so it reaches this
+            // path (an earlier revision asserted it could not, and a vmap
+            // entry panicked every debug-built caller). On the STRICT
+            // (callable) surface a merged manifest is the #817 defect, so
+            // any decline here is a loud error; on the LEGACY (C-source)
+            // surface the whole-program emission is the product contract
+            // and the decline reason rides along on the artifact.
+            if strictness == EntryStrictness::Strict
+                && let Some(reason) = entry_lane_decline
+            {
+                return Err(strict_entry_decline_error(reason));
             }
             artifact.entry_lane_decline = entry_lane_decline;
             Ok(artifact)
@@ -4003,6 +4118,23 @@ mod tests {
                 atom: WireDeepAtom::Symbol { value }
             } if value == "value"
         ));
+    }
+
+    /// The three sanitization rules `spec/11-ffi.md` §5a documents for the
+    /// legacy symbol mapping (reviewer N1: previously untested, so any of
+    /// them could regress silently).
+    #[test]
+    fn execution_c_symbol_sanitization_rules() {
+        // Reserved process entry is rewritten.
+        assert_eq!(execution_c_symbol(Some("main")), "chelis_main");
+        // Non-identifier characters map to `_`.
+        assert_eq!(execution_c_symbol(Some("my-model")), "my_model");
+        // Digit-leading and empty names gain the `chelis_` prefix.
+        assert_eq!(execution_c_symbol(Some("2fast")), "chelis_2fast");
+        assert_eq!(execution_c_symbol(Some("")), "chelis_");
+        // Ordinary names pass through unchanged; the default is chelis_main.
+        assert_eq!(execution_c_symbol(Some("solve")), "solve");
+        assert_eq!(execution_c_symbol(None), "chelis_main");
     }
 
     fn copy_drop_context_fixture() -> (TempDir, std::path::PathBuf) {

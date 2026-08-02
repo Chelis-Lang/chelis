@@ -2884,4 +2884,81 @@ def free(x: tensor[1, f32]) -> tensor[1, f32] = mul(copy(x), x)
             "expected a loud host-only error, got: {message}"
         );
     }
+
+    // Reviewer S2: a top-level value binding in a multi-def program used to
+    // hand back a silently MERGED model (every def's params in input_names,
+    // three outputs) while ignoring entry_name entirely, because the
+    // compiler's whole-DAG fallback produced a plausible-looking artifact
+    // that slipped past the empty-manifest guard. The callable surface is
+    // now strict: the job fails loudly at compile.
+    #[test]
+    fn compile_and_load_job_top_level_binding_is_loud_error() {
+        let dir = tempdir().expect("tempdir");
+        let source_path = dir.path().join("model.ch");
+        fs::write(
+            &source_path,
+            "glb = 2.0\n\
+             def helper(x: tensor[1, f32]) -> tensor[1, f32] = mul(x, x)\n\
+             def main(a: tensor[1, f32]) -> tensor[1, f32] = mul(copy(a), a)\n",
+        )
+        .expect("write source");
+        let result = run_compile_and_load_job(CompileAndLoadJob {
+            source_path,
+            source_kind: SourceKind::Surf,
+            target: CompileTarget::C,
+            entry_name: Some("main".to_string()),
+            artifact_dir: Some(PathBuf::from(dir.path())),
+        });
+        let message = match result {
+            Ok(_) => panic!("a top-level binding must not yield a merged callable model"),
+            Err(CompileAndLoadError::Message(m)) => m,
+            Err(CompileAndLoadError::Compiler(e)) => e
+                .errors
+                .first()
+                .map(|d| d.message.clone())
+                .unwrap_or_else(|| format!("{e:?}")),
+        };
+        assert!(
+            message.contains("top-level") && message.contains("eval"),
+            "expected the strict top-level-binding error naming eval, got: {message}"
+        );
+    }
+
+    // Reviewer B1: a vmap entry declines the entry lane as GradLike but does
+    // NOT require the host backend, so it used to reach a debug_assert (a
+    // panic across the FFI boundary in debug builds; a silently merged
+    // manifest in release). The callable surface now rejects it loudly as an
+    // unsupported feature.
+    #[test]
+    fn compile_and_load_job_vmap_entry_is_loud_unsupported() {
+        let dir = tempdir().expect("tempdir");
+        let source_path = dir.path().join("model.ch");
+        fs::write(
+            &source_path,
+            "def process(x: tensor[4, f32]) -> tensor[4, f32] = relu(x)\n\
+             def batch_process(xs: tensor[8, 4, f32]) -> tensor[8, 4, f32] = \
+             xs |> vmap(process, axis=0)\n",
+        )
+        .expect("write source");
+        let result = run_compile_and_load_job(CompileAndLoadJob {
+            source_path,
+            source_kind: SourceKind::Surf,
+            target: CompileTarget::C,
+            entry_name: Some("batch_process".to_string()),
+            artifact_dir: Some(PathBuf::from(dir.path())),
+        });
+        let message = match result {
+            Ok(_) => panic!("a vmap entry must not yield a whole-program callable model"),
+            Err(CompileAndLoadError::Message(m)) => m,
+            Err(CompileAndLoadError::Compiler(e)) => e
+                .errors
+                .first()
+                .map(|d| d.message.clone())
+                .unwrap_or_else(|| format!("{e:?}")),
+        };
+        assert!(
+            message.contains("batch_process") && message.contains("eval"),
+            "expected the strict transform-entry error naming the def and eval, got: {message}"
+        );
+    }
 }
