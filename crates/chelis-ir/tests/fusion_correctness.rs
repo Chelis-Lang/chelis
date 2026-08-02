@@ -31,7 +31,12 @@ fn mat_f32(rows: usize, cols: usize) -> TensorType {
 }
 
 fn const_vec(dag: &mut Dag, value: f64, n: usize) -> NodeId {
-    dag.add_node(RiscOp::Const { value }, vec![], vec_f32(n), None)
+    dag.add_node(
+        RiscOp::synth_const(Prim::F32, value),
+        vec![],
+        vec_f32(n),
+        None,
+    )
 }
 
 fn load(dag: &mut Dag, name: &str, ty: TensorType) -> NodeId {
@@ -52,7 +57,12 @@ fn assert_outputs_close(a: &[TensorValue], b: &[TensorValue], tol: f64, context:
     assert_eq!(a.len(), b.len(), "{context}: different number of outputs");
     for (i, (va, vb)) in a.iter().zip(b.iter()).enumerate() {
         assert_eq!(va.shape, vb.shape, "{context} output {i}: shapes differ");
-        for (j, (xa, xb)) in va.data.iter().zip(vb.data.iter()).enumerate() {
+        for (j, (xa, xb)) in va
+            .to_f64_lossy_vec()
+            .iter()
+            .zip(vb.to_f64_lossy_vec().iter())
+            .enumerate()
+        {
             assert!(
                 (xa - xb).abs() < tol,
                 "{context} output {i} element {j}: {xa} vs {xb} (diff {})",
@@ -105,7 +115,12 @@ fn f2_three_way_chain_fuses() {
     let b = const_vec(&mut dag, 2.0, 4);
     let c = dag.add_node(RiscOp::Add, vec![a, b], vec_f32(4), None);
     // relu = max_elem(x, 0)
-    let zero = dag.add_node(RiscOp::Const { value: 0.0 }, vec![], vec_f32(4), None);
+    let zero = dag.add_node(
+        RiscOp::synth_const(vec_f32(4).precision, 0.0),
+        vec![],
+        vec_f32(4),
+        None,
+    );
     let relu = dag.add_node(RiscOp::MaxElem, vec![c, zero], vec_f32(4), None);
     let d = const_vec(&mut dag, 3.0, 4);
     let e = dag.add_node(RiscOp::Mul, vec![relu, d], vec_f32(4), None);
@@ -203,7 +218,12 @@ fn f5_elementwise_into_reduction_fuses() {
     // that the emitter can detect). But more importantly: correctness.
     let mut dag = Dag::new();
     let x = load(&mut dag, "x", mat_f32(3, 4));
-    let c = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 4), None);
+    let c = dag.add_node(
+        RiscOp::synth_const(mat_f32(3, 4).precision, 1.0),
+        vec![],
+        mat_f32(3, 4),
+        None,
+    );
     let added = dag.add_node(RiscOp::Add, vec![x, c], mat_f32(3, 4), None);
     let summed = dag.add_node(
         RiscOp::Sum {
@@ -279,7 +299,12 @@ fn f6_movement_ops_pass_through() {
         mat_f32(2, 3),
         None,
     );
-    let c = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(2, 3), None);
+    let c = dag.add_node(
+        RiscOp::synth_const(mat_f32(2, 3).precision, 1.0),
+        vec![],
+        mat_f32(2, 3),
+        None,
+    );
     let added = dag.add_node(RiscOp::Add, vec![reshaped, c], mat_f32(2, 3), None);
     let negated = dag.add_node(RiscOp::Neg, vec![added], mat_f32(2, 3), None);
     dag.add_root(negated);
@@ -337,7 +362,12 @@ fn f7_mnist_fusion_reduces_nodes() {
 #[test]
 fn f8_trivial_dag_unchanged() {
     let mut dag = Dag::new();
-    let c = dag.add_node(RiscOp::Const { value: 42.0 }, vec![], scalar_f32(), None);
+    let c = dag.add_node(
+        RiscOp::synth_const(scalar_f32().precision, 42.0),
+        vec![],
+        scalar_f32(),
+        None,
+    );
     dag.add_root(c);
 
     let fused = chelis_ir::fuse::fuse(&dag);
@@ -612,7 +642,12 @@ fn f9_fan_in_two_inputs() {
 fn fr1_reduction_inlined_identifies_fused_elem_into_sum() {
     let mut dag = Dag::new();
     let x = load(&mut dag, "x", mat_f32(3, 4));
-    let c = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 4), None);
+    let c = dag.add_node(
+        RiscOp::synth_const(mat_f32(3, 4).precision, 1.0),
+        vec![],
+        mat_f32(3, 4),
+        None,
+    );
     let added = dag.add_node(RiscOp::Add, vec![x, c], mat_f32(3, 4), None);
     let summed = dag.add_node(
         RiscOp::Sum {
@@ -660,7 +695,12 @@ fn fr1_reduction_inlined_identifies_fused_elem_into_sum() {
 fn fr2_multi_consumer_fused_elem_not_inlined() {
     let mut dag = Dag::new();
     let x = load(&mut dag, "x", mat_f32(3, 4));
-    let c = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 4), None);
+    let c = dag.add_node(
+        RiscOp::synth_const(mat_f32(3, 4).precision, 1.0),
+        vec![],
+        mat_f32(3, 4),
+        None,
+    );
     let added = dag.add_node(RiscOp::Add, vec![x, c], mat_f32(3, 4), None);
     let negated = dag.add_node(RiscOp::Neg, vec![added], mat_f32(3, 4), None);
     // Two consumers of negated: root + sum
@@ -691,7 +731,12 @@ fn fr3_chain_into_sum_correctness() {
     // add→neg→sum: the add→neg chain fuses into FusedElem, which then feeds sum.
     let mut dag = Dag::new();
     let x = load(&mut dag, "x", mat_f32(3, 4));
-    let c = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 4), None);
+    let c = dag.add_node(
+        RiscOp::synth_const(mat_f32(3, 4).precision, 1.0),
+        vec![],
+        mat_f32(3, 4),
+        None,
+    );
     let added = dag.add_node(RiscOp::Add, vec![x, c], mat_f32(3, 4), None);
     let negated = dag.add_node(RiscOp::Neg, vec![added], mat_f32(3, 4), None);
     let summed = dag.add_node(

@@ -363,14 +363,20 @@ impl<'a> EvalContext<'a> {
         if !(prim.is_float() || prim.is_integer()) {
             return Ok(value);
         }
-        let scalar_value = tensor
-            .value
-            .data
-            .first()
-            .copied()
-            .ok_or_else(|| "rank-0 tensor with no data in named-axis result".to_string())?;
-        let bits = ScalarBits::from_f64_as(prim, scalar_value)?;
-        RuntimeValue::scalar(prim, bits)
+        if tensor.value.is_empty() {
+            return Err("rank-0 tensor with no data in named-axis result".to_string());
+        }
+        // The DAG evaluator finalized this element at the root's declared
+        // dtype; re-finalizing the exact element at the annotated prim is
+        // the ingress form (identity when the dtypes already agree).
+        let element = tensor.value.storage().scalar_at(0);
+        let value = match element.as_i64_exact() {
+            Some(v) => chelis_types::scalar_from_i64("named_axis", prim, v)
+                .map_err(|trap| trap.to_string())?,
+            None => chelis_types::scalar_from_f64("named_axis", prim, element.as_f64_lossy())
+                .map_err(|trap| trap.to_string())?,
+        };
+        Ok(RuntimeValue::from_scalar_value(value))
     }
 
     /// Force any top-level *value* bindings referenced (transitively
@@ -440,10 +446,12 @@ pub(super) fn pack_dag_roots(
                     root.0
                 )
             })?;
-        packed.push(RuntimeValue::Tensor(RuntimeTensorValue {
-            value: tensor,
+        debug_assert_eq!(
+            tensor.prim(),
             precision,
-        }));
+            "the DAG evaluator finalizes at the root's declared dtype"
+        );
+        packed.push(RuntimeValue::Tensor(RuntimeTensorValue::new(tensor)));
     }
     if packed.len() == 1 {
         Ok(packed.pop().expect("checked length"))

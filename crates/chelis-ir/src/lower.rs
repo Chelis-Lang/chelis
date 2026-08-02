@@ -3693,7 +3693,10 @@ fn symbolic_dim_var_name(expr: &Expr) -> Option<String> {
 #[derive(Debug, Clone, PartialEq)]
 struct LiteralToTensor {
     shape: Vec<usize>,
-    data: Vec<f64>,
+    /// Exact raw elements (chelis#856): integer leaves travel their
+    /// exact i64, float leaves their f64; finalization at the tensor's
+    /// ascribed dtype happens ONCE in `emit_literal_tensor`.
+    data: Vec<chelis_types::RawScalar>,
 }
 
 /// If `expr` is a `to_tensor(...)` application whose single argument
@@ -3741,7 +3744,7 @@ fn extract_cons_chain_tensor(expr: &Expr) -> Option<LiteralToTensor> {
     if let Some(scalars) = elements
         .iter()
         .map(|e| extract_numeric_leaf(e))
-        .collect::<Option<Vec<f64>>>()
+        .collect::<Option<Vec<chelis_types::RawScalar>>>()
     {
         return Some(LiteralToTensor {
             shape: vec![scalars.len()],
@@ -3791,38 +3794,58 @@ const MAX_TOTAL_INLINE_DEPTH: usize = 1024;
 ///     `(app (var neg) (lit 1.0))`; the recognizer returns the
 ///     negated inner value. Nested casts and lits are handled by the
 ///     recursive call.
-fn extract_numeric_leaf(expr: &Expr) -> Option<f64> {
+fn extract_numeric_leaf(expr: &Expr) -> Option<chelis_types::RawScalar> {
+    use chelis_types::RawScalar;
     match expr {
-        Expr::Atom(Atom::Int(n), _) => Some(*n as f64),
-        Expr::Atom(Atom::Float(f), _) => Some(*f),
-        Expr::Atom(Atom::Bool(b), _) => Some(if *b { 1.0 } else { 0.0 }),
-        Expr::List(_, _) | Expr::Node(_, _) => match stamped_parts(expr)?.0 {
-            DeepTag::Lit => match stamped_parts(expr)?.2.first()? {
-                Expr::Atom(Atom::Int(n), _) => Some(*n as f64),
-                Expr::Atom(Atom::Float(f), _) => Some(*f),
-                Expr::Atom(Atom::Bool(b), _) => Some(if *b { 1.0 } else { 0.0 }),
-                _ => None,
-            },
-            DeepTag::Cast => {
-                let inner = stamped_parts(expr)?.2.first()?;
-                extract_numeric_leaf(inner)
-            }
-            DeepTag::App => {
-                // Negative literal: `-x` desugars to
-                // `(app (var neg) <inner>)`. The recognizer returns
-                // `-extract(inner)` so the literal recognizer sees
-                // through the desugared unary minus. Any other app
-                // shape is not a static literal.
-                let kids = stamped_parts(expr)?.2;
-                let callee = kids.first()?;
-                if !expr_is_var_named(callee, "neg") {
-                    return None;
+        Expr::Atom(Atom::Int(n), _) => Some(RawScalar::Int(*n)),
+        Expr::Atom(Atom::Float(f), _) => Some(RawScalar::Float(*f)),
+        Expr::Atom(Atom::Bool(b), _) => Some(RawScalar::Int(i64::from(*b))),
+        Expr::List(_, _) | Expr::Node(_, _) => {
+            let (tag, _, kids) = stamped_parts(expr)?;
+            match tag {
+                DeepTag::Lit => match kids.first()? {
+                    Expr::Atom(Atom::Int(n), _) => Some(RawScalar::Int(*n)),
+                    Expr::Atom(Atom::Float(f), _) => Some(RawScalar::Float(*f)),
+                    Expr::Atom(Atom::Bool(b), _) => Some(RawScalar::Int(i64::from(*b))),
+                    _ => None,
+                },
+                DeepTag::Cast => {
+                    // A cast leaf APPLIES the checked default ladder
+                    // (spec/04 section 5.2) at recognition time, so
+                    // `cast(3.0, int32)` contributes 3 exactly and
+                    // `cast(9007199254740993, int64)` stays exact. A
+                    // trapping cast DECLINES static recognition (the
+                    // section C2 decline discipline): the dynamic lowering
+                    // evaluates the same cast and traps with its full
+                    // runtime diagnostic.
+                    let inner = kids.first()?;
+                    let raw = extract_numeric_leaf(inner)?;
+                    let target = LowerCtx::try_extract_prim(kids.get(1)?)?;
+                    let cast = chelis_types::cast_raw("cast", raw, target).ok()?;
+                    Some(match cast.as_i64_exact() {
+                        Some(i) => RawScalar::Int(i),
+                        None => RawScalar::Float(cast.as_f64_lossy()),
+                    })
                 }
-                let inner = kids.get(1)?;
-                Some(-extract_numeric_leaf(inner)?)
+                DeepTag::App => {
+                    // Negative literal: `-x` desugars to
+                    // `(app (var neg) <inner>)`. The recognizer returns
+                    // `-extract(inner)` so the literal recognizer sees
+                    // through the desugared unary minus. Any other app
+                    // shape is not a static literal.
+                    let callee = kids.first()?;
+                    if !expr_is_var_named(callee, "neg") {
+                        return None;
+                    }
+                    let inner = kids.get(1)?;
+                    Some(match extract_numeric_leaf(inner)? {
+                        RawScalar::Int(i) => RawScalar::Int(i.checked_neg()?),
+                        RawScalar::Float(f) => RawScalar::Float(-f),
+                    })
+                }
+                _ => None,
             }
-            _ => None,
-        },
+        }
         _ => None,
     }
 }
@@ -4973,22 +4996,26 @@ impl LowerCtx {
                     ))
                 }
             }
+            // BARE atoms reach here only from synthetic Deep (tests,
+            // internal expansions): the desugarer wraps every source
+            // literal in a typed `(lit {type: ...} ...)` node, which
+            // `lower_lit` finalizes at its ascribed dtype (the
+            // chelis#856 exactness path). Bare atoms keep the default
+            // f32 typing they always had; finalize at f32 is total.
             Atom::Int(n) => LoweredValue::Node(self.dag.add_node(
-                RiscOp::Const { value: *n as f64 },
+                RiscOp::synth_const(Self::default_type().precision, *n as f64),
                 vec![],
                 Self::default_type(),
                 self.current_span_id.clone(),
             )),
             Atom::Float(f) => LoweredValue::Node(self.dag.add_node(
-                RiscOp::Const { value: *f },
+                RiscOp::synth_const(Self::default_type().precision, *f),
                 vec![],
                 Self::default_type(),
                 self.current_span_id.clone(),
             )),
             Atom::Bool(b) => LoweredValue::Node(self.dag.add_node(
-                RiscOp::Const {
-                    value: if *b { 1.0 } else { 0.0 },
-                },
+                RiscOp::synth_const(Self::default_type().precision, if *b { 1.0 } else { 0.0 }),
                 vec![],
                 Self::default_type(),
                 self.current_span_id.clone(),
@@ -5067,7 +5094,7 @@ impl LowerCtx {
             // program that declares a signature or type alias.
             Some(DeepTag::Defsig | DeepTag::Deftype | DeepTag::Typealias) => {
                 LoweredValue::Node(self.dag.add_node(
-                    RiscOp::Const { value: 0.0 },
+                    RiscOp::synth_const(Self::default_type().precision, 0.0),
                     vec![],
                     Self::default_type(),
                     self.current_span_id.clone(),
@@ -5149,7 +5176,7 @@ impl LowerCtx {
             );
         }
         let mut last = LoweredValue::Node(self.dag.add_node(
-            RiscOp::Const { value: 0.0 },
+            RiscOp::synth_const(Self::default_type().precision, 0.0),
             vec![],
             Self::default_type(),
             self.current_span_id.clone(),
@@ -5179,7 +5206,7 @@ impl LowerCtx {
             );
         }
         let mut last = LoweredValue::Node(self.dag.add_node(
-            RiscOp::Const { value: 0.0 },
+            RiscOp::synth_const(Self::default_type().precision, 0.0),
             vec![],
             Self::default_type(),
             self.current_span_id.clone(),
@@ -5324,16 +5351,51 @@ impl LowerCtx {
             Self::default_type()
         };
 
-        let value = if let Some(val_expr) = elems.get(2) {
+        // The chelis#856 exactness path: the desugarer ascribes the
+        // literal's contextual dtype in the `lit` meta, so the sealed
+        // payload finalizes ONCE at that dtype right here. Integer
+        // atoms travel their exact i64 (no `as f64` laundering, which
+        // collapsed int64 above 2^53); an out-of-domain literal at its
+        // ascribed dtype is a loud lowering diagnostic, not a wrap.
+        let prim = ty.precision;
+        // A string literal is not a numeric constant and has no sealed
+        // payload to finalize: `finalize_scalar`'s `Prim::String` arm is
+        // an unreachable-by-construction PANIC, so reaching it here would
+        // surface as a bare panic-string diagnostic instead of a cited
+        // one. The DAG has no string vocabulary at all, so this is a
+        // lowering rejection, not a value. The one reachable path was
+        // `fail`'s message argument, closed at its own arm below.
+        if prim == Prim::String {
+            raise_lowering_error(
+                "a string literal has no numeric IR constant and cannot be lowered \
+                 into the RISC DAG; strings are host-lane values \
+                 (spec/05-risc-primitives.md; chelis#856)",
+                elems.first().map(Expr::span),
+                self.current_span_id.clone(),
+            )
+        }
+        let raw = if let Some(val_expr) = elems.get(2) {
             match val_expr {
-                Expr::Atom(Atom::Int(n), _) => *n as f64,
-                Expr::Atom(Atom::Float(f), _) => *f,
-                Expr::Atom(Atom::Bool(true), _) => 1.0,
-                Expr::Atom(Atom::Bool(false), _) => 0.0,
-                _ => 0.0,
+                Expr::Atom(Atom::Int(n), _) => chelis_types::RawScalar::Int(*n),
+                Expr::Atom(Atom::Float(f), _) => chelis_types::RawScalar::Float(*f),
+                Expr::Atom(Atom::Bool(true), _) => chelis_types::RawScalar::Int(1),
+                Expr::Atom(Atom::Bool(false), _) => chelis_types::RawScalar::Int(0),
+                _ => chelis_types::RawScalar::Int(0),
             }
         } else {
-            0.0
+            chelis_types::RawScalar::Int(0)
+        };
+        let value = match chelis_types::finalize_scalar("const", prim, raw) {
+            Ok(value) => value,
+            Err(trap) => raise_lowering_error(
+                format!(
+                    "literal does not finalize at its ascribed dtype `{}`: {trap} \
+                     (spec/04-type-system.md section 9 [04-NUM-1]; chelis#856)",
+                    prim.name()
+                ),
+                elems.first().map(Expr::span),
+                self.current_span_id.clone(),
+            ),
         };
 
         LoweredValue::Node(self.dag.add_node(
@@ -6208,7 +6270,7 @@ impl LowerCtx {
     /// gradient packing (chelis#520 D2) for fields with no adjoint.
     fn zero_tensor_node(&mut self, ty: &TensorType) -> NodeId {
         let mut node = self.dag.add_node(
-            RiscOp::Const { value: 0.0 },
+            RiscOp::synth_const(Self::default_type().precision, 0.0),
             vec![],
             Self::default_type(),
             self.current_span_id.clone(),
@@ -7093,7 +7155,7 @@ impl LowerCtx {
                 // (chelis#730 section C1.4).
                 last.unwrap_or_else(|| {
                     self.dag.add_node(
-                        RiscOp::Const { value: 0.0 },
+                        RiscOp::synth_const(Self::default_type().precision, 0.0),
                         vec![],
                         Self::default_type(),
                         self.current_span_id.clone(),
@@ -8444,9 +8506,16 @@ impl LowerCtx {
             // order; `lower_if` ties the placeholder's shape to the sibling
             // branch via a shape-dep).
             "fail" => {
-                for arg in args {
-                    let _ = self.lower_expr(arg);
-                }
+                // The message argument is NOT lowered. It is a string, and
+                // the DAG has no string vocabulary: the nodes it produced
+                // were discarded here and dropped by DCE, so their only
+                // effect was to push a `Prim::String` literal through
+                // `lower_lit`. Pre-#856 that smuggled a junk
+                // `Const { value: 0.0 }` typed `string` into the IR; with
+                // sealed payloads it hits `finalize_scalar`'s
+                // unreachable-by-construction panic and takes down any
+                // `grad`/`vmap` over a function containing `fail(...)`.
+                // Abort semantics (and the message) live in the host lane.
                 let dims = ty
                     .dims
                     .iter()
@@ -8456,7 +8525,7 @@ impl LowerCtx {
                     })
                     .collect();
                 self.dag.add_node(
-                    RiscOp::Const { value: 0.0 },
+                    RiscOp::synth_const(ty.precision, 0.0),
                     vec![],
                     TensorType {
                         dims,
@@ -8504,6 +8573,7 @@ impl LowerCtx {
     /// shape (the metadata's symbolic `Named("list", None)` dim is
     /// not usable here).
     fn emit_literal_tensor(&mut self, literal: &LiteralToTensor, ty: &TensorType) -> NodeId {
+        use chelis_types::{RawScalar, RawTensor};
         let shape: Vec<DimInfo> = literal.shape.iter().map(|n| DimInfo::Lit(*n)).collect();
         let precision = ty.precision;
         let tensor_ty = TensorType {
@@ -8511,27 +8581,105 @@ impl LowerCtx {
             precision,
         };
 
-        // Uniform-value fast path.
+        // The exact raw leaves finalize ONCE at the ascribed dtype
+        // (chelis#856): integer families through the exact i64 lane
+        // (no f64 laundering above 2^53), float families through their
+        // f64 images. An out-of-domain literal is a loud lowering
+        // diagnostic; cast leaves already applied the checked ladder
+        // (or declined static recognition) in `extract_numeric_leaf`.
+        let raise_on = |trap: chelis_types::NumericTrap, span_id: Option<String>| -> ! {
+            raise_lowering_error(
+                format!(
+                    "tensor literal does not finalize at its ascribed dtype \
+                     `{}`: {trap} (spec/04-type-system.md section 9 \
+                     [04-NUM-1]; chelis#856)",
+                    precision.name()
+                ),
+                None,
+                span_id,
+            )
+        };
+
+        // Uniform-value fast path (bit-level key so NaN-uniform lists
+        // still collapse to one Const).
+        let key = |raw: &RawScalar| -> (u8, u64) {
+            match raw {
+                RawScalar::Int(i) => (0, *i as u64),
+                RawScalar::Float(f) => (1, f.to_bits()),
+            }
+        };
         if literal
             .data
             .windows(2)
-            .all(|pair| pair[0].to_bits() == pair[1].to_bits())
+            .all(|pair| key(&pair[0]) == key(&pair[1]))
         {
+            let raw = literal.data.first().copied().unwrap_or(RawScalar::Int(0));
+            let value = match chelis_types::finalize_scalar("const", precision, raw) {
+                Ok(value) => value,
+                Err(trap) => raise_on(trap, self.current_span_id.clone()),
+            };
             return self.dag.add_node(
-                RiscOp::Const {
-                    value: literal.data.first().copied().unwrap_or(0.0),
-                },
+                RiscOp::Const { value },
                 vec![],
                 tensor_ty,
                 self.current_span_id.clone(),
             );
         }
 
-        // Non-uniform: emit a single ConstTensor node.
+        // Non-uniform: one ConstTensor with sealed per-dtype storage.
+        // Integer/bool targets take the exact integer lane; a float
+        // leaf reaching an integer target here is integral or the
+        // finalize diagnostic fires (cast leaves were already applied).
+        let raw_tensor = if precision.is_integer() || precision == Prim::Bool {
+            let mut ints = Vec::with_capacity(literal.data.len());
+            for raw in &literal.data {
+                match raw {
+                    RawScalar::Int(i) => ints.push(*i),
+                    RawScalar::Float(f) => {
+                        if f.fract() != 0.0 || !f.is_finite() {
+                            raise_on(
+                                chelis_types::NumericTrap::Domain {
+                                    op: "const",
+                                    prim: precision,
+                                },
+                                self.current_span_id.clone(),
+                            );
+                        }
+                        // Reject before the saturating `as` cast: an
+                        // integral f64 outside i64's range must not
+                        // silently clamp to i64::MAX/MIN.
+                        if *f < -9_223_372_036_854_775_808.0 || *f >= 9_223_372_036_854_775_808.0 {
+                            raise_on(
+                                chelis_types::NumericTrap::Overflow {
+                                    op: "const",
+                                    prim: precision,
+                                },
+                                self.current_span_id.clone(),
+                            );
+                        }
+                        ints.push(*f as i64);
+                    }
+                }
+            }
+            RawTensor::Int(ints)
+        } else {
+            RawTensor::Float(
+                literal
+                    .data
+                    .iter()
+                    .map(|raw| match raw {
+                        RawScalar::Int(i) => *i as f64,
+                        RawScalar::Float(f) => *f,
+                    })
+                    .collect(),
+            )
+        };
+        let data = match chelis_types::finalize_tensor("const", precision, raw_tensor) {
+            Ok(data) => data,
+            Err(trap) => raise_on(trap, self.current_span_id.clone()),
+        };
         self.dag.add_node(
-            RiscOp::ConstTensor {
-                data: literal.data.clone(),
-            },
+            RiscOp::ConstTensor { data },
             vec![],
             tensor_ty,
             self.current_span_id.clone(),
@@ -9424,11 +9572,30 @@ impl LowerCtx {
                 .and_then(|input| memo.get(input))
                 .copied();
             let value = match &node.op {
-                RiscOp::Const { value } => *value,
+                RiscOp::Const { value } => {
+                    // The fold memo is the f64 wide image (the
+                    // chelis#680 residue; exact integer folding arrives
+                    // with the Phase 2 kernel split). An integer
+                    // payload whose f64 image is not exact DECLINES the
+                    // fold instead of baking a collapsed value in
+                    // (chelis#856): the condition falls to runtime,
+                    // which reads the sealed payload exactly.
+                    if let Some(i) = value.as_i64_exact()
+                        && (i as f64) as i128 != i as i128
+                    {
+                        return None;
+                    }
+                    value.as_f64_lossy()
+                }
                 RiscOp::Cast { new_precision } => {
                     let input_id = *node.inputs.first()?;
                     let src = self.dag.get(input_id)?.output_type.precision;
-                    crate::eval::convert_cast_data(input0?, src, *new_precision)
+                    // A trapping cast DECLINES TO FOLD (the section C2
+                    // fold rule for casts): the condition falls to
+                    // runtime, where the checked ladder traps with its
+                    // full diagnostic. A fold must never bake a trap
+                    // away nor bake one in.
+                    crate::eval::convert_cast_data(input0?, src, *new_precision).ok()?
                 }
                 RiscOp::Add => input0? + input1?,
                 RiscOp::Mul => input0? * input1?,
@@ -10827,7 +10994,7 @@ impl LowerCtx {
         let else_node = self.conform_branch_placeholder(else_node, &out_ty, then_node);
         let mask = self.lower_if_mask(cond, &out_ty, else_node);
         let one = self.dag.add_node(
-            RiscOp::Const { value: 1.0 },
+            RiscOp::synth_const(out_ty.precision, 1.0),
             vec![],
             out_ty.clone(),
             self.current_span_id.clone(),
@@ -11436,6 +11603,85 @@ mod tests {
         assert_decode_once_at_boundary("test", std::slice::from_ref(&stamped));
     }
 
+    #[test]
+    fn stamped_numeric_leaf_preserves_exact_checked_cast_semantics() {
+        let span = Span::new(0, 0);
+        let meta = chelis_deep::ast::MetaMap::default();
+        let literal = Expr::node(
+            DeepTag::Lit,
+            meta.clone(),
+            vec![Expr::Atom(Atom::Int(9_007_199_254_740_993), span)],
+            span,
+        );
+        let int64 = Expr::node(
+            DeepTag::TPrim,
+            meta.clone(),
+            vec![Expr::Atom(Atom::Name("int64".into()), span)],
+            span,
+        );
+        let cast = Expr::node(DeepTag::Cast, meta, vec![literal, int64], span);
+
+        assert_eq!(
+            extract_numeric_leaf(&cast),
+            Some(chelis_types::RawScalar::Int(9_007_199_254_740_993)),
+            "the stamped carrier must not project an exact int64 through f64"
+        );
+    }
+
+    #[test]
+    fn stamped_numeric_leaf_declines_trapping_cast_and_integer_negation() {
+        let span = Span::new(0, 0);
+        let meta = chelis_deep::ast::MetaMap::default();
+        let int_lit = |value| {
+            Expr::node(
+                DeepTag::Lit,
+                meta.clone(),
+                vec![Expr::Atom(Atom::Int(value), span)],
+                span,
+            )
+        };
+        let prim = |name: &str| {
+            Expr::node(
+                DeepTag::TPrim,
+                meta.clone(),
+                vec![Expr::Atom(Atom::Name(name.into()), span)],
+                span,
+            )
+        };
+
+        let overflowing_cast = Expr::node(
+            DeepTag::Cast,
+            meta.clone(),
+            vec![int_lit(300), prim("int8")],
+            span,
+        );
+        assert_eq!(
+            extract_numeric_leaf(&overflowing_cast),
+            None,
+            "a checked overflow must stay on the dynamic trapping path"
+        );
+
+        let neg = Expr::node(
+            DeepTag::App,
+            meta.clone(),
+            vec![
+                Expr::node(
+                    DeepTag::Var,
+                    meta.clone(),
+                    vec![Expr::Atom(Atom::Name("neg".into()), span)],
+                    span,
+                ),
+                int_lit(i64::MIN),
+            ],
+            span,
+        );
+        assert_eq!(
+            extract_numeric_leaf(&neg),
+            None,
+            "negating signed MIN must decline rather than overflow or wrap"
+        );
+    }
+
     /// The env-keyed variant walks map VALUES, which is where library
     /// `program_defs` and type envs carry Deep.
     #[test]
@@ -11533,7 +11779,14 @@ mod tests {
         // tensor result type, so the initial placeholder can already have
         // the right rank even though its extent remains anonymous.
         let early_placeholder = ctx.dag.add_node(
-            RiscOp::Const { value: 0.0 },
+            RiscOp::synth_const(
+                TensorType {
+                    dims: vec![DimInfo::Named(String::new(), None)],
+                    precision: Prim::F32,
+                }
+                .precision,
+                0.0,
+            ),
             vec![],
             TensorType {
                 dims: vec![DimInfo::Named(String::new(), None)],
@@ -11588,7 +11841,10 @@ mod tests {
     fn lower_single_const() {
         let dag = parse_and_lower("(def {} x (lit {type: (t-prim {} f32)} 1.0))");
         assert_eq!(dag.len(), 1);
-        assert_eq!(dag.get(NodeId(0)).unwrap().op, RiscOp::Const { value: 1.0 });
+        assert_eq!(
+            dag.get(NodeId(0)).unwrap().op,
+            RiscOp::synth_const(Prim::F32, 1.0)
+        );
         assert!(verify::verify(&dag).is_empty());
     }
 
@@ -13218,7 +13474,7 @@ mod tests {
         );
         let vals = eval_tensor(&result.dag, &inputs).expect("windowed max_reduce grad eval");
         assert_eq!(
-            vals[&grad_x].data,
+            vals[&grad_x].to_f64_lossy_vec(),
             vec![0.0, 0.0, 1.0, 1.0],
             "subgradient must route to each column's argmax (issue #320)",
         );
@@ -13295,7 +13551,7 @@ mod tests {
         );
         let vals = eval_tensor(&result.dag, &inputs).expect("grad eval");
         assert_eq!(
-            vals[&grad_x].data,
+            vals[&grad_x].to_f64_lossy_vec(),
             vec![2.0, 2.0, 2.0],
             "d sum(2x) / dx must be [2, 2, 2] (chelis#369)",
         );
@@ -13315,7 +13571,7 @@ mod tests {
                 TensorValue::from_vec(vec![3], base.to_vec()),
             );
             eval_tensor(&result.dag, &ip).expect("analytic grad eval")[&grad_x]
-                .data
+                .to_f64_lossy_vec()
                 .clone()
         };
         let h = 1e-3;
@@ -13334,8 +13590,8 @@ mod tests {
                 "x".to_string(),
                 TensorValue::from_vec(vec![3], minus.to_vec()),
             );
-            let fp = eval_tensor(&dag, &ip).expect("plus eval")[&loss].data[0];
-            let fm = eval_tensor(&dag, &im).expect("minus eval")[&loss].data[0];
+            let fp = eval_tensor(&dag, &ip).expect("plus eval")[&loss].to_f64_lossy_vec()[0];
+            let fm = eval_tensor(&dag, &im).expect("minus eval")[&loss].to_f64_lossy_vec()[0];
             let numerical = (fp - fm) / (2.0 * h);
             assert!(
                 (a - numerical).abs() < 1e-3,
@@ -13398,7 +13654,7 @@ mod tests {
         );
         let vals = eval_tensor(&result.dag, &inputs).expect("windowed gather grad eval");
         assert_eq!(
-            vals[&grad_x].data,
+            vals[&grad_x].to_f64_lossy_vec(),
             vec![1.0, 0.0, 1.0, 0.0],
             "scatter-add adjoint must route to gathered source slots (issue #320)",
         );
@@ -13463,6 +13719,39 @@ mod tests {
         let dag = parse_and_lower(src);
         let node = dag.get(NodeId(0)).unwrap();
         assert_eq!(node.output_type.precision, Prim::F64);
+    }
+
+    /// Negative parity for the row above, and the structural backstop for
+    /// chelis#856's reachable-`Prim::String` bug: `finalize_scalar`'s
+    /// string arm is an unreachable-by-construction `panic!`, so a string
+    /// literal that reached `lower_lit` surfaced as a bare panic string
+    /// rather than a cited diagnostic. The DAG has no string vocabulary;
+    /// a string literal is a lowering rejection, and it says so.
+    #[test]
+    fn lower_lit_rejects_a_string_literal_with_a_cited_diagnostic() {
+        let expr = chelis_deep::parser::parse_str("(lit {type: (t-prim {} string)} \"hi\")")
+            .expect("parse failed")
+            .into_iter()
+            .next()
+            .expect("one expression");
+        let outcome = catch_lowering(move || {
+            let mut ctx = LowerCtx::new(HashMap::new(), HashMap::new(), LinearityInfo::default());
+            let _ = ctx.lower_expr(&expr);
+        });
+        let Err(diagnostic) = outcome else {
+            panic!("a string literal has no numeric IR constant and must not lower");
+        };
+        let message = diagnostic.to_string();
+        assert!(
+            message.contains("string literal has no numeric IR constant"),
+            "the rejection must be the cited lowering diagnostic, not \
+             `finalize_scalar`'s unreachable-arm panic; got: {message}"
+        );
+        assert!(
+            !message.contains("is not a numeric dtype and has no finalize semantics"),
+            "the unreachable-by-construction panic must not be the user-facing \
+             message; got: {message}"
+        );
     }
 
     #[test]
@@ -14278,9 +14567,10 @@ mod regression_tests {
 
     #[test]
     fn uniform_like_integer_cast_bound_fails_loudly() {
-        // A value-changing cast (float literal -> int32 truncation) is NOT
-        // folded — the lowering refuses to guess the cast semantics and fails
-        // loudly rather than bake a truncated bound into codegen (chelis#776).
+        // A dtype-changing cast (even the exactly integral 2.0 -> int32) is
+        // NOT accepted as a static uniform_like bound. The lowering fails
+        // loudly rather than let a cast launder the bound contract
+        // (chelis#776).
         let src = format!(
             "(app {{}} (var {{}} uniform_like) {WRAPPED_ARG_TEMPLATE} \
              (cast {{}} (lit {{}} 2.0) (t-prim {{}} int32)) \
@@ -14383,7 +14673,7 @@ mod regression_tests {
         assert_eq!(non_drop_len(&dag), 1);
         assert_eq!(
             dag.get(NodeId(0)).unwrap().op,
-            RiscOp::Const { value: 42.0 }
+            RiscOp::synth_const(Prim::F32, 42.0)
         );
     }
 
@@ -14398,9 +14688,18 @@ mod regression_tests {
         // Three Const nodes, one per child. The par node itself does not
         // produce an extra DAG node; its value is reused from the last child.
         assert_eq!(non_drop_len(&dag), 3);
-        assert_eq!(dag.get(NodeId(0)).unwrap().op, RiscOp::Const { value: 1.0 });
-        assert_eq!(dag.get(NodeId(1)).unwrap().op, RiscOp::Const { value: 2.0 });
-        assert_eq!(dag.get(NodeId(2)).unwrap().op, RiscOp::Const { value: 3.0 });
+        assert_eq!(
+            dag.get(NodeId(0)).unwrap().op,
+            RiscOp::synth_const(Prim::F32, 1.0)
+        );
+        assert_eq!(
+            dag.get(NodeId(1)).unwrap().op,
+            RiscOp::synth_const(Prim::F32, 2.0)
+        );
+        assert_eq!(
+            dag.get(NodeId(2)).unwrap().op,
+            RiscOp::synth_const(Prim::F32, 3.0)
+        );
     }
 
     #[test]
@@ -14410,7 +14709,7 @@ mod regression_tests {
         assert_eq!(non_drop_len(&dag), 2);
         assert_eq!(
             dag.get(NodeId(0)).unwrap().op,
-            RiscOp::Const { value: 42.0 }
+            RiscOp::synth_const(Prim::F32, 42.0)
         );
         assert_eq!(dag.get(NodeId(1)).unwrap().op, RiscOp::Realize);
     }
@@ -14420,7 +14719,10 @@ mod regression_tests {
         let src = "(copy {} (lit {type: (t-tensor {} (t-prim {} f32))} 7.0))";
         let dag = parse_and_lower(src);
         assert_eq!(non_drop_len(&dag), 2);
-        assert_eq!(dag.get(NodeId(0)).unwrap().op, RiscOp::Const { value: 7.0 });
+        assert_eq!(
+            dag.get(NodeId(0)).unwrap().op,
+            RiscOp::synth_const(Prim::F32, 7.0)
+        );
         assert_eq!(dag.get(NodeId(1)).unwrap().op, RiscOp::Copy);
         assert_eq!(dag.get(NodeId(1)).unwrap().inputs, vec![NodeId(0)]);
     }
@@ -14430,7 +14732,10 @@ mod regression_tests {
         let src = "(app {} (var {} drop) (lit {type: (t-tensor {} (t-prim {} f32))} 7.0))";
         let dag = parse_and_lower(src);
         assert_eq!(dag.len(), 2);
-        assert_eq!(dag.get(NodeId(0)).unwrap().op, RiscOp::Const { value: 7.0 });
+        assert_eq!(
+            dag.get(NodeId(0)).unwrap().op,
+            RiscOp::synth_const(Prim::F32, 7.0)
+        );
         assert_eq!(dag.get(NodeId(1)).unwrap().op, RiscOp::Drop);
         assert_eq!(dag.get(NodeId(1)).unwrap().inputs, vec![NodeId(0)]);
     }
@@ -14535,15 +14840,15 @@ mod regression_tests {
              (lit {type: (t-prim {} f32)} 9.0))",
         );
         assert!(
-            dag.nodes()
-                .iter()
-                .any(|node| matches!(node.op, RiscOp::Const { value } if value == 2.5)),
+            dag.nodes().iter().any(
+                |node| matches!(node.op, RiscOp::Const { value } if value.as_f64_lossy() == 2.5)
+            ),
             "taken branch's literal must be lowered: {dag:?}"
         );
         assert!(
-            !dag.nodes()
-                .iter()
-                .any(|node| matches!(node.op, RiscOp::Const { value } if value == 9.0)),
+            !dag.nodes().iter().any(
+                |node| matches!(node.op, RiscOp::Const { value } if value.as_f64_lossy() == 9.0)
+            ),
             "untaken branch's literal must not be lowered: {dag:?}"
         );
         assert!(
@@ -14566,15 +14871,15 @@ mod regression_tests {
              (arm {} (pat-ctor {} ModeB) () (lit {type: (t-prim {} f32)} 9.0)))",
         );
         assert!(
-            dag.nodes()
-                .iter()
-                .any(|node| matches!(node.op, RiscOp::Const { value } if value == 2.5)),
+            dag.nodes().iter().any(
+                |node| matches!(node.op, RiscOp::Const { value } if value.as_f64_lossy() == 2.5)
+            ),
             "arm selected by the pruned constructor must lower: {dag:?}"
         );
         assert!(
-            !dag.nodes()
-                .iter()
-                .any(|node| matches!(node.op, RiscOp::Const { value } if value == 9.0)),
+            !dag.nodes().iter().any(
+                |node| matches!(node.op, RiscOp::Const { value } if value.as_f64_lossy() == 9.0)
+            ),
             "dead arm must not lower: {dag:?}"
         );
     }
@@ -14592,25 +14897,23 @@ mod regression_tests {
              (lit {type: (t-prim {} f32)} 9.0))",
         );
         assert!(
-            dag.nodes()
-                .iter()
-                .any(|node| matches!(node.op, RiscOp::Const { value } if value == 2.5)),
+            dag.nodes().iter().any(
+                |node| matches!(node.op, RiscOp::Const { value } if value.as_f64_lossy() == 2.5)
+            ),
             "gte(3, 3) must fold true and take the then branch: {dag:?}"
         );
         assert!(
-            !dag.nodes()
-                .iter()
-                .any(|node| matches!(node.op, RiscOp::Const { value } if value == 9.0)),
+            !dag.nodes().iter().any(
+                |node| matches!(node.op, RiscOp::Const { value } if value.as_f64_lossy() == 9.0)
+            ),
             "untaken branch must not lower: {dag:?}"
         );
     }
 
     #[test]
-    fn static_cond_fold_applies_cast_truncation() {
-        // chelis#620 fold/eval parity: cast(0.9, int32) truncates toward
-        // zero (shared convert_cast_data), so gt(cast(0.9, int32), 0) is
-        // gt(0, 0) == false and the ELSE branch is taken. A fold that read
-        // the un-truncated 0.9 would wrongly select the then branch.
+    fn static_cond_fold_refuses_fractional_checked_cast() {
+        // A fractional checked cast Domain-traps. Static recognition must
+        // decline so the runtime mask path retains the cast and its trap.
         let dag = parse_and_lower_unchecked(
             "(if {} (app {} (var {} gt) \
              (cast {} (lit {} 0.9) int32) (cast {} (lit {} 0) int32)) \
@@ -14620,14 +14923,8 @@ mod regression_tests {
         assert!(
             dag.nodes()
                 .iter()
-                .any(|node| matches!(node.op, RiscOp::Const { value } if value == 9.0)),
-            "cast truncation must select the else branch: {dag:?}"
-        );
-        assert!(
-            !dag.nodes()
-                .iter()
-                .any(|node| matches!(node.op, RiscOp::Const { value } if value == 2.5)),
-            "then branch must not lower: {dag:?}"
+                .any(|node| matches!(node.op, RiscOp::Mul)),
+            "fractional checked cast must stay on the runtime mask path: {dag:?}"
         );
     }
 
@@ -14801,15 +15098,15 @@ mod regression_tests {
              (arm {} (pat-ctor {} ModeB) () (lit {type: (t-prim {} f32)} 9.0)))",
         );
         assert!(
-            dag.nodes()
-                .iter()
-                .any(|node| matches!(node.op, RiscOp::Const { value } if value == 2.5)),
+            dag.nodes().iter().any(
+                |node| matches!(node.op, RiscOp::Const { value } if value.as_f64_lossy() == 2.5)
+            ),
             "taken arm's literal must be lowered: {dag:?}"
         );
         assert!(
-            !dag.nodes()
-                .iter()
-                .any(|node| matches!(node.op, RiscOp::Const { value } if value == 9.0)),
+            !dag.nodes().iter().any(
+                |node| matches!(node.op, RiscOp::Const { value } if value.as_f64_lossy() == 9.0)
+            ),
             "dead arm's literal must not be lowered: {dag:?}"
         );
     }
@@ -15109,9 +15406,9 @@ mod regression_tests {
         let output = &result[roots.last().unwrap()];
         assert_eq!(output.shape, vec![1], "gradient shape must be [1]");
         assert!(
-            (output.data[0] - 6.0_f64).abs() < 1e-5,
+            (output.to_f64_lossy_vec()[0] - 6.0_f64).abs() < 1e-5,
             "gradient of sum(mul(x,x),0) at x=[3.0] must be 6.0, got {:?}",
-            output.data
+            output.to_f64_lossy_vec()
         );
     }
 
@@ -15176,9 +15473,9 @@ mod regression_tests {
         let output = &result[roots.last().unwrap()];
         assert_eq!(output.shape, vec![1], "gradient shape must be [1]");
         assert!(
-            (output.data[0] - 6.0_f64).abs() < 1e-5,
+            (output.to_f64_lossy_vec()[0] - 6.0_f64).abs() < 1e-5,
             "gradient of sum(mul(x,x),0) at x=[3.0] must be 6.0, got {:?}",
-            output.data
+            output.to_f64_lossy_vec()
         );
     }
 }

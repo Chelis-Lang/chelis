@@ -328,7 +328,7 @@ work, and only the deltas called out below force a downstream change.
 | A - syntax migration | `with seed(42)` -> `42i64` ([#731] P1) | one-time, final |
 | B - loud rejection of silently-wrong code | [#730]/[#731]/[#729] loud paths, [#730] P2 host-type | shells fix a real bug; permanent |
 | C - wire / binding break | [#729] §C3 per-dtype storage (schema + Python payload) | one-time; **must be atomic** (§C3 forbids partial adoption) |
-| D1 - payload rendering change | [#732] element/container strings | payload churn ONLY if one lane changes twice |
+| D1 - payload rendering change | [#732] canonical element/container grammar, then [#729] own-width eval completion | exactly two authorized steps: the shipped formatter grammar and one final eval value-width correction in v0.19; frozen afterward |
 | D2a - root label prefix | [05-OBS-6] `name = value` | SHIPPED once in v0.18.1; frozen; does not reopen D1 |
 | D2b - manifested root topology | [#912]/[#1023] complete root set/order, dotted expansion, unavailable-root diagnostics, and artifact routing | one coordinated post-v0.18.1 migration in both lanes; may not alter D1 or D2a |
 | E - reject-now-support-later | [#730] loud reject -> [#729] kernel lands | the add-then-remove-workaround trap |
@@ -372,9 +372,13 @@ patch.
 
 1. **Atomic wire break.** [#729] §C3 is all-layers-or-nothing; never split the
    storage decision across releases or binding consumers adapt N times.
-2. **Payload-render-once; root-prefix-once; root-topology-once.** [#732] froze
-   numeric payload digits and container/scalar shape for eval at P1 and C at
-   P2. [05-OBS-6] later authored a separate envelope around those frozen
+2. **Payload grammar once; own-width completion once; root-prefix once;
+   root-topology once.** [#732] froze the numeric grammar and
+   container/scalar shape for eval at P1 and C at P2. [#729] Phase 1 is the
+   one permitted follow-up to eval payload digits: per-dtype storage completes
+   shortest-round-trip rendering at the declared width (for example f32
+   `1.2247449159622192` becomes `1.2247449`). No later [#729] phase may change
+   those digits or shapes. [05-OBS-6] later authored a separate envelope around those frozen
    payloads; its `name = ` prefix shipped once in both lanes at v0.18.1. The
    remaining manifested root set/order, unavailable-root, and artifact cut
    rides v0.19 once. Neither later step may reopen [#732]'s formatter decisions
@@ -459,8 +463,16 @@ Migration-note stubs (the breaking delta per cut):
   complete manifested root set/order or unavailable-root diagnostics."
 - **0.19** (source migration) - "dtype semantics are grounded: integer overflow
   traps instead of wrapping, per-dtype tensor storage (wire-format v2, Python
-  payload shape changed), narrow dtypes preserved end-to-end; every op x dtype
+  payload shape changed), narrow dtypes preserved end-to-end. Eval float tensor
+  elements now render shortest-round-trip at their own width, so an f32 tensor
+  prints `1.2247449` where it printed `1.2247449159622192`; every op x dtype
   capability decision is now fixed (supported, or a cited stable rejection).
+  Checked casts now trap instead of choosing an implicit conversion for
+  fractional float-to-integer values (`cast(3.5, int32)`) and non-member bool
+  values (`cast(2, bool)`); apply `floor` or `round` before the integer cast,
+  and produce exactly 0 or 1 before a bool cast. Python `np.uint64` ingress now
+  raises `ChelisError` instead of silently producing an f64 payload; choose an
+  explicit int64 or f64 conversion.
   The v0.18.1 root prefix is unchanged; the complete manifested root set now
   appears in manifest order in both lanes. Update expectations for added or
   reordered dotted roots, and treat an unavailable owed root as a named

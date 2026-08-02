@@ -213,11 +213,28 @@ class EvalClassificationTests(unittest.TestCase):
         self.assertEqual(r.bucket, "agree")
 
     def test_eval_tensor_scalar(self):
+        # Execution wire v2 (chelis#729): tagged per-dtype payload.
         rec = eval_record("3.0")
         r = rc.classify_program(
-            rec, 0, eval_json({"type": "tensor", "value": {"shape": [], "data": [3.0]}})
+            rec,
+            0,
+            eval_json(
+                {
+                    "type": "tensor",
+                    "value": {"shape": [], "data": {"dtype": "f32", "values": [3.0]}},
+                }
+            ),
         )
         self.assertEqual(r.bucket, "agree")
+
+    def test_eval_tensor_scalar_v1_legacy_shape_is_rejected(self):
+        # The pre-v2 bare-array branch was deleted at the chelis#729
+        # rework: a v1 payload is a stale producer, and replaying it
+        # silently would launder exactly the dtype-erased shape the v2
+        # wire break exists to end.
+        with self.assertRaises(ValueError) as ctx:
+            rc._read_root_scalar({"type": "tensor", "value": {"shape": [], "data": [3.0]}})
+        self.assertIn("legacy v1", str(ctx.exception))
 
     def test_eval_nan_reconciliation_both_nonfinite(self):
         # Compiler renders non-finite as JSON null; Hull reference is NaN.

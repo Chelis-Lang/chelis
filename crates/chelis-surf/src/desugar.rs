@@ -1531,8 +1531,9 @@ impl DesugarCtx {
                 // literals (spec §5.5) keep their explicit suffix
                 // binding; `cast(1.1f32, f64)` still means "widen this
                 // f32 value". A float literal under an integer target
-                // keeps the default-then-truncate behavior because a
-                // decimal cannot bind at an integer type.
+                // keeps its default float source because a decimal cannot
+                // bind at an integer type; the checked cast then requires
+                // the value to be integral (spec/04 [04-NUM-14]).
                 let inner = match e.as_ref() {
                     Expr::List(items, _) => {
                         self.desugar_list_as_tensor_literal(items, prec, local_fn_params)
@@ -3114,7 +3115,7 @@ mod tests {
     fn cast_of_float_literal_to_integer_does_not_adopt() {
         // Negative parity: a float literal cannot "adopt" an integer
         // type — `cast(1.9, int32)` keeps the §5.3 f32 default on the
-        // literal and truncates at the cast, exactly as before.
+        // literal, so the checked cast Domain-traps on the fractional value.
         let expr = Expr::Cast(Box::new(float_lit(1.9)), "int32".to_string(), s());
         assert_eq!(
             print_expr(&desugar_expr(&expr)),

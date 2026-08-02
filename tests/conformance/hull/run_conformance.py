@@ -228,8 +228,31 @@ def _read_root_scalar(root_value: object) -> float | None:
     if ty == "tensor":
         if isinstance(val, dict):
             data = val.get("data")
-            if isinstance(data, list) and len(data) > 0 and isinstance(data[0], (int, float)):
-                return float(data[0])
+            # Execution wire v2 (chelis#729): the tensor payload is the
+            # tagged per-dtype form {"dtype": ..., "values": [...]}. The
+            # legacy v1 bare-array branch was DELETED at the chelis#729
+            # rework: no archived v1 outputs exist in this repo, the
+            # toolchain's own decoder now rejects v1 payloads loudly, and
+            # a v1 shape reaching this reader means a stale producer that
+            # must be regenerated, not silently replayed.
+            if isinstance(data, dict):
+                values = data.get("values")
+                if (
+                    isinstance(values, list)
+                    and len(values) > 0
+                    and isinstance(values[0], (bool, int, float))
+                ):
+                    first = values[0]
+                    if isinstance(first, bool):
+                        return 1.0 if first else 0.0
+                    return float(first)
+                return None
+            if isinstance(data, list):
+                raise ValueError(
+                    "legacy v1 bare-array tensor payload is not supported: "
+                    "regenerate the output with a current chelis "
+                    "(execution wire v2, chelis#729)"
+                )
         return None
     return None
 

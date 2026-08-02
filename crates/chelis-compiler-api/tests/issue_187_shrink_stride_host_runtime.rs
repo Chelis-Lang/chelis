@@ -58,7 +58,7 @@ windowed = shrink(&make, [[0, 1], [1, 3]])
     let result = eval_surf(src);
     let win = root_tensor(&result, "windowed");
     assert_eq!(win.shape, vec![1, 2], "windowed shape");
-    assert_eq!(win.data, vec![1.0, 2.0], "windowed data");
+    assert_eq!(win.data.to_f64_lossy_vec(), vec![1.0, 2.0], "windowed data");
 }
 
 /// EXPECT: `stride(&x, 1, 2)` on the same 2x4 input returns shape [2, 2]
@@ -74,7 +74,11 @@ strided = stride(&make, 1, 2)
     let result = eval_surf(src);
     let s = root_tensor(&result, "strided");
     assert_eq!(s.shape, vec![2, 2], "strided shape");
-    assert_eq!(s.data, vec![0.0, 2.0, 4.0, 6.0], "strided data");
+    assert_eq!(
+        s.data.to_f64_lossy_vec(),
+        vec![0.0, 2.0, 4.0, 6.0],
+        "strided data"
+    );
 }
 
 // ---------------------------------------------------------------------------

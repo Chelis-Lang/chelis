@@ -1178,6 +1178,8 @@ pub(super) fn check_restricted_op_in_body(
         && !TRANSCENDENTAL_FLOAT_ONLY_OPS.contains(&op_name)
         && !FLOAT_ONLY_DIV_OPS.contains(&op_name)
         && !INTEGER_ONLY_DIV_OPS.contains(&op_name)
+        && !BOOL_REJECTED_ARITH_OPS.contains(&op_name)
+        && op_name != "mean"
     {
         return;
     }
@@ -1185,7 +1187,7 @@ pub(super) fn check_restricted_op_in_body(
     // the call-site substitution. The arg may be either a direct
     // `(var x)` reference to a body param OR a deeper expression — for
     // the latter we look at its annotated type's precision slot.
-    for arg in op_args {
+    for (arg_index, arg) in op_args.iter().enumerate() {
         let resolved_prim = resolve_arg_precision_through_subst(arg, param_to_prec, subst);
         let Some(prim_name) = resolved_prim else {
             continue;
@@ -1194,6 +1196,21 @@ pub(super) fn check_restricted_op_in_body(
             continue;
         };
         let _ = call_site_list; // span hint reserved for future plumbing
+        let first_data_arg = arg_index == 0;
+        let consult_shared_policy =
+            BOOL_REJECTED_ARITH_OPS.contains(&op_name) || (op_name == "mean" && first_data_arg);
+        if consult_shared_policy
+            && let Some((kind, message, mut hints)) =
+                operand_dtype_rejection(op_name, &Type::Prim(prim))
+        {
+            hints.push(format!(
+                "Reached through the polymorphic sig for `{callee_name}` instantiated at \
+                 `{prim_name}`; the same operand-dtype rule applies to every such \
+                 instantiation, including via stdlib wrappers."
+            ));
+            errors.push(CheckError::new(kind, message, hints));
+            return;
+        }
         if INTEGER_REJECTED_OPS.contains(&op_name) && prim.is_integer() {
             errors.push(CheckError::new(
                 CheckErrorKind::PrecisionMismatch,

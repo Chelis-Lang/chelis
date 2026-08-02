@@ -121,8 +121,9 @@ named primitives below.
 **`trunc_div` semantics (integer-only).** `trunc_div(a, b)`
 computes the quotient rounded toward zero — the exact C/Rust
 integer `/` operator — and is **valid on integer operands only**
-(applying it to floats is a type error; use `floor_div` plus
-`floor`, or a `cast`, for a float truncating quotient).
+(applying it to floats is a type error; a float quotient rounded toward
+zero requires an explicit sign-aware `floor`/`ceil` composition before the
+checked integer cast).
 `trunc_div(7, 2) == 3`, `trunc_div(-7, 2) == -3`,
 `trunc_div(7, -2) == -3`, `trunc_div(-8, 2) == -4`. This is the
 exact quotient semantics chelis-std's `Std.Decimal` arithmetic
@@ -1462,15 +1463,26 @@ chelis#729/#686 capacity family).)*
 > SHALL be correctly rounded (bound zero, per chelis#719). Formatting
 > differences are never within tolerance.
 
-*(The table is pending; #719's fix (PR #760) precedes its sqrt row. This
-section, spec/05 §8, is its single authored address: `dtype_semantics.md`
-§C4 item 5 and `faithful_observation.md` Phase 3 point here and do not
-host it. Scope note, 2026-07-28: with arithmetic width fixed per dtype by
+*(This section, spec/05 §8, is the single authored address for the table:
+`dtype_semantics.md` §C4 item 5 and `faithful_observation.md` point here and
+do not host it. With arithmetic width fixed per dtype by
 [04-NUM-8], the table covers only genuine implementation variance at a
 single width - one lane's libm or SLEEF or vForce against another's for
 the transcendentals - and never a structural precision mismatch between
 lanes computing at different widths. Rows for add/sub/mul/div and the
 comparisons are bound zero by construction, not by measurement.)*
+
+**Per-op cross-lane value tolerance (normative).** Bounds apply after both
+lanes compute and finalize at the dtype's [04-NUM-8] arithmetic width. They
+never license computing an f32 program in f64, and never apply to formatting.
+
+| op | dtype | maximum lane-to-lane absolute difference |
+|---|---|---:|
+| `tan` | `f64` | `1e-12` |
+| `exp` | `f64` | `1e-12` |
+
+`sqrt` deliberately has no tolerance row: [05-OBS-3] requires correct
+rounding (bound zero).
 
 > **[05-OBS-4]** A scalar-typed value SHALL render as the bare scalar at
 > every exit in both lanes, including as a top-level labeled root
@@ -1486,10 +1498,7 @@ scalar already rendered bare in BOTH lanes and the compiled lane's
 labeled roots did too, so the bare form is the only choice consistent
 with [05-OBS-1]'s intra-lane exit agreement; the rank-0 wrapper was an
 eval-interpreter storage artifact. Conformant in both lanes for the
-locked repro; general C-lane digit grammar is Phase 2. The bare-scalar
-rendering inherits [05-OBS-1]'s annexed chelis#684 exception: an int64
-scalar root above 2^53 renders bare but carries the f64-collapsed
-stored value until chelis#729 repairs the realization's storage.)*
+locked repro; general C-lane digit grammar is Phase 2.)*
 
 > **[05-OBS-5]** Every exit in both lanes SHALL truncate tensor element
 > rendering after 32 elements, marking the cut with `, ...` inside the
@@ -1553,19 +1562,3 @@ never emits e-notation):
   numerically closest, then the even mantissa;
 - integer dtypes print exact base-10 digits (i64 formatting, never
   through double).
-
-**Eval width note (deliberate, chelis#732 Phase 1):** eval TENSOR float
-elements render at the stored f64 width, because the eval tensor store
-is f64-backed and its runtime precision tag is unreliable for float
-width (chelis#717); narrowing at render time would launder stored bits,
-which [05-OBS-1] forbids. Scalar exits render at their own width. Own-
-width tensor digits arrive when chelis#729 repairs the value metadata -
-a value-layer fix, not a grammar change.
-
-**Tag-vs-bits disagreements print the bits:** when an integer- or
-bool-tagged tensor slot stores a value outside the tag's value set (the
-live example: `mean` of an int64 tensor stores 187.5 - chelis#724
-domain territory), the element renders as the stored f64, so the value
-bug stays visible at the exit instead of being truncated into a
-well-formed lie. Rendering never repairs, rounds, or rejects stored
-values.

@@ -56,13 +56,12 @@
 //! undeclared reason OR has gone green. The green case is the [#729]
 //! handoff: when its value/capacity repair lands, the oracle goes red
 //! until the cell is un-ignored on its original assertion and the ledger
-//! row deleted in that change set. The two documented corpus-exclusion
-//! lists below (`C_LANE_EXCLUDED`, `EVAL_F64_LIST_EXCLUDED`) carry the
-//! full §B2.9 three-legged treatment: inventory equality against the
-//! oracle's `DECLARED_EXCLUSIONS` (neither list changes without editing
-//! the ledger), plus the NON-ignored exclusion probes below
-//! (`eval_f64_list_excluded_rows_still_narrow_through_the_f32_tag`,
-//! `c_lane_excluded_labels_still_fail_at_ingress`,
+//! row deleted in that change set. The remaining documented corpus-exclusion
+//! list below (`C_LANE_EXCLUDED`) carries the full §B2.9 three-legged
+//! treatment: inventory equality against the oracle's
+//! `DECLARED_EXCLUSIONS` (the list cannot change without editing the
+//! ledger), plus the NON-ignored exclusion probes below
+//! (`c_lane_excluded_labels_still_fail_at_ingress`,
 //! `c_lane_excluded_neg_zero_still_drops_the_sign`), which re-execute
 //! every excluded behavior in the DEFAULT suite and fail with a
 //! shrink-the-list message the moment an upstream repair lands - a stale
@@ -824,49 +823,6 @@ fn c_lane_rows(r: &FRow) -> bool {
     !C_LANE_EXCLUDED.contains(&r.label)
 }
 
-/// Rows excluded from the EVAL to_list assertions: the eval tensor lane
-/// pins its runtime precision tag at F32 even for checker-typed f64
-/// tensors (chelis#717's per-op-chaos family, verified here by execution:
-/// print shows the stored f64 while to_list narrows every element through
-/// the F32 tag - f64::MAX reads back as `inf`, 0.1 as its f32 image). A
-/// VALUE/metadata bug, [#729]'s per §I1, so these are exclusions with a
-/// probe comment on [#729], not red rendering cells. Only f32-exact f64
-/// values survive the tag; the print exit is asserted on EVERY row.
-///
-/// `f64-2p53` joined the list at chelis#732 Phase 1: 2^53 IS f32-exact, so
-/// the narrowed VALUE survives the tag, but the Phase 1 own-width scalar
-/// renderer now prints the to_list element AT ITS (narrowed) F32 width -
-/// and the shortest f32 string for 2^53 does not parse back to the same
-/// f64. The row's earlier green was rendering-accidental: the pre-contract
-/// f64-width renderer masked the chelis#717 narrowing for exactly this
-/// value class. Faithful rendering makes the value bug visible instead of
-/// laundered (faithful_observation.md, non-goals) - the cell returns when
-/// [#729] repairs the to_list value path.
-///
-/// `f64-tenth` LEFT the list 2026-07-30, caught by the §B2.9 exclusion
-/// probe's first execution: 0.1's F32-narrowed image renders as `0.1`,
-/// which parses back to the original f64 exactly, so the TEXT assertion
-/// this list guards passes for it (verified by execution: the to_list
-/// line reads `[inf, 0.0, 0.0, -0.0, 0.1, 0.3, ...]`). The row's earlier
-/// membership was rendering-era residue, not a current failure - exactly
-/// the stale over-claim the probe exists to catch. The VALUE is still
-/// F32-narrowed (chelis#717's subject); text coincidence is not repair,
-/// and the label rejoins nothing when [#729] lands - it is simply covered
-/// by the main assertion either way.
-const EVAL_F64_LIST_EXCLUDED: &[&str] = &[
-    "f64-max",
-    "f64-min-subnormal",
-    "f64-min-normal",
-    "f64-17-digit",
-    "f64-2p53",
-    "f64-2p53-plus-2",
-    "f64-audit-e19",
-];
-
-fn eval_f64_list_rows(r: &FRow) -> bool {
-    !EVAL_F64_LIST_EXCLUDED.contains(&r.label)
-}
-
 /// The compiled-lane subset of a table: the rows whose constants the C
 /// backend can render into compilable source (see `C_LANE_EXCLUDED`).
 fn c_rows(rows: &[FRow]) -> Vec<FRow> {
@@ -995,73 +951,6 @@ fn giant_integer_fingerprint_ignores_c_comments_and_literals() {
     assert!(!has_bare_giant_integer_literal(&format!(
         "char c = '0'; /* {giant} */ double x = 1e20;"
     )));
-}
-
-/// §B2.9 leg 2+3 for `EVAL_F64_LIST_EXCLUDED`: every excluded label still
-/// narrows through the stale F32 tag (chelis#717), verified on the same
-/// rendered output the main test skips it in. Per label: the to_list text
-/// IS the faithful shortest render of the F32-narrowed value (the declared
-/// fingerprint - any other failure shape is a different bug and trips the
-/// first assertion), and the f64 round-trip still fails (the fact that
-/// justifies the exclusion - when it stops failing, the repair landed).
-#[test]
-fn eval_f64_list_excluded_rows_still_narrow_through_the_f32_tag() {
-    let out = eval_stdout(&float_table_program("f64", F64_ROWS, false)).expect("eval");
-    let llines = list_lines(&out);
-    assert_eq!(llines.len(), 2, "expected both to_list renders:\n{out}");
-    let elems_per_line: Vec<Vec<String>> = llines.iter().map(|l| list_payload_elems(l)).collect();
-    for elems in &elems_per_line {
-        assert_eq!(elems.len(), F64_ROWS.len(), "element count:\n{out}");
-    }
-    let mut visited: Vec<&str> = Vec::new();
-    for label in EVAL_F64_LIST_EXCLUDED {
-        let (idx, row) = F64_ROWS
-            .iter()
-            .enumerate()
-            .find(|(_, r)| r.label == *label)
-            .unwrap_or_else(|| panic!("excluded label `{label}` is not an F64_ROWS row"));
-        for elems in &elems_per_line {
-            let text = &elems[idx];
-            let f32_bits = text_bits_at(text, Width::F32)
-                .unwrap_or_else(|e| panic!("[probe/{label}] to_list exit: {e}"));
-            assert_eq!(
-                f32_bits,
-                value_bits_at(row.value, Width::F32),
-                "[probe/{label}] to_list text `{text}` is not the F32-tag \
-                 narrowing of the stored value - the exclusion's declared \
-                 chelis#717 fingerprint no longer matches. Whatever this is, \
-                 it is a DIFFERENT defect: file it per \
-                 faithful_observation.md B2.5 before touching the exclusion."
-            );
-            let still_narrowed = text_bits_at(text, Width::F64)
-                .map(|bits| bits != value_bits_at(row.value, Width::F64))
-                .unwrap_or(true);
-            assert!(
-                still_narrowed,
-                "[probe/{label}] GOOD NEWS: the to_list exit now round-trips \
-                 at f64 - either the chelis#717/[#729] to_list value repair \
-                 landed, or the row's F32-narrowed image renders \
-                 text-coincident with the original (the f64-tenth shape, \
-                 shrunk 2026-07-30). Either way the exclusion overstates \
-                 breakage: remove `{label}` from EVAL_F64_LIST_EXCLUDED and \
-                 from DECLARED_EXCLUSIONS in \
-                 scripts/faithful_observation_phase2_oracle.py in this same \
-                 change set, so the main assertions cover it (B2.3: \
-                 red-to-green only by un-ignoring)."
-            );
-        }
-        visited.push(label);
-    }
-    // The ordered execution receipt (PR #962 round-1 F2 and round-2 M1):
-    // exact sequence, compared by the oracle against the declared order
-    // with multiplicity. The receipt is still probe-authored text - the
-    // INDEPENDENT re-execution evidence is the oracle's own per-label
-    // ground-truth driver, which re-derives these facts without trusting
-    // this line.
-    println!(
-        "exclusion probe EVAL_F64_LIST_EXCLUDED visited: {}",
-        visited.join(" ")
-    );
 }
 
 /// Run a linked exit binary and decode every rendered element at `w`.
@@ -1280,14 +1169,7 @@ fn int_table_program(dt: &str, rows: &[IRow]) -> String {
 #[test]
 fn eval_f64_tensor_exits_round_trip() {
     let out = eval_stdout(&float_table_program("f64", F64_ROWS, false)).expect("eval");
-    assert_float_exits(
-        &out,
-        Width::F64,
-        F64_ROWS,
-        all_rows,
-        eval_f64_list_rows,
-        "eval/f64",
-    );
+    assert_float_exits(&out, Width::F64, F64_ROWS, all_rows, all_rows, "eval/f64");
 
     let (ret, body) = float_specials_body("f64");
     let out = eval_stdout(&exits_program(&ret, &body)).expect("eval specials");
@@ -1348,11 +1230,14 @@ fn eval_int_tensor_exits_round_trip() {
     }
 }
 
-/// int64 ABOVE 2^53: tier 1 only. Eval's tensor storage is f64-backed
-/// (chelis#684, a [#729] value bug), so the constructed 2^53+1 is already
-/// collapsed BEFORE any exit renders it; faithful observation here means
-/// both exits agree on the stored (wrong) value. The C lane's tier-2
-/// version of this row is the chelis#723 ignored test below.
+/// int64 ABOVE 2^53: tier 1 only. Pre-chelis#729 the f64-backed storage
+/// collapsed 2^53+1 before ANY exit rendered it (green by uniform
+/// wrongness); chelis#729 Phase 1 made the host-lane exits exact with
+/// the tensor-lane labeled root still collapsing through the f64 DAG
+/// literal payload (green-to-ignored against chelis#856); the chelis#729
+/// rework sealed the DAG literal payload, so ALL FOUR exits are exact
+/// and the row is green again for the right reason. The C lane's
+/// tier-2 version of this row is the chelis#723 ignored test below.
 #[test]
 fn eval_int64_above_2p53_exits_agree_within_lane() {
     let program = exits_program(
@@ -2142,14 +2027,14 @@ fn wire_execution_value_rendering_round_trips() {
     let tensor = ExecutionValue::Tensor {
         value: TensorValue {
             shape: vec![finite.len()],
-            data: finite.clone(),
+            data: chelis_compiler_api::schema::TensorElements::from_f64_vec(finite.clone()),
         },
     };
     let json = serde_json::to_string(&tensor).expect("serialize");
     let back: ExecutionValue = serde_json::from_str(&json).expect("parse");
     match back {
         ExecutionValue::Tensor { value } => {
-            for (a, b) in value.data.iter().zip(&finite) {
+            for (a, b) in value.data.to_f64_lossy_vec().iter().zip(&finite) {
                 assert_eq!(a.to_bits(), b.to_bits(), "wire tensor element drifted");
             }
         }

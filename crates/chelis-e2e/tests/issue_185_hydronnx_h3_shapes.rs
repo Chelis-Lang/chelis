@@ -246,7 +246,12 @@ out = max_reduce(&stacked, 4)
         "maxpool element count mismatch"
     );
     for (i, &want) in expected.iter().enumerate() {
-        assert_close(out.data[i], want as f64, 1e-5, &format!("maxpool[{i}]"));
+        assert_close(
+            out.data.element_as_f64_lossy(i),
+            want as f64,
+            1e-5,
+            &format!("maxpool[{i}]"),
+        );
     }
 }
 
@@ -291,7 +296,12 @@ out = layer_norm(&x, &g, &b)
         }
     }
     for (i, &want) in expected.iter().enumerate() {
-        assert_close(out.data[i], want, 1e-5, &format!("layer_norm[{i}]"));
+        assert_close(
+            out.data.element_as_f64_lossy(i),
+            want,
+            1e-5,
+            &format!("layer_norm[{i}]"),
+        );
     }
 }
 
@@ -345,7 +355,12 @@ out = run_conv2d(make_x(), make_k())
     // accumulators and values in roughly [-1.5, 1.5], 1e-4 absolute
     // tolerance comfortably covers the worst-case rounding noise.
     for (i, &want) in expected.iter().enumerate() {
-        assert_close(out.data[i], want as f64, 1e-4, &format!("conv2d[{i}]"));
+        assert_close(
+            out.data.element_as_f64_lossy(i),
+            want as f64,
+            1e-4,
+            &format!("conv2d[{i}]"),
+        );
     }
 
     // Hand-computed lock for the top-left output pixel of output channel 0:
@@ -367,7 +382,7 @@ out = run_conv2d(make_x(), make_k())
         }
     }
     assert_close(
-        out.data[0],
+        out.data.element_as_f64_lossy(0),
         hand,
         1e-4,
         "conv2d hand-computed out[0, 0, 0, 0]",

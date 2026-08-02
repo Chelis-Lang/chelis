@@ -136,7 +136,7 @@ pub fn train_step(
     let loss = vals
         .get(&grad_result.output_node)
         .ok_or("loss node not in eval results")?
-        .data[0];
+        .element_f64_lossy(0);
 
     // SGD update
     for (name, fwd_node_id) in param_nodes {
@@ -146,9 +146,12 @@ pub fn train_step(
             let param = params
                 .get_mut(name)
                 .ok_or(format!("param {name} not found"))?;
-            for i in 0..param.data.len().min(grad_val.data.len()) {
-                param.data[i] -= lr * grad_val.data[i];
+            let mut updated = param.to_f64_lossy_vec();
+            let grad_wide = grad_val.to_f64_lossy_vec();
+            for i in 0..updated.len().min(grad_wide.len()) {
+                updated[i] -= lr * grad_wide[i];
             }
+            *param = TensorValue::from_vec(param.shape.clone(), updated);
         }
     }
 
@@ -182,18 +185,20 @@ pub fn accuracy(
         let batch_size = y_batch.shape[0];
         let n_classes = y_batch.shape[1];
 
+        let logits_wide = logits.to_f64_lossy_vec();
+        let labels_wide = y_batch.to_f64_lossy_vec();
         for b in 0..batch_size {
             let pred_class = (0..n_classes)
                 .max_by(|&i, &j| {
-                    logits.data[b * n_classes + i]
-                        .partial_cmp(&logits.data[b * n_classes + j])
+                    logits_wide[b * n_classes + i]
+                        .partial_cmp(&logits_wide[b * n_classes + j])
                         .unwrap()
                 })
                 .unwrap();
             let true_class = (0..n_classes)
                 .max_by(|&i, &j| {
-                    y_batch.data[b * n_classes + i]
-                        .partial_cmp(&y_batch.data[b * n_classes + j])
+                    labels_wide[b * n_classes + i]
+                        .partial_cmp(&labels_wide[b * n_classes + j])
                         .unwrap()
                 })
                 .unwrap();

@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "citation": "pre-Phase-1 wire-schema baseline; chelis#729",
+  "citation": "Phase-1 dtype-tagged wire-schema baseline; chelis#729",
   "rows": [
     {
       "flags": [
@@ -49,6 +49,13 @@
         "float-carrier"
       ],
       "id": "chelis_compiler_api::schema::Diagnostic.severity: f64",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::EvalResult.schema_version: u32",
       "kind": "wire-schema-numeric-field"
     },
     {
@@ -153,7 +160,56 @@
       "flags": [
         "float-carrier"
       ],
-      "id": "chelis_compiler_api::schema::TensorValue.data: Vec<f64>",
+      "id": "chelis_compiler_api::schema::TensorElements::Bf16.0: Vec<f64>",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "float-carrier"
+      ],
+      "id": "chelis_compiler_api::schema::TensorElements::F16.0: Vec<f64>",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "float-carrier"
+      ],
+      "id": "chelis_compiler_api::schema::TensorElements::F32.0: Vec<f32>",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "float-carrier"
+      ],
+      "id": "chelis_compiler_api::schema::TensorElements::F64.0: Vec<f64>",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::TensorElements::Int16.0: Vec<i16>",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::TensorElements::Int32.0: Vec<i32>",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::TensorElements::Int64.0: Vec<i64>",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::TensorElements::Int8.0: Vec<i8>",
       "kind": "wire-schema-numeric-field"
     },
     {
@@ -315,20 +371,6 @@
         "numeric-field"
       ],
       "id": "chelis_compiler_api::schema::WireRiscOp::Argmin.axis: usize",
-      "kind": "wire-schema-numeric-field"
-    },
-    {
-      "flags": [
-        "float-carrier"
-      ],
-      "id": "chelis_compiler_api::schema::WireRiscOp::Const.value: f64",
-      "kind": "wire-schema-numeric-field"
-    },
-    {
-      "flags": [
-        "float-carrier"
-      ],
-      "id": "chelis_compiler_api::schema::WireRiscOp::ConstTensor.data: Vec<f64>",
       "kind": "wire-schema-numeric-field"
     },
     {

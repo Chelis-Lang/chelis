@@ -42,7 +42,10 @@ fn vmap_elementwise_vectorizes_axis_zero() {
         )]),
     );
     assert_eq!(value.shape, vec![2, 3]);
-    assert_eq!(value.data, vec![-1.0, -2.0, -3.0, -4.0, 5.0, -6.0]);
+    assert_eq!(
+        value.to_f64_lossy_vec(),
+        vec![-1.0, -2.0, -3.0, -4.0, 5.0, -6.0]
+    );
 }
 
 #[test]
@@ -79,7 +82,7 @@ fn vmap_reduction_shifts_the_reduced_axis() {
         )]),
     );
     assert_eq!(value.shape, vec![2, 2]);
-    assert_eq!(value.data, vec![6.0, 15.0, 60.0, 24.0]);
+    assert_eq!(value.to_f64_lossy_vec(), vec![6.0, 15.0, 60.0, 24.0]);
 }
 
 #[test]

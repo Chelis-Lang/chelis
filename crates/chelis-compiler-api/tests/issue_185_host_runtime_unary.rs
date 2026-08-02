@@ -61,7 +61,12 @@ out = abs(&make)
     assert_eq!(out.shape, vec![5]);
     let expected = [3.0, 1.5, 0.0, 1.5, 3.0];
     for (i, &want) in expected.iter().enumerate() {
-        assert_close(out.data[i], want, 1e-6, &format!("abs[{i}]"));
+        assert_close(
+            out.data.element_as_f64_lossy(i),
+            want,
+            1e-6,
+            &format!("abs[{i}]"),
+        );
     }
 }
 
@@ -83,7 +88,12 @@ out = cos(&make)
         (2.0_f32).cos() as f64,
     ];
     for (i, &want) in expected.iter().enumerate() {
-        assert_close(out.data[i], want, 1e-6, &format!("cos[{i}]"));
+        assert_close(
+            out.data.element_as_f64_lossy(i),
+            want,
+            1e-6,
+            &format!("cos[{i}]"),
+        );
     }
 }
 
@@ -102,7 +112,12 @@ out = tan(&make)
         (1.0_f32).tan() as f64,
     ];
     for (i, &want) in expected.iter().enumerate() {
-        assert_close(out.data[i], want, 1e-5, &format!("tan[{i}]"));
+        assert_close(
+            out.data.element_as_f64_lossy(i),
+            want,
+            1e-5,
+            &format!("tan[{i}]"),
+        );
     }
 }
 
@@ -117,7 +132,12 @@ out = floor(&make)
     assert_eq!(out.shape, vec![5]);
     let expected = [-2.0, -1.0, 0.0, 1.0, 2.0];
     for (i, &want) in expected.iter().enumerate() {
-        assert_close(out.data[i], want, 1e-6, &format!("floor[{i}]"));
+        assert_close(
+            out.data.element_as_f64_lossy(i),
+            want,
+            1e-6,
+            &format!("floor[{i}]"),
+        );
     }
 }
 
@@ -132,7 +152,12 @@ out = ceil(&make)
     assert_eq!(out.shape, vec![5]);
     let expected = [-1.0, 0.0, 1.0, 2.0, 2.0];
     for (i, &want) in expected.iter().enumerate() {
-        assert_close(out.data[i], want, 1e-6, &format!("ceil[{i}]"));
+        assert_close(
+            out.data.element_as_f64_lossy(i),
+            want,
+            1e-6,
+            &format!("ceil[{i}]"),
+        );
     }
 }
 
@@ -151,7 +176,12 @@ out = atan(&make)
         (1.0_f32).atan() as f64,
     ];
     for (i, &want) in expected.iter().enumerate() {
-        assert_close(out.data[i], want, 1e-6, &format!("atan[{i}]"));
+        assert_close(
+            out.data.element_as_f64_lossy(i),
+            want,
+            1e-6,
+            &format!("atan[{i}]"),
+        );
     }
 }
 

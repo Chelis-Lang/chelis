@@ -816,7 +816,12 @@ fn bf16_const_fill_pinned_bit_patterns_for_0_1_0_01_pi() {
     for &(value, expected) in cases {
         let n = 4;
         let mut dag = Dag::new();
-        dag.add_node(RiscOp::Const { value }, vec![], vec_ty(n, Prim::Bf16), None);
+        dag.add_node(
+            RiscOp::synth_const(Prim::Bf16, value),
+            vec![],
+            vec_ty(n, Prim::Bf16),
+            None,
+        );
         let result = codegen(&dag, "bf16_const_extra").unwrap();
         let main_c = format!(
             r#"{HARNESS}
@@ -861,7 +866,12 @@ fn f16_const_fill_pinned_bit_patterns_for_0_1_0_01_pi() {
     for &(value, expected) in cases {
         let n = 4;
         let mut dag = Dag::new();
-        dag.add_node(RiscOp::Const { value }, vec![], vec_ty(n, Prim::F16), None);
+        dag.add_node(
+            RiscOp::synth_const(Prim::F16, value),
+            vec![],
+            vec_ty(n, Prim::F16),
+            None,
+        );
         let result = codegen(&dag, "f16_const_extra").unwrap();
         let main_c = format!(
             r#"{HARNESS}
@@ -913,7 +923,7 @@ fn cast_f32_to_bf16_preserves_value_per_ieee_754() {
     let n = 4;
     let mut dag = Dag::new();
     let src = dag.add_node(
-        RiscOp::Const { value: 1.5_f64 },
+        RiscOp::synth_const(vec_ty(n, Prim::F32).precision, 1.5_f64),
         vec![],
         vec_ty(n, Prim::F32),
         None,
@@ -962,7 +972,7 @@ fn cast_bf16_to_f32_preserves_value_per_ieee_754() {
     let n = 4;
     let mut dag = Dag::new();
     let src = dag.add_node(
-        RiscOp::Const { value: 1.5_f64 },
+        RiscOp::synth_const(vec_ty(n, Prim::Bf16).precision, 1.5_f64),
         vec![],
         vec_ty(n, Prim::Bf16),
         None,
@@ -1010,7 +1020,7 @@ fn cast_f32_to_f16_preserves_value_per_ieee_754() {
     let n = 4;
     let mut dag = Dag::new();
     let src = dag.add_node(
-        RiscOp::Const { value: 1.5_f64 },
+        RiscOp::synth_const(vec_ty(n, Prim::F32).precision, 1.5_f64),
         vec![],
         vec_ty(n, Prim::F32),
         None,
@@ -1083,24 +1093,24 @@ fn cross_backend_bf16_add_mul_chain_agrees_with_evaluator() {
 
     // Evaluator
     let mut inputs = std::collections::HashMap::new();
-    let a_eval = chelis_ir::eval::TensorValue {
-        data: vec![0.5, 1.5, 2.5, -0.25, 1.0, 2.0, -1.0, 0.125],
-        shape: vec![n],
-    };
-    let b_eval = chelis_ir::eval::TensorValue {
-        data: vec![0.25, 0.5, -1.5, 0.75, 0.125, -0.25, 1.0, 2.0],
-        shape: vec![n],
-    };
-    let c_eval = chelis_ir::eval::TensorValue {
-        data: vec![1.0, -1.0, 0.5, 2.0, 0.5, 1.0, -1.0, 1.0],
-        shape: vec![n],
-    };
+    let a_eval = chelis_ir::eval::TensorValue::from_vec(
+        vec![n],
+        vec![0.5, 1.5, 2.5, -0.25, 1.0, 2.0, -1.0, 0.125],
+    );
+    let b_eval = chelis_ir::eval::TensorValue::from_vec(
+        vec![n],
+        vec![0.25, 0.5, -1.5, 0.75, 0.125, -0.25, 1.0, 2.0],
+    );
+    let c_eval = chelis_ir::eval::TensorValue::from_vec(
+        vec![n],
+        vec![1.0, -1.0, 0.5, 2.0, 0.5, 1.0, -1.0, 1.0],
+    );
     inputs.insert("a".to_string(), a_eval.clone());
     inputs.insert("b".to_string(), b_eval.clone());
     inputs.insert("c".to_string(), c_eval.clone());
     let evals = chelis_ir::eval::eval_tensor(&dag, &inputs).unwrap();
     let last_id = NodeId(dag.len() - 1);
-    let eval_out = evals[&last_id].data.clone();
+    let eval_out = evals[&last_id].to_f64_lossy_vec().clone();
 
     // C backend
     let result = codegen(&dag, "bf16_chain").unwrap();

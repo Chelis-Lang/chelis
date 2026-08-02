@@ -27,16 +27,6 @@ fn cross_lane_stdout_is_byte_identical_where_bits_agree() {
 }
 
 const C_LANE_EXCLUDED: &[&str] = &["f64-neg-zero", "f64-max", "f64-audit-e19", "f32-max"];
-
-const EVAL_F64_LIST_EXCLUDED: &[&str] = &[
-    "f64-max",
-    "f64-min-subnormal",
-    "f64-min-normal",
-    "f64-17-digit",
-    "f64-2p53",
-    "f64-2p53-plus-2",
-    "f64-audit-e19",
-];
 """
 
 
@@ -166,6 +156,14 @@ class ExclusionTests(unittest.TestCase):
         violations = oracle.exclusion_violations(source)
         self.assertTrue(
             any("cannot run" in violation for violation in violations), violations
+        )
+
+    def test_an_undeclared_exclusion_const_is_a_violation(self) -> None:
+        source = HARNESS_FIXTURE + '\nconst NEW_ROWS_EXCLUDED: &[&str] = &["hidden"];\n'
+        violations = oracle.exclusion_violations(source)
+        self.assertTrue(
+            any("NEW_ROWS_EXCLUDED" in violation and "not declared" in violation for violation in violations),
+            violations,
         )
 
 
@@ -568,12 +566,12 @@ class ExclusionProbeTests(unittest.TestCase):
 
     def test_a_deleted_probe_is_a_violation(self) -> None:
         source = self._harness().replace(
-            "fn eval_f64_list_excluded_rows_still_narrow_through_the_f32_tag(",
+            "fn c_lane_excluded_labels_still_fail_at_ingress(",
             "fn renamed_probe(",
         )
         violations = oracle.exclusion_probe_violations(source)
         self.assertTrue(
-            any("not defined" in v and "EVAL_F64_LIST_EXCLUDED" in v for v in violations),
+            any("not defined" in v and "C_LANE_EXCLUDED" in v for v in violations),
             violations,
         )
 
@@ -592,11 +590,11 @@ class ExclusionProbeTests(unittest.TestCase):
     def test_a_probe_dropping_the_const_reference_is_a_violation(self) -> None:
         body = oracle.test_fn_body(
             self._harness(),
-            "eval_f64_list_excluded_rows_still_narrow_through_the_f32_tag",
+            "c_lane_excluded_labels_still_fail_at_ingress",
         )
         assert body is not None
         source = self._harness().replace(
-            body, body.replace("EVAL_F64_LIST_EXCLUDED", "LOCAL_LABELS")
+            body, body.replace("C_LANE_EXCLUDED", "LOCAL_LABELS")
         )
         violations = oracle.exclusion_probe_violations(source)
         self.assertTrue(
@@ -644,14 +642,14 @@ class ProbeAttributeTests(unittest.TestCase):
 
     def test_a_missing_test_attribute_is_a_violation(self) -> None:
         source = self._harness().replace(
-            "#[test]\nfn eval_f64_list_excluded_rows_still_narrow_through_the_f32_tag() {",
-            "fn eval_f64_list_excluded_rows_still_narrow_through_the_f32_tag() {",
+            "#[test]\nfn c_lane_excluded_labels_still_fail_at_ingress() {",
+            "fn c_lane_excluded_labels_still_fail_at_ingress() {",
             1,
         )
         violations = oracle.probe_attribute_violations(source)
         self.assertTrue(
             any(
-                "eval_f64_list_excluded_rows_still_narrow_through_the_f32_tag" in v
+                "c_lane_excluded_labels_still_fail_at_ingress" in v
                 for v in violations
             ),
             violations,
@@ -735,58 +733,6 @@ class GroundTruthTests(unittest.TestCase):
     (receipts are probe-authored), so the catch is the oracle's OWN
     re-execution - these tests pin its classifiers on real current
     behavior and on both failure directions."""
-
-    def _eval_rows(self):
-        return dict(
-            (name, rows) for name, _o, _p, rows in oracle.DECLARED_EXCLUSIONS
-        )["EVAL_F64_LIST_EXCLUDED"]
-
-    # The texts eval actually renders today for the excluded labels
-    # (verified by execution 2026-07-30).
-    _CURRENT = [
-        "inf",
-        "0.0",
-        "0.0",
-        "0.3",
-        "9007199000000000.0",
-        "9007199000000000.0",
-        "1e20",
-    ]
-
-    def test_current_eval_behavior_confirms_every_exclusion(self) -> None:
-        self.assertEqual(
-            oracle.eval_exclusion_ground_truth_violations(
-                self._CURRENT, self._eval_rows()
-            ),
-            [],
-        )
-
-    def test_a_repaired_row_is_a_gone_green_violation(self) -> None:
-        texts = list(self._CURRENT)
-        texts[0] = "1.7976931348623157e308"
-        violations = oracle.eval_exclusion_ground_truth_violations(
-            texts, self._eval_rows()
-        )
-        self.assertTrue(
-            any("f64-max" in v and "repair landed" in v for v in violations),
-            violations,
-        )
-
-    def test_a_wrong_fingerprint_is_a_different_defect_violation(self) -> None:
-        texts = list(self._CURRENT)
-        texts[3] = "1.5"
-        violations = oracle.eval_exclusion_ground_truth_violations(
-            texts, self._eval_rows()
-        )
-        self.assertTrue(
-            any("f64-17-digit" in v and "B2.5" in v for v in violations), violations
-        )
-
-    def test_a_length_drift_is_reported(self) -> None:
-        violations = oracle.eval_exclusion_ground_truth_violations(
-            self._CURRENT[:2], self._eval_rows()
-        )
-        self.assertTrue(any("drifted" in v for v in violations), violations)
 
     def test_c_fingerprints_confirm_and_flip(self) -> None:
         giant = "chelis_fill(t, 179769313486231570000000000000000000000000.0);"

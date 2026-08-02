@@ -180,28 +180,26 @@ fn metal_int64_abs_is_rejected_not_pre_planted_zero() {
 // chelis#726 - add on bool tensors
 // ===========================================================================
 
-/// Observed today: eval accepts and prints `data=[2.0, 1.0]` - the value 2
-/// inside a bool-typed tensor (and `to_list` of the same tensor says
-/// `[true, true]`). The correct behavior is a checker rejection; this row
-/// asserts rejection-or-domain-consistency so it goes green on either a
-/// checker fix or an authored bool-arithmetic semantics.
+/// Historical observation: eval accepted and printed `data=[2.0, 1.0]` -
+/// the value 2 inside a bool-typed tensor (while `to_list` of the same
+/// tensor said `[true, true]`). UN-IGNORED at the chelis#729 rework: the
+/// decided chelis#726 disposition landed as a check-time rejection at
+/// the shared operand-dtype chokepoint (chelis#860), so the Err arm is
+/// now the only reachable one and carries the capability citation.
 #[test]
-#[ignore = "chelis#726: add on bool tensors stores 2 in a bool tensor (prints 2.0, to_lists \
-            as true; Metal's typed kernel would compute 1). Must be rejected or made \
-            domain-consistent. Run with \
-            `cargo test -p chelis-cli --test metal_dtype_emission_and_bool_add -- --ignored`."]
 fn bool_tensor_add_is_rejected_or_stays_in_domain() {
     let program = "module M.Main\n\
          def f(x: tensor[2, bool], y: tensor[2, bool]) -> tensor[2, bool] = add(x, y)\n\
          out = print(f(to_tensor([true, false]), to_tensor([true, true])))\n";
     match eval_first_line(program) {
         Err(stderr) => assert!(
-            stderr.contains("bool") || stderr.contains("Type errors"),
-            "a rejection must name the bool-arithmetic problem; got: {stderr}"
+            stderr.contains("chelis#726") && stderr.contains("bool"),
+            "the rejection must carry the chelis#726 capability citation; \
+             got: {stderr}"
         ),
-        Ok(line) => assert!(
-            !line.contains("2.0"),
-            "a bool tensor must never hold the value 2; got: {line}"
+        Ok(line) => panic!(
+            "add on bool tensors must be rejected by the checker \
+             (chelis#726, decided); it evaluated and returned {line}"
         ),
     }
 }

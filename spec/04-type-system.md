@@ -1662,6 +1662,30 @@ cast(x: tensor[D, int32], f32) : tensor[D, f32]
 
 Cast is always explicit. The compiler never inserts implicit casts.
 
+**Value semantics ([04-NUM-14]).** A cast is a numeric operation under §9: its result
+is finalized into the target dtype or traps ([04-NUM-1..4]), identically
+on scalar and tensor surfaces. Per direction:
+
+- any source -> float target: IEEE RNE finalize at the target width
+  ([04-NUM-2]; overflow is the correctly signed infinity, never a trap).
+- integer/bool source -> integer target: exact value; out of the target
+  range traps `overflow` (no wrap).
+- float source -> integer target: the value must be finite, integral, and
+  in range. A fractional value or NaN/±inf traps `domain`; an integral
+  value outside the target width traps `overflow`. The default cast never
+  chooses a rounding rule; write `cast(floor(x), int32)` or
+  `cast(round(x), int32)` to state one explicitly.
+- any source -> bool target: strict {0, 1} membership; exactly 0/1
+  encodes false/true, anything else traps `domain` ([04-NUM-4]).
+
+Integer-to-float cast is total IEEE RNE and can lose integer exactness:
+`cast(9007199254740993i64, f64) = 9007199254740992.0` and
+`cast(16777217i32, f32) = 16777216.0`. This target-width rounding is the
+float finalization rule, not an implicit source-language cast. Conversion
+that discards a fractional part, wraps, or saturates requires an explicit
+rounding operation or a distinct named conversion; it is never the default
+float-to-integer behavior of `cast`.
+
 ### 5.3 Literal Types
 
 Integer literals default to `int32`. Float literals default to `f32`. These
@@ -1790,8 +1814,9 @@ apply at `p`: `cast(2147483648, int32)` is still a range error. Adoption
 is limited to unsuffixed numeric literals with a numeric `p` of matching
 kind: a suffixed literal binds at its suffix (§5.5; `cast(1.1f32, f64)`
 widens the f32 value), and a float literal under an integer `p` keeps the
-default-then-truncate cast semantics because a decimal cannot bind at an
-integer type.
+float source type because a decimal cannot bind at an integer type; the
+explicit cast then applies [04-NUM-14], accepting only a finite integral
+value in range and trapping `Domain` on a fractional value.
 
 Outside this closed set, numeric literals in a tensor body fall back to the
 §5.3 literal defaults: integer literals to `int32`, float literals to `f32`.
@@ -2685,6 +2710,18 @@ divergence as conforming only under this atom's conditions.)*
 > SHALL NOT invoke undefined or implementation-defined signed shifts.
 
  *(Implemented and UBSan-locked in eval and the C host lane for chelis#682.)*
+
+> **[04-NUM-14]** `cast(source, target)` SHALL be explicit and SHALL apply
+> the target dtype's finalization rule identically on scalar and tensor
+> surfaces. An integer or bool source cast to an integer target preserves
+> the exact value or traps `Overflow` when it is out of range. A float source
+> cast to an integer target SHALL trap `Domain` unless it is finite and
+> integral, and SHALL trap `Overflow` when that integral value is outside
+> the target range; the default cast SHALL NOT truncate, round, saturate, or
+> wrap. A source cast to a float target is total IEEE-754 round-to-nearest,
+> ties-to-even at the target width per [04-NUM-2], even when that loses
+> integer exactness. A source cast to `bool` accepts exactly 0 or 1 per
+> [04-NUM-4].
 
 ---
 

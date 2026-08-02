@@ -88,8 +88,9 @@ fn execution_values_identical(a: &ExecutionValue, b: &ExecutionValue) -> bool {
             x.shape == y.shape
                 && x.data.len() == y.data.len()
                 && x.data
+                    .to_f64_lossy_vec()
                     .iter()
-                    .zip(y.data.iter())
+                    .zip(y.data.to_f64_lossy_vec())
                     .all(|(l, r)| l.to_bits() == r.to_bits())
         }
         (List { value: x }, List { value: y }) | (Tuple { value: x }, Tuple { value: y }) => {

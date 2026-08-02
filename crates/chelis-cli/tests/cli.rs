@@ -890,7 +890,8 @@ fn eval_json_emits_tensor_shape_and_data() {
         &vec![Value::from(3)]
     );
     assert_eq!(
-        value["value"]["data"].as_array().expect("data"),
+        // Execution wire v2 (chelis#729): tagged per-dtype payload.
+        value["value"]["data"]["values"].as_array().expect("data"),
         &vec![Value::from(1.0), Value::from(2.0), Value::from(3.0)]
     );
 }
@@ -974,7 +975,9 @@ fn eval_json_def_only_emits_empty_roots_json() {
         .expect("run chelis eval --json --file");
     assert!(output.status.success(), "def-only eval --json exits 0");
     let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
-    assert_eq!(stdout.trim(), r#"{"roots":[]}"#);
+    // Execution wire v2 (chelis#729): EvalResult stamps its payload
+    // version.
+    assert_eq!(stdout.trim(), r#"{"schema_version":2,"roots":[]}"#);
     let json: Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
     assert_eq!(json["roots"].as_array().expect("roots").len(), 0);
 }

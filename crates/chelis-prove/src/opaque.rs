@@ -1511,15 +1511,15 @@ fn read_produced_field(
                 return None;
             };
             // A None result yields the NaN-filled sentinel: treat as failure.
-            if value.data.iter().any(|v| v.is_nan()) {
+            if value.data.to_f64_lossy_vec().iter().any(|v| v.is_nan()) {
                 return Some(false);
             }
             let count = dims.iter().product::<usize>().max(1);
             if value.data.len() != count {
                 return None;
             }
-            for (i, v) in value.data.iter().enumerate() {
-                env.insert(format!("{field_path}.{i}"), *v);
+            for (i, v) in value.data.to_f64_lossy_vec().into_iter().enumerate() {
+                env.insert(format!("{field_path}.{i}"), v);
             }
         }
         _ => {
@@ -1542,7 +1542,7 @@ fn read_produced_field(
                     if value.shape.iter().product::<usize>().max(1) == 1
                         && !value.data.is_empty() =>
                 {
-                    value.data[0]
+                    value.data.element_as_f64_lossy(0)
                 }
                 _ => return None,
             };

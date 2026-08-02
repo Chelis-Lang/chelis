@@ -820,6 +820,18 @@ impl<'a> EvalContext<'a> {
                         .cloned()
                         .flatten()
                         .or_else(|| arg_type_exprs.get(index).cloned().flatten());
+                    // chelis#729 Phase 1: a tensor argument ingress-finalizes
+                    // at the param's DECLARED element dtype (the host-lane
+                    // mirror of the DAG evaluator's Load ingress). Without
+                    // this, an Int64-tagged `to_tensor` literal flows into an
+                    // int8-typed param and the arithmetic runs at the wrong
+                    // width (the chelis#718 eval-tensor cell).
+                    let arg = match (declared.as_ref().and_then(declared_tensor_prim), arg) {
+                        (Some(prim), RuntimeValue::Tensor(tensor)) => {
+                            RuntimeValue::Tensor(ingress_tensor_to_declared(tensor, prim)?)
+                        }
+                        (_, arg) => arg,
+                    };
                     self.binding_types.insert(param.clone(), declared);
                     self.bindings.insert(param, arg);
                 }
@@ -855,20 +867,31 @@ impl<'a> EvalContext<'a> {
         // host eval lane just needs to pick the right re-pack.
         let target_prim = prim_from_name(target)
             .ok_or_else(|| format!("cast target `{target}` is not a recognized primitive type"))?;
+        // The CHECKED default ladder (`chelis_types::cast_scalar`; the
+        // chelis#759 one-rule-per-direction obligation), identical to
+        // the tensor surfaces: out-of-range integer targets trap,
+        // fractional-to-integer traps Domain instead of choosing an
+        // implicit rounding rule, and a bool target requires exactly 0/1.
         match (value, target_prim) {
             (RuntimeValue::Bool(value), Prim::Bool) => Ok(RuntimeValue::Bool(value)),
             (RuntimeValue::String(value), Prim::String) => Ok(RuntimeValue::String(value)),
-            (RuntimeValue::Scalar(payload), dst_dtype) if dst_dtype.is_integer() => {
-                RuntimeValue::scalar_like_int(dst_dtype, payload.bits().as_i64())
+            (RuntimeValue::Scalar(payload), dst_dtype)
+                if dst_dtype.is_integer() || dst_dtype.is_float() || dst_dtype == Prim::Bool =>
+            {
+                let cast = chelis_types::cast_scalar("cast", payload.value(), dst_dtype)
+                    .map_err(|trap| trap.to_string())?;
+                match cast.as_bool_exact() {
+                    Some(flag) => Ok(RuntimeValue::Bool(flag)),
+                    None => Ok(RuntimeValue::from_scalar_value(cast)),
+                }
             }
-            (RuntimeValue::Scalar(payload), dst_dtype) if dst_dtype.is_float() => {
-                RuntimeValue::scalar_like_float(dst_dtype, payload.bits().as_f64())
-            }
-            (RuntimeValue::Bool(value), dst_dtype) if dst_dtype.is_integer() => {
-                RuntimeValue::scalar_like_int(dst_dtype, if value { 1 } else { 0 })
-            }
-            (RuntimeValue::Bool(value), dst_dtype) if dst_dtype.is_float() => {
-                RuntimeValue::scalar_like_float(dst_dtype, if value { 1.0 } else { 0.0 })
+            (RuntimeValue::Bool(value), dst_dtype)
+                if dst_dtype.is_integer() || dst_dtype.is_float() =>
+            {
+                let raw = chelis_types::RawScalar::Int(if value { 1 } else { 0 });
+                let cast = chelis_types::cast_raw("cast", raw, dst_dtype)
+                    .map_err(|trap| trap.to_string())?;
+                Ok(RuntimeValue::from_scalar_value(cast))
             }
             (RuntimeValue::Tensor(tensor), _) => cast_tensor_value(tensor, target),
             (other, _) => Err(format!(
@@ -935,17 +958,25 @@ impl<'a> EvalContext<'a> {
             "eq" => compare_eq(args),
             "neq" => compare_eq(args).map(|value| match value {
                 RuntimeValue::Bool(value) => RuntimeValue::Bool(!value),
-                RuntimeValue::Tensor(t) => RuntimeValue::Tensor(RuntimeTensorValue {
-                    value: IrTensorValue::from_vec(
-                        t.value.shape.clone(),
-                        t.value
-                            .data
-                            .iter()
-                            .map(|x| if *x == 0.0 { 1.0 } else { 0.0 })
-                            .collect(),
-                    ),
-                    precision: Prim::Bool,
-                }),
+                RuntimeValue::Tensor(t) => {
+                    let flipped: Vec<i64> = t
+                        .value
+                        .storage()
+                        .to_i64_exact_vec()
+                        .expect("bool tensor storage reads exactly")
+                        .into_iter()
+                        .map(|x| if x == 0 { 1 } else { 0 })
+                        .collect();
+                    RuntimeValue::Tensor(
+                        RuntimeTensorValue::from_wide_int(
+                            "neq",
+                            Prim::Bool,
+                            t.value.shape.clone(),
+                            flipped,
+                        )
+                        .expect("0/1 buffer finalizes at bool"),
+                    )
+                }
                 other => other,
             }),
             "cmplt" => {
@@ -1267,7 +1298,11 @@ impl<'a> EvalContext<'a> {
                     ));
                 }
                 let n = n as usize;
-                let mut data = Vec::with_capacity(n);
+                // chelis#729 Phase 1: collect per family so integer scans
+                // stay exact at full i64 (a scan accumulating above 2^53
+                // no longer collapses through f64 storage).
+                let mut ints: Vec<i64> = Vec::new();
+                let mut floats: Vec<f64> = Vec::new();
                 let mut acc = initial;
                 for i in 0..n {
                     let index = RuntimeValue::int64(i as i64);
@@ -1276,7 +1311,7 @@ impl<'a> EvalContext<'a> {
                     // scalar precision; this catches a misbehaving callback
                     // that returns a different dtype before it corrupts the
                     // output tensor buffer.
-                    let value = match &acc {
+                    match &acc {
                         RuntimeValue::Scalar(payload) => {
                             if payload.dtype() != precision {
                                 return Err(format!(
@@ -1286,7 +1321,10 @@ impl<'a> EvalContext<'a> {
                                     precision.name()
                                 ));
                             }
-                            payload.bits().as_f64()
+                            match payload.value().as_i64_exact() {
+                                Some(v) => ints.push(v),
+                                None => floats.push(payload.as_f64()),
+                            }
                         }
                         RuntimeValue::Bool(b) => {
                             if precision != Prim::Bool {
@@ -1296,20 +1334,21 @@ impl<'a> EvalContext<'a> {
                                     precision.name()
                                 ));
                             }
-                            if *b { 1.0 } else { 0.0 }
+                            ints.push(if *b { 1 } else { 0 });
                         }
                         other => {
                             return Err(format!(
                                 "tensor_scan callback must return a scalar, got {other:?}"
                             ));
                         }
-                    };
-                    data.push(value);
+                    }
                 }
-                Ok(RuntimeValue::Tensor(RuntimeTensorValue {
-                    value: IrTensorValue::from_vec(vec![n], data),
-                    precision,
-                }))
+                let tensor = if precision.is_float() {
+                    RuntimeTensorValue::from_wide("tensor_scan", precision, vec![n], floats)?
+                } else {
+                    RuntimeTensorValue::from_wide_int("tensor_scan", precision, vec![n], ints)?
+                };
+                Ok(RuntimeValue::Tensor(tensor))
             }
             "partition" => {
                 let callback = args
@@ -1503,10 +1542,12 @@ impl<'a> EvalContext<'a> {
                 // contribute additional inner dims (and so on
                 // recursively).
                 let (precision, shape, data) = nested_list_to_tensor_data(&values)?;
-                Ok(RuntimeValue::Tensor(RuntimeTensorValue {
-                    value: IrTensorValue::from_vec(shape, data),
-                    precision,
-                }))
+                let storage =
+                    chelis_types::finalize_tensor("to_tensor", precision, data.into_raw())
+                        .map_err(|trap| trap.to_string())?;
+                Ok(RuntimeValue::Tensor(RuntimeTensorValue::new(
+                    IrTensorValue::from_storage(shape, storage),
+                )))
             }
             "to_list" => {
                 let tensor = expect_tensor_arg(args, 0)?;
@@ -1520,10 +1561,12 @@ impl<'a> EvalContext<'a> {
                     .cloned()
                     .ok_or_else(|| "pad_sequences expects 2 arguments".to_string())?;
                 let (precision, data, batch, width) = pad_sequences_value(&sequences, &pad)?;
-                Ok(RuntimeValue::Tensor(RuntimeTensorValue {
-                    value: IrTensorValue::from_vec(vec![batch, width], data),
-                    precision,
-                }))
+                let storage =
+                    chelis_types::finalize_tensor("pad_sequences", precision, data.into_raw())
+                        .map_err(|trap| trap.to_string())?;
+                Ok(RuntimeValue::Tensor(RuntimeTensorValue::new(
+                    IrTensorValue::from_storage(vec![batch, width], storage),
+                )))
             }
             "pad_sequences_to" => {
                 let sequences = expect_list_arg(args, 0)?;
@@ -1533,10 +1576,12 @@ impl<'a> EvalContext<'a> {
                     .cloned()
                     .ok_or_else(|| "pad_sequences_to expects 3 arguments".to_string())?;
                 let (precision, data, batch) = pad_sequences_to_value(&sequences, width, &pad)?;
-                Ok(RuntimeValue::Tensor(RuntimeTensorValue {
-                    value: IrTensorValue::from_vec(vec![batch, width.max(0) as usize], data),
-                    precision,
-                }))
+                let storage =
+                    chelis_types::finalize_tensor("pad_sequences_to", precision, data.into_raw())
+                        .map_err(|trap| trap.to_string())?;
+                Ok(RuntimeValue::Tensor(RuntimeTensorValue::new(
+                    IrTensorValue::from_storage(vec![batch, width.max(0) as usize], storage),
+                )))
             }
             "read_file" => {
                 let path = expect_string_arg(args, 0)?;
@@ -1769,34 +1814,40 @@ impl<'a> EvalContext<'a> {
                 if !tensor.value.shape.is_empty() {
                     return Err("tensor_to_scalar expects a rank-0 tensor".to_string());
                 }
-                let value = tensor.value.data.first().copied().unwrap_or(0.0);
-                match tensor.precision {
-                    Prim::Bool => Ok(RuntimeValue::Bool(value != 0.0)),
-                    p if p.is_integer() => RuntimeValue::scalar_like_int(p, value as i64),
-                    p if p.is_float() => RuntimeValue::scalar_like_float(p, value),
-                    other => Err(format!(
-                        "tensor_to_scalar: unsupported tensor element dtype `{}`",
-                        other.name()
-                    )),
+                if tensor.value.is_empty() {
+                    return Err("tensor_to_scalar expects a non-empty rank-0 tensor".to_string());
+                }
+                let element = tensor.value.storage().scalar_at(0);
+                match element.as_bool_exact() {
+                    Some(flag) => Ok(RuntimeValue::Bool(flag)),
+                    None => Ok(RuntimeValue::from_scalar_value(element)),
                 }
             }
             "scalar_to_tensor" => match args.first() {
                 Some(RuntimeValue::Scalar(payload)) if payload.dtype().is_integer() => {
-                    Ok(RuntimeValue::Tensor(RuntimeTensorValue {
-                        value: IrTensorValue::scalar(payload.bits().as_i64() as f64),
-                        precision: payload.dtype(),
-                    }))
+                    Ok(RuntimeValue::Tensor(RuntimeTensorValue::from_wide_int(
+                        "scalar_to_tensor",
+                        payload.dtype(),
+                        vec![],
+                        vec![payload.as_i64()],
+                    )?))
                 }
                 Some(RuntimeValue::Scalar(payload)) if payload.dtype().is_float() => {
-                    Ok(RuntimeValue::Tensor(RuntimeTensorValue {
-                        value: IrTensorValue::scalar(payload.bits().as_f64()),
-                        precision: payload.dtype(),
-                    }))
+                    Ok(RuntimeValue::Tensor(RuntimeTensorValue::from_wide(
+                        "scalar_to_tensor",
+                        payload.dtype(),
+                        vec![],
+                        vec![payload.as_f64()],
+                    )?))
                 }
-                Some(RuntimeValue::Bool(value)) => Ok(RuntimeValue::Tensor(RuntimeTensorValue {
-                    value: IrTensorValue::scalar(if *value { 1.0 } else { 0.0 }),
-                    precision: Prim::Bool,
-                })),
+                Some(RuntimeValue::Bool(value)) => {
+                    Ok(RuntimeValue::Tensor(RuntimeTensorValue::from_wide_int(
+                        "scalar_to_tensor",
+                        Prim::Bool,
+                        vec![],
+                        vec![if *value { 1 } else { 0 }],
+                    )?))
+                }
                 // #381: a top-level scalar binding (e.g. `c = cast(1.1, f64)`)
                 // captured by a def body is pre-evaluated through the DAG lane
                 // and arrives here as an already rank-0 (0-d) tensor, not a
@@ -1891,8 +1942,15 @@ impl<'a> EvalContext<'a> {
                 let actual = expect_tensor_arg(args, 0)?;
                 let expected = expect_tensor_arg(args, 1)?;
                 let label = expect_string_arg(args, 2)?;
-                let actual_data = &actual.value.data;
-                let expected_data = &expected.value.data;
+                let actual_data = actual.value.storage().to_i64_exact_vec().ok_or_else(|| {
+                    format!("assert_eq_tensor_int64 ({label}): actual tensor is not integer-typed")
+                })?;
+                let expected_data =
+                    expected.value.storage().to_i64_exact_vec().ok_or_else(|| {
+                        format!(
+                            "assert_eq_tensor_int64 ({label}): expected tensor is not integer-typed"
+                        )
+                    })?;
                 if actual_data.len() != expected_data.len() {
                     return Err(format!(
                         "assert_eq_tensor_int64 ({label}): length mismatch, expected {} elements, got {}",
@@ -1903,8 +1961,7 @@ impl<'a> EvalContext<'a> {
                 for (i, (&a, &e)) in actual_data.iter().zip(expected_data.iter()).enumerate() {
                     if a != e {
                         return Err(format!(
-                            "assert_eq_tensor_int64 ({label}): at index {i} expected {} got {}",
-                            e as i64, a as i64
+                            "assert_eq_tensor_int64 ({label}): at index {i} expected {e} got {a}"
                         ));
                     }
                 }
@@ -1920,8 +1977,8 @@ impl<'a> EvalContext<'a> {
                         "assert_close_tensor ({label}): invalid tolerance {tol} (must be finite and non-negative)"
                     ));
                 }
-                let actual_data = &actual.value.data;
-                let expected_data = &expected.value.data;
+                let actual_data = actual.value.to_f64_lossy_vec();
+                let expected_data = expected.value.to_f64_lossy_vec();
                 if actual_data.len() != expected_data.len() {
                     return Err(format!(
                         "assert_close_tensor ({label}): length mismatch, expected {} elements, got {}",
@@ -2164,50 +2221,37 @@ impl<'a> EvalContext<'a> {
             }
             // Activation primitives (Bucket 3).
             //
-            // Each activation must produce values byte-identical (to documented
-            // float tolerance) to the C backend's `chelis_host_*_f32` helpers
-            // emitted from `crates/chelis-backend-c/src/host_emit.rs`. Those
-            // helpers run all math through `float` (single precision); we
-            // therefore route every transcendental through `f32` here too —
-            // widening only happens at the very end when we re-store as
-            // `f64`-shaped tensor data. The closures themselves accept and
-            // return `f64` so `tensor_float_unop_f32` can cast at the
-            // boundary, which means `(x as f32).exp() as f64` and never
-            // `f64::exp(x)`.
+            // Per-dtype since chelis#729 Phase 1 (`tensor_float_unop`):
+            // an f64 tensor computes through the f64 activation body at
+            // full precision, while f32/f16/bf16 tensors keep the f32
+            // bodies (byte-identical, to documented float tolerance, with
+            // the C backend's `chelis_host_*_f32` helpers emitted from
+            // `crates/chelis-backend-c/src/host_emit.rs`) and finalize
+            // once at their own width.
             "relu" => {
                 let tensor = expect_tensor_arg(args, 0)?;
-                Ok(RuntimeValue::Tensor(tensor_float_unop_f32(
-                    &tensor,
-                    activation_relu_f32,
-                )))
+                tensor_float_unop(&tensor, activation_relu_f64, activation_relu_f32)
+                    .map(RuntimeValue::Tensor)
             }
             "sigmoid" => {
                 let tensor = expect_tensor_arg(args, 0)?;
-                Ok(RuntimeValue::Tensor(tensor_float_unop_f32(
-                    &tensor,
-                    activation_sigmoid_f32,
-                )))
+                tensor_float_unop(&tensor, activation_sigmoid_f64, activation_sigmoid_f32)
+                    .map(RuntimeValue::Tensor)
             }
             "tanh" => {
                 let tensor = expect_tensor_arg(args, 0)?;
-                Ok(RuntimeValue::Tensor(tensor_float_unop_f32(
-                    &tensor,
-                    activation_tanh_f32,
-                )))
+                tensor_float_unop(&tensor, activation_tanh_f64, activation_tanh_f32)
+                    .map(RuntimeValue::Tensor)
             }
             "silu" => {
                 let tensor = expect_tensor_arg(args, 0)?;
-                Ok(RuntimeValue::Tensor(tensor_float_unop_f32(
-                    &tensor,
-                    activation_silu_f32,
-                )))
+                tensor_float_unop(&tensor, activation_silu_f64, activation_silu_f32)
+                    .map(RuntimeValue::Tensor)
             }
             "gelu" => {
                 let tensor = expect_tensor_arg(args, 0)?;
-                Ok(RuntimeValue::Tensor(tensor_float_unop_f32(
-                    &tensor,
-                    activation_gelu_f32,
-                )))
+                tensor_float_unop(&tensor, activation_gelu_f64, activation_gelu_f32)
+                    .map(RuntimeValue::Tensor)
             }
             other => Err(format!("unsupported builtin `{other}` in host runtime")),
         }

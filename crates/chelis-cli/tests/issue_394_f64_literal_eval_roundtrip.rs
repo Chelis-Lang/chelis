@@ -64,6 +64,9 @@ fn rank0_tensor_datum(json: &Value) -> f64 {
         .and_then(|root| root.get("value"))
         .and_then(|value| value.get("value"))
         .and_then(|tensor| tensor.get("data"))
+        // Execution wire v2 (chelis#729): the payload is the tagged
+        // per-dtype form {"dtype": ..., "values": [...]}.
+        .and_then(|data| data.get("values"))
         .and_then(Value::as_array)
         .unwrap_or_else(|| panic!("expected a rank-0 tensor root; json={json}"));
     assert_eq!(data.len(), 1, "expected a single rank-0 datum; json={json}");

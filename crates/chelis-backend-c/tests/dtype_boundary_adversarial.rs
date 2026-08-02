@@ -43,7 +43,14 @@ fn mat(r: usize, c: usize, p: Prim) -> TensorType {
 fn c_backend_admits_f16_tensor_with_uint16_storage_post_ws_1() {
     let mut dag = Dag::new();
     let _ = dag.add_node(
-        RiscOp::Const { value: 1.0 },
+        RiscOp::synth_const(
+            TensorType {
+                dims: vec![DimInfo::Lit(4)],
+                precision: Prim::F16,
+            }
+            .precision,
+            1.0,
+        ),
         vec![],
         TensorType {
             dims: vec![DimInfo::Lit(4)],
@@ -68,7 +75,14 @@ fn c_backend_admits_f16_tensor_with_uint16_storage_post_ws_1() {
 fn c_backend_admits_bf16_tensor_with_uint16_storage_post_ws_1() {
     let mut dag = Dag::new();
     let _ = dag.add_node(
-        RiscOp::Const { value: 1.0 },
+        RiscOp::synth_const(
+            TensorType {
+                dims: vec![DimInfo::Lit(4)],
+                precision: Prim::Bf16,
+            }
+            .precision,
+            1.0,
+        ),
         vec![],
         TensorType {
             dims: vec![DimInfo::Lit(4)],
@@ -179,13 +193,13 @@ fn matmul_info_struct_carries_accumulator_field_post_ws_a1() {
 fn c_backend_blas_matmul_f64_does_not_silently_lower_to_sgemm() {
     let mut dag = Dag::new();
     let a = dag.add_node(
-        RiscOp::Const { value: 1.0 },
+        RiscOp::synth_const(mat(2, 3, Prim::F64).precision, 1.0),
         vec![],
         mat(2, 3, Prim::F64),
         None,
     );
     let b = dag.add_node(
-        RiscOp::Const { value: 1.0 },
+        RiscOp::synth_const(mat(3, 4, Prim::F64).precision, 1.0),
         vec![],
         mat(3, 4, Prim::F64),
         None,
@@ -252,13 +266,13 @@ fn c_backend_blas_matmul_f64_does_not_silently_lower_to_sgemm() {
 fn c_backend_blas_matmul_bf16_routes_through_convert_then_sgemm_post_ws_1() {
     let mut dag = Dag::new();
     let a = dag.add_node(
-        RiscOp::Const { value: 1.0 },
+        RiscOp::synth_const(mat(2, 3, Prim::Bf16).precision, 1.0),
         vec![],
         mat(2, 3, Prim::Bf16),
         None,
     );
     let b = dag.add_node(
-        RiscOp::Const { value: 1.0 },
+        RiscOp::synth_const(mat(3, 4, Prim::Bf16).precision, 1.0),
         vec![],
         mat(3, 4, Prim::Bf16),
         None,

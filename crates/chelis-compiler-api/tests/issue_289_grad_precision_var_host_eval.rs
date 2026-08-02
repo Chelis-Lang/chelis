@@ -69,7 +69,11 @@ fn issue289_host_eval_grad_through_precision_var_callee_dx_equals_w() {
     let result = eval_surf(&reproducer_source("0"));
     let out = root_tensor(&result, "out");
     assert_eq!(out.shape, vec![2], "issue #289 d/dx shape");
-    assert_eq!(out.data, vec![5.0, 6.0], "issue #289 d/dx = w");
+    assert_eq!(
+        out.data.to_f64_lossy_vec(),
+        vec![5.0, 6.0],
+        "issue #289 d/dx = w"
+    );
 }
 
 #[test]
@@ -77,7 +81,11 @@ fn issue289_host_eval_grad_through_precision_var_callee_dw_equals_x() {
     let result = eval_surf(&reproducer_source("1"));
     let out = root_tensor(&result, "out");
     assert_eq!(out.shape, vec![2], "issue #289 d/dw shape");
-    assert_eq!(out.data, vec![3.0, 4.0], "issue #289 d/dw = x");
+    assert_eq!(
+        out.data.to_f64_lossy_vec(),
+        vec![3.0, 4.0],
+        "issue #289 d/dw = x"
+    );
 }
 
 // =====================================================================

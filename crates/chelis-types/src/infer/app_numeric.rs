@@ -41,6 +41,219 @@ pub(super) const LOGICAL_OPS: &[&str] = &["and", "or", "not"];
 pub(super) const INT_BINOPS: &[&str] = &["mod", "bitand", "bitor", "bitxor"];
 pub(super) const INT_SHIFT_OPS: &[&str] = &["shl", "shr"];
 
+/// Arithmetic operations for which `bool` has no authored numeric meaning.
+/// Logical `and`/`or`/`not` remain the bool operations.
+pub(super) const BOOL_REJECTED_ARITH_OPS: &[&str] = &["add", "sub", "mul", "neg", "floor_div"];
+
+/// The post-desugar operand-dtype policy chokepoint from chelis#860.
+///
+/// Direct applications, reduction data arguments, and bare pipe stages all
+/// consult this function. Unresolved types stay admissible here; the
+/// polymorphic-instantiation pass mirrors the decided rows until Phase 4
+/// derives both paths from the capability table.
+pub(super) fn operand_dtype_rejection(
+    fname: &str,
+    resolved: &Type,
+) -> Option<(CheckErrorKind, String, Vec<String>)> {
+    let bool_operand = matches!(
+        resolved,
+        Type::Tensor(_, TensorPrec::Concrete(Prim::Bool)) | Type::Prim(Prim::Bool)
+    );
+    if bool_operand && BOOL_REJECTED_ARITH_OPS.contains(&fname) {
+        return Some((
+            CheckErrorKind::PrecisionMismatch,
+            format!(
+                "{fname} on bool operands is not admitted per the chelis#726 \
+                 capability decision and spec/04-type-system.md section 9 \
+                 [04-NUM-4]: bool is exactly {{0, 1}} and not a numeric dtype, \
+                 so arithmetic on it has no authored meaning"
+            ),
+            vec![
+                "chelis#726: count explicitly today with \
+                 `sum(cast(x, int64), 0)`; first-class `count` is the planned \
+                 replacement. Use `and`/`or`/`not` for bool logic."
+                    .to_string(),
+            ],
+        ));
+    }
+
+    if fname == "mean" {
+        let non_float_elem = match resolved {
+            Type::Tensor(_, TensorPrec::Concrete(prim)) if !prim.is_float() => Some(prim.name()),
+            Type::Prim(prim) if !prim.is_float() => Some(prim.name()),
+            _ => None,
+        };
+        if let Some(prim_name) = non_float_elem {
+            return Some((
+                CheckErrorKind::PrecisionMismatch,
+                format!(
+                    "mean on operand precision `{prim_name}` is not admitted per \
+                     the chelis#724 capability decision: mean is float-only \
+                     (f32, f64, bf16, f16). An integer mean has no authored \
+                     rounding, and a fractional result inside an integer tensor \
+                     violates spec/04-type-system.md section 9 [04-NUM-1]"
+                ),
+                vec![
+                    "chelis#724: cast to a float precision first, e.g. \
+                     `mean(cast(x, f32), 0)`."
+                        .to_string(),
+                ],
+            ));
+        }
+        return None;
+    }
+
+    if fname == "softmax" {
+        if let Type::Tensor(_, TensorPrec::Concrete(prim)) = resolved
+            && !prim.is_float()
+        {
+            return Some((
+                CheckErrorKind::PrecisionMismatch,
+                format!(
+                    "softmax on operand precision `{}` is not admitted per \
+                     spec/04-type-system.md §5.4: transcendental operations are \
+                     restricted to f32, f64, bf16, f16 (not integer)",
+                    prim.name()
+                ),
+                vec![
+                    "spec/04-type-system.md §5.4: cast to a float precision before \
+                     applying softmax."
+                        .to_string(),
+                ],
+            ));
+        }
+        return None;
+    }
+
+    if !TENSOR_OPS.contains(&fname) {
+        return None;
+    }
+
+    let ok = match fname {
+        "matmul" | "layer_norm" | "normalize" => {
+            matches!(resolved, Type::Tensor(_, _) | Type::Var(_) | Type::Error(_))
+        }
+        "add" | "mul" | "sub" | "max_elem" | "min_elem" | "neg" | "floor_div" => {
+            matches!(resolved, Type::Tensor(_, _) | Type::Var(_) | Type::Error(_))
+                || matches!(resolved, Type::Prim(prim) if prim.is_numeric())
+        }
+        "div" => {
+            matches!(
+                resolved,
+                Type::Tensor(_, TensorPrec::Var(_)) | Type::Var(_) | Type::Error(_)
+            ) || matches!(resolved, Type::Tensor(_, TensorPrec::Concrete(prim)) if prim.is_float())
+                || matches!(resolved, Type::Prim(prim) if prim.is_float())
+        }
+        "trunc_div" => {
+            matches!(
+                resolved,
+                Type::Tensor(_, TensorPrec::Var(_)) | Type::Var(_) | Type::Error(_)
+            ) || matches!(resolved, Type::Tensor(_, TensorPrec::Concrete(prim)) if prim.is_integer())
+                || matches!(resolved, Type::Prim(prim) if prim.is_integer())
+        }
+        "exp" | "log" | "sin" | "sqrt" | "relu" | "sigmoid" | "tanh" | "silu" | "gelu"
+        | "recip" => {
+            matches!(
+                resolved,
+                Type::Tensor(_, TensorPrec::Var(_)) | Type::Var(_) | Type::Error(_)
+            ) || matches!(resolved, Type::Tensor(_, TensorPrec::Concrete(prim)) if prim.is_float())
+                || matches!(resolved, Type::Prim(prim) if prim.is_float())
+        }
+        "cmplt" | "lt" | "gt" | "lte" | "gte" => {
+            matches!(resolved, Type::Tensor(_, _) | Type::Var(_) | Type::Error(_))
+                || matches!(resolved, Type::Prim(prim) if prim.is_numeric())
+        }
+        "eq" | "neq" => {
+            matches!(resolved, Type::Tensor(_, _) | Type::Var(_) | Type::Error(_))
+                || matches!(resolved, Type::Prim(_))
+        }
+        "and" | "or" | "not" => {
+            matches!(
+                resolved,
+                Type::Tensor(_, TensorPrec::Concrete(Prim::Bool)) | Type::Var(_) | Type::Error(_)
+            ) || matches!(resolved, Type::Prim(Prim::Bool))
+        }
+        _ => matches!(resolved, Type::Tensor(_, _) | Type::Var(_) | Type::Error(_)),
+    };
+    if ok {
+        return None;
+    }
+
+    let is_transcendental = matches!(
+        fname,
+        "exp" | "log" | "sin" | "sqrt" | "relu" | "sigmoid" | "tanh" | "silu" | "gelu" | "recip"
+    );
+    let resolved_int_prim = match resolved {
+        Type::Tensor(_, TensorPrec::Concrete(prim)) if prim.is_integer() => Some(prim.name()),
+        Type::Prim(prim) if prim.is_integer() => Some(prim.name()),
+        _ => None,
+    };
+    let resolved_float_prim = match resolved {
+        Type::Tensor(_, TensorPrec::Concrete(prim)) if prim.is_float() => Some(prim.name()),
+        Type::Prim(prim) if prim.is_float() => Some(prim.name()),
+        _ => None,
+    };
+
+    if is_transcendental
+        && let Type::Tensor(_, TensorPrec::Concrete(prim)) = resolved
+        && !prim.is_float()
+    {
+        Some((
+            CheckErrorKind::PrecisionMismatch,
+            format!(
+                "{fname} on operand precision `{}` is not admitted per \
+                 spec/04-type-system.md §5.4: transcendental operations are \
+                 restricted to f32, f64, bf16, f16 (not integer)",
+                prim.name()
+            ),
+            vec![format!(
+                "spec/04-type-system.md §5.4: cast to a float precision before \
+                 applying `{fname}`."
+            )],
+        ))
+    } else if fname == "div"
+        && let Some(prim_name) = resolved_int_prim
+    {
+        Some((
+            CheckErrorKind::PrecisionMismatch,
+            format!(
+                "div on integer operand precision `{prim_name}` is not admitted per \
+                 spec/05-risc-primitives.md §2.1: `div` is float-only (IEEE-754). \
+                 Use `floor_div` (round toward -inf) or `trunc_div` (round toward \
+                 zero) for integers."
+            ),
+            vec![
+                "spec/05-risc-primitives.md §2.1: integer division uses `floor_div` \
+                 or `trunc_div`; `div` requires float operands."
+                    .to_string(),
+            ],
+        ))
+    } else if fname == "trunc_div"
+        && let Some(prim_name) = resolved_float_prim
+    {
+        Some((
+            CheckErrorKind::PrecisionMismatch,
+            format!(
+                "trunc_div on float operand precision `{prim_name}` is not admitted \
+                 per spec/05-risc-primitives.md §2.1: `trunc_div` is integer-only. \
+                 Use `div` for IEEE-754 float division, or `floor_div` for a floored \
+                 float quotient."
+            ),
+            vec![
+                "spec/05-risc-primitives.md §2.1: `trunc_div` requires integer \
+                 operands."
+                    .to_string(),
+            ],
+        ))
+    } else {
+        Some((
+            CheckErrorKind::TypeMismatch,
+            format!("{fname} does not accept argument type {resolved} in this context"),
+            vec![],
+        ))
+    }
+}
+
 /// Check numeric, comparison, softmax, and reduction argument restrictions.
 ///
 /// `None` permits later operation-family checks. `Some` carries the original
@@ -65,180 +278,7 @@ pub(super) fn validate_numeric_and_reduction_arguments(
     {
         for arg_ty in arg_tys {
             let resolved = type_for_readonly_check(arg_ty, subst);
-            let ok = match fname.as_str() {
-                "matmul" | "layer_norm" | "normalize" => {
-                    matches!(resolved, Type::Tensor(_, _) | Type::Var(_) | Type::Error(_))
-                }
-                "add" | "mul" | "sub" | "max_elem" | "min_elem" | "neg" => {
-                    matches!(resolved, Type::Tensor(_, _) | Type::Var(_) | Type::Error(_))
-                        || matches!(resolved, Type::Prim(prec) if prec.is_numeric())
-                }
-                "floor_div" => {
-                    // chelis#178: `floor_div` accepts both integer
-                    // and float operands (round toward -inf for
-                    // ints, `floor(a/b)` for floats), so any
-                    // numeric precision is admissible.
-                    matches!(resolved, Type::Tensor(_, _) | Type::Var(_) | Type::Error(_))
-                        || matches!(resolved, Type::Prim(prec) if prec.is_numeric())
-                }
-                "div" => {
-                    // chelis#178: `div` is float-only. Integer
-                    // operands are a type error pointing at
-                    // `floor_div` / `trunc_div` (see the rejection
-                    // diagnostic below). An unresolved
-                    // `TensorPrec::Var(_)` is accepted so a
-                    // polymorphic body type-checks; the cross-row
-                    // pass `validate_polymorphic_op_constraints`
-                    // catches integer instantiations at the call
-                    // site.
-                    matches!(
-                        resolved,
-                        Type::Tensor(_, TensorPrec::Var(_)) | Type::Var(_) | Type::Error(_)
-                    ) || matches!(resolved, Type::Tensor(_, TensorPrec::Concrete(p)) if p.is_float())
-                        || matches!(resolved, Type::Prim(prec) if prec.is_float())
-                }
-                "trunc_div" => {
-                    // chelis#178: `trunc_div` is integer-only (the
-                    // C/Rust truncating quotient). Float operands
-                    // are a type error. Unresolved precision vars
-                    // are accepted for polymorphic bodies.
-                    matches!(
-                        resolved,
-                        Type::Tensor(_, TensorPrec::Var(_)) | Type::Var(_) | Type::Error(_)
-                    ) || matches!(resolved, Type::Tensor(_, TensorPrec::Concrete(p)) if p.is_integer())
-                        || matches!(resolved, Type::Prim(prec) if prec.is_integer())
-                }
-                "exp" | "log" | "sin" | "sqrt" | "relu" | "sigmoid" | "tanh" | "silu" | "gelu"
-                | "recip" => {
-                    // WS-A8 / RT-3 F3: spec/04-type-system.md §5.4
-                    // restricts transcendental ops to float
-                    // precisions (f32, f64, bf16, f16). The
-                    // tensor form was previously admitted with
-                    // any precision, slipping integer instantiations
-                    // past the type checker; the scalar form
-                    // already enforced this. Tensors carrying
-                    // an unresolved `TensorPrec::Var(_)` are
-                    // accepted here so a polymorphic body
-                    // type-checks; the cross-row enforcement
-                    // pass `validate_polymorphic_op_constraints`
-                    // catches integer instantiations at the
-                    // call site.
-                    matches!(
-                        resolved,
-                        Type::Tensor(_, TensorPrec::Var(_)) | Type::Var(_) | Type::Error(_)
-                    ) || matches!(resolved, Type::Tensor(_, TensorPrec::Concrete(p)) if p.is_float())
-                        || matches!(resolved, Type::Prim(prec) if prec.is_float())
-                }
-                "cmplt" | "lt" | "gt" | "lte" | "gte" => {
-                    matches!(resolved, Type::Tensor(_, _) | Type::Var(_) | Type::Error(_))
-                        || matches!(resolved, Type::Prim(prec) if prec.is_numeric())
-                }
-                "eq" | "neq" => {
-                    matches!(resolved, Type::Tensor(_, _) | Type::Var(_) | Type::Error(_))
-                        || matches!(resolved, Type::Prim(_))
-                }
-                "and" | "or" | "not" => {
-                    matches!(
-                        resolved,
-                        Type::Tensor(_, TensorPrec::Concrete(Prim::Bool))
-                            | Type::Var(_)
-                            | Type::Error(_)
-                    ) || matches!(resolved, Type::Prim(Prim::Bool))
-                }
-                _ => matches!(resolved, Type::Tensor(_, _) | Type::Var(_) | Type::Error(_)),
-            };
-            if !ok {
-                // WS-A8: surface a §5.4 citation when a
-                // transcendental rejects an integer tensor.
-                let is_transcendental = matches!(
-                    fname.as_str(),
-                    "exp"
-                        | "log"
-                        | "sin"
-                        | "sqrt"
-                        | "relu"
-                        | "sigmoid"
-                        | "tanh"
-                        | "silu"
-                        | "gelu"
-                        | "recip"
-                );
-                let resolved_int_prec = match &resolved {
-                    Type::Tensor(_, TensorPrec::Concrete(p)) if p.is_integer() => Some(p.name()),
-                    Type::Prim(p) if p.is_integer() => Some(p.name()),
-                    _ => None,
-                };
-                let resolved_float_prec = match &resolved {
-                    Type::Tensor(_, TensorPrec::Concrete(p)) if p.is_float() => Some(p.name()),
-                    Type::Prim(p) if p.is_float() => Some(p.name()),
-                    _ => None,
-                };
-                let (kind, message, hints) = if is_transcendental
-                    && let Type::Tensor(_, TensorPrec::Concrete(p)) = &resolved
-                    && !p.is_float()
-                {
-                    (
-                        CheckErrorKind::PrecisionMismatch,
-                        format!(
-                            "{fname} on operand precision `{}` is not admitted per \
-                             spec/04-type-system.md \u{00a7}5.4: transcendental \
-                             operations are restricted to f32, f64, bf16, f16 (not \
-                             integer)",
-                            p.name()
-                        ),
-                        vec![format!(
-                            "spec/04-type-system.md \u{00a7}5.4: cast to a float \
-                             precision before applying `{fname}`."
-                        )],
-                    )
-                } else if fname == "div"
-                    && let Some(pname) = resolved_int_prec
-                {
-                    // chelis#178: integer `div` is rejected; point
-                    // the user at the integer-division ops.
-                    (
-                        CheckErrorKind::PrecisionMismatch,
-                        format!(
-                            "div on integer operand precision `{pname}` is not admitted \
-                             per spec/05-risc-primitives.md \u{00a7}2.1: `div` is \
-                             float-only (IEEE-754). Use `floor_div` (round toward -inf) \
-                             or `trunc_div` (round toward zero) for integers."
-                        ),
-                        vec![
-                            "spec/05-risc-primitives.md \u{00a7}2.1: integer division \
-                             uses `floor_div` or `trunc_div`; `div` requires float \
-                             operands."
-                                .to_string(),
-                        ],
-                    )
-                } else if fname == "trunc_div"
-                    && let Some(pname) = resolved_float_prec
-                {
-                    // chelis#178: `trunc_div` is integer-only.
-                    (
-                        CheckErrorKind::PrecisionMismatch,
-                        format!(
-                            "trunc_div on float operand precision `{pname}` is not \
-                             admitted per spec/05-risc-primitives.md \u{00a7}2.1: \
-                             `trunc_div` is integer-only. Use `div` for IEEE-754 float \
-                             division, or `floor_div` for a floored float quotient."
-                        ),
-                        vec![
-                            "spec/05-risc-primitives.md \u{00a7}2.1: `trunc_div` requires \
-                             integer operands."
-                                .to_string(),
-                        ],
-                    )
-                } else {
-                    (
-                        CheckErrorKind::TypeMismatch,
-                        format!(
-                            "{fname} does not accept argument type {resolved} in this \
-                             context"
-                        ),
-                        vec![],
-                    )
-                };
+            if let Some((kind, message, hints)) = operand_dtype_rejection(fname, &resolved) {
                 reject!(
                     errors,
                     CheckError::new(
@@ -285,34 +325,16 @@ pub(super) fn validate_numeric_and_reduction_arguments(
                     );
                 }
             }
-            // WS-A8 / RT-3 F3: softmax is a transcendental row
-            // op per spec/04-type-system.md \u{00a7}5.4 and must
-            // reject integer operand precisions. Polymorphic
-            // (`Var`) precisions are accepted here so a poly
-            // body type-checks; the cross-row enforcement pass
-            // catches integer call-site instantiations.
-            if fname == "softmax"
-                && let Type::Tensor(_, TensorPrec::Concrete(p)) = &resolved
-                && !p.is_float()
-            {
+            if let Some((kind, message, hints)) = operand_dtype_rejection(fname, &resolved) {
                 reject!(
                     errors,
                     CheckError::new(
-                        CheckErrorKind::PrecisionMismatch,
+                        kind,
                         with_macro_provenance(
                             &deep::Expr::List(list.clone(), zero_span()),
-                            format!(
-                                "softmax on operand precision `{}` is not admitted per \
-                             spec/04-type-system.md \u{00a7}5.4: transcendental \
-                             operations are restricted to f32, f64, bf16, f16 \
-                             (not integer)",
-                                p.name()
-                            ),
+                            message,
                         ),
-                        vec![format!(
-                            "spec/04-type-system.md \u{00a7}5.4: cast to a float \
-                         precision before applying softmax."
-                        )],
+                        hints,
                     ),
                 );
             }
