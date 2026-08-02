@@ -1,6 +1,6 @@
 ## Context
 
-Chelis has several production owners for the same front-end sequence. The main copies are in compiler API compilation, CLI checks, edit validation, and E2E compilation.
+Chelis has several upper-consumer owners for the same front-end sequence. The main copies are in compiler API compilation, CLI checks, edit validation, and E2E compilation.
 
 The CLI check path calls `check_ir_fitness` and `check_typed_program` in sequence. Both calls run type inference over the same Deep program.
 
@@ -16,13 +16,14 @@ Backend separation remains controlled by `spec/08-backends.md`. This OpenSpec ch
 
 **Goals:**
 
-- One compiler-API module owns production orchestration for each semantic stage.
+- One compiler-API module owns production orchestration for each semantic stage in the upper-consumer scope.
 - Named pipeline goals make early phase stops explicit.
 - Fitness and a typed program come from one inference product on each selected path.
 - Typed outcomes make rejected, checked, and lowered states distinct.
 - Existing consumers preserve behavior while they move to the shared pipeline.
 - Contextual and monolithic checks use the same semantic state transitions.
-- One source guard prevents new production copies of the full sequence.
+- One source guard prevents new sequence copies in compiler API, CLI, and E2E production code.
+- One explicit dependency exception records the Reef package artifact sequence until issue #1012 removes it.
 
 **Non-Goals:**
 
@@ -36,9 +37,9 @@ Backend separation remains controlled by `spec/08-backends.md`. This OpenSpec ch
 
 ## Decisions
 
-### 1. Put the canonical pipeline in `chelis-compiler-api`
+### 1. Put the upper-consumer pipeline in `chelis-compiler-api`
 
-A new `chelis_compiler_api::pipeline` module will own source preparation, semantic stage transitions, and optional lowering.
+A new `chelis_compiler_api::pipeline` module will own source preparation, semantic stage transitions, and optional DAG production for upper consumers.
 
 Lower crates will keep their stage primitives. `chelis-types` will own type analysis, `chelis-effects` will own effect checks, and `chelis-ir` will own lowering.
 
@@ -57,6 +58,10 @@ The pipeline will use three boundaries:
 3. Optional lowering produces a DAG and canonical root metadata.
 
 Reef graph preparation, linked-name policy, and cache selection remain outside boundary one. They supply prepared declarations or a checked context.
+
+The `chelis-reef` package artifact path remains one dependency exception. It runs type, effect, and linearity stages because `chelis-compiler-api` depends on Reef.
+
+Issue #1012 owns a dependency-bottom core that will remove this exception. No other production crate can use the exception.
 
 CLI style policy remains before the pipeline. Target selection and backend emission remain after the pipeline.
 
@@ -150,15 +155,21 @@ Parity fixtures will compare root names, order, tuple suffixes, and DAG node IDs
 
 ### 9. Add a scoped source guard
 
-A test-only guard in `chelis-compiler-api` will inspect production Rust sources in this repository.
+A test-only guard in `chelis-compiler-api` will inspect production Rust sources under these exact roots:
 
-The guard will reject a production file outside the owner module that orchestrates two or more canonical semantic stages.
+- `crates/chelis-compiler-api/src`
+- `crates/chelis-cli/src`
+- `crates/chelis-e2e/src`
 
-The guard will exclude tests, examples, and lower-layer stage implementations. A focused production helper can still call one stage for one purpose.
+The guard will reject an in-scope production file outside the owner module that orchestrates two or more canonical semantic stages.
+
+The guard will exclude tests, examples, and the owner module. A focused production helper can still call one stage for one purpose.
 
 The guard core will accept an in-memory source inventory. Positive and negative fixtures will test the guard without repository mutation.
 
-A repository test will run the core against the actual workspace. This test prevents a new CLI or E2E copy from passing review unnoticed.
+A repository test will run the core against the guarded workspace. This test prevents a new CLI or E2E copy from passing review unnoticed.
+
+The guard does not claim coverage for all production crates. The dependency decision above records the Reef exception.
 
 ### 10. Use one acceptance oracle
 
@@ -168,7 +179,7 @@ The authoritative acceptance oracle will be:
 .venv/bin/python scripts/compiler_pipeline_oracle.py
 ```
 
-The script will run named parity tests for `chelis-compiler-api`, `chelis-cli`, and `chelis-e2e`. It will also run the source guard.
+The script will run named parity tests for `chelis-compiler-api`, `chelis-cli`, and `chelis-e2e`. It will also run the guarded-workspace source guard.
 
 The oracle will test accepted and rejected inputs. It will test type, effect, linearity, lowering, cache, root, JSON, and exit-code paths.
 
@@ -195,7 +206,7 @@ OpenSpec validation proves artifact structure only. It does not prove compiler c
 5. Migrate contextual, layered, cache, and whole-module edit paths.
 6. Migrate CLI check and build semantic orchestration without a JSON change.
 7. Migrate E2E compilation and root metadata to the compiler API.
-8. Activate the source guard after every listed production consumer delegates.
+8. Activate the source guard after every listed upper consumer delegates.
 9. Run the acceptance oracle and the local repository gate.
 10. Run a fresh-context adversarial review and correct confirmed findings.
 

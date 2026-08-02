@@ -30,6 +30,7 @@
 - [x] 1.28 Lock typed Deep authoring and opaque-value decode behavior in the authoritative oracle.
 - [x] 1.29 Lock strict invalid-tag rejection and nested structural-list acceptance in the authoritative oracle.
 - [x] 1.30 Lock lenient diagnostics, generic ADT parsing, and typed macro expansion in the authoritative oracle.
+- [x] 1.31 Lock the exact upper-consumer guard roots and the issue #1012 Reef exception.
 
 ## 2. Edit Proof and Semantic Rejection
 
@@ -118,6 +119,11 @@
   - The authoritative oracle passed with the expanded typed Deep and macro coverage.
   - After `main` moved again, the oracle passed against `fe9e5a6ad35ab0c95720cbb99c184aebba55f71c`.
   - The current-target local gate passed for all six changed crates.
+- [x] 6.13 Add compiler-API doctests and the raw-checkpoint fixture to the canonical local and hosted gate.
+  - All 29 gate unit tests passed.
+  - Five compiler-API compile-fail doctests and one regular doctest passed.
+  - The raw-checkpoint fixture passed its exact diagnostic checks.
+  - The complete local gate passed after the correction.
 
 ## 7. Adversarial Validation
 
@@ -144,6 +150,9 @@
 - [x] 7.20 Run a final fresh local red-team agent against the exact rebased tree and require a PASS verdict.
   - A fresh local Pi subagent reviewed exact commit `2ed580dabfe3f23525f013bada28b67e04f408c6`.
   - The review returned PASS with no implementation or specification findings.
+- [x] 7.21 Correct the guard-scope and continuous compile-fail defects from the PR review.
+  - All 75 source-guard tests passed.
+  - The authoritative compiler pipeline oracle passed after the correction.
 
 ## 8. Hosted Acceptance
 
@@ -156,3 +165,4 @@
 - [x] 8.3 Confirm that hosted output shows no wire, CLI, backend, runtime, package, or generated-code drift.
   - The integration gate, backend sanitizers, generated C and Metal smoke tests, package checks, and conformance gate passed.
   - The hosted output contained no drift finding for the wire, CLI, backend, runtime, package, or generated-code surfaces.
+- [ ] 8.4 Confirm that hosted CI executes both compile-fail gate commands on the remediated head.

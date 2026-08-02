@@ -1,6 +1,6 @@
 ## 1. Baseline Evidence
 
-- [x] 1.1 Record every production semantic sequence and classify its current phase boundary.
+- [x] 1.1 Record every semantic sequence in the upper-consumer scope and classify its current phase boundary.
 - [x] 1.2 Add accepted compiler-API parity fixtures for type analysis, full checks, and lowering.
 - [x] 1.3 Add compiler-API rejection fixtures for parse, type, effect, linearity, and lowering stages.
 - [x] 1.4 Add CLI fixtures that freeze JSON bytes, inferred signatures, diagnostics, and exit codes.
@@ -60,11 +60,12 @@
 ## 7. Recurrence Guard and Oracle
 
 - [x] 7.1 Implement the in-memory source-guard core with positive and negative inventories.
-- [x] 7.2 Add the actual-workspace guard with narrow owner and test exclusions.
-- [x] 7.3 Activate the guard after all listed production consumers delegate.
+- [x] 7.2 Add the guarded-workspace guard with narrow owner and test exclusions.
+- [x] 7.3 Activate the guard after all listed upper consumers delegate.
 - [x] 7.4 Add `scripts/compiler_pipeline_oracle.py` as the authoritative completion oracle.
 - [x] 7.5 Add Python tests for command selection, failure propagation, and success reporting.
 - [x] 7.6 Update `ARCHITECTURE.md` with pipeline ownership, goals, state types, and boundaries.
+- [x] 7.7 Lock the exact guard roots and document the Reef dependency exception under issue #1012.
 
 ## 8. Acceptance and Review
 
@@ -75,3 +76,6 @@
 - [x] 8.5 Run a fresh-context adversarial review against the specification and executable behavior.
 - [x] 8.6 Correct each confirmed finding and rerun the authoritative oracle.
 - [x] 8.7 Record hosted CI status: not requested because this workflow has no fresh remote approval.
+- [x] 8.8 Correct the ownership scope after PR review found the under-specified Reef exception.
+  - The active specification names the three guarded roots and the issue #1012 exception.
+  - The exact-root source-guard test passed.

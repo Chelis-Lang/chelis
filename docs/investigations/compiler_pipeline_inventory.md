@@ -16,7 +16,7 @@ The scope covers these consumers:
 - Deep authoring and opaque-value decode consumers
 - lenient Deep diagnostics and typed macro expansion
 
-Tests can call individual stages for focused evidence.
+This upper-consumer scope does not include `chelis-reef` package artifact construction. Tests can call individual stages for focused evidence.
 
 ## Baseline Sequences
 
@@ -41,7 +41,7 @@ The CLI check paths ran inference twice. They called `check_ir_fitness` and `che
 
 ## Canonical Ownership
 
-`chelis_compiler_api::pipeline` now owns these transitions:
+`chelis_compiler_api::pipeline` now owns these transitions in the upper-consumer scope:
 
 - source preparation
 - isolated and contextual type analysis
@@ -64,7 +64,7 @@ Valid generic ADTs retain typed declarations. The lenient fragment boundary reta
 
 The macro expander reads internal definitions and typed variable calls.
 
-The source guard checks production functions in these trees:
+The source guard checks production functions in exactly these trees:
 
 - `crates/chelis-compiler-api/src`
 - `crates/chelis-cli/src`
@@ -90,9 +90,11 @@ The guard ignores uninvoked callable bodies. Mutually exclusive execution paths 
 
 `chelis-reef` remains below `chelis-compiler-api` in the dependency graph. Its package artifact builder cannot call the compiler-API pipeline without a dependency cycle.
 
-This change does not invert that dependency. The guard treats Reef linking and package artifact construction as the lower preparation boundary.
+The package artifact and schema paths call `checked_program_with_effects`. This helper runs type, effect, and linearity stages on fully linked Deep.
 
-A later package-resolution split can move the remaining Reef artifact sequence behind the compiler API. That work is outside this change.
+This helper is one explicit dependency exception. The source guard excludes `crates/chelis-reef/src`, and no other production crate uses this exception.
+
+Issue #1012 owns the dependency-bottom pipeline core that will remove the exception. This change does not claim whole-workspace source-guard coverage.
 
 ## Final Artifact Boundaries
 
@@ -316,3 +318,15 @@ Current `main` includes the stack-safe normalization fix from #1035. All five `i
 ### Hosted Evidence
 
 Hosted CI evidence is pending. Local results do not replace macOS Smoke, Docs, or the changed-crate jobs.
+
+### PR Review Remediation
+
+A PR review found that the active ownership requirement exceeded the source guard scope. It also found that hosted CI did not execute two compile-fail controls.
+
+The ownership requirement now names the three guarded roots and the Reef dependency exception. A source-guard test locks this exact root set.
+
+The canonical gate now runs compiler-API doctests and the raw-checkpoint fixture. Gate unit tests lock both commands in local and hosted stages.
+
+The compiler-API doctests passed five compile-fail tests and one regular doctest. The checkpoint fixture passed with its exact diagnostic checks.
+
+All 29 gate unit tests passed. The complete local gate and authoritative compiler pipeline oracle passed after the correction.

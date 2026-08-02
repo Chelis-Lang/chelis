@@ -2719,15 +2719,19 @@ fn propagated_findings(functions: Vec<FunctionFacts>) -> Vec<Finding> {
         .collect()
 }
 
+// This is the upper-consumer scope, not a workspace-wide inventory.
+// `chelis-reef` remains a documented dependency exception. Issue #1012
+// owns the lower-core extraction that will remove that exception.
+const GUARDED_SOURCE_ROOTS: [&str; 3] = [
+    "crates/chelis-compiler-api/src",
+    "crates/chelis-cli/src",
+    "crates/chelis-e2e/src",
+];
+
 fn guarded_sources(workspace: &Path) -> Vec<PathBuf> {
-    let roots = [
-        workspace.join("crates/chelis-compiler-api/src"),
-        workspace.join("crates/chelis-cli/src"),
-        workspace.join("crates/chelis-e2e/src"),
-    ];
     let mut files = Vec::new();
-    for root in roots {
-        collect_rust_files(&root, &mut files);
+    for relative in GUARDED_SOURCE_ROOTS {
+        collect_rust_files(&workspace.join(relative), &mut files);
     }
     files.sort();
     files
@@ -2806,6 +2810,35 @@ fn actual_workspace_findings(workspace: &Path) -> Vec<Finding> {
         })
         .collect::<Vec<_>>();
     inspect_parsed_sources(&sources)
+}
+
+#[test]
+fn guarded_source_roots_match_the_upper_consumer_scope() {
+    let workspace = tempfile::tempdir().expect("temporary workspace");
+    let guarded = [
+        "crates/chelis-compiler-api/src/probe.rs",
+        "crates/chelis-cli/src/probe.rs",
+        "crates/chelis-e2e/src/probe.rs",
+    ];
+    let reef_exception = "crates/chelis-reef/src/probe.rs";
+    for relative in guarded.iter().chain(std::iter::once(&reef_exception)) {
+        let path = workspace.path().join(relative);
+        fs::create_dir_all(path.parent().expect("fixture parent")).expect("fixture directory");
+        fs::write(path, "fn probe() {}\n").expect("fixture source");
+    }
+
+    let actual = guarded_sources(workspace.path())
+        .into_iter()
+        .map(|path| {
+            path.strip_prefix(workspace.path())
+                .expect("workspace-relative source")
+                .to_path_buf()
+        })
+        .collect::<BTreeSet<_>>();
+    let expected = guarded.into_iter().map(PathBuf::from).collect();
+
+    assert_eq!(actual, expected);
+    assert!(!actual.contains(&PathBuf::from(reef_exception)));
 }
 
 #[test]
@@ -4433,7 +4466,7 @@ fn compiler_path_retains_the_realizability_manifest_observation() {
 }
 
 #[test]
-fn production_consumers_do_not_recreate_the_semantic_pipeline() {
+fn guarded_upper_consumers_do_not_recreate_the_semantic_pipeline() {
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
@@ -4441,6 +4474,6 @@ fn production_consumers_do_not_recreate_the_semantic_pipeline() {
     let findings = actual_workspace_findings(workspace);
     assert!(
         findings.is_empty(),
-        "production semantic pipeline duplicates remain: {findings:#?}"
+        "guarded upper-consumer semantic pipeline duplicates remain: {findings:#?}"
     );
 }

@@ -4,14 +4,15 @@ Chelis repeats front-end orchestration across the CLI, compiler API, edit valida
 
 ## What Changes
 
-- Add one compiler-API pipeline that owns parse, expansion, type checks, effect checks, linearity checks, and optional DAG lowering.
+- Add one compiler-API pipeline that owns parse, expansion, type checks, effect checks, linearity checks, and optional DAG production for upper consumers.
 - Add typed outcomes that separate a rejected analysis, a checked program, and a lowered program.
 - Derive fitness data and the checked program from one type-inference product on each selected semantic path.
 - Migrate compiler-API operations, CLI check and build paths, whole-module edit validation, and E2E compilation to the shared pipeline.
 - Keep Reef preparation, style policy, report presentation, exit codes, and target selection outside the semantic pipeline.
 - Keep backend emitters as final target-specific correctness boundaries.
 - Add parity evidence for accepted output, rejected diagnostics, CLI JSON, exit codes, inferred signatures, lowered DAGs, and root metadata.
-- Add a source guard that rejects new production copies of the complete semantic pass sequence.
+- Add a source guard that rejects new sequence copies in compiler API, CLI, and E2E production code.
+- Record Reef package artifact construction as one dependency exception that issue #1012 will remove.
 
 ### Non-Goals
 
@@ -36,6 +37,8 @@ None. Existing language, backend, Tide, and serialization requirements remain un
 
 The main changes affect `chelis-compiler-api`, `chelis-cli`, and `chelis-e2e`. Smaller changes affect `chelis-types`, `chelis-effects`, and compiler-API edit validation.
 
-The change adds an internal typed compiler API and removes duplicate production orchestration. Existing machine-facing APIs remain compatible.
+The change adds an internal typed compiler API and removes duplicate orchestration from the guarded upper-consumer scope. Existing machine-facing APIs remain compatible.
+
+`chelis-reef` remains below `chelis-compiler-api`. Its package artifact path retains one documented direct semantic sequence until issue #1012 removes the dependency cycle.
 
 The authoritative acceptance oracle will compare the shared path with frozen baseline fixtures across compiler-API, CLI, edit, and E2E consumers. The design will name the exact command.

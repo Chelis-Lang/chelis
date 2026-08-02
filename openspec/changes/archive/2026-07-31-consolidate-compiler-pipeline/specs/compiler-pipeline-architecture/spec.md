@@ -6,9 +6,21 @@ Backend separation remains under [`spec/08-backends.md`](../../../../../spec/08-
 
 ### Requirement: Canonical production pipeline owner
 
-`chelis-compiler-api` SHALL own production orchestration for source preparation, type analysis, effect checks, linearity checks, and optional DAG lowering.
+`chelis-compiler-api` SHALL own production orchestration in the upper-consumer scope. This scope contains `chelis-compiler-api`, `chelis-cli`, and `chelis-e2e`.
 
-Production consumers that need two or more semantic stages SHALL delegate to this owner. Lower-layer crates SHALL retain their individual stage implementations.
+Production functions in this scope that need two or more semantic stages SHALL delegate to this owner. Lower-layer crates SHALL retain individual stage implementations.
+
+`chelis-reef` package artifact construction SHALL remain one explicit dependency exception. It can run type, effect, and linearity stages directly because `chelis-compiler-api` depends on `chelis-reef`.
+
+Issue #1012 owns removal of this exception through a dependency-bottom pipeline core. No other production crate SHALL use this exception.
+
+The source architecture guard SHALL inspect production Rust files under exactly these roots:
+
+- `crates/chelis-compiler-api/src`
+- `crates/chelis-cli/src`
+- `crates/chelis-e2e/src`
+
+The guard SHALL NOT claim coverage for all workspace production files.
 
 #### Scenario: Production consumer delegates
 
@@ -17,8 +29,13 @@ Production consumers that need two or more semantic stages SHALL delegate to thi
 
 #### Scenario: Production consumer duplicates the sequence
 
-- **WHEN** a production file outside the owner orchestrates two or more canonical semantic stages
+- **WHEN** a guarded production file outside the owner orchestrates two or more canonical semantic stages
 - **THEN** the source architecture guard rejects the file and identifies the duplicated stage calls
+
+#### Scenario: Reef package artifact path uses the dependency exception
+
+- **WHEN** `chelis-reef` checks a fully linked package before artifact or schema output
+- **THEN** the documented dependency exception permits its direct type, effect, and linearity sequence
 
 ### Requirement: Closed pipeline goals and fixed pass order
 
@@ -142,8 +159,8 @@ The oracle SHALL run positive and negative parity suites for compiler API, CLI, 
 
 #### Scenario: Shared pipeline satisfies all contracts
 
-- **WHEN** the authoritative oracle runs after every production consumer delegates
-- **THEN** every parity suite and the actual-workspace source guard pass
+- **WHEN** the authoritative oracle runs after every guarded production consumer delegates
+- **THEN** every parity suite and the guarded-workspace source guard pass
 
 #### Scenario: A duplicate production pipeline is planted
 

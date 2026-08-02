@@ -12,13 +12,25 @@ This capability defines implementation architecture only. The pass order remains
 Backend separation remains under [`spec/08-backends.md`](../../../spec/08-backends.md). These requirements do not change language or backend semantics.
 
 ### Requirement: Canonical production pipeline owner
-`chelis-compiler-api` SHALL own production orchestration for source preparation, type analysis, effect checks, linearity checks, and optional DAG lowering.
+`chelis-compiler-api` SHALL own production orchestration in the upper-consumer scope. This scope contains `chelis-compiler-api`, `chelis-cli`, and `chelis-e2e`.
 
-Production consumers that need two or more semantic stages SHALL delegate to this owner. Lower-layer crates SHALL retain their individual stage implementations.
+Production functions in this scope that need two or more semantic stages SHALL delegate to this owner. Lower-layer crates SHALL retain individual stage implementations.
+
+`chelis-reef` package artifact construction SHALL remain one explicit dependency exception. It can run type, effect, and linearity stages directly because `chelis-compiler-api` depends on `chelis-reef`.
+
+Issue #1012 owns removal of this exception through a dependency-bottom pipeline core. No other production crate SHALL use this exception.
+
+The source architecture guard SHALL inspect production Rust files under exactly these roots:
+
+- `crates/chelis-compiler-api/src`
+- `crates/chelis-cli/src`
+- `crates/chelis-e2e/src`
+
+The guard SHALL NOT claim coverage for all workspace production files.
 
 The source architecture guard SHALL detect direct stage sequences. It SHALL also detect equivalent sequences composed through local helper calls.
 
-It SHALL use one inventory for all guarded workspace files. It SHALL propagate reachable stages through each crate-local call graph until the stage sets reach a fixed point.
+It SHALL use one inventory for all guarded files. It SHALL propagate reachable stages through each crate-local call graph until the stage sets reach a fixed point.
 
 The guard SHALL preserve local call-site multiplicity. It SHALL resolve local calls through path prefixes, named imports, glob imports, and local function-value aliases.
 
@@ -61,8 +73,12 @@ A focused helper that reaches only one semantic stage SHALL remain valid. A prod
 - **THEN** the path requests a compiler-API pipeline goal instead of calling the stages in sequence
 
 #### Scenario: Production consumer duplicates the sequence
-- **WHEN** a production file outside the owner orchestrates two or more canonical semantic stages
+- **WHEN** a guarded production file outside the owner orchestrates two or more canonical semantic stages
 - **THEN** the source architecture guard rejects the file and identifies the duplicated stage calls
+
+#### Scenario: Reef package artifact path uses the dependency exception
+- **WHEN** `chelis-reef` checks a fully linked package before artifact or schema output
+- **THEN** the documented dependency exception permits its direct type, effect, and linearity sequence
 
 #### Scenario: Production consumer composes stage helpers
 - **WHEN** a production function calls separate local helpers that reach type and effect stages
@@ -310,8 +326,8 @@ The oracle SHALL run positive and negative parity suites for compiler API, CLI, 
 
 #### Scenario: Shared pipeline satisfies all contracts
 
-- **WHEN** the authoritative oracle runs after every production consumer delegates
-- **THEN** every parity suite and the actual-workspace source guard pass
+- **WHEN** the authoritative oracle runs after every guarded production consumer delegates
+- **THEN** every parity suite and the guarded-workspace source guard pass
 
 #### Scenario: A duplicate production pipeline is planted
 
@@ -522,3 +538,12 @@ The oracle SHALL run after the implementation compiles against the target branch
 #### Scenario: A weak artifact shape returns
 - **WHEN** a negative fixture restores a Boolean success marker, raw root tuple, or parallel layered error vectors
 - **THEN** the authoritative oracle fails and identifies the broken boundary
+
+### Requirement: Continuous artifact compile-fail enforcement
+The canonical per-PR gate SHALL run `cargo test -p chelis-compiler-api --doc`.
+
+The same gate SHALL run `.venv/bin/python scripts/check_checkpoint_compile_fail.py`. Command-list unit tests SHALL NOT substitute for either executable control.
+
+#### Scenario: Hosted CI checks compile-time artifact boundaries
+- **WHEN** hosted CI runs the `lint-and-unit` gate stage
+- **THEN** it executes the compiler-API doctests and the raw-checkpoint compile-fail fixture

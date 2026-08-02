@@ -186,6 +186,15 @@ The script will include the new unit, integration, compile-fail, and consumer-pa
 
 Compile-fail tests will cover forged `ValidatedModule`, swapped root maps, contradictory layered outcomes, and raw checkpoint offsets. Runtime tests will cover alignment errors and diagnostic ranges.
 
+The canonical gate will also run these commands:
+
+```text
+cargo test -p chelis-compiler-api --doc
+.venv/bin/python scripts/check_checkpoint_compile_fail.py
+```
+
+The gate commands provide continuous local and hosted enforcement. Unit tests that inspect command lists do not replace either executable control.
+
 The source-guard suite will include direct stage sequences, helper-composed sequences, and focused one-stage helpers. It will reject orchestration through helper calls.
 
 The existing CLI, cache, compiler API, and E2E parity tests will prove that public behavior does not change. OpenSpec validation proves artifact structure only.
@@ -194,7 +203,9 @@ Local oracle results do not prove hosted CI status. The final acceptance record 
 
 ### 10. Propagate source stages through local helper calls
 
-The source guard will build one callable and import inventory for all guarded workspace files. It will propagate stage sets through each crate-local graph.
+The source guard will build one callable and import inventory for its three guarded roots. It will propagate stage sets through each crate-local graph.
+
+The guarded roots are `chelis-compiler-api`, `chelis-cli`, and `chelis-e2e` source trees. `chelis-reef` remains the issue #1012 dependency exception.
 
 A fixed-point calculation will handle helper chains. A production function will fail when one path reaches two or more canonical semantic stages.
 
@@ -278,7 +289,7 @@ The authoritative oracle will run only after the rebase compiles against the tar
 - **Risk: Root alignment rejects an existing host fallback.** → Keep a separate empty constructor behind the current fallback decision.
 - **Risk: Name conversion changes ordering.** → Preserve vector order and `BTreeMap` ordering in parity tests.
 - **Risk: The layered enum changes CLI report assembly.** → Freeze clean, effect, and linearity JSON bytes before migration.
-- **Risk: A compile-fail test does not run in CI.** → Keep compiler-API doctests in the authoritative oracle command.
+- **Risk: A compile-fail test does not run in CI.** → Run compiler-API doctests and the checkpoint fixture through the canonical gate.
 - **Risk: A successful empty DAG bypasses policy.** → Require an exact or selected host-backend root-binding mode.
 - **Risk: Helper composition bypasses the source guard.** → Test cross-file calls, path-specific aliases, higher-order calls, traits, and macros.
 - **Risk: Syntax creates false findings.** → Track path termination and exclude uninvoked callable bodies.
@@ -323,7 +334,8 @@ This change uses one acceptance phase and one authoritative oracle.
 16. Run a second fresh-context review after remediation.
 17. Add cross-file, alias, trait, macro, and executable-path source-guard tests.
 18. Run a third fresh-context review after source-guard remediation.
-19. Use hosted CI as final evidence for the full workspace and platform jobs.
+19. Add compiler-API doctests and the checkpoint fixture to the canonical gate.
+20. Use hosted CI as final evidence for the full workspace and platform jobs.
 
 Each type family can revert with its consumer migration because no persistent data changes. A rollback restores the prior Rust API and does not need data repair.
 

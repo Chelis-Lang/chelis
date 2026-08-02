@@ -64,7 +64,7 @@ it necessary.
 
 ### Canonical Pipeline Owner
 
-`chelis_compiler_api::pipeline` owns production front-end stage order.
+`chelis_compiler_api::pipeline` owns front-end stage order for compiler API, CLI, and E2E production code.
 Consumers select one closed goal:
 
 - `TypeAnalysis` returns fitness and one type-inference product.
@@ -78,7 +78,9 @@ A rejection does not contain a checked or lowered success product.
 The CLI retains style policy, Reef preparation, JSON, exit codes, target selection, and backend emission.
 Backend emitters remain final target-specific correctness boundaries.
 
-The source guard in `crates/chelis-compiler-api/src/source_arch.rs` rejects new consumer-owned semantic sequences.
+`chelis-reef` package artifact construction remains one dependency exception. Issue #1012 owns the lower-core extraction that will remove it.
+
+The source guard checks compiler API, CLI, and E2E production code. It does not claim coverage for all workspace crates.
 The detailed baseline is in `docs/investigations/compiler_pipeline_inventory.md`.
 
 ## Crate Dependency Graph
@@ -98,7 +100,7 @@ chelis-python ────────────┘          │
 ```
 
 The dependency graph is a strict DAG.
-`chelis-deep` is the foundation. Consumer crates delegate shared compiler orchestration to `chelis-compiler-api`.
+`chelis-deep` is the foundation. Upper consumer crates delegate shared compiler orchestration to `chelis-compiler-api`.
 
 ## Crates
 

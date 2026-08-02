@@ -14,7 +14,7 @@ The new compiler pipeline uses types for its major phases, but several public ar
 - Add a crate-private `DiagnosticCheckpoint` that replaces raw offsets for diagnostic iteration.
 - Replace the wide rejection type of `complete_checks` with an effect-or-linearity rejection type.
 - Replace the parallel error vectors in `LayeredCheck` with exclusive typed outcomes.
-- Extend the source guard through workspace-local helpers, path-specific aliases, higher-order calls, receiver methods, traits, and stage macros.
+- Extend the upper-consumer source guard through local helpers, path-specific aliases, higher-order calls, receiver methods, traits, and stage macros.
 - Preserve callable results from branch expressions and known array iterables.
 - Resolve `extern crate` aliases, local receiver type aliases, and canonical imports inside invoked local macros.
 - Classify canonical stages by module and function identity.
@@ -23,6 +23,7 @@ The new compiler pipeline uses types for its major phases, but several public ar
 - Exclude unrelated receivers, imports, and external qualified calls that only reuse a canonical stage name.
 - Rebase onto the current typed Deep AST and preserve typed ingestion, verification, identity validation, wire output, root collection, authoring, decode, and the realizability observation.
 - Add positive tests and compile-fail tests for each construction boundary.
+- Run the compiler-API doctests and raw-checkpoint fixture in the canonical local and hosted gate.
 - Keep all wire conversions at existing schema boundaries.
 
 ### Non-Goals
@@ -54,3 +55,5 @@ Existing Rust callers of the changed public compiler API must migrate.
 The implementation must compile against the current target branch. The migration must retain the existing #912 realizability manifest observation.
 
 The source guard adds `syn` as a direct development dependency. Existing machine-facing schema types remain unchanged.
+
+The canonical gate adds compiler-API doctests and the raw-checkpoint compile-fail command. These controls run locally and in hosted CI.

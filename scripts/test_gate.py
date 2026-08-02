@@ -193,6 +193,24 @@ class ListOutputTests(unittest.TestCase):
         rendered = [gate.render(c) for c in gate.LOCAL_STATIC_COMMANDS]
         self.assertIn("cargo test -p chelis-types --doc", rendered)
 
+    def test_pipeline_compile_fail_contracts_are_in_the_lint_and_unit_stage(self):
+        rendered = [
+            gate.render(command) for command in gate.STAGES["lint-and-unit"]
+        ]
+        for command in (
+            "cargo test -p chelis-compiler-api --doc",
+            ".venv/bin/python scripts/check_checkpoint_compile_fail.py",
+        ):
+            self.assertIn(command, rendered)
+
+    def test_pipeline_compile_fail_contracts_are_in_the_local_subset(self):
+        rendered = [gate.render(command) for command in gate.LOCAL_STATIC_COMMANDS]
+        for command in (
+            "cargo test -p chelis-compiler-api --doc",
+            ".venv/bin/python scripts/check_checkpoint_compile_fail.py",
+        ):
+            self.assertIn(command, rendered)
+
     def test_list_uses_nextest_not_cargo_test(self):
         # Regression guard: the historical `AGENTS.md` gate said
         # `cargo test --workspace` where CI runs `cargo nextest run`.
