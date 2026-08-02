@@ -3718,13 +3718,14 @@ fn symbolic_dim_var_name(expr: &Expr) -> Option<String> {
 /// runtime tensor literal and prints the result.
 ///
 /// `shape` is the rank-N dimension list (row-major). `data` is the
-/// row-major-flat float buffer of length `shape.iter().product()`.
+/// row-major-flat typed scalar buffer of length `shape.iter().product()`.
 #[derive(Debug, Clone, PartialEq)]
 struct LiteralToTensor {
     shape: Vec<usize>,
     /// Exact raw elements (chelis#856): integer leaves travel their
-    /// exact i64, float leaves their f64; finalization at the tensor's
-    /// ascribed dtype happens ONCE in `emit_literal_tensor`.
+    /// exact i64, float leaves the f64 image OF THEIR OWN DECLARED WIDTH
+    /// (chelis#864); finalization at the tensor's ascribed dtype happens
+    /// ONCE in `emit_literal_tensor`.
     data: Vec<chelis_types::RawScalar>,
 }
 
@@ -3811,13 +3812,12 @@ const MAX_STATIC_RECURSION_DEPTH: usize = 512;
 /// recursive cycles (k names at 512 each would otherwise stack k*512 levels).
 const MAX_TOTAL_INLINE_DEPTH: usize = 1024;
 
-/// Extract a numeric scalar from a Deep expression. Recognizes:
+/// Extract and width-finalize a numeric scalar from a checked Deep expression.
+/// Recognizes:
 ///   * `Atom::Int` / `Atom::Float` / `Atom::Bool`
 ///   * `(lit {} <Int|Float|Bool>)`
-///   * `(cast {} <Int|Float|Bool> <prim>)` (constant after cast is
-///     still a constant; the precision distinction is carried on the
-///     enclosing `to_tensor`'s type metadata, which the emit path
-///     uses for the lowered tensor's `precision` slot).
+///   * `(cast {} <Int|Float|Bool> <prim>)`, applying every f32/f64 cast in
+///     order instead of discarding the inner scalar's checked precision.
 ///   * `(app {} (var {} neg) <inner>)` (issue Chelis-Lang/chelis#218
 ///     R1 HIGH-1): surface negative literals like `-1.0` desugar to
 ///     `(app (var neg) (lit 1.0))`; the recognizer returns the
@@ -3832,12 +3832,31 @@ fn extract_numeric_leaf(expr: &Expr) -> Option<chelis_types::RawScalar> {
         Expr::List(_, _) | Expr::Node(_, _) => {
             let (tag, _, kids) = stamped_parts(expr)?;
             match tag {
-                DeepTag::Lit => match kids.first()? {
-                    Expr::Atom(Atom::Int(n), _) => Some(RawScalar::Int(*n)),
-                    Expr::Atom(Atom::Float(f), _) => Some(RawScalar::Float(*f)),
-                    Expr::Atom(Atom::Bool(b), _) => Some(RawScalar::Int(i64::from(*b))),
-                    _ => None,
-                },
+                DeepTag::Lit => {
+                    let raw = match kids.first()? {
+                        Expr::Atom(Atom::Int(n), _) => RawScalar::Int(*n),
+                        Expr::Atom(Atom::Float(f), _) => RawScalar::Float(*f),
+                        Expr::Atom(Atom::Bool(b), _) => RawScalar::Int(i64::from(*b)),
+                        _ => return None,
+                    };
+                    // chelis#864: a float literal carries its checked width
+                    // in its OWN type metadata (`0.1f32`), with no Cast node
+                    // following to apply it. Materialize that width here or
+                    // an enclosing f64 tensor widens the LEXICAL f64 `0.1`
+                    // instead of the stored f32 value, and the DAG root
+                    // disagrees with `print` before rendering begins.
+                    // Integer leaves keep their exact i64 (chelis#856); the
+                    // cast ladder is total into a float target, so this
+                    // finalize cannot trap. Absent metadata narrows nothing.
+                    let declared = expr_type_metadata(expr).and_then(LowerCtx::try_extract_prim);
+                    match (raw, declared) {
+                        (RawScalar::Float(_), Some(prim)) if prim.is_float() => {
+                            let finalized = chelis_types::cast_raw("lit", raw, prim).ok()?;
+                            Some(RawScalar::Float(finalized.as_f64_lossy()))
+                        }
+                        _ => Some(raw),
+                    }
+                }
                 DeepTag::Cast => {
                     // A cast leaf APPLIES the checked default ladder
                     // (spec/04 section 5.2) at recognition time, so

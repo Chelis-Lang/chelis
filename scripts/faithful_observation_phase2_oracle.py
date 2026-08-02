@@ -14,10 +14,12 @@ gone green.
 
 The obligations, in execution order:
 
-1. **The un-ignore rows** (Phase 2 oracle bullet 1). chelis#723's and
-   chelis#716's cells must be PRESENT, must carry no `#[ignore]`, and must
-   pass. Structural plus executed: a green run of a test that had been
-   quietly re-ignored would otherwise satisfy the suite.
+1. **The un-ignore rows** (Phase 2 oracle bullet 1). chelis#723's,
+   chelis#716's, and repaired chelis#864's cells must be PRESENT, must
+   carry exactly one unconditional `#[test]` attribute, and must pass.
+   `cfg`, `cfg_attr`, `ignore`, and unrecognized attribute shapes fail
+   closed: a green run of a conditionally skipped test would otherwise
+   satisfy the suite.
 2. **The retired interim locks** (bullet 3) must be absent from the tree.
 3. **The round-trip harness green set** (bullet 2) must pass.
 4. **The known-red ledger** must hold EXACTLY. `KNOWN_RED_CELLS` below
@@ -171,6 +173,7 @@ KNOWN_RED_CELLS: tuple[RedCell, ...] = (
 
 # Phase 2 oracle bullet 1: red-to-green only by un-ignoring (§B2.3).
 UNIGNORED_ROWS: tuple[tuple[Path, str, str], ...] = (
+    (HARNESS_SOURCE, "eval_f64_cast_tensor_root_renders_stored_width", "chelis#864"),
     (REDUCTION_MATRIX_SOURCE, "c_int64_tensor_print_is_exact_above_2p53", "chelis#723"),
     (NARROW_MATRIX_SOURCE, "c_print_of_f16_tensor_prints_f16_values", "chelis#716"),
     (NARROW_MATRIX_SOURCE, "c_to_list_of_f16_tensor_works", "chelis#716"),
@@ -456,7 +459,7 @@ GREEN_SUITES: tuple[tuple[str, tuple[str, ...]], ...] = (
         ),
     ),
     (
-        "the chelis#716/#723 un-ignored oracle rows",
+        "the chelis#716/#723/#864 un-ignored oracle rows",
         (
             "cargo",
             "nextest",
@@ -681,17 +684,19 @@ def unignored_violations(sources: dict[Path, str]) -> list[str]:
         if source is None:
             violations.append(f"{relative}: unreadable")
             continue
-        if not defines_test(source, name):
+        attrs = probe_attributes(source, name)
+        if attrs is None:
             violations.append(
                 f"{relative}: the {issue} oracle row {name} is gone; Phase 2 "
                 "requires it present and green."
             )
             continue
-        if name in ignored_cells(source):
+        if attrs != ["#[test]"]:
             violations.append(
-                f"{relative}: the {issue} oracle row {name} is `#[ignore]`d. "
-                "Phase 2's oracle requires it un-ignored (§B2.3: red-to-green "
-                "only by un-ignoring)."
+                f"{relative}: the {issue} oracle row {name} must carry exactly "
+                f"the unconditional `#[test]` attribute; found {attrs!r}. "
+                "A cfg, cfg_attr, ignore, or unrecognized attribute can remove "
+                "the repaired behavior while the suite still exits green."
             )
     return violations
 

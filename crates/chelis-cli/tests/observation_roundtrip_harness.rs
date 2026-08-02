@@ -1397,28 +1397,48 @@ fn eval_int64_scalar_root_above_2p53_renders_exact() {
 /// [05-OBS-1] regression lock.
 #[test]
 fn eval_f64_cast_tensor_root_renders_stored_width() {
-    let program = "module M.Main\n\
-         def mk() -> tensor[2, f64] = cast(to_tensor([0.1, 0.3]), f64)\n\
-         shown = print(mk())\n\
-         troot = mk()\n";
-    let out = eval_stdout(program).expect("eval");
-    let tlines = tensor_lines(&out);
-    assert_eq!(tlines.len(), 2, "transcript and root renders:\n{out}");
-    // Green half (control): the transcript renders the STORED bits (the
-    // f64 images of the f32-constructed elements) at the stored width.
-    assert_eq!(
-        tlines[0], "tensor(shape=[2], data=[0.10000000149011612, 0.30000001192092896])",
-        "the print transcript must keep rendering the stored bits"
-    );
-    // The labeled root must agree with the transcript ([05-OBS-1]
-    // intra-lane exit agreement). Before chelis#864 it rendered `0.1,
-    // 0.3`: the static DAG shortcut widened the unfinalized lexical
-    // decimals instead of the host path's stored f32 values.
-    assert_eq!(
-        tlines[1],
-        format!("troot = {}", tlines[0]),
-        "the labeled root must render the same stored bits as print"
-    );
+    let cases = [
+        (
+            "f32 tensor widened as a tensor",
+            "cast(to_tensor([0.1, 0.3]), f64)",
+        ),
+        (
+            "f32-suffixed leaves widened as scalars",
+            "to_tensor([cast(0.1f32, f64), cast(0.3f32, f64)])",
+        ),
+        (
+            "explicit inner f32 casts widened as scalars",
+            "to_tensor([cast(cast(0.1, f32), f64), cast(cast(0.3, f32), f64)])",
+        ),
+    ];
+    for (case, expression) in cases {
+        let program = format!(
+            "module M.Main\ndef mk() -> tensor[2, f64] = {expression}\n\
+             shown = print(mk())\ntroot = mk()\n"
+        );
+        let out = eval_stdout(&program).expect("eval");
+        let tlines = tensor_lines(&out);
+        assert_eq!(
+            tlines.len(),
+            2,
+            "{case}: transcript and root renders:\n{out}"
+        );
+        // Green half (control): the transcript renders the STORED bits (the
+        // f64 images of the f32-constructed elements) at the stored width.
+        assert_eq!(
+            tlines[0], "tensor(shape=[2], data=[0.10000000149011612, 0.30000001192092896])",
+            "{case}: the print transcript must keep rendering the stored bits"
+        );
+        // The labeled root must agree with the transcript ([05-OBS-1]
+        // intra-lane exit agreement). Before chelis#864 the static DAG
+        // shortcut could widen unfinalized lexical decimals instead of the
+        // host path's stored f32 values.
+        assert_eq!(
+            tlines[1],
+            format!("troot = {}", tlines[0]),
+            "{case}: the labeled root must render the same stored bits as print"
+        );
+    }
 }
 
 /// RED (chelis#865; [#729]/[#686] capacity family; PR #863 red-team F2):

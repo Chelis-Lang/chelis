@@ -98,9 +98,12 @@ re-executed rather than silently skipped, and fails when one goes
 green, so the upstream repair's landing forces the un-ignore in the
 same change set. That protocol has now retired the [#864] cell: current
 execution showed its root metadata was already F64, while the static
-`to_tensor` lowering shortcut skipped f32 literal-ingress finalization
-before the widening cast; the construction fix, original assertion,
-oracle-ledger shrink, and annex correction land together. This is a
+`to_tensor` lowering shortcut discarded the checked dtype of each literal
+leaf and cast chain before widening it. The construction fix now carries a
+private typed leaf through f32/f64 cast evaluation; the original assertion
+covers enclosing-tensor and scalar-widening shapes, and the repaired row is
+locked into the oracle's unconditional must-run inventory after leaving the
+known-red ledger. This is a
 narrow [#717]/[#729]-family value repair and does not claim the atomic
 per-dtype-storage Phase 1 migration. It ran in parallel with [#731] Phases 2-3 (the
 witness token + DeepTag). [#730] Phase 2 is COMPLETE AND
