@@ -419,7 +419,8 @@ pub fn run_deep_source_obligations(
     source: &str,
     options: &ObligationRunOptions,
 ) -> Result<ObligationRunResult, String> {
-    let exprs = chelis_deep::parser::parse_str(source).map_err(|e| format!("parse: {e}"))?;
+    let exprs = crate::deep_compat::parse_file_to_lists(source)
+        .map_err(|error| format!("parse: {error}"))?;
     let sigs: BTreeMap<String, Type> = match chelis_types::check_typed_program(&exprs) {
         Ok(checked) => checked
             .signature_inference()
@@ -1486,7 +1487,7 @@ fn eval_scalar_const(source: &str, name: &str) -> Option<f64> {
     // An in-module constant may be a value binding (`(var name)`) or a
     // zero-argument constant function (`(app (var name))`, the desugaring
     // of `def eps() -> f32 = 0.01`).
-    let exprs: Vec<Expr> = chelis_deep::parser::parse_str(source)
+    let exprs: Vec<Expr> = crate::deep_compat::parse_file_to_lists(source)
         .ok()?
         .iter()
         .map(strip_invariant_meta)
@@ -1940,8 +1941,8 @@ fn inject_into_module_stripped(
     type_name: &str,
     defs: Vec<Expr>,
 ) -> Result<Vec<Expr>, String> {
-    let exprs = chelis_deep::parser::parse_str(module_source)
-        .map_err(|e| format!("reparse module: {e}"))?;
+    let exprs = crate::deep_compat::parse_file_to_lists(module_source)
+        .map_err(|error| format!("reparse module: {error}"))?;
     let stripped: Vec<Expr> = exprs.iter().map(strip_invariant_meta).collect();
     Ok(inject_into_defining_module(&stripped, type_name, defs))
 }

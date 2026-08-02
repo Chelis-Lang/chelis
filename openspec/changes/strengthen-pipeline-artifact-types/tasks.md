@@ -116,7 +116,8 @@
 - [x] 6.11 Add the raw diagnostic-offset compile-fail fixture to the authoritative oracle.
 - [x] 6.12 Run the current-target local gate and authoritative oracle after all typed Deep target corrections.
   - The authoritative oracle passed with the expanded typed Deep and macro coverage.
-  - The local gate passed for all nine changed crates.
+  - After `main` moved again, the oracle passed against `fe9e5a6ad35ab0c95720cbb99c184aebba55f71c`.
+  - The current-target local gate passed for all six changed crates.
 
 ## 7. Adversarial Validation
 
@@ -138,10 +139,9 @@
 - [x] 7.16 Run a final fresh local red-team agent after the fifth remediation.
 - [x] 7.17 Correct the loop, control-flow, pattern-scope, macro-import, and documentation findings.
 - [x] 7.18 Rebase onto the current remote `main` after the target moved.
+  - The target moved again after the first hosted push. The branch now uses `fe9e5a6ad35ab0c95720cbb99c184aebba55f71c`.
 - [x] 7.19 Run the authoritative oracle after the sixth remediation and target rebase.
-- [x] 7.20 Run a final fresh local red-team agent against the exact rebased tree and require a PASS verdict.
-  - A fresh local Pi subagent reviewed exact commit `6583814412bc86a549666ca1bb97a6b180f4932c`.
-  - The review returned PASS with no implementation or specification findings.
+- [ ] 7.20 Run a final fresh local red-team agent against the exact rebased tree and require a PASS verdict.
 
 ## 8. Hosted Acceptance
 

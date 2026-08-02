@@ -1764,10 +1764,6 @@ fn deep_def_has_role(expr: &DeepExpr, expected: &str) -> bool {
     })
 }
 
-fn list_tag(list: &chelis_deep::List) -> Option<DeepTag> {
-    list.tag()
-}
-
 fn symbol_name(expr: &DeepExpr) -> Option<&str> {
     match expr {
         DeepExpr::Atom(chelis_deep::Atom::Name(name), _) => Some(name.as_str()),

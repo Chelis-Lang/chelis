@@ -411,88 +411,19 @@ fn raw_typed_literal_lit_expr(
 ///
 /// Parse a token stream into a list of typed expressions.
 ///
-/// Valid input produces `Expr::Node`, `Expr::BareList`, and
-/// `Expr::UnknownForm`. Malformed input keeps the transitional list form so
-/// diagnostic consumers can report the original structure.
+/// Routes through the raw parser + `stamp_to_typed` pipeline. All production
+/// goes through `RawParser` → `stamp_to_typed`, which produces `Expr::Node`,
+/// `Expr::BareList`, and `Expr::UnknownForm`.
 pub fn parse(tokens: &[Token]) -> Result<Vec<Expr>, ParseError> {
     let raw_exprs = parse_raw(tokens)?;
-    match crate::stamp_to_typed::stamp_exprs_lenient(raw_exprs.clone()) {
-        Ok(typed) => Ok(typed),
-        Err(error) if lenient_stamp_error_is_fatal(&error) => Err(stamp_error_to_parse(error)),
-        Err(_) => {
-            let mut diagnostic_exprs = raw_exprs
-                .into_iter()
-                .map(raw_to_diagnostic_expr)
-                .collect::<Vec<_>>();
-            stamp_tags(&mut diagnostic_exprs);
-            Ok(diagnostic_exprs)
+    let typed = crate::stamp_to_typed::stamp_exprs_lenient(raw_exprs).map_err(|e| {
+        ParseError::Expected {
+            expected: "valid Deep structure".to_string(),
+            found: format!("{e}"),
+            offset: 0,
         }
-    }
-}
-
-fn lenient_stamp_error_is_fatal(error: &crate::stamp_to_typed::StampError) -> bool {
-    matches!(
-        &error.kind,
-        crate::stamp_to_typed::StampErrorKind::NodeError(crate::node::NodeError::ArityViolation {
-            tag: crate::DeepTag::Fn,
-            ..
-        })
-    )
-}
-
-fn stamp_error_to_parse(error: crate::stamp_to_typed::StampError) -> ParseError {
-    ParseError::Expected {
-        expected: "valid Deep structure".to_string(),
-        found: error.to_string(),
-        offset: 0,
-    }
-}
-
-fn raw_to_diagnostic_expr(raw: crate::raw::RawExpr) -> Expr {
-    use crate::ast::{Atom, List, MetaExpr, MetaMap};
-    use crate::raw::{RawAtom, RawExpr};
-
-    match raw {
-        RawExpr::Atom(atom, span) => {
-            let atom = match atom {
-                RawAtom::Symbol(name) => Atom::Name(name),
-                RawAtom::Int(value) => Atom::Int(value),
-                RawAtom::Float(value) => Atom::Float(value),
-                RawAtom::Str(value) => Atom::Str(value),
-                RawAtom::Bool(value) => Atom::Bool(value),
-            };
-            Expr::Atom(atom, span)
-        }
-        RawExpr::List(elements, span) => Expr::List(
-            List {
-                elements: elements.into_iter().map(raw_to_diagnostic_expr).collect(),
-            },
-            span,
-        ),
-        RawExpr::Map(entries, span) => Expr::Map(
-            MetaMap {
-                entries: entries
-                    .into_iter()
-                    .map(|(key, value)| (key, raw_to_diagnostic_expr(value)))
-                    .collect(),
-            },
-            span,
-        ),
-        RawExpr::MetaExpr {
-            entries,
-            expr,
-            span,
-        } => Expr::MetaExpr(
-            MetaExpr {
-                entries: entries
-                    .into_iter()
-                    .map(|(key, value)| (key, raw_to_diagnostic_expr(value)))
-                    .collect(),
-                expr: Box::new(raw_to_diagnostic_expr(*expr)),
-            },
-            span,
-        ),
-    }
+    })?;
+    Ok(typed)
 }
 
 /// Decode-once stamping for hand-built `Expr::List` trees in tests.
@@ -609,9 +540,7 @@ pub fn parse_str(source: &str) -> Result<Vec<Expr>, ParseError> {
 /// Returns error if any unknown tags are found.
 pub fn parse_str_strict(source: &str) -> Result<Vec<Expr>, ParseError> {
     let tokens = lexer::lex(source)?;
-    let raw_exprs = parse_raw(&tokens)?;
-    let exprs =
-        crate::stamp_to_typed::stamp_exprs_lenient(raw_exprs).map_err(stamp_error_to_parse)?;
+    let exprs = parse(&tokens)?;
     let warnings = crate::validate::validate(&exprs);
     if let Some(w) = warnings.first() {
         return Err(ParseError::Expected {
