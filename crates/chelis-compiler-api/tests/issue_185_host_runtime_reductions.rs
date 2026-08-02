@@ -49,7 +49,11 @@ out = max_reduce(&make, 0)
     let result = eval_surf(src);
     let out = root_tensor(&result, "out");
     assert_eq!(out.shape, vec![3], "max_reduce axis-0 shape");
-    assert_eq!(out.data, vec![3.0, 4.0, 5.0], "max_reduce axis-0 data");
+    assert_eq!(
+        out.data.to_f64_lossy_vec(),
+        vec![3.0, 4.0, 5.0],
+        "max_reduce axis-0 data"
+    );
 }
 
 #[test]
@@ -62,7 +66,11 @@ out = max_reduce(&make, 1)
     let result = eval_surf(src);
     let out = root_tensor(&result, "out");
     assert_eq!(out.shape, vec![2], "max_reduce axis-1 shape");
-    assert_eq!(out.data, vec![4.0, 5.0], "max_reduce axis-1 data");
+    assert_eq!(
+        out.data.to_f64_lossy_vec(),
+        vec![4.0, 5.0],
+        "max_reduce axis-1 data"
+    );
 }
 
 #[test]

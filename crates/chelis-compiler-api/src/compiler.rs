@@ -5,7 +5,7 @@ use chelis_backend_c::CodegenResult;
 use chelis_backend_hip::HipCodegenResult;
 use chelis_deep::Expr as DeepExpr;
 use chelis_ir::dag::{Dag, DimInfo, FusedInput, FusedStepOp, NodeId, RiscOp, RtDim, TensorType};
-use chelis_ir::eval::{self, TensorValue as IrTensorValue};
+use chelis_ir::eval;
 use chelis_surf::ast::{
     BinOp, Decl, Expr, ImportKind, LetBinding, LetPattern, Literal, MatchArm, Param, Pattern,
     TypeExpr, UnaryOp, Variant, VariantFields,
@@ -1243,15 +1243,12 @@ fn eval_compiled(
     let bindings = bindings
         .into_iter()
         .map(|(name, value)| {
-            (
-                name,
-                IrTensorValue {
-                    shape: value.shape,
-                    data: value.data,
-                },
-            )
+            let tensor = crate::decode::wire_tensor_to_ir(&value).map_err(|message| {
+                stage_error("eval", format!("binding `{name}`: {message}"), "eval_error")
+            })?;
+            Ok((name, tensor))
         })
-        .collect::<HashMap<_, _>>();
+        .collect::<Result<HashMap<_, _>>>()?;
 
     let roots = compiled
         .tensor_root_names
@@ -1273,7 +1270,7 @@ fn eval_compiled(
         eval::eval_tensor_roots_with_strict(&compiled.dag, &roots, |name| {
             bindings.get(name).cloned()
         })
-        .map_err(|message| stage_error("eval", message, "eval_error"))?
+        .map_err(eval_stage_error)?
     };
 
     let mut tensor_values_by_name = HashMap::<String, RuntimeTensorValue>::new();
@@ -1301,12 +1298,14 @@ fn eval_compiled(
             .ok_or_else(|| {
                 stage_error("eval", format!("missing node {}", node_id.0), "eval_error")
             })?;
+        debug_assert_eq!(
+            value.prim(),
+            precision,
+            "the DAG evaluator finalizes at the root's declared dtype"
+        );
         tensor_values_by_name.insert(
             name.as_str().to_string(),
-            RuntimeTensorValue {
-                value: value.clone(),
-                precision,
-            },
+            RuntimeTensorValue::new(value.clone()),
         );
     }
 
@@ -1337,7 +1336,7 @@ fn eval_compiled(
             selected_root_names,
         )
     }
-    .map_err(|message| stage_error("eval", message, "eval_error"))?;
+    .map_err(eval_stage_error)?;
 
     let roots = compiled
         .all_root_names
@@ -1382,6 +1381,7 @@ fn eval_compiled(
         .collect::<Result<Vec<_>>>()?;
 
     Ok(EvalResult {
+        schema_version: crate::schema::EXECUTION_VALUE_SCHEMA_VERSION,
         roots,
         transcript: host_outcome.transcript,
     })
@@ -2602,6 +2602,20 @@ pub(crate) fn stage_error(stage: &str, message: impl Into<String>, kind: &str) -
     stage_error_with_span(stage, message, kind, None)
 }
 
+fn eval_stage_error(message: String) -> CompilerError {
+    let cast_domain = message.contains("numeric trap: domain in cast at");
+    let mut error = stage_error("eval", message, "eval_error");
+    if cast_domain && let Some(diagnostic) = error.errors.first_mut() {
+        diagnostic.suggestions.push(
+            "fractional float-to-int conversion must state its rounding explicitly: \
+             apply `floor` or `round` before `cast`; truncation-to-zero and the \
+             future named lossy cast are tracked by chelis#759"
+                .to_string(),
+        );
+    }
+    error
+}
+
 /// Lift a [`WireDagSchemaError`] from validating a `WireDag` at a
 /// process boundary into a typed `schema`-stage [`CompilerError`] (WI-2).
 /// An unsupported schema version is rejected here -- surfaced to the client
@@ -3630,7 +3644,10 @@ mod tests {
             None,
         );
         let indices = dag.add_node(
-            RiscOp::Const { value: 0.0 },
+            RiscOp::synth_const(
+                tensor_type(vec![4], chelis_types::types::Prim::Int64).precision,
+                0.0,
+            ),
             vec![],
             tensor_type(vec![4], chelis_types::types::Prim::Int64),
             None,
@@ -3662,7 +3679,10 @@ mod tests {
             None,
         );
         let indices = dag.add_node(
-            RiscOp::Const { value: 0.0 },
+            RiscOp::synth_const(
+                tensor_type(vec![4], chelis_types::types::Prim::Int32).precision,
+                0.0,
+            ),
             vec![],
             tensor_type(vec![4], chelis_types::types::Prim::Int32),
             None,
@@ -4198,7 +4218,7 @@ dims = (rank(x), shape(x, 1), numel(x))
                 "x".to_string(),
                 crate::schema::TensorValue {
                     shape: vec![2, 3],
-                    data: vec![0.0; 6],
+                    data: crate::schema::TensorElements::F32(vec![0.0; 6]),
                 },
             )]),
         })
@@ -4226,6 +4246,37 @@ dims = (rank(x), shape(x, 1), numel(x))
                 .any(|root| root.name.as_deref() == Some("dims.2")
                     && matches!(root.value, ExecutionValue::Int64 { value: 6 }))
         );
+    }
+
+    #[test]
+    fn eval_rejects_tagged_binding_dtype_substitution() {
+        let err = eval(EvalRequest {
+            source_kind: SourceKind::Surf,
+            source: "x: tensor[1, f32] = x\n".to_string(),
+            bindings: BTreeMap::from([(
+                "x".to_string(),
+                crate::schema::TensorValue {
+                    shape: vec![1],
+                    data: crate::schema::TensorElements::F16(vec![1.5]),
+                },
+            )]),
+        })
+        .expect_err("a tagged f16 binding must not be contextually cast to f32");
+        let message = err
+            .errors
+            .iter()
+            .map(|diagnostic| diagnostic.message.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            message.contains("f16"),
+            "source dtype must be named: {message}"
+        );
+        assert!(
+            message.contains("f32"),
+            "declared dtype must be named: {message}"
+        );
+        assert!(message.contains("casts are explicit"), "{message}");
     }
 
     #[test]
@@ -4526,7 +4577,7 @@ b: tensor[2, f32] = b
             "a".to_string(),
             crate::schema::TensorValue {
                 shape: vec![2],
-                data: vec![1.0, 2.0],
+                data: crate::schema::TensorElements::F32(vec![1.0, 2.0]),
             },
         );
         // `b` is intentionally omitted so that evaluating root `b` fails.
@@ -4585,7 +4636,7 @@ b: tensor[2, f32] = b
             "a".to_string(),
             crate::schema::TensorValue {
                 shape: vec![2],
-                data: vec![1.0, 2.0],
+                data: crate::schema::TensorElements::F32(vec![1.0, 2.0]),
             },
         );
 

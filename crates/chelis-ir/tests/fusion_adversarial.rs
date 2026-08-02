@@ -29,7 +29,12 @@ fn assert_close(a: &[TensorValue], b: &[TensorValue], tol: f64, label: &str) {
     assert_eq!(a.len(), b.len(), "{label}: different number of outputs");
     for (i, (va, vb)) in a.iter().zip(b.iter()).enumerate() {
         assert_eq!(va.shape, vb.shape, "{label} output {i}: shapes differ");
-        for (j, (xa, xb)) in va.data.iter().zip(vb.data.iter()).enumerate() {
+        for (j, (xa, xb)) in va
+            .to_f64_lossy_vec()
+            .iter()
+            .zip(vb.to_f64_lossy_vec().iter())
+            .enumerate()
+        {
             assert!(
                 (xa - xb).abs() < tol,
                 "{label} output {i} element {j}: {xa} vs {xb} (diff {})",
@@ -46,7 +51,12 @@ fn assert_close(a: &[TensorValue], b: &[TensorValue], tol: f64, label: &str) {
 fn adv1_long_chain_5_ops() {
     let mut dag = Dag::new();
     let x = load(&mut dag, "x", vec_f32(4));
-    let c = dag.add_node(RiscOp::Const { value: 0.1 }, vec![], vec_f32(4), None);
+    let c = dag.add_node(
+        RiscOp::synth_const(vec_f32(4).precision, 0.1),
+        vec![],
+        vec_f32(4),
+        None,
+    );
     let a = dag.add_node(RiscOp::Add, vec![x, c], vec_f32(4), None);
     let b = dag.add_node(RiscOp::Neg, vec![a], vec_f32(4), None);
     let e = dag.add_node(RiscOp::Exp, vec![b], vec_f32(4), None);
@@ -123,7 +133,12 @@ fn adv2_mixed_unary_binary_chain() {
 fn adv3_external_input_used_by_multiple_steps() {
     let mut dag = Dag::new();
     let x = load(&mut dag, "x", vec_f32(4));
-    let c = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], vec_f32(4), None);
+    let c = dag.add_node(
+        RiscOp::synth_const(vec_f32(4).precision, 2.0),
+        vec![],
+        vec_f32(4),
+        None,
+    );
     // add(x, c) → mul(result, c)
     // Both steps use 'c' as an external input
     let a = dag.add_node(RiscOp::Add, vec![x, c], vec_f32(4), None);
@@ -373,7 +388,7 @@ fn adv9_cmplt_in_fused_chain_produces_float() {
 
     // Check exact values: x<y = [1,0,1,1], neg = [-1,0,-1,-1]
     assert_eq!(
-        fuse_out[0].data,
+        fuse_out[0].to_f64_lossy_vec(),
         vec![-1.0, 0.0, -1.0, -1.0],
         "CmpLt in fused chain should produce 1.0/0.0 floats, not bools"
     );
@@ -386,7 +401,12 @@ fn adv9_cmplt_in_fused_chain_produces_float() {
 fn adv10_maxelem_in_fused_chain() {
     let mut dag = Dag::new();
     let x = load(&mut dag, "x", vec_f32(4));
-    let zero = dag.add_node(RiscOp::Const { value: 0.0 }, vec![], vec_f32(4), None);
+    let zero = dag.add_node(
+        RiscOp::synth_const(vec_f32(4).precision, 0.0),
+        vec![],
+        vec_f32(4),
+        None,
+    );
     // relu = max(x, 0)
     let relu = dag.add_node(RiscOp::MaxElem, vec![x, zero], vec_f32(4), None);
     let result = dag.add_node(RiscOp::Neg, vec![relu], vec_f32(4), None);
@@ -407,7 +427,7 @@ fn adv10_maxelem_in_fused_chain() {
 
     // relu(-1)=0, relu(2)=2, relu(-3)=0, relu(4)=4
     // neg: [0, -2, 0, -4]
-    assert_eq!(fuse_out[0].data, vec![0.0, -2.0, 0.0, -4.0]);
+    assert_eq!(fuse_out[0].to_f64_lossy_vec(), vec![0.0, -2.0, 0.0, -4.0]);
 }
 
 fn main() {}

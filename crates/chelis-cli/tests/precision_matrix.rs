@@ -663,6 +663,82 @@ fn i64_max_literal_is_exact() {
 }
 
 // ===========================================================================
+// TYPED-LITERAL SUFFIX WITNESSES (spec/02 P10a x chelis#729): the suffix
+// binds the literal "at exactly that precision"; these rows make that
+// guarantee executable in the eval lane per the chelis#729 thread's
+// work item. The compiled-lane halves ride the Phase 3 oracle files.
+// ===========================================================================
+
+/// An f16-suffixed literal computes at f16: the product of 0.1f16 with
+/// itself is the correctly rounded f16 square of the f16 image of 0.1,
+/// rendered shortest-at-f16-width (the scalar-lock value from
+/// narrow_dtype_matrix, reached through the SUFFIX form).
+#[test]
+fn f16_suffix_literal_computes_at_f16() {
+    assert_eq!(
+        eval_lane_str("mul(0.1f16, 0.1f16)").expect("eval"),
+        "0.009995"
+    );
+}
+
+/// An i64-suffixed literal above 2^53 is exact as a bare expression.
+#[test]
+fn int64_suffix_literal_bare_expression_is_exact() {
+    assert_eq!(
+        eval_lane_str("9007199254740993i64").expect("eval"),
+        "9007199254740993"
+    );
+}
+
+/// The same i64-suffixed literal through a top-level BINDING. Fixed at
+/// the chelis#729 rework (chelis#856): the DAG literal payload is the
+/// sealed dtype-true scalar, so the binding form is exact.
+#[test]
+fn int64_suffix_literal_binding_is_exact() {
+    let got = eval_program_first_line("module M.Main\nx = 9007199254740993i64\nout = print(x)\n")
+        .expect("eval");
+    assert_eq!(got, "9007199254740993");
+}
+
+// ===========================================================================
+// PIPE-FORM ACCEPTANCE BYPASS (rt857 F1 / chelis#860): `x |> recip` used
+// to escape the checker's float-only rejection that the direct form gets
+// (a chelis#709-class acceptance hole). CLOSED at the chelis#729 rework:
+// bare pipe stages consult the shared operand-dtype chokepoint, so the
+// rejection is now check-time (see issue_860_checker_chokepoint.rs). The
+// runtime Domain trap remains behind it as defense in depth (the
+// chelis#729 Phase 1 scalar guard).
+// ===========================================================================
+
+/// The program must FAIL LOUDLY on every polarity: since the chelis#860
+/// fix that failure is the check-time rejection; the runtime Domain trap
+/// is the defense-in-depth backstop this row keeps honest. Either way it
+/// must never succeed and print a substituted value (pre-fix it printed
+/// `0` and exited 0).
+#[test]
+fn int_recip_through_pipe_fails_loud_never_zero() {
+    for (expr, label) in [
+        ("cast(2, int32) |> recip", "int32"),
+        ("cast(2, int8) |> recip", "int8"),
+        ("cast(2, int64) |> recip", "int64"),
+    ] {
+        match eval_lane_str(expr) {
+            Ok(v) => panic!(
+                "{label}: `{expr}` must fail loudly (trap or checker rejection), \
+                 but it succeeded and returned {v}"
+            ),
+            Err(stderr) => assert!(
+                stderr.contains("numeric trap: domain")
+                    || stderr.contains("does not accept argument type")
+                    || stderr.contains("not admitted"),
+                "{label}: `{expr}` failed but without the branded domain trap or \
+                 the float-only rejection. Got: {stderr}"
+            ),
+        }
+    }
+}
+
+// ===========================================================================
 // OVERFLOW: per #680, errors not wraps, at EVERY width.
 //
 // Today there are TWO different behaviors split by width, neither authored:
@@ -688,8 +764,10 @@ fn assert_traps_with_overflow(expr: &str, label: &str) {
 
 /// Verified today: returns i64::MAX (saturates).
 #[test]
-#[ignore = "chelis#680: saturates to i64::MAX instead of trapping. This test asserts the CORRECT \
-            behavior and fails until the fix lands. Run with \
+#[ignore = "chelis#680: still saturates to i64::MAX. chelis#729 Phase 1 made int8/16/32 trap \
+            through finalize (their f64 wide value is exact); int64's wide value still comes \
+            from the unsplit f64 closures behind the cited saturating adapter, so the trap \
+            lands with the Phase 2 kernel split. Run with \
             `cargo test -p chelis-cli --test precision_matrix -- --ignored`."]
 fn int64_add_overflow_traps() {
     assert_traps_with_overflow(
@@ -701,8 +779,8 @@ fn int64_add_overflow_traps() {
 /// Verified today: returns i64::MAX. Both operands are in range; only the
 /// product overflows, so this cannot be dismissed as a bad literal.
 #[test]
-#[ignore = "chelis#680: saturates to i64::MAX instead of trapping. This test asserts the CORRECT \
-            behavior and fails until the fix lands. Run with \
+#[ignore = "chelis#680: still saturates to i64::MAX (see int64_add_overflow_traps: the \
+            int64 wide value waits for the Phase 2 kernel split). Run with \
             `cargo test -p chelis-cli --test precision_matrix -- --ignored`."]
 fn int64_mul_overflow_traps() {
     assert_traps_with_overflow(
@@ -713,18 +791,12 @@ fn int64_mul_overflow_traps() {
 
 /// Verified today: returns -128 (WRAPS, unlike int64 which saturates).
 #[test]
-#[ignore = "chelis#680: wraps to -128 instead of trapping. This test asserts the CORRECT \
-            behavior and fails until the fix lands. Run with \
-            `cargo test -p chelis-cli --test precision_matrix -- --ignored`."]
 fn int8_add_overflow_traps() {
     assert_traps_with_overflow("add(cast(127, int8), cast(1, int8))", "int8_add_overflow");
 }
 
 /// Verified today: returns -32768 (wraps).
 #[test]
-#[ignore = "chelis#680: wraps to -32768 instead of trapping. This test asserts the CORRECT \
-            behavior and fails until the fix lands. Run with \
-            `cargo test -p chelis-cli --test precision_matrix -- --ignored`."]
 fn int16_add_overflow_traps() {
     assert_traps_with_overflow(
         "add(cast(32767, int16), cast(1, int16))",
@@ -734,9 +806,6 @@ fn int16_add_overflow_traps() {
 
 /// Verified today: returns -2147483648 (wraps).
 #[test]
-#[ignore = "chelis#680: wraps to -2147483648 instead of trapping. This test asserts the CORRECT \
-            behavior and fails until the fix lands. Run with \
-            `cargo test -p chelis-cli --test precision_matrix -- --ignored`."]
 fn int32_add_overflow_traps() {
     assert_traps_with_overflow(
         "add(cast(2147483647, int32), cast(1, int32))",
@@ -786,9 +855,6 @@ fn int8_add_just_below_overflow_does_not_trap() {
 ///   eval -> [9007199254740992]   (IrTensorValue.data is Vec<f64>)
 ///   C    -> [9007199254740993]   (C runtime has dtype-tagged storage)
 #[test]
-#[ignore = "chelis#684: eval [9007199254740992], compiled C [9007199254740993]. This test asserts the CORRECT \
-            behavior and fails until the fix lands. Run with \
-            `cargo test -p chelis-cli --test precision_matrix -- --ignored`."]
 fn int64_tensor_round_trip_is_exact_in_every_lane() {
     let expr = "to_list(to_tensor([cast(9007199254740993, int64)]))";
     let eval_got = eval_lane_str(expr).expect("eval lane");
@@ -881,9 +947,6 @@ fn bare_expression_keeps_int64_exact() {
 /// Verified: prints `tensor(shape=[], data=[9007199254740992.0])`. An
 /// UNannotated top-level binding is enough to promote and corrupt.
 #[test]
-#[ignore = "chelis#684: binding promotes the scalar to a rank-0 f64 tensor. This test asserts the CORRECT \
-            behavior and fails until the fix lands. Run with \
-            `cargo test -p chelis-cli --test precision_matrix -- --ignored`."]
 fn unannotated_top_level_binding_keeps_int64_exact() {
     let got = eval_program_first_line(
         "module M.Main\nx = cast(9007199254740993, int64)\nout = print(x)\n",
@@ -900,9 +963,6 @@ fn unannotated_top_level_binding_keeps_int64_exact() {
 /// Verified: identical corruption to the unannotated form. Proves the promotion
 /// is caused by the BINDING, not by the type annotation.
 #[test]
-#[ignore = "chelis#684: binding promotes the scalar to a rank-0 f64 tensor. This test asserts the CORRECT \
-            behavior and fails until the fix lands. Run with \
-            `cargo test -p chelis-cli --test precision_matrix -- --ignored`."]
 fn annotated_top_level_binding_keeps_int64_exact() {
     let got = eval_program_first_line(
         "module M.Main\nx: int64 = cast(9007199254740993, int64)\nout = print(x)\n",
@@ -935,9 +995,6 @@ fn def_body_keeps_int64_exact() {
 /// Fan-out: binding used twice (auto-copy per the implicit-linearity rules).
 /// Both reads must agree with each other and with the true value.
 #[test]
-#[ignore = "chelis#684: binding promotes the scalar to a rank-0 f64 tensor. This test asserts the CORRECT \
-            behavior and fails until the fix lands. Run with \
-            `cargo test -p chelis-cli --test precision_matrix -- --ignored`."]
 fn int64_binding_fanout_keeps_both_reads_exact_and_equal() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("f.ch");

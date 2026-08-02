@@ -55,11 +55,11 @@ out = argmax_reduce(&make, 0)
     let out = root_tensor(&result, "out");
     assert_eq!(out.shape, vec![3], "argmax_reduce axis-0 shape");
     assert_eq!(
-        out.data,
+        out.data.to_f64_lossy_vec(),
         vec![1.0, 0.0, 1.0],
         "argmax_reduce axis-0 indices (integer-valued)"
     );
-    for v in &out.data {
+    for v in &out.data.to_f64_lossy_vec() {
         assert_eq!(
             *v,
             v.trunc(),
@@ -84,11 +84,11 @@ out = argmax_reduce(&make, 1)
     let out = root_tensor(&result, "out");
     assert_eq!(out.shape, vec![2], "argmax_reduce axis-1 shape");
     assert_eq!(
-        out.data,
+        out.data.to_f64_lossy_vec(),
         vec![1.0, 2.0],
         "argmax_reduce axis-1 indices (integer-valued)"
     );
-    for v in &out.data {
+    for v in &out.data.to_f64_lossy_vec() {
         assert_eq!(
             *v,
             v.trunc(),
@@ -113,11 +113,11 @@ out = argmin_reduce(&make, 0)
     let out = root_tensor(&result, "out");
     assert_eq!(out.shape, vec![3], "argmin_reduce axis-0 shape");
     assert_eq!(
-        out.data,
+        out.data.to_f64_lossy_vec(),
         vec![0.0, 1.0, 0.0],
         "argmin_reduce axis-0 indices (integer-valued)"
     );
-    for v in &out.data {
+    for v in &out.data.to_f64_lossy_vec() {
         assert_eq!(
             *v,
             v.trunc(),
@@ -141,11 +141,11 @@ out = argmin_reduce(&make, 1)
     let out = root_tensor(&result, "out");
     assert_eq!(out.shape, vec![2], "argmin_reduce axis-1 shape");
     assert_eq!(
-        out.data,
+        out.data.to_f64_lossy_vec(),
         vec![0.0, 1.0],
         "argmin_reduce axis-1 indices (integer-valued)"
     );
-    for v in &out.data {
+    for v in &out.data.to_f64_lossy_vec() {
         assert_eq!(
             *v,
             v.trunc(),

@@ -415,9 +415,6 @@ fn c_int64_tensor_sum_is_exact_via_to_list() {
 /// Observed today: eval prints [9007199254740992] - the Vec<f64> storage
 /// (#684) collapses the element before the sum ever runs.
 #[test]
-#[ignore = "chelis#684: eval's int64 tensor sum returns 9007199254740992 (f64 storage); the \
-            exact answer 9007199254740993 is what the C lane already produces. Run with \
-            `cargo test -p chelis-cli --test reduction_and_bitwise_matrix -- --ignored`."]
 fn eval_int64_tensor_sum_is_exact_at_2p53() {
     assert_eq!(
         eval_first_line(I64_SUM_2P53).expect("eval"),
@@ -450,13 +447,15 @@ fn c_int64_tensor_print_is_exact_above_2p53() {
 // chelis#724 - integer mean: three stages, three answers
 // ===========================================================================
 
-/// Observed today: eval prints 187.5 (a fractional value inside an
-/// int64-typed tensor), compiled C prints 187.0. This row asserts only lane
-/// AGREEMENT, not which of the three defensible semantics lands.
+/// Historical row (kept for the archaeology): eval printed 187.5 (a
+/// fractional value inside an int64-typed tensor) and compiled C printed
+/// 187.0 - three stages, three answers. RE-AUTHORED at the chelis#729
+/// rework per the DECIDED chelis#724 disposition (reject integer mean):
+/// both lanes now agree by construction because `chelis check` rejects
+/// the program before either lane runs, with the chelis#724 capability
+/// diagnostic pointing at the cast-first idiom. Lane agreement is the
+/// row's original assertion, now satisfied as agreement-in-rejection.
 #[test]
-#[ignore = "chelis#724: mean of an int64 tensor - eval 187.5, compiled C 187.0, checker \
-            blessed both. Lanes must agree once the semantics are authored. Run with \
-            `cargo test -p chelis-cli --test reduction_and_bitwise_matrix -- --ignored`."]
 fn int64_tensor_mean_lanes_agree() {
     if !c_toolchain_available() {
         panic!("needs a host C toolchain");
@@ -465,17 +464,18 @@ fn int64_tensor_mean_lanes_agree() {
          def f(x: tensor[4, int64]) -> tensor[int64] = mean(x, 0)\n\
          out = print(f(to_tensor([cast(100, int64), cast(400, int64), \
          cast(200, int64), cast(50, int64)])))\n";
-    let eval_got = eval_first_line(program).expect("eval");
-    let c_got = c_first_line(program, "i64_mean");
-    // chelis#729 Phase 0: agreement alone is not enough for this row.
-    // 187.5 in an int64 tensor is a domain violation even if both lanes
-    // were to agree on it; the checker keeps this red until the #724
-    // semantics are authored, not merely until the lanes coincide.
-    common::assert_elements_in_domain("int64", &eval_got, "i64_mean eval");
-    common::assert_elements_in_domain("int64", &c_got, "i64_mean C");
-    assert_eq!(
-        eval_got, c_got,
-        "mean of an integer tensor must mean ONE thing"
+    let eval_err = eval_first_line(program)
+        .expect_err("integer mean must be rejected by the checker (chelis#724)");
+    assert!(
+        eval_err.contains("chelis#724") && !eval_err.contains("numeric trap"),
+        "eval-lane rejection must be the check-time chelis#724 capability \
+         diagnostic, not a runtime trap; got: {eval_err}"
+    );
+    let (ok, c_stderr, _) = c_build_outcome(program, "i64_mean");
+    assert!(
+        !ok && c_stderr.contains("chelis#724"),
+        "compiled-lane build must reject with the same chelis#724 \
+         diagnostic (the check precedes codegen); got ok={ok}, stderr: {c_stderr}"
     );
 }
 

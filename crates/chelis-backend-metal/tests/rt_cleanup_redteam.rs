@@ -27,7 +27,12 @@ fn vec_prec(n: usize, prec: Prim) -> TensorType {
 
 fn build_const_root_dag(prec: Prim, value: f64) -> Dag {
     let mut dag = Dag::new();
-    let c = dag.add_node(RiscOp::Const { value }, vec![], vec_prec(4, prec), None);
+    let c = dag.add_node(
+        RiscOp::synth_const(prec, value),
+        vec![],
+        vec_prec(4, prec),
+        None,
+    );
     let stored = dag.add_node(
         RiscOp::Store { name: "out".into() },
         vec![c],

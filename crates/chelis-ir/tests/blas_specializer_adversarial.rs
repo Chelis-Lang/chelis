@@ -62,7 +62,12 @@ fn dead_intermediates_pruned(dag: &Dag) -> bool {
 /// (Expand → Cast → Mul → Sum or Cast → Expand → Mul → Sum) so adversarial
 /// perturbations can be injected at known positions.
 fn add_const_mat(dag: &mut Dag, prim: Prim, r: usize, c: usize) -> chelis_ir::dag::NodeId {
-    dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat(prim, r, c), None)
+    dag.add_node(
+        RiscOp::synth_const(mat(prim, r, c).precision, 1.0),
+        vec![],
+        mat(prim, r, c),
+        None,
+    )
 }
 
 /// ADV-1: A *non-identity* cast pair f32→f64→f32 between Expand and Mul
@@ -428,7 +433,12 @@ fn named_vs_lit_dim_reshape_is_not_identity_and_misses_blas() {
         ],
         precision: Prim::F32,
     };
-    let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], a_ty.clone(), None);
+    let a = dag.add_node(
+        RiscOp::synth_const(a_ty.precision, 1.0),
+        vec![],
+        a_ty.clone(),
+        None,
+    );
 
     // Reshape into all-Lit form: even though same numeric values, the
     // dims vector is structurally distinct -> not an identity Reshape.

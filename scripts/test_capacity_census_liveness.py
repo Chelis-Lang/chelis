@@ -7,6 +7,8 @@ Run: .venv/bin/python scripts/test_capacity_census_liveness.py
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from capacity_census_liveness import (
     IssueKind,
@@ -15,6 +17,7 @@ from capacity_census_liveness import (
     adjudicate,
     extract_issue_refs,
     fetch_issue,
+    load_census_rows,
 )
 
 
@@ -29,6 +32,23 @@ class ExtractIssueRefs(unittest.TestCase):
 
     def test_baseline_tag_has_no_refs(self) -> None:
         self.assertEqual(extract_issue_refs("baseline-2026-07-30"), [])
+
+
+class LoadCensusRows(unittest.TestCase):
+    def test_top_level_citation_is_inherited_without_overriding_row_citation(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            census = root / "typed.json"
+            census.write_text(
+                '{"citation":"chelis#729","rows":['
+                '{"kind":"wire","id":"inherited"},'
+                '{"kind":"wire","id":"specific","citation":"chelis#893"}'
+                "]}"
+            )
+            rows = load_census_rows(root, (Path("typed.json"),))
+
+        self.assertEqual(rows[0]["citation"], "chelis#729")
+        self.assertEqual(rows[1]["citation"], "chelis#893")
 
 
 class Adjudicate(unittest.TestCase):

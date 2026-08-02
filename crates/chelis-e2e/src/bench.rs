@@ -1497,7 +1497,11 @@ fn push_f32s(buf: &mut Vec<u8>, values: &[f32]) {
 fn push_tensor_f32(buf: &mut Vec<u8>, tensor: &TensorValue) {
     push_f32s(
         buf,
-        &tensor.data.iter().map(|v| *v as f32).collect::<Vec<_>>(),
+        &tensor
+            .to_f64_lossy_vec()
+            .iter()
+            .map(|v| *v as f32)
+            .collect::<Vec<_>>(),
     );
 }
 

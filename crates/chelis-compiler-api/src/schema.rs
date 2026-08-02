@@ -104,10 +104,143 @@ pub struct Span {
     pub len: usize,
 }
 
+/// Execution-payload wire version (chelis#729 Phase 1, the section C3
+/// storage decision's wire layer). Version history:
+///
+/// * v1 (implicit; no version field on the wire): `TensorValue.data` was
+///   an untagged `Vec<f64>`, which cannot carry exact int64 above 2^53
+///   (chelis#686) and erased every element dtype (chelis#685).
+/// * v2: `TensorValue.data` is the tagged per-dtype [`TensorElements`]
+///   payload below; numeric scalar leaves use exact-width
+///   [`ExecutionValue`] variants instead of substituting `Int64`/`Float64`;
+///   and [`EvalResult`] stamps `schema_version: 2`.
+///
+/// Mechanics (v1 compat DELETED at the chelis#729 rework): producers
+/// always stamp the current version, and `schema_version` is REQUIRED on
+/// decode and must equal this constant - a missing field is a loud serde
+/// "missing field `schema_version`" error, and a `1` (or any other
+/// value) is a loud error naming the field and both versions. Every
+/// reader and writer of this payload is in-repo, so there is no
+/// deployment that can legitimately present a version-less or v1
+/// payload; per the chelis#730 closed-vocabulary doctrine (closed types
+/// have no `Default` and no `Unknown`), the compat default was a spare
+/// key to a door that should have exactly one. Tensor BINDINGS in
+/// requests changed shape with v2, so a v1 client posting the old
+/// bare-array `data` also fails loudly at serde (a type error at the
+/// payload position), never a silent reinterpretation. This constant
+/// governs the execution payload only; `WIRE_DAG_SCHEMA_VERSION` below
+/// governs the `WireDag` surface and is independent (and, unlike this
+/// one, has a genuinely external consumer - see its note).
+pub const EXECUTION_VALUE_SCHEMA_VERSION: u32 = 2;
+
+/// Field validator for [`EvalResult::schema_version`]: the field is
+/// required and must equal [`EXECUTION_VALUE_SCHEMA_VERSION`]. The
+/// error names the field so a stale producer is diagnosable from the
+/// message alone.
+fn require_execution_value_schema_version<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    use serde::de::Error;
+    let version = u32::deserialize(deserializer)?;
+    if version != EXECUTION_VALUE_SCHEMA_VERSION {
+        return Err(D::Error::custom(format!(
+            "unsupported `schema_version` {version} on the execution-value              payload: this reader supports exactly              {EXECUTION_VALUE_SCHEMA_VERSION} (the v1 compat path was              deleted at the chelis#729 rework; regenerate the payload              with a current producer)"
+        )));
+    }
+    Ok(version)
+}
+
+/// Per-dtype tensor element payload (execution wire v2; the chelis#729
+/// section C3 storage decision expressed at the wire layer). Integer
+/// families carry exact integers at width; `f16`/`bf16` carry the EXACT
+/// f64 images of the stored half-precision values (every half value is
+/// exactly representable in f64, and JSON numbers carry f64 exactly);
+/// bool carries true/false.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "dtype", content = "values", rename_all = "snake_case")]
+pub enum TensorElements {
+    F64(Vec<f64>),
+    F32(Vec<f32>),
+    F16(Vec<f64>),
+    Bf16(Vec<f64>),
+    Int64(Vec<i64>),
+    Int32(Vec<i32>),
+    Int16(Vec<i16>),
+    Int8(Vec<i8>),
+    Bool(Vec<bool>),
+}
+
+impl TensorElements {
+    pub fn len(&self) -> usize {
+        match self {
+            TensorElements::F64(v) => v.len(),
+            TensorElements::F32(v) => v.len(),
+            TensorElements::F16(v) => v.len(),
+            TensorElements::Bf16(v) => v.len(),
+            TensorElements::Int64(v) => v.len(),
+            TensorElements::Int32(v) => v.len(),
+            TensorElements::Int16(v) => v.len(),
+            TensorElements::Int8(v) => v.len(),
+            TensorElements::Bool(v) => v.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Widen every element to f64. Exact except for int64 magnitudes
+    /// above 2^53, hence the lossy name (the section C3 read-side
+    /// contract; consumers that need exact int64 match the variant).
+    pub fn to_f64_lossy_vec(&self) -> Vec<f64> {
+        match self {
+            TensorElements::F64(v) => v.clone(),
+            TensorElements::F32(v) => v.iter().map(|&x| x as f64).collect(),
+            TensorElements::F16(v) => v.clone(),
+            TensorElements::Bf16(v) => v.clone(),
+            TensorElements::Int64(v) => v.iter().map(|&x| x as f64).collect(),
+            TensorElements::Int32(v) => v.iter().map(|&x| x as f64).collect(),
+            TensorElements::Int16(v) => v.iter().map(|&x| x as f64).collect(),
+            TensorElements::Int8(v) => v.iter().map(|&x| x as f64).collect(),
+            TensorElements::Bool(v) => v.iter().map(|&x| if x { 1.0 } else { 0.0 }).collect(),
+        }
+    }
+
+    /// One element widened to f64 (same loss profile as
+    /// [`Self::to_f64_lossy_vec`]).
+    pub fn element_as_f64_lossy(&self, index: usize) -> f64 {
+        match self {
+            TensorElements::F64(v) => v[index],
+            TensorElements::F32(v) => v[index] as f64,
+            TensorElements::F16(v) => v[index],
+            TensorElements::Bf16(v) => v[index],
+            TensorElements::Int64(v) => v[index] as f64,
+            TensorElements::Int32(v) => v[index] as f64,
+            TensorElements::Int16(v) => v[index] as f64,
+            TensorElements::Int8(v) => v[index] as f64,
+            TensorElements::Bool(v) => {
+                if v[index] {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
+        }
+    }
+
+    /// Convenience f64 constructor for request builders and tests that
+    /// carry plain float payloads.
+    pub fn from_f64_vec(data: Vec<f64>) -> Self {
+        TensorElements::F64(data)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct TensorValue {
     pub shape: Vec<usize>,
-    pub data: Vec<f64>,
+    pub data: TensorElements,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -116,14 +249,37 @@ pub struct DictEntryValue {
     pub value: ExecutionValue,
 }
 
+/// Machine-facing execution value. Every numeric scalar variant names its
+/// own dtype; the field width is either that dtype's exact Rust carrier or,
+/// for f16/bf16, the exact f64 image of the stored reduced-width value.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ExecutionValue {
     Tensor {
         value: TensorValue,
     },
+    Int8 {
+        value: i8,
+    },
+    Int16 {
+        value: i16,
+    },
+    Int32 {
+        value: i32,
+    },
     Int64 {
         value: i64,
+    },
+    Float16 {
+        /// Exact f64 image of the stored IEEE binary16 value.
+        value: f64,
+    },
+    Bfloat16 {
+        /// Exact f64 image of the stored bfloat16 value.
+        value: f64,
+    },
+    Float32 {
+        value: f32,
     },
     Float64 {
         value: f64,
@@ -588,6 +744,12 @@ pub struct EvaluatedRoot {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EvalResult {
+    /// Execution-payload wire version (see
+    /// [`EXECUTION_VALUE_SCHEMA_VERSION`]): producers stamp the current
+    /// version; decode REQUIRES the field and rejects any other version
+    /// loudly (the v1 compat default is gone, chelis#729 rework).
+    #[serde(deserialize_with = "require_execution_value_schema_version")]
+    pub schema_version: u32,
     pub roots: Vec<EvaluatedRoot>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub transcript: Vec<String>,
@@ -1160,10 +1322,25 @@ pub struct WireRecordPatternField {
 ///   extents), and `WireRtDim` gained the `Sym` variant. A reshape target
 ///   now serializes as a bound-tagged value (`lit` / `node` / `sym`), not
 ///   a dim-info object, so a pinned consumer must observe the bump.
-pub const WIRE_DAG_SCHEMA_VERSION: u32 = 3;
+/// - `4`: chelis#729 rework (chelis#856, the fifth storage layer) —
+///   `WireRiscOp::Const::value` changed from a bare f64 to the sealed
+///   dtype-tagged scalar payload and `WireRiscOp::ConstTensor::data`
+///   from `Vec<f64>` to the sealed per-dtype storage payload. Integer
+///   constants now travel exact at width (no f64 collapse above 2^53)
+///   and decoding finalizes through the dtype_semantics module
+///   (finalize-on-decode; corrupt reduced-float images are a loud
+///   decode error).
+pub const WIRE_DAG_SCHEMA_VERSION: u32 = 4;
 
-/// Backwards-compat default for [`WireDag::schema_version`]. A wire
-/// payload predating WI-2 carries no `schema_version`; it is the
+/// Backwards-compat default for [`WireDag::schema_version`]. KEPT at
+/// the chelis#729 rework (which deleted the sibling default on
+/// `EvalResult`) because the `WireDag` surface has a genuinely external
+/// consumer: Chelis-Lang/beacon ships its own parser with
+/// `SUPPORTED_SCHEMA_VERSIONS` covering 1-3 and content-addressed
+/// stored artifacts, so removing version-less acceptance here is a
+/// cross-repo decision, flagged on PR #857 rather than taken
+/// unilaterally. A wire payload predating WI-2 carries no
+/// `schema_version`; it is the
 /// pre-versioning surface, which is version `1`, so a missing field
 /// deserializes to the current baseline. This keeps deserialize additive
 /// (same rationale as [`default_sum_accumulator_name`]). The default is
@@ -1489,10 +1666,12 @@ pub enum WireRiscOp {
         strides: Vec<WireRtDim>,
     },
     Const {
-        value: f64,
+        /// Sealed dtype-tagged scalar (wire v4; finalize-on-decode).
+        value: chelis_types::ScalarValue,
     },
     ConstTensor {
-        data: Vec<f64>,
+        /// Sealed per-dtype storage (wire v4; finalize-on-decode).
+        data: chelis_types::TensorStorage,
     },
     Shape {
         axis: usize,

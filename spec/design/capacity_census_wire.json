@@ -1,0 +1,601 @@
+{
+  "version": 1,
+  "citation": "Phase-1 dtype-tagged wire-schema baseline; chelis#729",
+  "rows": [
+    {
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::ChangeSignatureResult.rewritten_calls: usize",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "float-carrier"
+      ],
+      "id": "chelis_compiler_api::schema::CheckResult.score: f64",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::CheckResult.total_nodes: usize",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::CheckResult.typed_nodes: usize",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::CheckResult.untyped_nodes: usize",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::CompileResult.peak_device_bytes_estimate: Option<usize>",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "float-carrier"
+      ],
+      "id": "chelis_compiler_api::schema::Diagnostic.severity: f64",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::EvalResult.schema_version: u32",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::EvaluatedRoot.node_id: usize",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "float-carrier"
+      ],
+      "id": "chelis_compiler_api::schema::ExecutionValue::Bfloat16.value: f64",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "float-carrier"
+      ],
+      "id": "chelis_compiler_api::schema::ExecutionValue::Float16.value: f64",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "float-carrier"
+      ],
+      "id": "chelis_compiler_api::schema::ExecutionValue::Float32.value: f32",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "float-carrier"
+      ],
+      "id": "chelis_compiler_api::schema::ExecutionValue::Float64.value: f64",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::ExecutionValue::Int16.value: i16",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::ExecutionValue::Int32.value: i32",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::ExecutionValue::Int64.value: i64",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::ExecutionValue::Int8.value: i8",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "float-carrier"
+      ],
+      "id": "chelis_compiler_api::schema::FitnessComponents.names: f64",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "float-carrier"
+      ],
+      "id": "chelis_compiler_api::schema::FitnessComponents.parse: f64",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "float-carrier"
+      ],
+      "id": "chelis_compiler_api::schema::FitnessComponents.structure: f64",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "float-carrier"
+      ],
+      "id": "chelis_compiler_api::schema::FitnessComponents.types: f64",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::GradResult.forward_nodes_by_name: std::collections::BTreeMap<String, usize>",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::GradResult.grad_nodes_by_name: std::collections::BTreeMap<String, usize>",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::GradResult.output_node: usize",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::LowerResult.named_roots: std::collections::BTreeMap<String, usize>",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::RenameResult.renamed_references: usize",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::Span.len: usize",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::Span.offset: usize",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "float-carrier"
+      ],
+      "id": "chelis_compiler_api::schema::TensorElements::Bf16.0: Vec<f64>",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "float-carrier"
+      ],
+      "id": "chelis_compiler_api::schema::TensorElements::F16.0: Vec<f64>",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "float-carrier"
+      ],
+      "id": "chelis_compiler_api::schema::TensorElements::F32.0: Vec<f32>",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "float-carrier"
+      ],
+      "id": "chelis_compiler_api::schema::TensorElements::F64.0: Vec<f64>",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::TensorElements::Int16.0: Vec<i16>",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::TensorElements::Int32.0: Vec<i32>",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::TensorElements::Int64.0: Vec<i64>",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::TensorElements::Int8.0: Vec<i8>",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::TensorValue.shape: Vec<usize>",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::WireDag.roots: Vec<usize>",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::WireDag.schema_version: u32",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::WireDagNode.id: usize",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::WireDagNode.inputs: Vec<usize>",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "float-carrier"
+      ],
+      "id": "chelis_compiler_api::schema::WireDeepAtom::Float.value: f64",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::WireDeepAtom::Int.value: i64",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::WireDimExpr::Concrete.value: usize",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::WireDimInfo::Lit.size: usize",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::WireDimInfo::Named.size: Option<usize>",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::WireFusedInput::External.index: usize",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::WireFusedInput::PreviousStep.index: usize",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::WireInferredDim::Lit.size: i64",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::WireInferredDim::Rank.id: u32",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::WireInferredDim::Var.id: u32",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::WireInferredPrecision::Var.id: u32",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::WireInferredType::Var.id: u32",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "float-carrier"
+      ],
+      "id": "chelis_compiler_api::schema::WireLiteral::Float.value: f64",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::WireLiteral::Int.value: i64",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "float-carrier"
+      ],
+      "id": "chelis_compiler_api::schema::WireLiteral::TypedFloat.value: f64",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::WireLiteral::TypedInt.value: i64",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::WireRiscOp::Argmax.axis: usize",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::WireRiscOp::Argmin.axis: usize",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "float-carrier"
+      ],
+      "id": "chelis_compiler_api::schema::WireRiscOp::Dropout.rate: f64",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::WireRiscOp::Dropout.seed: u64",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::WireRiscOp::Expand.axis: usize",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::WireRiscOp::Gather.axis: usize",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::WireRiscOp::MaxReduce.axis: usize",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::WireRiscOp::MinReduce.axis: usize",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::WireRiscOp::OneHot.vocab: usize",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "float-carrier"
+      ],
+      "id": "chelis_compiler_api::schema::WireRiscOp::Pad.fill: f64",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::WireRiscOp::Permute.axes: Vec<usize>",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::WireRiscOp::ProdReduce.axis: usize",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::WireRiscOp::ReduceWindow.strides: Vec<usize>",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::WireRiscOp::ReduceWindow.window_shape: Vec<usize>",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::WireRiscOp::ReduceWindowGrad.strides: Vec<usize>",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::WireRiscOp::ReduceWindowGrad.window_shape: Vec<usize>",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::WireRiscOp::Scatter.axis: usize",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::WireRiscOp::ScatterAdd.axis: usize",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::WireRiscOp::ScatterElements.axis: usize",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::WireRiscOp::Shape.axis: usize",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::WireRiscOp::Sum.axis: usize",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "float-carrier"
+      ],
+      "id": "chelis_compiler_api::schema::WireRiscOp::UniformLike.high: f64",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "float-carrier"
+      ],
+      "id": "chelis_compiler_api::schema::WireRiscOp::UniformLike.low: f64",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::WireRiscOp::UniformLike.seed: u64",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::WireRtDim::Lit.value: usize",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::WireRtDim::Node.input: usize",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::WireSurfExpr::TupleGet.index: i64",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::WireSurfExpr::Vmap.axis: Option<i64>",
+      "kind": "wire-schema-numeric-field"
+    }
+  ]
+}

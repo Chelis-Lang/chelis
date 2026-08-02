@@ -35,12 +35,12 @@ pub(super) fn pattern_matches(
                 (RuntimeValue::Scalar(payload), Expr::Atom(Atom::Int(rhs), _))
                     if payload.dtype().is_integer() =>
                 {
-                    payload.bits().as_i64() == *rhs
+                    payload.as_i64() == *rhs
                 }
                 (RuntimeValue::Scalar(payload), Expr::Atom(Atom::Float(rhs), _))
                     if payload.dtype().is_float() =>
                 {
-                    payload.bits().as_f64() == *rhs
+                    payload.as_f64_lossy() == *rhs
                 }
                 (RuntimeValue::Bool(lhs), Expr::Atom(Atom::Bool(rhs), _)) => lhs == rhs,
                 (RuntimeValue::String(lhs), Expr::Atom(Atom::Str(rhs), _)) => lhs == rhs,
@@ -353,14 +353,18 @@ pub(super) fn dispatch_scalar_binop(
         (RuntimeValue::Scalar(lp), RuntimeValue::Scalar(rp))
             if lp.dtype().is_integer() && rp.dtype().is_integer() =>
         {
-            // Mirror pre-WS-A0 behavior: integer scalar ops compute the
-            // result in f64 and truncate. Result dtype is the operand
-            // dtype; if dtypes differ, widen to int64.
+            // chelis#729 Phase 1: the wide value still comes from the
+            // unsplit f64 closure, and the trailing `as i64` saturating
+            // cast is the documented chelis#680 residue adapter (exact
+            // for int8/16/32, saturating at int64 until the Phase 2
+            // kernel split computes integers in i64). Construction then
+            // runs through finalize, which traps out-of-width results.
             let (ldt, rdt) = (lp.dtype(), rp.dtype());
-            let (lb, rb) = (lp.bits(), rp.bits());
             let result_dtype = if ldt == rdt { ldt } else { Prim::Int64 };
-            let value = op(lb.as_f64(), rb.as_f64()) as i64;
-            RuntimeValue::scalar_like_int(result_dtype, value)
+            RuntimeValue::scalar_from_int_wide(
+                result_dtype,
+                op(lp.as_f64_lossy(), rp.as_f64_lossy()),
+            )
         }
         (RuntimeValue::Scalar(lp), RuntimeValue::Scalar(rp))
             if lp.dtype().is_float() && rp.dtype().is_float() =>
@@ -378,7 +382,6 @@ pub(super) fn dispatch_scalar_binop(
             // re-precisioning fallback with an `unreachable!` that
             // names the spec invariant.
             let (ldt, rdt) = (lp.dtype(), rp.dtype());
-            let (lb, rb) = (lp.bits(), rp.bits());
             let result_dtype = match (ldt, rdt) {
                 (Prim::F64, _) | (_, Prim::F64) => Prim::F64,
                 (Prim::F32, _) | (_, Prim::F32) => Prim::F32,
@@ -391,7 +394,7 @@ pub(super) fn dispatch_scalar_binop(
                     ldt, rdt
                 ),
             };
-            let value = op(lb.as_f64(), rb.as_f64());
+            let value = op(lp.as_f64_lossy(), rp.as_f64_lossy());
             RuntimeValue::scalar_like_float(result_dtype, value)
         }
         _ => Err(format!(
@@ -424,10 +427,10 @@ pub(super) fn numeric_unop(
     match args.first() {
         Some(RuntimeValue::Tensor(tensor)) => tensor_numeric_unop(tensor, &op),
         Some(RuntimeValue::Scalar(payload)) if payload.dtype().is_integer() => {
-            RuntimeValue::scalar_like_int(payload.dtype(), op(payload.bits().as_f64()) as i64)
+            RuntimeValue::scalar_from_int_wide(payload.dtype(), op(payload.as_f64_lossy()))
         }
         Some(RuntimeValue::Scalar(payload)) if payload.dtype().is_float() => {
-            RuntimeValue::scalar_like_float(payload.dtype(), op(payload.bits().as_f64()))
+            RuntimeValue::scalar_like_float(payload.dtype(), op(payload.as_f64_lossy()))
         }
         other => Err(format!(
             "numeric op expects int or float arg, got {other:?}"
@@ -446,18 +449,15 @@ fn tensor_numeric_binop(
             lhs.value.shape, rhs.value.shape
         ));
     }
-    Ok(RuntimeValue::Tensor(RuntimeTensorValue {
-        value: IrTensorValue::from_vec(
-            lhs.value.shape.clone(),
-            lhs.value
-                .data
-                .iter()
-                .zip(&rhs.value.data)
-                .map(|(l, r)| op(*l, *r))
-                .collect(),
-        ),
-        precision: lhs.precision,
-    }))
+    let wide: Vec<f64> = lhs
+        .value
+        .to_f64_lossy_vec()
+        .into_iter()
+        .zip(rhs.value.to_f64_lossy_vec())
+        .map(|(l, r)| op(l, r))
+        .collect();
+    RuntimeTensorValue::from_wide("arithmetic", lhs.precision, lhs.value.shape.clone(), wide)
+        .map(RuntimeValue::Tensor)
 }
 
 fn tensor_scalar_binop(
@@ -465,20 +465,21 @@ fn tensor_scalar_binop(
     scalar: &RuntimeValue,
     op: &impl Fn(f64, f64) -> f64,
 ) -> Result<RuntimeValue, String> {
-    let scalar = runtime_scalar_as_f64(scalar)
+    let scalar = runtime_scalar_as_f64_lossy(scalar)
         .ok_or_else(|| format!("numeric op expects scalar rhs, got {scalar:?}"))?;
-    Ok(RuntimeValue::Tensor(RuntimeTensorValue {
-        value: IrTensorValue::from_vec(
-            tensor.value.shape.clone(),
-            tensor
-                .value
-                .data
-                .iter()
-                .map(|value| op(*value, scalar))
-                .collect(),
-        ),
-        precision: tensor.precision,
-    }))
+    let wide: Vec<f64> = tensor
+        .value
+        .to_f64_lossy_vec()
+        .into_iter()
+        .map(|value| op(value, scalar))
+        .collect();
+    RuntimeTensorValue::from_wide(
+        "arithmetic",
+        tensor.precision,
+        tensor.value.shape.clone(),
+        wide,
+    )
+    .map(RuntimeValue::Tensor)
 }
 
 fn scalar_tensor_binop(
@@ -486,61 +487,87 @@ fn scalar_tensor_binop(
     tensor: &RuntimeTensorValue,
     op: &impl Fn(f64, f64) -> f64,
 ) -> Result<RuntimeValue, String> {
-    let scalar = runtime_scalar_as_f64(scalar)
+    let scalar = runtime_scalar_as_f64_lossy(scalar)
         .ok_or_else(|| format!("numeric op expects scalar lhs, got {scalar:?}"))?;
-    Ok(RuntimeValue::Tensor(RuntimeTensorValue {
-        value: IrTensorValue::from_vec(
-            tensor.value.shape.clone(),
-            tensor
-                .value
-                .data
-                .iter()
-                .map(|value| op(scalar, *value))
-                .collect(),
-        ),
-        precision: tensor.precision,
-    }))
+    let wide: Vec<f64> = tensor
+        .value
+        .to_f64_lossy_vec()
+        .into_iter()
+        .map(|value| op(scalar, value))
+        .collect();
+    RuntimeTensorValue::from_wide(
+        "arithmetic",
+        tensor.precision,
+        tensor.value.shape.clone(),
+        wide,
+    )
+    .map(RuntimeValue::Tensor)
 }
 
 fn tensor_numeric_unop(
     tensor: &RuntimeTensorValue,
     op: &impl Fn(f64) -> f64,
 ) -> Result<RuntimeValue, String> {
-    Ok(RuntimeValue::Tensor(RuntimeTensorValue {
-        value: IrTensorValue::from_vec(
-            tensor.value.shape.clone(),
-            tensor.value.data.iter().map(|value| op(*value)).collect(),
-        ),
-        precision: tensor.precision,
-    }))
+    let wide: Vec<f64> = tensor
+        .value
+        .to_f64_lossy_vec()
+        .into_iter()
+        .map(op)
+        .collect();
+    RuntimeTensorValue::from_wide(
+        "arithmetic",
+        tensor.precision,
+        tensor.value.shape.clone(),
+        wide,
+    )
+    .map(RuntimeValue::Tensor)
 }
 
-/// Tensor-elementwise unary that runs through `f32` precision so the
-/// host-runtime activation primitives stay byte-identical (to f32 ulp
-/// tolerance) with the C backend's `chelis_host_*_f32` helpers, which
-/// always go through `float` in `crates/chelis-backend-c/src/host_emit.rs`.
-///
-/// The closure receives an `f64` (cast down from `f32`) and returns an
-/// `f64` (cast down from the float result of its body). The wrapper
-/// itself takes care of the cast-down-cast-back at the boundary; the
-/// caller need only ensure every internal transcendental is invoked
-/// against an `f32` value (via `as f32` followed by libm `f32::*`).
-pub(super) fn tensor_float_unop_f32(
+/// Tensor-elementwise unary at the tensor's OWN dtype (chelis#729
+/// Phase 1; the former `tensor_float_unop_f32` f32 funnel is deleted,
+/// closing chelis#717's f64-destroyed-to-f32 and skipped-narrowing
+/// rows). An f64 tensor computes through the f64 closure at full
+/// precision; every narrower float width computes through the f32
+/// closure (the C backend's `chelis_host_*_f32` parity path) and then
+/// finalizes once at its own width, which is the identity for f32 and
+/// the IEEE rounding for f16/bf16.
+pub(super) fn tensor_float_unop(
     tensor: &RuntimeTensorValue,
-    op: impl Fn(f32) -> f32,
-) -> RuntimeTensorValue {
-    RuntimeTensorValue {
-        value: IrTensorValue::from_vec(
-            tensor.value.shape.clone(),
-            tensor
-                .value
-                .data
-                .iter()
-                .map(|value| op(*value as f32) as f64)
-                .collect(),
-        ),
-        precision: tensor.precision,
-    }
+    scalar_op: impl Fn(f64) -> f64,
+    tensor_op: impl Fn(f32) -> f32,
+) -> Result<RuntimeTensorValue, String> {
+    let wide: Vec<f64> = match tensor.precision {
+        Prim::F64 => tensor
+            .value
+            .to_f64_lossy_vec()
+            .into_iter()
+            .map(scalar_op)
+            .collect(),
+        Prim::F32 | Prim::F16 | Prim::Bf16 => tensor
+            .value
+            .to_f64_lossy_vec()
+            .into_iter()
+            .map(|value| tensor_op(value as f32) as f64)
+            .collect(),
+        Prim::Int8 | Prim::Int16 | Prim::Int32 | Prim::Int64 | Prim::Bool => {
+            return Err(format!(
+                "float tensor op expects a float tensor, got {}",
+                tensor.precision.name()
+            ));
+        }
+        Prim::F8e4m3 | Prim::String => {
+            return Err(format!(
+                "float tensor op expects a float tensor, got {}",
+                tensor.precision.name()
+            ));
+        }
+    };
+    RuntimeTensorValue::from_wide(
+        "arithmetic",
+        tensor.precision,
+        tensor.value.shape.clone(),
+        wide,
+    )
 }
 
 /// `relu(x) = max(0, x)`. Exact in any precision; we still take `f32`
@@ -591,9 +618,35 @@ pub(super) fn activation_gelu_f32(x: f32) -> f32 {
     0.5 * x * (1.0 + inner.tanh())
 }
 
-fn runtime_scalar_as_f64(value: &RuntimeValue) -> Option<f64> {
+/// f64-precision activation bodies for f64 tensors (chelis#729 Phase 1:
+/// an f64 tensor computes at genuine f64 precision, chelis#717; the f32
+/// bodies above remain the C-parity path for the narrower widths).
+pub(super) fn activation_relu_f64(x: f64) -> f64 {
+    if x > 0.0 { x } else { 0.0 }
+}
+
+pub(super) fn activation_sigmoid_f64(x: f64) -> f64 {
+    1.0 / (1.0 + (-x).exp())
+}
+
+pub(super) fn activation_tanh_f64(x: f64) -> f64 {
+    x.tanh()
+}
+
+pub(super) fn activation_silu_f64(x: f64) -> f64 {
+    x * activation_sigmoid_f64(x)
+}
+
+pub(super) fn activation_gelu_f64(x: f64) -> f64 {
+    const C: f64 = 0.7978845608028654; // sqrt(2/pi)
+    const K: f64 = 0.044715;
+    let inner = C * (x + K * x * x * x);
+    0.5 * x * (1.0 + inner.tanh())
+}
+
+fn runtime_scalar_as_f64_lossy(value: &RuntimeValue) -> Option<f64> {
     match value {
-        RuntimeValue::Scalar(payload) => Some(payload.bits().as_f64()),
+        RuntimeValue::Scalar(payload) => Some(payload.as_f64_lossy()),
         RuntimeValue::Bool(value) => Some(if *value { 1.0 } else { 0.0 }),
         _ => None,
     }
@@ -614,7 +667,7 @@ pub(super) fn int_binop(
             // operands, and fails closed for mixed widths.
             let (ldt, rdt) = (lp.dtype(), rp.dtype());
             let result_dtype = if ldt == rdt { ldt } else { Prim::Int64 };
-            RuntimeValue::scalar_like_int(result_dtype, op(lp.bits().as_i64(), rp.bits().as_i64()))
+            RuntimeValue::scalar_like_int(result_dtype, op(lp.as_i64(), rp.as_i64()))
         }
         other => Err(format!("integer op expects int args, got {other:?}")),
     }
@@ -736,7 +789,7 @@ fn checked_int_binop(
         {
             let (ldt, rdt) = (lp.dtype(), rp.dtype());
             let result_dtype = if ldt == rdt { ldt } else { Prim::Int64 };
-            let value = op(lp.bits().as_i64(), rp.bits().as_i64())?;
+            let value = op(lp.as_i64(), rp.as_i64())?;
             RuntimeValue::scalar_like_int(result_dtype, value)
         }
         (Some(RuntimeValue::Tensor(lhs)), Some(RuntimeValue::Tensor(rhs)))
@@ -748,40 +801,69 @@ fn checked_int_binop(
                     lhs.value.shape, rhs.value.shape
                 ));
             }
-            let mut data = Vec::with_capacity(lhs.value.data.len());
-            for (l, r) in lhs.value.data.iter().zip(&rhs.value.data) {
-                data.push(op(*l as i64, *r as i64)? as f64);
+            let a = lhs
+                .value
+                .storage()
+                .to_i64_exact_vec()
+                .expect("integer tensor storage reads exactly");
+            let b = rhs
+                .value
+                .storage()
+                .to_i64_exact_vec()
+                .expect("integer tensor storage reads exactly");
+            let mut data = Vec::with_capacity(a.len());
+            for (l, r) in a.into_iter().zip(b) {
+                data.push(op(l, r)?);
             }
-            Ok(RuntimeValue::Tensor(RuntimeTensorValue {
-                value: IrTensorValue::from_vec(lhs.value.shape.clone(), data),
-                precision: lhs.precision,
-            }))
+            RuntimeTensorValue::from_wide_int(
+                "arithmetic",
+                lhs.precision,
+                lhs.value.shape.clone(),
+                data,
+            )
+            .map(RuntimeValue::Tensor)
         }
         (Some(RuntimeValue::Tensor(lhs)), Some(RuntimeValue::Scalar(rp)))
             if lhs.precision.is_integer() && rp.dtype().is_integer() =>
         {
-            let rhs = rp.bits().as_i64();
-            let mut data = Vec::with_capacity(lhs.value.data.len());
-            for l in &lhs.value.data {
-                data.push(op(*l as i64, rhs)? as f64);
+            let rhs = rp.as_i64();
+            let a = lhs
+                .value
+                .storage()
+                .to_i64_exact_vec()
+                .expect("integer tensor storage reads exactly");
+            let mut data = Vec::with_capacity(a.len());
+            for l in a {
+                data.push(op(l, rhs)?);
             }
-            Ok(RuntimeValue::Tensor(RuntimeTensorValue {
-                value: IrTensorValue::from_vec(lhs.value.shape.clone(), data),
-                precision: lhs.precision,
-            }))
+            RuntimeTensorValue::from_wide_int(
+                "arithmetic",
+                lhs.precision,
+                lhs.value.shape.clone(),
+                data,
+            )
+            .map(RuntimeValue::Tensor)
         }
         (Some(RuntimeValue::Scalar(lp)), Some(RuntimeValue::Tensor(rhs)))
             if lp.dtype().is_integer() && rhs.precision.is_integer() =>
         {
-            let lhs = lp.bits().as_i64();
-            let mut data = Vec::with_capacity(rhs.value.data.len());
-            for r in &rhs.value.data {
-                data.push(op(lhs, *r as i64)? as f64);
+            let lhs = lp.as_i64();
+            let b = rhs
+                .value
+                .storage()
+                .to_i64_exact_vec()
+                .expect("integer tensor storage reads exactly");
+            let mut data = Vec::with_capacity(b.len());
+            for r in b {
+                data.push(op(lhs, r)?);
             }
-            Ok(RuntimeValue::Tensor(RuntimeTensorValue {
-                value: IrTensorValue::from_vec(rhs.value.shape.clone(), data),
-                precision: rhs.precision,
-            }))
+            RuntimeTensorValue::from_wide_int(
+                "arithmetic",
+                rhs.precision,
+                rhs.value.shape.clone(),
+                data,
+            )
+            .map(RuntimeValue::Tensor)
         }
         other => Err(format!("integer op expects int args, got {other:?}")),
     }
@@ -801,7 +883,7 @@ pub(super) fn int_shift_binop(
         (Some(RuntimeValue::Scalar(lp)), Some(RuntimeValue::Scalar(rp)))
             if lp.dtype().is_integer() && rp.dtype().is_integer() =>
         {
-            let rhs = rp.bits().as_i64();
+            let rhs = rp.as_i64();
             if rhs < 0 {
                 return Err(format!("shift amount must be non-negative, got {rhs}"));
             }
@@ -817,8 +899,8 @@ pub(super) fn int_shift_binop(
             // fully shifted-out value (zero for left shift/nonnegative right
             // shift, all ones for negative arithmetic right shift). Avoid
             // invoking Rust's debug-panic shift path for those counts.
-            let lhs = lp.bits().as_i64();
-            let value = if rhs >= i64::from(width) {
+            let lhs = lp.as_i64();
+            let raw = if rhs >= i64::from(width) {
                 match op {
                     IntShiftOp::Left => 0,
                     IntShiftOp::Right if lhs < 0 => -1,
@@ -830,7 +912,20 @@ pub(super) fn int_shift_binop(
                     IntShiftOp::Right => lhs.wrapping_shr(rhs as u32),
                 }
             };
-            RuntimeValue::scalar_like_int(lp.dtype(), value)
+            // [04-NUM-13] discards bits at the declared width. Narrow before
+            // the trapping finalizer so an in-spec shift such as `1i8 << 7`
+            // stores -128 instead of being misclassified as arithmetic
+            // overflow.
+            let wrapped = match lp.dtype() {
+                Prim::Int8 => (raw as i8) as i64,
+                Prim::Int16 => (raw as i16) as i64,
+                Prim::Int32 => (raw as i32) as i64,
+                other => {
+                    debug_assert_eq!(other, Prim::Int64);
+                    raw
+                }
+            };
+            RuntimeValue::scalar_like_int(lp.dtype(), wrapped)
         }
         other => Err(format!("shift op expects int args, got {other:?}")),
     }
@@ -839,7 +934,7 @@ pub(super) fn int_shift_binop(
 fn float_unop(args: &[RuntimeValue], op: impl Fn(f64) -> f64) -> Result<RuntimeValue, String> {
     match args.first() {
         Some(RuntimeValue::Scalar(payload)) if payload.dtype().is_float() => {
-            RuntimeValue::scalar_like_float(payload.dtype(), op(payload.bits().as_f64()))
+            RuntimeValue::scalar_like_float(payload.dtype(), op(payload.as_f64_lossy()))
         }
         other => Err(format!("float op expects float arg, got {other:?}")),
     }
@@ -857,17 +952,18 @@ pub(super) fn float_unop_with_tensor(
     tensor_op: impl Fn(f32) -> f32,
 ) -> Result<RuntimeValue, String> {
     match args.first() {
-        Some(RuntimeValue::Tensor(tensor)) => Ok(RuntimeValue::Tensor(tensor_float_unop_f32(
-            tensor, tensor_op,
-        ))),
+        Some(RuntimeValue::Tensor(tensor)) => {
+            tensor_float_unop(tensor, scalar_op, tensor_op).map(RuntimeValue::Tensor)
+        }
         _ => float_unop(args, scalar_op),
     }
 }
 
-/// Coerce a scalar `RuntimeValue` to its `f64` representation for
-/// comparison with a tensor element. Returns `None` for non-scalar values.
-fn scalar_as_f64(value: &RuntimeValue) -> Option<f64> {
-    runtime_scalar_as_f64(value)
+/// Lossily coerce a scalar `RuntimeValue` to its legacy `f64`
+/// representation for comparison with a tensor element. Integer values
+/// above 2^53 cannot remain exact. Returns `None` for non-scalar values.
+fn scalar_as_f64_lossy(value: &RuntimeValue) -> Option<f64> {
+    runtime_scalar_as_f64_lossy(value)
 }
 
 pub(super) fn compare_eq(args: &[RuntimeValue]) -> Result<RuntimeValue, String> {
@@ -875,12 +971,12 @@ pub(super) fn compare_eq(args: &[RuntimeValue]) -> Result<RuntimeValue, String> 
         (Some(RuntimeValue::Scalar(lp)), Some(RuntimeValue::Scalar(rp)))
             if lp.dtype().is_integer() && rp.dtype().is_integer() =>
         {
-            Ok(RuntimeValue::Bool(lp.bits().as_i64() == rp.bits().as_i64()))
+            Ok(RuntimeValue::Bool(lp.as_i64() == rp.as_i64()))
         }
         (Some(RuntimeValue::Scalar(lp)), Some(RuntimeValue::Scalar(rp)))
             if lp.dtype().is_float() && rp.dtype().is_float() =>
         {
-            Ok(RuntimeValue::Bool(lp.bits().as_f64() == rp.bits().as_f64()))
+            Ok(RuntimeValue::Bool(lp.as_f64_lossy() == rp.as_f64_lossy()))
         }
         (Some(RuntimeValue::Bool(lhs)), Some(RuntimeValue::Bool(rhs))) => {
             Ok(RuntimeValue::Bool(lhs == rhs))
@@ -897,12 +993,16 @@ pub(super) fn compare_eq(args: &[RuntimeValue]) -> Result<RuntimeValue, String> 
         // Element-wise tensor-scalar equality: broadcast the scalar across
         // every element. Mirrors the build-target lane and unblocks
         // `is_nan_local`-style scalar comparisons against a tensor.
-        (Some(RuntimeValue::Tensor(tensor)), Some(scalar)) if scalar_as_f64(scalar).is_some() => {
-            let scalar_f = scalar_as_f64(scalar).expect("scalar guard");
+        (Some(RuntimeValue::Tensor(tensor)), Some(scalar))
+            if scalar_as_f64_lossy(scalar).is_some() =>
+        {
+            let scalar_f = scalar_as_f64_lossy(scalar).expect("scalar guard");
             tensor_compare_scalar(tensor, scalar_f, |a, b| a == b).map(RuntimeValue::Tensor)
         }
-        (Some(scalar), Some(RuntimeValue::Tensor(tensor))) if scalar_as_f64(scalar).is_some() => {
-            let scalar_f = scalar_as_f64(scalar).expect("scalar guard");
+        (Some(scalar), Some(RuntimeValue::Tensor(tensor)))
+            if scalar_as_f64_lossy(scalar).is_some() =>
+        {
+            let scalar_f = scalar_as_f64_lossy(scalar).expect("scalar guard");
             tensor_compare_scalar(tensor, scalar_f, |a, b| a == b).map(RuntimeValue::Tensor)
         }
         other => Err(format!("eq/neq expect matching scalar args, got {other:?}")),
@@ -918,16 +1018,16 @@ pub(super) fn ordered_compare(
             if lp.dtype().is_integer() && rp.dtype().is_integer() =>
         {
             Ok(RuntimeValue::Bool(cmp(
-                lp.bits().as_f64(),
-                rp.bits().as_f64(),
+                lp.as_f64_lossy(),
+                rp.as_f64_lossy(),
             )))
         }
         (Some(RuntimeValue::Scalar(lp)), Some(RuntimeValue::Scalar(rp)))
             if lp.dtype().is_float() && rp.dtype().is_float() =>
         {
             Ok(RuntimeValue::Bool(cmp(
-                lp.bits().as_f64(),
-                rp.bits().as_f64(),
+                lp.as_f64_lossy(),
+                rp.as_f64_lossy(),
             )))
         }
         // Element-wise tensor-tensor ordering. Mirrors the build-target lane
@@ -937,14 +1037,18 @@ pub(super) fn ordered_compare(
         }
         // Element-wise tensor-scalar ordering: broadcast the scalar across
         // every element. The result is a `tensor[D, bool]` mask.
-        (Some(RuntimeValue::Tensor(tensor)), Some(scalar)) if scalar_as_f64(scalar).is_some() => {
-            let scalar_f = scalar_as_f64(scalar).expect("scalar guard");
+        (Some(RuntimeValue::Tensor(tensor)), Some(scalar))
+            if scalar_as_f64_lossy(scalar).is_some() =>
+        {
+            let scalar_f = scalar_as_f64_lossy(scalar).expect("scalar guard");
             tensor_compare_scalar(tensor, scalar_f, cmp).map(RuntimeValue::Tensor)
         }
-        (Some(scalar), Some(RuntimeValue::Tensor(tensor))) if scalar_as_f64(scalar).is_some() => {
+        (Some(scalar), Some(RuntimeValue::Tensor(tensor)))
+            if scalar_as_f64_lossy(scalar).is_some() =>
+        {
             // `cmp(scalar, tensor[i])` — flip the comparator so the helper
             // can keep using `cmp(tensor[i], scalar)` internally.
-            let scalar_f = scalar_as_f64(scalar).expect("scalar guard");
+            let scalar_f = scalar_as_f64_lossy(scalar).expect("scalar guard");
             tensor_compare_scalar(tensor, scalar_f, |t, s| cmp(s, t)).map(RuntimeValue::Tensor)
         }
         other => Err(format!(
@@ -966,15 +1070,12 @@ pub(super) fn tensor_compare_value(
     }
     let data = lhs
         .value
-        .data
-        .iter()
-        .zip(&rhs.value.data)
-        .map(|(lhs, rhs)| if cmp(*lhs, *rhs) { 1.0 } else { 0.0 })
-        .collect::<Vec<_>>();
-    Ok(RuntimeTensorValue {
-        value: IrTensorValue::from_vec(lhs.value.shape.clone(), data),
-        precision: Prim::Bool,
-    })
+        .to_f64_lossy_vec()
+        .into_iter()
+        .zip(rhs.value.to_f64_lossy_vec())
+        .map(|(lhs, rhs)| if cmp(lhs, rhs) { 1 } else { 0 })
+        .collect::<Vec<i64>>();
+    RuntimeTensorValue::from_wide_int("cmp", Prim::Bool, lhs.value.shape.clone(), data)
 }
 
 /// Element-wise tensor-vs-scalar comparison. The scalar is broadcast across
@@ -989,14 +1090,11 @@ fn tensor_compare_scalar(
 ) -> Result<RuntimeTensorValue, String> {
     let data = tensor
         .value
-        .data
-        .iter()
-        .map(|element| if cmp(*element, scalar) { 1.0 } else { 0.0 })
-        .collect::<Vec<_>>();
-    Ok(RuntimeTensorValue {
-        value: IrTensorValue::from_vec(tensor.value.shape.clone(), data),
-        precision: Prim::Bool,
-    })
+        .to_f64_lossy_vec()
+        .into_iter()
+        .map(|element| if cmp(element, scalar) { 1 } else { 0 })
+        .collect::<Vec<i64>>();
+    RuntimeTensorValue::from_wide_int("cmp", Prim::Bool, tensor.value.shape.clone(), data)
 }
 
 pub(super) fn bool_binop(
@@ -1053,15 +1151,12 @@ pub(super) fn tensor_bool_binop(
     }
     let data = lhs
         .value
-        .data
-        .iter()
-        .zip(&rhs.value.data)
-        .map(|(l, r)| if op(*l != 0.0, *r != 0.0) { 1.0 } else { 0.0 })
-        .collect::<Vec<_>>();
-    Ok(RuntimeTensorValue {
-        value: IrTensorValue::from_vec(lhs.value.shape.clone(), data),
-        precision: Prim::Bool,
-    })
+        .to_f64_lossy_vec()
+        .into_iter()
+        .zip(rhs.value.to_f64_lossy_vec())
+        .map(|(l, r)| if op(l != 0.0, r != 0.0) { 1 } else { 0 })
+        .collect::<Vec<i64>>();
+    RuntimeTensorValue::from_wide_int("bool", Prim::Bool, lhs.value.shape.clone(), data)
 }
 
 /// Element-wise tensor-bool unary op. See `tensor_bool_binop` for the
@@ -1078,14 +1173,41 @@ pub(super) fn tensor_bool_unop(
     }
     let data = tensor
         .value
-        .data
-        .iter()
-        .map(|value| if op(*value != 0.0) { 1.0 } else { 0.0 })
-        .collect::<Vec<_>>();
-    Ok(RuntimeTensorValue {
-        value: IrTensorValue::from_vec(tensor.value.shape.clone(), data),
-        precision: Prim::Bool,
-    })
+        .to_f64_lossy_vec()
+        .into_iter()
+        .map(|value| if op(value != 0.0) { 1 } else { 0 })
+        .collect::<Vec<i64>>();
+    RuntimeTensorValue::from_wide_int("bool", Prim::Bool, tensor.value.shape.clone(), data)
+}
+
+/// Declared-tensor element dtype of a Deep type expression: `Some(prim)`
+/// exactly when the expression is a `t-tensor` whose element type is an
+/// active tensor dtype.
+pub(super) fn declared_tensor_prim(expr: &Expr) -> Option<Prim> {
+    let list = as_list(expr)?;
+    if tag(list) != Some(DeepTag::TTensor) {
+        return None;
+    }
+    extract_prim_from_type_expr(expr)
+}
+
+/// Ingress-finalize a tensor value at a declared element dtype (the
+/// host-lane mirror of the DAG evaluator's Load ingress; chelis#729
+/// Phase 1). Identity when the dtypes already agree; float targets apply
+/// the dtype's rounding, integer/bool targets domain-check loudly.
+pub(super) fn ingress_tensor_to_declared(
+    tensor: RuntimeTensorValue,
+    prim: Prim,
+) -> Result<RuntimeTensorValue, String> {
+    if tensor.precision == prim {
+        return Ok(tensor);
+    }
+    let storage = chelis_types::finalize_tensor("param", prim, tensor.value.storage().to_raw())
+        .map_err(|trap| trap.to_string())?;
+    Ok(RuntimeTensorValue::new(IrTensorValue::from_storage(
+        tensor.value.shape.clone(),
+        storage,
+    )))
 }
 
 pub(super) fn expect_tensor_arg(
@@ -1131,9 +1253,7 @@ pub(super) fn expect_dict_arg(
 
 pub(super) fn expect_int_arg(args: &[RuntimeValue], index: usize) -> Result<i64, String> {
     match args.get(index) {
-        Some(RuntimeValue::Scalar(payload)) if payload.dtype().is_integer() => {
-            Ok(payload.bits().as_i64())
-        }
+        Some(RuntimeValue::Scalar(payload)) if payload.dtype().is_integer() => Ok(payload.as_i64()),
         other => Err(format!("expected int arg at index {index}, got {other:?}")),
     }
 }
@@ -1148,10 +1268,10 @@ pub(super) fn expect_bool_arg(args: &[RuntimeValue], index: usize) -> Result<boo
 pub(super) fn expect_float_arg(args: &[RuntimeValue], index: usize) -> Result<f64, String> {
     match args.get(index) {
         Some(RuntimeValue::Scalar(payload)) if payload.dtype().is_float() => {
-            Ok(payload.bits().as_f64())
+            Ok(payload.as_f64_lossy())
         }
         Some(RuntimeValue::Scalar(payload)) if payload.dtype().is_integer() => {
-            Ok(payload.bits().as_f64())
+            Ok(payload.as_f64_lossy())
         }
         other => Err(format!(
             "expected float arg at index {index}, got {other:?}"
@@ -1174,12 +1294,12 @@ pub(super) fn runtime_value_eq(lhs: &RuntimeValue, rhs: &RuntimeValue) -> bool {
         (RuntimeValue::Scalar(lp), RuntimeValue::Scalar(rp))
             if lp.dtype().is_integer() && rp.dtype().is_integer() =>
         {
-            lp.bits().as_i64() == rp.bits().as_i64()
+            lp.as_i64() == rp.as_i64()
         }
         (RuntimeValue::Scalar(lp), RuntimeValue::Scalar(rp))
             if lp.dtype().is_float() && rp.dtype().is_float() =>
         {
-            lp.bits().as_f64() == rp.bits().as_f64()
+            lp.as_f64_lossy() == rp.as_f64_lossy()
         }
         (RuntimeValue::Bool(lhs), RuntimeValue::Bool(rhs)) => lhs == rhs,
         (RuntimeValue::String(lhs), RuntimeValue::String(rhs)) => lhs == rhs,
@@ -1225,16 +1345,8 @@ pub(super) fn dict_lookup<'a>(
 /// `crates/chelis-backend-c/src/emit.rs::emit_cast`). This helper closes
 /// the runtime/host-lane gap that PR #58's red-team v2 surfaced.
 ///
-/// Storage for `IrTensorValue::data` is always `Vec<f64>` regardless of
-/// the logical tensor precision. Float<->float casts where the storage
-/// already covers both ranges (any `Prim::F64` source, or any `Prim::F32`
-/// source widening to `Prim::F64`) are identity at the data level. The
-/// `Prim::F64 -> Prim::F32` narrowing case rounds through `(x as f32) as
-/// f64` so the runtime honors the precision loss honestly. Integer
-/// targets truncate toward zero, matching the scalar arms above and
-/// `(int32_t)f` in the C backend. The output shape is preserved
-/// element-for-element (C8 in `crates/chelis-ir/src/verify.rs`: cast dims
-/// must not change).
+/// The output shape is preserved element-for-element (C8 in
+/// `crates/chelis-ir/src/verify.rs`: cast dims must not change).
 pub(super) fn cast_tensor_value(
     tensor: RuntimeTensorValue,
     target: &str,
@@ -1245,76 +1357,14 @@ pub(super) fn cast_tensor_value(
         value: ir_value,
         precision: src_prim,
     } = tensor;
-    let IrTensorValue { data, shape } = ir_value;
-    let converted: Vec<f64> = data
-        .into_iter()
-        .map(|x| convert_scalar_data(x, src_prim, target_prim))
-        .collect();
-    Ok(RuntimeValue::Tensor(RuntimeTensorValue {
-        value: IrTensorValue::from_vec(shape, converted),
-        precision: target_prim,
-    }))
-}
-
-/// Element-wise scalar conversion for `cast_tensor_value`. Returns the
-/// converted value in `f64` storage. Float-to-float narrowing rounds
-/// through f32 to drop precision; float-to-int truncates; int-to-float
-/// preserves value; bool encodes as 0.0 / 1.0 and decodes via `!= 0.0`.
-fn convert_scalar_data(x: f64, src: Prim, dst: Prim) -> f64 {
-    if src == dst {
-        return x;
-    }
-    // Step 1: project the source storage into a normalized representation.
-    // Floats stay floats; ints route through i64; bools route through 0/1.
-    let as_int: Option<i64> = match src {
-        Prim::Int8 | Prim::Int32 | Prim::Int64 => Some(x as i64),
-        Prim::Bool => Some(if x != 0.0 { 1 } else { 0 }),
-        _ => None,
-    };
-    // Step 2: emit the value in the target precision's storage convention.
-    match dst {
-        Prim::F64 => match as_int {
-            Some(i) => i as f64,
-            None => x,
-        },
-        Prim::F32 => match as_int {
-            Some(i) => (i as f32) as f64,
-            None => (x as f32) as f64,
-        },
-        Prim::Int8 => match as_int {
-            Some(i) => (i as i8) as f64,
-            None => (x as i8) as f64,
-        },
-        Prim::Int32 => match as_int {
-            Some(i) => (i as i32) as f64,
-            None => (x as i32) as f64,
-        },
-        Prim::Int64 => match as_int {
-            Some(i) => i as f64,
-            None => (x as i64) as f64,
-        },
-        Prim::Bool => match as_int {
-            Some(i) => {
-                if i != 0 {
-                    1.0
-                } else {
-                    0.0
-                }
-            }
-            None => {
-                if x != 0.0 {
-                    1.0
-                } else {
-                    0.0
-                }
-            }
-        },
-        // Reduced floats and `string` are not valid tensor element types
-        // (see `Prim::is_valid_tensor_precision`); the checker rejects
-        // them before this point. Fall back to identity rather than
-        // silently corrupting data.
-        _ => x,
-    }
+    // chelis#729: one CHECKED cast ladder for both eval surfaces
+    // (`chelis_types::cast_raw` via the DAG evaluator's `cast_tensor`).
+    // Integer storage reads exactly, float targets finalize at width
+    // (f16/bf16 casts genuinely round, chelis#717), and out-of-range or
+    // out-of-domain elements TRAP per spec/04 section 5.2; the named
+    // lossy forms remain chelis#759's future surface.
+    chelis_ir::eval::cast_tensor(&ir_value, src_prim, target_prim)
+        .map(|value| RuntimeValue::Tensor(RuntimeTensorValue::new(value)))
 }
 
 /// Bucket 4b: recursively flatten a nested numeric/bool list into a
@@ -1328,9 +1378,9 @@ fn convert_scalar_data(x: f64, src: Prim, dst: Prim) -> f64 {
 /// behaviour for compatibility).
 pub(super) fn nested_list_to_tensor_data(
     outer: &[RuntimeValue],
-) -> Result<(Prim, Vec<usize>, Vec<f64>), String> {
+) -> Result<(Prim, Vec<usize>, ListTensorData), String> {
     if outer.is_empty() {
-        return Ok((Prim::F32, vec![0], Vec::new()));
+        return Ok((Prim::F32, vec![0], ListTensorData::Float(Vec::new())));
     }
 
     // Decide whether this is a leaf level (numeric/bool elements) or a
@@ -1346,7 +1396,7 @@ pub(super) fn nested_list_to_tensor_data(
 
     let mut precision: Option<Prim> = None;
     let mut inner_shape: Option<Vec<usize>> = None;
-    let mut data = Vec::new();
+    let mut data: Option<ListTensorData> = None;
     for (idx, value) in outer.iter().enumerate() {
         let RuntimeValue::List(inner) = value else {
             return Err(format!(
@@ -1372,40 +1422,91 @@ pub(super) fn nested_list_to_tensor_data(
                 ));
             }
         }
-        data.extend(sub_data);
+        match &mut data {
+            None => data = Some(sub_data),
+            Some(existing) => existing.extend(sub_data)?,
+        }
     }
 
     let mut shape = vec![outer.len()];
     shape.extend(inner_shape.unwrap_or_default());
-    Ok((precision.unwrap_or(Prim::F32), shape, data))
+    let precision = precision.unwrap_or(Prim::F32);
+    let data = data.unwrap_or(ListTensorData::Float(Vec::new()));
+    Ok((precision, shape, data))
 }
 
-fn list_to_tensor_data(values: &[RuntimeValue]) -> Result<(Prim, Vec<f64>), String> {
-    // Element classification: integer scalars → Int64-precision tensor;
-    // float scalars → F32-precision tensor; bools → Bool tensor. The
-    // homogeneity check below pins the precision to whatever the first
-    // typed element advertised.
-    let mut precision = None;
-    let mut data = Vec::with_capacity(values.len());
+/// Wide ingress buffer for `to_tensor`: exact i64 for the integer/bool
+/// families, exact f64 images for floats (chelis#729 Phase 1; ends the
+/// f64-collapse of exact int64 elements, chelis#684).
+pub(super) enum ListTensorData {
+    Int(Vec<i64>),
+    Float(Vec<f64>),
+}
+
+impl ListTensorData {
+    pub(super) fn into_raw(self) -> chelis_types::RawTensor {
+        match self {
+            ListTensorData::Int(v) => chelis_types::RawTensor::Int(v),
+            ListTensorData::Float(v) => chelis_types::RawTensor::Float(v),
+        }
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            ListTensorData::Int(v) => v.len(),
+            ListTensorData::Float(v) => v.len(),
+        }
+    }
+
+    fn extend(&mut self, other: ListTensorData) -> Result<(), String> {
+        match (self, other) {
+            (ListTensorData::Int(a), ListTensorData::Int(b)) => {
+                a.extend(b);
+                Ok(())
+            }
+            (ListTensorData::Float(a), ListTensorData::Float(b)) => {
+                a.extend(b);
+                Ok(())
+            }
+            (ListTensorData::Int(_), ListTensorData::Float(_))
+            | (ListTensorData::Float(_), ListTensorData::Int(_)) => {
+                Err("to_tensor requires homogeneous numeric or bool list elements".to_string())
+            }
+        }
+    }
+}
+
+fn list_to_tensor_data(values: &[RuntimeValue]) -> Result<(Prim, ListTensorData), String> {
+    // Element classification: integer scalars carry exact i64 in the wide
+    // ingress buffer while retaining the ELEMENT's own dtype; floats carry
+    // their exact f64 image at their own dtype; bools carry 0/1 into a Bool
+    // tensor. The homogeneity check pins the precision to whatever the first
+    // typed element advertised. The wide buffer is not authority to widen
+    // the resulting tensor.
+    let mut precision: Option<Prim> = None;
+    let mut ints: Vec<i64> = Vec::new();
+    let mut floats: Vec<f64> = Vec::new();
     for value in values {
         match value {
             RuntimeValue::Scalar(payload) if payload.dtype().is_integer() => {
-                precision.get_or_insert(Prim::Int64);
-                if precision != Some(Prim::Int64) {
+                let element_dtype = payload.dtype();
+                precision.get_or_insert(element_dtype);
+                if precision != Some(element_dtype) {
                     return Err(
                         "to_tensor requires homogeneous numeric or bool list elements".to_string(),
                     );
                 }
-                data.push(payload.bits().as_f64());
+                ints.push(payload.as_i64());
             }
             RuntimeValue::Scalar(payload) if payload.dtype().is_float() => {
-                precision.get_or_insert(Prim::F32);
-                if precision != Some(Prim::F32) {
+                let element_dtype = payload.dtype();
+                precision.get_or_insert(element_dtype);
+                if precision != Some(element_dtype) {
                     return Err(
                         "to_tensor requires homogeneous numeric or bool list elements".to_string(),
                     );
                 }
-                data.push(payload.bits().as_f64());
+                floats.push(payload.as_f64_lossy());
             }
             RuntimeValue::Bool(value) => {
                 precision.get_or_insert(Prim::Bool);
@@ -1414,7 +1515,7 @@ fn list_to_tensor_data(values: &[RuntimeValue]) -> Result<(Prim, Vec<f64>), Stri
                         "to_tensor requires homogeneous numeric or bool list elements".to_string(),
                     );
                 }
-                data.push(if *value { 1.0 } else { 0.0 });
+                ints.push(if *value { 1 } else { 0 });
             }
             other => {
                 return Err(format!(
@@ -1423,7 +1524,13 @@ fn list_to_tensor_data(values: &[RuntimeValue]) -> Result<(Prim, Vec<f64>), Stri
             }
         }
     }
-    Ok((precision.unwrap_or(Prim::F32), data))
+    let precision = precision.unwrap_or(Prim::F32);
+    let data = if precision.is_float() {
+        ListTensorData::Float(floats)
+    } else {
+        ListTensorData::Int(ints)
+    };
+    Ok((precision, data))
 }
 
 pub(super) fn tensor_to_list_values(
@@ -1435,64 +1542,88 @@ pub(super) fn tensor_to_list_values(
             tensor.value.shape.len()
         ));
     }
-    let mut values = Vec::with_capacity(tensor.value.data.len());
-    for value in &tensor.value.data {
-        let element = match tensor.precision {
-            Prim::Bool => RuntimeValue::Bool(*value != 0.0),
-            p if p.is_integer() => RuntimeValue::scalar_like_int(p, *value as i64)?,
-            p if p.is_float() => RuntimeValue::scalar_like_float(p, *value)?,
-            other => {
-                return Err(format!(
-                    "to_list expects numeric or bool tensor input, got {other:?}"
-                ));
-            }
+    // chelis#729 Phase 1: elements read the sealed per-dtype storage
+    // directly, so int64 lists stay exact above 2^53 and float elements
+    // carry their own width (the probe-2 to_list narrowing is gone).
+    let mut values = Vec::with_capacity(tensor.value.len());
+    for index in 0..tensor.value.len() {
+        let element = tensor.value.storage().scalar_at(index);
+        let element = match element.as_bool_exact() {
+            Some(flag) => RuntimeValue::Bool(flag),
+            None => RuntimeValue::from_scalar_value(element),
         };
         values.push(element);
     }
     Ok(values)
 }
 
+/// Shared row collector for the `pad_sequences*` family: the pad scalar fixes
+/// the exact output dtype, every non-empty row must carry that same dtype,
+/// and the padded row-major data stays in a wide ingress buffer until final
+/// storage construction (chelis#729 Phase 1, section C3).
+fn pad_sequences_rows(
+    sequences: &[RuntimeValue],
+    pad: &RuntimeValue,
+    op: &str,
+) -> Result<(Prim, ListTensorData, Vec<usize>), String> {
+    let pad_precision = match pad {
+        RuntimeValue::Scalar(payload)
+            if payload.dtype().is_integer() || payload.dtype().is_float() =>
+        {
+            payload.dtype()
+        }
+        other => {
+            return Err(format!("{op} expects numeric pad value, got {other:?}"));
+        }
+    };
+    let pad_is_int = pad_precision.is_integer();
+    let mut rows = Vec::with_capacity(sequences.len());
+    let mut lens = Vec::with_capacity(sequences.len());
+    for sequence in sequences {
+        let RuntimeValue::List(items) = sequence else {
+            return Err(format!("{op} expects nested lists, got {sequence:?}"));
+        };
+        let (row_precision, row) = list_to_tensor_data(items)?;
+        if row_precision != pad_precision && !items.is_empty() {
+            return Err(format!(
+                "{op} requires homogeneous numeric nested lists at `{}`; got `{}`",
+                pad_precision.name(),
+                row_precision.name()
+            ));
+        }
+        lens.push(row.len());
+        rows.push(row);
+    }
+    let mut data = if pad_is_int {
+        ListTensorData::Int(Vec::new())
+    } else {
+        ListTensorData::Float(Vec::new())
+    };
+    for row in rows {
+        // An empty row carries the family of its (empty) collector;
+        // coerce it to the pad family so extend type-checks.
+        let row = match (&data, row) {
+            (ListTensorData::Int(_), ListTensorData::Float(v)) if v.is_empty() => {
+                ListTensorData::Int(Vec::new())
+            }
+            (ListTensorData::Float(_), ListTensorData::Int(v)) if v.is_empty() => {
+                ListTensorData::Float(Vec::new())
+            }
+            (_, row) => row,
+        };
+        data.extend(row)?;
+    }
+    Ok((pad_precision, data, lens))
+}
+
 pub(super) fn pad_sequences_value(
     sequences: &[RuntimeValue],
     pad: &RuntimeValue,
-) -> Result<(Prim, Vec<f64>, usize, usize), String> {
-    let (pad_precision, pad_value) = match pad {
-        RuntimeValue::Scalar(payload) if payload.dtype().is_integer() => {
-            (Prim::Int64, payload.bits().as_f64())
-        }
-        RuntimeValue::Scalar(payload) if payload.dtype().is_float() => {
-            (Prim::F32, payload.bits().as_f64())
-        }
-        other => {
-            return Err(format!(
-                "pad_sequences expects numeric pad value, got {other:?}"
-            ));
-        }
-    };
-    let mut rows = Vec::<Vec<f64>>::with_capacity(sequences.len());
-    let mut width = 0usize;
-    for sequence in sequences {
-        let RuntimeValue::List(items) = sequence else {
-            return Err(format!(
-                "pad_sequences expects nested lists, got {sequence:?}"
-            ));
-        };
-        let (row_precision, row) = list_to_tensor_data(items)?;
-        if row_precision != pad_precision {
-            return Err("pad_sequences requires homogeneous numeric nested lists".to_string());
-        }
-        width = width.max(row.len());
-        rows.push(row);
-    }
-    let batch = rows.len();
-    let mut data = Vec::with_capacity(batch * width);
-    for row in rows {
-        data.extend(row.iter().copied());
-        data.extend(std::iter::repeat_n(
-            pad_value,
-            width.saturating_sub(row.len()),
-        ));
-    }
+) -> Result<(Prim, ListTensorData, usize, usize), String> {
+    let (pad_precision, rows, lens) = pad_sequences_rows(sequences, pad, "pad_sequences")?;
+    let width = lens.iter().copied().fold(0usize, usize::max);
+    let batch = lens.len();
+    let data = pad_rows(rows, &lens, width, pad, batch)?;
     Ok((pad_precision, data, batch, width))
 }
 
@@ -1500,47 +1631,59 @@ pub(super) fn pad_sequences_to_value(
     sequences: &[RuntimeValue],
     width: i64,
     pad: &RuntimeValue,
-) -> Result<(Prim, Vec<f64>, usize), String> {
+) -> Result<(Prim, ListTensorData, usize), String> {
     if width < 0 {
         return Err(format!(
             "pad_sequences_to requires non-negative width, got {width}"
         ));
     }
-    let (pad_precision, pad_value) = match pad {
-        RuntimeValue::Scalar(payload) if payload.dtype().is_integer() => {
-            (Prim::Int64, payload.bits().as_f64())
-        }
-        RuntimeValue::Scalar(payload) if payload.dtype().is_float() => {
-            (Prim::F32, payload.bits().as_f64())
-        }
-        other => {
-            return Err(format!(
-                "pad_sequences_to expects numeric pad value, got {other:?}"
-            ));
-        }
-    };
+    let (pad_precision, rows, lens) = pad_sequences_rows(sequences, pad, "pad_sequences_to")?;
     let width = width as usize;
-    let mut rows = Vec::<Vec<f64>>::with_capacity(sequences.len());
-    for sequence in sequences {
-        let RuntimeValue::List(items) = sequence else {
-            return Err(format!(
-                "pad_sequences_to expects nested lists, got {sequence:?}"
-            ));
-        };
-        let (row_precision, row) = list_to_tensor_data(items)?;
-        if row_precision != pad_precision {
-            return Err("pad_sequences_to requires homogeneous numeric nested lists".to_string());
-        }
-        rows.push(row);
-    }
-    let batch = rows.len();
-    let mut data = Vec::with_capacity(batch * width);
-    for row in rows {
-        let used = row.len().min(width);
-        data.extend(row.into_iter().take(used));
-        data.extend(std::iter::repeat_n(pad_value, width.saturating_sub(used)));
-    }
+    let batch = lens.len();
+    let data = pad_rows(rows, &lens, width, pad, batch)?;
     Ok((pad_precision, data, batch))
+}
+
+/// Lay the concatenated rows out row-major at `width`, truncating long
+/// rows and filling short ones with the pad scalar (exact per family).
+fn pad_rows(
+    rows: ListTensorData,
+    lens: &[usize],
+    width: usize,
+    pad: &RuntimeValue,
+    batch: usize,
+) -> Result<ListTensorData, String> {
+    let RuntimeValue::Scalar(payload) = pad else {
+        return Err(format!(
+            "pad_sequences expects numeric pad value, got {pad:?}"
+        ));
+    };
+    match rows {
+        ListTensorData::Int(flat) => {
+            let pad_value = payload.as_i64();
+            let mut out = Vec::with_capacity(batch * width);
+            let mut offset = 0usize;
+            for &len in lens {
+                let used = len.min(width);
+                out.extend_from_slice(&flat[offset..offset + used]);
+                out.extend(std::iter::repeat_n(pad_value, width.saturating_sub(used)));
+                offset += len;
+            }
+            Ok(ListTensorData::Int(out))
+        }
+        ListTensorData::Float(flat) => {
+            let pad_value = payload.as_f64_lossy();
+            let mut out = Vec::with_capacity(batch * width);
+            let mut offset = 0usize;
+            for &len in lens {
+                let used = len.min(width);
+                out.extend_from_slice(&flat[offset..offset + used]);
+                out.extend(std::iter::repeat_n(pad_value, width.saturating_sub(used)));
+                offset += len;
+            }
+            Ok(ListTensorData::Float(out))
+        }
+    }
 }
 
 fn tensor_numel(shape: &[usize]) -> usize {
@@ -1590,7 +1733,7 @@ pub(super) fn expect_int_list(values: &[RuntimeValue], op: &str) -> Result<Vec<u
         .iter()
         .map(|value| match value {
             RuntimeValue::Scalar(payload) if payload.dtype().is_integer() => {
-                let v = payload.bits().as_i64();
+                let v = payload.as_i64();
                 if v >= 0 {
                     Ok(v as usize)
                 } else {
@@ -1637,7 +1780,74 @@ pub(super) fn tensor_reduce_host(
         return Err("reduction over empty axis is undefined".to_string());
     }
     let out_numel = tensor_numel(&out_shape);
+
+    // chelis#729 Phase 1: integer-family inputs fold in EXACT i64
+    // (int64 sums stay exact above 2^53, chelis#684; Sum/Prod overflow
+    // traps via checked accumulation instead of wrapping). Argmax/Argmin
+    // keep the f64 comparison walk below (their output is an index).
+    if tensor.precision.is_integer()
+        && matches!(
+            op,
+            ReduceOp::Sum | ReduceOp::Min | ReduceOp::Max | ReduceOp::Prod
+        )
+    {
+        let data = tensor
+            .value
+            .storage()
+            .to_i64_exact_vec()
+            .expect("integer tensor storage reads exactly");
+        let mut out: Vec<Option<i64>> = vec![None; out_numel];
+        for (out_linear, slot_cell) in out.iter_mut().enumerate() {
+            let out_indices = linear_to_indices(out_linear, &out_shape);
+            for k in 0..axis_len {
+                let mut in_indices = Vec::with_capacity(rank);
+                let mut oi = 0;
+                for dim in 0..rank {
+                    if dim == axis {
+                        in_indices.push(k);
+                    } else {
+                        in_indices.push(out_indices[oi]);
+                        oi += 1;
+                    }
+                }
+                let value = data[indices_to_linear(&in_indices, &tensor.value.shape)];
+                let next = match (op, *slot_cell) {
+                    (ReduceOp::Sum, None) => value,
+                    (ReduceOp::Sum, Some(acc)) => acc.checked_add(value).ok_or_else(|| {
+                        chelis_types::NumericTrap::Overflow {
+                            op: "sum",
+                            prim: tensor.precision,
+                        }
+                        .to_string()
+                    })?,
+                    (ReduceOp::Prod, None) => value,
+                    (ReduceOp::Prod, Some(acc)) => acc.checked_mul(value).ok_or_else(|| {
+                        chelis_types::NumericTrap::Overflow {
+                            op: "prod_reduce",
+                            prim: tensor.precision,
+                        }
+                        .to_string()
+                    })?,
+                    (ReduceOp::Min, None) => value,
+                    (ReduceOp::Min, Some(acc)) => acc.min(value),
+                    (ReduceOp::Max, None) => value,
+                    (ReduceOp::Max, Some(acc)) => acc.max(value),
+                    (ReduceOp::Argmax | ReduceOp::Argmin, _) => {
+                        unreachable!("integer fold guard excludes arg reductions")
+                    }
+                };
+                *slot_cell = Some(next);
+            }
+        }
+        let wide: Vec<i64> = out
+            .into_iter()
+            .map(|slot| slot.expect("axis_len >= 1 fills every output slot"))
+            .collect();
+        return RuntimeTensorValue::from_wide_int("reduce", tensor.precision, out_shape, wide);
+    }
+
     let mut out = vec![0.0_f64; out_numel];
+    let wide_in = tensor.value.to_f64_lossy_vec();
     let sum_in_f32 = matches!(op, ReduceOp::Sum) && tensor.precision == Prim::F32;
     #[allow(clippy::needless_range_loop)]
     for out_linear in 0..out_numel {
@@ -1679,7 +1889,7 @@ pub(super) fn tensor_reduce_host(
                 }
             }
             let in_linear = indices_to_linear(&in_indices, &tensor.value.shape);
-            let value = tensor.value.data[in_linear];
+            let value = wide_in[in_linear];
             if value.is_nan() {
                 saw_nan = true;
             }
@@ -1750,10 +1960,7 @@ pub(super) fn tensor_reduce_host(
         ReduceOp::Argmax | ReduceOp::Argmin => Prim::Int64,
         ReduceOp::Sum | ReduceOp::Min | ReduceOp::Max | ReduceOp::Prod => tensor.precision,
     };
-    Ok(RuntimeTensorValue {
-        value: IrTensorValue::from_vec(out_shape, out),
-        precision: out_precision,
-    })
+    RuntimeTensorValue::from_wide("reduce", out_precision, out_shape, out)
 }
 
 /// Permute axes of a tensor, given an `axes` permutation. `axes[i]` is the
@@ -1782,17 +1989,17 @@ pub(super) fn tensor_permute_host(
     let in_shape = tensor.value.shape.clone();
     let out_shape: Vec<usize> = axes.iter().map(|&a| in_shape[a]).collect();
     let out_numel = tensor_numel(&out_shape);
-    let mut out = vec![0.0_f64; out_numel];
-    for in_linear in 0..tensor.value.data.len() {
+    let mut picks = vec![0usize; out_numel];
+    for in_linear in 0..tensor.value.len() {
         let in_indices = linear_to_indices(in_linear, &in_shape);
         let out_indices: Vec<usize> = axes.iter().map(|&a| in_indices[a]).collect();
-        let out_linear = indices_to_linear(&out_indices, &out_shape);
-        out[out_linear] = tensor.value.data[in_linear];
+        picks[indices_to_linear(&out_indices, &out_shape)] = in_linear;
     }
-    Ok(RuntimeTensorValue {
-        value: IrTensorValue::from_vec(out_shape, out),
-        precision: tensor.precision,
-    })
+    // reuse_* contract: permute is element-preserving (section C3).
+    Ok(RuntimeTensorValue::new(IrTensorValue::from_storage(
+        out_shape,
+        tensor.value.storage().reuse_gather(&picks),
+    )))
 }
 
 /// 2D matmul: lhs is [m, k], rhs is [k, n], output is [m, n].
@@ -1830,20 +2037,19 @@ pub(super) fn tensor_matmul_host(
     // couple the reference to torch's specific BLAS version, and still not
     // buy eval-vs-C bit-identity — net worse, no soundness win. So this is
     // a documented, expected precision characteristic, not a divergence.
+    let a = lhs.value.to_f64_lossy_vec();
+    let b = rhs.value.to_f64_lossy_vec();
     let mut out = vec![0.0_f64; m * n];
     for i in 0..m {
         for j in 0..n {
             let mut acc = 0.0_f64;
             for kk in 0..k_lhs {
-                acc += lhs.value.data[i * k_lhs + kk] * rhs.value.data[kk * n + j];
+                acc += a[i * k_lhs + kk] * b[kk * n + j];
             }
             out[i * n + j] = acc;
         }
     }
-    Ok(RuntimeTensorValue {
-        value: IrTensorValue::from_vec(vec![m, n], out),
-        precision: lhs.precision,
-    })
+    RuntimeTensorValue::from_wide("matmul", lhs.precision, vec![m, n], out)
 }
 
 /// Replicate a tensor along a new axis.
@@ -1885,19 +2091,19 @@ pub(super) fn tensor_expand_host(
     out_shape.extend_from_slice(&in_shape[axis..]);
 
     let out_numel = tensor_numel(&out_shape);
-    let mut out = vec![0.0_f64; out_numel];
-    for (out_linear, slot) in out.iter_mut().enumerate() {
+    let mut picks = Vec::with_capacity(out_numel);
+    for out_linear in 0..out_numel {
         let out_indices = linear_to_indices(out_linear, &out_shape);
         // Drop the inserted axis to recover the input index.
         let mut in_indices = out_indices;
         in_indices.remove(axis);
-        let in_linear = indices_to_linear(&in_indices, &in_shape);
-        *slot = tensor.value.data[in_linear];
+        picks.push(indices_to_linear(&in_indices, &in_shape));
     }
-    Ok(RuntimeTensorValue {
-        value: IrTensorValue::from_vec(out_shape, out),
-        precision: tensor.precision,
-    })
+    // reuse_* contract: expand is element-preserving (section C3).
+    Ok(RuntimeTensorValue::new(IrTensorValue::from_storage(
+        out_shape,
+        tensor.value.storage().reuse_gather(&picks),
+    )))
 }
 
 /// Strided windowed reduction host evaluator. Mirrors
@@ -1955,6 +2161,7 @@ pub(super) fn tensor_reduce_window_host(
 
     let out_numel = tensor_numel(&out_shape);
     let mut out = vec![0.0_f64; out_numel];
+    let wide_in = tensor.value.to_f64_lossy_vec();
     let window_volume: usize = window_shape.iter().product();
     let init_acc = match reducer {
         ReduceWindowOp::Max => f64::NEG_INFINITY,
@@ -1973,7 +2180,7 @@ pub(super) fn tensor_reduce_window_host(
                 src_indices[leading + i] = out_indices[leading + i] * strides[i] + window_pos[i];
             }
             let src_linear = indices_to_linear(&src_indices, in_shape);
-            let value = tensor.value.data[src_linear];
+            let value = wide_in[src_linear];
             // #172 sibling (intentionally NOT NaN-propagating here, mirrors the
             // C-emit note in `chelis-backend-c/src/emit.rs` ~3963): windowed
             // Max/Min use Rust `f64::max`/`f64::min`, which DROP NaN (return
@@ -2015,10 +2222,7 @@ pub(super) fn tensor_reduce_window_host(
         *slot = acc;
     }
 
-    Ok(RuntimeTensorValue {
-        value: IrTensorValue::from_vec(out_shape, out),
-        precision: tensor.precision,
-    })
+    RuntimeTensorValue::from_wide("reduce_window", tensor.precision, out_shape, out)
 }
 
 /// Pad each axis by `padding[i] = (lo_i, hi_i)`, filling the inserted
@@ -2049,7 +2253,7 @@ pub(super) fn tensor_pad_host(
         .map(|((lo, hi), in_dim)| in_dim + lo + hi)
         .collect();
     let out_numel = tensor_numel(&out_shape);
-    let mut out = vec![fill; out_numel];
+    let mut map: Vec<Option<usize>> = vec![None; out_numel];
     let in_numel = tensor_numel(in_shape);
     for in_linear in 0..in_numel {
         let in_indices = linear_to_indices(in_linear, in_shape);
@@ -2058,13 +2262,18 @@ pub(super) fn tensor_pad_host(
             .zip(padding.iter())
             .map(|(idx, (lo, _))| idx + lo)
             .collect();
-        let out_linear = indices_to_linear(&out_indices, &out_shape);
-        out[out_linear] = tensor.value.data[in_linear];
+        map[indices_to_linear(&out_indices, &out_shape)] = Some(in_linear);
     }
-    Ok(RuntimeTensorValue {
-        value: IrTensorValue::from_vec(out_shape, out),
-        precision: tensor.precision,
-    })
+    // The fill ingress-finalizes at the buffer's dtype (loud on a fill
+    // outside an integer dtype's domain).
+    let fill = chelis_types::scalar_from_f64("pad", tensor.precision, fill)
+        .map_err(|trap| trap.to_string())?;
+    // reuse_* contract: pad moves existing elements and places a
+    // finalized fill (section C3, element-preserving).
+    Ok(RuntimeTensorValue::new(IrTensorValue::from_storage(
+        out_shape,
+        tensor.value.storage().reuse_fill_gather(&fill, &map),
+    )))
 }
 
 /// Sub-tensor slice along every axis. For each axis the `bounds[i] =
@@ -2105,21 +2314,21 @@ pub(super) fn tensor_shrink_host(
         out_shape.push(end - start);
     }
     let out_numel = tensor_numel(&out_shape);
-    let mut out = vec![0.0_f64; out_numel];
-    for (out_linear, slot) in out.iter_mut().enumerate() {
+    let mut picks = Vec::with_capacity(out_numel);
+    for out_linear in 0..out_numel {
         let out_indices = linear_to_indices(out_linear, &out_shape);
         let in_indices: Vec<usize> = out_indices
             .iter()
             .zip(bounds.iter())
             .map(|(idx, (start, _))| idx + start)
             .collect();
-        let in_linear = indices_to_linear(&in_indices, in_shape);
-        *slot = tensor.value.data[in_linear];
+        picks.push(indices_to_linear(&in_indices, in_shape));
     }
-    Ok(RuntimeTensorValue {
-        value: IrTensorValue::from_vec(out_shape, out),
-        precision: tensor.precision,
-    })
+    // reuse_* contract: shrink is element-preserving (section C3).
+    Ok(RuntimeTensorValue::new(IrTensorValue::from_storage(
+        out_shape,
+        tensor.value.storage().reuse_gather(&picks),
+    )))
 }
 
 /// Strided view -- take every `strides[i]`-th element along axis i. Output
@@ -2150,21 +2359,21 @@ pub(super) fn tensor_stride_host(
         out_shape.push(in_dim.div_ceil(*step));
     }
     let out_numel = tensor_numel(&out_shape);
-    let mut out = vec![0.0_f64; out_numel];
-    for (out_linear, slot) in out.iter_mut().enumerate() {
+    let mut picks = Vec::with_capacity(out_numel);
+    for out_linear in 0..out_numel {
         let out_indices = linear_to_indices(out_linear, &out_shape);
         let in_indices: Vec<usize> = out_indices
             .iter()
             .zip(strides.iter())
             .map(|(idx, step)| idx * step.max(&1))
             .collect();
-        let in_linear = indices_to_linear(&in_indices, in_shape);
-        *slot = tensor.value.data[in_linear];
+        picks.push(indices_to_linear(&in_indices, in_shape));
     }
-    Ok(RuntimeTensorValue {
-        value: IrTensorValue::from_vec(out_shape, out),
-        precision: tensor.precision,
-    })
+    // reuse_* contract: stride is element-preserving (section C3).
+    Ok(RuntimeTensorValue::new(IrTensorValue::from_storage(
+        out_shape,
+        tensor.value.storage().reuse_gather(&picks),
+    )))
 }
 
 /// Convert a `RuntimeValue::List` of inner `List`s into a flat
@@ -2189,7 +2398,7 @@ pub(super) fn extract_bounds_pair_list(
                 }
                 let start = match &pair[0] {
                     RuntimeValue::Scalar(payload) if payload.dtype().is_integer() => {
-                        payload.bits().as_i64()
+                        payload.as_i64()
                     }
                     other => {
                         return Err(format!("{op} axis {axis} expects int start, got {other:?}"));
@@ -2197,7 +2406,7 @@ pub(super) fn extract_bounds_pair_list(
                 };
                 let end = match &pair[1] {
                     RuntimeValue::Scalar(payload) if payload.dtype().is_integer() => {
-                        payload.bits().as_i64()
+                        payload.as_i64()
                     }
                     other => {
                         return Err(format!("{op} axis {axis} expects int end, got {other:?}"));
@@ -2251,6 +2460,7 @@ pub(super) fn tensor_softmax_host(
     }
     let numel = tensor_numel(&in_shape);
     let mut out = vec![0.0_f64; numel];
+    let wide_in = tensor.value.to_f64_lossy_vec();
 
     // Iterate over each "slice" along the reduced axis: for every combination
     // of the other axes, compute max -> exp(x - max) -> sum -> divide.
@@ -2281,7 +2491,7 @@ pub(super) fn tensor_softmax_host(
         for k in 0..axis_size {
             base_indices[axis_usize] = k;
             let in_linear = indices_to_linear(&base_indices, &in_shape);
-            let v = tensor.value.data[in_linear];
+            let v = wide_in[in_linear];
             if v.is_nan() {
                 // NaN propagates: write NaN across the whole slice and
                 // continue. This matches IEEE behavior of every other
@@ -2331,7 +2541,7 @@ pub(super) fn tensor_softmax_host(
         for k in 0..axis_size {
             base_indices[axis_usize] = k;
             let in_linear = indices_to_linear(&base_indices, &in_shape);
-            sum_exp += (tensor.value.data[in_linear] - max_val).exp();
+            sum_exp += (wide_in[in_linear] - max_val).exp();
         }
         if sum_exp == 0.0 {
             return Err("softmax sum-of-exp is zero (numerical underflow)".to_string());
@@ -2340,15 +2550,12 @@ pub(super) fn tensor_softmax_host(
         for k in 0..axis_size {
             base_indices[axis_usize] = k;
             let in_linear = indices_to_linear(&base_indices, &in_shape);
-            let numer = (tensor.value.data[in_linear] - max_val).exp();
+            let numer = (wide_in[in_linear] - max_val).exp();
             out[in_linear] = numer / sum_exp;
         }
     }
 
-    Ok(RuntimeTensorValue {
-        value: IrTensorValue::from_vec(in_shape, out),
-        precision: tensor.precision,
-    })
+    RuntimeTensorValue::from_wide("softmax", tensor.precision, in_shape, out)
 }
 
 // ---------------------------------------------------------------------------
@@ -2400,10 +2607,12 @@ fn extract_root(
         .get(root)
         .map(|node| node.output_type.precision)
         .ok_or_else(|| format!("{op_label}: root node missing from DAG"))?;
-    Ok(RuntimeTensorValue {
-        value: tensor_value,
+    debug_assert_eq!(
+        tensor_value.prim(),
         precision,
-    })
+        "{op_label}: the DAG evaluator finalizes at the root's declared dtype"
+    );
+    Ok(RuntimeTensorValue::new(tensor_value))
 }
 
 /// Build a small DAG whose only input is `x`, attach the supplied
@@ -2575,21 +2784,33 @@ pub(super) fn tensor_concat_value(
     }
     let mut out_shape = first.value.shape.clone();
     out_shape[axis] = tensors.iter().map(|tensor| tensor.value.shape[axis]).sum();
-    let mut out = vec![0.0; tensor_numel(&out_shape)];
+    // reuse_* contract: concat moves existing elements only (section C3,
+    // element-preserving). Seed a zero-filled buffer at the shared dtype,
+    // then overwrite every slot from its owning part.
+    let out_numel = tensor_numel(&out_shape);
+    let zero = chelis_types::scalar_from_i64("concat", first.precision, 0)
+        .map_err(|trap| trap.to_string())?;
+    let seed = first
+        .value
+        .storage()
+        .reuse_fill_gather(&zero, &vec![None; out_numel]);
+    let mut out = IrTensorValue::from_storage(out_shape.clone(), seed);
     let mut axis_offset = 0usize;
     for tensor in &tensors {
-        for linear in 0..tensor.value.data.len() {
+        let mut writes = Vec::with_capacity(tensor.value.len());
+        for linear in 0..tensor.value.len() {
             let mut index = linear_to_indices(linear, &tensor.value.shape);
             index[axis] += axis_offset;
-            let out_linear = indices_to_linear(&index, &out_shape);
-            out[out_linear] = tensor.value.data[linear];
+            writes.push((indices_to_linear(&index, &out_shape), linear));
         }
+        out = IrTensorValue::from_storage(
+            out_shape.clone(),
+            out.storage()
+                .reuse_overwrite(tensor.value.storage(), writes),
+        );
         axis_offset += tensor.value.shape[axis];
     }
-    Ok(RuntimeValue::Tensor(RuntimeTensorValue {
-        value: IrTensorValue::from_vec(out_shape, out),
-        precision: first.precision,
-    }))
+    Ok(RuntimeValue::Tensor(RuntimeTensorValue::new(out)))
 }
 
 pub(super) fn tensor_reshape_value(
@@ -2601,17 +2822,19 @@ pub(super) fn tensor_reshape_value(
         .iter()
         .try_fold(1usize, |acc, dim| acc.checked_mul(*dim))
         .ok_or_else(|| "reshape target shape overflows usize".to_string())?;
-    if expected != tensor.value.data.len() {
+    if expected != tensor.value.len() {
         return Err(format!(
             "reshape expects {} elements but tensor has {}",
             expected,
-            tensor.value.data.len()
+            tensor.value.len()
         ));
     }
-    Ok(RuntimeTensorValue {
-        value: IrTensorValue::from_vec(new_shape, tensor.value.data.clone()),
-        precision: tensor.precision,
-    })
+    // reuse_* contract: reshape is element-preserving (section C3); the
+    // buffer moves unchanged under a new shape.
+    Ok(RuntimeTensorValue::new(IrTensorValue::from_storage(
+        new_shape,
+        tensor.value.storage().clone(),
+    )))
 }
 
 pub(super) fn tensor_split_value(
@@ -2633,18 +2856,18 @@ pub(super) fn tensor_split_value(
     for size in sizes {
         let mut shape = tensor.value.shape.clone();
         shape[axis] = size;
-        let mut data = vec![0.0; tensor_numel(&shape)];
-        for (linear, slot) in data.iter_mut().enumerate() {
+        let numel = tensor_numel(&shape);
+        let mut picks = Vec::with_capacity(numel);
+        for linear in 0..numel {
             let mut index = linear_to_indices(linear, &shape);
             index[axis] += offset;
-            let src = indices_to_linear(&index, &tensor.value.shape);
-            *slot = tensor.value.data[src];
+            picks.push(indices_to_linear(&index, &tensor.value.shape));
         }
         offset += size;
-        parts.push(RuntimeValue::Tensor(RuntimeTensorValue {
-            value: IrTensorValue::from_vec(shape, data),
-            precision: tensor.precision,
-        }));
+        // reuse_* contract: split is element-preserving (section C3).
+        parts.push(RuntimeValue::Tensor(RuntimeTensorValue::new(
+            IrTensorValue::from_storage(shape, tensor.value.storage().reuse_gather(&picks)),
+        )));
     }
     Ok(RuntimeValue::List(parts))
 }
@@ -2661,26 +2884,32 @@ pub(super) fn tensor_gather_value(
     let mut out_shape = tensor.value.shape[..axis].to_vec();
     out_shape.extend_from_slice(&indices.value.shape);
     out_shape.extend_from_slice(&tensor.value.shape[axis + 1..]);
-    let mut out = vec![0.0; tensor_numel(&out_shape)];
-    for (linear, slot) in out.iter_mut().enumerate() {
+    let index_values = indices
+        .value
+        .storage()
+        .to_i64_exact_vec()
+        .expect("integer tensor storage reads exactly");
+    let out_numel = tensor_numel(&out_shape);
+    let mut picks = Vec::with_capacity(out_numel);
+    for linear in 0..out_numel {
         let out_index = linear_to_indices(linear, &out_shape);
         let mut src_index = Vec::with_capacity(tensor.value.shape.len());
         src_index.extend_from_slice(&out_index[..axis]);
         let gathered_idx = &out_index[axis..axis + indices.value.shape.len()];
         let index_linear = indices_to_linear(gathered_idx, &indices.value.shape);
-        let value = indices.value.data[index_linear] as i64;
+        let value = index_values[index_linear];
         if value < 0 || value as usize >= tensor.value.shape[axis] {
             return Err(format!("gather index {value} out of bounds at axis {axis}"));
         }
         src_index.push(value as usize);
         src_index.extend_from_slice(&out_index[axis + indices.value.shape.len()..]);
-        let src_linear = indices_to_linear(&src_index, &tensor.value.shape);
-        *slot = tensor.value.data[src_linear];
+        picks.push(indices_to_linear(&src_index, &tensor.value.shape));
     }
-    Ok(RuntimeTensorValue {
-        value: IrTensorValue::from_vec(out_shape, out),
-        precision: tensor.precision,
-    })
+    // reuse_* contract: gather is element-preserving (section C3).
+    Ok(RuntimeTensorValue::new(IrTensorValue::from_storage(
+        out_shape,
+        tensor.value.storage().reuse_gather(&picks),
+    )))
 }
 
 pub(super) fn tensor_scatter_value(
@@ -2698,15 +2927,20 @@ pub(super) fn tensor_scatter_value(
     if expected.value.shape != updates.value.shape || expected.precision != updates.precision {
         return Err("scatter updates must match gathered tensor shape and precision".to_string());
     }
-    let mut out = base.value.data.clone();
+    let index_values = indices
+        .value
+        .storage()
+        .to_i64_exact_vec()
+        .expect("integer tensor storage reads exactly");
+    let mut writes = Vec::with_capacity(updates.value.len());
     let mut seen = std::collections::HashSet::new();
-    for linear in 0..updates.value.data.len() {
+    for linear in 0..updates.value.len() {
         let update_index = linear_to_indices(linear, &updates.value.shape);
         let mut out_index = Vec::with_capacity(base.value.shape.len());
         out_index.extend_from_slice(&update_index[..axis]);
         let gathered_idx = &update_index[axis..axis + indices.value.shape.len()];
         let index_linear = indices_to_linear(gathered_idx, &indices.value.shape);
-        let value = indices.value.data[index_linear] as i64;
+        let value = index_values[index_linear];
         if value < 0 || value as usize >= base.value.shape[axis] {
             return Err(format!(
                 "scatter index {value} out of bounds at axis {axis}"
@@ -2715,24 +2949,38 @@ pub(super) fn tensor_scatter_value(
         out_index.push(value as usize);
         out_index.extend_from_slice(&update_index[axis + indices.value.shape.len()..]);
         let out_linear = indices_to_linear(&out_index, &base.value.shape);
-        match mode {
-            "replace" => {
-                if !seen.insert(out_linear) {
-                    return Err(format!(
-                        "scatter replace mode rejects duplicate target index {}",
-                        out_linear
-                    ));
-                }
-                out[out_linear] = updates.value.data[linear];
-            }
-            "add" => out[out_linear] += updates.value.data[linear],
-            other => return Err(format!("scatter mode must be replace or add, got {other}")),
+        if mode == "replace" && !seen.insert(out_linear) {
+            return Err(format!(
+                "scatter replace mode rejects duplicate target index {}",
+                out_linear
+            ));
         }
+        writes.push((out_linear, linear));
     }
-    Ok(RuntimeTensorValue {
-        value: IrTensorValue::from_vec(base.value.shape.clone(), out),
-        precision: base.precision,
-    })
+    match mode {
+        // reuse_* contract: replace-scatter moves existing elements only
+        // (section C3, element-preserving).
+        "replace" => Ok(RuntimeTensorValue::new(IrTensorValue::from_storage(
+            base.value.shape.clone(),
+            base.value
+                .storage()
+                .reuse_overwrite(updates.value.storage(), writes),
+        ))),
+        "add" => {
+            let mut out = base.value.to_f64_lossy_vec();
+            let upd = updates.value.to_f64_lossy_vec();
+            for (out_linear, linear) in writes {
+                out[out_linear] += upd[linear];
+            }
+            RuntimeTensorValue::from_wide(
+                "scatter_add",
+                base.precision,
+                base.value.shape.clone(),
+                out,
+            )
+        }
+        other => Err(format!("scatter mode must be replace or add, got {other}")),
+    }
 }
 
 /// Element-wise replace-scatter with ONNX `ScatterElements` semantics
@@ -2760,10 +3008,14 @@ pub(super) fn tensor_scatter_elements_value(
             "scatter_elements requires data, indices, and updates to share a rank".to_string(),
         );
     }
-    let mut out = data.value.data.clone();
-    for linear in 0..updates.value.data.len() {
+    let index_values = indices
+        .value
+        .storage()
+        .to_i64_exact_vec()
+        .expect("integer tensor storage reads exactly");
+    let mut writes = Vec::with_capacity(updates.value.len());
+    for (linear, &value) in index_values.iter().enumerate() {
         let coord = linear_to_indices(linear, &updates.value.shape);
-        let value = indices.value.data[linear] as i64;
         if value < 0 || value as usize >= data.value.shape[axis] {
             return Err(format!(
                 "scatter_elements index {value} out of bounds at axis {axis}"
@@ -2771,14 +3023,16 @@ pub(super) fn tensor_scatter_elements_value(
         }
         let mut out_index = coord.clone();
         out_index[axis] = value as usize;
-        let out_linear = indices_to_linear(&out_index, &data.value.shape);
         // Last-write-wins: deterministic-order overwrite.
-        out[out_linear] = updates.value.data[linear];
+        writes.push((indices_to_linear(&out_index, &data.value.shape), linear));
     }
-    Ok(RuntimeTensorValue {
-        value: IrTensorValue::from_vec(data.value.shape.clone(), out),
-        precision: data.precision,
-    })
+    // reuse_* contract: element-preserving overwrite (section C3).
+    Ok(RuntimeTensorValue::new(IrTensorValue::from_storage(
+        data.value.shape.clone(),
+        data.value
+            .storage()
+            .reuse_overwrite(updates.value.storage(), writes),
+    )))
 }
 
 pub(super) fn tensor_where_value(
@@ -2799,24 +3053,26 @@ pub(super) fn tensor_where_value(
     if then_tensor.precision != else_tensor.precision {
         return Err("where expects matching branch precision".to_string());
     }
-    let data = cond
+    // reuse_* contract: `where` selects existing elements from the two
+    // branches (section C3, element-preserving). Start from the then
+    // branch and overwrite else-selected slots.
+    let cond_mask = cond
         .value
-        .data
+        .storage()
+        .to_i64_exact_vec()
+        .expect("bool tensor storage reads exactly");
+    let writes = cond_mask
         .iter()
-        .zip(&then_tensor.value.data)
-        .zip(&else_tensor.value.data)
-        .map(|((cond, then_value), else_value)| {
-            if *cond != 0.0 {
-                *then_value
-            } else {
-                *else_value
-            }
-        })
-        .collect();
-    Ok(RuntimeTensorValue {
-        value: IrTensorValue::from_vec(then_tensor.value.shape.clone(), data),
-        precision: then_tensor.precision,
-    })
+        .enumerate()
+        .filter(|(_, flag)| **flag == 0)
+        .map(|(linear, _)| (linear, linear));
+    Ok(RuntimeTensorValue::new(IrTensorValue::from_storage(
+        then_tensor.value.shape.clone(),
+        then_tensor
+            .value
+            .storage()
+            .reuse_overwrite(else_tensor.value.storage(), writes),
+    )))
 }
 
 pub(super) fn tensor_cumsum_value(
@@ -2824,7 +3080,7 @@ pub(super) fn tensor_cumsum_value(
     axis: i64,
 ) -> Result<RuntimeTensorValue, String> {
     let axis = normalize_axis(tensor.value.shape.len(), axis, "cumsum")?;
-    let mut data = tensor.value.data.clone();
+    let mut data = tensor.value.to_f64_lossy_vec();
     let axis_size = tensor.value.shape[axis];
     let inner: usize = tensor.value.shape[axis + 1..]
         .iter()
@@ -2846,10 +3102,7 @@ pub(super) fn tensor_cumsum_value(
             }
         }
     }
-    Ok(RuntimeTensorValue {
-        value: IrTensorValue::from_vec(tensor.value.shape.clone(), data),
-        precision: tensor.precision,
-    })
+    RuntimeTensorValue::from_wide("cumsum", tensor.precision, tensor.value.shape.clone(), data)
 }
 
 pub(super) fn tensor_sort_value(
@@ -2863,38 +3116,43 @@ pub(super) fn tensor_sort_value(
         .product::<usize>()
         .max(1);
     let outer: usize = tensor.value.shape[..axis].iter().product::<usize>().max(1);
-    let mut values = tensor.value.data.clone();
-    let mut indices = vec![0.0; tensor.value.data.len()];
+    let wide = tensor.value.to_f64_lossy_vec();
+    let mut picks = vec![0usize; tensor.value.len()];
+    let mut indices = vec![0i64; tensor.value.len()];
     for outer_idx in 0..outer {
         for inner_idx in 0..inner {
             let mut items = (0..axis_size)
                 .map(|axis_idx| {
                     let linear = (outer_idx * axis_size + axis_idx) * inner + inner_idx;
-                    (axis_idx, values[linear])
+                    (axis_idx, linear, wide[linear])
                 })
                 .collect::<Vec<_>>();
-            items.sort_by(|(lhs_idx, lhs_val), (rhs_idx, rhs_val)| {
+            items.sort_by(|(lhs_idx, _, lhs_val), (rhs_idx, _, rhs_val)| {
                 lhs_val
                     .partial_cmp(rhs_val)
                     .unwrap_or(std::cmp::Ordering::Equal)
                     .then(lhs_idx.cmp(rhs_idx))
             });
-            for (sorted_idx, (original_idx, value)) in items.into_iter().enumerate() {
+            for (sorted_idx, (original_idx, original_linear, _)) in items.into_iter().enumerate() {
                 let linear = (outer_idx * axis_size + sorted_idx) * inner + inner_idx;
-                values[linear] = value;
-                indices[linear] = original_idx as f64;
+                picks[linear] = original_linear;
+                indices[linear] = original_idx as i64;
             }
         }
     }
+    // reuse_* contract: the sorted values are a permutation of the input
+    // (section C3, element-preserving); the index tensor is exact int64.
     Ok(RuntimeValue::Tuple(vec![
-        RuntimeValue::Tensor(RuntimeTensorValue {
-            value: IrTensorValue::from_vec(tensor.value.shape.clone(), values),
-            precision: tensor.precision,
-        }),
-        RuntimeValue::Tensor(RuntimeTensorValue {
-            value: IrTensorValue::from_vec(tensor.value.shape.clone(), indices),
-            precision: Prim::Int64,
-        }),
+        RuntimeValue::Tensor(RuntimeTensorValue::new(IrTensorValue::from_storage(
+            tensor.value.shape.clone(),
+            tensor.value.storage().reuse_gather(&picks),
+        ))),
+        RuntimeValue::Tensor(RuntimeTensorValue::from_wide_int(
+            "sort",
+            Prim::Int64,
+            tensor.value.shape.clone(),
+            indices,
+        )?),
     ]))
 }
 
@@ -2917,8 +3175,9 @@ pub(super) fn tensor_diagonal_value(
             out_shape.push(*size);
         }
     }
-    let mut data = vec![0.0; tensor_numel(&out_shape)];
-    for (linear, slot) in data.iter_mut().enumerate() {
+    let out_numel = tensor_numel(&out_shape);
+    let mut picks = Vec::with_capacity(out_numel);
+    for linear in 0..out_numel {
         let out_index = linear_to_indices(linear, &out_shape);
         let mut src_index = Vec::with_capacity(tensor.value.shape.len());
         let mut out_pos = 0usize;
@@ -2931,13 +3190,13 @@ pub(super) fn tensor_diagonal_value(
                 out_pos += 1;
             }
         }
-        let src_linear = indices_to_linear(&src_index, &tensor.value.shape);
-        *slot = tensor.value.data[src_linear];
+        picks.push(indices_to_linear(&src_index, &tensor.value.shape));
     }
-    Ok(RuntimeTensorValue {
-        value: IrTensorValue::from_vec(out_shape, data),
-        precision: tensor.precision,
-    })
+    // reuse_* contract: diagonal is element-preserving (section C3).
+    Ok(RuntimeTensorValue::new(IrTensorValue::from_storage(
+        out_shape,
+        tensor.value.storage().reuse_gather(&picks),
+    )))
 }
 
 pub(super) fn tensor_trace_value(
@@ -2974,24 +3233,24 @@ pub(super) fn tensor_clamp_value(
             "clamp expects scalar tensor bounds or matching-shape tensor bounds".to_string(),
         );
     }
-    let mut out = Vec::with_capacity(tensor.value.data.len());
-    for linear in 0..tensor.value.data.len() {
+    let wide = tensor.value.to_f64_lossy_vec();
+    let lo_wide = lo.value.to_f64_lossy_vec();
+    let hi_wide = hi.value.to_f64_lossy_vec();
+    let mut out = Vec::with_capacity(wide.len());
+    for (linear, value) in wide.into_iter().enumerate() {
         let lo_value = if lo.value.shape.is_empty() {
-            lo.value.data[0]
+            lo_wide[0]
         } else {
-            lo.value.data[linear]
+            lo_wide[linear]
         };
         let hi_value = if hi.value.shape.is_empty() {
-            hi.value.data[0]
+            hi_wide[0]
         } else {
-            hi.value.data[linear]
+            hi_wide[linear]
         };
-        out.push(tensor.value.data[linear].clamp(lo_value, hi_value));
+        out.push(value.clamp(lo_value, hi_value));
     }
-    Ok(RuntimeTensorValue {
-        value: IrTensorValue::from_vec(tensor.value.shape.clone(), out),
-        precision: tensor.precision,
-    })
+    RuntimeTensorValue::from_wide("clamp", tensor.precision, tensor.value.shape.clone(), out)
 }
 
 pub(super) fn tensor_einsum_value(
@@ -3056,6 +3315,8 @@ pub(super) fn tensor_einsum_value(
     // the eval(f64)-vs-C(BLAS) gap at large k is an expected, tolerance-
     // covered precision characteristic, not a divergence. See the comment
     // in `tensor_matmul_host`.
+    let lhs_wide = lhs.value.to_f64_lossy_vec();
+    let rhs_wide = rhs.value.to_f64_lossy_vec();
     let mut out = vec![0.0; tensor_numel(&out_shape)];
     for (out_linear, slot) in out.iter_mut().enumerate() {
         let out_index = linear_to_indices(out_linear, &out_shape);
@@ -3078,15 +3339,12 @@ pub(super) fn tensor_einsum_value(
                 .iter()
                 .map(|label| label_values[label])
                 .collect::<Vec<_>>();
-            acc += lhs.value.data[indices_to_linear(&lhs_index, &lhs.value.shape)]
-                * rhs.value.data[indices_to_linear(&rhs_index, &rhs.value.shape)];
+            acc += lhs_wide[indices_to_linear(&lhs_index, &lhs.value.shape)]
+                * rhs_wide[indices_to_linear(&rhs_index, &rhs.value.shape)];
         }
         *slot = acc;
     }
-    Ok(RuntimeTensorValue {
-        value: IrTensorValue::from_vec(out_shape, out),
-        precision: lhs.precision,
-    })
+    RuntimeTensorValue::from_wide("einsum", lhs.precision, out_shape, out)
 }
 
 /// Every exit in the eval lane truncates tensor element rendering after
@@ -3107,81 +3365,6 @@ pub(super) const TENSOR_RENDER_LIMIT: usize = 32;
 /// class comes from what `to_tensor`/`cast`/the DAG actually stored.
 /// Own-width float tensor digits arrive when chelis#729 repairs the value
 /// metadata; scalar exits already render at their own width below.
-fn render_tensor_element(precision: Prim, stored: f64) -> String {
-    use chelis_types::{ElementRef, format_element};
-    // Exhaustive over Prim, no `_` arm (loud_unsupported.md section C4.1).
-    //
-    // Tag-vs-bits disagreements print the BITS: when an integer- or
-    // bool-tagged slot holds a value outside the tag's value set (the live
-    // example: `mean` of an int64 tensor stores 187.5 - chelis#724/[#729]
-    // domain territory), the element renders as the stored f64 so the
-    // value bug stays visible instead of laundered through truncation
-    // (faithful_observation.md non-goals: printing wrong stored bits
-    // faithfully is a feature). Panicking here would turn a runnable
-    // program's print into a crash ([05-UNS-3] forbids source-reachable
-    // panics), and truncating would manufacture a well-formed lie.
-    let faithful_f64 = || format_element(Prim::F64, ElementRef::F64(stored));
-    let int_or_bits = |width: Prim| -> String {
-        if stored.fract() != 0.0 || !stored.is_finite() {
-            return faithful_f64();
-        }
-        // Exact i64 range at f64 precision: [-2^63, 2^63). A saturating
-        // `as` cast outside it would print a near-miss integer for bits
-        // that are not that integer.
-        if !(-9223372036854775808.0..9223372036854775808.0).contains(&stored) {
-            return faithful_f64();
-        }
-        let as_int = stored as i64;
-        let element = match width {
-            Prim::Int8 => i8::try_from(as_int).map(ElementRef::I8).ok(),
-            Prim::Int16 => i16::try_from(as_int).map(ElementRef::I16).ok(),
-            Prim::Int32 => i32::try_from(as_int).map(ElementRef::I32).ok(),
-            Prim::Int64 => Some(ElementRef::I64(as_int)),
-            Prim::F16
-            | Prim::Bf16
-            | Prim::F32
-            | Prim::F64
-            | Prim::F8e4m3
-            | Prim::Bool
-            | Prim::String => None,
-        };
-        match element {
-            Some(element) => format_element(width, element),
-            // Out of the width's range: same tag-vs-bits story.
-            None => faithful_f64(),
-        }
-    };
-    match precision {
-        Prim::Bool => {
-            if stored == 1.0 {
-                format_element(Prim::Bool, ElementRef::Bool(true))
-            } else if stored == 0.0 && !stored.is_sign_negative() {
-                format_element(Prim::Bool, ElementRef::Bool(false))
-            } else {
-                // A bool-tagged slot holding neither +0 nor 1 prints the
-                // bits - including -0.0, whose sign bit is stored state a
-                // `false` rendering would launder (PR #792 red-team F6;
-                // reachable from source via `print(neg(bool_tensor))`).
-                faithful_f64()
-            }
-        }
-        Prim::Int8 => int_or_bits(Prim::Int8),
-        Prim::Int16 => int_or_bits(Prim::Int16),
-        Prim::Int32 => int_or_bits(Prim::Int32),
-        Prim::Int64 => int_or_bits(Prim::Int64),
-        Prim::F16 | Prim::Bf16 | Prim::F32 | Prim::F64 => faithful_f64(),
-        Prim::F8e4m3 => panic!(
-            "render_tensor_element: f8e4m3 is not in the active dtype set \
-             (spec/04-type-system.md section 1.1.1); the checker rejects it, \
-             so no tensor tag can carry it"
-        ),
-        Prim::String => panic!(
-            "render_tensor_element: no string tensors exist \
-             (to_tensor/cast/DAG typing only produce numeric/bool tensors)"
-        ),
-    }
-}
-
 /// Render a tensor payload: `tensor(shape=[..], data=[..])`, elements via
 /// [`render_tensor_element`], truncated per [`TENSOR_RENDER_LIMIT`]. A
 /// rank-0 tensor renders as its single element, bare: the
@@ -3190,21 +3373,32 @@ fn render_tensor_element(precision: Prim, stored: f64) -> String {
 /// realization of scalar bindings must not leak into the observation
 /// channel, and `print` of the same scalar already renders bare).
 fn render_tensor(tensor: &RuntimeTensorValue) -> String {
+    // chelis#729 Phase 1: elements render straight from the sealed
+    // per-dtype storage (`element_ref` carries the element at its own
+    // width), so the former f64-image bridge `render_tensor_element` and
+    // its tag-vs-bits disagreement arm are structurally unreachable: the
+    // storage variant IS the tag.
     if tensor.value.shape.is_empty() {
-        let stored = *tensor.value.data.first().unwrap_or_else(|| {
-            panic!(
-                "render_tensor: rank-0 tensor with no element (IrTensorValue \
-                 guarantees numel(shape=[]) == 1 at construction)"
-            )
-        });
-        return render_tensor_element(tensor.precision, stored);
+        assert!(
+            !tensor.value.is_empty(),
+            "render_tensor: rank-0 tensor with no element (IrTensorValue \
+             guarantees numel(shape=[]) == 1 at construction)"
+        );
+        return chelis_types::format_element(
+            tensor.precision,
+            tensor.value.storage().element_ref(0),
+        );
     }
-    let visible = tensor.value.data.len().min(TENSOR_RENDER_LIMIT);
-    let mut elements: Vec<String> = tensor.value.data[..visible]
-        .iter()
-        .map(|stored| render_tensor_element(tensor.precision, *stored))
+    let visible = tensor.value.len().min(TENSOR_RENDER_LIMIT);
+    let mut elements: Vec<String> = (0..visible)
+        .map(|index| {
+            chelis_types::format_element(
+                tensor.precision,
+                tensor.value.storage().element_ref(index),
+            )
+        })
         .collect();
-    if tensor.value.data.len() > visible {
+    if tensor.value.len() > visible {
         elements.push("...".to_string());
     }
     format!(
@@ -3222,20 +3416,10 @@ pub(crate) fn render_value(value: &RuntimeValue) -> String {
     match value {
         RuntimeValue::Tensor(tensor) => render_tensor(tensor),
         RuntimeValue::Scalar(payload) => {
-            // Scalars carry their dtype in ScalarBits (the dtype/bits
-            // invariant is enforced at construction), so every scalar exit
-            // renders at its OWN width per [05-OBS-2].
-            let element = match payload.bits() {
-                ScalarBits::I8(v) => ElementRef::I8(v),
-                ScalarBits::I16(v) => ElementRef::I16(v),
-                ScalarBits::I32(v) => ElementRef::I32(v),
-                ScalarBits::I64(v) => ElementRef::I64(v),
-                ScalarBits::F16(v) => ElementRef::F16(v),
-                ScalarBits::Bf16(v) => ElementRef::Bf16(v),
-                ScalarBits::F32(v) => ElementRef::F32(v),
-                ScalarBits::F64(v) => ElementRef::F64(v),
-            };
-            format_element(payload.dtype(), element)
+            // Scalars carry their dtype in the sealed storage variant
+            // (the dtype/bits invariant holds by construction), so every
+            // scalar exit renders at its OWN width per [05-OBS-2].
+            format_element(payload.dtype(), payload.value().element_ref())
         }
         RuntimeValue::Bool(value) => format_element(Prim::Bool, ElementRef::Bool(*value)),
         RuntimeValue::String(value) => value.clone(),
@@ -3323,17 +3507,16 @@ pub(super) fn uniform_like_value(
     let low_f = low as f32;
     let high_f = high as f32;
     let span_f = high_f - low_f;
-    let data = template
-        .value
-        .data
-        .iter()
-        .enumerate()
-        .map(|(index, _)| span_f.mul_add(dropout_sample(seed, index as u64) as f32, low_f) as f64)
+    let data = (0..template.value.len())
+        .map(|index| span_f.mul_add(dropout_sample(seed, index as u64) as f32, low_f) as f64)
         .collect::<Vec<_>>();
-    RuntimeTensorValue {
-        value: IrTensorValue::from_vec(template.value.shape.clone(), data),
-        precision: template.precision,
-    }
+    RuntimeTensorValue::from_wide(
+        "uniform_like",
+        template.precision,
+        template.value.shape.clone(),
+        data,
+    )
+    .expect("f32-image samples finalize at any float dtype")
 }
 
 #[cfg(test)]
@@ -3348,10 +3531,8 @@ mod uniform_like_affine_tests {
     use super::*;
 
     fn template_f32(n: usize) -> RuntimeTensorValue {
-        RuntimeTensorValue {
-            value: IrTensorValue::from_vec(vec![n], vec![0.0; n]),
-            precision: Prim::F32,
-        }
+        RuntimeTensorValue::from_wide("test", Prim::F32, vec![n], vec![0.0; n])
+            .expect("zero template finalizes at f32")
     }
 
     #[test]
@@ -3361,16 +3542,16 @@ mod uniform_like_affine_tests {
         // elem[4]: where the pre-#770 f64 affine rounded to the adjacent f32
         // (0x404215a9) instead of the sampler's 0x404215aa.
         assert_eq!(
-            out.value.data[4].to_bits(),
+            out.value.to_f64_lossy_vec()[4].to_bits(),
             (f32::from_bits(0x404215aa) as f64).to_bits(),
             "elem[4] must be the C f32 sampler value (0x404215aa), got {} (f32 bits {:#010x})",
-            out.value.data[4],
-            (out.value.data[4] as f32).to_bits(),
+            out.value.to_f64_lossy_vec()[4],
+            (out.value.to_f64_lossy_vec()[4] as f32).to_bits(),
         );
         let old_f64_affine = 2.0 + (5.0 - 2.0) * dropout_sample(42, 4);
         assert_eq!((old_f64_affine as f32).to_bits(), 0x404215a9);
         assert_ne!(
-            (out.value.data[4] as f32).to_bits(),
+            (out.value.to_f64_lossy_vec()[4] as f32).to_bits(),
             (old_f64_affine as f32).to_bits(),
             "the fix must not reproduce the old f64-affine rounding",
         );
@@ -3379,12 +3560,12 @@ mod uniform_like_affine_tests {
         // between `-ffp-contract=fast` (FMA, 0x408f5273) and `=off` (two
         // roundings, 0x408f5274). Pin the FMA values; show two-rounding differs.
         assert_eq!(
-            out.value.data[6].to_bits(),
+            out.value.to_f64_lossy_vec()[6].to_bits(),
             (f32::from_bits(0x408f5273) as f64).to_bits(),
             "elem[6] must be the single-rounding FMA value (0x408f5273)",
         );
         assert_eq!(
-            out.value.data[7].to_bits(),
+            out.value.to_f64_lossy_vec()[7].to_bits(),
             (f32::from_bits(0x403ec1e7) as f64).to_bits(),
             "elem[7] must be the single-rounding FMA value (0x403ec1e7)",
         );
@@ -3392,7 +3573,7 @@ mod uniform_like_affine_tests {
         let two_rounding_6 = 2.0f32 + (5.0f32 - 2.0f32) * unit6;
         assert_eq!(two_rounding_6.to_bits(), 0x408f5274);
         assert_ne!(
-            (out.value.data[6] as f32).to_bits(),
+            (out.value.to_f64_lossy_vec()[6] as f32).to_bits(),
             two_rounding_6.to_bits(),
         );
     }
@@ -3401,7 +3582,7 @@ mod uniform_like_affine_tests {
     fn affine_is_f32_for_negative_range() {
         let out = uniform_like_value(&template_f32(8), -3.0, -1.0, 42);
         assert_eq!(
-            out.value.data[3].to_bits(),
+            out.value.to_f64_lossy_vec()[3].to_bits(),
             (f32::from_bits(0xc010167a) as f64).to_bits(),
             "elem[3] must be the C f32 sampler value for [-3,-1) (0xc010167a)",
         );

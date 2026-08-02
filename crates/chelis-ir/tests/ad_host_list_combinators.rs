@@ -154,7 +154,7 @@ out = grad(loss)(to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)]))
 ",
     );
     assert_eq!(out.shape, vec![3]);
-    assert_close(&out.data, &[1.0, 1.0, 1.0], 1e-6, "boundary");
+    assert_close(&out.to_f64_lossy_vec(), &[1.0, 1.0, 1.0], 1e-6, "boundary");
 }
 
 #[test]
@@ -170,7 +170,7 @@ out = grad(loss)(to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)]))
 ",
     );
     assert_eq!(out.shape, vec![3]);
-    assert_close(&out.data, &[2.0, 4.0, 6.0], 1e-5, "map");
+    assert_close(&out.to_f64_lossy_vec(), &[2.0, 4.0, 6.0], 1e-5, "map");
 }
 
 #[test]
@@ -188,7 +188,7 @@ out = grad(first_derivative_sum)(to_tensor([cast(3.0, f32)]))
 ",
     );
     assert_eq!(out.shape, vec![1]);
-    assert_close(&out.data, &[18.0], 1e-5, "nested grad");
+    assert_close(&out.to_f64_lossy_vec(), &[18.0], 1e-5, "nested grad");
 }
 
 #[test]
@@ -209,7 +209,12 @@ out = grad(bs_total, wrt=spots)(
         .into_iter()
         .map(|spot| cdf_identity_black_scholes_delta(spot, 100.0, 0.05, 0.30, 1.25))
         .collect::<Vec<_>>();
-    assert_close(&out.data, &expected, 1e-10, "Black-Scholes f64 delta");
+    assert_close(
+        &out.to_f64_lossy_vec(),
+        &expected,
+        1e-10,
+        "Black-Scholes f64 delta",
+    );
 }
 
 #[test]
@@ -229,7 +234,12 @@ out = grad(bs_total_one_delta, wrt=spots)(
     let expected = [cdf_identity_black_scholes_gamma(
         100.0, 100.0, 0.05, 0.30, 1.25,
     )];
-    assert_close(&out.data, &expected, 1e-10, "Black-Scholes f64 gamma");
+    assert_close(
+        &out.to_f64_lossy_vec(),
+        &expected,
+        1e-10,
+        "Black-Scholes f64 gamma",
+    );
 }
 
 #[test]
@@ -252,7 +262,12 @@ out = vmap(grad(bs_total_one_batched, wrt=spots))(
         .into_iter()
         .map(|spot| cdf_identity_black_scholes_delta(spot, 100.0, 0.05, 0.30, 1.25))
         .collect::<Vec<_>>();
-    assert_close(&out.data, &expected, 1e-10, "vmap Black-Scholes f64 delta");
+    assert_close(
+        &out.to_f64_lossy_vec(),
+        &expected,
+        1e-10,
+        "vmap Black-Scholes f64 delta",
+    );
 }
 
 #[test]
@@ -269,7 +284,7 @@ out = vmap(grad(loss))(to_tensor([[cast(1.0, f32), cast(2.0, f32), cast(3.0, f32
     );
     assert_eq!(out.shape, vec![2, 3]);
     assert_close(
-        &out.data,
+        &out.to_f64_lossy_vec(),
         &[2.0, 4.0, 6.0, 8.0, 10.0, 12.0],
         1e-5,
         "vmap grad map",
@@ -289,7 +304,12 @@ out = grad(loss)(to_tensor([cast(-2.0, f32), cast(3.0, f32), cast(0.5, f32), cas
 ",
     );
     assert_eq!(out.shape, vec![4]);
-    assert_close(&out.data, &[0.0, 6.0, 1.0, 0.0], 1e-5, "filter");
+    assert_close(
+        &out.to_f64_lossy_vec(),
+        &[0.0, 6.0, 1.0, 0.0],
+        1e-5,
+        "filter",
+    );
 }
 
 #[test]
@@ -302,5 +322,5 @@ out = grad(loss)(to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)]))
 ",
     );
     assert_eq!(out.shape, vec![3]);
-    assert_close(&out.data, &[0.5, 2.0, 6.0], 1e-5, "fold");
+    assert_close(&out.to_f64_lossy_vec(), &[0.5, 2.0, 6.0], 1e-5, "fold");
 }

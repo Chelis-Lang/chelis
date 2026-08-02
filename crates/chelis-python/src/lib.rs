@@ -1717,7 +1717,8 @@ loss = (mean(x, 0) : tensor[f32])
         Python::with_gil(|py| {
             let module = PyModule::new(py, "_native").expect("module");
             register_module(&module).expect("register");
-            let bindings = r#"{"x":{"shape":[4],"data":[1.0,2.0,3.0,4.0]}}"#;
+            let bindings =
+                r#"{"x":{"shape":[4],"data":{"dtype":"f32","values":[1.0,2.0,3.0,4.0]}}}"#;
             let result = module
                 .getattr("eval_json")
                 .expect("eval_json")
@@ -1733,7 +1734,16 @@ loss = (mean(x, 0) : tensor[f32])
                 .find(|root| root["name"] == "loss")
                 .expect("loss root");
             assert_eq!(loss["value"]["type"].as_str(), Some("tensor"));
-            assert_eq!(loss["value"]["value"]["data"][0].as_f64(), Some(2.5));
+            // Execution wire v2 (chelis#729): the tensor payload is the
+            // tagged per-dtype form.
+            assert_eq!(
+                loss["value"]["value"]["data"]["dtype"].as_str(),
+                Some("f32")
+            );
+            assert_eq!(
+                loss["value"]["value"]["data"]["values"][0].as_f64(),
+                Some(2.5)
+            );
         });
     }
 

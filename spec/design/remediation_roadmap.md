@@ -121,13 +121,12 @@ at) is hard-gated on byte-identical rendering.
 module + storage decision; the kernel split + prove; backend adoption),
 validated by everything Waves 0-2 built. Entry gate: the [#729] §C6
 covered-family capacity census/tripwire (PR #956) lands BEFORE Phase 1
-entry. The baseline is explicitly partial: Phase 1 entry ALSO requires
-the typed wire-schema and PyO3 binding leg commands in [#729] §C6 to be
-implemented and green (`capacity_census_wire` and
-`capacity_census_bindings`, respectively), and Phase 1 re-derives its
-§C3 layer set from that completed census. These are explicit thick-red
-DAG edges below, not editable coverage metadata (PR #950 red teams P2-4
-and re-P1). The exact PR #956 follow-up
+entry. This change completes the two typed hard edges: the wire-schema and
+PyO3 binding commands in [#729] §C6 are implemented with reviewed baselines
+and red mutations (`capacity_census_wire` and `capacity_census_bindings`,
+respectively). Phase 1 re-derives its §C3 layer set from that completed
+census. These remain explicit thick-red DAG edges below, not editable
+coverage metadata (PR #950 red teams P2-4 and re-P1). The exact PR #956 follow-up
 `6ddf1a72d6dea6770a330d5c2ef3b8fa7d023c43` is part of that entry gate:
 conditional macro definitions taint their connected local-include
 component, bare and pointer-sized integer C callables classify
@@ -183,7 +182,7 @@ row (SATISFIED 2026-07-17: PR #760 merged, [#719] closed - the row may
 be authored when Phase 3 arrives); downstream of the set, [#754]'s
 ecosystem gate is hard-gated on [#732] Phase 2's byte-identical
 rendering. [#729] Phase 1 is separately hard-gated on PR #956's
-covered-family tripwire and both typed deferred-leg oracles. Not drawn
+covered-family tripwire and both typed-leg oracles. Not drawn
 (for legibility): OpenSpec remains [#733]'s planning workflow while a
 pinned Buoy shell and one-way Chelis adapter provide enforcement.
 The graph is acyclic. Node colors
@@ -247,8 +246,8 @@ flowchart TB
     direction TB
     n729p0["P0 · domain checker + #687 oracle lanes (LANDED)"]:::w0
     n729c6["C6 · covered-family capacity tripwire<br/>(PR #956)"]:::w3
-    n729c6wire["C6 · wire-schema enumerator<br/>+ mutation oracle"]:::w3
-    n729c6binding["C6 · PyO3 enumerator<br/>+ mutation oracle"]:::w3
+    n729c6wire["C6 · wire-schema enumerator<br/>+ mutation oracle (THIS CHANGE)"]:::w3
+    n729c6binding["C6 · PyO3 enumerator<br/>+ mutation oracle (THIS CHANGE)"]:::w3
     n729p1["P1 · semantics module + storage decision<br/>+ eval adoption"]:::w3
     n729p2["P2 · kernel split + traps + prove"]:::w3
     n729p3["P3 · C backend adoption<br/>+ generated observation"]:::w3
@@ -329,7 +328,7 @@ work, and only the deltas called out below force a downstream change.
 | A - syntax migration | `with seed(42)` -> `42i64` ([#731] P1) | one-time, final |
 | B - loud rejection of silently-wrong code | [#730]/[#731]/[#729] loud paths, [#730] P2 host-type | shells fix a real bug; permanent |
 | C - wire / binding break | [#729] §C3 per-dtype storage (schema + Python payload) | one-time; **must be atomic** (§C3 forbids partial adoption) |
-| D1 - payload rendering change | [#732] element/container strings | payload churn ONLY if one lane changes twice |
+| D1 - payload rendering change | [#732] canonical element/container grammar, then [#729] own-width eval completion | exactly two authorized steps: the shipped formatter grammar and one final eval value-width correction in v0.19; frozen afterward |
 | D2a - root label prefix | [05-OBS-6] `name = value` | SHIPPED once in v0.18.1; frozen; does not reopen D1 |
 | D2b - manifested root topology | [#912]/[#1023] complete root set/order, dotted expansion, unavailable-root diagnostics, and artifact routing | one coordinated post-v0.18.1 migration in both lanes; may not alter D1 or D2a |
 | E - reject-now-support-later | [#730] loud reject -> [#729] kernel lands | the add-then-remove-workaround trap |
@@ -373,9 +372,13 @@ patch.
 
 1. **Atomic wire break.** [#729] §C3 is all-layers-or-nothing; never split the
    storage decision across releases or binding consumers adapt N times.
-2. **Payload-render-once; root-prefix-once; root-topology-once.** [#732] froze
-   numeric payload digits and container/scalar shape for eval at P1 and C at
-   P2. [05-OBS-6] later authored a separate envelope around those frozen
+2. **Payload grammar once; own-width completion once; root-prefix once;
+   root-topology once.** [#732] froze the numeric grammar and
+   container/scalar shape for eval at P1 and C at P2. [#729] Phase 1 is the
+   one permitted follow-up to eval payload digits: per-dtype storage completes
+   shortest-round-trip rendering at the declared width (for example f32
+   `1.2247449159622192` becomes `1.2247449`). No later [#729] phase may change
+   those digits or shapes. [05-OBS-6] later authored a separate envelope around those frozen
    payloads; its `name = ` prefix shipped once in both lanes at v0.18.1. The
    remaining manifested root set/order, unavailable-root, and artifact cut
    rides v0.19 once. Neither later step may reopen [#732]'s formatter decisions
@@ -460,8 +463,16 @@ Migration-note stubs (the breaking delta per cut):
   complete manifested root set/order or unavailable-root diagnostics."
 - **0.19** (source migration) - "dtype semantics are grounded: integer overflow
   traps instead of wrapping, per-dtype tensor storage (wire-format v2, Python
-  payload shape changed), narrow dtypes preserved end-to-end; every op x dtype
+  payload shape changed), narrow dtypes preserved end-to-end. Eval float tensor
+  elements now render shortest-round-trip at their own width, so an f32 tensor
+  prints `1.2247449` where it printed `1.2247449159622192`; every op x dtype
   capability decision is now fixed (supported, or a cited stable rejection).
+  Checked casts now trap instead of choosing an implicit conversion for
+  fractional float-to-integer values (`cast(3.5, int32)`) and non-member bool
+  values (`cast(2, bool)`); apply `floor` or `round` before the integer cast,
+  and produce exactly 0 or 1 before a bool cast. Python `np.uint64` ingress now
+  raises `ChelisError` instead of silently producing an f64 payload; choose an
+  explicit int64 or f64 conversion.
   The v0.18.1 root prefix is unchanged; the complete manifested root set now
   appears in manifest order in both lanes. Update expectations for added or
   reordered dotted roots, and treat an unavailable owed root as a named

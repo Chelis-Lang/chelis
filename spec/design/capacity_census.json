@@ -43,34 +43,29 @@
         "mutations": [
           "exported_public_numeric_stdlib_def_is_enumerated"
         ]
-      }
-    ],
-    "deferred": [
+      },
       {
         "leg": "wire-schema-numeric-fields",
-        "owner": "chelis#729 Phase 1 entry hard edge",
-        "artifact": "crates/chelis-compiler-api/src/schema.rs public serde/JsonSchema graph",
-        "enumerator": "PLANNED: typed public wire-schema numeric-field enumerator",
-        "command": "PLANNED: cargo nextest run -p chelis-compiler-api --test capacity_census_wire",
-        "expected_success": "PLANNED: exact schema rows match a reviewed baseline",
+        "artifact": "crates/chelis-compiler-api/src/schema.rs public serialized type graph",
+        "enumerator": "rustdoc JSON public schema type graph -> wire-schema numeric fields",
+        "command": "cargo nextest run -p chelis-compiler-api --test capacity_census_wire",
+        "expected_success": "wire_schema_numeric_fields_match_the_reviewed_baseline passes",
         "mutations": [
-          "PLANNED: add/remove public f64 serde/JsonSchema field",
-          "CURRENT DEFERRED PROBE: ReviewerWireNumericProbe leaves this census unchanged"
+          "adding_or_removing_a_public_serialized_f64_field_changes_the_census"
         ]
       },
       {
         "leg": "binding-raw-dtype-params",
-        "owner": "chelis#729 Phase 1 entry hard edge",
         "artifact": "crates/chelis-python/src/lib.rs registered PyO3 callables",
-        "enumerator": "PLANNED: rustdoc-JSON PyO3 callable-signature enumerator",
-        "command": "PLANNED: cargo nextest run -p chelis-python --test capacity_census_bindings",
-        "expected_success": "PLANNED: exact binding rows match a reviewed baseline",
+        "enumerator": "live registered PyCFunctions/pyclasses joined to rustdoc JSON signatures",
+        "command": "cargo nextest run -p chelis-python --test capacity_census_bindings",
+        "expected_success": "registered_pyfunctions_match_the_reviewed_rustdoc_signatures passes",
         "mutations": [
-          "PLANNED: add/remove registered #[pyfunction] dtype: i32 parameter",
-          "CURRENT DEFERRED PROBE: reviewer_raw_dtype_probe leaves this census unchanged"
+          "a_registered_pyfunction_with_a_raw_dtype_parameter_is_rejected"
         ]
       }
-    ]
+    ],
+    "deferred": []
   },
   "rows": [
     {

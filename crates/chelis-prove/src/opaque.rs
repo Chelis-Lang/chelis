@@ -1228,7 +1228,8 @@ pub fn generate_binder(
     if !producers.is_empty() {
         for _ in 0..ctor_budget {
             ctor_attempts += 1;
-            let Some(env) = propose_via_constructor(inv, module_source, producers, rng) else {
+            let Some(env) = propose_via_constructor_lossy(inv, module_source, producers, rng)
+            else {
                 continue;
             };
             // STILL validate (a buggy producer costs efficiency, never
@@ -1410,10 +1411,11 @@ fn field_value_expr(path: &str, fty: &FieldType, env: &BTreeMap<String, f64>) ->
 }
 
 /// Constructor-based proposal: pick a producer, sample its raw inputs,
-/// evaluate it, Option-unwrap failures, and read back the produced
-/// record's field values into a flattened env. Returns `None` on producer
-/// failure (None result) or an unreadable output.
-fn propose_via_constructor(
+/// evaluate it, Option-unwrap failures, and read back the produced record's
+/// field values into the legacy f64 env. The conversion is deliberately
+/// named lossy until chelis#688 / #729 Phase 2 replaces that env. Returns
+/// `None` on producer failure (None result) or an unreadable output.
+fn propose_via_constructor_lossy(
     inv: &OpaqueInvariant,
     module_source: &str,
     producers: &[GenProducer],
@@ -1436,7 +1438,7 @@ fn propose_via_constructor(
     let mut env = BTreeMap::new();
     for (fname, fty) in &inv.fields {
         let field_path = format!("{}.{}", inv.binder, fname);
-        if !read_produced_field(
+        if !read_produced_field_lossy(
             module_source,
             producer,
             &arg_exprs,
@@ -1452,11 +1454,12 @@ fn propose_via_constructor(
     Some(env)
 }
 
-/// Read one representation field of a producer's result into `env`.
+/// Lossily read one representation field of a producer's result into the
+/// legacy f64 `env`.
 /// Returns `Some(true)` on success, `Some(false)` when the producer
 /// returned `None` (failure to unwrap), `None` on evaluation error.
 #[allow(clippy::too_many_arguments)]
-fn read_produced_field(
+fn read_produced_field_lossy(
     module_source: &str,
     producer: &GenProducer,
     arg_exprs: &[Expr],
@@ -1511,15 +1514,15 @@ fn read_produced_field(
                 return None;
             };
             // A None result yields the NaN-filled sentinel: treat as failure.
-            if value.data.iter().any(|v| v.is_nan()) {
+            if value.data.to_f64_lossy_vec().iter().any(|v| v.is_nan()) {
                 return Some(false);
             }
             let count = dims.iter().product::<usize>().max(1);
             if value.data.len() != count {
                 return None;
             }
-            for (i, v) in value.data.iter().enumerate() {
-                env.insert(format!("{field_path}.{i}"), *v);
+            for (i, v) in value.data.to_f64_lossy_vec().into_iter().enumerate() {
+                env.insert(format!("{field_path}.{i}"), v);
             }
         }
         _ => {
@@ -1528,7 +1531,12 @@ fn read_produced_field(
             // single-element Tensor). Extract the scalar; a NaN result is
             // the None-sentinel and counts as a producer failure.
             let v = match &root.value {
+                ExecutionValue::Float16 { value } | ExecutionValue::Bfloat16 { value } => *value,
+                ExecutionValue::Float32 { value } => *value as f64,
                 ExecutionValue::Float64 { value } => *value,
+                ExecutionValue::Int8 { value } => *value as f64,
+                ExecutionValue::Int16 { value } => *value as f64,
+                ExecutionValue::Int32 { value } => *value as f64,
                 ExecutionValue::Int64 { value } => *value as f64,
                 ExecutionValue::Bool { value } => {
                     if *value {
@@ -1542,7 +1550,7 @@ fn read_produced_field(
                     if value.shape.iter().product::<usize>().max(1) == 1
                         && !value.data.is_empty() =>
                 {
-                    value.data[0]
+                    value.data.element_as_f64_lossy(0)
                 }
                 _ => return None,
             };

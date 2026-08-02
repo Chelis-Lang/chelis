@@ -115,7 +115,12 @@ fn c_fused_reduce_sum_no_intermediate() {
         mat_f32(3, 4),
         None,
     );
-    let c = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 4), None);
+    let c = dag.add_node(
+        RiscOp::synth_const(mat_f32(3, 4).precision, 1.0),
+        vec![],
+        mat_f32(3, 4),
+        None,
+    );
     let added = dag.add_node(RiscOp::Add, vec![x, c], mat_f32(3, 4), None);
     let negated = dag.add_node(RiscOp::Neg, vec![added], mat_f32(3, 4), None);
     let summed = dag.add_node(
@@ -170,7 +175,12 @@ fn c_fused_reduce_max_no_intermediate() {
         mat_f32(3, 4),
         None,
     );
-    let c = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 4), None);
+    let c = dag.add_node(
+        RiscOp::synth_const(mat_f32(3, 4).precision, 1.0),
+        vec![],
+        mat_f32(3, 4),
+        None,
+    );
     let added = dag.add_node(RiscOp::Add, vec![x, c], mat_f32(3, 4), None);
     let negated = dag.add_node(RiscOp::Neg, vec![added], mat_f32(3, 4), None);
     let maxed = dag.add_node(
@@ -212,7 +222,12 @@ fn c_fused_reduce_compiles() {
         mat_f32(3, 4),
         None,
     );
-    let c = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 4), None);
+    let c = dag.add_node(
+        RiscOp::synth_const(mat_f32(3, 4).precision, 1.0),
+        vec![],
+        mat_f32(3, 4),
+        None,
+    );
     let added = dag.add_node(RiscOp::Add, vec![x, c], mat_f32(3, 4), None);
     let negated = dag.add_node(RiscOp::Neg, vec![added], mat_f32(3, 4), None);
     let summed = dag.add_node(

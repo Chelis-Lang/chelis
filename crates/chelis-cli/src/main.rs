@@ -9153,6 +9153,15 @@ fn run_tide_repl() -> Result<(), Box<dyn std::error::Error>> {
 /// the result unchanged so the `--json` path can serialize it directly.
 /// Error joining matches [`try_eval`] exactly, so JSON and text mode
 /// surface identical error text on failure.
+fn format_eval_diagnostic(diag: &chelis_compiler_api::schema::Diagnostic) -> String {
+    let mut rendered = diag.message.clone();
+    for hint in &diag.suggestions {
+        rendered.push_str("; hint: ");
+        rendered.push_str(hint);
+    }
+    rendered
+}
+
 fn try_eval_result(
     source_kind: SourceKind,
     source: &str,
@@ -9171,10 +9180,48 @@ fn try_eval_result(
     .map_err(|err| {
         err.errors
             .iter()
-            .map(|diag| diag.message.clone())
+            .map(format_eval_diagnostic)
             .collect::<Vec<_>>()
             .join("; ")
     })
+}
+
+#[cfg(test)]
+mod eval_diagnostic_rendering_tests {
+    use super::format_eval_diagnostic;
+    use chelis_compiler_api::schema::Diagnostic;
+
+    fn diagnostic(message: &str, suggestions: &[&str]) -> Diagnostic {
+        Diagnostic {
+            kind: "eval_error".to_string(),
+            message: message.to_string(),
+            severity: 1.0,
+            expected: None,
+            got: None,
+            suggestions: suggestions.iter().map(|hint| (*hint).to_string()).collect(),
+            span: None,
+            deep_path: None,
+        }
+    }
+
+    #[test]
+    fn structured_suggestions_render_without_matching_diagnostic_text() {
+        let diagnostic = diagnostic(
+            "renamed trap wording that contains no cast substring",
+            &["first recovery action", "second recovery action"],
+        );
+        assert_eq!(
+            format_eval_diagnostic(&diagnostic),
+            "renamed trap wording that contains no cast substring; hint: first recovery action; \
+             hint: second recovery action"
+        );
+    }
+
+    #[test]
+    fn diagnostic_without_suggestions_keeps_its_exact_message() {
+        let diagnostic = diagnostic("plain failure", &[]);
+        assert_eq!(format_eval_diagnostic(&diagnostic), "plain failure");
+    }
 }
 
 fn try_eval(

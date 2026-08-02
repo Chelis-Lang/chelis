@@ -3,6 +3,7 @@
 pub mod adt;
 pub mod context;
 pub(crate) mod deep_type;
+pub mod dtype_semantics;
 pub mod env;
 pub mod errors;
 pub mod fitness;
@@ -42,6 +43,10 @@ pub use builtins::{
 };
 pub use chelis_vocab::EffectKind;
 pub use context::TypeEnv;
+pub use dtype_semantics::{
+    NumericTrap, RawScalar, RawTensor, ScalarValue, StorageView, TensorStorage, cast_raw,
+    cast_scalar, finalize_scalar, finalize_tensor, scalar_from_f64, scalar_from_i64,
+};
 pub use fitness::{
     FitnessReport, StructuralStats, TypeAnalysisOutcome, analyze_ir_program,
     check_ir_program as check_ir_fitness, check_program, clean_fitness_from_stats,

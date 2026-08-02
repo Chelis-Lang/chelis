@@ -470,7 +470,7 @@ module_prefix = "Mylib"
         .expect("result root");
     assert_eq!(
         result["value"]["value"],
-        serde_json::json!({"shape": [], "data": [7.0]})
+        serde_json::json!({"shape": [], "data": {"dtype": "f32", "values": [7.0]}})
     );
 }
 

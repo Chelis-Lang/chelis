@@ -1,8 +1,9 @@
 # Grounded Dtype Semantics
 
-**Status:** Active phased plan. Phase 0 has landed; the §C6 covered-family
-tripwire is implemented in PR #956 pending merge; Phases 1-4 have not
-started. Tracking issue: [#729].
+**Status:** Active phased plan. Phase 0 and the PR #956 §C6 covered-family
+tripwire have landed. The typed wire-schema and registered-PyO3 entry legs
+are implemented by this change; Phases 1-4 have not started. Tracking issue:
+[#729].
 **Owning specs:** `spec/04-type-system.md` (gains an authored overflow/rounding
 section, today silent), `spec/05-risc-primitives.md` (op result semantics),
 and the audit record in `docs/investigations/numeric_audit_next_sweeps.md` /
@@ -69,10 +70,11 @@ Recorded so the next reader does not have to re-derive it:
 - **Not** a numerics-accuracy project. Transcendental ulp bounds ([#719]'s
   vvsqrtf, SLEEF vs libm differences) get a documented per-op tolerance
   table as part of the formatting/oracle contract (§C4), not new kernels.
-- **Not** a change to surface syntax or user-facing checker rules, except
-  where the capability table (Phase 4) surfaces cells that were never
-  authored (integer `mean` [#724], bool `add` [#726]) - each becomes an
-  explicit spec decision rather than a lane accident.
+- **Not** a general change to surface syntax or user-facing checker rules.
+  Phase 1 authors and enforces the already-decided integer-`mean` [#724]
+  and bool-arithmetic [#726] cells through [#860]'s operand-dtype
+  chokepoint; Phase 4 owns their table-derived mechanization, not their
+  authorship. Other checker policy remains out of scope.
 
 ## Vocabulary
 
@@ -104,7 +106,7 @@ drift in code.
 
 **Normative home: `spec/04-type-system.md` §9.1**, the consolidated
 per-dtype table, backed cell by cell by atoms [04-NUM-1] through
-[04-NUM-12]. That table is what a later reader cites and is the only
+[04-NUM-14]. That table is what a later reader cites and is the only
 normative copy; this section is the implementation-facing elaboration.
 Where the two disagree the spec wins and this section has a bug.
 
@@ -252,15 +254,40 @@ pub fn finalize_tensor(prim: Prim, raw: RawTensor) -> Result<TensorValue, Numeri
 This is the **storage decision** ([#684]/[#686]/[#685]): per-dtype buffers, not
 finalize-on-write over `Vec<f64>` - f64 storage cannot represent exact
 int64 above 2^53 regardless of write discipline, so it fails [#684] by
-construction. The decision is expressed at all four declaration layers in
-ONE change set (Phase 1): `chelis-ir/src/eval.rs` (`TensorValue`),
-`chelis-compiler-api/src/schema.rs` (wire schema - `data` becomes a tagged
-per-dtype payload; this is a wire-format break, versioned as such),
-`bindings/python/chelis/__init__.py` (per-dtype tuples / numpy dtypes,
-ending the `np.float64` cast of [#685]), and prove's env (§C5-consumer
-table). Partial adoption of the storage decision is forbidden: it is the
-one all-layers-or-nothing element of this plan, because a mixed state
-re-creates the very boundary bugs ([#684]/[#686]) it exists to end.
+construction. The census has five declaration layers. Phase 1 lands the exact
+representation atomically at four of them - `chelis-ir/src/eval.rs`
+(`TensorValue`), `chelis-compiler-api/src/schema.rs` (wire schema - tensor
+`data` and every numeric `ExecutionValue` scalar leaf become tagged
+per-dtype payloads; this is a wire-format break, versioned as such),
+`bindings/python/chelis/__init__.py` (per-dtype
+tuples / numpy dtypes, ending the `np.float64` cast of [#685]), and the
+layer the plan's original enumeration missed and [#856] filed: IR constant payloads
+(`RiscOp::Const`/`ConstTensor`), implemented in the Phase 1 stack
+(originally draft PR #857). The fifth census layer, prove's numeric env,
+keeps its existing f64 map until Phase 2 under [#688]; the Phase 1 wire/type
+change forced mechanical adapter edits there, and every surviving flattening
+read is explicitly named `*_lossy` rather than masquerading as exact.
+
+The constant payloads become the SEALED module types
+(`ScalarValue`/`TensorStorage`), so a `RiscOp::Const` or `ConstTensor` value
+cannot exist un-finalized: literals finalize once in `lower_lit` at their
+desugarer-ascribed dtype (integer atoms travel their exact i64),
+compiler-synthesized constants construct through
+`RiscOp::synth_const`/`synth_const_tensor`, the `WireDag` carries the
+dtype-tagged payloads (v4, finalize-on-decode with loud rejection of
+corrupt reduced-float images), the bincode caches bumped
+(`CHELIS_CTX_V6`, stdlib format 3), and constant folds decline rather
+than bake a collapsed integer or a trap in. This is deliberately scoped to
+the constant families, not a globally total claim about every IR field:
+`RiscOp::Pad { fill: f64 }` remains a raw numeric-capacity seam tracked by
+open [#878]. Partial adoption of the
+storage decision is forbidden: it is the one all-layers-or-nothing
+element of this plan, because a mixed state re-creates the very
+boundary bugs ([#684]/[#686]) it exists to end. The mechanical
+no-sixth-layer census over every remaining f64/Vec<f64> payload field
+is the in-tree `crates/chelis-cli/tests/issue_729_payload_census.rs`, whose
+scope is `RiscOp`/`WireRiscOp` carrier fields rather than every numeric form
+in the repository.
 
 **Normative home for the GUARANTEE this delivers:**
 `spec/04-type-system.md` [04-NUM-11] - a value survives storage,
@@ -296,19 +323,82 @@ re-finalizing via a `pub(crate) fn reuse_storage` escape hatch whose doc
 contract is "element-preserving ops only"; every use site cites it. That
 hatch is the ONE deliberate hole, kept greppable.
 
-**The cast ladder (2026-07 review; [#759]).** The explicit `cast`
-surface mirrors the read-side split above: the CHECKED cast is the
-default - `convert_cast_data` is a thin wrapper over `finalize_scalar`
-(consumer map), so a cast whose value does not survive the target dtype
-traps per §C1/§C2 - and a NAMED lossy/truncating form ([#759]) is the
-explicit escape hatch, the same species as [#753]'s `wrap_*`: never the
-default, greppable, per-direction semantics AUTHORED as an atom rather
-than inherited from a lane (proposal defaults: float->float is RNE at
-the target width; float->int truncates toward zero with the
-out-of-range rule authored, not accidental; int->narrower-int gets ONE
-authored rule), with capability-table rows and cross-lane oracle
-coverage like any other cell. Spelling and atom land with Phase 2's
-kernel work; cells ratified at Phase 4.
+**Implementation-signature notes (Phase 1 stack; same protocol as the
+[#732] `ElementRef` note - the doc records the implemented form):**
+
+- every constructor takes a leading `op: &'static str` so the C2 trap
+  message can name the operation (the sketch had no op channel);
+- `finalize_tensor` returns `TensorStorage` (shape stays with the
+  evaluator's `TensorValue`, which wraps the storage);
+- `F16`/`Bf16` buffers store `half::f16`/`half::bf16` (both
+  `repr(transparent)` over the sketch's `u16`);
+- the reuse hatch is implemented as the greppable `reuse_*` method family on
+  `TensorStorage` (`reuse_gather`, `reuse_fill_gather`,
+  `reuse_overwrite`), pub because its consumers live in `chelis-ir` and
+  `chelis-compiler-api`; the "element-preserving ops only" doc contract
+  and per-site citations are unchanged;
+- typed read slices are implemented as the borrowed `StorageView` enum;
+- the runtime's `ScalarPayload` wraps the module's sealed `ScalarValue`
+  (the old in-crate `ScalarBits` enum and its wrapping `from_*_as` raw
+  constructors are deleted), and tensor arguments ingress-finalize at
+  their DECLARED param dtype at call binding (the host-lane mirror of
+  the DAG evaluator's Load ingress).
+
+**The cast ladder ([#759]'s one-rule-per-direction obligation, executed at
+chelis#729 Phase 1).** The pre-Phase-1 design already selected the checked
+finalize-or-trap rung and left truncation for a future named lossy form. The
+rework replaces the split behavior in production code with that ONE authored
+rule per direction, identical on every
+eval surface: the shared ladder is `chelis_types::cast_raw`, consumed
+by `chelis_ir::eval::convert_cast_data` / `cast_value` (the DAG
+evaluator and the host tensor cast's delegation) and by the host
+scalar `eval_cast` via `cast_scalar`. The CHECKED cast is the DEFAULT;
+ratified at spec/04 §5.2 in the same change set:
+
+- any source -> float target: finalize (IEEE RNE at the target width;
+  overflow is the correctly signed infinity per [04-NUM-2]); total.
+- integer/bool source -> integer target: exact value; out of the
+  target range TRAPS `Overflow` (no wrap; int32 `300 -> int8` traps,
+  formerly `44`).
+- float source -> integer target: finalize only if finite and integral;
+  fractional values and NaN/inf TRAP `Domain`, and integral values outside
+  the target width TRAP `Overflow` (no saturation; `cast(300.0, int8)`
+  traps, formerly `127`). The user spells a rounding choice first, e.g.
+  `cast(floor(x), int32)` or `cast(round(x), int32)`.
+- any source -> bool target: STRICT {0, 1} membership - exactly 0/1
+  encodes false/true, anything else TRAPS `Domain` (`cast(2, bool)`
+  traps, formerly `true`). Scalar->bool now WORKS under this rule
+  (formerly a loud "unsupported cast" hole). Evidence for strict: the
+  2026-07-24 corpus sweep (grep plus full-suite execution under the
+  strict rule) found NO test, fixture, or example depending on the old
+  nonzero-to-1 encoding; the counting idiom already casts explicitly
+  (`sum(cast(x, int64))`).
+- int/bool source -> float target can lose integer exactness by design while
+  remaining total IEEE RNE: `cast(9007199254740993i64, f64)` yields
+  `9007199254740992.0`, and `cast(16777217i32, f32)` yields `16777216.0`.
+  These are explicit ByDesign controls, not a hidden f64 intermediate.
+- **Fold rule (the §C2 decline clause, applied to casts):** a
+  compile-time constant fold whose cast would trap DECLINES TO FOLD -
+  the condition falls to runtime, where the trap fires with its full
+  diagnostic (`lower.rs`'s static-`if` Cast arm).
+
+The trap op slot is `cast` (a real op name; the former host-scalar
+spelling `overflow in arithmetic at int8` is gone with the rewire, and
+[#861]'s naming decision set still owns the Phase 2 freeze). The NAMED
+lossy/truncating forms ([#759]) remain the future explicit escape
+hatch, the same species as [#753]'s `wrap_*`: never the default,
+greppable, with capability-table rows and cross-lane oracle coverage
+like any other cell. The compiled C lane stays documented-divergent
+until Phase 3 (issue-linked ignored rows in
+`crates/chelis-cli/tests/issue_759_checked_cast_default.rs`); spelling
+and atoms for the named forms land with Phase 2's kernel work; cells
+ratified at Phase 4.
+
+The 2026-08-02 dependency sweep found no executable example or fixture relying
+on fractional default-cast truncation. Six test-only sites exercised or
+described it; the trapping oracles now trap, and the one checker-pipeline
+fixture that needed an integral intermediate now spells `floor` before
+`cast`. Integral float-to-int controls remain green on both eval surfaces.
 
 ## C4. The observation contract (formatting; fixes [#728])
 
@@ -352,10 +442,18 @@ identical bytes):
    stored bits and each other. Acceptance is literal: for every dtype,
    dump the same tensor through all exits in both lanes and diff bytes.
 5. **The transcendental tolerance table.** Where lanes legitimately differ
-   in VALUE (libm vs SLEEF vs vForce, > 0.5 ulp ops), the per-op bound is
-   recorded in `spec/05-risc-primitives.md` next to the op, and the [#687]
-   oracle consults it; `sqrt` is required correctly rounded ([#719]) and has
-   no tolerance row. Formatting itself never has tolerance.
+   in VALUE (libm vs SLEEF vs vForce, > 0.5 ulp ops), the language-level
+   per-op bound belongs in `spec/05-risc-primitives.md` next to the op, and
+   the [#687] oracle will consult it; `sqrt` is required correctly rounded
+   ([#719]) and has no tolerance row. Formatting itself never has tolerance.
+   The Phase 1 `f64` `tan`/`exp` cross-lane controls use `1e-12` only as an
+   implementation-chosen test margin: macOS and glibc differed by one ulp in
+   the observed repros, while the defect those controls detect (computing an
+   `f64` program through `f32`) differs by roughly `1e-7`. `1e-12` was an
+   arbitrary separating margin, not a language decision, not an
+   [05-OBS-3] tolerance row, and not authority for another operation. The
+   normative tolerance table remains pending until its bounds are separately
+   decided and authored in `spec/05`.
 6. **Containers and scalar roots** (decided with [#732] Phase 1, identical
    to its §C1.5; ratified as [05-OBS-4]/[05-OBS-5]): a scalar-typed value
    renders as the BARE scalar at every exit in both lanes, including as a
@@ -409,9 +507,9 @@ behavior and is exactly what the atom forbids.
 |---|---|---|
 | eval scalar (`chelis-compiler-api/src/runtime/host_ops.rs`) | kernel split + `finalize_scalar` | [#680], [#718] eval-scalar cells |
 | eval tensor (same file + `chelis-ir/src/eval.rs`) | `finalize_tensor` bulk paths; `tensor_float_unop_f32` and raw `binary_map` deleted | [#717], [#684], [#724] eval half, [#726] eval half |
-| `convert_cast_data` (`chelis-ir/src/eval.rs`) | thin wrapper over `finalize_scalar` | [#717] cast rows, [#720] (via next row) |
+| `convert_cast_data` / tensor `cast_value` (`chelis-ir/src/eval.rs`) and host `eval_cast` | `cast_raw` / `cast_scalar`; checked target finalization with identical scalar/tensor rules | [#717] cast rows, [#720] (via next row) |
 | `fold_static_cond` / const folds (`chelis-ir/src/lower.rs`) | `int_binop` + finalize in the Cast arm; decline-on-trap | [#711], [#720] |
-| prove (`concrete_eval.rs`, `obligation_engine.rs:1857`, `opaque.rs:1536`) | env `HashMap<String, ScalarValue>`; flatteners deleted (will not compile post-split) | [#688] |
+| prove (`graph_extract.rs`, `obligation_engine.rs`, `opaque.rs`) | Phase 1 adapter state: existing f64 env with explicit `*_lossy` reads forced by the typed wire change; Phase 2 end state: exact sealed-value env and deleted flatteners | [#688] |
 | C host lane (`chelis-ir/src/host.rs`, `chelis-backend-c/src/host_emit.rs`) | `parse_host_type` narrow arms (forced by exhaustive `Prim`), per-dtype scalar storage + generated trap guards | [#714], [#718] C cells, [#715]'s dtype rows |
 | C emitted helpers (print, dtype switches) | GENERATED from `format_element` / exhaustive matches | [#716], [#723], [#728] |
 | Metal / HIP | capability table only (already honestly typed / cleanly rejecting) | - |
@@ -424,7 +522,7 @@ integration tier, not the workspace loop.
 
 ## C6. The covered-family capacity ratchet and Phase 1 entry edges (added 2026-07-30)
 
-**Current enforcement status.** The PR #956 change set implements the
+**Current enforcement status.** The merged PR #956 change set implements the
 structurally enforced successor for the header and stdlib families:
 canonical C declaration identity, matched-row metadata freeze, stdlib
 ADT-shape identity AND capacity classification, non-function ABI
@@ -433,12 +531,11 @@ walked published-header set, an INVERTED type-word rule that rejects
 unrecognized arithmetic spellings rather than classifying them
 dtype-free, runtime/stdlib numeric-callable authority registration,
 public-header context invariance, both pre-ratchet citation sets frozen
-by identity, and issue-kind-aware liveness are executable tripwires. These checks are
-not active on main until that PR lands. The checked-in baseline is still explicitly
-PARTIAL: wire-schema fields and PyO3 signatures are deferred typed legs
-whose named commands below are hard Phase 1 entry edges. No sentence in
-this section upgrades those legs to covered merely because metadata says
-so.
+by identity, and issue-kind-aware liveness are executable tripwires. The
+typed wire-schema and registered-PyO3 legs in this change complete the
+pre-Phase-1 inventory with separate generated baselines and mutation
+controls. Their named commands below remain the hard Phase 1 entry evidence;
+editing coverage metadata is not a substitute for making them green.
 
 §C1-§C5 make the EXISTING numeric surface correct and make
 supported-cell semantics unavoidable at op-result construction. The
@@ -633,7 +730,7 @@ cannot exist (PR #950 red team P1-3):
 | language ops | checker acceptance derived from Table A | [#729] Phase 4 | derivation |
 | published C signatures | tokenized canonical declaration inventory over callables AND non-function data, frozen derived classification, and a mechanically enforced ban on context-varying public ABI; this detects and blocks drift but does not generate the whole header | deliverable 1; the `RuntimeDType` fragment remains [#729] Phase 3 | census/tripwire |
 | prelude / stdlib value ADTs | permanent census whose identity preserves type, variant, and numeric field shape, CLASSIFIED on the same rule as the C families: a float primitive in an untagged variant or field is a `float-carrier` seam with no citation path, an integer primitive is a `numeric-op` owing a semantic decision. A numeric field is legal Surf, so no type seal can exist for this family - the seam classification is the strongest rung available | deliverable 1 | census/tripwire |
-| binding (PyO3) signatures | rustdoc-JSON registry + typed raw-dtype mutation oracle | the named pre-Phase-1 binding leg below | census/registry (deferred until its hard-edge command is green) |
+| binding (PyO3) signatures | rustdoc-JSON registry + typed raw-dtype mutation oracle | the named pre-Phase-1 binding leg below | census/registry |
 
 [#729] can close Phase 4 while chelis#893 remains open. Any
 C6-complete claim at the [#729] close is therefore scoped to the
@@ -651,9 +748,9 @@ Deliverables, with phase homes:
    `preprocessed_headers -> header_rows`; the stdlib legs use exactly
    `stdlib_rows -> scan_deftypes + scan_exported_numeric_defs`.
    Its leg manifest is a typed executable contract, not editable
-   `covered` prose; wire-schema fields and PyO3 signatures remain named
-   deferred legs until their separate entry commands below are
-   implemented and green. The payload-work citation is chelis#893, an
+   `covered` prose. This change adds the typed wire-schema and PyO3
+   signature legs and moves them to `covered` only with their separate
+   commands and red mutations green. The payload-work citation is chelis#893, an
    ISSUE - never PR #894. Implemented command:
    `cargo nextest run -p chelis-cli --test capacity_census_tripwire --no-fail-fast`
    is the authoritative covered-family oracle (regeneration: the same
@@ -677,19 +774,26 @@ Deliverables, with phase homes:
    is version 2, and its serialized `legs` value must equal the
    executable manifest exactly. Editing
    `spec/design/capacity_census.json` therefore cannot promote a
-   deferred leg. The two Phase 1 entry commitments are:
+   deferred leg. The completed typed Phase 1 entry commitments are:
 
-   | typed leg | owner | artifact | required enumerator | required command and expected success | standing mutations |
-   |---|---|---|---|---|---|
-   | `wire-schema-numeric-fields` | `chelis#729 Phase 1 entry hard edge` | `crates/chelis-compiler-api/src/schema.rs public serde/JsonSchema graph` | `PLANNED: typed public wire-schema numeric-field enumerator` | `PLANNED: cargo nextest run -p chelis-compiler-api --test capacity_census_wire`; `PLANNED: exact schema rows match a reviewed baseline` | `PLANNED: add/remove public f64 serde/JsonSchema field`; `CURRENT DEFERRED PROBE: ReviewerWireNumericProbe leaves this census unchanged` |
-   | `binding-raw-dtype-params` | `chelis#729 Phase 1 entry hard edge` | `crates/chelis-python/src/lib.rs registered PyO3 callables` | `PLANNED: rustdoc-JSON PyO3 callable-signature enumerator` | `PLANNED: cargo nextest run -p chelis-python --test capacity_census_bindings`; `PLANNED: exact binding rows match a reviewed baseline` | `PLANNED: add/remove registered #[pyfunction] dtype: i32 parameter`; `CURRENT DEFERRED PROBE: reviewer_raw_dtype_probe leaves this census unchanged` |
+   | typed leg | artifact | live enumerator | command and expected success | standing red mutation |
+   |---|---|---|---|---|
+   | `wire-schema-numeric-fields` | `crates/chelis-compiler-api/src/schema.rs` public serialized type graph | rustdoc JSON public schema type graph -> numeric fields | `cargo nextest run -p chelis-compiler-api --test capacity_census_wire`; `wire_schema_numeric_fields_match_the_reviewed_baseline` passes | `adding_or_removing_a_public_serialized_f64_field_changes_the_census` |
+   | `binding-raw-dtype-params` | `crates/chelis-python/src/lib.rs` registered PyO3 callables | live registered PyCFunctions/pyclasses joined to rustdoc JSON signatures | `cargo nextest run -p chelis-python --test capacity_census_bindings`; `registered_pyfunctions_match_the_reviewed_rustdoc_signatures` passes | `a_registered_pyfunction_with_a_raw_dtype_parameter_is_rejected` |
 
-   The `PLANNED:` strings are deliberately non-success states. Before
-   Phase 1, each owning change replaces every one with a live enumerator,
-   executable command, exact success condition, and mutation test in
-   `coverage_manifest()`; runs that command green; and updates this table
-   in the same change set. Merely deleting `PLANNED:` or moving a record
-   between vectors does not satisfy the edge.
+   Each leg is a live enumerator, executable command, exact success
+   condition, and mutation test recorded in `coverage_manifest()`. The wire
+   baseline freezes public serialized numeric carrier shapes only. Its
+   `float-carrier` classification is shape metadata for this census: a
+   `TensorElements::{F64,F32,F16,Bf16}` variant inside the serde dtype-tagged
+   payload is the intended carrier, not an untagged seam and not authority for
+   execution semantics. In
+   particular, post-PR-#956 root structures are census inputs, not authority
+   for root identity, manifest order, dotted-root expansion, `requires_main`,
+   artifact routing, or `HostReason`; those remain chelis#912 work. The PyO3
+   leg freezes registered signatures and rejects raw dtype ingress; it does
+   not inspect or redesign private runtime-dtype decoding. `KNOWN_TAGS` and
+   Deep stamping are outside this task entirely.
 
    Acceptance requirements, from the 2026-07-30 and 2026-07-31
    adversarial passes. Each bullet names the standing control that turns
@@ -972,10 +1076,11 @@ sanctioned disposition is present. The registry can validate an
 the right OP atom. CODEOWNERS routes that judgment but does not enforce
 owner approval.
 
-The baseline is also deliberately PARTIAL until its wire and PyO3 hard
-edges land, and a genuinely new surface kind remains invisible until an
-enumerator is added. For both covered and deferred families, the design
-criterion is CHEAPEST-PASSING-ACTION: an agent blocked by the tripwire
+The three baselines cover the currently named families after the wire and
+PyO3 hard edges land; a genuinely new surface kind remains invisible until
+an enumerator is added. For every covered family (and any future explicitly
+deferred family), the design criterion is CHEAPEST-PASSING-ACTION: an agent
+blocked by the tripwire
 must find that redesign/removal, extending the enumerator, or authoring
 the exact spec entry is the cheapest sanctioned action. The TODO flow,
 seam/metadata freeze, typed legs, liveness, mutation controls, and
@@ -1044,7 +1149,7 @@ numeric form is type-unrepresentable.
 | §C4 root envelope rule 7 | [05-OBS-6] authored 2026-07-31; full implementation acceptance pending [#1023] | spec/05 [05-OBS-6] + `faithful_observation.md` + this doc + the release roadmap + root-boundary corpus, one change set |
 | §C5 kernel signatures | Phase 2 | this doc |
 | §C6 covered-family census + tripwire | at PR #956 landing: canonical row identities, complete derived classifications, stdlib ADT shapes AND their capacity flags, callable-to-`[05-OP-N]` registrations, public-header context invariance, and BOTH grandfathered identity sets (seam and plain) all freeze; unflagged rows append by live ISSUE citation, new numeric callables also author/register a new OP atom, and FLAGGED rows are shrink-only (a shape-validated maintainer override is the sole human exception) | this doc + the executable tripwire/registry artifacts and their positive/negative controls, same change set |
-| §C6 deferred wire/PyO3 leg state | before Phase 1 entry, only when each named enumerator and mutation command below is green; an editable baseline field cannot change coverage | this doc + the typed leg manifest + owning enumerator/oracle in the same change set |
+| §C6 typed wire/PyO3 leg state | before Phase 1 entry: frozen when each named enumerator and mutation command is green; an editable baseline field cannot change coverage | this doc + the typed leg manifest + owning enumerator/oracle in the same change set |
 | capability table schema | Phase 4 entry | `capability_table.md` (the owning doc) + this doc |
 
 "Frozen" means: later phases may ADD consumers but not reinterpret
@@ -1135,22 +1240,14 @@ on the existing corpus with the fallback removed.
 ## Phase 1 - the semantics module, the storage decision, eval adoption
 
 **You inherit:** Phase 0's detectors (your acceptance instruments),
-Part I as the spec of what to build, and the §C6 capacity census +
-tripwire (PR #956), whose landing PRECEDES this phase (the roadmap's
-Wave 3 entry gate). The checked-in baseline is your starting inventory
-and is EXPLICITLY PARTIAL by the typed `coverage_manifest()` contract:
-header exports/layouts and stdlib ADTs/defs are covered; wire and PyO3
-are deferred. Phase 1 ENTRY therefore has two deliverables zero, before
-the storage decision touches `schema.rs`: implement the
-`wire-schema-numeric-fields` enumerator and make
-`cargo nextest run -p chelis-compiler-api --test capacity_census_wire`
-meet the exact §C6 success condition and mutations; implement the
-`binding-raw-dtype-params` rustdoc-JSON enumerator and make
-`cargo nextest run -p chelis-python --test capacity_census_bindings`
-meet its exact condition and mutations. Then replace the corresponding
-`PLANNED:` manifest fields and move each leg to `covered` in the same
-change set. "Every public numeric channel" is the state AFTER those
-commands are green, never the baseline's claim.
+Part I as the spec of what to build, and the complete §C6 capacity census
+and tripwire: PR #956's header/stdlib legs plus the typed wire-schema and
+registered-PyO3 legs landed before this phase (the roadmap's Wave 3 entry
+gate). Before touching the storage decision, re-run
+`capacity_census_tripwire`, `capacity_census_wire`, and
+`capacity_census_bindings`; all three must be green against the current
+surface. "Every public numeric channel" is the state those executable
+enumerators establish, never a prose or baseline claim.
 
 **You deliver:**
 
@@ -1161,7 +1258,8 @@ commands are green, never the baseline's claim.
    repo's negative-test-parity rule: every rounding case, every trap
    case, every special value).
 2. **The spec/04 section**: spec/04 §9 carries the decided contract as
-   current blockquote authorities [04-NUM-1..6] with an honest status banner
+   current blockquote authorities, including [04-NUM-14]'s checked-cast
+   ladder, with an honest status banner
    (seeded ahead of this phase; implementation tracked here). This phase
    RATIFIES and refines those semantics (and their §C1/§C2 correspondence) in
    the same PR as the module, so spec and code cannot diverge at the moment the
@@ -1171,15 +1269,24 @@ commands are green, never the baseline's claim.
    re-derived at entry** (the four layers named in §C3 - eval
    `TensorStorage`, the versioned wire schema, the Python boundary,
    prove's env - are the 2026-07 floor, not the set; the §C6 capacity
-   census is the enumeration that decides what else joined). Prove's
-   env type swap can be deferred to Phase 2 ONLY if prove keeps
-   compiling untouched (record which).
+   census is the enumeration that decides what else joined). The actual
+   Phase 1 outcome is recorded in §C3/§C5: prove's exact env swap is deferred
+   to Phase 2 under [#688], while the typed wire/storage change mechanically
+   converted its necessary flattening reads to explicitly named-lossy
+   adapters. This recorded adapter-only change replaces the earlier
+   "compiles untouched" condition.
 4. **Eval adoption**: eval scalar and tensor paths construct exclusively
    through the module (raw constructors are now private - the compiler
    gives you the site list; the PR description records the count).
    `tensor_float_unop_f32` and the raw f64 `binary_map`/`unary_map` paths
    are deleted, not deprecated.
 5. Crate-placement decision (open question 4) recorded in this doc.
+6. **Checker adoption of decided dtype cells:** [#860]'s single
+   post-desugar operand-dtype policy chokepoint covers direct applications,
+   reduction data arguments, bare pipe stages, and polymorphic
+   instantiations for integer `mean` [#724] and the authored bool-arithmetic
+   roster [#726]. Direct and polymorphic paths reuse one canonical diagnostic;
+   Phase 4 replaces this interim policy with the generated Table-A view.
 
 **Frozen at your exit:** §C1 table + spec section; §C3 API + storage +
 wire schema; §C4 rules 1-4 as implemented in Rust. **Eval is now the
@@ -1195,12 +1302,19 @@ note).
 audited ways at your exit - expected); trap wiring in `host_ops`' scalar
 kernels beyond what finalize forces (Phase 2); any generated-C work.
 
-**Oracle:** `eval_tensor_narrowing_matrix.rs` fully green and un-ignored;
-the eval rows of `narrow_dtype_matrix.rs`, `precision_matrix.rs`,
-`int_width_lane_matrix.rs`, `reduction_and_bitwise_matrix.rs` ([#724]'s
-eval half traps or is table-rejected - see open question 2, decided in
-this phase) green and un-ignored; every control untouched; the Phase 0
-domain checker green on ALL eval outputs, not just audited cells.
+**Oracle:** `.venv/bin/python scripts/dtype_phase1_oracle.py` is this phase's
+single authoritative command. Acceptance is exit 0 with the final line
+`PHASE 1 ORACLE: PASS`. Its tested command manifest runs the three §C6 entry
+censuses; the sealed semantics, typed Load, and execution-wire exactness
+controls; `eval_tensor_narrowing_matrix.rs`; the Phase 1 eval rows of
+`narrow_dtype_matrix.rs` ([#717] tensor cells), `precision_matrix.rs`
+([#684] storage/binding cells), `int_width_lane_matrix.rs` (the eval tensor
+trap cell), and `reduction_and_bitwise_matrix.rs` ([#684] sum and [#724]'s
+eval half); the checker/payload controls; the Phase 0 domain checker over all
+eval outputs; and the Python/Hull tagged-wire readers. It never runs ignored
+rows or compiled-C phase work. The exact scalar-kernel rows for [#680],
+[#688], [#718], and [#722] remain Phase 2 obligations; this oracle does not
+pull them across the kernel-split boundary.
 
 ## Phase 2 - the kernel split and prove
 
@@ -1400,7 +1514,7 @@ substitute fixes (needed for [#722]'s C half regardless of this plan).
 | 2 | integer `mean` / bool arithmetic / int floor-ceil-round capability rows | cells DECIDED 2026-07 on the issues ([#724] reject; [#726] reject + first-class `count`; [#712]/[#715] support - see capability_table.md's seed rows); Phase 4 ratifies each as an atom | capability table + spec/05 |
 | 3 | trap surface form and exact strings | Phase 2 | §C2 + `pub const` in the module |
 | 4 | crate placement | DECIDED 2026-07-17: a `chelis-types` MODULE. `Prim` already lives there (`types.rs`); the checker already consumes value-domain semantics (literal range diagnostics today, table-A acceptance at Phase 4); every §C5 consumer already depends on the crate; and §C3's privacy contract is module-scoped (`pub(in dtype_semantics)`), so the firewall is identical to a crate boundary. Constraint check passed: chelis-runtime stays dependency-light (libc+memmap2 only) - the generated helpers are emitted by chelis-backend-c, and C-side parity is enforced by tests, not a link edge. Discipline: the module stays import-clean (only `Prim` + std from the surrounding crate) so a later lift to a leaf crate remains mechanical. This also fixes [#732] Phase 1's `format_element` placement as FINAL (its §C3.1 pre-[#729] fallback is the answer - no Wave 2 -> Wave 3 migration) | §C5 + this doc + faithful_observation.md §C3.1 |
-| 5 | wire-schema versioning mechanics for the storage change | Phase 1 | schema.rs + `spec/design/chelis_manifest_spec.md` if it bites the manifest |
+| 5 | wire-schema versioning mechanics for the storage change | DECIDED in the Phase 1 implementation: `EXECUTION_VALUE_SCHEMA_VERSION = 2` in `schema.rs`. The tensor payload is the tagged per-dtype `TensorElements` (`{"dtype": ..., "values": [...]}`; integer families exact at width, f16/bf16 as their exact f64 images, bool as true/false); `EvalResult` stamps `schema_version` (serde default 1 on deserialize, so a version-less payload identifies a v1 producer loudly); v1 clients posting the old bare-array `data` binding fail loudly at serde (a type error at the payload position; the untagged-enum message does not name the field), never a reinterpretation. The manifest is NOT bitten: `chelis_manifest_spec.md` carries type strings, not `ExecutionValue` payloads. The constant is independent of `WIRE_DAG_SCHEMA_VERSION` (which still governs `WireDag`) | schema.rs |
 
 [#387]: https://github.com/Chelis-Lang/chelis/issues/387
 [#680]: https://github.com/Chelis-Lang/chelis/issues/680

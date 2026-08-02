@@ -71,7 +71,7 @@ fn pipe_unary_builtin_stage_lowers_and_evaluates() {
     let out = &values[roots.last().unwrap()];
     assert_eq!(out.shape, vec![3]);
     // relu([-1, 0, 2.5]) = [0, 0, 2.5]
-    assert_eq!(out.data, vec![0.0, 0.0, 2.5]);
+    assert_eq!(out.to_f64_lossy_vec(), vec![0.0, 0.0, 2.5]);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -113,7 +113,7 @@ fn pipe_plain_callable_with_args_lowers_and_evaluates() {
         .expect("eval succeeds");
     let out = &values[roots.last().unwrap()];
     assert_eq!(out.shape, vec![3]);
-    assert_eq!(out.data, vec![11.0, 22.0, 33.0]);
+    assert_eq!(out.to_f64_lossy_vec(), vec![11.0, 22.0, 33.0]);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -188,11 +188,15 @@ fn pipe_grad_stage_matches_non_pipe_application() {
     assert_eq!(pipe_out.shape, vec![1]);
     // df/dx for f(x) = sum(x*x) at x=[3.0] is [6.0].
     assert!(
-        (pipe_out.data[0] - 6.0).abs() < 1e-6,
+        (pipe_out.to_f64_lossy_vec()[0] - 6.0).abs() < 1e-6,
         "pipe grad result at x=3 must be 6.0, got {:?}",
-        pipe_out.data,
+        pipe_out.to_f64_lossy_vec(),
     );
-    for (p, a) in pipe_out.data.iter().zip(app_out.data.iter()) {
+    for (p, a) in pipe_out
+        .to_f64_lossy_vec()
+        .iter()
+        .zip(app_out.to_f64_lossy_vec().iter())
+    {
         assert!(
             (p - a).abs() < 1e-6,
             "pipe and non-pipe grad must agree element-wise: pipe={p}, app={a}",
@@ -273,12 +277,16 @@ fn pipe_vmap_grad_stage_matches_non_pipe_application() {
     let expected = [2.0, 4.0, 6.0];
     for (i, want) in expected.iter().enumerate() {
         assert!(
-            (pipe_out.data[i] - want).abs() < 1e-6,
+            (pipe_out.to_f64_lossy_vec()[i] - want).abs() < 1e-6,
             "pipe vmap-grad[{i}] must be {want}, got {:?}",
-            pipe_out.data,
+            pipe_out.to_f64_lossy_vec(),
         );
     }
-    for (p, a) in pipe_out.data.iter().zip(app_out.data.iter()) {
+    for (p, a) in pipe_out
+        .to_f64_lossy_vec()
+        .iter()
+        .zip(app_out.to_f64_lossy_vec().iter())
+    {
         assert!(
             (p - a).abs() < 1e-6,
             "pipe and non-pipe vmap-grad must agree element-wise: pipe={p}, app={a}",
@@ -332,7 +340,7 @@ fn pipe_vmap_def_stage_lowers_and_evaluates() {
     let out = &values[roots.last().unwrap()];
     assert_eq!(out.shape, vec![2, 3]);
     // vmap(relu_row)([[-1, 0, 2.5], [-3, 1, 0.5]]) = [[0, 0, 2.5], [0, 1, 0.5]]
-    assert_eq!(out.data, vec![0.0, 0.0, 2.5, 0.0, 1.0, 0.5]);
+    assert_eq!(out.to_f64_lossy_vec(), vec![0.0, 0.0, 2.5, 0.0, 1.0, 0.5]);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -506,12 +514,16 @@ fn pipe_fn_typed_parameter_stage_matches_non_pipe_call_site() {
     let expected = [2.0, 4.0, 6.0];
     for (i, want) in expected.iter().enumerate() {
         assert!(
-            (pipe_out.data[i] - want).abs() < 1e-6,
+            (pipe_out.to_f64_lossy_vec()[i] - want).abs() < 1e-6,
             "apply_one via pipe must produce {want} at index {i}, got {:?}",
-            pipe_out.data,
+            pipe_out.to_f64_lossy_vec(),
         );
     }
-    for (p, a) in pipe_out.data.iter().zip(app_out.data.iter()) {
+    for (p, a) in pipe_out
+        .to_f64_lossy_vec()
+        .iter()
+        .zip(app_out.to_f64_lossy_vec().iter())
+    {
         assert!(
             (p - a).abs() < 1e-6,
             "pipe and non-pipe apply_one must agree element-wise: pipe={p}, app={a}",

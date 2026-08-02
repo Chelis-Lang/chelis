@@ -453,10 +453,16 @@ const BASELINE: &[Entry] = &[
     (
         Pat::UnwrapOrNumericLiteral,
         "crates/chelis-ir/src/lower.rs",
-        13,
-        "structural at the P1 baseline: recursion-depth counter, \
-         desync-guarded rank/extent reads, the uniform-ConstTensor \
-         first-element read (non-empty by the windows(2) guard). FLAGGED, \
+        12,
+        "structural at the P1 baseline: recursion-depth counter and \
+         desync-guarded rank/extent reads. The uniform-ConstTensor \
+         first-element read LEFT this census at chelis#856 (13 -> 12, per \
+         spec/design/loud_unsupported.md B1: removals only with the site's \
+         fix): the sealed constant payload turned `unwrap_or(0.0)` on a \
+         raw f64 buffer into `unwrap_or(RawScalar::Int(0))` on a buffer \
+         the `windows(2)` guard already proved non-empty, and the value \
+         now finalizes at the node's dtype or raises a cited lowering \
+         diagnostic, so no numeric default survives the site. FLAGGED, \
          not proven: conv2d's present-but-non-literal stride unwrap_or(1) \
          / padding unwrap_or(0) - the chelis#776 shape (census row 23) - \
          and the with-seed defaults, whose effects-checker cover the \
@@ -511,14 +517,16 @@ const BASELINE: &[Entry] = &[
     (
         Pat::UnwrapOrNumericLiteral,
         "crates/chelis-compiler-api/src/runtime/eval.rs",
-        3,
+        2,
         "with-seed default (mirrors lower.rs; the chelis#793 negative-seed \
-         repro is now checker-rejected) and a scalarization first-element \
-         read; plus the `map_or(-1_i64, ...)` process-exit-code default \
-         (proven-structural: a signal-killed child has no exit code, and -1 \
-         is the conventional sentinel, not a chelis#703 value substitution) \
-         newly counted by the rt791 F6 widening; P1-frozen for the Phase 2 \
-         lint audit",
+         repro is now checker-rejected); plus the `map_or(-1_i64, ...)` \
+         process-exit-code default (proven-structural: a signal-killed \
+         child has no exit code, and -1 is the conventional sentinel, not \
+         a chelis#703 value substitution) newly counted by the rt791 F6 \
+         widening. The former scalarization first-element read was FIXED \
+         by chelis#729 Phase 1 (tensor_to_scalar reads the sealed storage \
+         and errors loudly on an empty buffer), shrinking this row per B1; \
+         P1-frozen for the Phase 2 lint audit",
     ),
     (
         Pat::UnwrapOrNumericLiteral,
@@ -703,11 +711,13 @@ const BASELINE: &[Entry] = &[
     (
         Pat::RustDebugNumericFormat,
         "crates/chelis-compiler-api/src/runtime/host_ops.rs",
-        50,
+        48,
         "declared derived-Debug residue carriers: Err(format!) \
          type-mismatch diagnostics over Value/Prim shapes, the tensor \
          SHAPE debug in render_tensor (elements route through \
-         format_element), and cfg(test) assertions",
+         format_element), and cfg(test) assertions; chelis#729 Phase 1 \
+         deleted the to_list mismatch site and consolidated the duplicate \
+         pad_sequences_to diagnostics",
     ),
     (
         Pat::RustDebugNumericFormat,
@@ -733,8 +743,10 @@ const BASELINE: &[Entry] = &[
     (
         Pat::RustDebugNumericFormat,
         "crates/chelis-compiler-api/src/runtime/tests.rs",
-        20,
-        "cfg-gated runtime unit-test assertions, not product exits",
+        21,
+        "cfg-gated runtime unit-test assertions, not product exits; \
+         chelis#729 Phase 1 replaced one raw-scalar assertion with two \
+         sealed ScalarValue assertion sites (net +1)",
     ),
     (
         Pat::RustDebugNumericFormat,
