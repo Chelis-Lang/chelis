@@ -56,6 +56,12 @@ pub enum ResugarError {
     #[error("Deep decompiler emitted invalid Surf: {reason}")]
     InvalidSurfaceProgram { reason: String },
 
+    #[error("invalid `{key}` metadata: expected {expected}")]
+    InvalidSurfaceMetadata { key: String, expected: &'static str },
+
+    #[error("Deep name `{name}` is not a valid Surf {role} identifier")]
+    InvalidSurfaceIdentifier { name: String, role: &'static str },
+
     #[error("Deep contains a non-finite float literal, which has no canonical Surf literal")]
     NonFiniteFloat,
 }
@@ -74,6 +80,11 @@ struct NodeRef<'a> {
 /// Keeping construction and rendering separate makes it impossible for this
 /// path to invent a second spelling for an AST construct.
 pub fn resugar_expression(expr: &DeepExpr) -> Result<Expr, ResugarError> {
+    validate_surface_metadata_tree(expr, SurfaceMetadataContext::default())?;
+    resugar_expression_inner(expr)
+}
+
+fn resugar_expression_inner(expr: &DeepExpr) -> Result<Expr, ResugarError> {
     let node = node_ref(expr)?;
     let annotation = (node.tag != DeepTag::Lit)
         .then(|| meta_value(node.meta, "type").map(resugar_type))
@@ -81,10 +92,12 @@ pub fn resugar_expression(expr: &DeepExpr) -> Result<Expr, ResugarError> {
         .transpose()?;
     let span = node.span;
     let expression = resugar_node(node)?;
-    Ok(match annotation {
+    let expression = match annotation {
         Some(ty) => Expr::Annotate(Box::new(expression), ty, span),
         None => expression,
-    })
+    };
+    validate_surface_expression(&expression)?;
+    Ok(expression)
 }
 
 /// Resugar a public Deep program into the shared canonical Surf AST.
@@ -95,7 +108,12 @@ pub fn resugar_expression(expr: &DeepExpr) -> Result<Expr, ResugarError> {
 /// erased a canonical source distinction such as module-path casing or a
 /// grouped `dim` declaration.
 pub fn resugar_program(exprs: &[DeepExpr]) -> Result<Vec<Decl>, ResugarError> {
-    resugar_declaration_sequence(exprs)
+    for expr in exprs {
+        validate_surface_metadata_tree(expr, SurfaceMetadataContext::default())?;
+    }
+    let declarations = resugar_declaration_sequence(exprs)?;
+    validate_surface_declarations(&declarations)?;
+    Ok(declarations)
 }
 
 /// Remove Deep metadata that is explicitly derived from source location and
@@ -105,12 +123,14 @@ pub fn resugar_program(exprs: &[DeepExpr]) -> Result<Vec<Decl>, ResugarError> {
 /// semantic members of the validated `surf_*` namespace) is retained. The
 /// non-semantic `surf_literal_style` and `surf_binding_type` origin markers are
 /// consumed while choosing the Surf AST and then ignored by this Deep-side
-/// comparison. Exact `type` entries on a `def`, its function value, and its
-/// parameters are also removed when the immediately preceding matching
-/// `defsig` already carries the same types. Canonical Surf deliberately folds
-/// that Deep pair into one typed declaration, so desugaring necessarily
-/// recreates those redundant annotations. A disagreement is retained and
-/// therefore still fails the oracle.
+/// comparison only when their values and placements satisfy the closed surface
+/// metadata contract. Malformed or misplaced markers remain visible. Exact
+/// `type` entries on a `def`, its function value, and its parameters are also
+/// removed when the immediately preceding matching `defsig` already carries
+/// the same types. Canonical Surf deliberately folds that Deep pair into one
+/// typed declaration, so desugaring necessarily recreates those redundant
+/// annotations. A disagreement is retained and therefore still fails the
+/// oracle.
 ///
 /// This narrow normalization is intentionally not
 /// [`chelis_deep::ast::strip_metadata`], which would erase language-relevant
@@ -415,6 +435,13 @@ fn rebuild_node_like(
 }
 
 fn normalize_roundtrip_expr(expr: &DeepExpr) -> DeepExpr {
+    normalize_roundtrip_expr_with_context(expr, SurfaceMetadataContext::default())
+}
+
+fn normalize_roundtrip_expr_with_context(
+    expr: &DeepExpr,
+    context: SurfaceMetadataContext,
+) -> DeepExpr {
     if let Ok(node) = node_ref(expr) {
         if node.tag == DeepTag::Lit
             && node.children.len() == 1
@@ -426,15 +453,15 @@ fn normalize_roundtrip_expr(expr: &DeepExpr) -> DeepExpr {
                     let converted = DeepExpr::Node(
                         Box::new(chelis_deep::node::Node::new(
                             DeepTag::Lit,
-                            normalize_roundtrip_meta(node.meta),
+                            normalize_roundtrip_meta(node.meta, Some(node.tag), context),
                             vec![DeepExpr::Atom(Atom::Float(*value as f64), *span)],
                         )),
                         node.span,
                     );
-                    return normalize_roundtrip_expr(&converted);
+                    return normalize_roundtrip_expr_with_context(&converted, context);
                 }
                 if *value < 0 {
-                    return normalize_negative_integer_literal(node, *value, suffix);
+                    return normalize_negative_integer_literal(node, *value, suffix, context);
                 }
             }
             if let DeepExpr::Atom(Atom::Float(value), span) = value
@@ -443,6 +470,7 @@ fn normalize_roundtrip_expr(expr: &DeepExpr) -> DeepExpr {
                 return normalized_unary_neg_literal(
                     node,
                     DeepExpr::Atom(Atom::Float(-*value), *span),
+                    context,
                 );
             }
         }
@@ -455,7 +483,7 @@ fn normalize_roundtrip_expr(expr: &DeepExpr) -> DeepExpr {
                 )),
                 node.span,
             );
-            let mut meta = normalize_roundtrip_meta(node.meta);
+            let mut meta = normalize_roundtrip_meta(node.meta, Some(node.tag), context);
             meta.entries.retain(|(key, _)| key != "type");
             meta.entries.push(("type".to_string(), unit_type));
             return DeepExpr::Node(
@@ -471,7 +499,7 @@ fn normalize_roundtrip_expr(expr: &DeepExpr) -> DeepExpr {
             return DeepExpr::Node(
                 Box::new(chelis_deep::node::Node::new(
                     DeepTag::TUnit,
-                    normalize_roundtrip_meta(node.meta),
+                    normalize_roundtrip_meta(node.meta, Some(node.tag), context),
                     Vec::new(),
                 )),
                 node.span,
@@ -485,53 +513,103 @@ fn normalize_roundtrip_expr(expr: &DeepExpr) -> DeepExpr {
             return DeepExpr::Node(
                 Box::new(chelis_deep::node::Node::new(
                     DeepTag::Var,
-                    normalize_roundtrip_meta(node.meta),
+                    normalize_roundtrip_meta(node.meta, Some(node.tag), context),
                     vec![DeepExpr::Atom(Atom::Name(name.to_string()), node.span)],
                 )),
                 node.span,
             );
         }
+
+        let children = node
+            .children
+            .iter()
+            .enumerate()
+            .map(|(index, child)| {
+                normalize_roundtrip_expr_with_context(
+                    child,
+                    SurfaceMetadataContext {
+                        binding_value: node.tag == DeepTag::Bind && index % 2 == 1,
+                        pipe_stage: node.tag == DeepTag::Pipe && index > 0,
+                    },
+                )
+            })
+            .collect();
+        return rebuild_node_like(
+            expr,
+            node.tag,
+            normalize_roundtrip_meta(node.meta, Some(node.tag), context),
+            children,
+            node.span,
+        );
     }
     match expr {
         DeepExpr::Atom(..) => expr.clone(),
-        DeepExpr::Node(node, span) => DeepExpr::Node(
-            Box::new(chelis_deep::node::Node::new(
-                node.tag(),
-                normalize_roundtrip_meta(node.meta()),
-                node.children_slice()
-                    .iter()
-                    .map(normalize_roundtrip_expr)
-                    .collect(),
-            )),
-            *span,
-        ),
+        DeepExpr::Node(..) => unreachable!("typed Deep nodes are handled above"),
         DeepExpr::List(list, span) => DeepExpr::List(
             chelis_deep::ast::List {
-                elements: list.elements.iter().map(normalize_roundtrip_expr).collect(),
+                elements: list
+                    .elements
+                    .iter()
+                    .map(|item| {
+                        normalize_roundtrip_expr_with_context(
+                            item,
+                            SurfaceMetadataContext::default(),
+                        )
+                    })
+                    .collect(),
             },
             *span,
         ),
-        DeepExpr::Map(meta, span) => DeepExpr::Map(normalize_roundtrip_meta(meta), *span),
+        DeepExpr::Map(meta, span) => DeepExpr::Map(
+            normalize_roundtrip_meta(meta, None, SurfaceMetadataContext::default()),
+            *span,
+        ),
         DeepExpr::MetaExpr(meta, span) => DeepExpr::MetaExpr(
             chelis_deep::ast::MetaExpr {
                 entries: meta
                     .entries
                     .iter()
                     .filter(|(key, _)| !is_roundtrip_derived_key(key))
-                    .map(|(key, value)| (key.clone(), normalize_roundtrip_expr(value)))
+                    .map(|(key, value)| {
+                        (
+                            key.clone(),
+                            normalize_roundtrip_expr_with_context(
+                                value,
+                                SurfaceMetadataContext::default(),
+                            ),
+                        )
+                    })
                     .collect(),
-                expr: Box::new(normalize_roundtrip_expr(&meta.expr)),
+                expr: Box::new(normalize_roundtrip_expr_with_context(
+                    &meta.expr,
+                    SurfaceMetadataContext::default(),
+                )),
             },
             *span,
         ),
-        DeepExpr::BareList(items, span) => {
-            DeepExpr::BareList(items.iter().map(normalize_roundtrip_expr).collect(), *span)
-        }
+        DeepExpr::BareList(items, span) => DeepExpr::BareList(
+            items
+                .iter()
+                .map(|item| {
+                    normalize_roundtrip_expr_with_context(item, SurfaceMetadataContext::default())
+                })
+                .collect(),
+            *span,
+        ),
         DeepExpr::UnknownForm(data) => {
             DeepExpr::UnknownForm(Box::new(chelis_deep::ast::UnknownFormData {
                 head: data.head.clone(),
-                meta: normalize_roundtrip_meta(&data.meta),
-                children: data.children.iter().map(normalize_roundtrip_expr).collect(),
+                meta: normalize_roundtrip_meta(&data.meta, None, SurfaceMetadataContext::default()),
+                children: data
+                    .children
+                    .iter()
+                    .map(|child| {
+                        normalize_roundtrip_expr_with_context(
+                            child,
+                            SurfaceMetadataContext::default(),
+                        )
+                    })
+                    .collect(),
                 span: data.span,
             }))
         }
@@ -542,36 +620,55 @@ fn normalize_negative_integer_literal(
     node: NodeRef<'_>,
     value: i64,
     suffix: Option<LiteralSuffix>,
+    context: SurfaceMetadataContext,
 ) -> DeepExpr {
     let value_span = match &node.children[0] {
         DeepExpr::Atom(_, span) => *span,
         _ => node.span,
     };
+    if value == i64::MIN {
+        return normalized_literal_like(
+            node,
+            DeepExpr::Atom(Atom::Int(value), value_span),
+            context,
+        );
+    }
     if integer_minimum(suffix) == Some(value) {
         let maximum = -(value + 1);
-        let negative_maximum =
-            normalized_unary_neg_literal(node, DeepExpr::Atom(Atom::Int(maximum), value_span));
-        let one = normalized_literal_like(node, DeepExpr::Atom(Atom::Int(1), value_span));
+        let negative_maximum = normalized_unary_neg_literal(
+            node,
+            DeepExpr::Atom(Atom::Int(maximum), value_span),
+            context,
+        );
+        let one = normalized_literal_like(node, DeepExpr::Atom(Atom::Int(1), value_span), context);
         return normalized_application("sub", vec![negative_maximum, one], node.span);
     }
-    normalized_unary_neg_literal(node, DeepExpr::Atom(Atom::Int(-value), value_span))
+    normalized_unary_neg_literal(node, DeepExpr::Atom(Atom::Int(-value), value_span), context)
 }
 
-fn normalized_literal_like(node: NodeRef<'_>, value: DeepExpr) -> DeepExpr {
+fn normalized_literal_like(
+    node: NodeRef<'_>,
+    value: DeepExpr,
+    context: SurfaceMetadataContext,
+) -> DeepExpr {
     DeepExpr::Node(
         Box::new(chelis_deep::node::Node::new(
             DeepTag::Lit,
-            normalize_roundtrip_meta(node.meta),
+            normalize_roundtrip_meta(node.meta, Some(node.tag), context),
             vec![value],
         )),
         node.span,
     )
 }
 
-fn normalized_unary_neg_literal(node: NodeRef<'_>, positive: DeepExpr) -> DeepExpr {
+fn normalized_unary_neg_literal(
+    node: NodeRef<'_>,
+    positive: DeepExpr,
+    context: SurfaceMetadataContext,
+) -> DeepExpr {
     normalized_application(
         "neg",
-        vec![normalized_literal_like(node, positive)],
+        vec![normalized_literal_like(node, positive, context)],
         node.span,
     )
 }
@@ -598,27 +695,52 @@ fn normalized_application(name: &str, arguments: Vec<DeepExpr>, span: Span) -> D
     )
 }
 
-fn normalize_roundtrip_meta(meta: &MetaMap) -> MetaMap {
+fn normalize_roundtrip_meta(
+    meta: &MetaMap,
+    tag: Option<DeepTag>,
+    context: SurfaceMetadataContext,
+) -> MetaMap {
     MetaMap {
         entries: meta
             .entries
             .iter()
-            .filter(|(key, _)| !is_roundtrip_derived_key(key))
-            .map(|(key, value)| (key.clone(), normalize_roundtrip_expr(value)))
+            .filter(|(key, value)| {
+                !is_roundtrip_derived_key(key)
+                    && !is_valid_surface_origin_marker(key, value, tag, context)
+            })
+            .map(|(key, value)| {
+                (
+                    key.clone(),
+                    normalize_roundtrip_expr_with_context(value, SurfaceMetadataContext::default()),
+                )
+            })
             .collect(),
+    }
+}
+
+fn is_valid_surface_origin_marker(
+    key: &str,
+    value: &DeepExpr,
+    tag: Option<DeepTag>,
+    context: SurfaceMetadataContext,
+) -> bool {
+    match key {
+        "surf_literal_style" => {
+            tag == Some(DeepTag::Lit)
+                && matches!(value, DeepExpr::Atom(Atom::Str(style), _) if matches!(style.as_str(), "unsuffixed" | "explicit"))
+        }
+        "surf_binding_type" => {
+            context.binding_value
+                && matches!(value, DeepExpr::Atom(Atom::Str(style), _) if matches!(style.as_str(), "inferred" | "explicit"))
+        }
+        _ => false,
     }
 }
 
 fn is_roundtrip_derived_key(key: &str) -> bool {
     matches!(
         key,
-        "span"
-            | "loc"
-            | "source"
-            | "effects"
-            | "invariant_amenability"
-            | "surf_literal_style"
-            | "surf_binding_type"
+        "span" | "loc" | "source" | "effects" | "invariant_amenability"
     )
 }
 
@@ -796,7 +918,7 @@ fn resugar_definition(
             params,
             ret_ty,
             effects,
-            body: resugar_expression(&function.children[1])?,
+            body: resugar_expression_inner(&function.children[1])?,
             span: definition.span,
         });
     }
@@ -804,7 +926,7 @@ fn resugar_definition(
     Ok(Decl::LetDef {
         name,
         ty: declared_type.map(resugar_type).transpose()?,
-        value: resugar_expression(&definition.children[1])?,
+        value: resugar_expression_inner(&definition.children[1])?,
         span: definition.span,
     })
 }
@@ -841,7 +963,7 @@ fn resugar_property(
             tuple
                 .children
                 .iter()
-                .map(resugar_expression)
+                .map(resugar_expression_inner)
                 .collect::<Result<Vec<_>, _>>()?
         }
     };
@@ -849,15 +971,15 @@ fn resugar_property(
     for (key, value) in &definition.meta.entries {
         let option = match key.as_str() {
             "property_tolerance" => Some(PropertyOption::Tolerance(
-                resugar_expression(value)?,
+                resugar_expression_inner(value)?,
                 value.span(),
             )),
             "property_seed" => Some(PropertyOption::Seed(
-                resugar_expression(value)?,
+                resugar_expression_inner(value)?,
                 value.span(),
             )),
             "property_samples" => Some(PropertyOption::Samples(
-                resugar_expression(value)?,
+                resugar_expression_inner(value)?,
                 value.span(),
             )),
             "property_contracts" => {
@@ -903,7 +1025,7 @@ fn resugar_property(
         name,
         params,
         preconditions,
-        body: resugar_expression(&function.children[1])?,
+        body: resugar_expression_inner(&function.children[1])?,
         options,
         span: definition.span,
     })
@@ -1112,7 +1234,7 @@ fn resugar_invariant(expr: &DeepExpr) -> Result<TypeInvariant, ResugarError> {
     }
     Ok(TypeInvariant {
         binder: params[0].name.clone(),
-        body: resugar_expression(&function.children[1])?,
+        body: resugar_expression_inner(&function.children[1])?,
         span: function.span,
     })
 }
@@ -1135,6 +1257,592 @@ fn structural_name_list(expr: &DeepExpr, owner: DeepTag) -> Result<Vec<String>, 
                 })
         })
         .collect()
+}
+
+#[derive(Clone, Copy, Default)]
+struct SurfaceMetadataContext {
+    binding_value: bool,
+    pipe_stage: bool,
+}
+
+fn validate_surface_metadata_tree(
+    expr: &DeepExpr,
+    context: SurfaceMetadataContext,
+) -> Result<(), ResugarError> {
+    match expr {
+        DeepExpr::Node(node, _) => {
+            validate_surface_node_metadata(node.tag(), node.meta(), node.children_slice(), context)?
+        }
+        DeepExpr::List(list, _) => {
+            if let (Some(DeepExpr::Atom(Atom::Tag(tag), _)), Some(DeepExpr::Map(meta, _))) =
+                (list.elements.first(), list.elements.get(1))
+            {
+                validate_surface_node_metadata(*tag, meta, &list.elements[2..], context)?;
+            } else {
+                for item in &list.elements {
+                    validate_surface_metadata_tree(item, SurfaceMetadataContext::default())?;
+                }
+            }
+        }
+        DeepExpr::Map(meta, _) => {
+            validate_non_node_surface_metadata(&meta.entries)?;
+            for (_, value) in &meta.entries {
+                validate_surface_metadata_tree(value, SurfaceMetadataContext::default())?;
+            }
+        }
+        DeepExpr::MetaExpr(meta, _) => {
+            validate_non_node_surface_metadata(&meta.entries)?;
+            for (_, value) in &meta.entries {
+                validate_surface_metadata_tree(value, SurfaceMetadataContext::default())?;
+            }
+            validate_surface_metadata_tree(&meta.expr, SurfaceMetadataContext::default())?;
+        }
+        DeepExpr::BareList(items, _) => {
+            for item in items {
+                validate_surface_metadata_tree(item, SurfaceMetadataContext::default())?;
+            }
+        }
+        DeepExpr::UnknownForm(data) => {
+            validate_non_node_surface_metadata(&data.meta.entries)?;
+            for (_, value) in &data.meta.entries {
+                validate_surface_metadata_tree(value, SurfaceMetadataContext::default())?;
+            }
+            for child in &data.children {
+                validate_surface_metadata_tree(child, SurfaceMetadataContext::default())?;
+            }
+        }
+        DeepExpr::Atom(..) => {}
+    }
+    Ok(())
+}
+
+fn validate_non_node_surface_metadata(entries: &[(String, DeepExpr)]) -> Result<(), ResugarError> {
+    for (key, _) in entries {
+        if !key.starts_with("surf_") {
+            continue;
+        }
+        if !is_known_surface_metadata_key(key) {
+            return Err(ResugarError::UnknownSurfaceMetadata { key: key.clone() });
+        }
+        return Err(ResugarError::InvalidSurfaceMetadata {
+            key: key.clone(),
+            expected: surface_metadata_expectation(key),
+        });
+    }
+    Ok(())
+}
+
+fn validate_surface_node_metadata(
+    tag: DeepTag,
+    meta: &MetaMap,
+    children: &[DeepExpr],
+    context: SurfaceMetadataContext,
+) -> Result<(), ResugarError> {
+    for (key, value) in &meta.entries {
+        if !key.starts_with("surf_") {
+            validate_surface_metadata_tree(value, SurfaceMetadataContext::default())?;
+            continue;
+        }
+        let valid = match key.as_str() {
+            "surf_path" => {
+                matches!(tag, DeepTag::Module | DeepTag::Import | DeepTag::ImportAll)
+                    && matches!(value, DeepExpr::Atom(Atom::Str(_), _))
+            }
+            "surf_dim_group_size" => {
+                tag == DeepTag::Defdim
+                    && matches!(value, DeepExpr::Atom(Atom::Int(size), _) if *size > 0)
+            }
+            "surf_pipe_stage" => {
+                tag == DeepTag::Fn
+                    && context.pipe_stage
+                    && matches!(value, DeepExpr::Atom(Atom::Str(marker), _) if marker == "call-first")
+            }
+            "surf_literal_style" => {
+                tag == DeepTag::Lit
+                    && matches!(value, DeepExpr::Atom(Atom::Str(style), _) if matches!(style.as_str(), "unsuffixed" | "explicit"))
+            }
+            "surf_binding_type" => {
+                context.binding_value
+                    && matches!(value, DeepExpr::Atom(Atom::Str(style), _) if matches!(style.as_str(), "inferred" | "explicit"))
+            }
+            _ => return Err(ResugarError::UnknownSurfaceMetadata { key: key.clone() }),
+        };
+        if !valid {
+            return Err(ResugarError::InvalidSurfaceMetadata {
+                key: key.clone(),
+                expected: surface_metadata_expectation(key),
+            });
+        }
+    }
+    for (index, child) in children.iter().enumerate() {
+        validate_surface_metadata_tree(
+            child,
+            SurfaceMetadataContext {
+                binding_value: tag == DeepTag::Bind && index % 2 == 1,
+                pipe_stage: tag == DeepTag::Pipe && index > 0,
+            },
+        )?;
+    }
+    Ok(())
+}
+
+fn is_known_surface_metadata_key(key: &str) -> bool {
+    matches!(
+        key,
+        "surf_path"
+            | "surf_dim_group_size"
+            | "surf_pipe_stage"
+            | "surf_literal_style"
+            | "surf_binding_type"
+    )
+}
+
+fn surface_metadata_expectation(key: &str) -> &'static str {
+    match key {
+        "surf_path" => "a string on a module or import node",
+        "surf_dim_group_size" => "a positive integer on the first defdim in a group",
+        "surf_pipe_stage" => "`\"call-first\"` on a function used as a pipe stage",
+        "surf_literal_style" => "`\"unsuffixed\"` or `\"explicit\"` on a literal",
+        "surf_binding_type" => "`\"inferred\"` or `\"explicit\"` on a bind value",
+        _ => unreachable!("unknown surface metadata handled separately"),
+    }
+}
+
+fn validate_surface_declarations(declarations: &[Decl]) -> Result<(), ResugarError> {
+    for declaration in declarations {
+        match declaration {
+            Decl::Module { name, decls, .. } => {
+                require_name(name, "module-path", is_qualified_type_name)?;
+                validate_surface_declarations(decls)?;
+            }
+            Decl::Import { module, kind, .. } => {
+                require_name(module, "module-path", is_qualified_type_name)?;
+                if let ImportKind::Names(names) = kind {
+                    for name in names {
+                        require_name(name, "import", is_declared_name)?;
+                    }
+                }
+            }
+            Decl::Sig { name, ty, .. } => {
+                require_name(name, "signature", is_lower_identifier)?;
+                validate_surface_type(ty)?;
+            }
+            Decl::Dim { names, .. } => {
+                for name in names {
+                    require_name(name, "dimension", is_value_identifier)?;
+                }
+            }
+            Decl::TypeDef {
+                name,
+                params,
+                variants,
+                invariant,
+                ..
+            } => {
+                require_name(name, "type", is_type_identifier)?;
+                for param in params {
+                    require_name(param, "type-parameter", is_value_identifier)?;
+                }
+                for variant in variants {
+                    require_name(&variant.name, "variant", is_type_identifier)?;
+                    match &variant.fields {
+                        VariantFields::Positional(types) => {
+                            for ty in types {
+                                validate_surface_type(ty)?;
+                            }
+                        }
+                        VariantFields::Record(fields) => {
+                            for (field, ty) in fields {
+                                require_name(field, "record-field", is_lower_identifier)?;
+                                validate_surface_type(ty)?;
+                            }
+                        }
+                    }
+                }
+                if let Some(invariant) = invariant {
+                    require_name(&invariant.binder, "invariant-binder", is_value_identifier)?;
+                    validate_surface_expression(&invariant.body)?;
+                }
+            }
+            Decl::TypeAlias {
+                name, params, ty, ..
+            } => {
+                require_name(name, "type", is_type_identifier)?;
+                for param in params {
+                    require_name(param, "type-parameter", is_value_identifier)?;
+                }
+                validate_surface_type(ty)?;
+            }
+            Decl::FunDef {
+                name,
+                dim_params,
+                params,
+                ret_ty,
+                body,
+                ..
+            } => {
+                require_name(name, "function", is_lower_identifier)?;
+                for param in dim_params {
+                    require_name(param, "function-quantifier", is_value_identifier)?;
+                }
+                validate_surface_params(params)?;
+                if let Some(ty) = ret_ty {
+                    validate_surface_type(ty)?;
+                }
+                validate_surface_expression(body)?;
+            }
+            Decl::Property {
+                name,
+                params,
+                preconditions,
+                body,
+                options,
+                ..
+            } => {
+                require_name(name, "property", is_lower_identifier)?;
+                validate_surface_params(params)?;
+                for expression in preconditions {
+                    validate_surface_expression(expression)?;
+                }
+                validate_surface_expression(body)?;
+                for option in options {
+                    match option {
+                        PropertyOption::Tolerance(expression, _)
+                        | PropertyOption::Seed(expression, _)
+                        | PropertyOption::Samples(expression, _) => {
+                            validate_surface_expression(expression)?;
+                        }
+                        PropertyOption::Contract(..) => {}
+                    }
+                }
+            }
+            Decl::LetDef {
+                name, ty, value, ..
+            } => {
+                require_name(name, "binding", is_value_identifier)?;
+                if let Some(ty) = ty {
+                    validate_surface_type(ty)?;
+                }
+                validate_surface_expression(value)?;
+            }
+            Decl::MacroDef {
+                name, params, body, ..
+            } => {
+                require_name(name, "macro", is_lower_identifier)?;
+                for param in params {
+                    require_name(param, "macro-parameter", is_lower_identifier)?;
+                }
+                validate_surface_expression(body)?;
+            }
+            Decl::Export { names, .. } => {
+                for name in names {
+                    require_name(name, "export", is_declared_name)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_surface_params(params: &[Param]) -> Result<(), ResugarError> {
+    for param in params {
+        require_name(&param.name, "parameter", is_value_identifier)?;
+        if let Some(ty) = &param.ty {
+            validate_surface_type(ty)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_surface_expression(expression: &Expr) -> Result<(), ResugarError> {
+    match expression {
+        Expr::Lit(..) => {}
+        Expr::Var(name, _) => require_name(name, "value", is_lower_identifier)?,
+        Expr::Constructor(name, _) => {
+            require_name(name, "constructor", is_qualified_type_name)?;
+        }
+        Expr::Apply(function, arguments, _) => {
+            validate_surface_expression(function)?;
+            for argument in arguments {
+                validate_surface_expression(argument)?;
+            }
+        }
+        Expr::List(items, _) | Expr::Tuple(items, _) | Expr::Par(items, _) | Expr::Do(items, _) => {
+            for item in items {
+                validate_surface_expression(item)?;
+            }
+        }
+        Expr::Record(name, fields, _) => {
+            require_name(name, "record-constructor", is_qualified_type_name)?;
+            for (field, value) in fields {
+                require_name(field, "record-field", is_lower_identifier)?;
+                validate_surface_expression(value)?;
+            }
+        }
+        Expr::RecordUpdate(base, fields, _) => {
+            validate_surface_expression(base)?;
+            for (field, value) in fields {
+                require_name(field, "record-field", is_lower_identifier)?;
+                validate_surface_expression(value)?;
+            }
+        }
+        Expr::Access(value, field, _) => {
+            validate_surface_expression(value)?;
+            require_name(field, "field", is_declared_name)?;
+        }
+        Expr::TupleGet(value, _, _)
+        | Expr::Unary(_, value, _)
+        | Expr::Jit(value, _)
+        | Expr::Realize(value, _)
+        | Expr::Copy(value, _)
+        | Expr::Borrow(value, _)
+        | Expr::Quote(value, _)
+        | Expr::Unquote(value, _)
+        | Expr::Splice(value, _) => validate_surface_expression(value)?,
+        Expr::Binary(_, left, right, _) => {
+            validate_surface_expression(left)?;
+            validate_surface_expression(right)?;
+        }
+        Expr::Pipe(value, stages, _) => {
+            validate_surface_expression(value)?;
+            for stage in stages {
+                validate_surface_expression(stage)?;
+            }
+        }
+        Expr::If(condition, consequence, alternative, _) => {
+            validate_surface_expression(condition)?;
+            validate_surface_expression(consequence)?;
+            validate_surface_expression(alternative)?;
+        }
+        Expr::Match(value, arms, _) => {
+            validate_surface_expression(value)?;
+            for arm in arms {
+                validate_surface_pattern(&arm.pattern)?;
+                if let Some(guard) = &arm.guard {
+                    validate_surface_expression(guard)?;
+                }
+                validate_surface_expression(&arm.body)?;
+            }
+        }
+        Expr::Lambda(params, body, _) => {
+            validate_surface_params(params)?;
+            validate_surface_expression(body)?;
+        }
+        Expr::Cast(value, precision, _) => {
+            validate_surface_expression(value)?;
+            require_name(precision, "precision", is_value_identifier)?;
+        }
+        Expr::Grad(function, wrt, _) => {
+            validate_surface_expression(function)?;
+            if let Some(names) = wrt {
+                for name in names {
+                    require_name(name, "gradient-parameter", is_value_identifier)?;
+                }
+            }
+        }
+        Expr::Vmap(function, _, _) => validate_surface_expression(function)?,
+        Expr::WithSeed(argument, body, _) | Expr::WithDevice(argument, body, _) => {
+            validate_surface_expression(argument)?;
+            validate_surface_expression(body)?;
+        }
+        Expr::Annotate(value, ty, _) => {
+            validate_surface_expression(value)?;
+            validate_surface_type(ty)?;
+        }
+        Expr::Block(bindings, body, _) => {
+            for binding in bindings {
+                validate_surface_let_pattern(&binding.pattern)?;
+                if let Some(ty) = &binding.ty {
+                    validate_surface_type(ty)?;
+                }
+                validate_surface_expression(&binding.value)?;
+            }
+            validate_surface_expression(body)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_surface_let_pattern(pattern: &LetPattern) -> Result<(), ResugarError> {
+    match pattern {
+        LetPattern::Var(name, _) => require_name(name, "binding", is_value_identifier)?,
+        LetPattern::Wildcard(_) => {}
+        LetPattern::Tuple(patterns, _) => {
+            for pattern in patterns {
+                validate_surface_let_pattern(pattern)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_surface_pattern(pattern: &Pattern) -> Result<(), ResugarError> {
+    match pattern {
+        Pattern::Wildcard(_) | Pattern::Lit(..) => {}
+        Pattern::Var(name, _) => require_name(name, "pattern-binding", is_value_identifier)?,
+        Pattern::Constructor(name, arguments, _) => {
+            require_name(name, "pattern-constructor", is_qualified_type_name)?;
+            for argument in arguments {
+                validate_surface_pattern(argument)?;
+            }
+        }
+        Pattern::Tuple(patterns, _) => {
+            for pattern in patterns {
+                validate_surface_pattern(pattern)?;
+            }
+        }
+        Pattern::Record(name, fields, _) => {
+            require_name(name, "pattern-constructor", is_qualified_type_name)?;
+            for (field, pattern) in fields {
+                require_name(field, "record-field", is_lower_identifier)?;
+                validate_surface_pattern(pattern)?;
+            }
+        }
+        Pattern::As(name, pattern, _) => {
+            require_name(name, "pattern-binding", is_value_identifier)?;
+            validate_surface_pattern(pattern)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_surface_type(ty: &TypeExpr) -> Result<(), ResugarError> {
+    match ty {
+        TypeExpr::Named(name, _) => {
+            let valid = name != "unit"
+                && name != "_"
+                && (is_lower_identifier(name) || is_qualified_type_name(name));
+            require_name(name, "type", |_| valid)?;
+        }
+        TypeExpr::Tensor(dimensions, precision, _) => {
+            for dimension in dimensions {
+                validate_surface_dimension(dimension)?;
+            }
+            require_name(precision, "precision", is_value_identifier)?;
+        }
+        TypeExpr::Arrow(arguments, result, _) => {
+            for argument in arguments {
+                validate_surface_type(argument)?;
+            }
+            validate_surface_type(result)?;
+        }
+        TypeExpr::Ref(inner, _) => validate_surface_type(inner)?,
+        TypeExpr::App(name, arguments, _) => {
+            require_name(name, "type-constructor", is_qualified_type_name)?;
+            for argument in arguments {
+                validate_surface_type(argument)?;
+            }
+        }
+        TypeExpr::Tuple(types, _) => {
+            for ty in types {
+                validate_surface_type(ty)?;
+            }
+        }
+        TypeExpr::Infer(_) => {}
+        TypeExpr::RankSpread(name, _) => {
+            require_name(name, "rank-variable", is_value_identifier)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_surface_dimension(dimension: &TypeExpr) -> Result<(), ResugarError> {
+    match dimension {
+        TypeExpr::Named(name, _) if name == "*" => Ok(()),
+        TypeExpr::Named(name, _)
+            if !name.is_empty()
+                && name.bytes().all(|byte| byte.is_ascii_digit())
+                && (name == "0" || !name.starts_with('0')) =>
+        {
+            Ok(())
+        }
+        TypeExpr::Named(name, _) => require_name(name, "dimension", is_value_identifier),
+        TypeExpr::RankSpread(name, _) => require_name(name, "rank-variable", is_value_identifier),
+        _ => Err(ResugarError::InvalidSurfaceIdentifier {
+            name: format!("{dimension:?}"),
+            role: "dimension",
+        }),
+    }
+}
+
+fn require_name(
+    name: &str,
+    role: &'static str,
+    predicate: impl FnOnce(&str) -> bool,
+) -> Result<(), ResugarError> {
+    if predicate(name) {
+        Ok(())
+    } else {
+        Err(ResugarError::InvalidSurfaceIdentifier {
+            name: name.to_string(),
+            role,
+        })
+    }
+}
+
+fn is_lower_identifier(name: &str) -> bool {
+    let mut bytes = name.bytes();
+    let Some(first) = bytes.next() else {
+        return false;
+    };
+    (first == b'_' || first.is_ascii_lowercase())
+        && name != "_"
+        && bytes.all(|byte| byte == b'_' || byte.is_ascii_alphanumeric())
+        && !is_reserved_word(name)
+}
+
+fn is_type_identifier(name: &str) -> bool {
+    let mut bytes = name.bytes();
+    let Some(first) = bytes.next() else {
+        return false;
+    };
+    first.is_ascii_uppercase() && bytes.all(|byte| byte == b'_' || byte.is_ascii_alphanumeric())
+}
+
+fn is_value_identifier(name: &str) -> bool {
+    is_lower_identifier(name) || (name.len() == 1 && name.as_bytes()[0].is_ascii_uppercase())
+}
+
+fn is_declared_name(name: &str) -> bool {
+    is_lower_identifier(name) || is_type_identifier(name)
+}
+
+fn is_qualified_type_name(name: &str) -> bool {
+    name.split('.').all(is_type_identifier)
+}
+
+fn is_reserved_word(name: &str) -> bool {
+    matches!(
+        name,
+        "def"
+            | "sig"
+            | "type"
+            | "dim"
+            | "macro"
+            | "match"
+            | "with"
+            | "fn"
+            | "module"
+            | "import"
+            | "if"
+            | "then"
+            | "else"
+            | "grad"
+            | "vmap"
+            | "jit"
+            | "realize"
+            | "copy"
+            | "tensor"
+            | "cast"
+            | "export"
+            | "par"
+            | "do"
+            | "quote"
+            | "unquote"
+            | "splice"
+            | "true"
+            | "false"
+    )
 }
 
 fn node_ref(expr: &DeepExpr) -> Result<NodeRef<'_>, ResugarError> {
@@ -1209,13 +1917,13 @@ fn resugar_node(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
             if let Some(operator) = resugar_operator_application(&node)? {
                 return Ok(operator);
             }
-            let function = resugar_expression(&node.children[0])?;
+            let function = resugar_expression_inner(&node.children[0])?;
             if node.children.len() == 1 && matches!(function, Expr::Constructor(..)) {
                 return Ok(function);
             }
             let arguments = node.children[1..]
                 .iter()
-                .map(resugar_expression)
+                .map(resugar_expression_inner)
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(Expr::Apply(Box::new(function), arguments, node.span))
         }
@@ -1233,7 +1941,7 @@ fn resugar_node(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
             {
                 resugar_literal_with_default_suffix(literal)?
             } else {
-                resugar_expression(&node.children[0])?
+                resugar_expression_inner(&node.children[0])?
             };
             Ok(Expr::Cast(
                 Box::new(operand),
@@ -1245,7 +1953,7 @@ fn resugar_node(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
             exact(&node, 2)?;
             Ok(Expr::Lambda(
                 resugar_params(&node.children[0])?,
-                Box::new(resugar_expression(&node.children[1])?),
+                Box::new(resugar_expression_inner(&node.children[1])?),
                 node.span,
             ))
         }
@@ -1253,15 +1961,15 @@ fn resugar_node(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
         T::If => {
             exact(&node, 3)?;
             Ok(Expr::If(
-                Box::new(resugar_expression(&node.children[0])?),
-                Box::new(resugar_expression(&node.children[1])?),
-                Box::new(resugar_expression(&node.children[2])?),
+                Box::new(resugar_expression_inner(&node.children[0])?),
+                Box::new(resugar_expression_inner(&node.children[1])?),
+                Box::new(resugar_expression_inner(&node.children[2])?),
                 node.span,
             ))
         }
         T::Match => {
             at_least(&node, 1)?;
-            let scrutinee = resugar_expression(&node.children[0])?;
+            let scrutinee = resugar_expression_inner(&node.children[0])?;
             let arms = node.children[1..]
                 .iter()
                 .map(resugar_arm)
@@ -1279,7 +1987,7 @@ fn resugar_node(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
         }
         T::RecordUpdate => {
             at_least(&node, 1)?;
-            let base = resugar_expression(&node.children[0])?;
+            let base = resugar_expression_inner(&node.children[0])?;
             let fields = node.children[1..]
                 .iter()
                 .map(resugar_kv_expression)
@@ -1289,7 +1997,7 @@ fn resugar_node(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
         T::Access => {
             exact(&node, 2)?;
             Ok(Expr::Access(
-                Box::new(resugar_expression(&node.children[0])?),
+                Box::new(resugar_expression_inner(&node.children[0])?),
                 name_child(&node, 1)?.to_string(),
                 node.span,
             ))
@@ -1302,7 +2010,7 @@ fn resugar_node(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
                 expected: "an integer `(lit ...)` node",
             })?;
             Ok(Expr::TupleGet(
-                Box::new(resugar_expression(&node.children[0])?),
+                Box::new(resugar_expression_inner(&node.children[0])?),
                 index,
                 node.span,
             ))
@@ -1310,7 +2018,7 @@ fn resugar_node(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
         T::Pipe => {
             at_least(&node, 2)?;
             Ok(Expr::Pipe(
-                Box::new(resugar_expression(&node.children[0])?),
+                Box::new(resugar_expression_inner(&node.children[0])?),
                 node.children[1..]
                     .iter()
                     .map(resugar_pipe_stage)
@@ -1323,7 +2031,7 @@ fn resugar_node(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
             Ok(Expr::Do(
                 node.children
                     .iter()
-                    .map(resugar_expression)
+                    .map(resugar_expression_inner)
                     .collect::<Result<Vec<_>, _>>()?,
                 node.span,
             ))
@@ -1331,15 +2039,15 @@ fn resugar_node(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
         T::Tuple => Ok(Expr::Tuple(
             node.children
                 .iter()
-                .map(resugar_expression)
+                .map(resugar_expression_inner)
                 .collect::<Result<Vec<_>, _>>()?,
             node.span,
         )),
         T::HandleEffect => {
             exact(&node, 2)?;
             let effect = decode_effect_kind(node)?;
-            let argument = Box::new(resugar_expression(&node.children[0])?);
-            let body = Box::new(resugar_expression(&node.children[1])?);
+            let argument = Box::new(resugar_expression_inner(&node.children[0])?);
+            let body = Box::new(resugar_expression_inner(&node.children[1])?);
             match effect {
                 EffectKind::Random => Ok(Expr::WithSeed(argument, body, node.span)),
                 EffectKind::Resource => Ok(Expr::WithDevice(argument, body, node.span)),
@@ -1355,7 +2063,7 @@ fn resugar_node(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
                 expected: "an integer `(lit ...)` axis",
             })?;
             Ok(Expr::Vmap(
-                Box::new(resugar_expression(&node.children[0])?),
+                Box::new(resugar_expression_inner(&node.children[0])?),
                 (axis != 0).then_some(axis),
                 node.span,
             ))
@@ -1371,7 +2079,7 @@ fn resugar_node(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
             Ok(Expr::Par(
                 node.children
                     .iter()
-                    .map(resugar_expression)
+                    .map(resugar_expression_inner)
                     .collect::<Result<Vec<_>, _>>()?,
                 node.span,
             ))
@@ -1474,6 +2182,17 @@ fn resugar_literal_impl(
     };
     let suppress_suffix = style == Some("unsuffixed");
     let preserve_default_suffix = preserve_default_suffix || style == Some("explicit");
+    if let DeepExpr::Atom(Atom::Int(value), _) = &node.children[0]
+        && *value == i64::MIN
+        && suffix == Some(LiteralSuffix::I64)
+    {
+        let literal = if suppress_suffix {
+            Literal::Int(*value)
+        } else {
+            Literal::TypedInt(*value, LiteralSuffix::I64)
+        };
+        return Ok(Expr::Lit(literal, node.span));
+    }
     if let DeepExpr::Atom(Atom::Int(value), _) = &node.children[0]
         && integer_minimum(suffix) == Some(*value)
     {
@@ -1603,14 +2322,14 @@ fn validate_literal_type(node: &NodeRef<'_>) -> Result<(), ResugarError> {
         (DeepExpr::Atom(Atom::Str(_), _), DeepTag::TPrim) => {
             primitive_type_name(ty) == Some("string")
         }
-        (DeepExpr::Atom(Atom::Int(_), _), DeepTag::TPrim) => {
-            primitive_type_name(ty).is_some_and(|name| {
-                matches!(
-                    name,
-                    "int8" | "int16" | "int32" | "int64" | "f16" | "bf16" | "f32" | "f64"
-                )
-            })
-        }
+        (DeepExpr::Atom(Atom::Int(value), _), DeepTag::TPrim) => primitive_type_name(ty)
+            .is_some_and(|name| match name {
+                "int8" => i8::try_from(*value).is_ok(),
+                "int16" => i16::try_from(*value).is_ok(),
+                "int32" => i32::try_from(*value).is_ok(),
+                "int64" | "f16" | "bf16" | "f32" | "f64" => true,
+                _ => false,
+            }),
         (DeepExpr::Atom(Atom::Float(_), _), DeepTag::TPrim) => primitive_type_name(ty)
             .is_some_and(|name| matches!(name, "f16" | "bf16" | "f32" | "f64")),
         (DeepExpr::BareList(items, _), DeepTag::TUnit) => items.is_empty(),
@@ -1634,7 +2353,7 @@ fn unary_node(
 ) -> Result<Expr, ResugarError> {
     exact(&node, 1)?;
     Ok(constructor(
-        Box::new(resugar_expression(&node.children[0])?),
+        Box::new(resugar_expression_inner(&node.children[0])?),
         node.span,
     ))
 }
@@ -1700,7 +2419,7 @@ fn resugar_let(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
             value: resugar_node(value_node)?,
         });
     }
-    let body = resugar_expression(&node.children[1])?;
+    let body = resugar_expression_inner(&node.children[1])?;
     match body {
         Expr::Block(body_bindings, body, span) => {
             bindings.extend(body_bindings);
@@ -1793,9 +2512,9 @@ fn try_resugar_destructuring_let(node: &NodeRef<'_>) -> Result<Option<Expr>, Res
     let binding = LetBinding {
         pattern,
         ty: None,
-        value: resugar_expression(&root_bind.children[1])?,
+        value: resugar_expression_inner(&root_bind.children[1])?,
     };
-    let body = resugar_expression(current)?;
+    let body = resugar_expression_inner(current)?;
     Ok(Some(match body {
         Expr::Block(mut bindings, body, span) => {
             bindings.insert(0, binding);
@@ -1954,12 +2673,12 @@ fn resugar_arm(expr: &DeepExpr) -> Result<MatchArm, ResugarError> {
     let guard = if is_empty_structural_list(&node.children[1]) {
         None
     } else {
-        Some(resugar_expression(&node.children[1])?)
+        Some(resugar_expression_inner(&node.children[1])?)
     };
     Ok(MatchArm {
         pattern: resugar_pattern(&node.children[0])?,
         guard,
-        body: resugar_expression(&node.children[2])?,
+        body: resugar_expression_inner(&node.children[2])?,
         span: node.span,
     })
 }
@@ -2044,7 +2763,7 @@ fn resugar_kv_expression(expr: &DeepExpr) -> Result<(String, Expr), ResugarError
     exact(&node, 2)?;
     Ok((
         name_child(&node, 0)?.to_string(),
-        resugar_expression(&node.children[1])?,
+        resugar_expression_inner(&node.children[1])?,
     ))
 }
 
@@ -2067,7 +2786,7 @@ fn resugar_kv_pattern(expr: &DeepExpr) -> Result<(String, Pattern), ResugarError
 fn resugar_pipe_stage(expr: &DeepExpr) -> Result<Expr, ResugarError> {
     let node = node_ref(expr)?;
     let Some(marker) = meta_value(node.meta, "surf_pipe_stage") else {
-        return resugar_expression(expr);
+        return resugar_expression_inner(expr);
     };
     let DeepExpr::Atom(Atom::Str(marker), _) = marker else {
         return Err(ResugarError::InvalidChild {
@@ -2083,7 +2802,7 @@ fn resugar_pipe_stage(expr: &DeepExpr) -> Result<Expr, ResugarError> {
             expected: "validated `surf_pipe_stage: \"call-first\"` on a function stage",
         });
     }
-    let lambda = resugar_expression(expr)?;
+    let lambda = resugar_expression_inner(expr)?;
     let Expr::Lambda(params, body, span) = lambda else {
         unreachable!("validated fn resugars to lambda")
     };
@@ -2145,7 +2864,7 @@ fn resugar_grad(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
         });
     }
     Ok(Expr::Grad(
-        Box::new(resugar_expression(&node.children[0])?),
+        Box::new(resugar_expression_inner(&node.children[0])?),
         wrt,
         node.span,
     ))
@@ -2190,7 +2909,7 @@ fn resugar_finite_list(node: &NodeRef<'_>) -> Result<Option<Vec<Expr>>, ResugarE
         return Ok(None);
     }
 
-    let mut items = vec![resugar_expression(&node.children[1])?];
+    let mut items = vec![resugar_expression_inner(&node.children[1])?];
     let mut tail = &node.children[2];
     loop {
         if variable_name(tail) == Some("Nil") {
@@ -2205,7 +2924,7 @@ fn resugar_finite_list(node: &NodeRef<'_>) -> Result<Option<Vec<Expr>>, ResugarE
         {
             return Ok(None);
         }
-        items.push(resugar_expression(&cons.children[1])?);
+        items.push(resugar_expression_inner(&cons.children[1])?);
         tail = &cons.children[2];
     }
 }
@@ -2222,7 +2941,7 @@ fn resugar_operator_application(node: &NodeRef<'_>) -> Result<Option<Expr>, Resu
         };
         return Ok(Some(Expr::Unary(
             operator,
-            Box::new(resugar_expression(&node.children[1])?),
+            Box::new(resugar_expression_inner(&node.children[1])?),
             node.span,
         )));
     }
@@ -2246,8 +2965,8 @@ fn resugar_operator_application(node: &NodeRef<'_>) -> Result<Option<Expr>, Resu
     };
     Ok(Some(Expr::Binary(
         operator,
-        Box::new(resugar_expression(&node.children[1])?),
-        Box::new(resugar_expression(&node.children[2])?),
+        Box::new(resugar_expression_inner(&node.children[1])?),
+        Box::new(resugar_expression_inner(&node.children[2])?),
         node.span,
     )))
 }

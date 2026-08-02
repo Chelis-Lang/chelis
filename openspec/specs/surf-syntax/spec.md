@@ -400,9 +400,13 @@ back to the `int32`/`f32` defaults.
 
 ### Requirement: Strings
 
-String literals SHALL be double-quoted with the escapes `\"`, `\\`, `\n`, `\t`, `\r`, `\0`,
-and SHALL desugar to `(lit {type: (t-prim {} string)} ...)`. Multiline strings,
-interpolation, and Unicode escapes SHALL NOT be supported in v1.
+String literals SHALL be double-quoted with the canonical named escapes `\"`,
+`\\`, `\n`, `\t`, `\r`, and `\0`, and SHALL desugar to
+`(lit {type: (t-prim {} string)} ...)`. A control character without a named
+escape SHALL use `\u{h}` with its minimal lowercase hexadecimal scalar value;
+that form SHALL be accepted only for U+0001..U+001F excluding tab, newline,
+and carriage return, and for U+007F..U+009F. Raw controls, printable-character
+Unicode-escape aliases, multiline strings, and interpolation SHALL be rejected.
 
 #### Scenario: String literal desugars
 

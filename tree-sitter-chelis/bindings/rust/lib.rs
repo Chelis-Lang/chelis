@@ -32,6 +32,18 @@ mod tests {
             .has_error()
     }
 
+    fn surf_sexp(source: &str) -> String {
+        let mut parser = Parser::new();
+        parser
+            .set_language(&surf_language())
+            .expect("Chelis Surf grammar loads");
+        parser
+            .parse(source, None)
+            .expect("tree-sitter returns a tree")
+            .root_node()
+            .to_sexp()
+    }
+
     #[test]
     fn surf_v019_tree_sitter_accepts_the_canonical_surface() {
         for source in [
@@ -53,9 +65,17 @@ mod tests {
             "negative_int_pattern = match x with { | -42 => 0 }\n",
             "negative_float_pattern = match x with { | -0.0 => 0 }\n",
             "minimum_int_pattern = match x with { | -9223372036854775808 => 0 }\n",
+            "minimum_int = -9223372036854775808\n",
+            "typed_minimum_int = -9223372036854775808i64\n",
+            "largest_int = 9223372036854775807\n",
+            "largest_axis: tensor[9223372036854775807, f32] = value\n",
             "empty_record = Empty {}\n",
             "empty_record_pattern = match x with { | Empty {} => 0 }\n",
             "def explicitly_pure() ! {} = ()\n",
+            "different_record_field = Point { x: y }\n",
+            "different_record_pattern = match p with { | Point { x: y } => y }\n",
+            "later_pipe_argument = x |> fn (v) -> f(y, v)\n",
+            "controls = \"\\u{8}\\u{1f}\\u{7f}\\u{85}\\0\\t\\n\\r\\\"\\\\\"\n",
         ] {
             assert!(
                 !surf_has_error(source),
@@ -112,10 +132,37 @@ mod tests {
             "value = 1.00000000000000001\n",
             "value = 0.10000000000000001\n",
             "value = 0.10000000000000001f64\n",
+            "value = 9223372036854775808\n",
+            "value = 9223372036854775808i64\n",
+            "value = 9223372036854775809\n",
+            "value = 999999999999999999999999999999999999999999\n",
+            "value = -9223372036854775809\n",
+            "value = -9223372036854775808i32\n",
+            "value = match x with { | 9223372036854775808 => 0 }\n",
+            "value: tensor[9223372036854775808, f32] = x\n",
+            "value = \"\\u{08}\"\n",
+            "value = \"\\u{0}\"\n",
+            "value = \"\\u{9}\"\n",
+            "value = \"\\u{a}\"\n",
+            "value = \"\\u{d}\"\n",
+            "value = \"\\u{22}\"\n",
+            "value = \"\\u{5c}\"\n",
+            "value = \"\\u{41}\"\n",
+            "value = \"\\u{B}\"\n",
+            "value = \"raw\tcontrol\"\n",
+            "value = \"raw\u{8}control\"\n",
+            "value = \"raw\u{7f}control\"\n",
+            "def unit_value() -> unit = ()\n",
+            "result = Point { x: x }\n",
+            "result = match p with { | Point { x: x } => x }\n",
+            "result = x |> fn (v) -> f(v, y)\n",
+            "result = x |> fn (v) -> realize(v)\n",
+            "result = x |> fn (v) -> copy(v)\n",
         ] {
             assert!(
                 surf_has_error(source),
-                "legacy alias parsed cleanly: {source}"
+                "legacy alias parsed cleanly: {source}\n{}",
+                surf_sexp(source),
             );
         }
     }

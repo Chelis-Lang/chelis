@@ -500,7 +500,9 @@ fn format_property_option(option: &PropertyOption) -> String {
         }
         PropertyOption::Seed(value, _) => format!("  with seed = {}", format_expr(value)),
         PropertyOption::Samples(value, _) => format!("  with samples = {}", format_expr(value)),
-        PropertyOption::Contract(id, _) => format!("  with contract = {id:?}"),
+        PropertyOption::Contract(id, _) => {
+            format!("  with contract = {}", canonical_string(id))
+        }
     }
 }
 
@@ -568,7 +570,7 @@ fn format_effect(effect: &EffectExpr) -> String {
         EffectExpr::Accum(_) => "Accum".to_string(),
         EffectExpr::Io(_) => "IO".to_string(),
         EffectExpr::Test(_) => "Test".to_string(),
-        EffectExpr::Resource(device, _) => format!("Resource(\"{device}\")"),
+        EffectExpr::Resource(device, _) => format!("Resource({})", canonical_string(device)),
     }
 }
 
@@ -781,7 +783,7 @@ fn format_lit(lit: &Literal) -> String {
         Literal::TypedFloat(value, suffix) => {
             format!("{}{}", canonical_float(*value), suffix.as_str())
         }
-        Literal::Str(value) => format!("{value:?}"),
+        Literal::Str(value) => canonical_string(value),
         Literal::Bool(value) => value.to_string(),
     }
 }
@@ -792,6 +794,34 @@ fn is_i64_min_magnitude_sentinel(expr: &Expr) -> bool {
         Expr::Lit(Literal::Int(i64::MIN), _)
             | Expr::Lit(Literal::TypedInt(i64::MIN, LiteralSuffix::I64), _)
     )
+}
+
+/// Render the unique Surf spelling for a string value.
+///
+/// Printable Unicode stays literal. The six P11 named escapes take
+/// precedence; the remaining C0/C1 controls use minimal lowercase `\\u{h}`.
+pub(crate) fn canonical_string(value: &str) -> String {
+    use std::fmt::Write as _;
+
+    let mut rendered = String::with_capacity(value.len() + 2);
+    rendered.push('"');
+    for character in value.chars() {
+        match character {
+            '"' => rendered.push_str("\\\""),
+            '\\' => rendered.push_str("\\\\"),
+            '\n' => rendered.push_str("\\n"),
+            '\t' => rendered.push_str("\\t"),
+            '\r' => rendered.push_str("\\r"),
+            '\0' => rendered.push_str("\\0"),
+            control if control.is_control() => {
+                write!(rendered, "\\u{{{:x}}}", control as u32)
+                    .expect("writing to a String cannot fail");
+            }
+            printable => rendered.push(printable),
+        }
+    }
+    rendered.push('"');
+    rendered
 }
 
 /// Print the shortest decimal spelling that round-trips to `value`.

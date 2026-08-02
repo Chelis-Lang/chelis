@@ -73,6 +73,62 @@ fn non_finite_float_literals_are_rejected_with_a_targeted_diagnostic() {
 }
 
 #[test]
+fn every_deep_string_has_one_reparseable_canonical_surf_spelling() {
+    let canonical = "value = \"\\u{8}\\u{1f}\\u{7f}\\u{85}\\0\\t\\n\\r\\\"\\\\\"\n";
+    assert_eq!(
+        format_source(canonical).expect("canonical controls parse"),
+        canonical
+    );
+
+    let controls = "\u{8}\u{1f}\u{7f}\u{85}";
+    let deep_source =
+        format!("(def {{}} value (lit {{type: (t-prim {{}} string)}} \"{controls}\"))");
+    let deep = parse_deep(&deep_source).expect("Deep control string parses");
+    let surf = format_program(&resugar_program(&deep).expect("Deep control string resugars"));
+    assert_eq!(surf, "value = \"\\u{8}\\u{1f}\\u{7f}\\u{85}\"\n");
+    let redesugared =
+        desugar_program(&parse_str(&surf).expect("resugared control string reparses"));
+    assert_eq!(
+        print_canonical(&normalize_deep_for_surface_roundtrip(&deep)),
+        print_canonical(&normalize_deep_for_surface_roundtrip(&redesugared)),
+    );
+}
+
+#[test]
+fn string_escape_aliases_and_raw_controls_are_rejected() {
+    for source in [
+        r#"value = "\u{08}""#,
+        r#"value = "\u{0}""#,
+        r#"value = "\u{9}""#,
+        r#"value = "\u{a}""#,
+        r#"value = "\u{d}""#,
+        r#"value = "\u{22}""#,
+        r#"value = "\u{5c}""#,
+        r#"value = "\u{41}""#,
+        r#"value = "\u{B}""#,
+        "value = \"raw\tcontrol\"",
+        "value = \"raw\u{8}control\"",
+        "value = \"raw\u{7f}control\"",
+    ] {
+        rejects(source);
+    }
+}
+
+#[test]
+fn every_string_bearing_surface_uses_the_canonical_renderer() {
+    let source = concat!(
+        "def resource() ! { Resource(\"gpu\\\"\\\\\\t\\0\") } = ()\n",
+        "@property escaped forall():\n",
+        "  true\n",
+        "  with contract = \"contract\\\"\\\\\\t\\0\"\n",
+    );
+    assert_eq!(
+        format_source(source).expect("escaped strings format"),
+        source
+    );
+}
+
+#[test]
 fn legacy_syntax_safe_aliases_are_rejected() {
     let aliases = [
         "def nullary = value",
@@ -331,6 +387,33 @@ fn default_type_suffixes_are_preserved_when_contextual_adoption_changes_meaning(
         format_program(&resugar_program(&desugared).expect("contextual literals resugar")),
         source,
     );
+}
+
+#[test]
+fn contextual_signed_minimum_preserves_its_adopted_int64_type() {
+    let source = concat!(
+        "contextual = cast(-9223372036854775808, int64)\n",
+        "explicit = cast(-9223372036854775808i64, int64)\n",
+    );
+    let deep = desugar_program(&parse_str(source).expect("signed minima parse"));
+    let surf = format_program(&resugar_program(&deep).expect("signed minima resugar"));
+    assert_eq!(surf, source);
+    let redesugared = desugar_program(&parse_str(&surf).expect("signed minima reparse"));
+    assert_eq!(
+        print_canonical(&normalize_deep_for_surface_roundtrip(&deep)),
+        print_canonical(&normalize_deep_for_surface_roundtrip(&redesugared)),
+    );
+}
+
+#[test]
+fn out_of_range_deep_integer_metadata_fails_closed_without_normalizer_panic() {
+    let mut deep = parse_deep("(lit {type: (t-prim {} int32)} -9223372036854775808)")
+        .expect("structurally accepted Deep literal parses");
+    let normalized = normalize_deep_for_surface_roundtrip(&deep);
+    assert!(print_canonical(&normalized).contains("-9223372036854775808"));
+    let error = resugar_expression(&deep.remove(0))
+        .expect_err("out-of-range typed integer must not emit invalid Surf");
+    assert!(error.to_string().contains("compatible"), "{error}");
 }
 
 #[test]
@@ -786,6 +869,75 @@ fn deep_surf_metadata_namespace_and_marker_values_are_closed() {
     let error = resugar_expression(&malformed[0])
         .expect_err("unknown binding-style marker value must fail closed");
     assert!(error.to_string().contains("inferred"));
+
+    for deep_source in [
+        "(var {surf_literal_style: \"future\"} x)",
+        "(var {surf_binding_type: \"future\"} x)",
+        "(var {surf_binding_type: \"inferred\"} x)",
+        "(var {surf_pipe_stage: \"call-first\"} x)",
+        "(var {surf_path: \"Demo\"} x)",
+        "(var {surf_dim_group_size: 1} x)",
+    ] {
+        let mut malformed = parse_deep(deep_source).expect("known metadata key parses");
+        let rendered = print_canonical(&malformed);
+        let Err(error) = resugar_expression(&malformed.remove(0)) else {
+            panic!(
+                "known Surf metadata unexpectedly resugared outside its declared placement: {deep_source}: {rendered}"
+            );
+        };
+        assert!(
+            error.to_string().contains("metadata"),
+            "{deep_source}: {error}"
+        );
+    }
+
+    let mut legacy_wrapper = parse_deep("^{:surf_literal_style \"explicit\"} (var {} x)")
+        .expect("legacy metadata expression parses");
+    let error = resugar_expression(&legacy_wrapper.remove(0))
+        .expect_err("surface metadata on a legacy metadata wrapper must fail closed");
+    assert!(error.to_string().contains("literal"));
+
+    let malformed =
+        parse_deep("(var {surf_binding_type: \"future\"} x)").expect("known metadata key parses");
+    assert!(
+        print_canonical(&normalize_deep_for_surface_roundtrip(&malformed))
+            .contains("surf_binding_type"),
+        "normalization must not erase malformed Surf metadata before validation"
+    );
+}
+
+#[test]
+fn deep_names_that_cannot_be_surf_tokens_fail_closed() {
+    for deep_source in [
+        "(var {} foo-bar)",
+        "(var {} foo.bar)",
+        "(app {} (var {} foo-bar) (lit {} 1))",
+        "(record {} Point (kv {} X (lit {} 1)))",
+        "(match {} (var {} point) (arm {} (pat-record {} Point (kv {} X (pat-var {} x))) () (var {} x)))",
+        "(def {} foo-bar (lit {} 1))",
+    ] {
+        let deep = parse_deep(deep_source).expect("structurally accepted Deep name parses");
+        let result = if deep_source.starts_with("(def ") {
+            resugar_program(&deep).map(|_| ())
+        } else {
+            resugar_expression(&deep[0]).map(|_| ())
+        };
+        let error = result.expect_err("invalid Deep name must not emit meaning-changing Surf");
+        assert!(
+            error.to_string().contains("identifier"),
+            "{deep_source}: {error}"
+        );
+    }
+
+    for deep_source in [
+        "(var {} foo_bar)",
+        "(var {} Some)",
+        "(record {} Point (kv {} x (lit {} 1)))",
+    ] {
+        let deep = parse_deep(deep_source).expect("valid Deep name parses");
+        resugar_expression(&deep[0])
+            .unwrap_or_else(|error| panic!("valid Deep name failed: {deep_source}: {error}"));
+    }
 }
 
 #[test]
@@ -837,20 +989,33 @@ fn roundtrip_normalization_strips_only_enumerated_derived_metadata() {
         "source:",
         "effects:",
         "invariant_amenability:",
-        "surf_literal_style:",
-        "surf_binding_type:",
     ] {
         assert!(
             !normalized.contains(derived),
             "derived key survived: {normalized}"
         );
     }
-    for semantic in ["eff:", "type:", "surf_path:"] {
+    for semantic in [
+        "eff:",
+        "type:",
+        "surf_path:",
+        "surf_literal_style:",
+        "surf_binding_type:",
+    ] {
         assert!(
             normalized.contains(semantic),
-            "semantic key was erased: {normalized}"
+            "semantic or misplaced surface key was erased: {normalized}"
         );
     }
+
+    let legal_markers = parse_deep(concat!(
+        "(bind {} x ",
+        "(lit {surf_literal_style: \"explicit\", surf_binding_type: \"inferred\"} 1))\n",
+    ))
+    .expect("legal origin markers parse");
+    let normalized_legal = print_canonical(&normalize_deep_for_surface_roundtrip(&legal_markers));
+    assert!(!normalized_legal.contains("surf_literal_style:"));
+    assert!(!normalized_legal.contains("surf_binding_type:"));
 }
 
 #[test]

@@ -314,6 +314,32 @@
     }
   },
   {
+    "type": "canonical_pipe_lambda_expression",
+    "named": true,
+    "fields": {
+      "body": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "expression",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "parameter",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
     "type": "cast_expression",
     "named": true,
     "fields": {
@@ -629,91 +655,11 @@
       "required": true,
       "types": [
         {
-          "type": "additive_expression",
-          "named": true
-        },
-        {
-          "type": "annotation_expression",
-          "named": true
-        },
-        {
-          "type": "block_expression",
-          "named": true
-        },
-        {
-          "type": "call_expression",
-          "named": true
-        },
-        {
-          "type": "comparison_expression",
-          "named": true
-        },
-        {
-          "type": "do_expression",
-          "named": true
-        },
-        {
-          "type": "equality_expression",
-          "named": true
-        },
-        {
-          "type": "field_expression",
-          "named": true
-        },
-        {
-          "type": "if_expression",
-          "named": true
-        },
-        {
           "type": "lambda_expression",
           "named": true
         },
         {
-          "type": "logical_and_expression",
-          "named": true
-        },
-        {
-          "type": "logical_or_expression",
-          "named": true
-        },
-        {
-          "type": "match_expression",
-          "named": true
-        },
-        {
-          "type": "multiplicative_expression",
-          "named": true
-        },
-        {
-          "type": "par_expression",
-          "named": true
-        },
-        {
-          "type": "pipe_expression",
-          "named": true
-        },
-        {
-          "type": "primary_expression",
-          "named": true
-        },
-        {
-          "type": "quote_expression",
-          "named": true
-        },
-        {
-          "type": "record_update_expression",
-          "named": true
-        },
-        {
-          "type": "transform_expression",
-          "named": true
-        },
-        {
-          "type": "unary_expression",
-          "named": true
-        },
-        {
-          "type": "with_handler_expression",
+          "type": "non_lambda_expression",
           "named": true
         }
       ]
@@ -920,6 +866,11 @@
         }
       ]
     }
+  },
+  {
+    "type": "identifier",
+    "named": true,
+    "fields": {}
   },
   {
     "type": "if_expression",
@@ -1359,7 +1310,7 @@
     "fields": {},
     "children": {
       "multiple": false,
-      "required": true,
+      "required": false,
       "types": [
         {
           "type": "pattern_number",
@@ -1410,6 +1361,101 @@
         },
         {
           "type": "unit_type",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "non_lambda_expression",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": false,
+      "required": true,
+      "types": [
+        {
+          "type": "additive_expression",
+          "named": true
+        },
+        {
+          "type": "annotation_expression",
+          "named": true
+        },
+        {
+          "type": "block_expression",
+          "named": true
+        },
+        {
+          "type": "call_expression",
+          "named": true
+        },
+        {
+          "type": "comparison_expression",
+          "named": true
+        },
+        {
+          "type": "do_expression",
+          "named": true
+        },
+        {
+          "type": "equality_expression",
+          "named": true
+        },
+        {
+          "type": "field_expression",
+          "named": true
+        },
+        {
+          "type": "if_expression",
+          "named": true
+        },
+        {
+          "type": "logical_and_expression",
+          "named": true
+        },
+        {
+          "type": "logical_or_expression",
+          "named": true
+        },
+        {
+          "type": "match_expression",
+          "named": true
+        },
+        {
+          "type": "multiplicative_expression",
+          "named": true
+        },
+        {
+          "type": "par_expression",
+          "named": true
+        },
+        {
+          "type": "pipe_expression",
+          "named": true
+        },
+        {
+          "type": "primary_expression",
+          "named": true
+        },
+        {
+          "type": "quote_expression",
+          "named": true
+        },
+        {
+          "type": "record_update_expression",
+          "named": true
+        },
+        {
+          "type": "transform_expression",
+          "named": true
+        },
+        {
+          "type": "unary_expression",
+          "named": true
+        },
+        {
+          "type": "with_handler_expression",
           "named": true
         }
       ]
@@ -1640,7 +1686,11 @@
         "required": true,
         "types": [
           {
-            "type": "expression",
+            "type": "canonical_pipe_lambda_expression",
+            "named": true
+          },
+          {
+            "type": "non_lambda_expression",
             "named": true
           }
         ]
@@ -1876,16 +1926,6 @@
     "type": "record_field",
     "named": true,
     "fields": {
-      "name": {
-        "multiple": false,
-        "required": true,
-        "types": [
-          {
-            "type": "identifier",
-            "named": true
-          }
-        ]
-      },
       "value": {
         "multiple": false,
         "required": true,
@@ -1932,16 +1972,6 @@
     "type": "record_pattern_field",
     "named": true,
     "fields": {
-      "name": {
-        "multiple": false,
-        "required": true,
-        "types": [
-          {
-            "type": "identifier",
-            "named": true
-          }
-        ]
-      },
       "pattern": {
         "multiple": false,
         "required": true,
@@ -2082,6 +2112,11 @@
         }
       ]
     }
+  },
+  {
+    "type": "string",
+    "named": true,
+    "fields": {}
   },
   {
     "type": "tensor_type",
@@ -2329,7 +2364,7 @@
     },
     "children": {
       "multiple": false,
-      "required": true,
+      "required": false,
       "types": [
         {
           "type": "expression",
@@ -2735,10 +2770,6 @@
     "named": false
   },
   {
-    "type": "identifier",
-    "named": true
-  },
-  {
     "type": "if",
     "named": false
   },
@@ -2810,10 +2841,6 @@
   {
     "type": "splice",
     "named": false
-  },
-  {
-    "type": "string",
-    "named": true
   },
   {
     "type": "tensor",

@@ -53,16 +53,19 @@ portable across Surf and Reef boundaries.
 | `opaque` | `true` | On a `deftype`: the type is opaque (see §2.2) |
 | `invariant` | `(fn {} (params {} <binder>) <expr>)` | On an opaque `deftype`: the declared invariant predicate (see §2.2) |
 | `invariant_amenability` | string | On an invariant-carrying `deftype`: `"linear"`/`"polynomial"`/`"transcendental"`/`"opaque"`; derived data, recomputed on desugar (see §2.2) |
-| `surf_path` | string | Exact canonical Surf module path spelling for a lowercased Deep module identity |
-| `surf_dim_group_size` | integer | Number of adjacent `defdim` declarations authored in one Surf `dim` group; present on the first member only |
-| `surf_pipe_stage` | string | Validated origin marker needed to reconstruct an exact first-argument call stage |
-| `surf_literal_style` | `"unsuffixed"` / `"explicit"` | Whether a numeric literal's precision came from an unsuffixed contextual/default binding or an authored suffix |
-| `surf_binding_type` | `"inferred"` / `"explicit"` | Whether a block binding's value `type` metadata came from inference or an authored binding annotation |
+| `surf_path` | string | Exact canonical Surf module path spelling; permitted only on `module`, `import`, and `import-all` |
+| `surf_dim_group_size` | positive integer | Number of adjacent `defdim` declarations authored in one Surf `dim` group; permitted only on the first member |
+| `surf_pipe_stage` | `"call-first"` | First-argument call-stage origin; permitted only on an `fn` child used as a non-initial `pipe` stage |
+| `surf_literal_style` | `"unsuffixed"` / `"explicit"` | Numeric literal origin; permitted only on `lit` |
+| `surf_binding_type` | `"inferred"` / `"explicit"` | Block-binding type origin; permitted only on the expression child of a `bind` name/value pair |
 
 The `surf_*` namespace is closed. A public Deep parser or programmatic
-validator MUST reject an unknown `surf_*` key. These five keys preserve only
-surface distinctions that canonical Deep otherwise erases; they do not change
-evaluation. Producers MUST NOT use the namespace for arbitrary provenance.
+validator MUST reject an unknown `surf_*` key. Resugaring MUST also reject a
+known key with any value or placement outside the table above; a standalone
+metadata map or legacy metadata-expression wrapper is not a permitted
+placement. These five keys preserve only surface distinctions that canonical
+Deep otherwise erases; they do not change evaluation. Producers MUST NOT use
+the namespace for arbitrary provenance.
 
 **Reserved for later phases:**
 
@@ -651,13 +654,16 @@ redundancy rule. Empty `tuple`/`t-tuple` normalize to `lit`/`t-unit`, and a
 zero-argument uppercase-constructor `app` normalizes to its bare `var`; these are
 the unique Surf encodings of those language values. Because Surf negative
 numerals are unary minus rather than signed tokens, a negative Deep `lit`
-normalizes to the equivalent `neg` application; the minimum signed value uses
-`sub(neg(max), 1)` so its positive magnitude never overflows the literal width.
+normalizes to the equivalent `neg` application. The full `int64` minimum uses
+Surf's directly representable signed-minimum literal; a narrower signed minimum
+uses `sub(neg(max), 1)` so its positive magnitude never overflows that literal
+width.
 An integer atom carrying a float primitive type normalizes to the equivalent
-float atom before that sign rule. The non-semantic `surf_literal_style` and
-`surf_binding_type` origin markers may be erased after they have selected the
-canonical Surf reconstruction; desugaring that Surf recreates the applicable
-marker. It may
+float atom before that sign rule. A valid, correctly placed non-semantic
+`surf_literal_style` or `surf_binding_type` origin marker may be erased after it
+has selected the canonical Surf reconstruction; desugaring that Surf recreates
+the applicable marker. A malformed or misplaced marker is retained so the
+round-trip oracle cannot hide a resugaring error. Normalization may
 not erase or rewrite any other declared `type` or `eff` data, handler effects,
 `wrt`, `opaque`, `invariant`, property semantics, or the other validated
 `surf_*` values. Implementations compare macro-authored Surf after expansion.
@@ -675,13 +681,17 @@ unsuffixed canonical numeric pattern token, including `-0.0` and the full
 | Integer | Decimal, no leading zeros | `07` → `7` |
 | Float | Finite, shortest round-trippable value spelling, with `.0` when otherwise integer-like | `1.` → `1.0`, `.5` → `0.5` |
 | Float (sci) | Lowercase `e`, only when selected by the shortest printer | equivalent longer spellings normalize to the printer result |
-| String | Double-quoted, standard escapes | |
+| String | Double-quoted; named Surf escapes where available, otherwise minimal lowercase `\u{h}` for control scalars | Printable-character and named-escape Unicode aliases are not canonical |
 | Boolean | `true` / `false` | |
 
 Canonical Deep contains no non-finite float literal. Producers that construct
 Deep programmatically must reject NaN and infinity before serialization;
 Deep-to-Surf resugaring reports either as unrepresentable rather than emitting
 an invalid Surf token.
+
+Every valid Deep string atom has a Surf representation. Resugaring uses the
+single P11 spelling: printable Unicode remains literal, the six named escapes
+are preferred, and other C0/C1 controls use minimal lowercase `\u{h}`.
 
 **Literal default rule.** An unsuffixed integer literal binds at type
 `int32` (i.e. its `lit` node carries `{type: (t-prim {} int32)}`); an
@@ -747,6 +757,12 @@ owns that rewrite.
 - Variables/functions: `[a-z_][a-z0-9_]*` (snake_case)
 - Types/variants: `[A-Z][a-zA-Z0-9]*` (PascalCase)
 - Module paths: dot-separated identifiers
+
+Deep's lexer admits a broader symbol alphabet for tag and producer use, but a
+public declaration, expression, pattern, type, field, or module name that is to
+be resugared MUST satisfy its corresponding Surf identifier rule and MUST NOT
+be a reserved Surf word. Deep-to-Surf resugaring rejects an invalid name rather
+than quoting it, rewriting it, or emitting text with changed meaning.
 
 ---
 

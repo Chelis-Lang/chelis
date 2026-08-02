@@ -861,7 +861,14 @@ contextual-inference rule.
 
 ### P11: Strings
 
-Double-quoted: `"hello world"`. Escapes: `\"`, `\\`, `\n`, `\t`, `\r`, `\0`. No multiline. No interpolation. No Unicode escapes in v1.
+Double-quoted: `"hello world"`. The canonical named escapes are `\"`, `\\`,
+`\n`, `\t`, `\r`, and `\0`. A Unicode control character that has no named
+escape uses `\u{h}` with its minimal lowercase hexadecimal scalar value (for
+example, U+0008 is `\u{8}` and U+007F is `\u{7f}`). That form is accepted only
+for U+0001..U+001F excluding tab, newline, and carriage return, and for
+U+007F..U+009F; it is not an alias for a printable character or a character
+with a named escape. Raw control characters are rejected. No multiline or
+interpolation.
 
 **⟹** `(lit {type: (t-prim {} string)} "hello world")`
 

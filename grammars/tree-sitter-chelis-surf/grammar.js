@@ -22,10 +22,17 @@ module.exports = grammar({
     $._canonical_pattern_number,
     $._canonical_axis_integer,
     $._canonical_nonzero_axis_integer,
+    $._canonical_min_integer_magnitude,
+    $._canonical_min_pattern_magnitude,
+    $._canonical_string,
+    $._canonical_identifier,
+    $._canonical_record_field_name,
+    $._canonical_record_pattern_field_name,
+    $._canonical_pipe_lambda_fn,
   ],
 
   extras: ($) => [/\s/, $.line_comment, $.block_comment],
-  word: ($) => $.identifier,
+  word: ($) => $._canonical_identifier,
 
   conflicts: ($) => [
     [$.tuple_expression, $.parenthesized_expression],
@@ -198,11 +205,11 @@ module.exports = grammar({
       ),
     value_identifier: ($) => choice($.identifier, $.single_upper_identifier),
 
-    expression: ($) =>
+    expression: ($) => choice($.lambda_expression, $.non_lambda_expression),
+    non_lambda_expression: ($) =>
       choice(
         $.if_expression,
         $.match_expression,
-        $.lambda_expression,
         $.with_handler_expression,
         $.block_expression,
         $.par_expression,
@@ -298,7 +305,23 @@ module.exports = grammar({
       ),
 
     pipe_expression: ($) =>
-      prec.left(PREC.pipe, seq($.expression, "|>", field("stage", $.expression))),
+      prec.left(
+        PREC.pipe,
+        seq(
+          $.expression,
+          "|>",
+          field("stage", choice($.canonical_pipe_lambda_expression, $.non_lambda_expression)),
+        ),
+      ),
+    canonical_pipe_lambda_expression: ($) =>
+      seq(
+        $._canonical_pipe_lambda_fn,
+        "(",
+        commaSep($.parameter),
+        ")",
+        "->",
+        field("body", $.expression),
+      ),
     logical_or_expression: ($) =>
       prec.left(PREC.or, seq($.expression, field("operator", "||"), $.expression)),
     logical_and_expression: ($) =>
@@ -321,7 +344,13 @@ module.exports = grammar({
         seq($.expression, field("operator", choice("*", "/", "%")), $.expression),
       ),
     unary_expression: ($) =>
-      prec(PREC.unary, seq(field("operator", choice("-", "!", "&")), $.expression)),
+      prec(
+        PREC.unary,
+        choice(
+          seq(field("operator", "-"), choice($.expression, $._canonical_min_integer_magnitude)),
+          seq(field("operator", choice("!", "&")), $.expression),
+        ),
+      ),
     annotation_expression: ($) =>
       prec.left(
         PREC.annotation,
@@ -438,7 +467,8 @@ module.exports = grammar({
         commaSep(choice($.record_field, $.record_pun)),
         "}",
       ),
-    record_field: ($) => seq(field("name", $.identifier), ":", field("value", $.expression)),
+    record_field: ($) =>
+      seq(field("name", $._canonical_record_field_name), ":", field("value", $.expression)),
     record_pun: ($) => field("name", $.identifier),
 
     pattern: ($) => choice($.as_pattern, $.pattern_atom),
@@ -474,7 +504,11 @@ module.exports = grammar({
         "}",
       ),
     record_pattern_field: ($) =>
-      seq(field("name", $.identifier), ":", field("pattern", $.pattern)),
+      seq(
+        field("name", $._canonical_record_pattern_field_name),
+        ":",
+        field("pattern", $.pattern),
+      ),
     record_pattern_pun: ($) => field("name", $.identifier),
 
     type_expression: ($) => choice($.function_type, $.non_arrow_type),
@@ -516,9 +550,10 @@ module.exports = grammar({
     // spelling check as the canonical Rust parser.
     number: ($) => $._canonical_number,
     pattern_number: ($) => $._canonical_pattern_number,
-    negative_pattern_number: ($) => seq("-", $.pattern_number),
-    string: () => token(seq('"', repeat(choice(/[^"\\\n\r]+/, /\\[nrt0"\\]/)), '"')),
-    identifier: () => /[_a-z][_A-Za-z0-9]*/,
+    negative_pattern_number: ($) =>
+      seq("-", choice($.pattern_number, $._canonical_min_pattern_magnitude)),
+    string: ($) => $._canonical_string,
+    identifier: ($) => $._canonical_identifier,
     single_upper_identifier: () => /[A-Z]/,
     type_identifier: () => /[A-Z][_A-Za-z0-9]*/,
     line_comment: () => token(seq("--", /[^\n\r]*/)),

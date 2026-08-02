@@ -136,7 +136,7 @@ fn validate_canonical_literal_spellings(source: &str, tokens: &[Token]) -> Resul
                 "9223372036854775808{}",
                 suffix.as_ref().map_or("", |suffix| (*suffix).as_str())
             )),
-            TokenKind::Str(value) => Some(format!("{value:?}")),
+            TokenKind::Str(value) => Some(crate::format::canonical_string(value)),
             _ => None,
         };
         let Some(expected) = expected else {

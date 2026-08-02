@@ -23,8 +23,17 @@ Metadata keys SHALL use the identifier charset `[A-Za-z_][A-Za-z0-9_]*` (no hyph
 carry compiler-relevant annotations. The `type` key SHALL be checked rather than trusted, and
 metadata fields SHALL be preserved by all spec-defined transformations and round-trip through
 canonical form. The `surf_*` namespace SHALL be closed to `surf_path`,
-`surf_dim_group_size`, and `surf_pipe_stage`; an unknown key in that namespace SHALL be
-rejected.
+`surf_dim_group_size`, `surf_pipe_stage`, `surf_literal_style`, and
+`surf_binding_type`; an unknown key in that namespace SHALL be rejected. Known keys SHALL
+also be rejected outside their closed contracts: `surf_path` is a string on a module or
+import, `surf_dim_group_size` is a positive integer on the first grouped `defdim`,
+`surf_pipe_stage` is `"call-first"` on an `fn` used as a non-initial pipe stage,
+`surf_literal_style` is `"unsuffixed"` or `"explicit"` on a `lit`, and
+`surf_binding_type` is `"inferred"` or `"explicit"` on a `bind` value. The latter two
+markers preserve authored-versus-inferred Surf distinctions and do not change evaluation.
+Round-trip normalization MAY erase those two origin markers only when their value and
+placement are valid and after they select the Surf reconstruction; malformed or misplaced
+markers and the other validated `surf_*` values SHALL remain visible.
 
 #### Scenario: Producer-specific metadata key accepted
 
@@ -288,11 +297,15 @@ That normalization SHALL materialize a checked standalone `def` type as a `defsi
 `tuple`/`t-tuple` to unit, and map zero-argument uppercase-constructor `app` to the bare
 constructor without erasing semantic type data. Multi-pair `bind` nodes SHALL resugar in
 their written sequential order; empty `pat-tuple` SHALL resugar directly as `()`.
-Negative Deep literals SHALL normalize to Surf's unary-minus application shape, including a
-non-overflowing decomposition for a signed minimum; float-typed integer atoms SHALL normalize
+Negative Deep literals SHALL normalize to Surf's unary-minus application shape. The full
+`int64` minimum SHALL use Surf's direct signed-minimum literal, while a narrower signed
+minimum SHALL use a non-overflowing decomposition; float-typed integer atoms SHALL normalize
 to the equivalent float atom. Negative `pat-lit` values SHALL instead resugar directly as an
 unsuffixed negative pattern, including negative zero and the full `int64` minimum. Nested
-application SHALL preserve its association through an explicitly grouped Surf callee.
+application SHALL preserve its association through an explicitly grouped Surf callee. Every
+Deep string SHALL use Surf's named or minimal lowercase control escape and remain
+representable. Any public Deep name that cannot occupy its corresponding Surf identifier
+position SHALL fail resugaring explicitly rather than be rewritten.
 
 #### Scenario: Direct Deep forms remain distinct
 
@@ -303,6 +316,11 @@ application SHALL preserve its association through an explicitly grouped Surf ca
 
 - **WHEN** malformed Deep reaches the resugaring boundary
 - **THEN** resugaring returns a structural error rather than a placeholder Surf expression
+
+#### Scenario: Invalid surface name fails explicitly
+
+- **WHEN** a Deep value or field name contains punctuation or uses the wrong Surf casing
+- **THEN** resugaring returns an identifier error rather than emitting invalid or meaning-changing Surf
 
 #### Scenario: Unsigned suffix rejected at lex time
 

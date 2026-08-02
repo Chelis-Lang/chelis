@@ -13,9 +13,276 @@ enum TokenType {
   CANONICAL_PATTERN_NUMBER,
   CANONICAL_AXIS_INTEGER,
   CANONICAL_NONZERO_AXIS_INTEGER,
+  CANONICAL_MIN_INTEGER_MAGNITUDE,
+  CANONICAL_MIN_PATTERN_MAGNITUDE,
+  CANONICAL_STRING,
+  CANONICAL_IDENTIFIER,
+  CANONICAL_RECORD_FIELD_NAME,
+  CANONICAL_RECORD_PATTERN_FIELD_NAME,
+  CANONICAL_PIPE_LAMBDA_FN,
 };
 
 bool is_digit(int32_t value) { return value >= '0' && value <= '9'; }
+
+bool is_identifier_start(int32_t value) {
+  return value == '_' || (value >= 'a' && value <= 'z');
+}
+
+bool is_identifier_continue(int32_t value) {
+  return is_identifier_start(value) || (value >= 'A' && value <= 'Z') ||
+         is_digit(value);
+}
+
+std::string consume_identifier(TSLexer *lexer) {
+  std::string identifier;
+  while (is_identifier_continue(lexer->lookahead)) {
+    identifier.push_back(static_cast<char>(lexer->lookahead));
+    lexer->advance(lexer, false);
+  }
+  return identifier;
+}
+
+bool is_reserved_identifier(const std::string &identifier) {
+  return identifier == "_" || identifier == "unit" || identifier == "def" ||
+         identifier == "sig" || identifier == "type" || identifier == "dim" ||
+         identifier == "macro" || identifier == "match" || identifier == "with" ||
+         identifier == "fn" || identifier == "module" || identifier == "import" ||
+         identifier == "if" || identifier == "then" || identifier == "else" ||
+         identifier == "grad" || identifier == "vmap" || identifier == "jit" ||
+         identifier == "realize" || identifier == "copy" ||
+         identifier == "tensor" || identifier == "cast" ||
+         identifier == "export" || identifier == "par" || identifier == "do" ||
+         identifier == "quote" || identifier == "unquote" ||
+         identifier == "splice" || identifier == "true" || identifier == "false";
+}
+
+void skip_line_comment(TSLexer *lexer) {
+  while (!lexer->eof(lexer) && lexer->lookahead != '\n' &&
+         lexer->lookahead != '\r') {
+    lexer->advance(lexer, false);
+  }
+}
+
+bool skip_trivia_for_lookahead(TSLexer *lexer) {
+  while (!lexer->eof(lexer)) {
+    while (lexer->lookahead == ' ' || lexer->lookahead == '\t' ||
+           lexer->lookahead == '\n' || lexer->lookahead == '\r') {
+      lexer->advance(lexer, false);
+    }
+    if (lexer->lookahead == '-') {
+      lexer->advance(lexer, false);
+      if (lexer->lookahead != '-') {
+        return false;
+      }
+      lexer->advance(lexer, false);
+      skip_line_comment(lexer);
+      continue;
+    }
+    if (lexer->lookahead == '{') {
+      lexer->advance(lexer, false);
+      if (lexer->lookahead != '-') {
+        return false;
+      }
+      lexer->advance(lexer, false);
+      unsigned depth = 1;
+      while (!lexer->eof(lexer) && depth > 0) {
+        if (lexer->lookahead == '{') {
+          lexer->advance(lexer, false);
+          if (lexer->lookahead == '-') {
+            lexer->advance(lexer, false);
+            ++depth;
+          }
+        } else if (lexer->lookahead == '-') {
+          lexer->advance(lexer, false);
+          if (lexer->lookahead == '}') {
+            lexer->advance(lexer, false);
+            --depth;
+          }
+        } else {
+          lexer->advance(lexer, false);
+        }
+      }
+      if (depth != 0) {
+        return false;
+      }
+      continue;
+    }
+    return true;
+  }
+  return false;
+}
+
+bool consume_arrow_after_trivia(TSLexer *lexer) {
+  while (!lexer->eof(lexer)) {
+    while (lexer->lookahead == ' ' || lexer->lookahead == '\t' ||
+           lexer->lookahead == '\n' || lexer->lookahead == '\r') {
+      lexer->advance(lexer, false);
+    }
+    if (lexer->lookahead == '-') {
+      lexer->advance(lexer, false);
+      if (lexer->lookahead == '>') {
+        lexer->advance(lexer, false);
+        return true;
+      }
+      if (lexer->lookahead != '-') {
+        return false;
+      }
+      lexer->advance(lexer, false);
+      skip_line_comment(lexer);
+      continue;
+    }
+    if (lexer->lookahead != '{') {
+      return false;
+    }
+    lexer->advance(lexer, false);
+    if (lexer->lookahead != '-') {
+      return false;
+    }
+    lexer->advance(lexer, false);
+    unsigned depth = 1;
+    while (!lexer->eof(lexer) && depth > 0) {
+      if (lexer->lookahead == '{') {
+        lexer->advance(lexer, false);
+        if (lexer->lookahead == '-') {
+          lexer->advance(lexer, false);
+          ++depth;
+        }
+      } else if (lexer->lookahead == '-') {
+        lexer->advance(lexer, false);
+        if (lexer->lookahead == '}') {
+          lexer->advance(lexer, false);
+          --depth;
+        }
+      } else {
+        lexer->advance(lexer, false);
+      }
+    }
+    if (depth != 0) {
+      return false;
+    }
+  }
+  return false;
+}
+
+bool scan_identifier(TSLexer *lexer, const bool *valid_symbols) {
+  if (!is_identifier_start(lexer->lookahead)) {
+    return false;
+  }
+  const std::string name = consume_identifier(lexer);
+  lexer->mark_end(lexer);
+  if (is_reserved_identifier(name)) {
+    return false;
+  }
+
+  const bool expression_field = valid_symbols[CANONICAL_RECORD_FIELD_NAME];
+  const bool pattern_field = valid_symbols[CANONICAL_RECORD_PATTERN_FIELD_NAME];
+  if (expression_field || pattern_field) {
+    bool explicit_field = skip_trivia_for_lookahead(lexer) && lexer->lookahead == ':';
+    bool redundant_pun = false;
+    if (explicit_field) {
+      lexer->advance(lexer, false);
+      if (skip_trivia_for_lookahead(lexer) &&
+          is_identifier_start(lexer->lookahead)) {
+        const std::string value_name = consume_identifier(lexer);
+        redundant_pun = value_name == name && skip_trivia_for_lookahead(lexer) &&
+                        (lexer->lookahead == ',' || lexer->lookahead == '}');
+      }
+    }
+    if (explicit_field && !redundant_pun) {
+      lexer->result_symbol = pattern_field && !expression_field
+                                 ? CANONICAL_RECORD_PATTERN_FIELD_NAME
+                                 : CANONICAL_RECORD_FIELD_NAME;
+      return true;
+    }
+  }
+
+  if (valid_symbols[CANONICAL_IDENTIFIER]) {
+    lexer->result_symbol = CANONICAL_IDENTIFIER;
+    return true;
+  }
+  return false;
+}
+
+bool scan_pipe_lambda_fn(TSLexer *lexer) {
+  if (lexer->lookahead != 'f') {
+    return false;
+  }
+  lexer->advance(lexer, false);
+  if (lexer->lookahead != 'n') {
+    return false;
+  }
+  lexer->advance(lexer, false);
+  if (is_identifier_continue(lexer->lookahead)) {
+    return false;
+  }
+  lexer->mark_end(lexer);
+
+  if (!skip_trivia_for_lookahead(lexer) || lexer->lookahead != '(') {
+    return true;
+  }
+  lexer->advance(lexer, false);
+  if (!skip_trivia_for_lookahead(lexer) ||
+      !(is_identifier_start(lexer->lookahead) ||
+        (lexer->lookahead >= 'A' && lexer->lookahead <= 'Z'))) {
+    return true;
+  }
+  const std::string parameter = consume_identifier(lexer);
+  if (!skip_trivia_for_lookahead(lexer) || lexer->lookahead != ')') {
+    return true;  // typed or multiple parameters are never call-stage aliases
+  }
+  lexer->advance(lexer, false);
+  if (!consume_arrow_after_trivia(lexer)) {
+    return true;
+  }
+  if (!skip_trivia_for_lookahead(lexer) ||
+      !(is_identifier_start(lexer->lookahead) ||
+        (lexer->lookahead >= 'A' && lexer->lookahead <= 'Z'))) {
+    return true;
+  }
+
+  std::string callable = consume_identifier(lexer);
+  if (!skip_trivia_for_lookahead(lexer)) {
+    return true;
+  }
+  while (lexer->lookahead == '.') {
+    lexer->advance(lexer, false);
+    if (!skip_trivia_for_lookahead(lexer) ||
+        !(is_identifier_start(lexer->lookahead) ||
+          (lexer->lookahead >= 'A' && lexer->lookahead <= 'Z'))) {
+      return true;
+    }
+    callable = consume_identifier(lexer);
+    if (!skip_trivia_for_lookahead(lexer)) {
+      return true;
+    }
+  }
+  if (lexer->lookahead != '(') {
+    return true;
+  }
+  lexer->advance(lexer, false);
+  if (!skip_trivia_for_lookahead(lexer) ||
+      !(is_identifier_start(lexer->lookahead) ||
+        (lexer->lookahead >= 'A' && lexer->lookahead <= 'Z'))) {
+    return true;
+  }
+  const std::string first_argument = consume_identifier(lexer);
+  if (first_argument != parameter || !skip_trivia_for_lookahead(lexer)) {
+    return true;
+  }
+
+  const bool direct_argument_end = lexer->lookahead == ')' || lexer->lookahead == ',';
+  const bool transform_alias =
+      (callable == "realize" || callable == "copy") && lexer->lookahead == ')';
+  const bool cast_alias = callable == "cast" && lexer->lookahead == ',';
+  if (transform_alias || cast_alias ||
+      (callable != "realize" && callable != "copy" && callable != "cast" &&
+       direct_argument_end)) {
+    return false;
+  }
+
+  lexer->result_symbol = CANONICAL_PIPE_LAMBDA_FN;
+  return true;
+}
 
 bool consume_digits(TSLexer *lexer, std::string &text) {
   bool consumed = false;
@@ -25,6 +292,83 @@ bool consume_digits(TSLexer *lexer, std::string &text) {
     lexer->advance(lexer, false);
   }
   return consumed;
+}
+
+bool fits_positive_i64(const std::string &digits) {
+  static constexpr char MAX_I64[] = "9223372036854775807";
+  const std::size_t max_length = sizeof(MAX_I64) - 1;
+  return digits.size() < max_length ||
+         (digits.size() == max_length && digits <= MAX_I64);
+}
+
+bool is_canonical_control_escape(const std::string &digits) {
+  if (digits.empty() || (digits.size() > 1 && digits.front() == '0')) {
+    return false;
+  }
+  uint32_t scalar = 0;
+  const auto parsed = std::from_chars(
+      digits.data(), digits.data() + digits.size(), scalar, 16);
+  if (parsed.ec != std::errc() || parsed.ptr != digits.data() + digits.size()) {
+    return false;
+  }
+  char rendered[8];
+  const auto formatted = std::to_chars(rendered, rendered + sizeof(rendered), scalar, 16);
+  if (formatted.ec != std::errc() ||
+      std::string(rendered, formatted.ptr) != digits) {
+    return false;
+  }
+  const bool unnamed_c0 = scalar >= 1 && scalar <= 0x1f &&
+                          scalar != 0x09 && scalar != 0x0a && scalar != 0x0d;
+  return unnamed_c0 || (scalar >= 0x7f && scalar <= 0x9f);
+}
+
+bool scan_string(TSLexer *lexer) {
+  lexer->advance(lexer, false);  // opening quote
+  while (!lexer->eof(lexer)) {
+    const int32_t lookahead = lexer->lookahead;
+    if (lookahead == '"') {
+      lexer->advance(lexer, false);
+      lexer->mark_end(lexer);
+      lexer->result_symbol = CANONICAL_STRING;
+      return true;
+    }
+    if (lookahead == '\\') {
+      lexer->advance(lexer, false);
+      if (lexer->eof(lexer)) {
+        return false;
+      }
+      if (lexer->lookahead == '\\' || lexer->lookahead == '"' ||
+          lexer->lookahead == 'n' || lexer->lookahead == 't' ||
+          lexer->lookahead == 'r' || lexer->lookahead == '0') {
+        lexer->advance(lexer, false);
+        continue;
+      }
+      if (lexer->lookahead != 'u') {
+        return false;
+      }
+      lexer->advance(lexer, false);
+      if (lexer->lookahead != '{') {
+        return false;
+      }
+      lexer->advance(lexer, false);
+      std::string digits;
+      while (is_digit(lexer->lookahead) ||
+             (lexer->lookahead >= 'a' && lexer->lookahead <= 'f')) {
+        digits.push_back(static_cast<char>(lexer->lookahead));
+        lexer->advance(lexer, false);
+      }
+      if (lexer->lookahead != '}' || !is_canonical_control_escape(digits)) {
+        return false;
+      }
+      lexer->advance(lexer, false);
+      continue;
+    }
+    if (lookahead < 0x20 || (lookahead >= 0x7f && lookahead <= 0x9f)) {
+      return false;
+    }
+    lexer->advance(lexer, false);
+  }
+  return false;
 }
 
 std::string canonical_float(double value) {
@@ -97,6 +441,9 @@ bool is_canonical_number(const std::string &numeric,
 
   const bool is_float = numeric.find_first_of(".e") != std::string::npos;
   if (!is_float) {
+    if (!fits_positive_i64(numeric)) {
+      return false;
+    }
     if (suffix.empty()) {
       return true;
     }
@@ -123,15 +470,15 @@ bool scan_number(TSLexer *lexer, const bool *valid_symbols) {
   const bool axis_context = valid_symbols[CANONICAL_AXIS_INTEGER];
   const bool nonzero_axis_context =
       valid_symbols[CANONICAL_NONZERO_AXIS_INTEGER];
+  const bool min_integer_context =
+      valid_symbols[CANONICAL_MIN_INTEGER_MAGNITUDE];
+  const bool min_pattern_context =
+      valid_symbols[CANONICAL_MIN_PATTERN_MAGNITUDE];
   if (!expression_context && !pattern_context && !axis_context &&
-      !nonzero_axis_context) {
+      !nonzero_axis_context && !min_integer_context && !min_pattern_context) {
     return false;
   }
 
-  while (lexer->lookahead == ' ' || lexer->lookahead == '\t' ||
-         lexer->lookahead == '\n' || lexer->lookahead == '\r') {
-    lexer->advance(lexer, true);
-  }
   if (!is_digit(lexer->lookahead)) {
     return false;
   }
@@ -168,11 +515,24 @@ bool scan_number(TSLexer *lexer, const bool *valid_symbols) {
   }
   lexer->mark_end(lexer);
 
+  if (numeric == "9223372036854775808") {
+    if (min_pattern_context && suffix.empty()) {
+      lexer->result_symbol = CANONICAL_MIN_PATTERN_MAGNITUDE;
+      return true;
+    }
+    if (min_integer_context && (suffix.empty() || suffix == "i64")) {
+      lexer->result_symbol = CANONICAL_MIN_INTEGER_MAGNITUDE;
+      return true;
+    }
+    return false;
+  }
+
   if (!expression_context && !pattern_context &&
       (axis_context || nonzero_axis_context)) {
     const bool canonical_axis = suffix.empty() &&
                                 numeric.find_first_of(".e") == std::string::npos &&
-                                (numeric == "0" || numeric.front() != '0');
+                                (numeric == "0" || numeric.front() != '0') &&
+                                fits_positive_i64(numeric);
     if (!canonical_axis || (nonzero_axis_context && numeric == "0")) {
       return false;
     }
@@ -209,6 +569,26 @@ void tree_sitter_chelis_surf_external_scanner_deserialize(void *, const char *,
 
 bool tree_sitter_chelis_surf_external_scanner_scan(void *, TSLexer *lexer,
                                                    const bool *valid_symbols) {
+  while (lexer->lookahead == ' ' || lexer->lookahead == '\t' ||
+         lexer->lookahead == '\n' || lexer->lookahead == '\r') {
+    lexer->advance(lexer, true);
+  }
+  if (valid_symbols[CANONICAL_STRING] && lexer->lookahead == '"') {
+    return scan_string(lexer);
+  }
+  if (valid_symbols[CANONICAL_PIPE_LAMBDA_FN] && lexer->lookahead == 'f') {
+    const bool accepted = scan_pipe_lambda_fn(lexer);
+    if (accepted) {
+      lexer->result_symbol = CANONICAL_PIPE_LAMBDA_FN;
+    }
+    return accepted;
+  }
+  if (is_identifier_start(lexer->lookahead) &&
+      (valid_symbols[CANONICAL_IDENTIFIER] ||
+       valid_symbols[CANONICAL_RECORD_FIELD_NAME] ||
+       valid_symbols[CANONICAL_RECORD_PATTERN_FIELD_NAME])) {
+    return scan_identifier(lexer, valid_symbols);
+  }
   return scan_number(lexer, valid_symbols);
 }
 

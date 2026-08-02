@@ -572,6 +572,34 @@ fn lex_string(source: &str, i: &mut usize) -> Result<Token, LexError> {
                     b't' => s.push('\t'),
                     b'r' => s.push('\r'),
                     b'0' => s.push('\0'),
+                    b'u' => {
+                        *i += 1;
+                        if *i >= bytes.len() || bytes[*i] != b'{' {
+                            return Err(LexError::InvalidEscape {
+                                ch: 'u',
+                                offset: *i - 1,
+                            });
+                        }
+                        *i += 1;
+                        let digits_start = *i;
+                        while *i < bytes.len() && bytes[*i].is_ascii_hexdigit() {
+                            *i += 1;
+                        }
+                        if digits_start == *i || *i >= bytes.len() || bytes[*i] != b'}' {
+                            return Err(LexError::InvalidEscape {
+                                ch: 'u',
+                                offset: digits_start.saturating_sub(2),
+                            });
+                        }
+                        let scalar = u32::from_str_radix(&source[digits_start..*i], 16)
+                            .ok()
+                            .and_then(char::from_u32)
+                            .ok_or(LexError::InvalidEscape {
+                                ch: 'u',
+                                offset: digits_start.saturating_sub(2),
+                            })?;
+                        s.push(scalar);
+                    }
                     other => {
                         return Err(LexError::InvalidEscape {
                             ch: other as char,
