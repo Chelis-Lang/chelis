@@ -171,7 +171,13 @@ fn render_execution_value(value: &ExecutionValue) -> String {
         ExecutionValue::Tensor { value } => {
             format!("shape={:?} data={:?}", value.shape, value.data)
         }
+        ExecutionValue::Int8 { value } => value.to_string(),
+        ExecutionValue::Int16 { value } => value.to_string(),
+        ExecutionValue::Int32 { value } => value.to_string(),
         ExecutionValue::Int64 { value } => value.to_string(),
+        ExecutionValue::Float16 { value } => value.to_string(),
+        ExecutionValue::Bfloat16 { value } => value.to_string(),
+        ExecutionValue::Float32 { value } => value.to_string(),
         ExecutionValue::Float64 { value } => value.to_string(),
         ExecutionValue::Bool { value } => value.to_string(),
         ExecutionValue::String { value } => value.clone(),

@@ -69,6 +69,27 @@
       "flags": [
         "float-carrier"
       ],
+      "id": "chelis_compiler_api::schema::ExecutionValue::Bfloat16.value: f64",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "float-carrier"
+      ],
+      "id": "chelis_compiler_api::schema::ExecutionValue::Float16.value: f64",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "float-carrier"
+      ],
+      "id": "chelis_compiler_api::schema::ExecutionValue::Float32.value: f32",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "float-carrier"
+      ],
       "id": "chelis_compiler_api::schema::ExecutionValue::Float64.value: f64",
       "kind": "wire-schema-numeric-field"
     },
@@ -76,7 +97,28 @@
       "flags": [
         "numeric-field"
       ],
+      "id": "chelis_compiler_api::schema::ExecutionValue::Int16.value: i16",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::ExecutionValue::Int32.value: i32",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "numeric-field"
+      ],
       "id": "chelis_compiler_api::schema::ExecutionValue::Int64.value: i64",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::ExecutionValue::Int8.value: i8",
       "kind": "wire-schema-numeric-field"
     },
     {

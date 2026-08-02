@@ -12,7 +12,7 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 const FROZEN_BASELINE_SHA256: &str =
-    "1f792ac4da7fdf3d6b6e089ed3d1302fb0f13a19f77b5cd37318024c79d12b42";
+    "11eca7c5350703bc05d8f77a3fd7a3c9d2963469c583405c3387be86ad0f620e";
 
 #[derive(Debug, Deserialize, PartialEq, Eq)]
 struct SurfaceRow {

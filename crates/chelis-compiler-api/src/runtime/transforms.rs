@@ -610,7 +610,7 @@ pub(super) fn runtime_value_to_dag_input(
                 .and_then(|e| param_precision_at(e, index))
                 .unwrap_or(payload.dtype());
             Ok((
-                IrTensorValue::scalar(payload.as_f64()),
+                IrTensorValue::scalar(payload.as_f64_lossy()),
                 TensorType {
                     dims: vec![],
                     precision,

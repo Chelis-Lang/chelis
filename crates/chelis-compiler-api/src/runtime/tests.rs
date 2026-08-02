@@ -1556,7 +1556,161 @@ fn scalar_payload_dtype_is_the_storage_variant() {
         other => panic!("expected RuntimeValue::Scalar, got {other:?}"),
     };
     assert_eq!(payload.dtype(), Prim::F16);
-    assert_eq!(payload.as_f64(), 1.5);
+    assert_eq!(payload.as_f64_lossy(), 1.5);
+}
+
+fn numeric_scalar(prim: Prim, integer: i64, float: f64) -> RuntimeValue {
+    if prim.is_integer() {
+        RuntimeValue::from_scalar_value(
+            chelis_types::scalar_from_i64("test", prim, integer)
+                .expect("test integer fits its dtype"),
+        )
+    } else {
+        RuntimeValue::from_scalar_value(
+            chelis_types::scalar_from_f64("test", prim, float)
+                .expect("float finalization is total"),
+        )
+    }
+}
+
+/// chelis#729 Phase 1, dtype-semantics C3: scalar values nested in the
+/// execution wire are dtype-tagged carriers too. Lists, tuples, and ADTs may
+/// not silently widen all integer values to int64 or all floats to f64.
+#[test]
+fn execution_wire_nested_numeric_scalars_keep_their_dtype_tags() {
+    let cases = [
+        (Prim::Int8, "int8"),
+        (Prim::Int16, "int16"),
+        (Prim::Int32, "int32"),
+        (Prim::Int64, "int64"),
+        (Prim::F16, "float16"),
+        (Prim::Bf16, "bfloat16"),
+        (Prim::F32, "float32"),
+        (Prim::F64, "float64"),
+    ];
+
+    for (prim, expected_tag) in cases {
+        let scalar = numeric_scalar(prim, 7, 1.5);
+        let containers = [
+            RuntimeValue::List(vec![scalar.clone()]),
+            RuntimeValue::Tuple(vec![scalar.clone()]),
+            RuntimeValue::Dict(vec![(
+                RuntimeValue::String("value".to_string()),
+                scalar.clone(),
+            )]),
+            RuntimeValue::Adt {
+                ctor: "Boxed".to_string(),
+                fields: vec![scalar],
+                field_names: Some(vec!["value".to_string()]),
+            },
+        ];
+
+        for container in containers {
+            let encoded = runtime_value_to_schema(&container).expect("wire encode");
+            let json = serde_json::to_value(encoded).expect("serialize execution value");
+            let nested = json
+                .get("value")
+                .and_then(|value| value.as_array())
+                .and_then(|values| values.first())
+                .or_else(|| {
+                    json.get("fields")
+                        .and_then(|value| value.as_array())
+                        .and_then(|values| values.first())
+                })
+                .or_else(|| {
+                    json.get("entries")
+                        .and_then(|value| value.as_array())
+                        .and_then(|entries| entries.first())
+                        .and_then(|entry| entry.get("value"))
+                })
+                .expect("container has one nested scalar");
+            assert_eq!(
+                nested.get("type").and_then(|value| value.as_str()),
+                Some(expected_tag),
+                "nested numeric scalar must keep its own wire tag: {json}"
+            );
+        }
+    }
+}
+
+/// Positive width matrix for the list bridges covered by Phase 1 eval
+/// adoption. The checker derives the exact element dtype, so runtime
+/// construction must preserve it for `to_tensor`, `pad_sequences`, and
+/// `pad_sequences_to`.
+#[test]
+fn list_tensor_bridges_preserve_every_numeric_dtype() {
+    let dtypes = [
+        Prim::Int8,
+        Prim::Int16,
+        Prim::Int32,
+        Prim::Int64,
+        Prim::F16,
+        Prim::Bf16,
+        Prim::F32,
+        Prim::F64,
+    ];
+
+    for prim in dtypes {
+        let value = numeric_scalar(prim, 7, if prim == Prim::F64 { 1e100 } else { 1.5 });
+        let expected_float = if prim == Prim::F64 { 1e100 } else { 1.5 };
+        let (tensor_prim, _, tensor_data) =
+            nested_list_to_tensor_data(std::slice::from_ref(&value))
+                .expect("to_tensor list ingress");
+        assert_eq!(tensor_prim, prim, "to_tensor must preserve the input dtype");
+        match tensor_data {
+            ListTensorData::Int(values) => assert_eq!(values, vec![7]),
+            ListTensorData::Float(values) => assert_eq!(values, vec![expected_float]),
+        }
+
+        let sequences = [RuntimeValue::List(vec![value.clone()])];
+        let (padded_prim, padded_data, _, _) =
+            pad_sequences_value(&sequences, &value).expect("pad_sequences ingress");
+        assert_eq!(
+            padded_prim, prim,
+            "pad_sequences must preserve the input dtype"
+        );
+        match padded_data {
+            ListTensorData::Int(values) => assert_eq!(values, vec![7]),
+            ListTensorData::Float(values) => assert_eq!(values, vec![expected_float]),
+        }
+
+        let (padded_to_prim, padded_to_data, _) =
+            pad_sequences_to_value(&sequences, 2, &value).expect("pad_sequences_to ingress");
+        assert_eq!(
+            padded_to_prim, prim,
+            "pad_sequences_to must preserve the input dtype"
+        );
+        match padded_to_data {
+            ListTensorData::Int(values) => assert_eq!(values, vec![7, 7]),
+            ListTensorData::Float(values) => {
+                assert_eq!(values, vec![expected_float, expected_float])
+            }
+        }
+    }
+}
+
+/// Negative-test parity for the exact list bridge: same-family dtypes are
+/// still heterogeneous. Accepting int8 beside int16 or f64 beside f32 would
+/// perform an implicit cast that the checker never authorized.
+#[test]
+fn list_tensor_bridges_reject_same_family_dtype_substitution() {
+    let int8 = numeric_scalar(Prim::Int8, 7, 0.0);
+    let int16 = numeric_scalar(Prim::Int16, 7, 0.0);
+    assert!(
+        nested_list_to_tensor_data(&[int8.clone(), int16.clone()]).is_err(),
+        "to_tensor must reject heterogeneous integer widths"
+    );
+    assert!(
+        pad_sequences_value(&[RuntimeValue::List(vec![int8])], &int16).is_err(),
+        "pad_sequences must reject a different integer pad dtype"
+    );
+
+    let f64_value = numeric_scalar(Prim::F64, 0, 1e100);
+    let f32_pad = numeric_scalar(Prim::F32, 0, 0.0);
+    assert!(
+        pad_sequences_to_value(&[RuntimeValue::List(vec![f64_value])], 2, &f32_pad).is_err(),
+        "pad_sequences_to must reject a different float pad dtype"
+    );
 }
 
 /// E2 (WS-A0 RT-1 fixup): `prim_from_name` must panic on the
@@ -1634,7 +1788,7 @@ fn scalar_constructor_accepts_every_active_numeric_dtype() {
         match v {
             RuntimeValue::Scalar(payload) => {
                 assert_eq!(payload.dtype(), dtype);
-                assert_eq!(payload.as_f64(), value);
+                assert_eq!(payload.as_f64_lossy(), value);
             }
             other => panic!("expected RuntimeValue::Scalar, got {other:?}"),
         }

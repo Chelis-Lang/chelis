@@ -2082,7 +2082,9 @@ def make(x: f32) -> Probability = Probability { value: x }
     for violating in [2.5_f64, -0.5_f64] {
         let payload = ExecutionValue::Adt {
             ctor: "Probability".to_string(),
-            fields: vec![ExecutionValue::Float64 { value: violating }],
+            fields: vec![ExecutionValue::Float32 {
+                value: violating as f32,
+            }],
         };
         let err = try_decode_adt_value(&exprs, &payload)
             .expect_err("out-of-band probability must be rejected");

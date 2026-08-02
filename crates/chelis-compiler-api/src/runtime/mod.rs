@@ -123,7 +123,7 @@ impl ScalarPayload {
     /// View any numeric scalar as f64. Exact for every float width and
     /// for integers up to 2^53; int64 may lose precision past 2^53 (the
     /// named-lossy read of the dtype-semantics contract).
-    pub(crate) fn as_f64(&self) -> f64 {
+    pub(crate) fn as_f64_lossy(&self) -> f64 {
         self.value.as_f64_lossy()
     }
 
@@ -310,7 +310,9 @@ impl RuntimeValue {
     /// `as_i64` for the float row.
     pub fn as_f64(&self) -> Option<f64> {
         match self {
-            RuntimeValue::Scalar(payload) if payload.dtype().is_float() => Some(payload.as_f64()),
+            RuntimeValue::Scalar(payload) if payload.dtype().is_float() => {
+                Some(payload.as_f64_lossy())
+            }
             _ => None,
         }
     }
@@ -755,23 +757,26 @@ pub(crate) fn runtime_value_to_schema(value: &RuntimeValue) -> Result<ExecutionV
                 },
             }
         }
-        RuntimeValue::Scalar(payload) => {
-            let dtype = payload.dtype();
-            if dtype.is_integer() {
-                ExecutionValue::Int64 {
-                    value: payload.as_i64(),
-                }
-            } else if dtype.is_float() {
-                ExecutionValue::Float64 {
-                    value: payload.as_f64(),
-                }
-            } else {
-                return Err(format!(
-                    "non-numeric scalar dtype `{}` cannot be encoded into ExecutionValue",
-                    dtype.name()
-                ));
+        RuntimeValue::Scalar(payload) => match payload.value().element_ref() {
+            chelis_types::ElementRef::I8(value) => ExecutionValue::Int8 { value },
+            chelis_types::ElementRef::I16(value) => ExecutionValue::Int16 { value },
+            chelis_types::ElementRef::I32(value) => ExecutionValue::Int32 { value },
+            chelis_types::ElementRef::I64(value) => ExecutionValue::Int64 { value },
+            chelis_types::ElementRef::F16(value) => ExecutionValue::Float16 {
+                value: f64::from(value),
+            },
+            chelis_types::ElementRef::Bf16(value) => ExecutionValue::Bfloat16 {
+                value: f64::from(value),
+            },
+            chelis_types::ElementRef::F32(value) => ExecutionValue::Float32 { value },
+            chelis_types::ElementRef::F64(value) => ExecutionValue::Float64 { value },
+            chelis_types::ElementRef::Bool(_) => {
+                return Err(
+                    "bool ScalarValue unexpectedly reached the numeric RuntimeValue::Scalar wire path"
+                        .to_string(),
+                );
             }
-        }
+        },
         RuntimeValue::Bool(value) => ExecutionValue::Bool { value: *value },
         RuntimeValue::String(value) => ExecutionValue::String {
             value: value.clone(),

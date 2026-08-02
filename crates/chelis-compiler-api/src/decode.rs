@@ -42,7 +42,6 @@
 use std::collections::HashMap;
 
 use chelis_deep::ast::Expr;
-use chelis_ir::eval::TensorValue as IrTensorValue;
 use chelis_types::types::Prim;
 
 use crate::runtime::{
@@ -198,14 +197,34 @@ fn structural_decode(
 ) -> Result<RuntimeValue, DecodeError> {
     match payload {
         ExecutionValue::Adt { ctor, fields } => decode_adt(ctor, fields, field_types),
+        ExecutionValue::Int8 { value } => RuntimeValue::scalar_like_int(Prim::Int8, *value as i64)
+            .map_err(DecodeError::Structural),
+        ExecutionValue::Int16 { value } => {
+            RuntimeValue::scalar_like_int(Prim::Int16, *value as i64)
+                .map_err(DecodeError::Structural)
+        }
+        ExecutionValue::Int32 { value } => {
+            RuntimeValue::scalar_like_int(Prim::Int32, *value as i64)
+                .map_err(DecodeError::Structural)
+        }
         ExecutionValue::Int64 { value } => Ok(RuntimeValue::int64(*value)),
+        ExecutionValue::Float16 { value } => {
+            RuntimeValue::scalar_like_float(Prim::F16, *value).map_err(DecodeError::Structural)
+        }
+        ExecutionValue::Bfloat16 { value } => {
+            RuntimeValue::scalar_like_float(Prim::Bf16, *value).map_err(DecodeError::Structural)
+        }
+        ExecutionValue::Float32 { value } => {
+            RuntimeValue::scalar_like_float(Prim::F32, *value as f64)
+                .map_err(DecodeError::Structural)
+        }
         ExecutionValue::Float64 { value } => Ok(RuntimeValue::float64(*value)),
         ExecutionValue::Bool { value } => Ok(RuntimeValue::Bool(*value)),
         ExecutionValue::String { value } => Ok(RuntimeValue::String(value.clone())),
         ExecutionValue::Unit => Ok(RuntimeValue::Unit),
-        // The wire payload carries its dtype (execution wire v2); decode
-        // it exactly at that dtype. Field-position decode additionally
-        // ingress-finalizes at the declared field precision below.
+        // The wire payload carries its dtype (execution wire v2); decode it
+        // exactly at that dtype. Field-position decode below requires that
+        // tag to match the declaration rather than inserting a cast.
         ExecutionValue::Tensor { value } => Ok(RuntimeValue::Tensor(RuntimeTensorValue::new(
             wire_tensor_to_ir(value).map_err(DecodeError::Structural)?,
         ))),
@@ -319,23 +338,32 @@ fn decode_scalar_field(
         };
     }
 
-    if prim.is_integer() {
-        return match payload {
-            ExecutionValue::Int64 { value } => {
-                RuntimeValue::scalar_like_int(prim, *value).map_err(DecodeError::Structural)
-            }
-            other => Err(mismatch(&describe_payload(other))),
-        };
-    }
-
-    // Float-typed field. Accept a wire float; reject ints (the wire keeps
-    // ints and floats distinct, so a float field fed an int is a real
-    // type mismatch, not a silent widening).
-    match payload {
-        ExecutionValue::Float64 { value } => {
+    match (prim, payload) {
+        (Prim::Int8, ExecutionValue::Int8 { value }) => {
+            RuntimeValue::scalar_like_int(prim, *value as i64).map_err(DecodeError::Structural)
+        }
+        (Prim::Int16, ExecutionValue::Int16 { value }) => {
+            RuntimeValue::scalar_like_int(prim, *value as i64).map_err(DecodeError::Structural)
+        }
+        (Prim::Int32, ExecutionValue::Int32 { value }) => {
+            RuntimeValue::scalar_like_int(prim, *value as i64).map_err(DecodeError::Structural)
+        }
+        (Prim::Int64, ExecutionValue::Int64 { value }) => {
+            RuntimeValue::scalar_like_int(prim, *value).map_err(DecodeError::Structural)
+        }
+        (Prim::F16, ExecutionValue::Float16 { value }) => {
             RuntimeValue::scalar_like_float(prim, *value).map_err(DecodeError::Structural)
         }
-        other => Err(mismatch(&describe_payload(other))),
+        (Prim::Bf16, ExecutionValue::Bfloat16 { value }) => {
+            RuntimeValue::scalar_like_float(prim, *value).map_err(DecodeError::Structural)
+        }
+        (Prim::F32, ExecutionValue::Float32 { value }) => {
+            RuntimeValue::scalar_like_float(prim, *value as f64).map_err(DecodeError::Structural)
+        }
+        (Prim::F64, ExecutionValue::Float64 { value }) => {
+            RuntimeValue::scalar_like_float(prim, *value).map_err(DecodeError::Structural)
+        }
+        (_, other) => Err(mismatch(&describe_payload(other))),
     }
 }
 
@@ -348,13 +376,14 @@ fn decode_tensor_field(
     match payload {
         ExecutionValue::Tensor { value } => {
             let tensor = wire_tensor_to_ir(value).map_err(DecodeError::Structural)?;
-            // Ingress-finalize at the DECLARED field precision (identity
-            // when the wire dtype already agrees).
-            let storage = chelis_types::finalize_tensor("decode", prim, tensor.storage().to_raw())
-                .map_err(|trap| DecodeError::Structural(trap.to_string()))?;
-            Ok(RuntimeValue::Tensor(RuntimeTensorValue::new(
-                IrTensorValue::from_storage(value.shape.clone(), storage),
-            )))
+            if tensor.prim() != prim {
+                return Err(DecodeError::Structural(format!(
+                    "constructor `{ctor}` field `{field}` expects a tensor of `{}`, payload supplied a tensor of `{}`; wire decode never inserts an implicit cast",
+                    prim.name(),
+                    tensor.prim().name()
+                )));
+            }
+            Ok(RuntimeValue::Tensor(RuntimeTensorValue::new(tensor)))
         }
         other => Err(DecodeError::Structural(format!(
             "constructor `{ctor}` field `{field}` expects a tensor of `{}`, payload supplied {}",
@@ -367,8 +396,14 @@ fn decode_tensor_field(
 fn describe_payload(payload: &ExecutionValue) -> String {
     match payload {
         ExecutionValue::Tensor { .. } => "a tensor".to_string(),
-        ExecutionValue::Int64 { .. } => "an int".to_string(),
-        ExecutionValue::Float64 { .. } => "a float".to_string(),
+        ExecutionValue::Int8 { .. } => "an int8".to_string(),
+        ExecutionValue::Int16 { .. } => "an int16".to_string(),
+        ExecutionValue::Int32 { .. } => "an int32".to_string(),
+        ExecutionValue::Int64 { .. } => "an int64".to_string(),
+        ExecutionValue::Float16 { .. } => "an f16".to_string(),
+        ExecutionValue::Bfloat16 { .. } => "a bf16".to_string(),
+        ExecutionValue::Float32 { .. } => "an f32".to_string(),
+        ExecutionValue::Float64 { .. } => "an f64".to_string(),
         ExecutionValue::Bool { .. } => "a bool".to_string(),
         ExecutionValue::String { .. } => "a string".to_string(),
         ExecutionValue::List { .. } => "a list".to_string(),
@@ -400,7 +435,9 @@ type Probability = | Probability { value: f32 }
     fn prob_payload(value: f64) -> ExecutionValue {
         ExecutionValue::Adt {
             ctor: "Probability".to_string(),
-            fields: vec![ExecutionValue::Float64 { value }],
+            fields: vec![ExecutionValue::Float32 {
+                value: value as f32,
+            }],
         }
     }
 
@@ -454,6 +491,49 @@ type Probability = | Probability { value: f32 }
         };
         let err = try_decode_adt_value(&exprs, &payload).expect_err("int into float field");
         assert!(matches!(err, DecodeError::Structural(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn wider_float_tag_is_not_an_implicit_field_cast() {
+        let exprs = program_exprs(PROBABILITY_SRC);
+        let payload = ExecutionValue::Adt {
+            ctor: "Probability".to_string(),
+            fields: vec![ExecutionValue::Float64 { value: 0.3 }],
+        };
+        let err = try_decode_adt_value(&exprs, &payload)
+            .expect_err("f64 wire carrier must not silently narrow into an f32 field");
+        assert!(matches!(err, DecodeError::Structural(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn every_numeric_scalar_wire_tag_round_trips_through_nested_carriers() {
+        let scalars = vec![
+            ExecutionValue::Int8 { value: -8 },
+            ExecutionValue::Int16 { value: -16 },
+            ExecutionValue::Int32 { value: -32 },
+            ExecutionValue::Int64 {
+                value: 9_007_199_254_740_993,
+            },
+            ExecutionValue::Float16 { value: 1.5 },
+            ExecutionValue::Bfloat16 { value: 1.5 },
+            ExecutionValue::Float32 { value: 0.25 },
+            ExecutionValue::Float64 { value: 1e100 },
+        ];
+
+        for payload in [
+            ExecutionValue::List {
+                value: scalars.clone(),
+            },
+            ExecutionValue::Tuple { value: scalars },
+        ] {
+            let decoded = structural_decode(&payload, &HashMap::new()).expect("structural decode");
+            let reencoded = decoded.to_execution_value().expect("wire re-encode");
+            assert_eq!(
+                serde_json::to_value(reencoded).expect("serialize re-encoded value"),
+                serde_json::to_value(payload).expect("serialize original value"),
+                "nested numeric wire values must round-trip without dtype or value substitution"
+            );
+        }
     }
 
     #[test]
@@ -515,7 +595,7 @@ type Holder = | Holder { weights: tensor[3, f32] }
             fields: vec![ExecutionValue::Tensor {
                 value: TensorValue {
                     shape: vec![3],
-                    data: crate::schema::TensorElements::from_f64_vec(vec![0.1, 0.2, 0.7]),
+                    data: crate::schema::TensorElements::F32(vec![0.1, 0.2, 0.7]),
                 },
             }],
         };
@@ -525,10 +605,8 @@ type Holder = | Holder { weights: tensor[3, f32] }
         match &fields[0] {
             RuntimeValue::Tensor(t) => {
                 assert_eq!(t.value.shape, vec![3]);
-                // chelis#729 Phase 1: the declared f32 field ingress-
-                // finalizes the wire f64 payload at f32 (per-dtype
-                // storage; [04-NUM-1..2]), so the stored elements are the
-                // exact f32 images of the wire values.
+                // chelis#729 Phase 1: the wire and declared field agree on
+                // f32, so decode preserves the tagged carrier exactly.
                 assert_eq!(t.value.prim(), chelis_types::types::Prim::F32);
                 assert_eq!(
                     t.value.to_f64_lossy_vec(),
@@ -537,5 +615,27 @@ type Holder = | Holder { weights: tensor[3, f32] }
             }
             other => panic!("expected tensor field, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn wider_tensor_tag_is_not_an_implicit_field_cast() {
+        let src = r#"
+module M
+
+type Holder = | Holder { weights: tensor[1, f32] }
+"#;
+        let exprs = program_exprs(src);
+        let payload = ExecutionValue::Adt {
+            ctor: "Holder".to_string(),
+            fields: vec![ExecutionValue::Tensor {
+                value: TensorValue {
+                    shape: vec![1],
+                    data: crate::schema::TensorElements::F64(vec![0.5]),
+                },
+            }],
+        };
+        let err = try_decode_adt_value(&exprs, &payload)
+            .expect_err("f64 tensor carrier must not silently narrow into an f32 field");
+        assert!(matches!(err, DecodeError::Structural(_)), "got {err:?}");
     }
 }

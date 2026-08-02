@@ -81,6 +81,24 @@ class DtypeIngressTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             chelis.TensorValue(shape=(1,), data=(1,))
 
+    def test_execution_wire_accepts_every_exact_numeric_scalar_tag(self) -> None:
+        cases = [
+            ("int8", -8),
+            ("int16", -16),
+            ("int32", -32),
+            ("int64", 2**53 + 1),
+            ("float16", 1.5),
+            ("bfloat16", 1.5),
+            ("float32", 0.25),
+            ("float64", 1e100),
+        ]
+        for wire_type, value in cases:
+            with self.subTest(wire_type=wire_type):
+                self.assertEqual(
+                    chelis._execution_value({"type": wire_type, "value": value}),
+                    value,
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

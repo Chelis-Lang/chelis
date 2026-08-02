@@ -1854,7 +1854,12 @@ fn flatten_field_value(
         }
         crate::opaque::FieldType::Scalar(_) => {
             let v = match value {
+                ExecutionValue::Float16 { value } | ExecutionValue::Bfloat16 { value } => *value,
+                ExecutionValue::Float32 { value } => *value as f64,
                 ExecutionValue::Float64 { value } => *value,
+                ExecutionValue::Int8 { value } => *value as f64,
+                ExecutionValue::Int16 { value } => *value as f64,
+                ExecutionValue::Int32 { value } => *value as f64,
                 ExecutionValue::Int64 { value } => *value as f64,
                 ExecutionValue::Bool { value } => {
                     if *value {
@@ -2184,7 +2189,7 @@ mod finding_tests {
         let inv = scalar_inv("Probability", "Probability", "value");
         let wrong = ExecutionValue::Adt {
             ctor: "Velocity".to_string(),
-            fields: vec![ExecutionValue::Float64 { value: 0.5 }],
+            fields: vec![ExecutionValue::Float32 { value: 0.5 }],
         };
         let err = opaque_record_env(&wrong, &inv)
             .expect_err("a wrong-ctor same-arity ADT must be rejected, not flattened");
@@ -2203,7 +2208,7 @@ mod finding_tests {
         let inv = scalar_inv("Probability", "Probability", "value");
         let right = ExecutionValue::Adt {
             ctor: "Probability".to_string(),
-            fields: vec![ExecutionValue::Float64 { value: 0.5 }],
+            fields: vec![ExecutionValue::Float32 { value: 0.5 }],
         };
         let env =
             opaque_record_env(&right, &inv).expect("the matching-ctor case must flatten cleanly");
@@ -2227,7 +2232,7 @@ mod finding_tests {
         let multi = ExecutionValue::Tensor {
             value: TensorValue {
                 shape: vec![3],
-                data: TensorElements::from_f64_vec(vec![0.5, f64::NAN, 0.5]),
+                data: TensorElements::F32(vec![0.5, f32::NAN, 0.5]),
             },
         };
         let err = flatten_field_value(&multi, &fty, "p.value", &mut env)
@@ -2251,7 +2256,7 @@ mod finding_tests {
         let single = ExecutionValue::Tensor {
             value: TensorValue {
                 shape: vec![1],
-                data: TensorElements::from_f64_vec(vec![0.5]),
+                data: TensorElements::F32(vec![0.5]),
             },
         };
         flatten_field_value(&single, &fty, "p.value", &mut env)
@@ -2261,11 +2266,11 @@ mod finding_tests {
 
     #[test]
     fn f8_true_scalar_for_scalar_field_still_works() {
-        // A plain Float64 scalar (the common case) is unaffected by the fix.
+        // A plain exact-tagged f32 scalar is unaffected by the fix.
         let fty = FieldType::Scalar("f32".to_string());
         let mut env = BTreeMap::new();
         flatten_field_value(
-            &ExecutionValue::Float64 { value: 0.25 },
+            &ExecutionValue::Float32 { value: 0.25 },
             &fty,
             "p.value",
             &mut env,

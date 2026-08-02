@@ -1323,7 +1323,7 @@ impl<'a> EvalContext<'a> {
                             }
                             match payload.value().as_i64_exact() {
                                 Some(v) => ints.push(v),
-                                None => floats.push(payload.as_f64()),
+                                None => floats.push(payload.as_f64_lossy()),
                             }
                         }
                         RuntimeValue::Bool(b) => {
@@ -1837,7 +1837,7 @@ impl<'a> EvalContext<'a> {
                         "scalar_to_tensor",
                         payload.dtype(),
                         vec![],
-                        vec![payload.as_f64()],
+                        vec![payload.as_f64_lossy()],
                     )?))
                 }
                 Some(RuntimeValue::Bool(value)) => {

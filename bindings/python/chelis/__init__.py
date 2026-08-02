@@ -391,9 +391,9 @@ def _execution_value(payload: dict[str, Any]) -> Any:
     kind = payload["type"]
     if kind == "tensor":
         return _tensor_value(payload["value"])
-    if kind == "int64":
+    if kind in ("int8", "int16", "int32", "int64"):
         return int(payload["value"])
-    if kind == "float64":
+    if kind in ("float16", "bfloat16", "float32", "float64"):
         return float(payload["value"])
     if kind == "bool":
         return bool(payload["value"])

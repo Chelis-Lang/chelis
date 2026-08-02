@@ -133,3 +133,46 @@ fn v2_bool_and_half_payloads_round_trip() {
         }
     }
 }
+
+/// Numeric scalar leaves are exact-width tagged carriers as well as tensor
+/// elements. This locks the serde surface independently of evaluator
+/// construction, including the full int64 digits above 2^53.
+#[test]
+fn v2_numeric_scalar_variants_round_trip_at_every_dtype() {
+    let payload = ExecutionValue::List {
+        value: vec![
+            ExecutionValue::Int8 { value: -8 },
+            ExecutionValue::Int16 { value: -16 },
+            ExecutionValue::Int32 { value: -32 },
+            ExecutionValue::Int64 {
+                value: 9_007_199_254_740_993,
+            },
+            ExecutionValue::Float16 { value: 1.5 },
+            ExecutionValue::Bfloat16 { value: 1.5 },
+            ExecutionValue::Float32 { value: 0.25 },
+            ExecutionValue::Float64 { value: 1e100 },
+        ],
+    };
+    let json = serde_json::to_string(&payload).expect("serialize scalar carriers");
+    assert!(
+        json.contains("9007199254740993"),
+        "int64 scalar digits must remain exact: {json}"
+    );
+    let decoded: ExecutionValue = serde_json::from_str(&json).expect("decode scalar carriers");
+    assert_eq!(
+        serde_json::to_value(decoded).expect("serialize decoded value"),
+        serde_json::to_value(payload).expect("serialize original value")
+    );
+}
+
+/// Negative parity: the type vocabulary is closed. A generic `float` tag is
+/// not guessed as f32 or f64.
+#[test]
+fn v2_unknown_numeric_scalar_tag_is_rejected() {
+    let err = serde_json::from_str::<ExecutionValue>(r#"{"type":"float","value":0.5}"#)
+        .expect_err("unknown scalar dtype tag must be rejected");
+    assert!(
+        err.to_string().contains("variant") || err.to_string().contains("float"),
+        "the rejection should point at the unknown scalar tag: {err}"
+    );
+}

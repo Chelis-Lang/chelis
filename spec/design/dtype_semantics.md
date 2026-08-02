@@ -260,9 +260,10 @@ finalize-on-write over `Vec<f64>` - f64 storage cannot represent exact
 int64 above 2^53 regardless of write discipline, so it fails [#684] by
 construction. The census has five declaration layers. Phase 1 lands the exact
 representation atomically at four of them - `chelis-ir/src/eval.rs`
-(`TensorValue`), `chelis-compiler-api/src/schema.rs` (wire schema -
-`data` becomes a tagged per-dtype payload; this is a wire-format break,
-versioned as such), `bindings/python/chelis/__init__.py` (per-dtype
+(`TensorValue`), `chelis-compiler-api/src/schema.rs` (wire schema - tensor
+`data` and every numeric `ExecutionValue` scalar leaf become tagged
+per-dtype payloads; this is a wire-format break, versioned as such),
+`bindings/python/chelis/__init__.py` (per-dtype
 tuples / numpy dtypes, ending the `np.float64` cast of [#685]), and the
 layer the plan's original enumeration missed and [#856] filed: IR constant payloads
 (`RiscOp::Const`/`ConstTensor`), implemented in the Phase 1 stack
@@ -445,10 +446,18 @@ identical bytes):
    stored bits and each other. Acceptance is literal: for every dtype,
    dump the same tensor through all exits in both lanes and diff bytes.
 5. **The transcendental tolerance table.** Where lanes legitimately differ
-   in VALUE (libm vs SLEEF vs vForce, > 0.5 ulp ops), the per-op bound is
-   recorded in `spec/05-risc-primitives.md` next to the op, and the [#687]
-   oracle consults it; `sqrt` is required correctly rounded ([#719]) and has
-   no tolerance row. Formatting itself never has tolerance.
+   in VALUE (libm vs SLEEF vs vForce, > 0.5 ulp ops), the language-level
+   per-op bound belongs in `spec/05-risc-primitives.md` next to the op, and
+   the [#687] oracle will consult it; `sqrt` is required correctly rounded
+   ([#719]) and has no tolerance row. Formatting itself never has tolerance.
+   The Phase 1 `f64` `tan`/`exp` cross-lane controls use `1e-12` only as an
+   implementation-chosen test margin: macOS and glibc differed by one ulp in
+   the observed repros, while the defect those controls detect (computing an
+   `f64` program through `f32`) differs by roughly `1e-7`. `1e-12` was an
+   arbitrary separating margin, not a language decision, not an
+   [05-OBS-3] tolerance row, and not authority for another operation. The
+   normative tolerance table remains pending until its bounds are separately
+   decided and authored in `spec/05`.
 6. **Containers and scalar roots** (decided with [#732] Phase 1, identical
    to its §C1.5; ratified as [05-OBS-4]/[05-OBS-5]): a scalar-typed value
    renders as the BARE scalar at every exit in both lanes, including as a
@@ -1298,11 +1307,14 @@ audited ways at your exit - expected); trap wiring in `host_ops`' scalar
 kernels beyond what finalize forces (Phase 2); any generated-C work.
 
 **Oracle:** `eval_tensor_narrowing_matrix.rs` fully green and un-ignored;
-the eval rows of `narrow_dtype_matrix.rs`, `precision_matrix.rs`,
-`int_width_lane_matrix.rs`, `reduction_and_bitwise_matrix.rs` ([#724]'s
-eval half traps or is table-rejected - see open question 2, decided in
-this phase) green and un-ignored; every control untouched; the Phase 0
-domain checker green on ALL eval outputs, not just audited cells.
+the Phase 1 eval rows of `narrow_dtype_matrix.rs` ([#717] tensor cells),
+`precision_matrix.rs` ([#684] storage/binding cells),
+`int_width_lane_matrix.rs` (the eval tensor trap cell), and
+`reduction_and_bitwise_matrix.rs` ([#684] sum and [#724]'s eval half)
+green and un-ignored; every control untouched; the Phase 0 domain checker
+green on ALL eval outputs, not just audited cells. The exact scalar-kernel
+rows for [#680], [#688], [#718], and [#722] remain Phase 2 obligations;
+this oracle does not pull them across the kernel-split boundary.
 
 ## Phase 2 - the kernel split and prove
 

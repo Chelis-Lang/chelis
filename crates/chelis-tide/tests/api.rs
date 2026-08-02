@@ -383,8 +383,16 @@ items = to_list(x)
         .find(|root| root["name"] == "items")
         .expect("items root");
     assert_eq!(items["value"]["type"], "list");
-    assert_eq!(items["value"]["value"][0]["type"], "float64");
-    assert_eq!(items["value"]["value"][3]["value"], 4.0);
+    let values = items["value"]["value"].as_array().expect("list values");
+    assert_eq!(values.len(), 4);
+    assert!(values.iter().all(|value| value["type"] == "float32"));
+    assert_eq!(
+        values
+            .iter()
+            .map(|value| value["value"].as_f64().expect("float32 value"))
+            .collect::<Vec<_>>(),
+        vec![1.0, 2.0, 3.0, 4.0]
+    );
 }
 
 #[tokio::test]

@@ -40,7 +40,7 @@ pub(super) fn pattern_matches(
                 (RuntimeValue::Scalar(payload), Expr::Atom(Atom::Float(rhs), _))
                     if payload.dtype().is_float() =>
                 {
-                    payload.as_f64() == *rhs
+                    payload.as_f64_lossy() == *rhs
                 }
                 (RuntimeValue::Bool(lhs), Expr::Atom(Atom::Bool(rhs), _)) => lhs == rhs,
                 (RuntimeValue::String(lhs), Expr::Atom(Atom::Str(rhs), _)) => lhs == rhs,
@@ -361,7 +361,10 @@ pub(super) fn dispatch_scalar_binop(
             // runs through finalize, which traps out-of-width results.
             let (ldt, rdt) = (lp.dtype(), rp.dtype());
             let result_dtype = if ldt == rdt { ldt } else { Prim::Int64 };
-            RuntimeValue::scalar_from_int_wide(result_dtype, op(lp.as_f64(), rp.as_f64()))
+            RuntimeValue::scalar_from_int_wide(
+                result_dtype,
+                op(lp.as_f64_lossy(), rp.as_f64_lossy()),
+            )
         }
         (RuntimeValue::Scalar(lp), RuntimeValue::Scalar(rp))
             if lp.dtype().is_float() && rp.dtype().is_float() =>
@@ -391,7 +394,7 @@ pub(super) fn dispatch_scalar_binop(
                     ldt, rdt
                 ),
             };
-            let value = op(lp.as_f64(), rp.as_f64());
+            let value = op(lp.as_f64_lossy(), rp.as_f64_lossy());
             RuntimeValue::scalar_like_float(result_dtype, value)
         }
         _ => Err(format!(
@@ -424,10 +427,10 @@ pub(super) fn numeric_unop(
     match args.first() {
         Some(RuntimeValue::Tensor(tensor)) => tensor_numeric_unop(tensor, &op),
         Some(RuntimeValue::Scalar(payload)) if payload.dtype().is_integer() => {
-            RuntimeValue::scalar_from_int_wide(payload.dtype(), op(payload.as_f64()))
+            RuntimeValue::scalar_from_int_wide(payload.dtype(), op(payload.as_f64_lossy()))
         }
         Some(RuntimeValue::Scalar(payload)) if payload.dtype().is_float() => {
-            RuntimeValue::scalar_like_float(payload.dtype(), op(payload.as_f64()))
+            RuntimeValue::scalar_like_float(payload.dtype(), op(payload.as_f64_lossy()))
         }
         other => Err(format!(
             "numeric op expects int or float arg, got {other:?}"
@@ -643,7 +646,7 @@ pub(super) fn activation_gelu_f64(x: f64) -> f64 {
 
 fn runtime_scalar_as_f64(value: &RuntimeValue) -> Option<f64> {
     match value {
-        RuntimeValue::Scalar(payload) => Some(payload.as_f64()),
+        RuntimeValue::Scalar(payload) => Some(payload.as_f64_lossy()),
         RuntimeValue::Bool(value) => Some(if *value { 1.0 } else { 0.0 }),
         _ => None,
     }
@@ -931,7 +934,7 @@ pub(super) fn int_shift_binop(
 fn float_unop(args: &[RuntimeValue], op: impl Fn(f64) -> f64) -> Result<RuntimeValue, String> {
     match args.first() {
         Some(RuntimeValue::Scalar(payload)) if payload.dtype().is_float() => {
-            RuntimeValue::scalar_like_float(payload.dtype(), op(payload.as_f64()))
+            RuntimeValue::scalar_like_float(payload.dtype(), op(payload.as_f64_lossy()))
         }
         other => Err(format!("float op expects float arg, got {other:?}")),
     }
@@ -972,7 +975,7 @@ pub(super) fn compare_eq(args: &[RuntimeValue]) -> Result<RuntimeValue, String> 
         (Some(RuntimeValue::Scalar(lp)), Some(RuntimeValue::Scalar(rp)))
             if lp.dtype().is_float() && rp.dtype().is_float() =>
         {
-            Ok(RuntimeValue::Bool(lp.as_f64() == rp.as_f64()))
+            Ok(RuntimeValue::Bool(lp.as_f64_lossy() == rp.as_f64_lossy()))
         }
         (Some(RuntimeValue::Bool(lhs)), Some(RuntimeValue::Bool(rhs))) => {
             Ok(RuntimeValue::Bool(lhs == rhs))
@@ -1009,12 +1012,18 @@ pub(super) fn ordered_compare(
         (Some(RuntimeValue::Scalar(lp)), Some(RuntimeValue::Scalar(rp)))
             if lp.dtype().is_integer() && rp.dtype().is_integer() =>
         {
-            Ok(RuntimeValue::Bool(cmp(lp.as_f64(), rp.as_f64())))
+            Ok(RuntimeValue::Bool(cmp(
+                lp.as_f64_lossy(),
+                rp.as_f64_lossy(),
+            )))
         }
         (Some(RuntimeValue::Scalar(lp)), Some(RuntimeValue::Scalar(rp)))
             if lp.dtype().is_float() && rp.dtype().is_float() =>
         {
-            Ok(RuntimeValue::Bool(cmp(lp.as_f64(), rp.as_f64())))
+            Ok(RuntimeValue::Bool(cmp(
+                lp.as_f64_lossy(),
+                rp.as_f64_lossy(),
+            )))
         }
         // Element-wise tensor-tensor ordering. Mirrors the build-target lane
         // and unblocks the same downstream tensor-level boolean ops.
@@ -1249,8 +1258,12 @@ pub(super) fn expect_bool_arg(args: &[RuntimeValue], index: usize) -> Result<boo
 
 pub(super) fn expect_float_arg(args: &[RuntimeValue], index: usize) -> Result<f64, String> {
     match args.get(index) {
-        Some(RuntimeValue::Scalar(payload)) if payload.dtype().is_float() => Ok(payload.as_f64()),
-        Some(RuntimeValue::Scalar(payload)) if payload.dtype().is_integer() => Ok(payload.as_f64()),
+        Some(RuntimeValue::Scalar(payload)) if payload.dtype().is_float() => {
+            Ok(payload.as_f64_lossy())
+        }
+        Some(RuntimeValue::Scalar(payload)) if payload.dtype().is_integer() => {
+            Ok(payload.as_f64_lossy())
+        }
         other => Err(format!(
             "expected float arg at index {index}, got {other:?}"
         )),
@@ -1277,7 +1290,7 @@ pub(super) fn runtime_value_eq(lhs: &RuntimeValue, rhs: &RuntimeValue) -> bool {
         (RuntimeValue::Scalar(lp), RuntimeValue::Scalar(rp))
             if lp.dtype().is_float() && rp.dtype().is_float() =>
         {
-            lp.as_f64() == rp.as_f64()
+            lp.as_f64_lossy() == rp.as_f64_lossy()
         }
         (RuntimeValue::Bool(lhs), RuntimeValue::Bool(rhs)) => lhs == rhs,
         (RuntimeValue::String(lhs), RuntimeValue::String(rhs)) => lhs == rhs,
@@ -1455,20 +1468,21 @@ impl ListTensorData {
 }
 
 fn list_to_tensor_data(values: &[RuntimeValue]) -> Result<(Prim, ListTensorData), String> {
-    // Element classification: integer scalars carry exact i64 into an
-    // Int64-precision tensor; float scalars carry their exact f64 image
-    // at the ELEMENT's own dtype (an f64-element list is F64-tagged,
-    // ending the probe-2 F32 pin; f32 literal lists stay F32); bools
-    // carry 0/1 into a Bool tensor. The homogeneity check pins the
-    // precision to whatever the first typed element advertised.
+    // Element classification: integer scalars carry exact i64 in the wide
+    // ingress buffer while retaining the ELEMENT's own dtype; floats carry
+    // their exact f64 image at their own dtype; bools carry 0/1 into a Bool
+    // tensor. The homogeneity check pins the precision to whatever the first
+    // typed element advertised. The wide buffer is not authority to widen
+    // the resulting tensor.
     let mut precision: Option<Prim> = None;
     let mut ints: Vec<i64> = Vec::new();
     let mut floats: Vec<f64> = Vec::new();
     for value in values {
         match value {
             RuntimeValue::Scalar(payload) if payload.dtype().is_integer() => {
-                precision.get_or_insert(Prim::Int64);
-                if precision != Some(Prim::Int64) {
+                let element_dtype = payload.dtype();
+                precision.get_or_insert(element_dtype);
+                if precision != Some(element_dtype) {
                     return Err(
                         "to_tensor requires homogeneous numeric or bool list elements".to_string(),
                     );
@@ -1483,7 +1497,7 @@ fn list_to_tensor_data(values: &[RuntimeValue]) -> Result<(Prim, ListTensorData)
                         "to_tensor requires homogeneous numeric or bool list elements".to_string(),
                     );
                 }
-                floats.push(payload.as_f64());
+                floats.push(payload.as_f64_lossy());
             }
             RuntimeValue::Bool(value) => {
                 precision.get_or_insert(Prim::Bool);
@@ -1534,24 +1548,26 @@ pub(super) fn tensor_to_list_values(
     Ok(values)
 }
 
-/// Shared row collector for the `pad_sequences*` family: classify the pad
-/// scalar (integers pad an Int64 tensor with exact i64 values, floats an
-/// F32 tensor), collect rows in the same family, and return the padded
-/// row-major wide buffer (chelis#729 Phase 1: exact i64 ids survive,
-/// the eval half of the chelis#713 class).
+/// Shared row collector for the `pad_sequences*` family: the pad scalar fixes
+/// the exact output dtype, every non-empty row must carry that same dtype,
+/// and the padded row-major data stays in a wide ingress buffer until final
+/// storage construction (chelis#729 Phase 1, section C3).
 fn pad_sequences_rows(
     sequences: &[RuntimeValue],
     pad: &RuntimeValue,
     op: &str,
 ) -> Result<(Prim, ListTensorData, Vec<usize>), String> {
-    let pad_is_int = match pad {
-        RuntimeValue::Scalar(payload) if payload.dtype().is_integer() => true,
-        RuntimeValue::Scalar(payload) if payload.dtype().is_float() => false,
+    let pad_precision = match pad {
+        RuntimeValue::Scalar(payload)
+            if payload.dtype().is_integer() || payload.dtype().is_float() =>
+        {
+            payload.dtype()
+        }
         other => {
             return Err(format!("{op} expects numeric pad value, got {other:?}"));
         }
     };
-    let pad_precision = if pad_is_int { Prim::Int64 } else { Prim::F32 };
+    let pad_is_int = pad_precision.is_integer();
     let mut rows = Vec::with_capacity(sequences.len());
     let mut lens = Vec::with_capacity(sequences.len());
     for sequence in sequences {
@@ -1559,9 +1575,12 @@ fn pad_sequences_rows(
             return Err(format!("{op} expects nested lists, got {sequence:?}"));
         };
         let (row_precision, row) = list_to_tensor_data(items)?;
-        let row_is_int = !row_precision.is_float();
-        if row_is_int != pad_is_int && !items.is_empty() {
-            return Err(format!("{op} requires homogeneous numeric nested lists"));
+        if row_precision != pad_precision && !items.is_empty() {
+            return Err(format!(
+                "{op} requires homogeneous numeric nested lists at `{}`; got `{}`",
+                pad_precision.name(),
+                row_precision.name()
+            ));
         }
         lens.push(row.len());
         rows.push(row);
@@ -1644,7 +1663,7 @@ fn pad_rows(
             Ok(ListTensorData::Int(out))
         }
         ListTensorData::Float(flat) => {
-            let pad_value = payload.as_f64();
+            let pad_value = payload.as_f64_lossy();
             let mut out = Vec::with_capacity(batch * width);
             let mut offset = 0usize;
             for &len in lens {

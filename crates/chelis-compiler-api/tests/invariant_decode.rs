@@ -77,7 +77,13 @@ fn eval_result_value(source: &str) -> ExecutionValue {
 fn execution_values_identical(a: &ExecutionValue, b: &ExecutionValue) -> bool {
     use ExecutionValue::*;
     match (a, b) {
+        (Int8 { value: x }, Int8 { value: y }) => x == y,
+        (Int16 { value: x }, Int16 { value: y }) => x == y,
+        (Int32 { value: x }, Int32 { value: y }) => x == y,
         (Int64 { value: x }, Int64 { value: y }) => x == y,
+        (Float16 { value: x }, Float16 { value: y })
+        | (Bfloat16 { value: x }, Bfloat16 { value: y }) => x.to_bits() == y.to_bits(),
+        (Float32 { value: x }, Float32 { value: y }) => x.to_bits() == y.to_bits(),
         // Bit-identical float compare: `to_bits` so a NaN payload would
         // compare equal to itself, and -0.0 is distinguished from 0.0.
         (Float64 { value: x }, Float64 { value: y }) => x.to_bits() == y.to_bits(),
@@ -269,7 +275,7 @@ fn wrong_constructor_is_structural_not_invariant() {
     let exprs = program_exprs(PROBABILITY_SRC);
     let payload = ExecutionValue::Adt {
         ctor: "NotAProbability".to_string(),
-        fields: vec![ExecutionValue::Float64 { value: 0.3 }],
+        fields: vec![ExecutionValue::Float32 { value: 0.3 }],
     };
     let err = try_decode_adt_value(&exprs, &payload).expect_err("unknown ctor rejected");
     assert!(
@@ -295,8 +301,8 @@ fn extra_field_is_structural_not_invariant() {
     let payload = ExecutionValue::Adt {
         ctor: "Probability".to_string(),
         fields: vec![
-            ExecutionValue::Float64 { value: 0.3 },
-            ExecutionValue::Float64 { value: 0.4 },
+            ExecutionValue::Float32 { value: 0.3 },
+            ExecutionValue::Float32 { value: 0.4 },
         ],
     };
     let err = try_decode_adt_value(&exprs, &payload).expect_err("extra field rejected");
@@ -376,9 +382,9 @@ fn nested_inner_violating_rejected_naming_inner_type() {
         fields: vec![
             ExecutionValue::Adt {
                 ctor: "Probability".to_string(),
-                fields: vec![ExecutionValue::Float64 { value: 1.5 }],
+                fields: vec![ExecutionValue::Float32 { value: 1.5 }],
             },
-            ExecutionValue::Float64 { value: 2.0 },
+            ExecutionValue::Float32 { value: 2.0 },
         ],
     };
     let err = try_decode_adt_value(&exprs, &payload)
@@ -404,9 +410,9 @@ fn nested_inner_nan_rejected_fail_closed() {
         fields: vec![
             ExecutionValue::Adt {
                 ctor: "Probability".to_string(),
-                fields: vec![ExecutionValue::Float64 { value: f64::NAN }],
+                fields: vec![ExecutionValue::Float32 { value: f32::NAN }],
             },
-            ExecutionValue::Float64 { value: 2.0 },
+            ExecutionValue::Float32 { value: 2.0 },
         ],
     };
     let err = try_decode_adt_value(&exprs, &payload).expect_err("inner NaN rejected");
@@ -438,7 +444,7 @@ fn rejected_decode_yields_no_value() {
         },
         ExecutionValue::Adt {
             ctor: "Nope".to_string(),
-            fields: vec![ExecutionValue::Float64 { value: 0.3 }],
+            fields: vec![ExecutionValue::Float32 { value: 0.3 }],
         },
     ];
     for payload in &rejecting {
@@ -453,7 +459,9 @@ fn rejected_decode_yields_no_value() {
 fn prob_payload(value: f64) -> ExecutionValue {
     ExecutionValue::Adt {
         ctor: "Probability".to_string(),
-        fields: vec![ExecutionValue::Float64 { value }],
+        fields: vec![ExecutionValue::Float32 {
+            value: value as f32,
+        }],
     }
 }
 
@@ -482,7 +490,9 @@ def make(x: f32) -> Tol = Tol { value: x }
 fn tol_payload(value: f64) -> ExecutionValue {
     ExecutionValue::Adt {
         ctor: "Tol".to_string(),
-        fields: vec![ExecutionValue::Float64 { value }],
+        fields: vec![ExecutionValue::Float32 {
+            value: value as f32,
+        }],
     }
 }
 

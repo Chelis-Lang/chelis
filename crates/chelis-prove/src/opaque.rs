@@ -1528,7 +1528,12 @@ fn read_produced_field(
             // single-element Tensor). Extract the scalar; a NaN result is
             // the None-sentinel and counts as a producer failure.
             let v = match &root.value {
+                ExecutionValue::Float16 { value } | ExecutionValue::Bfloat16 { value } => *value,
+                ExecutionValue::Float32 { value } => *value as f64,
                 ExecutionValue::Float64 { value } => *value,
+                ExecutionValue::Int8 { value } => *value as f64,
+                ExecutionValue::Int16 { value } => *value as f64,
+                ExecutionValue::Int32 { value } => *value as f64,
                 ExecutionValue::Int64 { value } => *value as f64,
                 ExecutionValue::Bool { value } => {
                     if *value {

@@ -578,7 +578,7 @@ fn check_representation_finite(
 ) -> Result<(), InvariantViolation> {
     match value {
         RuntimeValue::Scalar(payload) if payload.dtype().is_float() => {
-            let v = payload.as_f64();
+            let v = payload.as_f64_lossy();
             if !v.is_finite() {
                 return Err(InvariantViolation::NonFiniteRepresentation {
                     type_name: type_name.to_string(),

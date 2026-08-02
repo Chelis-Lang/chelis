@@ -34,9 +34,7 @@ acceptance remain under [#912]/[#1023], not this formatter class. Phase 3
 remains. Tracking issue: [#732].
 **Owning specs:** `spec/05-risc-primitives.md` (its §8 carries this
 plan's ratified contract as current blockquote authorities [05-OBS-1..6]; the
-per-op tolerance table is authored in that section as rows become necessary
-for portable value oracles (f64 `tan`/`exp` seed it with [#729] Phase 1), while
-the complete machine projection and cross-lane oracle land at Phase 3 and
+per-op tolerance table lands into the same section at Phase 3, while
 chelis#733 later migrates authority form and revisions through the pinned Buoy
 shell-side integration), `spec/04-type-system.md` (dtype value-set
 definitions, shared with `spec/design/dtype_semantics.md` §C1), and the audit
@@ -331,15 +329,13 @@ For every dtype and every storable value:
 1. **The round-trip invariant** (§C2.1) lands as a property harness over
    the probe corpus and the matrix tests' outputs - red today on [#723] and
    [#716]'s cells, green after Phase 2, and permanent thereafter.
-2. **The per-op value-tolerance table** is authored normatively in
-   `spec/05-risc-primitives.md` §8. A row needed by an earlier portable
-   value oracle lands there with that oracle; [#729] Phase 1 seeds f64
-   `tan` and `exp` at `1e-12` rather than hiding the bound in tests. Phase 3
-   supplies the `const` Rust machine projection beside the capability table
-   (the same no-second-parser resolution as that doc's open question 1),
-   consumed directly by the [#687] oracle and by [#754]'s shell-facing gate;
-   a tripwire checks it against §8 so prose and data cannot drift. Complete
-   content: for each transcendental, the
+2. **The per-op value-tolerance table** is a MACHINE artifact first
+   (2026-07 review integration): its authoritative form is `const` Rust
+   beside the capability table (the same no-second-parser resolution as
+   that doc's open question 1), consumed directly by the [#687] oracle
+   and by [#754]'s shell-facing gate; the `spec/05-risc-primitives.md`
+   §8 rendering is generated from or tripwire-checked against it, so
+   prose and data cannot drift. Content: for each transcendental, the
    documented cross-lane bound (default: 1 ulp at the computed width;
    `sqrt`: 0 - correctly rounded per IEEE; [#719] is FIXED (PR #760,
    merged 2026-07-17), so the row may be authored when Phase 3 arrives;
@@ -369,7 +365,7 @@ For every dtype and every storable value:
 | §C2 agreement contract | Phase 1 (intra-lane; FROZEN for eval 2026-07-20), Phase 2 (cross-lane byte equality) | same protocol |
 | §C3.3 C formatting routine behavior AND its C ABI signature | Phase 2 (the signature settled at the R2 review, before the 0.18 tag) | this doc; must stay grammar-identical to Rust `{:?}` (§C1.3 - an earlier revision of this row said `Display`, which §C1.3 explicitly rules out). The signature is frozen for the same reason the render is: after 0.18 ships, changing it breaks every shell that links the runtime |
 | §C1.1 root envelope | [05-OBS-6] authored 2026-07-31; full implementation acceptance pending [#1023] | spec/05 [05-OBS-6] + this doc + dtype_semantics.md §C4 + the release roadmap + the root-boundary corpus, one change set |
-| §C4 tolerance table (authored into spec/05 §8 per [05-OBS-3]) | f64 `tan`/`exp` seed rows with [#729] Phase 1; complete table + machine projection at Phase 3 | spec/05 rows accompany the first test that needs each bound; Phase 3 adds the projection and [#687] corpus |
+| §C4 tolerance table (authored into spec/05 §8 per [05-OBS-3]) | Phase 3 | spec/05 edit + [#687] corpus, one change set |
 
 ## B2. Invariants that hold across every boundary
 

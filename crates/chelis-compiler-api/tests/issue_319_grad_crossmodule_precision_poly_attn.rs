@@ -546,8 +546,8 @@ fn issue_319_distinct_precisions_not_force_merged() {
                 .find(|r| r.name.as_deref() == Some("out"))
                 .expect("out root");
             match &root.value {
-                ExecutionValue::Float64 { value } => assert!(
-                    (value - 21.0).abs() < 1e-9,
+                ExecutionValue::Float32 { value } => assert!(
+                    (*value - 21.0).abs() < f32::EPSILON,
                     "issue #319 distinct-precision: f32 result must be exact (21.0), got {value}",
                 ),
                 ExecutionValue::Tensor { value } => {

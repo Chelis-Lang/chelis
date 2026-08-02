@@ -1463,26 +1463,15 @@ chelis#729/#686 capacity family).)*
 > SHALL be correctly rounded (bound zero, per chelis#719). Formatting
 > differences are never within tolerance.
 
-*(This section, spec/05 §8, is the single authored address for the table:
-`dtype_semantics.md` §C4 item 5 and `faithful_observation.md` point here and
-do not host it. With arithmetic width fixed per dtype by
+*(The table is pending; #719's fix (PR #760) precedes its sqrt row. This
+section, spec/05 §8, is its single authored address: `dtype_semantics.md`
+§C4 item 5 and `faithful_observation.md` Phase 3 point here and do not
+host it. Scope note, 2026-07-28: with arithmetic width fixed per dtype by
 [04-NUM-8], the table covers only genuine implementation variance at a
 single width - one lane's libm or SLEEF or vForce against another's for
 the transcendentals - and never a structural precision mismatch between
 lanes computing at different widths. Rows for add/sub/mul/div and the
 comparisons are bound zero by construction, not by measurement.)*
-
-**Per-op cross-lane value tolerance (normative).** Bounds apply after both
-lanes compute and finalize at the dtype's [04-NUM-8] arithmetic width. They
-never license computing an f32 program in f64, and never apply to formatting.
-
-| op | dtype | maximum lane-to-lane absolute difference |
-|---|---|---:|
-| `tan` | `f64` | `1e-12` |
-| `exp` | `f64` | `1e-12` |
-
-`sqrt` deliberately has no tolerance row: [05-OBS-3] requires correct
-rounding (bound zero).
 
 > **[05-OBS-4]** A scalar-typed value SHALL render as the bare scalar at
 > every exit in both lanes, including as a top-level labeled root

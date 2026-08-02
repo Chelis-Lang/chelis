@@ -111,7 +111,9 @@ pub struct Span {
 ///   an untagged `Vec<f64>`, which cannot carry exact int64 above 2^53
 ///   (chelis#686) and erased every element dtype (chelis#685).
 /// * v2: `TensorValue.data` is the tagged per-dtype [`TensorElements`]
-///   payload below, and [`EvalResult`] stamps `schema_version: 2`.
+///   payload below; numeric scalar leaves use exact-width
+///   [`ExecutionValue`] variants instead of substituting `Int64`/`Float64`;
+///   and [`EvalResult`] stamps `schema_version: 2`.
 ///
 /// Mechanics (v1 compat DELETED at the chelis#729 rework): producers
 /// always stamp the current version, and `schema_version` is REQUIRED on
@@ -247,14 +249,37 @@ pub struct DictEntryValue {
     pub value: ExecutionValue,
 }
 
+/// Machine-facing execution value. Every numeric scalar variant names its
+/// own dtype; the field width is either that dtype's exact Rust carrier or,
+/// for f16/bf16, the exact f64 image of the stored reduced-width value.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ExecutionValue {
     Tensor {
         value: TensorValue,
     },
+    Int8 {
+        value: i8,
+    },
+    Int16 {
+        value: i16,
+    },
+    Int32 {
+        value: i32,
+    },
     Int64 {
         value: i64,
+    },
+    Float16 {
+        /// Exact f64 image of the stored IEEE binary16 value.
+        value: f64,
+    },
+    Bfloat16 {
+        /// Exact f64 image of the stored bfloat16 value.
+        value: f64,
+    },
+    Float32 {
+        value: f32,
     },
     Float64 {
         value: f64,

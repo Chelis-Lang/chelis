@@ -128,8 +128,8 @@ fn c_f64_tensor_unary_ops_are_f64_precise() {
     let tan_program = f64_unop_program("tan", "1.5", "3.0");
     let line = c_first_line(&tan_program, "c_f64_tan").expect("C lane should run");
     common::assert_elements_in_domain("f64", &line, "c_f64_tan");
-    // Property-based, not an exact string: [05-OBS-3]'s f64 `tan` row
-    // permits at most 1e-12 because double tan is not required to
+    // Property-based, not an exact string: the Phase 1 implementation
+    // control uses a 1e-12 separating margin because double tan is not required to
     // be correctly rounded and may differ by a few ulp between platform
     // libms (see the eval tan control above). f64 PRECISION is the claim:
     // the #717 bug's f32-destroyed value is ~5e-7 away from true tan,
@@ -144,7 +144,7 @@ fn c_f64_tensor_unary_ops_are_f64_precise() {
     let eval_v = parse_data(&eval_line)[0];
     assert!(
         (v - eval_v).abs() <= 1e-12,
-        "[05-OBS-3] f64 tan lane delta exceeds 1e-12: eval={eval_v}, C={v}"
+        "Phase 1 f64 tan lane delta exceeds the implementation control's 1e-12 margin: eval={eval_v}, C={v}"
     );
 
     let exp_program = f64_unop_program("exp", "2.0", "3.0");
@@ -154,7 +154,7 @@ fn c_f64_tensor_unary_ops_are_f64_precise() {
     let eval_exp = parse_data(&eval_exp_line)[0];
     assert!(
         (c_exp - eval_exp).abs() <= 1e-12,
-        "[05-OBS-3] f64 exp lane delta exceeds 1e-12: eval={eval_exp}, C={c_exp}"
+        "Phase 1 f64 exp lane delta exceeds the implementation control's 1e-12 margin: eval={eval_exp}, C={c_exp}"
     );
 
     let line = c_first_line(&f64_unop_program("sqrt", "2.0", "3.0"), "c_f64_sqrt")
@@ -308,8 +308,8 @@ fn eval_f32_tensor_tan_and_sqrt_do_narrow_to_f32() {
 fn eval_f64_tensor_tan_keeps_f64_precision() {
     let line = eval_first_line(&f64_unop_program("tan", "1.5", "3.0")).expect("eval should run");
     common::assert_elements_in_domain("f64", &line, "eval_f64_tan");
-    // Property-based like the C control above, under [05-OBS-3]'s f64
-    // `tan` bound, and for the same reason
+    // Property-based like the C control above, under the same Phase 1
+    // implementation margin and for the same reason
     // (rt857 round-1 CI caught it): double tan is not required to be
     // correctly rounded and differs by 1 ulp between platform libms
     // (macOS 14.10141994717172 vs glibc 14.101419947171719). f64
@@ -338,8 +338,8 @@ fn eval_f64_tensor_sqrt_keeps_f64_precision() {
 fn eval_f64_tensor_exp_keeps_f64_precision() {
     let line = eval_first_line(&f64_unop_program("exp", "2.0", "3.0")).expect("eval should run");
     common::assert_elements_in_domain("f64", &line, "eval_f64_exp");
-    // Property-based under [05-OBS-3]'s f64 `exp` 1e-12 row, for the
-    // same libm-variance reason as tan (double
+    // Property-based under the Phase 1 implementation's 1e-12 separating
+    // margin, for the same libm-variance reason as tan (double
     // exp is also not required correctly rounded); sqrt keeps its exact
     // string below because IEEE-754 requires sqrt correctly rounded.
     let v = parse_data(&line)[0];
