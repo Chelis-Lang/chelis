@@ -102,6 +102,27 @@ pub struct CompilerError {
     pub errors: Vec<Diagnostic>,
 }
 
+/// `Diagnostic::kind` for an evaluation abandoned via a cancellation token
+/// (chelis#914), as opposed to one that failed on its own merits.
+///
+/// `Diagnostic::kind` is an open string, so this is purely additive: existing
+/// consumers that do not know the value simply see an unfamiliar kind, and the
+/// serialized shape is unchanged.
+pub const EVAL_CANCELLED_KIND: &str = "cancelled";
+
+impl CompilerError {
+    /// Whether this error is a cancellation rather than a genuine failure.
+    ///
+    /// Prefer this over inspecting messages: it reads the structured
+    /// `Diagnostic::kind` set at the eval-stage boundary, so it cannot be
+    /// confused by a program whose own error text discusses cancellation.
+    pub fn is_cancellation(&self) -> bool {
+        self.errors
+            .iter()
+            .any(|diagnostic| diagnostic.kind == EVAL_CANCELLED_KIND)
+    }
+}
+
 type Result<T> = std::result::Result<T, CompilerError>;
 
 pub fn parse(request: ParseRequest) -> Result<ParseResult> {
@@ -2248,8 +2269,7 @@ fn eval_compiled(
                 // dtype tags still exist; the wire `value` below cannot
                 // carry them (chelis#732 P1, [05-OBS-1]).
                 display: Some(crate::runtime::render_value(&value)),
-                value: runtime_value_to_schema(&value)
-                    .map_err(|message| stage_error("eval", message, "eval_error"))?,
+                value: runtime_value_to_schema(&value).map_err(eval_stage_error)?,
             })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -3500,9 +3520,18 @@ pub(crate) fn stage_error(stage: &str, message: impl Into<String>, kind: &str) -
     stage_error_with_span(stage, message, kind, None)
 }
 
+/// Lift an eval-lane failure message into a `CompilerError` at the one
+/// boundary where lane-internal text becomes a structured diagnostic.
+/// Cancellation gets its dedicated kind; genuine evaluation failures retain
+/// the recovery suggestions attached by their owning diagnostic rules.
 fn eval_stage_error(message: String) -> CompilerError {
+    let kind = if chelis_types::is_cancellation(&message) {
+        EVAL_CANCELLED_KIND
+    } else {
+        "eval_error"
+    };
     let cast_domain = message.contains("numeric trap: domain in cast at");
-    let mut error = stage_error("eval", message, "eval_error");
+    let mut error = stage_error("eval", message, kind);
     if cast_domain && let Some(diagnostic) = error.errors.first_mut() {
         diagnostic.suggestions.push(
             "fractional float-to-int conversion must state its rounding explicitly: \

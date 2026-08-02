@@ -158,6 +158,14 @@ centered on Surf.
 Evaluate a single expression through the evaluator fast path.
 No C emission or external compiler process is involved.
 
+`chelis eval --timeout N` sets an optional wall-clock budget of `N` seconds
+for either the expression or file form. Exceeding the budget MUST produce a
+non-zero exit and a timeout diagnostic; it MUST NOT return a partial or
+otherwise successful evaluation result. Without `--timeout`, evaluation has
+no CLI-imposed deadline. Interactive interruption and embedding-surface
+cancellation use the same cooperative mechanism but preserve their native
+signal or exception behavior.
+
 ### `chelis deep file.ch`
 
 Show the canonical Deep form of Surf input.
