@@ -183,3 +183,58 @@ def per_example_grads(
     assert!(result.root_nodes.contains_key("per_example_grads.0"));
     assert!(result.root_nodes.contains_key("per_example_grads.1"));
 }
+
+#[test]
+fn pipeline_preserves_the_empty_host_only_root_product() {
+    let result = compile_surf("label = \"host only\"\n").expect("host-only source must compile");
+
+    assert!(result.dag.roots().is_empty());
+    assert!(result.root_nodes.is_empty());
+    assert!(result.deep_text.contains("host only"));
+}
+
+#[test]
+fn pipeline_preserves_canonical_root_order_and_node_mapping() {
+    let source = r#"
+def first(x: tensor[n, f32]) -> tensor[n, f32] = copy(x)
+def pair(x: tensor[n, f32]) -> (tensor[n, f32], tensor[n, f32]) = (copy(x), x)
+"#;
+    let result = compile_surf(source).expect("ordered tuple roots must lower");
+    let roots = result.dag.roots();
+
+    assert_eq!(roots.len(), 3);
+    assert_eq!(result.root_nodes["first"], roots[0]);
+    assert_eq!(result.root_nodes["pair.0"], roots[1]);
+    assert_eq!(result.root_nodes["pair.1"], roots[2]);
+}
+
+#[test]
+fn pipeline_preserves_rejection_stage_messages() {
+    let fixtures = [
+        ("def broken(\n", "Surf parse error:"),
+        ("def broken -> int32 = missing\n", "Type errors:"),
+        (
+            "def noisy(x: tensor[4, f32]) -> tensor[4, f32] ! { } = dropout(x, 0.5)\n",
+            "Random",
+        ),
+        (
+            "def broken(x: tensor[4, f32]) -> tensor[4, f32] = { y = realize(x); add(x, y) }\n",
+            "consumed",
+        ),
+        (
+            "def loss(theta: tensor[2, f32]) -> f32 = tensor_to_scalar(sum(floor(copy(theta)), 0))\ngrad_loss = grad(loss, wrt=(theta))\nout = grad_loss(to_tensor([1.5, 2.5]))\n",
+            "grad",
+        ),
+    ];
+
+    for (source, expected) in fixtures {
+        let error = match compile_surf(source) {
+            Ok(_) => panic!("the fixture must reject"),
+            Err(error) => error,
+        };
+        assert!(
+            error.contains(expected),
+            "expected `{expected}` in `{error}`"
+        );
+    }
+}

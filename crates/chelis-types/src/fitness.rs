@@ -4,7 +4,7 @@
 //! is. This is the training signal for AI agents (see spec section 6).
 
 use crate::errors::{CheckError, CheckErrorKind};
-use crate::infer::{InferResult, infer_ir_program};
+use crate::infer::{CheckedProgram, InferResult, InferStats};
 
 /// Weights for each fitness component (spec section 6.1).
 const W_PARSE: f64 = 0.1;
@@ -153,6 +153,21 @@ impl FitnessReport {
     }
 }
 
+/// A single IR type-analysis product.
+///
+/// Rejected analysis carries only its fitness report. Accepted analysis carries
+/// the report and the checked program produced by the same inference session.
+#[derive(Debug)]
+pub enum TypeAnalysisOutcome {
+    Rejected {
+        fitness: FitnessReport,
+    },
+    Accepted {
+        fitness: FitnessReport,
+        program: Box<CheckedProgram>,
+    },
+}
+
 /// Type-check a Deep program and produce a fitness report.
 /// Runs tag validation to compute the structure component.
 pub fn check_program(exprs: &[chelis_deep::Expr]) -> FitnessReport {
@@ -161,35 +176,57 @@ pub fn check_program(exprs: &[chelis_deep::Expr]) -> FitnessReport {
     FitnessReport::from_infer_result_with_structure(&result, structure)
 }
 
-/// IR/0h-aware fitness report that treats typed self-loads as valid
-/// program inputs, matching the executable compiler pipeline.
-pub fn check_ir_program(exprs: &[chelis_deep::Expr]) -> FitnessReport {
-    let structure = structure_score(exprs);
-    let result = infer_ir_program(exprs);
-    if result.errors.is_empty() {
-        // chelis#858: report the inference product's own counters instead
-        // of fabricating `typed_nodes = count_nodes(exprs)`. The old
-        // fabrication meant a silently-skipped root could manufacture a
-        // vacuous 1.0 with node counts the checker never visited; a clean
-        // result still scores 1.0, but its counts are now the checked
-        // truth.
-        return FitnessReport {
-            score: 1.0,
-            components: FitnessComponents {
-                parse: 1.0,
-                structure,
-                names: 1.0,
-                types: 1.0,
-            },
-            errors: Vec::new(),
-            typed_nodes: result.typed_nodes,
-            untyped_nodes: result.total_nodes.saturating_sub(result.typed_nodes),
-            total_nodes: result.total_nodes,
-            unresolved_names: Vec::new(),
-        };
+/// Run one IR-aware inference session and return its fitness and checked product.
+pub fn analyze_ir_program(exprs: &[chelis_deep::Expr]) -> TypeAnalysisOutcome {
+    let structural = structural_stats(exprs);
+    let structure = structure_score_from_stats(structural);
+    match crate::infer::check_ir_program(exprs) {
+        Ok(program) => TypeAnalysisOutcome::Accepted {
+            fitness: clean_fitness_from_stats(structural, program.infer_stats()),
+            program: Box::new(program),
+        },
+        Err(result) => TypeAnalysisOutcome::Rejected {
+            fitness: rejected_ir_fitness(&result, structure),
+        },
     }
+}
 
-    let mut report = FitnessReport::from_infer_result_with_structure(&result, structure);
+/// Build the canonical clean fitness report from structural and inference data.
+///
+/// Contextual and layered callers use this function instead of copying fitness
+/// weights or clean-report formulas.
+pub fn clean_fitness_from_stats(structural: StructuralStats, infer: InferStats) -> FitnessReport {
+    let structure = structure_score_from_stats(structural);
+    let components = FitnessComponents {
+        parse: 1.0,
+        structure,
+        names: 1.0,
+        types: 1.0,
+    };
+    FitnessReport {
+        score: weighted_score(&components, false),
+        components,
+        errors: Vec::new(),
+        typed_nodes: infer.typed_nodes,
+        untyped_nodes: infer.total_nodes.saturating_sub(infer.typed_nodes),
+        total_nodes: infer.total_nodes,
+        unresolved_names: Vec::new(),
+    }
+}
+
+/// IR-aware fitness compatibility entry.
+///
+/// The report now comes from the same inference product as
+/// [`analyze_ir_program`].
+pub fn check_ir_program(exprs: &[chelis_deep::Expr]) -> FitnessReport {
+    match analyze_ir_program(exprs) {
+        TypeAnalysisOutcome::Rejected { fitness }
+        | TypeAnalysisOutcome::Accepted { fitness, .. } => fitness,
+    }
+}
+
+fn rejected_ir_fitness(result: &InferResult, structure: f64) -> FitnessReport {
+    let mut report = FitnessReport::from_infer_result_with_structure(result, structure);
 
     // IR adds executable-pipeline validation after type inference. Ensure
     // those failures reduce the fitness score as well, so score 1.0 always means
@@ -200,29 +237,28 @@ pub fn check_ir_program(exprs: &[chelis_deep::Expr]) -> FitnessReport {
 
     report.typed_nodes = effective_typed;
     report.untyped_nodes = effective_untyped;
-    // This branch is only reached with a non-empty error vector (the clean
-    // case returned above). A runtime-nodeless unit here therefore failed to
-    // type at declaration level, so its `types` component is 0.0, not a
-    // vacuous 1.0 (chelis#833 / §C4.4) -- the score lands near 0.4 rather
-    // than a near-perfect ceiling.
+    // A runtime-nodeless unit here failed at declaration level, so its
+    // `types` component is 0.0 instead of a vacuous 1.0.
     report.components.types = if report.total_nodes == 0 {
         0.0
     } else {
         effective_typed as f64 / report.total_nodes as f64
     };
-    report.score = weighted_score(&report.components, !report.errors.is_empty());
+    report.score = weighted_score(&report.components, true);
 
     report
 }
 
 fn structure_score(exprs: &[chelis_deep::Expr]) -> f64 {
-    let stats = structural_stats(exprs);
-    if exprs.is_empty() {
+    structure_score_from_stats(structural_stats(exprs))
+}
+
+fn structure_score_from_stats(stats: StructuralStats) -> f64 {
+    if stats.total_nodes == 0 {
         1.0
     } else {
-        let node_count = stats.total_nodes.max(1);
-        let valid = node_count.saturating_sub(stats.invalid_nodes);
-        valid as f64 / node_count as f64
+        let valid = stats.total_nodes.saturating_sub(stats.invalid_nodes);
+        valid as f64 / stats.total_nodes as f64
     }
 }
 
@@ -303,6 +339,32 @@ mod tests {
     fn score(src: &str) -> FitnessReport {
         let exprs = chelis_deep::parser::parse_str(src).unwrap();
         FitnessReport::from_infer_result(&crate::infer::infer_program(&exprs))
+    }
+
+    #[test]
+    fn accepted_analysis_uses_one_type_session() {
+        let exprs =
+            chelis_deep::parser::parse_str("(def {} answer (lit {type: (t-prim {} int32)} 42))")
+                .unwrap();
+        crate::session::reset_type_analysis_session_count();
+
+        assert!(matches!(
+            analyze_ir_program(&exprs),
+            TypeAnalysisOutcome::Accepted { .. }
+        ));
+        assert_eq!(crate::session::type_analysis_session_count(), 1);
+    }
+
+    #[test]
+    fn rejected_analysis_uses_one_type_session() {
+        let exprs = chelis_deep::parser::parse_str("(def {} answer (var {} missing))").unwrap();
+        crate::session::reset_type_analysis_session_count();
+
+        assert!(matches!(
+            analyze_ir_program(&exprs),
+            TypeAnalysisOutcome::Rejected { .. }
+        ));
+        assert_eq!(crate::session::type_analysis_session_count(), 1);
     }
 
     #[test]

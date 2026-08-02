@@ -91,25 +91,30 @@ CHELIS_LINT_CHECK: list[str] = [
 NEXTEST_WORKSPACE: list[str] = [
     "cargo", "nextest", "run", "--workspace", "--profile", "ci",
 ]
-# chelis#875: `cargo nextest` does not execute doctests, and every other
-# gate stage runs under nextest. The chelis#731 Phase 2 `ErrorWitness`
-# compile-fail oracles (crates/chelis-types/src/errors.rs) are rustdoc
-# ```compile_fail blocks, so before this stage existed they ran in NO
-# continuous job: the strongest artifact in that plan sat on the top rung
-# of docs/agent_quality_architecture.md's ladder with nothing driving it.
+# chelis#875: `cargo nextest` does not execute doctests. Each crate with
+# a compile-fail contract needs an explicit rustdoc command. The current
+# gate covers the type-system and compiler-pipeline contracts. The
+# C-backend CI job also runs that crate's doctests through an unfiltered
+# `cargo test -p chelis-backend-c` command.
 #
-# NARROWING, stated so a future widening is a conscious act: this is
-# scoped to `-p chelis-types`, not `--workspace --doc`. It buys the
-# oracles that motivated the issue at ~0.5s; a workspace-wide doctest
-# stage is a larger change (every crate's doc examples become gating) and
-# should be argued on its own merits rather than smuggled in here.
-#
-# Doctests run in exactly two places in this repo: this stage, and the
-# C-backend CI job's unfiltered `cargo test -p chelis-backend-c` (which
-# picks up that crate's privacy compile-fail doctests as a side effect of
-# having no `--lib`/`--test` filter). A `compile_fail` oracle added to any
-# OTHER crate runs nowhere until one of those two is extended.
+# Do not replace these commands with `--workspace --doc`. That command
+# makes every workspace doc example part of the gate without a reviewed
+# scope change.
 DOCTEST_TYPES: list[str] = ["cargo", "test", "-p", "chelis-types", "--doc"]
+DOCTEST_COMPILER_API: list[str] = [
+    "cargo",
+    "test",
+    "-p",
+    "chelis-compiler-api",
+    "--doc",
+]
+# This script verifies the exact compiler diagnostic from the standalone
+# raw-offset fixture. Its Python unit tests use fake runners and do not
+# execute the fixture.
+CHECKPOINT_COMPILE_FAIL: list[str] = [
+    ".venv/bin/python",
+    "scripts/check_checkpoint_compile_fail.py",
+]
 
 STAGES: dict[str, list[list[str]]] = {
     "lint-and-unit": [
@@ -118,6 +123,8 @@ STAGES: dict[str, list[list[str]]] = {
         FMT_CHECK,
         CHELIS_LINT_CHECK,
         DOCTEST_TYPES,
+        DOCTEST_COMPILER_API,
+        CHECKPOINT_COMPILE_FAIL,
     ],
     "integration": [
         NEXTEST_WORKSPACE,
@@ -137,6 +144,8 @@ LOCAL_STATIC_COMMANDS: list[list[str]] = [
     FMT_CHECK,
     CHELIS_LINT_CHECK,
     DOCTEST_TYPES,
+    DOCTEST_COMPILER_API,
+    CHECKPOINT_COMPILE_FAIL,
 ]
 
 LOCAL_ANNOTATION = "local + ci"

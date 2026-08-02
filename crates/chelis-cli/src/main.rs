@@ -1939,17 +1939,43 @@ fn cmd_check_one_on_grown_stack(
 
     let (report, effect_errors, linearity_errors, inferred_signatures_json) =
         if let Some(layered) = layered {
-            let inferred = if show_inferred {
-                format_inferred_signatures_json(&layered.typed_program)
-            } else {
-                String::new()
-            };
-            (
-                layered.fitness,
-                layered.effect_errors,
-                layered.linearity_errors,
-                inferred,
-            )
+            match layered {
+                chelis_compiler_api::LayeredCheck::Clean {
+                    fitness,
+                    typed_program,
+                } => {
+                    let inferred = if show_inferred {
+                        format_inferred_signatures_json(&typed_program)
+                    } else {
+                        String::new()
+                    };
+                    (fitness, Vec::new(), Vec::new(), inferred)
+                }
+                chelis_compiler_api::LayeredCheck::EffectRejected {
+                    fitness,
+                    effect_errors,
+                    typed_program,
+                } => {
+                    let inferred = if show_inferred {
+                        format_inferred_signatures_json(&typed_program)
+                    } else {
+                        String::new()
+                    };
+                    (fitness, effect_errors, Vec::new(), inferred)
+                }
+                chelis_compiler_api::LayeredCheck::LinearityRejected {
+                    fitness,
+                    linearity_errors,
+                    typed_program,
+                } => {
+                    let inferred = if show_inferred {
+                        format_inferred_signatures_json(&typed_program)
+                    } else {
+                        String::new()
+                    };
+                    (fitness, Vec::new(), linearity_errors, inferred)
+                }
+            }
         } else {
             // Monolithic path: full inference over the whole merged
             // program. Used when the input is not inside a reef package,
@@ -1981,36 +2007,9 @@ fn cmd_check_one_on_grown_stack(
                 let json = synthetic_check_report_with_error(EMPTY_PROGRAM_MESSAGE);
                 return Ok((json, true));
             }
-            let deep_exprs = expanded_desugared_program(&decls).map_err(boxed_string_error)?;
-            let report = chelis_types::check_ir_fitness(&deep_exprs);
-            let typed_program = chelis_types::check_typed_program(&deep_exprs);
-            let inferred = if show_inferred {
-                typed_program
-                    .as_ref()
-                    .ok()
-                    .map(format_inferred_signatures_json)
-                    .unwrap_or_else(|| "[]".to_string())
-            } else {
-                String::new()
-            };
-            // Linearity-F3 PR 2: `check_linearity` now returns
-            // module-wrapped violations as errors (the PR 1 warning
-            // channel was removed once the in-repo corpus was confirmed
-            // clean), so this is a flat Ok/Err dispatch with no separate
-            // warnings vector.
-            let (effect_errors, linearity_errors) = match &typed_program {
-                Ok(checked) => match chelis_effects::check_program(checked) {
-                    Ok(checked) => (
-                        Vec::new(),
-                        chelis_types::check_linearity(&checked)
-                            .err()
-                            .unwrap_or_default(),
-                    ),
-                    Err(errors) => (errors, Vec::new()),
-                },
-                Err(_) => (Vec::new(), Vec::new()),
-            };
-            (report, effect_errors, linearity_errors, inferred)
+            let prepared = chelis_compiler_api::pipeline::prepare_surf_decls(&decls, None)
+                .map_err(|error| boxed_string_error(error.to_string()))?;
+            check_prepared_for_cli(prepared, show_inferred)
         };
     assemble_check_json(
         report,
@@ -2019,6 +2018,51 @@ fn cmd_check_one_on_grown_stack(
         &inferred_signatures_json,
         show_inferred,
     )
+}
+
+fn check_prepared_for_cli(
+    prepared: chelis_compiler_api::pipeline::PreparedProgram,
+    show_inferred: bool,
+) -> (
+    chelis_types::FitnessReport,
+    Vec<chelis_effects::EffectError>,
+    Vec<chelis_types::errors::CheckError>,
+    String,
+) {
+    let analysis = match chelis_compiler_api::pipeline::analyze_prepared(prepared) {
+        chelis_compiler_api::pipeline::PreparedTypeAnalysisOutcome::Rejected { fitness } => {
+            return (
+                fitness,
+                Vec::new(),
+                Vec::new(),
+                if show_inferred {
+                    "[]".to_string()
+                } else {
+                    String::new()
+                },
+            );
+        }
+        chelis_compiler_api::pipeline::PreparedTypeAnalysisOutcome::Accepted(analysis) => *analysis,
+    };
+
+    let fitness = analysis.fitness().clone();
+    let inferred = if show_inferred {
+        format_inferred_signatures_json(analysis.program())
+    } else {
+        String::new()
+    };
+    match chelis_compiler_api::pipeline::complete_checks(
+        analysis,
+        chelis_compiler_api::pipeline::SemanticContext::Isolated,
+    ) {
+        Ok(_) => (fitness, Vec::new(), Vec::new(), inferred),
+        Err(chelis_compiler_api::pipeline::SemanticRejection::Effects { errors }) => {
+            (fitness, errors, Vec::new(), inferred)
+        }
+        Err(chelis_compiler_api::pipeline::SemanticRejection::Linearity { errors }) => {
+            (fitness, Vec::new(), errors, inferred)
+        }
+    }
 }
 
 /// Assemble the hand-built `chelis check` JSON report and the issue
@@ -2152,10 +2196,11 @@ fn assemble_check_json(
 /// A `.dp` is already-lowered IR by construction, so this skips the
 /// Surf desugar + macro-expand stage (`expanded_desugared_program`)
 /// that the `.ch` arm of [`cmd_check_one`] runs and parses the file
-/// directly through the strict Deep parser. Everything downstream of
-/// the parse is byte-for-byte the same pipeline the `.ch` arm uses:
-/// `check_ir_fitness` -> `check_typed_program` -> `check_program`
-/// (effects) -> `check_linearity`, then [`assemble_check_json`].
+/// directly through the strict Deep parser. Everything after the parse
+/// uses the same compiler-API pipeline as the `.ch` arm.
+///
+/// [`check_prepared_for_cli`] calls `analyze_prepared` and `complete_checks`.
+/// It then sends their typed results to [`assemble_check_json`].
 ///
 /// `parse_and_stamp_file` keeps the `.dp`
 /// check surface on the same closed-vocabulary tag gate as
@@ -2183,29 +2228,9 @@ fn cmd_check_one_deep(
         let json = synthetic_check_report_with_error(EMPTY_PROGRAM_MESSAGE);
         return Ok((json, true));
     }
-    let report = chelis_types::check_ir_fitness(&deep_exprs);
-    let typed_program = chelis_types::check_typed_program(&deep_exprs);
-    let inferred = if show_inferred {
-        typed_program
-            .as_ref()
-            .ok()
-            .map(format_inferred_signatures_json)
-            .unwrap_or_else(|| "[]".to_string())
-    } else {
-        String::new()
-    };
-    let (effect_errors, linearity_errors) = match &typed_program {
-        Ok(checked) => match chelis_effects::check_program(checked) {
-            Ok(checked) => (
-                Vec::new(),
-                chelis_types::check_linearity(&checked)
-                    .err()
-                    .unwrap_or_default(),
-            ),
-            Err(errors) => (errors, Vec::new()),
-        },
-        Err(_) => (Vec::new(), Vec::new()),
-    };
+    let prepared = chelis_compiler_api::pipeline::prepare_deep(deep_exprs, None);
+    let (report, effect_errors, linearity_errors, inferred) =
+        check_prepared_for_cli(prepared, show_inferred);
     assemble_check_json(
         report,
         &effect_errors,
@@ -2576,24 +2601,25 @@ fn cmd_build(
     // pruning did not drop any decls (so the full program is the
     // lowering target), reuse the cached chelis-std sub-context for the
     // type-check stage instead of re-inferring chelis-std. When pruning
-    // fires the layered whole-program `CheckedProgram` would not match
-    // the pruned lowering target, so the monolithic path is used.
+    // fires the layered whole-program checked state would not match
+    // the pruned lower target, so the monolithic path is used.
     // `check_layered_for_build` returns `Ok(None)` on any non-chelis-std
     // type/effect/linearity error, falling back to monolithic so the
     // error-path output stays byte-identical.
-    let layered_full_checked: Option<chelis_types::CheckedProgram> = match &prepared {
-        Some(prepared)
-            if !chelis_compiler_api::cache_disabled()
-                && pruned_deep_exprs.len() == full_deep_exprs.len() =>
-        {
-            chelis_compiler_api::check_layered_for_build(
-                &prepared.stdlib_decls,
-                &prepared.non_stdlib_decls,
-            )
-            .map_err(|e| boxed_string_error(compiler_error_messages(&e)))?
-        }
-        _ => None,
-    };
+    let layered_full_checked: Option<chelis_compiler_api::pipeline::CheckedCompilation> =
+        match &prepared {
+            Some(prepared)
+                if !chelis_compiler_api::cache_disabled()
+                    && pruned_deep_exprs.len() == full_deep_exprs.len() =>
+            {
+                chelis_compiler_api::check_layered_for_build(
+                    &prepared.stdlib_decls,
+                    &prepared.non_stdlib_decls,
+                )
+                .map_err(|e| boxed_string_error(compiler_error_messages(&e)))?
+            }
+            _ => None,
+        };
 
     let preserve_host_library_surface = if prepared.is_none()
         && target == "c"
@@ -2633,18 +2659,21 @@ fn cmd_build(
     // Use the layered whole-program `CheckedProgram` when it is available
     // (no-pruning case) and the deep-exprs being lowered are the full
     // program; otherwise check monolithically.
-    let checked = match layered_full_checked {
-        Some(checked) if deep_exprs.len() == checked.exprs().len() => checked,
-        _ => checked_program_with_effects(&deep_exprs).map_err(|e| format!("Check errors: {e}"))?,
+    let checked_compilation = match layered_full_checked {
+        Some(checked) if deep_exprs.len() == checked.program().exprs().len() => checked,
+        _ => checked_compilation_with_effects(&deep_exprs)
+            .map_err(|e| format!("Check errors: {e}"))?,
     };
-    chelis_effects::validate_build_target(&checked, target)
+    let checked = checked_compilation.program();
+    chelis_effects::validate_build_target(checked, target)
         .map_err(|errors| format_effect_errors(&errors))?;
-    reject_host_only_builtins_before_host_lowering(&checked, target)?;
-    let mut compiled_program = chelis_ir::host::try_lower_compiled_program(&checked)
+    reject_host_only_builtins_before_host_lowering(checked, target)?;
+    let mut compiled_program = chelis_ir::host::try_lower_compiled_program(checked)
         .map_err(|diagnostic| format!("Lowering error: {diagnostic}"))?;
     emit_summary_rejections(compiled_program.host.as_ref());
-    let mut dag = lower_checked_for_cli(&checked, compiled_program.host.as_ref())?;
-    let all_root_names = lowered_root_names_from_exprs(&deep_exprs, checked.type_env());
+    let mut dag =
+        lower_checked_for_cli(checked_compilation.clone(), compiled_program.host.as_ref())?;
+    let tensor_root_names = checked_compilation.root_metadata().tensor_names().clone();
     let entry_root_names =
         lowered_root_names_from_decls(&entry_decls, &deep_exprs, checked.type_env());
     let entry_display_root_names = root_names_from_decls(&entry_decls, checked.type_env())
@@ -2686,11 +2715,11 @@ fn cmd_build(
             })
             .collect();
     }
-    let selected = all_root_names
+    let selected = tensor_root_names
         .iter()
         .enumerate()
         .filter_map(|(index, name)| {
-            if entry_root_names.iter().any(|entry| entry == name) {
+            if entry_root_names.iter().any(|entry| entry == name.as_str()) {
                 dag.roots().get(index).copied()
             } else {
                 None
@@ -2776,7 +2805,7 @@ fn cmd_build(
                 .host
                 .as_ref()
                 .and_then(chelis_ir::host::preferred_tensor_entry_name)
-                .and_then(|name| chelis_ir::host::lower_named_tensor_entry_dag(&checked, name));
+                .and_then(|name| chelis_ir::host::lower_named_tensor_entry_dag(checked, name));
             if dag.roots().is_empty()
                 && preferred_entry_dag.is_none()
                 && host_requires_host_backend
@@ -2790,7 +2819,10 @@ fn cmd_build(
                 } else if !dag.roots().is_empty() {
                     dag.clone()
                 } else {
-                    lower_checked_for_cli(&checked, compiled_program.host.as_ref())?
+                    lower_checked_for_cli(
+                        checked_compilation.clone(),
+                        compiled_program.host.as_ref(),
+                    )?
                 };
                 hip_dag = chelis_ir::optimize::dead_code_eliminate(&hip_dag);
                 reject_unsupported_effect_ops(&hip_dag, "hip")?;
@@ -2817,7 +2849,7 @@ fn cmd_build(
                 .host
                 .as_ref()
                 .and_then(chelis_ir::host::preferred_tensor_entry_name)
-                .and_then(|name| chelis_ir::host::lower_named_tensor_entry_dag(&checked, name));
+                .and_then(|name| chelis_ir::host::lower_named_tensor_entry_dag(checked, name));
             if dag.roots().is_empty()
                 && preferred_entry_dag.is_none()
                 && host_requires_host_backend
@@ -2834,7 +2866,10 @@ fn cmd_build(
                 } else if !dag.roots().is_empty() {
                     dag.clone()
                 } else {
-                    lower_checked_for_cli(&checked, compiled_program.host.as_ref())?
+                    lower_checked_for_cli(
+                        checked_compilation.clone(),
+                        compiled_program.host.as_ref(),
+                    )?
                 };
                 metal_dag = chelis_ir::optimize::dead_code_eliminate(&metal_dag);
                 reject_unsupported_effect_ops(&metal_dag, "metal")?;
@@ -2908,16 +2943,18 @@ fn cmd_build_deep(
         pruned_deep_exprs
     };
     let symbolic_dims = collect_symbolic_dims_from_deep(&final_deep_exprs);
-    let checked = checked_program_with_effects(&final_deep_exprs)
+    let checked_compilation = checked_compilation_with_effects(&final_deep_exprs)
         .map_err(|e| format!("Check errors: {e}"))?;
-    chelis_effects::validate_build_target(&checked, target)
+    let checked = checked_compilation.program();
+    chelis_effects::validate_build_target(checked, target)
         .map_err(|errors| format_effect_errors(&errors))?;
-    reject_host_only_builtins_before_host_lowering(&checked, target)?;
-    let mut compiled_program = chelis_ir::host::try_lower_compiled_program(&checked)
+    reject_host_only_builtins_before_host_lowering(checked, target)?;
+    let mut compiled_program = chelis_ir::host::try_lower_compiled_program(checked)
         .map_err(|diagnostic| format!("Lowering error: {diagnostic}"))?;
     emit_summary_rejections(compiled_program.host.as_ref());
-    let mut dag = lower_checked_for_cli(&checked, compiled_program.host.as_ref())?;
-    let all_root_names = lowered_root_names_from_exprs(&final_deep_exprs, checked.type_env());
+    let mut dag =
+        lower_checked_for_cli(checked_compilation.clone(), compiled_program.host.as_ref())?;
+    let tensor_root_names = checked_compilation.root_metadata().tensor_names().clone();
     let entry_root_names = lowered_root_names_from_exprs(&entry_deep_exprs, checked.type_env());
     let entry_display_root_names = root_names_from_exprs(&entry_deep_exprs, checked.type_env())
         .into_iter()
@@ -2952,11 +2989,11 @@ fn cmd_build_deep(
             })
             .collect();
     }
-    let selected = all_root_names
+    let selected = tensor_root_names
         .iter()
         .enumerate()
         .filter_map(|(index, name)| {
-            if entry_root_names.iter().any(|entry| entry == name) {
+            if entry_root_names.iter().any(|entry| entry == name.as_str()) {
                 dag.roots().get(index).copied()
             } else {
                 None
@@ -3023,7 +3060,7 @@ fn cmd_build_deep(
                 .host
                 .as_ref()
                 .and_then(chelis_ir::host::preferred_tensor_entry_name)
-                .and_then(|name| chelis_ir::host::lower_named_tensor_entry_dag(&checked, name));
+                .and_then(|name| chelis_ir::host::lower_named_tensor_entry_dag(checked, name));
             if dag.roots().is_empty()
                 && preferred_entry_dag.is_none()
                 && host_requires_host_backend
@@ -3037,7 +3074,10 @@ fn cmd_build_deep(
                 } else if !dag.roots().is_empty() {
                     dag.clone()
                 } else {
-                    lower_checked_for_cli(&checked, compiled_program.host.as_ref())?
+                    lower_checked_for_cli(
+                        checked_compilation.clone(),
+                        compiled_program.host.as_ref(),
+                    )?
                 };
                 hip_dag = chelis_ir::optimize::dead_code_eliminate(&hip_dag);
                 reject_unsupported_effect_ops(&hip_dag, "hip")?;
@@ -3060,7 +3100,7 @@ fn cmd_build_deep(
                 .host
                 .as_ref()
                 .and_then(chelis_ir::host::preferred_tensor_entry_name)
-                .and_then(|name| chelis_ir::host::lower_named_tensor_entry_dag(&checked, name));
+                .and_then(|name| chelis_ir::host::lower_named_tensor_entry_dag(checked, name));
             if dag.roots().is_empty()
                 && preferred_entry_dag.is_none()
                 && host_requires_host_backend
@@ -3074,7 +3114,10 @@ fn cmd_build_deep(
                 } else if !dag.roots().is_empty() {
                     dag.clone()
                 } else {
-                    lower_checked_for_cli(&checked, compiled_program.host.as_ref())?
+                    lower_checked_for_cli(
+                        checked_compilation.clone(),
+                        compiled_program.host.as_ref(),
+                    )?
                 };
                 metal_dag = chelis_ir::optimize::dead_code_eliminate(&metal_dag);
                 reject_unsupported_effect_ops(&metal_dag, "metal")?;
@@ -9227,14 +9270,29 @@ fn format_eval_result(result: &chelis_compiler_api::schema::EvalResult) -> Strin
 // text pre-rendered by the runtime's single renderer (see
 // `format_eval_result` above and `EvaluatedRoot::display`).
 
+fn checked_compilation_with_effects(
+    deep_exprs: &[chelis_deep::ast::Expr],
+) -> Result<chelis_compiler_api::pipeline::CheckedCompilation, String> {
+    let prepared = chelis_compiler_api::pipeline::prepare_deep(deep_exprs.to_vec(), None);
+    let analysis = match chelis_compiler_api::pipeline::analyze_prepared(prepared) {
+        chelis_compiler_api::pipeline::PreparedTypeAnalysisOutcome::Accepted(analysis) => *analysis,
+        chelis_compiler_api::pipeline::PreparedTypeAnalysisOutcome::Rejected { fitness } => {
+            return Err(format!("Type errors: {:?}", fitness.errors));
+        }
+    };
+    chelis_compiler_api::pipeline::complete_checks(
+        analysis,
+        chelis_compiler_api::pipeline::SemanticContext::Isolated,
+    )
+    .map_err(|rejection| rejection.to_string())
+}
+
 fn checked_program_with_effects(
     deep_exprs: &[chelis_deep::ast::Expr],
 ) -> Result<chelis_types::CheckedProgram, String> {
-    let checked = chelis_types::check_ir_program(deep_exprs)
-        .map_err(|r| format!("Type errors: {:?}", r.errors))?;
-    let checked =
-        chelis_effects::check_program(&checked).map_err(|errors| format_effect_errors(&errors))?;
-    chelis_types::check_linearity(&checked).map_err(|errors| format_type_errors(&errors))
+    let checked = checked_compilation_with_effects(deep_exprs)?;
+    let (_, _, program, _) = checked.into_parts();
+    Ok(program)
 }
 
 /// Emit any sparse-helper summary rejections collected during host
@@ -9265,10 +9323,10 @@ fn emit_summary_rejections(host: Option<&chelis_ir::host::ConcreteHostProgram>) 
 fn expanded_desugared_program(
     decls: &[chelis_surf::ast::Decl],
 ) -> Result<Vec<chelis_deep::ast::Expr>, String> {
-    let deep = chelis_surf::desugar::desugar_program(decls);
-    chelis_macros::expand_program(&deep, &chelis_macros::ExpansionOptions::default())
-        .map(|expanded| normalize_deep_nodes(expanded.into_exprs()))
-        .map_err(|err| err.to_string())
+    chelis_compiler_api::pipeline::prepare_surf_decls(decls, None)
+        .map(chelis_compiler_api::pipeline::PreparedProgram::into_expanded_deep)
+        .map(normalize_deep_nodes)
+        .map_err(|error| error.to_string())
 }
 
 /// Recursively convert `Expr::Node` → `Expr::List` and `Expr::BareList` →
@@ -9331,29 +9389,20 @@ fn normalize_deep_node(expr: &chelis_deep::ast::Expr) -> chelis_deep::ast::Expr 
 }
 
 fn lower_checked_for_cli(
-    checked: &chelis_types::CheckedProgram,
+    checked: chelis_compiler_api::pipeline::CheckedCompilation,
     host_program: Option<&chelis_ir::host::ConcreteHostProgram>,
 ) -> Result<chelis_ir::Dag, Box<dyn std::error::Error>> {
-    match chelis_ir::lower::try_lower_program(checked) {
-        Ok(dag) => Ok(dag),
-        // Issue #197: a *fatal* lowering diagnostic (the AD-rejection
-        // path for `grad` over a non-differentiable op) must propagate
-        // even when the host program would otherwise be able to take
-        // over. The host fallback emits an unresolved call to the
-        // grad-function symbol; we must surface the AD-rejection text
-        // instead so the user sees `floor is non-differentiable
-        // (piecewise constant)` rather than a compile-clean build
-        // that fails at gcc-link time.
-        Err(diagnostic)
-            if !diagnostic.fatal
-                && host_program
-                    .map(chelis_ir::host::host_program_requires_host_backend)
-                    .unwrap_or(false) =>
-        {
-            Ok(chelis_ir::Dag::new())
-        }
-        Err(diagnostic) => Err(boxed_string_error(diagnostic.to_string())),
-    }
+    let mode = if host_program
+        .map(chelis_ir::host::host_program_requires_host_backend)
+        .unwrap_or(false)
+    {
+        chelis_compiler_api::pipeline::LoweringMode::AllowHostBackend
+    } else {
+        chelis_compiler_api::pipeline::LoweringMode::Strict
+    };
+    chelis_compiler_api::pipeline::lower_checked(checked, mode)
+        .map(chelis_compiler_api::pipeline::LoweredCompilation::into_dag)
+        .map_err(|rejection| boxed_string_error(rejection.to_string()))
 }
 
 fn boxed_string_error(message: String) -> Box<dyn std::error::Error> {
@@ -9361,14 +9410,6 @@ fn boxed_string_error(message: String) -> Box<dyn std::error::Error> {
 }
 
 fn format_effect_errors(errors: &[chelis_effects::EffectError]) -> String {
-    errors
-        .iter()
-        .map(|error| error.message.clone())
-        .collect::<Vec<_>>()
-        .join("; ")
-}
-
-fn format_type_errors(errors: &[chelis_types::errors::CheckError]) -> String {
     errors
         .iter()
         .map(|error| error.message.clone())
@@ -9833,23 +9874,15 @@ fn collect_symbolic_dims_expr(expr: &chelis_deep::ast::Expr, dims: &mut Vec<Stri
 /// `docs/investigations/redundant_linearity_autofix_architecture.md`
 /// (Path 1B).
 fn typed_pipeline_accepts_surf(source: &str) -> bool {
-    let Ok(decls) = chelis_surf::parser::parse_str(source) else {
-        return false;
-    };
-    let Ok(deep_exprs) = expanded_desugared_program(&decls) else {
-        return false;
-    };
-    let report = chelis_types::check_ir_fitness(&deep_exprs);
-    if !report.errors.is_empty() {
-        return false;
-    }
-    let Ok(typed_program) = chelis_types::check_typed_program(&deep_exprs) else {
-        return false;
-    };
-    let Ok(effect_checked) = chelis_effects::check_program(&typed_program) else {
-        return false;
-    };
-    chelis_types::check_linearity(&effect_checked).is_ok()
+    matches!(
+        chelis_compiler_api::pipeline::run_source(chelis_compiler_api::pipeline::PipelineRequest {
+            source_kind: chelis_compiler_api::schema::SourceKind::Surf,
+            source,
+            entry: None,
+            goal: chelis_compiler_api::pipeline::PipelineGoal::FullCheck,
+        },),
+        Ok(chelis_compiler_api::pipeline::PipelineOutcome::Checked(_))
+    )
 }
 
 /// `chelis lint` — naming-convention lint per `spec/01-nomenclature.md`.

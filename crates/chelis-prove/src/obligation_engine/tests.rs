@@ -13,18 +13,31 @@ use super::*;
 
 /// Run a single-module Surf source through the obligation engine at the
 /// given tier and return the outcomes.
-fn run(surf: &str, tier: &str) -> Vec<ObligationOutcome> {
-    let opts = ObligationRunOptions {
+fn options(tier: &str) -> ObligationRunOptions {
+    ObligationRunOptions {
         seed: 0,
         samples: 16,
         smt_timeout_ms: 2000,
         tier: tier.to_string(),
         only: None,
         invariant_min_rate: 0.01,
-    };
-    match run_surf_source_obligations(surf, &opts).expect("engine run") {
+    }
+}
+
+fn run(surf: &str, tier: &str) -> Vec<ObligationOutcome> {
+    match run_surf_source_obligations(surf, &options(tier)).expect("engine run") {
         ObligationRunResult::Ran(o) => o,
         other => panic!("expected a clean module to run, got {other:?}"),
+    }
+}
+
+fn run_deep(surf: &str, tier: &str) -> Vec<ObligationOutcome> {
+    let declarations = chelis_surf::parser::parse_str(surf).expect("parse Surf fixture");
+    let expressions = chelis_surf::desugar::desugar_program(&declarations);
+    let source = chelis_deep::printer::print_canonical(&expressions);
+    match run_deep_source_obligations(&source, &options(tier)).expect("engine run") {
+        ObligationRunResult::Ran(outcomes) => outcomes,
+        other => panic!("expected a clean Deep module to run, got {other:?}"),
     }
 }
 
@@ -163,6 +176,26 @@ fn u1_clean_scalar_producer_still_passes() {
         only_outcome(&outcomes).status,
         ObligationStatus::Passed,
         "a clean scalar producer still passes under the unified chokepoint"
+    );
+}
+
+#[test]
+fn typed_deep_clean_scalar_producer_still_passes() {
+    let outcomes = run_deep(SCALAR_CLEAN, "fuzz-only");
+    assert_eq!(
+        only_outcome(&outcomes).status,
+        ObligationStatus::Passed,
+        "typed Deep input retains the clean producer obligation"
+    );
+}
+
+#[test]
+fn typed_deep_nonfinite_scalar_producer_still_fails() {
+    let outcomes = run_deep(SCALAR_INF_INEQ, "fuzz-only");
+    assert_eq!(
+        only_outcome(&outcomes).status,
+        ObligationStatus::Failed,
+        "typed Deep input retains the failing producer obligation"
     );
 }
 

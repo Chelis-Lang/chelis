@@ -185,12 +185,11 @@ class WorkspaceMemberPackagesTests(unittest.TestCase):
 
 
 class LocalCommandListTests(unittest.TestCase):
-    def test_static_subset_is_exactly_clippy_fmt_lint_doctest(self):
-        # The doctest stage joined the static subset in chelis#875: it is
-        # the only thing that drives the chelis#731 `ErrorWitness`
-        # compile-fail oracles, since `cargo nextest` (every other stage's
-        # runner) does not execute doctests. Asserted by exact list so a
-        # stage cannot be dropped from the pre-push subset silently.
+    def test_static_subset_has_the_exact_compile_time_contracts(self):
+        # `cargo nextest` does not execute doctests. The static subset
+        # drives the chelis#731 `ErrorWitness` contracts, the compiler
+        # pipeline artifact contracts, and the raw-checkpoint fixture.
+        # Assert the exact list so no pre-push stage disappears silently.
         rendered = [gate.render(c) for c in gate.local_command_list([])]
         self.assertEqual(
             rendered,
@@ -200,6 +199,8 @@ class LocalCommandListTests(unittest.TestCase):
                 "cargo run -p chelis-cli --bin chelis --quiet -- "
                 "lint --check .",
                 "cargo test -p chelis-types --doc",
+                "cargo test -p chelis-compiler-api --doc",
+                ".venv/bin/python scripts/check_checkpoint_compile_fail.py",
             ],
         )
 

@@ -10,6 +10,32 @@ use crate::context::TypeEnv;
 use crate::errors::CheckError;
 use crate::infer::{CheckedProgram, InferResult, InferStats, SignatureInferenceMetadata};
 
+#[cfg(test)]
+thread_local! {
+    static TYPE_ANALYSIS_SESSION_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_type_analysis_session_count() {
+    TYPE_ANALYSIS_SESSION_COUNT.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn type_analysis_session_count() -> usize {
+    TYPE_ANALYSIS_SESSION_COUNT.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn record_type_analysis_session() {
+    TYPE_ANALYSIS_SESSION_COUNT.with(|count| count.set(count.get() + 1));
+}
+
+/// A sink-issued boundary for later diagnostic iteration.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct DiagnosticCheckpoint {
+    offset: usize,
+}
+
 /// The sole destination accepted by witness-minting checker code.
 ///
 /// Its storage and constructor are private to this module.  The narrow
@@ -28,16 +54,65 @@ impl DiagnosticSink<'_> {
         self.errors.is_empty()
     }
 
-    pub(crate) fn len(&self) -> usize {
-        self.errors.len()
+    pub(crate) fn checkpoint(&self) -> DiagnosticCheckpoint {
+        DiagnosticCheckpoint {
+            offset: self.errors.len(),
+        }
     }
 
     pub(crate) fn iter(&self) -> std::slice::Iter<'_, CheckError> {
         self.errors.iter()
     }
 
-    pub(crate) fn iter_from(&self, start: usize) -> std::slice::Iter<'_, CheckError> {
-        self.errors[start..].iter()
+    pub(crate) fn iter_since(
+        &self,
+        checkpoint: DiagnosticCheckpoint,
+    ) -> std::slice::Iter<'_, CheckError> {
+        self.errors[checkpoint.offset..].iter()
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_checkpoint_tests {
+    use super::*;
+    use crate::errors::CheckErrorKind;
+
+    fn diagnostic(message: &str) -> CheckError {
+        CheckError::new(CheckErrorKind::Other, message.to_string(), vec![])
+    }
+
+    #[test]
+    fn iter_since_includes_diagnostics_after_the_checkpoint() {
+        let mut errors = Vec::new();
+        let mut sink = DiagnosticSink {
+            errors: &mut errors,
+        };
+        let checkpoint = sink.checkpoint();
+        sink.push(diagnostic("first new diagnostic"));
+        sink.push(diagnostic("second new diagnostic"));
+
+        let messages = sink
+            .iter_since(checkpoint)
+            .map(|error| error.message.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(messages, ["first new diagnostic", "second new diagnostic"]);
+    }
+
+    #[test]
+    fn iter_since_excludes_diagnostics_before_the_checkpoint() {
+        let mut errors = Vec::new();
+        let mut sink = DiagnosticSink {
+            errors: &mut errors,
+        };
+        sink.push(diagnostic("earlier diagnostic"));
+        let checkpoint = sink.checkpoint();
+        sink.push(diagnostic("new diagnostic"));
+
+        let messages = sink
+            .iter_since(checkpoint)
+            .map(|error| error.message.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(messages, ["new diagnostic"]);
     }
 }
 
@@ -248,6 +323,8 @@ pub(crate) fn check_ir_with_signature_context(
     signature_context: &SignatureInferenceMetadata,
     exprs: &[chelis_deep::Expr],
 ) -> Result<CheckedProgram, InferResult> {
+    #[cfg(test)]
+    record_type_analysis_session();
     crate::infer::run_on_grown_stack(|| {
         run_result(|sink| {
             crate::infer::check_ir_with_signature_context_in_session(

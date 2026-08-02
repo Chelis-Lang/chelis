@@ -4,11 +4,15 @@ pub mod context;
 pub mod decode;
 pub mod fragment;
 pub mod layered;
+pub mod pipeline;
 pub mod prune;
 pub(crate) mod runtime;
 pub mod schema;
 pub mod stdlib_cache;
 pub mod target_capability;
+
+#[cfg(test)]
+mod source_arch;
 
 pub use chelis_types::{LinkedProgramGuard, install_linked_program_guard};
 pub use compiler::{
@@ -25,7 +29,7 @@ pub use context::{
 /// it in V1 -- see `decode` module docs.
 pub use decode::{DecodeError, decode_adt_value, try_decode_adt_value};
 pub use fragment::{
-    DeepErrorPath, EditValidationError, EditValidationReport, ReplacementError, ReplacementReport,
+    DeepErrorPath, EditValidationError, ReplacementError, ReplacementReport, ValidatedModule,
     check_body_replacement, check_whole_module_edit,
 };
 pub use layered::{LayeredCheck, check_layered, check_layered_for_build, stdlib_structural_stats};

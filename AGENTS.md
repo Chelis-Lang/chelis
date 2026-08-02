@@ -406,6 +406,8 @@ python3 scripts/gate.py --list
 # cargo fmt --all -- --check  # local + ci
 # cargo run -p chelis-cli --bin chelis --quiet -- lint --check .  # local + ci
 # cargo test -p chelis-types --doc  # local + ci
+# cargo test -p chelis-compiler-api --doc  # local + ci
+# .venv/bin/python scripts/check_checkpoint_compile_fail.py  # local + ci
 # cargo nextest run --workspace --profile ci  # ci-owned
 # # --local also runs: cargo nextest run -p <crate> for each crate changed vs origin/main
 ```
@@ -415,20 +417,23 @@ The gate runs `cargo nextest run` (CI's actual runner), not `cargo test
 naming gate). The sanitizer, macOS-smoke, LOC-report, no-AI-authorship,
 docs, and smt-build CI jobs are out of scope for this script by design.
 
-The `cargo test -p chelis-types --doc` stage exists because `cargo
-nextest` does not execute doctests and every other gate stage runs
-under nextest (chelis#875). Without it the chelis#731 Phase 2
-`ErrorWitness` compile-fail oracles ran in no continuous job. It is
-deliberately scoped to one crate rather than `--workspace --doc`: a
-workspace-wide doctest stage makes every crate's doc examples gating
-and should be argued on its own merits, not inherited from this one.
+The two explicit rustdoc stages exist because `cargo nextest` does not
+execute doctests. The `chelis-types` command runs the chelis#731
+`ErrorWitness` contracts. The `chelis-compiler-api` command runs the
+compiler-pipeline artifact contracts.
 
-**Doctests only run where something invokes them.** Today that is two
-places: this stage (`chelis-types`) and the C-backend job's
-`cargo test -p chelis-backend-c`, which is unfiltered and so picks up
-that crate's privacy compile-fail doctests. A `compile_fail` oracle
-added to any other crate runs nowhere until this stage is widened or
-that crate gains an equivalent invocation, in the same change set.
+The gate does not use `--workspace --doc`. That command makes every
+workspace doc example part of the gate without a reviewed scope change.
+
+**Doctests only run where something invokes them.** The canonical gate
+invokes doctests for `chelis-types` and `chelis-compiler-api`. The
+C-backend job also runs `cargo test -p chelis-backend-c` without a
+filter. A `compile_fail` oracle in another crate runs nowhere until that
+crate gains an equivalent invocation in the same change set.
+
+The checkpoint script checks the raw-offset fixture against exact Rust
+diagnostics. Its Python unit tests use fake runners and do not execute
+the fixture.
 
 Local pre-push gate (chelis#360):
 
@@ -437,8 +442,8 @@ python3 scripts/gate.py --local
 ```
 
 `--local` runs the developer pre-push subset: workspace clippy
-(`-D warnings`, compile-only), `cargo fmt --check`,
-`chelis lint --check .`, `cargo test -p chelis-types --doc`, and
+(`-D warnings`, compile-only), `cargo fmt --check`, `chelis lint
+--check .`, both explicit rustdoc commands, the checkpoint fixture, and
 `cargo nextest run -p <crate>` for each
 crate changed vs `origin/main` (committed diff plus uncommitted work;
 owning packages are resolved from each member's `Cargo.toml`, not the

@@ -5,8 +5,7 @@ use chelis_backend_c::CodegenResult;
 use chelis_backend_hip::HipCodegenResult;
 use chelis_deep::Expr as DeepExpr;
 use chelis_ir::dag::{Dag, DimInfo, FusedInput, FusedStepOp, NodeId, RiscOp, RtDim, TensorType};
-use chelis_ir::eval::{self};
-use chelis_ir::lower::top_level_lowering_map;
+use chelis_ir::eval;
 use chelis_surf::ast::{
     BinOp, Decl, Expr, ImportKind, LetBinding, LetPattern, Literal, MatchArm, Param, Pattern,
     TypeExpr, UnaryOp, Variant, VariantFields,
@@ -178,7 +177,7 @@ pub fn replace_function_body(
 
     Ok(crate::schema::ReplaceFunctionBodyResult {
         changed_def_deep: chelis_deep::printer::print_expr(&changed_def),
-        module_deep: chelis_deep::printer::print_canonical(&report.rewritten_module),
+        module_deep: chelis_deep::printer::print_canonical(report.validated_module.as_exprs()),
     })
 }
 
@@ -224,7 +223,7 @@ pub fn add_function(request: AddFunctionRequest) -> Result<AddFunctionResult> {
     Ok(AddFunctionResult {
         added_def_deep: chelis_deep::printer::print_expr(&parsed.def),
         added_defsig_deep: parsed.defsig.as_ref().map(chelis_deep::printer::print_expr),
-        module_deep: chelis_deep::printer::print_canonical(&report.rewritten_module),
+        module_deep: chelis_deep::printer::print_canonical(report.as_exprs()),
     })
 }
 
@@ -297,7 +296,7 @@ pub fn replace_function(request: ReplaceFunctionRequest) -> Result<ReplaceFuncti
             .replaced_defsig
             .as_ref()
             .map(chelis_deep::printer::print_expr),
-        module_deep: chelis_deep::printer::print_canonical(&report.rewritten_module),
+        module_deep: chelis_deep::printer::print_canonical(report.as_exprs()),
     })
 }
 
@@ -319,7 +318,7 @@ pub fn rename(request: RenameRequest) -> Result<RenameResult> {
             .renamed_defsig
             .as_ref()
             .map(chelis_deep::printer::print_expr),
-        module_deep: chelis_deep::printer::print_canonical(&report.rewritten_module),
+        module_deep: chelis_deep::printer::print_canonical(report.as_exprs()),
         renamed_references: edited.renamed_references,
     })
 }
@@ -350,7 +349,7 @@ pub fn change_signature(request: ChangeSignatureRequest) -> Result<ChangeSignatu
     Ok(ChangeSignatureResult {
         changed_def_deep: chelis_deep::printer::print_expr(&edited.changed_def),
         changed_defsig_deep: chelis_deep::printer::print_expr(&edited.changed_defsig),
-        module_deep: chelis_deep::printer::print_canonical(&report.rewritten_module),
+        module_deep: chelis_deep::printer::print_canonical(report.as_exprs()),
         rewritten_calls: edited.rewritten_calls,
     })
 }
@@ -377,7 +376,7 @@ pub fn add_property(request: AddPropertyRequest) -> Result<AddPropertyResult> {
     Ok(AddPropertyResult {
         added_property_def_deep: chelis_deep::printer::print_expr(&parsed.def),
         added_defsig_deep: parsed.defsig.as_ref().map(chelis_deep::printer::print_expr),
-        module_deep: chelis_deep::printer::print_canonical(&report.rewritten_module),
+        module_deep: chelis_deep::printer::print_canonical(report.as_exprs()),
     })
 }
 
@@ -694,8 +693,20 @@ fn wire_deep_error_path(path: crate::fragment::DeepErrorPath) -> crate::schema::
 }
 
 pub fn check(request: crate::schema::CheckRequest) -> Result<CheckResult> {
-    let deep_exprs = deep_exprs_from_source(request.source_kind, &request.source)?;
-    let report = chelis_types::check_ir_fitness(&deep_exprs);
+    let outcome = crate::pipeline::run_source(crate::pipeline::PipelineRequest {
+        source_kind: request.source_kind,
+        source: &request.source,
+        entry: None,
+        goal: crate::pipeline::PipelineGoal::TypeAnalysis,
+    })
+    .map_err(pipeline_rejection_to_compiler_error)?;
+    let crate::pipeline::PipelineOutcome::TypeAnalysis(analysis) = outcome else {
+        unreachable!("the type-analysis goal returns only a type-analysis outcome")
+    };
+    let report = match analysis {
+        chelis_types::TypeAnalysisOutcome::Rejected { fitness }
+        | chelis_types::TypeAnalysisOutcome::Accepted { fitness, .. } => fitness,
+    };
     Ok(CheckResult {
         score: report.score,
         components: FitnessComponents {
@@ -728,8 +739,8 @@ pub fn lower(request: LowerRequest) -> Result<LowerResult> {
         dag,
         named_roots: compiled
             .named_roots
-            .into_iter()
-            .map(|(k, v)| (k, v.0))
+            .into_entries()
+            .map(|(name, node)| (name.into_string(), node.0))
             .collect(),
     })
 }
@@ -1043,142 +1054,36 @@ fn compile_new_source_in_context(
     let rewritten =
         chelis_reef::rewrite_entry_decls_with_reef_graph(&context.reef_state, &flat_decls)
             .map_err(|err| stage_error("reef", err, "reef_error"))?;
-    let new_deep = chelis_macros::expand_program(
-        &chelis_surf::desugar::desugar_program(&rewritten),
-        &chelis_macros::ExpansionOptions::default(),
-    )
-    .map_err(|err| stage_error("desugar", err.to_string(), "macro_error"))?
-    .into_exprs();
+    let prepared = crate::pipeline::prepare_surf_decls(&rewritten, None).map_err(|error| {
+        pipeline_rejection_to_compiler_error(crate::pipeline::PipelineRejection::Preparation(error))
+    })?;
 
-    // Phase C: type-check new code against the library type env.
-    let new_checked = chelis_types::check_ir_with_signature_context(
+    // Type-check the new code once against the library context, then run the
+    // shared effect and linearity transitions.
+    let analysis = crate::pipeline::analyze_prepared_with_context(
+        prepared,
         &context.type_env,
         context.library_checked.signature_inference(),
-        &new_deep,
     )
     .map_err(|report| CompilerError {
         stage: "check".to_string(),
         errors: report.errors.iter().map(check_error_diagnostic).collect(),
     })?;
-
-    // Phase D: effects checker, library + new.
-    let new_checked =
-        chelis_effects::check_effects_with_context(&context.library_checked, &new_checked)
-            .map_err(|errors| CompilerError {
-                stage: "effects".to_string(),
-                errors: errors
-                    .iter()
-                    .map(|error| Diagnostic {
-                        kind: "effect_error".to_string(),
-                        message: error.message.clone(),
-                        severity: 0.8,
-                        expected: None,
-                        got: None,
-                        suggestions: vec![],
-                        span: None,
-                        deep_path: None,
-                    })
-                    .collect(),
-            })?;
-
-    // Phase E: linearity checker, library + new.
-    let new_checked =
-        chelis_types::check_linearity_with_context(&context.library_checked, &new_checked)
-            .map_err(|errors| CompilerError {
-                stage: "linearity".to_string(),
-                errors: errors.iter().map(check_error_diagnostic).collect(),
-            })?;
-
-    // Build the same CompiledSource shape `compile_source` produces, but
-    // for the new code only — the library state lives in the composed
-    // Dag and the type-env is unioned so eval-time name resolution
-    // continues to find library symbols.
-    let all_root_names =
-        root_names_from_checked_exprs(new_checked.exprs(), new_checked.type_env(), false);
-    // For the lowered-only filter (which feeds the tensor evaluator's
-    // root list), use the context-aware lowering map so a new-code def
-    // referencing a library function inherits the library's
-    // lowered-vs-host classification — matching the monolithic
-    // `lower_program(library + new)` decision byte-for-byte.
-    let combined_lowered_names = chelis_ir::lower::top_level_lowering_map_with_context(
+    let checked = crate::pipeline::complete_checks(
+        analysis,
+        crate::pipeline::SemanticContext::Library(&context.library_checked),
+    )
+    .map_err(|rejection| pipeline_rejection_to_compiler_error(rejection.into()))?;
+    let lowered = crate::pipeline::lower_checked_with_context(
+        checked,
         &context.library_dag,
-        new_checked.exprs(),
-        new_checked.type_env(),
-    );
-    let new_tensor_root_names = root_names_from_checked_exprs_with_lowered_map(
-        new_checked.exprs(),
-        new_checked.type_env(),
-        Some(&combined_lowered_names),
-    );
-
-    // Lower against the cached library DAG.
-    //
-    // chelis#730 Phase 1: same auxiliary-DAG rule as `compile_source` -
-    // when the new code has zero tensor roots, a NON-FATAL lowering
-    // rejection (e.g. an unsupported op inside a def the host runtime
-    // evaluates) is absorbed and eval proceeds without new-code DAG
-    // roots; the placeholder that used to keep this call total by
-    // accident is gone. Fatal diagnostics and tensor-rooted programs
-    // still surface the error.
-    let composed_dag = match chelis_ir::lower::try_lower_program_with_context(
-        &context.library_dag,
-        &new_checked,
-    ) {
-        Ok(dag) => dag,
-        Err(diagnostic) if !diagnostic.fatal && new_tensor_root_names.is_empty() => {
-            context.library_dag.dag.clone()
-        }
-        Err(diagnostic) => {
-            return Err(stage_error_with_span(
-                "lower",
-                diagnostic.to_string(),
-                "lower_error",
-                deep_span_to_schema(diagnostic.span),
-            ));
-        }
-    };
-
-    // The composed Dag's roots are [library_roots ..., new_roots ...].
-    // Slice to the new-code tail so `tensor_root_names` aligns 1:1 with
-    // the roots `eval_compiled` will iterate.
-    let library_root_count = context.library_dag.dag.roots().len();
-    let composed_roots = composed_dag.roots();
-    let new_root_slice_start = library_root_count.min(composed_roots.len());
-    let new_root_ids: Vec<NodeId> = composed_roots[new_root_slice_start..].to_vec();
-
-    if !new_tensor_root_names.is_empty() && new_root_ids.len() != new_tensor_root_names.len() {
-        return Err(stage_error(
-            "lower",
-            format!(
-                "lowered new-code root count mismatch: expected {} named roots, got {}",
-                new_tensor_root_names.len(),
-                new_root_ids.len()
-            ),
-            "lower_error",
-        ));
-    }
-
-    let named_roots = new_tensor_root_names
-        .iter()
-        .cloned()
-        .zip(new_root_ids.iter().copied())
-        .collect::<BTreeMap<_, _>>();
-
-    let mut forward_nodes_by_name = named_roots.clone();
-    for node in composed_dag.nodes() {
-        if let RiscOp::Load { name } = &node.op {
-            forward_nodes_by_name
-                .entry(name.as_str().to_string())
-                .or_insert(node.id);
-        }
-    }
-
-    // Replace the composed Dag's roots vector with just the new-code
-    // roots so `eval_compiled`'s iteration over `dag.roots()` aligns with
-    // `tensor_root_names`. The composed Dag keeps every node (library +
-    // new) so dependency lookups during evaluation still resolve.
-    let mut dag_for_eval = composed_dag;
-    dag_for_eval.set_roots(new_root_ids);
+        crate::pipeline::LoweringMode::AllowHostOnly,
+    )
+    .map_err(pipeline_rejection_to_compiler_error)?;
+    let lowered_parts = lowered.into_parts();
+    let (_, _, new_checked, root_metadata) = lowered_parts.checked.into_parts();
+    let all_root_names = root_metadata.all_names().clone();
+    let new_tensor_root_names = root_metadata.tensor_names().clone();
 
     // Phase G' — carry the library defs + lowered classification into
     // the runtime. Without this, the host evaluator's `top_level_defs`
@@ -1196,11 +1101,11 @@ fn compile_new_source_in_context(
 
     Ok(CompiledSource {
         checked: new_checked,
-        dag: dag_for_eval,
+        dag: lowered_parts.dag,
         all_root_names,
         tensor_root_names: new_tensor_root_names,
-        named_roots,
-        forward_nodes_by_name,
+        named_roots: lowered_parts.named_roots,
+        forward_node_index: lowered_parts.forward_node_index,
         library_runtime: Some(library_runtime),
     })
 }
@@ -1350,7 +1255,10 @@ fn eval_compiled(
         .iter()
         .enumerate()
         .filter_map(|(index, name)| {
-            if selected.as_ref().is_some_and(|set| !set.contains(name)) {
+            if selected
+                .as_ref()
+                .is_some_and(|set| !set.contains(name.as_str()))
+            {
                 return None;
             }
             compiled.dag.roots().get(index).copied()
@@ -1366,8 +1274,11 @@ fn eval_compiled(
     };
 
     let mut tensor_values_by_name = HashMap::<String, RuntimeTensorValue>::new();
-    for name in &compiled.tensor_root_names {
-        if selected.as_ref().is_some_and(|set| !set.contains(name)) {
+    for name in compiled.tensor_root_names.iter() {
+        if selected
+            .as_ref()
+            .is_some_and(|set| !set.contains(name.as_str()))
+        {
             continue;
         }
         let Some(node_id) = compiled.named_roots.get(name) else {
@@ -1392,8 +1303,10 @@ fn eval_compiled(
             precision,
             "the DAG evaluator finalizes at the root's declared dtype"
         );
-        let _ = precision;
-        tensor_values_by_name.insert(name.clone(), RuntimeTensorValue::new(value.clone()));
+        tensor_values_by_name.insert(
+            name.as_str().to_string(),
+            RuntimeTensorValue::new(value.clone()),
+        );
     }
 
     // When a selected-roots filter is set (eval_selected / eval_many), push it
@@ -1429,7 +1342,11 @@ fn eval_compiled(
         .all_root_names
         .iter()
         .enumerate()
-        .filter(|(_, name)| selected.as_ref().is_none_or(|set| set.contains(*name)))
+        .filter(|(_, name)| {
+            selected
+                .as_ref()
+                .is_none_or(|set| set.contains(name.as_str()))
+        })
         .filter_map(|(index, name)| {
             // Host value bindings and tensor-lane roots first; then fall
             // back to a host-lane *zero-argument fn* root's applied value
@@ -1437,17 +1354,17 @@ fn eval_compiled(
             // but not a value binding, so it never lands in
             // `host_bindings` (chelis blocker2).
             let value = lookup_runtime_value_for_root(
-                name,
+                name.as_str(),
                 &host_outcome.host_bindings,
                 &tensor_values_by_name,
             )
-            .or_else(|| host_outcome.host_root_values.get(name).cloned())?;
+            .or_else(|| host_outcome.host_root_values.get(name.as_str()).cloned())?;
             let node_id = compiled
                 .named_roots
                 .get(name)
                 .map(|id| id.0)
                 .unwrap_or(index);
-            Some((node_id, name.clone(), value))
+            Some((node_id, name.as_str().to_string(), value))
         })
         .map(|(node_id, name, value)| {
             Ok(EvaluatedRoot {
@@ -1472,9 +1389,10 @@ fn eval_compiled(
 
 pub fn grad(request: GradRequest) -> Result<GradResult> {
     let compiled = compile_source(request.source_kind, &request.source)?;
+    let output_name = crate::pipeline::IrName::new(request.output_name.as_str());
     let output = compiled
-        .forward_nodes_by_name
-        .get(&request.output_name)
+        .forward_node_index
+        .get(&output_name)
         .copied()
         .ok_or_else(|| unknown_name_error("grad", "output_name", &request.output_name))?;
 
@@ -1482,9 +1400,10 @@ pub fn grad(request: GradRequest) -> Result<GradResult> {
         .wrt_names
         .iter()
         .map(|name| {
+            let ir_name = crate::pipeline::IrName::new(name.as_str());
             compiled
-                .forward_nodes_by_name
-                .get(name)
+                .forward_node_index
+                .get(&ir_name)
                 .copied()
                 .ok_or_else(|| unknown_name_error("grad", "wrt_names", name))
         })
@@ -1526,9 +1445,9 @@ pub fn grad(request: GradRequest) -> Result<GradResult> {
         output_node: grad_result.output_node.0,
         grad_nodes_by_name,
         forward_nodes_by_name: compiled
-            .forward_nodes_by_name
-            .into_iter()
-            .map(|(name, node)| (name, node.0))
+            .forward_node_index
+            .into_entries()
+            .map(|(name, node)| (name.into_string(), node.0))
             .collect(),
     })
 }
@@ -1579,6 +1498,81 @@ pub fn batch(requests: Vec<BatchRequest>) -> BatchResultEnvelope {
     }
 }
 
+pub(crate) fn pipeline_rejection_to_compiler_error(
+    rejection: crate::pipeline::PipelineRejection,
+) -> CompilerError {
+    use crate::pipeline::{PipelineRejection, PreparationError};
+
+    match rejection {
+        PipelineRejection::Preparation(PreparationError::SurfParse { source, error }) => {
+            stage_error_with_span(
+                "parse",
+                error.to_string(),
+                "surf_parse_error",
+                parse_error_span_surf(&source, &error),
+            )
+        }
+        PipelineRejection::Preparation(PreparationError::DeepParse(error)) => {
+            stage_error_with_span(
+                "parse",
+                error.to_string(),
+                "deep_parse_error",
+                parse_error_span_deep(&error),
+            )
+        }
+        PipelineRejection::Preparation(PreparationError::Expansion(error)) => {
+            stage_error("desugar", error.to_string(), "macro_error")
+        }
+        PipelineRejection::Type { fitness } => CompilerError {
+            stage: "check".to_string(),
+            errors: fitness.errors.iter().map(check_error_diagnostic).collect(),
+        },
+        PipelineRejection::Effects { errors } => CompilerError {
+            stage: "effects".to_string(),
+            errors: errors
+                .iter()
+                .map(|error| Diagnostic {
+                    kind: "effect_error".to_string(),
+                    message: error.message.clone(),
+                    severity: 0.8,
+                    expected: None,
+                    got: None,
+                    suggestions: Vec::new(),
+                    span: None,
+                    deep_path: None,
+                })
+                .collect(),
+        },
+        PipelineRejection::Linearity { errors } => CompilerError {
+            stage: "linearity".to_string(),
+            errors: errors.iter().map(check_error_diagnostic).collect(),
+        },
+        PipelineRejection::Lower(diagnostic) => stage_error_with_span(
+            "lower",
+            diagnostic.to_string(),
+            "lower_error",
+            deep_span_to_schema(diagnostic.span),
+        ),
+        PipelineRejection::RootCount {
+            context,
+            expected,
+            actual,
+        } => {
+            let subject = match context {
+                crate::pipeline::RootCountContext::Program => "root",
+                crate::pipeline::RootCountContext::NewCode => "new-code root",
+            };
+            stage_error(
+                "lower",
+                format!(
+                    "lowered {subject} count mismatch: expected {expected} named roots, got {actual}"
+                ),
+                "lower_error",
+            )
+        }
+    }
+}
+
 pub fn result_envelope<T>(result: Result<T>) -> crate::schema::ApiEnvelope<T> {
     match result {
         Ok(value) => crate::schema::ApiEnvelope::success(value),
@@ -1589,10 +1583,10 @@ pub fn result_envelope<T>(result: Result<T>) -> crate::schema::ApiEnvelope<T> {
 struct CompiledSource {
     checked: CheckedProgram,
     dag: Dag,
-    all_root_names: Vec<String>,
-    tensor_root_names: Vec<String>,
-    named_roots: BTreeMap<String, NodeId>,
-    forward_nodes_by_name: BTreeMap<String, NodeId>,
+    all_root_names: crate::pipeline::AllRootNames,
+    tensor_root_names: crate::pipeline::TensorRootNames,
+    named_roots: crate::pipeline::NamedRoots,
+    forward_node_index: crate::pipeline::ForwardNodeIndex,
     /// Phase G' — optional library context payload threaded into the
     /// host evaluator so library `def` names resolve at runtime when
     /// new code calls them. `None` on the monolithic `compile_source`
@@ -1639,138 +1633,67 @@ fn compile_source_scoped(
     source: &str,
     entry: Option<&str>,
 ) -> Result<CompiledSource> {
-    let deep_exprs: Vec<DeepExpr> = match source_kind {
-        SourceKind::Surf => {
-            let decls = parse_surf(source)?;
-            chelis_macros::expand_program(
-                &chelis_surf::desugar::desugar_program(&decls),
-                &chelis_macros::ExpansionOptions::default(),
-            )
-            .map_err(|err| stage_error("desugar", err.to_string(), "macro_error"))?
-            .into_exprs()
-        }
-        SourceKind::Deep => parse_deep(source)?,
+    let outcome = crate::pipeline::run_source(crate::pipeline::PipelineRequest {
+        source_kind,
+        source,
+        entry,
+        goal: crate::pipeline::PipelineGoal::Lower(crate::pipeline::LoweringMode::AllowHostOnly),
+    })
+    .map_err(pipeline_rejection_to_compiler_error)?;
+    let crate::pipeline::PipelineOutcome::Lowered(lowered) = outcome else {
+        unreachable!("the lower goal returns only a lowered outcome")
     };
-
-    let deep_exprs = match entry {
-        Some(entry) => crate::prune::prune_to_entry(deep_exprs, entry),
-        None => deep_exprs,
-    };
-
-    let checked = chelis_types::check_ir_program(&deep_exprs).map_err(|report| CompilerError {
-        stage: "check".to_string(),
-        errors: report.errors.iter().map(check_error_diagnostic).collect(),
-    })?;
-    let checked = chelis_effects::check_program(&checked).map_err(|errors| CompilerError {
-        stage: "effects".to_string(),
-        errors: errors
-            .iter()
-            .map(|error| Diagnostic {
-                kind: "effect_error".to_string(),
-                message: error.message.clone(),
-                severity: 0.8,
-                expected: None,
-                got: None,
-                suggestions: vec![],
-                span: None,
-                deep_path: None,
-            })
-            .collect(),
-    })?;
-    let checked = chelis_types::check_linearity(&checked).map_err(|errors| CompilerError {
-        stage: "linearity".to_string(),
-        errors: errors.iter().map(check_error_diagnostic).collect(),
-    })?;
-    let all_root_names = root_names_from_checked_exprs(checked.exprs(), checked.type_env(), false);
-    let tensor_root_names =
-        root_names_from_checked_exprs(checked.exprs(), checked.type_env(), true);
 
     // Issue #912: compute realizability and manifest alongside existing
-    // routing. This is observe-only — the existing code path is unchanged.
-    // Issue #912: compute realizability and manifest alongside existing routing.
-    let _realizability_result = chelis_effects::realizability::infer_realizability(
-        &checked,
+    // routing. This is observe-only. The manifest will replace the old
+    // root classification at Task 8.
+    let checked_program = lowered.checked().program();
+    let realizability_result = chelis_effects::realizability::infer_realizability(
+        checked_program,
         crate::target_capability::tensor_capable_prims(chelis_types::types::Target::C),
     );
-    let _manifest =
-        chelis_effects::realizability::compute_root_manifest(&checked, &_realizability_result);
-
-    // chelis#730 Phase 1: the whole-program DAG here is AUXILIARY for a
-    // program whose roots are all host-evaluated (e.g. `out = print(...)`)
-    // - the host runtime computes those roots and the DAG goes unused.
-    // Before Phase 1 an unsupported construct inside an (unused) def
-    // lowered to a silent zero placeholder, which kept this call total by
-    // accident; now that such sites raise, a NON-FATAL lowering rejection
-    // with zero tensor roots is absorbed (mirroring
-    // `try_lower_compiled_program`'s host fallback) so eval keeps
-    // computing what it computed correctly. A fatal diagnostic, or any
-    // failure when a tensor root actually needs the DAG, still surfaces.
-    let dag = match chelis_ir::lower::try_lower_program(&checked) {
-        Ok(dag) => dag,
-        Err(diagnostic) if !diagnostic.fatal && tensor_root_names.is_empty() => {
-            chelis_ir::dag::Dag::new()
-        }
-        Err(diagnostic) => {
-            return Err(stage_error_with_span(
-                "lower",
-                diagnostic.to_string(),
-                "lower_error",
-                deep_span_to_schema(diagnostic.span),
-            ));
-        }
-    };
-
-    if !tensor_root_names.is_empty() && dag.roots().len() != tensor_root_names.len() {
-        return Err(stage_error(
-            "lower",
-            format!(
-                "lowered root count mismatch: expected {} named roots, got {}",
-                tensor_root_names.len(),
-                dag.roots().len()
-            ),
-            "lower_error",
-        ));
-    }
-
-    let named_roots = tensor_root_names
-        .iter()
-        .cloned()
-        .zip(dag.roots().iter().copied())
-        .collect::<BTreeMap<_, _>>();
-
-    let mut forward_nodes_by_name = named_roots.clone();
-    for node in dag.nodes() {
-        if let RiscOp::Load { name } = &node.op {
-            forward_nodes_by_name
-                .entry(name.as_str().to_string())
-                .or_insert(node.id);
+    let _manifest = chelis_effects::realizability::compute_root_manifest(
+        checked_program,
+        &realizability_result,
+    );
+    // Task 8 migration diff: compare manifest lane assignments against
+    // the old predicate's root classification. Log disagreements.
+    #[cfg(debug_assertions)]
+    {
+        use chelis_types::types::Lane;
+        let old_tensor_set = lowered
+            .checked()
+            .root_metadata()
+            .tensor_names()
+            .iter()
+            .map(|name| name.as_str())
+            .collect::<std::collections::HashSet<_>>();
+        for entry in &_manifest.entries {
+            let old_is_tensor = old_tensor_set.contains(entry.name.as_str());
+            let new_is_tensor = entry.lane == Lane::Tensor;
+            if old_is_tensor != new_is_tensor {
+                eprintln!(
+                    "[#912 migration-diff] def `{}`: old={} new={}",
+                    entry.name,
+                    if old_is_tensor { "Tensor" } else { "Host" },
+                    if new_is_tensor { "Tensor" } else { "Host" },
+                );
+            }
         }
     }
+
+    let lowered_parts = lowered.into_parts();
+    let (_, _, checked, root_metadata) = lowered_parts.checked.into_parts();
 
     Ok(CompiledSource {
         checked,
-        dag,
-        all_root_names,
-        tensor_root_names,
-        named_roots,
-        forward_nodes_by_name,
+        dag: lowered_parts.dag,
+        all_root_names: root_metadata.all_names().clone(),
+        tensor_root_names: root_metadata.tensor_names().clone(),
+        named_roots: lowered_parts.named_roots,
+        forward_node_index: lowered_parts.forward_node_index,
         library_runtime: None,
     })
-}
-
-fn deep_exprs_from_source(source_kind: SourceKind, source: &str) -> Result<Vec<DeepExpr>> {
-    match source_kind {
-        SourceKind::Surf => {
-            let decls = parse_surf(source)?;
-            chelis_macros::expand_program(
-                &chelis_surf::desugar::desugar_program(&decls),
-                &chelis_macros::ExpansionOptions::default(),
-            )
-            .map(|expanded| expanded.into_exprs())
-            .map_err(|err| stage_error("desugar", err.to_string(), "macro_error"))
-        }
-        SourceKind::Deep => parse_deep(source),
-    }
 }
 
 fn parse_surf(source: &str) -> Result<Vec<Decl>> {
@@ -1807,119 +1730,6 @@ fn canonicalize_decompiled_surf(source: &str) -> Result<String> {
     Ok(chelis_surf::format::format_program(&decls))
 }
 
-fn root_names_from_checked_exprs(
-    exprs: &[DeepExpr],
-    type_env: &HashMap<String, DeepExpr>,
-    lowered_only: bool,
-) -> Vec<String> {
-    let lowered_names = lowered_only.then(|| top_level_lowering_map(exprs, type_env));
-    let mut names = Vec::new();
-    for expr in exprs {
-        collect_checked_decl_names(expr, type_env, lowered_names.as_ref(), &mut names);
-    }
-    names
-}
-
-/// Phase G variant: same as [`root_names_from_checked_exprs`] but uses a
-/// pre-computed `lowered_names` map (typically from
-/// `top_level_lowering_map_with_context`) so library-context lowering
-/// decisions feed the new-code's root-name filter.
-fn root_names_from_checked_exprs_with_lowered_map(
-    exprs: &[DeepExpr],
-    type_env: &HashMap<String, DeepExpr>,
-    lowered_names: Option<&HashMap<String, bool>>,
-) -> Vec<String> {
-    let mut names = Vec::new();
-    for expr in exprs {
-        collect_checked_decl_names(expr, type_env, lowered_names, &mut names);
-    }
-    names
-}
-
-fn collect_checked_decl_names(
-    expr: &DeepExpr,
-    type_env: &HashMap<String, DeepExpr>,
-    lowered_names: Option<&HashMap<String, bool>>,
-    out: &mut Vec<String>,
-) {
-    let DeepExpr::List(list, _) = expr else {
-        return;
-    };
-    let Some(tag) = list_tag(list) else {
-        return;
-    };
-    match tag {
-        DeepTag::Module => {
-            for child in list.elements.iter().skip(3) {
-                collect_checked_decl_names(child, type_env, lowered_names, out);
-            }
-        }
-        DeepTag::Def => {
-            if let Some(name) = list.elements.get(2).and_then(symbol_name) {
-                if lowered_names.is_some_and(|map| !map.get(name).copied().unwrap_or(false)) {
-                    return;
-                }
-                let body = list.elements.get(3);
-                let ty = type_env
-                    .get(name)
-                    .or_else(|| body.and_then(expr_type_metadata));
-                extend_root_names_from_value(name, ty, body, out);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn extend_root_names_from_value(
-    name: &str,
-    ty: Option<&DeepExpr>,
-    value: Option<&DeepExpr>,
-    out: &mut Vec<String>,
-) {
-    if let Some(DeepExpr::List(list, _)) = ty
-        && let Some(tag) = list_tag(list)
-    {
-        if tag == DeepTag::TFn {
-            extend_root_names_from_value(name, list.elements.last(), None, out);
-            return;
-        }
-        if tag == DeepTag::TTuple {
-            for (index, child) in list.elements.iter().skip(2).enumerate() {
-                extend_root_names_from_value(&format!("{name}.{index}"), Some(child), None, out);
-            }
-            return;
-        }
-    }
-    if let Some(DeepExpr::List(list, _)) = value
-        && list_tag(list) == Some(DeepTag::Tuple)
-    {
-        for (index, child) in list.elements.iter().skip(2).enumerate() {
-            extend_root_names_from_value(
-                &format!("{name}.{index}"),
-                expr_type_metadata(child),
-                Some(child),
-                out,
-            );
-        }
-        return;
-    }
-    out.push(name.to_string());
-}
-
-fn expr_type_metadata(expr: &DeepExpr) -> Option<&DeepExpr> {
-    let DeepExpr::List(list, _) = expr else {
-        return None;
-    };
-    match list.elements.get(1) {
-        Some(DeepExpr::Map(meta, _)) => meta
-            .entries
-            .iter()
-            .find(|(key, _)| key == "type")
-            .map(|(_, value)| value),
-        _ => None,
-    }
-}
-
 fn deep_expr_tag(expr: &DeepExpr) -> Option<DeepTag> {
     expr.tag()
 }
@@ -1952,10 +1762,6 @@ fn deep_def_has_role(expr: &DeepExpr, expected: &str) -> bool {
         key == "chelis_role"
             && matches!(value, DeepExpr::Atom(chelis_deep::Atom::Str(role), _) if role == expected)
     })
-}
-
-fn list_tag(list: &chelis_deep::List) -> Option<DeepTag> {
-    list.tag()
 }
 
 fn symbol_name(expr: &DeepExpr) -> Option<&str> {
@@ -3687,6 +3493,65 @@ mod tests {
     use std::path::Path;
     use tempfile::TempDir;
 
+    #[test]
+    fn typed_deep_node_wire_bridge_preserves_the_complete_node_shape() {
+        let exprs =
+            chelis_deep::parse_and_stamp_file("(def {source: \"test\"} root (var {} value))")
+                .expect("typed Deep must parse and stamp");
+        assert!(matches!(exprs.first(), Some(DeepExpr::Node(_, _))));
+
+        let wire = wire_deep_expr(&exprs[0]);
+        let WireDeepExprKind::List { elements } = wire.kind else {
+            panic!("a typed node must cross the wire as its canonical list shape");
+        };
+        assert_eq!(
+            elements.len(),
+            4,
+            "def must retain tag, metadata, and children"
+        );
+        assert!(matches!(
+            &elements[0].kind,
+            WireDeepExprKind::Atom {
+                atom: WireDeepAtom::Symbol { value }
+            } if value == "def"
+        ));
+        let WireDeepExprKind::Map { entries } = &elements[1].kind else {
+            panic!("def metadata must remain at wire element 1");
+        };
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].key, "source");
+        assert!(matches!(
+            &entries[0].value.kind,
+            WireDeepExprKind::Atom {
+                atom: WireDeepAtom::Str { value }
+            } if value == "test"
+        ));
+        assert!(matches!(
+            &elements[2].kind,
+            WireDeepExprKind::Atom {
+                atom: WireDeepAtom::Symbol { value }
+            } if value == "root"
+        ));
+        let WireDeepExprKind::List {
+            elements: value_elements,
+        } = &elements[3].kind
+        else {
+            panic!("the def runtime child must remain a complete wire node");
+        };
+        assert!(matches!(
+            &value_elements[0].kind,
+            WireDeepExprKind::Atom {
+                atom: WireDeepAtom::Symbol { value }
+            } if value == "var"
+        ));
+        assert!(matches!(
+            &value_elements[2].kind,
+            WireDeepExprKind::Atom {
+                atom: WireDeepAtom::Symbol { value }
+            } if value == "value"
+        ));
+    }
+
     fn copy_drop_context_fixture() -> (TempDir, std::path::PathBuf) {
         let dir = TempDir::new().expect("tempdir");
         let root = dir.path().join("myapp");
@@ -4119,12 +3984,20 @@ def loss(x: tensor[2, 2, f32], w: tensor[2, 2, f32]) -> tensor[f32] =
         let compiled = compile_source(SourceKind::Surf, source).expect("compile");
 
         assert_eq!(
-            compiled.all_root_names,
-            vec!["logits".to_string(), "loss".to_string()]
+            compiled
+                .all_root_names
+                .iter()
+                .map(crate::pipeline::IrName::as_str)
+                .collect::<Vec<_>>(),
+            ["logits", "loss"]
         );
         assert_eq!(
-            compiled.named_roots.keys().cloned().collect::<Vec<_>>(),
-            vec!["logits".to_string(), "loss".to_string()]
+            compiled
+                .named_roots
+                .keys()
+                .map(crate::pipeline::IrName::as_str)
+                .collect::<Vec<_>>(),
+            ["logits", "loss"]
         );
         assert_eq!(compiled.dag.roots().len(), 2);
     }
@@ -4136,7 +4009,9 @@ def loss(x: tensor[2, 2, f32], w: tensor[2, 2, f32]) -> tensor[f32] =
         let source = "def n -> int32 = add(cast(20, int32), cast(22, int32))\n";
         let compiled = compile_source(SourceKind::Surf, source).expect("compile");
         assert!(
-            compiled.all_root_names.contains(&"n".to_string()),
+            compiled
+                .all_root_names
+                .contains(&crate::pipeline::IrName::new("n")),
             "arrow-form def `n` must be in all_root_names; got: {:?}",
             compiled.all_root_names
         );
@@ -4154,12 +4029,20 @@ def logits(x: tensor[2, 2, f32], w: tensor[2, 2, f32]) -> tensor[2, 2, f32] =
         let compiled = compile_source(SourceKind::Surf, source).expect("compile");
 
         assert_eq!(
-            compiled.all_root_names,
-            vec!["label".to_string(), "logits".to_string()]
+            compiled
+                .all_root_names
+                .iter()
+                .map(crate::pipeline::IrName::as_str)
+                .collect::<Vec<_>>(),
+            ["label", "logits"]
         );
         assert_eq!(
-            compiled.named_roots.keys().cloned().collect::<Vec<_>>(),
-            vec!["logits".to_string()]
+            compiled
+                .named_roots
+                .keys()
+                .map(crate::pipeline::IrName::as_str)
+                .collect::<Vec<_>>(),
+            ["logits"]
         );
         assert_eq!(compiled.dag.roots().len(), 1);
     }
@@ -4175,7 +4058,10 @@ def out(x: tensor[2, f32]) -> tensor[2, f32] = add(consume(x), consume(x))
 "#,
         )
         .expect("monolithic compile");
-        let monolithic_root = monolithic.named_roots["out"];
+        let monolithic_root = *monolithic
+            .named_roots
+            .get(&crate::pipeline::IrName::new("out"))
+            .expect("out root");
         let monolithic_summary = chelis_ir::analysis::analyze_function_copy_cost(
             &monolithic.dag,
             "out",
@@ -4191,7 +4077,10 @@ def out(x: tensor[2, f32]) -> tensor[2, f32] = add(consume(x), consume(x))
              def out(x: tensor[2, f32]) -> tensor[2, f32] = add(consume(x), consume(x))\n",
         )
         .expect("compile new source in context");
-        let context_root = compiled.named_roots["out"];
+        let context_root = *compiled
+            .named_roots
+            .get(&crate::pipeline::IrName::new("out"))
+            .expect("out root");
         let context_summary =
             chelis_ir::analysis::analyze_function_copy_cost(&compiled.dag, "out", context_root);
 
@@ -4211,17 +4100,24 @@ def out(x: tensor[2, f32]) -> tensor[2, f32] = add(consume(x), consume(x))
 
         let compiled = compile_source(SourceKind::Surf, source).expect("compile");
 
-        assert_eq!(
-            compiled.named_roots.keys().cloned().collect::<Vec<_>>(),
-            Vec::<String>::new()
-        );
-        assert!(compiled.all_root_names.iter().any(|name| name == "status"));
-        assert!(compiled.all_root_names.iter().any(|name| name == "loss"));
+        assert!(compiled.named_roots.is_empty());
         assert!(
             compiled
                 .all_root_names
                 .iter()
-                .any(|name| name == "should_stop")
+                .any(|name| name.as_str() == "status")
+        );
+        assert!(
+            compiled
+                .all_root_names
+                .iter()
+                .any(|name| name.as_str() == "loss")
+        );
+        assert!(
+            compiled
+                .all_root_names
+                .iter()
+                .any(|name| name.as_str() == "should_stop")
         );
     }
 

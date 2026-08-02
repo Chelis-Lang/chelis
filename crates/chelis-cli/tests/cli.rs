@@ -4183,6 +4183,21 @@ fn fmt_check_succeeds_for_canonical_deep() {
 }
 
 #[test]
+fn fmt_deep_rejects_a_bare_name_in_a_runtime_position() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("bare_runtime_name.dp");
+    write_file(&path, "(def {} f x)\n");
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["fmt", path.to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("bare name"));
+}
+
+#[test]
 fn fmt_check_succeeds_for_canonical_surf() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("mnist.ch");
