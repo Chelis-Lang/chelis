@@ -18,6 +18,81 @@ const DEF_NAME_INDEX: usize = 2;
 const DEF_VALUE_INDEX: usize = 3;
 const FN_PARAMS_INDEX: usize = 2;
 
+/// Recursively bridge stamped trees to the legacy `List` carrier used by the
+/// mutating authoring implementation. Read-only authoring APIs must consume
+/// `Node` directly and therefore never call this adapter.
+fn normalize_for_mutation(exprs: &[Expr]) -> Vec<Expr> {
+    exprs.iter().map(normalize_expr_for_mutation).collect()
+}
+
+fn normalize_expr_for_mutation(expr: &Expr) -> Expr {
+    match expr {
+        Expr::Node(node, span) => {
+            let list = node.to_list(*span);
+            let elements = list
+                .elements
+                .iter()
+                .map(normalize_expr_for_mutation)
+                .collect();
+            Expr::List(List { elements }, *span)
+        }
+        Expr::BareList(elements, span) => Expr::List(
+            List {
+                elements: elements.iter().map(normalize_expr_for_mutation).collect(),
+            },
+            *span,
+        ),
+        Expr::List(list, span) => Expr::List(
+            List {
+                elements: list
+                    .elements
+                    .iter()
+                    .map(normalize_expr_for_mutation)
+                    .collect(),
+            },
+            *span,
+        ),
+        Expr::Map(map, span) => Expr::Map(
+            MetaMap {
+                entries: map
+                    .entries
+                    .iter()
+                    .map(|(key, value)| (key.clone(), normalize_expr_for_mutation(value)))
+                    .collect(),
+            },
+            *span,
+        ),
+        Expr::MetaExpr(meta, span) => Expr::MetaExpr(
+            crate::ast::MetaExpr {
+                entries: meta
+                    .entries
+                    .iter()
+                    .map(|(key, value)| (key.clone(), normalize_expr_for_mutation(value)))
+                    .collect(),
+                expr: Box::new(normalize_expr_for_mutation(&meta.expr)),
+            },
+            *span,
+        ),
+        Expr::UnknownForm(data) => {
+            let mut elements = vec![Expr::Atom(Atom::Name(data.head.clone()), data.span)];
+            elements.push(Expr::Map(
+                MetaMap {
+                    entries: data
+                        .meta
+                        .entries
+                        .iter()
+                        .map(|(key, value)| (key.clone(), normalize_expr_for_mutation(value)))
+                        .collect(),
+                },
+                data.span,
+            ));
+            elements.extend(data.children.iter().map(normalize_expr_for_mutation));
+            Expr::List(List { elements }, data.span)
+        }
+        Expr::Atom(..) => expr.clone(),
+    }
+}
+
 /// Borrowed canonical-node view shared by the legacy and successor carriers.
 ///
 /// `children` uses semantic indexing: child 0 is the first element after the
@@ -251,16 +326,17 @@ pub fn rename_function(
     function_name: &str,
     new_name: &str,
 ) -> Result<RenameReport, AuthoringError> {
-    let resolved = resolve_function(module_exprs, function_name)?;
+    let module_exprs = normalize_for_mutation(module_exprs);
+    let resolved = resolve_function(&module_exprs, function_name)?;
     validate_new_symbol(new_name)?;
     let old_name = bare_name(&resolved.qualified_name).to_string();
-    let module = single_module(module_exprs)?;
+    let module = single_module(&module_exprs)?;
     if top_level_function_names(module).contains(new_name) {
         return Err(AuthoringError::DuplicateFunction {
             name: new_name.to_string(),
         });
     }
-    let expected = references(module_exprs, &old_name)?.references.len();
+    let expected = references(&module_exprs, &old_name)?.references.len();
     let old_top_level_names = top_level_function_names(module);
 
     let mut rewritten = module_exprs.to_vec();
@@ -331,9 +407,11 @@ pub fn replace_function(
     function_name: &str,
     new_decls: &[Expr],
 ) -> Result<ReplaceFunctionReport, AuthoringError> {
-    let resolved = resolve_function(module_exprs, function_name)?;
+    let module_exprs = normalize_for_mutation(module_exprs);
+    let new_decls = normalize_for_mutation(new_decls);
+    let resolved = resolve_function(&module_exprs, function_name)?;
     let old_name = bare_name(&resolved.qualified_name).to_string();
-    let parsed = parse_function_bundle(new_decls, Some(&old_name))?;
+    let parsed = parse_function_bundle(&new_decls, Some(&old_name))?;
 
     let mut rewritten = module_exprs.to_vec();
     let module = single_module_mut(&mut rewritten)?;
@@ -387,14 +465,17 @@ pub fn change_signature(
     argument_order: &[String],
     param_renames: &[(String, String)],
 ) -> Result<ChangeSignatureReport, AuthoringError> {
-    let resolved = resolve_function(module_exprs, function_name)?;
+    let module_exprs = normalize_for_mutation(module_exprs);
+    let new_defsig = normalize_expr_for_mutation(new_defsig);
+    let new_params = normalize_expr_for_mutation(new_params);
+    let resolved = resolve_function(&module_exprs, function_name)?;
     let target_name = bare_name(&resolved.qualified_name).to_string();
-    validate_new_defsig(new_defsig, &target_name)?;
-    validate_params_node(new_params)?;
-    let old_params = function_params(module_exprs, function_name)?;
+    validate_new_defsig(&new_defsig, &target_name)?;
+    validate_params_node(&new_params)?;
+    let old_params = function_params(&module_exprs, function_name)?;
     let old_param_set: BTreeSet<String> = old_params.iter().cloned().collect();
     validate_argument_order(argument_order, &old_param_set)?;
-    let expected_calls = references(module_exprs, &target_name)?.references.len();
+    let expected_calls = references(&module_exprs, &target_name)?.references.len();
     let rename_map: BTreeMap<String, String> = param_renames.iter().cloned().collect();
 
     let mut rewritten = module_exprs.to_vec();
@@ -905,6 +986,19 @@ where
         }
         return;
     }
+    if node.tag == DeepTag::Arm {
+        let Some(pattern) = node.children.first() else {
+            return;
+        };
+        f(pattern, scope, format!("{path}.0"));
+        let added = pattern_binders(pattern);
+        with_scope(scope, added, |scope| {
+            for (semantic_index, child) in node.children.iter().enumerate().skip(1) {
+                f(child, scope, format!("{path}.{semantic_index}"));
+            }
+        });
+        return;
+    }
     for (semantic_index, child) in node.children.iter().enumerate() {
         f(child, scope, format!("{path}.{semantic_index}"));
     }
@@ -970,6 +1064,22 @@ where
         with_scope(scope, added, |scope| {
             if let Some(body) = list.elements.get_mut(3) {
                 f(body, scope);
+            }
+        });
+        return;
+    }
+    if tag == Some(DeepTag::Arm) {
+        let added = list
+            .elements
+            .get(2)
+            .map(pattern_binders)
+            .unwrap_or_default();
+        if let Some(pattern) = list.elements.get_mut(2) {
+            f(pattern, scope);
+        }
+        with_scope(scope, added, |scope| {
+            for child in list.elements.iter_mut().skip(3) {
+                f(child, scope);
             }
         });
         return;
@@ -1275,6 +1385,54 @@ fn bind_names(expr: &Expr) -> Vec<String> {
         .filter_map(symbol)
         .map(str::to_string)
         .collect()
+}
+
+fn pattern_binders(expr: &Expr) -> Vec<String> {
+    let mut names = Vec::new();
+    collect_pattern_binders(expr, &mut names);
+    names
+}
+
+fn collect_pattern_binders(expr: &Expr, out: &mut Vec<String>) {
+    let Some(pattern) = node_view(expr) else {
+        return;
+    };
+    match pattern.tag {
+        DeepTag::PatVar => {
+            if let Some(name) = pattern.children.first().and_then(symbol) {
+                out.push(name.to_string());
+            }
+        }
+        DeepTag::PatAs => {
+            if let Some(name) = pattern.children.first().and_then(symbol) {
+                out.push(name.to_string());
+            }
+            if let Some(inner) = pattern.children.get(1) {
+                collect_pattern_binders(inner, out);
+            }
+        }
+        DeepTag::PatTuple => {
+            for child in pattern.children {
+                collect_pattern_binders(child, out);
+            }
+        }
+        DeepTag::PatCtor => {
+            for child in pattern.children.iter().skip(1) {
+                collect_pattern_binders(child, out);
+            }
+        }
+        DeepTag::PatRecord => {
+            for field in pattern.children.iter().skip(1) {
+                if let Some(kv) = tagged_node_view(field, DeepTag::Kv)
+                    && let Some(field_pattern) = kv.children.get(1)
+                {
+                    collect_pattern_binders(field_pattern, out);
+                }
+            }
+        }
+        DeepTag::PatLit | DeepTag::PatWild => {}
+        _ => {}
+    }
 }
 
 fn param_name(expr: &Expr) -> Option<&str> {
