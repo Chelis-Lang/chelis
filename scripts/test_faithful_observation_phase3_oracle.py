@@ -75,6 +75,55 @@ fn hidden_value_row() {}
         )
         self.assertIn("undeclared Phase 3 runtime receipt: fabricated-case", violations)
 
+    def test_forged_eval_receipts_cannot_replace_required_behavior(self) -> None:
+        sources = oracle.shipped_sources()
+        source = sources[oracle.EVAL_AGREEMENT_SOURCE]
+        for name, case in (
+            ("agreement_operation_identity_is_derived_from_ir", "operation-identity-canary"),
+            ("agreement_compiled_observation_reaches_comparator", "compiled-observation-canary"),
+            ("agreement_width_nonconformance_is_behavioral", "width-nonconformance-canary"),
+            ("agreement_sqrt_is_exact", "sqrt(4)"),
+        ):
+            source = oracle.replace_test_body(
+                source,
+                name,
+                f'{{ record_phase3_receipt("{case}", "forged"); }}',
+            )
+        sources[oracle.EVAL_AGREEMENT_SOURCE] = source
+
+        violations = oracle.definition_digest_violations(sources)
+
+        for name in (
+            "agreement_operation_identity_is_derived_from_ir",
+            "agreement_compiled_observation_reaches_comparator",
+            "agreement_width_nonconformance_is_behavioral",
+            "agreement_sqrt_is_exact",
+        ):
+            self.assertTrue(any(name in item for item in violations), violations)
+
+    def test_empty_parity_and_rejected_drivers_fail_the_definition_ratchet(self) -> None:
+        sources = oracle.shipped_sources()
+        sources[oracle.PARITY_SOURCE] = oracle.replace_test_body(
+            sources[oracle.PARITY_SOURCE],
+            "parity_tensor_structural_ops",
+            "{}",
+        )
+        sources[oracle.REJECTED_SOURCE] = oracle.replace_test_body(
+            sources[oracle.REJECTED_SOURCE],
+            "rejected_cells_fail_the_build_with_their_pinned_diagnostics",
+            "{}",
+        )
+
+        violations = oracle.definition_digest_violations(sources)
+
+        self.assertTrue(any("parity_tensor_structural_ops" in item for item in violations))
+        self.assertTrue(
+            any(
+                "rejected_cells_fail_the_build_with_their_pinned_diagnostics" in item
+                for item in violations
+            )
+        )
+
 
 class ComparatorAdoptionTests(unittest.TestCase):
     def test_removed_f64_oracle_spellings_stay_absent(self) -> None:
