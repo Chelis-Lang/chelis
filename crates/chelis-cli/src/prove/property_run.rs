@@ -10,8 +10,8 @@
 //!
 //! Gated on the `chelis-prove` optional dependency (the shared runner lives
 //! there). Without the capability the CLI falls back to its local
-//! Tier-C-only property path in the parent module.
-#![cfg(feature = "chelis-prove")]
+//! Tier-C-only property path in the parent module. The parent module
+//! declaration owns this feature gate.
 
 use std::collections::BTreeMap;
 use std::path::Path;

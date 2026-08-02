@@ -10,8 +10,7 @@
 //! folds them into the prove summary.
 //!
 //! Gated on the `chelis-prove` optional dependency (the same gate the
-//! Tier B SMT lowering uses).
-#![cfg(feature = "chelis-prove")]
+//! Tier B SMT lowering uses) by the parent module declaration.
 
 use chelis_prove::CompositeVerdict;
 use chelis_prove::obligation_engine::{

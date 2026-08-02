@@ -9864,7 +9864,7 @@ impl LowerCtx {
     /// (the #703 silent-substitution class). Callers that bake this into
     /// codegen now go through [`Self::resolve_static_f64_arg`], which turns an
     /// unresolvable value into a loud lowering error.
-    fn extract_f64_value(&self, expr: &Expr) -> Option<f64> {
+    fn extract_f64_value(expr: &Expr) -> Option<f64> {
         match expr {
             Expr::Atom(Atom::Float(f), _) => Some(*f),
             Expr::Atom(Atom::Int(n), _) => Some(*n as f64),
@@ -9878,7 +9878,7 @@ impl LowerCtx {
                         let inner = kids.first()?;
                         let target = kids.get(1)?;
                         match Self::try_extract_prim(target) {
-                            Some(prim) if prim.is_float() => self.extract_f64_value(inner),
+                            Some(prim) if prim.is_float() => Self::extract_f64_value(inner),
                             _ => None,
                         }
                     }
@@ -9890,7 +9890,7 @@ impl LowerCtx {
                             .is_some_and(|callee| expr_is_var_named(callee, "neg")) =>
                     {
                         let inner = kids.get(1)?;
-                        self.extract_f64_value(inner).map(|v| -v)
+                        Self::extract_f64_value(inner).map(|v| -v)
                     }
                     // `(lit {} <atom>)` and any other list carrying a bare numeric
                     // atom in the value slot (pre-chelis#776 behavior, preserved).
@@ -9923,7 +9923,7 @@ impl LowerCtx {
     /// own evaluator and does not require this DAG lowering to succeed, so a
     /// runtime bound that fails the build still evaluates to the right range.
     fn resolve_static_f64_arg(&self, expr: &Expr, builtin: &str, arg_desc: &str) -> f64 {
-        self.extract_f64_value(expr).unwrap_or_else(|| {
+        Self::extract_f64_value(expr).unwrap_or_else(|| {
             let found = match expr {
                 Expr::List(list, _) => get_tag(list).map(DeepTag::as_str).unwrap_or("expression"),
                 _ => "expression",
