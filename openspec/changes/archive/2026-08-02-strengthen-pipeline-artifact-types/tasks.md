@@ -147,6 +147,12 @@
 
 ## 8. Hosted Acceptance
 
-- [ ] 8.1 Record hosted CI results separately from local oracle results.
-- [ ] 8.2 Require green macOS Smoke, Docs, and changed-crate jobs before final acceptance.
-- [ ] 8.3 Confirm that hosted output shows no wire, CLI, backend, runtime, package, or generated-code drift.
+- [x] 8.1 Record hosted CI results separately from local oracle results.
+  - Hosted runs `30762284990`, `30762284996`, and `30762284986` passed for exact head `57dfd607a25f8aeb6a2b7a874735845d0165e056`.
+  - The hosted results remain separate from the local oracle and gate logs.
+- [x] 8.2 Require green macOS Smoke, Docs, and changed-crate jobs before final acceptance.
+  - `macOS Smoke`, `Docs`, `Lint and Unit Tests (Linux)`, and `Integration Tests (Linux)` completed successfully.
+  - The Linux integration gate covered the complete workspace, including all six locally detected changed crates.
+- [x] 8.3 Confirm that hosted output shows no wire, CLI, backend, runtime, package, or generated-code drift.
+  - The integration gate, backend sanitizers, generated C and Metal smoke tests, package checks, and conformance gate passed.
+  - The hosted output contained no drift finding for the wire, CLI, backend, runtime, package, or generated-code surfaces.

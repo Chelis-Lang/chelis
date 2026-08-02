@@ -3,9 +3,7 @@
 ## Purpose
 
 Define the module boundaries, source-size limit, public API parity, and behavior parity for the Chelis type-inference implementation.
-
 ## Requirements
-
 ### Requirement: Role-based inference modules
 
 The type-inference implementation SHALL use a module tree rooted at `crates/chelis-types/src/infer/mod.rs`. Separate modules SHALL own program orchestration, checked-program construction, validation, expression forms, and application inference.
@@ -65,3 +63,20 @@ Rejected programs SHALL produce equal ordered diagnostic kinds, messages, spans,
 
 - **WHEN** the refactored checker processes a rejected parity fixture
 - **THEN** its ordered diagnostics equal the recorded baseline in kind, message, span, and hints
+
+### Requirement: Sink-issued diagnostic checkpoints
+`DiagnosticSink` SHALL issue an opaque `DiagnosticCheckpoint` from its current length. Code that examines new diagnostics SHALL call `iter_since` with this checkpoint instead of a raw `usize` offset.
+
+The checkpoint constructor SHALL remain private to the diagnostic-session module. The sink SHALL only append diagnostics while a checkpoint is active.
+
+#### Scenario: Iteration starts at a checkpoint
+- **WHEN** inference records a checkpoint and then appends diagnostics
+- **THEN** `iter_since` returns the diagnostics that follow the checkpoint in insertion order
+
+#### Scenario: Earlier diagnostics exist
+- **WHEN** the sink contains diagnostics before it issues a checkpoint
+- **THEN** `iter_since` excludes those earlier diagnostics
+
+#### Scenario: A caller supplies a raw offset
+- **WHEN** code passes a `usize` to `iter_since`
+- **THEN** Rust rejects the call because `iter_since` requires `DiagnosticCheckpoint`
