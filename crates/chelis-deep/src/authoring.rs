@@ -976,13 +976,39 @@ where
     }
     if node.tag == DeepTag::Let {
         if let Some(bind) = node.children.first() {
-            f(bind, scope, format!("{path}.0"));
-            let added = bind_names(bind);
-            with_scope(scope, added, |scope| {
-                if let Some(body) = node.children.get(1) {
-                    f(body, scope, format!("{path}.1"));
+            let mut inserted = Vec::new();
+            if let Some(bind) = tagged_node_view(bind, DeepTag::Bind) {
+                if let Some(meta) = bind.meta {
+                    for (key, value) in &meta.entries {
+                        f(value, scope, format!("{path}.0.meta.{key}"));
+                    }
                 }
-            });
+                for pair_start in (0..bind.children.len()).step_by(2) {
+                    if let Some(name_expr) = bind.children.get(pair_start) {
+                        f(name_expr, scope, format!("{path}.0.{pair_start}"));
+                    }
+                    let has_value = if let Some(value) = bind.children.get(pair_start + 1) {
+                        f(value, scope, format!("{path}.0.{}", pair_start + 1));
+                        true
+                    } else {
+                        false
+                    };
+                    if has_value
+                        && let Some(name) = bind.children.get(pair_start).and_then(symbol)
+                        && scope.insert(name.to_string())
+                    {
+                        inserted.push(name.to_string());
+                    }
+                }
+            } else {
+                f(bind, scope, format!("{path}.0"));
+            }
+            if let Some(body) = node.children.get(1) {
+                f(body, scope, format!("{path}.1"));
+            }
+            for name in inserted {
+                scope.remove(&name);
+            }
         }
         return;
     }
@@ -1057,15 +1083,46 @@ where
         return;
     }
     if tag == Some(DeepTag::Let) {
-        let added = list.elements.get(2).map(bind_names).unwrap_or_default();
+        let mut inserted = Vec::new();
         if let Some(bind) = list.elements.get_mut(2) {
-            f(bind, scope);
-        }
-        with_scope(scope, added, |scope| {
-            if let Some(body) = list.elements.get_mut(3) {
-                f(body, scope);
+            if let Some(bind) = tagged_list_mut(bind, DeepTag::Bind) {
+                if let Some(meta) = bind.elements.get_mut(1) {
+                    f(meta, scope);
+                }
+                let mut pair_start = 2;
+                while pair_start < bind.elements.len() {
+                    let name = bind
+                        .elements
+                        .get(pair_start)
+                        .and_then(symbol)
+                        .map(str::to_string);
+                    if let Some(name_expr) = bind.elements.get_mut(pair_start) {
+                        f(name_expr, scope);
+                    }
+                    let has_value = if let Some(value) = bind.elements.get_mut(pair_start + 1) {
+                        f(value, scope);
+                        true
+                    } else {
+                        false
+                    };
+                    if has_value
+                        && let Some(name) = name
+                        && scope.insert(name.clone())
+                    {
+                        inserted.push(name);
+                    }
+                    pair_start += 2;
+                }
+            } else {
+                f(bind, scope);
             }
-        });
+        }
+        if let Some(body) = list.elements.get_mut(3) {
+            f(body, scope);
+        }
+        for name in inserted {
+            scope.remove(&name);
+        }
         return;
     }
     if tag == Some(DeepTag::Arm) {
@@ -1375,18 +1432,6 @@ fn params_node_names(expr: &Expr) -> Option<Vec<String>> {
     )
 }
 
-fn bind_names(expr: &Expr) -> Vec<String> {
-    let Some(bind) = tagged_node_view(expr, DeepTag::Bind) else {
-        return Vec::new();
-    };
-    bind.children
-        .iter()
-        .step_by(2)
-        .filter_map(symbol)
-        .map(str::to_string)
-        .collect()
-}
-
 fn pattern_binders(expr: &Expr) -> Vec<String> {
     let mut names = Vec::new();
     collect_pattern_binders(expr, &mut names);
@@ -1431,7 +1476,64 @@ fn collect_pattern_binders(expr: &Expr, out: &mut Vec<String>) {
             }
         }
         DeepTag::PatLit | DeepTag::PatWild => {}
-        _ => {}
+        // Explicit non-pattern dispositions make a future DeepTag addition a
+        // compile-time decision here instead of silently treating a new
+        // pattern form as binder-free.
+        DeepTag::Module
+        | DeepTag::Import
+        | DeepTag::ImportAll
+        | DeepTag::Export
+        | DeepTag::Defsig
+        | DeepTag::Def
+        | DeepTag::Deftype
+        | DeepTag::Typealias
+        | DeepTag::Variant
+        | DeepTag::Field
+        | DeepTag::Defdim
+        | DeepTag::If
+        | DeepTag::Match
+        | DeepTag::Arm
+        | DeepTag::Fn
+        | DeepTag::Let
+        | DeepTag::Bind
+        | DeepTag::Var
+        | DeepTag::Lit
+        | DeepTag::App
+        | DeepTag::Record
+        | DeepTag::Access
+        | DeepTag::Pipe
+        | DeepTag::Block
+        | DeepTag::Tuple
+        | DeepTag::TupleGet
+        | DeepTag::RecordUpdate
+        | DeepTag::Par
+        | DeepTag::Borrow
+        | DeepTag::TPrim
+        | DeepTag::TFn
+        | DeepTag::TTensor
+        | DeepTag::TRef
+        | DeepTag::TAdt
+        | DeepTag::TVar
+        | DeepTag::TUnit
+        | DeepTag::TTuple
+        | DeepTag::DName
+        | DeepTag::DVar
+        | DeepTag::DLit
+        | DeepTag::DRank
+        | DeepTag::Effects
+        | DeepTag::Resource
+        | DeepTag::HandleEffect
+        | DeepTag::Grad
+        | DeepTag::Vmap
+        | DeepTag::Jit
+        | DeepTag::Realize
+        | DeepTag::Cast
+        | DeepTag::Copy
+        | DeepTag::Quote
+        | DeepTag::Unquote
+        | DeepTag::Splice
+        | DeepTag::Params
+        | DeepTag::Kv => {}
     }
 }
 
