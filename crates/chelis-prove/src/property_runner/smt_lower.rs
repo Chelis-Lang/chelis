@@ -17,7 +17,7 @@ use std::{
     collections::{HashMap, HashSet},
 };
 
-use chelis_deep::ast::{Atom as DeepAtom, Expr as DeepExpr, List as DeepList};
+use chelis_deep::ast::{Atom as DeepAtom, Expr as DeepExpr};
 use chelis_surf::ast::{BinOp, Decl, Expr, LetPattern, Literal, Param, TypeExpr, UnaryOp};
 
 use crate::contracts::{
@@ -626,10 +626,10 @@ fn deep_arith(expr: &DeepExpr, ctx: &DeepInlineCtx) -> Option<crate::solver::Smt
         return Some(SmtExpr::Apply(name.to_string(), smt_args));
     }
     if deep_tag(expr) == Some(DeepTag::If) {
-        let list = deep_list(expr)?;
-        let cond = list.elements.get(2)?;
-        let then_expr = list.elements.get(3)?;
-        let else_expr = list.elements.get(4)?;
+        let (_, children) = deep_node_parts(expr)?;
+        let cond = children.first()?;
+        let then_expr = children.get(1)?;
+        let else_expr = children.get(2)?;
         return Some(SmtExpr::Ite(
             Box::new(deep_expr_to_smt(cond, ctx)?),
             Box::new(deep_arith(then_expr, ctx)?),
@@ -707,10 +707,10 @@ fn deep_arith_subst(
         return Some(SmtExpr::Apply(name.to_string(), smt_args));
     }
     if deep_tag(expr) == Some(DeepTag::If) {
-        let list = deep_list(expr)?;
-        let cond = list.elements.get(2)?;
-        let then_expr = list.elements.get(3)?;
-        let else_expr = list.elements.get(4)?;
+        let (_, children) = deep_node_parts(expr)?;
+        let cond = children.first()?;
+        let then_expr = children.get(1)?;
+        let else_expr = children.get(2)?;
         return Some(SmtExpr::Ite(
             Box::new(deep_expr_to_smt_subst(cond, subst, ctx)?),
             Box::new(deep_arith_subst(then_expr, subst, ctx)?),
@@ -718,9 +718,9 @@ fn deep_arith_subst(
         ));
     }
     if deep_tag(expr) == Some(DeepTag::Let) {
-        let list = deep_list(expr)?;
-        let bind = list.elements.get(2)?;
-        let body = list.elements.get(3)?;
+        let (_, children) = deep_node_parts(expr)?;
+        let bind = children.first()?;
+        let body = children.get(1)?;
         let mut extended = subst.clone();
         for (name, value) in deep_bind_pairs(bind)? {
             let lowered = deep_arith_subst(value, &extended, ctx)?;
@@ -792,15 +792,15 @@ fn lookup_deep_fun_body<'a>(
 ) -> Option<(Vec<String>, &'a DeepExpr)> {
     let mut stack: Vec<&DeepExpr> = exprs.iter().collect();
     while let Some(expr) = stack.pop() {
-        let Some(list) = deep_list(expr) else {
+        let Some((tag, children)) = deep_node_parts(expr) else {
             continue;
         };
-        match list_tag_from_list(list) {
-            Some(DeepTag::Module) => {
-                stack.extend(list.elements.iter().skip(3));
+        match tag {
+            DeepTag::Module => {
+                stack.extend(children.iter().skip(1));
             }
-            Some(DeepTag::Def) if list.elements.get(2).and_then(deep_symbol_text) == Some(name) => {
-                let fn_expr = list.elements.get(3)?;
+            DeepTag::Def if children.first().and_then(deep_symbol_text) == Some(name) => {
+                let fn_expr = children.get(1)?;
                 let params = deep_fn_param_names(fn_expr)?;
                 let body = deep_fn_body(fn_expr)?;
                 return Some((params, body));
@@ -812,23 +812,22 @@ fn lookup_deep_fun_body<'a>(
 }
 
 fn deep_fn_param_names(expr: &DeepExpr) -> Option<Vec<String>> {
-    let list = deep_list(expr)?;
-    if list_tag_from_list(list) != Some(DeepTag::Fn) {
+    let (tag, children) = deep_node_parts(expr)?;
+    if tag != DeepTag::Fn {
         return None;
     }
-    let params = list.elements.get(2).and_then(deep_list)?;
-    if list_tag_from_list(params) != Some(DeepTag::Params) {
+    let (params_tag, params) = deep_node_parts(children.first()?)?;
+    if params_tag != DeepTag::Params {
         return None;
     }
     params
-        .elements
         .iter()
-        .skip(2)
         .map(|param| {
             deep_symbol_text(param)
                 .or_else(|| {
-                    let list = deep_list(param)?;
-                    list.elements.first().and_then(deep_symbol_text)
+                    deep_structural_elements(param)?
+                        .first()
+                        .and_then(deep_symbol_text)
                 })
                 .map(str::to_string)
         })
@@ -836,20 +835,20 @@ fn deep_fn_param_names(expr: &DeepExpr) -> Option<Vec<String>> {
 }
 
 fn deep_fn_body(expr: &DeepExpr) -> Option<&DeepExpr> {
-    let list = deep_list(expr)?;
-    if list_tag_from_list(list) != Some(DeepTag::Fn) {
+    let (tag, children) = deep_node_parts(expr)?;
+    if tag != DeepTag::Fn {
         return None;
     }
-    list.elements.get(3)
+    children.get(1)
 }
 
 fn deep_bind_pairs(expr: &DeepExpr) -> Option<Vec<(&str, &DeepExpr)>> {
-    let list = deep_list(expr)?;
-    if list_tag_from_list(list) != Some(DeepTag::Bind) {
+    let (tag, children) = deep_node_parts(expr)?;
+    if tag != DeepTag::Bind {
         return None;
     }
     let mut pairs = Vec::new();
-    let mut children = list.elements.iter().skip(2);
+    let mut children = children.iter();
     while let Some(name) = children.next() {
         let value = children.next()?;
         pairs.push((deep_symbol_text(name)?, value));
@@ -863,69 +862,71 @@ fn deep_builtin_cmp<'a>(expr: &'a DeepExpr, name: &str) -> Option<(&'a DeepExpr,
 }
 
 fn deep_app_name_and_args(expr: &DeepExpr) -> Option<(&str, &[DeepExpr])> {
-    let list = deep_list(expr)?;
-    if list_tag_from_list(list) != Some(DeepTag::App) {
+    let (tag, children) = deep_node_parts(expr)?;
+    if tag != DeepTag::App {
         return None;
     }
-    let name = list.elements.get(2).and_then(deep_var_name)?;
-    Some((name, &list.elements[3..]))
+    let name = children.first().and_then(deep_var_name)?;
+    Some((name, children.get(1..)?))
 }
 
 fn deep_var_name(expr: &DeepExpr) -> Option<&str> {
-    let list = deep_list(expr)?;
-    if list_tag_from_list(list) != Some(DeepTag::Var) {
+    let (tag, children) = deep_node_parts(expr)?;
+    if tag != DeepTag::Var {
         return None;
     }
-    list.elements.get(2).and_then(deep_symbol_text)
+    children.first().and_then(deep_symbol_text)
 }
 
 fn deep_float_lit(expr: &DeepExpr) -> Option<f64> {
-    let list = deep_list(expr)?;
-    if list_tag_from_list(list) != Some(DeepTag::Lit) {
+    let (tag, children) = deep_node_parts(expr)?;
+    if tag != DeepTag::Lit {
         return None;
     }
-    match list.elements.get(2)? {
+    match children.first()? {
         DeepExpr::Atom(DeepAtom::Float(value), _) => Some(*value),
         _ => None,
     }
 }
 
 fn deep_int_lit(expr: &DeepExpr) -> Option<i64> {
-    let list = deep_list(expr)?;
-    if list_tag_from_list(list) != Some(DeepTag::Lit) {
+    let (tag, children) = deep_node_parts(expr)?;
+    if tag != DeepTag::Lit {
         return None;
     }
-    match list.elements.get(2)? {
+    match children.first()? {
         DeepExpr::Atom(DeepAtom::Int(value), _) => Some(*value),
         _ => None,
     }
 }
 
 fn deep_bool_lit(expr: &DeepExpr) -> Option<bool> {
-    let list = deep_list(expr)?;
-    if list_tag_from_list(list) != Some(DeepTag::Lit) {
+    let (tag, children) = deep_node_parts(expr)?;
+    if tag != DeepTag::Lit {
         return None;
     }
-    match list.elements.get(2)? {
+    match children.first()? {
         DeepExpr::Atom(DeepAtom::Bool(value), _) => Some(*value),
         _ => None,
     }
 }
 
 fn deep_tag(expr: &DeepExpr) -> Option<DeepTag> {
+    deep_node_parts(expr).map(|(tag, _)| tag)
+}
+
+fn deep_node_parts(expr: &DeepExpr) -> Option<(DeepTag, &[DeepExpr])> {
     match expr {
-        DeepExpr::List(list, _) => list.tag(),
+        DeepExpr::Node(node, _) => Some((node.tag(), node.children_slice())),
+        DeepExpr::List(list, _) => Some((list.tag()?, list.elements.get(2..)?)),
         _ => None,
     }
 }
 
-fn list_tag_from_list(list: &DeepList) -> Option<DeepTag> {
-    list.tag()
-}
-
-fn deep_list(expr: &DeepExpr) -> Option<&DeepList> {
+fn deep_structural_elements(expr: &DeepExpr) -> Option<&[DeepExpr]> {
     match expr {
-        DeepExpr::List(list, _) => Some(list),
+        DeepExpr::BareList(elements, _) => Some(elements),
+        DeepExpr::List(list, _) => Some(&list.elements),
         _ => None,
     }
 }
