@@ -797,16 +797,19 @@ fn top_level_items(exprs: &[Expr]) -> Vec<&Expr> {
 }
 
 fn collect_top_level_items<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
-    let Expr::List(list, _) = expr else {
-        return;
-    };
-    if tag(list) == Some(DeepTag::Module) {
-        for child in list.elements.iter().skip(3) {
-            collect_top_level_items(child, out);
+    match expr {
+        Expr::List(list, _) if tag(list) == Some(DeepTag::Module) => {
+            for child in list.elements.iter().skip(3) {
+                collect_top_level_items(child, out);
+            }
         }
-        return;
+        Expr::Node(node, _) if node.tag() == DeepTag::Module => {
+            for child in node.children_slice().iter().skip(1) {
+                collect_top_level_items(child, out);
+            }
+        }
+        _ => out.push(expr),
     }
-    out.push(expr);
 }
 
 pub(crate) fn runtime_value_to_schema(value: &RuntimeValue) -> Result<ExecutionValue, String> {

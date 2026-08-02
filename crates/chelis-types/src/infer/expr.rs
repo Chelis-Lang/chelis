@@ -354,6 +354,7 @@ pub(super) fn infer_expr_with_type_metadata_ownership(
             // those functions are migrated to accept Node directly, this
             // `to_list` call becomes dead code.
             let list = node.to_list(*span);
+            product.register_bridge_children(node.children_slice(), children(&list));
             match node.tag() {
                 DeepTag::Var => infer_var(&list, env, vg, subst, adt_reg, errors),
                 DeepTag::Lit => {
@@ -538,7 +539,8 @@ pub(super) fn infer_expr_with_type_metadata_ownership(
             CheckError::new(
                 CheckErrorKind::UnknownForm,
                 format!(
-                    "unknown form `{}` has no checker disposition (typed-node boundary)",
+                    "unknown Deep tag `{}` has no checker disposition (not in the 62-tag \
+                     closed vocabulary of spec/03-deep-syntax.md; chelis#731 [04-TOT-1])",
                     data.head
                 ),
                 vec![],

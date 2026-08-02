@@ -3141,15 +3141,13 @@ fn emit_deep_error(options: &ProveOptions<'_>, property: &DeepProperty, message:
                 "source": source_json_deep(property, options),
             })
         );
+    } else if let Some(source) = bridge_source_details(property, options) {
+        println!(
+            "property error: {}: {message}\n  --> {}:{}:{} {}\n  | {}",
+            property.name, source.file, source.line, source.column, source.id, source.text
+        );
     } else {
-        if let Some(source) = bridge_source_details(property, options) {
-            println!(
-                "property error: {}: {message}\n  --> {}:{}:{} {}\n  | {}",
-                property.name, source.file, source.line, source.column, source.id, source.text
-            );
-        } else {
-            println!("property error: {}: {message}", property.name);
-        }
+        println!("property error: {}: {message}", property.name);
     }
 }
 

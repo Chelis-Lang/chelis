@@ -12,6 +12,9 @@
 //! spec/04-type-system.md §10 [04-TOT-2];
 //! spec/design/checker_totality.md §C3.1.
 
+mod support;
+
+use chelis_deep::DeepTag;
 use chelis_types::errors::CheckErrorKind;
 use chelis_types::types::Type;
 use chelis_types::{build_type_env_from_library, check_ir_program, check_ir_with_context};
@@ -53,7 +56,17 @@ fn assert_surf_accepts(source: &str, label: &str) {
 }
 
 fn assert_one_type_resolution_error(source: &str, needle: &str, label: &str) {
-    let exprs = parse(source);
+    let exprs = match chelis_deep::parser::parse_str(source) {
+        Ok(exprs) => exprs,
+        Err(error) => {
+            let message = error.to_string();
+            assert!(
+                message.contains(needle),
+                "{label}: stamped-boundary diagnostic must name `{needle}`, got {message:?}"
+            );
+            return;
+        }
+    };
     let result =
         check_ir_program(&exprs).expect_err("malformed/unknown Deep type must fail the checker");
     assert_eq!(
@@ -425,12 +438,13 @@ fn malformed_canonical_primitive_reports_once_at_every_type_consumer() {
 
 #[test]
 fn independent_rhs_and_malformed_let_ascription_each_report_once() {
-    let exprs = parse(
+    let mut exprs = parse(
         "(def {} bad
            (let {} (bind {} value
-             (var {type: (t-prim {} f32 extra)} missing))
+             (var {type: (t-prim {} f32)} missing))
              (lit {} 0)))",
     );
+    support::append_name_to_last_node(&mut exprs, DeepTag::TPrim, "extra");
     let result = check_ir_program(&exprs)
         .expect_err("the independent RHS and ascription roots must both fail the checker");
     assert_eq!(
@@ -463,10 +477,11 @@ fn independent_rhs_and_malformed_let_ascription_each_report_once() {
 
 #[test]
 fn prebound_failure_is_owned_by_its_exact_duplicate_name_declaration() {
-    let exprs = parse(
+    let mut exprs = parse(
         "(def {} duplicate (var {} missing))
-         (def {} duplicate (lit {type: (t-prim {} f32 extra)} 1.0))",
+         (def {} duplicate (lit {type: (t-prim {} f32)} 1.0))",
     );
+    support::append_name_to_last_node(&mut exprs, DeepTag::TPrim, "extra");
     let result = check_ir_program(&exprs)
         .expect_err("duplicate declarations with independent roots must fail the checker");
     assert_eq!(

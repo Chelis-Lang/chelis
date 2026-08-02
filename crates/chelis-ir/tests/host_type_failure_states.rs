@@ -8,6 +8,8 @@
 use std::fs;
 use std::path::Path;
 
+use chelis_deep::Span;
+use chelis_deep::ast::{Atom, Expr, List, MetaMap};
 use chelis_deep::parser::parse_str;
 use chelis_ir::{
     ConcreteHostType, HostInferenceVar, HostPrecisionTerm, HostShapeSlot, HostShapeTerm,
@@ -159,7 +161,19 @@ fn raw_decoder_preserves_exact_primitives_and_polymorphic_names() {
 
 #[test]
 fn raw_decoder_rejects_malformed_and_unknown_syntax_without_a_term() {
-    let malformed = parse_one("(t-prim {})");
+    // The parser now rejects a zero-child `t-prim` before it can reach the
+    // decoder. Construct the controlled legacy mutation directly so this
+    // remains a decoder failure-state test rather than a parser test.
+    let span = Span::new(0, 0);
+    let malformed = Expr::List(
+        List {
+            elements: vec![
+                Expr::Atom(Atom::Tag(chelis_deep::DeepTag::TPrim), span),
+                Expr::Map(MetaMap::default(), span),
+            ],
+        },
+        span,
+    );
     assert!(matches!(
         decode_host_type(&malformed),
         Err(HostTypeDecodeError::MalformedTypeSyntax { .. })

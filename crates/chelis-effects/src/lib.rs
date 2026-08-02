@@ -252,11 +252,9 @@ fn infer_program_effects_with_context(
 /// build/eval path. Descends nested wrappers to any depth.
 fn flattened_top_level(exprs: &[Expr]) -> Vec<&Expr> {
     fn push<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
-        if let Expr::List(list, _) = expr
-            && get_tag(list) == Some(DeepTag::Module)
-        {
-            // `(module {} name children...)`: skip tag, meta, name.
-            for child in list.elements.iter().skip(3) {
+        if let Some(kids) = stamped_children(expr, DeepTag::Module) {
+            // Module semantic children are `[name, declarations...]`.
+            for child in kids.iter().skip(1) {
                 push(child, out);
             }
             return;
@@ -273,15 +271,11 @@ fn flattened_top_level(exprs: &[Expr]) -> Vec<&Expr> {
 fn top_level_def_bodies(exprs: &[Expr]) -> HashMap<String, Expr> {
     let mut defs = HashMap::new();
     for expr in flattened_top_level(exprs) {
-        if let Expr::List(list, _) = expr
-            && get_tag(list) == Some(DeepTag::Def)
+        if let Some(kids) = stamped_children(expr, DeepTag::Def)
+            && kids.len() >= 2
+            && let Some(name) = symbol_name(&kids[0])
         {
-            let kids = children(list);
-            if kids.len() >= 2
-                && let Some(name) = symbol_name(&kids[0])
-            {
-                defs.insert(name.to_string(), kids[1].clone());
-            }
+            defs.insert(name.to_string(), kids[1].clone());
         }
     }
     defs
@@ -290,11 +284,26 @@ fn top_level_def_bodies(exprs: &[Expr]) -> HashMap<String, Expr> {
 fn top_level_callable_names(bodies: &HashMap<String, Expr>) -> HashSet<String> {
     bodies
         .iter()
-        .filter_map(|(name, body)| match body {
-            Expr::List(list, _) if get_tag(list) == Some(DeepTag::Fn) => Some(name.clone()),
-            _ => None,
-        })
+        .filter(|(_, body)| body.tag() == Some(DeepTag::Fn))
+        .map(|(name, _)| name.clone())
         .collect()
+}
+
+fn stamped_children(expr: &Expr, expected: DeepTag) -> Option<&[Expr]> {
+    stamped_parts(expr, expected).map(|(_, children)| children)
+}
+
+fn stamped_parts(expr: &Expr, expected: DeepTag) -> Option<(&MetaMap, &[Expr])> {
+    match expr {
+        Expr::List(list, _) if get_tag(list) == Some(expected) => {
+            let Expr::Map(meta, _) = list.elements.get(1)? else {
+                return None;
+            };
+            Some((meta, children(list)))
+        }
+        Expr::Node(node, _) if node.tag() == expected => Some((node.meta(), node.children_slice())),
+        _ => None,
+    }
 }
 
 fn infer_expr_effects(
@@ -489,8 +498,7 @@ fn infer_let_effects(
     let mut local_scope = locals.clone();
     let mut effects = EffectSet::new();
 
-    if let Expr::List(bind_list, _) = &kids[0] {
-        let bind_kids = children(bind_list);
+    if let Some(bind_kids) = stamped_children(&kids[0], DeepTag::Bind) {
         let mut i = 0;
         while i + 1 < bind_kids.len() {
             let value = &bind_kids[i + 1];
@@ -498,11 +506,10 @@ fn infer_let_effects(
                 infer_expr_effects(value, top_level_effects, top_level_callables, &local_scope);
             effects.extend(&value_effects);
             if let Some(name) = symbol_name(&bind_kids[i]) {
-                let binding_effects = match value {
-                    Expr::List(value_list, _) if get_tag(value_list) == Some(DeepTag::Fn) => {
-                        value_effects
-                    }
-                    _ => EffectSet::new(),
+                let binding_effects = if value.tag() == Some(DeepTag::Fn) {
+                    value_effects
+                } else {
+                    EffectSet::new()
                 };
                 local_scope.insert(name.to_string(), binding_effects);
             }
@@ -592,59 +599,12 @@ fn annotate_effects(
             let tag = get_tag(list);
             let kids = children(list);
             let annotated_children = match tag {
-                Some(DeepTag::Let) if kids.len() >= 2 => {
-                    let bind = if let Expr::List(bind_list, bind_span) = &kids[0] {
-                        let bind_kids = children(bind_list);
-                        let mut elements =
-                            vec![bind_list.elements[0].clone(), bind_list.elements[1].clone()];
-                        let mut i = 0;
-                        while i + 1 < bind_kids.len() {
-                            elements.push(bind_kids[i].clone());
-                            let value = annotate_effects(
-                                &bind_kids[i + 1],
-                                top_level_effects,
-                                top_level_callables,
-                                &local_scope,
-                            );
-                            let value_effects = infer_expr_effects(
-                                &bind_kids[i + 1],
-                                top_level_effects,
-                                top_level_callables,
-                                &local_scope,
-                            );
-                            if let Some(name) = symbol_name(&bind_kids[i]) {
-                                let binding_effects = match &bind_kids[i + 1] {
-                                    Expr::List(value_list, _)
-                                        if get_tag(value_list) == Some(DeepTag::Fn) =>
-                                    {
-                                        value_effects
-                                    }
-                                    _ => EffectSet::new(),
-                                };
-                                local_scope.insert(name.to_string(), binding_effects);
-                            }
-                            elements.push(value);
-                            i += 2;
-                        }
-                        Expr::List(chelis_deep::ast::List { elements }, *bind_span)
-                    } else {
-                        annotate_effects(
-                            &kids[0],
-                            top_level_effects,
-                            top_level_callables,
-                            &local_scope,
-                        )
-                    };
-                    vec![
-                        bind,
-                        annotate_effects(
-                            &kids[1],
-                            top_level_effects,
-                            top_level_callables,
-                            &local_scope,
-                        ),
-                    ]
-                }
+                Some(DeepTag::Let) if kids.len() >= 2 => annotate_let_children(
+                    kids,
+                    top_level_effects,
+                    top_level_callables,
+                    &mut local_scope,
+                ),
                 _ => kids
                     .iter()
                     .map(|kid| {
@@ -687,14 +647,130 @@ fn annotate_effects(
                 )
             }
         }
-        // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
-        // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
         Expr::Node(node, span) => {
-            let bridged = Expr::List(node.to_list(*span), *span);
-            annotate_effects(&bridged, top_level_effects, top_level_callables, locals)
+            let mut local_scope = locals.clone();
+            let annotated_children =
+                if node.tag() == DeepTag::Let && node.children_slice().len() >= 2 {
+                    annotate_let_children(
+                        node.children_slice(),
+                        top_level_effects,
+                        top_level_callables,
+                        &mut local_scope,
+                    )
+                } else {
+                    node.children_slice()
+                        .iter()
+                        .map(|child| {
+                            annotate_effects(child, top_level_effects, top_level_callables, locals)
+                        })
+                        .collect()
+                };
+            let mut meta = node.meta().clone();
+            if node.tag() == DeepTag::Fn {
+                let effects =
+                    infer_expr_effects(expr, top_level_effects, top_level_callables, locals);
+                if !effects.is_empty() {
+                    upsert_meta(&mut meta, "effects", effect_set_expr(&effects));
+                }
+            }
+            Expr::node(node.tag(), meta, annotated_children, *span)
         }
-        Expr::BareList(_, _) | Expr::UnknownForm(_) => expr.clone(),
+        Expr::BareList(elements, span) => Expr::BareList(
+            elements
+                .iter()
+                .map(|child| {
+                    annotate_effects(child, top_level_effects, top_level_callables, locals)
+                })
+                .collect(),
+            *span,
+        ),
+        Expr::UnknownForm(data) => Expr::UnknownForm(Box::new(chelis_deep::UnknownFormData {
+            head: data.head.clone(),
+            meta: data.meta.clone(),
+            children: data
+                .children
+                .iter()
+                .map(|child| {
+                    annotate_effects(child, top_level_effects, top_level_callables, locals)
+                })
+                .collect(),
+            span: data.span,
+        })),
     }
+}
+
+fn annotate_let_children(
+    kids: &[Expr],
+    top_level_effects: &HashMap<String, EffectSet>,
+    top_level_callables: &HashSet<String>,
+    local_scope: &mut HashMap<String, EffectSet>,
+) -> Vec<Expr> {
+    let Some(bind_kids) = stamped_children(&kids[0], DeepTag::Bind) else {
+        return vec![
+            annotate_effects(
+                &kids[0],
+                top_level_effects,
+                top_level_callables,
+                local_scope,
+            ),
+            annotate_effects(
+                &kids[1],
+                top_level_effects,
+                top_level_callables,
+                local_scope,
+            ),
+        ];
+    };
+
+    let mut annotated_bind_kids = Vec::with_capacity(bind_kids.len());
+    let mut index = 0;
+    while index + 1 < bind_kids.len() {
+        annotated_bind_kids.push(bind_kids[index].clone());
+        let value = &bind_kids[index + 1];
+        annotated_bind_kids.push(annotate_effects(
+            value,
+            top_level_effects,
+            top_level_callables,
+            local_scope,
+        ));
+        let value_effects =
+            infer_expr_effects(value, top_level_effects, top_level_callables, local_scope);
+        if let Some(name) = symbol_name(&bind_kids[index]) {
+            let binding_effects = if value.tag() == Some(DeepTag::Fn) {
+                value_effects
+            } else {
+                EffectSet::new()
+            };
+            local_scope.insert(name.to_string(), binding_effects);
+        }
+        index += 2;
+    }
+    annotated_bind_kids.extend(bind_kids[index..].iter().cloned());
+
+    let annotated_bind = match &kids[0] {
+        Expr::List(bind_list, span) => {
+            let mut elements = vec![bind_list.elements[0].clone(), bind_list.elements[1].clone()];
+            elements.extend(annotated_bind_kids);
+            Expr::List(chelis_deep::ast::List { elements }, *span)
+        }
+        Expr::Node(bind_node, span) => Expr::node(
+            bind_node.tag(),
+            bind_node.meta().clone(),
+            annotated_bind_kids,
+            *span,
+        ),
+        _ => unreachable!("stamped_children accepted only a tagged List or Node"),
+    };
+
+    vec![
+        annotated_bind,
+        annotate_effects(
+            &kids[1],
+            top_level_effects,
+            top_level_callables,
+            local_scope,
+        ),
+    ]
 }
 
 fn update_effect_metadata(
@@ -805,17 +881,14 @@ fn validate_unhandled_random_roots(
     errors: &mut Vec<EffectError>,
 ) {
     for expr in flattened_top_level(exprs) {
-        if let Expr::List(list, _) = expr
-            && get_tag(list) == Some(DeepTag::Def)
-        {
-            let kids = children(list);
+        if let Some(kids) = stamped_children(expr, DeepTag::Def) {
             if kids.len() < 2 {
                 continue;
             }
             let Some(name) = symbol_name(&kids[0]) else {
                 continue;
             };
-            if matches!(&kids[1], Expr::List(body, _) if get_tag(body) == Some(DeepTag::Fn)) {
+            if stamped_children(&kids[1], DeepTag::Fn).is_some() {
                 continue;
             }
             if effects_by_def
@@ -838,30 +911,16 @@ fn validate_unhandled_random_roots(
 
 /// Extract the effect set declared on a `(defsig name t-fn-with-eff-meta)` expression.
 /// Returns `None` when there is no explicit effect annotation (i.e., inference-only mode).
-fn declared_effects_from_defsig(list: &List) -> Option<EffectSet> {
+fn declared_effects_from_defsig(expr: &Expr) -> Option<EffectSet> {
     // defsig has form: (defsig {} name t-fn-expr)
-    let kids = children(list);
+    let kids = stamped_children(expr, DeepTag::Defsig)?;
     let t_fn = kids.get(1)?;
-    let Expr::List(t_fn_list, _) = t_fn else {
-        return None;
-    };
-    if get_tag(t_fn_list) != Some(DeepTag::TFn) {
-        return None;
-    }
-    // t-fn metadata is element [1] (the meta map).
-    let Expr::Map(meta, _) = t_fn_list.elements.get(1)? else {
-        return None;
-    };
+    let (meta, _) = stamped_parts(t_fn, DeepTag::TFn)?;
     let (_, eff_expr) = meta.entries.iter().find(|(key, _)| key == "eff")?;
     // eff_expr is (effects {} sym sym ...)
-    let Expr::List(eff_list, _) = eff_expr else {
-        return None;
-    };
-    if get_tag(eff_list) != Some(DeepTag::Effects) {
-        return None;
-    }
+    let effect_children = stamped_children(eff_expr, DeepTag::Effects)?;
     let mut declared = EffectSet::new();
-    for child in children(eff_list) {
+    for child in effect_children {
         if let Some(name) = symbol_name(child) {
             match name {
                 "random" => declared.insert(Effect::Random),
@@ -871,9 +930,8 @@ fn declared_effects_from_defsig(list: &List) -> Option<EffectSet> {
                 // "diff" is currently tracked separately and does not appear in inferred sets.
                 _ => {}
             }
-        } else if let Expr::List(inner, _) = child
-            && get_tag(inner) == Some(DeepTag::Resource)
-            && let Some(device) = children(inner).first().and_then(|expr| match expr {
+        } else if let Some(resource_children) = stamped_children(child, DeepTag::Resource)
+            && let Some(device) = resource_children.first().and_then(|expr| match expr {
                 Expr::Atom(Atom::Str(value), _) => Some(value.clone()),
                 _ => None,
             })
@@ -896,14 +954,11 @@ fn validate_declared_vs_inferred(
 ) {
     let mut declared_by_name: HashMap<String, EffectSet> = HashMap::new();
     for expr in flattened_top_level(exprs) {
-        if let Expr::List(list, _) = expr
-            && get_tag(list) == Some(DeepTag::Defsig)
-        {
-            let kids = children(list);
+        if let Some(kids) = stamped_children(expr, DeepTag::Defsig) {
             let Some(name) = kids.first().and_then(symbol_name) else {
                 continue;
             };
-            if let Some(declared) = declared_effects_from_defsig(list) {
+            if let Some(declared) = declared_effects_from_defsig(expr) {
                 declared_by_name.insert(name.to_string(), declared);
             }
         }
@@ -1076,13 +1131,15 @@ fn upsert_meta(meta: &mut MetaMap, key: &str, value: Expr) {
 }
 
 fn var_name(expr: &Expr) -> Option<&str> {
-    let Expr::List(list, _) = expr else {
-        return None;
-    };
-    if get_tag(list) != Some(DeepTag::Var) {
-        return None;
+    match expr {
+        Expr::List(list, _) if get_tag(list) == Some(DeepTag::Var) => {
+            children(list).first().and_then(symbol_name)
+        }
+        Expr::Node(node, _) if node.tag() == DeepTag::Var => {
+            node.children_slice().first().and_then(symbol_name)
+        }
+        _ => None,
     }
-    children(list).first().and_then(symbol_name)
 }
 
 fn get_tag(list: &List) -> Option<DeepTag> {
@@ -1168,6 +1225,79 @@ mod tests {
         let reconstructed = check_program(&typed).expect("effect check");
         assert_eq!(reconstructed.type_env(), &expected_type_env);
         assert_eq!(reconstructed.signature_inference(), &expected_signatures);
+    }
+
+    #[test]
+    fn stamped_effect_annotation_preserves_the_checked_node_carrier() {
+        let deep = chelis_deep::parse_and_stamp("(def {} answer (fn {} (params {}) (lit {} 1)))")
+            .expect("canonical Deep fixture stamps");
+        let typed = chelis_types::check_typed_program(&deep).expect("type check");
+
+        let reconstructed = check_program(&typed).expect("effect check");
+
+        assert!(
+            matches!(
+                reconstructed.annotated_exprs().first(),
+                Some(Expr::Node(..))
+            ),
+            "effect annotation must not normalize stamped checker output"
+        );
+    }
+
+    #[test]
+    fn stamped_declared_pure_function_rejects_inferred_random() {
+        let deep = chelis_deep::parse_and_stamp(
+            r#"(defsig {} entry
+                 (t-fn {eff: (effects {})}
+                   (t-tensor {} (d-lit {} 8) (t-prim {} f32))
+                   (t-tensor {} (d-lit {} 8) (t-prim {} f32))))
+               (def {} entry
+                 (fn {}
+                   (params {} (x {type: (t-tensor {} (d-lit {} 8) (t-prim {} f32))}))
+                   (app {} (var {} dropout) (var {} x) (lit {} 0.5))))"#,
+        )
+        .expect("canonical Deep fixture stamps");
+        let typed = chelis_types::check_typed_program(&deep).expect("type check");
+
+        let errors = check_program(&typed).expect_err("declared-pure Random body must reject");
+
+        assert!(
+            errors.iter().any(|error| {
+                error.message.contains("entry") && error.message.contains("Random")
+            }),
+            "effect diagnostic must name the function and missing effect: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn stamped_declared_pure_function_rejects_random_local_closure() {
+        let deep = chelis_deep::parse_and_stamp(
+            r#"(defsig {} entry
+                 (t-fn {eff: (effects {})}
+                   (t-tensor {} (d-lit {} 8) (t-prim {} f32))
+                   (t-tensor {} (d-lit {} 8) (t-prim {} f32))))
+               (def {} entry
+                 (fn {}
+                   (params {} (x {type: (t-tensor {} (d-lit {} 8) (t-prim {} f32))}))
+                   (let {}
+                     (bind {} step
+                       (fn {}
+                         (params {} (y {type: (t-tensor {} (d-lit {} 8) (t-prim {} f32))}))
+                         (app {} (var {} dropout) (var {} y) (lit {} 0.5))))
+                     (app {} (var {} step) (var {} x)))))"#,
+        )
+        .expect("canonical Deep fixture stamps");
+        let typed = chelis_types::check_typed_program(&deep).expect("type check");
+
+        let errors =
+            check_program(&typed).expect_err("declared-pure local Random closure must reject");
+
+        assert!(
+            errors.iter().any(|error| {
+                error.message.contains("entry") && error.message.contains("Random")
+            }),
+            "effect diagnostic must name the function and local closure effect: {errors:?}"
+        );
     }
 
     #[test]

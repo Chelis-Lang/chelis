@@ -15,7 +15,7 @@
 use chelis_deep::DeepTag;
 use std::fmt;
 
-use chelis_deep::ast::{Atom, Expr, List};
+use chelis_deep::ast::{Atom, Expr, MetaMap};
 use chelis_types::types::Prim;
 
 use crate::dag::{DimInfo, TensorType};
@@ -316,12 +316,7 @@ pub fn decode_host_type(expr: &Expr) -> Result<HostTypeTerm, HostTypeDecodeError
     if let Expr::MetaExpr(meta, _) = expr {
         return decode_host_type(&meta.expr);
     }
-    let list = match expr {
-        Expr::List(list, _) => list,
-        _ => return Err(malformed("expected a Deep type node")),
-    };
-    let tag = list_tag(list).ok_or_else(|| malformed("type node has no symbolic tag"))?;
-    let children = list_children(list)?;
+    let (tag, _, children) = stamped_parts(expr)?;
     match tag {
         DeepTag::TPrim => {
             let name = one_symbol_child(children, "t-prim")?;
@@ -370,12 +365,8 @@ pub fn decode_host_type(expr: &Expr) -> Result<HostTypeTerm, HostTypeDecodeError
 /// that replaces `expr_type(...).unwrap_or(Unknown)` in the legacy lowerer.
 pub fn decode_host_type_metadata(expr: &Expr) -> Result<HostTypeTerm, HostTypeDecodeError> {
     match expr {
-        Expr::List(list, _) => {
-            let metadata = match list.elements.get(1) {
-                Some(Expr::Map(metadata, _)) => metadata,
-                Some(_) => return Err(malformed("Deep node metadata slot is not a map")),
-                None => return Err(HostTypeDecodeError::MissingTypeMetadata),
-            };
+        Expr::List(_, _) | Expr::Node(_, _) => {
+            let (_, metadata, _) = stamped_parts(expr)?;
             let type_expr = metadata
                 .entries
                 .iter()
@@ -440,12 +431,8 @@ fn decode_tensor_type(children: &[Expr]) -> Result<HostTypeTerm, HostTypeDecodeE
 }
 
 fn decode_precision(expr: &Expr) -> Result<HostPrecisionTerm, HostTypeDecodeError> {
-    let list = match expr {
-        Expr::List(list, _) => list,
-        _ => return Err(malformed("tensor precision is not a type node")),
-    };
-    let tag = list_tag(list).ok_or_else(|| malformed("precision node has no symbolic tag"))?;
-    let children = list_children(list)?;
+    let (tag, _, children) =
+        stamped_parts(expr).map_err(|_| malformed("tensor precision is not a type node"))?;
     match tag {
         DeepTag::TPrim => {
             let name = one_symbol_child(children, "tensor t-prim")?;
@@ -472,12 +459,8 @@ fn decode_shape_slot(expr: &Expr) -> Result<HostShapeSlot, HostTypeDecodeError> 
     if let Expr::Atom(Atom::Int(value), _) = expr {
         return nonnegative_dim(*value);
     }
-    let list = match expr {
-        Expr::List(list, _) => list,
-        _ => return Err(malformed("tensor dimension is not a dimension node")),
-    };
-    let tag = list_tag(list).ok_or_else(|| malformed("dimension node has no symbolic tag"))?;
-    let children = list_children(list)?;
+    let (tag, _, children) =
+        stamped_parts(expr).map_err(|_| malformed("tensor dimension is not a dimension node"))?;
     match tag {
         DeepTag::DName | DeepTag::DVar => Ok(HostShapeSlot::Dim(DimInfo::Named(
             one_symbol_child(children, tag.as_str())?.to_string(),
@@ -528,15 +511,20 @@ fn decode_adt_type(children: &[Expr]) -> Result<HostTypeTerm, HostTypeDecodeErro
     }
 }
 
-fn list_tag(list: &List) -> Option<DeepTag> {
-    list.tag()
-}
-
-fn list_children(list: &List) -> Result<&[Expr], HostTypeDecodeError> {
-    match list.elements.get(1) {
-        Some(Expr::Map(_, _)) => Ok(&list.elements[2..]),
-        Some(_) => Err(malformed("type node metadata slot is not a map")),
-        None => Err(malformed("type node has no metadata slot")),
+fn stamped_parts(expr: &Expr) -> Result<(DeepTag, &MetaMap, &[Expr]), HostTypeDecodeError> {
+    match expr {
+        Expr::List(list, _) => match list.elements.get(1) {
+            Some(Expr::Map(meta, _)) => Ok((
+                list.tag()
+                    .ok_or_else(|| malformed("type node has no symbolic tag"))?,
+                meta,
+                &list.elements[2..],
+            )),
+            Some(_) => Err(malformed("type node metadata slot is not a map")),
+            None => Err(malformed("type node has no metadata slot")),
+        },
+        Expr::Node(node, _) => Ok((node.tag(), node.meta(), node.children_slice())),
+        _ => Err(malformed("expected a Deep type node")),
     }
 }
 

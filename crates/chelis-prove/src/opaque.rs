@@ -157,18 +157,17 @@ impl OpaqueInvariant {
 
 fn tag(expr: &Expr) -> Option<DeepTag> {
     match expr {
+        Expr::Node(node, _) => Some(node.tag()),
         Expr::List(list, _) => list.tag(),
         _ => None,
     }
 }
 
 fn children(expr: &Expr) -> &[Expr] {
-    if let Expr::List(list, _) = expr
-        && list.elements.len() >= 2
-    {
-        &list.elements[2..]
-    } else {
-        &[]
+    match expr {
+        Expr::Node(node, _) => node.children_slice(),
+        Expr::List(list, _) if list.elements.len() >= 2 => &list.elements[2..],
+        _ => &[],
     }
 }
 
@@ -180,15 +179,17 @@ fn symbol_text(expr: &Expr) -> Option<&str> {
 }
 
 fn meta_value<'a>(expr: &'a Expr, key: &str) -> Option<&'a Expr> {
-    if let Expr::List(list, _) = expr
-        && let Some(Expr::Map(map, _)) = list.elements.get(1)
-    {
-        return map
-            .entries
-            .iter()
-            .find_map(|(k, v)| (k == key).then_some(v));
-    }
-    None
+    let meta = match expr {
+        Expr::Node(node, _) => node.meta(),
+        Expr::List(list, _) => match list.elements.get(1) {
+            Some(Expr::Map(meta, _)) => meta,
+            _ => return None,
+        },
+        _ => return None,
+    };
+    meta.entries
+        .iter()
+        .find_map(|(entry_key, value)| (entry_key == key).then_some(value))
 }
 
 // ===========================================================================
@@ -246,10 +247,8 @@ fn index_deftypes<'a>(exprs: &'a [Expr], out: &mut HashMap<String, &'a Expr>) {
         {
             out.entry(name.to_string()).or_insert(expr);
         }
-        if let Expr::List(list, _) = expr {
-            for child in list.elements.iter().skip(2) {
-                index_deftypes(std::slice::from_ref(child), out);
-            }
+        for child in children(expr) {
+            index_deftypes(std::slice::from_ref(child), out);
         }
     }
 }
@@ -268,10 +267,8 @@ fn collect_in<'a>(
         }
     }
     // Recurse into module wrappers and any nesting.
-    if let Expr::List(list, _) = expr {
-        for child in list.elements.iter().skip(2) {
-            collect_in(child, deftypes, oks, errs);
-        }
+    for child in children(expr) {
+        collect_in(child, deftypes, oks, errs);
     }
 }
 
@@ -393,10 +390,16 @@ fn predicate_binder(fn_node: &Expr) -> Option<String> {
         return Some(name.to_string());
     }
     // A typed-param list `(p {type: ...})`: head symbol is the name.
-    if let Expr::List(list, _) = first
-        && let Some(Expr::Atom(Atom::Name(s), _)) = list.elements.first()
+    let elements = match first {
+        Expr::BareList(elements, _) => Some(elements.as_slice()),
+        Expr::List(list, _) => Some(list.elements.as_slice()),
+        _ => None,
+    };
+    if let Some(name) = elements
+        .and_then(|elements| elements.first())
+        .and_then(symbol_text)
     {
-        return Some(s.clone());
+        return Some(name.to_string());
     }
     None
 }
@@ -595,9 +598,7 @@ pub(crate) fn const_declared_int_type(exprs: &[Expr], name: &str) -> Option<Stri
                         return Some(prim);
                     }
                 }
-                if let Expr::List(list, _) = expr
-                    && let Some(found) = scan(&list.elements[2.min(list.elements.len())..], name)
-                {
+                if let Some(found) = scan(children(expr), name) {
                     return Some(found);
                 }
             }
@@ -609,14 +610,10 @@ pub(crate) fn const_declared_int_type(exprs: &[Expr], name: &str) -> Option<Stri
         if tag(expr) != Some(DeepTag::Lit) {
             return None;
         }
-        if let Expr::List(list, _) = expr
-            && let Some(Expr::Map(meta, _)) = list.elements.get(1)
+        if let Some(ty) = meta_value(expr, "type")
+            && tag(ty) == Some(DeepTag::TPrim)
         {
-            for (k, v) in &meta.entries {
-                if k == "type" && tag(v) == Some(DeepTag::TPrim) {
-                    return symbol_text(children(v).first()?).map(str::to_string);
-                }
-            }
+            return symbol_text(children(ty).first()?).map(str::to_string);
         }
         None
     }
@@ -652,9 +649,7 @@ pub(crate) fn const_declared_int_type(exprs: &[Expr], name: &str) -> Option<Stri
                         };
                     }
                 }
-                if let Expr::List(list, _) = expr
-                    && let Some(found) = scan(&list.elements[2.min(list.elements.len())..], name)
-                {
+                if let Some(found) = scan(children(expr), name) {
                     return Some(found);
                 }
             }
@@ -1492,7 +1487,7 @@ fn read_produced_field(
         let_block("__r", call, access)
     };
     let probe_def = node_def(probe, body);
-    let exprs = chelis_deep::parser::parse_str(module_source).ok()?;
+    let exprs = chelis_deep::parser::parse_and_stamp_file(module_source).ok()?;
     let program = inject_into_module_with_source(&exprs, type_name, probe_def);
     let source = chelis_deep::printer::print_canonical(&program);
     let result = chelis_compiler_api::compiler::eval_selected(
@@ -1604,10 +1599,7 @@ fn contains_equality_atom(expr: &Expr) -> bool {
     {
         return true;
     }
-    if let Expr::List(list, _) = expr {
-        return list.elements.iter().skip(2).any(contains_equality_atom);
-    }
-    false
+    children(expr).iter().any(contains_equality_atom)
 }
 
 fn is_two_sided_band(expr: &Expr) -> bool {
@@ -1879,10 +1871,9 @@ fn inject_into_module_with_source(exprs: &[Expr], type_name: &str, def: Expr) ->
         {
             return true;
         }
-        if let Expr::List(l, _) = expr {
-            return l.elements.iter().any(|c| module_defines(c, type_name));
-        }
-        false
+        children(expr)
+            .iter()
+            .any(|child| module_defines(child, type_name))
     }
     let mut out = Vec::with_capacity(exprs.len());
     let mut injected = false;
@@ -1891,15 +1882,33 @@ fn inject_into_module_with_source(exprs: &[Expr], type_name: &str, def: Expr) ->
         if !injected
             && tag(&stripped) == Some(DeepTag::Module)
             && module_defines(&stripped, type_name)
-            && let Expr::List(l, span) = &stripped
         {
-            let mut elements = l.elements.clone();
-            elements.push(def.clone());
-            out.push(Expr::List(chelis_deep::ast::List { elements }, *span));
-            injected = true;
-        } else {
-            out.push(stripped);
+            match &stripped {
+                Expr::Node(node, span) => {
+                    let mut module_children = node.children_slice().to_vec();
+                    module_children.push(def.clone());
+                    out.push(Expr::Node(
+                        Box::new(chelis_deep::node::Node::new(
+                            DeepTag::Module,
+                            node.meta().clone(),
+                            module_children,
+                        )),
+                        *span,
+                    ));
+                    injected = true;
+                    continue;
+                }
+                Expr::List(list, span) => {
+                    let mut elements = list.elements.clone();
+                    elements.push(def.clone());
+                    out.push(Expr::List(chelis_deep::ast::List { elements }, *span));
+                    injected = true;
+                    continue;
+                }
+                _ => {}
+            }
         }
+        out.push(stripped);
     }
     if !injected {
         out.push(def);
@@ -1911,6 +1920,23 @@ fn inject_into_module_with_source(exprs: &[Expr], type_name: &str, def: Expr) ->
 /// every deftype, recursively. Keeps `opaque: true` so opacity is intact.
 fn strip_invariant_metadata(expr: &Expr) -> Expr {
     match expr {
+        Expr::Node(node, span) => {
+            let tag = node.tag();
+            let mut meta = node.meta().clone();
+            if tag == DeepTag::Deftype {
+                meta.entries
+                    .retain(|(key, _)| key != "invariant" && key != "invariant_amenability");
+            }
+            let children = node
+                .children_slice()
+                .iter()
+                .map(strip_invariant_metadata)
+                .collect();
+            Expr::Node(
+                Box::new(chelis_deep::node::Node::new(tag, meta, children)),
+                *span,
+            )
+        }
         Expr::List(list, span) => {
             let mut elements: Vec<Expr> =
                 list.elements.iter().map(strip_invariant_metadata).collect();
@@ -1927,6 +1953,16 @@ fn strip_invariant_metadata(expr: &Expr) -> Expr {
             }
             Expr::List(chelis_deep::ast::List { elements }, *span)
         }
+        Expr::BareList(elements, span) => Expr::BareList(
+            elements.iter().map(strip_invariant_metadata).collect(),
+            *span,
+        ),
+        Expr::UnknownForm(data) => Expr::UnknownForm(Box::new(chelis_deep::ast::UnknownFormData {
+            head: data.head.clone(),
+            meta: data.meta.clone(),
+            children: data.children.iter().map(strip_invariant_metadata).collect(),
+            span: data.span,
+        })),
         other => other.clone(),
     }
 }

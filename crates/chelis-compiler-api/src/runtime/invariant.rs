@@ -14,7 +14,7 @@ use chelis_deep::ast::Expr;
 use chelis_types::types::Prim;
 
 use super::host_ops::render_value;
-use super::transforms::{as_list, extract_prim_from_type_expr, prim_from_name, var_name};
+use super::transforms::{extract_prim_from_type_expr, prim_from_name, var_name};
 // Brings the parent module's runtime types (`EvalContext`, `RuntimeValue`,
 // `RuntimeTensorValue`) and the private Deep-shape helpers (`tag`, `children`,
 // `get_meta`, `symbol_name`, `top_level_items`) into scope, mirroring the
@@ -186,20 +186,13 @@ impl std::fmt::Display for InvariantViolation {
 pub(crate) fn collect_type_invariants(exprs: &[Expr]) -> HashMap<String, InvariantEntry> {
     let mut out = HashMap::new();
     for expr in top_level_items(exprs) {
-        let Expr::List(list, _) = expr else {
-            continue;
-        };
-        if tag(list) != Some(DeepTag::Deftype) {
-            continue;
-        }
-        let Some(meta) = get_meta(list) else {
+        let Some((DeepTag::Deftype, meta, kids)) = expr_parts(expr) else {
             continue;
         };
         let Some((_, inv_value)) = meta.entries.iter().find(|(key, _)| key == "invariant") else {
             // No declared invariant: this type contributes no table entry.
             continue;
         };
-        let kids = children(list);
         let Some(type_name) = kids.first().and_then(symbol_name) else {
             continue;
         };
@@ -211,13 +204,10 @@ pub(crate) fn collect_type_invariants(exprs: &[Expr]) -> HashMap<String, Invaria
         // single-record-variant representation means there is exactly one
         // in V1, but iterating keeps the table honest if that widens.
         for variant in kids.iter().skip(2) {
-            let Some(variant_list) = as_list(variant) else {
+            let Some((DeepTag::Variant, _, variant_kids)) = expr_parts(variant) else {
                 continue;
             };
-            if tag(variant_list) != Some(DeepTag::Variant) {
-                continue;
-            }
-            let Some(ctor) = children(variant_list).first().and_then(symbol_name) else {
+            let Some(ctor) = variant_kids.first().and_then(symbol_name) else {
                 continue;
             };
             let entry = match &parsed {
@@ -279,28 +269,24 @@ pub(crate) fn collect_zero_arg_constants(exprs: &[Expr]) -> HashMap<String, Expr
     // the bare value-binding form. Parameterized fn defs are not candidates.
     let mut candidates: HashMap<String, Expr> = HashMap::new();
     for expr in top_level_items(exprs) {
-        let Expr::List(list, _) = expr else {
+        let Some((DeepTag::Def, _, kids)) = expr_parts(expr) else {
             continue;
         };
-        if tag(list) != Some(DeepTag::Def) {
-            continue;
-        }
-        let kids = children(list);
         let Some(name) = kids.first().and_then(symbol_name) else {
             continue;
         };
         let Some(body) = kids.get(1) else {
             continue;
         };
-        let candidate_body = match as_list(body) {
+        let candidate_body = match expr_parts(body) {
             // Fn-wrapped form: keep only the empty-params (zero-arg) case,
             // and take the unwrapped inner value body.
-            Some(fn_list) if tag(fn_list) == Some(DeepTag::Fn) => {
-                let fn_kids = children(fn_list);
-                let Some(params_list) = fn_kids.first().and_then(as_list) else {
+            Some((DeepTag::Fn, _, fn_kids)) => {
+                let Some((DeepTag::Params, _, params_kids)) = fn_kids.first().and_then(expr_parts)
+                else {
                     continue;
                 };
-                if tag(params_list) != Some(DeepTag::Params) || !children(params_list).is_empty() {
+                if !params_kids.is_empty() {
                     // Non-empty params => a parameterized function, not a
                     // constant. Not in the predicate grammar as a value.
                     continue;
@@ -342,16 +328,16 @@ fn is_constant_foldable(
     candidates: &HashMap<String, Expr>,
     visiting: &mut HashSet<String>,
 ) -> bool {
-    let Some(list) = as_list(expr) else {
+    let Some((node_tag, _, kids)) = expr_parts(expr) else {
         // A bare atom (not wrapped in a Deep node) is not a value form.
         return false;
     };
-    match tag(list) {
+    match node_tag {
         // A literal value is the base constant.
-        Some(DeepTag::Lit) => true,
+        DeepTag::Lit => true,
         // A reference folds only to another genuine constant; chase it.
-        Some(DeepTag::Var) => {
-            let Some(name) = children(list).first().and_then(symbol_name) else {
+        DeepTag::Var => {
+            let Some(name) = kids.first().and_then(symbol_name) else {
                 return false;
             };
             if visiting.contains(name) {
@@ -369,8 +355,7 @@ fn is_constant_foldable(
         }
         // An application folds when the callee is an admitted predicate-
         // grammar op and every argument is itself constant foldable.
-        Some(DeepTag::App) => {
-            let kids = children(list);
+        DeepTag::App => {
             let Some(callee) = kids.first() else {
                 return false;
             };
@@ -440,33 +425,21 @@ pub(crate) struct DecodeField {
 pub(crate) fn collect_ctor_field_types(exprs: &[Expr]) -> HashMap<String, Vec<DecodeField>> {
     let mut out = HashMap::new();
     for expr in top_level_items(exprs) {
-        let Expr::List(list, _) = expr else {
+        let Some((DeepTag::Deftype, _, kids)) = expr_parts(expr) else {
             continue;
         };
-        if tag(list) != Some(DeepTag::Deftype) {
-            continue;
-        }
-        let kids = children(list);
         for variant in kids.iter().skip(2) {
-            let Some(variant_list) = as_list(variant) else {
+            let Some((DeepTag::Variant, _, variant_kids)) = expr_parts(variant) else {
                 continue;
             };
-            if tag(variant_list) != Some(DeepTag::Variant) {
-                continue;
-            }
-            let variant_kids = children(variant_list);
             let Some(ctor) = variant_kids.first().and_then(symbol_name) else {
                 continue;
             };
             let mut fields = Vec::new();
             for field in variant_kids.iter().skip(1) {
-                let Some(field_list) = as_list(field) else {
+                let Some((DeepTag::Field, _, field_kids)) = expr_parts(field) else {
                     continue;
                 };
-                if tag(field_list) != Some(DeepTag::Field) {
-                    continue;
-                }
-                let field_kids = children(field_list);
                 let Some(name) = field_kids.first().and_then(symbol_name) else {
                     continue;
                 };
@@ -494,18 +467,18 @@ pub(crate) fn collect_ctor_field_types(exprs: &[Expr]) -> HashMap<String, Vec<De
 /// (function types, generics, type variables) -- the chokepoint treats a
 /// field with no classifiable type as outside the decodable surface.
 fn decode_field_type(expr: &Expr) -> Option<DecodeFieldType> {
-    let list = as_list(expr)?;
-    match tag(list) {
-        Some(DeepTag::TPrim) => children(list)
+    let (tag, _, kids) = expr_parts(expr)?;
+    match tag {
+        DeepTag::TPrim => kids
             .first()
             .and_then(symbol_name)
             .and_then(prim_from_name)
             .map(DecodeFieldType::Prim),
-        Some(DeepTag::TTensor) => children(list)
+        DeepTag::TTensor => kids
             .last()
             .and_then(extract_prim_from_type_expr)
             .map(DecodeFieldType::Tensor),
-        Some(DeepTag::TAdt) => children(list)
+        DeepTag::TAdt => kids
             .first()
             .and_then(symbol_name)
             .map(|name| DecodeFieldType::Adt(name.to_string())),
@@ -515,18 +488,26 @@ fn decode_field_type(expr: &Expr) -> Option<DecodeFieldType> {
 
 /// Parse `(fn {} (params {} <binder>) <body>)` into `(binder, body)`.
 fn parse_invariant_fn(expr: &Expr) -> Option<(String, Expr)> {
-    let list = as_list(expr)?;
-    if tag(list) != Some(DeepTag::Fn) {
+    let (tag, _, kids) = expr_parts(expr)?;
+    if tag != DeepTag::Fn {
         return None;
     }
-    let kids = children(list);
-    let params = as_list(kids.first()?)?;
-    if tag(params) != Some(DeepTag::Params) {
+    let (params_tag, _, params_kids) = expr_parts(kids.first()?)?;
+    if params_tag != DeepTag::Params {
         return None;
     }
-    let binder = children(params).first().and_then(symbol_name)?;
+    let binder = params_kids.first().and_then(symbol_name)?;
     let body = kids.get(1)?;
     Some((binder.to_string(), body.clone()))
+}
+
+/// Borrow the common stamped shape without reconstructing a legacy `List`.
+fn expr_parts(expr: &Expr) -> Option<(DeepTag, &MetaMap, &[Expr])> {
+    match expr {
+        Expr::List(list, _) => Some((tag(list)?, get_meta(list)?, children(list))),
+        Expr::Node(node, _) => Some((node.tag(), node.meta(), node.children_slice())),
+        _ => None,
+    }
 }
 
 /// Render a [`InvariantPredicate`] body for a violation message. Uses the

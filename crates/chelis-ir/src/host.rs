@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use chelis_deep::ast::{Atom, Expr, List};
+use chelis_deep::ast::{Atom, Expr, List, MetaMap};
 use chelis_deep::decode_effect_kind;
 use chelis_types::adt::{AdtDef, AdtRegistry};
 use chelis_types::infer::type_to_deep_expr;
@@ -8370,24 +8370,26 @@ fn expr_host_type(
         Expr::Atom(Atom::Float(_), _) => HostTypeTerm::Float64,
         Expr::Atom(Atom::Bool(_), _) => HostTypeTerm::Bool,
         Expr::Atom(Atom::Str(_), _) => HostTypeTerm::String,
-        Expr::List(list, _) if tag(list) == Some(DeepTag::Var) => children(list)
-            .first()
-            .and_then(symbol_name)
-            .and_then(|name| {
-                expr_type(expr)
-                    .filter(|ty| !ty.is_unresolved())
-                    .or_else(|| {
-                        scope
-                            .get(name)
-                            .cloned()
-                            .or_else(|| lookup_declared_host_type(program, name))
-                    })
-            })
-            .unwrap_or_else(fresh_host_inference),
-        Expr::List(list, _) if tag(list) == Some(DeepTag::App) => {
+        Expr::List(_, _) | Expr::Node(_, _) if expr.tag() == Some(DeepTag::Var) => {
+            stamped_parts(expr)
+                .and_then(|(_, _, kids)| kids.first())
+                .and_then(symbol_name)
+                .and_then(|name| {
+                    expr_type(expr)
+                        .filter(|ty| !ty.is_unresolved())
+                        .or_else(|| {
+                            scope
+                                .get(name)
+                                .cloned()
+                                .or_else(|| lookup_declared_host_type(program, name))
+                        })
+                })
+                .unwrap_or_else(fresh_host_inference)
+        }
+        Expr::List(_, _) | Expr::Node(_, _) if expr.tag() == Some(DeepTag::App) => {
             let explicit = expr_type(expr).unwrap_or_else(fresh_host_inference);
             if app_expr_needs_inferred_type(&explicit) {
-                let inferred = infer_app_expr_host_type(list, program, scope)
+                let inferred = infer_app_expr_host_type(expr, program, scope)
                     .unwrap_or_else(fresh_host_inference);
                 if should_prefer_inferred_app_type(&explicit, &inferred) {
                     inferred
@@ -8409,16 +8411,18 @@ fn app_expr_needs_inferred_type(explicit: &HostTypeTerm) -> bool {
 }
 
 fn infer_app_expr_host_type(
-    list: &List,
+    expr: &Expr,
     program: &CheckedProgram,
     scope: &HashMap<String, HostTypeTerm>,
 ) -> Option<HostTypeTerm> {
-    let kids = children(list);
-    let callee = kids.first().and_then(as_list)?;
-    if tag(callee) != Some(DeepTag::Var) {
+    let (DeepTag::App, _, kids) = stamped_parts(expr)? else {
         return None;
-    }
-    let name = children(callee).first().and_then(symbol_name)?;
+    };
+    let callee = kids.first()?;
+    let (DeepTag::Var, _, callee_kids) = stamped_parts(callee)? else {
+        return None;
+    };
+    let name = callee_kids.first().and_then(symbol_name)?;
     if !BUILTIN_NAMES.contains(&name) {
         if let Some(definition) = lookup_adt_constructor_definition(program, name) {
             let mut substitutions = HashMap::new();
@@ -8562,29 +8566,22 @@ fn expr_scalar_float_precision(expr: &Expr) -> Option<chelis_types::types::Prim>
     if let Expr::MetaExpr(meta, _) = expr {
         return expr_scalar_float_precision(&meta.expr);
     }
-    let Expr::List(list, _) = expr else {
-        return None;
-    };
+    let (node_tag, meta, kids) = stamped_parts(expr)?;
     let prim_of_t_prim = |type_expr: &Expr| -> Option<chelis_types::types::Prim> {
-        let Expr::List(inner, _) = type_expr else {
+        let (DeepTag::TPrim, _, kids) = stamped_parts(type_expr)? else {
             return None;
         };
-        if tag(inner) != Some(DeepTag::TPrim) {
-            return None;
-        }
-        children(inner)
-            .first()
+        kids.first()
             .and_then(symbol_name)
             .and_then(chelis_types::types::Prim::parse_name)
     };
-    if let Some(Expr::Map(meta, _)) = list.elements.get(1)
-        && let Some((_, type_expr)) = meta.entries.iter().find(|(key, _)| key == "type")
+    if let Some((_, type_expr)) = meta.entries.iter().find(|(key, _)| key == "type")
         && let Some(prim) = prim_of_t_prim(type_expr)
     {
         return prim.is_float().then_some(prim);
     }
-    if tag(list) == Some(DeepTag::Cast)
-        && let Some(target) = children(list).get(1)
+    if node_tag == DeepTag::Cast
+        && let Some(target) = kids.get(1)
         && let Some(prim) = prim_of_t_prim(target)
     {
         return prim.is_float().then_some(prim);
@@ -8661,8 +8658,8 @@ fn expr_int_literal(expr: &Expr) -> Option<i64> {
     match expr {
         Expr::Atom(Atom::Int(value), _) => Some(*value),
         Expr::MetaExpr(meta, _) => expr_int_literal(&meta.expr),
-        Expr::List(list, _) if tag(list) == Some(DeepTag::Lit) => {
-            children(list).first().and_then(expr_int_literal)
+        Expr::List(_, _) | Expr::Node(_, _) if expr.tag() == Some(DeepTag::Lit) => {
+            stamped_parts(expr)?.2.first().and_then(expr_int_literal)
         }
         // Movement-op axis/size args are routinely written as
         // `cast(0, int32)` / `cast(2, int32)` (the canonical integer-
@@ -8673,8 +8670,8 @@ fn expr_int_literal(expr: &Expr) -> Option<i64> {
         // shape handler bails and the result type degrades to a
         // dims-less placeholder, splitting a constant-broadcast `let`
         // binding into an unsupported host-lane builtin (issue #300).
-        Expr::List(list, _) if tag(list) == Some(DeepTag::Cast) => {
-            children(list).first().and_then(expr_int_literal)
+        Expr::List(_, _) | Expr::Node(_, _) if expr.tag() == Some(DeepTag::Cast) => {
+            stamped_parts(expr)?.2.first().and_then(expr_int_literal)
         }
         _ => None,
     }
@@ -8786,13 +8783,9 @@ fn terminal_name(name: &str) -> &str {
 
 fn find_top_level_def_expr<'a>(exprs: &'a [Expr], name: &str) -> Option<&'a Expr> {
     for expr in top_level_items(exprs) {
-        let Expr::List(list, _) = expr else {
+        let Some((DeepTag::Def, _, kids)) = stamped_parts(expr) else {
             continue;
         };
-        if tag(list) != Some(DeepTag::Def) {
-            continue;
-        }
-        let kids = children(list);
         let Some(def_name) = kids.first().and_then(symbol_name) else {
             continue;
         };
@@ -8815,11 +8808,17 @@ fn expr_tensor_type(
 }
 
 fn expr_type(expr: &Expr) -> Option<HostTypeTerm> {
-    let Expr::List(list, _) = expr else {
-        return None;
-    };
-    let meta = match list.elements.get(1) {
-        Some(Expr::Map(meta, _)) => meta,
+    // Parameter binders are untagged list carriers `(name {type: ...})`,
+    // not Deep vocabulary nodes. Preserve their source-authored metadata
+    // while reading stamped vocabulary nodes directly; routing all Lists
+    // through `stamped_parts` erases symbolic binder names such as `n` and
+    // replaces them with checker-minted `dN` aliases at host emission.
+    let meta = match expr {
+        Expr::List(list, _) => match list.elements.get(1) {
+            Some(Expr::Map(meta, _)) => meta,
+            _ => return None,
+        },
+        Expr::Node(node, _) => node.meta(),
         _ => return None,
     };
     meta.entries
@@ -8829,11 +8828,12 @@ fn expr_type(expr: &Expr) -> Option<HostTypeTerm> {
 }
 
 fn expr_fn_type(expr: &Expr) -> Option<(Vec<HostTypeTerm>, HostTypeTerm)> {
-    let Expr::List(list, _) = expr else {
-        return None;
-    };
-    let meta = match list.elements.get(1) {
-        Some(Expr::Map(meta, _)) => meta,
+    let meta = match expr {
+        Expr::List(list, _) => match list.elements.get(1) {
+            Some(Expr::Map(meta, _)) => meta,
+            _ => return None,
+        },
+        Expr::Node(node, _) => node.meta(),
         _ => return None,
     };
     meta.entries
@@ -8853,13 +8853,9 @@ fn parse_fn_type_expr(expr: &Expr) -> Option<(Vec<HostTypeTerm>, HostTypeTerm)> 
 }
 
 fn parse_fn_type_expr_parts(expr: &Expr) -> Option<(Vec<Expr>, Expr)> {
-    let Expr::List(list, _) = expr else {
+    let (DeepTag::TFn, _, kids) = stamped_parts(expr)? else {
         return None;
     };
-    if tag(list) != Some(DeepTag::TFn) {
-        return None;
-    }
-    let kids = children(list);
     let (ret, args) = kids.split_last()?;
     Some((args.to_vec(), ret.clone()))
 }
@@ -10488,6 +10484,20 @@ fn children(list: &List) -> &[Expr] {
     }
 }
 
+/// Borrow a canonical stamped node without reconstructing a legacy `List`.
+fn stamped_parts(expr: &Expr) -> Option<(DeepTag, &MetaMap, &[Expr])> {
+    match expr {
+        Expr::List(list, _) => {
+            let Some(Expr::Map(meta, _)) = list.elements.get(1) else {
+                return None;
+            };
+            Some((tag(list)?, meta, children(list)))
+        }
+        Expr::Node(node, _) => Some((node.tag(), node.meta(), node.children_slice())),
+        _ => None,
+    }
+}
+
 fn as_list(expr: &Expr) -> Option<&List> {
     match expr {
         Expr::List(list, _) => Some(list),
@@ -10804,13 +10814,10 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
 
     fn infer_scalar_to_tensor_host_type(arg_src: &str) -> Option<HostTypeTerm> {
         let app = parse_deep_app(&format!("(app {{}} (var {{}} scalar_to_tensor) {arg_src})"));
-        let Expr::List(list, _) = &app else {
-            panic!("app expr must be a list");
-        };
         // Empty checked program: the arm under test must not depend on
         // program-level lookups for the precision recovery.
         let program = surf_check("unrelated = 1\n");
-        infer_app_expr_host_type(list, &program, &HashMap::new())
+        infer_app_expr_host_type(&app, &program, &HashMap::new())
     }
 
     #[test]
@@ -10914,16 +10921,13 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
         let app = parse_deep_app(&format!(
             "(app {{}} (var {{}} concat) (var {{}} rows) {axis_src})"
         ));
-        let Expr::List(list, _) = &app else {
-            panic!("app expr must be a list");
-        };
         let program = surf_check("unrelated = 1\n");
         let mut scope = HashMap::new();
         scope.insert(
             "rows".to_string(),
             HostTypeTerm::List(Box::new(HostTypeTerm::Tensor(rank2_element()))),
         );
-        infer_app_expr_host_type(list, &program, &scope)
+        infer_app_expr_host_type(&app, &program, &scope)
     }
 
     #[test]

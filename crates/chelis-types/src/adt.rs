@@ -161,6 +161,19 @@ impl AdtRegistry {
                         variant_start = 2;
                     }
                 }
+                deep::Expr::Node(node, _)
+                    if matches!(node.tag(), DeepTag::Variant | DeepTag::Field) =>
+                {
+                    variant_start = 1;
+                }
+                deep::Expr::BareList(elements, _) => {
+                    for element in elements {
+                        if let deep::Expr::Atom(deep::Atom::Name(name), _) = element {
+                            type_params.push(name.clone());
+                        }
+                    }
+                    variant_start = 2;
+                }
                 _ => {
                     variant_start = 1;
                 }
@@ -187,10 +200,7 @@ impl AdtRegistry {
         };
 
         for variant_expr in variant_children {
-            if let deep::Expr::List(list, _) = variant_expr
-                && get_tag(list) == Some(DeepTag::Variant)
-            {
-                let vchildren = list_children(list);
+            if let Some((DeepTag::Variant, vchildren)) = stamped_parts(variant_expr) {
                 if vchildren.is_empty() {
                     continue;
                 }
@@ -209,9 +219,8 @@ impl AdtRegistry {
                 // uses it) resolve too.
                 let mut fields: Vec<(Option<String>, Type)> = Vec::new();
                 for field_expr in &vchildren[1..] {
-                    match field_expr {
-                        deep::Expr::List(flist, _) if get_tag(flist) == Some(DeepTag::Field) => {
-                            let fchildren = list_children(flist);
+                    match stamped_parts(field_expr) {
+                        Some((DeepTag::Field, fchildren)) => {
                             if fchildren.len() >= 2 {
                                 let fname = match &fchildren[0] {
                                     deep::Expr::Atom(deep::Atom::Name(s), _) => s.clone(),
@@ -501,6 +510,14 @@ impl AdtRegistry {
 /// Helper: get tag string from a Deep List.
 fn get_tag(list: &deep::List) -> Option<DeepTag> {
     list.tag()
+}
+
+fn stamped_parts(expr: &deep::Expr) -> Option<(DeepTag, &[deep::Expr])> {
+    match expr {
+        deep::Expr::Node(node, _) => Some((node.tag(), node.children_slice())),
+        deep::Expr::List(list, _) => Some((get_tag(list)?, list_children(list))),
+        _ => None,
+    }
 }
 
 fn terminal_name_matches(full_name: &str, short_name: &str) -> bool {

@@ -155,14 +155,16 @@ fn canonical_decls(source: &str) -> Vec<String> {
 }
 
 fn module_decl_exprs(exprs: &[Expr]) -> Vec<Expr> {
-    let module = exprs
+    exprs
         .iter()
         .find_map(|expr| match expr {
-            Expr::List(list, _) if is_tag(list, "module") => Some(list),
+            Expr::List(list, _) if is_tag(list, "module") => Some(list.elements[3..].to_vec()),
+            Expr::Node(node, _) if node.tag() == chelis_deep::DeepTag::Module => {
+                Some(node.children_slice()[1..].to_vec())
+            }
             _ => None,
         })
-        .expect("single module");
-    module.elements[3..].to_vec()
+        .expect("single module")
 }
 
 fn is_tag(list: &chelis_deep::List, tag: &str) -> bool {

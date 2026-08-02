@@ -21,18 +21,16 @@ pub(super) fn infer_app(
     }
 
     // Check if func is a comparison op (for special return type handling)
-    let func_name = if let deep::Expr::List(flist, _) = &kids[0] {
-        if get_tag(flist) == Some(DeepTag::Var) {
-            children(flist)
-                .first()
-                .and_then(|e| symbol_name(e))
-                .map(|s| s.to_string())
-        } else {
-            None
-        }
-    } else {
-        None
-    };
+    let func_name = stamped_parts(&kids[0]).and_then(|(tag, _, callee_kids)| {
+        (tag == DeepTag::Var)
+            .then(|| {
+                callee_kids
+                    .first()
+                    .and_then(symbol_name)
+                    .map(str::to_string)
+            })
+            .flatten()
+    });
 
     if matches!(func_name.as_deref(), Some("permute")) {
         return infer_permute_app(list, env, vg, subst, adt_reg, errors, product);

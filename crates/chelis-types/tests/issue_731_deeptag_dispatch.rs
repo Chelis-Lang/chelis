@@ -19,8 +19,9 @@
 //! * both polarities: the dispatched tags still check cleanly on a
 //!   well-typed control program.
 
-use chelis_deep::DeepTag;
 use chelis_deep::parser::parse_str;
+use chelis_deep::role::{AritySpec, ChildStampRole, arity_contract, child_stamp_role};
+use chelis_deep::{Atom, DeepTag, Expr, List, MetaMap, Span};
 use chelis_types::errors::CheckErrorKind;
 use chelis_types::infer_program;
 
@@ -65,11 +66,43 @@ const NO_EXPRESSION_DISPOSITION: [DeepTag; 30] = [
     DeepTag::Resource,
 ];
 
-/// Infer `(def {} f (<tag> {}))` and return the error list.
-fn errors_for_body_tag(tag: &str) -> Vec<chelis_types::errors::CheckError> {
-    let source = format!("(def {{}} f ({tag} {{}}))");
-    let exprs = parse_str(&source).expect("lenient Deep parse");
-    infer_program(&exprs).errors
+fn zero() -> Span {
+    Span::new(0, 0)
+}
+
+/// Construct an arity-valid stamped node in expression position. The
+/// checker-disposition oracle must not depend on malformed source surviving
+/// the parser now that `Node::try_new` owns structural arity.
+fn stamped_body(tag: DeepTag) -> Expr {
+    let child_count = match arity_contract(tag) {
+        AritySpec::Fixed(count) | AritySpec::AtLeast(count) => count,
+        AritySpec::Range(minimum, _) => minimum,
+    };
+    let children = (0..child_count)
+        .map(|index| match child_stamp_role(tag, index, child_count) {
+            ChildStampRole::Binder | ChildStampRole::Selector | ChildStampRole::Syntax => {
+                Expr::Atom(Atom::Name(format!("slot_{index}")), zero())
+            }
+            ChildStampRole::RuntimeExpr
+            | ChildStampRole::Type
+            | ChildStampRole::EffectHandler
+            | ChildStampRole::ExplicitInferenceBypass => Expr::Atom(Atom::Int(0), zero()),
+        })
+        .collect();
+    Expr::node(tag, MetaMap::default(), children, zero())
+}
+
+fn errors_for_stamped_body(tag: DeepTag) -> Vec<chelis_types::errors::CheckError> {
+    let def = Expr::node(
+        DeepTag::Def,
+        MetaMap::default(),
+        vec![
+            Expr::Atom(Atom::Name("f".to_string()), zero()),
+            stamped_body(tag),
+        ],
+        zero(),
+    );
+    infer_program(&[def]).errors
 }
 
 // ── Negative polarity: no-disposition tags are rejected loudly ──────────────
@@ -77,7 +110,7 @@ fn errors_for_body_tag(tag: &str) -> Vec<chelis_types::errors::CheckError> {
 #[test]
 fn in_vocabulary_tags_without_expression_disposition_are_rejected_loudly() {
     for tag in NO_EXPRESSION_DISPOSITION {
-        let errors = errors_for_body_tag(tag.as_str());
+        let errors = errors_for_stamped_body(tag);
         assert!(
             !errors.is_empty(),
             "`{}` in expression position must push a diagnostic, not be \
@@ -143,7 +176,8 @@ fn no_disposition_list_is_disjoint_and_in_vocabulary() {
 
 #[test]
 fn unknown_tag_outside_the_vocabulary_keeps_the_raw_string_loud_arm() {
-    let errors = errors_for_body_tag("bogus_wrapper");
+    let exprs = parse_str("(def {} f (bogus_wrapper {}))").expect("lenient Deep parse");
+    let errors = infer_program(&exprs).errors;
     let unknown_form = errors
         .iter()
         .find(|e| matches!(e.kind, CheckErrorKind::UnknownForm))
@@ -162,8 +196,22 @@ fn unknown_tag_outside_the_vocabulary_keeps_the_raw_string_loud_arm() {
 /// raw-string arm (there is no tag string to decode).
 #[test]
 fn untagged_list_in_expression_position_is_rejected_loudly() {
-    let exprs = parse_str("(def {} f ((var {} g) (var {} x)))").expect("lenient Deep parse");
-    let errors = infer_program(&exprs).errors;
+    // The stamped source boundary rejects this shape. Retain the checker
+    // oracle through the still-public programmatic legacy carrier until
+    // `Expr::List` is deleted by the #1023 migration.
+    let untagged = Expr::List(
+        List {
+            elements: vec![Expr::Atom(Atom::Int(0), zero())],
+        },
+        zero(),
+    );
+    let def = Expr::node(
+        DeepTag::Def,
+        MetaMap::default(),
+        vec![Expr::Atom(Atom::Name("f".to_string()), zero()), untagged],
+        zero(),
+    );
+    let errors = infer_program(&[def]).errors;
     assert!(
         errors
             .iter()
@@ -207,7 +255,25 @@ fn block_checks_every_child_not_only_the_last() {
 
 #[test]
 fn childless_block_is_malformed() {
-    let errors = errors_for_body_tag("block");
+    assert!(
+        parse_str("(def {} f (block {}))").is_err(),
+        "the stamped constructor must reject a childless block at ingress"
+    );
+
+    // [04-TOT-3] still binds malformed nodes that reach the checker through
+    // a programmatic mutation of the transitional mutable carrier.
+    let mut block = stamped_body(DeepTag::Block);
+    let Expr::Node(node, _) = &mut block else {
+        unreachable!("stamped_body always constructs a Node")
+    };
+    node.children_vec_mut().clear();
+    let def = Expr::node(
+        DeepTag::Def,
+        MetaMap::default(),
+        vec![Expr::Atom(Atom::Name("f".to_string()), zero()), block],
+        zero(),
+    );
+    let errors = infer_program(&[def]).errors;
     assert!(
         errors
             .iter()

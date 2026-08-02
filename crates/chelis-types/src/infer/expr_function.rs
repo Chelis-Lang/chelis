@@ -93,11 +93,8 @@ pub(super) fn infer_def_body_with_sig(
     product: &mut InferenceProduct,
 ) -> Type {
     // Match: body is `(fn (params ...) body-expr)` AND decl is `Fn(args, ret)`.
-    let fn_list = match body {
-        deep::Expr::List(list, _) if get_tag(list) == Some(DeepTag::Fn) => list,
-        _ => {
-            return infer_expr(body, env, vg, subst, adt_reg, errors, product);
-        }
+    let Some((DeepTag::Fn, _, kids)) = stamped_parts(body) else {
+        return infer_expr(body, env, vg, subst, adt_reg, errors, product);
     };
     let (decl_args, decl_ret) = match decl_ty {
         Type::Fn(args, ret) => (args, ret.as_ref()),
@@ -106,8 +103,10 @@ pub(super) fn infer_def_body_with_sig(
         }
     };
 
-    let kids = children(fn_list);
     if kids.len() < 2 {
+        let deep::Expr::List(fn_list, _) = body else {
+            unreachable!("validated Node::Fn satisfies its arity contract")
+        };
         return malformed_form(fn_list, "fn", "parameters and a body", errors);
     }
     let params = extract_params(&kids[0], vg, adt_reg, errors, annotation_binder_mode(env));
@@ -161,13 +160,12 @@ pub(super) fn extract_params(
     errors: &mut DiagnosticSink<'_>,
     binder_mode: BinderMode<'_>,
 ) -> Vec<(String, Option<Type>)> {
-    let deep::Expr::List(list, _) = expr else {
-        return vec![];
-    };
-    let elems = if get_tag(list) == Some(DeepTag::Params) {
-        children(list)
-    } else {
-        &list.elements
+    let elems = match expr {
+        deep::Expr::Node(node, _) if node.tag() == DeepTag::Params => node.children_slice(),
+        deep::Expr::List(list, _) if get_tag(list) == Some(DeepTag::Params) => children(list),
+        deep::Expr::List(list, _) => list.elements.as_slice(),
+        deep::Expr::BareList(elements, _) => elements.as_slice(),
+        _ => return vec![],
     };
     let mut resolver = DeepTypeResolver::new(
         TypeUseSite::Annotation,
@@ -216,6 +214,23 @@ pub(super) fn extract_params(
                 };
                 params.push((name.to_string(), annotation));
             }
+            deep::Expr::BareList(elements, _) => {
+                let Some(name) = elements.first().and_then(symbol_name) else {
+                    continue;
+                };
+                let annotation = match elements.get(1) {
+                    Some(deep::Expr::Map(meta, _)) => meta
+                        .entries
+                        .iter()
+                        .find(|(key, _)| key == "type")
+                        .map(|(_, value)| match resolver.resolve(value) {
+                            Ok(ty) => resolve_type_aliases(&ty.into_type(), adt_reg),
+                            Err(witness) => propagate(&witness),
+                        }),
+                    _ => None,
+                };
+                params.push((name.to_string(), annotation));
+            }
             _ => {}
         }
     }
@@ -241,8 +256,7 @@ pub(super) fn infer_let(
     // kids[1] = body
     let mut let_env = env.clone();
 
-    if let deep::Expr::List(bind_list, _) = &kids[0] {
-        let bind_children = children(bind_list);
+    if let Some((DeepTag::Bind, _, bind_children)) = stamped_parts(&kids[0]) {
         // Process pairs: name, expr
         let mut i = 0;
         while i + 1 < bind_children.len() {
@@ -269,14 +283,13 @@ pub(super) fn infer_let(
                 // and the ascription was silently dropped. Unify the
                 // inferred RHS type against the declared type so the
                 // ascription propagates into downstream sig calls.
-                let final_ty = if let deep::Expr::List(rhs_list, _) = rhs_expr
-                    && let Some(meta) = get_meta(rhs_list)
-                    && let Some(declared_ty_expr) = meta
-                        .entries
-                        .iter()
-                        .find(|(k, _)| k == "type")
-                        .map(|(_, v)| v)
-                {
+                let final_ty = if let Some(declared_ty_expr) =
+                    stamped_parts(rhs_expr).and_then(|(_, meta, _)| {
+                        meta.entries
+                            .iter()
+                            .find(|(k, _)| k == "type")
+                            .map(|(_, v)| v)
+                    }) {
                     let declared_ty = match &rhs_type_metadata_resolution {
                         // A root metadata-aware RHS consumer records the exact
                         // result it owns. Reuse that result here so the same

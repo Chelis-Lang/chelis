@@ -101,10 +101,31 @@ fn collect_input_spans(exprs: &[Expr]) -> BTreeSet<String> {
         if let Some(s) = expr.span_id() {
             acc.insert(s.to_owned());
         }
-        if let Expr::List(list, _) = expr {
-            for child in &list.elements {
-                walk(child, acc);
+        match expr {
+            Expr::List(list, _) => list.elements.iter().for_each(|child| walk(child, acc)),
+            Expr::Node(node, _) => {
+                node.meta()
+                    .entries
+                    .iter()
+                    .for_each(|(_, value)| walk(value, acc));
+                node.children_slice()
+                    .iter()
+                    .for_each(|child| walk(child, acc));
             }
+            Expr::Map(map, _) => map.entries.iter().for_each(|(_, value)| walk(value, acc)),
+            Expr::MetaExpr(meta, _) => {
+                meta.entries.iter().for_each(|(_, value)| walk(value, acc));
+                walk(&meta.expr, acc);
+            }
+            Expr::BareList(elements, _) => elements.iter().for_each(|child| walk(child, acc)),
+            Expr::UnknownForm(data) => {
+                data.meta
+                    .entries
+                    .iter()
+                    .for_each(|(_, value)| walk(value, acc));
+                data.children.iter().for_each(|child| walk(child, acc));
+            }
+            Expr::Atom(_, _) => {}
         }
     }
     let mut out = BTreeSet::new();

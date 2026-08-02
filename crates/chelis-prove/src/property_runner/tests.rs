@@ -761,6 +761,23 @@ const DEEP_TRUE_PROPERTY: &str = r#"(module {}
 "#;
 
 #[test]
+fn stamped_deep_property_discovery_never_silently_returns_zero() {
+    let exprs = chelis_deep::parser::parse_and_stamp_file(DEEP_TRUE_PROPERTY)
+        .expect("canonical Deep property stamps");
+    assert!(
+        matches!(exprs.first(), Some(DeepExpr::Node(..))),
+        "the file ingress must exercise the stamped Node representation: {exprs:#?}"
+    );
+
+    let outcomes = run_deep(DEEP_TRUE_PROPERTY, "fuzz-only");
+    assert_eq!(
+        outcomes.len(),
+        1,
+        "a stamped user property must produce one outcome, never a silent empty success"
+    );
+}
+
+#[test]
 fn f7_deep_fuzz_only_runs_the_fuzz_loop() {
     // `--tier fuzz-only` on a deep property runs the fuzz loop and passes a
     // true property with samples > 0.

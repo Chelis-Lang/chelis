@@ -1995,7 +1995,7 @@ impl DesugarCtx {
         // tensor-literal rule (position 2, spec §P10b / §5.6) can inspect
         // each argument against the callee's declared signature.
         let mut surf_args: Vec<&Expr> = Vec::new();
-        let base_func = self.collect_apply_chain_surf(func, &mut surf_args);
+        let base_func = Self::collect_apply_chain_surf(func, &mut surf_args);
         for arg in args {
             surf_args.push(arg);
         }
@@ -2043,10 +2043,10 @@ impl DesugarCtx {
     /// Like `collect_apply_chain` but returns surface-level argument
     /// references so contextual tensor-literal inference can inspect
     /// the arg AST against the callee's signature before desugar.
-    fn collect_apply_chain_surf<'a>(&self, expr: &'a Expr, args: &mut Vec<&'a Expr>) -> &'a Expr {
+    fn collect_apply_chain_surf<'a>(expr: &'a Expr, args: &mut Vec<&'a Expr>) -> &'a Expr {
         match expr {
             Expr::Apply(inner_func, inner_args, _) => {
-                let base = self.collect_apply_chain_surf(inner_func, args);
+                let base = Self::collect_apply_chain_surf(inner_func, args);
                 for arg in inner_args {
                     args.push(arg);
                 }

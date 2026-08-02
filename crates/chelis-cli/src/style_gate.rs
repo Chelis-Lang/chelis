@@ -212,6 +212,18 @@ fn check_fmt(file: &Path, source: &str) -> Option<FmtDiff> {
     let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("");
     let canonical = if ext == "dp" {
         let format_source = strip_deep_lint_directive_lines(source);
+        // Canonical Deep always uses LF and ends non-empty programs with a
+        // newline. Check these byte-level invariants before parsing: malformed
+        // or role-invalid Deep may be rejected by the stamped parser, but that
+        // must not make CRLF or a missing final newline silently pass the
+        // formatting gate.
+        if format_source.contains('\r')
+            || (!format_source.is_empty() && !format_source.ends_with('\n'))
+        {
+            return Some(FmtDiff {
+                path: file.to_path_buf(),
+            });
+        }
         match chelis_deep::parser::parse_and_stamp_file(&format_source) {
             Ok(exprs) => chelis_deep::printer::print_canonical(&exprs),
             // Stamp failed (e.g. arity mismatch from CRLF content); fall

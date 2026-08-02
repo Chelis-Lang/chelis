@@ -20,10 +20,11 @@
 //! Spec authority: spec/04-type-system.md §10 [04-TOT-2];
 //! spec/design/checker_totality.md §C3.
 
-use chelis_deep::Expr;
-use chelis_deep::parser::parse_str as parse_deep_lenient;
+mod support;
+
 use chelis_deep::parser::parse_str_strict as parse_deep;
 use chelis_deep::printer::print_canonical;
+use chelis_deep::{DeepTag, Expr};
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str as parse_surf;
 use chelis_types::errors::CheckErrorKind;
@@ -151,11 +152,13 @@ fn unknown_bare_and_canonical_deep_cast_targets_are_rejected_loudly() {
 
 #[test]
 fn canonical_t_prim_with_an_extra_child_is_rejected_once() {
-    // Deliberately lenient: strict Deep validation rejects this shape at the
-    // parser boundary, while this regression owns the checker's nested cast
-    // consumer when malformed Deep reaches it programmatically.
-    let deep = parse_deep_lenient(&deep_cast_program("(t-prim {} f32 extra)"))
-        .expect("malformed nested cast target must remain parseable leniently");
+    assert!(
+        chelis_deep::parser::parse_str(&deep_cast_program("(t-prim {} f32 extra)")).is_err(),
+        "wrong-arity canonical types must be rejected at stamped ingress"
+    );
+    let mut deep = chelis_deep::parser::parse_str(&deep_cast_program("(t-prim {} f32)"))
+        .expect("valid control must stamp");
+    support::append_name_to_last_node(&mut deep, DeepTag::TPrim, "extra");
     let report = check_ir_fitness(&deep);
     assert!(
         report.score < 1.0,
