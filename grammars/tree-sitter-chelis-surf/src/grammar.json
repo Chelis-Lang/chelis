@@ -3252,8 +3252,13 @@
           "type": "FIELD",
           "name": "name",
           "content": {
-            "type": "SYMBOL",
-            "name": "_canonical_record_field_name"
+            "type": "ALIAS",
+            "content": {
+              "type": "SYMBOL",
+              "name": "_canonical_record_field_name"
+            },
+            "named": true,
+            "value": "identifier"
           }
         },
         {
@@ -3587,8 +3592,13 @@
           "type": "FIELD",
           "name": "name",
           "content": {
-            "type": "SYMBOL",
-            "name": "_canonical_record_pattern_field_name"
+            "type": "ALIAS",
+            "content": {
+              "type": "SYMBOL",
+              "name": "_canonical_record_pattern_field_name"
+            },
+            "named": true,
+            "value": "identifier"
           }
         },
         {

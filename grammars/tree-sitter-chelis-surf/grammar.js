@@ -468,7 +468,11 @@ module.exports = grammar({
         "}",
       ),
     record_field: ($) =>
-      seq(field("name", $._canonical_record_field_name), ":", field("value", $.expression)),
+      seq(
+        field("name", alias($._canonical_record_field_name, $.identifier)),
+        ":",
+        field("value", $.expression),
+      ),
     record_pun: ($) => field("name", $.identifier),
 
     pattern: ($) => choice($.as_pattern, $.pattern_atom),
@@ -505,7 +509,7 @@ module.exports = grammar({
       ),
     record_pattern_field: ($) =>
       seq(
-        field("name", $._canonical_record_pattern_field_name),
+        field("name", alias($._canonical_record_pattern_field_name, $.identifier)),
         ":",
         field("pattern", $.pattern),
       ),
