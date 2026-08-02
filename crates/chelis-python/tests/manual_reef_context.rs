@@ -25,6 +25,11 @@
 //! cargo test -p chelis-python --test manual_reef_context -- --ignored
 //! ```
 //!
+//! The temp project's compiler pin is derived from the workspace version:
+//! this driver exports `CHELIS_ORACLE_COMPILER_PIN` (`=<CARGO_PKG_VERSION>`)
+//! to the child, so the fixture never goes stale at a version bump. Export it
+//! manually only when invoking the `.py` file directly.
+//!
 //! Expected success condition: the child Python process exits 0 after printing
 //! "All reef-context acceptance checks passed."
 //!
@@ -65,6 +70,13 @@ fn reef_context_manual_acceptance_oracle() {
     let status = Command::new(&python)
         .arg(repo_root.join("bindings/python/tests/manual_reef_context.py"))
         .current_dir(&repo_root)
+        // The temp project's compiler pin must equal the workspace version;
+        // chelis-reef rejects any other pin (a hardcoded pin in the fixture
+        // goes stale at every version bump).
+        .env(
+            "CHELIS_ORACLE_COMPILER_PIN",
+            concat!("=", env!("CARGO_PKG_VERSION")),
+        )
         .status()
         .expect("run manual reef-context acceptance");
 

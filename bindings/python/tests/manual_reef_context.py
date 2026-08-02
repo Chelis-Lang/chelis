@@ -30,15 +30,28 @@ import numpy as np
 import chelis
 
 
-REEF_TOML = """\
+# The temp project's compiler pin must equal the dev workspace version the
+# bindings were built from (chelis-reef rejects any other pin). The Rust
+# driver (crates/chelis-python/tests/manual_reef_context.rs) sets this env
+# var from CARGO_PKG_VERSION; export it manually when invoking this file
+# directly. A hardcoded pin here goes stale at every version bump — that
+# failure mode is exactly what broke this oracle at 0.18.1.
+_PIN = os.environ.get("CHELIS_ORACLE_COMPILER_PIN")
+if not _PIN:
+    raise SystemExit(
+        "CHELIS_ORACLE_COMPILER_PIN is not set; export it as `=<workspace "
+        "version>` (the cargo test driver sets it automatically)"
+    )
+
+REEF_TOML = f"""\
 [package]
 name = "acctproj"
 version = "0.1.0"
-compiler = "=0.16.1"
+compiler = "{_PIN}"
 module_prefix = "Acctproj"
 
 [dependencies]
-chelis-std = { version = "0.4.0" }
+chelis-std = {{ version = "0.4.0" }}
 """
 
 # A sibling library module: a pure-tensor function (callable-compilable) and a
