@@ -1203,6 +1203,7 @@ fn hash_error(msg: &str) -> CompilerError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::compiler::stage_error;
     use std::fs;
     use std::path::PathBuf;
     use tempfile::TempDir;

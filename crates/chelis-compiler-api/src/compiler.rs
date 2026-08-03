@@ -1280,57 +1280,49 @@ pub fn compile_for_execution_in_context(
 /// - no `entry_name`, no `main`, exactly one tensor root → that root;
 /// - no `entry_name`, no `main`, several tensor roots → error asking for
 ///   `entry_name` (no silent "merge every def", cf. #817);
-/// - no tensor roots at all → `Ok(None)` **only when the lowered DAG is also
-///   rootless**; the caller then rejects with the scalar/host-only guidance
-///   (a scalar or host-only entry). Zero names with a NON-rootless DAG is an
-///   internal error (see the guard below), never a silent `Ok(None)`.
+/// - no tensor roots at all → `Ok(None)`; the caller then rejects with the
+///   scalar/host-only guidance (a scalar or host-only entry).
+///
+/// Name-to-node resolution goes through the #1013 pipeline's typed
+/// [`crate::pipeline::NamedRoots`] map, whose construction
+/// (`NamedRoots::aligned` in `finish_lowering`) verifies the name/root
+/// correspondence and rejects any count mismatch as a typed
+/// `PipelineRejection::RootCount` before a `CompiledSource` can exist. An
+/// earlier revision indexed `dag.roots()` positionally by the name's index
+/// in `tensor_root_names` and carried a hand-rolled zero-names/rootful-DAG
+/// invariant guard; both are superseded by the typed map (the mismatch
+/// state is unrepresentable). `tensor_root_names` is still the SELECTABLE
+/// SET and the source-order listing for error messages: its entries are
+/// exactly the new-code defs, so linker-mangled library roots are never
+/// selectable by construction.
 fn resolve_in_context_entry<'a>(
     compiled: &'a CompiledSource,
     entry_name: Option<&str>,
 ) -> Result<Option<(&'a str, Dag)>> {
     let roots = &compiled.tensor_root_names;
-    // Invariant guard (#822 review, Fix A): zero named tensor roots while the
-    // lowered DAG HAS roots. Returning `Ok(None)` here would skip the caller's
-    // rootless reject (it checks `dag.roots()`, which is non-empty) and fall
-    // through to whole-DAG codegen with every root merged — the #817-class
-    // regression this lane exists to prevent. The state should be unreachable
-    // through public APIs: `new_tensor_root_names` and the lowered roots both
-    // derive from the same `top_level_lowering_map_with_context` classification
-    // in `compile_new_source_in_context` (which also enforces 1:1 alignment
-    // whenever the name list is non-empty), the in-context path is Surf-only
-    // and every Surf top-level decl is named (no anonymous roots), and the
-    // absorbed-lowering fallback contributes zero new-code roots. Decline
-    // loudly rather than emit a merged artifact if a future lowering change
-    // ever breaks that agreement.
-    if roots.is_empty() && !compiled.dag.roots().is_empty() {
-        return Err(stage_error(
-            "compile",
-            format!(
-                "internal: in-context lowering produced {} new-code DAG root(s) but zero \
-                 named tensor roots; refusing to fall through to whole-program codegen, \
-                 which would merge every root's inputs (#817). This indicates a root-name \
-                 vs lowering classification mismatch; please report it.",
-                compiled.dag.roots().len()
-            ),
-            "compile_error",
-        ));
-    }
-    let index = match entry_name {
+    let list_entries = || {
+        roots
+            .iter()
+            .map(|root| root.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let selected: &crate::pipeline::IrName = match entry_name {
         Some(name) => {
             // Exact match ONLY, mirroring the monolithic strict lane's
             // `resolve_execution_entry`. An earlier revision fell back to a
             // linker-mangled root whose name ends with `__<name>`, on the
             // theory that library-originated entries come back mangled. They
             // never do: `tensor_root_names` holds NEW-CODE roots only (the
-            // composed roots are sliced past `library_root_count`), and
+            // pipeline slices the composed roots past the library count), and
             // new-code decl names are copied verbatim (`rewrite_eval_decl`)
             // with linker-format user decls hard-rejected. The suffix arm's
             // only reachable effect was silently compiling a DIFFERENT def:
             // an ordinary double-underscore def like `compute__solve` (legal
             // source) satisfied `entry_name = "solve"` with no diagnostic,
             // which is the #817 wrong-entry class this lane exists to close.
-            if let Some(index) = roots.iter().position(|root| root == name) {
-                index
+            if let Some(root) = roots.iter().find(|root| root.as_str() == name) {
+                root
             } else if roots.is_empty() {
                 return Ok(None);
             } else {
@@ -1339,7 +1331,7 @@ fn resolve_in_context_entry<'a>(
                     format!(
                         "unknown entry_name `{name}`; this program's tensor entries are: \
                          {}. Pass one of these as entry_name.",
-                        roots.join(", ")
+                        list_entries()
                     ),
                     "compile_error",
                 ));
@@ -1350,19 +1342,19 @@ fn resolve_in_context_entry<'a>(
             // mirroring the monolithic `resolve_execution_entry`. Without this
             // a multi-def in-context file with a `main` erroneously reported
             // "ambiguous" while the same file compiled fine outside a project.
-            if let Some(index) = roots.iter().position(|root| root == "main") {
-                index
+            if let Some(root) = roots.iter().find(|root| root.as_str() == "main") {
+                root
             } else {
-                match roots.len() {
-                    0 => return Ok(None),
-                    1 => 0,
+                match roots.as_slice() {
+                    [] => return Ok(None),
+                    [only] => only,
                     _ => {
                         return Err(stage_error(
                             "compile",
                             format!(
                                 "ambiguous entry: this program has multiple tensor entries ({}) \
                                  and none named `main`. Pass entry_name to select one.",
-                                roots.join(", ")
+                                list_entries()
                             ),
                             "compile_error",
                         ));
@@ -1371,17 +1363,20 @@ fn resolve_in_context_entry<'a>(
             }
         }
     };
-    let root = *compiled.dag.roots().get(index).ok_or_else(|| {
+    let root = *compiled.named_roots.get(selected).ok_or_else(|| {
         stage_error(
             "compile",
-            "internal: in-context tensor root index out of range",
+            format!(
+                "internal: in-context tensor entry `{selected}` has no node in the \
+                 pipeline's named-root map; please report it."
+            ),
             "compile_error",
         )
     })?;
     let mut scoped = compiled.dag.clone();
     scoped.set_roots(vec![root]);
     let scoped = chelis_ir::optimize::dead_code_eliminate(&scoped);
-    Ok(Some((roots[index].as_str(), scoped)))
+    Ok(Some((selected.as_str(), scoped)))
 }
 
 /// The branded HIP reef-context rejection (chelis#829), shared by the Hip
@@ -5231,30 +5226,16 @@ def out(x: tensor[2, f32]) -> tensor[2, f32] = add(consume(x), consume(x))
         assert_eq!(artifact.inputs[0].name, "x");
     }
 
-    // Fix A invariant guard (#822 review): zero named tensor roots while the
-    // lowered DAG HAS roots must be a loud internal error, never a silent
-    // `Ok(None)` (which would skip the rootless reject and fall through to
-    // whole-DAG codegen with every root merged, #817-class). The state is
-    // unreachable through public APIs — the name filter and the lowering share
-    // one classification map and Surf top-level decls are all named — so the
-    // mismatch is synthesized directly on the `CompiledSource`.
-    #[test]
-    fn resolve_in_context_entry_rejects_rootful_dag_with_zero_names() {
-        let mut compiled = compile_source(
-            SourceKind::Surf,
-            "def main(x: tensor[2, f32]) -> tensor[2, f32] = realize(x)\n",
-        )
-        .expect("compile");
-        assert_eq!(compiled.dag.roots().len(), 1, "fixture must lower one root");
-        compiled.tensor_root_names.clear();
-        let err = resolve_in_context_entry(&compiled, None)
-            .expect_err("zero names with a rootful DAG must error, not fall through");
-        let message = &err.errors[0].message;
-        assert!(
-            message.contains("zero named tensor roots") && message.contains("#817"),
-            "expected the invariant-guard message, got: {message}"
-        );
-    }
+    // The old "Fix A" invariant guard (#822 review) rejected zero named
+    // tensor roots alongside a rootful DAG, synthesized by clearing
+    // `tensor_root_names` by hand. The #1013 pipeline made that state
+    // unrepresentable: `NamedRoots::aligned` (in `finish_lowering`) verifies
+    // the name/root correspondence at construction and rejects any count
+    // mismatch as a typed `PipelineRejection::RootCount` before a
+    // `CompiledSource` exists, and `resolve_in_context_entry` now resolves
+    // name-to-node through that typed map rather than by positional index.
+    // The guard and its synthesized-mismatch test are therefore retired; the
+    // type-level lock lives in `pipeline::NamedRoots` and its tests.
 
     #[test]
     fn compile_source_preserves_scalar_string_foundation_root_names() {
