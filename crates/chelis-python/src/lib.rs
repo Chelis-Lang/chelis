@@ -8,7 +8,7 @@ use std::rc::Rc;
 use std::sync::OnceLock;
 
 use chelis_compiler_api::compiler::{
-    self, CompiledExecutionArtifact, CompilerError, ExecutionTensorSpec,
+    self, CompiledExecutionArtifact, CompilerError, EntryLaneDecline, ExecutionTensorSpec,
 };
 use chelis_compiler_api::schema::{
     CheckRequest, CompileRequest, CompileTarget, DecompileRequest, DesugarRequest, EvalRequest,
@@ -787,6 +787,74 @@ fn ensure_supported_execution_artifact_inner(
 ) -> Result<(), String> {
     let target = artifact.compile_result.target;
     let supported = supported_execution_dtypes(target);
+    // A callable artifact must expose at least one input or output. An
+    // artifact with neither is a genuinely host-lane program: `compile_and_load`
+    // cannot build a callable model from it, and the old behavior returned a
+    // silent empty manifest that failed later with a confusing "expected 0
+    // positional inputs". Fail loudly here, reporting the entry lane's ACTUAL
+    // recorded decline reason (`entry_lane_decline`, #819 Fix 2) rather than a
+    // generic guess that blamed globals/grad for, e.g., a scalar-signature
+    // entry. (Contrast: the #817/#818 metadata bugs also surfaced as empty
+    // manifests; those are fixed upstream in `compile_for_execution` and no
+    // longer reach this branch.) See chelis#730.
+    if artifact.inputs.is_empty() && artifact.outputs.is_empty() {
+        let prefix = "compile_and_load produced no callable interface (no inputs or outputs)";
+        return Err(match &artifact.entry_lane_decline {
+            Some(EntryLaneDecline::NotTensorSignature { entry }) => format!(
+                "{prefix}: the selected entry `{entry}` has a scalar (non-tensor) \
+                 signature, which has no compiled tensor ABI. Wrap its scalar \
+                 parameters and result as rank-1 tensors (e.g. `f32` -> \
+                 `tensor[1, f32]`), or select a tensor-in/tensor-out `def` with \
+                 `entry_name=`."
+            ),
+            Some(EntryLaneDecline::GradLike { entry }) => format!(
+                "{prefix}: entry `{entry}` uses a `grad`/`vmap` form, which only the \
+                 host-program lane can emit (multi-root gradient tuples); its result \
+                 is not a plain compiled tensor kernel and compile_and_load cannot \
+                 expose it as one. If you meant a different, tensor-in/tensor-out \
+                 `def`, select it with `entry_name=`."
+            ),
+            Some(EntryLaneDecline::HasGlobals) => format!(
+                "{prefix}: the program has top-level (non-`def`) bindings, which only \
+                 the host-program lane can emit; a standalone entry kernel would \
+                 either demote a referenced global to a required runtime input or \
+                 drop an independent global's computation. Move the computation into \
+                 tensor-in/tensor-out `def`s to get a callable artifact."
+            ),
+            Some(EntryLaneDecline::NoEntryResolved) => format!(
+                "{prefix}: no tensor-in/tensor-out entry `def` resolved for this \
+                 host-lane program. Define one (or select an existing one with \
+                 `entry_name=`) to get a callable artifact."
+            ),
+            Some(
+                EntryLaneDecline::LoweringFailed { entry }
+                | EntryLaneDecline::EmptyAfterDce { entry }
+                | EntryLaneDecline::InputsOutsideParams { entry, .. },
+            ) => format!(
+                "{prefix}: entry `{entry}` could not be lowered as a standalone \
+                 compiled tensor kernel and stays on the host-program lane, which \
+                 has no callable tensor ABI. If you meant a different, \
+                 tensor-in/tensor-out `def`, select it with `entry_name=`."
+            ),
+            // `EntryLaneDecline` is `#[non_exhaustive]` (future tiering
+            // variants, chelis#828/#830): report any unrecognized decline
+            // reason generically rather than failing to compile against a
+            // newer chelis-compiler-api.
+            Some(other) => format!(
+                "{prefix}: the entry lane declined this compilation \
+                 ({other:?}) and it stays on the host-program lane, which has \
+                 no callable tensor ABI. If you meant a different, \
+                 tensor-in/tensor-out `def`, select it with `entry_name=`."
+            ),
+            None => format!(
+                "{prefix} because the selected entry requires the host-program lane, \
+                 which has no callable tensor ABI. If you meant a different, \
+                 tensor-in/tensor-out `def`, select it with `entry_name=`; if this IS \
+                 the def you want, its result is not a plain compiled tensor kernel \
+                 and compile_and_load cannot expose it as one."
+            ),
+        });
+    }
     for spec in artifact.inputs.iter().chain(artifact.outputs.iter()) {
         if !supported.contains(&spec.dtype.as_str()) {
             return Err(format!(
@@ -979,12 +1047,47 @@ fn compile_shared_library_inner(
         .unwrap_or("model");
     let lib_path = root.join(format!("{stem}.so"));
     let compiler = native_compiler_path(artifact.compile_result.target);
+
+    // #817/#818: this artifact is dlopen'd and called IN-PROCESS (see
+    // `load_artifact` / `call_host`), unlike the `chelis build` product,
+    // which is run as a standalone executable. On Linux/glibc, libgomp's
+    // OpenMP worker threads reach their `__thread` state through the
+    // initial-exec TLS model, which is only sound for modules present in the
+    // program's initial link set. When libgomp is pulled in as a dependency
+    // of a `dlopen`'d shared object, those worker-thread TLS accesses fault —
+    // a silent, output-free SIGSEGV that fires the first time a parallel
+    // region actually RUNS (loading the library is fine; calling it is not).
+    // macOS never hit this: `runtime_toolchain` only adds `-fopenmp` for real
+    // gcc, so the Apple-clang build of this same path was already serial.
+    // OpenMP is a pure throughput optimization here — a single in-process
+    // call of a typically small graph gains nothing from it, and stripping it
+    // makes every platform take the same correct serial path (the `#pragma
+    // omp` lines become inert). This mirrors `compile_result_hip_host`, which
+    // already drops `-fopenmp` for its own loadable-artifact reasons. The
+    // `chelis build` / subprocess-executable paths keep OpenMP untouched.
+    let openmp_dropped = |flag: &&String| *flag != "-fopenmp";
+    let compile_flags: Vec<&String> = artifact
+        .compile_result
+        .compile_flags
+        .iter()
+        .filter(openmp_dropped)
+        .collect();
+    let link_flags: Vec<&String> = artifact
+        .compile_result
+        .link_flags
+        .iter()
+        .filter(openmp_dropped)
+        .collect();
+
     let mut command = Command::new(&compiler);
     command.current_dir(root);
     command.arg("-O3");
     command.arg("-shared");
     command.arg("-fPIC");
-    command.args(&artifact.compile_result.compile_flags);
+    // Silence the now-unrecognized `#pragma omp ...` lines the serial build
+    // no longer acts on, so the diagnostics stay clean without changing codegen.
+    command.arg("-Wno-unknown-pragmas");
+    command.args(&compile_flags);
     for file in &artifact.compile_result.files {
         if file.path.ends_with(".c") || file.path.ends_with(".cpp") {
             command.arg(root.join(&file.path));
@@ -995,7 +1098,7 @@ fn compile_shared_library_inner(
         command.arg("none");
     }
     command.arg(runtime_library);
-    command.args(&artifact.compile_result.link_flags);
+    command.args(&link_flags);
     command.arg("-o");
     command.arg(&lib_path);
 
@@ -2427,6 +2530,435 @@ loss = (mean(x, 0) : tensor[f32])
         assert!(
             err.contains("CHELIS_RUNTIME_DIR"),
             "error must name CHELIS_RUNTIME_DIR, got: {err}"
+        );
+    }
+
+    fn run_job_manifest(source: &str, entry: Option<&str>) -> ArtifactManifest {
+        let dir = tempdir().expect("tempdir");
+        let source_path = dir.path().join("model.ch");
+        fs::write(&source_path, source).expect("write source");
+        let output = run_compile_and_load_job(CompileAndLoadJob {
+            source_path,
+            source_kind: SourceKind::Surf,
+            target: CompileTarget::C,
+            entry_name: entry.map(str::to_string),
+            artifact_dir: Some(PathBuf::from(dir.path())),
+        })
+        .expect("compile and load job");
+        let manifest_text =
+            fs::read_to_string(output.lib_path.with_extension("json")).expect("read manifest");
+        serde_json::from_str(&manifest_text).expect("parse manifest")
+    }
+
+    // Issue #817: a multi-def file compiled through the `compile_and_load`
+    // job path scopes its callable interface to the entry def, not the union
+    // of every def's params. This is the manifest the loaded `CompiledModel`
+    // exposes as `input_names`/`output_names`, and the ABI the runtime calls.
+    #[test]
+    fn compile_and_load_job_scopes_metadata_to_entry_def() {
+        let source = "\
+def helper(x: tensor[1, f32]) -> tensor[1, f32] = mul(x, x)
+def solve(a: tensor[1, f32], b: tensor[1, f32]) -> tensor[1, f32] = add(helper(a), helper(b))
+";
+        let manifest = run_job_manifest(source, Some("solve"));
+        let inputs: Vec<_> = manifest.inputs.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(inputs, vec!["a", "b"], "must scope to `solve`, not merge");
+        assert_eq!(manifest.outputs.len(), 1);
+    }
+
+    // Issue #818: a single def whose body uses `concat` reports its real
+    // inputs/outputs instead of the empty manifest the host-lane early-return
+    // used to write.
+    #[test]
+    fn compile_and_load_job_reports_concat_entry_metadata() {
+        let source = "\
+def main(a: tensor[1, f32], b: tensor[1, f32]) -> tensor[2, f32] = {
+  x = mul(copy(a), b)
+  y = add(a, b)
+  concat([x, y], cast(0, int32))
+}
+";
+        let manifest = run_job_manifest(source, None);
+        let inputs: Vec<_> = manifest.inputs.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(inputs, vec!["a", "b"]);
+        assert_eq!(manifest.outputs.len(), 1);
+    }
+
+    fn contiguous_strides(shape: &[usize]) -> Vec<usize> {
+        let mut strides = vec![1usize; shape.len()];
+        for axis in (0..shape.len().saturating_sub(1)).rev() {
+            strides[axis] = strides[axis + 1] * shape[axis + 1];
+        }
+        strides
+    }
+
+    /// Compile `source` (selecting `entry`), dlopen the artifact, and call the
+    /// manifest-declared host entry with `inputs` (each a `(data, shape)` pair
+    /// of f32 values), returning the numeric outputs. This exercises the full
+    /// manifest<->ABI agreement: input order/shape from the manifest, the
+    /// `host_entry_name` symbol resolved via `dlsym`, and the runtime-allocated
+    /// output tensors read back. Gated (non-`#[ignore]`) so CI's default
+    /// `cargo test -p chelis-python` verifies numbers, not just metadata.
+    fn run_job_and_call(
+        source: &str,
+        entry: Option<&str>,
+        inputs: &[(Vec<f32>, Vec<usize>)],
+    ) -> Vec<Vec<f32>> {
+        let dir = tempdir().expect("tempdir");
+        let source_path = dir.path().join("model.ch");
+        fs::write(&source_path, source).expect("write source");
+        let output = run_compile_and_load_job(CompileAndLoadJob {
+            source_path,
+            source_kind: SourceKind::Surf,
+            target: CompileTarget::C,
+            entry_name: entry.map(str::to_string),
+            artifact_dir: Some(PathBuf::from(dir.path())),
+        })
+        .expect("compile and load job");
+        let manifest: ArtifactManifest = serde_json::from_str(
+            &fs::read_to_string(output.lib_path.with_extension("json")).expect("read manifest"),
+        )
+        .expect("parse manifest");
+        assert_eq!(
+            manifest.inputs.len(),
+            inputs.len(),
+            "test must supply one value per manifest input: {:?}",
+            manifest.inputs
+        );
+
+        let library = unsafe { Library::new(&output.lib_path) }.expect("load shared library");
+        let symbol = nul_terminated(&manifest.host_entry_name);
+        let entry_fn = unsafe {
+            library
+                .get::<HostEntry>(symbol.as_bytes())
+                .expect("host entry symbol resolves via dlsym")
+        };
+
+        // Keep input buffers alive across the call.
+        let mut buffers: Vec<Vec<f32>> = inputs.iter().map(|(data, _)| data.clone()).collect();
+        let mut input_tensors: Vec<ChelisTensor> = Vec::with_capacity(inputs.len());
+        for (index, (_, shape)) in inputs.iter().enumerate() {
+            let strides = contiguous_strides(shape);
+            input_tensors.push(ChelisTensor {
+                data: buffers[index].as_mut_ptr(),
+                shape: dims_array(shape).expect("shape fits ABI"),
+                strides: dims_array(&strides).expect("strides fit ABI"),
+                ndim: shape.len() as i32,
+                dtype: CHELIS_F32,
+                size: element_count(shape).expect("element count") as i32,
+                owns_data: 0,
+            });
+        }
+        let mut input_ptrs: Vec<*mut ChelisTensor> =
+            input_tensors.iter_mut().map(|t| t as *mut _).collect();
+        let mut output_ptrs: Vec<*mut ChelisTensor> =
+            vec![std::ptr::null_mut(); manifest.outputs.len()];
+        unsafe {
+            (*entry_fn)(
+                input_ptrs.as_mut_ptr(),
+                input_ptrs.len() as c_int,
+                output_ptrs.as_mut_ptr(),
+                output_ptrs.len() as c_int,
+            );
+        }
+        let results = output_ptrs
+            .iter()
+            .map(|&ptr| {
+                assert!(!ptr.is_null(), "compiled execution returned a NULL output");
+                let tensor = unsafe { &*ptr };
+                let slice =
+                    unsafe { std::slice::from_raw_parts(tensor.data, tensor.size as usize) };
+                slice.to_vec()
+            })
+            .collect::<Vec<_>>();
+        drop(input_tensors);
+        drop(buffers);
+        drop(library);
+        results
+    }
+
+    // Issue #817: end-to-end numeric agreement through the manifest-declared
+    // ABI. `solve(a, b) = helper(a) + helper(b) = a*a + b*b`; with a=3, b=4 the
+    // compiled artifact must return [25.].
+    #[test]
+    fn compile_and_load_job_calls_multi_def_entry_and_returns_numbers() {
+        let source = "\
+def helper(x: tensor[1, f32]) -> tensor[1, f32] = mul(x, x)
+def solve(a: tensor[1, f32], b: tensor[1, f32]) -> tensor[1, f32] = add(helper(a), helper(b))
+";
+        let outputs = run_job_and_call(
+            source,
+            Some("solve"),
+            &[(vec![3.0], vec![1]), (vec![4.0], vec![1])],
+        );
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(outputs[0], vec![25.0], "helper(3)+helper(4) = 9+16 = 25");
+    }
+
+    // Issue #818: end-to-end numeric agreement for a concat body.
+    // `main(a, b) = concat(mul(copy(a), b), add(a, b))`; with a=[3], b=[4] the
+    // compiled artifact must return [12., 7.].
+    #[test]
+    fn compile_and_load_job_calls_concat_entry_and_returns_numbers() {
+        let source = "\
+def main(a: tensor[1, f32], b: tensor[1, f32]) -> tensor[2, f32] = {
+  x = mul(copy(a), b)
+  y = add(a, b)
+  concat([x, y], cast(0, int32))
+}
+";
+        let outputs = run_job_and_call(source, None, &[(vec![3.0], vec![1]), (vec![4.0], vec![1])]);
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(outputs[0], vec![12.0, 7.0], "concat(3*4, 3+4) = [12, 7]");
+    }
+
+    // Fix 7: an `entry_name` that names no def in a clean tensor program is a
+    // loud error through the job path (the same surface `compile_and_load`
+    // uses), listing the real entry defs — not a silent wrong-def selection.
+    #[test]
+    fn compile_and_load_job_unknown_entry_name_errors() {
+        let dir = tempdir().expect("tempdir");
+        let source_path = dir.path().join("model.ch");
+        fs::write(
+            &source_path,
+            "def helper(x: tensor[1, f32]) -> tensor[1, f32] = mul(x, x)\n\
+             def solve(a: tensor[1, f32], b: tensor[1, f32]) -> tensor[1, f32] = add(helper(a), helper(b))\n",
+        )
+        .expect("write source");
+        let result = run_compile_and_load_job(CompileAndLoadJob {
+            source_path,
+            source_kind: SourceKind::Surf,
+            target: CompileTarget::C,
+            entry_name: Some("nope".to_string()),
+            artifact_dir: Some(PathBuf::from(dir.path())),
+        });
+        let message = match result {
+            Ok(_) => panic!("unknown entry_name must not silently compile a wrong def"),
+            Err(CompileAndLoadError::Message(m)) => m,
+            Err(CompileAndLoadError::Compiler(e)) => format!("{e:?}"),
+        };
+        assert!(
+            message.contains("unknown entry_name `nope`") && message.contains("solve"),
+            "expected an unknown-entry error listing defs, got: {message}"
+        );
+    }
+
+    // Fix 2: a def named `free`, selected via `entry_name` in a multi-def
+    // program (so it goes through the entry-scoped metadata lane), must produce
+    // a linkable artifact. Emitting `void free(...)` would clash with libc, and
+    // even `void chelis_free(...)` would clash with the runtime's own
+    // `chelis_free` (declared in `chelis_runtime.h`) — so the entry lane emits
+    // the fixed, collision-free symbol `chelis_main`. This is an end-to-end
+    // compile: `run_compile_and_load_job` invokes cc to build the shared
+    // library, so a successful load + a callable manifest proves the
+    // translation unit linked, and we dlopen+call it ([9.] for free(3) =
+    // mul(3,3)).
+    //
+    // (The single-def pure program `def free(x) = ...` lowers no host program
+    // at all and takes the free-form pure-DAG path instead, where the emitted
+    // symbol is `entry_name` after sanitization only — `main` -> `chelis_main`,
+    // non-identifier characters -> `_` — so `free` passes through unchanged
+    // and STILL collides with libc, a documented pre-existing tide contract
+    // left unchanged; see `execution_c_symbol`. That is why this fixture is
+    // multi-def: per-def host wrappers force a host program, and the entry
+    // lane claims it.)
+    #[test]
+    fn compile_and_load_job_def_named_free_links_and_calls() {
+        let source = "\
+def other(y: tensor[1, f32]) -> tensor[1, f32] = add(y, y)
+def free(x: tensor[1, f32]) -> tensor[1, f32] = mul(copy(x), x)
+";
+        let manifest = run_job_manifest(source, Some("free"));
+        assert_eq!(
+            manifest.host_entry_name, "chelis_main",
+            "def named `free` must emit the collision-free `chelis_main` symbol"
+        );
+        let outputs = run_job_and_call(source, Some("free"), &[(vec![3.0], vec![1])]);
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(outputs[0], vec![9.0], "free(3) = 3*3 = 9");
+    }
+
+    // #819 Fix 2: an explicit `entry_name` naming an existing def with a
+    // scalar (non-tensor) signature used to yield the generic empty-manifest
+    // error blaming globals/grad/string-record-effect. The error must now
+    // report the ACTUAL recorded decline reason: the scalar signature, with
+    // the `tensor[1, f32]` wrap guidance.
+    #[test]
+    fn compile_and_load_job_scalar_entry_reports_scalar_signature_error() {
+        let dir = tempdir().expect("tempdir");
+        let source_path = dir.path().join("model.ch");
+        fs::write(
+            &source_path,
+            "def scale(x: f32) -> f32 = mul(x, x)\n\
+             def solve(a: tensor[1, f32]) -> tensor[1, f32] = mul(copy(a), a)\n",
+        )
+        .expect("write source");
+        let result = run_compile_and_load_job(CompileAndLoadJob {
+            source_path,
+            source_kind: SourceKind::Surf,
+            target: CompileTarget::C,
+            entry_name: Some("scale".to_string()),
+            artifact_dir: Some(PathBuf::from(dir.path())),
+        });
+        let message = match result {
+            Ok(_) => panic!("scalar-signature entry must not silently compile"),
+            Err(CompileAndLoadError::Message(m)) => m,
+            Err(CompileAndLoadError::Compiler(e)) => format!("{e:?}"),
+        };
+        assert!(
+            message.contains("`scale`") && message.contains("scalar"),
+            "error must name the entry and its scalar signature, got: {message}"
+        );
+        assert!(
+            message.contains("tensor[1, f32]"),
+            "error must give the tensor[1, f32] wrap guidance, got: {message}"
+        );
+        assert!(
+            !message.contains("grad") && !message.contains("globals"),
+            "error must not blame grad/globals for a scalar signature, got: {message}"
+        );
+    }
+
+    // Negative-parity sibling of the scalar case: a `grad` entry selected by
+    // name compiles WITHOUT error (host lane owns it, #309), and the job-path
+    // rejection reports the grad-specific reason, not the scalar one.
+    #[test]
+    fn compile_and_load_job_grad_entry_reports_grad_reason() {
+        let dir = tempdir().expect("tempdir");
+        let source_path = dir.path().join("model.ch");
+        fs::write(
+            &source_path,
+            "module Repro.GradEntry\n\
+             def loss(x: tensor[2, f32], w: tensor[2, f32]) -> f32 =\n  \
+             tensor_to_scalar(sum(mul(x, w), cast(0, int32)))\n\
+             def dloss(x: tensor[2, f32], w: tensor[2, f32]) -> tensor[2, f32] = (grad(loss)(x, w)).0\n",
+        )
+        .expect("write source");
+        let result = run_compile_and_load_job(CompileAndLoadJob {
+            source_path,
+            source_kind: SourceKind::Surf,
+            target: CompileTarget::C,
+            entry_name: Some("dloss".to_string()),
+            artifact_dir: Some(PathBuf::from(dir.path())),
+        });
+        let message = match result {
+            Ok(_) => panic!("grad entry has no callable tensor ABI and must be rejected"),
+            Err(CompileAndLoadError::Message(m)) => m,
+            Err(CompileAndLoadError::Compiler(e)) => {
+                panic!("grad entry must compile host-lane without a compiler error, got: {e:?}")
+            }
+        };
+        assert!(
+            message.contains("`dloss`") && message.contains("grad"),
+            "error must name the entry and the grad reason, got: {message}"
+        );
+    }
+
+    // A genuinely host-only program (top-level bindings/globals, no
+    // tensor-signature entry) can't back a callable model. Instead of the old
+    // silent empty manifest that failed later with "expected 0 positional
+    // inputs", the job now fails loudly with an actionable message.
+    #[test]
+    fn compile_and_load_job_rejects_host_only_program_loudly() {
+        let dir = tempdir().expect("tempdir");
+        let source_path = dir.path().join("model.ch");
+        fs::write(
+            &source_path,
+            "total = add(cast(1, int64), cast(2, int64))\n",
+        )
+        .expect("write source");
+        let result = run_compile_and_load_job(CompileAndLoadJob {
+            source_path,
+            source_kind: SourceKind::Surf,
+            target: CompileTarget::C,
+            entry_name: None,
+            artifact_dir: Some(PathBuf::from(dir.path())),
+        });
+        let message = match result {
+            Ok(_) => panic!("host-only program must not silently yield a non-callable artifact"),
+            Err(CompileAndLoadError::Message(m)) => m,
+            Err(CompileAndLoadError::Compiler(e)) => format!("{e:?}"),
+        };
+        assert!(
+            message.contains("no callable interface"),
+            "expected a loud host-only error, got: {message}"
+        );
+    }
+
+    // Reviewer S2: a top-level value binding in a multi-def program used to
+    // hand back a silently MERGED model (every def's params in input_names,
+    // three outputs) while ignoring entry_name entirely, because the
+    // compiler's whole-DAG fallback produced a plausible-looking artifact
+    // that slipped past the empty-manifest guard. The callable surface is
+    // now strict: the job fails loudly at compile.
+    #[test]
+    fn compile_and_load_job_top_level_binding_is_loud_error() {
+        let dir = tempdir().expect("tempdir");
+        let source_path = dir.path().join("model.ch");
+        fs::write(
+            &source_path,
+            "glb = 2.0\n\
+             def helper(x: tensor[1, f32]) -> tensor[1, f32] = mul(x, x)\n\
+             def main(a: tensor[1, f32]) -> tensor[1, f32] = mul(copy(a), a)\n",
+        )
+        .expect("write source");
+        let result = run_compile_and_load_job(CompileAndLoadJob {
+            source_path,
+            source_kind: SourceKind::Surf,
+            target: CompileTarget::C,
+            entry_name: Some("main".to_string()),
+            artifact_dir: Some(PathBuf::from(dir.path())),
+        });
+        let message = match result {
+            Ok(_) => panic!("a top-level binding must not yield a merged callable model"),
+            Err(CompileAndLoadError::Message(m)) => m,
+            Err(CompileAndLoadError::Compiler(e)) => e
+                .errors
+                .first()
+                .map(|d| d.message.clone())
+                .unwrap_or_else(|| format!("{e:?}")),
+        };
+        assert!(
+            message.contains("top-level") && message.contains("eval"),
+            "expected the strict top-level-binding error naming eval, got: {message}"
+        );
+    }
+
+    // Reviewer B1: a vmap entry declines the entry lane as GradLike but does
+    // NOT require the host backend, so it used to reach a debug_assert (a
+    // panic across the FFI boundary in debug builds; a silently merged
+    // manifest in release). The callable surface now rejects it loudly as an
+    // unsupported feature.
+    #[test]
+    fn compile_and_load_job_vmap_entry_is_loud_unsupported() {
+        let dir = tempdir().expect("tempdir");
+        let source_path = dir.path().join("model.ch");
+        fs::write(
+            &source_path,
+            "def process(x: tensor[4, f32]) -> tensor[4, f32] = relu(x)\n\
+             def batch_process(xs: tensor[8, 4, f32]) -> tensor[8, 4, f32] = \
+             xs |> vmap(process, axis=0)\n",
+        )
+        .expect("write source");
+        let result = run_compile_and_load_job(CompileAndLoadJob {
+            source_path,
+            source_kind: SourceKind::Surf,
+            target: CompileTarget::C,
+            entry_name: Some("batch_process".to_string()),
+            artifact_dir: Some(PathBuf::from(dir.path())),
+        });
+        let message = match result {
+            Ok(_) => panic!("a vmap entry must not yield a whole-program callable model"),
+            Err(CompileAndLoadError::Message(m)) => m,
+            Err(CompileAndLoadError::Compiler(e)) => e
+                .errors
+                .first()
+                .map(|d| d.message.clone())
+                .unwrap_or_else(|| format!("{e:?}")),
+        };
+        assert!(
+            message.contains("batch_process") && message.contains("eval"),
+            "expected the strict transform-entry error naming the def and eval, got: {message}"
         );
     }
 }

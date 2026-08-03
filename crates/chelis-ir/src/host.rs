@@ -1419,6 +1419,76 @@ pub fn lower_named_tensor_entry_dag(program: &CheckedProgram, name: &str) -> Opt
     }
 }
 
+/// Does the named top-level def have a pure tensor signature — every
+/// parameter a tensor and a tensor result?
+///
+/// This is the per-*entry* analogue of the tensor-signature predicate
+/// [`preferred_tensor_entry_name`] uses. The entry-scoped compiled
+/// metadata lane (#817/#818) only claims tensor-signature entries; a
+/// scalar/record/ADT-returning def selected by name must stay on the
+/// host lane.
+pub fn function_has_tensor_signature(program: &ConcreteHostProgram, name: &str) -> bool {
+    program.functions.iter().any(|function| {
+        function.name == name
+            && matches!(function.ret_ty, ConcreteHostType::Tensor(_))
+            && function
+                .params
+                .iter()
+                .all(|param| matches!(param.ty, ConcreteHostType::Tensor(_)))
+    })
+}
+
+/// Does the named entry def's body use a `grad`/`vmap`/`vmap-grad` form?
+///
+/// Such an entry MUST stay on the host lane even though it is
+/// tensor-signature and [`lower_named_tensor_entry_dag`] *can* produce a
+/// DAG for it: the host lane owns the multi-root grad-tuple emission
+/// (assembling a real `chelis_tuple` from per-`wrt` gradient outputs, see
+/// #309), which the single-root entry-scoped kernel path does not.
+///
+/// This is deliberately narrower than "the body needs the host runtime":
+/// a DAG-lowerable host-runtime builtin such as `concat` lowers cleanly
+/// through `lower_named_tensor_entry_dag` (that IS the #818 fix), so it is
+/// NOT excluded here. Only genuinely host-lane-owned forms are.
+pub fn named_entry_uses_grad_like(program: &CheckedProgram, name: &str) -> bool {
+    let defs = collect_program_defs(program.exprs());
+    match lookup_program_def(&defs, name) {
+        Some(body) => expr_contains_grad_like(body),
+        None => false,
+    }
+}
+
+/// Does the checked program bind any top-level VALUE binding — a
+/// `(def name body)` whose body is not a `fn`, i.e. a global like
+/// `glb = 2.0` or `total = add(...)`?
+///
+/// This is the SOURCE-LEVEL predicate, deliberately distinct from
+/// checking the lowered `HostProgram::globals`: `lower_host_program`
+/// drops a top-level value binding from `host.globals` when it is
+/// DAG-lowerable, uncaptured by any `fn` def, and the program emits no
+/// host `main` (`skip_for_lowered` in `lower_host_program` below), so a
+/// lowered-artifact check
+/// misses exactly those bindings. The compiled-execution entry lane
+/// (#819) keys its `HasGlobals` decline on this predicate because its
+/// standalone entry lowering would silently drop such a binding's
+/// computation. Top-level type signatures are separate items (not
+/// `def`-tagged) and do not count; a `def` with an `fn` body is a
+/// function definition, not a value binding.
+pub fn program_has_top_level_value_bindings(program: &CheckedProgram) -> bool {
+    top_level_items(program.exprs()).iter().any(|expr| {
+        let Expr::List(list, _) = expr else {
+            return false;
+        };
+        if tag(list) != Some(DeepTag::Def) {
+            return false;
+        }
+        !matches!(
+            children(list).get(1),
+            Some(Expr::List(body_list, _)) if tag(body_list) == Some(DeepTag::Fn)
+        )
+    })
+}
+
 fn lower_host_program(
     program: &CheckedProgram,
     lowered_names: &HashMap<String, bool>,
