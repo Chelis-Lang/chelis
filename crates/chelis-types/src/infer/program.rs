@@ -939,6 +939,28 @@ pub(super) fn infer_ir_program_with_state(
     // origin keeps an owning witness from leaking into an earlier body.
     let collected_ir_types = collect_ir_types_with_origins(items.iter().map(|(_, expr)| *expr));
 
+    // chelis#1124: names that carry an explicit `(defsig {} name ...)` in this
+    // check unit already had their AUTHORITATIVE declared type bound into
+    // `state.env` by `collect_all_declarations` above. The prebind below reads
+    // each def's own BODY type stamp (via `collect_ir_types_with_origins`) and
+    // rebinds the name to it — the mechanism that lets a `defsig`-less def be
+    // resolved by cross-references before its body is inferred. But letting a
+    // body stamp overwrite a defsig binding replaces the declared signature
+    // with the body's own type, so `infer_top_level`'s body-vs-defsig
+    // unification (which the IR ingress DOES run) then compares the body
+    // against itself and silently accepts a `defsig`/body mismatch. The typed
+    // ingress (`infer_program_with_product_in_session`) has no such rebind and
+    // rejects the mismatch; keeping the defsig binding here restores parity.
+    // For every well-typed program the defsig type and the body stamp agree, so
+    // this skip is a no-op except on exactly the mismatch that must be rejected.
+    let defsig_names: std::collections::HashSet<&str> = items
+        .iter()
+        .filter_map(|(_, expr)| match stamped_parts(expr) {
+            Some((DeepTag::Defsig, _, kids)) => kids.first().and_then(symbol_name),
+            _ => None,
+        })
+        .collect();
+
     let mut prebound_type_failures = HashMap::new();
     for (name, ty_expr) in &collected_ir_types.type_env {
         match resolve_deep_type(
@@ -950,6 +972,11 @@ pub(super) fn infer_ir_program_with_state(
             errors,
         ) {
             Ok(ty) => {
+                if defsig_names.contains(name.as_str()) {
+                    // Preserve the defsig-derived binding (chelis#1124); do not
+                    // overwrite the declared signature with the body's stamp.
+                    continue;
+                }
                 let scheme = state.env.generalize(&ty, &state.subst);
                 state.env.bind(name.clone(), scheme);
             }
