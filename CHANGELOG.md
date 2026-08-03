@@ -79,6 +79,33 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   The Linux job runs per pull request with bounded parallelism, reclaimed runner disk, and a cached cvc5 toolchain closure.
   The macOS job is a documented manual dispatch gate with the identical check set.
 
+- **`chelis eval --timeout <SECS>` bounds an evaluation (chelis#914,
+  chelis#930).** Absent, nothing changes: evaluation runs to completion.
+  On trip the run exits non-zero with `error: evaluation timed out after
+  {secs}s (--timeout)` and never returns a partial result
+  (`spec/09-tide.md`). A cooperative cancellation token is polled through
+  inference, annotation, validation, linearity, compilation, and every
+  node visit in both evaluator lanes; `CancelToken`, `install_cancel_token`,
+  `current_cancel_token`, `is_cancellation`, and `EVAL_CANCELLED_MSG` are
+  public from `chelis-compiler-api`, and cancelled runs carry the
+  `cancelled` diagnostic kind. Polling is deliberately not exhaustive —
+  the style gate, Reef graph preparation, and lowering's whole-program
+  walk do not poll, and the uninterruptible unit is one top-level
+  declaration or one node visit — so a process-level hard exit backstops
+  the deadline by five seconds. The Python bindings run the JSON entry
+  points on a joined worker thread and poll for signals every 50 ms, so
+  `KeyboardInterrupt` arrives during a long compile instead of after it.
+- **The Python bindings resolve a source against its reef package
+  (chelis#816).** `compile_and_load` and `eval` take a keyword-only
+  `project_root`: `None` auto-discovers the enclosing package for
+  `compile_and_load` only when the source actually has an `import`
+  declaration, a path forces in-context resolution, and `False` forces the
+  bare self-contained path. Previously an importing source failed with
+  `unbound variable`. C target only — `target="hip"` with a `project_root`
+  is a branded `unsupported:` rejection naming chelis#829. Only the
+  compiled source's own defs are selectable via `entry_name`; imported
+  library defs are callable from the entry body but not selectable.
+
 ### Changed
 
 - **A builtin-named function parameter that is *called* in its own body
@@ -94,6 +121,26 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   `unsupported: builtin ...` diagnostic; `process_run`'s rejection
   prose changed accordingly.
 
+- **`shape(x, axis)` returns `int32` under eval, not `int64`** (#729
+  Phase 2). `int32` is the normative carrier for the shape query
+  (`spec/05-risc-primitives.md` §2.2); the old `int64` payload stayed
+  invisible only while mixed-width arithmetic silently promoted. Code
+  that fed a `shape` result into an `int64`-typed position now needs an
+  explicit `cast`.
+- **Entry-scoped compiled artifacts emit the fixed C symbol
+  `chelis_main`** (chelis#817, chelis#818), carried in the manifest as
+  `host_entry_name`, so a def named `main`, `free`, or `malloc` links
+  cleanly. The trade-off is deliberate: two artifacts can no longer be
+  statically linked into one binary, and the symbol is no longer
+  user-chosen. Entry scoping rides `compiler::compile`, so tide
+  `/compile`, cove, and `chelis.compile()` now emit the entry-scoped
+  kernel for a multi-def C compile rather than the whole program. The
+  `chelis build` object-mode lane is a separate emitter and is unchanged
+  (`def main` still becomes `<program>__main`).
+- **Integer `abs` is a loud rejection on HIP and Metal** until the typed
+  Phase 3 kernel lands (chelis#699). The C backend implements it — see
+  Fixed below.
+
 ### Fixed
 
 - **Compiled list combinators grow accumulators in place (part of chelis#943).**
@@ -101,6 +148,54 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   exclusive, pre-sized accumulators instead of rebuilding a list for every
   element. Runtime guards preserve immutable-list semantics and reject invalid
   capacities, shared destinations, and self-extension.
+
+- **Integer arithmetic under eval executes at its declared width with
+  exact overflow traps** (#729 Phase 2; closes chelis#680, chelis#711,
+  chelis#717, chelis#718, chelis#722, chelis#724, chelis#726). Integer
+  operations round-tripped through `f64`, so `add(cast(2^53, int64),
+  cast(1, int64))` answered `9007199254740992` in eval while compiled C
+  answered `9007199254740993`; `lt`/`gt` at the 2^53 boundary compared
+  through `.as_f64()` and returned the wrong answer; `max_elem` returned
+  the *smaller* operand; `i64::MAX + 1` saturated and the narrower widths
+  wrapped; and constant folding evaluated an `int64` comparison in `f64`,
+  took the wrong branch, and deleted the correct one at compile time.
+  Overflow now traps with a frozen message grammar that is normative in
+  `spec/04-type-system.md` [04-NUM-9] and byte-identical across lanes
+  (`numeric trap: overflow in add at int64`), naming the canonical
+  lowered primitive rather than the composed source operation. `neg` and
+  `abs` admit signed integers and trap on the unrepresentable minimum;
+  `floor`/`ceil`/`round` on an integer are exactly the identity. f32 and
+  f64 execute at declared width, f16 and bf16 through binary32 with one
+  finalization. The acceptance oracle is
+  `.venv/bin/python scripts/dtype_phase2_oracle.py`. Eval is the reference
+  lane: backend adoption is Phase 3 and has not landed.
+- **The C backend emits exact, trapping integer `abs`** (chelis#1065,
+  part of chelis#699). A compiled `grad` through integer `abs` previously
+  returned all zeros — both lanes agreeing on a wrong answer. The runtime
+  guard checks the declared-width minimum before negating, avoiding
+  signed-overflow UB, and aborts with the same frozen trap text eval
+  prints. Integer `abs` is held unfused so ordinary programs cannot be
+  optimized back onto the float-only template; an externally supplied
+  fused integer `abs` is still a loud C rejection.
+- **`compile_and_load(entry_name=…)` selects the named def** (chelis#817,
+  chelis#818). Manifests previously reported another def's parameters —
+  `input_names` came back as `('x', 'a', 'b')` for a two-argument entry,
+  or empty for a single block-bodied def — and calling the model raised
+  `ValueError`. Default selection now prefers a tensor-signature def named
+  `main`, else the sole tensor-signature def, else a loud error listing
+  candidates, replacing a silent "last def wins". A declined entry reports
+  why (`EntryLaneDecline`) instead of generic boilerplate. Also fixes a
+  Linux `SIGSEGV`: `-fopenmp` is dropped from the in-process `dlopen`ed
+  library, whose initial-exec TLS faulted libgomp; `chelis build` and
+  subprocess paths are untouched and results are numerically identical.
+- **Arrow-form defs surface as roots in standalone-file eval**
+  (chelis#947). `def n -> int32 = add(20, 22)` in a file reported nothing,
+  because an arrow-form def desugars to a zero-arg fn and the root filter
+  excluded every fn-typed decl. Zero-arg fns are added back when the
+  selected-root set would otherwise be empty, in both human-readable and
+  `--json` output. Narrow by construction: a file that also has an
+  ordinary value root still does not surface its arrow-form defs, and a
+  file evaluated from inside a reef package root takes a different path.
 
 ## [0.18.1] — 2026-08-01
 
