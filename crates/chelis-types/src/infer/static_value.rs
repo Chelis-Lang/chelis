@@ -26,13 +26,11 @@ pub(super) fn bind_fn_params_unknown(fn_list: &deep::List, env: &mut HashMap<Str
     let Some(params_expr) = children(fn_list).first() else {
         return;
     };
-    let deep::Expr::List(params_list, _) = params_expr else {
+    // chelis#1107 amendment: carrier-preserving read.
+    let Some((DeepTag::Params, _, param_entries)) = stamped_parts(params_expr) else {
         return;
     };
-    if get_tag(params_list) != Some(DeepTag::Params) {
-        return;
-    }
-    for param in children(params_list) {
+    for param in param_entries {
         match param {
             deep::Expr::Atom(deep::Atom::Name(name), _) => {
                 env.insert(name.clone(), StaticValue::Unknown);
@@ -62,13 +60,12 @@ pub(super) fn literal_static_value(expr: &deep::Expr) -> StaticValue {
 }
 
 pub(super) fn app_builtin_name(expr: &deep::Expr) -> Option<&str> {
-    let deep::Expr::List(list, _) = expr else {
-        return None;
-    };
-    if get_tag(list) != Some(DeepTag::Var) {
+    // chelis#1107 amendment: carrier-preserving read.
+    let (tag, _, kids) = stamped_parts(expr)?;
+    if tag != DeepTag::Var {
         return None;
     }
-    children(list).first().and_then(symbol_name)
+    kids.first().and_then(symbol_name)
 }
 
 pub(super) fn validate_static_builtin_application(

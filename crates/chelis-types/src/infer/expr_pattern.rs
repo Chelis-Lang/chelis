@@ -651,13 +651,12 @@ pub(super) fn infer_pipe(
 /// stages contain ordinary application nodes and are handled by the normal
 /// post-application chokepoint.
 pub(super) fn bare_var_stage_name(stage: &deep::Expr) -> Option<&str> {
-    let deep::Expr::List(list, _) = stage else {
-        return None;
-    };
-    if get_tag(list) != Some(DeepTag::Var) {
+    // chelis#1107 amendment: carrier-preserving read.
+    let (tag, _, kids) = stamped_parts(stage)?;
+    if tag != DeepTag::Var {
         return None;
     }
-    children(list).first().and_then(symbol_name)
+    kids.first().and_then(symbol_name)
 }
 
 /// If `stage` is a `(fn (params x) body)` Deep node with exactly one
@@ -675,21 +674,16 @@ pub(super) fn synthesized_unary_lambda_param(
     _adt_reg: &AdtRegistry,
     _vg: &mut VarGen,
 ) -> Option<String> {
-    let deep::Expr::List(list, _) = stage else {
-        return None;
-    };
-    if get_tag(list) != Some(DeepTag::Fn) {
+    // chelis#1107 amendment: carrier-preserving read (both levels).
+    let (tag, _, kids) = stamped_parts(stage)?;
+    if tag != DeepTag::Fn {
         return None;
     }
-    let kids = children(list);
     let params_expr = kids.first()?;
-    let deep::Expr::List(params_list, _) = params_expr else {
-        return None;
-    };
-    if get_tag(params_list) != Some(DeepTag::Params) {
+    let (params_tag, _, param_kids) = stamped_parts(params_expr)?;
+    if params_tag != DeepTag::Params {
         return None;
     }
-    let param_kids = children(params_list);
     if param_kids.len() != 1 {
         return None;
     }
@@ -719,7 +713,9 @@ pub(super) fn infer_pipe_stage_lambda(
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
 ) -> Type {
-    let deep::Expr::List(list, _) = stage else {
+    // chelis#1107 amendment: carrier-preserving read -- a stamped pipe-stage
+    // `fn` node used to fall straight into the malformed-form rejection.
+    let Some((_, _, kids)) = stamped_parts(stage) else {
         return report(
             errors,
             CheckError::new(
@@ -731,10 +727,27 @@ pub(super) fn infer_pipe_stage_lambda(
             ),
         );
     };
-    let kids = children(list);
     let body = match kids.get(1) {
         Some(body) => body,
-        None => return malformed_form(list, "pipe stage", "a body", errors),
+        None => {
+            // A stamped `fn` node satisfies its `Fixed(2)` arity contract at
+            // construction, so only a legacy `List` carrier can be short here.
+            // chelis#1107 amendment (justified-safe, not routed): see the
+            // arity-contract argument in the comment directly above.
+            let deep::Expr::List(list, _) = stage else {
+                return report(
+                    errors,
+                    CheckError::new(
+                        CheckErrorKind::MalformedForm,
+                        "malformed pipe stage: expected a body \
+                         (spec/03-deep-syntax.md; chelis#731 [04-TOT-3])"
+                            .to_string(),
+                        vec![],
+                    ),
+                );
+            };
+            return malformed_form(list, "pipe stage", "a body", errors);
+        }
     };
 
     let mut fn_env = env.clone();

@@ -112,11 +112,11 @@ pub(super) fn static_list_len(expr: Option<&deep::Expr>, env: &Env) -> Option<us
     if let Some(elements) = collect_cons_chain_for_shape(expr) {
         return Some(elements.len());
     }
-    let deep::Expr::List(list, _) = expr else {
-        return None;
-    };
-    if get_tag(list) == Some(DeepTag::Var) {
-        let name = children(list).first().and_then(|e| symbol_name(e))?;
+    // chelis#1107: carrier-preserving read; a `List`-only destructure lost the
+    // recorded literal length of a stamped `(var {} xs)` on the typed ingress.
+    let (tag, _, kids) = stamped_parts(expr)?;
+    if tag == DeepTag::Var {
+        let name = kids.first().and_then(|e| symbol_name(e))?;
         return env.list_literal_len(name);
     }
     None

@@ -60,13 +60,10 @@ pub(super) fn detect_trivial_non_terminating_fns(
     let mut terminal_callees: HashMap<String, Option<HashSet<String>>> = HashMap::new();
     let mut def_order: Vec<String> = Vec::new();
     for expr in top_level_decl_items(exprs) {
-        let deep::Expr::List(list, _) = expr else {
+        // chelis#1107 amendment: carrier-preserving read.
+        let Some((DeepTag::Def, _, kids)) = stamped_parts(expr) else {
             continue;
         };
-        if get_tag(list) != Some(DeepTag::Def) {
-            continue;
-        }
-        let kids = children(list);
         let Some(name) = kids.first().and_then(symbol_name) else {
             continue;
         };
@@ -185,13 +182,11 @@ pub(super) fn collect_terminal_callees(
                 let Some(callee) = kids.first() else {
                     return false;
                 };
-                let deep::Expr::List(callee_list, _) = callee else {
+                // chelis#1107 amendment: carrier-preserving read.
+                let Some((DeepTag::Var, _, callee_kids)) = stamped_parts(callee) else {
                     return false;
                 };
-                if get_tag(callee_list) != Some(DeepTag::Var) {
-                    return false;
-                }
-                let Some(cname) = children(callee_list).first().and_then(symbol_name) else {
+                let Some(cname) = callee_kids.first().and_then(symbol_name) else {
                     return false;
                 };
                 if shadowed.contains(cname) {
@@ -280,13 +275,11 @@ pub(super) fn every_terminal_is_self_call(expr: &deep::Expr, def_name: &str) -> 
                 let Some(callee) = kids.first() else {
                     return false;
                 };
-                let deep::Expr::List(callee_list, _) = callee else {
+                // chelis#1107 amendment: carrier-preserving read.
+                let Some((DeepTag::Var, _, callee_kids)) = stamped_parts(callee) else {
                     return false;
                 };
-                if get_tag(callee_list) != Some(DeepTag::Var) {
-                    return false;
-                }
-                children(callee_list).first().and_then(symbol_name) == Some(def_name)
+                callee_kids.first().and_then(symbol_name) == Some(def_name)
             }
             Some(DeepTag::Let) => {
                 let kids = children(list);
@@ -648,13 +641,17 @@ pub(super) fn build_def_param_scope(
     sigs: &IrTypeEnv,
 ) -> HashMap<String, deep::Expr> {
     let mut scope = HashMap::new();
-    let deep::Expr::List(list, _) = expr else {
+    // chelis#1107: carrier-preserving read. A `List`-only destructure returned
+    // an empty scope for every stamped `def`, which -- together with the two
+    // collectors below and the callee read in
+    // `check_app_for_poly_op_constraint` -- left the whole WS-A8 cross-row
+    // pass inert on `check_typed_program`.
+    let Some((tag, _, kids)) = stamped_parts(expr) else {
         return scope;
     };
-    if get_tag(list) != Some(DeepTag::Def) {
+    if tag != DeepTag::Def {
         return scope;
     }
-    let kids = children(list);
     let Some(name) = kids.first().and_then(symbol_name) else {
         return scope;
     };
@@ -676,16 +673,19 @@ pub(super) fn build_def_param_scope(
         return scope;
     }
     // Fall back: inline param-type annotations.
-    let deep::Expr::List(fn_list, _) = body_expr else {
+    let Some((_, _, fn_kids)) = stamped_parts(body_expr) else {
         return scope;
     };
-    let Some(deep::Expr::List(params_list, _)) = children(fn_list).first() else {
+    let Some(params_expr) = fn_kids.first() else {
         return scope;
     };
-    if get_tag(params_list) != Some(DeepTag::Params) {
+    let Some((params_tag, _, params)) = stamped_parts(params_expr) else {
+        return scope;
+    };
+    if params_tag != DeepTag::Params {
         return scope;
     }
-    for param in children(params_list) {
+    for param in params {
         if let Some((pname, Some(ty_expr))) = param_name_and_inline_type(param) {
             scope.insert(pname, ty_expr);
         }
@@ -737,13 +737,13 @@ pub(super) fn param_name_and_inline_type(
 pub(super) fn collect_defsig_exprs(exprs: &[deep::Expr]) -> HashMap<String, deep::Expr> {
     let mut out = HashMap::new();
     for expr in top_level_decl_items(exprs) {
-        let deep::Expr::List(list, _) = expr else {
+        // chelis#1107: carrier-preserving read; see `build_def_param_scope`.
+        let Some((tag, _, kids)) = stamped_parts(expr) else {
             continue;
         };
-        if get_tag(list) != Some(DeepTag::Defsig) {
+        if tag != DeepTag::Defsig {
             continue;
         }
-        let kids = children(list);
         if let Some(name) = kids.first().and_then(symbol_name)
             && let Some(sig) = kids.get(1)
         {
@@ -759,13 +759,13 @@ pub(super) type DefBodyMap = HashMap<String, (Vec<String>, deep::Expr)>;
 pub(super) fn collect_def_bodies(exprs: &[deep::Expr]) -> DefBodyMap {
     let mut out = HashMap::new();
     for expr in top_level_decl_items(exprs) {
-        let deep::Expr::List(list, _) = expr else {
+        // chelis#1107: carrier-preserving read; see `build_def_param_scope`.
+        let Some((tag, _, kids)) = stamped_parts(expr) else {
             continue;
         };
-        if get_tag(list) != Some(DeepTag::Def) {
+        if tag != DeepTag::Def {
             continue;
         }
-        let kids = children(list);
         let Some(name) = kids.first().and_then(symbol_name) else {
             continue;
         };
@@ -867,13 +867,16 @@ pub(super) fn check_app_for_poly_op_constraint(
     let Some(callee_expr) = kids.first() else {
         return;
     };
-    let deep::Expr::List(callee_list, _) = callee_expr else {
+    // chelis#1107: carrier-preserving read. The walker's Node bridge rebuilds
+    // only the `app` node, so the callee arrives as `Expr::Node` and a
+    // `List`-only destructure returned before any call site was ever checked.
+    let Some((callee_tag, _, callee_kids)) = stamped_parts(callee_expr) else {
         return;
     };
-    if get_tag(callee_list) != Some(DeepTag::Var) {
+    if callee_tag != DeepTag::Var {
         return;
     }
-    let Some(callee_name) = children(callee_list).first().and_then(symbol_name) else {
+    let Some(callee_name) = callee_kids.first().and_then(symbol_name) else {
         return;
     };
     // Look up the callee's declared signature; only proceed if it carries
@@ -958,13 +961,14 @@ pub(super) fn lookup_sig_in_type_env<'a>(
 }
 
 pub(super) fn parse_t_fn_parts(expr: &deep::Expr) -> Option<(Vec<deep::Expr>, deep::Expr)> {
-    let deep::Expr::List(list, _) = expr else {
-        return None;
-    };
-    if get_tag(list) != Some(DeepTag::TFn) {
+    // chelis#1107: carrier-preserving read. Every reader in this WS-A8 support
+    // cluster took the stamped carrier only after `collect_defsig_exprs` was
+    // fixed to see it; a `List`-only destructure here would have left the pass
+    // half-live.
+    let (tag, _, kids) = stamped_parts(expr)?;
+    if tag != DeepTag::TFn {
         return None;
     }
-    let kids = children(list);
     let (ret, args) = kids.split_last()?;
     Some((args.iter().map(|e| (*e).clone()).collect(), (*ret).clone()))
 }
@@ -972,9 +976,9 @@ pub(super) fn parse_t_fn_parts(expr: &deep::Expr) -> Option<(Vec<deep::Expr>, de
 /// Strip a leading `(t-ref {} ...)` wrapper for precision-var probing;
 /// the borrow doesn't affect the precision slot.
 pub(super) fn strip_t_ref(expr: &deep::Expr) -> &deep::Expr {
-    if let deep::Expr::List(list, _) = expr
-        && get_tag(list) == Some(DeepTag::TRef)
-        && let Some(inner) = list.elements.get(2)
+    // chelis#1107: carrier-preserving read.
+    if let Some((DeepTag::TRef, _, kids)) = stamped_parts(expr)
+        && let Some(inner) = kids.first()
     {
         return inner;
     }
@@ -983,13 +987,14 @@ pub(super) fn strip_t_ref(expr: &deep::Expr) -> &deep::Expr {
 
 pub(super) fn type_expr_has_tensor_prec_var(expr: &deep::Expr) -> bool {
     let stripped = strip_t_ref(expr);
-    let deep::Expr::List(list, _) = stripped else {
+    // chelis#1107: carrier-preserving read.
+    let Some((tag, _, kids)) = stamped_parts(stripped) else {
         return false;
     };
-    match get_tag(list) {
-        Some(DeepTag::TTensor) => precision_var_name_in_type_expr(stripped).is_some(),
-        Some(DeepTag::TFn) | Some(DeepTag::TTuple) | Some(DeepTag::TAdt) => {
-            children(list).iter().any(type_expr_has_tensor_prec_var)
+    match tag {
+        DeepTag::TTensor => precision_var_name_in_type_expr(stripped).is_some(),
+        DeepTag::TFn | DeepTag::TTuple | DeepTag::TAdt => {
+            kids.iter().any(type_expr_has_tensor_prec_var)
         }
         _ => false,
     }
@@ -1000,46 +1005,34 @@ pub(super) fn type_expr_has_tensor_prec_var(expr: &deep::Expr) -> bool {
 /// slot is `(t-var {} name)`; `None` when concrete or non-tensor.
 pub(super) fn precision_var_name_in_type_expr(expr: &deep::Expr) -> Option<String> {
     let stripped = strip_t_ref(expr);
-    let deep::Expr::List(list, _) = stripped else {
-        return None;
-    };
-    if get_tag(list) != Some(DeepTag::TTensor) {
-        return None;
-    }
-    let last = list.elements.last()?;
-    let deep::Expr::List(prec_list, _) = last else {
-        return None;
-    };
-    if get_tag(prec_list) != Some(DeepTag::TVar) {
+    // chelis#1107: carrier-preserving read.
+    let (tag, _, kids) = stamped_parts(stripped)?;
+    if tag != DeepTag::TTensor {
         return None;
     }
-    children(prec_list)
-        .first()
-        .and_then(symbol_name)
-        .map(String::from)
+    let last = kids.last()?;
+    let (prec_tag, _, prec_kids) = stamped_parts(last)?;
+    if prec_tag != DeepTag::TVar {
+        return None;
+    }
+    prec_kids.first().and_then(symbol_name).map(String::from)
 }
 
 /// Pull the concrete `(t-prim {} name)` from a tensor-type expression's
 /// precision slot. Returns `None` when the slot is a tvar.
 pub(super) fn precision_prim_name_in_type_expr(expr: &deep::Expr) -> Option<String> {
     let stripped = strip_t_ref(expr);
-    let deep::Expr::List(list, _) = stripped else {
-        return None;
-    };
-    if get_tag(list) != Some(DeepTag::TTensor) {
-        return None;
-    }
-    let last = list.elements.last()?;
-    let deep::Expr::List(prec_list, _) = last else {
-        return None;
-    };
-    if get_tag(prec_list) != Some(DeepTag::TPrim) {
+    // chelis#1107: carrier-preserving read.
+    let (tag, _, kids) = stamped_parts(stripped)?;
+    if tag != DeepTag::TTensor {
         return None;
     }
-    children(prec_list)
-        .first()
-        .and_then(symbol_name)
-        .map(String::from)
+    let last = kids.last()?;
+    let (prec_tag, _, prec_kids) = stamped_parts(last)?;
+    if prec_tag != DeepTag::TPrim {
+        return None;
+    }
+    prec_kids.first().and_then(symbol_name).map(String::from)
 }
 
 /// Look up the type of `(var name)` in the enclosing-def `scope` map
@@ -1050,26 +1043,20 @@ pub(super) fn resolve_var_type_in_scope(
     expr: &deep::Expr,
     scope: &HashMap<String, deep::Expr>,
 ) -> Option<deep::Expr> {
-    let deep::Expr::List(list, _) = expr else {
-        return None;
-    };
-    if get_tag(list) != Some(DeepTag::Var) {
+    // chelis#1107: carrier-preserving read.
+    let (tag, _, kids) = stamped_parts(expr)?;
+    if tag != DeepTag::Var {
         return None;
     }
-    let name = children(list).first().and_then(symbol_name)?;
+    let name = kids.first().and_then(symbol_name)?;
     scope.get(name).cloned()
 }
 
 /// Pull the `type:` meta entry off a Deep expression. Returns the inner
 /// type expression when present.
 pub(super) fn annotated_type_of_expr(expr: &deep::Expr) -> Option<deep::Expr> {
-    let deep::Expr::List(list, _) = expr else {
-        return None;
-    };
-    let meta = match list.elements.get(1) {
-        Some(deep::Expr::Map(meta, _)) => meta,
-        _ => return None,
-    };
+    // chelis#1107: carrier-preserving read.
+    let (_, meta, _) = stamped_parts(expr)?;
     meta.entries
         .iter()
         .find(|(k, _)| k == "type")
@@ -1090,13 +1077,13 @@ pub(super) fn walk_body_for_restricted_ops(
     errors: &mut DiagnosticSink<'_>,
 ) {
     stack_guard!("walk_body_for_restricted_ops", expr);
-    if let deep::Expr::List(list, _) = expr
-        && get_tag(list) == Some(DeepTag::App)
-    {
-        let kids = children(list);
-        if let Some(deep::Expr::List(callee, _)) = kids.first()
-            && get_tag(callee) == Some(DeepTag::Var)
-            && let Some(op_name) = children(callee).first().and_then(symbol_name)
+    // chelis#1107: carrier-preserving read, so the walk descends through
+    // stamped `Expr::Node` bodies instead of stopping at the first one.
+    if let Some((tag, _, kids)) = stamped_parts(expr) {
+        if tag == DeepTag::App
+            && let Some(callee) = kids.first()
+            && let Some((DeepTag::Var, _, callee_kids)) = stamped_parts(callee)
+            && let Some(op_name) = callee_kids.first().and_then(symbol_name)
         {
             check_restricted_op_in_body(
                 op_name,
@@ -1108,18 +1095,7 @@ pub(super) fn walk_body_for_restricted_ops(
                 errors,
             );
         }
-        for child in &list.elements {
-            walk_body_for_restricted_ops(
-                child,
-                param_to_prec,
-                subst,
-                callee_name,
-                call_site_list,
-                errors,
-            );
-        }
-    } else if let deep::Expr::List(list, _) = expr {
-        for child in &list.elements {
+        for child in kids {
             walk_body_for_restricted_ops(
                 child,
                 param_to_prec,
@@ -1321,9 +1297,10 @@ pub(super) fn resolve_arg_precision_through_subst(
     param_to_prec: &HashMap<String, String>,
     subst: &HashMap<String, String>,
 ) -> Option<String> {
-    if let deep::Expr::List(list, _) = arg
-        && get_tag(list) == Some(DeepTag::Var)
-        && let Some(name) = children(list).first().and_then(symbol_name)
+    // chelis#1107: carrier-preserving read -- the last link in the WS-A8
+    // chain, so a stamped `(var {} x)` operand resolves its precision.
+    if let Some((DeepTag::Var, _, kids)) = stamped_parts(arg)
+        && let Some(name) = kids.first().and_then(symbol_name)
         && let Some(prec_var) = param_to_prec.get(name)
         && let Some(prim) = subst.get(prec_var)
     {
@@ -1707,15 +1684,41 @@ pub(super) fn span_of_list(list: &deep::List) -> Span {
 }
 
 pub(super) fn ir_builtin_name(list: &deep::List) -> Option<&str> {
-    let func_expr = list.elements.get(2)?;
-    let func_list = match func_expr {
-        deep::Expr::List(list, _) => list,
-        _ => return None,
+    ir_builtin_name_of_expr(list.elements.get(2)?)
+}
+
+/// The builtin callee name of an `app`'s callee child, on either carrier.
+///
+/// chelis#1107 amendment: `validate_ir_expr` bridges a stamped `Expr::Node`
+/// one level (`Node::to_list`), so the callee child it hands on is still an
+/// `Expr::Node`. The previous `List`-only read returned `None` for every
+/// stamped callee, which silently disabled the shape-sensitivity and
+/// output-type derivation below on the stamped carrier.
+pub(super) fn ir_builtin_name_of_expr(func_expr: &deep::Expr) -> Option<&str> {
+    let (DeepTag::Var, _, kids) = stamped_parts(func_expr)? else {
+        return None;
     };
-    match (func_list.tag(), func_list.elements.get(2)) {
-        (Some(DeepTag::Var), Some(deep::Expr::Atom(deep::Atom::Name(name), _))) => {
-            Some(name.as_str())
-        }
+    match kids.first() {
+        Some(deep::Expr::Atom(deep::Atom::Name(name), _)) => Some(name.as_str()),
+        _ => None,
+    }
+}
+
+/// Borrow `expr` as a `deep::List`, materializing a one-level bridge for a
+/// stamped `Expr::Node` into `storage`.
+///
+/// chelis#1107 amendment: the `derive_*` output-type family threads
+/// `&deep::List` through several helpers. Rather than change all of their
+/// signatures, the entry points bridge once here; every leaf reader they call
+/// (`tensor_precision_expr`, `ir_builtin_name`, …) is carrier-agnostic, so one
+/// level is enough.
+pub(super) fn as_list<'a>(
+    expr: &'a deep::Expr,
+    storage: &'a mut Option<deep::List>,
+) -> Option<&'a deep::List> {
+    match expr {
+        deep::Expr::List(list, _) => Some(list),
+        deep::Expr::Node(node, span) => Some(storage.insert(node.to_list(*span))),
         _ => None,
     }
 }
@@ -1817,20 +1820,18 @@ pub(super) fn is_ir_binary_shape_passthrough_builtin(name: &str) -> bool {
 pub(super) fn let_rhs_is_recognized_shape_sensitive(expr: &deep::Expr) -> bool {
     stack_guard!("let_rhs_is_recognized_shape_sensitive", expr, false);
     let inner = peel_borrow(expr);
-    let deep::Expr::List(list, _) = inner else {
+    // chelis#1107 amendment: carrier-preserving read.
+    let Some((DeepTag::App, _, kids)) = stamped_parts(inner) else {
         return false;
     };
-    if get_tag(list) != Some(DeepTag::App) {
-        return false;
-    }
-    let Some(func_name) = ir_builtin_name(list) else {
+    let Some(func_name) = kids.first().and_then(ir_builtin_name_of_expr) else {
         return false;
     };
     if is_ir_shape_sensitive_builtin(func_name) {
         return true;
     }
     if is_ir_unary_shape_passthrough_builtin(func_name)
-        && let Some(arg) = list.elements.get(3)
+        && let Some(arg) = kids.get(1)
     {
         return let_rhs_is_recognized_shape_sensitive(arg);
     }
@@ -1840,12 +1841,12 @@ pub(super) fn let_rhs_is_recognized_shape_sensitive(expr: &deep::Expr) -> bool {
         // resolvable operand's type and falls through to the second,
         // so a failed inner shape-sensitive call on either side
         // means the whole RHS is structurally broken.
-        if let Some(lhs) = list.elements.get(3)
+        if let Some(lhs) = kids.get(1)
             && let_rhs_is_recognized_shape_sensitive(lhs)
         {
             return true;
         }
-        if let Some(rhs) = list.elements.get(4)
+        if let Some(rhs) = kids.get(2)
             && let_rhs_is_recognized_shape_sensitive(rhs)
         {
             return true;
@@ -1894,21 +1895,38 @@ pub(super) fn extend_ir_env_with_fn_params(
     let Some(params_expr) = children(fn_list).first() else {
         return scoped;
     };
-    let deep::Expr::List(params_list, _) = params_expr else {
+    // chelis#1107 amendment: carrier-preserving read. `validate_ir_expr`
+    // bridges only the `fn` node, so `(params {} ...)` arrives as `Expr::Node`.
+    let Some((DeepTag::Params, _, param_entries)) = stamped_parts(params_expr) else {
         return scoped;
     };
-    if get_tag(params_list) != Some(DeepTag::Params) {
-        return scoped;
-    }
-    for param in children(params_list) {
-        let deep::Expr::List(param_list, _) = param else {
-            continue;
-        };
-        let Some(name) = param_list.elements.first().and_then(symbol_name) else {
-            continue;
-        };
-        let Some(meta) = get_meta(param_list) else {
-            continue;
+    for param in param_entries {
+        // An inline-annotated entry `(x {type: T})` is symbol-headed, so the
+        // stamp pass carries it as `Expr::BareList`, never a `Node` -- this
+        // one needs its own arm rather than `stamped_parts`.
+        // chelis#1107 amendment (justified-safe, not routed): this match
+        // handles every carrier a params entry can take -- `List` (legacy) and
+        // `BareList` (stamped, symbol-headed) -- so there is no fall-through.
+        let (name, meta) = match param {
+            deep::Expr::List(param_list, _) => {
+                let Some(name) = param_list.elements.first().and_then(symbol_name) else {
+                    continue;
+                };
+                let Some(meta) = get_meta(param_list) else {
+                    continue;
+                };
+                (name, meta)
+            }
+            deep::Expr::BareList(elems, _) => {
+                let Some(name) = elems.first().and_then(symbol_name) else {
+                    continue;
+                };
+                let Some(deep::Expr::Map(meta, _)) = elems.get(1) else {
+                    continue;
+                };
+                (name, meta)
+            }
+            _ => continue,
         };
         let Some((_, ty)) = meta.entries.iter().find(|(k, _)| k == "type") else {
             continue;
@@ -2362,9 +2380,10 @@ pub(super) fn derive_ir_builtin_output_type(
     expr: &deep::Expr,
     type_env: &IrTypeEnv,
 ) -> Option<deep::Expr> {
-    let deep::Expr::List(list, _) = expr else {
-        return None;
-    };
+    // chelis#1107 amendment: carrier-preserving entry. The `derive_*` helpers
+    // below take `&deep::List`, so bridge a stamped Node once here.
+    let mut bridge = None;
+    let list = as_list(expr, &mut bridge)?;
     if get_tag(list) != Some(DeepTag::App) {
         return None;
     }
@@ -2577,16 +2596,14 @@ pub(super) fn tensor_dim_exprs_from_type_expr(expr: &deep::Expr) -> Option<Vec<d
 /// raw Deep `Expr` so it can be re-used unchanged when synthesizing
 /// a derived tensor type.
 pub(super) fn tensor_precision_expr(ty: &deep::Expr) -> Option<deep::Expr> {
-    let deep::Expr::List(list, _) = ty else {
-        return None;
-    };
-    if get_tag(list) == Some(DeepTag::TRef) {
-        return children(list).first().and_then(tensor_precision_expr);
+    // chelis#1107 amendment: carrier-preserving read.
+    let (tag, _, kids) = stamped_parts(ty)?;
+    if tag == DeepTag::TRef {
+        return kids.first().and_then(tensor_precision_expr);
     }
-    if get_tag(list) != Some(DeepTag::TTensor) {
+    if tag != DeepTag::TTensor {
         return None;
     }
-    let kids = children(list);
     kids.last().cloned()
 }
 

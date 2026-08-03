@@ -160,61 +160,72 @@ pub(super) fn is_static_numeric_bound(expr: &deep::Expr) -> bool {
     // bound is then treated as non-resolvable and rejected loudly, never a
     // silent accept).
     stack_guard!("is_static_numeric_bound", expr, false);
-    match expr {
-        deep::Expr::Atom(deep::Atom::Float(_) | deep::Atom::Int(_), _) => true,
-        deep::Expr::List(list, _) => match get_tag(list) {
-            // A float-target cast of a resolvable value. An integer target
-            // truncates and is left unresolved, matching the lowering.
-            Some(DeepTag::Cast) => {
-                let inner_resolvable = list.elements.get(2).is_some_and(is_static_numeric_bound);
-                let target_is_float = list.elements.get(3).is_some_and(deep_prim_is_float);
-                target_is_float && inner_resolvable
-            }
-            // neg(<inner>): unary minus desugars to `(app {} (var {} neg) <inner>)`.
-            Some(DeepTag::App) if children(list).first().is_some_and(expr_is_neg_var) => {
-                children(list).get(1).is_some_and(is_static_numeric_bound)
-            }
-            // Only a `lit`-tagged list carries a numeric atom AS ITS VALUE.
-            // The lowering's `extract_f64_value` catch-all reads element 2 of
-            // ANY list, which blesses a form whose value is NOT at element 2 --
-            // e.g. `(par {} 2.0 3.0)`, whose value is its LAST child (3.0) per
-            // spec/03-deep-syntax.md §2.3, while element 2 is the FIRST child
-            // (2.0). Accepting that would let the checker bless a bound the
-            // lowering folds from the wrong position (the chelis#703 silent-
-            // substitution shape; chelis#731 red team). The checker's arm is
-            // therefore NARROWER than the lowering's on purpose: a `par`-wrapped
-            // (or otherwise non-literal, non-cast, non-neg) bound is rejected
-            // here, so it never reaches the fold. The lowering-side over-broad
-            // catch-all is filed separately.
-            Some(DeepTag::Lit) => matches!(
-                list.elements.get(2),
-                Some(deep::Expr::Atom(
-                    deep::Atom::Float(_) | deep::Atom::Int(_),
-                    _
-                ))
-            ),
-            _ => false,
-        },
+    if matches!(
+        expr,
+        deep::Expr::Atom(deep::Atom::Float(_) | deep::Atom::Int(_), _)
+    ) {
+        return true;
+    }
+    // chelis#1107 round 3: this was an `Expr::List`-only match with a
+    // fail-CLOSED `_ => false` default, so on the stamped ingress EVERY bound
+    // read as non-resolvable and `uniform_like(x, 0.0, 1.0)` -- ordinary
+    // literal bounds -- was REJECTED by `check_typed_program` while
+    // `check_ir_program` accepted it. An over-rejection of a valid program,
+    // in the same reader class as the shape-path findings.
+    let Some((tag, _, kids)) = stamped_parts(expr) else {
+        return false;
+    };
+    match tag {
+        // A float-target cast of a resolvable value. An integer target
+        // truncates and is left unresolved, matching the lowering.
+        DeepTag::Cast => {
+            let inner_resolvable = kids.first().is_some_and(is_static_numeric_bound);
+            let target_is_float = kids.get(1).is_some_and(deep_prim_is_float);
+            target_is_float && inner_resolvable
+        }
+        // neg(<inner>): unary minus desugars to `(app {} (var {} neg) <inner>)`.
+        DeepTag::App if kids.first().is_some_and(expr_is_neg_var) => {
+            kids.get(1).is_some_and(is_static_numeric_bound)
+        }
+        // Only a `lit`-tagged list carries a numeric atom AS ITS VALUE.
+        // The lowering's `extract_f64_value` catch-all reads element 2 of
+        // ANY list, which blesses a form whose value is NOT at element 2 --
+        // e.g. `(par {} 2.0 3.0)`, whose value is its LAST child (3.0) per
+        // spec/03-deep-syntax.md §2.3, while element 2 is the FIRST child
+        // (2.0). Accepting that would let the checker bless a bound the
+        // lowering folds from the wrong position (the chelis#703 silent-
+        // substitution shape; chelis#731 red team). The checker's arm is
+        // therefore NARROWER than the lowering's on purpose: a `par`-wrapped
+        // (or otherwise non-literal, non-cast, non-neg) bound is rejected
+        // here, so it never reaches the fold. The lowering-side over-broad
+        // catch-all is filed separately.
+        DeepTag::Lit => matches!(
+            kids.first(),
+            Some(deep::Expr::Atom(
+                deep::Atom::Float(_) | deep::Atom::Int(_),
+                _
+            ))
+        ),
         _ => false,
     }
 }
 
 /// True when `target` is a `(t-prim {} <name>)` naming a float precision.
 pub(super) fn deep_prim_is_float(target: &deep::Expr) -> bool {
-    matches!(target, deep::Expr::List(list, _)
-        if get_tag(list) == Some(DeepTag::TPrim)
-            && children(list)
-                .first()
-                .and_then(symbol_name)
-                .and_then(Prim::parse_name)
-                .is_some_and(|prim| prim.is_float()))
+    // chelis#1107 round 3: carrier-preserving read.
+    matches!(stamped_parts(target), Some((DeepTag::TPrim, _, kids))
+        if kids
+            .first()
+            .and_then(symbol_name)
+            .and_then(Prim::parse_name)
+            .is_some_and(|prim| prim.is_float()))
 }
 
 /// True when `expr` is `(var {} neg)`, the callee of a desugared unary minus.
 pub(super) fn expr_is_neg_var(expr: &deep::Expr) -> bool {
-    matches!(expr, deep::Expr::List(list, _)
-        if get_tag(list) == Some(DeepTag::Var)
-            && children(list).first().and_then(symbol_name) == Some("neg"))
+    // chelis#1107 round 3: carrier-preserving read.
+    matches!(stamped_parts(expr), Some((DeepTag::Var, _, kids))
+        if kids.first().and_then(symbol_name) == Some("neg"))
 }
 
 /// Get metadata map from element[1] of a list.
@@ -564,10 +575,8 @@ pub(super) fn infer_diagonal_result_type(
 }
 
 pub(super) fn macro_source(expr: &deep::Expr) -> Option<String> {
-    let deep::Expr::List(list, _) = expr else {
-        return None;
-    };
-    let meta = get_meta(list)?;
+    // chelis#1107 amendment: carrier-preserving read.
+    let (_, meta, _) = stamped_parts(expr)?;
     let source = meta
         .entries
         .iter()
@@ -777,13 +786,17 @@ pub(super) fn build_opacity_meta(
     // (the reef rewrite emits them with internal names), so each
     // exported name self-attributes through its stem.
     for (module, item) in items {
-        let deep::Expr::List(list, _) = item else {
+        // chelis#1107: carrier-preserving read. A `List`-only destructure
+        // skipped every stamped declaration, leaving both maps empty on the
+        // stamped ingress -- the opacity diagnostic then reported "exported
+        // producers: none" for a module that exports one.
+        let Some((tag, _, kids)) = stamped_parts(item) else {
             continue;
         };
-        if get_tag(list) != Some(DeepTag::Export) {
+        if tag != DeepTag::Export {
             continue;
         }
-        for child in children(list) {
+        for child in kids {
             let Some(name) = symbol_name(child) else {
                 continue;
             };
@@ -806,13 +819,13 @@ pub(super) fn build_opacity_meta(
     // legitimately exported producers in pipelines that strip Export
     // decls (fail-open for unattributable names by design).
     for (module, item) in items {
-        let deep::Expr::List(list, _) = item else {
+        // chelis#1107: carrier-preserving read, as in pass 1 above.
+        let Some((tag, _, kids)) = stamped_parts(item) else {
             continue;
         };
-        if !matches!(get_tag(list), Some(DeepTag::Def) | Some(DeepTag::Defsig)) {
+        if !matches!(tag, DeepTag::Def | DeepTag::Defsig) {
             continue;
         }
-        let kids = children(list);
         let Some(name) = kids.first().and_then(symbol_name) else {
             continue;
         };
@@ -825,7 +838,7 @@ pub(super) fn build_opacity_meta(
             continue;
         };
         meta.bindings.insert(name.to_string(), target);
-        if get_tag(list) == Some(DeepTag::Defsig)
+        if tag == DeepTag::Defsig
             && let Some(scheme) = env.lookup(name)
         {
             declared_sigs.insert(name.to_string(), scheme.body.clone());
@@ -898,13 +911,17 @@ pub(super) fn build_opacity_meta(
 pub(super) fn report_duplicate_defs(items: &[&deep::Expr], errors: &mut DiagnosticSink<'_>) {
     let mut seen: HashSet<&str> = HashSet::new();
     for expr in items {
-        let deep::Expr::List(list, _) = expr else {
+        // chelis#1107: `stamped_parts` reads both carriers. A `List`-only
+        // destructure skipped every stamped declaration, so this check fired
+        // on `check_ir_program` (which normalizes Node to List) and never on
+        // `check_typed_program`.
+        let Some((tag, _, kids)) = stamped_parts(expr) else {
             continue;
         };
-        if get_tag(list) != Some(DeepTag::Def) {
+        if tag != DeepTag::Def {
             continue;
         }
-        let Some(name) = children(list).first().and_then(symbol_name) else {
+        let Some(name) = kids.first().and_then(symbol_name) else {
             continue;
         };
         if !seen.insert(name) {
@@ -929,13 +946,14 @@ pub(super) fn report_duplicate_defs(items: &[&deep::Expr], errors: &mut Diagnost
 pub(super) fn report_duplicate_defsigs(items: &[&deep::Expr], errors: &mut DiagnosticSink<'_>) {
     let mut seen: HashSet<&str> = HashSet::new();
     for expr in items {
-        let deep::Expr::List(list, _) = expr else {
+        // chelis#1107: carrier-preserving read, as in `report_duplicate_defs`.
+        let Some((tag, _, kids)) = stamped_parts(expr) else {
             continue;
         };
-        if get_tag(list) != Some(DeepTag::Defsig) {
+        if tag != DeepTag::Defsig {
             continue;
         }
-        let Some(name) = children(list).first().and_then(symbol_name) else {
+        let Some(name) = kids.first().and_then(symbol_name) else {
             continue;
         };
         if !seen.insert(name) {
@@ -978,14 +996,13 @@ pub(super) fn report_duplicate_defsigs(items: &[&deep::Expr], errors: &mut Diagn
 /// same name; report once per name, as the `def` (what the user wrote).
 pub(super) fn report_builtin_shadowing(items: &[&deep::Expr], errors: &mut DiagnosticSink<'_>) {
     let decl_name = |expr: &deep::Expr, tag: DeepTag| -> Option<String> {
-        let deep::Expr::List(list, _) = expr else {
-            return None;
-        };
-        if get_tag(list) != Some(tag) {
+        // chelis#1107: carrier-preserving read. Without it the §8.6 shadowing
+        // gate never fired on the stamped ingress.
+        let (found_tag, _, kids) = stamped_parts(expr)?;
+        if found_tag != tag {
             return None;
         }
-        children(list)
-            .first()
+        kids.first()
             .and_then(symbol_name)
             .filter(|name| builtins::BUILTIN_NAMES.contains(name))
             .map(str::to_string)
@@ -1337,13 +1354,12 @@ pub(super) fn type_contains_rank(ty: &Type) -> bool {
 
 /// Extract the callee name from an `app`'s first child when it is `(var {} name)`.
 pub(super) fn app_var_name(callee: &deep::Expr) -> Option<&str> {
-    let deep::Expr::List(list, _) = callee else {
-        return None;
-    };
-    if get_tag(list) != Some(DeepTag::Var) {
+    // chelis#1107 amendment: carrier-preserving read.
+    let (tag, _, kids) = stamped_parts(callee)?;
+    if tag != DeepTag::Var {
         return None;
     }
-    children(list).first().and_then(symbol_name)
+    kids.first().and_then(symbol_name)
 }
 
 /// Names of every top-level `def` in the program (after module flattening),
@@ -1377,6 +1393,18 @@ pub(super) fn check_rank_body_discipline(
     errors: &mut DiagnosticSink<'_>,
 ) {
     stack_guard!("check_rank_body_discipline", expr);
+    // chelis#1107 amendment: bridge a stamped `Expr::Node` one level and
+    // recurse. The walk re-enters per child, so each nested Node is bridged in
+    // turn -- without this the §4.2 rank-body-discipline check returned at the
+    // first node and never ran on the stamped ingress.
+    if let deep::Expr::Node(node, span) = expr {
+        let bridged = deep::Expr::List(node.to_list(*span), *span);
+        check_rank_body_discipline(def_name, &bridged, user_def_names, errors);
+        return;
+    }
+    // chelis#1107 amendment (justified-safe, not routed): the `Node` bridge
+    // directly above re-enters with a `List`, so this reader only ever sees
+    // the `List` carrier.
     let deep::Expr::List(list, _) = expr else {
         return;
     };

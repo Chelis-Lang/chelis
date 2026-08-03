@@ -87,13 +87,16 @@ pub(super) fn detect_module_reopens(exprs: &[deep::Expr], errors: &mut Diagnosti
         reported: &mut HashSet<String>,
         errors: &mut DiagnosticSink<'_>,
     ) {
-        let deep::Expr::List(list, _) = expr else {
+        // chelis#1107: carrier-preserving read. A `List`-only destructure
+        // returned on every stamped `module`, so the reopen check never ran
+        // on `check_typed_program`.
+        let Some((tag, _, kids)) = stamped_parts(expr) else {
             return;
         };
-        if get_tag(list) != Some(DeepTag::Module) {
+        if tag != DeepTag::Module {
             return;
         }
-        let name = list.elements.get(2).and_then(symbol_name);
+        let name = kids.first().and_then(symbol_name);
         let key = match (prefix, name) {
             (Some(p), Some(n)) => Some(format!("{p}.{n}")),
             (None, Some(n)) => Some(n.to_string()),
@@ -114,7 +117,7 @@ pub(super) fn detect_module_reopens(exprs: &[deep::Expr], errors: &mut Diagnosti
                 )],
             ));
         }
-        for child in list.elements.iter().skip(3) {
+        for child in kids.iter().skip(1) {
             walk(child, key.as_deref(), seen, reported, errors);
         }
     }
@@ -138,13 +141,14 @@ pub(super) fn detect_module_reopens(exprs: &[deep::Expr], errors: &mut Diagnosti
         if lexical.is_some() {
             continue;
         }
-        let deep::Expr::List(list, _) = expr else {
+        // chelis#1107: carrier-preserving read, as in `walk` above.
+        let Some((tag, _, kids)) = stamped_parts(expr) else {
             continue;
         };
-        if !matches!(get_tag(list), Some(DeepTag::Deftype | DeepTag::Def)) {
+        if !matches!(tag, DeepTag::Deftype | DeepTag::Def) {
             continue;
         }
-        let Some(name) = children(list).first().and_then(symbol_name) else {
+        let Some(name) = kids.first().and_then(symbol_name) else {
             continue;
         };
         let Some(stem_key) = crate::opacity::reef_module_stem(name) else {
@@ -182,19 +186,36 @@ pub(super) fn detect_forged_linker_names(exprs: &[deep::Expr], errors: &mut Diag
         return;
     }
     for expr in top_level_decl_items(exprs) {
-        let deep::Expr::List(list, _) = expr else {
-            continue;
-        };
+        // chelis#1107: carrier-preserving read. A `List`-only destructure
+        // skipped every stamped declaration, so this forgery guard ran only
+        // on `check_ir_program`.
+        //
         // `defmacro` is compiler-internal pre-expansion syntax outside the
-        // vocabulary; it stays symbol-headed (raw-string boundary).
-        if !matches!(
-            get_tag(list),
-            Some(DeepTag::Deftype | DeepTag::Def | DeepTag::Defsig | DeepTag::Typealias)
-        ) && list.unknown_tag_symbol() != Some("defmacro")
-        {
+        // vocabulary; it stays symbol-headed (raw-string boundary), so it
+        // never decodes and is matched on its head string instead.
+        let (kids, is_declaration) = match stamped_parts(expr) {
+            Some((tag, _, kids)) => (
+                kids,
+                matches!(
+                    tag,
+                    DeepTag::Deftype | DeepTag::Def | DeepTag::Defsig | DeepTag::Typealias
+                ),
+            ),
+            None => match expr {
+                deep::Expr::List(list, _) => (
+                    children(list),
+                    list.unknown_tag_symbol() == Some("defmacro"),
+                ),
+                deep::Expr::UnknownForm(data) => {
+                    (data.children.as_slice(), data.head == "defmacro")
+                }
+                _ => continue,
+            },
+        };
+        if !is_declaration {
             continue;
         }
-        if let Some(name) = children(list).first().and_then(symbol_name)
+        if let Some(name) = kids.first().and_then(symbol_name)
             && crate::opacity::is_linker_format_name(name)
         {
             errors.push(crate::opacity::forged_linker_name_error(name));
@@ -1431,17 +1452,18 @@ pub(super) fn collect_pattern_names_for_signature(expr: &deep::Expr, names: &mut
     // so the check entry boundary fails hard with a located diagnostic. See
     // `STACK_RED_ZONE_BYTES`.
     stack_guard!("collect_pattern_names_for_signature", expr);
-    let deep::Expr::List(list, _) = expr else {
+    // chelis#1107: carrier-preserving read; a `List`-only destructure collected
+    // no pattern binder at all from a stamped `match`.
+    let Some((tag, _, kids)) = stamped_parts(expr) else {
         return;
     };
-    match get_tag(list) {
-        Some(DeepTag::PatVar) => {
-            if let Some(name) = children(list).first().and_then(symbol_name) {
+    match tag {
+        DeepTag::PatVar => {
+            if let Some(name) = kids.first().and_then(symbol_name) {
                 names.insert(name.to_string());
             }
         }
-        Some(DeepTag::PatAs) => {
-            let kids = children(list);
+        DeepTag::PatAs => {
             if let Some(name) = kids.first().and_then(symbol_name) {
                 names.insert(name.to_string());
             }
@@ -1450,7 +1472,7 @@ pub(super) fn collect_pattern_names_for_signature(expr: &deep::Expr, names: &mut
             }
         }
         _ => {
-            for child in children(list) {
+            for child in kids {
                 collect_pattern_names_for_signature(child, names);
             }
         }
@@ -1475,13 +1497,12 @@ pub(super) fn var_name_list(list: &deep::List) -> Option<&str> {
 }
 
 pub(super) fn borrow_inner_for_signature(expr: &deep::Expr) -> Option<&deep::Expr> {
-    let deep::Expr::List(list, _) = expr else {
-        return None;
-    };
-    if get_tag(list) != Some(DeepTag::Borrow) {
+    // chelis#1107 amendment: carrier-preserving read.
+    let (tag, _, kids) = stamped_parts(expr)?;
+    if tag != DeepTag::Borrow {
         return None;
     }
-    children(list).first()
+    kids.first()
 }
 
 pub(super) fn is_direct_unshadowed_var(

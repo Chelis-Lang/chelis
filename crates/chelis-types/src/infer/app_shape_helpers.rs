@@ -84,25 +84,25 @@ pub(super) fn collect_cons_chain_for_shape(expr: &deep::Expr) -> Option<Vec<&dee
     let mut out = Vec::new();
     let mut cursor = expr;
     loop {
-        let deep::Expr::List(list, _) = cursor else {
-            return None;
-        };
-        match get_tag(list)? {
+        // chelis#1107: carrier-preserving read. A `List`-only destructure gave
+        // up on every stamped node, so no cons chain was ever recognized on
+        // `check_typed_program`.
+        let (tag, _, kids) = stamped_parts(cursor)?;
+        match tag {
             DeepTag::Var => {
-                let name = children(list).first().and_then(symbol_name)?;
+                let name = kids.first().and_then(symbol_name)?;
                 if name == "Nil" {
                     return Some(out);
                 }
                 return None;
             }
             DeepTag::App => {
-                let app_children = children(list);
-                let func = app_children.first()?;
+                let func = kids.first()?;
                 if !is_builtin_var(func, "Cons") {
                     return None;
                 }
-                let head = app_children.get(1)?;
-                let tail = app_children.get(2)?;
+                let head = kids.get(1)?;
+                let tail = kids.get(2)?;
                 out.push(head);
                 cursor = tail;
             }
@@ -119,45 +119,56 @@ pub(super) fn collect_cons_chain_for_shape(expr: &deep::Expr) -> Option<Vec<&dee
 /// only the static-recognition predicate.
 pub(super) fn extract_numeric_leaf_for_shape(expr: &deep::Expr) -> Option<()> {
     stack_guard!("extract_numeric_leaf_for_shape", expr, None);
-    match expr {
-        deep::Expr::Atom(deep::Atom::Int(_), _) => Some(()),
-        deep::Expr::Atom(deep::Atom::Float(_), _) => Some(()),
-        deep::Expr::Atom(deep::Atom::Bool(_), _) => Some(()),
-        deep::Expr::List(list, _) => match get_tag(list)? {
-            DeepTag::Lit => match list.elements.get(2)? {
-                deep::Expr::Atom(deep::Atom::Int(_), _)
-                | deep::Expr::Atom(deep::Atom::Float(_), _)
-                | deep::Expr::Atom(deep::Atom::Bool(_), _) => Some(()),
-                _ => None,
-            },
-            DeepTag::Cast => extract_numeric_leaf_for_shape(list.elements.get(2)?),
-            DeepTag::App => {
-                // Issue #218 R1 HIGH-1 mirror: a surface negative
-                // literal `-x` desugars to `(app (var neg) <inner>)`.
-                // Recurse through the unary minus so the static
-                // recognizer matches the IR lowering's analogous
-                // recognizer in `crates/chelis-ir/src/lower.rs`.
-                let callee = children(list).first()?;
-                if !is_builtin_var(callee, "neg") {
-                    return None;
-                }
-                let inner = children(list).get(1)?;
-                extract_numeric_leaf_for_shape(inner)
-            }
+    if matches!(
+        expr,
+        deep::Expr::Atom(
+            deep::Atom::Int(_) | deep::Atom::Float(_) | deep::Atom::Bool(_),
+            _
+        )
+    ) {
+        return Some(());
+    }
+    // chelis#1107 round 3: this used to be an `Expr::List`-only match arm with
+    // a non-erroring `_ => None` default, so a stamped `lit`/`cast`/`neg` leaf
+    // fell to the default, `walk_static_cons_chain_shape` gave up, and
+    // `to_tensor` produced a rank-1 WILDCARD instead of the real element
+    // count. That masked a genuine count mismatch: `to_tensor([-1.0, -2.0])`
+    // declared `tensor[3, f32]` was accepted by `check_typed_program` and
+    // rejected by `check_ir_program`. It bites positive literals too -- the
+    // `neg` recognizer below is only one of the three shapes that were lost.
+    let (tag, _, kids) = stamped_parts(expr)?;
+    match tag {
+        DeepTag::Lit => match kids.first()? {
+            deep::Expr::Atom(deep::Atom::Int(_), _)
+            | deep::Expr::Atom(deep::Atom::Float(_), _)
+            | deep::Expr::Atom(deep::Atom::Bool(_), _) => Some(()),
             _ => None,
         },
+        DeepTag::Cast => extract_numeric_leaf_for_shape(kids.first()?),
+        DeepTag::App => {
+            // Issue #218 R1 HIGH-1 mirror: a surface negative
+            // literal `-x` desugars to `(app (var neg) <inner>)`.
+            // Recurse through the unary minus so the static
+            // recognizer matches the IR lowering's analogous
+            // recognizer in `crates/chelis-ir/src/lower.rs`.
+            let callee = kids.first()?;
+            if !is_builtin_var(callee, "neg") {
+                return None;
+            }
+            extract_numeric_leaf_for_shape(kids.get(1)?)
+        }
         _ => None,
     }
 }
 
 pub(super) fn symbolic_dim_ref_name(expr: &deep::Expr) -> Option<&str> {
-    let deep::Expr::List(list, _) = expr else {
-        return None;
-    };
-    if get_tag(list) != Some(DeepTag::Var) {
+    // chelis#1107: carrier-preserving read; a stamped named axis (`sum(x, seq)`)
+    // was unrecognizable on the typed ingress.
+    let (tag, _, kids) = stamped_parts(expr)?;
+    if tag != DeepTag::Var {
         return None;
     }
-    children(list).first().and_then(symbol_name)
+    kids.first().and_then(symbol_name)
 }
 
 /// chelis#397/#469: the materializability class of a runtime `expand` size
@@ -245,49 +256,56 @@ pub(super) fn classify_expand_size(expr: &deep::Expr, env: &Env) -> SizeClass {
             SizeClass::Sourceless
         };
     }
-    match expr {
-        deep::Expr::List(list, _) => {
-            match get_tag(list) {
-                // `cast(<inner>, ty)` — provenance is the inner expr's.
-                Some(DeepTag::Cast) => children(list)
-                    .first()
-                    .map_or(SizeClass::Unknown, |inner| classify_expand_size(inner, env)),
-                Some(DeepTag::Var) => match symbolic_dim_ref_name(expr) {
-                    // A name carried by an in-scope tensor's shape is a
-                    // Form-2 symbolic dim with a real source.
-                    Some(name) if env.tensor_carries_dim(name) => SizeClass::ShapeSourced,
-                    // A recorded `let` provenance (shape-sourced or static).
-                    Some(name) => match env.size_provenance(name) {
-                        Some(crate::env::SizeProvenance::ShapeSourced) => SizeClass::ShapeSourced,
-                        Some(crate::env::SizeProvenance::Static) => SizeClass::Static,
-                        // A bare value binding (a runtime scalar parameter)
-                        // with no tensor source and no static provenance.
-                        None if env.lookup(name).is_some() => SizeClass::Sourceless,
-                        None => SizeClass::Unknown,
-                    },
-                    None => SizeClass::Unknown,
-                },
-                // Integer arithmetic: combine the operands' classes.
-                Some(DeepTag::App) => classify_arith_app(list, env),
-                // chelis#530: any other List-shaped size — a tuple
-                // projection (`t.0`), an inline `match`/`if`, a record
-                // `access`, etc. — has NO backend-materializable shape
-                // source. It is `Sourceless`, NOT `Unknown`: returning
-                // `Unknown` here let the inline `expand(b, 0, t.0)` form
-                // (and its `cast`/arithmetic wrappers) reach the
-                // non-rejecting `_ => subst.apply(result_ty)` accept arm of
-                // `check_expand_signature` and silently miscompile in C to a
-                // hardcoded extent-1 axis (eval `[3, 2]` vs C `[1, 2]`),
-                // exactly the silent-miscompile class #469 exists to
-                // prevent. The `shape(t, ..)`, `cast(..)`, literal,
-                // bare-`var`, and arithmetic forms are all recognized BEFORE
-                // this arm, so reaching here means the size is genuinely
-                // sourceless at the check layer. Mirrors the `classify_arith_app`
-                // non-arith-`app` fail-closed default below.
-                _ => SizeClass::Sourceless,
-            }
-        }
-        _ => SizeClass::Unknown,
+    // chelis#1107 round 3: this outer match was `Expr::List`-only with a
+    // non-erroring `_ => SizeClass::Unknown` default, and `Unknown` is the
+    // ACCEPTING class in `check_expand_signature` (`Sourceless` is the
+    // rejecting one). So a stamped `Expr::Node` size argument fell to the
+    // fail-OPEN default: `expand(x, 0, k)` with a runtime scalar `k` was
+    // accepted by `check_typed_program` and rejected by `check_ir_program`
+    // as a §4.7.2 sourceless size -- the exact silent-miscompile class
+    // chelis#469 exists to prevent. Reading both carriers here also restores
+    // the deliberately fail-CLOSED `_ => Sourceless` default below.
+    let Some((tag, _, kids)) = stamped_parts(expr) else {
+        return SizeClass::Unknown;
+    };
+    match tag {
+        // `cast(<inner>, ty)` — provenance is the inner expr's.
+        DeepTag::Cast => kids
+            .first()
+            .map_or(SizeClass::Unknown, |inner| classify_expand_size(inner, env)),
+        DeepTag::Var => match symbolic_dim_ref_name(expr) {
+            // A name carried by an in-scope tensor's shape is a
+            // Form-2 symbolic dim with a real source.
+            Some(name) if env.tensor_carries_dim(name) => SizeClass::ShapeSourced,
+            // A recorded `let` provenance (shape-sourced or static).
+            Some(name) => match env.size_provenance(name) {
+                Some(crate::env::SizeProvenance::ShapeSourced) => SizeClass::ShapeSourced,
+                Some(crate::env::SizeProvenance::Static) => SizeClass::Static,
+                // A bare value binding (a runtime scalar parameter)
+                // with no tensor source and no static provenance.
+                None if env.lookup(name).is_some() => SizeClass::Sourceless,
+                None => SizeClass::Unknown,
+            },
+            None => SizeClass::Unknown,
+        },
+        // Integer arithmetic: combine the operands' classes.
+        DeepTag::App => classify_arith_app(kids, env),
+        // chelis#530: any other List-shaped size — a tuple
+        // projection (`t.0`), an inline `match`/`if`, a record
+        // `access`, etc. — has NO backend-materializable shape
+        // source. It is `Sourceless`, NOT `Unknown`: returning
+        // `Unknown` here let the inline `expand(b, 0, t.0)` form
+        // (and its `cast`/arithmetic wrappers) reach the
+        // non-rejecting `_ => subst.apply(result_ty)` accept arm of
+        // `check_expand_signature` and silently miscompile in C to a
+        // hardcoded extent-1 axis (eval `[3, 2]` vs C `[1, 2]`),
+        // exactly the silent-miscompile class #469 exists to
+        // prevent. The `shape(t, ..)`, `cast(..)`, literal,
+        // bare-`var`, and arithmetic forms are all recognized BEFORE
+        // this arm, so reaching here means the size is genuinely
+        // sourceless at the check layer. Mirrors the `classify_arith_app`
+        // non-arith-`app` fail-closed default below.
+        _ => SizeClass::Sourceless,
     }
 }
 
@@ -309,9 +327,11 @@ pub(super) fn classify_expand_size(expr: &deep::Expr, env: &Env) -> SizeClass {
 /// arm, so reaching here means the call is genuinely sourceless at the check
 /// layer (a user `def` wrapping `shape` is opaque here and would be rejected
 /// at lowering too — no `shape_dep`).
-pub(super) fn classify_arith_app(list: &deep::List, env: &Env) -> SizeClass {
+/// chelis#1107 round 3: takes the children slice rather than a `&deep::List`,
+/// so the classifier works on either carrier (a stamped `Expr::Node` has no
+/// `&deep::List` to hand over).
+pub(super) fn classify_arith_app(kids: &[deep::Expr], env: &Env) -> SizeClass {
     const INT_ARITH: &[&str] = &["add", "sub", "mul", "div", "mod", "neg"];
-    let kids = children(list);
     let Some(callee) = kids.first() else {
         return SizeClass::Sourceless;
     };
@@ -342,19 +362,18 @@ pub(super) fn classify_arith_app(list: &deep::List, env: &Env) -> SizeClass {
 /// presence is what proves a tensor source); a runtime axis is fine.
 pub(super) fn shape_read_operand(expr: &deep::Expr) -> Option<&deep::Expr> {
     stack_guard!("shape_read_operand", expr, None);
-    let deep::Expr::List(list, _) = expr else {
-        return None;
-    };
+    // chelis#1107: carrier-preserving read; a `List`-only destructure never
+    // recognized a stamped `shape(...)` read.
+    let (tag, _, kids) = stamped_parts(expr)?;
     // Strip outer `cast(..., ty)` wrappers (tag form and app form).
-    if get_tag(list) == Some(DeepTag::Cast) {
-        return children(list).first().and_then(shape_read_operand);
+    if tag == DeepTag::Cast {
+        return kids.first().and_then(shape_read_operand);
     }
-    let kids = children(list);
     let callee = kids.first()?;
-    if get_tag(list) == Some(DeepTag::App) && is_builtin_var(callee, "cast") {
+    if tag == DeepTag::App && is_builtin_var(callee, "cast") {
         return kids.get(1).and_then(shape_read_operand);
     }
-    if get_tag(list) == Some(DeepTag::App) && is_builtin_var(callee, "shape") {
+    if tag == DeepTag::App && is_builtin_var(callee, "shape") {
         // `(app {} (var shape) <operand> <axis>)`.
         return kids.get(1);
     }
@@ -381,17 +400,15 @@ pub(super) fn shape_operand_var_name(operand: &deep::Expr) -> Option<&str> {
     if let Some(name) = symbolic_dim_ref_name(operand) {
         return Some(name);
     }
-    let deep::Expr::List(list, _) = operand else {
-        return None;
-    };
+    // chelis#1107 amendment: carrier-preserving read.
+    let (tag, _, kids) = stamped_parts(operand)?;
     // `&x` desugars to the `(borrow {} (var x))` TAG form; `borrow(x)`
     // may also appear as the `(app {} (var borrow) (var x))` builtin form.
-    if get_tag(list) == Some(DeepTag::Borrow) {
-        return children(list).first().and_then(shape_operand_var_name);
+    if tag == DeepTag::Borrow {
+        return kids.first().and_then(shape_operand_var_name);
     }
-    let kids = children(list);
     let callee = kids.first()?;
-    if get_tag(list) == Some(DeepTag::App) && is_builtin_var(callee, "borrow") {
+    if tag == DeepTag::App && is_builtin_var(callee, "borrow") {
         return kids.get(1).and_then(shape_operand_var_name);
     }
     None

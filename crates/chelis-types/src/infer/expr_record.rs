@@ -284,13 +284,19 @@ pub(super) fn infer_record(
     };
 
     for kv_expr in kids.iter().skip(1) {
-        let deep::Expr::List(kv_list, _) = kv_expr else {
+        // chelis#1107: read the `kv` through `stamped_parts`, which accepts
+        // both carriers. `infer_expr`'s Node bridge rebuilds only the record
+        // node itself (`Node::to_list` is shallow), so on the stamped ingress
+        // every `kv` child arrives as `Expr::Node`. A `List`-only destructure
+        // sent all of them to `continue`, and NO field of a record literal was
+        // type-checked at all -- a bool into an f32 field checked clean while
+        // `check_ir_program`, which normalizes Node to List first, rejected it.
+        let Some((kv_tag, _, kv_kids)) = stamped_parts(kv_expr) else {
             continue;
         };
-        if get_tag(kv_list) != Some(DeepTag::Kv) {
+        if kv_tag != DeepTag::Kv {
             continue;
         }
-        let kv_kids = children(kv_list);
         let (Some(field_name), Some(value)) =
             (kv_kids.first().and_then(symbol_name), kv_kids.get(1))
         else {
@@ -566,13 +572,15 @@ pub(super) fn infer_record_update(
     // nested errors surface exactly once.
     let mut kv_pairs: Vec<(&str, Type)> = Vec::new();
     for kv_expr in kids.iter().skip(1) {
-        let deep::Expr::List(kv_list, _) = kv_expr else {
+        // chelis#1107: same carrier-preserving read as `infer_record` above --
+        // a stamped `kv` arrives as `Expr::Node` and a `List`-only destructure
+        // skipped every update field.
+        let Some((kv_tag, _, kv_kids)) = stamped_parts(kv_expr) else {
             continue;
         };
-        if get_tag(kv_list) != Some(DeepTag::Kv) {
+        if kv_tag != DeepTag::Kv {
             continue;
         }
-        let kv_kids = children(kv_list);
         let (Some(field_name), Some(value)) =
             (kv_kids.first().and_then(symbol_name), kv_kids.get(1))
         else {
