@@ -4058,14 +4058,30 @@ fn lower_host_expr_kind(
         Expr::List(list, _) if tag(list) == Some(DeepTag::Record) => {
             lower_record_host_expr(list, program, scope, tensor_helpers, expected_ty)?
         }
-        Expr::List(list, _) if tag(list) == Some(DeepTag::Lit) => lower_host_expr(
-            children(list).first().ok_or_else(|| {
+        Expr::List(list, _) if tag(list) == Some(DeepTag::Lit) => {
+            let child = children(list).first().ok_or_else(|| {
                 host_expr_lowering_error(expr, "a `lit` node has no literal child")
-            })?,
-            program,
-            scope,
-            tensor_helpers,
-        )?,
+            })?;
+            let value = lower_host_expr(child, program, scope, tensor_helpers)?;
+
+            // chelis#1110: the lexical carrier is f64, but the checker-stamped
+            // `lit` node owns the literal's declared width. Preserve that
+            // semantic operation explicitly in HostExpr so an enclosing cast
+            // cannot widen the unfinalized lexical decimal. This is the host
+            // counterpart of static DAG leaf finalization in `lower.rs`.
+            if matches!(value.kind, HostExprKind::Float(_))
+                && let Some(precision) = expr_scalar_float_precision(expr)
+                && precision != chelis_types::types::Prim::F64
+            {
+                HostExpr::new(HostExprKind::Builtin {
+                    name: "cast".to_string(),
+                    args: vec![value],
+                    ty: HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(precision)),
+                })
+            } else {
+                value
+            }
+        }
         Expr::List(list, _) if tag(list) == Some(DeepTag::Var) => {
             let name = children(list)
                 .first()

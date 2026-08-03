@@ -66,11 +66,19 @@ enum CExpressionBuiltin {
     Log,
     Sin,
     Cos,
+    Tan,
+    Atan,
     Tanh,
+    Floor,
+    Ceil,
+    Round,
+    Recip,
     Pow,
     Abs,
     Min,
     Max,
+    MinElem,
+    MaxElem,
 }
 
 impl CExpressionBuiltin {
@@ -122,11 +130,19 @@ impl CExpressionBuiltin {
             "log" => Self::Log,
             "sin" => Self::Sin,
             "cos" => Self::Cos,
+            "tan" => Self::Tan,
+            "atan" => Self::Atan,
             "tanh" => Self::Tanh,
+            "floor" => Self::Floor,
+            "ceil" => Self::Ceil,
+            "round" => Self::Round,
+            "recip" => Self::Recip,
             "pow" => Self::Pow,
             "abs" => Self::Abs,
             "min" => Self::Min,
             "max" => Self::Max,
+            "min_elem" => Self::MinElem,
+            "max_elem" => Self::MaxElem,
             other => {
                 return Err(Unsupported::new(
                     UnsupportedKind::Builtin(other.to_string()),
@@ -1761,9 +1777,11 @@ impl<'a> HostEmitter<'a> {
             HostExprKind::Int(value) => self
                 .lines
                 .push(format!("{}{target} = {};", self.indent, value)),
-            HostExprKind::Float(value) => self
-                .lines
-                .push(format!("{}{target} = {};", self.indent, value)),
+            HostExprKind::Float(value) => self.lines.push(format!(
+                "{}{target} = chelis_f64_from_bits(UINT64_C(0x{:016x}));",
+                self.indent,
+                value.to_bits()
+            )),
             HostExprKind::Bool(value) => self.lines.push(format!(
                 "{}{target} = {};",
                 self.indent,
@@ -2249,7 +2267,17 @@ impl<'a> HostEmitter<'a> {
             "cast" => {
                 let expr = match (&arg_vars[0].1, ty) {
                     (source, target) if is_integer_abi(source) && is_integer_abi(target) => {
-                        format!("({}){}", c_type(target)?, arg_vars[0].0)
+                        let message = NumericTrap::Overflow {
+                            op: "cast",
+                            prim: integer_abi_prim(target)?,
+                        }
+                        .to_string();
+                        format!(
+                            "({})chelis_checked_int_cast((int64_t){}, {}, {message:?})",
+                            c_type(target)?,
+                            arg_vars[0].0,
+                            integer_abi_width(target)?
+                        )
                     }
                     (source, HostType::Float64) if is_integer_abi(source) => {
                         format!("(double){}", arg_vars[0].0)
@@ -2257,8 +2285,22 @@ impl<'a> HostEmitter<'a> {
                     (source, HostType::Float32) if is_integer_abi(source) => {
                         format!("(float){}", arg_vars[0].0)
                     }
-                    (HostType::Float64 | HostType::Float32, target) if is_integer_abi(target) => {
-                        format!("({}){}", c_type(target)?, arg_vars[0].0)
+                    (source, HostType::Float16) if is_integer_abi(source) => {
+                        format!("chelis_f32_to_f16((float){})", arg_vars[0].0)
+                    }
+                    (source, HostType::BFloat16) if is_integer_abi(source) => {
+                        format!("chelis_f32_to_bf16((float){})", arg_vars[0].0)
+                    }
+                    (source, target) if is_float_abi(source) && is_integer_abi(target) => {
+                        let prim = integer_abi_prim(target)?;
+                        let domain = NumericTrap::Domain { op: "cast", prim }.to_string();
+                        let overflow = NumericTrap::Overflow { op: "cast", prim }.to_string();
+                        format!(
+                            "({})chelis_checked_float_to_int({}, {}, {domain:?}, {overflow:?})",
+                            c_type(target)?,
+                            scalar_float_as_double(&arg_vars[0].0, source),
+                            integer_abi_width(target)?
+                        )
                     }
                     // WS-4: float entry params can now be `Float32`, so the
                     // int<->float casts must cover both float widths. The C
@@ -2279,11 +2321,60 @@ impl<'a> HostEmitter<'a> {
                     (HostType::Float32, HostType::Float64) => {
                         format!("(double){0}", arg_vars[0].0)
                     }
+                    (HostType::Float64, HostType::Float16) => {
+                        format!("chelis_f32_to_f16((float){0})", arg_vars[0].0)
+                    }
+                    (HostType::Float64, HostType::BFloat16) => {
+                        format!("chelis_f32_to_bf16((float){0})", arg_vars[0].0)
+                    }
+                    (HostType::Float32, HostType::Float16) => {
+                        format!("chelis_f32_to_f16({0})", arg_vars[0].0)
+                    }
+                    (HostType::Float32, HostType::BFloat16) => {
+                        format!("chelis_f32_to_bf16({0})", arg_vars[0].0)
+                    }
+                    (HostType::Float16, HostType::Float32) => {
+                        format!("chelis_f16_to_f32({0})", arg_vars[0].0)
+                    }
+                    (HostType::BFloat16, HostType::Float32) => {
+                        format!("chelis_bf16_to_f32({0})", arg_vars[0].0)
+                    }
+                    (HostType::Float16, HostType::Float64) => {
+                        format!("(double)chelis_f16_to_f32({0})", arg_vars[0].0)
+                    }
+                    (HostType::BFloat16, HostType::Float64) => {
+                        format!("(double)chelis_bf16_to_f32({0})", arg_vars[0].0)
+                    }
+                    (HostType::Float16, HostType::BFloat16) => {
+                        format!("chelis_f32_to_bf16(chelis_f16_to_f32({0}))", arg_vars[0].0)
+                    }
+                    (HostType::BFloat16, HostType::Float16) => {
+                        format!("chelis_f32_to_f16(chelis_bf16_to_f32({0}))", arg_vars[0].0)
+                    }
                     (HostType::Bool, target) if is_integer_abi(target) => {
                         format!("({}){}", c_type(target)?, arg_vars[0].0)
                     }
                     (source, HostType::Bool) if is_integer_abi(source) => {
-                        format!("((bool){})", arg_vars[0].0)
+                        let message = NumericTrap::Domain {
+                            op: "cast",
+                            prim: Prim::Bool,
+                        }
+                        .to_string();
+                        format!(
+                            "chelis_checked_bool_from_int((int64_t){}, {message:?})",
+                            arg_vars[0].0
+                        )
+                    }
+                    (source, HostType::Bool) if is_float_abi(source) => {
+                        let message = NumericTrap::Domain {
+                            op: "cast",
+                            prim: Prim::Bool,
+                        }
+                        .to_string();
+                        format!(
+                            "chelis_checked_bool_from_float({}, {message:?})",
+                            scalar_float_as_double(&arg_vars[0].0, source)
+                        )
                     }
                     _ => arg_vars[0].0.clone(),
                 };
@@ -2687,11 +2778,19 @@ impl<'a> HostEmitter<'a> {
             "log",
             "sin",
             "cos",
+            "tan",
+            "atan",
             "tanh",
+            "floor",
+            "ceil",
+            "round",
+            "recip",
             "pow",
             "abs",
             "min",
             "max",
+            "min_elem",
+            "max_elem",
         ];
         // A TENSOR operand reaching these scalar operator arms means the
         // op has no tensor emission arm (the tensor block above returned
@@ -2751,13 +2850,45 @@ impl<'a> HostEmitter<'a> {
         // exist.
         let build_expression = || -> Result<EmittedExpr, Unsupported> {
             let arg = |index: usize| EmittedExpr::identifier(arg_vars[index].0.clone());
+            let numeric_arg =
+                |index: usize| scalar_arithmetic_arg_expr(&arg_vars[index].0, &arg_vars[index].1);
             let binary = |operator, lhs, rhs| EmittedExpr::binary(operator, lhs, rhs);
             let unary = |operator, operand| EmittedExpr::unary(operator, operand);
             let expression_builtin = CExpressionBuiltin::decode(name)?;
             let expr = match expression_builtin {
-                CExpressionBuiltin::Add => binary(BinaryOperator::Add, arg(0), arg(1)),
-                CExpressionBuiltin::Sub => binary(BinaryOperator::Subtract, arg(0), arg(1)),
-                CExpressionBuiltin::Mul => binary(BinaryOperator::Multiply, arg(0), arg(1)),
+                CExpressionBuiltin::Add if is_integer_abi(ty) => integer_checked_binary_expr(
+                    "chelis_int_checked_add",
+                    "add",
+                    arg(0),
+                    arg(1),
+                    ty,
+                )?,
+                CExpressionBuiltin::Add => finalize_scalar_expr(
+                    binary(BinaryOperator::Add, numeric_arg(0), numeric_arg(1)),
+                    ty,
+                ),
+                CExpressionBuiltin::Sub if is_integer_abi(ty) => integer_checked_binary_expr(
+                    "chelis_int_checked_sub",
+                    "sub",
+                    arg(0),
+                    arg(1),
+                    ty,
+                )?,
+                CExpressionBuiltin::Sub => finalize_scalar_expr(
+                    binary(BinaryOperator::Subtract, numeric_arg(0), numeric_arg(1)),
+                    ty,
+                ),
+                CExpressionBuiltin::Mul if is_integer_abi(ty) => integer_checked_binary_expr(
+                    "chelis_int_checked_mul",
+                    "mul",
+                    arg(0),
+                    arg(1),
+                    ty,
+                )?,
+                CExpressionBuiltin::Mul => finalize_scalar_expr(
+                    binary(BinaryOperator::Multiply, numeric_arg(0), numeric_arg(1)),
+                    ty,
+                ),
                 // #387: integer scalar `div`/`mod` trap portably on a zero
                 // divisor (ARM64 does not fault on integer div-by-zero), using the
                 // same clean diagnostic the evaluator emits. `chelis_int_div_guard`
@@ -2771,29 +2902,39 @@ impl<'a> HostEmitter<'a> {
                     arg(0),
                     EmittedExpr::call("chelis_int_div_guard", [arg(1)]),
                 ),
-                CExpressionBuiltin::Div => binary(BinaryOperator::Divide, arg(0), arg(1)),
+                CExpressionBuiltin::Div => finalize_scalar_expr(
+                    binary(BinaryOperator::Divide, numeric_arg(0), numeric_arg(1)),
+                    ty,
+                ),
                 // chelis#178: `trunc_div` is integer-only — the guarded C `/`
                 // quotient (round toward zero).
                 CExpressionBuiltin::TruncDiv => binary(
                     BinaryOperator::Divide,
                     arg(0),
-                    EmittedExpr::call("chelis_int_div_guard", [arg(1)]),
+                    checked_integer_divisor_expr("trunc_div", arg(0), arg(1), ty)?,
                 ),
                 // chelis#178: `floor_div` rounds toward -inf. Integer (host
                 // scalar) operands use the guarded `/` plus a remainder-sign
                 // correction; float operands use `floor(a / b)`.
                 CExpressionBuiltin::FloorDiv if is_integer_abi(&arg_vars[0].1) => {
-                    let guarded_divisor = || EmittedExpr::call("chelis_int_div_guard", [arg(1)]);
-                    let quotient = binary(BinaryOperator::Divide, arg(0), guarded_divisor());
-                    let remainder = || binary(BinaryOperator::Remainder, arg(0), guarded_divisor());
+                    let guarded_divisor =
+                        || checked_integer_divisor_expr("floor_div", arg(0), arg(1), ty);
+                    let quotient = binary(BinaryOperator::Divide, arg(0), guarded_divisor()?);
+                    let remainder = || {
+                        Ok::<_, Unsupported>(binary(
+                            BinaryOperator::Remainder,
+                            arg(0),
+                            guarded_divisor()?,
+                        ))
+                    };
                     let nonzero = binary(
                         BinaryOperator::NotEqual,
-                        remainder(),
+                        remainder()?,
                         EmittedExpr::integer(0),
                     );
                     let sign_differs = binary(
                         BinaryOperator::NotEqual,
-                        binary(BinaryOperator::Less, remainder(), EmittedExpr::integer(0)),
+                        binary(BinaryOperator::Less, remainder()?, EmittedExpr::integer(0)),
                         binary(BinaryOperator::Less, arg(1), EmittedExpr::integer(0)),
                     );
                     let correction = EmittedExpr::conditional(
@@ -2803,13 +2944,25 @@ impl<'a> HostEmitter<'a> {
                     );
                     binary(BinaryOperator::Subtract, quotient, correction)
                 }
-                CExpressionBuiltin::FloorDiv => {
-                    EmittedExpr::call("floor", [binary(BinaryOperator::Divide, arg(0), arg(1))])
-                }
-                CExpressionBuiltin::Mod => binary(
-                    BinaryOperator::Remainder,
-                    arg(0),
-                    EmittedExpr::call("chelis_int_div_guard", [arg(1)]),
+                CExpressionBuiltin::FloorDiv => finalize_scalar_expr(
+                    EmittedExpr::call(
+                        float_math_function(ty, "floor", "floorf"),
+                        [binary(
+                            BinaryOperator::Divide,
+                            numeric_arg(0),
+                            numeric_arg(1),
+                        )],
+                    ),
+                    ty,
+                ),
+                CExpressionBuiltin::Mod => EmittedExpr::conditional(
+                    binary(BinaryOperator::Equal, arg(1), EmittedExpr::integer(-1)),
+                    EmittedExpr::integer(0),
+                    binary(
+                        BinaryOperator::Remainder,
+                        arg(0),
+                        checked_integer_divisor_expr("mod", arg(0), arg(1), ty)?,
+                    ),
                 ),
                 CExpressionBuiltin::BitAnd => binary(BinaryOperator::BitAnd, arg(0), arg(1)),
                 CExpressionBuiltin::BitOr => binary(BinaryOperator::BitOr, arg(0), arg(1)),
@@ -2838,30 +2991,44 @@ impl<'a> HostEmitter<'a> {
                     EmittedExpr::call("chelis_tensor_cmplt", [arg(0), arg(1)])
                 }
                 CExpressionBuiltin::CompareLess | CExpressionBuiltin::Less => {
-                    binary(BinaryOperator::Less, arg(0), arg(1))
+                    binary(BinaryOperator::Less, numeric_arg(0), numeric_arg(1))
                 }
-                CExpressionBuiltin::Greater => binary(BinaryOperator::Greater, arg(0), arg(1)),
+                CExpressionBuiltin::Greater => {
+                    binary(BinaryOperator::Greater, numeric_arg(0), numeric_arg(1))
+                }
                 CExpressionBuiltin::GreaterEqual => {
-                    binary(BinaryOperator::GreaterEqual, arg(0), arg(1))
+                    binary(BinaryOperator::GreaterEqual, numeric_arg(0), numeric_arg(1))
                 }
-                CExpressionBuiltin::LessEqual => binary(BinaryOperator::LessEqual, arg(0), arg(1)),
+                CExpressionBuiltin::LessEqual => {
+                    binary(BinaryOperator::LessEqual, numeric_arg(0), numeric_arg(1))
+                }
                 CExpressionBuiltin::Equal => match (&arg_vars[0].1, &arg_vars[1].1) {
                     (HostType::String, HostType::String) => {
                         EmittedExpr::call("chelis_string_eq", [arg(0), arg(1)])
                     }
-                    _ => binary(BinaryOperator::Equal, arg(0), arg(1)),
+                    _ => binary(BinaryOperator::Equal, numeric_arg(0), numeric_arg(1)),
                 },
                 CExpressionBuiltin::NotEqual => match (&arg_vars[0].1, &arg_vars[1].1) {
                     (HostType::String, HostType::String) => unary(
                         UnaryOperator::LogicalNot,
                         EmittedExpr::call("chelis_string_eq", [arg(0), arg(1)]),
                     ),
-                    _ => binary(BinaryOperator::NotEqual, arg(0), arg(1)),
+                    _ => binary(BinaryOperator::NotEqual, numeric_arg(0), numeric_arg(1)),
                 },
                 CExpressionBuiltin::And => binary(BinaryOperator::LogicalAnd, arg(0), arg(1)),
                 CExpressionBuiltin::Or => binary(BinaryOperator::LogicalOr, arg(0), arg(1)),
                 CExpressionBuiltin::Not => unary(UnaryOperator::LogicalNot, arg(0)),
-                CExpressionBuiltin::Neg => unary(UnaryOperator::Negate, arg(0)),
+                CExpressionBuiltin::Neg if is_integer_abi(ty) => EmittedExpr::call(
+                    "chelis_int_checked_neg",
+                    [
+                        arg(0),
+                        EmittedExpr::integer(integer_abi_width(ty)?),
+                        EmittedExpr::string_literal(integer_trap_message(ty, "neg", true)?),
+                    ],
+                ),
+                CExpressionBuiltin::Neg => {
+                    finalize_scalar_expr(unary(UnaryOperator::Negate, numeric_arg(0)), ty)
+                }
                 CExpressionBuiltin::StringConcat => {
                     EmittedExpr::call("chelis_string_concat", [arg(0), arg(1)])
                 }
@@ -2982,13 +3149,72 @@ impl<'a> HostEmitter<'a> {
                 // The RISC DAG variants of these ops are handled separately in
                 // `emit.rs`, but when a Surf `def` body is routed through the
                 // host interpreter, we need the libm names directly.
-                CExpressionBuiltin::Sqrt => EmittedExpr::call("sqrt", [arg(0)]),
-                CExpressionBuiltin::Exp => EmittedExpr::call("exp", [arg(0)]),
-                CExpressionBuiltin::Log => EmittedExpr::call("log", [arg(0)]),
-                CExpressionBuiltin::Sin => EmittedExpr::call("sin", [arg(0)]),
-                CExpressionBuiltin::Cos => EmittedExpr::call("cos", [arg(0)]),
-                CExpressionBuiltin::Tanh => EmittedExpr::call("tanh", [arg(0)]),
-                CExpressionBuiltin::Pow => EmittedExpr::call("pow", [arg(0), arg(1)]),
+                CExpressionBuiltin::Sqrt => finalize_scalar_expr(
+                    EmittedExpr::call(float_math_function(ty, "sqrt", "sqrtf"), [numeric_arg(0)]),
+                    ty,
+                ),
+                CExpressionBuiltin::Exp => finalize_scalar_expr(
+                    EmittedExpr::call(float_math_function(ty, "exp", "expf"), [numeric_arg(0)]),
+                    ty,
+                ),
+                CExpressionBuiltin::Log => finalize_scalar_expr(
+                    EmittedExpr::call(float_math_function(ty, "log", "logf"), [numeric_arg(0)]),
+                    ty,
+                ),
+                CExpressionBuiltin::Sin => finalize_scalar_expr(
+                    EmittedExpr::call(float_math_function(ty, "sin", "sinf"), [numeric_arg(0)]),
+                    ty,
+                ),
+                CExpressionBuiltin::Cos => finalize_scalar_expr(
+                    EmittedExpr::call(float_math_function(ty, "cos", "cosf"), [numeric_arg(0)]),
+                    ty,
+                ),
+                CExpressionBuiltin::Tan => finalize_scalar_expr(
+                    EmittedExpr::call(float_math_function(ty, "tan", "tanf"), [numeric_arg(0)]),
+                    ty,
+                ),
+                CExpressionBuiltin::Atan => finalize_scalar_expr(
+                    EmittedExpr::call(float_math_function(ty, "atan", "atanf"), [numeric_arg(0)]),
+                    ty,
+                ),
+                CExpressionBuiltin::Tanh => finalize_scalar_expr(
+                    EmittedExpr::call(float_math_function(ty, "tanh", "tanhf"), [numeric_arg(0)]),
+                    ty,
+                ),
+                CExpressionBuiltin::Floor
+                | CExpressionBuiltin::Ceil
+                | CExpressionBuiltin::Round
+                    if is_integer_abi(ty) =>
+                {
+                    arg(0)
+                }
+                CExpressionBuiltin::Floor => finalize_scalar_expr(
+                    EmittedExpr::call(float_math_function(ty, "floor", "floorf"), [numeric_arg(0)]),
+                    ty,
+                ),
+                CExpressionBuiltin::Ceil => finalize_scalar_expr(
+                    EmittedExpr::call(float_math_function(ty, "ceil", "ceilf"), [numeric_arg(0)]),
+                    ty,
+                ),
+                CExpressionBuiltin::Round => finalize_scalar_expr(
+                    EmittedExpr::call(float_math_function(ty, "round", "roundf"), [numeric_arg(0)]),
+                    ty,
+                ),
+                CExpressionBuiltin::Recip => finalize_scalar_expr(
+                    binary(
+                        BinaryOperator::Divide,
+                        EmittedExpr::integer(1),
+                        numeric_arg(0),
+                    ),
+                    ty,
+                ),
+                CExpressionBuiltin::Pow => finalize_scalar_expr(
+                    EmittedExpr::call(
+                        float_math_function(ty, "pow", "powf"),
+                        [numeric_arg(0), numeric_arg(1)],
+                    ),
+                    ty,
+                ),
                 CExpressionBuiltin::Abs => match arg_vars[0].1 {
                     HostType::Int8 | HostType::Int16 | HostType::Int32 | HostType::Int64 => {
                         let prim = match arg_vars[0].1 {
@@ -3008,7 +3234,16 @@ impl<'a> HostEmitter<'a> {
                             ],
                         )
                     }
-                    HostType::Float32 | HostType::Float64 => EmittedExpr::call("fabs", [arg(0)]),
+                    HostType::Float16
+                    | HostType::BFloat16
+                    | HostType::Float32
+                    | HostType::Float64 => finalize_scalar_expr(
+                        EmittedExpr::call(
+                            float_math_function(ty, "fabs", "fabsf"),
+                            [numeric_arg(0)],
+                        ),
+                        ty,
+                    ),
                     ref other => {
                         return Err(invalid_abi_shape(
                             format!("abs carries non-numeric argument type `{other:?}`"),
@@ -3016,8 +3251,44 @@ impl<'a> HostEmitter<'a> {
                         ));
                     }
                 },
-                CExpressionBuiltin::Min => EmittedExpr::call("fmin", [arg(0), arg(1)]),
-                CExpressionBuiltin::Max => EmittedExpr::call("fmax", [arg(0), arg(1)]),
+                CExpressionBuiltin::Min => finalize_scalar_expr(
+                    EmittedExpr::call(
+                        float_math_function(ty, "fmin", "fminf"),
+                        [numeric_arg(0), numeric_arg(1)],
+                    ),
+                    ty,
+                ),
+                CExpressionBuiltin::Max => finalize_scalar_expr(
+                    EmittedExpr::call(
+                        float_math_function(ty, "fmax", "fmaxf"),
+                        [numeric_arg(0), numeric_arg(1)],
+                    ),
+                    ty,
+                ),
+                CExpressionBuiltin::MinElem if is_integer_abi(ty) => EmittedExpr::conditional(
+                    binary(BinaryOperator::Less, arg(0), arg(1)),
+                    arg(0),
+                    arg(1),
+                ),
+                CExpressionBuiltin::MaxElem if is_integer_abi(ty) => EmittedExpr::conditional(
+                    binary(BinaryOperator::Greater, arg(0), arg(1)),
+                    arg(0),
+                    arg(1),
+                ),
+                CExpressionBuiltin::MinElem => finalize_scalar_expr(
+                    EmittedExpr::call(
+                        float_math_function(ty, "fmin", "fminf"),
+                        [numeric_arg(0), numeric_arg(1)],
+                    ),
+                    ty,
+                ),
+                CExpressionBuiltin::MaxElem => finalize_scalar_expr(
+                    EmittedExpr::call(
+                        float_math_function(ty, "fmax", "fmaxf"),
+                        [numeric_arg(0), numeric_arg(1)],
+                    ),
+                    ty,
+                ),
             };
             Ok(expr)
         };
@@ -5046,9 +5317,10 @@ impl<'a> HostEmitter<'a> {
             HostType::Int8 | HostType::Int16 | HostType::Int32 | HostType::Int64 => {
                 format!("chelis_value_from_int64((int64_t){value})")
             }
-            // The boxed value option has no separate f32 slot; an f32
-            // promotes losslessly to the f64 box (WS-4).
-            HostType::Float64 | HostType::Float32 => format!("chelis_value_from_f64({value})"),
+            HostType::Float64 => format!("chelis_value_from_f64({value})"),
+            HostType::Float32 => format!("chelis_value_from_f32_boxed({value})"),
+            HostType::Float16 => format!("chelis_value_from_f16_bits_boxed({value})"),
+            HostType::BFloat16 => format!("chelis_value_from_bf16_bits_boxed({value})"),
             HostType::Bool => format!("chelis_value_from_bool({value})"),
             HostType::String => format!("chelis_value_from_string({value})"),
             HostType::Adt(_, _) => format!("chelis_value_from_adt({value})"),
@@ -5056,11 +5328,7 @@ impl<'a> HostEmitter<'a> {
             HostType::List(_) => format!("chelis_value_from_list({value})"),
             HostType::Tuple(_) => format!("chelis_value_from_tuple({value})"),
             HostType::Dict(_, _) => format!("chelis_value_from_dict({value})"),
-            // A boxed-only reduced-float list element never exists as a C
-            // scalar to box FROM: the scalar expression that would
-            // produce one is rejected at its own site (chelis#714).
-            HostType::ReducedFloatBoxed(_)
-            | HostType::Callback(_, _)
+            HostType::Callback(_, _)
             | HostType::Option(_)
             | HostType::MappedFile
             | HostType::Unit => {
@@ -5079,10 +5347,13 @@ impl<'a> HostEmitter<'a> {
             HostType::Int8 | HostType::Int16 | HostType::Int32 | HostType::Int64 => {
                 format!("({})chelis_value_as_int64({value_expr})", c_type(ty)?)
             }
-            // f32 is unboxed via the f64 accessor (the box stored it as
-            // f64); the surrounding `c_decl` narrows back to `float` (WS-4).
-            HostType::Float64 | HostType::Float32 => {
-                format!("chelis_value_as_f64({value_expr})")
+            HostType::Float64 => format!("chelis_value_as_f64({value_expr})"),
+            HostType::Float32 => format!("(float)chelis_value_as_f64({value_expr})"),
+            HostType::Float16 => {
+                format!("chelis_f32_to_f16((float)chelis_value_as_f64({value_expr}))")
+            }
+            HostType::BFloat16 => {
+                format!("chelis_f32_to_bf16((float)chelis_value_as_f64({value_expr}))")
             }
             HostType::Bool => format!("chelis_value_as_bool({value_expr})"),
             HostType::String => format!("chelis_value_as_string({value_expr})"),
@@ -5091,11 +5362,7 @@ impl<'a> HostEmitter<'a> {
             HostType::List(_) => format!("chelis_value_as_list({value_expr})"),
             HostType::Tuple(_) => format!("chelis_value_as_tuple({value_expr})"),
             HostType::Dict(_, _) => format!("chelis_value_as_dict({value_expr})"),
-            // Unboxing a reduced-float element into a C scalar is exactly
-            // the missing chelis#714 ABI cell; reject loudly rather than
-            // widening through double behind the user's back.
-            HostType::ReducedFloatBoxed(_)
-            | HostType::Callback(_, _)
+            HostType::Callback(_, _)
             | HostType::Option(_)
             | HostType::MappedFile
             | HostType::Unit => {
@@ -5126,13 +5393,14 @@ impl<'a> HostEmitter<'a> {
             // runtime's shortest-round-trip routine at their OWN width
             // (the f32 C value widens to its exact double image), never
             // through a fixed-precision printf (chelis#748).
-            HostType::Float64 | HostType::Float32 => {
+            HostType::Float64 | HostType::Float32 | HostType::Float16 | HostType::BFloat16 => {
                 let dtype = scalar_float_dtype_macro(ty);
+                let value = scalar_float_as_double(value, ty);
                 self.lines.push(format!(
                     "{}{{ char fmt_buf[CHELIS_FORMAT_SHORTEST_BUF]; \
-                     chelis_format_shortest((double)({}), {dtype}, fmt_buf, sizeof fmt_buf); \
+                     chelis_format_shortest({value}, {dtype}, fmt_buf, sizeof fmt_buf); \
                      printf(\"%s\\n\", fmt_buf); }}",
-                    self.indent, value
+                    self.indent
                 ));
             }
             HostType::Bool => self.lines.push(format!(
@@ -5246,13 +5514,14 @@ impl<'a> HostEmitter<'a> {
             }
             // chelis#732 Phase 2: same own-width routine as
             // `emit_print_value` (intra-lane exit agreement, [05-OBS-1]).
-            HostType::Float64 | HostType::Float32 => {
+            HostType::Float64 | HostType::Float32 | HostType::Float16 | HostType::BFloat16 => {
                 let dtype = scalar_float_dtype_macro(ty);
+                let value = scalar_float_as_double(value, ty);
                 self.lines.push(format!(
                     "{}{{ char fmt_buf[CHELIS_FORMAT_SHORTEST_BUF]; \
-                     chelis_format_shortest((double)({}), {dtype}, fmt_buf, sizeof fmt_buf); \
+                     chelis_format_shortest({value}, {dtype}, fmt_buf, sizeof fmt_buf); \
                      printf(\"%s\", fmt_buf); }}",
-                    self.indent, value
+                    self.indent
                 ));
             }
             HostType::Bool => self.lines.push(format!(
@@ -5463,6 +5732,13 @@ fn is_integer_abi(ty: &HostAbiType) -> bool {
     )
 }
 
+fn is_float_abi(ty: &HostAbiType) -> bool {
+    matches!(
+        ty,
+        HostAbiType::Float16 | HostAbiType::BFloat16 | HostAbiType::Float32 | HostAbiType::Float64
+    )
+}
+
 fn integer_abi_width(ty: &HostAbiType) -> Result<i64, Unsupported> {
     match ty {
         HostAbiType::Int8 => Ok(8),
@@ -5474,6 +5750,69 @@ fn integer_abi_width(ty: &HostAbiType) -> Result<i64, Unsupported> {
             "C host integer shift emission",
         )),
     }
+}
+
+fn integer_abi_prim(ty: &HostAbiType) -> Result<Prim, Unsupported> {
+    match ty {
+        HostAbiType::Int8 => Ok(Prim::Int8),
+        HostAbiType::Int16 => Ok(Prim::Int16),
+        HostAbiType::Int32 => Ok(Prim::Int32),
+        HostAbiType::Int64 => Ok(Prim::Int64),
+        other => Err(invalid_abi_shape(
+            format!("integer kernel operand resolved to {other:?}"),
+            "C host integer kernel emission",
+        )),
+    }
+}
+
+fn integer_trap_message(
+    ty: &HostAbiType,
+    op: &'static str,
+    overflow: bool,
+) -> Result<String, Unsupported> {
+    let prim = integer_abi_prim(ty)?;
+    Ok(if overflow {
+        NumericTrap::Overflow { op, prim }
+    } else {
+        NumericTrap::DivZero { op, prim }
+    }
+    .to_string())
+}
+
+fn integer_checked_binary_expr(
+    function: &'static str,
+    op: &'static str,
+    lhs: EmittedExpr,
+    rhs: EmittedExpr,
+    ty: &HostAbiType,
+) -> Result<EmittedExpr, Unsupported> {
+    Ok(EmittedExpr::call(
+        function,
+        [
+            lhs,
+            rhs,
+            EmittedExpr::integer(integer_abi_width(ty)?),
+            EmittedExpr::string_literal(integer_trap_message(ty, op, true)?),
+        ],
+    ))
+}
+
+fn checked_integer_divisor_expr(
+    op: &'static str,
+    dividend: EmittedExpr,
+    divisor: EmittedExpr,
+    ty: &HostAbiType,
+) -> Result<EmittedExpr, Unsupported> {
+    Ok(EmittedExpr::call(
+        "chelis_int_checked_divisor",
+        [
+            dividend,
+            divisor,
+            EmittedExpr::integer(integer_abi_width(ty)?),
+            EmittedExpr::string_literal(integer_trap_message(ty, op, false)?),
+            EmittedExpr::string_literal(integer_trap_message(ty, op, true)?),
+        ],
+    ))
 }
 
 /// The C / C++ reserved words a Chelis identifier must not collide with
@@ -5842,9 +6181,7 @@ fn sparse_elem_type(prim: Prim) -> &'static str {
 }
 
 /// Width id macro for a scalar float `HostType` handed to
-/// `chelis_format_shortest` (chelis#732 Phase 2). Reduced-float scalars
-/// have no C-host ABI cell (rejected pre-codegen, loud_unsupported.md
-/// section C6.3), so the print sites only ever see these two widths.
+/// `chelis_format_shortest` (chelis#732 Phase 2).
 /// `CHELIS_<DTYPE>` macro selector for a scalar float print, matching
 /// the sibling `sparse_dtype_macro` naming. It selects a DTYPE, not a
 /// width: spec/04 [04-NUM-8] gives storage and arithmetic width separate
@@ -5852,9 +6189,48 @@ fn sparse_elem_type(prim: Prim) -> &'static str {
 /// one call site that feeds `chelis_format_shortest`.
 fn scalar_float_dtype_macro(ty: &HostType) -> &'static str {
     match ty {
+        HostType::Float16 => chelis_vocab::RuntimeDType::F16.c_macro(),
+        HostType::BFloat16 => chelis_vocab::RuntimeDType::Bf16.c_macro(),
         HostType::Float32 => chelis_vocab::RuntimeDType::F32.c_macro(),
         HostType::Float64 => chelis_vocab::RuntimeDType::F64.c_macro(),
         other => unreachable!("scalar float print of non-float host type {other:?}"),
+    }
+}
+
+fn scalar_float_as_double(value: &str, ty: &HostType) -> String {
+    match ty {
+        HostType::Float16 => format!("(double)chelis_f16_to_f32({value})"),
+        HostType::BFloat16 => format!("(double)chelis_bf16_to_f32({value})"),
+        HostType::Float32 | HostType::Float64 => format!("(double)({value})"),
+        other => unreachable!("scalar float conversion of non-float host type {other:?}"),
+    }
+}
+
+fn scalar_arithmetic_arg_expr(value: &str, ty: &HostType) -> EmittedExpr {
+    let value = EmittedExpr::identifier(value.to_string());
+    match ty {
+        HostType::Float16 => EmittedExpr::call("chelis_f16_to_f32", [value]),
+        HostType::BFloat16 => EmittedExpr::call("chelis_bf16_to_f32", [value]),
+        _ => value,
+    }
+}
+
+fn finalize_scalar_expr(value: EmittedExpr, ty: &HostType) -> EmittedExpr {
+    match ty {
+        HostType::Float16 => EmittedExpr::call("chelis_f32_to_f16", [value]),
+        HostType::BFloat16 => EmittedExpr::call("chelis_f32_to_bf16", [value]),
+        _ => value,
+    }
+}
+
+fn float_math_function(
+    ty: &HostType,
+    binary64: &'static str,
+    binary32: &'static str,
+) -> &'static str {
+    match ty {
+        HostType::Float16 | HostType::BFloat16 | HostType::Float32 => binary32,
+        _ => binary64,
     }
 }
 

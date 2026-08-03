@@ -171,6 +171,125 @@ static inline int64_t chelis_int_abs_guard(int64_t value, int bits,
     }
     return value < 0 ? -value : value;
 }
+
+/* chelis#729 Phase 3: checked signed arithmetic at the declared width.
+ * Every check happens before the C operation, so signed-overflow undefined
+ * behavior is unreachable. These are header-local implementation helpers,
+ * not exported runtime callables. */
+static inline void chelis_int_limits(int bits, int64_t *minimum, int64_t *maximum) {
+    switch (bits) {
+        case 8: *minimum = INT8_MIN; *maximum = INT8_MAX; break;
+        case 16: *minimum = INT16_MIN; *maximum = INT16_MAX; break;
+        case 32: *minimum = INT32_MIN; *maximum = INT32_MAX; break;
+        case 64: *minimum = INT64_MIN; *maximum = INT64_MAX; break;
+        default:
+            fprintf(stderr, "chelis internal error: invalid integer width %d\n", bits);
+            abort();
+    }
+}
+
+static inline void chelis_numeric_trap(const char *message) {
+    fprintf(stderr, "%s\n", message);
+    abort();
+}
+
+static inline int64_t chelis_int_checked_add(int64_t lhs, int64_t rhs, int bits,
+                                             const char *trap_message) {
+    int64_t minimum, maximum;
+    chelis_int_limits(bits, &minimum, &maximum);
+    if ((rhs > 0 && lhs > maximum - rhs) || (rhs < 0 && lhs < minimum - rhs)) {
+        chelis_numeric_trap(trap_message);
+    }
+    return lhs + rhs;
+}
+
+static inline int64_t chelis_int_checked_sub(int64_t lhs, int64_t rhs, int bits,
+                                             const char *trap_message) {
+    int64_t minimum, maximum;
+    chelis_int_limits(bits, &minimum, &maximum);
+    if ((rhs < 0 && lhs > maximum + rhs) || (rhs > 0 && lhs < minimum + rhs)) {
+        chelis_numeric_trap(trap_message);
+    }
+    return lhs - rhs;
+}
+
+static inline int64_t chelis_int_checked_mul(int64_t lhs, int64_t rhs, int bits,
+                                             const char *trap_message) {
+    int64_t minimum, maximum;
+    chelis_int_limits(bits, &minimum, &maximum);
+    if (lhs != 0 && rhs != 0) {
+        if ((lhs == -1 && rhs == minimum) || (rhs == -1 && lhs == minimum)) {
+            chelis_numeric_trap(trap_message);
+        }
+        if ((lhs > 0 && rhs > 0 && lhs > maximum / rhs) ||
+            (lhs > 0 && rhs < 0 && rhs < minimum / lhs) ||
+            (lhs < 0 && rhs > 0 && lhs < minimum / rhs) ||
+            (lhs < 0 && rhs < 0 && lhs < maximum / rhs)) {
+            chelis_numeric_trap(trap_message);
+        }
+    }
+    return lhs * rhs;
+}
+
+static inline int64_t chelis_int_checked_neg(int64_t value, int bits,
+                                             const char *trap_message) {
+    int64_t minimum, maximum;
+    chelis_int_limits(bits, &minimum, &maximum);
+    (void)maximum;
+    if (value == minimum) chelis_numeric_trap(trap_message);
+    return -value;
+}
+
+static inline int64_t chelis_int_checked_divisor(int64_t dividend, int64_t divisor,
+                                                 int bits, const char *zero_message,
+                                                 const char *overflow_message) {
+    int64_t minimum, maximum;
+    chelis_int_limits(bits, &minimum, &maximum);
+    (void)maximum;
+    if (divisor == 0) chelis_numeric_trap(zero_message);
+    if (dividend == minimum && divisor == -1) chelis_numeric_trap(overflow_message);
+    return divisor;
+}
+
+static inline int64_t chelis_checked_int_cast(int64_t value, int bits,
+                                              const char *overflow_message) {
+    int64_t minimum, maximum;
+    chelis_int_limits(bits, &minimum, &maximum);
+    if (value < minimum || value > maximum) chelis_numeric_trap(overflow_message);
+    return value;
+}
+
+static inline int64_t chelis_checked_float_to_int(double value, int bits,
+                                                  const char *domain_message,
+                                                  const char *overflow_message) {
+    if (!isfinite(value) || trunc(value) != value) chelis_numeric_trap(domain_message);
+    if (bits == 64) {
+        if (value < -9223372036854775808.0 || value >= 9223372036854775808.0) {
+            chelis_numeric_trap(overflow_message);
+        }
+    } else {
+        int64_t minimum, maximum;
+        chelis_int_limits(bits, &minimum, &maximum);
+        if (value < (double)minimum || value > (double)maximum) {
+            chelis_numeric_trap(overflow_message);
+        }
+    }
+    return (int64_t)value;
+}
+
+static inline bool chelis_checked_bool_from_int(int64_t value,
+                                                const char *domain_message) {
+    if (value != 0 && value != 1) chelis_numeric_trap(domain_message);
+    return value == 1;
+}
+
+static inline bool chelis_checked_bool_from_float(double value,
+                                                  const char *domain_message) {
+    if (!isfinite(value) || (value != 0.0 && value != 1.0)) {
+        chelis_numeric_trap(domain_message);
+    }
+    return value == 1.0;
+}
 /* [04-NUM-13] / chelis#682: width-bounded two's-complement shifts.
  * Generated code must not use C's signed shift operators directly:
  * left-shifting a negative value or into the sign bit is undefined, a
@@ -299,6 +418,28 @@ chelis_value chelis_value_from_dict(chelis_dict *value);
 chelis_value chelis_value_from_adt(chelis_adt *value);
 void chelis_value_retain(chelis_value value);
 void chelis_value_release(chelis_value value);
+
+/* chelis#729 Phase 3: boxed non-f64 float scalars use the existing rank-0
+ * tagged tensor carrier.  Keeping the public chelis_value layout frozen avoids
+ * creating another bare-float ABI channel while the tensor's dtype retains the
+ * source width through recursive list/tuple/dict storage. */
+static inline chelis_value chelis_value_from_f32_boxed(float value) {
+    return chelis_value_from_tensor(chelis_scalar_tensor_from_f32(value));
+}
+
+static inline chelis_value chelis_value_from_f16_bits_boxed(uint16_t bits) {
+    chelis_tensor *tensor = chelis_scalar_tensor_from_f32(0.0f);
+    tensor->dtype = CHELIS_F16;
+    *((uint16_t *)tensor->data) = bits;
+    return chelis_value_from_tensor(tensor);
+}
+
+static inline chelis_value chelis_value_from_bf16_bits_boxed(uint16_t bits) {
+    chelis_tensor *tensor = chelis_scalar_tensor_from_f32(0.0f);
+    tensor->dtype = CHELIS_BF16;
+    *((uint16_t *)tensor->data) = bits;
+    return chelis_value_from_tensor(tensor);
+}
 int64_t chelis_value_as_int64(chelis_value value);
 double chelis_value_as_f64(chelis_value value);
 bool chelis_value_as_bool(chelis_value value);

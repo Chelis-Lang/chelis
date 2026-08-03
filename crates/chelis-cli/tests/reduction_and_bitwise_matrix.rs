@@ -352,6 +352,42 @@ fn negative_shift_counts_trap_before_ubsan_at_every_width() {
     }
 }
 
+/// Phase 3 checked-accumulator row: integer reduction overflow must use the
+/// same declared-width trap in eval and generated C, and the language trap
+/// must fire before UBSan can observe signed-overflow undefined behavior.
+#[test]
+fn integer_reduce_sum_overflow_traps_before_ubsan() {
+    if !c_toolchain_available() {
+        panic!("needs a host C toolchain with UBSan");
+    }
+    for (ty, max) in [("int32", "2147483647"), ("int64", "9223372036854775807")] {
+        let program = format!(
+            "module M.Main\ndef run(x: tensor[2, {ty}]) -> tensor[{ty}] = sum(x, cast(0, int32))\n\
+             out = print(run(to_tensor([cast({max}, {ty}), cast(1, {ty})])))\n"
+        );
+        let expected = format!("numeric trap: overflow in sum at {ty}");
+        let eval_err = eval_first_line(&program).expect_err("eval reduction overflow must trap");
+        assert!(
+            eval_err.contains(&expected),
+            "{ty}: wrong eval reduction diagnostic: {eval_err}"
+        );
+        let run = c_ubsan_run(&program, &format!("sum_overflow_{ty}"));
+        assert!(
+            !run.status.success(),
+            "{ty}: compiled reduction overflow must trap"
+        );
+        let stderr = String::from_utf8_lossy(&run.stderr);
+        assert!(
+            stderr.contains(&expected),
+            "{ty}: wrong C reduction diagnostic: {stderr}"
+        );
+        assert!(
+            !stderr.contains("runtime error:"),
+            "{ty}: language trap must precede signed-overflow UB: {stderr}"
+        );
+    }
+}
+
 // ===========================================================================
 // chelis#692 - int64 reduce ops panic the compiler
 // ===========================================================================

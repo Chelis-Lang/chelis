@@ -34,6 +34,8 @@ pub(crate) enum HostAbiType {
     Int16,
     Int32,
     Int64,
+    Float16,
+    BFloat16,
     Float32,
     Float64,
     Bool,
@@ -46,18 +48,6 @@ pub(crate) enum HostAbiType {
     /// arguments.  Function results, bindings, fields, and container elements
     /// all cross [`Self::try_from_concrete`], which rejects function values.
     Callback(Vec<HostAbiType>, Box<HostAbiType>),
-    /// An f16/bf16 element INSIDE a heap list (chelis#732 Phase 2's
-    /// `to_list` exit). The element exists only behind `chelis_value`
-    /// boxes, where the runtime stores its exact f64 image; the list
-    /// itself is an ordinary `chelis_list *`. This is a NAMED boxed-only
-    /// state, not an erasure: it has no standalone C scalar spelling
-    /// (`c_type_name` returns `None`, like [`Self::Callback`]) and every
-    /// path that would materialize the element as a C scalar (boxing,
-    /// unboxing, declaration) still rejects with the chelis#714
-    /// diagnostic. Scalar-position f16/bf16 keeps rejecting in
-    /// [`Self::try_from_concrete`]; only the list-element position
-    /// constructs this variant.
-    ReducedFloatBoxed(Prim),
     Adt(String, Vec<HostAbiType>),
     List(Box<HostAbiType>),
     Dict(Box<HostAbiType>, Box<HostAbiType>),
@@ -90,17 +80,12 @@ impl HostAbiType {
             ConcreteHostType::Scalar(Prim::Int16) => Self::Int16,
             ConcreteHostType::Scalar(Prim::Int32) => Self::Int32,
             ConcreteHostType::Scalar(Prim::Int64) => Self::Int64,
+            ConcreteHostType::Scalar(Prim::F16) => Self::Float16,
+            ConcreteHostType::Scalar(Prim::Bf16) => Self::BFloat16,
             ConcreteHostType::Scalar(Prim::F32) => Self::Float32,
             ConcreteHostType::Scalar(Prim::F64) => Self::Float64,
             ConcreteHostType::Scalar(Prim::Bool) => Self::Bool,
             ConcreteHostType::Scalar(Prim::String) => Self::String,
-            // No exact C host-scalar storage/rounding contract exists for
-            // reduced floats before chelis#729 Table A/B.  Reject them as
-            // known logical dtypes; never recreate the former widened-double
-            // path that happened to be green for exactly-representable values.
-            ConcreteHostType::Scalar(precision @ (Prim::F16 | Prim::Bf16)) => {
-                return Err(unimplemented_scalar(*precision));
-            }
             // f8e4m3 is deferred and inadmissible in the active language per
             // spec/04-type-system.md section 1.1.1.  It still has a `Prim`
             // identity so this boundary can reject it precisely.
@@ -122,19 +107,7 @@ impl HostAbiType {
                     .map(Self::try_from_concrete)
                     .collect::<Result<Vec<_>, _>>()?,
             ),
-            // chelis#732 Phase 2: `to_list` of an f16/bf16 tensor produces
-            // a list whose elements live behind `chelis_value` boxes (the
-            // runtime stores each element's exact f64 image); the LIST is
-            // an ordinary heap pointer, so printing and rooting it needs
-            // no scalar element ABI. The element itself keeps no scalar C
-            // representation: see `ReducedFloatBoxed`. Every other
-            // container position keeps the value-position rejection.
-            ConcreteHostType::List(inner) => match inner.as_ref() {
-                ConcreteHostType::Scalar(precision @ (Prim::F16 | Prim::Bf16)) => {
-                    Self::List(Box::new(Self::ReducedFloatBoxed(*precision)))
-                }
-                _ => Self::List(Box::new(Self::try_from_concrete(inner)?)),
-            },
+            ConcreteHostType::List(inner) => Self::List(Box::new(Self::try_from_concrete(inner)?)),
             ConcreteHostType::Dict(key, value) => Self::Dict(
                 Box::new(Self::try_from_concrete(key)?),
                 Box::new(Self::try_from_concrete(value)?),
@@ -176,15 +149,12 @@ impl HostAbiType {
             Self::Int16 => Some("int16_t"),
             Self::Int32 => Some("int32_t"),
             Self::Int64 => Some("int64_t"),
+            Self::Float16 | Self::BFloat16 => Some("uint16_t"),
             Self::Float32 => Some("float"),
             Self::Float64 => Some("double"),
             Self::Bool => Some("bool"),
             Self::String => Some("chelis_string"),
             Self::Callback(_, _) => None,
-            // Boxed-only list element (chelis#732 Phase 2): no standalone
-            // C scalar spelling exists; declaring one is the chelis#714
-            // rejection at the caller.
-            Self::ReducedFloatBoxed(_) => None,
             Self::Adt(_, _) => Some("chelis_adt*"),
             Self::List(_) => Some("chelis_list*"),
             Self::Dict(_, _) => Some("chelis_dict*"),
@@ -197,11 +167,12 @@ impl HostAbiType {
                 Self::Int8
                 | Self::Int16
                 | Self::Int32
+                | Self::Float16
+                | Self::BFloat16
                 | Self::Float32
                 | Self::Bool
                 | Self::String
                 | Self::Callback(_, _)
-                | Self::ReducedFloatBoxed(_)
                 | Self::Adt(_, _)
                 | Self::List(_)
                 | Self::Dict(_, _)
@@ -592,16 +563,6 @@ fn project_callback_argument(
         span_id: expr.span_id,
         merged_spans: expr.merged_spans,
     })
-}
-
-fn unimplemented_scalar(precision: Prim) -> Unsupported {
-    rejected_dtype(
-        precision,
-        chelis_types::unimplemented_rejection!(
-            714,
-            "the C-host scalar ABI has no exact representation for this dtype; no alternate dtype is permitted"
-        ),
-    )
 }
 
 fn rejected_dtype(precision: Prim, authority: RejectionAuthority) -> Unsupported {

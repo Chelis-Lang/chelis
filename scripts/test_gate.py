@@ -630,10 +630,10 @@ class CiParityTests(unittest.TestCase):
             ),
         )
 
-    def test_nested_dtype_phase2_oracle_is_continuous(self):
+    def test_nested_dtype_phase3_oracle_is_continuous(self):
         block = _ci_job_block("integration")
         numpy_command = "run: uv pip install --python .venv/bin/python 'numpy>=2.0'"
-        oracle_command = "run: .venv/bin/python scripts/dtype_phase2_oracle.py"
+        oracle_command = "run: .venv/bin/python scripts/dtype_phase3_oracle.py"
         gate_command = "run: python3 scripts/gate.py integration"
         self.assertEqual(block.count(numpy_command), 1)
         self.assertEqual(block.count(oracle_command), 1)

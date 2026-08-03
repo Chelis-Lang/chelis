@@ -13,9 +13,8 @@
 //!
 //! Bounding controls: conditions with an effectful branch (`fail`) route
 //! host-lane, do not fold, and the compiled int64 comparison there is exact
-//! (locked below). The ignored int8 row belongs to the Phase 3 compiled-C
-//! trap work; this Phase 2 fold must at least decline when its typed kernel
-//! detects the overflow.
+//! (locked below). The Phase 3 int8 row also proves that folding cannot hide
+//! the required checked-overflow trap.
 
 #![allow(clippy::uninlined_format_args)]
 
@@ -95,10 +94,17 @@ fn eval_first_line(program: &str) -> Result<String, String> {
         .to_string())
 }
 
-/// f32 bit pattern of the 222.0 branch payload as it appears in emitted
-/// `chelis_fill_f32_bits` calls (111.0 is 0x42de0000; the broken rows
-/// assert on the DELETED branch's bits, which is 222.0's).
-const BITS_222: &str = "435e0000";
+/// Bit patterns of the 222.0 branch payload. Depending on whether the host
+/// literal is finalized before or after expression emission, the exact-bit
+/// constructor carries the f32 or f64 representation. Either proves that the
+/// semantically selected branch survived; stdout below proves its final dtype.
+const BITS_222_F32: &str = "435e0000";
+const BITS_222_F64: &str = "406bc00000000000";
+
+fn emitted_contains_222(emitted: &str) -> bool {
+    let emitted = emitted.to_lowercase();
+    emitted.contains(BITS_222_F32) || emitted.contains(BITS_222_F64)
+}
 
 // ===========================================================================
 // chelis#720 - the Cast arm deletes the IEEE-correct branch
@@ -109,10 +115,6 @@ const BITS_222: &str = "435e0000";
 /// compiled binary prints 111, and 222's bit pattern is ABSENT from the
 /// emitted C - the correct branch was deleted at compile time.
 #[test]
-#[ignore = "chelis#720 fold semantics are now covered in chelis-ir; the end-to-end C row \
-            remains blocked because C host ABI selection rejects f16 before dead-condition \
-            elimination. Artifact routing and C host ABI support are outside this Phase 2 \
-            slice. Run with `cargo test -p chelis-cli --test fold_static_cond_matrix -- --ignored`."]
 fn f16_cast_condition_folds_with_f16_semantics() {
     let program = "def pick() -> f32 = if lt(cast(2048.0, f16), cast(2049.0, f16)) \
                    then 111.0 else 222.0\nout = print(pick())\n";
@@ -127,8 +129,8 @@ fn f16_cast_condition_folds_with_f16_semantics() {
     let (emitted, stdout, _, ok) = build_and_run_c(program, "fold_f16").expect("C lane");
     assert!(ok);
     assert!(
-        emitted.to_lowercase().contains(BITS_222),
-        "the 222 branch (0x435e0000) must exist in the emitted C; it was deleted"
+        emitted_contains_222(&emitted),
+        "the 222 branch must exist in the emitted C at f32 or f64 width; it was deleted"
     );
     assert!(
         stdout.lines().next().unwrap_or("").trim() == "222.0",
@@ -138,10 +140,6 @@ fn f16_cast_condition_folds_with_f16_semantics() {
 
 /// bf16 sibling at threshold 257 (8-bit mantissa).
 #[test]
-#[ignore = "chelis#720 fold semantics are now covered in chelis-ir; the end-to-end C row \
-            remains blocked because C host ABI selection rejects bf16 before dead-condition \
-            elimination. Artifact routing and C host ABI support are outside this Phase 2 \
-            slice. Run with `cargo test -p chelis-cli --test fold_static_cond_matrix -- --ignored`."]
 fn bf16_cast_condition_folds_with_bf16_semantics() {
     let program = "def pick() -> f32 = if lt(cast(256.0, bf16), cast(257.0, bf16)) \
                    then 111.0 else 222.0\nout = print(pick())\n";
@@ -152,8 +150,8 @@ fn bf16_cast_condition_folds_with_bf16_semantics() {
     let (emitted, stdout, _, ok) = build_and_run_c(program, "fold_bf16").expect("C lane");
     assert!(ok);
     assert!(
-        emitted.to_lowercase().contains(BITS_222),
-        "the 222 branch (0x435e0000) must exist in the emitted C; it was deleted"
+        emitted_contains_222(&emitted),
+        "the 222 branch must exist in the emitted C at f32 or f64 width; it was deleted"
     );
     assert!(
         stdout.lines().next().unwrap_or("").trim() == "222.0",
@@ -172,10 +170,6 @@ fn bf16_cast_condition_folds_with_bf16_semantics() {
 /// verified when this row was probed). The decided contract (#680/#695)
 /// says the overflow itself must trap in both lanes.
 #[test]
-#[ignore = "chelis#718: an int8 overflow used as a branch condition sends eval and C down \
-            opposite branches (eval wraps to -56 and prints 111; C widens to 200 and prints \
-            222); the contract says the overflow must trap in both lanes. Run with \
-            `cargo test -p chelis-cli --test fold_static_cond_matrix -- --ignored`."]
 fn int8_overflow_condition_traps_in_both_lanes() {
     let program = "def pick() -> f32 = if lt(add(100i8, 100i8), 0i8) \
                    then 111.0 else 222.0\nout = print(pick())\n";
