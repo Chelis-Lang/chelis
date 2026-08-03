@@ -1111,8 +1111,8 @@ fn eval_supports_lists_and_tensor_bridge() {
         // digit; the genuinely int-typed token lists keep bare integers.
         .stdout(predicate::str::contains("\n[1.0, 2.0, 3.0]\n"))
         .stdout(predicate::str::contains("\n[2.0, 3.0, 4.0]\n"))
-        .stdout(predicate::str::contains("\n[1i64, 2i64, 3i64]\n"))
-        .stdout(predicate::str::contains("\n[[1i64, 2i64], [3i64]]\n"))
+        .stdout(predicate::str::contains("\n[1, 2, 3]\n"))
+        .stdout(predicate::str::contains("\n[[1, 2], [3]]\n"))
         .stdout(predicate::str::contains("[1.0, 2.0, 3.0, 4.0]\n"));
 }
 
@@ -1135,7 +1135,7 @@ fn eval_supports_dicts_and_iteration_collections() {
             "[(0, alpha), (1, beta), (2, gamma)]",
         ))
         .stdout(predicate::str::contains("[alpha, beta, gamma]"))
-        .stdout(predicate::str::contains("[1i64, 2i64, 3i64]"))
+        .stdout(predicate::str::contains("[1, 2, 3]"))
         .stdout(predicate::str::contains(
             "[(alpha, 1), (beta, 20), (gamma, 3), (delta, 4), (epsilon, 5)]",
         ))
@@ -1156,12 +1156,12 @@ fn eval_supports_map_filter_fold_collections() {
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("[2i64, 3i64, 4i64, 5i64]"))
-        .stdout(predicate::str::contains("[2i64, 4i64]"))
-        .stdout(predicate::str::contains("[1i64, 3i64, 6i64, 10i64]"))
-        .stdout(predicate::str::contains("([3i64, 4i64], [1i64, 2i64])"))
-        .stdout(predicate::str::contains("[1i64, 11i64, 2i64, 12i64]"))
-        .stdout(predicate::str::contains("[[1i64, 11i64], [2i64, 12i64]]"))
+        .stdout(predicate::str::contains("[2, 3, 4, 5]"))
+        .stdout(predicate::str::contains("[2, 4]"))
+        .stdout(predicate::str::contains("[1, 3, 6, 10]"))
+        .stdout(predicate::str::contains("([3, 4], [1, 2])"))
+        .stdout(predicate::str::contains("[1, 11, 2, 12]"))
+        .stdout(predicate::str::contains("[[1, 11], [2, 12]]"))
         .stdout(predicate::str::contains("total=6"));
 }
 
@@ -1178,11 +1178,11 @@ fn eval_supports_phase3h_tensor_structural_ops() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "contracted = tensor(shape=[2i64, 2i64], data=[19.0, 22.0, 43.0, 50.0])",
+            "contracted = tensor(shape=[2, 2], data=[19.0, 22.0, 43.0, 50.0])",
         ))
         // chelis#732 P1: int64 sort indices print as integers.
         .stdout(predicate::str::contains(
-            "sorted_indices = tensor(shape=[2i64], data=[0i64, 1i64])",
+            "sorted_indices = tensor(shape=[2], data=[0, 1])",
         ));
 }
 
@@ -1513,15 +1513,15 @@ fn build_c_host_tensor_helper_dedups_repeated_inputs_at_callsite() {
 #include <stdio.h>
 
 int main(void) {
-    int shape[2i64] = {2, 3};
+    int shape[2] = {2, 3};
     chelis_tensor *a = chelis_alloc(2, shape, CHELIS_F32);
-    float values[6i64] = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f};
+    float values[6] = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f};
     for (int i = 0; i < 6; ++i) {
         a->data[i] = values[i];
     }
 
     chelis_tensor *out = gram(a);
-    float expected[9i64] = {
+    float expected[9] = {
         17.0f, 22.0f, 27.0f,
         22.0f, 29.0f, 36.0f,
         27.0f, 36.0f, 45.0f
@@ -1657,11 +1657,11 @@ int main(void) {
         fprintf(stderr, "unexpected tuple tensor sizes\n");
         return 1;
     }
-    if (fabsf(lhs->data[0i64] - 1.0f) > 1e-4f || fabsf(lhs->data[1i64] - 2.0f) > 1e-4f) {
+    if (fabsf(lhs->data[0] - 1.0f) > 1e-4f || fabsf(lhs->data[1] - 2.0f) > 1e-4f) {
         fprintf(stderr, "lhs mismatch\n");
         return 1;
     }
-    if (fabsf(rhs->data[0i64] - 3.0f) > 1e-4f || fabsf(rhs->data[1i64] - 4.0f) > 1e-4f) {
+    if (fabsf(rhs->data[0] - 3.0f) > 1e-4f || fabsf(rhs->data[1] - 4.0f) > 1e-4f) {
         fprintf(stderr, "rhs mismatch\n");
         return 1;
     }
@@ -1974,7 +1974,7 @@ fn build_c_map_tensor_grad_specializes_callback_item_type() {
     let stdout = String::from_utf8(run_output.stdout).expect("utf-8 stdout");
     assert!(
         stdout.contains(
-            "rows = [tensor(shape=[2i64], data=[2.0, 4.0]), tensor(shape=[2i64], data=[2.0, 4.0])]"
+            "rows = [tensor(shape=[2], data=[2.0, 4.0]), tensor(shape=[2], data=[2.0, 4.0])]"
         ),
         "unexpected gradient rows output:\n{stdout}"
     );
@@ -2594,7 +2594,7 @@ fn build_c_grad_named_fn_multi_param_wrt_builds_and_is_numerically_correct() {
     let stdout = String::from_utf8(run_output.stdout).expect("utf-8 stdout");
     // grad(sum(theta*x), wrt=theta) = x = [3.0, 4.0]
     assert!(
-        stdout.contains("out = tensor(shape=[2i64], data=[3.0, 4.0])"),
+        stdout.contains("out = tensor(shape=[2], data=[3.0, 4.0])"),
         "gradient of sum(theta*x) w.r.t. theta must equal x=[3.0, 4.0], got:\n{stdout}"
     );
 }
@@ -2661,7 +2661,7 @@ fn build_c_grad_locally_bound_alias_form_lowers() {
     let stdout = String::from_utf8(run_output.stdout).expect("utf-8 stdout");
     // grad(sum(theta*x), wrt=theta) = x = [3.0, 4.0]
     assert!(
-        stdout.contains("out = tensor(shape=[2i64], data=[3.0, 4.0])"),
+        stdout.contains("out = tensor(shape=[2], data=[3.0, 4.0])"),
         "locally-bound grad alias must produce the same gradient as the inline form, got:\n{stdout}"
     );
 }
@@ -2818,7 +2818,7 @@ fn build_c_grad_named_fn_wrt_second_param_is_numerically_correct() {
     let stdout = String::from_utf8(run_output.stdout).expect("utf-8 stdout");
     // grad(sum(theta*x), wrt=x) = theta = [1.0, 2.0]
     assert!(
-        stdout.contains("out = tensor(shape=[2i64], data=[1.0, 2.0])"),
+        stdout.contains("out = tensor(shape=[2], data=[1.0, 2.0])"),
         "gradient of sum(theta*x) w.r.t. x must equal theta=[1.0, 2.0], got:\n{stdout}"
     );
 }
@@ -2883,7 +2883,7 @@ fn build_c_grad_over_named_fn_with_nested_call_body_builds() {
     let stdout = String::from_utf8(run_output.stdout).expect("utf-8 stdout");
     // grad(sum(theta*theta)) = 2 * theta = [2.0, 4.0, 6.0]
     assert!(
-        stdout.contains("out = tensor(shape=[3i64], data=[2.0, 4.0, 6.0])"),
+        stdout.contains("out = tensor(shape=[3], data=[2.0, 4.0, 6.0])"),
         "grad of sum(theta*theta) w.r.t. theta must be 2*theta=[2.0, 4.0, 6.0], got:\n{stdout}"
     );
 }
@@ -2943,7 +2943,7 @@ fn build_c_grad_over_named_fn_with_pipe_body_builds() {
     // grad(sum(theta*theta)) = 2 * theta = [2.0, 4.0, 6.0] — must match the
     // nested-call control fixture's output exactly.
     assert!(
-        stdout.contains("out = tensor(shape=[3i64], data=[2.0, 4.0, 6.0])"),
+        stdout.contains("out = tensor(shape=[3], data=[2.0, 4.0, 6.0])"),
         "grad of sum(theta*theta) w.r.t. theta must be 2*theta=[2.0, 4.0, 6.0], got:\n{stdout}"
     );
 }
@@ -3539,9 +3539,9 @@ def apply(
 #include "scatter_runtime_bad.h"
 
 int main(void) {
-    int base_shape[2i64] = {3, 2};
-    int idx_shape[1i64] = {2};
-    int updates_shape[2i64] = {2, 2};
+    int base_shape[2] = {3, 2};
+    int idx_shape[1] = {2};
+    int updates_shape[2] = {2, 2};
 
     chelis_tensor *base = chelis_alloc(2, base_shape, CHELIS_F32);
     chelis_tensor *idx = chelis_alloc(1, idx_shape, CHELIS_I32);
@@ -3551,12 +3551,12 @@ int main(void) {
      * width and a float-bit-pattern write would surface as the bit
      * pattern as an int (e.g. 1065353216 for 1.0f), defeating the
      * duplicate-index fixture. */
-    ((int32_t*)idx->data)[0i64] = 1;
-    ((int32_t*)idx->data)[1i64] = 1;
-    updates->data[0i64] = 5.0f;
-    updates->data[1i64] = 5.0f;
-    updates->data[2i64] = 6.0f;
-    updates->data[3i64] = 6.0f;
+    ((int32_t*)idx->data)[0] = 1;
+    ((int32_t*)idx->data)[1] = 1;
+    updates->data[0] = 5.0f;
+    updates->data[1] = 5.0f;
+    updates->data[2] = 6.0f;
+    updates->data[3] = 6.0f;
 
     chelis_tensor *output = apply(base, idx, updates);
 
@@ -3962,7 +3962,7 @@ fn build_c_rejects_reduce_window_over_runtime_symbolic_axis() {
     write_file(
         &path,
         "padded = pad_sequences([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]], 0.0)\n\
-         windowed = reduce_window_max(padded, [2i64], [1i64])\n",
+         windowed = reduce_window_max(padded, [2], [1])\n",
     );
     let out_dir = dir.path().join("rw-build");
 
@@ -3999,7 +3999,7 @@ fn build_c_rejects_bf16_reduce_window_with_clean_diagnostic() {
     write_file(
         &path,
         "def pool_bf16(x: tensor[1, 1, 4, 4, bf16]) -> tensor[1, 1, 3, 3, bf16] = \
-         reduce_window_max(&x, [2i64, 2i64], [1i64, 1i64])\n",
+         reduce_window_max(&x, [2, 2], [1, 1])\n",
     );
     let out_dir = dir.path().join("rw-bf16-build");
 
@@ -4033,7 +4033,7 @@ fn build_hip_rejects_reduce_window_with_clean_diagnostic() {
     write_file(
         &path,
         "def pool_hip(x: tensor[1, 1, 4, 4, f32]) -> tensor[1, 1, 3, 3, f32] = \
-         reduce_window_max(&x, [2i64, 2i64], [1i64, 1i64])\n",
+         reduce_window_max(&x, [2, 2], [1, 1])\n",
     );
     let out_dir = dir.path().join("rw-hip-build");
 
@@ -4645,7 +4645,7 @@ def main(
   w: tensor[784, 10, f32],
   b: tensor[10, f32]
 ) -> tensor[32, 10, f32] = {
-  bias = expand(&b, 0, shape(&x, cast(0, int64)))
+  bias = expand(&b, 0, shape(&x, cast(0, int32)))
   wx = matmul(&x, &w)
   add(wx, bias)
 }
@@ -4975,8 +4975,8 @@ fn build_hip_accepts_symbolic_dims_and_binds_them_from_input_metadata() {
         .stdout(predicate::str::contains("Peak device memory formula:"));
 
     let source = fs::read_to_string(out_dir.join("symbolic_hip.cpp")).expect("generated source");
-    assert!(source.contains("int batch = inputs[0i64]->shape[0i64];"));
-    assert!(source.contains("int features = inputs[0i64]->shape[1i64];"));
+    assert!(source.contains("int batch = inputs[0]->shape[0];"));
+    assert!(source.contains("int features = inputs[0]->shape[1];"));
 }
 
 #[test]
@@ -5023,15 +5023,15 @@ fn build_symbolic_matmul_succeeds_on_c_and_hip_targets() {
         .stdout(predicate::str::contains("Peak device memory formula:"));
 
     let c_source = fs::read_to_string(c_out.join("symbolic_matmul.c")).expect("generated c");
-    assert!(c_source.contains("int batch = inputs[0i64]->shape[0i64];"));
-    assert!(c_source.contains("int in_dim = inputs[0i64]->shape[1i64];"));
-    assert!(c_source.contains("inputs[1i64]->shape[0i64] != in_dim"));
+    assert!(c_source.contains("int batch = inputs[0]->shape[0];"));
+    assert!(c_source.contains("int in_dim = inputs[0]->shape[1];"));
+    assert!(c_source.contains("inputs[1]->shape[0] != in_dim"));
 
     let hip_source =
         fs::read_to_string(hip_out.join("symbolic_matmul_hip.cpp")).expect("generated hip");
-    assert!(hip_source.contains("int batch = inputs[0i64]->shape[0i64];"));
-    assert!(hip_source.contains("int in_dim = inputs[0i64]->shape[1i64];"));
-    assert!(hip_source.contains("inputs[1i64]->shape[0i64] != in_dim"));
+    assert!(hip_source.contains("int batch = inputs[0]->shape[0];"));
+    assert!(hip_source.contains("int in_dim = inputs[0]->shape[1];"));
+    assert!(hip_source.contains("inputs[1]->shape[0] != in_dim"));
 }
 
 #[test]
@@ -5059,8 +5059,8 @@ fn build_hip_accepts_symbolic_softmax() {
 
     let source =
         fs::read_to_string(out_dir.join("symbolic_softmax_hip.cpp")).expect("generated source");
-    assert!(source.contains("int batch = inputs[0i64]->shape[0i64];"));
-    assert!(source.contains("int seq = inputs[0i64]->shape[1i64];"));
+    assert!(source.contains("int batch = inputs[0]->shape[0];"));
+    assert!(source.contains("int seq = inputs[0]->shape[1];"));
     assert!(source.contains("kernel_maxred_ax1"));
     assert!(source.contains("kernel_sum_ax1"));
 }
@@ -5090,8 +5090,8 @@ fn build_hip_accepts_symbolic_row_sum() {
 
     let source =
         fs::read_to_string(out_dir.join("symbolic_sum_hip.cpp")).expect("generated source");
-    assert!(source.contains("int batch = inputs[0i64]->shape[0i64];"));
-    assert!(source.contains("int seq = inputs[0i64]->shape[1i64];"));
+    assert!(source.contains("int batch = inputs[0]->shape[0];"));
+    assert!(source.contains("int seq = inputs[0]->shape[1];"));
     assert!(source.contains("kernel_sum_ax1"));
 }
 
@@ -5120,7 +5120,7 @@ fn build_hip_accepts_symbolic_leading_dims_for_layer_norm() {
 
     let source =
         fs::read_to_string(out_dir.join("symbolic_layer_norm_hip.cpp")).expect("generated source");
-    assert!(source.contains("int batch = inputs[0i64]->shape[0i64];"));
+    assert!(source.contains("int batch = inputs[0]->shape[0];"));
     assert!(source.contains("kernel_sum_ax1"));
 }
 
@@ -7744,7 +7744,7 @@ fn eval_realize_is_identity_in_host_runtime() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "tensor(shape=[3i64], data=[1.0, 2.0, 3.0])",
+            "tensor(shape=[3], data=[1.0, 2.0, 3.0])",
         ));
 }
 
@@ -7815,7 +7815,7 @@ fn eval_grad_wrapper_fn_param_form_returns_correct_gradient() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "tensor(shape=[2i64], data=[3.0, 4.0])",
+            "tensor(shape=[2], data=[3.0, 4.0])",
         ));
 }
 
@@ -7904,7 +7904,7 @@ fn eval_vmap_returns_per_element_results() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "result = tensor(shape=[3i64], data=[1.0, 4.0, 9.0])",
+            "result = tensor(shape=[3], data=[1.0, 4.0, 9.0])",
         ));
 }
 
@@ -7927,7 +7927,7 @@ fn eval_realize_does_not_regress_to_host_runtime_unsupported() {
         .stdout(
             predicate::str::contains("host runtime does not support `realize`")
                 .not()
-                .and(predicate::str::contains("tensor(shape=[1i64], data=[1.0])")),
+                .and(predicate::str::contains("tensor(shape=[1], data=[1.0])")),
         );
 }
 
@@ -8374,7 +8374,7 @@ fn build_c_to_tensor_2d_nested_literal_matches_eval_output() {
         .clone();
     let eval_text = String::from_utf8(eval_stdout).expect("eval stdout utf8");
     assert!(
-        eval_text.contains("shape=[2i64, 2i64]"),
+        eval_text.contains("shape=[2, 2]"),
         "eval should report rank-2 shape: {eval_text}",
     );
 
@@ -8415,8 +8415,8 @@ fn build_c_linreg_expand_singleton_bias_keeps_rank2_shape() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("linreg_expand_bias.ch");
     let out_dir = dir.path().join("linreg-expand-bias-out");
-    // Rank-1 [1i64] bias expanded along axis 0 with count 4 must produce
-    // rank-2 [4i64, 1i64] output. This is the exact shape pattern the
+    // Rank-1 [1] bias expanded along axis 0 with count 4 must produce
+    // rank-2 [4, 1] output. This is the exact shape pattern the
     // `examples/linreg.ch` predict/loss helpers rely on
     // (`expand(b, 0, 64i64)` where `b: tensor[1, f32]`).
     write_file(
@@ -8458,16 +8458,16 @@ fn build_c_linreg_expand_singleton_bias_keeps_rank2_shape() {
         .success();
 
     let generated = fs::read_to_string(out_dir.join("linreg_expand_bias.c")).expect("generated c");
-    // Output ndim=2 and a [4i64, 1i64] shape literal must appear in the
+    // Output ndim=2 and a [4, 1] shape literal must appear in the
     // generated allocation; previously the runtime divergence caused
     // the C emit to render the wrong rank.
     assert!(
         generated.contains("(int[]){ 4, 1 }"),
-        "expected generated C to allocate rank-2 [4i64, 1i64] for the expand result; got:\n{generated}",
+        "expected generated C to allocate rank-2 [4, 1] for the expand result; got:\n{generated}",
     );
 
     // `chelis test`/`chelis eval` must produce the same shape as the
-    // typer (rank-2 [4i64, 1i64] with all entries equal to the singleton
+    // typer (rank-2 [4, 1] with all entries equal to the singleton
     // value). The host-runtime evaluator path is exercised by the
     // companion test `host_runtime_expand_singleton_input_inserts_not_replicates`
     // in `chelis-compiler-api`; this CLI test pins the typer + C emit
@@ -8693,10 +8693,10 @@ fn build_c_pipe_into_user_defined_unary_tensor_fn_matches_nested_call() {
         run_output.status,
     );
     let stdout = String::from_utf8(run_output.stdout).expect("utf-8 stdout");
-    // `step([1i64, 2i64, 3i64]) = [1i64, 4i64, 9i64]`, `step([1i64, 4i64, 9i64]) = [1i64, 16i64, 81i64]`.
+    // `step([1, 2, 3]) = [1, 4, 9]`, `step([1, 4, 9]) = [1, 16, 81]`.
     assert_eq!(
         stdout.trim_end(),
-        "out = tensor(shape=[3i64], data=[1.0, 16.0, 81.0])",
+        "out = tensor(shape=[3], data=[1.0, 16.0, 81.0])",
         "compiled binary stdout for `xs |> step |> step` must match the \
          nested-call form's value; got: {stdout:?}",
     );
@@ -8715,7 +8715,7 @@ fn build_c_pipe_into_user_defined_unary_tensor_fn_matches_nested_call() {
 // computing anything.
 //
 // The build exits 0 either way, so this drives the emitted kernel and
-// pins the value: x * x over [1i64, 2i64, 3i64] must be [1i64, 4i64, 9i64].
+// pins the value: x * x over [1, 2, 3] must be [1, 4, 9].
 #[test]
 #[cfg(unix)]
 fn build_c_higher_order_def_with_unused_fn_param_keeps_its_kernel() {
@@ -8747,7 +8747,7 @@ fn build_c_higher_order_def_with_unused_fn_param_keeps_its_kernel() {
     // A pure-DAG module emits no `main`, so drive the kernel directly.
     write_file(
         &out_dir.join("driver.c"),
-        "#include <stdio.h>\n         #include <string.h>\n         #include \"chelis_runtime.h\"\n         void only_ho(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);\n         int main(void) {\n         \x20   int shape[1i64] = {3};\n         \x20   chelis_tensor* x = chelis_alloc(1, shape, CHELIS_F32);\n         \x20   float xd[3i64] = {1.0f, 2.0f, 3.0f};\n         \x20   memcpy(x->data, xd, sizeof(xd));\n         \x20   chelis_tensor* ins[1i64] = { x };\n         \x20   chelis_tensor* outs[1i64] = { NULL };\n         \x20   only_ho(ins, 1, outs, 1);\n         \x20   for (int i = 0; i < 3; i++) printf(\"%.1f\\n\", outs[0i64]->data[i]);\n         \x20   return 0;\n         }\n",
+        "#include <stdio.h>\n         #include <string.h>\n         #include \"chelis_runtime.h\"\n         void only_ho(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);\n         int main(void) {\n         \x20   int shape[1] = {3};\n         \x20   chelis_tensor* x = chelis_alloc(1, shape, CHELIS_F32);\n         \x20   float xd[3] = {1.0f, 2.0f, 3.0f};\n         \x20   memcpy(x->data, xd, sizeof(xd));\n         \x20   chelis_tensor* ins[1] = { x };\n         \x20   chelis_tensor* outs[1] = { NULL };\n         \x20   only_ho(ins, 1, outs, 1);\n         \x20   for (int i = 0; i < 3; i++) printf(\"%.1f\\n\", outs[0]->data[i]);\n         \x20   return 0;\n         }\n",
     );
 
     let status = gcc_link_sources(&out_dir, &["driver.c", "only_ho.c"], "only_ho_driver");
@@ -8823,9 +8823,9 @@ fn build_c_mixed_module_keeps_working_roots_and_drops_only_the_rootless_grad() {
     let stdout = String::from_utf8(run.stdout).expect("utf-8 stdout");
     assert_eq!(
         stdout.trim_end(),
-        "theta = tensor(shape=[3i64], data=[1.0, 2.0, 3.0])\n\
-         squared = tensor(shape=[3i64], data=[1.0, 4.0, 9.0])\n\
-         dsumsq = tensor(shape=[3i64], data=[2.0, 4.0, 6.0])",
+        "theta = tensor(shape=[3], data=[1.0, 2.0, 3.0])\n\
+         squared = tensor(shape=[3], data=[1.0, 4.0, 9.0])\n\
+         dsumsq = tensor(shape=[3], data=[2.0, 4.0, 6.0])",
         "the unused-fn-param def must keep computing x * x while the grad \
          def is fixed; got: {stdout:?}",
     );
@@ -8849,8 +8849,8 @@ fn build_c_mixed_module_keeps_working_roots_and_drops_only_the_rootless_grad() {
 // Asserting the build succeeds is not enough on its own — a root can be
 // dropped and still produce compilable C — so this also runs the linked
 // binary and pins the gradient value. d/dtheta sum(theta * theta) is
-// 2 * theta, so [1i64, 2i64, 3i64] must yield [2i64, 4i64, 6i64]; a dropped or zeroed
-// gradient root shows up here as [0i64, 0i64, 0i64] or a missing line.
+// 2 * theta, so [1, 2, 3] must yield [2, 4, 6]; a dropped or zeroed
+// gradient root shows up here as [0, 0, 0] or a missing line.
 #[test]
 #[cfg(unix)]
 fn build_c_grad_program_keeps_both_named_roots() {
@@ -8904,8 +8904,8 @@ fn build_c_grad_program_keeps_both_named_roots() {
     let stdout = String::from_utf8(run.stdout).expect("utf-8 stdout");
     assert_eq!(
         stdout.trim_end(),
-        "theta = tensor(shape=[3i64], data=[1.0, 2.0, 3.0])\n\
-         dsumsq = tensor(shape=[3i64], data=[2.0, 4.0, 6.0])",
+        "theta = tensor(shape=[3], data=[1.0, 2.0, 3.0])\n\
+         dsumsq = tensor(shape=[3], data=[2.0, 4.0, 6.0])",
         "grad_quadratic must print both roots with the exact gradient \
          2 * theta; got: {stdout:?}",
     );
@@ -9045,7 +9045,7 @@ fn build_c_grad_program_has_zero_definitely_lost_under_valgrind() {
     // The program itself must produce the correct gradient before we
     // care about leaks.
     assert!(
-        vg_stdout.contains("dsumsq = tensor(shape=[3i64], data=[2.0, 4.0, 6.0])"),
+        vg_stdout.contains("dsumsq = tensor(shape=[3], data=[2.0, 4.0, 6.0])"),
         "grad_quadratic produced wrong output under valgrind:\n{vg_stdout}"
     );
 
@@ -9550,7 +9550,7 @@ fn build_c_call_return_list_escape_has_zero_definitely_lost_under_valgrind() {
          \x20 id2(xs)\n\
          }\n\
          out = mk(cast(5, int64))\n",
-        &["out = [5i64, 10i64, 15i64]"],
+        &["out = [5, 10, 15]"],
     );
 }
 
@@ -9575,7 +9575,7 @@ fn build_c_call_fresh_result_does_not_over_retain_under_valgrind() {
          \x20 dup(xs)\n\
          }\n\
          out = mk(cast(5, int64))\n",
-        &["out = [3i64, 3i64]"],
+        &["out = [3, 3]"],
     );
 }
 

@@ -15,7 +15,7 @@
 //! def f(x: tensor[2, f32]) -> f32 = {
 //!   k = expand(scalar_to_tensor(cast(3.0, f32)),
 //!              cast(0, int32),
-//!              cast(shape(&x, cast(0, int32)), int32))
+//!              cast(shape(&x, cast(0, int32)), int64))
 //!   tensor_to_scalar(sum(mul(x, k), cast(0, int32)))
 //! }
 //! def df(x: tensor[2, f32]) -> tensor[2, f32] = grad(f)(x)
@@ -23,7 +23,7 @@
 //!
 //! Before the fix:
 //!   * `chelis check` -> clean (type-checks: the size-1 source broadcasts
-//!     up to `tensor[2i64]`).
+//!     up to `tensor[2]`).
 //!   * `chelis eval` -> `Lowering error: grad(...) lowering rejected:
 //!     failed to construct backward DAG (... binary op ... mismatched
 //!     dimension at axis 0: Lit(2) vs Lit(1))`.
@@ -39,7 +39,7 @@
 //!
 //! (A rank-1 `to_tensor([c])` source is intentionally NOT exercised: the
 //! language's `expand` INSERTS rather than replaces, so
-//! `expand([1i64], 0, n)` is `[n, 1]`, which does not broadcast against a
+//! `expand([1], 0, n)` is `[n, 1]`, which does not broadcast against a
 //! `tensor[n]` operand — that is not a valid const-broadcast and is not
 //! what #318's downstream uses. See the lowering-rank-rule note in
 //! `chelis-ir/src/lower.rs`'s
@@ -56,7 +56,7 @@ use tempfile::tempdir;
 /// `tensor[2, f32]`, shape-derived `expand` size `shape(&x, 0)`.
 const REPRO_RANK0: &str = "module Repro.GradExpandShape0\n\
 def f(x: tensor[2, f32]) -> f32 = {\n\
-  k = expand(scalar_to_tensor(cast(3.0, f32)), cast(0, int32), cast(shape(&x, cast(0, int64)), int64))\n\
+  k = expand(scalar_to_tensor(cast(3.0, f32)), cast(0, int32), cast(shape(&x, cast(0, int32)), int64))\n\
   tensor_to_scalar(sum(mul(x, k), cast(0, int32)))\n\
 }\n\
 def df(x: tensor[2, f32]) -> tensor[2, f32] = grad(f)(x)\n\
@@ -104,7 +104,7 @@ fn run_eval(source: &str, stem: &str) -> std::process::Output {
 }
 
 /// Assert `chelis eval` of `source` succeeds and prints the constant
-/// gradient `[3i64, 3i64]` as a `tensor[2i64]`.
+/// gradient `[3, 3]` as a `tensor[2]`.
 fn assert_eval_grad_is_3_3(source: &str, stem: &str, label: &str) {
     let output = run_eval(source, stem);
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -114,12 +114,12 @@ fn assert_eval_grad_is_3_3(source: &str, stem: &str, label: &str) {
         "{label}: `chelis eval` must succeed; stdout={stdout} stderr={stderr}",
     );
     assert!(
-        stdout.contains("shape=[2i64]"),
-        "{label}: gradient must be tensor[2i64]; got stdout={stdout}",
+        stdout.contains("shape=[2]"),
+        "{label}: gradient must be tensor[2]; got stdout={stdout}",
     );
     assert!(
-        stdout.contains("data=[3i64, 3i64]") || stdout.contains("data=[3.0, 3.0]"),
-        "{label}: df(x) must equal [3i64, 3i64]; got stdout={stdout}",
+        stdout.contains("data=[3, 3]") || stdout.contains("data=[3.0, 3.0]"),
+        "{label}: df(x) must equal [3, 3]; got stdout={stdout}",
     );
 }
 
@@ -142,8 +142,8 @@ fn issue_318_check_is_clean() {
 /// The headline failure (acceptance oracle): `chelis eval` of the
 /// rank-0-source shape-derived reproducer must succeed and print the
 /// correct constant gradient. Before the fix this exits non-zero with
-/// the "failed to construct backward DAG" lowering error / a `[2i64] vs
-/// [1i64]` shape mismatch in the evaluator.
+/// the "failed to construct backward DAG" lowering error / a `[2] vs
+/// [1]` shape mismatch in the evaluator.
 #[test]
 fn issue_318_eval_gradient_is_correct() {
     assert_eval_grad_is_3_3(REPRO_RANK0, "repro0", "issue #318 rank-0 source");

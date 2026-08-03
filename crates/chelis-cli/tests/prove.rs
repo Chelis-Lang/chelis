@@ -594,23 +594,23 @@ fn call_form_predicate_proves_at_smt_like_operator_form() {
     );
     let props = property_records(&output.stdout);
     assert_eq!(props.len(), 1, "records: {props:?}");
-    assert_eq!(props[0i64]["name"], "callform_nonneg");
-    assert_eq!(props[0i64]["status"], "passed");
+    assert_eq!(props[0]["name"], "callform_nonneg");
+    assert_eq!(props[0]["status"], "passed");
     assert_eq!(
-        props[0i64]["proof_tier"], "smt",
+        props[0]["proof_tier"], "smt",
         "call-form must lower to SMT, not drop to fuzz: {}",
-        props[0i64]
+        props[0]
     );
     // chelis#422: an SMT proof is over the reals, so the green discloses the
     // machine-arithmetic gap as `proven_modulo_real_arithmetic` with
     // `real_arithmetic` in qualifiers[]. The key invariant for this test is
     // that call-form matches operator-form exactly (same badge, same SMT tier).
     assert_eq!(
-        props[0i64]["composite_verdict"],
+        props[0]["composite_verdict"],
         "proven_modulo_real_arithmetic"
     );
     assert_eq!(
-        props[0i64]["qualifiers"],
+        props[0]["qualifiers"],
         serde_json::json!(["real_arithmetic"])
     );
 }
@@ -645,16 +645,16 @@ fn operator_form_predicate_still_proves_at_smt() {
     );
     let props = property_records(&output.stdout);
     assert_eq!(props.len(), 1, "records: {props:?}");
-    assert_eq!(props[0i64]["name"], "operator_nonneg");
-    assert_eq!(props[0i64]["status"], "passed");
-    assert_eq!(props[0i64]["proof_tier"], "smt");
+    assert_eq!(props[0]["name"], "operator_nonneg");
+    assert_eq!(props[0]["status"], "passed");
+    assert_eq!(props[0]["proof_tier"], "smt");
     // chelis#422: over-reals SMT proof discloses the machine-arith gap.
     assert_eq!(
-        props[0i64]["composite_verdict"],
+        props[0]["composite_verdict"],
         "proven_modulo_real_arithmetic"
     );
     assert_eq!(
-        props[0i64]["qualifiers"],
+        props[0]["qualifiers"],
         serde_json::json!(["real_arithmetic"])
     );
 }
@@ -694,16 +694,16 @@ fn measure_zero_false_call_form_is_refuted_at_smt_not_fuzz_passed() {
     );
     let props = property_records(&output.stdout);
     assert_eq!(props.len(), 1, "records: {props:?}");
-    assert_eq!(props[0i64]["name"], "callform_false");
+    assert_eq!(props[0]["name"], "callform_false");
     assert_eq!(
-        props[0i64]["status"], "failed",
+        props[0]["status"], "failed",
         "must be refuted, not passed: {}",
-        props[0i64]
+        props[0]
     );
     assert_eq!(
-        props[0i64]["proof_tier"], "smt",
+        props[0]["proof_tier"], "smt",
         "refutation must come from SMT, not fuzz: {}",
-        props[0i64]
+        props[0]
     );
     // chelis#422 (symmetric Disproved hedge): the disproof is over the REALS
     // (the goal is Real f32 `sub`/`mul`), so the SMT counterexample may be a
@@ -714,19 +714,19 @@ fn measure_zero_false_call_form_is_refuted_at_smt_not_fuzz_passed() {
     // side. (The predicate hedges every over-reals disproof; it does not
     // separately confirm the counterexample survives machine rounding.)
     assert_eq!(
-        props[0i64]["composite_verdict"],
+        props[0]["composite_verdict"],
         "disproved_modulo_real_arithmetic"
     );
-    let qualifiers = props[0i64]["qualifiers"].as_array().expect("qualifiers array");
+    let qualifiers = props[0]["qualifiers"].as_array().expect("qualifiers array");
     assert!(
         qualifiers.iter().any(|q| q == "real_arithmetic"),
         "a hedged disproof discloses real_arithmetic symmetric to the proof side: {}",
-        props[0i64]
+        props[0]
     );
     assert_eq!(
-        props[0i64]["counterexample"]["x"], "12345.0",
+        props[0]["counterexample"]["x"], "12345.0",
         "SMT must report the exact root as counterexample: {}",
-        props[0i64]
+        props[0]
     );
 }
 
@@ -759,13 +759,13 @@ fn user_smt_property_json_carries_real_arith_model_and_refutation_model() {
     );
     let props = property_records(&output.stdout);
     assert_eq!(props.len(), 1, "records: {props:?}");
-    assert_eq!(props[0i64]["status"], "failed");
-    assert_eq!(props[0i64]["proof_tier"], "smt");
-    assert_eq!(props[0i64]["arith_model"], "real");
+    assert_eq!(props[0]["status"], "failed");
+    assert_eq!(props[0]["proof_tier"], "smt");
+    assert_eq!(props[0]["arith_model"], "real");
     assert!(
-        props[0i64]["counterexample"].get("x").is_some(),
+        props[0]["counterexample"].get("x").is_some(),
         "SMT counterexample should surface model bindings: {}",
-        props[0i64]
+        props[0]
     );
 }
 
@@ -820,7 +820,7 @@ import Std.Contracts (normal_cdf)
     );
     let props = property_records(&output.stdout);
     assert_eq!(props.len(), 1, "records: {props:?}");
-    let prop = &props[0i64];
+    let prop = &props[0];
     assert_eq!(prop["name"], "put_call_parity_with_cdf_contract");
     assert_eq!(prop["status"], "passed");
     assert_eq!(prop["proof_tier"], "smt");
@@ -1574,7 +1574,7 @@ fn bridge_failure_resolves_spans_manifest_to_ears_source() {
   "spans": [
     {
       "deep_node_id": "req_FIN_003",
-      "deep_path": "module.def[2i64]",
+      "deep_path": "module.def[2]",
       "ears_id": "FIN-003",
       "ears_file": "references/finance_options/options_rules.ears",
       "ears_text": "WHILE the exchange is open, the portfolio delta shall be at most the limit.",
@@ -1674,7 +1674,7 @@ fn wi8_bridge_green_assumption_discharge_tier_joins_to_c_earchin_source_id() {
   "spans": [
     {
       "deep_node_id": "req_FIN_007",
-      "deep_path": "module.def[2i64]",
+      "deep_path": "module.def[2]",
       "ears_id": "FIN-007",
       "ears_file": "references/finance_options/options_rules.ears",
       "ears_text": "The premium shall be non-negative.",
@@ -2350,12 +2350,12 @@ fn goal_field_carries_the_property_body_for_an_smt_proof() {
     assert!(output.status.success());
     let records = property_records(&output.stdout);
     assert_eq!(records.len(), 1, "records: {records:?}");
-    assert_eq!(records[0i64]["proof_tier"], "smt");
-    assert_eq!(records[0i64]["status"], "passed");
+    assert_eq!(records[0]["proof_tier"], "smt");
+    assert_eq!(records[0]["status"], "passed");
     assert_eq!(
-        records[0i64]["goal"], "((x - 1.0) <= x)",
+        records[0]["goal"], "((x - 1.0) <= x)",
         "an smt proof still carries the discharged proposition: {}",
-        records[0i64]
+        records[0]
     );
 }
 
@@ -2387,11 +2387,11 @@ fn goal_field_carries_the_body_for_a_refuted_unguarded_property() {
         .expect("run prove");
     let records = property_records(&output.stdout);
     assert_eq!(records.len(), 1, "records: {records:?}");
-    assert_eq!(records[0i64]["status"], "failed");
+    assert_eq!(records[0]["status"], "failed");
     assert_eq!(
-        records[0i64]["goal"], "(((x - 12345.0) * (x - 12345.0)) > 0.0)",
+        records[0]["goal"], "(((x - 12345.0) * (x - 12345.0)) > 0.0)",
         "a refuted unguarded property binds its FAILED verdict to the exact body claim: {}",
-        records[0i64]
+        records[0]
     );
 }
 
@@ -2431,9 +2431,9 @@ fn goal_field_carries_the_invariant_predicate_for_an_obligation() {
         .expect("run prove");
     let records = obligation_records(&output.stdout);
     assert_eq!(records.len(), 1, "obligation records: {records:?}");
-    let goal = records[0i64]["goal"]
+    let goal = records[0]["goal"]
         .as_str()
-        .unwrap_or_else(|| panic!("obligation record must carry a goal: {}", records[0i64]));
+        .unwrap_or_else(|| panic!("obligation record must carry a goal: {}", records[0]));
     // The bare predicate `p.value >= 0.0 && p.value <= 1.0`, lowered to Deep and
     // metadata-stripped: an `and` of two comparisons over the binder's `value`.
     assert_eq!(
@@ -2609,11 +2609,11 @@ fn issue_435_pure_fuzz_base_reads_fuzz_validated_not_proven_modulo_contract() {
     assert!(output.status.success());
     let records = property_records(&output.stdout);
     assert_eq!(records.len(), 1, "records: {records:?}");
-    let record = &records[0i64];
+    let record = &records[0];
     assert_eq!(record["proof_tier"], "fuzz", "the base is a fuzz fallback");
     assert_eq!(record["status"], "passed");
     // The only assumption is discharged by fuzz -- nothing SMT-discharged.
-    assert_eq!(record["assumptions"][0i64]["discharge"]["method"], "fuzz");
+    assert_eq!(record["assumptions"][0]["discharge"]["method"], "fuzz");
     // The honesty contract: a pure-fuzz base is `fuzz_validated`, NEVER a
     // `proven_*` badge.
     assert_eq!(record["composite_verdict"], "fuzz_validated");
@@ -2661,16 +2661,16 @@ def square(x: f32) -> f32 = mul(x, x)
     );
     let props = property_records(&output.stdout);
     assert_eq!(props.len(), 1, "records: {props:?}");
-    assert_eq!(props[0i64]["status"], "passed", "{}", props[0i64]);
+    assert_eq!(props[0]["status"], "passed", "{}", props[0]);
     assert_eq!(
-        props[0i64]["proof_tier"], "smt",
+        props[0]["proof_tier"], "smt",
         "must prove at SMT, not drop to fuzz: {}",
-        props[0i64]
+        props[0]
     );
     assert_eq!(
-        props[0i64]["composite_verdict"], "proven_modulo_real_arithmetic",
+        props[0]["composite_verdict"], "proven_modulo_real_arithmetic",
         "{}",
-        props[0i64]
+        props[0]
     );
 }
 
@@ -2703,14 +2703,14 @@ fn issue_417_mixed_call_form_arith_false_goal_disproves_at_smt() {
     let props = property_records(&output.stdout);
     assert_eq!(props.len(), 1, "records: {props:?}");
     assert_eq!(
-        props[0i64]["status"], "failed",
+        props[0]["status"], "failed",
         "false call-form goal must disprove at SMT, not fuzz-pass: {}",
-        props[0i64]
+        props[0]
     );
     assert_eq!(
-        props[0i64]["proof_tier"], "smt",
+        props[0]["proof_tier"], "smt",
         "disproof must come from SMT: {}",
-        props[0i64]
+        props[0]
     );
 }
 
@@ -2752,20 +2752,20 @@ where (d > 0.5), (r > g), (r < 9.5):
         );
         let props = property_records(&output.stdout);
         assert_eq!(props.len(), 1, "records: {props:?}");
-        assert_eq!(props[0i64]["status"], expected_status, "{}", props[0i64]);
-        assert_eq!(props[0i64]["proof_tier"], "smt", "{}", props[0i64]);
-        assert_eq!(props[0i64]["samples"], 0, "{}", props[0i64]);
+        assert_eq!(props[0]["status"], expected_status, "{}", props[0]);
+        assert_eq!(props[0]["proof_tier"], "smt", "{}", props[0]);
+        assert_eq!(props[0]["samples"], 0, "{}", props[0]);
         if expected_status == "passed" {
             assert_eq!(
-                props[0i64]["composite_verdict"], "proven_modulo_real_arithmetic",
+                props[0]["composite_verdict"], "proven_modulo_real_arithmetic",
                 "{}",
-                props[0i64]
+                props[0]
             );
         } else {
             assert!(
-                props[0i64].get("counterexample").is_some(),
+                props[0].get("counterexample").is_some(),
                 "SMT disproof must carry a model: {}",
-                props[0i64]
+                props[0]
             );
         }
     }
@@ -2890,12 +2890,12 @@ where (x > 0.5), (x < 9.5):
     assert_eq!(output.status.code(), Some(2));
     let props = property_records(&output.stdout);
     assert_eq!(props.len(), 1, "records: {props:?}");
-    assert_eq!(props[0i64]["status"], "unsupported", "{}", props[0i64]);
-    assert_eq!(props[0i64]["proof_tier"], "smt", "{}", props[0i64]);
+    assert_eq!(props[0]["status"], "unsupported", "{}", props[0]);
+    assert_eq!(props[0]["proof_tier"], "smt", "{}", props[0]);
     assert_eq!(
-        props[0i64]["reason"], "scalar grad SMT lowering does not support call `exp`",
+        props[0]["reason"], "scalar grad SMT lowering does not support call `exp`",
         "{}",
-        props[0i64]
+        props[0]
     );
 }
 
@@ -3018,11 +3018,11 @@ out = conditional_derivative(2.0)
     assert_eq!(prove.status.code(), Some(2));
     let props = property_records(&prove.stdout);
     assert_eq!(props.len(), 1, "records: {props:?}");
-    assert_eq!(props[0i64]["status"], "unsupported", "{}", props[0i64]);
+    assert_eq!(props[0]["status"], "unsupported", "{}", props[0]);
     assert_eq!(
-        props[0i64]["reason"], "scalar grad SMT lowering does not support conditionals",
+        props[0]["reason"], "scalar grad SMT lowering does not support conditionals",
         "{}",
-        props[0i64]
+        props[0]
     );
 
     let build = Command::cargo_bin("chelis")
@@ -3080,12 +3080,12 @@ out = cast_derivative(2.0)
     assert_eq!(prove.status.code(), Some(2));
     let props = property_records(&prove.stdout);
     assert_eq!(props.len(), 1, "records: {props:?}");
-    assert_eq!(props[0i64]["status"], "unsupported", "{}", props[0i64]);
+    assert_eq!(props[0]["status"], "unsupported", "{}", props[0]);
     assert_eq!(
-        props[0i64]["reason"],
+        props[0]["reason"],
         "scalar grad SMT lowering does not support casts in differentiated bodies",
         "{}",
-        props[0i64]
+        props[0]
     );
 
     let build = Command::cargo_bin("chelis")
@@ -3185,8 +3185,8 @@ out = quadratic_grad(3.0)
     );
     let props = property_records(&prove.stdout);
     assert_eq!(props.len(), 1, "records: {props:?}");
-    assert_eq!(props[0i64]["status"], "passed", "{}", props[0i64]);
-    assert_eq!(props[0i64]["proof_tier"], "smt", "{}", props[0i64]);
+    assert_eq!(props[0]["status"], "passed", "{}", props[0]);
+    assert_eq!(props[0]["proof_tier"], "smt", "{}", props[0]);
 
     let quadratic = |x: f64| x * x + x;
     let h = 1e-4;
@@ -3252,16 +3252,16 @@ def fabs(x: f32) -> f32 = if (x >= 0.0) then x else (0.0 - x)
     );
     let props = property_records(&output.stdout);
     assert_eq!(props.len(), 1, "records: {props:?}");
-    assert_eq!(props[0i64]["status"], "passed", "{}", props[0i64]);
+    assert_eq!(props[0]["status"], "passed", "{}", props[0]);
     assert_eq!(
-        props[0i64]["proof_tier"], "smt",
+        props[0]["proof_tier"], "smt",
         "nested goal-site fmax must lower to SMT, not return unsupported: {}",
-        props[0i64]
+        props[0]
     );
     assert_ne!(
-        props[0i64]["status"], "unsupported",
+        props[0]["status"], "unsupported",
         "the chelis#425 symptom (does not lower to Tier B) must be gone: {}",
-        props[0i64]
+        props[0]
     );
 }
 
@@ -3314,7 +3314,7 @@ fn issue_434_transcendental_smt_only_is_honest_unsupported_not_internal_error() 
         .expect("run prove");
     let props = property_records(&output.stdout);
     assert_eq!(props.len(), 1, "records: {props:?}");
-    let prop = &props[0i64];
+    let prop = &props[0];
     // Verdict: Unsupported, never proven, never a passed fuzz-as-proven.
     assert_eq!(
         prop["status"], "unsupported",
@@ -3370,7 +3370,7 @@ fn issue_434_transcendental_auto_is_fuzz_validated_never_proven() {
         .expect("run prove");
     let props = property_records(&output.stdout);
     assert_eq!(props.len(), 1, "records: {props:?}");
-    let prop = &props[0i64];
+    let prop = &props[0];
     // auto falls to Tier C (fuzz); the verdict must read fuzz_validated, NEVER
     // any proven_* form. This is the no-silent-fuzz-as-proven invariant.
     assert_eq!(

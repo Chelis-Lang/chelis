@@ -11,7 +11,7 @@
 //!
 //! Fix (`extract_reshape_dim_list` in `chelis-ir/src/lower.rs`): a
 //! `shape(operand, axis)`-derived reshape target dim (directly or through the
-//! `let k = shape(x, 0); reshape(&x, [k, 1])` indirection) is resolved to the
+//! `let k = shape(x, 0); reshape(&x, [k, 1i64])` indirection) is resolved to the
 //! operand's declaring source dim and recorded as a `shape_dep` — folding to a
 //! concrete `Lit` when the operand axis is static and to a Load-carried
 //! `Named` when symbolic. Either way the dim traces to a declaring input, so
@@ -133,12 +133,12 @@ fn finite_difference(forward_body: &str, base: &[f64]) -> Vec<f64> {
     fd
 }
 
-// Linear loss: sum(reshape(x, [shape(x,0), 1])) = sum(x). grad == 1 everywhere.
+// Linear loss: sum(reshape(x, [shape(x,0), 1i64])) = sum(x). grad == 1 everywhere.
 const LINEAR_BODY: &str = "  k = cast(shape(x, cast(0, int32)), int64)\n\
   r = reshape(&x, [k, cast(1, int64)])\n\
   sum(sum(r, cast(0, int32)), cast(0, int32)) |> tensor_to_scalar";
 
-// Nonlinear loss: sum(square(reshape(x, [shape(x,0), 1]))) = sum(x^2).
+// Nonlinear loss: sum(square(reshape(x, [shape(x,0), 1i64]))) = sum(x^2).
 // grad == 2 x.
 const NONLINEAR_BODY: &str = "  k = cast(shape(x, cast(0, int32)), int64)\n\
   r = reshape(&x, [k, cast(1, int64)])\n\

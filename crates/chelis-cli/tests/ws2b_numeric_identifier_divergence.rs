@@ -300,13 +300,13 @@ const EVAL_MOD_ZERO_DIAGNOSTIC: &str = "numeric trap: division by zero in mod at
 #[test]
 fn issue_387_integer_trunc_div_truncates_eval_matches_backend() {
     let source = "def d(x: tensor[2, int64], y: tensor[2, int64]) -> tensor[2, int64] = trunc_div(x, y)\n\
-out = d(cast(to_tensor([7, -7]), int64), cast(to_tensor([2i64, 2i64]), int64))\n";
+out = d(cast(to_tensor([7, -7]), int64), cast(to_tensor([2, 2]), int64))\n";
 
     let build = chelis_build_c(source, "inttruncdiv");
     let stdout = compile_and_run_emitted(build.path(), &build.path().join("inttruncdiv.c"));
     assert_eq!(
         binding_line(&stdout, "out"),
-        "out = tensor(shape=[2i64], data=[3, -3])",
+        "out = tensor(shape=[2], data=[3, -3])",
         "integer trunc_div must truncate toward zero (7/2=3, -7/2=-3); stdout={stdout:?}",
     );
 
@@ -326,13 +326,13 @@ out = d(cast(to_tensor([7, -7]), int64), cast(to_tensor([2i64, 2i64]), int64))\n
 #[test]
 fn chelis_178_integer_floor_div_rounds_toward_neg_inf_eval_matches_backend() {
     let source = "def d(x: tensor[2, int64], y: tensor[2, int64]) -> tensor[2, int64] = floor_div(x, y)\n\
-out = d(cast(to_tensor([7, -7]), int64), cast(to_tensor([2i64, 2i64]), int64))\n";
+out = d(cast(to_tensor([7, -7]), int64), cast(to_tensor([2, 2]), int64))\n";
 
     let build = chelis_build_c(source, "intfloordiv");
     let stdout = compile_and_run_emitted(build.path(), &build.path().join("intfloordiv.c"));
     assert_eq!(
         binding_line(&stdout, "out"),
-        "out = tensor(shape=[2i64], data=[3, -4])",
+        "out = tensor(shape=[2], data=[3, -4])",
         "integer floor_div must round toward -inf (7/2=3, -7/2=-4); stdout={stdout:?}",
     );
 
@@ -457,11 +457,11 @@ fn issue_387_integer_mod_by_zero_traps_with_same_diagnostic() {
 /// SIGFPE-dependent trap silently returned a wrong value there.
 #[test]
 fn issue_387_integer_div_by_zero_traps_in_backend() {
-    // y - z = [2i64, 0i64]: the second divisor is zero, computed at runtime.
+    // y - z = [2, 0]: the second divisor is zero, computed at runtime.
     // chelis#178: integer division is `trunc_div`; the zero-divisor guard
     // applies to it identically.
     let source = "def d(x: tensor[2, int64], y: tensor[2, int64], z: tensor[2, int64]) -> tensor[2, int64] = trunc_div(x, sub(y, z))\n\
-out = d(cast(to_tensor([7i64, 8i64]), int64), cast(to_tensor([3i64, 5i64]), int64), cast(to_tensor([1i64, 5i64]), int64))\n";
+out = d(cast(to_tensor([7, 8]), int64), cast(to_tensor([3, 5]), int64), cast(to_tensor([1, 5]), int64))\n";
 
     let build = chelis_build_c(source, "intdivtrap");
     let kernel_c = build.path().join("intdivtrap.c");
@@ -623,7 +623,7 @@ out = make(to_tensor([cast(1.0, f64), cast(2.0, f64)]))\n";
     let eval_out = chelis_eval_ok(source, "s2t_capture");
     assert_eq!(
         binding_line(&eval_out, "out"),
-        "out = tensor(shape=[2i64], data=[2.1, 3.1])",
+        "out = tensor(shape=[2], data=[2.1, 3.1])",
         "eval: 1.1 + [1.0, 2.0] = [2.1, 3.1]; stdout={eval_out:?}",
     );
 
@@ -650,7 +650,7 @@ out = make(to_tensor([cast(1.0, f64), cast(2.0, f64)]))\n";
     // Pin the exact value too, so a both-lanes-wrong regression can't pass.
     assert_eq!(
         binding_line(&stdout, "out"),
-        "out = tensor(shape=[2i64], data=[2.1, 3.1])",
+        "out = tensor(shape=[2], data=[2.1, 3.1])",
         "C: captured 1.1 must survive as f64; stdout={stdout:?}",
     );
 }
@@ -691,7 +691,7 @@ out = am(to_tensor([[1.0, 9.0, 3.0], [7.0, 5.0, 6.0]]))\n";
     let stdout = compile_and_run_emitted(build.path(), &build.path().join("argmax.c"));
     assert_eq!(
         binding_line(&stdout, "out"),
-        "out = tensor(shape=[2i64], data=[1i64, 0i64])",
+        "out = tensor(shape=[2], data=[1, 0])",
         "argmax of row 0 is index 1, row 1 is index 0; stdout={stdout:?}",
     );
     // The reinterpreted-f32-bits signature must never appear.
@@ -718,7 +718,7 @@ out = am(to_tensor([[1.0, 9.0, 3.0], [7.0, 5.0, 6.0]]))\n";
     let stdout = compile_and_run_emitted(build.path(), &build.path().join("argmin.c"));
     assert_eq!(
         binding_line(&stdout, "out"),
-        "out = tensor(shape=[2i64], data=[0i64, 1i64])",
+        "out = tensor(shape=[2], data=[0, 1])",
         "argmin of row 0 is index 0, row 1 is index 1; stdout={stdout:?}",
     );
     assert!(
@@ -770,12 +770,12 @@ out = add(register, to_tensor([1.0, 2.0]))\n";
     let stdout = compile_and_run_emitted(build.path(), &kernel_c);
     assert_eq!(
         binding_line(&stdout, "register"),
-        "register = tensor(shape=[2i64], data=[10.0, 20.0])",
+        "register = tensor(shape=[2], data=[10.0, 20.0])",
         "stdout={stdout:?}",
     );
     assert_eq!(
         binding_line(&stdout, "out"),
-        "out = tensor(shape=[2i64], data=[11.0, 22.0])",
+        "out = tensor(shape=[2], data=[11.0, 22.0])",
         "stdout={stdout:?}",
     );
 
@@ -820,7 +820,7 @@ out = f(to_tensor([1.0, 2.0]))\n";
     let stdout = compile_and_run_emitted(build.path(), &kernel_c);
     assert_eq!(
         binding_line(&stdout, "out"),
-        "out = tensor(shape=[2i64], data=[11.0, 22.0])",
+        "out = tensor(shape=[2], data=[11.0, 22.0])",
         "stdout={stdout:?}",
     );
 
@@ -845,7 +845,7 @@ out = add(w, to_tensor([1.0, 2.0]))\n";
     let stdout = compile_and_run_emitted(build.path(), &build.path().join("ordinary.c"));
     assert_eq!(
         binding_line(&stdout, "out"),
-        "out = tensor(shape=[2i64], data=[11.0, 22.0])",
+        "out = tensor(shape=[2], data=[11.0, 22.0])",
         "stdout={stdout:?}",
     );
 }
@@ -878,12 +878,12 @@ out = df(to_tensor([1.0, 5.0, 3.0]))\n";
     );
 
     // Compile + run against the (debug) runtime; a dtype-assert abort would
-    // make the binary exit non-zero. d/dx max([1i64, 5i64, 3i64]) routes the gradient
-    // to the max element (index 1): [0i64, 1i64, 0i64].
+    // make the binary exit non-zero. d/dx max([1,5,3]) routes the gradient
+    // to the max element (index 1): [0, 1, 0].
     let stdout = compile_and_run_emitted(build.path(), &kernel_c);
     assert_eq!(
         binding_line(&stdout, "out"),
-        "out = tensor(shape=[3i64], data=[0.0, 1.0, 0.0])",
+        "out = tensor(shape=[3], data=[0.0, 1.0, 0.0])",
         "max-reduce backward gradient flows to the max element; stdout={stdout:?}",
     );
 
@@ -934,7 +934,7 @@ out = df(to_tensor([1.0, 2.0, 3.0]))\n";
 // the float-typed `->data`, so `(int)t->data[i]` on a CHELIS_I32 index
 // `(int)`-truncates the FLOAT reinterpretation of the int32 bits (index `2`
 // → `(int)2.8e-45f` → `0`), silently gathering the WRONG row. The user
-// surface defaults integer literals to int32 (`to_tensor([2i64, 0i64, 1i64])` is a
+// surface defaults integer literals to int32 (`to_tensor([2, 0, 1])` is a
 // CHELIS_I32 tensor), so this fires on ordinary index code; the pre-fix
 // corpus never reproduced it because every gather fixture cast indices to
 // int64 (`cast(_, int64)`), which took the always-correct CHELIS_I64 branch.
@@ -953,23 +953,23 @@ out = df(to_tensor([1.0, 2.0, 3.0]))\n";
 /// width via `read_index_slot`).
 #[test]
 fn issue_476_gather_int32_indices_backend_matches_eval() {
-    // indices [2i64, 0i64, 1i64] over a 3x2 table → rows [30i64, 31i64],[10i64, 11i64],[20i64, 21i64].
+    // indices [2, 0, 1] over a 3x2 table → rows [30,31],[10,11],[20,21].
     let source = "table = to_tensor([[10.0, 11.0], [20.0, 21.0], [30.0, 31.0]])\n\
-embed = gather(table, to_tensor([2i64, 0i64, 1i64]), 0)\n";
+embed = gather(table, to_tensor([2, 0, 1]), 0)\n";
 
     let build = chelis_build_c(source, "gatheri32");
     let stdout = compile_and_run_emitted(build.path(), &build.path().join("gatheri32.c"));
     assert_eq!(
         binding_line(&stdout, "embed"),
-        "embed = tensor(shape=[3i64, 2i64], data=[30.0, 31.0, 10.0, 11.0, 20.0, 21.0])",
+        "embed = tensor(shape=[3, 2], data=[30.0, 31.0, 10.0, 11.0, 20.0, 21.0])",
         "int32-index gather must select rows 2,0,1; stdout={stdout:?}",
     );
     // NEGATIVE: the pre-fix corruption read every int32 index as 0 (the
     // float reinterpretation of small ints rounds toward zero), so every
-    // output row was row 0 (`[10i64, 11i64]`). That signature must never appear.
+    // output row was row 0 (`[10,11]`). That signature must never appear.
     assert_ne!(
         binding_line(&stdout, "embed"),
-        "embed = tensor(shape=[3i64, 2i64], data=[10.0, 11.0, 10.0, 11.0, 10.0, 11.0])",
+        "embed = tensor(shape=[3, 2], data=[10.0, 11.0, 10.0, 11.0, 10.0, 11.0])",
         "pre-fix #476 read every int32 index as row 0; that corruption must \
          not recur; stdout={stdout:?}",
     );
@@ -988,13 +988,13 @@ embed = gather(table, to_tensor([2i64, 0i64, 1i64]), 0)\n";
 #[test]
 fn issue_476_gather_int64_indices_unchanged() {
     let source = "table = to_tensor([[10.0, 11.0], [20.0, 21.0], [30.0, 31.0]])\n\
-embed = gather(table, cast(to_tensor([2i64, 0i64, 1i64]), int64), 0)\n";
+embed = gather(table, cast(to_tensor([2, 0, 1]), int64), 0)\n";
 
     let build = chelis_build_c(source, "gatheri64");
     let stdout = compile_and_run_emitted(build.path(), &build.path().join("gatheri64.c"));
     assert_eq!(
         binding_line(&stdout, "embed"),
-        "embed = tensor(shape=[3i64, 2i64], data=[30.0, 31.0, 10.0, 11.0, 20.0, 21.0])",
+        "embed = tensor(shape=[3, 2], data=[30.0, 31.0, 10.0, 11.0, 20.0, 21.0])",
         "int64-index gather must select rows 2,0,1; stdout={stdout:?}",
     );
 
@@ -1013,16 +1013,16 @@ embed = gather(table, cast(to_tensor([2i64, 0i64, 1i64]), int64), 0)\n";
 /// user-facing scatter surface in addition to the inline emit.
 #[test]
 fn issue_476_scatter_replace_int32_indices_backend_matches_eval() {
-    // base 3x2 zeros; updates rows written at indices [2i64, 0i64, 1i64].
+    // base 3x2 zeros; updates rows written at indices [2,0,1].
     let source = "base = to_tensor([[0.0, 0.0], [0.0, 0.0], [0.0, 0.0]])\n\
-out = scatter(base, to_tensor([2i64, 0i64, 1i64]), to_tensor([[1.0, 1.0], [2.0, 2.0], [3.0, 3.0]]), 0, \"replace\")\n";
+out = scatter(base, to_tensor([2, 0, 1]), to_tensor([[1.0, 1.0], [2.0, 2.0], [3.0, 3.0]]), 0, \"replace\")\n";
 
     let build = chelis_build_c(source, "scatteri32");
     let stdout = compile_and_run_emitted(build.path(), &build.path().join("scatteri32.c"));
     assert_eq!(
         binding_line(&stdout, "out"),
-        "out = tensor(shape=[3i64, 2i64], data=[2.0, 2.0, 3.0, 3.0, 1.0, 1.0])",
-        "scatter_replace at int32 indices [2i64, 0i64, 1i64] places update row 0→pos2, \
+        "out = tensor(shape=[3, 2], data=[2.0, 2.0, 3.0, 3.0, 1.0, 1.0])",
+        "scatter_replace at int32 indices [2,0,1] places update row 0→pos2, \
          1→pos0, 2→pos1; stdout={stdout:?}",
     );
 
@@ -1042,7 +1042,7 @@ out = scatter(base, to_tensor([2i64, 0i64, 1i64]), to_tensor([[1.0, 1.0], [2.0, 
 /// accumulates grad 2; index 0 once → grad 1; index 1 never → grad 0.
 #[test]
 fn issue_476_gather_grad_scatter_add_int32_backend_matches_eval() {
-    let source = "def f(table: tensor[3, 2, f32]) -> f32 = tensor_to_scalar(sum(sum(gather(table, to_tensor([2i64, 0i64, 2i64]), 0), 0), 0))\n\
+    let source = "def f(table: tensor[3, 2, f32]) -> f32 = tensor_to_scalar(sum(sum(gather(table, to_tensor([2, 0, 2]), 0), 0), 0))\n\
 def df(table: tensor[3, 2, f32]) -> tensor[3, 2, f32] = grad(f)(table)\n\
 out = df(to_tensor([[10.0, 11.0], [20.0, 21.0], [30.0, 31.0]]))\n";
 
@@ -1050,16 +1050,16 @@ out = df(to_tensor([[10.0, 11.0], [20.0, 21.0], [30.0, 31.0]]))\n";
     let stdout = compile_and_run_emitted(build.path(), &build.path().join("gathergradi32.c"));
     assert_eq!(
         binding_line(&stdout, "out"),
-        "out = tensor(shape=[3i64, 2i64], data=[1.0, 1.0, 0.0, 0.0, 2.0, 2.0])",
-        "grad of gather([2i64, 0i64, 2i64]) accumulates 1 at row0, 0 at row1, 2 at row2; \
+        "out = tensor(shape=[3, 2], data=[1.0, 1.0, 0.0, 0.0, 2.0, 2.0])",
+        "grad of gather([2,0,2]) accumulates 1 at row0, 0 at row1, 2 at row2; \
          stdout={stdout:?}",
     );
     // NEGATIVE: the pre-fix corruption read every index as 0, so the ENTIRE
-    // gradient (3 gather positions) would pile onto row 0 (`[3i64, 3i64]`) and rows
+    // gradient (3 gather positions) would pile onto row 0 (`[3,3]`) and rows
     // 1,2 would be zero. That signature must never appear.
     assert_ne!(
         binding_line(&stdout, "out"),
-        "out = tensor(shape=[3i64, 2i64], data=[3.0, 3.0, 0.0, 0.0, 0.0, 0.0])",
+        "out = tensor(shape=[3, 2], data=[3.0, 3.0, 0.0, 0.0, 0.0, 0.0])",
         "pre-fix #476 piled the whole gather grad onto row 0; that corruption \
          must not recur; stdout={stdout:?}",
     );
@@ -1091,7 +1091,7 @@ out = df(to_tensor([[10.0, 11.0], [20.0, 21.0], [30.0, 31.0]]))\n";
 #[test]
 fn issue_172_max_reduce_propagates_nan_backend_matches_eval() {
     // Row 0: a/b = [0/0, 1/1] = [NaN, 1] -> max NaN. Row 1: [2/1, 3/1] =
-    // [2i64, 3i64] -> max 3. The output is a `tensor[2i64]` (both lanes label it),
+    // [2, 3] -> max 3. The output is a `tensor[2]` (both lanes label it),
     // and the non-NaN row proves the fix doesn't blanket-NaN the result.
     let source = "def f(a: tensor[2, 2, f32], b: tensor[2, 2, f32]) -> tensor[2, f32] = max_reduce(div(a, b), 1)\n\
 out = f(to_tensor([[0.0, 1.0], [2.0, 3.0]]), to_tensor([[0.0, 1.0], [1.0, 1.0]]))\n";
@@ -1159,7 +1159,7 @@ out = f(to_tensor([[1.0, 3.0, 2.0], [6.0, 4.0, 5.0]]))\n";
     let stdout = compile_and_run_emitted(build.path(), &build.path().join("maxok.c"));
     assert_eq!(
         binding_line(&stdout, "out"),
-        "out = tensor(shape=[2i64], data=[3.0, 6.0])",
+        "out = tensor(shape=[2], data=[3.0, 6.0])",
         "NaN-free max_reduce must be unchanged; stdout={stdout:?}",
     );
     let eval_out = chelis_eval_ok(source, "maxok");

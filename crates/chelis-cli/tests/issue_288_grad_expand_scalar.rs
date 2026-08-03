@@ -138,8 +138,8 @@ fn issue_288_eval_gradient_is_correct() {
         "issue #288: `chelis eval` must succeed; stdout={stdout} stderr={stderr}",
     );
     assert!(
-        stdout.contains("shape=[2i64]"),
-        "gradient must be tensor[2i64]; got stdout={stdout}",
+        stdout.contains("shape=[2]"),
+        "gradient must be tensor[2]; got stdout={stdout}",
     );
     assert!(
         stdout.contains("data=[2.5, 2.5]"),

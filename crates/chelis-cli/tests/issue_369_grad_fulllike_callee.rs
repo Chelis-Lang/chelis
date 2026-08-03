@@ -17,7 +17,7 @@
 //! so the `expand` size argument is `cast(var len, int32)`, NOT a direct
 //! `shape(...)` app. The pre-fix extent recognizer cannot see through the
 //! `let`, so the size silently defaults to `Lit(1)`; the forward `mul(x,
-//! twos)` then mixes `tensor[3i64]` with `tensor[1i64]`, the type checker
+//! twos)` then mixes `tensor[3]` with `tensor[1]`, the type checker
 //! accepts it via size-1 broadcasting, but `grad` clones the forward into
 //! the backward DAG and `verify` rejects:
 //!
@@ -34,7 +34,7 @@
 //! INLINE-DIRECT form (shape inlined into the expand size) PASSES — it is
 //! the discriminator and the #318 control here.
 //!
-//! `loss(x) = sum(2*x)`, so `df(x) = [2i64, 2i64, 2i64]` for any `x`. This file is
+//! `loss(x) = sum(2*x)`, so `df(x) = [2, 2, 2]` for any `x`. This file is
 //! the end-to-end CLI acceptance oracle: `check` clean and `eval` runs to
 //! the correct gradient through the full `[n]`-callee idiom. The lowering
 //! and IR-level grad+eval coverage lives in `crates/chelis-ir/src/lower.rs`
@@ -50,7 +50,7 @@ use tempfile::tempdir;
 
 /// The headline reproducer: `tensor_full_like` behind the `[n]`-quantified
 /// callee — the exact downstream `tests_blocked/grad/full_like_scalar_broadcast.ch`
-/// idiom. `df(to_tensor([1i64, 2i64, 3i64])) = [2i64, 2i64, 2i64]`.
+/// idiom. `df(to_tensor([1,2,3])) = [2, 2, 2]`.
 const REPRO_CALLEE: &str = "module Repro.GradFullLikeCallee\n\
 def tensor_full_like[n](x: &tensor[n, f32], value: f32) -> tensor[n, f32] = {\n\
   len = shape(x, cast(0, int32))\n\
@@ -81,7 +81,7 @@ out = df(to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)]))\n";
 /// discriminator.
 const REPRO_INLINE_DIRECT: &str = "module Repro.GradInlineDirect\n\
 def loss_direct(x: tensor[3, f32]) -> f32 = {\n\
-  twos = expand(scalar_to_tensor(cast(2.0, f32)), cast(0, int32), cast(shape(&x, cast(0, int64)), int64))\n\
+  twos = expand(scalar_to_tensor(cast(2.0, f32)), cast(0, int32), cast(shape(&x, cast(0, int32)), int64))\n\
   sum(mul(x, twos), cast(0, int32)) |> tensor_to_scalar\n\
 }\n\
 def df(x: tensor[3, f32]) -> tensor[3, f32] = grad(loss_direct)(x)\n\
@@ -93,20 +93,20 @@ out = df(to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)]))\n";
 /// does NOT leak a stale entry ACROSS the def boundary. Both defs bind the
 /// SAME name `len` to a `shape(...)` read, at DIFFERENT extents:
 ///
-/// * caller `loss_cross(x: tensor[5i64])` binds `len = shape(&guide, 0)` where
-///   `guide: tensor[3i64]` — caller's `len` is 3 — and uses it to build a
-///   grad-neutral `tensor[3i64]` of zeros, so the caller's `shape_bindings`
+/// * caller `loss_cross(x: tensor[5])` binds `len = shape(&guide, 0)` where
+///   `guide: tensor[3]` — caller's `len` is 3 — and uses it to build a
+///   grad-neutral `tensor[3]` of zeros, so the caller's `shape_bindings`
 ///   genuinely carries `len -> 3`.
 /// * the `tensor_full_like(&x, ...)` callee independently binds its OWN
-///   `len = shape(x, 0)` where `x: tensor[5i64]` — callee's `len` is 5 — and
+///   `len = shape(x, 0)` where `x: tensor[5]` — callee's `len` is 5 — and
 ///   that inner `len` MUST win when its `expand` extent is recovered.
 ///
 /// If the caller's `len -> 3` leaked into the callee, the callee's `expand`
-/// would build a `tensor[3i64]` and `mul(x: tensor[5i64], twos: tensor[3i64])` would
+/// would build a `tensor[3]` and `mul(x: tensor[5], twos: tensor[3])` would
 /// fail the backward DAG with `Lit(5) vs Lit(3)` — the exact #369 symptom.
-/// `loss = sum(2*x) + sum(zeros3)`, so `df(x) = [2i64, 2i64, 2i64, 2i64, 2i64]` (the
-/// `tensor[5i64]` shape itself is the discriminator: a leaked caller extent
-/// would have produced a tensor[3i64]-shaped failure, not a wrong gradient).
+/// `loss = sum(2*x) + sum(zeros3)`, so `df(x) = [2, 2, 2, 2, 2]` (the
+/// `tensor[5]` shape itself is the discriminator: a leaked caller extent
+/// would have produced a tensor[3]-shaped failure, not a wrong gradient).
 const REPRO_CROSS_DEF_SHADOW: &str = "module Repro.GradCrossDefShadow\n\
 def tensor_full_like[n](y: &tensor[n, f32], value: f32) -> tensor[n, f32] = {\n\
   len = shape(y, cast(0, int32))\n\
@@ -178,7 +178,7 @@ fn run_eval(source: &str, stem: &str) -> std::process::Output {
 }
 
 /// Assert `chelis eval` of `source` succeeds and prints the constant
-/// gradient `[2i64, 2i64, 2i64]` as a `tensor[3i64]`.
+/// gradient `[2, 2, 2]` as a `tensor[3]`.
 fn assert_eval_grad_is_2_2_2(source: &str, stem: &str, label: &str) {
     let output = run_eval(source, stem);
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -188,12 +188,12 @@ fn assert_eval_grad_is_2_2_2(source: &str, stem: &str, label: &str) {
         "{label}: `chelis eval` must succeed; stdout={stdout} stderr={stderr}",
     );
     assert!(
-        stdout.contains("shape=[3i64]"),
-        "{label}: gradient must be tensor[3i64]; got stdout={stdout}",
+        stdout.contains("shape=[3]"),
+        "{label}: gradient must be tensor[3]; got stdout={stdout}",
     );
     assert!(
-        stdout.contains("data=[2i64, 2i64, 2i64]") || stdout.contains("data=[2.0, 2.0, 2.0]"),
-        "{label}: df(x) must equal [2i64, 2i64, 2i64]; got stdout={stdout}",
+        stdout.contains("data=[2, 2, 2]") || stdout.contains("data=[2.0, 2.0, 2.0]"),
+        "{label}: df(x) must equal [2, 2, 2]; got stdout={stdout}",
     );
 }
 
@@ -246,10 +246,10 @@ fn issue_369_inline_direct_control_still_works() {
 /// `tensor_full_like` callee both bind `len = shape(...)` at DIFFERENT
 /// extents (caller 3, callee 5). The callee's inner `len` must win — its
 /// `expand` recovers extent 5 (its own param), not the caller's 3 — so
-/// `df(x)` is the `tensor[5i64]` gradient `[2i64, 2i64, 2i64, 2i64, 2i64]`. A stale
+/// `df(x)` is the `tensor[5]` gradient `[2, 2, 2, 2, 2]`. A stale
 /// `shape_bindings` entry leaking across the def boundary would build a
-/// `tensor[3i64]` inside the callee and fail the backward DAG with `Lit(5) vs
-/// Lit(3)`; the `shape=[5i64]` + non-zero gradient assertion below is the
+/// `tensor[3]` inside the callee and fail the backward DAG with `Lit(5) vs
+/// Lit(3)`; the `shape=[5]` + non-zero gradient assertion below is the
 /// numeric oracle that the inner scope is honored. NOTE: this MUST run
 /// through the full checked CLI pipeline — the unchecked unit lower path
 /// has empty `program_defs`, so callee inlining does not resolve there.
@@ -265,14 +265,14 @@ fn issue_369_eval_cross_def_callee_shadow_inner_len_wins() {
          `Lit(5) vs Lit(3)`. stdout={stdout} stderr={stderr}",
     );
     assert!(
-        stdout.contains("shape=[5i64]"),
-        "cross-def shadow: gradient must be tensor[5i64] (the callee's param \
+        stdout.contains("shape=[5]"),
+        "cross-def shadow: gradient must be tensor[5] (the callee's param \
          extent, not the caller's 3); got stdout={stdout}",
     );
     assert!(
-        stdout.contains("data=[2i64, 2i64, 2i64, 2i64, 2i64]")
+        stdout.contains("data=[2, 2, 2, 2, 2]")
             || stdout.contains("data=[2.0, 2.0, 2.0, 2.0, 2.0]"),
-        "cross-def shadow: df(x) must equal [2i64, 2i64, 2i64, 2i64, 2i64]; got stdout={stdout}",
+        "cross-def shadow: df(x) must equal [2, 2, 2, 2, 2]; got stdout={stdout}",
     );
 }
 

@@ -182,12 +182,12 @@ fn assert_value_parity(source: &str, stem: &str, want: &[f64]) {
 }
 
 /// The chelis#664 headline: a runtime-strided operand beside the full
-/// input. eval rejects `[3i64]` vs `[6i64]`; pre-fix C exited 0 printing
-/// `[2i64, 5i64, 8i64]` (the strided view added to x's first three elements).
+/// input. eval rejects `[3]` vs `[6]`; pre-fix C exited 0 printing
+/// `[2, 5, 8]` (the strided view added to x's first three elements).
 #[test]
 fn issue_664_elementwise_stride_operand_mismatch_errs_in_both_lanes() {
     let source = format!(
-        "module Repro.ElemStride\nsig f: tensor[n, f32] -> tensor[n, f32]\ndef f(x) = {{\n  s = stride(x, cast(2, int32))\n  add(s, x)\n}}\nout = f(to_tensor([{}]))\n",
+        "module Repro.ElemStride\nsig f: tensor[n, f32] -> tensor[n, f32]\ndef f(x) = {{\n  s = stride(x, cast(2, int64))\n  add(s, x)\n}}\nout = f(to_tensor([{}]))\n",
         six()
     );
     assert_error_parity(
@@ -198,12 +198,12 @@ fn issue_664_elementwise_stride_operand_mismatch_errs_in_both_lanes() {
     );
 }
 
-/// Pad variant: `[4i64]` vs `[3i64]` — pre-fix the C binary's last element was
+/// Pad variant: `[4]` vs `[3]` — pre-fix the C binary's last element was
 /// an out-of-bounds read of `x`.
 #[test]
 fn issue_664_elementwise_pad_operand_mismatch_errs_in_both_lanes() {
     let source = format!(
-        "module Repro.ElemPad\nsig f: tensor[n, f32] -> tensor[n, f32]\ndef f(x) = {{\n  p = pad(x, [[cast(1, int32), cast(0, int32)]], cast(0.0, f32))\n  add(p, x)\n}}\nout = f(to_tensor([{}]))\n",
+        "module Repro.ElemPad\nsig f: tensor[n, f32] -> tensor[n, f32]\ndef f(x) = {{\n  p = pad(x, [[cast(1, int64), cast(0, int64)]], cast(0.0, f32))\n  add(p, x)\n}}\nout = f(to_tensor([{}]))\n",
         f32_literal(&[1.0, 2.0, 3.0])
     );
     assert_error_parity(
@@ -218,11 +218,11 @@ fn issue_664_elementwise_pad_operand_mismatch_errs_in_both_lanes() {
 /// `shrink` (untouched by chelis#632) — proves the guard covers the
 /// pre-existing #616-era path, not just the chelis#632-widened one. (A
 /// literal bound would pin the sig's `n` at check time; the runtime
-/// bound `n - 3` keeps the wildcard route: `[3i64]` vs `[6i64]` at run time.)
+/// bound `n - 3` keeps the wildcard route: `[3]` vs `[6]` at run time.)
 #[test]
 fn issue_664_elementwise_shrink_control_errs_in_both_lanes() {
     let source = format!(
-        "module Repro.ElemShrink\nsig f: tensor[n, f32] -> tensor[n, f32]\ndef f(x) = {{\n  k = cast(sub(cast(shape(x, cast(0, int32)), int64), cast(3, int64)), int32)\n  s = shrink(x, [[cast(0, int32), k]])\n  add(s, x)\n}}\nout = f(to_tensor([{}]))\n",
+        "module Repro.ElemShrink\nsig f: tensor[n, f32] -> tensor[n, f32]\ndef f(x) = {{\n  k = cast(sub(cast(shape(x, cast(0, int32)), int64), cast(3, int64)), int32)\n  s = shrink(x, [[cast(0, int64), k]])\n  add(s, x)\n}}\nout = f(to_tensor([{}]))\n",
         six()
     );
     assert_error_parity(
@@ -236,11 +236,11 @@ fn issue_664_elementwise_shrink_control_errs_in_both_lanes() {
 /// Reshape whose target folds to a SYM (the shape read of the ORIGINAL
 /// input, 6) over the strided view (3 elements). The pre-fix numel guard
 /// fired only for Node-valued targets, so the binary exited 0 printing
-/// `[1i64, 3i64, 5i64, 0i64, 0i64, 0i64]`.
+/// `[1, 3, 5, 0, 0, 0]`.
 #[test]
 fn issue_664_reshape_sym_target_numel_mismatch_errs_in_both_lanes() {
     let source = format!(
-        "module Repro.ReshapeSym\nsig f: tensor[n, f32] -> tensor[u, f32]\ndef f(x) = {{\n  s = stride(x, cast(2, int32))\n  reshape(s, [cast(shape(x, cast(0, int32)), int64)])\n}}\nout = f(to_tensor([{}]))\n",
+        "module Repro.ReshapeSym\nsig f: tensor[n, f32] -> tensor[u, f32]\ndef f(x) = {{\n  s = stride(x, cast(2, int64))\n  reshape(s, [cast(shape(x, cast(0, int32)), int64)])\n}}\nout = f(to_tensor([{}]))\n",
         six()
     );
     assert_error_parity(
@@ -257,7 +257,7 @@ fn issue_664_reshape_sym_target_numel_mismatch_errs_in_both_lanes() {
 #[test]
 fn issue_664_reshape_static_target_over_runtime_input_errs_in_both_lanes() {
     let source = format!(
-        "module Repro.ReshapeStatic\nsig f: tensor[n, f32] -> tensor[u, f32]\ndef f(x) = {{\n  s = stride(x, cast(2, int32))\n  reshape(s, [cast(6, int64)])\n}}\nout = f(to_tensor([{}]))\n",
+        "module Repro.ReshapeStatic\nsig f: tensor[n, f32] -> tensor[u, f32]\ndef f(x) = {{\n  s = stride(x, cast(2, int64))\n  reshape(s, [cast(6, int64)])\n}}\nout = f(to_tensor([{}]))\n",
         six()
     );
     assert_error_parity(
@@ -269,11 +269,11 @@ fn issue_664_reshape_static_target_over_runtime_input_errs_in_both_lanes() {
 }
 
 /// No false abort: two runtime-strided operands with MATCHING shapes
-/// must still run in both lanes (`[2i64, 6i64, 10i64]`).
+/// must still run in both lanes (`[2, 6, 10]`).
 #[test]
 fn issue_664_matching_runtime_operands_still_run() {
     let source = format!(
-        "module Repro.ElemMatch\nsig f: tensor[n, f32] -> tensor[u, f32]\ndef f(x) = {{\n  a = stride(x, cast(2, int32))\n  b = stride(x, cast(2, int32))\n  add(a, b)\n}}\nout = f(to_tensor([{}]))\n",
+        "module Repro.ElemMatch\nsig f: tensor[n, f32] -> tensor[u, f32]\ndef f(x) = {{\n  a = stride(x, cast(2, int64))\n  b = stride(x, cast(2, int64))\n  add(a, b)\n}}\nout = f(to_tensor([{}]))\n",
         six()
     );
     assert_value_parity(&source, "elemmatch", &[2.0, 6.0, 10.0]);

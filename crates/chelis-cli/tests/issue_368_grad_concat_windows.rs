@@ -116,24 +116,24 @@ fn assert_close(label: &str, got: &[f64], want: &[f64]) {
 
 const AVGPOOL_FWD: &str = "module Repro.AvgFwd\n\
 def pool(x: tensor[4, f32]) -> tensor[2, f32] = {\n\
-  r0 = reshape(shrink(&x, [[cast(0, int32), cast(2, int32)]]), [cast(1, int64), cast(2, int64)])\n\
-  r1 = reshape(shrink(&x, [[cast(2, int32), cast(4, int32)]]), [cast(1, int64), cast(2, int64)])\n\
+  r0 = reshape(shrink(&x, [[cast(0, int64), cast(2, int64)]]), [cast(1, int64), cast(2, int64)])\n\
+  r1 = reshape(shrink(&x, [[cast(2, int64), cast(4, int64)]]), [cast(1, int64), cast(2, int64)])\n\
   mean(concat([r0, r1], cast(0, int32)), cast(0, int32))\n\
 }\n\
 out = pool(to_tensor([cast(2.0, f32), cast(4.0, f32), cast(6.0, f32), cast(8.0, f32)]))\n";
 
 const AVGPOOL_GRAD: &str = "module Repro.AvgGrad\n\
 def pool(x: tensor[4, f32]) -> f32 = {\n\
-  r0 = reshape(shrink(&x, [[cast(0, int32), cast(2, int32)]]), [cast(1, int64), cast(2, int64)])\n\
-  r1 = reshape(shrink(&x, [[cast(2, int32), cast(4, int32)]]), [cast(1, int64), cast(2, int64)])\n\
+  r0 = reshape(shrink(&x, [[cast(0, int64), cast(2, int64)]]), [cast(1, int64), cast(2, int64)])\n\
+  r1 = reshape(shrink(&x, [[cast(2, int64), cast(4, int64)]]), [cast(1, int64), cast(2, int64)])\n\
   pooled = mean(concat([r0, r1], cast(0, int32)), cast(0, int32))\n\
   sum(pooled, cast(0, int32)) |> tensor_to_scalar\n\
 }\n\
 out = grad(pool)(to_tensor([cast(2.0, f32), cast(4.0, f32), cast(6.0, f32), cast(8.0, f32)]))\n";
 
 /// FORWARD PARITY (req 1): the Pad+Add concat forward must equal the host
-/// `concat` semantics. avgpool of `[2i64, 4i64, 6i64, 8i64]` stacks rows `[[2i64, 4i64],[6i64, 8i64]]` and
-/// means over axis 0 (across rows) -> `[mean(2,6), mean(4,8)]` = `[4i64, 6i64]`.
+/// `concat` semantics. avgpool of `[2,4,6,8]` stacks rows `[[2,4],[6,8]]` and
+/// means over axis 0 (across rows) -> `[mean(2,6), mean(4,8)]` = `[4, 6]`.
 /// (Same value the host `chelis_tensor_concat` forward produces.)
 #[test]
 fn issue_368_avgpool_forward_matches_host_concat() {
@@ -162,8 +162,8 @@ fn issue_368_avgpool_grad_is_inverse_window_size() {
 
 const MAXPOOL_GRAD: &str = "module Repro.MaxGrad\n\
 def pool(x: tensor[4, f32]) -> f32 = {\n\
-  r0 = reshape(shrink(&x, [[cast(0, int32), cast(2, int32)]]), [cast(1, int64), cast(2, int64)])\n\
-  r1 = reshape(shrink(&x, [[cast(2, int32), cast(4, int32)]]), [cast(1, int64), cast(2, int64)])\n\
+  r0 = reshape(shrink(&x, [[cast(0, int64), cast(2, int64)]]), [cast(1, int64), cast(2, int64)])\n\
+  r1 = reshape(shrink(&x, [[cast(2, int64), cast(4, int64)]]), [cast(1, int64), cast(2, int64)])\n\
   pooled = max_reduce(concat([r0, r1], cast(0, int32)), cast(0, int32))\n\
   sum(pooled, cast(0, int32)) |> tensor_to_scalar\n\
 }\n\
@@ -173,10 +173,10 @@ out = grad(pool)(to_tensor([cast(1.0, f32), cast(5.0, f32), cast(3.0, f32), cast
 /// max-path reproducer. Pre-fix this failed backward-DAG verification with
 /// `binary op at node N has mismatched dimension count: 1 vs 0`.
 ///
-/// concat stacks rows `[[1i64, 5i64],[3i64, 4i64]]`; `max_reduce` over axis 0 (across rows)
-/// -> `[max(1,3), max(5,4)]` = `[3i64, 5i64]`, picking source elements x[2i64]=3 and
-/// x[1i64]=5. The subgradient of max routes 1 to each selected element and 0
-/// elsewhere, so d/dx sum(maxpool) = onehot at {1, 2} = `[0i64, 1i64, 1i64, 0i64]`.
+/// concat stacks rows `[[1,5],[3,4]]`; `max_reduce` over axis 0 (across rows)
+/// -> `[max(1,3), max(5,4)]` = `[3, 5]`, picking source elements x[2]=3 and
+/// x[1]=5. The subgradient of max routes 1 to each selected element and 0
+/// elsewhere, so d/dx sum(maxpool) = onehot at {1, 2} = `[0, 1, 1, 0]`.
 #[test]
 fn issue_368_maxpool_grad_is_onehot_to_max_element() {
     let out = eval_ok(MAXPOOL_GRAD, "maxgrad");
@@ -192,9 +192,9 @@ fn issue_368_maxpool_grad_is_onehot_to_max_element() {
 
 const CONCAT3_GRAD: &str = "module Repro.Concat3\n\
 def f(x: tensor[3, f32]) -> f32 = {\n\
-  r0 = reshape(shrink(&x, [[cast(0, int32), cast(1, int32)]]), [cast(1, int64), cast(1, int64)])\n\
-  r1 = reshape(shrink(&x, [[cast(1, int32), cast(2, int32)]]), [cast(1, int64), cast(1, int64)])\n\
-  r2 = reshape(shrink(&x, [[cast(2, int32), cast(3, int32)]]), [cast(1, int64), cast(1, int64)])\n\
+  r0 = reshape(shrink(&x, [[cast(0, int64), cast(1, int64)]]), [cast(1, int64), cast(1, int64)])\n\
+  r1 = reshape(shrink(&x, [[cast(1, int64), cast(2, int64)]]), [cast(1, int64), cast(1, int64)])\n\
+  r2 = reshape(shrink(&x, [[cast(2, int64), cast(3, int64)]]), [cast(1, int64), cast(1, int64)])\n\
   rows = [r0, r1, r2]\n\
   stacked = concat(rows, cast(0, int32))\n\
   sum(sum(stacked, cast(0, int32)), cast(0, int32)) |> tensor_to_scalar\n\
@@ -235,7 +235,7 @@ def f(x: tensor[2, f32]) = {\n\
 out = f(to_tensor([cast(1.0, f32), cast(2.0, f32)]))\n";
 
 /// NEGATIVE PARITY (forward, no grad): a plain `concat` of two rows must
-/// still produce the correct stacked `[2i64, 2i64]` tensor `[[1i64, 2i64],[10i64, 20i64]]`. This
+/// still produce the correct stacked `[2, 2]` tensor `[[1,2],[10,20]]`. This
 /// guards that routing differentiable concat through Pad+Add did not change
 /// the forward concat result.
 #[test]
@@ -249,7 +249,7 @@ fn issue_368_plain_forward_concat_stacks_correctly() {
 /// chelis#368 (negative-axis consistency): a NEGATIVE concat axis now evaluates
 /// in the forward host lane, matching the IR lowering (grad / C-build) and the
 /// negative-axis convention every other axis-taking op already follows
-/// (reductions, softmax). `concat(-1)` of two `[1i64, 2i64]` rows == concat axis 1.
+/// (reductions, softmax). `concat(-1)` of two `[1, 2]` rows == concat axis 1.
 /// Before the fix the host forward path rejected it ("concat requires
 /// non-negative axis") while the grad and C backends — which lower through
 /// `lower_tensor_concat` — accepted it, an eval-forward-vs-IR divergence.
@@ -270,7 +270,7 @@ fn issue_368_negative_concat_axis_forward_matches_positive() {
         vec![1, 4],
         "negative-axis concat forward shape ({out})"
     );
-    // x=[1i64, 2i64]: a=[[1i64, 2i64]], b=[[5i64, 14i64]], concat last axis -> [[1i64, 2i64, 5i64, 14i64]].
+    // x=[1,2]: a=[[1,2]], b=[[5,14]], concat last axis -> [[1,2,5,14]].
     assert_close(
         "negative-axis concat forward",
         &data,
@@ -331,7 +331,7 @@ out = grad(loss)(to_tensor([[cast(1.0, f32), cast(2.0, f32)], [cast(3.0, f32), c
 
 /// Same symbolic-axis shape, NONLINEAR loss: d/dx sum(5 x^2) = 10 x. Pins that
 /// the resolved sentinel routes the cotangent through the squared concat
-/// correctly (finite-difference validated: [10i64, 20i64, 30i64, 40i64]).
+/// correctly (finite-difference validated: [10, 20, 30, 40]).
 #[test]
 fn issue_368_symbolic_nonconcat_axis_grad_nonlinear() {
     let out = eval_ok(SYM_BATCH_NONLINEAR, "symbatchnl");
@@ -367,7 +367,7 @@ fn issue_368_symbolic_nonconcat_axis_grad_nonlinear() {
 /// and runtime movement adjoints (the stride adjoint's node-valued trim /
 /// merge, the shrink adjoint's `shape(x, axis) - end` pad).
 ///
-/// avgpool1d([1i64, 2i64, 3i64, 4i64], window 2, stride 2) = [1.5, 3.5];
+/// avgpool1d([1, 2, 3, 4], window 2, stride 2) = [1.5, 3.5];
 /// loss = sum(avgpool1d(x)), so dloss/dx = 1/2 everywhere (each element
 /// contributes to exactly one window mean over 2 elements).
 ///
@@ -397,7 +397,7 @@ def avgpool1d(x) = {\n\
 def window_row[n](x: &tensor[n, f32], m: int64, k: int64) -> tensor[u, m, f32] = {\n\
   start = cast(k, int32)\n\
   extent = cast(add(add(k, mul(sub(m, cast(1, int64)), cast(2, int64))), cast(1, int64)), int32)\n\
-  reshape(stride(shrink(x, [[start, extent]]), cast(2, int32)), [cast(1, int64), m])\n\
+  reshape(stride(shrink(x, [[start, extent]]), cast(2, int64)), [cast(1, int64), m])\n\
 }";
 
     // Forward parity: the pooled means themselves.

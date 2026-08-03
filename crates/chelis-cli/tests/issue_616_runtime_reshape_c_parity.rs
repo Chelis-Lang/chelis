@@ -1,6 +1,6 @@
 //! chelis#616 step 3b: forward eval-vs-C parity for runtime (node-valued)
 //! RESHAPE target extents — the windowed `reshape(stride(shrink(x, ...)),
-//! [1, m])` form of the avgpool oracle's `window_row`, with the window count
+//! [1i64, m])` form of the avgpool oracle's `window_row`, with the window count
 //! `m` computed from `shape()` arithmetic at run time.
 //!
 //! The reshape target `m` lowers to a rank-0 integer scalar node the op
@@ -23,7 +23,7 @@ use tempfile::{TempDir, tempdir};
 const WINDOW_BODY: &str = "\
   m = add(floor_div(sub(cast(shape(x, cast(0, int32)), int64), cast(2, int64)), cast(2, int64)), cast(1, int64))\n\
   extent = cast(add(mul(sub(m, cast(1, int64)), cast(2, int64)), cast(1, int64)), int32)\n\
-  reshape(stride(shrink(x, [[cast(0, int32), extent]]), cast(2, int32)), [cast(1, int64), m])";
+  reshape(stride(shrink(x, [[cast(0, int64), extent]]), cast(2, int64)), [cast(1, int64), m])";
 
 fn window_source(out_line: &str) -> String {
     format!(
@@ -151,7 +151,7 @@ fn gcc(
 }
 
 /// eval-vs-C forward parity at n = 6 (m = 3): both lanes compute the window
-/// `[1i64, 3i64, 5i64]` by resolving the shrink extent AND the reshape target `m`
+/// `[1, 3, 5]` by resolving the shrink extent AND the reshape target `m`
 /// from runtime scalars.
 #[test]
 fn issue_616_runtime_reshape_window_forward_eval_matches_c() {
@@ -198,7 +198,7 @@ fn issue_616_runtime_reshape_c_binary_handles_multiple_lengths() {
         .iter()
         .map(|n| {
             format!(
-                "    {{ int shape[1i64] = {{{n}}}; chelis_tensor* x = chelis_alloc(1, shape, CHELIS_F32); \
+                "    {{ int shape[1] = {{{n}}}; chelis_tensor* x = chelis_alloc(1, shape, CHELIS_F32); \
                  for (int i = 0; i < {n}; i++) x->data[i] = (float)(i + 1); \
                  chelis_tensor* w = out(x); \
                  for (int i = 0; i < w->size; i++) printf(\"%.6f\\n\", w->data[i]); \
@@ -247,14 +247,14 @@ int main(void) {{
 /// GRADIENT eval-vs-C parity for the full runtime window chain: the loss
 /// `sum(sum(w))` over the windowed `[1, m]` reshape reads elements
 /// 0, 2, ... of the input, so the gradient is the upsample mask
-/// `[1i64, 0i64, 1i64, 0i64]` — computed by the runtime movement adjoints (Shape-read
+/// `[1, 0, 1, 0]` — computed by the runtime movement adjoints (Shape-read
 /// trim bounds, runtime merge extents) identically in both lanes.
 #[test]
 fn issue_616_runtime_window_grad_eval_matches_c() {
     let source = "module Repro.RtWindowGrad\nsig f: tensor[4, f32] -> f32\ndef f(x) = {\n\
   m = add(floor_div(sub(cast(shape(x, cast(0, int32)), int64), cast(2, int64)), cast(2, int64)), cast(1, int64))\n\
   extent = cast(add(mul(sub(m, cast(1, int64)), cast(2, int64)), cast(1, int64)), int32)\n\
-  w = reshape(stride(shrink(x, [[cast(0, int32), extent]]), cast(2, int32)), [cast(1, int64), m])\n\
+  w = reshape(stride(shrink(x, [[cast(0, int64), extent]]), cast(2, int64)), [cast(1, int64), m])\n\
   sum(sum(w, cast(0, int32)), cast(0, int32)) |> tensor_to_scalar\n\
 }\nout = grad(f)(to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32), cast(4.0, f32)]))\n";
 

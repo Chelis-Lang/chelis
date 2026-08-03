@@ -17,7 +17,7 @@
 //!      the reduced axis needs a concrete size (that stays fail-closed).
 //!   3. `reshape` whose target dims are integer ARITHMETIC over
 //!      statically-sized `shape()` reads (the school im2col witness shape,
-//!      `reshape(p, [mul(b_d, a_d), 1])`): `extract_reshape_dim_list` now
+//!      `reshape(p, [mul(b_d, a_d), 1i64])`): `extract_reshape_dim_list` now
 //!      const-folds the arithmetic to a `Lit` when every leaf is static, so
 //!      the backward `Expand`/`Sum` no longer inherits the checker's
 //!      `Named("*")` wildcard (the dag.rs symbolic-occurrences ICE).
@@ -38,7 +38,7 @@
 //! numel invariant is enforced at run time — a clean eval error and a C
 //! runtime abort (never the pre-hardening silent wildcard acceptance, and
 //! never a lowering-time refusal of a valid program). The symbolic-sig
-//! im2col form is now a passing grad oracle; the ill-formed [4i64, 4i64]-over-8
+//! im2col form is now a passing grad oracle; the ill-formed [4, 4]-over-8
 //! form is a runtime numel-mismatch error in both lanes. A target the fold
 //! PROVES negative still fails loud at lowering (proven-invalid program).
 
@@ -184,10 +184,10 @@ fn assert_close(label: &str, got: &[f64], want: &[f64], tol: f64) {
 
 const STRIDE_SIG: &str = "sig f: tensor[batch, 4, f32] -> f32";
 
-const STRIDE_LINEAR_BODY: &str = "  s = stride(&x, cast(1, int32), cast(2, int32))\n\
+const STRIDE_LINEAR_BODY: &str = "  s = stride(&x, cast(1, int64), cast(2, int64))\n\
   sum(sum(s, cast(0, int32)), cast(0, int32)) |> tensor_to_scalar";
 
-const STRIDE_NONLINEAR_BODY: &str = "  s = stride(&x, cast(1, int32), cast(2, int32))\n\
+const STRIDE_NONLINEAR_BODY: &str = "  s = stride(&x, cast(1, int64), cast(2, int64))\n\
   sq = mul(s, s)\n\
   sum(sum(sq, cast(0, int32)), cast(0, int32)) |> tensor_to_scalar";
 
@@ -234,7 +234,7 @@ fn issue_513_stride_symbolic_batch_grad_nonlinear_matches_fd() {
 /// kept columns are {0, 3}, gradient 2x there and 0 elsewhere.
 #[test]
 fn issue_513_stride_overshoot_symbolic_batch_grad_matches_fd() {
-    let body = "  s = stride(&x, cast(1, int32), cast(3, int32))\n\
+    let body = "  s = stride(&x, cast(1, int64), cast(3, int64))\n\
   sq = mul(s, s)\n\
   sum(sum(sq, cast(0, int32)), cast(0, int32)) |> tensor_to_scalar";
     let (shape, grad) = eval_grad(&grad_source(
@@ -283,9 +283,9 @@ fn issue_513_prod_reduce_symbolic_batch_grad_matches_fd() {
 /// ADVERSARIAL: zero elements in the input on the ENABLED symbolic-bystander
 /// path. The naive `g * prod / x_i` adjoint divides by zero here; the
 /// prefix*suffix construction must produce the exact finite leave-one-out
-/// products through the sentinel-bounded slices. Row 0 = [2i64, 0i64, 4i64] has one
+/// products through the sentinel-bounded slices. Row 0 = [2, 0, 4] has one
 /// zero (gradient nonzero ONLY at the zero position: 2 * 4 = 8); row 1 =
-/// [0i64, 0i64, 5i64] has two zeros (every leave-one-out product contains a zero, so
+/// [0, 0, 5] has two zeros (every leave-one-out product contains a zero, so
 /// the whole row's gradient is 0).
 #[test]
 fn issue_513_prod_reduce_zero_element_symbolic_batch_grad_matches_fd() {
@@ -335,7 +335,7 @@ fn reshape_arith_source(nonlinear: bool, literal: &str, grad: bool) -> String {
 
 const RESHAPE_BASE: [f64; 4] = [1.0, 2.0, 3.0, 4.0];
 
-/// FD oracle, linear: loss = sum(reshape(permute(x), [b*a, 1])) = sum(x),
+/// FD oracle, linear: loss = sum(reshape(permute(x), [b*a, 1i64])) = sum(x),
 /// gradient all ones. Pre-fix the unresolvable `mul(...)` target fell back to
 /// the checker's `Named("*")` wildcard dims and the backward Expand ICEd in
 /// `symbolic_occurrences` ("symbolic dim `*` ... no Load input declares it").
@@ -417,7 +417,7 @@ const RESHAPE2_BASE: [f64; 8] = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
 
 /// The gated-domain division/mod arms of the fold: target
 /// `[floor_div(mul(b_d, a_d), 4), add(sub(b_d, a_d), mod(a_d, b_d))]`
-/// = `[8 / 4, (4 - 2) + (2 mod 4)]` = `[2i64, 4i64]` (all operands non-negative,
+/// = `[8 / 4, (4 - 2) + (2 mod 4)]` = `[2, 4]` (all operands non-negative,
 /// all divisors positive, so floor, trunc, and euclidean semantics agree
 /// and the fold is exact). Loss = sum of squares, gradient 2x. Pre-fold
 /// these arms had no positive coverage at all.
@@ -536,7 +536,7 @@ fn matrix_driver(rows: usize, cols: usize, values: &[f64]) -> String {
 #include "chelis_runtime.h"
 extern chelis_tensor* out(chelis_tensor* arg0);
 int main(void) {{
-    int shape[2i64] = {{{rows}, {cols}}};
+    int shape[2] = {{{rows}, {cols}}};
     chelis_tensor* x = chelis_alloc(2, shape, CHELIS_F32);
     float xd[{n}] = {{{init}}};
     memcpy(x->data, xd, sizeof(xd));
@@ -565,7 +565,7 @@ fn parse_lines(stdout: &str) -> Vec<f64> {
 /// bare-exports fine because its body reads `shape()`). The stride and
 /// prod_reduce verbs here have shape()-free bodies, so their C oracles use
 /// the applied form, whose emitted C still reads `batch` from the runtime
-/// input tensor (`inputs[0i64]->shape[0i64]`, and the build log reports
+/// input tensor (`inputs[0]->shape[0]`, and the build log reports
 /// "Symbolic dims: batch") and so exercises the symbolic-dim lowering end
 /// to end.
 fn compile_and_run_main(build_dir: &Path, stem: &str) -> String {
@@ -737,14 +737,14 @@ fn expect_grad_failure(source: &str, stem: &str, needle: &str, context: &str) {
 
 /// chelis#616: a stride along the SYMBOLIC axis itself now builds the
 /// runtime adjoint cascade (Shape-read trim + runtime merge extent). For
-/// `f(x) = sum(stride(x, 2i64))` over `[1i64, 2i64, 3i64, 4i64]`, the loss reads elements
-/// 0 and 2, so the gradient is the upsample mask `[1i64, 0i64, 1i64, 0i64]`.
+/// `f(x) = sum(stride(x, 2i64))` over `[1, 2, 3, 4]`, the loss reads elements
+/// 0 and 2, so the gradient is the upsample mask `[1, 0, 1, 0]`.
 #[test]
 fn issue_513_stride_on_symbolic_axis_grad_is_upsample_mask() {
     let source = "module Repro.StrideSymAxis\n\
 sig f: tensor[n, f32] -> f32\n\
 def f(x) = {\n\
-  s = stride(&x, cast(2, int32))\n\
+  s = stride(&x, cast(2, int64))\n\
   sum(s, cast(0, int32)) |> tensor_to_scalar\n\
 }\n\
 out = grad(f)(to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32), cast(4.0, f32)]))\n";
@@ -780,14 +780,14 @@ out = grad(f)(to_tensor([[cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)], [cast
 
 /// chelis#616: a shrink with CONCRETE sub-range bounds on a symbolic axis
 /// now builds the runtime Pad adjoint (`after = shape(x, axis) - end`). For
-/// the `[[0i64, 1i64], [1i64, 3i64]]` sub-range over a `[2i64, 4i64]` input, the loss reads
-/// `x[0i64][1..3]`, so the gradient is 1 exactly there.
+/// the `[[0,1], [1,3]]` sub-range over a `[2, 4]` input, the loss reads
+/// `x[0][1..3]`, so the gradient is 1 exactly there.
 #[test]
 fn issue_513_shrink_concrete_bounds_on_symbolic_axis_grad_is_window_mask() {
     let source = "module Repro.ShrinkSymAxis\n\
 sig f: tensor[batch, 4, f32] -> f32\n\
 def f(x) = {\n\
-  s = shrink(&x, [[cast(0, int32), cast(1, int32)], [cast(1, int32), cast(3, int32)]])\n\
+  s = shrink(&x, [[cast(0, int64), cast(1, int64)], [cast(1, int64), cast(3, int64)]])\n\
   sum(sum(s, cast(0, int32)), cast(0, int32)) |> tensor_to_scalar\n\
 }\n\
 out = grad(f)(to_tensor([[cast(1.0, f32), cast(2.0, f32), cast(3.0, f32), cast(4.0, f32)], [cast(5.0, f32), cast(6.0, f32), cast(7.0, f32), cast(8.0, f32)]]))\n";
@@ -802,7 +802,7 @@ out = grad(f)(to_tensor([[cast(1.0, f32), cast(2.0, f32), cast(3.0, f32), cast(4
 }
 
 /// The SYMBOLIC-sig arithmetic reshape target (the true school im2col form,
-/// `tensor[a, b, f32]` with `reshape(p, [mul(b_d, a_d), 1])`) now LOWERS
+/// `tensor[a, b, f32]` with `reshape(p, [mul(b_d, a_d), 1i64])`) now LOWERS
 /// (chelis#616): the runtime product becomes a rank-0 scalar node that the
 /// reshape references as a node-valued target extent, the numel invariant is
 /// enforced at run time, and the backward pass resolves the runtime extent
@@ -844,7 +844,7 @@ out = grad(f)(to_tensor([[cast(1.0, f32), cast(2.0, f32)], [cast(3.0, f32), cast
 /// `floor_div`, the domain where floor, trunc, and euclidean division
 /// disagree), so chelis#616 lowers the expression to a runtime scalar
 /// instead of guessing. Its true runtime value makes the written target
-/// [4i64, 4i64] — 16 elements over an 8-element input — so BOTH lanes must reject
+/// [4, 4] — 16 elements over an 8-element input — so BOTH lanes must reject
 /// it at run time with the numel invariant: the eval lane with a clean
 /// error, the C lane with the emitted numel abort. (Pre-hardening this was
 /// the silent-acceptance hole: a wildcard anon dim bound to a coincidental
@@ -931,7 +931,7 @@ fn issue_513_reshape_arith_negative_fold_fails_loud() {
 /// a gate-refused-but-VALID arithmetic target must keep evaluating through
 /// the host lane, which computes the written expression with true runtime
 /// semantics (`neg(floor_div(sub(2, 5), 2))` = 2 under floor division, so
-/// the reshape is [2i64, 4i64] over the 8-element input and the loss is
+/// the reshape is [2, 4] over the 8-element input and the loss is
 /// sum(x^2) = 204). The lowering refusal must never leak into forward
 /// evaluation of forms the host lane handles honestly.
 #[test]
