@@ -484,12 +484,20 @@ and from CPU at the ~1 ULP level on f32.
 
 | Name | Signature | Semantics |
 |---|---|---|
-| `reshape` | `(&tensor[D_old,p], shape) -> tensor[D_new,p]` | Reinterpret memory layout. Product of dimensions must match. |
-| `permute` | `(&tensor[d1,...,dn,p], axes) -> tensor[d_axes,p]` | Reorder dimensions. `axes` is a permutation of 0..n-1. |
-| `expand` | `(&tensor[D_small,p], shape) -> tensor[D_large,p]` | Broadcast a dimension of size 1 to a larger size. Does NOT copy data. |
-| `pad` | `(&tensor[D,p], padding, fill) -> tensor[D',p]` | Add elements at boundaries. `padding` specifies (before, after) per axis. |
-| `shrink` | `(&tensor[D,p], bounds) -> tensor[D',p]` | Slice: extract a contiguous sub-tensor. `bounds` specifies (start, end) per axis. |
-| `stride` | `(&tensor[D,p], strides) -> tensor[D',p]` | Strided access: take every n-th element along each axis. |
+| `reshape` | `(&tensor[D_old,p], shape: List<int64>) -> tensor[D_new,p]` | Reinterpret memory layout. Product of dimensions must match. |
+| `permute` | `(&tensor[d1,...,dn,p], axes: int32...) -> tensor[d_axes,p]` | Reorder dimensions. `axes` is a permutation of 0..n-1, passed as one scalar argument per axis. |
+| `expand` | `(&tensor[D_small,p], axis: int32, size: int64) -> tensor[D_large,p]` | Insert or set a dimension at position `axis` with width `size` (size-1 broadcast). Does NOT copy data. Named-axis and anchored forms: `spec/04-type-system.md` §4.5.3. |
+| `pad` | `(&tensor[D,p], padding: List<List<int64>>, fill) -> tensor[D',p]` | Add elements at boundaries. `padding` specifies (before, after) per axis. |
+| `shrink` | `(&tensor[D,p], bounds: List<List<int64>>) -> tensor[D',p]` | Slice: extract a contiguous sub-tensor. `bounds` specifies (start, end) per axis. |
+| `stride` | `(&tensor[D,p], strides: int64...) -> tensor[D',p]` | Strided access: take every n-th element along each axis. |
+
+`expand`'s positional form is the (tensor, axis, size) triop; a
+two-argument list form is an arity error. The named-axis form
+(`expand(x, new, size)` with a dimension name) and the four-argument
+anchored form remain as `spec/04-type-system.md` §4.5.3 states them.
+Where the axis is positional it is axis-domain `int32`; `size` is
+extent-domain `int64` in every form, which makes the canonical broadcast
+idiom `expand(b, axis, shape(x, axis))` well-typed by construction.
 
 **Movement AD adjoints:**
 
@@ -501,6 +509,60 @@ and from CPU at the ~1 ULP level on f32.
 | `pad` | `shrink(g, inverse_padding)` — extract the non-padded region |
 | `shrink` | `pad(g, inverse_bounds)` — pad gradient back to original size |
 | `stride` | appropriate expand/scatter (implementation-specific) |
+
+**Extent-domain and axis-domain arguments:**
+
+> **[05-DIM-1]** Every movement and shape argument is exactly one of two
+> KINDS, and the kind determines its dtype. An EXTENT-DOMAIN quantity
+> measures or indexes along an axis - a dimension extent, a slice bound, a
+> pad amount, a stride step - and SHALL be `int64`. An AXIS-DOMAIN quantity
+> names an axis - a rank index, a permutation entry - and SHALL be `int32`.
+> No movement argument is both, and within this movement and shape
+> surface no lane SHALL accept one kind's dtype in the other kind's
+> position.
+
+> **[05-DIM-2]** `shape(x, axis)` SHALL return `int64`. Its result is an
+> extent-domain quantity under [05-DIM-1], and it is the canonical producer
+> of the values that reach every extent-domain slot. Its `axis` parameter is
+> axis-domain and remains `int32`.
+
+The split is by what the quantity can grow to, not by where it appears. An
+extent-domain value scales with the data: a dimension extent, an offset into
+one, or a step across one is bounded only by tensor size. An axis-domain
+value is bounded by rank, which is small and statically known, so `int32` is
+permanent headroom rather than a limit anyone can reach.
+
+[05-DIM-1] scopes to movement and shape arguments. The axis parameters of
+reduction and concatenation ops (`sum`, `cumsum`, `concat`) are axis-domain
+in nature, and the window extents and stride steps of the `reduce_window_*`
+family are extent-domain in nature, but neither group is yet classified by
+a numbered atom; chelis#1113 owns both classifications.
+
+Two things make the distinction normative rather than stylistic. First,
+`spec/04-type-system.md` [04-NUM-11]: a value crosses every boundary at its
+declared dtype and no stage substitutes a wider representation to
+compensate, so a dtype mismatch between an extent's producer and its
+consumer cannot be absorbed below the language; it has to be settled in
+the signature. Second, a language whose
+extent reader is narrower than its extent writer cannot round-trip its own
+dimensions: an extent that can be written but not read back at the same
+width has not survived the boundary crossing [04-NUM-11] requires it to
+survive.
+
+Two boundary notes. Extent-domain slots do not adopt literals: no
+`spec/04-type-system.md` §5.6 position reaches a list literal or a
+scalar against a remote callee signature, so an extent literal states
+`int64` itself, with a suffix or an explicit `cast`
+(`reshape(x, [2i64, 2i64])`, `stride(x, 2i64)`), and an unsuffixed
+`int32` literal in an extent slot is a type error whose diagnostic names
+the fix. §5.6 records why that adoption set stays closed. And
+arithmetic on extents is ordinary program arithmetic: it computes at the
+declared `int64` width like every other op ([04-NUM-8]), with no narrower
+internal substitute. The width of the loop counters and addressing
+expressions a backend synthesizes is governed by [04-NUM-8]'s
+synthesized-arithmetic clause, not by this section.
+
+*(Not fully implemented; chelis#1112 owns the dim-surface gaps.)*
 
 #### 2.4.1 Runtime (node-valued) bounds and reshape targets (chelis#616)
 
@@ -530,7 +592,8 @@ operand-shape agreement at equal rank whenever a non-static extent is
 involved (chelis#664; rank-0 scalar operands are the backend's broadcast
 idiom and are exempt). A dim whose extent
 is computed by the op at run time is an *op-declared* symbolic dim: the C
-backend declares it inline at the owning op (`int name = <extent>;`) and the
+backend declares it inline at the owning op (`int64_t name = <extent>;`,
+the [05-DIM-1] extent carrier) and the
 evaluator binds it from the actual value mid-evaluation; a second site
 computing a different value for the same symbol aborts/errs loudly (the
 over-unification guard). Since chelis#631/#632 the guard no longer fires on
@@ -542,7 +605,7 @@ pass-through is identity-only (stride step 1 / zero pad; see
 spec/04-type-system.md §4.7), so a non-identity movement axis types a
 fresh runtime-guarded extent rather than repeating the input's symbol.
 The guard remains the soundness floor for a genuinely CLAIMED symbol
-equality (e.g. an explicit `-> tensor[n]` over `stride(x, 2)`) and for
+equality (e.g. an explicit `-> tensor[n]` over `stride(x, 2i64)`) and for
 any future checker imprecision.
 
 The movement adjoints are runtime-capable on the same representation: the
@@ -584,11 +647,11 @@ dependency and fails closed when its input is absent (chelis#351).
 
 | Name | Signature | Semantics |
 |---|---|---|
-| `shape` | `(&tensor[d1,...,dn,p], axis: int32) -> int` | Runtime extent of the input along `axis`, as a rank-0 integer scalar. |
+| `shape` | `(&tensor[d1,...,dn,p], axis: int32) -> int64` | Runtime extent of the input along `axis`, as a rank-0 integer scalar. |
 
-The Surf `shape(tensor, axis)` builtin types this read as an `int32` scalar
-(the hydronnx ONNX translator constructs the equivalent DAG node as `int64`
-per chelis#558). Two lowering shapes exist, and they are distinct:
+The Surf `shape(tensor, axis)` builtin types this read as an `int64` scalar
+per [05-DIM-2] — extent-domain out, axis-domain in. Two lowering shapes
+exist, and they are distinct:
 
 - **As an extent argument** to `expand` / `reshape`, a `shape()` read is folded
   into the movement node's `DimExpr` (the output dim), not materialized as a

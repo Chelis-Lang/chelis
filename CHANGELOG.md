@@ -6,7 +6,32 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.18.2] — 2026-08-03
+
 ### Added
+
+- **`chelis-std` CSV/JSON serializers (chelis#928).** `Std.Io.Csv` gains
+  `to_csv` / `try_to_csv` / `write_csv` / `try_write_csv` (header from the
+  first row's key order, minimal quoting with doubled embedded quotes, LF
+  endings; blank-rendering records are emitted as a quoted empty field so
+  the reader cannot drop them; fields or headers containing CR/LF are
+  rejected because the line-based reader cannot round-trip them).
+  `Std.Io.Json` gains `to_json` / `try_to_json` / `write_json` /
+  `try_write_json` (insertion-order keys, shortest-round-trip f64 via
+  `to_string`, non-finite numbers fail loudly / return `None`) and now
+  exports the seven `Json` constructors so documents can be built directly.
+  New `Std.Text` module with `join(parts, sep)`. The bundled chelis-std
+  0.4.0 dist bytes changed accordingly (same version; committed reef.lock
+  hashes regenerated). Serialization helpers are iterative (map/fold), not
+  per-character recursive, so multi-kilobyte fields do not hit the eval
+  lane's recursion ceiling. `try_load_json` on a missing path now returns
+  `None` (previously it trapped inside `read_file`), matching
+  `try_read_csv`'s missing-file contract. These serializers are the
+  **compiled-lane counterpart** of the eval-only prelude JSON/CSV builtins
+  (chelis#890/chelis#903): ordinary package defs that `chelis build`
+  accepts, on std's own `Json` ADT, unaffected by the builtins'
+  `EVAL_ONLY_HOST_BUILTINS` rejection — reef package name-rewriting keeps
+  the shared `to_json`/`to_csv`/`parse_json` names apart in both lanes.
 
 - **Host-lane JSON I/O builtins (chelis#890).** A prelude `Json` ADT
   (`JNull | JBool bool | JInt int64 | JNum f64 | JStr string | JList
@@ -56,6 +81,33 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   The Linux job runs per pull request with bounded parallelism, reclaimed runner disk, and a cached cvc5 toolchain closure.
   The macOS job is a documented manual dispatch gate with the identical check set.
 
+- **`chelis eval --timeout <SECS>` bounds an evaluation (chelis#914,
+  chelis#930).** Absent, nothing changes: evaluation runs to completion.
+  On trip the run exits non-zero with `error: evaluation timed out after
+  {secs}s (--timeout)` and never returns a partial result
+  (`spec/09-tide.md`). A cooperative cancellation token is polled through
+  inference, annotation, validation, linearity, compilation, and every
+  node visit in both evaluator lanes; `CancelToken`, `install_cancel_token`,
+  `current_cancel_token`, `is_cancellation`, and `EVAL_CANCELLED_MSG` are
+  public from `chelis-compiler-api`, and cancelled runs carry the
+  `cancelled` diagnostic kind. Polling is deliberately not exhaustive —
+  the style gate, Reef graph preparation, and lowering's whole-program
+  walk do not poll, and the uninterruptible unit is one top-level
+  declaration or one node visit — so a process-level hard exit backstops
+  the deadline by five seconds. The Python bindings run the JSON entry
+  points on a joined worker thread and poll for signals every 50 ms, so
+  `KeyboardInterrupt` arrives during a long compile instead of after it.
+- **The Python bindings resolve a source against its reef package
+  (chelis#816).** `compile_and_load` and `eval` take a keyword-only
+  `project_root`: `None` auto-discovers the enclosing package for
+  `compile_and_load` only when the source actually has an `import`
+  declaration, a path forces in-context resolution, and `False` forces the
+  bare self-contained path. Previously an importing source failed with
+  `unbound variable`. C target only — `target="hip"` with a `project_root`
+  is a branded `unsupported:` rejection naming chelis#829. Only the
+  compiled source's own defs are selectable via `entry_name`; imported
+  library defs are callable from the entry body but not selectable.
+
 ### Changed
 
 - **A builtin-named function parameter that is *called* in its own body
@@ -70,6 +122,37 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   `compile_for_execution`/chelis-python) reject through the section-C2
   `unsupported: builtin ...` diagnostic; `process_run`'s rejection
   prose changed accordingly.
+- **`chelis-deep` `Node`'s mutable child/metadata accessors are removed
+  in favor of transactional replacement** (chelis#1101). `Node::meta_mut`,
+  `children_slice_mut`, and `children_vec_mut` are gone; use
+  `try_replace_meta` / `try_replace_child` / `try_replace_children`, which
+  revalidate the whole candidate against the construction gate so a mutation
+  cannot reopen the closed-vocabulary domain. No external consumer existed at
+  the removal; migrate any downstream `Node` mutation to the `try_replace_*` API.
+
+- **`shape(x, axis)` returns `int32` under eval, not `int64`** (#729
+  Phase 2), conforming to the `int32` return that `spec/04` §4.7.1 stated
+  at the time; the old `int64` payload stayed invisible only while
+  mixed-width arithmetic silently promoted. **Known divergence, do not
+  migrate onto this:** chelis#1000 landed in this same release and
+  reverses that rule — `[05-DIM-2]` now says `shape` SHALL return `int64`
+  as an extent-domain quantity — so the evaluator is non-conforming here
+  and is expected to move back to `int64` (chelis#1120, chelis#1112).
+  Code that feeds a `shape` result into an `int64` position needs a
+  `cast` on 0.18.2 specifically, and will not once that lands.
+- **Entry-scoped compiled artifacts emit the fixed C symbol
+  `chelis_main`** (chelis#817, chelis#818), carried in the manifest as
+  `host_entry_name`, so a def named `main`, `free`, or `malloc` links
+  cleanly. The trade-off is deliberate: two artifacts can no longer be
+  statically linked into one binary, and the symbol is no longer
+  user-chosen. Entry scoping rides `compiler::compile`, so tide
+  `/compile`, cove, and `chelis.compile()` now emit the entry-scoped
+  kernel for a multi-def C compile rather than the whole program. The
+  `chelis build` object-mode lane is a separate emitter and is unchanged
+  (`def main` still becomes `<program>__main`).
+- **Integer `abs` is a loud rejection on HIP and Metal** until the typed
+  Phase 3 kernel lands (chelis#699). The C backend implements it — see
+  Fixed below.
 
 ### Fixed
 
@@ -78,6 +161,64 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   exclusive, pre-sized accumulators instead of rebuilding a list for every
   element. Runtime guards preserve immutable-list semantics and reject invalid
   capacities, shared destinations, and self-extension.
+
+- **Integer arithmetic under eval executes at its declared width with
+  exact overflow traps** (#729 Phase 2; closes chelis#680, chelis#711,
+  chelis#717, chelis#718, chelis#722, chelis#724, chelis#726). Integer
+  operations round-tripped through `f64`, so `add(cast(2^53, int64),
+  cast(1, int64))` answered `9007199254740992` in eval while compiled C
+  answered `9007199254740993`; `lt`/`gt` at the 2^53 boundary compared
+  through `.as_f64()` and returned the wrong answer; `max_elem` returned
+  the *smaller* operand; `i64::MAX + 1` saturated and the narrower widths
+  wrapped; and constant folding evaluated an `int64` comparison in `f64`,
+  took the wrong branch, and deleted the correct one at compile time.
+  Overflow now traps with a frozen message grammar that is normative in
+  `spec/04-type-system.md` [04-NUM-9] and byte-identical across lanes
+  (`numeric trap: overflow in add at int64`), naming the canonical
+  lowered primitive rather than the composed source operation. `neg` and
+  `abs` admit signed integers and trap on the unrepresentable minimum;
+  `floor`/`ceil`/`round` on an integer are exactly the identity. f32 and
+  f64 execute at declared width, f16 and bf16 through binary32 with one
+  finalization. The acceptance oracle is
+  `.venv/bin/python scripts/dtype_phase2_oracle.py`. Eval is the reference
+  lane: backend adoption is Phase 3 and has not landed.
+- **The C backend emits exact, trapping integer `abs`** (chelis#1065,
+  part of chelis#699). A compiled `grad` through integer `abs` previously
+  returned all zeros — both lanes agreeing on a wrong answer. The runtime
+  guard checks the declared-width minimum before negating, avoiding
+  signed-overflow UB, and aborts with the same frozen trap text eval
+  prints. Integer `abs` is held unfused so ordinary programs cannot be
+  optimized back onto the float-only template; an externally supplied
+  fused integer `abs` is still a loud C rejection.
+- **`compile_and_load(entry_name=…)` selects the named def** (chelis#817,
+  chelis#818). Manifests previously reported another def's parameters —
+  `input_names` came back as `('x', 'a', 'b')` for a two-argument entry,
+  or empty for a single block-bodied def — and calling the model raised
+  `ValueError`. Default selection now prefers a tensor-signature def named
+  `main`, else the sole tensor-signature def, else a loud error listing
+  candidates, replacing a silent "last def wins". A declined entry reports
+  why (`EntryLaneDecline`) instead of generic boilerplate. Also fixes a
+  Linux `SIGSEGV`: `-fopenmp` is dropped from the in-process `dlopen`ed
+  library, whose initial-exec TLS faulted libgomp; `chelis build` and
+  subprocess paths are untouched and results are numerically identical.
+- **Arrow-form defs surface as roots in standalone-file eval**
+  (chelis#947). `def n -> int32 = add(20, 22)` in a file reported nothing,
+  because an arrow-form def desugars to a zero-arg fn and the root filter
+  excluded every fn-typed decl. Zero-arg fns are added back when the
+  selected-root set would otherwise be empty, in both human-readable and
+  `--json` output. Narrow by construction: a file that also has an
+  ordinary value root still does not surface its arrow-form defs, and a
+  file evaluated from inside a reef package root takes a different path.
+- **A module mixing a `grad` def with ordinary defs builds again**
+  (chelis#1095). The C lane failed outright with `lowered root count
+  mismatch: expected 2 named roots, got 1`, because a `grad` def declares
+  a named root but lowers to no tensor node. The declared inventory now
+  subtracts exactly the defs the lowerer positively reports as holding no
+  tensor node, rather than guessing from the type: a higher-order def is
+  not rootless in general — `def d(f, x) = f(x)` applies its fn parameter
+  and still lowers to a real root — so a static predicate would have
+  silently dropped working kernels. The chelis#232 drift guard stays live,
+  since only positively accounted-for names are subtracted.
 
 ## [0.18.1] — 2026-08-01
 
@@ -198,29 +339,6 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 ## [0.17.5] — 2026-07-31
 
 ### Added
-
-- **`chelis-std` CSV/JSON serializers (chelis#928).** `Std.Io.Csv` gains
-  `to_csv` / `try_to_csv` / `write_csv` / `try_write_csv` (header from the
-  first row's key order, minimal quoting with doubled embedded quotes, LF
-  endings; blank-rendering records are emitted as a quoted empty field so
-  the reader cannot drop them; fields or headers containing CR/LF are
-  rejected because the line-based reader cannot round-trip them).
-  `Std.Io.Json` gains `to_json` / `try_to_json` / `write_json` /
-  `try_write_json` (insertion-order keys, shortest-round-trip f64 via
-  `to_string`, non-finite numbers fail loudly / return `None`) and now
-  exports the seven `Json` constructors so documents can be built directly.
-  New `Std.Text` module with `join(parts, sep)`. The bundled chelis-std
-  0.4.0 dist bytes changed accordingly (same version; committed reef.lock
-  hashes regenerated). Serialization helpers are iterative (map/fold), not
-  per-character recursive, so multi-kilobyte fields do not hit the eval
-  lane's recursion ceiling. `try_load_json` on a missing path now returns
-  `None` (previously it trapped inside `read_file`), matching
-  `try_read_csv`'s missing-file contract. These serializers are the
-  **compiled-lane counterpart** of the eval-only prelude JSON/CSV builtins
-  (chelis#890/chelis#903): ordinary package defs that `chelis build`
-  accepts, on std's own `Json` ADT, unaffected by the builtins'
-  `EVAL_ONLY_HOST_BUILTINS` rejection — reef package name-rewriting keeps
-  the shared `to_json`/`to_csv`/`parse_json` names apart in both lanes.
 
 - **`chelis-vocab` defines a closed vocabulary for the physical representations of runtime elements.**
   `RuntimeDType::repr()` maps each dtype to one `Repr` value.
