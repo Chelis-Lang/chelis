@@ -65,7 +65,7 @@ def oracle_legs(python: str) -> tuple[OracleLeg, ...]:
             ),
         ),
         OracleLeg(
-            "IR declared-width reduction behavior",
+            "IR declared-width reductions and adjoints",
             (
                 "cargo",
                 "nextest",

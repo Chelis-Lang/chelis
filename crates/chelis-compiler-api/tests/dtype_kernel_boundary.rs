@@ -1,16 +1,22 @@
 //! Structural locks for chelis#729 Phase 2's typed host-runtime boundary.
 
 use chelis_types::{
-    ArgReduceOp, FloatBinOp, FloatUnOp, IntBinOp, IntUnOp, NumericKernelError, ScalarValue,
-    TensorReduceOp, TensorStorage, arg_reduce_tensor_groups, float_binop, float_tensor_binop,
-    float_tensor_unop, float_unop, int_binop, int_tensor_binop, int_tensor_unop, int_unop,
-    reduce_tensor_groups,
+    ArgReduceOp, FloatBinOp, FloatUnOp, IntBinOp, IntUnOp, NumericKernelError, ReduceWindowGradOp,
+    ScalarValue, TensorReduceOp, TensorStorage, arg_reduce_tensor_groups, float_binop,
+    float_tensor_binop, float_tensor_unop, float_unop, int_binop, int_tensor_binop,
+    int_tensor_unop, int_unop, reduce_tensor_groups, reduce_window_grad_tensor_groups,
 };
 
 type ReduceKernel =
     fn(TensorReduceOp, &TensorStorage, &[Vec<usize>]) -> Result<TensorStorage, NumericKernelError>;
 type ArgReduceKernel =
     fn(ArgReduceOp, &TensorStorage, &[Vec<usize>]) -> Result<TensorStorage, NumericKernelError>;
+type ReduceWindowGradKernel = fn(
+    ReduceWindowGradOp,
+    &TensorStorage,
+    &TensorStorage,
+    &[Vec<usize>],
+) -> Result<TensorStorage, NumericKernelError>;
 
 #[test]
 fn closed_kernel_signatures_are_the_public_arithmetic_boundary() {
@@ -36,6 +42,7 @@ fn closed_kernel_signatures_are_the_public_arithmetic_boundary() {
         float_tensor_unop;
     let _: ReduceKernel = reduce_tensor_groups;
     let _: ArgReduceKernel = arg_reduce_tensor_groups;
+    let _: ReduceWindowGradKernel = reduce_window_grad_tensor_groups;
 }
 
 #[test]

@@ -23,9 +23,9 @@ use crate::dag::{
 };
 use chelis_types::dtype_semantics::{
     ArgReduceOp, CompareOp, FloatBinOp, FloatUnOp, IntBinOp, IntUnOp, RawScalar, RawTensor,
-    TensorReduceOp, TensorStorage, arg_reduce_tensor_groups, compare_tensors, finalize_tensor,
-    float_tensor_binop, float_tensor_unop, int_tensor_binop, int_tensor_unop, reduce_tensor_groups,
-    scalar_from_f64,
+    ReduceWindowGradOp, TensorReduceOp, TensorStorage, arg_reduce_tensor_groups, compare_tensors,
+    finalize_tensor, float_tensor_binop, float_tensor_unop, int_tensor_binop, int_tensor_unop,
+    reduce_tensor_groups, reduce_window_grad_tensor_groups, scalar_from_f64,
 };
 use chelis_types::types::Prim;
 
@@ -952,8 +952,6 @@ fn reduce_window_grad(
         "reduce_window_grad: input rank {rank} smaller than window arity {n}"
     );
     let leading = rank - n;
-    let window_volume: f64 = window_shape.iter().product::<usize>() as f64;
-
     // Output dim per windowed axis: floor((in - w) / s) + 1 (Valid padding),
     // matching the forward. The cotangent `g` is indexed by this shape.
     let mut out_shape = x.shape[..leading].to_vec();
@@ -975,63 +973,37 @@ fn reduce_window_grad(
         g.shape
     );
 
-    let x_data = x.to_f64_lossy_vec();
-    let g_data = g.to_f64_lossy_vec();
-    let mut din = vec![0.0_f64; x_data.len()];
-
-    // Walk each output position `o` (one upstream gradient value `g[o]`),
-    // then walk that window's source positions. `Max`/`Min` need the
-    // window extreme first; `Sum`/`Mean` scatter unconditionally.
-    for (out_flat, &g_val) in g_data.iter().enumerate() {
+    let mut groups = Vec::with_capacity(g.len());
+    for out_flat in 0..g.len() {
         let out_idx = linear_to_index(out_flat, &out_shape);
-
-        let src_flat_at = |window_pos: &[usize]| -> usize {
+        let mut group = Vec::with_capacity(window_shape.iter().product());
+        for_each_window_pos(window_shape, n, |window_pos| {
             let mut src_idx = vec![0usize; rank];
             src_idx[..leading].copy_from_slice(&out_idx[..leading]);
             for i in 0..n {
                 src_idx[leading + i] = out_idx[leading + i] * strides[i] + window_pos[i];
             }
-            index_to_linear(&src_idx, &x.shape)
-        };
-
-        // First pass (Max/Min only): find the window extreme.
-        let extreme = match reducer {
-            ReduceWindowKind::Max | ReduceWindowKind::Min => {
-                let mut acc = match reducer {
-                    ReduceWindowKind::Max => f64::NEG_INFINITY,
-                    _ => f64::INFINITY,
-                };
-                for_each_window_pos(window_shape, n, |window_pos| {
-                    let v = x_data[src_flat_at(window_pos)];
-                    acc = match reducer {
-                        ReduceWindowKind::Max => acc.max(v),
-                        _ => acc.min(v),
-                    };
-                });
-                Some(acc)
-            }
-            ReduceWindowKind::Sum | ReduceWindowKind::Mean => None,
-        };
-
-        // Second pass: scatter the contribution into `din`.
-        for_each_window_pos(window_shape, n, |window_pos| {
-            let src = src_flat_at(window_pos);
-            match reducer {
-                ReduceWindowKind::Sum => din[src] += g_val,
-                ReduceWindowKind::Mean => din[src] += g_val / window_volume,
-                ReduceWindowKind::Max | ReduceWindowKind::Min => {
-                    // Distribute to every position equal to the window
-                    // extreme (ties get the full gradient, mirroring the
-                    // `max_reduce` `eq`-mask adjoint).
-                    if x_data[src] == extreme.expect("extreme computed for Max/Min") {
-                        din[src] += g_val;
-                    }
-                }
-            }
+            group.push(index_to_linear(&src_idx, &x.shape));
         });
+        groups.push(group);
     }
-
-    finalize_wide("reduce_window_grad", prim, x.shape.clone(), din)
+    let op = match reducer {
+        ReduceWindowKind::Sum => ReduceWindowGradOp::Sum,
+        ReduceWindowKind::Mean => ReduceWindowGradOp::Mean,
+        ReduceWindowKind::Max => ReduceWindowGradOp::Max,
+        ReduceWindowKind::Min => ReduceWindowGradOp::Min,
+    };
+    let storage = reduce_window_grad_tensor_groups(op, x.storage(), g.storage(), &groups)
+        .map_err(|err| err.to_string())?;
+    if storage.prim() != prim {
+        return Err(format!(
+            "{} produced {} storage for {} IR output",
+            op.name(),
+            storage.prim().name(),
+            prim.name()
+        ));
+    }
+    Ok(TensorValue::from_storage(x.shape.clone(), storage))
 }
 
 /// Invoke `f` once per multi-index inside an `n`-dimensional window of
@@ -2722,6 +2694,36 @@ mod tests {
         let din_mean =
             reduce_window_grad(&x, &ones, ReduceWindowKind::Mean, &[2], &[1], Prim::F64).unwrap();
         assert_eq!(din_mean.to_f64_lossy_vec(), vec![0.5, 1.0, 1.0, 0.5]);
+    }
+
+    #[test]
+    fn phase2_reduce_window_grad_accumulates_overlaps_at_declared_width() {
+        let f32_tensor = |shape, values| {
+            TensorValue::from_storage(
+                shape,
+                finalize_tensor("test", Prim::F32, RawTensor::Float(values)).unwrap(),
+            )
+        };
+        let x = f32_tensor(vec![5], vec![0.0; 5]);
+        let witness = f32_tensor(vec![3], vec![16_777_216.0, 1.0, -16_777_216.0]);
+        let actual =
+            reduce_window_grad(&x, &witness, ReduceWindowKind::Sum, &[3], &[1], Prim::F32).unwrap();
+        assert_eq!(
+            actual.to_f64_lossy_vec(),
+            vec![
+                16_777_216.0,
+                16_777_216.0,
+                0.0,
+                -16_777_215.0,
+                -16_777_216.0
+            ],
+            "the center receives all three cotangents and must round after each f32 add"
+        );
+
+        let control = f32_tensor(vec![3], vec![4.0, 1.0, -4.0]);
+        let actual =
+            reduce_window_grad(&x, &control, ReduceWindowKind::Sum, &[3], &[1], Prim::F32).unwrap();
+        assert_eq!(actual.to_f64_lossy_vec(), vec![4.0, 5.0, 1.0, -3.0, -4.0]);
     }
 
     #[test]

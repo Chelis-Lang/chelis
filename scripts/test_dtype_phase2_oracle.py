@@ -21,7 +21,7 @@ class CommandManifestTests(unittest.TestCase):
                 "inherited Phase 1 contract",
                 "sealed numeric kernels and trap bytes",
                 "IR kernel exclusivity",
-                "IR declared-width reduction behavior",
+                "IR declared-width reductions and adjoints",
                 "host kernel exclusivity",
                 "host eval Phase 2 matrices",
                 "exact prover carriers",

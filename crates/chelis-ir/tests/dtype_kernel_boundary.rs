@@ -44,10 +44,15 @@ fn source_slice<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
 fn ir_reductions_can_only_plan_groups_and_call_typed_kernels() {
     let source = include_str!("../src/eval.rs");
     let window = source_slice(source, "fn reduce_window(", "fn reduce_window_grad(");
+    let window_grad = source_slice(source, "fn reduce_window_grad(", "fn for_each_window_pos(");
     let axis = source_slice(source, "fn axis_reduction_groups(", "fn reshape(");
-    let reduction_boundary = format!("{window}\n{axis}");
+    let reduction_boundary = format!("{window}\n{window_grad}\n{axis}");
 
-    for required in ["reduce_tensor_groups", "arg_reduce_tensor_groups"] {
+    for required in [
+        "reduce_tensor_groups",
+        "reduce_window_grad_tensor_groups",
+        "arg_reduce_tensor_groups",
+    ] {
         assert!(
             reduction_boundary.contains(required),
             "chelis#729 Phase 2 requires `{required}` inside the IR reduction boundary"
@@ -62,6 +67,17 @@ fn ir_reductions_can_only_plan_groups_and_call_typed_kernels() {
         assert!(
             source.contains(required),
             "chelis#729 Phase 2 requires the IR dispatch to map `{required}`"
+        );
+    }
+    for required in [
+        "ReduceWindowGradOp::Sum",
+        "ReduceWindowGradOp::Mean",
+        "ReduceWindowGradOp::Max",
+        "ReduceWindowGradOp::Min",
+    ] {
+        assert!(
+            window_grad.contains(required),
+            "chelis#729 Phase 2 requires the window-adjoint dispatch to map `{required}`"
         );
     }
     for forbidden in [

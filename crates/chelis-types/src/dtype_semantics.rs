@@ -417,6 +417,32 @@ pub enum ArgReduceOp {
     Argmin,
 }
 
+/// Closed reducer set for the reverse-mode window adjoint. Shape and window
+/// membership remain consumer-owned; all value selection and overlap-add
+/// arithmetic crosses the dtype-keyed kernel boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReduceWindowGradOp {
+    Sum,
+    Mean,
+    Max,
+    Min,
+}
+
+impl ReduceWindowGradOp {
+    pub const fn name(self) -> &'static str {
+        "reduce_window_grad"
+    }
+
+    const fn forward_op(self) -> TensorReduceOp {
+        match self {
+            Self::Sum => TensorReduceOp::ReduceWindowSum,
+            Self::Mean => TensorReduceOp::ReduceWindowMean,
+            Self::Max => TensorReduceOp::ReduceWindowMax,
+            Self::Min => TensorReduceOp::ReduceWindowMin,
+        }
+    }
+}
+
 impl ArgReduceOp {
     pub const fn name(self) -> &'static str {
         match self {
@@ -1988,6 +2014,96 @@ pub fn arg_reduce_tensor_groups(
     finalize_tensor(op.name(), Prim::Int64, RawTensor::Int(indices)).map_err(Into::into)
 }
 
+/// Apply the reverse-mode window adjoint to explicitly ordered source-index
+/// groups. Each group corresponds to one cotangent element. Selection,
+/// scaling, overlap accumulation, and finalization all execute at the input
+/// dtype's [04-NUM-8] arithmetic width.
+pub fn reduce_window_grad_tensor_groups(
+    op: ReduceWindowGradOp,
+    input: &TensorStorage,
+    cotangent: &TensorStorage,
+    groups: &[Vec<usize>],
+) -> Result<TensorStorage, NumericKernelError> {
+    let prim = input.prim();
+    if !prim.is_float() {
+        return Err(NumericKernelError::WrongFamily {
+            op: op.name(),
+            expected: NumericFamily::Float,
+            actual: prim,
+        });
+    }
+    if cotangent.prim() != prim {
+        return Err(NumericKernelError::DtypeMismatch {
+            op: op.name(),
+            lhs: prim,
+            rhs: cotangent.prim(),
+        });
+    }
+    if groups.len() != cotangent.len() {
+        return Err(NumericKernelError::LengthMismatch {
+            op: op.name(),
+            lhs: groups.len(),
+            rhs: cotangent.len(),
+        });
+    }
+
+    let forward_op = op.forward_op();
+    let accumulator =
+        reduction_arithmetic_prim(prim).ok_or(NumericKernelError::InvalidReductionSignature {
+            op: op.name(),
+            input: prim,
+            accumulator: prim,
+            result: prim,
+        })?;
+    let zero = reduction_seed(forward_op, accumulator, 0, 0.0)?;
+    let mut output = vec![zero; input.len()];
+
+    for (group_index, group) in groups.iter().enumerate() {
+        let mut contribution =
+            scalar_at_reduction_width(forward_op, cotangent, group_index, accumulator)?;
+        if op == ReduceWindowGradOp::Mean {
+            let divisor = reduction_seed(
+                forward_op,
+                accumulator,
+                group.len() as i64,
+                group.len() as f64,
+            )?;
+            contribution = reduction_div_float(forward_op, contribution, divisor)?;
+        }
+        let extreme = match op {
+            ReduceWindowGradOp::Max | ReduceWindowGradOp::Min => {
+                Some(reduce_group(forward_op, input, group, accumulator)?)
+            }
+            ReduceWindowGradOp::Sum | ReduceWindowGradOp::Mean => None,
+        };
+
+        for &input_index in group {
+            let selected = match extreme {
+                Some(extreme) => {
+                    let value =
+                        scalar_at_reduction_width(forward_op, input, input_index, accumulator)?;
+                    compare_scalars(CompareOp::Eq, value, extreme)?
+                }
+                None => true,
+            };
+            if selected {
+                output[input_index] = reduction_add(forward_op, output[input_index], contribution)?;
+            }
+        }
+    }
+
+    let values = output
+        .into_iter()
+        .map(|value| reduction_result_scalar(forward_op, value, prim))
+        .collect::<Result<Vec<_>, NumericKernelError>>()?;
+    finalize_tensor(
+        op.name(),
+        prim,
+        RawTensor::Float(values.iter().map(ScalarValue::as_f64_lossy).collect()),
+    )
+    .map_err(Into::into)
+}
+
 fn splat_storage(value: ScalarValue, len: usize) -> TensorStorage {
     let buf = match value.bits {
         Bits::I8(value) => Buf::I8(vec![value; len]),
@@ -3363,6 +3479,62 @@ mod tests {
                 .unwrap()
                 .to_f64_lossy_vec(),
             vec![1.0]
+        );
+    }
+
+    #[test]
+    fn window_grad_overlap_add_uses_each_declared_float_arithmetic_width() {
+        let groups = vec![vec![0, 1, 2], vec![1, 2, 3], vec![2, 3, 4]];
+        for (prim, cotangents, expected_center) in [
+            (Prim::F16, vec![2048.0, 1.0, -2048.0], 1.0),
+            (Prim::Bf16, vec![256.0, 1.0, -256.0], 1.0),
+            (Prim::F32, vec![16_777_216.0, 1.0, -16_777_216.0], 0.0),
+            (
+                Prim::F64,
+                vec![9_007_199_254_740_992.0, 1.0, -9_007_199_254_740_992.0],
+                0.0,
+            ),
+        ] {
+            let input = finalize_tensor("test", prim, RawTensor::Float(vec![0.0; 5])).unwrap();
+            let cotangent = finalize_tensor("test", prim, RawTensor::Float(cotangents)).unwrap();
+            let output = reduce_window_grad_tensor_groups(
+                ReduceWindowGradOp::Sum,
+                &input,
+                &cotangent,
+                &groups,
+            )
+            .unwrap();
+            assert_eq!(
+                output.element_f64_lossy(2),
+                expected_center,
+                "{} overlap-add must use its arithmetic width",
+                prim.name()
+            );
+        }
+    }
+
+    #[test]
+    fn window_grad_kernel_preserves_selection_ties_and_rejects_dtype_mismatch() {
+        let input =
+            finalize_tensor("test", Prim::F32, RawTensor::Float(vec![2.0, 2.0, 2.0])).unwrap();
+        let cotangent =
+            finalize_tensor("test", Prim::F32, RawTensor::Float(vec![4.0, 4.0])).unwrap();
+        let groups = vec![vec![0, 1], vec![1, 2]];
+        assert_eq!(
+            reduce_window_grad_tensor_groups(ReduceWindowGradOp::Max, &input, &cotangent, &groups,)
+                .unwrap()
+                .to_f64_lossy_vec(),
+            vec![4.0, 8.0, 4.0]
+        );
+
+        let wrong = finalize_tensor("test", Prim::F64, RawTensor::Float(vec![4.0, 4.0])).unwrap();
+        assert_eq!(
+            reduce_window_grad_tensor_groups(ReduceWindowGradOp::Sum, &input, &wrong, &groups,),
+            Err(NumericKernelError::DtypeMismatch {
+                op: "reduce_window_grad",
+                lhs: Prim::F32,
+                rhs: Prim::F64,
+            })
         );
     }
 
