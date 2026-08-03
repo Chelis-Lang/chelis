@@ -16,37 +16,83 @@ pub const VALID_TAGS: &[&str] = &DeepTag::ALL_STRS;
 /// typed dispatch arm. Keep this callable from other crates' permanent
 /// suites (the parser-side and desugar-side invariant tests).
 pub fn find_raw_vocabulary_tag(exprs: &[Expr]) -> Option<String> {
-    fn walk(expr: &Expr) -> Option<String> {
-        match expr {
-            Expr::List(list, _) => {
-                if let Some(symbol) = list.unknown_tag_symbol()
-                    && DeepTag::parse(symbol).is_some()
-                {
-                    return Some(symbol.to_string());
-                }
-                list.elements.iter().find_map(walk)
+    exprs.iter().find_map(|expr| walk(expr, true))
+}
+
+/// The construction-time half of the decode-once scan (chelis#1109):
+/// identical to [`find_raw_vocabulary_tag`] except that it stops at a
+/// stamped [`crate::node::Node`] boundary instead of re-walking that
+/// subtree.
+///
+/// Soundness is inductive, not an approximation. A `Node` exists only if
+/// `Node::validate` accepted it — `try_new`, `new`, and `Deserialize` all
+/// route through it, `Node`'s fields are private to its module, and every
+/// post-construction mutator (`try_replace_meta`, `try_replace_child`,
+/// `try_replace_children`) revalidates the whole candidate node before it
+/// commits. So each `Expr::Node` below the node under construction already
+/// passed this same scan over its own metadata and children, and by
+/// induction over construction order its whole subtree is free of raw
+/// vocabulary tags. Re-walking it is pure repetition, and repeating it at
+/// every ancestor made bottom-up stamping quadratic in nesting depth.
+///
+/// Non-`Node` carriers (`List`, `BareList`, `Map`, `MetaExpr`,
+/// `UnknownForm`) carry no such guarantee — nothing validated them — so
+/// the scan still descends through them to any depth, including into
+/// metadata values.
+pub(crate) fn find_raw_vocabulary_tag_below_gate(exprs: &[Expr]) -> Option<String> {
+    exprs.iter().find_map(|expr| walk(expr, false))
+}
+
+fn walk(expr: &Expr, descend_into_nodes: bool) -> Option<String> {
+    match expr {
+        Expr::List(list, _) => {
+            if let Some(symbol) = list.unknown_tag_symbol()
+                && DeepTag::parse(symbol).is_some()
+            {
+                return Some(symbol.to_string());
             }
-            Expr::Map(map, _) => map.entries.iter().find_map(|(_, value)| walk(value)),
-            Expr::MetaExpr(meta, _) => {
-                walk(&meta.expr).or_else(|| meta.entries.iter().find_map(|(_, value)| walk(value)))
-            }
-            Expr::Atom(_, _) => None,
-            Expr::Node(node, _) => node
-                .meta()
-                .entries
+            list.elements
                 .iter()
-                .find_map(|(_, value)| walk(value))
-                .or_else(|| node.children_slice().iter().find_map(walk)),
-            Expr::BareList(elements, _) => elements.iter().find_map(walk),
-            Expr::UnknownForm(data) => data
-                .meta
-                .entries
-                .iter()
-                .find_map(|(_, value)| walk(value))
-                .or_else(|| data.children.iter().find_map(walk)),
+                .find_map(|element| walk(element, descend_into_nodes))
         }
+        Expr::Map(map, _) => map
+            .entries
+            .iter()
+            .find_map(|(_, value)| walk(value, descend_into_nodes)),
+        Expr::MetaExpr(meta, _) => walk(&meta.expr, descend_into_nodes).or_else(|| {
+            meta.entries
+                .iter()
+                .find_map(|(_, value)| walk(value, descend_into_nodes))
+        }),
+        Expr::Atom(_, _) => None,
+        Expr::Node(node, _) => {
+            if !descend_into_nodes {
+                return None;
+            }
+            node.meta()
+                .entries
+                .iter()
+                .find_map(|(_, value)| walk(value, descend_into_nodes))
+                .or_else(|| {
+                    node.children_slice()
+                        .iter()
+                        .find_map(|child| walk(child, descend_into_nodes))
+                })
+        }
+        Expr::BareList(elements, _) => elements
+            .iter()
+            .find_map(|element| walk(element, descend_into_nodes)),
+        Expr::UnknownForm(data) => data
+            .meta
+            .entries
+            .iter()
+            .find_map(|(_, value)| walk(value, descend_into_nodes))
+            .or_else(|| {
+                data.children
+                    .iter()
+                    .find_map(|child| walk(child, descend_into_nodes))
+            }),
     }
-    exprs.iter().find_map(walk)
 }
 
 #[derive(Debug, Clone)]

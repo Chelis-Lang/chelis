@@ -174,6 +174,102 @@ fn node_constructor_rejects_raw_vocabulary_below_its_gate() {
 }
 
 #[test]
+fn construction_gate_descends_through_every_unvalidated_carrier() {
+    // chelis#1109 stops the construction scan at a stamped `Node` child,
+    // whose subtree cleared the same scan already. Nothing validated the
+    // other carriers, so the scan must still reach a raw tag buried at any
+    // depth below them, in children and in metadata alike.
+    let clean = Expr::node(
+        DeepTag::Lit,
+        MetaMap::default(),
+        vec![Expr::Atom(Atom::Int(1), sp())],
+        sp(),
+    );
+
+    let buried_in_child = Expr::BareList(
+        vec![Expr::List(
+            List {
+                elements: vec![Expr::Map(
+                    MetaMap {
+                        entries: vec![("probe".to_string(), raw_vocabulary_form("if"))],
+                    },
+                    sp(),
+                )],
+            },
+            sp(),
+        )],
+        sp(),
+    );
+    assert!(
+        matches!(
+            Node::try_new(
+                DeepTag::App,
+                MetaMap::default(),
+                vec![clean.clone(), buried_in_child],
+            ),
+            Err(NodeError::RawVocabularyTag { ref raw_tag, .. }) if raw_tag == "if"
+        ),
+        "a raw tag under BareList/List/Map must still be rejected"
+    );
+
+    let buried_in_metadata = Expr::UnknownForm(Box::new(UnknownFormData {
+        head: "future-form".to_string(),
+        meta: MetaMap::default(),
+        children: vec![Expr::BareList(vec![raw_vocabulary_form("tuple")], sp())],
+        span: sp(),
+    }));
+    assert!(
+        matches!(
+            Node::try_new(
+                DeepTag::App,
+                MetaMap {
+                    entries: vec![("probe".to_string(), buried_in_metadata)],
+                },
+                vec![clean.clone()],
+            ),
+            Err(NodeError::RawVocabularyTag { ref raw_tag, .. }) if raw_tag == "tuple"
+        ),
+        "a raw tag under an UnknownForm in metadata must still be rejected"
+    );
+
+    // Stopping at one stamped child must not stop the scan of its siblings.
+    assert!(
+        matches!(
+            Node::try_new(
+                DeepTag::App,
+                MetaMap::default(),
+                vec![clean, raw_vocabulary_form("let")],
+            ),
+            Err(NodeError::RawVocabularyTag { ref raw_tag, .. }) if raw_tag == "let"
+        ),
+        "a stamped sibling must not shadow a raw tag later in the child list"
+    );
+}
+
+#[test]
+fn deeply_nested_stamped_construction_scans_each_level_once() {
+    // Bottom-up stamping constructs one gated node per level, and before
+    // chelis#1109 each construction re-walked the entire subtree below it,
+    // so the total cost was quadratic in nesting depth (measured in
+    // release: 3,200 levels took 24.4ms, versus 0.14ms after the fix).
+    // The parser's own recursion limit keeps the corpus well under this
+    // depth, so this is a shape regression test, not a wall-clock gate --
+    // the behavioral lock on the boundary skip lives in node.rs's
+    // `construction_scan_stops_at_a_stamped_node_boundary`.
+    let mut expr = Expr::node(
+        DeepTag::Lit,
+        MetaMap::default(),
+        vec![Expr::Atom(Atom::Int(1), sp())],
+        sp(),
+    );
+    for _ in 0..1000 {
+        expr = Expr::node(DeepTag::App, MetaMap::default(), vec![expr], sp());
+    }
+
+    assert_eq!(find_raw_vocabulary_tag(std::slice::from_ref(&expr)), None);
+}
+
+#[test]
 fn node_metadata_replacement_revalidates_before_commit() {
     let mut node = Node::try_new(
         DeepTag::Var,
