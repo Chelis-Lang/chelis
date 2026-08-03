@@ -198,13 +198,20 @@ impl Node {
         // Decode-once is recursive: a public caller cannot smuggle an old
         // raw-string vocabulary node through a metadata value or child of the
         // new gated carrier (chelis#731 Phase 3 successor acceptance).
+        //
+        // The scan stops at an already-stamped `Expr::Node` boundary
+        // (chelis#1109): that child cleared this same scan when IT was
+        // constructed, so re-walking its subtree here only repeats work, once
+        // per ancestor, which made bottom-up stamping quadratic in nesting
+        // depth. Every non-Node carrier is still walked to any depth. See
+        // `find_raw_vocabulary_tag_below_gate` for the induction.
         let raw_tag = meta
             .entries
             .iter()
             .find_map(|(_, value)| {
-                crate::validate::find_raw_vocabulary_tag(std::slice::from_ref(value))
+                crate::validate::find_raw_vocabulary_tag_below_gate(std::slice::from_ref(value))
             })
-            .or_else(|| crate::validate::find_raw_vocabulary_tag(children));
+            .or_else(|| crate::validate::find_raw_vocabulary_tag_below_gate(children));
         if let Some(raw_tag) = raw_tag {
             return Err(NodeError::RawVocabularyTag {
                 container: tag,
@@ -504,6 +511,57 @@ mod tests {
         let node = Node::new(DeepTag::Def, MetaMap::default(), vec![name("f"), int(42)]);
         // Index 0 of Def is Binder, not RuntimeExpr.
         let _ = node.expr_child(0);
+    }
+
+    /// chelis#1109: the construction scan stops at an already-stamped
+    /// `Expr::Node`. This pins both halves of that induction.
+    ///
+    /// The smuggling node below is fabricated through the private fields,
+    /// which only this module can reach — `try_new`, `new`, `Deserialize`,
+    /// and the three `try_replace_*` mutators all route through `validate`,
+    /// so no caller can produce a real `Node` carrying a raw vocabulary tag.
+    /// The permanent boundary oracle `find_raw_vocabulary_tag` still
+    /// descends into Node subtrees, so if a future edit ever did produce
+    /// one, the lowering-boundary assertion still catches it.
+    #[test]
+    fn construction_scan_stops_at_a_stamped_node_boundary() {
+        let raw = Expr::List(
+            List {
+                elements: vec![
+                    Expr::Atom(Atom::Name("lit".to_string()), sp()),
+                    Expr::Map(MetaMap::default(), sp()),
+                    int(0),
+                ],
+            },
+            sp(),
+        );
+
+        // Unreachable outside this module: the fields are private.
+        let smuggled = Expr::Node(
+            Box::new(Node {
+                tag: DeepTag::Var,
+                meta: MetaMap::default(),
+                children: vec![raw.clone()],
+            }),
+            sp(),
+        );
+
+        assert_eq!(
+            crate::validate::find_raw_vocabulary_tag(std::slice::from_ref(&smuggled)).as_deref(),
+            Some("lit"),
+            "the permanent boundary oracle must still descend into Node subtrees"
+        );
+        assert!(
+            Node::try_new(DeepTag::App, MetaMap::default(), vec![smuggled]).is_ok(),
+            "construction must trust an already-validated Node child instead of \
+             re-walking it once per ancestor"
+        );
+
+        // The same raw form under an unvalidated carrier is still rejected.
+        assert!(matches!(
+            Node::try_new(DeepTag::App, MetaMap::default(), vec![raw]),
+            Err(NodeError::RawVocabularyTag { .. })
+        ));
     }
 
     #[test]
