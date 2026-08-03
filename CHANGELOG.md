@@ -70,6 +70,13 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   `compile_for_execution`/chelis-python) reject through the section-C2
   `unsupported: builtin ...` diagnostic; `process_run`'s rejection
   prose changed accordingly.
+- **`chelis-deep` `Node`'s mutable child/metadata accessors are removed
+  in favor of transactional replacement** (chelis#1101). `Node::meta_mut`,
+  `children_slice_mut`, and `children_vec_mut` are gone; use
+  `try_replace_meta` / `try_replace_child` / `try_replace_children`, which
+  revalidate the whole candidate against the construction gate so a mutation
+  cannot reopen the closed-vocabulary domain. No external consumer existed at
+  the removal; migrate any downstream `Node` mutation to the `try_replace_*` API.
 
 ### Fixed
 
