@@ -1,5 +1,6 @@
 module Std.Io.Json
-export (Json, load_json, parse_json, try_load_json, try_parse_json, json_get, json_string, json_int, json_float, json_bool, json_array, json_object, json_is_null)
+export (Json, JsonNull, JsonBool, JsonInt, JsonFloat, JsonString, JsonArray, JsonObject, load_json, parse_json, try_load_json, try_parse_json, to_json, try_to_json, write_json, try_write_json, json_get, json_string, json_int, json_float, json_bool, json_array, json_object, json_is_null)
+import Std.Text (join)
 type Json =
   | JsonNull
   | JsonBool(bool)
@@ -14,7 +15,7 @@ def load_json(path: string) -> Json = {
     | None => fail(string_concat("load_json failed for ", path))
   }
 }
-def try_load_json(path: string) -> Option[Json] = try_parse_json(read_file(path))
+def try_load_json(path: string) -> Option[Json] = { if not(file_exists(path)) then None else try_parse_json(read_file(path)) }
 def parse_json(text: string) -> Json = {
   match try_parse_json(text) with {
     | Some(value) => value
@@ -101,6 +102,51 @@ def json_is_null(value: Option[Json]) -> bool = {
     | None => false
   }
 }
+def to_json(value: Json) -> string = {
+  match try_to_json(value) with {
+    | Some(text) => text
+    | None => fail("to_json failed: non-finite numbers cannot be represented in JSON")
+  }
+}
+def try_to_json(value: Json) -> Option[string] = { if json_finite(value) then Some(render_json(value)) else None }
+def json_finite(value: Json) -> bool = {
+  match value with {
+    | JsonNull => true
+    | JsonBool(_) => true
+    | JsonInt(_) => true
+    | JsonFloat(x) => finite_f64(x)
+    | JsonString(_) => true
+    | JsonArray(items) => fold(fn (acc: bool, item: Json) -> and(acc, json_finite(item)), true, items)
+    | JsonObject(entries) => fold(fn (acc: bool, kv: (string, Json)) -> and(acc, json_finite(kv.1)), true, dict_entries(entries))
+  }
+}
+def finite_f64(x: f64) -> bool = not(or(neq(x, x), or(eq(x, div(1.0f64, 0.0f64)), eq(x, div(-1.0f64, 0.0f64)))))
+def render_json(value: Json) -> string = {
+  match value with {
+    | JsonNull => "null"
+    | JsonBool(flag) => if flag then "true" else "false"
+    | JsonInt(n) => to_string(n)
+    | JsonFloat(x) => to_string(x)
+    | JsonString(text) => quote_string(text)
+    | JsonArray(items) => string_concat("[", string_concat(join(map(fn (item: Json) -> render_json(item), items), ","), "]"))
+    | JsonObject(entries) => string_concat("{", string_concat(join(map(fn (kv: (string, Json)) -> string_concat(quote_string(kv.0), string_concat(":", render_json(kv.1))), dict_entries(entries)), ","), "}"))
+  }
+}
+def write_json(path: string, value: Json) -> unit = {
+  match try_to_json(value) with {
+    | Some(text) => write_file(path, text)
+    | None => fail(string_concat("write_json failed for ", string_concat(path, ": non-finite numbers cannot be represented in JSON")))
+  }
+}
+def try_write_json(path: string, value: Json) -> Option[unit] = {
+  match try_to_json(value) with {
+    | Some(text) => Some(write_file(path, text))
+    | None => None
+  }
+}
+def quote_string(text: string) -> string = string_concat("\"", string_concat(escape_text(text), "\""))
+def escape_text(text: string) -> string = { if not(or(string_contains(text, "\""), or(string_contains(text, "\\"), or(string_contains(text, "\n"), or(string_contains(text, "\t"), string_contains(text, "\r")))))) then text else fold(fn (acc: string, idx: int64) -> string_concat(acc, escape_char(char_at(text, idx))), "", range(cast(0, int64), string_len(text))) }
+def escape_char(ch: string) -> string = { if eq(ch, "\"") then "\\\"" else if eq(ch, "\\") then "\\\\" else if eq(ch, "\n") then "\\n" else if eq(ch, "\t") then "\\t" else if eq(ch, "\r") then "\\r" else ch }
 def parse_value(text: string, idx: int64) -> Option[(Json, int64)] = {
   if gte(idx, string_len(text)) then None else {
     ch = char_at(text, idx)

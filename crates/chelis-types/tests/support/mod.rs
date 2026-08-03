@@ -1,78 +1,68 @@
-use chelis_deep::{Atom, DeepTag, Expr, Span};
+//! Test-only constructors for adversarial checker-boundary mutations.
 
-/// Mutate the last stamped node with `tag` in reverse source order. This is a
-/// controlled adversarial seam for [04-TOT-3]: production parsing cannot
-/// construct wrong-arity nodes, but the transitional mutable Node API can
-/// still hand one to the checker until #1023 closes that public surface.
-pub fn append_name_to_last_node(exprs: &mut [Expr], tag: DeepTag, name: &str) {
-    let child = Expr::Atom(Atom::Name(name.to_string()), Span::new(0, 0));
-    assert!(
-        exprs
-            .iter_mut()
-            .rev()
-            .any(|expr| append_to_last(expr, tag, &child)),
-        "fixture must contain a stamped `{}` node",
-        tag.as_str()
-    );
+use chelis_deep::ast::{Atom, Expr, List, MetaExpr, MetaMap};
+use chelis_deep::{RawAtom, RawExpr};
+
+/// Parse Deep syntax without running the stamped `Node` constructor.
+///
+/// Production parsing must reject malformed arity and role shapes before the
+/// checker sees them. A few totality tests also need to prove the checker
+/// fails closed when a programmatic/legacy caller bypasses that boundary.
+/// This test-only converter recreates that mutation explicitly and then
+/// decodes known list heads with the deprecated legacy tag stamper.
+///
+/// This replaces an earlier seam that parsed a valid program and then widened
+/// one node through `Node`'s mutable child API. That API no longer exists:
+/// the successor carrier revalidates every candidate before commit, so a
+/// wrong-arity `Node` is unconstructible. The legacy `List` carrier is the
+/// remaining way to hand the checker a malformed tree.
+pub(crate) fn parse_unchecked_legacy(source: &str) -> Vec<Expr> {
+    let raw = chelis_deep::parse_raw_str(source).expect("adversarial Deep syntax must lex/parse");
+    let mut exprs: Vec<_> = raw.into_iter().map(raw_to_legacy).collect();
+    chelis_deep::parser::stamp_tags(&mut exprs);
+    exprs
 }
 
-fn append_to_last(expr: &mut Expr, tag: DeepTag, child: &Expr) -> bool {
-    match expr {
-        Expr::Atom(..) => false,
-        Expr::List(list, _) => list
-            .elements
-            .iter_mut()
-            .rev()
-            .any(|expr| append_to_last(expr, tag, child)),
-        Expr::Map(meta, _) => meta
-            .entries
-            .iter_mut()
-            .rev()
-            .any(|(_, expr)| append_to_last(expr, tag, child)),
-        Expr::MetaExpr(meta, _) => {
-            append_to_last(&mut meta.expr, tag, child)
-                || meta
-                    .entries
-                    .iter_mut()
-                    .rev()
-                    .any(|(_, expr)| append_to_last(expr, tag, child))
-        }
-        Expr::Node(node, _) => {
-            if node
-                .children_slice_mut()
-                .iter_mut()
-                .rev()
-                .any(|expr| append_to_last(expr, tag, child))
-                || node
-                    .meta_mut()
-                    .entries
-                    .iter_mut()
-                    .rev()
-                    .any(|(_, expr)| append_to_last(expr, tag, child))
-            {
-                return true;
-            }
-            if node.tag() == tag {
-                node.children_vec_mut().push(child.clone());
-                return true;
-            }
-            false
-        }
-        Expr::BareList(elements, _) => elements
-            .iter_mut()
-            .rev()
-            .any(|expr| append_to_last(expr, tag, child)),
-        Expr::UnknownForm(data) => {
-            data.children
-                .iter_mut()
-                .rev()
-                .any(|expr| append_to_last(expr, tag, child))
-                || data
-                    .meta
-                    .entries
-                    .iter_mut()
-                    .rev()
-                    .any(|(_, expr)| append_to_last(expr, tag, child))
-        }
+fn raw_to_legacy(raw: RawExpr) -> Expr {
+    match raw {
+        RawExpr::Atom(atom, span) => Expr::Atom(
+            match atom {
+                RawAtom::Symbol(value) => Atom::Name(value),
+                RawAtom::Int(value) => Atom::Int(value),
+                RawAtom::Float(value) => Atom::Float(value),
+                RawAtom::Str(value) => Atom::Str(value),
+                RawAtom::Bool(value) => Atom::Bool(value),
+            },
+            span,
+        ),
+        RawExpr::List(elements, span) => Expr::List(
+            List {
+                elements: elements.into_iter().map(raw_to_legacy).collect(),
+            },
+            span,
+        ),
+        RawExpr::Map(entries, span) => Expr::Map(
+            MetaMap {
+                entries: entries
+                    .into_iter()
+                    .map(|(key, value)| (key, raw_to_legacy(value)))
+                    .collect(),
+            },
+            span,
+        ),
+        RawExpr::MetaExpr {
+            entries,
+            expr,
+            span,
+        } => Expr::MetaExpr(
+            MetaExpr {
+                entries: entries
+                    .into_iter()
+                    .map(|(key, value)| (key, raw_to_legacy(value)))
+                    .collect(),
+                expr: Box::new(raw_to_legacy(*expr)),
+            },
+            span,
+        ),
     }
 }

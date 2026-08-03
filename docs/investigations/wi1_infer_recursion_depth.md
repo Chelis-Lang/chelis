@@ -209,6 +209,13 @@ safety net ran. The #1023 stabilization makes the transitional normalization
 an explicit heap-worklist traversal and removes its stale recursive-walker
 exemption. This restores the covered-or-rejected contract; it does not make
 the legacy representation bridge a permanent #908 boundary.
+The regression fixture itself still owns and recursively drops its 4,000-deep
+input after the borrowed check returns. Its worker therefore clears the
+test-only reduced-segment override and drops that fixture inside a fresh
+production-sized grown segment. Worker aborts remain fatal, and the two tests
+remain active on macOS. Thus a green test proves the typed stack-budget
+diagnostic rather than treating SIGBUS, a panic, or an ignored test as valid
+rejection evidence.
 
 ## WI-1 guard-completeness residual (WS-5 walker scan; WS-2 red zone)
 

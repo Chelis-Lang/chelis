@@ -6,7 +6,9 @@
 mod stack;
 
 use stack::*;
-pub use stack::{run_on_grown_stack, set_grow_segment_bytes_for_test};
+pub use stack::{
+    reset_grow_segment_bytes_for_test, run_on_grown_stack, set_grow_segment_bytes_for_test,
+};
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
