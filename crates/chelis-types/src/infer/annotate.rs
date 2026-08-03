@@ -278,11 +278,9 @@ pub(super) fn annotate_child_for_role(
 /// True for the `(t-var _)` placeholder that `desugar_fun_def` emits
 /// in a synthesized sig for a parameter that had no declared type.
 pub(super) fn is_wildcard_tvar_expr(expr: &deep::Expr) -> bool {
-    let deep::Expr::List(list, _) = expr else {
-        return false;
-    };
-    get_tag(list) == Some(DeepTag::TVar)
-        && children(list).first().and_then(symbol_name) == Some("_")
+    // chelis#1107 amendment: carrier-preserving read.
+    matches!(stamped_parts(expr), Some((DeepTag::TVar, _, kids))
+        if kids.first().and_then(symbol_name) == Some("_"))
 }
 
 /// Rebuild a `(params ...)` node so every previously-bare parameter
@@ -307,8 +305,23 @@ pub(super) fn annotate_params_node(
     params_expr: &deep::Expr,
     declared_param_type_exprs: &[deep::Expr],
 ) -> deep::Expr {
-    let deep::Expr::List(list, span) = params_expr else {
-        return params_expr.clone();
+    // chelis#1107 amendment: accept both carriers. A stamped `(params ...)`
+    // arrives as `Expr::Node`, and the `List`-only read this replaced returned
+    // it unchanged -- so no parameter ever received its declared-type metadata
+    // on the stamped ingress.
+    //
+    // The bridge is materialized into a local rather than handled by
+    // re-entering this function: a self-recursive walk here would owe a
+    // `stack_guard!` (see `tests/stack_guard_coverage.rs`) for a recursion
+    // that is only ever one level deep.
+    let bridged;
+    let (list, span) = match params_expr {
+        deep::Expr::List(list, span) => (list, span),
+        deep::Expr::Node(node, span) if node.tag() == DeepTag::Params => {
+            bridged = node.to_list(*span);
+            (&bridged, span)
+        }
+        _ => return params_expr.clone(),
     };
     if get_tag(list) != Some(DeepTag::Params) {
         return params_expr.clone();

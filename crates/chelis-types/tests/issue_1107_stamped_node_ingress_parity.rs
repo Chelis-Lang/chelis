@@ -334,3 +334,54 @@ fn literal_reduction_axis_is_accepted_on_both_ingresses() {
         "literal reduction axis",
     );
 }
+
+// ── reshape shape-list readers (the red team's amendment finding) ──────────
+//
+// `reshape_output_dims` reads its shape-list argument through
+// `collect_shape_list_elements` and `list_literal_len`. Both were bare
+// `let deep::Expr::List(..) else` readers, so on the stamped ingress they
+// returned `None` and reshape collapsed to a rank-1 wildcard, while the
+// normalizing ingress read the literal shape. Bidirectional and user-reachable
+// through `chelis prove`, which drives `check_typed_program`.
+//
+// This member was LATENT and PRE-EXISTING (it reproduces on 84e84b36, before
+// the first #1107 commit). It was missed by the original sweep because that
+// sweep was corpus-driven: a probe only proves what the corpus reached. The
+// amendment replaced it with a static textual audit of the whole reader class.
+
+/// `[2, 3]` in its desugared `Cons(2, Cons(3, Nil))` form.
+const SHAPE_LIST_2_3: &str = "(app {} (var {} Cons) (lit {type: (t-prim {} int64)} 2) \
+   (app {} (var {} Cons) (lit {type: (t-prim {} int64)} 3) (var {} Nil)))";
+
+#[test]
+fn reshape_to_concrete_dims_is_accepted_on_both_ingresses() {
+    // Over-rejection form: the typed ingress inferred `tensor[*, f32]` for the
+    // reshape and rejected this valid program against its declared
+    // `tensor[2, 3, f32]`, while the IR ingress accepted it.
+    assert_agree_and_accept(
+        &format!(
+            "(defsig {{}} f (t-fn {{}} (t-tensor {{}} (d-lit {{}} 6) (t-prim {{}} f32)) \
+               (t-tensor {{}} (d-lit {{}} 2) (d-lit {{}} 3) (t-prim {{}} f32))))\n\
+             (def {{}} f (fn {{}} (params {{}} x) \
+               (app {{}} (var {{}} reshape) (var {{}} x) {SHAPE_LIST_2_3})))"
+        ),
+        "reshape to concrete dims matching its declared result",
+    );
+}
+
+#[test]
+fn reshape_shape_mismatch_is_rejected_on_both_ingresses() {
+    // Fail-open form: the same reshape declared `-> tensor[n, f32]` is a real
+    // rank mismatch. The typed ingress accepted it, because a rank-1 wildcard
+    // unified with the declared rank-1 result; the IR ingress rejected it.
+    assert_agree_and_reject(
+        &format!(
+            "(defsig {{}} g (t-fn {{}} (t-tensor {{}} (d-lit {{}} 6) (t-prim {{}} f32)) \
+               (t-tensor {{}} (d-var {{}} n) (t-prim {{}} f32))))\n\
+             (def {{}} g (fn {{}} (params {{}} x) \
+               (app {{}} (var {{}} reshape) (var {{}} x) {SHAPE_LIST_2_3})))"
+        ),
+        "body doesn't match declared signature",
+        "reshape whose real rank-2 result contradicts a declared rank-1 signature",
+    );
+}

@@ -690,6 +690,11 @@ pub(crate) fn run_type_stamp_mutation_case(
             let root = node_expr(DeepTag::App, vec![runtime_child]);
             let mut product = InferenceProduct::default();
             product.begin_root(&root);
+            // chelis#1107 amendment (justified-safe, not routed): `root` is
+            // built two lines above by this file's own `node_expr`, which
+            // returns `deep::Expr::List` unconditionally. No stamped `Node`
+            // can reach this reader -- it is `#[cfg(test)]` mutation-case
+            // scaffolding over a locally constructed value, not program input.
             let deep::Expr::List(root_list, _) = &root else {
                 unreachable!("node_expr produces a list")
             };

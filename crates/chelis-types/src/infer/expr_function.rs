@@ -104,6 +104,11 @@ pub(super) fn infer_def_body_with_sig(
     };
 
     if kids.len() < 2 {
+        // chelis#1107 amendment (justified-safe, not routed): reached only
+        // when the `fn` has fewer than two children. `arity_contract(Fn)` is
+        // `Fixed(2)` and `Node::validate` enforces it at construction, so a
+        // stamped `Node` is never short -- only a legacy `List` carrier can
+        // land here.
         let deep::Expr::List(fn_list, _) = body else {
             unreachable!("validated Node::Fn satisfies its arity contract")
         };

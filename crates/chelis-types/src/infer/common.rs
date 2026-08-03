@@ -564,10 +564,8 @@ pub(super) fn infer_diagonal_result_type(
 }
 
 pub(super) fn macro_source(expr: &deep::Expr) -> Option<String> {
-    let deep::Expr::List(list, _) = expr else {
-        return None;
-    };
-    let meta = get_meta(list)?;
+    // chelis#1107 amendment: carrier-preserving read.
+    let (_, meta, _) = stamped_parts(expr)?;
     let source = meta
         .entries
         .iter()
@@ -1345,13 +1343,12 @@ pub(super) fn type_contains_rank(ty: &Type) -> bool {
 
 /// Extract the callee name from an `app`'s first child when it is `(var {} name)`.
 pub(super) fn app_var_name(callee: &deep::Expr) -> Option<&str> {
-    let deep::Expr::List(list, _) = callee else {
-        return None;
-    };
-    if get_tag(list) != Some(DeepTag::Var) {
+    // chelis#1107 amendment: carrier-preserving read.
+    let (tag, _, kids) = stamped_parts(callee)?;
+    if tag != DeepTag::Var {
         return None;
     }
-    children(list).first().and_then(symbol_name)
+    kids.first().and_then(symbol_name)
 }
 
 /// Names of every top-level `def` in the program (after module flattening),
@@ -1385,6 +1382,18 @@ pub(super) fn check_rank_body_discipline(
     errors: &mut DiagnosticSink<'_>,
 ) {
     stack_guard!("check_rank_body_discipline", expr);
+    // chelis#1107 amendment: bridge a stamped `Expr::Node` one level and
+    // recurse. The walk re-enters per child, so each nested Node is bridged in
+    // turn -- without this the §4.2 rank-body-discipline check returned at the
+    // first node and never ran on the stamped ingress.
+    if let deep::Expr::Node(node, span) = expr {
+        let bridged = deep::Expr::List(node.to_list(*span), *span);
+        check_rank_body_discipline(def_name, &bridged, user_def_names, errors);
+        return;
+    }
+    // chelis#1107 amendment (justified-safe, not routed): the `Node` bridge
+    // directly above re-enters with a `List`, so this reader only ever sees
+    // the `List` carrier.
     let deep::Expr::List(list, _) = expr else {
         return;
     };

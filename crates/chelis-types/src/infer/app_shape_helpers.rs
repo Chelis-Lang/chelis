@@ -380,17 +380,15 @@ pub(super) fn shape_operand_var_name(operand: &deep::Expr) -> Option<&str> {
     if let Some(name) = symbolic_dim_ref_name(operand) {
         return Some(name);
     }
-    let deep::Expr::List(list, _) = operand else {
-        return None;
-    };
+    // chelis#1107 amendment: carrier-preserving read.
+    let (tag, _, kids) = stamped_parts(operand)?;
     // `&x` desugars to the `(borrow {} (var x))` TAG form; `borrow(x)`
     // may also appear as the `(app {} (var borrow) (var x))` builtin form.
-    if get_tag(list) == Some(DeepTag::Borrow) {
-        return children(list).first().and_then(shape_operand_var_name);
+    if tag == DeepTag::Borrow {
+        return kids.first().and_then(shape_operand_var_name);
     }
-    let kids = children(list);
     let callee = kids.first()?;
-    if get_tag(list) == Some(DeepTag::App) && is_builtin_var(callee, "borrow") {
+    if tag == DeepTag::App && is_builtin_var(callee, "borrow") {
         return kids.get(1).and_then(shape_operand_var_name);
     }
     None

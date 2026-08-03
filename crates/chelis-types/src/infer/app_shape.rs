@@ -1220,12 +1220,16 @@ pub(super) fn cons_chain_int_pairs(expr: &deep::Expr) -> PairListShape {
     let mut cursor = expr;
     let mut axis = 0usize;
     loop {
-        let deep::Expr::List(outer, _) = cursor else {
-            return PairListShape::Unknown;
+        // chelis#1107 amendment: carrier-preserving read. A `List`-only
+        // destructure classified every stamped pad/crop pair-list as
+        // `Unknown`, so the bounds check never ran on the typed ingress.
+        let (outer_tag, outer_kids) = match stamped_parts(cursor) {
+            Some((tag, _, kids)) => (Some(tag), kids),
+            None => return PairListShape::Unknown,
         };
-        match get_tag(outer) {
+        match outer_tag {
             Some(DeepTag::Var) => {
-                let name = match children(outer).first().and_then(symbol_name) {
+                let name = match outer_kids.first().and_then(symbol_name) {
                     Some(name) => name,
                     None => return PairListShape::Unknown,
                 };
@@ -1243,7 +1247,7 @@ pub(super) fn cons_chain_int_pairs(expr: &deep::Expr) -> PairListShape {
                 return PairListShape::Unknown;
             }
             Some(DeepTag::App) => {
-                let app_children = children(outer);
+                let app_children = outer_kids;
                 let func = match app_children.first() {
                     Some(func) => func,
                     None => return PairListShape::Unknown,
@@ -1306,15 +1310,17 @@ pub(super) enum InnerPairShape {
 /// silently falling back to `NonLiteral` (red team round 2 finding
 /// R2-L1; mirrors how reshape extracts dim literals).
 pub(super) fn cons_chain_two_ints(expr: &deep::Expr, _axis: usize) -> InnerPairShape {
-    let deep::Expr::List(list, _) = expr else {
-        return InnerPairShape::Unknown;
+    // chelis#1107 amendment: carrier-preserving read.
+    let (outer_tag, outer_kids) = match stamped_parts(expr) {
+        Some((tag, _, kids)) => (Some(tag), kids),
+        None => return InnerPairShape::Unknown,
     };
-    if get_tag(list) != Some(DeepTag::App) {
+    if outer_tag != Some(DeepTag::App) {
         // Inner element is not a Cons-chain. The `Nil` case (zero-element
         // list literal) is malformed; any other `var` is an opaque
         // `List[Int32]` reference whose contents the runtime will check.
-        if matches!(get_tag(list), Some(DeepTag::Var)) {
-            let is_nil = children(list)
+        if matches!(outer_tag, Some(DeepTag::Var)) {
+            let is_nil = outer_kids
                 .first()
                 .and_then(symbol_name)
                 .map(|name| name == "Nil")
@@ -1335,12 +1341,14 @@ pub(super) fn cons_chain_two_ints(expr: &deep::Expr, _axis: usize) -> InnerPairS
     let mut head_values: Vec<Option<i64>> = Vec::new();
     let mut inner_cursor: &deep::Expr = expr;
     loop {
-        let deep::Expr::List(inner, _) = inner_cursor else {
-            return InnerPairShape::Unknown;
+        // chelis#1107 amendment: carrier-preserving read.
+        let (inner_tag, inner_kids) = match stamped_parts(inner_cursor) {
+            Some((tag, _, kids)) => (Some(tag), kids),
+            None => return InnerPairShape::Unknown,
         };
-        match get_tag(inner) {
+        match inner_tag {
             Some(DeepTag::Var) => {
-                let name = match children(inner).first().and_then(symbol_name) {
+                let name = match inner_kids.first().and_then(symbol_name) {
                     Some(n) => n,
                     None => return InnerPairShape::Unknown,
                 };
@@ -1366,7 +1374,7 @@ pub(super) fn cons_chain_two_ints(expr: &deep::Expr, _axis: usize) -> InnerPairS
                 return InnerPairShape::Literal((start, end));
             }
             Some(DeepTag::App) => {
-                let app_children = children(inner);
+                let app_children = inner_kids;
                 let func = match app_children.first() {
                     Some(f) => f,
                     None => return InnerPairShape::Unknown,
@@ -1398,15 +1406,21 @@ pub(super) fn cons_chain_two_ints(expr: &deep::Expr, _axis: usize) -> InnerPairS
 }
 
 pub(super) fn list_literal_len(expr: &deep::Expr) -> Option<usize> {
-    let deep::Expr::List(list, _) = expr else {
-        return None;
-    };
     // The host-lane list-literal spelling is compiler-internal and outside
     // the closed vocabulary; it stays symbol-headed (raw-string boundary).
-    if list.unknown_tag_symbol() != Some("list") {
-        return None;
+    //
+    // chelis#1107 amendment: because that head never decodes, the stamp pass
+    // carries it as `Expr::UnknownForm`, not `Expr::Node` -- so this reader
+    // needs an `UnknownForm` arm rather than `stamped_parts`. Without it the
+    // rank fell back to 1 on the typed ingress while the normalizing ingress
+    // read the real element count.
+    match expr {
+        deep::Expr::List(list, _) if list.unknown_tag_symbol() == Some("list") => {
+            Some(children(list).len())
+        }
+        deep::Expr::UnknownForm(data) if data.head == "list" => Some(data.children.len()),
+        _ => None,
     }
-    Some(children(list).len())
 }
 
 /// Build the output dim list for `reshape(input, shape_list)`.
@@ -1493,25 +1507,28 @@ pub(super) fn collect_shape_list_elements(expr: &deep::Expr) -> Option<Vec<&deep
     let mut elems = Vec::new();
     let mut cursor = expr;
     loop {
-        let deep::Expr::List(list, _) = cursor else {
-            return None;
-        };
-        match get_tag(list)? {
+        // chelis#1107 amendment (the red team's confirmed member): a
+        // `List`-only destructure gave up on every stamped Cons chain, so
+        // `reshape_output_dims` collapsed to a rank-1 wildcard on the typed
+        // ingress while the normalizing ingress read the literal shape --
+        // bidirectionally divergent, and user-reachable through `chelis
+        // prove`.
+        let (tag, _, kids) = stamped_parts(cursor)?;
+        match tag {
             DeepTag::Var => {
-                let name = children(list).first().and_then(symbol_name)?;
+                let name = kids.first().and_then(symbol_name)?;
                 if name == "Nil" {
                     return Some(elems);
                 }
                 return None;
             }
             DeepTag::App => {
-                let app_children = children(list);
-                let func = app_children.first()?;
+                let func = kids.first()?;
                 if !is_builtin_var(func, "Cons") {
                     return None;
                 }
-                elems.push(app_children.get(1)?);
-                cursor = app_children.get(2)?;
+                elems.push(kids.get(1)?);
+                cursor = kids.get(2)?;
             }
             _ => return None,
         }
@@ -1539,11 +1556,7 @@ pub(super) fn extract_shape_axis_of(
     if !is_target_ty(target_ty, Prim::Int64) {
         return None;
     }
-    let shape_call = inner_to_list(inner)?;
-    if !is_shape_app(shape_call) {
-        return None;
-    }
-    let shape_args = children(shape_call);
+    let shape_args = app_children_of(inner)?;
     let func = shape_args.first()?;
     if !is_builtin_var(func, "shape") {
         return None;
@@ -1564,16 +1577,11 @@ pub(super) fn extract_shape_axis_of(
 /// Strip one layer of `cast` (tag-form or `app`-form) and return
 /// (inner_expr, target_type_expr).
 pub(super) fn peel_cast(expr: &deep::Expr) -> Option<(&deep::Expr, &deep::Expr)> {
-    let deep::Expr::List(list, _) = expr else {
-        return None;
-    };
-    match get_tag(list)? {
-        DeepTag::Cast => {
-            let kids = children(list);
-            Some((kids.first()?, kids.get(1)?))
-        }
+    // chelis#1107 amendment: carrier-preserving read.
+    let (tag, _, kids) = stamped_parts(expr)?;
+    match tag {
+        DeepTag::Cast => Some((kids.first()?, kids.get(1)?)),
         DeepTag::App => {
-            let kids = children(list);
             let func = kids.first()?;
             if !is_builtin_var(func, "cast") {
                 return None;
@@ -1587,37 +1595,29 @@ pub(super) fn peel_cast(expr: &deep::Expr) -> Option<(&deep::Expr, &deep::Expr)>
 /// Treat `(t-prim {} <name>)` as the target type marker emitted by
 /// `cast(..., int64)` etc. Returns true iff the marker matches `prim`.
 pub(super) fn is_target_ty(expr: &deep::Expr, prim: Prim) -> bool {
-    let deep::Expr::List(list, _) = expr else {
+    // chelis#1107 amendment: carrier-preserving read.
+    let Some((DeepTag::TPrim, _, kids)) = stamped_parts(expr) else {
         return false;
     };
-    if get_tag(list) != Some(DeepTag::TPrim) {
-        return false;
-    }
-    let Some(name_expr) = children(list).first() else {
+    let Some(name_expr) = kids.first() else {
         return false;
     };
     symbol_name(name_expr) == Some(prim.name())
 }
 
-/// Treat `expr` as an `(app {} ...)` list and return its `deep::List`,
-/// or `None` if it isn't.
-pub(super) fn inner_to_list(expr: &deep::Expr) -> Option<&deep::List> {
-    let deep::Expr::List(list, _) = expr else {
-        return None;
-    };
-    if get_tag(list) == Some(DeepTag::App) {
-        Some(list)
-    } else {
-        None
+/// Treat `expr` as an `(app {} ...)` node and return its children, or
+/// `None` if it isn't one.
+///
+/// chelis#1107 amendment: this used to hand back a `&deep::List`, which is
+/// unrepresentable for a stamped `Expr::Node`. Returning the children slice
+/// is carrier-agnostic and is all the single caller ever wanted. The old
+/// `is_shape_app` helper went with it -- its sole call site immediately
+/// re-checked the same `is_builtin_var(func, "shape")` condition itself.
+pub(super) fn app_children_of(expr: &deep::Expr) -> Option<&[deep::Expr]> {
+    match stamped_parts(expr)? {
+        (DeepTag::App, _, kids) => Some(kids),
+        _ => None,
     }
-}
-
-/// True iff `app_list` is an `(app {} (var {} shape) ...)`.
-pub(super) fn is_shape_app(app_list: &deep::List) -> bool {
-    children(app_list)
-        .first()
-        .map(|f| is_builtin_var(f, "shape"))
-        .unwrap_or(false)
 }
 
 /// Extract an int literal from a Deep expr, looking through `cast(N, int64)`

@@ -1497,13 +1497,12 @@ pub(super) fn var_name_list(list: &deep::List) -> Option<&str> {
 }
 
 pub(super) fn borrow_inner_for_signature(expr: &deep::Expr) -> Option<&deep::Expr> {
-    let deep::Expr::List(list, _) = expr else {
-        return None;
-    };
-    if get_tag(list) != Some(DeepTag::Borrow) {
+    // chelis#1107 amendment: carrier-preserving read.
+    let (tag, _, kids) = stamped_parts(expr)?;
+    if tag != DeepTag::Borrow {
         return None;
     }
-    children(list).first()
+    kids.first()
 }
 
 pub(super) fn is_direct_unshadowed_var(
