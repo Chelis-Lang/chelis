@@ -223,7 +223,7 @@ coral      = { version = "0.5.0" }
 
 **Rule:** snake_case (PEP 8 throughout).
 
-Examples: `bench_phase_j.py`, `bump_compiler_pins.py`, `gen_goldens.py`,
+Examples: `benchmark_parser_throughput.py`, `bump_compiler_pins.py`, `gen_goldens.py`,
 `validate_book_examples.py`.
 
 ### 2.9 Shell scripts
@@ -730,7 +730,7 @@ chelis monorepo's authoritative language-spec ordering.
 ```
 
 Shell repos (`nautilus`, `coral`, `shoals`, `octant`) have their own
-`spec/` directories holding per-shell phase plans and design notes.
+`spec/` directories holding per-shell implementation plans and design notes.
 Those follow §8.2's snake_case rule, not §8.1's numbered-spec rule.
 
 ### 8.2 Design files
@@ -738,9 +738,9 @@ Those follow §8.2's snake_case rule, not §8.1's numbered-spec rule.
 **Rule:** snake_case in `chelis/spec/design/` and in any shell repo's
 top-level `spec/` directory.
 
-Examples: `phase1a_kernel_codegen.md`, `chelis_canonical_reference.md`,
-`phase3j_pre_release.md`, `grad_eval_host_runtime.md`,
-`phase3l.md` (shell repo phase plan).
+Examples: `dtype_semantics.md`, `chelis_canonical_reference.md`,
+`pre_release_validation.md`, `grad_eval_host_runtime.md`,
+`runtime_abi.md` (shell repo implementation plan).
 
 The historical kebab-case minority files (`grad-eval-host-runtime.md`,
 `host-emit-hashmap-iteration-nondeterminism.md`, etc.) rename to
@@ -908,45 +908,18 @@ already outside the rule's scope; no additional carve-out is needed.
 
 ## 9. Project-cutting conventions
 
-### 9.1 Phase identifiers
-
-**Rule:** lowercase `phase` + digit + lowercase letter.
-
-Established by historical practice (`phase3j`, `phase1a`, `phase5`).
-Phase A artifacts use the same form: `phase_a` in filenames,
-`phase-a` in branch names.
-
-```
-reef_install_from_github.rs    // Rust file (snake)
-feat/phase-a-item6-from-github  // git branch (kebab)
-phase-a-item6                   // commit scope (kebab)
-```
-
-### 9.2 Branch naming
-
-**Rule:** `{type}/{phase-id}-{item-slug-kebab}`.
-
-Type prefixes follow conventional commits (`feat`, `fix`, `test`,
-`docs`, `style`, `chore`, `refactor`).
-
-```
-feat/phase-a-item6-from-github
-fix/phase-a-chelis-std-runtime
-docs/spec-nomenclature-expansion
-```
-
-### 9.3 Commit conventions
+### 9.1 Commit conventions
 
 **Rule:** Conventional commits.
 
 ```
-feat(phase-a-item9): add lockfile remote_origin
-test(phase-a-item8): bootstrap parallel install
-style(reef): rename phaseA tests to phase_a
-docs(spec): expand nomenclature with style rules
+feat(reef): record lockfile remote origin
+test(reef): cover parallel bootstrap installs
+style(reef): give bootstrap tests descriptive names
+docs(spec): define declarative naming
 ```
 
-### 9.4 CI workflows
+### 9.2 CI workflows
 
 **Rule:** Three workflow files per repo, identical names across all
 five repos.

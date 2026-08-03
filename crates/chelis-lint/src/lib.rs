@@ -1,8 +1,10 @@
 //! Naming-convention lint for the Chelis ecosystem.
 //!
-//! The authoritative rule set lives in `chelis/spec/01-nomenclature.md`. This
-//! crate translates each rule into an executable check, walks a target tree,
-//! and reports violations with `file:line:col: rule_id: message` references.
+//! Language naming and style rules live in `chelis/spec/01-nomenclature.md`.
+//! Repository workflow conventions may instead be owned by `CONTRIBUTING.md`.
+//! This crate translates each rule into an executable check, walks a target
+//! tree, and reports violations with `file:line:col: rule_id: message`
+//! references.
 //!
 //! Architecture:
 //!
@@ -114,8 +116,9 @@ pub trait Rule: Send + Sync {
     /// `--explain <id>` invocations.
     fn id(&self) -> &str;
 
-    /// Section of `spec/01-nomenclature.md` that documents this rule, e.g.
-    /// `"§6.2"`. Printed alongside violations so readers can find the rule.
+    /// Owning documentation reference for this rule, for example `"§6.2"` in
+    /// `spec/01-nomenclature.md` or `"CONTRIBUTING.md § Declarative Naming"`.
+    /// Printed alongside violations so readers can find the rule.
     fn spec_ref(&self) -> &str;
 
     /// Surfaces this rule cares about. The driver only invokes `check` when
