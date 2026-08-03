@@ -2,9 +2,10 @@
 """Authoritative chelis#729 Phase 1 acceptance oracle.
 
 This runner turns `spec/design/dtype_semantics.md`'s Phase 1 oracle into one
-executable command. It covers the three frozen entry censuses, the sealed
-dtype/storage and typed-ingress contracts, the exact execution wire, every
-named eval/checker matrix, and the Python/Hull readers of the tagged wire.
+executable command. It inherits the complete Phase 0 detector contract, then
+covers the three frozen entry censuses, the sealed dtype/storage and
+typed-ingress contracts, the exact execution wire, Phase 1-specific
+payload/checker controls, and the Python/Hull readers of the tagged wire.
 
 Usage:
 
@@ -36,6 +37,10 @@ def oracle_legs(python: str) -> tuple[OracleLeg, ...]:
     """Return the frozen Phase 1 command manifest in execution order."""
 
     return (
+        OracleLeg(
+            "inherited Phase 0 contract",
+            (python, "scripts/dtype_phase0_oracle.py"),
+        ),
         OracleLeg(
             "covered-family Rust and C tripwire",
             (
@@ -110,25 +115,13 @@ def oracle_legs(python: str) -> tuple[OracleLeg, ...]:
             ),
         ),
         OracleLeg(
-            "eval and checker matrices",
+            "Phase 1 payload and checker contracts",
             (
                 "cargo",
                 "nextest",
                 "run",
                 "-p",
                 "chelis-cli",
-                "--test",
-                "domain_checker",
-                "--test",
-                "eval_tensor_narrowing_matrix",
-                "--test",
-                "narrow_dtype_matrix",
-                "--test",
-                "precision_matrix",
-                "--test",
-                "int_width_lane_matrix",
-                "--test",
-                "reduction_and_bitwise_matrix",
                 "--test",
                 "issue_729_payload_census",
                 "--test",

@@ -630,6 +630,16 @@ class CiParityTests(unittest.TestCase):
             ),
         )
 
+    def test_nested_dtype_phase2_oracle_is_continuous(self):
+        block = _ci_job_block("integration")
+        numpy_command = "run: uv pip install --python .venv/bin/python 'numpy>=2.0'"
+        oracle_command = "run: .venv/bin/python scripts/dtype_phase2_oracle.py"
+        gate_command = "run: python3 scripts/gate.py integration"
+        self.assertEqual(block.count(numpy_command), 1)
+        self.assertEqual(block.count(oracle_command), 1)
+        self.assertLess(block.index(numpy_command), block.index(oracle_command))
+        self.assertLess(block.index(gate_command), block.index(oracle_command))
+
     def test_non_gate_jobs_are_excluded_by_name(self):
         # The non-gate jobs are allowed to keep their own cargo/chelis
         # invocations. This test pins the exclusion list so it stays

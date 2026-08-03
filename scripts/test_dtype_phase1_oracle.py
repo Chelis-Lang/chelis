@@ -18,21 +18,24 @@ class CommandManifestTests(unittest.TestCase):
         self.assertEqual(
             [leg.name for leg in oracle.oracle_legs(sys.executable)],
             [
+                "inherited Phase 0 contract",
                 "covered-family Rust and C tripwire",
                 "typed execution-wire census",
                 "registered PyO3 signature census",
                 "sealed dtype semantics",
                 "typed Load ingress",
                 "execution-wire exactness",
-                "eval and checker matrices",
+                "Phase 1 payload and checker contracts",
                 "Python dtype ingress",
                 "Hull tagged-value reader",
             ],
         )
 
-    def test_eval_leg_is_the_exact_design_doc_matrix(self) -> None:
+    def test_phase1_leg_does_not_repeat_phase0_matrices(self) -> None:
         leg = next(
-            leg for leg in oracle.oracle_legs(sys.executable) if leg.name == "eval and checker matrices"
+            leg
+            for leg in oracle.oracle_legs(sys.executable)
+            if leg.name == "Phase 1 payload and checker contracts"
         )
         tests = {
             leg.argv[index + 1]
@@ -42,16 +45,17 @@ class CommandManifestTests(unittest.TestCase):
         self.assertEqual(
             tests,
             {
-                "domain_checker",
-                "eval_tensor_narrowing_matrix",
-                "narrow_dtype_matrix",
-                "precision_matrix",
-                "int_width_lane_matrix",
-                "reduction_and_bitwise_matrix",
                 "issue_729_payload_census",
                 "issue_759_checked_cast_default",
                 "issue_860_checker_chokepoint",
             },
+        )
+
+    def test_inherited_leg_uses_the_oracle_interpreter(self) -> None:
+        inherited = oracle.oracle_legs("/chosen/python")[0]
+        self.assertEqual(
+            inherited.argv,
+            ("/chosen/python", "scripts/dtype_phase0_oracle.py"),
         )
 
     def test_no_leg_runs_ignored_or_c_backend_phase_rows(self) -> None:
@@ -71,7 +75,7 @@ class RunnerTests(unittest.TestCase):
             subprocess.CompletedProcess([], 0),
             subprocess.CompletedProcess([], 7),
         ]
-        with self.assertRaisesRegex(SystemExit, "typed execution-wire census"):
+        with self.assertRaisesRegex(SystemExit, "covered-family Rust and C tripwire"):
             oracle.run_oracle(sys.executable)
         self.assertEqual(run.call_count, 2)
 

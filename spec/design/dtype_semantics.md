@@ -1,17 +1,17 @@
 # Grounded Dtype Semantics
 
-**Status:** Active phased plan. Phase 0, the PR #956 §C6 covered-family
-tripwire, and Phase 1's typed wire-schema, registered-PyO3 entry legs, and
-sealed dtype-semantics layer have landed through PRs #1033 and #1049. Draft
-PR #1054 consolidates the complete Phase 2 kernel split, exact prover
-carriers, trap freeze, integer-unary evaluator rows, and the ordinary,
-windowed, argument-reduction, and overlapping window-adjoint consumers
-discovered by its red team. Its single Phase 2 oracle is
-`.venv/bin/python scripts/dtype_phase2_oracle.py`. Draft PR #1065 begins
-Phase 3 with the exact, minimum-trapping signed-integer `abs` kernel in the C
-tensor and scalar-host lanes. General fused integer kernels and the remaining
-C rows mean Phase 3 is not complete, and Phase 4 has not started. Tracking
-issue: [#729].
+**Status:** Active phased plan. Phase 0 landed in PR #758; its named receipt is
+`.venv/bin/python scripts/dtype_phase0_oracle.py`, and the temporary compiled
+print-truncation slack is now zero after [#732] Phase 2. The PR #956 §C6
+covered-family tripwire and Phase 1's typed wire-schema, registered-PyO3 entry
+legs, and sealed dtype-semantics layer landed through PRs #1033 and #1049.
+Phase 2's complete kernel split, exact prover carriers, trap freeze, and
+reduction/adjoint consumers landed through PR #1054. The continuously wired
+`.venv/bin/python scripts/dtype_phase2_oracle.py` inherits the complete Phase
+1 and Phase 0 contracts. PR #1065 began Phase 3 with exact,
+minimum-trapping signed-integer `abs` in the C tensor and scalar-host lanes.
+General fused integer kernels and the remaining C rows mean Phase 3 is not
+complete, and Phase 4 has not started. Tracking issue: [#729].
 **Owning specs:** `spec/04-type-system.md` (gains an authored overflow/rounding
 section, today silent), `spec/05-risc-primitives.md` (op result semantics),
 and the audit record in `docs/investigations/numeric_audit_next_sweeps.md` /
@@ -1277,9 +1277,13 @@ load-bearing evidence.
 **Explicitly not yours:** fixing anything the detectors reveal; touching
 production code at all.
 
-**Oracle:** the invariant harness runs in CI, red (ignored) on exactly the
-audit's known bad cells, green on all controls. `parity.rs` still passes
-on the existing corpus with the fallback removed.
+**Oracle:** `.venv/bin/python scripts/dtype_phase0_oracle.py` is this phase's
+single authoritative command. Acceptance is exit 0 with the final line
+`DTYPE PHASE 0 ORACLE: PASS`. Its tested manifest runs the frozen domain
+checker and every active dtype matrix carrying a detector chokepoint, the
+byte-exact executable-example parity corpus with the fallback removed, and
+the retained floating agreement controls. It never opts into ignored rows.
+The command executes continuously by inheritance through the Phase 2 oracle.
 
 ## Phase 1 - the semantics module, the storage decision, eval adoption
 
@@ -1348,17 +1352,14 @@ kernels beyond what finalize forces (Phase 2); any generated-C work.
 
 **Oracle:** `.venv/bin/python scripts/dtype_phase1_oracle.py` is this phase's
 single authoritative command. Acceptance is exit 0 with the final line
-`PHASE 1 ORACLE: PASS`. Its tested command manifest runs the three §C6 entry
-censuses; the sealed semantics, typed Load, and execution-wire exactness
-controls; `eval_tensor_narrowing_matrix.rs`; the Phase 1 eval rows of
-`narrow_dtype_matrix.rs` ([#717] tensor cells), `precision_matrix.rs`
-([#684] storage/binding cells), `int_width_lane_matrix.rs` (the eval tensor
-trap cell), and `reduction_and_bitwise_matrix.rs` ([#684] sum and [#724]'s
-eval half); the checker/payload controls; the Phase 0 domain checker over all
-eval outputs; and the Python/Hull tagged-wire readers. It never runs ignored
-rows or compiled-C phase work. The exact scalar-kernel rows for [#680],
-[#688], [#718], and [#722] remain Phase 2 obligations; this oracle does not
-pull them across the kernel-split boundary.
+`PHASE 1 ORACLE: PASS`. Its tested command manifest first inherits the
+complete Phase 0 oracle, then runs the three §C6 entry censuses; the sealed
+semantics, typed Load, and execution-wire exactness controls; the Phase
+1-specific checker/payload controls; and the Python/Hull tagged-wire readers.
+It never repeats Phase 0's matrix commands, runs ignored rows, or pulls in
+compiled-C phase work. The exact scalar-kernel rows for [#680], [#688],
+[#718], and [#722] remain Phase 2 obligations; this oracle does not pull them
+across the kernel-split boundary.
 
 ## Phase 2 - the kernel split and prove
 
@@ -1412,13 +1413,17 @@ your exit); formatting anywhere.
 **Oracle:** `.venv/bin/python scripts/dtype_phase2_oracle.py` is this phase's
 single authoritative command. Acceptance is exit 0 with the final line
 `DTYPE PHASE 2 ORACLE: PASS`. Its tested manifest inherits the complete Phase
-1 oracle; exercises all sealed numeric-kernel and frozen trap-string tests;
+1 oracle and therefore Phase 0; exercises all sealed numeric-kernel and frozen
+trap-string tests;
 runs the IR and host structural exclusivity locks; runs declared-width
 ordinary, windowed, and argument-reduction behavior including negative
 parity at every integer width and reverse-mode overlap accumulation at every
 float arithmetic width; runs the active eval matrices for [#680], precision,
 exact int64 values, and static-condition folding; and finishes with the exact
 prover-carrier boundary. It never runs ignored rows or Phase 3 backend suites.
+The required Linux Integration job runs this command after the normal
+`scripts/gate.py integration` stage, so all three phase contracts are
+continuous without changing the developer gate's command set.
 
 ## Phase 3 - backends adopt; the observation channel is generated
 

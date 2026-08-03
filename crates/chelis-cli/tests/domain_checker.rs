@@ -153,23 +153,23 @@ fn f64_accepts_every_parseable_value_including_specials() {
 }
 
 #[test]
-fn f32_accepts_exact_widened_and_shortest_and_print_truncated_forms() {
+fn f32_accepts_exact_widened_and_own_width_shortest_forms() {
     // Exact widened rendering (eval's f64-shortest of an f32 value).
     assert!(is_member("f32", "0.30000001192092896"));
     assert!(is_member("f32", "16777216"));
     assert!(is_member("f32", "1.4142135381698608"));
     // Own-width shortest rendering (Rust {:?} of the f32). Note this
-    // branch accepts EXACTLY the {:?} form, not every near-rendering:
-    // the lanes print exact-widened, %.16g-truncated, or shortest forms,
-    // and those three are the accepted grammar.
+    // branch accepts EXACTLY the {:?} form, not every near-rendering.
     assert!(is_member("f32", "0.1"));
     assert!(is_member("f32", "0.3"));
-    // %.16g print truncation of the widened value (the compiled lane's
-    // rendering; relative error ~1e-16, inside the 1e-13 slack).
-    assert!(is_member("f32", "0.300000011920929"));
     // Specials.
     assert!(is_member("f32", "inf"));
     assert!(is_member("f32", "nan"));
+}
+
+#[test]
+fn f32_rejects_the_retired_percent_g_truncation_form() {
+    assert!(!is_member("f32", "0.300000011920929"));
 }
 
 #[test]

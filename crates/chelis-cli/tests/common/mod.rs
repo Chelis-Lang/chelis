@@ -339,36 +339,19 @@ pub fn stub_toolchain(home: &Path, ver: &str) {
 // rules requires editing dtype_semantics.md and chelis#729 in the same
 // change set (its §B1 protocol).
 //
-// Reading membership off PRINTED text has two documented consequences:
+// Reading membership off PRINTED text has one documented consequence:
 //
-// 1. PRINT-TRUNCATION SLACK - TEMPORARY BY CONSTRUCTION, RATCHETS TO 0.
-//    The compiled lane renders float payloads via `%.16g`, which
-//    truncates the widened value's decimal expansion at 16 significant
-//    digits (relative error < 1e-15). Membership for f32/f16/bf16
-//    therefore accepts a token whose f64 reading is within 1e-13
-//    RELATIVE of the widened nearest-at-width value. The classes stay
-//    cleanly separated: the smallest real violation this checker exists
-//    to catch is a skipped f32 rounding, whose relative distance to the
-//    nearest f32 is on the order of an f32 ulp (~6e-8), five orders of
-//    magnitude above the slack; f16/bf16 ulps are larger still.
-//    This slack is NOT a value tolerance and is NOT permanent: it exists
-//    only because today's C printer truncates. When chelis#732 Phase 2
-//    lands shortest-round-trip formatting in the compiled lane, every
-//    printed token parses back exactly and
-//    `DOMAIN_PRINT_TRUNCATION_SLACK` ratchets to 0 - flipping the
-//    constant is an item on #732 Phase 2's adoption checklist, not a
-//    judgment call left to a future reader.
-// 2. TEXT AMBIGUITY IS RESOLVED TOWARD NO-FALSE-POSITIVES. A token that
+// TEXT AMBIGUITY IS RESOLVED TOWARD NO-FALSE-POSITIVES. A token that
 //    is the shortest-round-trip rendering of an f32 at f32 width (for
 //    example `0.1`) is accepted, even though the same text could have
 //    been printed from an out-of-domain f64. Controls must never fail;
 //    a missed violation surfaces later through the exact-string rows.
 // ---------------------------------------------------------------------------
 
-/// Relative slack for `%.16g`-style print truncation (module note 1).
-/// TEMPORARY: ratchets to 0 when chelis#732 Phase 2 makes the compiled
-/// lane print shortest-round-trip tokens; do not treat as a tolerance.
-pub const DOMAIN_PRINT_TRUNCATION_SLACK: f64 = 1e-13;
+/// Retired `%.16g`-style print-truncation slack. chelis#732 Phase 2 made
+/// compiled rendering shortest-round-trip, so Phase 0's promised ratchet is
+/// now exact: near-but-distinct decimal tokens are domain violations.
+pub const DOMAIN_PRINT_TRUNCATION_SLACK: f64 = 0.0;
 
 /// Strip `List[...]` wrappers (the drivers pass return types like
 /// `List[int64]` for `to_list` rows) down to the element prim name.
@@ -466,9 +449,9 @@ pub fn element_domain_violation(prim: &str, token: &str) -> Option<String> {
     }
 }
 
-/// Shared narrow-float membership: exact widened rendering, own-width
-/// shortest rendering, or within print-truncation slack of the widened
-/// nearest-at-width value. See the module notes for why each branch exists.
+/// Shared narrow-float membership: exact widened rendering or own-width
+/// shortest rendering. The zero slack below is retained as the executable
+/// Phase 0 ratchet that rejects the retired `%.16g` accommodation.
 fn narrow_float_violation(
     t: &str,
     prim: &str,
@@ -500,7 +483,7 @@ fn narrow_float_violation(
     }
     Some(format!(
         "`{t}` is not representable in {prim}: nearest {prim} value is {h:?}, \
-         relative deviation {rel:e} exceeds the print-truncation slack \
+         relative deviation {rel:e} exceeds the exact domain slack \
          {DOMAIN_PRINT_TRUNCATION_SLACK:e}"
     ))
 }
