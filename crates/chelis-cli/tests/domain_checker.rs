@@ -221,11 +221,22 @@ fn f16_membership_at_11_bit_mantissa() {
 
 #[test]
 fn bf16_membership_at_8_bit_mantissa() {
-    for t in ["256", "256.0", "0.75", "0.010009765625", "inf"] {
+    for t in [
+        "256",
+        "256.0",
+        "0.75",
+        "0.010009765625",
+        // Own-width shortest form of the stored bf16 value nearest 1/3.
+        "0.334",
+        "inf",
+    ] {
         assert!(is_member("bf16", t), "{t} must be in the bf16 value set");
     }
     assert!(!is_member("bf16", "257"));
     assert!(!is_member("bf16", "257.0"));
+    // A nearby decimal that merely rounds to the same bf16 is not the
+    // canonical own-width shortest rendering.
+    assert!(!is_member("bf16", "0.3339"));
 }
 
 // ---------------------------------------------------------------------------
