@@ -149,20 +149,29 @@ REQUIRED_TEST_DEFINITION_SHA256: dict[Path, dict[str, str]] = {
         "parity_transformer_block_library_only": "1219362b0fe28ff5efacbe52249f4c151c646fabdc6557fbb04de5b691bcd06d",
         "parity_vmap_relu_library_only": "0c3450ba322a3254bed1eb9b1474abf660661453af72c4b74d1084b68f0260b1",
     },
+    # The nine f32/f16/bf16 rows below were re-frozen when chelis#732 Phase 3
+    # rebased onto chelis#729 Phase 1/2 (PRs #1049, #1054). Evidence for the
+    # revision: #1054 deleted the untyped `RiscOp::Const { value: f64 }`
+    # constructor, so the previous definitions cannot compile at all - this is
+    # a forced spelling migration, not a corpus revision. Each row's diff is
+    # exactly `RiscOp::Const { value: X }` -> `RiscOp::synth_const(P, X)` where
+    # `P` is the same dtype the node already declared and `X` the same literal.
+    # No expected string, comparator entrypoint, label, or assertion changed,
+    # and all rows pass with their verbatim expected renderings.
     EVAL_AGREEMENT_SOURCE: {
-        "agreement_add": "aa21bd3c8867d8703241ccec34d42e5fc4c38cd86b331d9cc7dfac7dd051645a",
+        "agreement_add": "4db22a4302714b8be688532417daa7776374646094e70c2671875f5564e30960",
         "agreement_atan": "80c1d1edd7d7857c6392470b80ec650e7db64c0d790781746ed92520c4ed9b85",
-        "agreement_bf16_add": "681477e6d9c0a38477f4649d165361fee6709066c14d7e583f22ba98eb8c9f16",
-        "agreement_bf16_reduce_sum_matches_eval_exactly": "24ef73d63f4c561841b70164b0e8ff0c5db7f54047d25419eebe37602eb31403",
-        "agreement_compiled_observation_reaches_comparator": "343b1887715aa2566c09c40d0a8f7897e3bf71e4b5b999bb64d823fb4d79d0f0",
+        "agreement_bf16_add": "ad2029f00557c4759e3c90d2461a223fade971fefd9dcb666569e4b2b9b0974d",
+        "agreement_bf16_reduce_sum_matches_eval_exactly": "681adb9f8f561b673798b7e29c35494fa42e62ffbef8757a25a63412fd7c043d",
+        "agreement_compiled_observation_reaches_comparator": "bbfed1ebbe05619f0ccb6fd73b1e6356d47444f2e7e4511f492a967f277c1d90",
         "agreement_cos": "bb39c151b0be1d95a7c7e75c4e949e6e4c1da4c335f7abe119e088fa5d866d04",
-        "agreement_exp": "3d982a6201d599802368ba9e8919dd5d27a1807fd66ce9beec77f4f1e027482f",
-        "agreement_f16_add": "76e15994659af4bd3643e57276ea9f21005135ee26a1772264ceb33debea9b3e",
+        "agreement_exp": "fb328fbf479c5e174e3ca7fccc4f2df3404b826771c39618ce841715412a3f12",
+        "agreement_f16_add": "8ecc6efe5e052e32850786174495f249776d35676ffffbcced66e308c6ce3c7c",
         "agreement_log": "84ca6c7ba3b27a0718b42f40d15dd1c786648e33562b63a9ecddfaa02416c709",
-        "agreement_mul": "99d1f365f623572885e27af44137c37da1a6fd3e34c4df7a01a121c2ed7dce7b",
-        "agreement_neg": "3445ff9b0d11d539bd03aa7c76b888a30929705be701d9e7b5e0058800eec364",
+        "agreement_mul": "ba21fed3999506c32eb163bcdaaa10a135c744008f7b908e5f7fc98c0338fc97",
+        "agreement_neg": "71fb3152676dbfbbd06487b493cc2201e3730163b7cceff01801b930bc003a30",
         "agreement_operation_identity_is_derived_from_ir": "b35dd2f9eac4362f5c38639c8a882b38872d5400d2399d8963cfe2427340dec6",
-        "agreement_relu": "ff45e597ad9d21fe2df350a937bea44cded67f5c3348271be368db77bb8f6679",
+        "agreement_relu": "51c6c9b881398cff2f1e7c263e7ccb919641bb014d2b4ac0853e97a6c9c25d61",
         "agreement_sin": "7d1c26bc002402b089c6c035eb756dedd70de05f06c2253ad362462d8243a170",
         "agreement_sqrt_is_exact": "63ee422b92eef85a5635892c57282dbd9cec0154bd3d79ae4c57ca1744f0ac6a",
         "agreement_tan": "33480e20e37c50cbd1ba8ae7864b77f860831c1ecce8577dcf22b28640e0116e",

@@ -610,7 +610,6 @@ dependencies = [
  "chelis-runtime",
  "chelis-surf",
  "chelis-types",
- "half",
  "predicates",
  "serde",
  "serde_json",

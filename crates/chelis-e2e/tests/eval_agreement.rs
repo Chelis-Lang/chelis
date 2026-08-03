@@ -44,7 +44,7 @@ use chelis_types::agreement::{
     AgreementError, AgreementOp, AgreementOutcome, ArithmeticWidthStatus,
     compare_exact_observations, compare_rendered_elements,
 };
-use chelis_types::observation::format_element;
+use chelis_types::observation::{ElementRef, format_element};
 use chelis_types::types::Prim;
 
 fn scalar_f32() -> TensorType {
@@ -371,7 +371,14 @@ fn record_phase3_receipt(case: &str, detail: &str) {
         .append(true)
         .open(path)
         .expect("open Phase 3 receipt file");
-    writeln!(receipt, "{case}\t{detail}").expect("append Phase 3 receipt");
+    // One buffer, one append. `writeln!` can emit the case, the separator and
+    // the detail as separate `write` calls, and nextest runs each of these
+    // tests in its own process, so a split write interleaves two receipts into
+    // one corrupt line.
+    let line = format!("{case}\t{detail}\n");
+    receipt
+        .write_all(line.as_bytes())
+        .expect("append Phase 3 receipt");
 }
 
 fn compare_lanes_with<F>(
@@ -443,7 +450,7 @@ fn agreement_compiled_observation_reaches_comparator() {
     }
     let mut dag = Dag::new();
     dag.add_node(
-        RiscOp::Const { value: 7.0 },
+        RiscOp::synth_const(Prim::Int32, 7.0),
         vec![],
         scalar_ty(Prim::Int32),
         None,
@@ -639,7 +646,12 @@ fn assert_unary_transcendental(op: RiscOp, op_name: &str, input: f64, expected: 
         return;
     }
     let mut dag = Dag::new();
-    let argument = dag.add_node(RiscOp::Const { value: input }, vec![], scalar_f32(), None);
+    let argument = dag.add_node(
+        RiscOp::synth_const(scalar_f32().precision, input),
+        vec![],
+        scalar_f32(),
+        None,
+    );
     dag.add_node(op, vec![argument], scalar_f32(), None);
     let func_name = format!("test_{op_name}");
     let label = format!("{op_name}({input})");
