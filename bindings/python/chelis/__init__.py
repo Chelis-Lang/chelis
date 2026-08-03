@@ -196,19 +196,52 @@ def compile_and_load(
     source_kind: str = "surf",
     entry_name: str | None = None,
     artifact_dir: str | Path | None = None,
+    project_root: str | Path | bool | None = None,
 ) -> CompiledModel:
     """Compile a source file to a shared library and return a callable model.
 
     This is the product path for Phase 3b-ii direct execution. Native compilation runs
     without holding the Python GIL.
+
+    ``project_root`` selects the reef package whose declared dependencies the source
+    may import (issue #816):
+
+    - ``None`` (the default) — auto-discover the enclosing reef package, but *only* when
+      the source actually contains an ``import`` declaration. An import-free source (or
+      any non-Surf source) is compiled self-contained exactly as before, so a
+      self-contained file that happens to sit inside a reef project neither pays the
+      project's context-compile cost nor is coupled to a broken sibling file.
+    - A path — force in-context resolution against that reef package (it must contain a
+      ``reef.toml``), regardless of whether the source imports.
+    - ``False`` — force the bare self-contained path even for an importing source inside
+      a project. This is the explicit opt-out from auto-discovery.
+
+    Only the defs in the compiled source itself are selectable as entries, by
+    their bare names; imported library defs are callable from the entry's body
+    but are not themselves selectable via ``entry_name=``. ``input_names`` /
+    ``output_names`` are the selected entry's own parameter/output names. A
+    scalar-signature entry (e.g.
+    ``def main(s: f32, ...) -> f32``) is not a compiled tensor kernel — wrap scalars as
+    ``tensor[1, f32]``; use :func:`eval` for scalar results.
     """
 
+    if project_root is True:
+        raise ValueError(
+            "project_root=True is not meaningful; pass a reef package path, "
+            "False to force the bare path, or omit it to auto-discover"
+        )
+    force_bare = project_root is False
+    native_project_root = (
+        None if project_root is None or force_bare else str(project_root)
+    )
     native = _native.compile_and_load(
         str(source_path),
         target=target,
         source_kind=source_kind,
         entry_name=entry_name,
         artifact_dir=None if artifact_dir is None else str(artifact_dir),
+        project_root=native_project_root,
+        force_bare=force_bare,
     )
     return CompiledModel(native)
 
@@ -274,6 +307,7 @@ def eval(
     bindings: Mapping[str, Any] | None = None,
     *,
     source_kind: str = "surf",
+    project_root: str | Path | bool | None = None,
 ) -> EvalResult:
     """Evaluate Chelis source.
 
@@ -284,8 +318,24 @@ def eval(
     `ChelisError` until the caller chooses an explicit numpy cast. Zero-copy
     execution of compiled artifacts belongs to `chelis.load()` in Phase
     `3b-ii`.
+
+    ``project_root`` resolves reef-declared dependencies the source imports (issue
+    #816): the source is evaluated against the compiled library context of the reef
+    package at that path (which must contain a ``reef.toml``). Because ``eval`` takes
+    raw text with no file to walk from, there is no auto-discovery — omit
+    ``project_root`` (the default), or pass ``False`` explicitly, and self-contained
+    source evaluates exactly as before. Unlike :func:`compile_and_load`,
+    scalar-signature entries work here.
     """
 
+    if project_root is True:
+        raise ValueError(
+            "project_root=True is not meaningful; pass a reef package path, "
+            "False for the bare path, or omit it"
+        )
+    native_project_root = (
+        None if project_root is None or project_root is False else str(project_root)
+    )
     serializable = {
         name: _tensor_value_payload(value) for name, value in (bindings or {}).items()
     }
@@ -294,6 +344,7 @@ def eval(
             source,
             json.dumps(serializable),
             source_kind=source_kind,
+            project_root=native_project_root,
         )
     )
     return EvalResult(

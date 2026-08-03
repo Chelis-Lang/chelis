@@ -14,15 +14,20 @@ pub mod target_capability;
 #[cfg(test)]
 mod source_arch;
 
+/// Re-export of reef package-root discovery so callers (e.g. the Python
+/// bindings' `compile_and_load` auto-discovery) can resolve the enclosing
+/// reef project without depending on `chelis-reef` directly. See issue #816.
+pub use chelis_reef::{find_package_root_for_dir, find_package_root_for_input};
 pub use chelis_types::{LinkedProgramGuard, install_linked_program_guard};
 pub use compiler::{
-    PreparedEvalInContext, check_in_context, eval_in_context, eval_many_in_context,
-    prepare_eval_in_context,
+    PreparedEvalInContext, check_in_context, compile_for_execution_in_context, eval_in_context,
+    eval_in_context_with_bindings, eval_many_in_context, prepare_eval_in_context,
+    surf_source_has_import,
 };
 pub use compiler::{add_function, replace_function_body};
 pub use context::{
-    CacheError, CacheIdentity, CompiledContext, ContextHash, compile_reef_context,
-    load_or_compile_for_package,
+    CacheError, CacheIdentity, CompiledContext, ContextHash, ContextLoadPath, compile_reef_context,
+    load_or_compile_for_package, load_or_compile_with_local_registry_fallback,
 };
 /// Experimental decode chokepoint for opaque-type invariant revalidation
 /// (RFC `opaque_invariants_rfc.md` D-DECODE). No production codec consumes

@@ -9,7 +9,7 @@
     },
     {
       "flags": [],
-      "id": "chelis_python::compile_and_load(py: Python<'_>, source_path: &str, target: &str, source_kind: &str, entry_name: Option<String>, artifact_dir: Option<&str>) -> PyResult<NativeCompiledModel>",
+      "id": "chelis_python::compile_and_load(py: Python<'_>, source_path: &str, target: &str, source_kind: &str, entry_name: Option<String>, artifact_dir: Option<&str>, project_root: Option<&str>, force_bare: bool) -> PyResult<NativeCompiledModel>",
       "kind": "binding-pyfunction"
     },
     {
@@ -29,7 +29,7 @@
     },
     {
       "flags": [],
-      "id": "chelis_python::eval_json(py: Python<'_>, source: &str, bindings_json: &str, source_kind: &str) -> PyResult<String>",
+      "id": "chelis_python::eval_json(py: Python<'_>, source: &str, bindings_json: &str, source_kind: &str, project_root: Option<&str>) -> PyResult<String>",
       "kind": "binding-pyfunction"
     },
     {

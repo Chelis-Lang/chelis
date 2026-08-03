@@ -40,6 +40,34 @@ The Phase 3 Python path is split into two cuts:
   The per-target admit-list is `supported_execution_dtypes` in `chelis-python`; the
   marshalling layer derives the NumPy dtype and the DLPack element width from it rather
   than assuming f32, and rejects any dtype it cannot describe
+- reef dependency resolution via `project_root=` on `compile_and_load` and `eval`
+  (chelis#816): with a reef package root, imports of reef-declared dependencies resolve
+  against the package's linked library context instead of failing with `unbound
+  variable`. `compile_and_load` auto-discovers the root by walking up from the source
+  file, but only when the (Surf) source contains an `import` declaration; an import-free
+  or non-Surf source, or `project_root=False`, takes the bare self-contained path. An
+  explicit `project_root=` path forces in-context resolution regardless (an
+  empty/whitespace `project_root=""` is rejected outright). `eval` (raw
+  text) requires an explicit `project_root=`. With no applicable root the bare
+  self-contained behavior is unchanged **except** that a rank-0 (scalar-out) tensor
+  entry is now rejected with wrap-as-`tensor[1, f32]` guidance on every path, bare
+  included (rather than emitting an unbuildable scalar kernel), and that when
+  auto-discovery found no root for an importing source, a failing bare compile's
+  error gains a hint naming `project_root=` (error text only; same failure). Default in-context entry
+  selection prefers a tensor def named `main`. A scalar-signature entry has no callable
+  tensor kernel and is rejected with tensor-wrap guidance; `eval` runs it. The
+  in-context lane is entry-scoped where the monolithic lane is whole-program: a
+  top-level (non-`def`) value binding in the new source does not decline compilation
+  (monolithically it does, `HasGlobals`) — the artifact is scoped to the selected
+  entry, and an unreferenced sibling global's computation is simply not part of it.
+  Run `eval` for whole-program semantics. Only the compiled source's own defs
+  are selectable as entries, by their bare names; imported library defs are
+  callable from the entry's body but are not themselves selectable via
+  `entry_name`. Reef-context resolution is **C-target
+  only**: a HIP reef-context compile (`target="hip"` with a `project_root=`) is rejected
+  as unsupported (chelis#829) rather than silently mis-scoped, and the rejection
+  fires before the reef context is compiled, so it does not cost the first
+  context build.
 
 ### Phase 5a
 

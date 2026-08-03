@@ -44,6 +44,65 @@ Entry selection for `compile_and_load` (chelis#817 / chelis#818):
   that use `grad`/`vmap` or string/record/effect operations. `compile_and_load` fails
   loudly for these; select a tensor-in/tensor-out `def` with `entry_name=` instead.
 
+Reef dependency resolution (chelis#816):
+
+- `compile_and_load(..., project_root=)` and `eval(..., project_root=)` resolve
+  imports of reef-declared dependencies (`import Shoals.Pricing (bs_call_scalar)`) by
+  compiling the source against the reef package's linked library context, instead of
+  failing with `unbound variable`. Without a root the source is compiled/evaluated
+  self-contained, as before — with the single exception in the **Rank-0 scalars** bullet
+  below (a rank-0 tensor entry is now rejected with wrap guidance on every path).
+- Root selection differs by entry point:
+  - `compile_and_load` **auto-discovers** the enclosing reef package by walking up from
+    `source_path` (looking for `reef.toml`) — but **only when the source actually
+    contains an `import` declaration**. An import-free (self-contained) source, or any
+    non-Surf source, takes the bare path as before (save the rank-0 rejection below),
+    so a self-contained file
+    that happens to sit inside a reef project neither pays the project's
+    context-compile cost nor is coupled to a broken sibling file. Pass a
+    `project_root=` path to force in-context resolution regardless of imports, or
+    `project_root=False` to force the bare path even for an importing source. A
+    `project_root` with no `reef.toml` is a loud error naming `project_root=`, and an
+    empty/whitespace `project_root=""` is rejected outright (it would otherwise probe
+    for `reef.toml` relative to the process CWD). When auto-discovery finds no root
+    and the bare compile of an importing source then fails, the error carries a hint
+    that discovery came up empty and that `project_root=` names the remedy.
+  - `eval` takes raw text with no file to walk from, so it does **not** auto-discover:
+    pass `project_root=` explicitly, or omit it (or pass `False`) for the
+    self-contained path.
+  - Reef imports are a Surf-only construct: `source_kind="deep"` never routes
+    in-context (an explicit `project_root=` with a deep source is rejected).
+  - Default in-context entry selection prefers a tensor def named `main` (matching the
+    monolithic path), so a multi-def file behaves the same inside and outside a project.
+- `CHELIS_REEF_HOME` keys the on-disk context cache the same way the CLI uses it; the
+  first build of a package's library context is slow (tens of seconds to minutes),
+  subsequent calls hit the cache.
+- **Scalar entries.** A def with a scalar signature (`def main(s: f32, ...) -> f32`)
+  has no callable tensor kernel; `compile_and_load` rejects it with guidance to wrap
+  scalars as rank-1 tensors (`tensor[1, f32]`). The same program runs through `eval`,
+  which supports scalar and host-only entries.
+- **Top-level globals (entry-scoped semantics).** In-context compilation is
+  entry-scoped: a top-level (non-`def`) binding in the compiled source (e.g.
+  `glb = 2.0` next to `def main`) does not block compilation, and the compiled
+  artifact runs only the selected entry — an unreferenced sibling global's
+  computation is not part of it. This is deliberately more permissive than the
+  bare/monolithic path, where top-level bindings decline the entry lane and keep
+  whole-program host-lane routing. Use `eval` when the sibling globals'
+  computations matter.
+- **Selectable entries.** Only the defs in the compiled source itself are
+  selectable as entries, by their bare names; imported library defs are callable
+  from the entry's body but are not themselves selectable via `entry_name=`. A
+  compiled entry's `input_names` are its own parameter names; consult them (do not
+  assume order).
+- **Rank-0 scalars.** A tensor-in / scalar-out entry (e.g. a reduce to a `tensor[f32]`)
+  is rejected on every path — including the bare self-contained path — with the same
+  wrap-as-`tensor[1, f32]` guidance, rather than emitting an unbuildable scalar kernel.
+- **C-target only.** Reef-context resolution is supported only for `target="c"`. A
+  `target="hip"` compile with a `project_root=` (or auto-discovered root) is rejected as
+  unsupported, because the HIP backend does not yet apply the entry-scoped DAG selection
+  the C path uses and would otherwise merge every reef-linked def into one kernel. Use
+  `target="c"`, or run through `eval`. Tracked as chelis#829.
+
 Compiler selection:
 
 - native C compilation resolves through Chelis's shared platform toolchain:

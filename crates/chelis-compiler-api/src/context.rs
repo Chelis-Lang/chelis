@@ -641,6 +641,65 @@ pub fn load_or_compile_for_package(
     Ok(ctx)
 }
 
+/// Which route [`load_or_compile_with_local_registry_fallback`] took to
+/// produce its context.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextLoadPath {
+    /// The disk-cache-aware [`load_or_compile_for_package`] succeeded
+    /// (cache hit or a cache-miss compile+save).
+    Cached,
+    /// [`load_or_compile_for_package`] failed with the LocalRegistry
+    /// source-hash gap and the uncached [`compile_reef_context`] fallback
+    /// succeeded instead.
+    LocalRegistryFallback,
+}
+
+/// [`load_or_compile_for_package`] with the LocalRegistry hash-gap fallback
+/// folded in — the single home for the `hash_error`/`"LocalRegistry"`
+/// detection string-match (chelis#822 review, Fix D).
+///
+/// A dependency resolved from the `LocalRegistry` (e.g. `chelis-std`) cannot
+/// be source-hashed yet, so the disk-cache probe errors with a `hash_error`
+/// diagnostic naming `LocalRegistry`. That is not a real failure: fall back
+/// to an uncached in-memory [`compile_reef_context`], which handles the
+/// LocalRegistry case (digests = `None`). Any other error is a genuine
+/// compile failure and propagates. The returned [`ContextLoadPath`] reports
+/// which route produced the context.
+///
+/// Call sites: chelis-python's `load_reef_context` uses this today. The CLI
+/// `chelis test` worker (`cmd_internal_test_file` /
+/// `is_local_registry_hash_unsupported` in crates/chelis-cli/src/main.rs)
+/// still carries its own copy of the detection + fallback and should migrate
+/// here when the #830 `build --in-context` work lands, rather than growing a
+/// third copy. (The CLI *eval* site deliberately differs: on the hash gap it
+/// drops to the legacy `prepare_eval` path, not to `compile_reef_context`.)
+pub fn load_or_compile_with_local_registry_fallback(
+    reef_home: &Path,
+    package_dir: &Path,
+    verbose_corruption_to_stderr: bool,
+) -> Result<(CompiledContext, ContextLoadPath), CompilerError> {
+    match load_or_compile_for_package(reef_home, package_dir, verbose_corruption_to_stderr) {
+        Ok(context) => Ok((context, ContextLoadPath::Cached)),
+        Err(err) if is_local_registry_hash_gap(&err) => {
+            compile_reef_context(reef_home, package_dir)
+                .map(|context| (context, ContextLoadPath::LocalRegistryFallback))
+        }
+        Err(err) => Err(err),
+    }
+}
+
+/// The LocalRegistry hash-gap detection predicate: a `hash_error` diagnostic
+/// whose message names `LocalRegistry`. Named (rather than inline) so the
+/// string-match has unit tests locking it against wording drift in the
+/// upstream diagnostic: a `hash_error` NOT naming LocalRegistry, or any other
+/// diagnostic kind, must propagate as a genuine failure rather than trigger
+/// the uncached-recompile fallback (#822 review round 3, finding 4).
+fn is_local_registry_hash_gap(err: &CompilerError) -> bool {
+    err.errors
+        .iter()
+        .any(|d| d.kind == "hash_error" && d.message.contains("LocalRegistry"))
+}
+
 /// Magic header bytes for the Phase I disk-cache file format.
 /// Trailing newline guards against accidental concatenation with another
 /// file (e.g., a misuse that piped two cache files together).
@@ -1144,6 +1203,7 @@ fn hash_error(msg: &str) -> CompilerError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::compiler::stage_error;
     use std::fs;
     use std::path::PathBuf;
     use tempfile::TempDir;
@@ -1246,5 +1306,37 @@ mod tests {
             ctx.reef_state.package_root,
             restored.reef_state.package_root
         );
+    }
+
+    // #822 review round 3, finding 4: the LocalRegistry hash-gap detection is
+    // a string match over the upstream diagnostic; these lock it in both
+    // directions so wording drift cannot silently reroute genuine failures
+    // into the uncached-recompile fallback (or vice versa).
+    #[test]
+    fn local_registry_hash_gap_predicate_matches_the_gap_shape() {
+        let gap = stage_error(
+            "context",
+            "cannot source-hash dependency `chelis-std` resolved from the LocalRegistry",
+            "hash_error",
+        );
+        assert!(is_local_registry_hash_gap(&gap));
+    }
+
+    #[test]
+    fn local_registry_hash_gap_predicate_rejects_other_failures() {
+        // A hash_error about something else is a genuine failure.
+        let other_hash = stage_error(
+            "context",
+            "content hash mismatch for src/lib.ch",
+            "hash_error",
+        );
+        assert!(!is_local_registry_hash_gap(&other_hash));
+        // A non-hash diagnostic naming LocalRegistry is a genuine failure.
+        let other_kind = stage_error(
+            "context",
+            "LocalRegistry package `chelis-std` failed to compile",
+            "compile_error",
+        );
+        assert!(!is_local_registry_hash_gap(&other_kind));
     }
 }

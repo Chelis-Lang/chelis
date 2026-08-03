@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::env;
 use std::ffi::{c_char, c_int, c_void};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -9,10 +10,16 @@ use std::sync::OnceLock;
 
 use chelis_compiler_api::compiler::{
     self, CompiledExecutionArtifact, CompilerError, EntryLaneDecline, ExecutionTensorSpec,
+    reef_context_hip_unsupported_error,
 };
 use chelis_compiler_api::schema::{
     CheckRequest, CompileRequest, CompileTarget, DecompileRequest, DesugarRequest, EvalRequest,
-    SourceKind, TensorValue, ValidateMode, ValidateRequest,
+    EvalResult, SourceKind, TensorValue, ValidateMode, ValidateRequest,
+};
+use chelis_compiler_api::{
+    CompiledContext, compile_for_execution_in_context, eval_in_context_with_bindings,
+    find_package_root_for_input, load_or_compile_with_local_registry_fallback,
+    surf_source_has_import,
 };
 use chelis_vocab::RuntimeDType;
 use libloading::Library;
@@ -159,7 +166,32 @@ struct CompileAndLoadJob {
     target: CompileTarget,
     entry_name: Option<String>,
     artifact_dir: Option<PathBuf>,
+    /// Reef project root for dependency resolution (issue #816). `None` on
+    /// the legacy self-contained path — bare source with no reef context,
+    /// byte-for-byte the pre-#816 behavior. `Some` routes the compile
+    /// through `compile_for_execution_in_context` so library imports resolve.
+    project_root: Option<PathBuf>,
+    /// Explicit opt-out of reef-context resolution (`project_root=False` in
+    /// Python, issue #816 review round 2). When `true`, the bare self-contained
+    /// path is forced even for a source that imports and sits inside a reef
+    /// project — the escape hatch when auto-discovery would otherwise couple
+    /// the compile to whole-project health or cost. Mutually exclusive with an
+    /// explicit `project_root`.
+    force_bare: bool,
 }
+
+// Issue #816 in-process-memo gate: `run_compile_and_load_job` /
+// `run_eval_in_context_job` run under `py.allow_threads`, so any
+// `CompiledContext` they hold must be `Send`. This is the compile-time proof
+// the plan asked for. It holds today (every field — `PreparedReefGraph`,
+// `TypeEnv`, `CheckedProgram`, `LoweredLibrary` — is `Send`), which is why an
+// in-process memo would be sound; we still rely on the disk cache for
+// amortization (it invalidates on source-hash change, which a naive
+// path-keyed in-process memo would not — correctness first).
+const _: fn() = || {
+    fn assert_send<T: Send>() {}
+    assert_send::<CompiledContext>();
+};
 
 struct CompileAndLoadOutput {
     lib_path: PathBuf,
@@ -527,14 +559,36 @@ fn compile_json(
     run_json(py, || compiler::compile(request))
 }
 
-#[pyfunction(signature = (source, bindings_json = "{}", *, source_kind = "surf"))]
+#[pyfunction(signature = (source, bindings_json = "{}", *, source_kind = "surf", project_root = None))]
 fn eval_json(
     py: Python<'_>,
     source: &str,
     bindings_json: &str,
     source_kind: &str,
+    project_root: Option<&str>,
 ) -> PyResult<String> {
     let bindings = parse_bindings_json(bindings_json)?;
+    // Issue #816: with `project_root=`, resolve reef-declared dependencies
+    // by evaluating the source against the package's compiled library
+    // context. `eval` takes raw text (no file to walk from), so — unlike
+    // `compile_and_load` — it does NOT auto-discover; the root is explicit
+    // or the legacy bare-source path runs unchanged. Only Surf source can
+    // carry reef imports, so `deep` source keeps the bare path.
+    if let Some(root) = project_root {
+        let source_kind = parse_source_kind(source_kind)?;
+        if source_kind != SourceKind::Surf {
+            return Err(PyValueError::new_err(
+                "project_root= reef resolution applies to Surf source only",
+            ));
+        }
+        let root = PathBuf::from(root);
+        let source = source.to_string();
+        let result = py
+            .allow_threads(move || run_eval_in_context_job(&root, &source, bindings))
+            .map_err(compile_and_load_error)?;
+        return serde_json::to_string(&result)
+            .map_err(|err| ChelisError::new_err(format!("serialization failed: {err}")));
+    }
     let request = EvalRequest {
         source_kind: parse_source_kind(source_kind)?,
         source: source.to_string(),
@@ -552,7 +606,8 @@ fn validate_json(py: Python<'_>, source: &str, mode: &str) -> PyResult<String> {
     run_json(py, || compiler::validate(request))
 }
 
-#[pyfunction(signature = (source_path, *, target = "c", source_kind = "surf", entry_name = None, artifact_dir = None))]
+#[pyfunction(signature = (source_path, *, target = "c", source_kind = "surf", entry_name = None, artifact_dir = None, project_root = None, force_bare = false))]
+#[allow(clippy::too_many_arguments)] // 1:1 with the Python keyword surface
 fn compile_and_load(
     py: Python<'_>,
     source_path: &str,
@@ -560,13 +615,22 @@ fn compile_and_load(
     source_kind: &str,
     entry_name: Option<String>,
     artifact_dir: Option<&str>,
+    project_root: Option<&str>,
+    force_bare: bool,
 ) -> PyResult<NativeCompiledModel> {
+    if force_bare && project_root.is_some() {
+        return Err(PyValueError::new_err(
+            "project_root= and force-bare (project_root=False) are mutually exclusive",
+        ));
+    }
     let job = CompileAndLoadJob {
         source_path: PathBuf::from(source_path),
         source_kind: parse_source_kind(source_kind)?,
         target: parse_compile_target(target)?,
         entry_name,
         artifact_dir: artifact_dir.map(PathBuf::from),
+        project_root: project_root.map(PathBuf::from),
+        force_bare,
     };
     let output = py
         .allow_threads(move || run_compile_and_load_job(job))
@@ -688,13 +752,17 @@ fn parse_validate_mode(value: &str) -> PyResult<ValidateMode> {
     }
 }
 
-fn compiler_error(err: CompilerError) -> PyErr {
+fn compiler_error_message(err: &CompilerError) -> String {
     let detail = err
         .errors
         .first()
         .map(|diagnostic| diagnostic.message.as_str())
         .unwrap_or("unknown compiler error");
-    ChelisError::new_err(format!("{}: {detail}", err.stage))
+    format!("{}: {detail}", err.stage)
+}
+
+fn compiler_error(err: CompilerError) -> PyErr {
+    ChelisError::new_err(compiler_error_message(&err))
 }
 
 #[derive(Debug)]
@@ -710,18 +778,191 @@ fn compile_and_load_error(err: CompileAndLoadError) -> PyErr {
     }
 }
 
+/// `reef_home` sourced exactly as the CLI does at its
+/// `load_or_compile_for_package` call site (`run_eval_in_context` in
+/// crates/chelis-cli/src/main.rs): `CHELIS_REEF_HOME` if set, else an empty
+/// path so `load_or_compile_for_package` resolves the XDG cache fallback.
+fn reef_home_from_env() -> PathBuf {
+    env::var_os("CHELIS_REEF_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(""))
+}
+
+/// Reject an empty / whitespace-only `project_root=` explicitly (#822 review,
+/// Fix C). Python `project_root=""` reaches Rust as `PathBuf::from("")`, and
+/// the `reef.toml` probe would then resolve against the process CWD —
+/// producing a confusing "no reef.toml found at project_root=``" (or worse,
+/// silently picking up an unrelated `reef.toml` in the CWD).
+fn reject_blank_project_root(root: &Path) -> Result<(), CompileAndLoadError> {
+    if root.as_os_str().to_string_lossy().trim().is_empty() {
+        return Err(CompileAndLoadError::Message(
+            "project_root= is empty; pass the path to the directory containing your \
+             project's reef.toml, pass project_root=False to force the bare \
+             self-contained path, or omit it to auto-discover"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Build (or load from cache) the compiled reef context for `root`, mapping a
+/// missing/invalid `reef.toml` to an actionable message that names
+/// `project_root=`. Verbose corruption logging is off (bindings run silent).
+fn load_reef_context(root: &Path) -> Result<CompiledContext, CompileAndLoadError> {
+    reject_blank_project_root(root)?;
+    if !root.join("reef.toml").exists() {
+        return Err(CompileAndLoadError::Message(format!(
+            "no reef.toml found at project_root=`{}`. Point project_root= at the \
+             directory containing your project's reef.toml (the reef package root).",
+            root.display()
+        )));
+    }
+    let reef_home = reef_home_from_env();
+    // The LocalRegistry hash-gap fallback (cache probe errors on a
+    // LocalRegistry dep such as `chelis-std` → uncached `compile_reef_context`)
+    // lives in the shared compiler-api helper; see its doc for the precedent
+    // (`chelis test` worker, NOT the CLI eval site, which drops to legacy
+    // `prepare_eval` instead — a divergence to watch if the CLI paths are
+    // later unified).
+    load_or_compile_with_local_registry_fallback(&reef_home, root, false)
+        .map(|(context, _path)| context)
+        .map_err(CompileAndLoadError::Compiler)
+}
+
+/// Resolve the reef package root for a `compile_and_load` job (issue #816).
+///
+/// Precedence (review round 2):
+/// - `force_bare` (Python `project_root=False`) → `Ok(None)`, bare path,
+///   unconditionally — the explicit opt-out, even for an importing source
+///   inside a project;
+/// - explicit `project_root=` → that root (must contain a `reef.toml`), which
+///   forces the in-context path regardless of whether the source imports.
+///   Non-Surf source with an explicit `project_root=` is rejected, mirroring
+///   `eval_json`'s Surf-only guard (reef imports are a Surf-only construct);
+/// - no `project_root` (auto-discovery) → in-context ONLY when the source is
+///   Surf AND actually contains an `import` declaration. An import-free (or
+///   non-Surf) source takes the bare path exactly as pre-#816, so a self-
+///   contained file inside a project neither pays the context-compile cost nor
+///   couples to a broken sibling file.
+///
+/// `Ok(None)` means no reef context applies and the legacy bare-source path
+/// runs unchanged.
+fn resolve_compile_reef_root(
+    job: &CompileAndLoadJob,
+    source: &str,
+) -> Result<Option<PathBuf>, CompileAndLoadError> {
+    if job.force_bare {
+        return Ok(None);
+    }
+    match &job.project_root {
+        Some(explicit) => {
+            reject_blank_project_root(explicit)?;
+            if job.source_kind != SourceKind::Surf {
+                return Err(CompileAndLoadError::Message(
+                    "project_root= reef resolution applies to Surf source only; \
+                     compile deep (.dp) source without project_root="
+                        .to_string(),
+                ));
+            }
+            if !explicit.join("reef.toml").exists() {
+                return Err(CompileAndLoadError::Message(format!(
+                    "no reef.toml found at project_root=`{}`. Point project_root= at the \
+                     directory containing your project's reef.toml (the reef package root).",
+                    explicit.display()
+                )));
+            }
+            Ok(Some(explicit.clone()))
+        }
+        None => {
+            // Auto-discovery is import-gated and Surf-only: a source that
+            // cannot carry reef imports (deep source, or Surf with no `import`
+            // decl) is self-contained and takes the bare path — no context
+            // compile, no coupling to sibling-file health.
+            if job.source_kind != SourceKind::Surf || !surf_source_has_import(source) {
+                return Ok(None);
+            }
+            find_package_root_for_input(&job.source_path).map_err(|err| {
+                CompileAndLoadError::Message(format!("reef root discovery failed: {err}"))
+            })
+        }
+    }
+}
+
+/// Evaluate `source` against the reef context at `root`, threading `bindings`
+/// through (issue #816). Backs `eval(..., project_root=...)`.
+fn run_eval_in_context_job(
+    root: &Path,
+    source: &str,
+    bindings: BTreeMap<String, TensorValue>,
+) -> Result<EvalResult, CompileAndLoadError> {
+    let context = load_reef_context(root)?;
+    eval_in_context_with_bindings(&context, source, bindings).map_err(CompileAndLoadError::Compiler)
+}
+
 fn run_compile_and_load_job(
     job: CompileAndLoadJob,
 ) -> Result<CompileAndLoadOutput, CompileAndLoadError> {
     let source = fs::read_to_string(&job.source_path)
         .map_err(|err| CompileAndLoadError::Message(format!("read source failed: {err}")))?;
-    let artifact = compiler::compile_for_execution(CompileRequest {
-        source_kind: job.source_kind,
-        source: source.clone(),
-        target: job.target,
-        entry_name: job.entry_name,
-    })
-    .map_err(CompileAndLoadError::Compiler)?;
+    let reef_root = resolve_compile_reef_root(&job, &source)?;
+    // #822 review round 3, finding 3: the HIP reef-context rejection depends
+    // on nothing but the target and the presence of a reef root, so fire it
+    // BEFORE `load_reef_context` pays the whole context compile (tens of
+    // seconds to minutes on a real project). The compiler-side guard in the
+    // Hip codegen arm stays as defense in depth for non-python callers; both
+    // sites share `reef_context_hip_unsupported_error`, so the brand and
+    // guidance cannot drift.
+    if job.target == CompileTarget::Hip && reef_root.is_some() {
+        return Err(CompileAndLoadError::Compiler(
+            reef_context_hip_unsupported_error(),
+        ));
+    }
+    // #822 review, Fix B: auto-discovery was attempted (importing Surf source,
+    // no explicit root, no opt-out) but found no enclosing reef project — e.g.
+    // the walk stopped at a nested `.git` or filesystem boundary before any
+    // `reef.toml`. The bare compile that follows will most likely fail on the
+    // unresolved imports (`unbound variable`); annotate that failure with a
+    // hint naming `project_root=` so the user learns discovery came up empty
+    // instead of guessing. Non-importing sources and explicit-root paths keep
+    // their errors untouched.
+    let discovery_found_no_root = reef_root.is_none()
+        && !job.force_bare
+        && job.project_root.is_none()
+        && job.source_kind == SourceKind::Surf
+        && surf_source_has_import(&source);
+    let artifact = match &reef_root {
+        Some(root) => {
+            let context = load_reef_context(root)?;
+            compile_for_execution_in_context(
+                &context,
+                &source,
+                job.target,
+                job.entry_name.as_deref(),
+            )
+            .map_err(CompileAndLoadError::Compiler)?
+        }
+        None => compiler::compile_for_execution(CompileRequest {
+            source_kind: job.source_kind,
+            source: source.clone(),
+            target: job.target,
+            entry_name: job.entry_name,
+        })
+        .map_err(|err| {
+            if discovery_found_no_root {
+                CompileAndLoadError::Message(format!(
+                    "{}\nhint: this source contains `import` declarations, but reef \
+                     auto-discovery found no enclosing project (no reef.toml walking up \
+                     from `{}`; discovery stops at a .git or filesystem boundary). If the \
+                     source belongs to a reef project, pass \
+                     project_root=<path-to-project>.",
+                    compiler_error_message(&err),
+                    job.source_path.display()
+                ))
+            } else {
+                CompileAndLoadError::Compiler(err)
+            }
+        })?,
+    };
     ensure_supported_execution_artifact_inner(&artifact).map_err(CompileAndLoadError::Message)?;
 
     let tempdir = if job.artifact_dir.is_none() {
@@ -854,6 +1095,25 @@ fn ensure_supported_execution_artifact_inner(
                  and compile_and_load cannot expose it as one."
             ),
         });
+    }
+    // Issue #816 Step 3: a scalar-signature entry (e.g. `def main(s: f32,
+    // ...) -> f32`) lowers with rank-0 (scalar) inputs/outputs. Those have no
+    // callable tensor ABI here and their scalar codegen is not linkable, so
+    // reject them BEFORE the C build with actionable wrap guidance rather than
+    // letting the user hit a raw clang error. `eval` has no such restriction —
+    // scalar entries evaluate fine through it.
+    for spec in artifact.inputs.iter().chain(artifact.outputs.iter()) {
+        if spec.dims.is_empty() {
+            return Err(format!(
+                "compile_and_load cannot expose a scalar `{}`: the selected entry has a \
+                 scalar (rank-0) signature. Wrap scalar parameters and results as rank-1 \
+                 tensors (`tensor[1, f32]`): pass values as length-1 tensors and use \
+                 `to_tensor`/indexing inside the def, so the entry is tensor-in/tensor-out. \
+                 If you want the scalar result directly, use `chelis.eval` instead, which \
+                 supports scalar entries.",
+                spec.name
+            ));
+        }
     }
     for spec in artifact.inputs.iter().chain(artifact.outputs.iter()) {
         if !supported.contains(&spec.dtype.as_str()) {
@@ -1913,6 +2173,8 @@ loss = (mean(x, 0) : tensor[f32])
             target: CompileTarget::C,
             entry_name: None,
             artifact_dir: Some(PathBuf::from(dir.path())),
+            project_root: None,
+            force_bare: false,
         })
         .expect("compile and load job");
 
@@ -1963,6 +2225,8 @@ loss = (mean(x, 0) : tensor[f32])
             target: CompileTarget::C,
             entry_name: None,
             artifact_dir: Some(PathBuf::from(dir.path())),
+            project_root: None,
+            force_bare: false,
         })
         .expect("compile and load job");
 
@@ -2035,6 +2299,8 @@ loss = (mean(x, 0) : tensor[f32])
             target: CompileTarget::C,
             entry_name: None,
             artifact_dir: Some(PathBuf::from(second_dir.path())),
+            project_root: None,
+            force_bare: false,
         })
         .expect("second compile and load job");
         let second_library =
@@ -2091,6 +2357,8 @@ loss = (mean(x, 0) : tensor[f32])
             target: CompileTarget::C,
             entry_name: None,
             artifact_dir: Some(PathBuf::from(dir.path())),
+            project_root: None,
+            force_bare: false,
         })
         .expect("compile and load job");
 
@@ -2358,6 +2626,8 @@ loss = (mean(x, 0) : tensor[f32])
             target: CompileTarget::C,
             entry_name: None,
             artifact_dir: Some(PathBuf::from(dir.path())),
+            project_root: None,
+            force_bare: false,
         })
         .expect("compile and load job");
 
@@ -2543,6 +2813,8 @@ loss = (mean(x, 0) : tensor[f32])
             target: CompileTarget::C,
             entry_name: entry.map(str::to_string),
             artifact_dir: Some(PathBuf::from(dir.path())),
+            project_root: None,
+            force_bare: false,
         })
         .expect("compile and load job");
         let manifest_text =
@@ -2613,6 +2885,8 @@ def main(a: tensor[1, f32], b: tensor[1, f32]) -> tensor[2, f32] = {
             target: CompileTarget::C,
             entry_name: entry.map(str::to_string),
             artifact_dir: Some(PathBuf::from(dir.path())),
+            project_root: None,
+            force_bare: false,
         })
         .expect("compile and load job");
         let manifest: ArtifactManifest = serde_json::from_str(
@@ -2731,6 +3005,8 @@ def main(a: tensor[1, f32], b: tensor[1, f32]) -> tensor[2, f32] = {
             target: CompileTarget::C,
             entry_name: Some("nope".to_string()),
             artifact_dir: Some(PathBuf::from(dir.path())),
+            project_root: None,
+            force_bare: false,
         });
         let message = match result {
             Ok(_) => panic!("unknown entry_name must not silently compile a wrong def"),
@@ -2799,6 +3075,8 @@ def free(x: tensor[1, f32]) -> tensor[1, f32] = mul(copy(x), x)
             target: CompileTarget::C,
             entry_name: Some("scale".to_string()),
             artifact_dir: Some(PathBuf::from(dir.path())),
+            project_root: None,
+            force_bare: false,
         });
         let message = match result {
             Ok(_) => panic!("scalar-signature entry must not silently compile"),
@@ -2840,6 +3118,8 @@ def free(x: tensor[1, f32]) -> tensor[1, f32] = mul(copy(x), x)
             target: CompileTarget::C,
             entry_name: Some("dloss".to_string()),
             artifact_dir: Some(PathBuf::from(dir.path())),
+            project_root: None,
+            force_bare: false,
         });
         let message = match result {
             Ok(_) => panic!("grad entry has no callable tensor ABI and must be rejected"),
@@ -2873,6 +3153,8 @@ def free(x: tensor[1, f32]) -> tensor[1, f32] = mul(copy(x), x)
             target: CompileTarget::C,
             entry_name: None,
             artifact_dir: Some(PathBuf::from(dir.path())),
+            project_root: None,
+            force_bare: false,
         });
         let message = match result {
             Ok(_) => panic!("host-only program must not silently yield a non-callable artifact"),
@@ -2883,6 +3165,500 @@ def free(x: tensor[1, f32]) -> tensor[1, f32] = mul(copy(x), x)
             message.contains("no callable interface"),
             "expected a loud host-only error, got: {message}"
         );
+    }
+
+    // Issue #816 plumbing (cheap, no Shoals): an explicit `project_root` that
+    // has no `reef.toml` is a loud, actionable error naming `project_root=` —
+    // never a silent fall-through to the bare-source path.
+    #[test]
+    fn compile_and_load_project_root_without_reef_toml_errors() {
+        let dir = tempdir().expect("tempdir");
+        let source_path = dir.path().join("model.ch");
+        fs::write(
+            &source_path,
+            "def main(x: tensor[1, f32]) -> tensor[1, f32] = mul(x, x)\n",
+        )
+        .expect("write source");
+        let no_reef = tempdir().expect("tempdir"); // deliberately has no reef.toml
+        let result = run_compile_and_load_job(CompileAndLoadJob {
+            source_path,
+            source_kind: SourceKind::Surf,
+            target: CompileTarget::C,
+            entry_name: None,
+            artifact_dir: Some(PathBuf::from(dir.path())),
+            project_root: Some(no_reef.path().to_path_buf()),
+            force_bare: false,
+        });
+        let message = match result {
+            Ok(_) => panic!("project_root with no reef.toml must error, not silently compile"),
+            Err(CompileAndLoadError::Message(m)) => m,
+            Err(CompileAndLoadError::Compiler(e)) => format!("{e:?}"),
+        };
+        assert!(
+            message.contains("no reef.toml") && message.contains("project_root="),
+            "expected an actionable no-reef.toml error naming project_root=, got: {message}"
+        );
+    }
+
+    // #822 review, Fix C: an empty `project_root` (Python `project_root=""`)
+    // must be rejected explicitly, not resolved against the process CWD into a
+    // confusing "no reef.toml found at project_root=``" error.
+    #[test]
+    fn compile_and_load_empty_project_root_is_rejected_explicitly() {
+        let dir = tempdir().expect("tempdir");
+        let source_path = dir.path().join("model.ch");
+        fs::write(
+            &source_path,
+            "def main(x: tensor[1, f32]) -> tensor[1, f32] = mul(x, x)\n",
+        )
+        .expect("write source");
+        let result = run_compile_and_load_job(CompileAndLoadJob {
+            source_path,
+            source_kind: SourceKind::Surf,
+            target: CompileTarget::C,
+            entry_name: None,
+            artifact_dir: Some(PathBuf::from(dir.path())),
+            project_root: Some(PathBuf::from("")),
+            force_bare: false,
+        });
+        let message = match result {
+            Ok(_) => panic!("empty project_root must be rejected, not compiled"),
+            Err(CompileAndLoadError::Message(m)) => m,
+            Err(CompileAndLoadError::Compiler(e)) => format!("{e:?}"),
+        };
+        assert!(
+            message.contains("project_root= is empty"),
+            "expected the explicit empty-project_root rejection, got: {message}"
+        );
+        assert!(
+            !message.contains("no reef.toml"),
+            "must not fall through to the CWD-relative reef.toml probe: {message}"
+        );
+    }
+
+    // Fix C, eval lane: `eval(..., project_root=\"  \")` goes through
+    // `run_eval_in_context_job` → `load_reef_context`, which must apply the
+    // same blank-root rejection.
+    #[test]
+    fn eval_whitespace_project_root_is_rejected_explicitly() {
+        let result = run_eval_in_context_job(
+            Path::new("   "),
+            "def main(x: tensor[1, f32]) -> tensor[1, f32] = mul(x, x)\n",
+            BTreeMap::new(),
+        );
+        let message = match result {
+            Ok(_) => panic!("whitespace project_root must be rejected"),
+            Err(CompileAndLoadError::Message(m)) => m,
+            Err(CompileAndLoadError::Compiler(e)) => format!("{e:?}"),
+        };
+        assert!(
+            message.contains("project_root= is empty"),
+            "expected the explicit empty-project_root rejection, got: {message}"
+        );
+    }
+
+    // #822 review, Fix B: an importing Surf source with NO discoverable reef
+    // root (auto-discovery attempted, found nothing — here the walk stops at
+    // the temp-dir boundary) takes the bare path; when that bare compile then
+    // fails, the error must carry a hint that discovery came up empty and that
+    // project_root= names the remedy.
+    #[test]
+    fn bare_path_importing_source_failure_names_project_root_hint() {
+        let dir = tempdir().expect("tempdir");
+        let source_path = dir.path().join("model.ch");
+        fs::write(
+            &source_path,
+            "import Shoals.Pricing (bs_call)\n\n\
+             def main(x: tensor[2, f32]) -> tensor[2, f32] = bs_call(x)\n",
+        )
+        .expect("write source");
+        let result = run_compile_and_load_job(CompileAndLoadJob {
+            source_path,
+            source_kind: SourceKind::Surf,
+            target: CompileTarget::C,
+            entry_name: None,
+            artifact_dir: Some(PathBuf::from(dir.path())),
+            project_root: None,
+            force_bare: false,
+        });
+        let message = match result {
+            Ok(_) => panic!("importing source with no discoverable root must fail bare"),
+            Err(CompileAndLoadError::Message(m)) => m,
+            Err(CompileAndLoadError::Compiler(e)) => {
+                panic!("expected the hint-annotated Message error, got {e:?}")
+            }
+        };
+        assert!(
+            message.contains("auto-discovery found no enclosing project")
+                && message.contains("project_root=<path-to-project>"),
+            "expected the discovery-miss hint naming project_root=, got: {message}"
+        );
+    }
+
+    // Fix B negative sidecar: a NON-importing source that fails to compile on
+    // the bare path keeps its plain compiler error — no project_root= hint
+    // (discovery was never attempted for it).
+    #[test]
+    fn bare_path_non_importing_failure_has_no_project_root_hint() {
+        let dir = tempdir().expect("tempdir");
+        let source_path = dir.path().join("model.ch");
+        fs::write(
+            &source_path,
+            "def main(x: tensor[2, f32]) -> tensor[2, f32] = bogus_helper(x)\n",
+        )
+        .expect("write source");
+        let result = run_compile_and_load_job(CompileAndLoadJob {
+            source_path,
+            source_kind: SourceKind::Surf,
+            target: CompileTarget::C,
+            entry_name: None,
+            artifact_dir: Some(PathBuf::from(dir.path())),
+            project_root: None,
+            force_bare: false,
+        });
+        match result {
+            Ok(_) => panic!("unbound-variable source must fail"),
+            Err(CompileAndLoadError::Compiler(err)) => {
+                let rendered = compiler_error_message(&err);
+                assert!(
+                    !rendered.contains("project_root="),
+                    "non-importing failure must not carry the discovery hint: {rendered}"
+                );
+            }
+            Err(CompileAndLoadError::Message(m)) => {
+                panic!("expected a plain Compiler error without the hint, got: {m}")
+            }
+        }
+    }
+
+    // Issue #816 no-regression (cheap, no Shoals): with `project_root=None` and
+    // a source file NOT inside any reef package, root discovery returns `None`,
+    // so the bare-source path runs unchanged. This locks the "no root found or
+    // applicable → today's behavior EXACTLY" constraint at the resolver seam.
+    #[test]
+    fn compile_and_load_no_project_root_and_no_package_resolves_to_bare_path() {
+        let dir = tempdir().expect("tempdir");
+        let source_path = dir.path().join("model.ch");
+        fs::write(
+            &source_path,
+            "def main(x: tensor[1, f32]) -> tensor[1, f32] = mul(x, x)\n",
+        )
+        .expect("write source");
+        let job = CompileAndLoadJob {
+            source_path,
+            source_kind: SourceKind::Surf,
+            target: CompileTarget::C,
+            entry_name: None,
+            artifact_dir: Some(PathBuf::from(dir.path())),
+            project_root: None,
+            force_bare: false,
+        };
+        let source = fs::read_to_string(&job.source_path).expect("read source");
+        let resolved =
+            resolve_compile_reef_root(&job, &source).expect("root discovery must not error");
+        assert!(
+            resolved.is_none(),
+            "a source outside any reef package must resolve to the bare-source path, got {resolved:?}"
+        );
+    }
+
+    // A minimal reef package on disk (reef.toml + src/), enough for
+    // `find_package_root_for_input` to walk up and discover the root. No
+    // dependencies / lockfile — these tests exercise the ROUTING seam
+    // (`resolve_compile_reef_root`), not a context compile.
+    fn minimal_reef_project() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("proj");
+        fs::create_dir_all(root.join("src")).expect("mkdir src");
+        fs::write(
+            root.join("reef.toml"),
+            "[package]\nname = \"proj\"\nversion = \"0.1.0\"\ncompiler = \"=0.16.1\"\nmodule_prefix = \"Proj\"\n",
+        )
+        .expect("write reef.toml");
+        (dir, root)
+    }
+
+    fn resolve_root_for(
+        source: &str,
+        source_kind: SourceKind,
+        force_bare: bool,
+    ) -> (Option<PathBuf>, PathBuf) {
+        let (_dir, root) = minimal_reef_project();
+        let source_path = root.join("src/entry.ch");
+        fs::write(&source_path, source).expect("write entry");
+        let job = CompileAndLoadJob {
+            source_path,
+            source_kind,
+            target: CompileTarget::C,
+            entry_name: None,
+            artifact_dir: None,
+            project_root: None,
+            force_bare,
+        };
+        let resolved = resolve_compile_reef_root(&job, source).expect("resolve must not error");
+        // `root` outlives `_dir`? No — return the resolved path (owned) and the
+        // expected root; the tempdir is dropped after the assertion in-caller
+        // reads only the returned values, both owned.
+        (resolved, root)
+    }
+
+    // Issue #816 review round 2 (item 2i): auto-discovery is IMPORT-GATED. A
+    // self-contained (import-free) source physically inside a reef project must
+    // take the bare path — it never needs a library context, so it must not pay
+    // the context-compile cost nor couple to sibling-file health.
+    #[test]
+    fn auto_discovery_skips_import_free_source_inside_project() {
+        let (resolved, _root) = resolve_root_for(
+            "def main(x: tensor[1, f32]) -> tensor[1, f32] = mul(copy(x), x)\n",
+            SourceKind::Surf,
+            false,
+        );
+        assert!(
+            resolved.is_none(),
+            "an import-free in-project source must resolve to the bare path, got {resolved:?}"
+        );
+    }
+
+    // Issue #816 review round 2 (item 6c, positive auto-discovery): a source
+    // that DOES import a reef dependency and sits inside a project resolves to
+    // `Some(root)` — the in-context path.
+    #[test]
+    fn auto_discovery_resolves_importing_source_inside_project() {
+        let (resolved, _root) = resolve_root_for(
+            "module Proj.Entry\nimport Proj.Lib (helper)\n\
+             def main(x: tensor[1, f32]) -> tensor[1, f32] = helper(x)\n",
+            SourceKind::Surf,
+            false,
+        );
+        // `find_package_root_for_input` canonicalizes (macOS `/var` symlinks to
+        // `/private/var`), so compare by the discovered package directory name.
+        let resolved =
+            resolved.expect("an importing in-project source must auto-discover its root");
+        assert!(
+            resolved.ends_with("proj"),
+            "auto-discovery must resolve the enclosing reef package, got {resolved:?}"
+        );
+    }
+
+    // Issue #816 review round 2 (item 2ii): `force_bare` (Python
+    // `project_root=False`) forces the bare path even for an importing source
+    // inside a project — the explicit opt-out.
+    #[test]
+    fn force_bare_forces_bare_path_even_for_importing_source() {
+        let (resolved, _root) = resolve_root_for(
+            "module Proj.Entry\nimport Proj.Lib (helper)\n\
+             def main(x: tensor[1, f32]) -> tensor[1, f32] = helper(x)\n",
+            SourceKind::Surf,
+            true,
+        );
+        assert!(
+            resolved.is_none(),
+            "force_bare must override auto-discovery, got {resolved:?}"
+        );
+    }
+
+    // Issue #816 review round 2 (item 1): a deep (`.dp`/`source_kind="deep"`)
+    // source auto-discovering inside a reef project takes the bare path —
+    // reef imports are a Surf-only construct, and the pre-PR bare behavior must
+    // be preserved (the in-context path unconditionally parses Surf).
+    #[test]
+    fn deep_source_auto_discovery_takes_bare_path() {
+        let (resolved, _root) =
+            resolve_root_for("(module {} Proj.Entry)\n", SourceKind::Deep, false);
+        assert!(
+            resolved.is_none(),
+            "a deep source must take the bare path, got {resolved:?}"
+        );
+    }
+
+    // Issue #816 review round 2 (item 1): an EXPLICIT `project_root=` with a
+    // deep source is rejected (mirrors `eval_json`'s Surf-only guard) rather
+    // than silently routing deep source through the Surf-only in-context path.
+    #[test]
+    fn deep_source_with_explicit_project_root_is_rejected() {
+        let (_dir, root) = minimal_reef_project();
+        let source_path = root.join("src/entry.dp");
+        fs::write(&source_path, "(module {} Proj.Entry)\n").expect("write entry");
+        let job = CompileAndLoadJob {
+            source_path,
+            source_kind: SourceKind::Deep,
+            target: CompileTarget::C,
+            entry_name: None,
+            artifact_dir: None,
+            project_root: Some(root.clone()),
+            force_bare: false,
+        };
+        let err = resolve_compile_reef_root(&job, "(module {} Proj.Entry)\n")
+            .expect_err("deep + explicit project_root must be rejected");
+        let message = match err {
+            CompileAndLoadError::Message(m) => m,
+            CompileAndLoadError::Compiler(e) => format!("{e:?}"),
+        };
+        assert!(
+            message.contains("Surf source only"),
+            "expected a Surf-only rejection, got: {message}"
+        );
+    }
+
+    // Issue #816 review round 2 (rank-0 guard, documented behavior change): the
+    // rank-0 scalar guard in `ensure_supported_execution_artifact_inner` also
+    // applies to the BARE path. A tensor-in / scalar-out entry (`mean` reduces
+    // to a rank-0 result) is rejected with wrap guidance BEFORE the C build,
+    // rather than emitting an unbuildable scalar kernel. This is an intentional
+    // improvement over the pre-#816 "bare path byte-for-byte unchanged" claim.
+    #[test]
+    fn bare_path_rejects_rank0_scalar_output_with_wrap_guidance() {
+        let dir = tempdir().expect("tempdir");
+        let source_path = dir.path().join("model.ch");
+        fs::write(
+            &source_path,
+            "def main(x: tensor[2, f32]) -> tensor[f32] = mean(x, 0)\n",
+        )
+        .expect("write source");
+        let result = run_compile_and_load_job(CompileAndLoadJob {
+            source_path,
+            source_kind: SourceKind::Surf,
+            target: CompileTarget::C,
+            entry_name: None,
+            artifact_dir: Some(PathBuf::from(dir.path())),
+            project_root: None,
+            force_bare: false,
+        });
+        let message = match result {
+            Ok(_) => panic!("a rank-0 scalar output must be rejected on the bare path"),
+            Err(CompileAndLoadError::Message(m)) => m,
+            Err(CompileAndLoadError::Compiler(e)) => format!("{e:?}"),
+        };
+        assert!(
+            message.contains("scalar (rank-0)") && message.contains("tensor[1, f32]"),
+            "expected rank-0 wrap guidance, got: {message}"
+        );
+    }
+
+    // A two-package path-dep reef project on disk with a pure-tensor library
+    // function `scale2(x) = add(x, x)`, compilable fully in-process (reef.lock
+    // fast path, no network, no installed toolchain) — the same shape the
+    // compiler-api `copy_drop_context_fixture` uses, but with a `reef.lock` so
+    // `load_or_compile_for_package` resolves the path dep offline.
+    fn path_dep_tensor_project() -> (tempfile::TempDir, PathBuf) {
+        let ver = chelis_compiler_api::COMPILER_VERSION;
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("myapp");
+        fs::create_dir_all(root.join("src")).expect("mkdir src");
+        fs::create_dir_all(root.join("mylib/src")).expect("mkdir mylib/src");
+        fs::write(
+            root.join("reef.toml"),
+            format!(
+                "[package]\nname = \"myapp\"\nversion = \"0.1.0\"\ncompiler = \"={ver}\"\nmodule_prefix = \"App\"\n\n[dependencies]\nmylib = {{ path = \"./mylib\" }}\n"
+            ),
+        )
+        .expect("write app reef.toml");
+        fs::write(
+            root.join("reef.lock"),
+            format!(
+                "[package]\nname = \"myapp\"\nversion = \"0.1.0\"\n\n[[dependencies]]\nname = \"mylib\"\nversion = \"0.1.0\"\ncompiler = \"={ver}\"\narchive_sha256 = \"\"\nshell_sha256 = \"\"\n\n[dependencies.source]\nkind = \"path\"\npath = \"./mylib\"\n"
+            ),
+        )
+        .expect("write app reef.lock");
+        fs::write(
+            root.join("src/main.ch"),
+            "module App.Main\n\ndef placeholder -> int32 = cast(0, int32)\n",
+        )
+        .expect("write app main");
+        fs::write(
+            root.join("mylib/reef.toml"),
+            format!(
+                "[package]\nname = \"mylib\"\nversion = \"0.1.0\"\ncompiler = \"={ver}\"\nmodule_prefix = \"Mylib\"\n"
+            ),
+        )
+        .expect("write lib reef.toml");
+        fs::write(
+            root.join("mylib/src/lib.ch"),
+            "module Mylib.Lib\nexport (scale2)\n\n\
+             def scale2(x: tensor[2, f32]) -> tensor[2, f32] = add(copy(x), x)\n",
+        )
+        .expect("write lib module");
+        (dir, root)
+    }
+
+    // Issue #816 review round 2 (item 6a): a full in-context `compile_and_load`
+    // end-to-end with a numeric assertion, through the Python job path. Two
+    // defs (`main` calls the library `scale2`, `sibling` unrelated), NO
+    // `entry_name` → `main` selected and scoped to ONE input; the dlopened
+    // kernel returns `main([3, 4]) == 2*[3, 4] == [6, 8]` (the wrong-subgraph-
+    // slice guard: picking `sibling` or merging params would change the ABI or
+    // the value). Also asserts positive auto-discovery: no `project_root`, the
+    // importing source file lives inside the project tree.
+    #[test]
+    fn in_context_compile_and_load_end_to_end_numeric() {
+        let (_dir, root) = path_dep_tensor_project();
+        let entry_path = root.join("src/entry.ch");
+        fs::write(
+            &entry_path,
+            "module App.Entry\nimport Mylib.Lib (scale2)\n\n\
+             def main(x: tensor[2, f32]) -> tensor[2, f32] = scale2(x)\n\
+             def sibling(a: tensor[2, f32], b: tensor[2, f32]) -> tensor[2, f32] = add(a, b)\n",
+        )
+        .expect("write entry");
+        let artifact_dir = tempdir().expect("artifact tempdir");
+        // Auto-discovery: project_root=None, the file is inside the project.
+        let output = run_compile_and_load_job(CompileAndLoadJob {
+            source_path: entry_path,
+            source_kind: SourceKind::Surf,
+            target: CompileTarget::C,
+            entry_name: None,
+            artifact_dir: Some(PathBuf::from(artifact_dir.path())),
+            project_root: None,
+            force_bare: false,
+        })
+        .expect("in-context compile_and_load job");
+
+        let manifest: ArtifactManifest = serde_json::from_str(
+            &fs::read_to_string(output.lib_path.with_extension("json")).expect("read manifest"),
+        )
+        .expect("parse manifest");
+        assert_eq!(
+            manifest.inputs.len(),
+            1,
+            "entry scoped to `main` (1 input), not `sibling`/merged: {:?}",
+            manifest.inputs
+        );
+        assert_eq!(manifest.outputs.len(), 1);
+
+        let library = unsafe { Library::new(&output.lib_path) }.expect("load shared library");
+        let symbol = nul_terminated(&manifest.host_entry_name);
+        let entry_fn = unsafe {
+            library
+                .get::<HostEntry>(symbol.as_bytes())
+                .expect("host entry symbol resolves")
+        };
+        let mut buffer: Vec<f32> = vec![3.0, 4.0];
+        let strides = contiguous_strides(&[2]);
+        let mut input = ChelisTensor {
+            data: buffer.as_mut_ptr(),
+            shape: dims_array(&[2]).expect("shape"),
+            strides: dims_array(&strides).expect("strides"),
+            ndim: 1,
+            dtype: CHELIS_F32,
+            size: 2,
+            owns_data: 0,
+        };
+        let mut input_ptrs: Vec<*mut ChelisTensor> = vec![&mut input as *mut _];
+        let mut output_ptrs: Vec<*mut ChelisTensor> = vec![std::ptr::null_mut(); 1];
+        unsafe {
+            (*entry_fn)(
+                input_ptrs.as_mut_ptr(),
+                input_ptrs.len() as c_int,
+                output_ptrs.as_mut_ptr(),
+                output_ptrs.len() as c_int,
+            );
+        }
+        assert!(!output_ptrs[0].is_null(), "NULL output");
+        let out = unsafe { &*output_ptrs[0] };
+        let slice = unsafe { std::slice::from_raw_parts(out.data, out.size as usize) };
+        assert_eq!(slice, &[6.0, 8.0], "main([3,4]) == 2*[3,4]");
+        drop(buffer);
+        drop(library);
     }
 
     // Reviewer S2: a top-level value binding in a multi-def program used to
@@ -2908,6 +3684,8 @@ def free(x: tensor[1, f32]) -> tensor[1, f32] = mul(copy(x), x)
             target: CompileTarget::C,
             entry_name: Some("main".to_string()),
             artifact_dir: Some(PathBuf::from(dir.path())),
+            project_root: None,
+            force_bare: false,
         });
         let message = match result {
             Ok(_) => panic!("a top-level binding must not yield a merged callable model"),
@@ -2946,6 +3724,8 @@ def free(x: tensor[1, f32]) -> tensor[1, f32] = mul(copy(x), x)
             target: CompileTarget::C,
             entry_name: Some("batch_process".to_string()),
             artifact_dir: Some(PathBuf::from(dir.path())),
+            project_root: None,
+            force_bare: false,
         });
         let message = match result {
             Ok(_) => panic!("a vmap entry must not yield a whole-program callable model"),
@@ -2959,6 +3739,99 @@ def free(x: tensor[1, f32]) -> tensor[1, f32] = mul(copy(x), x)
         assert!(
             message.contains("batch_process") && message.contains("eval"),
             "expected the strict transform-entry error naming the def and eval, got: {message}"
+        );
+    }
+
+    // #822 review round 3, finding 3: the HIP reef-context rejection must
+    // fire BEFORE the reef context is compiled. The fixture's reef.toml is
+    // deliberately unparseable garbage: if the job ever reached
+    // `load_reef_context` first, the failure would be a manifest error, not
+    // the branded HIP rejection asserted here.
+    #[test]
+    fn compile_and_load_job_rejects_hip_reef_context_before_context_compile() {
+        let dir = tempdir().expect("tempdir");
+        let source_path = dir.path().join("model.ch");
+        fs::write(
+            &source_path,
+            "import Mylib.Copy (consume)\n\
+             def main(x: tensor[2, f32]) -> tensor[2, f32] = consume(x)\n",
+        )
+        .expect("write source");
+        let project = tempdir().expect("tempdir");
+        fs::write(project.path().join("reef.toml"), "this is not TOML {{{{")
+            .expect("write garbage manifest");
+        let result = run_compile_and_load_job(CompileAndLoadJob {
+            source_path,
+            source_kind: SourceKind::Surf,
+            target: CompileTarget::Hip,
+            entry_name: None,
+            artifact_dir: Some(PathBuf::from(dir.path())),
+            project_root: Some(project.path().to_path_buf()),
+            force_bare: false,
+        });
+        let message = match result {
+            Ok(_) => panic!("HIP reef-context must be rejected"),
+            Err(CompileAndLoadError::Message(m)) => m,
+            Err(CompileAndLoadError::Compiler(e)) => e
+                .errors
+                .first()
+                .map(|d| format!("{} {}", d.kind, d.message))
+                .unwrap_or_else(|| format!("{e:?}")),
+        };
+        assert!(
+            message.contains("unsupported_feature") && message.contains("chelis#829"),
+            "expected the branded early HIP rejection (not a manifest error), got: {message}"
+        );
+    }
+
+    // #822 review round 3, finding 5: the documented "an explicit
+    // `project_root=` forces in-context resolution regardless of whether the
+    // source imports" claim had no test. Route detection: the fixture's
+    // library is corrupted, so the CONTEXT compile fails; an import-free
+    // source that silently took the bare path would compile fine. Getting the
+    // context error proves the forced routing; the bare-path control proves
+    // the same source is otherwise healthy.
+    #[test]
+    fn explicit_project_root_forces_context_for_import_free_source() {
+        let (_dir, root) = path_dep_tensor_project();
+        fs::write(root.join("mylib/src/lib.ch"), "def broken( := nonsense\n")
+            .expect("corrupt library source");
+        let outside = tempdir().expect("tempdir");
+        let source_path = outside.path().join("model.ch");
+        fs::write(
+            &source_path,
+            "def main(x: tensor[1, f32]) -> tensor[1, f32] = mul(copy(x), x)\n",
+        )
+        .expect("write source");
+        let artifact_dir = tempdir().expect("artifact tempdir");
+
+        // Control: bare path (no project_root) compiles the healthy source.
+        run_compile_and_load_job(CompileAndLoadJob {
+            source_path: source_path.clone(),
+            source_kind: SourceKind::Surf,
+            target: CompileTarget::C,
+            entry_name: None,
+            artifact_dir: Some(PathBuf::from(artifact_dir.path())),
+            project_root: None,
+            force_bare: false,
+        })
+        .expect("bare path must compile the import-free source");
+
+        // Explicit root: must route in-context and therefore hit the broken
+        // library, never silently fall back to the bare path.
+        let result = run_compile_and_load_job(CompileAndLoadJob {
+            source_path,
+            source_kind: SourceKind::Surf,
+            target: CompileTarget::C,
+            entry_name: None,
+            artifact_dir: Some(PathBuf::from(artifact_dir.path())),
+            project_root: Some(root),
+            force_bare: false,
+        });
+        assert!(
+            result.is_err(),
+            "an explicit project_root must force in-context resolution (and hit the \
+             corrupted library), not silently take the bare path"
         );
     }
 }
