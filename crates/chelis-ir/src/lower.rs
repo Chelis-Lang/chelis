@@ -11917,6 +11917,36 @@ mod tests {
             None,
             "negating signed MIN must decline rather than overflow or wrap"
         );
+
+        // chelis#1123 red-team finding 2: negating a TYPED leaf at its
+        // width's minimum overflows in the typed kernel and declines to
+        // the dynamic path, which reports "overflow in neg at int8" when
+        // the def is actually called (the uncalled-def silence is the
+        // pre-existing chelis#1132 class).
+        let typed_min_neg = Expr::node(
+            DeepTag::App,
+            meta.clone(),
+            vec![
+                Expr::node(
+                    DeepTag::Var,
+                    meta.clone(),
+                    vec![Expr::Atom(Atom::Name("neg".into()), span)],
+                    span,
+                ),
+                Expr::node(
+                    DeepTag::Cast,
+                    meta.clone(),
+                    vec![int_lit(-128), prim("int8")],
+                    span,
+                ),
+            ],
+            span,
+        );
+        assert_eq!(
+            extract_numeric_leaf(&typed_min_neg),
+            None,
+            "typed negation overflow must decline static recognition"
+        );
     }
 
     /// The env-keyed variant walks map VALUES, which is where library

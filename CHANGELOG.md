@@ -73,6 +73,18 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **Const-lowering literal staging keeps every element's dtype with the value
+  (chelis#1116).** The static tensor-literal path staged elements as untagged
+  i64-or-f64 and re-derived the dtype later; it now carries the sealed typed
+  scalar end to end and inserts finalized values exactly, implementing the
+  [04-NUM-11] transport clause. One behavior consequence, in the conforming
+  direction: an untyped integer element finalizing into an f32/bf16 tensor
+  literal now single-rounds where the non-uniform path previously
+  double-rounded through f64 (the uniform path already single-rounded, so the
+  two paths disagreed). Reachable only from hand-written Deep whose lit atom
+  kind disagrees with its declared prim family (chelis#1131); Surf programs
+  are unaffected.
+
 - **Compiled list combinators grow accumulators in place (part of chelis#943).**
   The C backend now gives `map`, `filter`, `scan`, `partition`, and `flat_map`
   exclusive, pre-sized accumulators instead of rebuilding a list for every

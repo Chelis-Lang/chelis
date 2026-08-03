@@ -22,6 +22,29 @@ fn surf_to_dag(source: &str) -> Result<Dag, String> {
     try_lower_program(&checked).map_err(|diag| format!("lowering failed: {diag:?}"))
 }
 
+/// chelis#1123 red-team finding 3: a literal mixing an explicit cast with a
+/// bare integer literal stages Typed + Raw, whose uniformity keys differ by
+/// construction, so lowering takes the ConstTensor path even though the
+/// finalized elements are equal. Values are identical to a Const splat;
+/// pinned so the node shape is a recorded decision, not an accident.
+#[test]
+fn mixed_cast_and_bare_integer_literal_lowers_to_const_tensor() {
+    let source = r#"
+def main() -> tensor[2, int32] =
+  to_tensor([cast(1, int32), 1])
+"#;
+    let dag = surf_to_dag(source).expect("pipeline succeeds");
+    let data = dag
+        .nodes()
+        .iter()
+        .find_map(|n| match &n.op {
+            RiscOp::ConstTensor { data } => data.to_i64_exact_vec(),
+            _ => None,
+        })
+        .expect("mixed Typed/Raw staging takes the ConstTensor path");
+    assert_eq!(data, vec![1, 1]);
+}
+
 /// A non-uniform literal `to_tensor` should produce a ConstTensor node.
 #[test]
 fn to_tensor_non_uniform_lowers_to_const_tensor() {

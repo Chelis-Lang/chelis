@@ -2857,6 +2857,40 @@ mod tests {
         let _ = tensor_from_scalars(Prim::F64, &[v]);
     }
 
+    // ---- chelis#1123 red-team finding 1: integer ingest single-rounds ----
+
+    #[test]
+    fn int_ingest_into_f32_single_rounds_not_via_f64() {
+        // Verified images differ for this value: single rounding i64->f32
+        // yields bits 0x5A800001; double rounding through f64 first yields
+        // 0x5A800000. Finalize takes the single-rounding path ([04-NUM-1]:
+        // one rounding, at the declared width).
+        let single = fin_i(Prim::F32, 18_014_399_583_223_809).unwrap();
+        let bits = (single.as_f64_lossy() as f32).to_bits();
+        assert_eq!(bits, 0x5A80_0001, "finalize must single-round i64->f32");
+        let double = ((18_014_399_583_223_809i64 as f64) as f32).to_bits();
+        assert_eq!(
+            double, 0x5A80_0000,
+            "control: the double-rounded image is a different f32"
+        );
+    }
+
+    #[test]
+    fn int_ingest_into_bf16_single_rounds_not_via_f64() {
+        let x: i64 = 18_084_767_253_659_649;
+        let single = fin_i(Prim::Bf16, x).unwrap().as_f64_lossy();
+        let double = f64::from(half::bf16::from_f64(x as f64));
+        assert_ne!(
+            single, double,
+            "bf16 integer ingest must not round through f64"
+        );
+        // Correct rounding is nearest: the single-rounded image sits
+        // strictly closer to the true integer than the double-rounded one.
+        let err_single = (x - single as i64).abs();
+        let err_double = (x - double as i64).abs();
+        assert!(err_single < err_double);
+    }
+
     // ---- section C1 row: f64 (identity; specials preserved) ----
 
     #[test]
