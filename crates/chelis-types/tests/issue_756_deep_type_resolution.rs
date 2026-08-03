@@ -14,7 +14,6 @@
 
 mod support;
 
-use chelis_deep::DeepTag;
 use chelis_types::errors::CheckErrorKind;
 use chelis_types::types::Type;
 use chelis_types::{build_type_env_from_library, check_ir_program, check_ir_with_context};
@@ -438,13 +437,12 @@ fn malformed_canonical_primitive_reports_once_at_every_type_consumer() {
 
 #[test]
 fn independent_rhs_and_malformed_let_ascription_each_report_once() {
-    let mut exprs = parse(
+    let exprs = support::parse_unchecked_legacy(
         "(def {} bad
            (let {} (bind {} value
-             (var {type: (t-prim {} f32)} missing))
+             (var {type: (t-prim {} f32 extra)} missing))
              (lit {} 0)))",
     );
-    support::append_name_to_last_node(&mut exprs, DeepTag::TPrim, "extra");
     let result = check_ir_program(&exprs)
         .expect_err("the independent RHS and ascription roots must both fail the checker");
     assert_eq!(
@@ -477,11 +475,10 @@ fn independent_rhs_and_malformed_let_ascription_each_report_once() {
 
 #[test]
 fn prebound_failure_is_owned_by_its_exact_duplicate_name_declaration() {
-    let mut exprs = parse(
+    let exprs = support::parse_unchecked_legacy(
         "(def {} duplicate (var {} missing))
-         (def {} duplicate (lit {type: (t-prim {} f32)} 1.0))",
+         (def {} duplicate (lit {type: (t-prim {} f32 extra)} 1.0))",
     );
-    support::append_name_to_last_node(&mut exprs, DeepTag::TPrim, "extra");
     let result = check_ir_program(&exprs)
         .expect_err("duplicate declarations with independent roots must fail the checker");
     assert_eq!(

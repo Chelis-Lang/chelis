@@ -45,32 +45,44 @@ fn assert_no_legacy_list(expr: &Expr) {
     }
 }
 
-fn find_node_mut(expr: &mut Expr, tag: DeepTag) -> Option<&mut chelis_deep::node::Node> {
+/// Push a metadata entry onto the first stamped node carrying `tag`.
+///
+/// The stamped carrier hands out no mutable borrow of its children or
+/// metadata, so this rebuilds the enclosing nodes inside-out and lets each
+/// `try_replace_*` revalidate the complete candidate before commit.
+fn push_meta_on_first_node(expr: &mut Expr, tag: DeepTag, entry: (String, Expr)) -> bool {
     match expr {
         Expr::Node(node, _) => {
             if node.tag() == tag {
-                return Some(node);
+                let mut meta = node.meta().clone();
+                meta.entries.push(entry);
+                node.try_replace_meta(meta)
+                    .expect("test fixture metadata must preserve the Node invariant");
+                return true;
             }
-            for child in node.children_slice_mut() {
-                if let Some(found) = find_node_mut(child, tag) {
-                    return Some(found);
+            for index in 0..node.child_count() {
+                let mut child = node.children_slice()[index].clone();
+                if push_meta_on_first_node(&mut child, tag, entry.clone()) {
+                    node.try_replace_child(index, child)
+                        .expect("rebuilt child must preserve the Node invariant");
+                    return true;
                 }
             }
-            None
+            false
         }
         Expr::BareList(elements, _) => elements
             .iter_mut()
-            .find_map(|child| find_node_mut(child, tag)),
+            .any(|child| push_meta_on_first_node(child, tag, entry.clone())),
         Expr::UnknownForm(data) => data
             .children
             .iter_mut()
-            .find_map(|child| find_node_mut(child, tag)),
+            .any(|child| push_meta_on_first_node(child, tag, entry.clone())),
         Expr::Map(map, _) => map
             .entries
             .iter_mut()
-            .find_map(|(_, value)| find_node_mut(value, tag)),
-        Expr::MetaExpr(meta, _) => find_node_mut(&mut meta.expr, tag),
-        Expr::Atom(_, _) | Expr::List(_, _) => None,
+            .any(|(_, value)| push_meta_on_first_node(value, tag, entry.clone())),
+        Expr::MetaExpr(meta, _) => push_meta_on_first_node(&mut meta.expr, tag, entry),
+        Expr::Atom(_, _) | Expr::List(_, _) => false,
     }
 }
 
@@ -170,33 +182,38 @@ fn effects_only_reannotation_accepts_stamped_nodes_and_rejects_other_metadata() 
     let checked = check_typed_program(&program).expect("stamped program must type-check");
 
     let mut effects_only = checked.annotated_exprs().to_vec();
-    let function = effects_only
-        .iter_mut()
-        .find_map(|expr| find_node_mut(expr, DeepTag::Fn))
-        .expect("fixture contains a stamped function");
     let effect_row = Expr::node(
         DeepTag::Effects,
         MetaMap::default(),
         vec![Expr::Atom(Atom::Name("io".to_string()), Span::new(0, 0))],
         Span::new(0, 0),
     );
-    function
-        .meta_mut()
-        .entries
-        .push(("effects".to_string(), effect_row));
+    assert!(
+        effects_only.iter_mut().any(|expr| push_meta_on_first_node(
+            expr,
+            DeepTag::Fn,
+            ("effects".to_string(), effect_row.clone())
+        )),
+        "fixture contains a stamped function"
+    );
     checked
         .try_with_effect_annotations(effects_only)
         .expect("effects-owned metadata is the only legal stamped rewrite");
 
     let mut forged = checked.annotated_exprs().to_vec();
-    let root = forged
-        .first_mut()
-        .and_then(|expr| find_node_mut(expr, DeepTag::Def))
-        .expect("fixture contains a stamped declaration");
-    root.meta_mut().entries.push((
-        "forged".to_string(),
-        Expr::Atom(Atom::Bool(true), Span::new(0, 0)),
-    ));
+    assert!(
+        forged
+            .first_mut()
+            .is_some_and(|expr| push_meta_on_first_node(
+                expr,
+                DeepTag::Def,
+                (
+                    "forged".to_string(),
+                    Expr::Atom(Atom::Bool(true), Span::new(0, 0)),
+                ),
+            )),
+        "fixture contains a stamped declaration"
+    );
     checked
         .try_with_effect_annotations(forged)
         .expect_err("non-effects stamped metadata must not reconstruct success");

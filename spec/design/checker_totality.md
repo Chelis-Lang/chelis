@@ -730,6 +730,33 @@ validator/oracle coverage is incomplete, and some paths validate then consume
 a reparsed legacy tree. This paragraph records state; [#908] owns completing
 the structural cut.
 
+**Construction gate (2026-08-03).** A partial [#731] Phase 3 hardening now
+closes the *construction* half of successor acceptance. Public `Node`
+construction rejects a raw closed-vocabulary tag recursively, in metadata
+values as well as children, so a legacy form cannot hide below a newly
+stamped carrier. RuntimeExpr slots reject the transitional `Atom::Tag`
+carrier alongside bare names. Metadata and child replacement are
+validate-before-commit and transactional: a rejected candidate leaves the
+original node untouched. The raw mutable child and metadata borrows
+(`children_slice_mut`, `children_vec_mut`, `meta_mut`) are gone, and the
+path/module rewrite helpers rebuild stamped Nodes inside-out, so no caller
+can reopen the raw-vocabulary or arity domain after construction. Mutable
+path resolution into a stamped Node is now a structured error rather than a
+borrow. Checker-totality mutations that deliberately bypass the constructor
+do so through an explicitly test-only raw-to-legacy adapter; ordinary
+positive coverage continues through the production stamped parser. The
+WI-1 depth-oracle harness tears down its owned deep fixture on a fresh
+production-sized grown segment, so a green test proves the typed
+stack-budget diagnostic rather than accepting an abort.
+
+The *ingress* half is NOT discharged. The generic compiler API Deep path
+still uses `parse_str_strict`, not `parse_and_stamp_file`; the read-only
+authoring surfaces (outline, references, call graph) still normalize to
+`List` and still have the arm/`let` binder-scope gaps; and the legacy
+`List` variant and consumer bridge remain active. Phase 3 MUST NOT be
+called successor-accepted until those remaining §C4.2 ingress and deletion
+clauses are executable and green.
+
 **Frozen at your exit:** the variant set = the vocabulary, changing only
 per B1's one-change-set rule.
 

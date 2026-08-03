@@ -19,6 +19,8 @@
 //! * both polarities: the dispatched tags still check cleanly on a
 //!   well-typed control program.
 
+mod support;
+
 use chelis_deep::parser::parse_str;
 use chelis_deep::role::{AritySpec, ChildStampRole, arity_contract, child_stamp_role};
 use chelis_deep::{Atom, DeepTag, Expr, List, MetaMap, Span};
@@ -261,19 +263,10 @@ fn childless_block_is_malformed() {
     );
 
     // [04-TOT-3] still binds malformed nodes that reach the checker through
-    // a programmatic mutation of the transitional mutable carrier.
-    let mut block = stamped_body(DeepTag::Block);
-    let Expr::Node(node, _) = &mut block else {
-        unreachable!("stamped_body always constructs a Node")
-    };
-    node.children_vec_mut().clear();
-    let def = Expr::node(
-        DeepTag::Def,
-        MetaMap::default(),
-        vec![Expr::Atom(Atom::Name("f".to_string()), zero()), block],
-        zero(),
-    );
-    let errors = infer_program(&[def]).errors;
+    // the deprecated legacy carrier. The stamped `Node` can no longer be
+    // widened after construction, so the legacy `List` is the remaining
+    // route by which a childless block reaches the checker.
+    let errors = infer_program(&support::parse_unchecked_legacy("(def {} f (block {}))")).errors;
     assert!(
         errors
             .iter()

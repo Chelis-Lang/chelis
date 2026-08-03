@@ -2083,17 +2083,18 @@ fn inject_into_module_with_source(exprs: &[Expr], type_name: &str, def: Expr) ->
             && module_defines(&stripped, type_name)
         {
             match &stripped {
+                // The probe `def` this module receives is built in the
+                // deprecated legacy `List` carrier (see `node` above), so it
+                // cannot be pushed under a stamped `Module` Node: that node
+                // revalidates its whole subtree and rejects a raw
+                // closed-vocabulary tag below the gate. Inject into the
+                // module's canonical List form instead. The result is printed
+                // and reparsed by `eval_selected` immediately below, so the
+                // carrier is transient and the emitted text is unchanged.
                 Expr::Node(node, span) => {
-                    let mut module_children = node.children_slice().to_vec();
-                    module_children.push(def.clone());
-                    out.push(Expr::Node(
-                        Box::new(chelis_deep::node::Node::new(
-                            DeepTag::Module,
-                            node.meta().clone(),
-                            module_children,
-                        )),
-                        *span,
-                    ));
+                    let mut elements = node.to_list(*span).elements;
+                    elements.push(def.clone());
+                    out.push(Expr::List(chelis_deep::ast::List { elements }, *span));
                     injected = true;
                     continue;
                 }

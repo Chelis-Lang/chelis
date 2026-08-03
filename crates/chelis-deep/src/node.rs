@@ -25,12 +25,27 @@ pub enum NodeError {
         index: usize,
         name: String,
     },
+    /// A transitional decoded tag atom appeared where a runtime expression
+    /// node is required.
+    TagAtExprSlot {
+        tag: DeepTag,
+        index: usize,
+        child_tag: DeepTag,
+    },
     /// Child count violates `arity_contract`.
     ArityViolation {
         tag: DeepTag,
         expected: AritySpec,
         actual: usize,
     },
+    /// A transactional replacement addressed a child that does not exist.
+    ChildOutOfBounds {
+        tag: DeepTag,
+        index: usize,
+        child_count: usize,
+    },
+    /// A closed-vocabulary tag survived as a raw string below the gate.
+    RawVocabularyTag { container: DeepTag, raw_tag: String },
 }
 
 impl std::fmt::Display for NodeError {
@@ -44,6 +59,17 @@ impl std::fmt::Display for NodeError {
                     tag.as_str()
                 )
             }
+            NodeError::TagAtExprSlot {
+                tag,
+                index,
+                child_tag,
+            } => write!(
+                f,
+                "transitional tag atom `{}` at RuntimeExpr child position \
+                 (tag={}, index={index}); construct a validated Node expression",
+                child_tag.as_str(),
+                tag.as_str()
+            ),
             NodeError::ArityViolation {
                 tag,
                 expected,
@@ -55,6 +81,20 @@ impl std::fmt::Display for NodeError {
                     tag.as_str()
                 )
             }
+            NodeError::ChildOutOfBounds {
+                tag,
+                index,
+                child_count,
+            } => write!(
+                f,
+                "child index {index} is out of bounds for `{}` with {child_count} children",
+                tag.as_str()
+            ),
+            NodeError::RawVocabularyTag { container, raw_tag } => write!(
+                f,
+                "raw closed-vocabulary tag `{raw_tag}` below stamped `{}` node",
+                container.as_str()
+            ),
         }
     }
 }
@@ -90,7 +130,7 @@ impl Node {
     /// Boundary constructor — returns `Err` when the user wrote
     /// something wrong (Name at RuntimeExpr slot, wrong arity).
     pub fn try_new(tag: DeepTag, meta: MetaMap, children: Vec<Expr>) -> Result<Self, NodeError> {
-        Self::validate(tag, &children)?;
+        Self::validate(tag, &meta, &children)?;
         Ok(Node {
             tag,
             meta,
@@ -102,7 +142,7 @@ impl Node {
     /// violation would indicate a compiler bug (rewriting
     /// already-validated trees).
     pub fn new(tag: DeepTag, meta: MetaMap, children: Vec<Expr>) -> Self {
-        if let Err(e) = Self::validate(tag, &children) {
+        if let Err(e) = Self::validate(tag, &meta, &children) {
             panic!("Node::new invariant violation (compiler bug): {e}");
         }
         Node {
@@ -112,7 +152,7 @@ impl Node {
         }
     }
 
-    fn validate(tag: DeepTag, children: &[Expr]) -> Result<(), NodeError> {
+    fn validate(tag: DeepTag, meta: &MetaMap, children: &[Expr]) -> Result<(), NodeError> {
         // Arity check.
         let spec = arity_contract(tag);
         let n = children.len();
@@ -129,18 +169,47 @@ impl Node {
             });
         }
 
-        // Per-child role check: reject Name at RuntimeExpr positions.
+        // Per-child role check: RuntimeExpr positions contain expression
+        // nodes or literal atoms, never structural names or the transitional
+        // Atom::Tag carrier.
         for (index, child) in children.iter().enumerate() {
             let role = child_stamp_role(tag, index, n);
-            if role == ChildStampRole::RuntimeExpr
-                && let Expr::Atom(Atom::Name(s), _) = child
-            {
-                return Err(NodeError::NameAtExprSlot {
-                    tag,
-                    index,
-                    name: s.clone(),
-                });
+            if role == ChildStampRole::RuntimeExpr {
+                match child {
+                    Expr::Atom(Atom::Name(s), _) => {
+                        return Err(NodeError::NameAtExprSlot {
+                            tag,
+                            index,
+                            name: s.clone(),
+                        });
+                    }
+                    Expr::Atom(Atom::Tag(child_tag), _) => {
+                        return Err(NodeError::TagAtExprSlot {
+                            tag,
+                            index,
+                            child_tag: *child_tag,
+                        });
+                    }
+                    _ => {}
+                }
             }
+        }
+
+        // Decode-once is recursive: a public caller cannot smuggle an old
+        // raw-string vocabulary node through a metadata value or child of the
+        // new gated carrier (chelis#731 Phase 3 successor acceptance).
+        let raw_tag = meta
+            .entries
+            .iter()
+            .find_map(|(_, value)| {
+                crate::validate::find_raw_vocabulary_tag(std::slice::from_ref(value))
+            })
+            .or_else(|| crate::validate::find_raw_vocabulary_tag(children));
+        if let Some(raw_tag) = raw_tag {
+            return Err(NodeError::RawVocabularyTag {
+                container: tag,
+                raw_tag,
+            });
         }
 
         Ok(())
@@ -158,10 +227,41 @@ impl Node {
         &self.meta
     }
 
-    /// Mutable access to metadata (for annotation passes that add
-    /// type/span info without rebuilding the node).
-    pub fn meta_mut(&mut self) -> &mut MetaMap {
-        &mut self.meta
+    /// Replace metadata only after revalidating the complete node.
+    ///
+    /// The replacement is transactional: validation failure leaves the
+    /// original metadata untouched. Public callers never receive a mutable
+    /// reference that could reopen the raw-vocabulary domain after
+    /// construction (chelis#731 Phase 3).
+    pub fn try_replace_meta(&mut self, meta: MetaMap) -> Result<(), NodeError> {
+        Self::validate(self.tag, &meta, &self.children)?;
+        self.meta = meta;
+        Ok(())
+    }
+
+    /// Replace one child only after validating the complete candidate node.
+    ///
+    /// The replacement is transactional: every failure leaves the original
+    /// child vector untouched.
+    pub fn try_replace_child(&mut self, index: usize, child: Expr) -> Result<(), NodeError> {
+        if index >= self.children.len() {
+            return Err(NodeError::ChildOutOfBounds {
+                tag: self.tag,
+                index,
+                child_count: self.children.len(),
+            });
+        }
+        let mut children = self.children.clone();
+        children[index] = child;
+        self.try_replace_children(children)
+    }
+
+    /// Replace all children only after validating the complete candidate
+    /// node. Validation failure is transactional.
+    pub fn try_replace_children(&mut self, children: Vec<Expr>) -> Result<(), NodeError> {
+        Self::validate(self.tag, &self.meta, &children)?;
+        self.children = children;
+        Ok(())
     }
 
     /// Number of children.
@@ -169,25 +269,10 @@ impl Node {
         self.children.len()
     }
 
-    /// Direct slice access to children (bridge convenience). Consumers
-    /// that need positional access without role-typed iteration use this
-    /// during the transition period before they are migrated to the
-    /// role-typed API.
+    /// Read-only bridge for remaining positional consumers. This cannot
+    /// reopen the validated domain; mutable access is intentionally absent.
     pub fn children_slice(&self) -> &[Expr] {
         &self.children
-    }
-
-    /// Mutable slice access to children (bridge convenience for the
-    /// path-module rewrite operations that need to replace a child
-    /// in-place).
-    pub fn children_slice_mut(&mut self) -> &mut [Expr] {
-        &mut self.children
-    }
-
-    /// Mutable Vec access to children (bridge convenience for structural
-    /// operations that insert/remove children, e.g. module-excluding-def).
-    pub fn children_vec_mut(&mut self) -> &mut Vec<Expr> {
-        &mut self.children
     }
 
     // === Bridge: reconstruct List for transition-period consumers ===

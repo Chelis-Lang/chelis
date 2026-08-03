@@ -3,7 +3,6 @@
 
 mod support;
 
-use chelis_deep::DeepTag;
 use chelis_types::{TypeEnv, build_type_env_from_library, check_ir_program, check_ir_with_context};
 
 const LEGAL: &str = r#"
@@ -101,9 +100,9 @@ fn serialized_context_drops_transient_binder_scope() {
 
 #[test]
 fn malformed_parameter_is_rejected_once_by_the_binder_owner() {
-    let mut exprs =
-        parse("(def {} bad (fn {} (params {} (x {type: (t-prim {} f32)})) (var {} x)))");
-    support::append_name_to_last_node(&mut exprs, DeepTag::TPrim, "extra");
+    let exprs = support::parse_unchecked_legacy(
+        "(def {} bad (fn {} (params {} (x {type: (t-prim {} f32 extra)})) (var {} x)))",
+    );
     let errors = check_ir_program(&exprs)
         .expect_err("malformed binder syntax must fail")
         .errors;
