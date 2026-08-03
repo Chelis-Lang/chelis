@@ -182,8 +182,8 @@ fn assert_value_parity(source: &str, stem: &str, want: &[f64]) {
 }
 
 /// The chelis#664 headline: a runtime-strided operand beside the full
-/// input. eval rejects `[3]` vs `[6]`; pre-fix C exited 0 printing
-/// `[2, 5, 8]` (the strided view added to x's first three elements).
+/// input. eval rejects `[3i64]` vs `[6i64]`; pre-fix C exited 0 printing
+/// `[2i64, 5i64, 8i64]` (the strided view added to x's first three elements).
 #[test]
 fn issue_664_elementwise_stride_operand_mismatch_errs_in_both_lanes() {
     let source = format!(
@@ -198,7 +198,7 @@ fn issue_664_elementwise_stride_operand_mismatch_errs_in_both_lanes() {
     );
 }
 
-/// Pad variant: `[4]` vs `[3]` — pre-fix the C binary's last element was
+/// Pad variant: `[4i64]` vs `[3i64]` — pre-fix the C binary's last element was
 /// an out-of-bounds read of `x`.
 #[test]
 fn issue_664_elementwise_pad_operand_mismatch_errs_in_both_lanes() {
@@ -218,7 +218,7 @@ fn issue_664_elementwise_pad_operand_mismatch_errs_in_both_lanes() {
 /// `shrink` (untouched by chelis#632) — proves the guard covers the
 /// pre-existing #616-era path, not just the chelis#632-widened one. (A
 /// literal bound would pin the sig's `n` at check time; the runtime
-/// bound `n - 3` keeps the wildcard route: `[3]` vs `[6]` at run time.)
+/// bound `n - 3` keeps the wildcard route: `[3i64]` vs `[6i64]` at run time.)
 #[test]
 fn issue_664_elementwise_shrink_control_errs_in_both_lanes() {
     let source = format!(
@@ -236,7 +236,7 @@ fn issue_664_elementwise_shrink_control_errs_in_both_lanes() {
 /// Reshape whose target folds to a SYM (the shape read of the ORIGINAL
 /// input, 6) over the strided view (3 elements). The pre-fix numel guard
 /// fired only for Node-valued targets, so the binary exited 0 printing
-/// `[1, 3, 5, 0, 0, 0]`.
+/// `[1i64, 3i64, 5i64, 0i64, 0i64, 0i64]`.
 #[test]
 fn issue_664_reshape_sym_target_numel_mismatch_errs_in_both_lanes() {
     let source = format!(
@@ -269,7 +269,7 @@ fn issue_664_reshape_static_target_over_runtime_input_errs_in_both_lanes() {
 }
 
 /// No false abort: two runtime-strided operands with MATCHING shapes
-/// must still run in both lanes (`[2, 6, 10]`).
+/// must still run in both lanes (`[2i64, 6i64, 10i64]`).
 #[test]
 fn issue_664_matching_runtime_operands_still_run() {
     let source = format!(

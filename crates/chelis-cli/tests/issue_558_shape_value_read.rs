@@ -227,7 +227,7 @@ out = grad(f)(to_tensor([[cast(1.0, f32), cast(2.0, f32)], [cast(3.0, f32), cast
 /// Build the bare-export `out = grad(f)` C program (emits an exported
 /// `out(chelis_tensor*)`); the verb body reads `shape()` so the bare-grad
 /// export lane accepts it (chelis#613). The emitted `out()` reads `batch`
-/// from `inputs[0]->shape[0]` at runtime.
+/// from `inputs[0i64]->shape[0i64]` at runtime.
 fn build_c_bare(sig: &str, stem: &str) -> (TempDir, std::path::PathBuf) {
     let source = format!(
         "module Repro.ShapeGradBare\n{sig}\ndef f(x) = {{\n{SHAPE_MUL_BODY}\n}}\nout = grad(f)\n"
@@ -260,7 +260,7 @@ fn run_driver_for_rows(build_dir: &Path, stem: &str, rows: &[usize]) -> Vec<Vec<
         .iter()
         .map(|r| {
             format!(
-                "    {{ int shape[2] = {{{r}, 2}}; chelis_tensor* x = chelis_alloc(2, shape, CHELIS_F32); \
+                "    {{ int shape[2i64] = {{{r}, 2}}; chelis_tensor* x = chelis_alloc(2, shape, CHELIS_F32); \
                  for (int i = 0; i < {n}; i++) x->data[i] = (float)(i + 1); \
                  chelis_tensor* g = out(x); \
                  for (int i = 0; i < g->size; i++) printf(\"%.6f\\n\", g->data[i]); \
@@ -329,7 +329,7 @@ int main(void) {{
 
 /// The C backend reads the runtime dim: ONE compiled binary, fed batch =
 /// 2, 3, 5, produces a gradient of `batch` at every element (the `shape(x,
-/// 0)` read resolves from `inputs[0]->shape[0]` at execution time, not a
+/// 0)` read resolves from `inputs[0i64]->shape[0i64]` at execution time, not a
 /// codegen-baked constant). This is the definitive runtime-dim-value oracle.
 /// The batch=2 case additionally agrees with the eval lane.
 #[test]
@@ -375,7 +375,7 @@ fn issue_558_shape_value_forward_matches_c() {
 // ---------------------------------------------------------------------------
 
 // A RUNTIME (metadata-derived, non-literal) shape axis. `ax = shape(x, 0) - 3`
-// is `0` for a `tensor[3, 2]` input (in range), but it is a data-flow VALUE,
+// is `0` for a `tensor[3i64, 2i64]` input (in range), but it is a data-flow VALUE,
 // so `extract_int_for_dim` cannot fold it to a literal and the DAG lowering
 // has no representable axis. The `def`-body is shared by the two tests below.
 const RUNTIME_AXIS_BODY: &str = "\
@@ -421,7 +421,7 @@ fn issue_558_runtime_axis_shape_grad_is_rejected_loudly() {
 
 /// The loud grad rejection must NOT regress the forward lane: the host
 /// evaluator resolves a runtime shape axis, so the same body evaluated forward
-/// returns the real value. For `tensor[3, 2]` with `[1..6]`,
+/// returns the real value. For `tensor[3i64, 2i64]` with `[1..6]`,
 /// `ax = shape(x, 0) - 3 = 0`, `shape(x, 0) = 3`, `sum(x) = 21`, so
 /// `loss = 21 * 3 = 63`.
 #[test]

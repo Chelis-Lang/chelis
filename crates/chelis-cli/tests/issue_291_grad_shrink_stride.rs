@@ -23,9 +23,9 @@
 //!     `stride`: "no reverse-mode adjoint is defined for `stride`".
 //!
 //! Expected gradients:
-//!   * `shrink(x, [0,2))` then sum: `f = x0 + x1`, `df = [1, 1, 0, 0]`
+//!   * `shrink(x, [0,2))` then sum: `f = x0 + x1`, `df = [1i64, 1i64, 0i64, 0i64]`
 //!     (cotangent scattered into the sliced positions).
-//!   * `stride(x, 2)` then sum: `f = x0 + x2`, `df = [1, 0, 1, 0]`
+//!   * `stride(x, 2i64)` then sum: `f = x0 + x2`, `df = [1i64, 0i64, 1i64, 0i64]`
 //!     (cotangent scattered into the strided slots).
 //!
 //! This file is the end-to-end acceptance oracle: `check` clean, `build
@@ -172,13 +172,13 @@ fn issue_291_shrink_eval_gradient_is_correct() {
         "issue #291 shrink: `chelis eval` must succeed; stdout={stdout} stderr={stderr}",
     );
     assert!(
-        stdout.contains("shape=[4]"),
-        "gradient must be tensor[4]; got stdout={stdout}",
+        stdout.contains("shape=[4i64]"),
+        "gradient must be tensor[4i64]; got stdout={stdout}",
     );
-    // f = x0 + x1, df = [1, 1, 0, 0] (cotangent in the sliced positions).
+    // f = x0 + x1, df = [1i64, 1i64, 0i64, 0i64] (cotangent in the sliced positions).
     assert!(
         stdout.contains("data=[1.0, 1.0, 0.0, 0.0]"),
-        "shrink df(x) must equal [1, 1, 0, 0]; got stdout={stdout}",
+        "shrink df(x) must equal [1i64, 1i64, 0i64, 0i64]; got stdout={stdout}",
     );
 }
 
@@ -192,13 +192,13 @@ fn issue_291_stride_eval_gradient_is_correct() {
         "issue #291 stride: `chelis eval` must succeed; stdout={stdout} stderr={stderr}",
     );
     assert!(
-        stdout.contains("shape=[4]"),
-        "gradient must be tensor[4]; got stdout={stdout}",
+        stdout.contains("shape=[4i64]"),
+        "gradient must be tensor[4i64]; got stdout={stdout}",
     );
-    // f = x0 + x2, df = [1, 0, 1, 0] (cotangent in the strided slots).
+    // f = x0 + x2, df = [1i64, 0i64, 1i64, 0i64] (cotangent in the strided slots).
     assert!(
         stdout.contains("data=[1.0, 0.0, 1.0, 0.0]"),
-        "stride df(x) must equal [1, 0, 1, 0]; got stdout={stdout}",
+        "stride df(x) must equal [1i64, 0i64, 1i64, 0i64]; got stdout={stdout}",
     );
 }
 

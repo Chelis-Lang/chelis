@@ -283,8 +283,8 @@ fn expand_error_inline_size_still_fires_form3_gate_once() {
     // Form-3 gate: the #469 sourceless-size reject must fire EXACTLY ONCE
     // (not skipped, not doubled), and never an ICE.
     let msgs = reject_messages(
-        "def g[a, n](b: tensor[n, f32], t: (int32, int32)) -> tensor[a, n, f32] = \
-         expand(b, 0, add(t.1, cast(1, int32)))\n",
+        "def g[a, n](b: tensor[n, f32], t: (int64, int64)) -> tensor[a, n, f32] = \
+         expand(b, 0, add(t.1, cast(1, int64)))\n",
         "3c: expand Error size",
     );
     let form3: Vec<_> = msgs

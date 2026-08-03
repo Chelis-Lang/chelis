@@ -151,7 +151,7 @@ fn gcc(
 }
 
 /// eval-vs-C forward parity at n = 6 (m = 3): both lanes compute the window
-/// `[1, 3, 5]` by resolving the shrink extent AND the reshape target `m`
+/// `[1i64, 3i64, 5i64]` by resolving the shrink extent AND the reshape target `m`
 /// from runtime scalars.
 #[test]
 fn issue_616_runtime_reshape_window_forward_eval_matches_c() {
@@ -198,7 +198,7 @@ fn issue_616_runtime_reshape_c_binary_handles_multiple_lengths() {
         .iter()
         .map(|n| {
             format!(
-                "    {{ int shape[1] = {{{n}}}; chelis_tensor* x = chelis_alloc(1, shape, CHELIS_F32); \
+                "    {{ int shape[1i64] = {{{n}}}; chelis_tensor* x = chelis_alloc(1, shape, CHELIS_F32); \
                  for (int i = 0; i < {n}; i++) x->data[i] = (float)(i + 1); \
                  chelis_tensor* w = out(x); \
                  for (int i = 0; i < w->size; i++) printf(\"%.6f\\n\", w->data[i]); \
@@ -247,7 +247,7 @@ int main(void) {{
 /// GRADIENT eval-vs-C parity for the full runtime window chain: the loss
 /// `sum(sum(w))` over the windowed `[1, m]` reshape reads elements
 /// 0, 2, ... of the input, so the gradient is the upsample mask
-/// `[1, 0, 1, 0]` — computed by the runtime movement adjoints (Shape-read
+/// `[1i64, 0i64, 1i64, 0i64]` — computed by the runtime movement adjoints (Shape-read
 /// trim bounds, runtime merge extents) identically in both lanes.
 #[test]
 fn issue_616_runtime_window_grad_eval_matches_c() {

@@ -52,7 +52,7 @@ use tempfile::tempdir;
 /// the batch axis of rank-2 `x`. The #579 discriminator case (passed even at
 /// 0.12.0); pinned so the working baseline is explicit.
 const BN1D_SOURCE: &str = "def bn1d_scale(x: &tensor[a, n, f32], g: &tensor[n, f32]) -> tensor[a, n, f32] = {\n\
-    \x20 gb: tensor[a, n, f32] = expand(g, 0, shape(x, cast(0, int32)))\n\
+    \x20 gb: tensor[a, n, f32] = expand(g, 0, shape(x, cast(0, int64)))\n\
     \x20 mul(x, gb)\n\
     }\n\
     xs = to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])\n\
@@ -78,7 +78,7 @@ const BN1D_LET_BOUND_SOURCE: &str = "def bn1d_scale(x: &tensor[a, n, f32], g: &t
 /// How the chained corpus spells its runtime extents.
 #[derive(Clone, Copy)]
 enum ExtentSpelling {
-    /// `expand(g, 1, shape(x, cast(2, int32)))`: the `bias_broadcast` form.
+    /// `expand(g, 1, shape(x, cast(2, int64)))`: the `bias_broadcast` form.
     /// Already worked end-to-end at v0.12.0; pinned as the working baseline.
     Inline,
     /// School's batchnorm form: `h_dim = cast(shape(x, cast(2, int32)),
@@ -385,13 +385,13 @@ fn assert_eval_agrees_with_backend(source: &str, name: &str, backend: &str) {
 }
 
 // Expected values for the chained achw corpora: x carries sequential data
-// 1..=numel over shape [a, c, h, w]; g = [10, 20, 30]; b = [1, 2, 3]. The
+// 1..=numel over shape [a, c, h, w]; g = [10i64, 20i64, 30i64]; b = [1i64, 2i64, 3i64]. The
 // channel of flat index i is (i / (h*w)) % c.
 //
-// SMALL corpus [2, 3, 2, 2] (24 elements): fits under the evaluator's
+// SMALL corpus [2i64, 3i64, 2i64, 2i64] (24 elements): fits under the evaluator's
 // 32-element print budget, so every element is asserted; the sequential
 // affine values encode flat position, catching axis permutations in VALUES.
-// BIG corpus [2, 3, 4, 5] (120 elements): all four dims DISTINCT, so any
+// BIG corpus [2i64, 3i64, 4i64, 5i64] (120 elements): all four dims DISTINCT, so any
 // axis or shape-source mixup changes the output SHAPE and cannot hide; the
 // printer truncates data to a prefix, which is asserted element-for-element.
 const SMALL_SHAPE: [usize; 4] = [2, 3, 2, 2];
@@ -405,8 +405,8 @@ fn channel_of(i: usize, shape: &[usize; 4]) -> usize {
 
 // ── Positives: the #579 patterns in the supported shape-sourced form ─────
 
-/// Assert the bn1d corpus `out` tensor: xs `[[1,2,3],[4,5,6]]` scaled
-/// per-column by g `[10,20,30]`.
+/// Assert the bn1d corpus `out` tensor: xs `[[1i64, 2i64, 3i64],[4i64, 5i64, 6i64]]` scaled
+/// per-column by g `[10i64, 20i64, 30i64]`.
 fn assert_bn1d_out(tensors: &[(String, Vec<usize>, Vec<f64>)], label: &str) {
     let out = find_tensor(tensors, "out", label);
     assert_eq!(out.1, vec![2, 3], "{label}: bn1d broadcast shape");
@@ -635,12 +635,12 @@ fn issue_579_sourceless_expand_rejects_in_eval_without_rank_ice() {
 
 /// Negative parity for the positive bn1d case: broadcasting over the WRONG
 /// axis (extent read from `x` axis 0 but inserted at axis 1, ascribed
-/// `[3, 2]`) makes the following `mul` shape-invalid and must be rejected at
+/// `[3i64, 2i64]`) makes the following `mul` shape-invalid and must be rejected at
 /// check with a dimension-mismatch reason.
 #[test]
 fn issue_579_wrong_axis_broadcast_rejected_at_check() {
     let source = "def bad(x: &tensor[2, 3, f32], g: &tensor[3, f32]) -> tensor[2, 3, f32] = {\n\
-        \x20 gb: tensor[3, 2, f32] = expand(g, 1, shape(x, cast(0, int32)))\n\
+        \x20 gb: tensor[3, 2, f32] = expand(g, 1, shape(x, cast(0, int64)))\n\
         \x20 mul(x, gb)\n\
         }\n\
         out = bad(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]), to_tensor([10.0, 20.0, 30.0]))\n";
@@ -658,7 +658,7 @@ fn issue_579_wrong_axis_broadcast_rejected_at_check() {
 /// wrong-shape success.
 #[test]
 fn issue_579_out_of_bounds_insert_axis_fails_eval_with_targeted_reason() {
-    let source = "def bad(g: &tensor[3, f32]) -> tensor[3, 2, 2, f32] = expand(g, 3, 2)\n\
+    let source = "def bad(g: &tensor[3, f32]) -> tensor[3, 2, 2, f32] = expand(g, 3, 2i64)\n\
         out = bad(to_tensor([1.0, 2.0, 3.0]))\n";
     let dir = tempdir().expect("tempdir");
     let stderr = eval_stderr_expecting_failure(dir.path(), source, "issue_579_axis_oob");

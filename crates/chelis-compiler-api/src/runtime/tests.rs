@@ -1099,7 +1099,7 @@ fn host_runtime_expand_inserts_new_leading_axis() {
     let checked = checked_surf(
         r#"
 b = to_tensor([cast(10.0, f32), cast(100.0, f32)])
-y = expand(b, cast(0, int32), cast(3, int32))
+y = expand(b, cast(0, int32), cast(3, int64))
 "#,
     );
     let outcome = evaluate_host_program(&checked, &HashMap::new())
@@ -1118,7 +1118,7 @@ fn host_runtime_expand_inserts_trailing_axis() {
     let checked = checked_surf(
         r#"
 b = to_tensor([cast(1.0, f32), cast(2.0, f32)])
-y = expand(b, cast(1, int32), cast(2, int32))
+y = expand(b, cast(1, int32), cast(2, int64))
 "#,
     );
     let outcome = evaluate_host_program(&checked, &HashMap::new())
@@ -1140,7 +1140,7 @@ fn host_runtime_expand_singleton_input_inserts_not_replicates() {
     let checked = checked_surf(
         r#"
 b = to_tensor([cast(7.0, f32)])
-y = expand(b, cast(0, int32), cast(4, int32))
+y = expand(b, cast(0, int32), cast(4, int64))
 "#,
     );
     let outcome = evaluate_host_program(&checked, &HashMap::new())
@@ -1165,7 +1165,7 @@ fn host_runtime_expand_negative_count_errors() {
     let checked = checked_surf(
         r#"
 b = to_tensor([cast(1.0, f32), cast(2.0, f32)])
-zero_count = sub(cast(0, int32), cast(0, int32))
+zero_count = sub(cast(0, int64), cast(0, int64))
 y = expand(b, cast(0, int32), zero_count)
 "#,
     );

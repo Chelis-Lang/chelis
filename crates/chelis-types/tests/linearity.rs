@@ -241,10 +241,10 @@ def bad(pair: (tensor[4, f32], int32)): int32 =
 fn tensor_shape_queries_do_not_consume_tensor_inputs() {
     check_surf(
         r#"
-def ok(x: tensor[2, 3, f32]): int32 =
+def ok(x: tensor[2, 3, f32]): int64 =
   {
     r: int32 = rank(x)
-    c: int32 = shape(x, 1)
+    c: int64 = shape(x, 1)
     n: int64 = numel(x)
     _ = drop(x)
     c

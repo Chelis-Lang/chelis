@@ -106,11 +106,17 @@ pub(super) fn infer_expand_app(
         .map(|(index, arg)| {
             // The name/size/anchor slots may carry dim names; a name bound in
             // the value environment is a runtime value instead (issue #259
-            // scope discrimination, as in the generic-path exemption).
+            // scope discrimination, as in the generic-path exemption). A dim
+            // name in the size slot is an extent-domain value ([05-DIM-1]),
+            // so it types int64; the name/anchor slots are axis-domain.
             if index >= 1
                 && symbolic_dim_ref_name(arg).is_some_and(|name| env.lookup(name).is_none())
             {
-                Type::Prim(Prim::Int32)
+                if index == 2 {
+                    Type::Prim(Prim::Int64)
+                } else {
+                    Type::Prim(Prim::Int32)
+                }
             } else {
                 infer_expr(arg, env, vg, subst, adt_reg, errors, product)
             }
@@ -131,12 +137,13 @@ pub(super) fn infer_expand_app(
     ) {
         return err;
     }
-    // The size slot must still be an int32 (a literal, a symbolic dim, or a
-    // runtime int32 expression — §4.7.2); a non-int size is a type error the
-    // arity-3 scheme would otherwise have caught.
+    // The size slot must be an int64 (a literal, a symbolic dim, or a
+    // runtime int64 expression; extent-domain under [05-DIM-1], §4.7.2);
+    // a non-int64 size is a type error the arity-3 scheme would otherwise
+    // have caught.
     let size_ty = subst.apply(&arg_tys[2]);
     match size_ty {
-        Type::Prim(Prim::Int32) | Type::Var(_) | Type::Error(_) => {}
+        Type::Prim(Prim::Int64) | Type::Var(_) | Type::Error(_) => {}
         other => {
             return report(
                 errors,
@@ -144,7 +151,9 @@ pub(super) fn infer_expand_app(
                     CheckErrorKind::TypeMismatch,
                     with_macro_provenance(
                         &deep::Expr::List(list.clone(), zero_span()),
-                        format!("expand expects an int32 size, got {other}"),
+                        format!(
+                            "expand expects an int64 size (write Ni64 or cast(N, int64)), got {other}"
+                        ),
                     ),
                     vec![],
                 ),
@@ -342,8 +351,25 @@ pub(super) fn infer_reshape_app(
                 let shape_ty = infer_expr(shape_expr, env, vg, subst, adt_reg, errors, product);
                 let expected_shape_ty =
                     Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int64)]);
-                if let Err(te) = unify(&shape_ty, &expected_shape_ty, subst) {
-                    return report(errors, te.into());
+                if let Err(_te) = unify(&shape_ty, &expected_shape_ty, subst) {
+                    // spec/04 §4.7.5: the slot-mismatch diagnostic names the
+                    // fix, and its direction states the slot's demand rather
+                    // than a unification-order artifact (chelis#916).
+                    return report(
+                        errors,
+                        CheckError::new(
+                            CheckErrorKind::PrecisionMismatch,
+                            with_macro_provenance(
+                                &deep::Expr::List(list.clone(), zero_span()),
+                                format!(
+                                    "reshape expects an int64 shape list (write i64-suffixed \
+                                     elements, e.g. 2i64, or cast(..., int64)), got {}",
+                                    subst.apply(&shape_ty)
+                                ),
+                            ),
+                            vec![],
+                        ),
+                    );
                 }
                 let dims = reshape_output_dims(shape_expr, input_var_name.as_deref(), &[], subst);
                 return Type::Tensor(dims, TensorPrec::Concrete(precision));
@@ -356,8 +382,25 @@ pub(super) fn infer_reshape_app(
                 let shape_ty = infer_expr(shape_expr, env, vg, subst, adt_reg, errors, product);
                 let expected_shape_ty =
                     Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int64)]);
-                if let Err(te) = unify(&shape_ty, &expected_shape_ty, subst) {
-                    return report(errors, te.into());
+                if let Err(_te) = unify(&shape_ty, &expected_shape_ty, subst) {
+                    // spec/04 §4.7.5: the slot-mismatch diagnostic names the
+                    // fix, and its direction states the slot's demand rather
+                    // than a unification-order artifact (chelis#916).
+                    return report(
+                        errors,
+                        CheckError::new(
+                            CheckErrorKind::PrecisionMismatch,
+                            with_macro_provenance(
+                                &deep::Expr::List(list.clone(), zero_span()),
+                                format!(
+                                    "reshape expects an int64 shape list (write i64-suffixed \
+                                     elements, e.g. 2i64, or cast(..., int64)), got {}",
+                                    subst.apply(&shape_ty)
+                                ),
+                            ),
+                            vec![],
+                        ),
+                    );
                 }
                 let dims =
                     reshape_output_dims(shape_expr, input_var_name.as_deref(), &input_dims, subst);
@@ -371,8 +414,25 @@ pub(super) fn infer_reshape_app(
                 let shape_ty = infer_expr(shape_expr, env, vg, subst, adt_reg, errors, product);
                 let expected_shape_ty =
                     Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int64)]);
-                if let Err(te) = unify(&shape_ty, &expected_shape_ty, subst) {
-                    return report(errors, te.into());
+                if let Err(_te) = unify(&shape_ty, &expected_shape_ty, subst) {
+                    // spec/04 §4.7.5: the slot-mismatch diagnostic names the
+                    // fix, and its direction states the slot's demand rather
+                    // than a unification-order artifact (chelis#916).
+                    return report(
+                        errors,
+                        CheckError::new(
+                            CheckErrorKind::PrecisionMismatch,
+                            with_macro_provenance(
+                                &deep::Expr::List(list.clone(), zero_span()),
+                                format!(
+                                    "reshape expects an int64 shape list (write i64-suffixed \
+                                     elements, e.g. 2i64, or cast(..., int64)), got {}",
+                                    subst.apply(&shape_ty)
+                                ),
+                            ),
+                            vec![],
+                        ),
+                    );
                 }
             }
             input_ty
@@ -428,8 +488,9 @@ pub(super) fn infer_shrink_app(
         return err;
     }
 
-    // The bounds argument must be a `List[List[Int32]]`.
-    let int_list = Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int32)]);
+    // The bounds argument must be a `List[List[Int64]]` (extent-domain
+    // under [05-DIM-1]).
+    let int_list = Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int64)]);
     let expected_bounds_ty = Type::Adt("List".to_string(), vec![int_list]);
     if let Err(_te) = unify(&bounds_ty, &expected_bounds_ty, subst) {
         return report(
@@ -439,7 +500,8 @@ pub(super) fn infer_shrink_app(
                 with_macro_provenance(
                     &deep::Expr::List(list.clone(), zero_span()),
                     format!(
-                        "shrink expects a list of [start, end] int32 bounds pairs, got {}",
+                        "shrink expects a list of [start, end] int64 bounds pairs \
+                         (write 0i64 or cast(..., int64) on each bound), got {}",
                         subst.apply(&bounds_ty)
                     ),
                 ),
@@ -631,7 +693,8 @@ pub(super) fn infer_stride_app(
     for stride_ty in &stride_tys {
         let resolved = subst.apply(stride_ty);
         match resolved {
-            Type::Prim(Prim::Int32) | Type::Var(_) | Type::Error(_) => {}
+            // Stride steps are extent-domain ([05-DIM-1]): int64.
+            Type::Prim(Prim::Int64) | Type::Var(_) | Type::Error(_) => {}
             other => {
                 return report(
                     errors,
@@ -639,7 +702,7 @@ pub(super) fn infer_stride_app(
                         CheckErrorKind::TypeMismatch,
                         with_macro_provenance(
                             &deep::Expr::List(list.clone(), zero_span()),
-                            format!("stride expects int32 strides, got {other}"),
+                            format!("stride expects int64 strides (write 2i64), got {other}"),
                         ),
                         vec![],
                     ),
@@ -780,7 +843,8 @@ pub(super) fn infer_pad_app(
         return err;
     }
 
-    let int_list = Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int32)]);
+    // Padding pairs are extent-domain ([05-DIM-1]): List[List[Int64]].
+    let int_list = Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int64)]);
     let expected_padding_ty = Type::Adt("List".to_string(), vec![int_list]);
     if let Err(_te) = unify(&padding_ty, &expected_padding_ty, subst) {
         return report(
@@ -790,7 +854,8 @@ pub(super) fn infer_pad_app(
                 with_macro_provenance(
                     &deep::Expr::List(list.clone(), zero_span()),
                     format!(
-                        "pad expects a list of [lo, hi] int32 padding pairs, got {}",
+                        "pad expects a list of [lo, hi] int64 padding pairs \
+                         (write 1i64 or cast(..., int64) on each amount), got {}",
                         subst.apply(&padding_ty)
                     ),
                 ),
@@ -1546,16 +1611,19 @@ pub(super) fn collect_shape_list_elements(expr: &deep::Expr) -> Option<Vec<&deep
     }
 }
 
-/// If `expr` has the syntactic form
-/// `cast(shape(<var named input_var_name>, <concrete int axis>), int64)`,
-/// return the axis. Both `cast` and `shape` may surface either as the
-/// dedicated tag (`(cast {} ...)`, ...) or as `(app {} (var {} cast)
-/// ...)`. The axis expression matches `extract_int_for_dim` -- it
-/// accepts `N`, `lit N`, and `cast(N, int{32,64})`.
+/// If `expr` has one of the spec/04 §4.7.3 recognized forms
+/// `shape(<var named input_var_name>, <concrete int axis>)` or
+/// `cast(shape(<var named input_var_name>, <concrete int axis>), int64)`
+/// (the second is an identity cast under [05-DIM-2], kept so the
+/// pre-[05-DIM-2] spelling retains its propagation), return the axis.
+/// Both `cast` and `shape` may surface either as the dedicated tag
+/// (`(cast {} ...)`, ...) or as `(app {} (var {} cast) ...)`. The axis
+/// expression matches `extract_int_for_dim` -- it accepts `N`, `lit N`,
+/// and `cast(N, int{32,64})`.
 ///
 /// Returns `None` when:
-/// - `expr` doesn't match the expected outer cast-to-int64,
-/// - the inner expression is not a `shape(...)` call,
+/// - a cast wrapper is present but its target is not `int64`,
+/// - the candidate expression is not a `shape(...)` call,
 /// - the shape's tensor arg is not a `var` matching `input_var_name`,
 /// - the axis is not a concrete non-negative int.
 pub(super) fn extract_shape_axis_of(
@@ -1563,11 +1631,16 @@ pub(super) fn extract_shape_axis_of(
     input_var_name: Option<&str>,
 ) -> Option<usize> {
     let input = input_var_name?;
-    let (inner, target_ty) = peel_cast(expr)?;
-    if !is_target_ty(target_ty, Prim::Int64) {
-        return None;
-    }
-    let shape_args = app_children_of(inner)?;
+    let candidate = match peel_cast(expr) {
+        Some((inner, target_ty)) => {
+            if !is_target_ty(target_ty, Prim::Int64) {
+                return None;
+            }
+            inner
+        }
+        None => expr,
+    };
+    let shape_args = app_children_of(candidate)?;
     let func = shape_args.first()?;
     if !is_builtin_var(func, "shape") {
         return None;

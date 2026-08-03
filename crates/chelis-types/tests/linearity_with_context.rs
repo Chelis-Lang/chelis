@@ -286,12 +286,12 @@ fn parity_pair_five_observational_query_does_not_consume() {
     // Library def whose new-code call passes a tensor through an
     // observational builtin (`shape`) — must not consume `my_x`.
     let library_src = r#"
-def lib_shape0(t: &tensor[2, 3, f32]): int32 = shape(t, 0)
+def lib_shape0(t: &tensor[2, 3, f32]): int64 = shape(t, 0)
 "#;
     let new_src = r#"
 def caller(my_x: tensor[2, 3, f32]): tensor[2, 3, f32] =
   {
-    n: int32 = lib_shape0(my_x)
+    n: int64 = lib_shape0(my_x)
     y: tensor[2, 3, f32] = relu(my_x)
     _ = drop(my_x)
     y

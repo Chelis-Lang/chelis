@@ -11,7 +11,7 @@
 //! handles every input length and the two lanes must agree exactly.
 //!
 //! The verb: `shrink(x, [[1, n-1]])` keeps `[2, ..., n-1]` for input
-//! `[1, 2, ..., n]` (with `n = shape(x, 0)` read at run time); `stride(_, 2)`
+//! `[1, 2, ..., n]` (with `n = shape(x, 0)` read at run time); `stride(_, 2i64)`
 //! then keeps every other element: `[2, 4, 6, ...]`.
 
 use std::fs;
@@ -148,7 +148,7 @@ fn gcc(
 }
 
 /// eval-vs-C forward parity for the anchored shrink -> stride chain at
-/// n = 6: both lanes compute `[2, 4]` by resolving the shrink end (`n - 1`)
+/// n = 6: both lanes compute `[2i64, 4i64]` by resolving the shrink end (`n - 1`)
 /// and the stride extent at run time. Each movement op declares its own
 /// fresh runtime dim in the emitted C (the copy-first-input dim shortcut
 /// must not propagate the shrink's extent onto the stride).
@@ -199,7 +199,7 @@ fn issue_616_runtime_shrink_c_binary_handles_multiple_lengths() {
         .iter()
         .map(|n| {
             format!(
-                "    {{ int shape[1] = {{{n}}}; chelis_tensor* x = chelis_alloc(1, shape, CHELIS_F32); \
+                "    {{ int shape[1i64] = {{{n}}}; chelis_tensor* x = chelis_alloc(1, shape, CHELIS_F32); \
                  for (int i = 0; i < {n}; i++) x->data[i] = (float)(i + 1); \
                  chelis_tensor* w = out(x); \
                  for (int i = 0; i < w->size; i++) printf(\"%.6f\\n\", w->data[i]); \
@@ -299,7 +299,7 @@ fn issue_632_direct_return_movement_chain_eval_matches_c() {
 /// checker's pass-through arm unified `u := n` and the §4.4.1 return-dim
 /// rigidity guard REJECTED this well-formed program at check time; now
 /// axis 0 mints a fresh extent, the program checks, and both lanes agree
-/// on `[1, 3, 5]`.
+/// on `[1i64, 3i64, 5i64]`.
 #[test]
 fn issue_632_literal_stride_under_sig_symbols_matches_c() {
     let input: Vec<f64> = (1..=6).map(|v| v as f64).collect();
@@ -334,8 +334,8 @@ fn issue_632_literal_stride_under_sig_symbols_matches_c() {
 /// axis to a wildcard when any bound was non-literal; downstream
 /// unification then filled the runtime axis's extent from the sibling
 /// literal axis and the C backend baked the wrong extent unguarded — a
-/// SILENT mis-size (C returned shape [3,3] with fabricated values where
-/// eval computed [2,3]). Per-axis inference keeps the literal axis precise
+/// SILENT mis-size (C returned shape [3i64, 3i64] with fabricated values where
+/// eval computed [2i64, 3i64]). Per-axis inference keeps the literal axis precise
 /// and only the runtime axis symbolic; both lanes must now agree exactly.
 #[test]
 fn issue_616_multi_axis_runtime_shrink_matches_c() {
@@ -368,8 +368,8 @@ out = f(to_tensor([[cast(1.0, f32), cast(2.0, f32), cast(3.0, f32), cast(4.0, f3
     );
     let stdout = String::from_utf8_lossy(&run.stdout);
     assert!(
-        stdout.contains("shape=[2, 3]"),
-        "C matslice must keep the true [2, 3] shape, never a baked sibling \
+        stdout.contains("shape=[2i64, 3i64]"),
+        "C matslice must keep the true [2i64, 3i64] shape, never a baked sibling \
          extent; stdout={stdout}"
     );
     let c_values = parse_tensor_data(&stdout);
@@ -407,8 +407,8 @@ out = f(to_tensor([[cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)], [cast(4.0, 
     );
     let stdout = String::from_utf8_lossy(&run.stdout);
     assert!(
-        stdout.contains("shape=[4, 5]"),
-        "C matpad must produce the true [4, 5] shape; stdout={stdout}"
+        stdout.contains("shape=[4i64, 5i64]"),
+        "C matpad must produce the true [4i64, 5i64] shape; stdout={stdout}"
     );
     let c_values = parse_tensor_data(&stdout);
     assert_close("eval-vs-C matpad", &c_values, &eval_values);
@@ -430,7 +430,7 @@ out = f(to_tensor([[cast(1.0, f32), cast(2.0, f32), cast(3.0, f32), cast(4.0, f3
     let output = run_eval(source, "matslicebad");
     assert!(
         !output.status.success(),
-        "the out-of-range literal bound [1, 9] on the 5-wide axis must be \
+        "the out-of-range literal bound [1i64, 9i64] on the 5-wide axis must be \
          rejected even with a runtime sibling axis; stdout={}",
         String::from_utf8_lossy(&output.stdout)
     );

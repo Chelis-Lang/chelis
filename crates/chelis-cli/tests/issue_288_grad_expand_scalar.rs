@@ -6,7 +6,7 @@
 //! ```chelis
 //! module Repro.GradExpandConst
 //! def f(x: tensor[2, f32]) -> f32 = {
-//!   k = expand(scalar_to_tensor(cast(2.5, f32)), cast(0, int32), cast(2, int32))
+//!   k = expand(scalar_to_tensor(cast(2.5, f32)), cast(0, int32), cast(2, int64))
 //!   tensor_to_scalar(sum(mul(x, k), cast(0, int32)))
 //! }
 //! def df(x: tensor[2, f32]) -> tensor[2, f32] = grad(f)(x)
@@ -36,7 +36,7 @@ use tempfile::tempdir;
 
 const REPRO: &str = "module Repro.GradExpandConst\n\
 def f(x: tensor[2, f32]) -> f32 = {\n\
-  k = expand(scalar_to_tensor(cast(2.5, f32)), cast(0, int32), cast(2, int32))\n\
+  k = expand(scalar_to_tensor(cast(2.5, f32)), cast(0, int32), cast(2, int64))\n\
   tensor_to_scalar(sum(mul(x, k), cast(0, int32)))\n\
 }\n\
 def df(x: tensor[2, f32]) -> tensor[2, f32] = grad(f)(x)\n\
@@ -138,8 +138,8 @@ fn issue_288_eval_gradient_is_correct() {
         "issue #288: `chelis eval` must succeed; stdout={stdout} stderr={stderr}",
     );
     assert!(
-        stdout.contains("shape=[2]"),
-        "gradient must be tensor[2]; got stdout={stdout}",
+        stdout.contains("shape=[2i64]"),
+        "gradient must be tensor[2i64]; got stdout={stdout}",
     );
     assert!(
         stdout.contains("data=[2.5, 2.5]"),

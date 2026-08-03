@@ -21,7 +21,7 @@
 //! "expand"` that the C emitter renders as `void* k = /* unsupported
 //! builtin expand */ 0`. The consuming `sum(mul(x, k), 0)` tensor helper
 //! then took `k` as a "scalar" input and emitted
-//! `((float*)tmp->data)[0] = (float)(void* k);` -- the pointer-to-float
+//! `((float*)tmp->data)[0i64] = (float)(void* k);` -- the pointer-to-float
 //! cast gcc rejects.
 //!
 //! The grad in the headline reproducer is incidental: the same defect
@@ -187,7 +187,7 @@ fn compile_and_run_emitted(build_dir: &Path, kernel_c: &Path) -> String {
 fn issue_300_grad_const_expand_kernel_compiles_and_runs() {
     let source = "module Repro.GradExpandConst\n\
 def f(x: tensor[2, f32]) -> f32 = {\n  \
-  k = expand(scalar_to_tensor(cast(2.5, f32)), cast(0, int32), cast(2, int32))\n  \
+  k = expand(scalar_to_tensor(cast(2.5, f32)), cast(0, int32), cast(2, int64))\n  \
   tensor_to_scalar(sum(mul(x, k), cast(0, int32)))\n\
 }\n\
 def df(x: tensor[2, f32]) -> tensor[2, f32] = grad(f)(x)\n\
@@ -197,7 +197,7 @@ out = df(to_tensor([3.0, 4.0]))\n";
     let kernel_c = build.path().join("repro.c");
     let stdout = compile_and_run_emitted(build.path(), &kernel_c);
     assert!(
-        stdout.contains("shape=[2]") && stdout.contains("data=[2.5, 2.5]"),
+        stdout.contains("shape=[2i64]") && stdout.contains("data=[2.5, 2.5]"),
         "grad(f)(x) must print [2.5, 2.5]; got stdout={stdout:?}",
     );
 }
@@ -205,12 +205,12 @@ out = df(to_tensor([3.0, 4.0]))\n";
 /// Minimal non-grad control: the same defect reproduces on the pure
 /// forward path. A scalar-returning function with a constant `expand`
 /// binding consumed by a tensor reduction. `f(x) = sum(x * 2.5)` for
-/// `x = [3, 4]` is `2.5 * 7 = 17.5`.
+/// `x = [3i64, 4i64]` is `2.5 * 7 = 17.5`.
 #[test]
 fn issue_300_forward_scalar_const_expand_compiles_and_runs() {
     let source = "module Repro.ForwardConstExpand\n\
 def h(x: tensor[2, f32]) -> f32 = {\n  \
-  k = expand(scalar_to_tensor(cast(2.5, f32)), cast(0, int32), cast(2, int32))\n  \
+  k = expand(scalar_to_tensor(cast(2.5, f32)), cast(0, int32), cast(2, int64))\n  \
   tensor_to_scalar(sum(mul(x, k), cast(0, int32)))\n\
 }\n\
 out = h(to_tensor([3.0, 4.0]))\n";
@@ -221,21 +221,21 @@ out = h(to_tensor([3.0, 4.0]))\n";
     let trimmed = stdout.trim();
     assert!(
         trimmed.contains("17.5"),
-        "h(x) = sum(x * 2.5) for x=[3,4] must be 17.5; got stdout={trimmed:?}",
+        "h(x) = sum(x * 2.5) for x=[3i64, 4i64] must be 17.5; got stdout={trimmed:?}",
     );
 }
 
 /// A tensor-returning function with a constant-`expand` binding consumed
 /// by a tensor helper, driven through a host call (`out = scale(...)`).
 /// This pins that the constant value is actually materialized into the
-/// broadcast tensor: `scale(x) = x * 2.5` for `x = [3, 4]` is
+/// broadcast tensor: `scale(x) = x * 2.5` for `x = [3i64, 4i64]` is
 /// `[7.5, 10.0]`. The pre-fix `scalar_to_tensor` f64-vs-f32 storage
 /// mismatch zeroed the constant, so `mul(x, k)` collapsed to `x * 0`.
 #[test]
 fn issue_300_scale_const_expand_materializes_value() {
     let source = "module Repro.ScaleConstExpand\n\
 def scale(x: tensor[2, f32]) -> tensor[2, f32] = {\n  \
-  k = expand(scalar_to_tensor(cast(2.5, f32)), cast(0, int32), cast(2, int32))\n  \
+  k = expand(scalar_to_tensor(cast(2.5, f32)), cast(0, int32), cast(2, int64))\n  \
   mul(x, k)\n\
 }\n\
 out = scale(to_tensor([3.0, 4.0]))\n";
@@ -244,8 +244,8 @@ out = scale(to_tensor([3.0, 4.0]))\n";
     let kernel_c = build.path().join("scale.c");
     let stdout = compile_and_run_emitted(build.path(), &kernel_c);
     assert!(
-        stdout.contains("shape=[2]") && stdout.contains("data=[7.5, 10.0]"),
-        "scale(x) = x * 2.5 for x=[3,4] must print [7.5, 10.0]; got stdout={stdout:?}",
+        stdout.contains("shape=[2i64]") && stdout.contains("data=[7.5, 10.0]"),
+        "scale(x) = x * 2.5 for x=[3i64, 4i64] must print [7.5, 10.0]; got stdout={stdout:?}",
     );
 }
 
@@ -289,7 +289,7 @@ fn chelis_eval(source: &str, stem: &str) -> String {
 fn issue_308_const_expand_f64_exact_precision() {
     let source = "module Repro.ScaleConstExpandF64\n\
 def scale64(x: tensor[2, f64]) -> tensor[2, f64] = {\n  \
-  k = expand(scalar_to_tensor(cast(1.1, f64)), cast(0, int32), cast(2, int32))\n  \
+  k = expand(scalar_to_tensor(cast(1.1, f64)), cast(0, int32), cast(2, int64))\n  \
   mul(x, k)\n\
 }\n\
 out = scale64(cast(to_tensor([1.0, 1.0]), f64))\n";
@@ -298,7 +298,7 @@ out = scale64(cast(to_tensor([1.0, 1.0]), f64))\n";
     let kernel_c = build.path().join("scale64.c");
     let stdout = compile_and_run_emitted(build.path(), &kernel_c);
     assert!(
-        stdout.contains("shape=[2]") && stdout.contains("data=[1.1, 1.1]"),
+        stdout.contains("shape=[2i64]") && stdout.contains("data=[1.1, 1.1]"),
         "f64 const-broadcast must materialize the exact f64 constant \
          (issue #308); got stdout={stdout:?}",
     );
@@ -320,7 +320,7 @@ out = scale64(cast(to_tensor([1.0, 1.0]), f64))\n";
 
 /// Issue #308 headline reproducer (scalar-return host lane): the same
 /// f64 const-broadcast consumed by a reduction in an f64-returning
-/// function. `h(x) = sum(x * 1.1)` for `x = [1, 1]` at true f64
+/// function. `h(x) = sum(x * 1.1)` for `x = [1i64, 1i64]` at true f64
 /// precision is exactly `2.2`; the pre-fix f32-truncated constant gave
 /// `2.200000047683716` in the evaluator (and `2.2000000476...`-class
 /// values wherever the DAG lane materialized the constant).
@@ -328,7 +328,7 @@ out = scale64(cast(to_tensor([1.0, 1.0]), f64))\n";
 fn issue_308_forward_scalar_const_expand_f64_exact() {
     let source = "module Repro.FwdConstExpandF64\n\
 def h(x: tensor[2, f64]) -> f64 = {\n  \
-  k = expand(scalar_to_tensor(cast(1.1, f64)), cast(0, int32), cast(2, int32))\n  \
+  k = expand(scalar_to_tensor(cast(1.1, f64)), cast(0, int32), cast(2, int64))\n  \
   tensor_to_scalar(sum(mul(x, k), cast(0, int32)))\n\
 }\n\
 out = h(cast(to_tensor([1.0, 1.0]), f64))\n";
@@ -339,7 +339,7 @@ out = h(cast(to_tensor([1.0, 1.0]), f64))\n";
     let trimmed = stdout.trim();
     assert!(
         trimmed.contains("2.2") && !trimmed.contains("2.200000047683716"),
-        "h(x) = sum(x * 1.1) for f64 x=[1,1] must be exactly 2.2 \
+        "h(x) = sum(x * 1.1) for f64 x=[1i64, 1i64] must be exactly 2.2 \
          (issue #308); got stdout={trimmed:?}",
     );
 

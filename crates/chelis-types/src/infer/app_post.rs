@@ -753,8 +753,10 @@ pub(super) fn finish_unified_app(
                 }
                 if let Some(axis_arg) = arg_tys.get(1) {
                     match subst.apply(axis_arg) {
+                        // [05-DIM-2]: extent-domain out (int64), axis-domain
+                        // in (int32).
                         Type::Prim(Prim::Int32) | Type::Var(_) | Type::Error(_) => {
-                            return Type::Prim(Prim::Int32);
+                            return Type::Prim(Prim::Int64);
                         }
                         other => {
                             return report(

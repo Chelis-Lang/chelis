@@ -520,8 +520,8 @@ fn parity_corpus_is_complete() {
 
 #[test]
 fn parity_comparator_accepts_byte_identical_tensor_lines() {
-    let a = b"contracted = tensor(shape=[2, 2], data=[19.0, 22.0, 43.0, 50.0])\n";
-    let b = b"contracted = tensor(shape=[2, 2], data=[19.0, 22.0, 43.0, 50.0])\n";
+    let a = b"contracted = tensor(shape=[2i64, 2i64], data=[19.0, 22.0, 43.0, 50.0])\n";
+    let b = b"contracted = tensor(shape=[2i64, 2i64], data=[19.0, 22.0, 43.0, 50.0])\n";
     assert!(assert_parity(a, b, "self-test-ok").is_ok());
 }
 
@@ -529,22 +529,22 @@ fn parity_comparator_accepts_byte_identical_tensor_lines() {
 /// blind spot in miniature. A sub-tolerance drift must now report.
 #[test]
 fn parity_comparator_reports_sub_tolerance_float_drift() {
-    let a = b"contracted = tensor(shape=[2, 2], data=[19.0, 22.0, 43.0, 50.0])\n";
-    let b = b"contracted = tensor(shape=[2, 2], data=[19.0000001, 22.0, 43.0, 50.0])\n";
+    let a = b"contracted = tensor(shape=[2i64, 2i64], data=[19.0, 22.0, 43.0, 50.0])\n";
+    let b = b"contracted = tensor(shape=[2i64, 2i64], data=[19.0000001, 22.0, 43.0, 50.0])\n";
     assert!(assert_parity(a, b, "self-test-drift").is_err());
 }
 
 #[test]
 fn parity_comparator_rejects_value_divergence() {
-    let a = b"contracted = tensor(shape=[2, 2], data=[19.0, 22.0, 43.0, 50.0])\n";
-    let b = b"contracted = tensor(shape=[2, 2], data=[19.5, 22.0, 43.0, 50.0])\n";
+    let a = b"contracted = tensor(shape=[2i64, 2i64], data=[19.0, 22.0, 43.0, 50.0])\n";
+    let b = b"contracted = tensor(shape=[2i64, 2i64], data=[19.5, 22.0, 43.0, 50.0])\n";
     assert!(assert_parity(a, b, "self-test-fail").is_err());
 }
 
 #[test]
 fn parity_comparator_byte_equal_for_non_tensor() {
-    let a = b"len=4, items=4, shape=2x2\n[1, 2, 3]\n";
-    let b = b"len=4, items=4, shape=2x2\n[1, 2, 3]\n";
+    let a = b"len=4, items=4, shape=2x2\n[1i64, 2i64, 3i64]\n";
+    let b = b"len=4, items=4, shape=2x2\n[1i64, 2i64, 3i64]\n";
     assert!(assert_parity(a, b, "byte-eq").is_ok());
 }
 
