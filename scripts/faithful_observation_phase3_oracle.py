@@ -11,6 +11,11 @@ acceptance command. It rejects silent corpus shrinkage before running:
 * the rejected-cell corpus must use the same exact comparator entrypoint;
 * every frozen executable row must retain its independently reviewed
   definition digest, so producer-authored receipts cannot replace behavior;
+* both of `eval_agreement.rs`'s comparison legs are guarded by a behavioral
+  canary that runs the shipped helper, because the checks in this file can
+  only see that the comparator is NAMED, never that it is INVOKED: a shared
+  assertion helper neutered into a no-op deletes its leg from every row at
+  once and edits no frozen definition (chelis#1104);
 * the only ignored test in these suites is the declared system-CBLAS
   prerequisite. A value-divergence ignore must be added to this executable
   ledger and to the owning design status rather than silently appearing.
@@ -77,6 +82,7 @@ REQUIRED_TESTS = {
     EVAL_AGREEMENT_SOURCE: {
         "agreement_operation_identity_is_derived_from_ir",
         "agreement_compiled_observation_reaches_comparator",
+        "agreement_expected_value_reaches_comparator",
         "agreement_width_nonconformance_is_behavioral",
         "agreement_add",
         "agreement_mul",
@@ -103,6 +109,7 @@ REQUIRED_TESTS = {
 REQUIRED_EVAL_RECEIPTS = {
     "operation-identity-canary",
     "compiled-observation-canary",
+    "expected-value-canary",
     "width-nonconformance-canary",
     "add(3,4)",
     "mul(5,6)",
@@ -158,6 +165,12 @@ REQUIRED_TEST_DEFINITION_SHA256: dict[Path, dict[str, str]] = {
     # `P` is the same dtype the node already declared and `X` the same literal.
     # No expected string, comparator entrypoint, label, or assertion changed,
     # and all rows pass with their verbatim expected renderings.
+    # `agreement_expected_value_reaches_comparator` was added by chelis#1104 as
+    # the expected-value leg's usage canary. It is a new row, not a revision:
+    # no existing digest moved with it, and its own freeze is secondary - the
+    # canary fails behaviorally when `assert_expected` stops consulting the
+    # comparator, so tampering with this digest does not buy a green run.
+
     EVAL_AGREEMENT_SOURCE: {
         "agreement_add": "4db22a4302714b8be688532417daa7776374646094e70c2671875f5564e30960",
         "agreement_atan": "80c1d1edd7d7857c6392470b80ec650e7db64c0d790781746ed92520c4ed9b85",
@@ -166,6 +179,7 @@ REQUIRED_TEST_DEFINITION_SHA256: dict[Path, dict[str, str]] = {
         "agreement_compiled_observation_reaches_comparator": "bbfed1ebbe05619f0ccb6fd73b1e6356d47444f2e7e4511f492a967f277c1d90",
         "agreement_cos": "bb39c151b0be1d95a7c7e75c4e949e6e4c1da4c335f7abe119e088fa5d866d04",
         "agreement_exp": "fb328fbf479c5e174e3ca7fccc4f2df3404b826771c39618ce841715412a3f12",
+        "agreement_expected_value_reaches_comparator": "44e94c88c0ad3978ae6dd3e68bcdd307fdc7b10aa73eb29b73ec1b5705fe5fc2",
         "agreement_f16_add": "8ecc6efe5e052e32850786174495f249776d35676ffffbcced66e308c6ce3c7c",
         "agreement_log": "84ca6c7ba3b27a0718b42f40d15dd1c786648e33562b63a9ecddfaa02416c709",
         "agreement_mul": "ba21fed3999506c32eb163bcdaaa10a135c744008f7b908e5f7fc98c0338fc97",

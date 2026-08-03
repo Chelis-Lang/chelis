@@ -891,12 +891,20 @@ edit is not a repair. This makes an emptied parity row, an emptied rejected-cell
 driver, or an eval test that emits a forged producer-authored receipt fail
 before its suite runs. Eval/C receipts remain runtime-entry and multiplicity
 evidence; they are not trusted as evidence of their own free-form detail.
-Two digest-locked behavioral canaries perturb the compiled observation before
-the shared comparator and present an adjacent f32 result while the evaluator
-is marked nonconforming; together with the exact operation-identity canary,
-they prove that compiled bytes reach the decision, the real IR op selects the
-tolerance, and chelis#897 blocks tolerance rather than relying on source-token
-presence.
+Three digest-locked behavioral canaries perturb the compiled observation before
+the shared comparator, drive the shared `assert_expected` helper with a
+known-wrong expected value, and present an adjacent f32 result while the
+evaluator is marked nonconforming; together with the exact operation-identity
+canary, they prove that compiled bytes reach the decision, that the verbatim
+expected value reaches it too, that the real IR op selects the tolerance, and
+that chelis#897 blocks tolerance rather than relying on source-token presence.
+The expected-value canary closes chelis#1104: the source-level checks can only
+see that the comparator is NAMED in a suite, so a shared assertion helper
+neutered into a no-op used to delete the verbatim leg from every row at once
+while every frozen test definition, receipt, and comparator obligation stayed
+intact. Each leg of the comparison therefore owes a canary that runs the
+shipped helper, and the guard is behavioral: tampering with its digest does not
+make it pass.
 The sole allowed ignore is
 `parity_transformer_block_library_only`, whose exact reason is the
 environmental system-CBLAS prerequisite. There are no value-divergence
