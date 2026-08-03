@@ -252,9 +252,17 @@ fn deeply_nested_stamped_construction_scans_each_level_once() {
     // chelis#1109 each construction re-walked the entire subtree below it,
     // so the total cost was quadratic in nesting depth (measured in
     // release: 3,200 levels took 24.4ms, versus 0.14ms after the fix).
-    // The parser's own recursion limit keeps the corpus well under this
-    // depth, so this is a shape regression test, not a wall-clock gate --
-    // the behavioral lock on the boundary skip lives in node.rs's
+    //
+    // There is no parser depth limit to lean on here: `parse_raw_str`
+    // parses a 1,000-level chain and simply overflows the stack somewhere
+    // before 2,000. The depth below is bounded by the DESCENDING oracle
+    // this test asserts, which recurses once per level and overflows a
+    // debug test thread between 2,500 and 3,000; construction itself is
+    // iterative and stays fine past 8,000, and dropping the tree recurses
+    // too (fine at 3,000, overflows by 8,000). 1,000 keeps the margin.
+    //
+    // This is a shape regression test, not a wall-clock gate -- the
+    // behavioral lock on the boundary skip lives in node.rs's
     // `construction_scan_stops_at_a_stamped_node_boundary`.
     let mut expr = Expr::node(
         DeepTag::Lit,
