@@ -11,9 +11,9 @@
 -- out of scope for issue Chelis-Lang/chelis 187.
 def block(x: tensor[8, 256, f32], wqkv: tensor[256, 192, f32], wo: tensor[64, 256, f32]) -> tensor[8, 256, f32] = {
   qkv = matmul(copy(x), wqkv)
-  q = shrink(&qkv, [[0, 8], [0, 64]])
-  k = shrink(&qkv, [[0, 8], [64, 128]])
-  v = shrink(&qkv, [[0, 8], [128, 192]])
+  q = shrink(&qkv, [[0i64, 8i64], [0i64, 64i64]])
+  k = shrink(&qkv, [[0i64, 8i64], [64i64, 128i64]])
+  v = shrink(&qkv, [[0i64, 8i64], [128i64, 192i64]])
   scores = matmul(q, permute(k, 1, 0))
   probs = softmax(scores, 1)
   attn_out = matmul(matmul(probs, v), wo)

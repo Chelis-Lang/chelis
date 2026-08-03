@@ -23,14 +23,14 @@ use tempfile::{TempDir, tempdir};
 
 /// Runtime-shrink-only verb; its single movement output dim is the sig's `u`.
 const SHRINK_BODY: &str = "\
-  extent = cast(sub(cast(shape(x, cast(0, int32)), int64), cast(1, int64)), int32)\n\
+  extent = cast(sub(cast(shape(x, cast(0, int32)), int64), cast(1, int64)), int64)\n\
   shrink(x, [[cast(1, int64), extent]])";
 
 /// The full runtime shrink -> stride chain, anchored by a static reshape so
 /// each movement output keeps its own (anonymous) dim. This is the
 //  movement-op shape of the chelis#616 avgpool oracle's `window_row`.
 const CHAIN_ANCHORED_BODY: &str = "\
-  extent = cast(sub(cast(shape(x, cast(0, int32)), int64), cast(1, int64)), int32)\n\
+  extent = cast(sub(cast(shape(x, cast(0, int32)), int64), cast(1, int64)), int64)\n\
   w = stride(shrink(x, [[cast(1, int64), extent]]), cast(2, int64))\n\
   reshape(w, [cast(2, int64)])";
 
@@ -266,7 +266,7 @@ int main(void) {{
 fn issue_632_direct_return_movement_chain_eval_matches_c() {
     let input: Vec<f64> = (1..=6).map(|v| v as f64).collect();
     let body = "\
-  extent = cast(sub(cast(shape(x, cast(0, int32)), int64), cast(1, int64)), int32)\n\
+  extent = cast(sub(cast(shape(x, cast(0, int32)), int64), cast(1, int64)), int64)\n\
   stride(shrink(x, [[cast(1, int64), extent]]), cast(2, int64))";
     let source = format!(
         "module Repro.RtDegenerate\nsig f: tensor[n, f32] -> tensor[u, f32]\ndef f(x) = {{\n{body}\n}}\nout = f(to_tensor([{}]))\n",
@@ -342,7 +342,7 @@ fn issue_616_multi_axis_runtime_shrink_matches_c() {
     let source = "module Repro.MatSlice\n\
 sig f: tensor[rows, 5, f32] -> tensor[rows, 3, f32]\n\
 def f(x) = {\n\
-  rows = cast(shape(x, cast(0, int32)), int32)\n\
+  rows = cast(shape(x, cast(0, int32)), int64)\n\
   shrink(x, [[cast(0, int64), rows], [cast(1, int64), cast(4, int64)]])\n\
 }\n\
 out = f(to_tensor([[cast(1.0, f32), cast(2.0, f32), cast(3.0, f32), cast(4.0, f32), cast(5.0, f32)], [cast(6.0, f32), cast(7.0, f32), cast(8.0, f32), cast(9.0, f32), cast(10.0, f32)]]))\n";
@@ -383,7 +383,7 @@ fn issue_616_multi_axis_runtime_pad_matches_c() {
     let source = "module Repro.MatPad\n\
 sig f: tensor[rows, 3, f32] -> tensor[u, 5, f32]\n\
 def f(x) = {\n\
-  k = cast(shape(x, cast(0, int32)), int32)\n\
+  k = cast(shape(x, cast(0, int32)), int64)\n\
   pad(x, [[cast(0, int64), k], [cast(1, int64), cast(1, int64)]], cast(0.0, f32))\n\
 }\n\
 out = f(to_tensor([[cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)], [cast(4.0, f32), cast(5.0, f32), cast(6.0, f32)]]))\n";
@@ -423,7 +423,7 @@ fn issue_616_literal_axis_still_checked_beside_runtime_axis() {
     let source = "module Repro.MatSliceBad\n\
 sig f: tensor[rows, 5, f32] -> tensor[rows, 3, f32]\n\
 def f(x) = {\n\
-  rows = cast(shape(x, cast(0, int32)), int32)\n\
+  rows = cast(shape(x, cast(0, int32)), int64)\n\
   shrink(x, [[cast(0, int64), rows], [cast(1, int64), cast(9, int64)]])\n\
 }\n\
 out = f(to_tensor([[cast(1.0, f32), cast(2.0, f32), cast(3.0, f32), cast(4.0, f32), cast(5.0, f32)], [cast(6.0, f32), cast(7.0, f32), cast(8.0, f32), cast(9.0, f32), cast(10.0, f32)]]))\n";
@@ -452,7 +452,7 @@ fn issue_616_runtime_shrink_grad_through_reduction_matches_c() {
     let source = "module Repro.RtShrinkGrad\n\
 sig f: tensor[5, f32] -> f32\n\
 def f(x) = {\n\
-  e = cast(sub(cast(shape(x, cast(0, int32)), int64), cast(1, int64)), int32)\n\
+  e = cast(sub(cast(shape(x, cast(0, int32)), int64), cast(1, int64)), int64)\n\
   w = shrink(x, [[cast(1, int64), e]])\n\
   sum(w, cast(0, int32)) |> tensor_to_scalar\n\
 }\n\
@@ -489,7 +489,7 @@ out = grad(f)(to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32), cast(4.
 fn issue_616_runtime_shrink_zero_size_axis_errs_in_both_lanes() {
     // k = n - 4 == 0 for the 4-element input: bounds [0, 0).
     let body = "\
-  k = cast(sub(cast(shape(x, cast(0, int32)), int64), cast(4, int64)), int32)\n\
+  k = cast(sub(cast(shape(x, cast(0, int32)), int64), cast(4, int64)), int64)\n\
   shrink(x, [[cast(0, int64), k]])";
     let input = f32_literal(&[1.0, 2.0, 3.0, 4.0]);
     let source = format!(
@@ -531,7 +531,7 @@ fn issue_616_runtime_shrink_zero_size_axis_errs_in_both_lanes() {
 fn issue_616_runtime_shrink_overshoot_errs_in_both_lanes() {
     // end = n + 1 > n: out of range for every input.
     let body = "\
-  extent = cast(add(cast(shape(x, cast(0, int32)), int64), cast(1, int64)), int32)\n\
+  extent = cast(add(cast(shape(x, cast(0, int32)), int64), cast(1, int64)), int64)\n\
   shrink(x, [[cast(1, int64), extent]])";
     let input = f32_literal(&[1.0, 2.0, 3.0, 4.0]);
     let source = format!(

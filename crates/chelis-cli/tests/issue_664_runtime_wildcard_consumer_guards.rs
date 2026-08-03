@@ -222,7 +222,7 @@ fn issue_664_elementwise_pad_operand_mismatch_errs_in_both_lanes() {
 #[test]
 fn issue_664_elementwise_shrink_control_errs_in_both_lanes() {
     let source = format!(
-        "module Repro.ElemShrink\nsig f: tensor[n, f32] -> tensor[n, f32]\ndef f(x) = {{\n  k = cast(sub(cast(shape(x, cast(0, int32)), int64), cast(3, int64)), int32)\n  s = shrink(x, [[cast(0, int64), k]])\n  add(s, x)\n}}\nout = f(to_tensor([{}]))\n",
+        "module Repro.ElemShrink\nsig f: tensor[n, f32] -> tensor[n, f32]\ndef f(x) = {{\n  k = cast(sub(cast(shape(x, cast(0, int32)), int64), cast(3, int64)), int64)\n  s = shrink(x, [[cast(0, int64), k]])\n  add(s, x)\n}}\nout = f(to_tensor([{}]))\n",
         six()
     );
     assert_error_parity(
