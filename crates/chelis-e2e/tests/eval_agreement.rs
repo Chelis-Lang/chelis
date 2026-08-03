@@ -477,6 +477,46 @@ fn agreement_compiled_observation_reaches_comparator() {
     );
 }
 
+/// chelis#1104: the verbatim expected-value leg's usage canary, and the
+/// counterpart of the compiled-observation canary above.
+///
+/// Every value row states its result as a verbatim string through the shared
+/// `assert_expected`. Because that helper is shared, a body that stopped
+/// consulting `compare_exact_observations` would delete the expected-value leg
+/// from all of them at once without editing one digest-frozen test definition.
+/// Source-level guards cannot see that: they check that the comparator is
+/// *named* in this file, not that it is *invoked*. So this canary drives the
+/// shipped helper rather than the comparator directly, and pins which argument
+/// takes the reference role: a known-wrong expected value must still reject,
+/// with the exact comparator's own `ExactMismatch` rendering.
+#[test]
+fn agreement_expected_value_reaches_comparator() {
+    let rejection =
+        std::panic::catch_unwind(|| assert_expected("expected-value-canary", "8.0", "7.0"))
+            .expect_err("a wrong expected value must reach the exact comparator");
+    let message = rejection
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| rejection.downcast_ref::<&str>().copied())
+        .unwrap_or_default();
+    let expected_rejection = AgreementError::ExactMismatch {
+        context: "expected-value-canary".to_string(),
+        reference: "7.0".to_string(),
+        candidate: "8.0".to_string(),
+    };
+    assert_eq!(
+        message,
+        format!("expected-value-canary: {expected_rejection}")
+    );
+
+    assert_expected("expected-value-canary", "7.0", "7.0");
+
+    record_phase3_receipt(
+        "expected-value-canary",
+        "expected=7.0\tactual=8.0\terror=ExactMismatch",
+    );
+}
+
 #[test]
 fn agreement_width_nonconformance_is_behavioral() {
     let eval = format_element(Prim::F32, ElementRef::F32(1.0));

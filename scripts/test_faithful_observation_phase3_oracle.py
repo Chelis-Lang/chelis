@@ -50,6 +50,21 @@ fn hidden_value_row() {}
         violations = oracle.source_violations(sources)
         self.assertTrue(any("agreement_sqrt_is_exact" in item for item in violations), violations)
 
+    def test_deleting_the_expected_value_canary_is_a_violation(self) -> None:
+        """chelis#1104: the usage guard for the verbatim leg cannot quietly leave."""
+        sources = oracle.shipped_sources()
+        sources[oracle.EVAL_AGREEMENT_SOURCE] = sources[
+            oracle.EVAL_AGREEMENT_SOURCE
+        ].replace(
+            "fn agreement_expected_value_reaches_comparator()",
+            "fn deleted_expected_value_canary()",
+        )
+        violations = oracle.source_violations(sources)
+        self.assertTrue(
+            any("agreement_expected_value_reaches_comparator" in item for item in violations),
+            violations,
+        )
+
     def test_empty_required_body_is_caught_by_missing_runtime_receipt(self) -> None:
         receipts = "\n".join(
             f"{case}\tbehavior executed"
@@ -81,6 +96,7 @@ fn hidden_value_row() {}
         for name, case in (
             ("agreement_operation_identity_is_derived_from_ir", "operation-identity-canary"),
             ("agreement_compiled_observation_reaches_comparator", "compiled-observation-canary"),
+            ("agreement_expected_value_reaches_comparator", "expected-value-canary"),
             ("agreement_width_nonconformance_is_behavioral", "width-nonconformance-canary"),
             ("agreement_sqrt_is_exact", "sqrt(4)"),
         ):
@@ -96,6 +112,7 @@ fn hidden_value_row() {}
         for name in (
             "agreement_operation_identity_is_derived_from_ir",
             "agreement_compiled_observation_reaches_comparator",
+            "agreement_expected_value_reaches_comparator",
             "agreement_width_nonconformance_is_behavioral",
             "agreement_sqrt_is_exact",
         ):
